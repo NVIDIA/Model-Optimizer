@@ -7,6 +7,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 **New Features**
 
 - Add support for Transformer Engine quantization for Megatron Core models.
+- Add support to enable custom emulated quantization backend. See :meth:`register_quant_backend <modelopt.torch.quantization.nn.modules.tensor_quantizer.register_quant_backend>`` for more details. See an example in ``tests/unit/torch/quantization/test_custom_backend.py``.
 
 0.40 (2025-12-12)
 ^^^^^^^^^^^^^^^^^
