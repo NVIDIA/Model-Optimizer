@@ -39,6 +39,7 @@ __all__ = [
     "num2hrb",
     "print_rank_0",
     "silence_matched_warnings",
+    "warn_rank_0",
 ]
 
 
@@ -106,6 +107,12 @@ def print_rank_0(*args, **kwargs):
     """Prints only on the master process."""
     if dist.is_master():
         print(*args, **kwargs, flush=True)
+
+
+def warn_rank_0(message, *args, **kwargs):
+    """Issues a warning only on the master process."""
+    if dist.is_master():
+        warnings.warn(message, *args, **kwargs)
 
 
 # Global reentrant lock for thread-safe printing (allows nested @atomic_print decorators)
