@@ -57,6 +57,7 @@ from .model_config import (
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
     QUANTIZATION_NVFP4_AWQ,
+    QUANTIZATION_NVFP4_SVDQUANT,
     QUANTIZATION_W4A8_AWQ,
     QUANTIZATION_W4A8_MXFP4_FP8,
     QUANTIZATION_W4A8_NVFP4_FP8,
@@ -165,7 +166,7 @@ def resmooth_and_get_scale(
         )
         new_weights.append(weight)
         # If NVFP4_AWQ then we view the scales as uint8 to allow for cat later
-        if quantization == QUANTIZATION_NVFP4_AWQ:
+        if quantization in [QUANTIZATION_NVFP4_AWQ, QUANTIZATION_NVFP4_SVDQUANT]:
             scale, _ = NVFP4QTensor.get_weights_scaling_factor(weight, group_size).view(torch.uint8)
         else:
             scale = get_scaling_factor_from_weight(weight, group_size)
@@ -176,7 +177,7 @@ def resmooth_and_get_scale(
     return (
         torch.cat(new_weights, dim=0),
         resmoothed_scales.view(torch.float8_e4m3fn)
-        if quantization == QUANTIZATION_NVFP4_AWQ
+        if quantization in [QUANTIZATION_NVFP4_AWQ, QUANTIZATION_NVFP4_SVDQUANT]
         else resmoothed_scales,  # if NVFP4_AWQ we view the scales back as float8_e4m3fn after cat
         new_pre_quant_scale,
     )
@@ -243,6 +244,7 @@ def get_activation_scaling_factor(
     if get_quantization_format(module) in [
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
+        QUANTIZATION_NVFP4_SVDQUANT,
     ]:
         return NVFP4QTensor.get_activation_scaling_factor(input_quantizer)
     return get_scaling_factor(input_quantizer)
@@ -270,6 +272,7 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
     if quantization_format in [
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
+        QUANTIZATION_NVFP4_SVDQUANT,
         QUANTIZATION_W4A8_NVFP4_FP8,
     ]:
         if quantization_format == QUANTIZATION_W4A8_NVFP4_FP8:
@@ -303,6 +306,7 @@ def get_weight_scaling_factor_2(module: nn.Module, weight_name: str = "weight") 
     if get_quantization_format(module) in [
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
+        QUANTIZATION_NVFP4_SVDQUANT,
     ]:
         return NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(weight_quantizer)
     elif get_quantization_format(module) == QUANTIZATION_W4A8_NVFP4_FP8:
@@ -487,6 +491,12 @@ def get_quantization_format(module) -> str | None:
             block_sizes = getattr(weight_quantizer, "block_sizes")
             scale_bits = block_sizes.get("scale_bits")
 
+            if (
+                input_quantizer is not None
+                and hasattr(input_quantizer, "_pre_quant_scale")
+                and hasattr(weight_quantizer, "svdquant_lora_a")
+            ):
+                return QUANTIZATION_NVFP4_SVDQUANT
             if input_quantizer is not None and hasattr(input_quantizer, "_pre_quant_scale"):
                 return QUANTIZATION_NVFP4_AWQ
             if getattr(layer, "fused_with_prequant", False):
@@ -660,13 +670,16 @@ def process_layer_quant_config(layer_config_dict):
         elif v == "w4a8_nvfp4_fp8":
             layer_config = {
                 "quant_algo": "W4A8_NVFP4_FP8",
-                "group_size": layer_config_dict[prefix + ".awq_block_size"],
-                "has_zero_point": False,
-                "pre_quant_scale": True,
+                "group_size": block_size_value,
             }
         elif v == "w4a8_mxfp4_fp8":
             layer_config = {
                 "quant_algo": "W4A8_MXFP4_FP8",
+                "group_size": block_size_value,
+            }
+        elif v == "nvfp4_svdquant":
+            layer_config = {
+                "quant_algo": "NVFP4_SVD",
                 "group_size": block_size_value,
             }
         else:
@@ -813,7 +826,12 @@ def to_quantized_weight(
     if quantization in [QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ]:
         return pack_int4_in_uint8(weight, weights_scaling_factor)
 
-    if quantization in [QUANTIZATION_NVFP4, QUANTIZATION_NVFP4_AWQ, QUANTIZATION_W4A8_NVFP4_FP8]:
+    if quantization in [
+        QUANTIZATION_NVFP4,
+        QUANTIZATION_NVFP4_AWQ,
+        QUANTIZATION_W4A8_NVFP4_FP8,
+        QUANTIZATION_NVFP4_SVDQUANT,
+    ]:
         assert block_size is not None, "Block size not passed. Unable to quantize to NVFP4 format."
         assert weights_scaling_factor2 is not None, (
             "Weights scaling factor 2 not passed. Unable to quantize to NVFP4 format"
