@@ -23,6 +23,7 @@ from modelopt.torch.quantization.utils import replace_function
 
 from .config import SparseAttentionAttributeConfig
 from .methods import get_sparse_method
+from .stats_manager import SparseAttentionStatsManager
 
 
 class SparseAttentionModule(DynamicModule):
@@ -129,9 +130,10 @@ class SparseAttentionModule(DynamicModule):
 
         Returns:
             Dictionary with sparsity statistics including 'average_sparsity' if available.
-            Returns empty dict (statistics collection will be added in calibration PR).
+            Returns empty dict if stats manager is not enabled.
         """
-        # TODO: Statistics collection will be added in calibration PR
+        if self._stats_manager is not None and self._stats_manager.enabled:
+            return self._stats_manager.get_summary()
         return {}
 
     def _setup(self):
@@ -139,6 +141,14 @@ class SparseAttentionModule(DynamicModule):
         # Apply default configuration if not yet configured
         if not hasattr(self, "_method"):
             self.set_from_attribute_config(None)
+
+        # Create stats manager if stats collection is enabled
+        if self._method_config.get("collect_stats", False):
+            self._stats_manager = SparseAttentionStatsManager(
+                module_name="sparse_attention", enabled=True
+            )
+        else:
+            self._stats_manager = None
 
     def forward(self, *args, **kwargs):
         """Forward with selected sparse attention method.
@@ -156,6 +166,10 @@ class SparseAttentionModule(DynamicModule):
         # Apply sparse attention through the context
         with context:
             result = super().forward(*args, **kwargs)
+
+        # Collect stats if manager is available
+        if self._stats_manager is not None and hasattr(self._sparse_method_instance, "_last_stats"):
+            self._stats_manager.collect(self._sparse_method_instance._last_stats)
 
         return result
 

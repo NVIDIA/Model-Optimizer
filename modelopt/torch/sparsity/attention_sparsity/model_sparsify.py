@@ -19,13 +19,15 @@ from typing import Any
 
 import torch
 
-from modelopt.torch.opt.conversion import apply_mode
+from modelopt.torch.opt.conversion import ModeloptStateManager, apply_mode
 from modelopt.torch.opt.searcher import ForwardLoop
 
+from .calibration import calibrate_sparse_attention
 from .config import SparseAttentionConfig
 from .mode import SparseAttentionModeRegistry
 
 __all__ = [
+    "calibrate",
     "sparsify",
 ]
 
@@ -58,12 +60,36 @@ def sparsify(
             .. code-block::python
 
                 config = {
-                    "method": "flash_skip_softmax",
+                    "sparse_cfg": {
+                        # Phase-aware thresholds with backend selection
+                        "*attention*": {
+                            "method": "flash_skip_softmax",
+                            "threshold": {"prefill": 1e-3, "decode": 1e-5},
+                            "backend": "pytorch",  # Only pytorch backend supported
+                            "enable": True,
+                        },
+                        # Disable for specific layers
+                        "*layer.0*": {"enable": False},
+                        # Default settings
+                        "default": {"enable": False},
+                    },
+                }
+
+            For automatic threshold calibration using RULER dataset:
+
+            .. code-block::python
+
+                config = {
                     "sparse_cfg": {
                         "*attention*": {
-                            "threshold": {"prefill": 1e-3, "decode": 1e-5},
+                            "method": "flash_skip_softmax",
                             "backend": "pytorch",
                             "enable": True,
+                            "calibration": {  # Enables automatic threshold calibration
+                                "target_sparse_ratio": 0.5,
+                                "samples": 48,
+                                "max_seqlen": 8192,
+                            },
                         },
                         "default": {"enable": False},
                     },
@@ -125,5 +151,56 @@ def sparsify(
     model = apply_mode(
         model, mode=[("sparse_attention", config)], registry=SparseAttentionModeRegistry
     )
+
+    # Calibrate the sparsity ratio of the attention modules
+    return calibrate(model, config, forward_loop=forward_loop)
+
+
+def calibrate(
+    model: torch.nn.Module,
+    config: dict[str, Any] | SparseAttentionConfig | None = None,
+    forward_loop: ForwardLoop | None = None,
+) -> torch.nn.Module:
+    """Calibrates sparse attention thresholds based on target sparsity.
+
+    This function performs calibration to find optimal thresholds that achieve
+    the target sparsity ratio specified in the config.
+
+    Args:
+        model: Model with sparse attention modules
+        config: Sparse attention config (extracted from modelopt state if None)
+        forward_loop: Optional callable that forwards calibration data through the model.
+            If provided, uses this for calibration data.
+            If None, will auto-generate RULER dataset for calibration.
+
+    Returns:
+        The calibrated model with optimized sparse attention thresholds.
+        If no calibration is configured, returns the model unchanged.
+    """
+    # Get config from model if not provided
+    if config is None:
+        manager = ModeloptStateManager(model)
+        if manager.last_mode and manager.last_mode.name == "sparse_attention":
+            config = manager._last_config
+        else:
+            # No sparse attention applied, return model unchanged
+            return model
+
+    # Extract sparse_cfg
+    if isinstance(config, dict):
+        sparse_cfg = config.get("sparse_cfg", {})
+    else:
+        sparse_cfg = config.sparse_cfg
+
+    # Check if calibration is configured in any sparse_cfg pattern
+    has_calibration = any(
+        isinstance(cfg, dict) and "calibration" in cfg for cfg in sparse_cfg.values()
+    )
+
+    if not has_calibration:
+        return model
+
+    # Run calibration (handles stats collection internally)
+    calibrate_sparse_attention(model, config, forward_loop=forward_loop)
 
     return model

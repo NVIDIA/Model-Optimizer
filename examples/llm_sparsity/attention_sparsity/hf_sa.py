@@ -29,7 +29,10 @@ import modelopt.torch.opt as mto
 import modelopt.torch.sparsity.attention_sparsity as mtsa
 from modelopt.torch.export import export_hf_checkpoint
 from modelopt.torch.sparsity.attention_sparsity import SparseAttentionConfig
-from modelopt.torch.sparsity.attention_sparsity.config import SKIP_SOFTMAX_DEFAULT
+from modelopt.torch.sparsity.attention_sparsity.config import (
+    SKIP_SOFTMAX_CALIB,
+    SKIP_SOFTMAX_DEFAULT,
+)
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 
@@ -38,9 +41,10 @@ RAND_SEED = 1234
 # Enable HuggingFace checkpointing support
 mto.enable_huggingface_checkpointing()
 
-# You can define custom configurations or use the default
+# Sparse attention configuration choices
 SPARSE_ATTN_CFG_CHOICES = {
     "skip_softmax": SKIP_SOFTMAX_DEFAULT,
+    "skip_softmax_calib": SKIP_SOFTMAX_CALIB,
 }
 
 

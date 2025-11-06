@@ -55,6 +55,9 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         self.enable_correction_factor = config.get("enable_correction_factor", True)
         self.phase = config.get("phase", None)
 
+        # Calibration mode: when True, prevent threshold updates to preserve calibrator's test threshold
+        self._calibration_mode = False
+
         # Initialize threshold
         if isinstance(self.threshold_config, dict):
             self.threshold = self.threshold_config.get(
@@ -62,6 +65,10 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             )
         else:
             self.threshold = self.threshold_config
+
+    def set_calibration_mode(self, enabled: bool):
+        """Set calibration mode to prevent _update_threshold from modifying the threshold."""
+        self._calibration_mode = enabled
 
     def _update_threshold(self, phase: str):
         """Update threshold based on phase."""
@@ -278,8 +285,9 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         # Infer phase from tensor shape
         phase = self._infer_phase(attention_scores)
 
-        # Update threshold for the detected phase
-        self._update_threshold(phase)
+        # Update threshold for the detected phase (skip during calibration)
+        if not self._calibration_mode:
+            self._update_threshold(phase)
 
         # Apply block-wise sparsity
         sparse_mask, stats = self.calc_correction_factor_and_p(attention_scores, phase)

@@ -43,8 +43,11 @@ def run_attention_sparsity_command(*, model: str, method: str = "skip_softmax", 
 
 @pytest.mark.parametrize("method", ["skip_softmax"])
 def test_attention_sparsity(tiny_llama_path, tmp_path, method):
-    """Test sparse attention with TinyLlama."""
+    """Test sparse attention with TinyLlama (with and without calibration)."""
     run_attention_sparsity_command(
         model=tiny_llama_path,
         method=method,
+        seq_len=128,
+        num_samples=1,
+        max_new_tokens=10,
     )
