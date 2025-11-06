@@ -40,6 +40,12 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         description="The sparse attention method to use (e.g., 'flash_skip_softmax').",
     )
 
+    method: str = ModeloptField(
+        default="flash_skip_softmax",
+        title="Sparse attention method.",
+        description="The sparse attention method to use (e.g., 'flash_skip_softmax').",
+    )
+
     enable: bool = ModeloptField(
         default=True,
         title="Enable sparse attention.",
@@ -156,6 +162,7 @@ SKIP_SOFTMAX_DEFAULT = {
     "sparse_cfg": {
         "*attn*": {
             "method": "flash_skip_softmax",
+            "method": "flash_skip_softmax",
             "threshold": {
                 "prefill": 1e-3,  # More aggressive during prefill
                 "decode": 1e-4,  # Conservative during decode
@@ -183,6 +190,10 @@ class SparseAttentionConfig(ModeloptBaseConfig):
             "*attention*": {"method": "flash_skip_softmax", "enable": True},
             "default": {"enable": False},
         },
+        default={
+            "*attention*": {"method": "flash_skip_softmax", "enable": True},
+            "default": {"enable": False},
+        },
         title="Sparse attention configuration",
         description="Pattern-based configuration for sparse attention. Keys are patterns to match module names, "
         "values are configuration dicts with parameters like 'threshold', 'enable', and 'calibration'.",
@@ -196,14 +207,16 @@ class SparseAttentionConfig(ModeloptBaseConfig):
 
 
 class FlashSkipSoftmaxConfig(SparseAttentionConfig):
+class FlashSkipSoftmaxConfig(SparseAttentionConfig):
     """Configuration for Flash Attention-aware softmax skip sparse attention."""
 
+    # Override sparse_cfg with flash_skip_softmax specific defaults
     # Override sparse_cfg with flash_skip_softmax specific defaults
     sparse_cfg: SparseAttentionCfgType = ModeloptField(
         default={
             "*attention*": {
                 "method": "flash_skip_softmax",
-                "threshold": {"prefill": 1e-3, "decode": 1e-4},
+                "threshold": {"prefill": 1e-3, "decode": 1e-5},
                 "br": 128,  # Flash Attention block rows
                 "bc": 128,  # Flash Attention block columns
                 "backend": "pytorch",  # Only pytorch backend supported
@@ -213,6 +226,7 @@ class FlashSkipSoftmaxConfig(SparseAttentionConfig):
         },
         title="Flash softmax skip sparse configuration",
         description="Pattern-based configuration with flash_skip_softmax specific defaults. "
+        description="Pattern-based configuration with flash_skip_softmax specific defaults. "
         "Includes FA block sizes (br, bc) and correction factor settings.",
         validate_default=True,
     )
@@ -220,6 +234,7 @@ class FlashSkipSoftmaxConfig(SparseAttentionConfig):
 
 __all__ = [
     "SKIP_SOFTMAX_DEFAULT",
+    "FlashSkipSoftmaxConfig",
     "FlashSkipSoftmaxConfig",
     "SparseAttentionAttributeConfig",
     "SparseAttentionCfgType",
