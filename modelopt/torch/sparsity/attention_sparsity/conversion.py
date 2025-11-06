@@ -26,8 +26,8 @@ from modelopt.torch.opt.mode import ConvertReturnType, MetadataDict
 from modelopt.torch.utils import get_unwrapped_name
 
 from .config import SparseAttentionConfig
-from .nn.sparse_attention import SparseAttentionModule, SparseAttentionRegistry
 from .plugins.huggingface import register_sparse_attention_on_the_fly
+from .sparse_attention import SparseAttentionModule, SparseAttentionRegistry
 
 
 def is_attn_sparsified(model: nn.Module) -> bool:
@@ -67,7 +67,7 @@ def convert_to_sparse_attention_model(
 
     # Apply configuration to sparse attention modules
     sparse_cfg = config.sparse_cfg if hasattr(config, "sparse_cfg") else {}
-    set_sparse_attention_by_cfg(model, sparse_cfg, config)
+    set_sparse_attention_by_cfg(model, sparse_cfg)
 
     # Create metadata
     metadata = {}
@@ -106,33 +106,31 @@ def _replace_sparse_attention_modules(model: nn.Module, version=None):
         _replace_sparse_attention_modules(getattr(model, name), version=version)
 
 
-def set_sparse_attention_by_cfg(model: nn.Module, sparse_cfg: dict, config: SparseAttentionConfig):
+def set_sparse_attention_by_cfg(model: nn.Module, sparse_cfg: dict):
     """Apply sparse attention configuration to model.
 
     Similar to quantization's set_quantizer_by_cfg.
 
     Args:
         model: Model with sparse attention modules
-        sparse_cfg: Sparse configuration dictionary
-        config: Global sparse attention configuration
+        sparse_cfg: Sparse configuration dictionary mapping patterns to attributes
     """
     sparse_cfg = sparse_cfg.copy()
 
     # Apply default first if exists
     if "default" in sparse_cfg:
-        set_sparse_attention_attribute(model, "*", sparse_cfg["default"], config)
+        set_sparse_attention_attribute(model, "*", sparse_cfg["default"])
         sparse_cfg.pop("default")
 
     # Apply pattern-specific configs
     for pattern, cfg in sparse_cfg.items():
-        set_sparse_attention_attribute(model, pattern, cfg, config)
+        set_sparse_attention_attribute(model, pattern, cfg)
 
 
 def set_sparse_attention_attribute(
     model: nn.Module,
     wildcard_or_filter: str | Callable,
     attribute_cfg: dict[str, Any],
-    global_config: SparseAttentionConfig,
 ):
     """Set sparse attention attributes for modules matching pattern.
 
@@ -141,18 +139,10 @@ def set_sparse_attention_attribute(
     Args:
         model: Model to configure
         wildcard_or_filter: Pattern to match module names
-        attribute_cfg: Attributes to apply
-        global_config: Global sparse attention configuration
+        attribute_cfg: Attributes to apply (must include 'method')
     """
-    # Merge global config fields with pattern config
     # Filter out model-level configs that shouldn't be passed to modules
     module_cfg = {k: v for k, v in attribute_cfg.items() if k != "calibration"}
-
-    full_cfg = {
-        "method": global_config.method,
-        "collect_stats": global_config.collect_stats,
-        **module_cfg,
-    }
 
     for name, module in model.named_modules():
         if not isinstance(module, SparseAttentionModule):
@@ -165,11 +155,11 @@ def set_sparse_attention_attribute(
         elif callable(wildcard_or_filter):
             matched = wildcard_or_filter(name)
         else:
-            continue
+            raise NotImplementedError(f"Unsupported type {type(wildcard_or_filter)}")
 
         if matched:
             # Apply config using the same method as TensorQuantizer
-            module.set_from_attribute_config(full_cfg)
+            module.set_from_attribute_config(module_cfg)
 
 
 def restore_sparse_attention_model(
@@ -236,16 +226,11 @@ def update_sparse_attention_metadata(
         if isinstance(module, SparseAttentionModule):
             module_name = get_unwrapped_name(name, model)
 
-            # Collect method config from module attributes
-            method_config = {
-                k[1:]: v
-                for k, v in module.__dict__.items()
-                if k.startswith("_") and k not in ("_method", "_enabled", "_sparse_method_instance")
-            }
-
+            # Save the method configuration that was used
+            # _method_config already contains the validated config dict
             module_state = {
                 "method": module._sparse_method_instance.name,
-                "method_config": method_config,
+                "method_config": module._method_config.copy(),
             }
 
             sparse_state[module_name] = module_state
@@ -353,23 +338,16 @@ def print_sparse_attention_summary(model: nn.Module):
         method = getattr(module, "_method", "unknown")
         method_counts[method] = method_counts.get(method, 0) + 1
 
-    print(f"\n{'=' * 70}")
-    print(f"{'Sparse Attention Summary':^70}")
-    print(f"{'=' * 70}")
     print(f"Total sparse attention modules: {len(sparse_modules)}")
-    print(f"  Enabled:  {enabled_count}")
-    print(f"  Disabled: {disabled_count}")
+    print(f"Enabled:  {enabled_count}")
+    print(f"Disabled: {disabled_count}")
 
     if method_counts:
         print("\nMethods:")
         for method, count in sorted(method_counts.items()):
-            print(f"  {method}: {count}")
-
-    print(f"\n{'Module Details':^70}")
-    print(f"{'-' * 70}")
+            print(f"{method}: {count}")
 
     for name, module in sparse_modules:
-        status = "✓" if module.is_enabled else "✗"
         method = getattr(module, "_method", "unknown")
         threshold = getattr(module, "_threshold", "N/A")
 
@@ -381,7 +359,4 @@ def print_sparse_attention_summary(model: nn.Module):
         else:
             threshold_str = str(threshold)
 
-        print(f"{status} {name}")
-        print(f"   Method: {method}, Threshold: {threshold_str}")
-
-    print(f"{'=' * 70}\n")
+        print(f"{name}: Method: {method}, Threshold: {threshold_str}")

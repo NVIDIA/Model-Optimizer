@@ -15,6 +15,8 @@
 
 """Registry and base class for sparse attention methods."""
 
+import re
+import warnings
 from abc import ABC, abstractmethod
 
 import torch
@@ -53,6 +55,27 @@ class SparseAttentionMethod(ABC):
 _SPARSE_ATTENTION_METHODS: dict[str, dict[str, type[SparseAttentionMethod]]] = {}
 
 
+def _version_key(version_str: str) -> list[int]:
+    """Extract numeric parts for proper version sorting.
+
+    Args:
+        version_str: Version string (e.g., "v1", "v2", "v10")
+
+    Returns:
+        List of integers extracted from version string for sorting
+
+    Examples:
+        >>> _version_key("v1")
+        [1]
+        >>> _version_key("v10")
+        [10]
+        >>> _version_key("v2.3.1")
+        [2, 3, 1]
+    """
+    parts = re.findall(r"\d+", version_str)
+    return [int(p) for p in parts] if parts else [0]
+
+
 def register_sparse_method(name: str, version: str = "v1"):
     """Decorator to register sparse attention methods with version support.
 
@@ -60,10 +83,10 @@ def register_sparse_method(name: str, version: str = "v1"):
         name: Method name to register
         version: Version string (default: "v1")
 
-    Example:
+    Example::
+
         @register_sparse_method("my_method", version="v3")
-        class MyMethodV3(SparseAttentionMethod):
-            ...
+        class MyMethodV3(SparseAttentionMethod): ...
     """
 
     def decorator(cls: type[SparseAttentionMethod]):
@@ -71,8 +94,6 @@ def register_sparse_method(name: str, version: str = "v1"):
             _SPARSE_ATTENTION_METHODS[name] = {}
 
         if version in _SPARSE_ATTENTION_METHODS[name]:
-            import warnings
-
             warnings.warn(
                 f"Overriding existing sparse attention method: {name}@{version}",
                 RuntimeWarning,
@@ -99,8 +120,8 @@ def get_sparse_method(name: str, version: str | None = None) -> type[SparseAtten
         ValueError: If method name or version is not registered
 
     Example:
-        >>> get_sparse_method("flash_softmax_skip")  # Latest version
-        >>> get_sparse_method("flash_softmax_skip", "v1")  # Specific version
+        >>> get_sparse_method("flash_skip_softmax")  # Latest version
+        >>> get_sparse_method("flash_skip_softmax", "v1")  # Specific version
     """
     if name not in _SPARSE_ATTENTION_METHODS:
         available = list(_SPARSE_ATTENTION_METHODS.keys())
@@ -109,7 +130,7 @@ def get_sparse_method(name: str, version: str | None = None) -> type[SparseAtten
     method_versions = _SPARSE_ATTENTION_METHODS[name]
 
     if not version:
-        version = sorted(method_versions.keys())[-1]
+        version = sorted(method_versions.keys(), key=_version_key)[-1]
 
     if version not in method_versions:
         available_versions = list(method_versions.keys())

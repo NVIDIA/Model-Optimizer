@@ -19,15 +19,13 @@ from typing import Any
 
 import torch
 
-from modelopt.torch.opt.conversion import ModeloptStateManager, apply_mode
+from modelopt.torch.opt.conversion import apply_mode
 from modelopt.torch.opt.searcher import ForwardLoop
 
-from .calibration import calibrate_sparse_attention
 from .config import SparseAttentionConfig
 from .mode import SparseAttentionModeRegistry
 
 __all__ = [
-    "calibrate",
     "sparsify",
 ]
 
@@ -39,19 +37,16 @@ def sparsify(
 ) -> torch.nn.Module:
     """Applies sparse attention optimization to the model in-place.
 
-    This method performs replacement of attention modules with their sparse counterparts and
-    optionally performs calibration as specified by ``config``.
-    ``forward_loop`` is used to forward data through the model and gather statistics for calibration.
+    This method performs replacement of attention modules with their sparse counterparts.
 
     Args:
         model: A pytorch model
         config: A dictionary or an instance of
             :class:`SparseAttentionConfig <modelopt.torch.sparsity.attention_sparsity.config.SparseAttentionConfig>`
-            specifying the values for keys ``"sparse_cfg"``, ``"method"``, and optionally ``"calibration"``.
+            specifying the values for keys ``"sparse_cfg"`` and ``"method"``.
 
             The ``"sparse_cfg"`` key specifies the sparse attention configurations.
-            The ``"method"`` key specifies the sparse attention method (e.g., "softmax_skip").
-            The ``"calibration"`` key specifies calibration settings if automatic threshold tuning is desired.
+            The ``"method"`` key specifies the sparse attention method (e.g., "flash_skip_softmax").
 
             Sparse attention configurations is a dictionary mapping wildcards or filter functions
             to its sparse attention attributes. The wildcards or filter functions are matched
@@ -63,22 +58,13 @@ def sparsify(
             .. code-block::python
 
                 config = {
-                    "method": "softmax_skip",
+                    "method": "flash_skip_softmax",
                     "sparse_cfg": {
-                        # Phase-aware thresholds with backend selection and calibration
                         "*attention*": {
                             "threshold": {"prefill": 1e-3, "decode": 1e-5},
-                            "backend": "pytorch",  # Only pytorch backend supported
+                            "backend": "pytorch",
                             "enable": True,
-                            "calibration": {  # Optional: enables automatic threshold calibration
-                                "target_sparse_ratio": 0.5,
-                                "samples": 48,
-                                "max_seqlen": 8192,
-                            },
                         },
-                        # Disable for specific layers
-                        "*layer_0*": {"enable": False},
-                        # Default settings
                         "default": {"enable": False},
                     },
                 }
@@ -89,11 +75,7 @@ def sparsify(
 
             This requires the model to be loaded with ``attn_implementation="eager"``.
 
-        forward_loop: A callable that forwards all calibration data through the model. This is used
-            to gather statistics for calibration. It should take model as the argument. It does not need
-            to return anything.
-
-            This argument is only required when calibration is enabled in the config.
+        forward_loop: Reserved for future use.
 
             Here are a few examples for correct ``forward_loop`` definitions:
 
@@ -143,55 +125,5 @@ def sparsify(
     model = apply_mode(
         model, mode=[("sparse_attention", config)], registry=SparseAttentionModeRegistry
     )
-
-    # Calibrate the sparsity ratio of the attention modules
-    return calibrate(model, forward_loop=forward_loop)
-
-
-def calibrate(
-    model: torch.nn.Module,
-    forward_loop: ForwardLoop | None = None,
-) -> torch.nn.Module:
-    """Calibrates sparse attention thresholds based on target sparsity.
-
-    This function performs calibration to find optimal thresholds that achieve
-    the target sparsity ratio specified in the sparse attention configuration.
-
-    Args:
-        model: A pytorch model with sparse attention already applied
-        forward_loop: Optional callable that forwards calibration data through the model.
-            It should take model as the argument and can optionally return metrics.
-            If None, will auto-generate RULER dataset for calibration.
-
-    Returns:
-        The calibrated model with optimized sparse attention thresholds.
-        If no calibration is configured, returns the model unchanged.
-    """
-    # Get the sparse attention config from the model's state
-    if not ModeloptStateManager.is_converted(model):
-        return model
-
-    manager = ModeloptStateManager(model)
-
-    sparse_attn_config = next(
-        (state["config"] for name, state in manager._state if name == "sparse_attention"), None
-    )
-
-    if sparse_attn_config is None:
-        return model
-
-    # Check if calibration is configured in any sparse_cfg pattern
-    # Note: sparse_attn_config is always a dict (stored via config.model_dump())
-    sparse_cfg = sparse_attn_config.get("sparse_cfg", {})
-
-    has_calibration = any(
-        isinstance(cfg, dict) and "calibration" in cfg for cfg in sparse_cfg.values()
-    )
-
-    if not has_calibration:
-        return model
-
-    # Run calibration (handles stats collection internally)
-    calibrate_sparse_attention(model, sparse_attn_config, forward_loop=forward_loop)
 
     return model

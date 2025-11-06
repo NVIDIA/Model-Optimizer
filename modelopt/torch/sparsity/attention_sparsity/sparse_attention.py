@@ -21,9 +21,8 @@ import torch.nn.functional as F
 from modelopt.torch.opt.dynamic import DynamicModule, _DMRegistryCls
 from modelopt.torch.quantization.utils import replace_function
 
-from ..config import SparseAttentionAttributeConfig
-from ..methods import get_sparse_method
-from .stats_manager import SparseAttentionStatsManager
+from .config import SparseAttentionAttributeConfig
+from .methods import get_sparse_method
 
 
 class SparseAttentionModule(DynamicModule):
@@ -51,7 +50,7 @@ class SparseAttentionModule(DynamicModule):
     _enabled: bool
         Whether sparse attention is enabled
     _method: str
-        The sparse attention method to use (e.g., "flash_softmax_skip")
+        The sparse attention method to use (e.g., "flash_skip_softmax")
     _method_config: dict
         Configuration dictionary for the sparse method (threshold, br, bc, etc.)
     _sparse_method_instance: SparseAttentionMethod
@@ -67,12 +66,10 @@ class SparseAttentionModule(DynamicModule):
 
         Args:
             attribute_cfg: Sparse attention attribute configuration.
-                         If None, uses default SparseAttentionAttributeConfig.
         """
-        # Use default config if not provided
-        attribute_cfg = (
-            attribute_cfg if attribute_cfg is not None else SparseAttentionAttributeConfig()
-        )
+        # Ensure config is validated through Pydantic
+        if not isinstance(attribute_cfg, SparseAttentionAttributeConfig):
+            attribute_cfg = SparseAttentionAttributeConfig(**(attribute_cfg or {}))
 
         # Store raw config for method initialization
         self._method_config = {}
@@ -87,8 +84,8 @@ class SparseAttentionModule(DynamicModule):
             "method": ("_method", lambda val: str(val)),
         }
 
-        # Process each attribute from config
-        for attribute, val in attribute_cfg.items():
+        # Process each attribute from validated config
+        for attribute, val in attribute_cfg.model_dump().items():
             # Validate attribute if using config class
             if hasattr(SparseAttentionAttributeConfig, "model_fields"):
                 assert attribute in SparseAttentionAttributeConfig.model_fields, (
@@ -132,10 +129,9 @@ class SparseAttentionModule(DynamicModule):
 
         Returns:
             Dictionary with sparsity statistics including 'average_sparsity' if available.
-            Returns empty dict if stats manager is not enabled.
+            Returns empty dict (statistics collection will be added in calibration PR).
         """
-        if self._stats_manager is not None and self._stats_manager.enabled:
-            return self._stats_manager.get_summary()
+        # TODO: Statistics collection will be added in calibration PR
         return {}
 
     def _setup(self):
@@ -143,14 +139,6 @@ class SparseAttentionModule(DynamicModule):
         # Apply default configuration if not yet configured
         if not hasattr(self, "_method"):
             self.set_from_attribute_config(None)
-
-        # Create stats manager if stats collection is enabled
-        if self._method_config.get("collect_stats", False):
-            self._stats_manager = SparseAttentionStatsManager(
-                module_name="sparse_attention", enabled=True
-            )
-        else:
-            self._stats_manager = None
 
     def forward(self, *args, **kwargs):
         """Forward with selected sparse attention method.
@@ -168,10 +156,6 @@ class SparseAttentionModule(DynamicModule):
         # Apply sparse attention through the context
         with context:
             result = super().forward(*args, **kwargs)
-
-        # Collect stats if manager is available
-        if self._stats_manager is not None and hasattr(self._sparse_method_instance, "_last_stats"):
-            self._stats_manager.collect(self._sparse_method_instance._last_stats)
 
         return result
 

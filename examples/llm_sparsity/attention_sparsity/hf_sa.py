@@ -22,54 +22,26 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+import modelopt.torch.opt as mto
 import modelopt.torch.sparsity.attention_sparsity as mtsa
 from modelopt.torch.export import export_hf_checkpoint
 from modelopt.torch.sparsity.attention_sparsity import SparseAttentionConfig
-from modelopt.torch.sparsity.attention_sparsity.config import (
-    SKIP_SOFTMAX_CALIB,
-    SKIP_SOFTMAX_DEFAULT,
-)
-from modelopt.torch.sparsity.attention_sparsity.nn.sparse_attention import SparseAttentionModule
+from modelopt.torch.sparsity.attention_sparsity.config import SKIP_SOFTMAX_DEFAULT
+from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 
 RAND_SEED = 1234
 
+# Enable HuggingFace checkpointing support
+mto.enable_huggingface_checkpointing()
+
 # You can define custom configurations or use the default
 SPARSE_ATTN_CFG_CHOICES = {
     "skip_softmax": SKIP_SOFTMAX_DEFAULT,
-    "skip_softmax_calib": SKIP_SOFTMAX_CALIB,
 }
-
-
-def print_sparsity_stats(model: nn.Module):
-    """Print sparsity statistics if available."""
-    module_stats = []
-    for name, module in model.named_modules():
-        if hasattr(module, "get_stats"):
-            stats = module.get_stats()
-            if stats and "average_sparsity" in stats:
-                module_stats.append((name, stats["average_sparsity"]))
-
-    if not module_stats:
-        print("No sparsity statistics available")
-        return
-
-    # Check if all modules have the same sparsity
-    sparsities = [s for _, s in module_stats]
-    if len(set(sparsities)) == 1:
-        # All identical - show summary
-        print(f"Average sparsity across all {len(module_stats)} modules: {sparsities[0]:.2%}")
-    else:
-        # Different sparsities - show individual values
-        avg_sparsity = sum(sparsities) / len(sparsities)
-        print(f"Average sparsity: {avg_sparsity:.2%}")
-        print("Per-module breakdown:")
-        for name, sparsity in module_stats:
-            print(f"  {name}: {sparsity:.2%} sparse")
 
 
 def get_narrativeqa_samples(num_samples=3):
@@ -77,9 +49,16 @@ def get_narrativeqa_samples(num_samples=3):
 
     Args:
         num_samples: Number of samples to generate
+
+    Raises:
+        RuntimeError: If dataset loading fails
+        ValueError: If no valid samples could be loaded
     """
-    # Load NarrativeQA dataset
-    dataset = load_dataset("narrativeqa", split="test", streaming=True)
+    # Load NarrativeQA dataset with retry logic
+    try:
+        dataset = load_dataset("narrativeqa", split="test", streaming=True)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load NarrativeQA dataset: {e}")
 
     samples = []
     for i, item in enumerate(dataset):
@@ -120,8 +99,10 @@ def truncate_text(text: str, tokenizer, max_length: int):
         return text
 
     # Need to truncate - preserve beginning and end
-    # Reserve some tokens for special tokens
-    available_tokens = max_length - 2  # Account for special tokens
+    # Calculate actual special tokens used
+    dummy_tokens = tokenizer.encode("", add_special_tokens=True)
+    special_token_count = len(dummy_tokens)
+    available_tokens = max_length - special_token_count
 
     # Split tokens roughly in half for beginning and end
     begin_tokens = available_tokens // 2
@@ -173,9 +154,7 @@ def verify_outputs(model, tokenizer, args):
     print("BASELINE vs SPARSE ATTENTION COMPARISON")
     print("=" * 60)
     print(f"\nTest prompt: {display_prompt}")
-    print(f"Input tokens: {inputs['input_ids'].shape[1]} (max: {args.seq_len})")
-    if "[...]" in truncated_prompt:
-        print("Note: Text was middle-truncated to fit token limit")
+    print(f"Input tokens: {inputs['input_ids'].shape[1]}")
 
     # Helper function to generate text
     def generate_text(model, inputs, args, tokenizer):
@@ -235,22 +214,12 @@ def sparsify_model(model, args):
         modified_sparse_cfg[pattern] = modified_cfg
 
     # Create new config with modified settings
-    sparse_config = SparseAttentionConfig(
-        method=base_config["method"],
-        sparse_cfg=modified_sparse_cfg,
-        collect_stats=True,  # Enable stats collection for monitoring
-    )
+    sparse_config = SparseAttentionConfig(sparse_cfg=modified_sparse_cfg)
 
-    # Sparsify with optional calibration - framework handles calibration automatically
+    # Sparsify the model
     model = mtsa.sparsify(model, config=sparse_config)
 
     print("Sparse attention applied successfully!")
-
-    # Show sparsity statistics
-    print("\n" + "=" * 60)
-    print("Sparsity Statistics")
-    print("=" * 60)
-    print_sparsity_stats(model)
 
     return model
 
