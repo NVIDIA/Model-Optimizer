@@ -20,6 +20,7 @@ processing pattern for optimal performance.
 """
 
 import math
+from typing import Any
 
 import numpy as np
 import torch
@@ -44,7 +45,7 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         """
         config = method_config or {}
 
-        # Extract configuration (defaults handled by Pydantic)
+        # Extract configuration
         self.threshold_config = config["threshold"]
         self.br = config["br"]
         self.bc = config["bc"]
@@ -52,7 +53,6 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         self.is_causal = config["is_causal"]
 
         # Optional parameters not in Pydantic config
-        self.enable_correction_factor = config.get("enable_correction_factor", True)
         self.phase = config.get("phase", None)
 
         # Calibration mode: when True, prevent threshold updates to preserve calibrator's test threshold
@@ -191,18 +191,15 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             element_mask = element_mask[:, :, :seq_q, :seq_k]
 
             # Step 8: Calculate sparsity statistics
-            # Count kept blocks (averaged across batch and heads)
-            kept_blocks = block_mask.sum().item() / (batch_size * num_heads)
-
-            # Total valid blocks (lower triangle only for causal attention)
-            # Note: Causal mask pre-applied by attention module, so block_mask naturally
-            # has zeros in upper triangle. We only count lower triangle for denominator.
-            total_blocks = (
-                num_block_rows * (num_block_rows + 1) // 2  # Causal: N(N+1)/2
-                if self.is_causal
-                else num_block_rows * num_block_cols  # Non-causal: N*N
-            )
-            sparsity = 1 - (kept_blocks / total_blocks)
+            # density = sum(mask) / numel(mask) * N / (N+1) for causal
+            if self.is_causal:
+                density = float(block_mask.sum() / block_mask.numel()) * (
+                    num_block_rows / (num_block_rows + 1)
+                )
+            else:
+                density = float(block_mask.sum() / block_mask.numel())
+            sparsity = 1 - density
+            total_blocks = num_block_rows * num_block_cols
         else:  # decode
             blocked_attn, _, num_block_cols, _, padded_seq_k = self._reshape_to_blocks(
                 attn_weights, 1, self.bc
@@ -239,14 +236,14 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             element_mask = element_mask.reshape(batch_size, num_heads, 1, padded_seq_k)
             element_mask = element_mask[:, :, :seq_q, :seq_k]
 
-            # Step 7: Calculate statistics
-            kept_blocks = block_mask.sum().item() / (batch_size * num_heads)
+            # Step 7: Calculate sparsity statistics
+            density = float(block_mask.sum() / block_mask.numel())
+            sparsity = 1 - density
             total_blocks = num_block_cols
-            sparsity = 1 - (kept_blocks / total_blocks)
 
         # Create stats dictionary
         stats = {
-            "correction_factor": correction_factor if self.enable_correction_factor else 1.0,
+            "correction_factor": correction_factor,
             "sparsity": sparsity,
             "phase": phase,
             "total_blocks": total_blocks,
@@ -300,6 +297,34 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         sparse_scores = attention_scores.masked_fill(~sparse_mask, mask_value)
 
         return query, key, value, sparse_scores
+
+    def get_threshold_info(self) -> dict[str, Any]:
+        """Get threshold information for this method.
+
+        Returns:
+            Dictionary with threshold configuration and calibration info.
+        """
+        threshold_scale_factor = getattr(self, "threshold_scale_factor", None)
+
+        if threshold_scale_factor is not None:
+            # Calibrated dynamic threshold
+            return {
+                "type": "dynamic",
+                "scale_factor": threshold_scale_factor,
+                "formula": "λ / length",
+                "example_lengths": {
+                    1024: threshold_scale_factor / 1024,
+                    2048: threshold_scale_factor / 2048,
+                    4096: threshold_scale_factor / 4096,
+                    8192: threshold_scale_factor / 8192,
+                },
+            }
+        else:
+            # Static threshold (single value or phase-specific dict)
+            return {
+                "type": "static",
+                "value": self.threshold_config,
+            }
 
     @property
     def name(self) -> str:

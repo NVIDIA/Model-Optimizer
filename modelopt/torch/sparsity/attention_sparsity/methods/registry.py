@@ -18,6 +18,7 @@
 import re
 import warnings
 from abc import ABC, abstractmethod
+from typing import Any
 
 import torch
 
@@ -44,6 +45,18 @@ class SparseAttentionMethod(ABC):
         Returns:
             Tuple of (query, key, value, attention_scores) with sparsity applied
         """
+
+    def get_threshold_info(self) -> dict[str, Any]:
+        """Get threshold information for display/debugging.
+
+        Returns:
+            Dictionary with threshold information. Should include:
+            - 'type': 'static', 'dynamic', or 'none'
+            - 'value': threshold value (for static)
+            - 'scale_factor': scale factor (for dynamic)
+            - Other method-specific info
+        """
+        return {"type": "none", "value": None}
 
     @property
     @abstractmethod

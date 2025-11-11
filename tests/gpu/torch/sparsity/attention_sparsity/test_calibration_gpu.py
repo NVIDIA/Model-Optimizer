@@ -115,9 +115,9 @@ class TestCalibrationGPU:
         model = simple_model
 
         config = {
-            "method": "flash_softmax_skip",
             "sparse_cfg": {
                 "*attn*": {
+                    "method": "flash_skip_softmax",
                     "threshold": 1e-3,
                     "br": 64,
                     "bc": 64,
@@ -155,9 +155,9 @@ class TestCalibrationGPU:
         model = simple_model
 
         config = {
-            "method": "flash_softmax_skip",
             "sparse_cfg": {
                 "*attn*": {
+                    "method": "flash_skip_softmax",
                     "threshold": 1e-3,
                     "backend": "pytorch",
                     "enable": True,
@@ -187,9 +187,9 @@ class TestCalibrationGPU:
         model = simple_model
 
         config = {
-            "method": "flash_softmax_skip",
             "sparse_cfg": {
                 "*attn*": {
+                    "method": "flash_skip_softmax",
                     "threshold": 1e-3,
                     "enable": True,
                     "calibration": {
@@ -214,9 +214,9 @@ class TestCalibrationGPU:
         model = simple_model
 
         config = {
-            "method": "flash_softmax_skip",
             "sparse_cfg": {
                 "*attn*": {
+                    "method": "flash_skip_softmax",
                     "threshold": 1e-3,
                     "enable": True,
                     "calibration": {
@@ -261,9 +261,9 @@ class TestCalibrationEndToEnd:
         model = simple_model_setup
 
         config = {
-            "method": "flash_softmax_skip",
             "sparse_cfg": {
                 "*attn*": {
+                    "method": "flash_skip_softmax",
                     "threshold": 1e-3,
                     "backend": "pytorch",
                     "enable": True,
@@ -297,9 +297,9 @@ class TestCalibrationEndToEnd:
         """Compare calibrated vs fixed threshold models."""
         # Config with calibration
         config_calibrated = {
-            "method": "flash_softmax_skip",
             "sparse_cfg": {
                 "*attn*": {
+                    "method": "flash_skip_softmax",
                     "threshold": 1e-3,
                     "enable": True,
                     "calibration": {
@@ -313,9 +313,9 @@ class TestCalibrationEndToEnd:
 
         # Config with fixed threshold (no calibration)
         config_fixed = {
-            "method": "flash_softmax_skip",
             "sparse_cfg": {
                 "*attn*": {
+                    "method": "flash_skip_softmax",
                     "threshold": 1e-3,
                     "enable": True,
                 }
@@ -356,9 +356,9 @@ class TestCalibrationEndToEnd:
         initial_memory = torch.cuda.memory_allocated()
 
         config = {
-            "method": "flash_softmax_skip",
             "sparse_cfg": {
                 "*attn*": {
+                    "method": "flash_skip_softmax",
                     "threshold": 1e-3,
                     "enable": True,
                     "calibration": {

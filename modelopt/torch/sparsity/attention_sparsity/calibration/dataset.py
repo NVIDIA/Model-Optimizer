@@ -17,12 +17,13 @@
 
 import random
 import string
-import uuid
 from dataclasses import dataclass
 from typing import Any
 
 from tqdm import tqdm
 from transformers import AutoTokenizer
+
+from . import ruler_utils
 
 
 def _generate_target_lengths(
@@ -143,7 +144,7 @@ RULER_TASKS = {
             " Answer: According to the coded text above, "
             "the three most frequently appeared words are:"
         ),
-        args={},
+        args={"alpha": 2.0},
     ),
     "qa_1": RulerTask(
         name="qa_1",
@@ -158,7 +159,7 @@ RULER_TASKS = {
             "Question: {query}"
         ),
         answer_prefix=" Answer:",
-        args={"dataset": "squad", "demo_selection": "topk_lt_ctx"},
+        args={"dataset": "squad"},
     ),
     "qa_2": RulerTask(
         name="qa_2",
@@ -173,7 +174,7 @@ RULER_TASKS = {
             "Question: {query}"
         ),
         answer_prefix=" Answer:",
-        args={"dataset": "hotpotqa", "demo_selection": "topk_lt_ctx"},
+        args={"dataset": "hotpotqa"},
     ),
 }
 
@@ -185,17 +186,17 @@ class RulerDatasetBuilder:
         self,
         samples: int,
         max_seqlen: int,
-        tokenizer_name_or_path: str,
-        seed: int = 42,
+        tokenizer_name_or_path: str | object,
         num_length_bins: int = 4,
         max_length_filter: int = 65536,
+        seed: int = 42,
     ):
         """Initialize RULER dataset builder.
 
         Args:
             samples: Total number of samples to generate (distributed evenly across length bins)
             max_seqlen: Maximum sequence length (length bins auto-generated as powers of 2)
-            tokenizer_name_or_path: HuggingFace tokenizer path
+            tokenizer_name_or_path: HuggingFace tokenizer path or tokenizer object
             seed: Random seed for reproducibility
             num_length_bins: Number of length bins to generate (default: 4)
             max_length_filter: Maximum sequence length to keep (default: 65536)
@@ -229,8 +230,11 @@ class RulerDatasetBuilder:
         # Distribute samples evenly across lengths
         self.samples_per_length = [samples // len(self.target_lengths)] * len(self.target_lengths)
 
-        # Initialize tokenizer and seed
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
+        # Initialize tokenizer
+        if isinstance(tokenizer_name_or_path, str):
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
+        else:
+            self.tokenizer = tokenizer_name_or_path
         random.seed(seed)
 
     def build_calibration_dataset(self) -> list[dict[str, Any]]:
@@ -247,9 +251,7 @@ class RulerDatasetBuilder:
             desc="Generating RULER calibration samples",
             total=len(self.target_lengths),
         ):
-            samples_per_task = num_samples // len(self.subtasks)
-            if samples_per_task <= 0:
-                continue
+            samples_per_task = max(num_samples // len(self.subtasks), 1)
 
             # Generate equal samples for each task
             for task_name in self.subtasks:
@@ -293,50 +295,43 @@ class RulerDatasetBuilder:
         """Generate a needle-in-haystack sample."""
         args = task.args
 
-        # Generate needles based on type
-        if args["type_needle_k"] == "words":
-            needle_keys = [self._generate_random_word() for _ in range(args["num_needle_k"])]
-        else:  # uuids
-            needle_keys = [str(uuid.uuid4()) for _ in range(args["num_needle_k"])]
-
-        if args["type_needle_v"] == "numbers":
-            needle_values = [
-                str(random.randint(100000, 999999)) for _ in range(args["num_needle_v"])
-            ]
-        else:  # uuids
-            needle_values = [str(uuid.uuid4()) for _ in range(args["num_needle_v"])]
-
-        # Select query needles
-        query_keys = random.sample(needle_keys, min(args["num_needle_q"], len(needle_keys)))
-
-        # Generate context with needles
-        context = self._generate_niah_context(
-            target_length, needle_keys, needle_values, args["type_haystack"]
+        # Find optimal haystack size for target length
+        optimal_haystack = ruler_utils.find_optimal_haystack_size(
+            tokenizer=self.tokenizer,
+            max_seq_length=target_length,
+            template=task.template,
+            answer_prefix=task.answer_prefix,
+            tokens_to_generate=task.tokens_to_generate,
+            type_haystack=args.get("type_haystack", "essay"),
+            type_needle_k=args.get("type_needle_k", "words"),
+            type_needle_v=args.get("type_needle_v", "numbers"),
+            num_needle_k=args.get("num_needle_k", 1),
+            num_needle_v=args.get("num_needle_v", 1),
+            num_needle_q=args.get("num_needle_q", 1),
         )
 
-        # Format template
-        template = task.template.format(
-            type_needle_v=args["type_needle_v"],
-            context=context,
-            query=query_keys[0] if query_keys else needle_keys[0],
+        # Generate sample using official RULER implementation
+        sample = ruler_utils.generate_niah_sample(
+            num_haystack=optimal_haystack,
+            tokenizer=self.tokenizer,
+            template=task.template,
+            answer_prefix=task.answer_prefix,
+            tokens_to_generate=task.tokens_to_generate,
+            type_haystack=args.get("type_haystack", "essay"),
+            type_needle_k=args.get("type_needle_k", "words"),
+            type_needle_v=args.get("type_needle_v", "numbers"),
+            num_needle_k=args.get("num_needle_k", 1),
+            num_needle_v=args.get("num_needle_v", 1),
+            num_needle_q=args.get("num_needle_q", 1),
+            random_seed=self.seed + sample_idx,
         )
 
-        # Add answer prefix
-        full_input = template + task.answer_prefix.format(
-            type_needle_v=args["type_needle_v"],
-            query=query_keys[0] if query_keys else needle_keys[0],
-        )
+        # Add task metadata
+        sample["task"] = task.name
+        sample["target_length"] = target_length
+        sample["sample_idx"] = sample_idx
 
-        # Tokenize to get actual length
-        tokens = self.tokenizer.encode(full_input, add_special_tokens=False)
-
-        return {
-            "input": full_input,
-            "length": len(tokens),
-            "task": task.name,
-            "target_length": target_length,
-            "sample_idx": sample_idx,
-        }
+        return sample
 
     def _generate_vt_sample(
         self, task: RulerTask, target_length: int, sample_idx: int
@@ -471,47 +466,6 @@ class RulerDatasetBuilder:
             "sample_idx": sample_idx,
         }
 
-    def _generate_niah_context(
-        self,
-        target_length: int,
-        needle_keys: list[str],
-        needle_values: list[str],
-        haystack_type: str,
-    ) -> str:
-        """Generate context for needle-in-haystack tasks."""
-        # Create needle sentences
-        needles = []
-        for key, value in zip(needle_keys, needle_values):
-            needles.append(f"The magic number for {key} is {value}.")
-
-        # Generate haystack based on type
-        if haystack_type == "repeat":
-            base_text = "The grass is green. The sky is blue. The sun is yellow. " * 100
-        elif haystack_type == "essay":
-            base_text = self._generate_essay_text(500)
-        else:  # needle type - more needles as distractors
-            base_text = self._generate_needle_haystack(500)
-
-        # Insert needles at random positions
-        words = base_text.split()
-        for needle in needles:
-            insert_pos = random.randint(0, len(words))
-            words.insert(insert_pos, needle)
-
-        context = " ".join(words)
-
-        # Adjust to target length
-        tokens = self.tokenizer.encode(context, add_special_tokens=False)
-        while len(tokens) < target_length * 0.7:  # Leave room for template
-            context += " " + self._generate_essay_text(100)
-            tokens = self.tokenizer.encode(context, add_special_tokens=False)
-
-        if len(tokens) > target_length * 0.9:
-            # Truncate if too long
-            context = self.tokenizer.decode(tokens[: int(target_length * 0.8)])
-
-        return context
-
     def _pad_context_with_text(
         self, base_context: str, target_length: int, padding_type: str
     ) -> str:
@@ -590,13 +544,3 @@ class RulerDatasetBuilder:
     def _generate_document_text(self, num_words: int) -> str:
         """Generate document-like text."""
         return self._generate_essay_text(num_words)
-
-    def _generate_needle_haystack(self, num_items: int) -> str:
-        """Generate haystack with many needle-like distractors."""
-        items = []
-        for _ in range(num_items):
-            key = self._generate_random_word()
-            value = str(random.randint(100000, 999999))
-            items.append(f"The value for {key} is {value}.")
-
-        return " ".join(items)

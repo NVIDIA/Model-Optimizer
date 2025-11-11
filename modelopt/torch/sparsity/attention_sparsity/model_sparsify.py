@@ -19,7 +19,7 @@ from typing import Any
 
 import torch
 
-from modelopt.torch.opt.conversion import ModeloptStateManager, apply_mode
+from modelopt.torch.opt.conversion import apply_mode
 from modelopt.torch.opt.searcher import ForwardLoop
 
 from .calibration import calibrate_sparse_attention
@@ -136,7 +136,7 @@ def sparsify(
 
                     from transformers import AutoModelForCausalLM
 
-                    model = AutoModelForCausalLM.from_pretrained(
+                    model = AutoModelForCausalLM.from_pretrained(b
                         model_path,
                         attn_implementation="eager",  # Required for sparse attention
                         torch_dtype=torch.bfloat16,
@@ -158,49 +158,20 @@ def sparsify(
 
 def calibrate(
     model: torch.nn.Module,
-    config: dict[str, Any] | SparseAttentionConfig | None = None,
+    config: dict[str, Any] | SparseAttentionConfig,
     forward_loop: ForwardLoop | None = None,
 ) -> torch.nn.Module:
     """Calibrates sparse attention thresholds based on target sparsity.
 
-    This function performs calibration to find optimal thresholds that achieve
-    the target sparsity ratio specified in the config.
-
     Args:
         model: Model with sparse attention modules
-        config: Sparse attention config (extracted from modelopt state if None)
+        config: Sparse attention configuration with calibration settings
         forward_loop: Optional callable that forwards calibration data through the model.
             If provided, uses this for calibration data.
             If None, will auto-generate RULER dataset for calibration.
 
     Returns:
         The calibrated model with optimized sparse attention thresholds.
-        If no calibration is configured, returns the model unchanged.
     """
-    # Get config from model if not provided
-    if config is None:
-        manager = ModeloptStateManager(model)
-        if manager.last_mode and manager.last_mode.name == "sparse_attention":
-            config = manager._last_config
-        else:
-            # No sparse attention applied, return model unchanged
-            return model
-
-    # Extract sparse_cfg
-    if isinstance(config, dict):
-        sparse_cfg = config.get("sparse_cfg", {})
-    else:
-        sparse_cfg = config.sparse_cfg
-
-    # Check if calibration is configured in any sparse_cfg pattern
-    has_calibration = any(
-        isinstance(cfg, dict) and "calibration" in cfg for cfg in sparse_cfg.values()
-    )
-
-    if not has_calibration:
-        return model
-
-    # Run calibration (handles stats collection internally)
     calibrate_sparse_attention(model, config, forward_loop=forward_loop)
-
     return model
