@@ -15,7 +15,9 @@
 
 """Calibration utilities."""
 
+import gc
 import math
+import os
 import warnings
 from functools import partial
 
@@ -23,11 +25,13 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from tqdm import tqdm
 
 from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
+from modelopt.torch.utils.perf import get_gpu_mem_fraction
 
 from .calib import MseCalibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
@@ -1157,3 +1161,313 @@ def svdquant(
             with enable_weight_access_and_writeback(module, model):
                 postprocess(module, name)
     max_calibrate(model, forward_loop)
+
+
+def update_hessian(input, hessian, n_samples):
+    """Update hessian matrix with new input samples using incremental formula.
+
+    Args:
+        input: Input tensor (batch_size, ..., features)
+        hessian: Current Hessian matrix to update in-place
+        n_samples: Number of samples already processed
+
+    Returns:
+        Tuple of (updated_hessian, new_sample_count)
+    """
+    batch_size = input.shape[0]
+
+    # Incremental averaging: scale down old hessian
+    hessian *= n_samples / (n_samples + batch_size)
+    n_samples += batch_size
+
+    # Compute outer product: H += (X^T X) / n_samples
+    input_flat = input.reshape(-1, input.shape[-1]).t().float()
+    scaled_input = math.sqrt(2 / n_samples) * input_flat
+    hessian.add_(scaled_input @ scaled_input.t())
+
+    return hessian, n_samples
+
+
+def prepare_hessian_inverse(h, weight, percdamp):
+    """Prepare inverse Hessian with dead neuron handling and damping."""
+    h = h.clone()
+
+    # Handle dead neurons (zero diagonal elements)
+    dead_mask = torch.diag(h) == 0
+    h[dead_mask, dead_mask] = 1
+    weight[:, dead_mask] = 0
+
+    # Add damping to diagonal
+    damp = percdamp * torch.mean(torch.diag(h))
+    diag_indices = torch.arange(h.shape[0], device=h.device)
+    h[diag_indices, diag_indices] += damp
+
+    try:
+        h = torch.cholesky_inverse(torch.linalg.cholesky(h))
+        h_inv = torch.linalg.cholesky(h, upper=True)
+    except (RuntimeError, torch.linalg.LinAlgError):
+        print("Warning: Hessian is not positive definite, using identity matrix")
+        h_inv = torch.eye(h.shape[0], device=h.device, dtype=h.dtype)
+    return h_inv
+
+
+def quantize_block(block_weight, block_hinv, quantizer):
+    """Quantize a block of weights group by group (based on quantizer block sizes) with error propagation.
+
+    Returns:
+        quantized_block: Quantized weights
+        losses: Quantization losses per element
+        errors: Accumulated errors for propagation
+    """
+    _, block_size = block_weight.shape
+    quantized_block = torch.zeros_like(block_weight)
+    losses = torch.zeros_like(block_weight)
+    errors = torch.zeros_like(block_weight)
+    group_size = getattr(quantizer, "block_sizes", [None])[-1]
+
+    if group_size is None:
+        raise ValueError("Block sizes not found in quantizer")
+
+    assert block_size % group_size == 0, "Block size must be divisible by group size"
+
+    for group_start in range(0, block_size, group_size):
+        group_end = min(group_start + group_size, block_size)
+        group_cols = slice(group_start, group_end)
+        # Get current column and its Hessian inverse diagonal
+        weight_col = block_weight[:, group_cols]
+        hinv_diag = torch.diag(block_hinv[group_cols, group_cols])
+
+        # Quantize the column
+        quantized_cols = quantizer(weight_col)
+        quantized_block[:, group_cols] = quantized_cols
+
+        # Compute quantization error and loss
+        error = (weight_col - quantized_cols) / hinv_diag
+        losses[:, group_cols] = (weight_col - quantized_cols) ** 2 / (hinv_diag**2) / 2
+        errors[:, group_cols] = error
+
+        # Propagate error to remaining columns in block
+        block_weight[:, group_start:] -= error @ block_hinv[group_start:group_end, group_start:]
+
+    return quantized_block, losses, errors
+
+
+def print_relative_mse_error(q: torch.Tensor, w: torch.Tensor, h: torch.Tensor, module_name: str):
+    """Print relative mean squared error between quantized and original weights.
+
+    Computes the Hessian-weighted relative MSE between quantized and original weights,
+    providing a measure of quantization quality. This metric is adapted from the GPTQ
+    repository.
+
+    Args:
+        q (torch.Tensor): Quantized weight tensor
+        w (torch.Tensor): Original weight tensor
+        h (torch.Tensor): Hessian matrix used for weighting the error
+        module_name (str): Name of the module for logging purposes
+
+    Note:
+        Implementation adapted from the GPTQ repository:
+        https://github.com/IST-DASLab/FP-Quant
+    """
+    delta = q - w
+    mse = (delta).mm(h).mul(delta).mean() / (w.mm(h).mul(w).mean() + 1e-6)
+    print(f"[{module_name}] Relative MSE error: {mse.item():.2e}")
+
+
+def blockwise_weight_update(module, h, block_size, percdamp):
+    """Update module weights using GPTQ-style blockwise quantization.
+
+    Args:
+        module: Neural network module with weight and weight_quantizer
+        H: Hessian matrix (d x d)
+        block_size: Size of blocks to process at once
+        percdamp: Damping percentage for Hessian diagonal
+    """
+    weight = module.weight.data.clone()
+    _, num_cols = weight.shape
+
+    # Preprocess Hessian: handle dead neurons and add damping
+    h_inv = prepare_hessian_inverse(h, weight, percdamp).to(weight.dtype)
+
+    # Initialize output tensors
+    quantized_weight = torch.zeros_like(weight)
+    losses = torch.zeros_like(weight)
+
+    # Process weights in blocks
+    for block_start in range(0, num_cols, block_size):
+        block_end = min(block_start + block_size, num_cols)
+
+        # Process current block
+        block_weight = weight[:, block_start:block_end].clone()
+        block_hinv = h_inv[block_start:block_end, block_start:block_end]
+
+        quantized_block, block_losses, block_errors = quantize_block(
+            block_weight, block_hinv, module.weight_quantizer
+        )
+
+        # Store results
+        quantized_weight[:, block_start:block_end] = quantized_block
+        losses[:, block_start:block_end] = block_losses
+
+        # Propagate errors to remaining weights
+        weight[:, block_end:] -= block_errors @ h_inv[block_start:block_end, block_end:]
+
+    # Print relative mse error
+    print_relative_mse_error(
+        quantized_weight, module.weight, h.to(module.weight.dtype), module.name
+    )
+    # Update module weights
+    module.weight.data = quantized_weight.reshape(module.weight.shape).to(module.weight.data.dtype)
+
+
+def gptq_lite(
+    model: nn.Module,
+    forward_loop: ForwardLoop | None = None,
+    percdamp: float = 0.01,
+    block_size: int = 128,
+    hessian_state_path: str | None = None,
+):
+    """GPTQ-lite quantization - a simplified GPTQ variant.
+
+    Key differences from GPTQ:
+    - Layers are quantized in parallel (not sequentially with updated activations)
+    - Uses group-wise updates instead of column-wise updates
+
+    Args:
+        model: Model to be calibrated.
+        forward_loop: Callable that forwards calibration data through the model.
+        percdamp: Percentage of avg Hessian diagonal for damping (default: 0.01).
+        block_size: Block size for GPTQ weight update.
+        hessian_state_path: Path to save/load Hessian state. If None, compute without saving.
+            If path exists, load from it. If path doesn't exist, compute and save to it.
+
+    See :class:`GPTQLiteConfig <modelopt.torch.quantization.config.GPTQLiteConfig>` for
+    details on the remaining arguments.
+    """
+    # Dictionary to store hessian matrices: {layer_name: {"hessian": Tensor, "n_samples": int}}
+    hessian_state = {}
+
+    def initialize_hessian_state(tensor_mapping):
+        """Initialize hessian state with zeros."""
+        for name, (shape, device) in tensor_mapping.items():
+            # Use CPU if GPU memory is tight
+            target_device = "cpu" if get_gpu_mem_fraction(device) > 0.65 else device
+            hessian_state[name] = {
+                "hessian": torch.zeros(shape, dtype=torch.float32, device=target_device),
+                "n_samples": 0,
+            }
+
+    def load_hessian_state(path, tensor_mapping):
+        """Load hessian state from file."""
+        print_rank_0(f"Loading hessian state from {path}")
+        loaded_state = torch.load(path, map_location="cpu")
+
+        for name, (shape, device) in tensor_mapping.items():
+            if name not in loaded_state:
+                raise KeyError(f"Layer '{name}' not found in loaded hessian state")
+
+            # Move to appropriate device based on memory
+            target_device = "cpu" if get_gpu_mem_fraction(device) > 0.65 else device
+            hessian_state[name] = {
+                "hessian": loaded_state[name]["hessian"].to(target_device),
+                "n_samples": loaded_state[name]["n_samples"],
+            }
+
+        print_rank_0(f"Successfully loaded hessian state with {len(hessian_state)} layers")
+
+    def save_hessian_state(path):
+        """Save hessian state to file."""
+        print_rank_0(f"Saving hessian state to {path}")
+        try:
+            # Move to CPU for saving
+            cpu_state = {
+                name: {"hessian": state["hessian"].cpu(), "n_samples": state["n_samples"]}
+                for name, state in hessian_state.items()
+            }
+
+            os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
+            torch.save(cpu_state, path)
+            print_rank_0(f"Successfully saved hessian state to {path}")
+        except Exception as e:
+            print_rank_0(f"Error saving hessian state: {e}")
+            print_rank_0("Continuing execution...")
+
+    def hessian_hook(module, input, output):
+        """Hook to intercept activations and update hessian matrix."""
+        state = hessian_state[module.name]
+        hessian, n_samples = update_hessian(input[0], state["hessian"], state["n_samples"])
+        hessian_state[module.name] = {"hessian": hessian, "n_samples": n_samples}
+        torch.cuda.empty_cache()
+        gc.collect()
+
+    # Phase 1: Collect statistics for quantizers
+    enable_stats_collection(model)
+    max_calibrate(model, forward_loop)
+    finish_stats_collection(model)
+
+    # Phase 2: Build tensor mapping for all quantized layers
+    tensor_mapping = {}
+    for name, module in model.named_modules():
+        if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
+            in_features = module.weight.shape[1]
+            tensor_mapping[name] = ((in_features, in_features), module.weight.device)
+            module.name = name  # Attach name for easy access in hooks
+
+    print_rank_0(f"Found {len(tensor_mapping)} quantized layers")
+
+    # Phase 3: Load or compute Hessians
+    hessian_exists = hessian_state_path is not None and os.path.exists(hessian_state_path)
+
+    if hessian_exists:
+        load_hessian_state(hessian_state_path, tensor_mapping)
+    else:
+        if forward_loop is None:
+            raise ValueError("forward_loop must be provided when computing Hessians")
+
+        # Initialize hessian state
+        initialize_hessian_state(tensor_mapping)
+
+        # Register hooks to collect activations
+        handles = []
+        for name, module in model.named_modules():
+            if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
+                handles.append(module.register_forward_hook(hessian_hook))
+
+        # Run forward loop to compute hessians
+        print_rank_0("Computing Hessian matrices...")
+        forward_loop(model)
+
+        # Remove hooks
+        for handle in handles:
+            handle.remove()
+
+        # Save if path provided
+        if hessian_state_path is not None:
+            save_hessian_state(hessian_state_path)
+
+    # Phase 4: Update weights using computed Hessians
+    print_rank_0("Updating weights using GPTQ-lite algorithm...")
+
+    quantized_modules = [
+        (name, module)
+        for name, module in model.named_modules()
+        if is_quantized_linear(module) and module.weight_quantizer.is_enabled
+    ]
+
+    for name, module in tqdm(quantized_modules, desc="Quantizing layers"):
+        state = hessian_state[module.name]
+        hessian = state["hessian"].to(module.weight.device)
+        blockwise_weight_update(module, hessian, block_size, percdamp)
+        torch.cuda.empty_cache()
+
+    # Phase 5: Reset and recalibrate quantizer statistics
+    for name, module in model.named_modules():
+        if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
+            module.input_quantizer.reset_amax()
+            module.output_quantizer.reset_amax()
+
+    enable_stats_collection(model)
+    max_calibrate(model, forward_loop)
+    finish_stats_collection(model)
+
+    print_rank_0("GPTQ-lite quantization completed successfully")
