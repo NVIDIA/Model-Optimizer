@@ -90,8 +90,7 @@ class DynamicThresholdCalibrator:
         attention_modules = [m for m in model.modules() if isinstance(m, SparseAttentionModule)]
 
         if not attention_modules:
-            warnings.warn("No sparse attention modules found for calibration")
-            return {}
+            raise ValueError("No sparse attention modules found for calibration")
 
         print("Starting dynamic threshold calibration")
         print(f"Target sparsity: {self.target_sparse_ratio}")

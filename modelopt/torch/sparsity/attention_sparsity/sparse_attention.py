@@ -15,6 +15,8 @@
 
 """Extensible sparse attention module."""
 
+from typing import Any
+
 import torch
 import torch.nn.functional as F
 
@@ -104,6 +106,14 @@ class SparseAttentionModule(DynamicModule):
         # Initialize sparse method instance
         self._init_sparse_method()
 
+        # Create stats manager based on config
+        if self._method_config.get("collect_stats", False):
+            self._stats_manager = SparseAttentionStatsManager(
+                module_name="sparse_attention", enabled=True
+            )
+        else:
+            self._stats_manager = None
+
     def _init_sparse_method(self):
         """Initialize the sparse method instance."""
         method_class = get_sparse_method(self._method)
@@ -136,19 +146,21 @@ class SparseAttentionModule(DynamicModule):
             return self._stats_manager.get_summary()
         return {}
 
+    def get_threshold_info(self) -> dict[str, Any]:
+        """Get threshold information from the sparse method instance.
+
+        Returns:
+            Dictionary with threshold information from the sparse method.
+        """
+        if hasattr(self, "_sparse_method_instance") and self._sparse_method_instance is not None:
+            return self._sparse_method_instance.get_threshold_info()
+        return {"type": "none", "value": None}
+
     def _setup(self):
         """Setup called by DynamicModule."""
         # Apply default configuration if not yet configured
         if not hasattr(self, "_method"):
             self.set_from_attribute_config(None)
-
-        # Create stats manager if stats collection is enabled
-        if self._method_config.get("collect_stats", False):
-            self._stats_manager = SparseAttentionStatsManager(
-                module_name="sparse_attention", enabled=True
-            )
-        else:
-            self._stats_manager = None
 
     def forward(self, *args, **kwargs):
         """Forward with selected sparse attention method.
