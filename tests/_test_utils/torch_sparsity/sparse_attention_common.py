@@ -153,13 +153,15 @@ def sparsify_model_and_forward(model, config, calib_data):
     with torch.no_grad():
         for batch in calib_data:
             output = model(batch)
-            assert not torch.isnan(output).any(), "NaN in output"
-            assert output is not None, "Output is None"
+            assert not torch.isnan(output).any(), (
+                f"NaN detected in output for batch shape {batch.shape}"
+            )
+            assert output is not None, f"Output is None for batch shape {batch.shape}"
 
     return model
 
 
-def save_restore_test(model_cls, device, sparse_config):
+def save_restore_test(model_cls, device, sparse_config, atol=1e-6):
     """Test save and restore of sparse attention state.
 
     Args:
@@ -190,6 +192,6 @@ def save_restore_test(model_cls, device, sparse_config):
         output_sparse = model_sparse(test_input)
         output_restored = model_restored(test_input)
 
-    assert torch.allclose(output_sparse, output_restored, atol=1e-6), (
+    assert torch.allclose(output_sparse, output_restored, atol), (
         "Restored model output doesn't match original"
     )

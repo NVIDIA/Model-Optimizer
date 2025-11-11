@@ -43,9 +43,11 @@ from lm_eval.__main__ import cli_evaluate, parse_eval_args, setup_parser
 from lm_eval.api.model import T
 from lm_eval.models.huggingface import HFLM
 from quantization_utils import quantize_model
+from sparse_attention_utils import sparsify_model
 
 import modelopt.torch.opt as mto
 from modelopt.torch.quantization.utils import is_quantized
+from modelopt.torch.sparsity.attention_sparsity.conversion import is_attn_sparsified
 
 
 def create_from_arg_obj(cls: type[T], arg_dict: dict, additional_config: dict | None = None) -> T:
@@ -60,8 +62,19 @@ def create_from_arg_obj(cls: type[T], arg_dict: dict, additional_config: dict | 
     calib_size = arg_dict.pop("calib_size", 512)
     compress = arg_dict.pop("compress", False)
 
+    # Sparse attention arguments
+    sparse_cfg = arg_dict.pop("sparse_cfg", None)
+
     additional_config = {} if additional_config is None else additional_config
     additional_config = {k: v for k, v in additional_config.items() if v is not None}
+
+    # Force eager attention if sparse attention is requested
+    if sparse_cfg:
+        additional_config["attn_implementation"] = "eager"
+        warnings.warn(
+            "Sparse attention requires attn_implementation='eager'. "
+            "Forcing eager attention implementation."
+        )
 
     # Enable automatic save/load of modelopt state huggingface checkpointing
     mto.enable_huggingface_checkpointing()
@@ -90,6 +103,15 @@ def create_from_arg_obj(cls: type[T], arg_dict: dict, additional_config: dict | 
             compress=compress,
             auto_quantize_checkpoint=auto_quantize_checkpoint,
         )
+
+    if sparse_cfg:
+        if is_attn_sparsified(model_obj.model):
+            warnings.warn("Skipping sparse attention: model already has sparse attention applied.")
+        else:
+            sparsify_model(
+                model=model_obj,
+                sparse_cfg=sparse_cfg,
+            )
 
     return model_obj
 
@@ -152,6 +174,11 @@ def setup_parser_with_modelopt_args():
         action="store_true",
         help="Compress the model after quantization",
     )
+    parser.add_argument(
+        "--sparse_cfg",
+        type=str,
+        help="Sparse attention configuration (e.g., SKIP_SOFTMAX_DEFAULT, SKIP_SOFTMAX_CALIB)",
+    )
     return parser
 
 
@@ -177,6 +204,7 @@ if __name__ == "__main__":
             "calib_batch_size": args.calib_batch_size,
             "calib_size": args.calib_size,
             "compress": args.compress,
+            "sparse_cfg": args.sparse_cfg,
         }
     )
 

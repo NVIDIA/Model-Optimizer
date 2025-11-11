@@ -20,6 +20,7 @@ processing pattern for optimal performance.
 """
 
 import math
+from typing import Any
 
 import numpy as np
 import torch
@@ -44,7 +45,7 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         """
         config = method_config or {}
 
-        # Extract configuration (defaults handled by Pydantic)
+        # Extract configuration
         self.threshold_config = config["threshold"]
         self.br = config["br"]
         self.bc = config["bc"]
@@ -300,6 +301,34 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         sparse_scores = attention_scores.masked_fill(~sparse_mask, mask_value)
 
         return query, key, value, sparse_scores
+
+    def get_threshold_info(self) -> dict[str, Any]:
+        """Get threshold information for this method.
+
+        Returns:
+            Dictionary with threshold configuration and calibration info.
+        """
+        threshold_scale_factor = getattr(self, "threshold_scale_factor", None)
+
+        if threshold_scale_factor is not None:
+            # Calibrated dynamic threshold
+            return {
+                "type": "dynamic",
+                "scale_factor": threshold_scale_factor,
+                "formula": "λ / length",
+                "example_lengths": {
+                    1024: threshold_scale_factor / 1024,
+                    2048: threshold_scale_factor / 2048,
+                    4096: threshold_scale_factor / 4096,
+                    8192: threshold_scale_factor / 8192,
+                },
+            }
+        else:
+            # Static threshold (single value or phase-specific dict)
+            return {
+                "type": "static",
+                "value": self.threshold_config,
+            }
 
     @property
     def name(self) -> str:

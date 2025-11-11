@@ -301,62 +301,42 @@ def enable_sparse_attention(model: nn.Module, wildcard_or_filter_func: str | Cal
             module.enable()
 
 
+def _format_threshold(info: dict) -> str:
+    """Format threshold info for display."""
+    t = info.get("type")
+    if t == "dynamic":
+        return f"λ={info.get('scale_factor', 0):.2f}"
+    if t == "static":
+        v = info.get("value")
+        if isinstance(v, dict):
+            return f"threshold={v}"
+        return f"threshold={v:.2e}" if isinstance(v, float) else f"threshold={v}"
+    return "threshold=N/A"
+
+
 def print_sparse_attention_summary(model: nn.Module):
     """Print summary of sparse attention modules in the model.
 
-    Similar to mtq.print_quant_summary for API consistency.
-
     Args:
         model: Model with sparse attention applied
-
-    Prints:
-        - Total sparse attention modules
-        - Enabled vs disabled count
-        - Method distribution
-        - Configuration summary by module
-
-    Example:
-        >>> import modelopt.torch.sparsity.attention_sparsity as sparse_attn
-        >>> model = sparse_attn.sparsify(model, config)
-        >>> sparse_attn.print_sparse_attention_summary(model)
     """
-    sparse_modules = []
-    for name, module in model.named_modules():
-        if isinstance(module, SparseAttentionModule):
-            sparse_modules.append((name, module))
+    sparse_modules = [
+        (name, m) for name, m in model.named_modules() if isinstance(m, SparseAttentionModule)
+    ]
 
     if not sparse_modules:
-        print("No sparse attention modules found in model")
+        print("No sparse attention modules found")
         return
 
-    enabled_count = sum(1 for _, m in sparse_modules if m.is_enabled)
-    disabled_count = len(sparse_modules) - enabled_count
+    enabled = sum(1 for _, m in sparse_modules if m.is_enabled)
+    print(f"Sparse attention: {enabled}/{len(sparse_modules)} modules enabled")
 
-    # Count methods
-    method_counts = {}
+    # Group by (method, threshold)
+    groups: dict[tuple[str, str], int] = {}
     for _, module in sparse_modules:
         method = getattr(module, "_method", "unknown")
-        method_counts[method] = method_counts.get(method, 0) + 1
+        threshold = _format_threshold(module.get_threshold_info())
+        groups[(method, threshold)] = groups.get((method, threshold), 0) + 1
 
-    print(f"Total sparse attention modules: {len(sparse_modules)}")
-    print(f"Enabled:  {enabled_count}")
-    print(f"Disabled: {disabled_count}")
-
-    if method_counts:
-        print("\nMethods:")
-        for method, count in sorted(method_counts.items()):
-            print(f"{method}: {count}")
-
-    for name, module in sparse_modules:
-        method = getattr(module, "_method", "unknown")
-        threshold = getattr(module, "_threshold", "N/A")
-
-        # Format threshold nicely
-        if isinstance(threshold, dict):
-            threshold_str = str(threshold)
-        elif isinstance(threshold, float):
-            threshold_str = f"{threshold:.2e}"
-        else:
-            threshold_str = str(threshold)
-
-        print(f"Method: {method}, Threshold: {threshold_str}")
+    for (method, threshold), count in sorted(groups.items()):
+        print(f"  {method}: {count} layers, {threshold}")

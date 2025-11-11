@@ -20,18 +20,24 @@ import pytest
 pytest.importorskip("transformers")
 
 import numpy as np
-import pytest
 from _test_utils.torch_sparsity.sparse_attention_common import (
     SimpleAttentionModel,
     SimpleTransformerEncoder,
 )
+from pydantic import ValidationError
 
 from modelopt.torch.sparsity.attention_sparsity import sparsify
 from modelopt.torch.sparsity.attention_sparsity.calibration import (
     DynamicThresholdCalibrator,
     RulerDatasetBuilder,
 )
+from modelopt.torch.sparsity.attention_sparsity.calibration.calibrate import (
+    _extract_calibration_config,
+    calibrate_sparse_attention,
+    create_calibration_forward_loop,
+)
 from modelopt.torch.sparsity.attention_sparsity.calibration.dataset import _generate_target_lengths
+from modelopt.torch.sparsity.attention_sparsity.config import CalibrationConfig
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 
 
@@ -337,18 +343,18 @@ class TestCalibrationIntegration:
 
         config = {
             "sparse_cfg": {
+                "calibration": {
+                    "target_sparse_ratio": 0.5,
+                    "samples": 4,
+                    "max_seqlen": 1024,
+                },
                 "*attention*": {
                     "method": "flash_skip_softmax",
                     "threshold": 1e-3,
                     "br": 64,
                     "bc": 64,
                     "enable": True,
-                    "calibration": {
-                        "target_sparse_ratio": 0.5,
-                        "samples": 4,
-                        "max_seqlen": 1024,
-                    },
-                }
+                },
             },
         }
 
@@ -376,8 +382,6 @@ class TestCalibrationIntegration:
 
     def test_calibration_config_validation(self):
         """Test CalibrationConfig validation."""
-        from modelopt.torch.sparsity.attention_sparsity.config import CalibrationConfig
-
         # Valid config
         config = CalibrationConfig(
             target_sparse_ratio=0.5,
@@ -406,8 +410,6 @@ class TestCalibrationIntegration:
 
     def test_threshold_trials_validation(self):
         """Test threshold_trials validation."""
-        from modelopt.torch.sparsity.attention_sparsity.config import CalibrationConfig
-
         # Valid custom threshold_trials
         config = CalibrationConfig(
             target_sparse_ratio=0.5,
@@ -432,11 +434,190 @@ class TestCalibrationIntegration:
             CalibrationConfig(threshold_trials=[1e-4, 0])
 
         # Invalid: not a list (Pydantic raises ValidationError, not ValueError)
-        from pydantic import ValidationError
-
         with pytest.raises(ValidationError, match="Input should be a valid list"):
             CalibrationConfig(threshold_trials=1e-4)
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+class TestDynamicThresholdCalibratorMethods:
+    """Test individual methods of DynamicThresholdCalibrator."""
+
+    def test_set_threshold(self):
+        """Test _set_threshold method."""
+        model = SimpleAttentionModel(hidden_size=64, num_heads=4)
+        config = {
+            "sparse_cfg": {
+                "*attention*": {
+                    "method": "flash_skip_softmax",
+                    "threshold": 0.1,
+                    "br": 64,
+                    "bc": 64,
+                    "enable": True,
+                }
+            },
+        }
+        sparse_model = sparsify(model, config)
+
+        # Get sparse modules
+        modules = [m for m in sparse_model.modules() if isinstance(m, SparseAttentionModule)]
+        assert len(modules) > 0
+
+        # Create calibrator and set threshold
+        calibrator = DynamicThresholdCalibrator(target_sparse_ratio=0.5)
+        calibrator._set_threshold(modules, 0.05)
+
+        # Verify threshold was set
+        for module in modules:
+            assert module._sparse_method_instance.threshold == 0.05
+
+    def test_enable_disable_calibration_mode(self):
+        """Test _enable_calibration_mode and _disable_calibration_mode."""
+        model = SimpleAttentionModel(hidden_size=64, num_heads=4)
+        config = {
+            "sparse_cfg": {
+                "*attention*": {
+                    "method": "flash_skip_softmax",
+                    "threshold": 0.1,
+                    "br": 64,
+                    "bc": 64,
+                    "enable": True,
+                }
+            },
+        }
+        sparse_model = sparsify(model, config)
+
+        modules = [m for m in sparse_model.modules() if isinstance(m, SparseAttentionModule)]
+
+        calibrator = DynamicThresholdCalibrator(target_sparse_ratio=0.5)
+
+        # Enable calibration mode
+        calibrator._enable_calibration_mode(modules)
+
+        for module in modules:
+            assert module._stats_manager is not None
+            assert module._stats_manager.enabled is True
+            assert module._stats_manager.calibration_mode is True
+            assert module._sparse_method_instance._calibration_mode is True
+
+        # Disable calibration mode
+        calibrator._disable_calibration_mode(modules)
+
+        for module in modules:
+            assert module._stats_manager.calibration_mode is False
+            assert module._sparse_method_instance._calibration_mode is False
+
+    def test_extract_calibration_stats_no_stats(self):
+        """Test _extract_calibration_stats when no stats collected."""
+        model = SimpleAttentionModel(hidden_size=64, num_heads=4)
+        config = {
+            "sparse_cfg": {
+                "*attention*": {
+                    "method": "flash_skip_softmax",
+                    "threshold": 0.1,
+                    "br": 64,
+                    "bc": 64,
+                    "enable": True,
+                }
+            },
+        }
+        sparse_model = sparsify(model, config)
+
+        modules = [m for m in sparse_model.modules() if isinstance(m, SparseAttentionModule)]
+
+        calibrator = DynamicThresholdCalibrator(target_sparse_ratio=0.5)
+
+        # Extract stats without running any forward passes
+        stats = calibrator._extract_calibration_stats(modules)
+
+        # Should return empty list
+        assert stats == []
+
+    def test_calibrator_with_single_sample(self):
+        """Test calibrator edge case with only one sample."""
+        calibrator = DynamicThresholdCalibrator(
+            target_sparse_ratio=0.5,
+            threshold_trials=[0.001, 0.01, 0.1],
+        )
+
+        # Even with one sample, regression should work
+        assert calibrator.target_sparse_ratio == 0.5
+        assert len(calibrator.threshold_trials) == 3
+
+
+class TestCalibrateFunction:
+    """Test calibrate_sparse_attention function."""
+
+    def test_calibrate_no_config(self):
+        """Test calibration when config has no calibration section."""
+        model = SimpleAttentionModel(hidden_size=64, num_heads=4)
+
+        # Config without calibration
+        config = {
+            "sparse_cfg": {
+                "*attention*": {
+                    "method": "flash_skip_softmax",
+                    "threshold": 0.1,
+                    "br": 64,
+                    "bc": 64,
+                    "enable": True,
+                }
+            },
+        }
+
+        # Should return empty dict when no calibration config
+        result = calibrate_sparse_attention(model, config)
+
+        assert result == {}
+
+    def test_extract_calibration_config(self):
+        """Test _extract_calibration_config function."""
+        # Config with calibration
+        config = {
+            "sparse_cfg": {
+                "calibration": {
+                    "target_sparse_ratio": 0.3,
+                    "samples": 12,
+                    "max_seqlen": 2048,
+                },
+                "*attn*": {
+                    "method": "flash_skip_softmax",
+                },
+            },
+        }
+
+        calib_config = _extract_calibration_config(config)
+
+        assert calib_config is not None
+        assert calib_config.target_sparse_ratio == 0.3
+        assert calib_config.samples == 12
+        assert calib_config.max_seqlen == 2048
+
+    def test_extract_calibration_config_none(self):
+        """Test _extract_calibration_config when no calibration."""
+        # Config without calibration
+        config = {
+            "sparse_cfg": {
+                "*attn*": {
+                    "method": "flash_skip_softmax",
+                    "threshold": 0.1,
+                }
+            },
+        }
+
+        calib_config = _extract_calibration_config(config)
+
+        assert calib_config is None
+
+    def test_create_calibration_forward_loop(self):
+        """Test create_calibration_forward_loop function."""
+        calibration_data = [
+            {"input": "This is a test sample.", "length": 512},
+            {"input": "Another test sample.", "length": 1024},
+        ]
+
+        forward_loop = create_calibration_forward_loop(
+            calibration_data=calibration_data,
+            tokenizer_name_or_path="gpt2",
+        )
+
+        # Should return a callable
+        assert callable(forward_loop)
