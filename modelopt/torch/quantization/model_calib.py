@@ -1211,15 +1211,26 @@ def prepare_hessian_inverse(h, weight, percdamp):
     return h_inv
 
 
-def quantize_block(block_weight, block_hinv, quantizer):
+def quantize_block(full_weight, block_start, block_end, h_inv, quantizer):
     """Quantize a block of weights group by group (based on quantizer block sizes) with error propagation.
 
+    Args:
+        full_weight: The complete weight tensor (needed for INT4 quantization)
+        block_start: Starting column index of the block
+        block_end: Ending column index of the block
+        h_inv: Hessian inverse
+        quantizer: The quantizer to apply
+
     Returns:
-        quantized_block: Quantized weights
+        quantized_block: Quantized weights for this block
         losses: Quantization losses per element
         errors: Accumulated errors for propagation
     """
-    _, block_size = block_weight.shape
+    # Extract the block we're working on
+    block_weight = full_weight[:, block_start:block_end].clone()
+    block_hinv = h_inv[block_start:block_end, block_start:block_end]
+    block_size = block_end - block_start
+
     quantized_block = torch.zeros_like(block_weight)
     losses = torch.zeros_like(block_weight)
     errors = torch.zeros_like(block_weight)
@@ -1237,8 +1248,9 @@ def quantize_block(block_weight, block_hinv, quantizer):
         weight_col = block_weight[:, group_cols]
         hinv_diag = torch.diag(block_hinv[group_cols, group_cols])
 
-        # Quantize the column
-        quantized_cols = quantizer(weight_col)
+        # Quantize using the full weight, then extract the columns we need
+        quantized_full = quantizer(full_weight)
+        quantized_cols = quantized_full[:, block_start + group_start : block_start + group_end]
         quantized_block[:, group_cols] = quantized_cols
 
         # Compute quantization error and loss
@@ -1297,14 +1309,9 @@ def blockwise_weight_update(module, h, block_size, percdamp):
     for block_start in range(0, num_cols, block_size):
         block_end = min(block_start + block_size, num_cols)
 
-        # Process current block
-        block_weight = weight[:, block_start:block_end].clone()
-        block_hinv = h_inv[block_start:block_end, block_start:block_end]
-
         quantized_block, block_losses, block_errors = quantize_block(
-            block_weight, block_hinv, module.weight_quantizer
+            weight, block_start, block_end, h_inv, module.weight_quantizer
         )
-
         # Store results
         quantized_weight[:, block_start:block_end] = quantized_block
         losses[:, block_start:block_end] = block_losses
