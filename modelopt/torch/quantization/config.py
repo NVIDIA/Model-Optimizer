@@ -1189,6 +1189,39 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
     )
 
 
+class GPTQLiteConfig(QuantizeAlgorithmConfig):
+    """The config for GPTQ lite.
+
+    GPTQ lite is a variant of GPTQ that does not exactly follow the official GPTQ implementation.
+
+    GPTQ lite does not perform sequential quantization of layers. This means that the updated
+    activations are not used to process the next layer.
+
+    GPTQ lite also uses dynamic scales computed during the weight update phase. The original GPTQ
+    implementation uses static scales computed on the weights before beginning blockwise update.
+
+    """
+
+    method: Literal["gptq_lite"] = ModeloptField("gptq_lite")
+    percdamp: float | None = ModeloptField(
+        default=0.01,
+        gt=0.0,
+        le=1.0,
+        title="Percentage damping factor.",
+        description="The percentage of average Hessian diagonal used for damping.",
+    )
+    block_size: int | None = ModeloptField(
+        default=128,
+        title="Block size for GPTQ weight update.",
+        description="The block size for GPTQ weight update.",
+    )
+    hessian_state_path: str | None = ModeloptField(
+        default=None,
+        title="Path to the Hessian state file.",
+        description="The path to the Hessian state file.",
+    )
+
+
 QuantizeQuantCfgType = dict[
     str | Callable,
     QuantizerAttributeConfig
