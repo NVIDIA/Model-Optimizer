@@ -118,7 +118,10 @@ def test_gptq_updates(block_size, dim, model_weight, expect_weight_change):
         assert torch.allclose(model.weight.data, q_dq_weight), "Weight should be equal"
 
 
-def test_gptq_e2e_flow():
+@pytest.mark.parametrize(
+    "quant_cfg", [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG]
+)
+def test_gptq_e2e_flow(quant_cfg):
     model = AutoModelForCausalLM.from_pretrained(
         "TinyLlama/TinyLlama-1.1B-Chat-v1.0", device_map="auto"
     )
@@ -137,14 +140,13 @@ def test_gptq_e2e_flow():
     assert tokenizer.pad_token is not None, "Pad token cannot be set!"
     model.eval()
 
-    quant_cfg = mtq.NVFP4_DEFAULT_CFG
     quant_cfg["algorithm"] = "gptq_lite"
     # Define quantizer/dataloader
     calib_dataloader = get_dataset_dataloader(
         dataset_name="cnn_dailymail",
         tokenizer=tokenizer,
         batch_size=16,
-        num_samples=128,
+        num_samples=512,
         device="cuda",
         include_labels=False,
     )

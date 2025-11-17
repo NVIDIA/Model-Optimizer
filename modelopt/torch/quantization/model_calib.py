@@ -1183,7 +1183,7 @@ def update_hessian(input, hessian, n_samples):
     # Compute outer product: H += (X^T X) / n_samples
     input_flat = input.reshape(-1, input.shape[-1]).t().float()
     scaled_input = math.sqrt(2 / n_samples) * input_flat
-    hessian.add_(scaled_input @ scaled_input.t())
+    hessian.add_((scaled_input @ scaled_input.t()).to(hessian.device))
 
     return hessian, n_samples
 
@@ -1237,7 +1237,8 @@ def quantize_block(full_weight, block_start, block_end, h_inv, quantizer):
     group_size = getattr(quantizer, "block_sizes", [None])[-1]
 
     if group_size is None:
-        raise ValueError("Block sizes not found in quantizer")
+        warnings.warn("Block sizes not found in quantizer, using group size of 1")
+        group_size = 1
 
     assert block_size % group_size == 0, "Block size must be divisible by group size"
 
