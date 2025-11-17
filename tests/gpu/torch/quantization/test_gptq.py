@@ -137,7 +137,8 @@ def test_gptq_e2e_flow():
     assert tokenizer.pad_token is not None, "Pad token cannot be set!"
     model.eval()
 
-    quant_cfg = mtq.NVFP4_GPTQ_LITE_CFG
+    quant_cfg = mtq.NVFP4_DEFAULT_CFG
+    quant_cfg["algorithm"] = "gptq_lite"
     # Define quantizer/dataloader
     calib_dataloader = get_dataset_dataloader(
         dataset_name="cnn_dailymail",
