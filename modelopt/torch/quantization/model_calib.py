@@ -1234,7 +1234,8 @@ def quantize_block(full_weight, block_start, block_end, h_inv, quantizer):
     quantized_block = torch.zeros_like(block_weight)
     losses = torch.zeros_like(block_weight)
     errors = torch.zeros_like(block_weight)
-    group_size = getattr(quantizer, "block_sizes", [None])[-1]
+    if getattr(quantizer, "block_sizes", None) is not None:
+        group_size = quantizer.block_sizes[-1]
 
     if group_size is None:
         warnings.warn("Block sizes not found in quantizer, using group size of 1")

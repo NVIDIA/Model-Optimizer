@@ -145,7 +145,7 @@ def test_gptq_e2e_flow(quant_cfg):
     calib_dataloader = get_dataset_dataloader(
         dataset_name="cnn_dailymail",
         tokenizer=tokenizer,
-        batch_size=16,
+        batch_size=32,
         num_samples=512,
         device="cuda",
         include_labels=False,
