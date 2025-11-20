@@ -469,7 +469,7 @@ if __name__ == "__main__":
         "--mla_quant", 
         type=str, 
         default=None, 
-        help="MLA quantization type: None (disable), per_tensor_fp8, nvfp4 (all), or nvfp4_linear_only (linear layers only)"
+        help="MLA quantization type: None (disable), per_tensor_fp8, nvfp4_wq_a_wkv_a_wq_b_wo, or nvfp4_wq_a_wkv_a_wq_b_wo_fp8_wkv_b"
     )
 
     args = parser.parse_args()
