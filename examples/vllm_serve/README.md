@@ -57,10 +57,10 @@ lm_eval --model local-completions --tasks gsm8k --model_args model=<model_name>,
 
 Overwrite the calibrated amax value with prepared values from either QAT/PTQ.
 
-Step 1: export the model with bf16 weights and amax values.
+Step 1: export the model with bf16 weights and amax values. To export the model:
 
-- For HF model set `export_bf16_weights_amax` to export the model with function `modelopt.torch.export.unified_export_hf.export_hf_checkpoint`.
-- For MCore model use `export_bf16_weights_amax` to export the model with function `modelopt.torch.export.unified_export_megatron.export_mcore_gpt_to_hf`.
+- For HF model use `modelopt.torch.export.export_hf_vllm_fq_checkpoint` function.
+- For MCore model use `modelopt.torch.export.export_mcore_gpt_to_hf_vllm_fq` function.
 
 Step 2: configure <quant_amax.pth> from exported model using AMAX_FILE_PATH environment variable in step 1. For example:
 

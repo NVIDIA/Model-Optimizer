@@ -59,7 +59,6 @@ from .model_config import (
 )
 from .model_utils import get_language_model_from_vl, is_multimodal_model
 from .plugins import export_spec_ckpt_config, export_spec_ckpt_state_dict, spec_opt_only
-from .plugins.vllm_fakequant import export_hf_vllm_fq_checkpoint
 from .quant_utils import (
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
@@ -559,7 +558,6 @@ def export_hf_checkpoint(
     dtype: torch.dtype | None = None,
     export_dir: Path | str = tempfile.gettempdir(),
     save_modelopt_state: bool = False,
-    export_vllm_fq_weights_qstate: bool = False,
 ):
     """Exports the torch model to unified checkpoint and saves to export_dir.
 
@@ -568,8 +566,6 @@ def export_hf_checkpoint(
         dtype: the weights data type to export the unquantized layers or the default model data type if None.
         export_dir: the target export path.
         save_modelopt_state: whether to save the modelopt state_dict.
-        export_vllm_fq_weights_qstate: whether to export the weights and quantization state separately for vLLM
-        fakequant serving.
     """
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
@@ -583,11 +579,7 @@ def export_hf_checkpoint(
         return
 
     try:
-        if export_vllm_fq_weights_qstate:
-            post_state_dict = export_hf_vllm_fq_checkpoint(model, export_dir)
-            hf_quant_config = None
-        else:
-            post_state_dict, hf_quant_config = _export_hf_checkpoint(model, dtype)
+        post_state_dict, hf_quant_config = _export_hf_checkpoint(model, dtype)
 
         if hf_quant_config is not None:
             # Save hf_quant_config.json for\ backward compatibility
