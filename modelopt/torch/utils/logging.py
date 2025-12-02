@@ -148,7 +148,8 @@ def capture_io(capture_stderr: bool = True) -> Iterator[StringIO]:
     Returns:
         Iterator[StringIO]: An iterator that yields a StringIO object that contains the captured output.
 
-    Example:
+    Example::
+
         with capture_io() as buf:
             print("Hello, world!")
         print(buf.getvalue())
