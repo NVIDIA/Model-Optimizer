@@ -186,6 +186,7 @@ class QATTrainer(ModelOptHFTrainer):
         print_rank_0(f"Saved modelopt state to {self._modelopt_state_path}")
 
     def _restore_modelopt_state_with_weights(self):
+        # Security NOTE: weights_only=False is used here on ModelOpt-generated state_dict, not on untrusted user input
         modelopt_state = torch.load(self._modelopt_state_path, weights_only=False)
         modelopt_weights = modelopt_state.pop("modelopt_state_weights", None)
         restore_from_modelopt_state(self.model, modelopt_state)

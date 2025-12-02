@@ -84,7 +84,7 @@ python data_prep.py --save_path data
 
 The following command demonstrates how to perform SAT on the Llama2-7B model on 8 GPUs.
 The model is finetuned on the [cnn_dailymail](https://huggingface.co/datasets/abisee/cnn_dailymail) dataset for 3 epochs.
-The input data is tokenized to a maximum length of 1024 tokens. The tokenized data is saved as a pickle file for faster data loading. The one-time process takes less than an hour to finish depending on the CPU. The resulting pickle file can be utilized for future training sessions.
+The input data is tokenized to a maximum length of 1024 tokens.
 
 ```sh
 bash launch_finetune.sh --model meta-llama/Llama-2-7b-hf \
