@@ -337,14 +337,16 @@ def disable_lora_quantizers_in_config(config, layers):
 
 
 @contextmanager
-def replace_function(package, name, new_func):
+def replace_function(package, name, new_func, og_func_cache_name=None):
     """Replace a function with a new one within a context."""
+    if og_func_cache_name is None:
+        og_func_cache_name = "_" + name
     old_func = getattr(package, name)
     setattr(package, name, new_func)
-    setattr(package, "_" + name, old_func)
+    setattr(package, og_func_cache_name, old_func)
     yield
     setattr(package, name, old_func)
-    delattr(package, "_" + name)
+    delattr(package, og_func_cache_name)
 
 
 @contextmanager
