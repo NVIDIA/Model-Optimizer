@@ -1029,7 +1029,11 @@ def svdquant(
 
     def postprocess(module, name):
         print_rank_0(f"SVD {name}")
-        u, s, vt = torch.linalg.svd(module.weight.data.double())
+        weight = module.weight.data
+        original_device = weight.device
+        original_dtype = weight.dtype
+        weight_f64 = weight.to(dtype=torch.float64, device=original_device)
+        u, s, vt = torch.linalg.svd(weight_f64, full_matrices=False)
         if u.shape[1] < lowrank or vt.shape[0] < lowrank:
             warnings.warn(
                 "The low-rank dimensions do not match the layer dimensions. "
@@ -1039,9 +1043,12 @@ def svdquant(
             return
         us = u[:, :lowrank] * s[:lowrank]
         vt = vt[:lowrank]
-        dtype = module.weight.dtype
-        module.weight_quantizer.svdquant_lora_a = vt.to(dtype=dtype)
-        module.weight_quantizer.svdquant_lora_b = us.to(dtype=dtype)
+        module.weight_quantizer.svdquant_lora_a = vt.to(
+            dtype=original_dtype, device=original_device
+        )
+        module.weight_quantizer.svdquant_lora_b = us.to(
+            dtype=original_dtype, device=original_device
+        )
         module.weight.data.sub_(
             module.weight_quantizer.svdquant_lora_b @ module.weight_quantizer.svdquant_lora_a
         )
