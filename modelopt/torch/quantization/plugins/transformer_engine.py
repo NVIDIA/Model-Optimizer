@@ -250,7 +250,6 @@ class _QuantTELayerNormLinear(_ParallelLinear):
 
     def forward(self, *args, **kwargs):
         """Call ModelOpt patch for _LayerNormLinear functional."""
-
         # This is multi-process safe (such as in torch distributed jobs), not multi-thread safe
         _QuantLayerNormLinearFunc.modelopt_quantizers = (
             self.input_quantizer,
