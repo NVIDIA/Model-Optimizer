@@ -169,3 +169,68 @@ def test_gptq_e2e_flow(quant_cfg):
     print(
         f"Generated ids after quantization: {tokenizer.decode(generated_ids_after_ptq[0], skip_special_tokens=True)}"
     )
+
+
+@pytest.mark.parametrize(
+    "quant_cfg", [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG]
+)
+def test_gptq_weight_folding(quant_cfg):
+    """Test that folded weights match the quantized-dequantized weights from GPTQ."""
+    # Setup model
+    model = AutoModelForCausalLM.from_pretrained(
+        "TinyLlama/TinyLlama-1.1B-Chat-v1.0", device_map="auto"
+    )
+    tokenizer = AutoTokenizer.from_pretrained(
+        "TinyLlama/TinyLlama-1.1B-Chat-v1.0", trust_remote_code=True
+    )
+
+    if tokenizer.pad_token != "<unk>" or tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+
+    model.eval()
+
+    # Configure GPTQ quantization
+    quant_cfg["algorithm"] = "gptq_lite"
+
+    # Prepare calibration data
+    calib_dataloader = get_dataset_dataloader(
+        dataset_name="cnn_dailymail",
+        tokenizer=tokenizer,
+        batch_size=32,
+        num_samples=128,  # Reduced for faster testing
+        device="cuda",
+        include_labels=False,
+    )
+
+    # Step 1: Quantize model using GPTQ
+    calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
+    model = mtq.quantize(model, quant_cfg, forward_loop=calibrate_loop)
+
+    # Collect quantized-dequantized weights before folding
+    qdq_weights_before = {}
+    for name, module in model.named_modules():
+        if hasattr(module, "weight_quantizer") and hasattr(module, "weight"):
+            # Get the quantized-dequantized weight using the quantizer
+            with torch.no_grad():
+                qdq_weight = module.weight_quantizer(module.weight.data)
+                qdq_weights_before[name] = qdq_weight.clone()
+
+    assert len(qdq_weights_before) > 0, "No quantized weights found in the model"
+
+    # Step 2: Fold weights
+    mtq.fold_weight(model)
+
+    # Step 3: Compare weights between step 1 and 2
+    for name, module in model.named_modules():
+        if name in qdq_weights_before:
+            # After folding, the weight should equal the QDQ weight from before
+            folded_weight = module.weight.data
+            qdq_weight_before = qdq_weights_before[name]
+
+            # Check if weights are equal (use allclose for floating point comparison)
+            assert torch.allclose(folded_weight, qdq_weight_before), (
+                f"Folded weight for {name} doesn't match QDQ weight before folding"
+            )
+
+    print(f"Successfully verified weight folding for {len(qdq_weights_before)} layers")

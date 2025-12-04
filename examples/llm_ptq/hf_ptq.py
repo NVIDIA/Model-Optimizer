@@ -248,6 +248,7 @@ def auto_quantize(
             "fp8_pb_wo",
             "w4a8_mxfp4_fp8",
             "nvfp4_mlp_only",
+            "nvfp4_gptq_lite",
         ]
         for args.qformat in qformat_list
     ), "One or more quantization formats provided are not supported for unified checkpoint export"
@@ -623,10 +624,16 @@ def export_quantized(
                     "They will be set at deployment time."
                 )
 
-            export_hf_checkpoint(
-                full_model,
-                export_dir=export_path,
-            )
+            if args.export_qdq_weights:
+                breakpoint()
+                mtq.fold_weight(full_model)
+                full_model.save_pretrained(export_path)
+
+            else:
+                export_hf_checkpoint(
+                    full_model,
+                    export_dir=export_path,
+                )
 
         # Copy custom model files (Python files and JSON configs) if trust_remote_code is used
         copy_custom_model_files(args.pyt_ckpt_path, export_path, args.trust_remote_code)
@@ -1038,6 +1045,12 @@ def parse_args() -> argparse.Namespace:
             "Use low memory mode for quantization."
             "This is an experimental feature and may not work for all quantization formats."
         ),
+        default=False,
+        action="store_true",
+    )
+    parser.add_argument(
+        "--export_qdq_weights",
+        help=("Used for GPTQ weights as is without compressed weights for deployment."),
         default=False,
         action="store_true",
     )

@@ -233,6 +233,15 @@ INT4_BLOCKWISE_WEIGHT_ONLY_CFG = {
     },
     "algorithm": "max",
 }
+INT4_BLOCKWISE_WEIGHT_ONLY_GPTQ_LITE_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {"num_bits": 4, "block_sizes": {-1: 128}, "enable": True},
+        "*input_quantizer": {"enable": False},
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": "gptq_lite",
+}
+
 
 INT4_AWQ_CFG = {
     "quant_cfg": {
