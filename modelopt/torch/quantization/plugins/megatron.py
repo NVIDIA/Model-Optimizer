@@ -33,6 +33,7 @@ from megatron.core.utils import get_tensor_model_parallel_group_if_none
 
 from modelopt.torch.opt.plugins.megatron import (
     _MegatronMLP,
+    ensure_metadata_has_dp_cp_group,
     register_modelopt_extra_state_callbacks,
 )
 from modelopt.torch.utils.distributed import ParallelState
@@ -228,30 +229,6 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
 
 
 CUSTOM_MODEL_PLUGINS.add(megatron_replace_quant_module_hook)
-
-
-def ensure_metadata_has_dp_cp_group(metadata):
-    """Ensure `metadata` is a dict containing `dp_cp_group` entry.
-
-    If `metadata` is None, a new dict is returned with `dp_cp_group` set.
-    If `metadata` is a dict and missing `dp_cp_group`, it is updated in-place.
-
-    This function is adapted from megatron-lm's megatron.core.transformer.utils to avoid
-    dependency on megatron-lm's specific version.
-
-    Note:
-        This is a temporary method and will be removed once this function is merged to
-        megatron.core.transformer.utils in the main branch of megatron-lm.
-    """
-    if metadata is None:
-        metadata = {}
-    if "dp_cp_group" not in metadata:
-        try:
-            metadata["dp_cp_group"] = get_data_parallel_group(with_context_parallel=True)
-        except (AssertionError, RuntimeError):
-            # Fallback if context parallel is not initialized
-            metadata["dp_cp_group"] = get_data_parallel_group()
-    return metadata
 
 
 class _MegatronParallelLinear(_ParallelLinear):
