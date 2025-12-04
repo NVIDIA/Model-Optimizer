@@ -93,11 +93,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [llm_ptq]
+        example: [llm_ptq, vlm_ptq]
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.1.0rc2.post2"
+      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc4"
       example: ${{ matrix.example }}
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-h100-latest-1
@@ -111,7 +111,7 @@ jobs:
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.1.0rc2.post2"
+      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc4"
       example: ${{ matrix.example }}
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-h100-latest-2

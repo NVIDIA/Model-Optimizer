@@ -27,7 +27,7 @@ This section focuses on Post-training quantization, a technique that reduces mod
 
 ### Docker
 
-For Hugging Face models, please use the TensorRT-LLM docker image (e.g., `nvcr.io/nvidia/tensorrt-llm/release:1.1.0rc2.post2`).
+For Hugging Face models, please use the TensorRT-LLM docker image (e.g., `nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc4`).
 For NeMo models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:25.09`).
 Visit our [installation docs](https://nvidia.github.io/TensorRT-Model-Optimizer/getting_started/2_installation.html) for more information.
 

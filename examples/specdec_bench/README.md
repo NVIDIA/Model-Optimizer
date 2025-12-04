@@ -4,7 +4,7 @@
 
 This benchmark is meant to be a lightweight layer ontop of an existing vLLM/SGLang/TRTLLM installation. For example, no install
 is required if one is running in the following dockers: `vllm/vllm-openai:v0.11.0` (vLLM), `lmsysorg/sglang:v0.5.4.post2` (SGLang), or
-`nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc1` (TRT-LLM).
+`nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc4` (TRT-LLM).
 
 Next
 
@@ -16,7 +16,7 @@ cd examples/specdec_bench
 
 Collect relevant metrics on acceptance rate, timing, and outputs for Speculative Decoding methods.
 Acceptance rate refers to the number of tokens generated on every iteration.  For a standard Autoregressive LLM, this number
-is just 1.  
+is just 1.
 
 ## Getting Started
 

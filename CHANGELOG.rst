@@ -27,6 +27,7 @@ Model Optimizer Changelog (Linux)
 
 **Misc**
 
+- Bump TensorRT-LLM docker to 1.2.0rc4.
 - Bump minimum recommended transformers version to 4.53.
 - Replace ONNX simplification package from ``onnxsim`` to ``onnxslim``.
 
