@@ -24,6 +24,7 @@ from _test_utils.torch.misc import set_seed
 from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
     get_tiny_llama,
+    get_tiny_qwen3_moe,
     tf_modelopt_state_and_output_tester,
 )
 
@@ -137,12 +138,10 @@ def test_dbrx():
     assert torch.allclose(out_1[0], out_2[0])
 
 
-@pytest.mark.parametrize(
-    "method",
-    ["gradient", "kl_div"],
-)
-def test_autoquantize_huggingface(method):
-    model = get_tiny_llama()
+@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+@pytest.mark.parametrize("model_provider", [get_tiny_llama, get_tiny_qwen3_moe])
+def test_autoquantize_huggingface(model_provider, method):
+    model = model_provider()
     input_ids = model.dummy_inputs["input_ids"]
 
     def forward_step(model, batch):

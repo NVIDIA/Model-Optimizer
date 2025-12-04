@@ -50,7 +50,7 @@ from modelopt.torch.export import (
     get_model_type,
 )
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
-from modelopt.torch.quantization.config import need_calibration
+from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg, need_calibration
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
 from modelopt.torch.utils.dataset_utils import (
@@ -155,7 +155,8 @@ def auto_quantize(
         # AutoQuantize scoring is the costly phase; allow smaller sample counts than calibration.
         num_score_steps=min(len(calib_dataloader), max(auto_quantize_score_size // batch_size, 1)),
         verbose=True,
-        disabled_layers=["*lm_head*"],
+        # Disable all default disabled layers such as lm_head, mlp.gate, router etc.
+        disabled_layers=list(_default_disabled_quantizer_cfg.keys()),
         method=auto_quantize_method,
         checkpoint=auto_quantize_checkpoint,
     )

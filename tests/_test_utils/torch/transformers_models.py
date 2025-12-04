@@ -30,6 +30,8 @@ from transformers import (
     LlamaForCausalLM,
     Qwen3Config,
     Qwen3ForCausalLM,
+    Qwen3MoeConfig,
+    Qwen3MoeForCausalLM,
     T5Config,
     T5ForConditionalGeneration,
     T5Tokenizer,
@@ -59,6 +61,28 @@ def get_tiny_qwen3(**config_kwargs) -> "Qwen3ForCausalLM":
     tiny_qwen3 = Qwen3ForCausalLM(Qwen3Config(**kwargs))
 
     return tiny_qwen3
+
+
+def get_tiny_qwen3_moe(**config_kwargs) -> "Qwen3MoeForCausalLM":
+    set_seed(SEED)
+
+    kwargs = {
+        "hidden_size": 32,
+        "intermediate_size": 32,
+        "moe_intermediate_size": 32,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 32,
+        "vocab_size": 32,
+        "num_experts": 4,
+        "num_experts_per_tok": 2,
+        "decoder_sparse_step": 1,
+    }
+    kwargs.update(**config_kwargs)
+    tiny_qwen3_moe = Qwen3MoeForCausalLM(Qwen3MoeConfig(**kwargs))
+
+    return tiny_qwen3_moe
 
 
 def get_tiny_llama(**config_kwargs) -> LlamaForCausalLM:

@@ -755,7 +755,7 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
 
     score_module_rules = [
         # Use MLP layer output for gate_proj, up_proj, down_proj for Qwen3 like MoE models (local and shared experts)
-        r"^(.*?\.mlp\.experts)\.\d+\.(gate_proj|up_proj|down_proj)$",
+        r"^(.*?\.mlp)\.experts\.\d+\.(gate_proj|up_proj|down_proj)$",
         r"^(.*?)\.(\d+\.(w1|w2|w3))$",  # mixtral experts
         r"^(.*?)\.((w1_linear|w2_linear|w3_linear)\.\d+)$",  # dbrx experts
     ]
