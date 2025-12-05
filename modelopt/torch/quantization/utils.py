@@ -15,6 +15,7 @@
 
 """Quantization utilities."""
 
+import copy
 from collections import namedtuple
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any
@@ -843,7 +844,8 @@ def update_quant_cfg_with_kv_cache_quant(
 ) -> dict[str, Any]:
     """Update the quant_cfg with the kv cache quant_cfg."""
     # If quant_cfg["quant_cfg"] is None, it corresponds to only kv cache quantization case
-    quant_cfg["quant_cfg"] = quant_cfg.get("quant_cfg", {"default": {"enable": False}})
+    quant_cfg = copy.deepcopy(quant_cfg)
+    quant_cfg["quant_cfg"] = quant_cfg.get("quant_cfg") or {"default": {"enable": False}}
     quant_cfg["quant_cfg"].update(kv_cache_quant_cfg)
 
     # Set default algorithm for kv cache quantization if not provided.

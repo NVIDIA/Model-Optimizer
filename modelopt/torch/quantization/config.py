@@ -89,8 +89,8 @@ To get the string representation of a module class, do:
 
     from modelopt.torch.quantization import QuantModuleRegistry
 
-    # Get the class name for nn.Conv2d
-    class_name = QuantModuleRegistry.get_key(nn.Conv2d)
+    # Get the class name for torch.nn.Conv2d
+    class_name = QuantModuleRegistry.get_key(torch.nn.Conv2d)
 
 Here is an example of a quantization config:
 
@@ -103,7 +103,7 @@ Here is an example of a quantization config:
             "*input_quantizer": {"num_bits": 8, "axis": None},
 
             # Module class names mapping to quantizer configurations
-            "nn.LeakyReLU": {"*input_quantizer": {"enable": False}},
+            "torch.nn.LeakyReLU": {"*input_quantizer": {"enable": False}},
 
         }
     }
@@ -137,14 +137,16 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 """
 
 from collections.abc import Callable
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import ValidationInfo, field_validator, model_validator
 
+from modelopt.recipe._config_loader import load_config
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.utils.network import ConstructorLike
 
-_default_disabled_quantizer_cfg = {
+_default_disabled_quantizer_cfg = load_config("configs/ptq/base")["quant_cfg"]
+_default_disabled_quantizer_cfg_deprecated = {
     "nn.BatchNorm1d": {"*": {"enable": False}},
     "nn.BatchNorm2d": {"*": {"enable": False}},
     "nn.BatchNorm3d": {"*": {"enable": False}},
@@ -161,17 +163,22 @@ _default_disabled_quantizer_cfg = {
     "output.*": {"enable": False},
     "default": {"enable": False},
 }
+assert _default_disabled_quantizer_cfg_deprecated == _default_disabled_quantizer_cfg
 
-_mamba_moe_disabled_quantizer_cfg = {
+_mamba_moe_disabled_quantizer_cfg = load_config("configs/ptq/base_mamba")["quant_cfg"]
+_mamba_moe_disabled_quantizer_cfg_deprecated = {
     "*fc1_latent_proj*": {"enable": False},  # Skip Latent MOE
     "*fc2_latent_proj*": {"enable": False},  # Skip Latent MOE
     "*q_proj*": {"enable": False},  # Skip QKV Linear
     "*k_proj*": {"enable": False},  # Skip QKV Linear
     "*v_proj*": {"enable": False},  # Skip QKV Linear
     "*o_proj*": {"enable": False},  # Skip QKV Output Projection
+    "default": {"enable": False},
 }
+assert _mamba_moe_disabled_quantizer_cfg_deprecated == _mamba_moe_disabled_quantizer_cfg
 
-INT8_DEFAULT_CFG = {
+INT8_DEFAULT_CFG = load_config("general/ptq/int8_default-fp8_kv.yml")["model_quant"]
+INT8_DEFAULT_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {"num_bits": 8, "axis": 0},
         "*input_quantizer": {"num_bits": 8, "axis": None},
@@ -179,8 +186,12 @@ INT8_DEFAULT_CFG = {
     },
     "algorithm": "max",
 }
+assert INT8_DEFAULT_CFG_DEPRECATED == INT8_DEFAULT_CFG, "Expected {}, but got {}".format(
+    INT8_DEFAULT_CFG_DEPRECATED, INT8_DEFAULT_CFG
+)
 
-INT8_SMOOTHQUANT_CFG = {
+INT8_SMOOTHQUANT_CFG = load_config("general/ptq/int8_smoothquant-fp8_kv.yml")["model_quant"]
+INT8_SMOOTHQUANT_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {"num_bits": 8, "axis": 0},
         "*input_quantizer": {"num_bits": 8, "axis": None},
@@ -188,8 +199,10 @@ INT8_SMOOTHQUANT_CFG = {
     },
     "algorithm": "smoothquant",
 }
+assert INT8_SMOOTHQUANT_CFG_DEPRECATED == INT8_SMOOTHQUANT_CFG
 
-INT8_WEIGHT_ONLY_CFG = {
+INT8_WEIGHT_ONLY_CFG = load_config("general/ptq/int8_weight_only-fp8_kv.yml")["model_quant"]
+INT8_WEIGHT_ONLY_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {"num_bits": 8, "axis": 0},
         "*input_quantizer": {"enable": False},
@@ -197,30 +210,40 @@ INT8_WEIGHT_ONLY_CFG = {
     },
     "algorithm": "max",
 }
+assert INT8_WEIGHT_ONLY_CFG_DEPRECATED == INT8_WEIGHT_ONLY_CFG
 
-FP8_DEFAULT_CFG = {
+FP8_DEFAULT_CFG = load_config("general/ptq/fp8_default-fp8_kv.yml")["model_quant"]
+FP8_DEFAULT_CFG_DEPRECATED = {
     "quant_cfg": {
-        "*weight_quantizer": {"num_bits": (4, 3), "axis": None},
-        "*input_quantizer": {"num_bits": (4, 3), "axis": None},
+        "*weight_quantizer": {"num_bits": [4, 3], "axis": None},
+        "*input_quantizer": {"num_bits": [4, 3], "axis": None},
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": "max",
 }
+assert FP8_DEFAULT_CFG_DEPRECATED == FP8_DEFAULT_CFG
 
-MAMBA_MOE_FP8_AGGRESSIVE_CFG = {
+MAMBA_MOE_FP8_AGGRESSIVE_CFG = load_config("general/ptq/mamba_moe_fp8_aggressive-fp8_kv.yml")[
+    "model_quant"
+]
+MAMBA_MOE_FP8_AGGRESSIVE_CFG_DEPRECATED = {
     "quant_cfg": {
-        "*weight_quantizer": {"num_bits": (4, 3), "axis": None},
-        "*input_quantizer": {"num_bits": (4, 3), "axis": None},
+        "*weight_quantizer": {"num_bits": [4, 3], "axis": None},
+        "*input_quantizer": {"num_bits": [4, 3], "axis": None},
         **_default_disabled_quantizer_cfg,
         **_mamba_moe_disabled_quantizer_cfg,
     },
     "algorithm": "max",
 }
+assert MAMBA_MOE_FP8_AGGRESSIVE_CFG_DEPRECATED == MAMBA_MOE_FP8_AGGRESSIVE_CFG
 
-MAMBA_MOE_FP8_CONSERVATIVE_CFG = {
+MAMBA_MOE_FP8_CONSERVATIVE_CFG = load_config("general/ptq/mamba_moe_fp8_conservative-fp8_kv.yml")[
+    "model_quant"
+]
+MAMBA_MOE_FP8_CONSERVATIVE_CFG_DEPRECATED = {
     "quant_cfg": {
-        "*weight_quantizer": {"num_bits": (4, 3), "axis": None},
-        "*input_quantizer": {"num_bits": (4, 3), "axis": None},
+        "*weight_quantizer": {"num_bits": [4, 3], "axis": None},
+        "*input_quantizer": {"num_bits": [4, 3], "axis": None},
         **_default_disabled_quantizer_cfg,
         **_mamba_moe_disabled_quantizer_cfg,
         "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
@@ -228,12 +251,16 @@ MAMBA_MOE_FP8_CONSERVATIVE_CFG = {
     },
     "algorithm": "max",
 }
+assert MAMBA_MOE_FP8_CONSERVATIVE_CFG_DEPRECATED == MAMBA_MOE_FP8_CONSERVATIVE_CFG
 
-FP8_PER_CHANNEL_PER_TOKEN_CFG = {
+FP8_PER_CHANNEL_PER_TOKEN_CFG = load_config("general/ptq/fp8_per_channel_per_token-fp8_kv.yml")[
+    "model_quant"
+]
+FP8_PER_CHANNEL_PER_TOKEN_CFG_DEPRECATED = {
     "quant_cfg": {
-        "*weight_quantizer": {"num_bits": (4, 3), "axis": 0},
+        "*weight_quantizer": {"num_bits": [4, 3], "axis": 0},
         "*input_quantizer": {
-            "num_bits": (4, 3),
+            "num_bits": [4, 3],
             "type": "dynamic",
             "block_sizes": {-1: None},
         },
@@ -241,12 +268,16 @@ FP8_PER_CHANNEL_PER_TOKEN_CFG = {
     },
     "algorithm": "max",
 }
+assert FP8_PER_CHANNEL_PER_TOKEN_CFG_DEPRECATED == FP8_PER_CHANNEL_PER_TOKEN_CFG
 
 # FP8 2D blockwise fake quantization config for deepseek models
-FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG = {
+FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG = load_config(
+    "general/ptq/fp8_2d_blockwise_weight_only-fp8_kv.yml"
+)["model_quant"]
+FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {
-            "num_bits": (4, 3),
+            "num_bits": [4, 3],
             "block_sizes": {-1: 128, -2: 128},
             "enable": True,
         },
@@ -255,8 +286,12 @@ FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG = {
     },
     "algorithm": "max",
 }
+assert FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG_DEPRECATED == FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG
 
-INT4_BLOCKWISE_WEIGHT_ONLY_CFG = {
+INT4_BLOCKWISE_WEIGHT_ONLY_CFG = load_config("general/ptq/int4_blockwise_weight_only-fp8_kv.yml")[
+    "model_quant"
+]
+INT4_BLOCKWISE_WEIGHT_ONLY_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": 4,
@@ -268,9 +303,10 @@ INT4_BLOCKWISE_WEIGHT_ONLY_CFG = {
     },
     "algorithm": "max",
 }
+assert INT4_BLOCKWISE_WEIGHT_ONLY_CFG_DEPRECATED == INT4_BLOCKWISE_WEIGHT_ONLY_CFG
 
-
-INT4_AWQ_CFG = {
+INT4_AWQ_CFG = load_config("general/ptq/int4_awq-fp8_kv.yml")["model_quant"]
+INT4_AWQ_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": 4,
@@ -280,14 +316,17 @@ INT4_AWQ_CFG = {
         "*input_quantizer": {"enable": False},
         **_default_disabled_quantizer_cfg,
     },
-    "algorithm": {"method": "awq_lite", "alpha_step": 0.1},
-    # "algorithm": {"method": "awq_full", "alpha_step": 0.1, "max_co_batch_size": 1024},
+    "algorithm": "awq_lite",
+    # "algorithm": {"method": "awq_full", "max_co_batch_size": 1024},
     # "algorithm": {"method": "awq_clip", "max_co_batch_size": 2048},
 }
+assert INT4_AWQ_CFG_DEPRECATED == INT4_AWQ_CFG
+
 
 # W4A8 currently uses INT4 blockwise quantization (block size = 128) followed by FP8 quantization
 # for weights. This could change in the future
-W4A8_AWQ_BETA_CFG = {
+W4A8_AWQ_BETA_CFG = load_config("general/ptq/w4a8_awq_beta-fp8_kv.yml")["model_quant"]
+W4A8_AWQ_BETA_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": [
             {
@@ -296,129 +335,145 @@ W4A8_AWQ_BETA_CFG = {
                 "enable": True,
             },
             {
-                "num_bits": (4, 3),
+                "num_bits": [4, 3],
                 "enable": True,
             },
         ],
         "*input_quantizer": {
-            "num_bits": (4, 3),
+            "num_bits": [4, 3],
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": "awq_lite",
 }
+assert W4A8_AWQ_BETA_CFG_DEPRECATED == W4A8_AWQ_BETA_CFG
 
-MXFP8_DEFAULT_CFG = {
+MXFP8_DEFAULT_CFG = load_config("general/ptq/mxfp8_default-fp8_kv.yml")["model_quant"]
+MXFP8_DEFAULT_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {
-            "num_bits": (4, 3),
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "num_bits": [4, 3],
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
             "enable": True,
         },
         "*input_quantizer": {
-            "num_bits": (4, 3),
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "num_bits": [4, 3],
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": None,
 }
+assert MXFP8_DEFAULT_CFG_DEPRECATED == MXFP8_DEFAULT_CFG
 
-MXFP6_DEFAULT_CFG = {
+
+MXFP6_DEFAULT_CFG = load_config("general/ptq/mxfp6_default-fp8_kv.yml")["model_quant"]
+MXFP6_DEFAULT_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {
-            "num_bits": (3, 2),
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "num_bits": [3, 2],
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
             "enable": True,
         },
         "*input_quantizer": {
-            "num_bits": (3, 2),
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "num_bits": [3, 2],
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": None,
 }
+assert MXFP6_DEFAULT_CFG_DEPRECATED == MXFP6_DEFAULT_CFG
 
-MXFP4_DEFAULT_CFG = {
+
+MXFP4_DEFAULT_CFG = load_config("general/ptq/mxfp4_default-fp8_kv.yml")["model_quant"]
+MXFP4_DEFAULT_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "num_bits": [2, 1],
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
             "enable": True,
         },
         "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "num_bits": [2, 1],
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": None,
 }
+assert MXFP4_DEFAULT_CFG_DEPRECATED == MXFP4_DEFAULT_CFG
 
-W4A8_MXFP4_FP8_CFG = {
+W4A8_MXFP4_FP8_CFG = load_config("general/ptq/w4a8_mxfp4_fp8-fp8_kv.yml")["model_quant"]
+W4A8_MXFP4_FP8_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "num_bits": [2, 1],
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
             "enable": True,
         },
-        "*input_quantizer": {"num_bits": (4, 3), "axis": None},
+        "*input_quantizer": {"num_bits": [4, 3], "axis": None},
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": None,
 }
+assert W4A8_MXFP4_FP8_CFG_DEPRECATED == W4A8_MXFP4_FP8_CFG
 
-MXINT8_DEFAULT_CFG = {
+
+MXINT8_DEFAULT_CFG = load_config("general/ptq/mxint8_default-fp8_kv.yml")["model_quant"]
+MXINT8_DEFAULT_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": 8,
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
             "enable": True,
         },
         "*input_quantizer": {
             "num_bits": 8,
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": None,
 }
+assert MXINT8_DEFAULT_CFG_DEPRECATED == MXINT8_DEFAULT_CFG
 
-FP8_KV_CFG = {
+FP8_KV_CFG = load_config("configs/ptq/kv_fp8.yml")
+FP8_KV_CFG_DEPRECATED = {
     "quant_cfg": {
         "*[kv]_bmm_quantizer": {
-            "num_bits": (4, 3),
+            "num_bits": [4, 3],
             "enable": True,
         },
-        "default": {"enable": False},
     },
-    "algorithm": "max",
 }
+assert FP8_KV_CFG_DEPRECATED == FP8_KV_CFG
 
-FP8_AFFINE_KV_CFG = {
+FP8_AFFINE_KV_CFG = load_config("configs/ptq/kv_fp8_affine.yml")
+FP8_AFFINE_KV_CFG_DEPRECATED = {
     "quant_cfg": {
         "*[kv]_bmm_quantizer": {
-            "num_bits": (4, 3),
+            "num_bits": [4, 3],
             "bias": {-2: None, -4: None, "type": "static"},
         },
-        "default": {"enable": False},
-    },
-    "algorithm": "max",
+    }
 }
+assert FP8_AFFINE_KV_CFG_DEPRECATED == FP8_AFFINE_KV_CFG
+
 
 _nvfp4_quantizer = {
-    "num_bits": (2, 1),
-    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+    "num_bits": [2, 1],
+    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": [4, 3]},
     "enable": True,
 }
 
-NVFP4_DEFAULT_CFG = {
+NVFP4_DEFAULT_CFG = load_config("general/ptq/nvfp4_default-fp8_kv.yml")["model_quant"]
+NVFP4_DEFAULT_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": _nvfp4_quantizer,
         "*input_quantizer": _nvfp4_quantizer,
@@ -426,12 +481,16 @@ NVFP4_DEFAULT_CFG = {
     },
     "algorithm": "max",
 }
+assert NVFP4_DEFAULT_CFG_DEPRECATED == NVFP4_DEFAULT_CFG
 
-NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = {
+NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = load_config(
+    "general/ptq/nvfp4_w4a4_weight_mse_fp8_sweep-fp8_kv.yml"
+)["model_quant"]
+NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "num_bits": [2, 1],
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": [4, 3]},
             "enable": True,
         },
         "*input_quantizer": _nvfp4_quantizer,
@@ -442,12 +501,20 @@ NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = {
         "fp8_scale_sweep": True,
     },
 }
+assert NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG_DEPRECATED == NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG, (
+    "Expected {}, but got {}".format(
+        NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG_DEPRECATED, NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG
+    )
+)
 
-NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG = {
+NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG = load_config(
+    "general/ptq/nvfp4_w4a4_weight_local_hessian-fp8_kv.yml"
+)["model_quant"]
+NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "num_bits": [2, 1],
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": [4, 3]},
             "enable": True,
         },
         "*input_quantizer": _nvfp4_quantizer,
@@ -458,8 +525,12 @@ NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG = {
         "fp8_scale_sweep": True,
     },
 }
+assert NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG_DEPRECATED == NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG
 
-MAMBA_MOE_NVFP4_AGGRESSIVE_CFG = {
+MAMBA_MOE_NVFP4_AGGRESSIVE_CFG = load_config("general/ptq/mamba_moe_nvfp4_aggressive-fp8_kv.yml")[
+    "model_quant"
+]
+MAMBA_MOE_NVFP4_AGGRESSIVE_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": _nvfp4_quantizer,
         "*input_quantizer": _nvfp4_quantizer,
@@ -468,7 +539,12 @@ MAMBA_MOE_NVFP4_AGGRESSIVE_CFG = {
     },
     "algorithm": "max",
 }
-MAMBA_MOE_NVFP4_CONSERVATIVE_CFG = {
+assert MAMBA_MOE_NVFP4_AGGRESSIVE_CFG_DEPRECATED == MAMBA_MOE_NVFP4_AGGRESSIVE_CFG
+
+MAMBA_MOE_NVFP4_CONSERVATIVE_CFG = load_config(
+    "general/ptq/mamba_moe_nvfp4_conservative-fp8_kv.yml"
+)["model_quant"]
+MAMBA_MOE_NVFP4_CONSERVATIVE_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": _nvfp4_quantizer,
         "*input_quantizer": _nvfp4_quantizer,
@@ -479,9 +555,11 @@ MAMBA_MOE_NVFP4_CONSERVATIVE_CFG = {
     },
     "algorithm": "max",
 }
+assert MAMBA_MOE_NVFP4_CONSERVATIVE_CFG_DEPRECATED == MAMBA_MOE_NVFP4_CONSERVATIVE_CFG
 
 
-NVFP4_AWQ_LITE_CFG = {
+NVFP4_AWQ_LITE_CFG = load_config("general/ptq/nvfp4_awq_lite-fp8_kv.yml")["model_quant"]
+NVFP4_AWQ_LITE_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": _nvfp4_quantizer,
         "*input_quantizer": _nvfp4_quantizer,
@@ -489,8 +567,10 @@ NVFP4_AWQ_LITE_CFG = {
     },
     "algorithm": "awq_lite",
 }
+assert NVFP4_AWQ_LITE_CFG_DEPRECATED == NVFP4_AWQ_LITE_CFG
 
-NVFP4_AWQ_CLIP_CFG = {
+NVFP4_AWQ_CLIP_CFG = load_config("general/ptq/nvfp4_awq_clip-fp8_kv.yml")["model_quant"]
+NVFP4_AWQ_CLIP_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": _nvfp4_quantizer,
         "*input_quantizer": _nvfp4_quantizer,
@@ -498,8 +578,10 @@ NVFP4_AWQ_CLIP_CFG = {
     },
     "algorithm": {"method": "awq_clip"},
 }
+assert NVFP4_AWQ_CLIP_CFG_DEPRECATED == NVFP4_AWQ_CLIP_CFG
 
-NVFP4_AWQ_FULL_CFG = {
+NVFP4_AWQ_FULL_CFG = load_config("general/ptq/nvfp4_awq_full-fp8_kv.yml")["model_quant"]
+NVFP4_AWQ_FULL_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": _nvfp4_quantizer,
         "*input_quantizer": _nvfp4_quantizer,
@@ -507,54 +589,58 @@ NVFP4_AWQ_FULL_CFG = {
     },
     "algorithm": {"method": "awq_full", "alpha_step": 0.1},
 }
+assert NVFP4_AWQ_FULL_CFG_DEPRECATED == NVFP4_AWQ_FULL_CFG
 
-
-NVFP4_AFFINE_KV_CFG = {
+NVFP4_AFFINE_KV_CFG = load_config("configs/ptq/kv_nvfp4_affine.yml")
+NVFP4_AFFINE_KV_CFG_DEPRECATED = {
     "quant_cfg": {
         "*[kv]_bmm_quantizer": {
             **_nvfp4_quantizer,
             "bias": {-2: None, -4: None, "type": "static"},
         },
-        "default": {"enable": False},
-    },
-    "algorithm": "max",
+    }
 }
+assert NVFP4_AFFINE_KV_CFG_DEPRECATED == NVFP4_AFFINE_KV_CFG
 
-NVFP4_KV_CFG = {
+NVFP4_KV_CFG = load_config("configs/ptq/kv_nvfp4.yml")
+NVFP4_KV_CFG_DEPRECATED = {
     "quant_cfg": {
         "*[kv]_bmm_quantizer": _nvfp4_quantizer,
-        "default": {"enable": False},
     },
-    "algorithm": "max",
 }
+assert NVFP4_KV_CFG_DEPRECATED == NVFP4_KV_CFG
+
 
 # Moved from examples/diffusers/quantization/config.py to here
-NVFP4_FP8_MHA_CONFIG = {
+NVFP4_FP8_MHA_CONFIG = load_config("general/ptq/nvfp4_fp8_mha-fp8_kv.yml")["model_quant"]
+NVFP4_FP8_MHA_CONFIG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": _nvfp4_quantizer,
         "*input_quantizer": _nvfp4_quantizer,
         "*output_quantizer": {"enable": False},
         "*q_bmm_quantizer": {
-            "num_bits": (4, 3),
+            "num_bits": [4, 3],
         },
         "*k_bmm_quantizer": {
-            "num_bits": (4, 3),
+            "num_bits": [4, 3],
         },
         "*v_bmm_quantizer": {
-            "num_bits": (4, 3),
+            "num_bits": [4, 3],
         },
         "*softmax_quantizer": {
-            "num_bits": (4, 3),
+            "num_bits": [4, 3],
         },
         "transformer_blocks*bmm2_output_quantizer": {
-            "num_bits": (4, 3),
+            "num_bits": [4, 3],
         },
-        "default": {"enable": False},
+        **_default_disabled_quantizer_cfg,
     },
     "algorithm": "max",
 }
+assert NVFP4_FP8_MHA_CONFIG_DEPRECATED == NVFP4_FP8_MHA_CONFIG
 
-NVFP4_KV_ROTATE_CFG = {
+NVFP4_KV_ROTATE_CFG = load_config("configs/ptq/kv_nvfp4_rotate.yml")
+NVFP4_KV_ROTATE_CFG_DEPRECATED = {
     "quant_cfg": {
         "*q_bmm_quantizer": {
             "enable": False,
@@ -566,10 +652,13 @@ NVFP4_KV_ROTATE_CFG = {
         },
         "*v_bmm_quantizer": _nvfp4_quantizer,
     },
-    "algorithm": "max",
 }
+assert NVFP4_KV_ROTATE_CFG_DEPRECATED == NVFP4_KV_ROTATE_CFG
 
-NVFP4_SVDQUANT_DEFAULT_CFG = {
+NVFP4_SVDQUANT_DEFAULT_CFG = load_config("general/ptq/nvfp4_svdquant_default-fp8_kv.yml")[
+    "model_quant"
+]
+NVFP4_SVDQUANT_DEFAULT_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": _nvfp4_quantizer,
         "*input_quantizer": _nvfp4_quantizer,
@@ -577,57 +666,70 @@ NVFP4_SVDQUANT_DEFAULT_CFG = {
     },
     "algorithm": {"method": "svdquant", "lowrank": 32},
 }
+assert NVFP4_SVDQUANT_DEFAULT_CFG_DEPRECATED == NVFP4_SVDQUANT_DEFAULT_CFG
 
-W4A8_NVFP4_FP8_CFG = {
+
+W4A8_NVFP4_FP8_CFG = load_config("general/ptq/w4a8_nvfp4_fp8-fp8_kv.yml")["model_quant"]
+W4A8_NVFP4_FP8_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (4, 3)},
+            "num_bits": [2, 1],
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [4, 3]},
             "enable": True,
         },
         "*input_quantizer": {
-            "num_bits": (4, 3),
+            "num_bits": [4, 3],
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": "max",
 }
+assert W4A8_NVFP4_FP8_CFG_DEPRECATED == W4A8_NVFP4_FP8_CFG
 
-MXFP4_MLP_WEIGHT_ONLY_CFG = {
+
+MXFP4_MLP_WEIGHT_ONLY_CFG = load_config("general/ptq/mxfp4_mlp_weight_only-fp8_kv.yml")[
+    "model_quant"
+]
+MXFP4_MLP_WEIGHT_ONLY_CFG_DEPRECATED = {
     "quant_cfg": {
         "*mlp*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "num_bits": [2, 1],
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
             "enable": True,
         },
         "*block_sparse_moe*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "num_bits": [2, 1],
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": None,
 }
+assert MXFP4_MLP_WEIGHT_ONLY_CFG_DEPRECATED == MXFP4_MLP_WEIGHT_ONLY_CFG
 
-NVFP4_MLP_WEIGHT_ONLY_CFG = {
+
+NVFP4_MLP_WEIGHT_ONLY_CFG = load_config("general/ptq/nvfp4_mlp_weight_only-fp8_kv.yml")[
+    "model_quant"
+]
+NVFP4_MLP_WEIGHT_ONLY_CFG_DEPRECATED = {
     "quant_cfg": {
         "*mlp*weight_quantizer": {
-            "num_bits": (2, 1),
+            "num_bits": [2, 1],
             "block_sizes": {
                 -1: 32,
                 "type": "dynamic",
-                "scale_bits": (4, 3),
+                "scale_bits": [4, 3],
             },  # Note: block_size is 32 here
             "enable": True,
         },
         "*block_sparse_moe*weight_quantizer": {
-            "num_bits": (2, 1),
+            "num_bits": [2, 1],
             "block_sizes": {
                 -1: 32,
                 "type": "dynamic",
-                "scale_bits": (4, 3),
+                "scale_bits": [4, 3],
             },  # Note: block_size is 32 here
             "enable": True,
         },
@@ -635,6 +737,7 @@ NVFP4_MLP_WEIGHT_ONLY_CFG = {
     },
     "algorithm": "max",
 }
+assert NVFP4_MLP_WEIGHT_ONLY_CFG_DEPRECATED == NVFP4_MLP_WEIGHT_ONLY_CFG
 
 _nvfp4_mlp_only_quant_cfg = {
     "*mlp*weight_quantizer": _nvfp4_quantizer,
@@ -644,12 +747,15 @@ _nvfp4_mlp_only_quant_cfg = {
     **_default_disabled_quantizer_cfg,
 }
 
-NVFP4_MLP_ONLY_CFG = {
+NVFP4_MLP_ONLY_CFG = load_config("general/ptq/nvfp4_mlp_only-fp8_kv.yml")["model_quant"]
+NVFP4_MLP_ONLY_CFG_DEPRECATED = {
     "quant_cfg": _nvfp4_mlp_only_quant_cfg,
     "algorithm": "max",
 }
+assert NVFP4_MLP_ONLY_CFG_DEPRECATED == NVFP4_MLP_ONLY_CFG
 
-NVFP4_OMLP_ONLY_CFG = {
+NVFP4_OMLP_ONLY_CFG = load_config("general/ptq/nvfp4_omlp_only-fp8_kv.yml")["model_quant"]
+NVFP4_OMLP_ONLY_CFG_DEPRECATED = {
     "quant_cfg": {
         "*o_proj*weight_quantizer": _nvfp4_quantizer,
         "*o_proj*input_quantizer": _nvfp4_quantizer,
@@ -657,6 +763,7 @@ NVFP4_OMLP_ONLY_CFG = {
     },
     "algorithm": "max",
 }
+assert NVFP4_OMLP_ONLY_CFG_DEPRECATED == NVFP4_OMLP_ONLY_CFG
 
 choices: set[str] = {
     "FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG",
@@ -670,6 +777,7 @@ choices: set[str] = {
     "INT8_SMOOTHQUANT_CFG",
     "INT8_WEIGHT_ONLY_CFG",
     "MXFP4_DEFAULT_CFG",
+    "MXFP6_DEFAULT_CFG",
     "MXFP8_DEFAULT_CFG",
     "MXINT8_DEFAULT_CFG",
     "NVFP4_AFFINE_KV_CFG",
@@ -688,6 +796,7 @@ choices: set[str] = {
     "MXFP4_MLP_WEIGHT_ONLY_CFG",
     "NVFP4_MLP_ONLY_CFG",
     "NVFP4_OMLP_ONLY_CFG",
+    "NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG",
     "MAMBA_MOE_NVFP4_CONSERVATIVE_CFG",
     "MAMBA_MOE_NVFP4_AGGRESSIVE_CFG",
     "MAMBA_MOE_FP8_CONSERVATIVE_CFG",
@@ -708,7 +817,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         description="""If True, enables the quantizer. If False, by-pass the quantizer and returns the input tensor.""",
     )
 
-    num_bits: int | tuple[int, int] | str = ModeloptField(
+    num_bits: int | tuple[int, int] | list[int] | str = ModeloptField(
         default=8,
         title="An integer or a tuple of two integers specifying the number of quantization bits.",
         description="""`num_bits` can be:
@@ -748,6 +857,19 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
 
         _validate_recursive(values)
         return values
+
+    @field_validator("num_bits", mode="before")
+    @classmethod
+    def tuple_num_bits(cls, num_bits: int | list[int] | tuple[int, int]) -> int | tuple[int, int]:
+        """Convert num_bits to tuple if list."""
+        if isinstance(num_bits, list):
+            if len(num_bits) != 2:
+                raise ValueError(
+                    f"num_bits list must have exactly 2 elements [exponent_bits, mantissa_bits], got {len(num_bits)}"
+                )
+            return cast("tuple[int, int]", tuple(num_bits))
+
+        return num_bits
 
     @model_validator(mode="after")
     def validate_num_bits(self):
@@ -909,6 +1031,16 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
             for k, v in block_sizes.items()
             if k not in ["type", "scale_bits", "scale_block_sizes"]
         }
+
+    @field_validator("block_sizes", mode="before")
+    @classmethod
+    def tuple_block_sizes_scale_bits(cls, v) -> dict | None:
+        """Convert block_sizes.scale_bits to tuple if list."""
+        if isinstance(v, dict) and v.get("scale_bits"):
+            scale_bits = v.get("scale_bits")
+            if isinstance(scale_bits, list):
+                v["scale_bits"] = tuple(scale_bits)
+        return v
 
     @field_validator("block_sizes")
     @classmethod
