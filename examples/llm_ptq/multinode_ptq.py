@@ -30,12 +30,19 @@ import torch.nn as nn
 from accelerate import Accelerator
 from example_utils import build_quant_cfg, get_tokenizer
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoProcessor,
+    PreTrainedTokenizer,
+    PreTrainedTokenizerFast,
+)
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import get_model_type
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
+from modelopt.torch.export.model_utils import is_multimodal_model
 from modelopt.torch.export.unified_export_hf import _export_hf_checkpoint
 from modelopt.torch.quantization.config import need_calibration
 from modelopt.torch.quantization.utils import patch_fsdp_mp_dtypes
@@ -242,6 +249,28 @@ def export_model(
     """
     export_dir = Path(export_path)
     export_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check if the model is a multimodal/VLM model
+    is_vlm = is_multimodal_model(model)
+
+    if is_vlm:
+        # Save original model config and the processor config to the export path for VLMs.
+        print(f"Saving original model config to {export_path}")
+
+        config_kwargs = {"trust_remote_code": args.trust_remote_code}
+        if args.attn_implementation is not None:
+            config_kwargs["attn_implementation"] = args.attn_implementation
+        AutoConfig.from_pretrained(args.pyt_ckpt_path, **config_kwargs).save_pretrained(export_path)
+
+        # Try to save processor config if available
+        try:
+            print(f"Saving processor config to {export_path}")
+            AutoProcessor.from_pretrained(
+                args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code
+            ).save_pretrained(export_path)
+        except Exception as e:
+            print(f"Warning: Could not save processor config: {e}")
+            print("This is normal for some VLM architectures that don't use AutoProcessor")
 
     post_state_dict, hf_quant_config = _export_hf_checkpoint(
         model, torch.bfloat16, accelerator=accelerator
