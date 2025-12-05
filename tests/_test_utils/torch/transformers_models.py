@@ -85,6 +85,24 @@ def get_tiny_qwen3_moe(**config_kwargs) -> "Qwen3MoeForCausalLM":
     return tiny_qwen3_moe
 
 
+def get_tiny_bert(**config_kwargs) -> "BertForQuestionAnswering":
+    set_seed(SEED)
+
+    kwargs = {
+        "hidden_size": 32,
+        "intermediate_size": 32,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 2,
+        "max_position_embeddings": 32,
+        "vocab_size": 32,
+    }
+    kwargs.update(**config_kwargs)
+    tiny_bert = BertForQuestionAnswering(BertConfig(**kwargs))
+
+    return tiny_bert
+
+
 def get_tiny_llama(**config_kwargs) -> LlamaForCausalLM:
     set_seed(SEED)
     kwargs = {

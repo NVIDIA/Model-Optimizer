@@ -17,7 +17,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from _test_utils.torch.transformers_models import get_tiny_llama, get_tiny_t5
+from _test_utils.torch.transformers_models import get_tiny_bert, get_tiny_llama, get_tiny_t5
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.plugins.huggingface import _QuantAttention
@@ -72,6 +72,7 @@ kv_cache_config = {
 )
 def test_kv_quant_hf(model_getter, attn_cls):
     model_test = model_getter()
+    print(model_test)
     input_ids = torch.randint(0, model_test.config.vocab_size, (1, 4))
     if getattr(model_test.config, "is_encoder_decoder", False):
         kwargs = {"decoder_input_ids": input_ids}
@@ -110,3 +111,39 @@ def test_kv_quant_hf(model_getter, attn_cls):
     if attn_cls is not None:
         _QuantAttention.is_compatible_attention = original_is_compatible_attention
         mtq.unregister(attn_cls)
+
+
+def test_kv_quant_bert():
+    """Test KV cache quantization on BERT model with decorated attention."""
+    model_test = get_tiny_bert()
+    input_ids = torch.randint(0, model_test.config.vocab_size, (1, 8))
+    attention_mask = torch.ones_like(input_ids)
+
+    # Run forward pass before quantization
+    model_test(input_ids, attention_mask=attention_mask)
+
+    # Quantize with KV cache quantization
+    mtq.quantize(
+        model_test,
+        kv_cache_config,
+        lambda model: model(input_ids, attention_mask=attention_mask),
+    )
+
+    # BERT attention modules are at encoder.layer.X.attention.self
+    found_quantized_attention = False
+    for name, module in model_test.named_modules():
+        if "attention.self" in name or name.endswith(".self"):
+            if hasattr(module, "k_bmm_quantizer") and hasattr(module, "v_bmm_quantizer"):
+                found_quantized_attention = True
+                # Verify quantizers were calibrated
+                assert module.k_bmm_quantizer.amax is not None, f"k_bmm not calibrated in {name}"
+                assert module.v_bmm_quantizer.amax is not None, f"v_bmm not calibrated in {name}"
+                assert module.q_bmm_quantizer.amax is not None, f"q_bmm not calibrated in {name}"
+
+    assert found_quantized_attention, "No quantized attention modules found in BERT model"
+
+    # Run forward pass after quantization to ensure it works
+    output = model_test(input_ids, attention_mask=attention_mask)
+    assert output is not None
+    assert output.start_logits is not None
+    assert output.end_logits is not None
