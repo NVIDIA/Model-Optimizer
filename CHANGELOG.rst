@@ -20,6 +20,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add support for PyTorch Geometric quantization.
 - Add per tensor and per channel MSE calibrator support.
 - Added support for PTQ/QAT checkpoint export and loading for running fakequant evaluation in vLLM. See `examples/vllm_serve/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/vllm_serve#load-qatptq-model-and-serve-in-vllm-wip>`_ for more details.
+- Added support for mixed precision quantization and ONNX export. See `examples/onnx_ptq/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq#mixed-precision-quantization-auto-mode>`_ for more details.
 
 **Documentation**
 

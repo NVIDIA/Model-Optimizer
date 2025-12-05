@@ -323,12 +323,6 @@ def main():
         )
         print(f"Quantized Model - Top-1 Accuracy: {top1:.2f}%, Top-5 Accuracy: {top5:.2f}%")
 
-    if args.quantize_mode in ["auto"]:
-        print(
-            f"The selected quantization mode {args.quantize_mode} is not supported for ONNX export yet."
-        )
-        return
-
     # Export to ONNX
     export_to_onnx(
         quantized_model,

@@ -166,6 +166,30 @@ python evaluate.py \
     --model_name=vit_base_patch16_224
 ```
 
+### Mixed Precision Quantization (Auto Mode)
+
+The `auto` mode enables mixed precision quantization by searching for the optimal quantization format per layer. This approach balances model accuracy and compression by assigning different precision formats (e.g., NVFP4, FP8) to different layers based on their sensitivity.
+
+#### How it works
+
+1. **Sensitivity Analysis**: Computes per-layer sensitivity scores using gradient-based analysis
+2. **Format Search**: Searches across specified quantization formats for each layer
+3. **Constraint Optimization**: Finds the optimal format assignment that satisfies the effective bits constraint while minimizing accuracy loss
+
+#### Usage
+
+```bash
+python torch_quant_to_onnx.py \
+    --timm_model_name=vit_base_patch16_224 \
+    --quantize_mode=auto \
+    --auto_quantization_formats NVFP4_AWQ_LITE_CFG FP8_DEFAULT_CFG \
+    --effective_bits=4.8 \
+    --num_score_steps=128 \
+    --calibration_data_size=512 \
+    --evaluate \
+    --onnx_save_path=vit_base_patch16_224.auto_quant.onnx
+```
+
 ### ONNX Export Supported LLM Models
 
 | Model | FP16 | INT4 | FP8 | NVFP4 |
