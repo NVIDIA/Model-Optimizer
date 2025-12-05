@@ -577,7 +577,7 @@ def get_prefixed_param_names(parent_model, target_module):
 
 
 def create_fsdp_param_mapping(fsdp_param_list, model):
-    """Builds a mapping from module name to their corresponding FSDPParam.
+    """Builds a mapping from full parameter name to their corresponding FSDPParam.
 
     Args:
         fsdp_param_list (list): List of FSDPParam.
@@ -586,10 +586,16 @@ def create_fsdp_param_mapping(fsdp_param_list, model):
     Returns:
         dict: Full parameter name → FSDP parameter.
     """
-    return {
-        get_prefixed_param_names(model, param._module_info.module): param
-        for param in fsdp_param_list
-    }
+    mapping = {}
+    for param in fsdp_param_list:
+        # Get the module name
+        module_name = get_prefixed_param_names(model, param._module_info.module)
+        if module_name is not None:
+            # Get the parameter name from _module_info and construct full param name
+            param_name = param._module_info.param_name
+            full_param_name = f"{module_name}.{param_name}"
+            mapping[full_param_name] = param
+    return mapping
 
 
 @contextmanager
@@ -718,44 +724,44 @@ def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
         if isinstance(root_model, FSDPModule):
             # Update FSDPParam list
             for module in modules_to_update:
-                name = _get_module_name(module, root_model)
-                if name not in fsdp_param_mapping:
-                    continue
+                for n, p in module.named_parameters():
+                    name = _get_module_name(module, root_model)
+                    name = f"{name}.{n}"
+                    if name not in fsdp_param_mapping:
+                        continue
 
-                old_fsdp_param = fsdp_param_mapping[name]
+                    old_fsdp_param = fsdp_param_mapping[name]
 
-                # Update mp policy to reflect the new dtype
-                new_mp_policy = MixedPrecisionPolicy(
-                    param_dtype=module.weight.dtype,
-                    reduce_dtype=None,
-                    output_dtype=None,
-                    cast_forward_inputs=False,
-                )
-
-                with no_requires_grad():
-                    # Create a new QFSDPParam or FSDPParam based on weight type
-                    param_class = (
-                        QFSDPParam if isinstance(module.weight, QTensorWrapper) else FSDPParam
+                    # Update mp policy to reflect the new dtype
+                    new_mp_policy = MixedPrecisionPolicy(
+                        param_dtype=p.dtype,
+                        reduce_dtype=None,
+                        output_dtype=None,
+                        cast_forward_inputs=False,
                     )
 
-                    new_param = param_class(
-                        module.weight,
-                        old_fsdp_param._module_info,
-                        old_fsdp_param.mesh_info,
-                        old_fsdp_param.post_forward_mesh_info,
-                        old_fsdp_param.device,
-                        None,
-                        new_mp_policy,
-                        None,
-                    )
-                    if not isinstance(new_param, QFSDPParam):
-                        new_param.init_dtype_attrs(new_mp_policy)
+                    with no_requires_grad():
+                        # Create a new QFSDPParam or FSDPParam based on weight type
+                        param_class = QFSDPParam if isinstance(p, QTensorWrapper) else FSDPParam
 
-                    # Update the FSDPParam mapping to keep track of the new FSDPParam
-                    fsdp_param_mapping[name] = new_param
+                        new_param = param_class(
+                            p,
+                            old_fsdp_param._module_info,
+                            old_fsdp_param.mesh_info,
+                            old_fsdp_param.post_forward_mesh_info,
+                            old_fsdp_param.device,
+                            None,
+                            new_mp_policy,
+                            None,
+                        )
+                        if not isinstance(new_param, QFSDPParam):
+                            new_param.init_dtype_attrs(new_mp_policy)
 
-                    # Remove the post_load_hook_handle to allow gc to collect the old FSDPParam
-                    old_fsdp_param._post_load_hook_handle.remove()
+                        # Update the FSDPParam mapping to keep track of the new FSDPParam
+                        fsdp_param_mapping[name] = new_param
+
+                        # Remove the post_load_hook_handle to allow gc to collect the old FSDPParam
+                        old_fsdp_param._post_load_hook_handle.remove()
 
             # Update FSDPParam list with new compressed weights
             fsdp_param_group.fsdp_params = list(fsdp_param_mapping.values())
