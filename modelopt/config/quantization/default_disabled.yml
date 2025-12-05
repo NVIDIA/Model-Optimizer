@@ -1,0 +1,44 @@
+quant_cfg:
+  default:
+    enable: false
+
+  # path:
+  '*block_sparse_moe.gate*':
+    # Skip the MOE router
+    enable: false
+  '*linear_attn.conv1d*':
+    enable: false
+  '*lm_head*':
+    enable: false
+  '*mixer.conv1d*':
+    enable: false
+  '*mlp.gate.*':
+    # Skip the MOE router
+    enable: false
+  '*mlp.shared_expert_gate.*':
+    # Skip the MOE router
+    enable: false
+  '*output_layer*':
+    enable: false
+  '*proj_out.*':
+    # In Whisper model, lm_head has key name proj_out
+    enable: false
+  '*router*':
+    # Skip the MOE router
+    enable: false
+  'output.*':
+    enable: false
+
+  # module:
+  torch.nn.BatchNorm1d:
+    '*':
+      enable: false
+  torch.nn.BatchNorm2d:
+    '*':
+      enable: false
+  torch.nn.BatchNorm3d:
+    '*':
+      enable: false
+  torch.nn.LeakyReLU:
+    '*':
+      enable: false

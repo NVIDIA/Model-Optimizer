@@ -804,8 +804,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--qformat",
         help=(
-            "Quantization format. If --auto_quantize_bits is set, this argument specifies the quantization "
-            "format for optimal per-layer auto_quantize search."
+            "Quantization format. Multiple possible choices: "
+            f"In plain quantization case: 1. it can be a format name, valid names are: {QUANT_CFG_CHOICES.keys()}. "
+            "2. it can be a built-in quantization configuration name, they are equivalent to file names without suffix "
+            "under modelopt/config/quantization/. "
+            "3. It can be a path to a quantization configuration yaml file for custom quantization formats. "
+            "In auto-quantize case, i.e. --auto_quantize_bits is set: "
+            "it is a list of format names, separated by semicolon. "
         ),
         default="fp8",
     )
