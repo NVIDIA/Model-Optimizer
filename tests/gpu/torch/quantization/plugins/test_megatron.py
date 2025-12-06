@@ -978,6 +978,10 @@ def test_convert_mcore_te_gpt_model(distributed_setup_size_1):
     for name, param in model.named_parameters():
         param.requires_grad = True
 
+    # Set to eval mode to disable dropout for deterministic outputs
+    model.eval()
+    ref_output = forward(model)
+
     model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward)
 
     for n, m in model.named_modules():
@@ -986,6 +990,26 @@ def test_convert_mcore_te_gpt_model(distributed_setup_size_1):
             assert m.input_quantizer.amax is not None
             assert m.weight_quantizer.amax is not None
 
+    # Save which quantizers are enabled before disabling
+    enabled_quantizers = {
+        name
+        for name, m in model.named_modules()
+        if isinstance(m, mtq.nn.TensorQuantizer) and m.is_enabled
+    }
+
+    mtq.disable_quantizer(model, "*")
+    disabled_output = forward(model)
+    assert torch.allclose(ref_output, disabled_output, atol=1e-5), (
+        "Output with quantizers disabled should match reference output"
+    )
+
+    mtq.enable_quantizer(model, lambda name: name in enabled_quantizers)
+    enabled_output = forward(model)
+    assert not torch.allclose(ref_output, enabled_output, atol=1e-5), (
+        "Output with quantizers enabled should differ from reference output"
+    )
+    # enable model for training to test backward pass
+    model.train()
     loss = forward(model).sum()
     loss.backward()
 

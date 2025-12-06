@@ -32,6 +32,21 @@ from .custom import _ParallelLinear
 _TE_VERSION = Version(te.__version__)
 
 
+def _check_te_fp8_enabled():
+    """Check if Transformer Engine FP8 autocast is enabled and raise error if so."""
+    try:
+        from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+
+        if FP8GlobalStateManager.is_fp8_enabled():
+            raise RuntimeError(
+                "Transformer Engine FP8 training (fp8_autocast) is enabled, which conflicts with "
+                "ModelOpt quantization. Please disable TE FP8 autocast when using ModelOpt "
+                "quantization, or use ModelOpt's FP8 quantization instead."
+            )
+    except ImportError:
+        pass  # Older TE versions may not have this API
+
+
 @QuantModuleRegistry.register({te.pytorch.Linear: "te_Linear"})
 class _QuantTELinear(_ParallelLinear):
     @property
@@ -58,6 +73,7 @@ class _QuantTELinear(_ParallelLinear):
     @staticmethod
     def te_quantized_linear_fn(package, func_name, self, *args, **kwargs):
         """Quantized version specifically for TE with weight first, then input."""
+        _check_te_fp8_enabled()
         if Version("2.0") <= _TE_VERSION:
             idx = 1 if func_name == "_forward" else 0
             weight, inputs = args[idx], args[idx + 1]
@@ -127,6 +143,7 @@ class _QuantTEGroupedLinear(_ParallelLinear):
 
     @staticmethod
     def te_grouped_quantized_linear_fn(package, func_name, self, *args):
+        _check_te_fp8_enabled()
         idx = 1 if func_name == "_forward" else 0
         inp = args[idx]
         num_gemms = len(args[idx + 1])
@@ -250,6 +267,7 @@ class _QuantTELayerNormLinear(_ParallelLinear):
 
     def forward(self, *args, **kwargs):
         """Call ModelOpt patch for _LayerNormLinear functional."""
+        _check_te_fp8_enabled()
         # This is multi-process safe (such as in torch distributed jobs), not multi-thread safe
         _QuantLayerNormLinearFunc.modelopt_quantizers = (
             self.input_quantizer,
