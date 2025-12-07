@@ -663,10 +663,10 @@ class HFEagleModel(EagleModel):
         self,
         input_ids,
         attention_mask,
-        position_ids,
-        past_key_values,
-        freeze_base_model,
-        labels,
+        position_ids=None,
+        past_key_values=None,
+        freeze_base_model=True,
+        labels=None,
         **kwargs,
     ):
         # TODO: This function still use eagle_module. Ideally we should remove it,
@@ -916,7 +916,7 @@ class HFEagleModel(EagleModel):
         valid = loss_mask[:, :, 0].bool()
         correct = (base_predict_tok == eagle_predict_tok) & valid
         denom = valid.sum().clamp_min(1).float()
-        accuracy = round(correct.sum().float().div(denom).item(), 3)
+        accuracy = correct.sum().float().div(denom)
 
         return classification_loss, accuracy
 
