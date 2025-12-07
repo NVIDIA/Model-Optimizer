@@ -55,18 +55,18 @@ class SmallLinearModelwithCustomWeight(torch.nn.Module):
 
 
 class SmallQKVModel(torch.nn.Module):
-    def __init__(self, dim=4, device="cuda", apply_embed=False):
+    def __init__(self, dim=4, device="cuda", apply_embed=False, bias=False):
         super().__init__()
         self.embedding = torch.nn.Embedding(2, dim)
-        self.q_proj = torch.nn.Linear(dim, dim, bias=False)
-        self.k_proj = torch.nn.Linear(dim, dim, bias=False)
-        self.v_proj = torch.nn.Linear(dim, dim, bias=False)
-        self.o_proj = torch.nn.Linear(dim, dim, bias=False)
+        self.q_proj = torch.nn.Linear(dim, dim, bias=bias)
+        self.k_proj = torch.nn.Linear(dim, dim, bias=bias)
+        self.v_proj = torch.nn.Linear(dim, dim, bias=bias)
+        self.o_proj = torch.nn.Linear(dim, dim, bias=bias)
         self.device = device
         self.config = None
         self.apply_embed = apply_embed
         # TODO: Debug why fsdp2 modifies bias of layernorm for awq
-        self.input_layernorm = torch.nn.LayerNorm(dim, bias=False)
+        self.input_layernorm = torch.nn.LayerNorm(dim, bias=bias)
 
     def forward(self, x):
         if self.apply_embed:

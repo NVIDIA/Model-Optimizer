@@ -712,9 +712,15 @@ def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
             # Assert that all the modules in the module list are present in this fsdp_param_group
             if len(modules_to_update) > 1:
                 for module in modules_to_update:
-                    name = _get_module_name(module, root_model)
-                    assert name in fsdp_param_mapping, (
-                        f"Module {module} not found in fsdp_param_mapping"
+                    module_name = _get_module_name(module, root_model)
+                    # Check if any parameter from this module is in the mapping
+                    module_params_in_mapping = any(
+                        f"{module_name}.{n}" in fsdp_param_mapping
+                        for n, _ in module.named_parameters()
+                    )
+                    assert module_params_in_mapping, (
+                        f"Module {module} with name '{module_name}' not found in fsdp_param_mapping. "
+                        f"Available keys: {list(fsdp_param_mapping.keys())}"
                     )
         # Yields for necessary weight updates/processing
         yield
