@@ -226,7 +226,7 @@ def register_hf_attentions_on_the_fly(model):
             f"Could not create a quantized attention class for  {attention_cls} from this model. "
             "To enable KV Cache quantization, please create a custom quantized attention class for this model and "
             "register it to ModelOpt using `mtq.register` "
-            "(see https://nvidia.github.io/TensorRT-Model-Optimizer/guides/_pytorch_quantization.html#custom-quantized-module-and-quantizer-placement)"
+            "(see https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#custom-quantized-module-and-quantizer-placement)"
         )
 
 

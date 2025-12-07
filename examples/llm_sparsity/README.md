@@ -1,8 +1,8 @@
 # Sparsity for HuggingFace Models
 
-In this tutorial, we demonstrate how to use Nvidia TensorRT Model Optimizer to perform Post-Training Sparsification (PTS) and Sparsity Aware Training (SAT) on a HuggingFace [Llama2-7B](https://huggingface.co/meta-llama/Llama-2-7b-hf) model.
+In this tutorial, we demonstrate how to use Nvidia Model Optimizer to perform Post-Training Sparsification (PTS) and Sparsity Aware Training (SAT) on a HuggingFace [Llama2-7B](https://huggingface.co/meta-llama/Llama-2-7b-hf) model.
 
-To learn more about the sparsity feature, please refer to the [documentation](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/6_sparsity.html).
+To learn more about the sparsity feature, please refer to the [documentation](https://nvidia.github.io/Model-Optimizer/guides/6_sparsity.html).
 
 ## Getting Started
 

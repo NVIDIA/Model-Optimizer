@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Nvidia TensorRT Model Optimizer (modelopt)."""
+"""Nvidia Model Optimizer (modelopt)."""
 
 from importlib.metadata import version as _version
 

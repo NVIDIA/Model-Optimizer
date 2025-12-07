@@ -9,11 +9,11 @@ Make sure to use as small models and less data as possible to keep the tests fas
 
 ## Running the tests
 
-To run a test, start from the recommended docker image from our [installation docs](https://nvidia.github.io/TensorRT-Model-Optimizer/getting_started/2_installation.html).
-Then mount your local modelopt directory to `/workspace/TensorRT-Model-Optimizer` and run this from the root of the repository.
+To run a test, start from the recommended docker image from our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html).
+Then mount your local modelopt directory to `/workspace/Model-Optimizer` and run this from the root of the repository.
 
 ```bash
-cd /workspace/TensorRT-Model-Optimizer
+cd /workspace/Model-Optimizer
 pip install -e ".[all,dev-test]"
 pytest tests/examples/$TEST
 ```

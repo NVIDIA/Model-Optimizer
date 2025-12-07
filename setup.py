@@ -114,11 +114,11 @@ if __name__ == "__main__":
     setuptools.setup(
         name="nvidia-modelopt",
         version=version,
-        description="Nvidia TensorRT Model Optimizer: a unified model optimization and deployment toolkit.",
-        long_description="Checkout https://github.com/nvidia/TensorRT-Model-Optimizer for more information.",
+        description="Nvidia Model Optimizer: a unified model optimization and deployment toolkit.",
+        long_description="Checkout https://github.com/nvidia/Model-Optimizer for more information.",
         long_description_content_type="text/markdown",
         author="NVIDIA Corporation",
-        url="https://github.com/NVIDIA/TensorRT-Model-Optimizer",
+        url="https://github.com/NVIDIA/Model-Optimizer",
         license="Apache 2.0",
         license_files=("LICENSE_HEADER",),
         classifiers=[

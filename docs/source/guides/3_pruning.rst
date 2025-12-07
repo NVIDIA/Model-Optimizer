@@ -5,7 +5,7 @@ Pruning
 .. tip::
 
     Checkout `Qwen 3 NeMo Minitron Pruning & Distillation <https://github.com/NVIDIA-NeMo/NeMo/tree/main/tutorials/llm/qwen/pruning-distillation>`_ and
-    `ResNet20 on CIFAR-10 Notebook <https://github.com/NVIDIA/TensorRT-Model-Optimizer/blob/main/examples/pruning/cifar_resnet.ipynb>`_
+    `ResNet20 on CIFAR-10 Notebook <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/pruning/cifar_resnet.ipynb>`_
     for an end-to-end example of pruning.
 
 ModelOpt provides three main pruning methods (aka ``mode``) - Minitron, FastNAS and GradNAS - via a unified API
@@ -61,7 +61,7 @@ Prerequisites
 #. Please see the API reference of :meth:`mtp.prune() <modelopt.torch.prune.pruning.prune>` for more details.
 
 Below we show an example using :class:`"fastnas" <modelopt.torch.prune.fastnas.FastNASModeDescriptor>`.
-For Minitron pruning, please refer to the `example snippet <https://github.com/NVIDIA/TensorRT-Model-Optimizer/tree/main/examples/pruning#getting-started>`_ in the pruning readme.
+For Minitron pruning, please refer to the `example snippet <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning#getting-started>`_ in the pruning readme.
 
 Perform pruning
 ---------------

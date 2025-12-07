@@ -46,7 +46,7 @@ sys.path.append(os.path.abspath("./_ext"))
 
 # -- Project information -----------------------------------------------------
 
-project = "TensorRT Model Optimizer"  # pylint: disable=C0103
+project = "Model Optimizer"  # pylint: disable=C0103
 copyright = "2023-2025, NVIDIA Corporation"  # pylint: disable=C0103
 author = "NVIDIA Corporation"  # pylint: disable=C0103
 version = __version__

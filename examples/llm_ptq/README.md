@@ -11,13 +11,13 @@ This section focuses on Post-training quantization, a technique that reduces mod
 | **Section** | **Description** | **Link** | **Docs** |
 | :------------: | :------------: | :------------: | :------------: |
 | Pre-Requisites | Required & optional packages to use this technique | \[[Link](#pre-requisites)\] | |
-| Getting Started | Learn how to optimize your models using PTQ to reduce precision and improve inference efficiency | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/1_quantization.html)\] |
+| Getting Started | Learn how to optimize your models using PTQ to reduce precision and improve inference efficiency | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Support Matrix | View the support matrix to see quantization compatibility and feature availability across different models | \[[Link](#support-matrix)\] | |
-| AutoQuantize | Automatically chooses layers/precisions for mixed precision quantization to enhanced inference performance and accuracy tradeoffs | \[[Link](#autoquantize)\] | \[[docs](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/_pytorch_quantization.html#optimal-partial-quantization-using-auto-quantize)\] |
-| Real Quant | Real Quant compresses model weights in a low-precision format to reduce memory requirements of quantization. | \[[Link](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/_compress_quantized_models.html)\] | |
+| AutoQuantize | Automatically chooses layers/precisions for mixed precision quantization to enhanced inference performance and accuracy tradeoffs | \[[Link](#autoquantize)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#optimal-partial-quantization-using-auto-quantize)\] |
+| Real Quant | Real Quant compresses model weights in a low-precision format to reduce memory requirements of quantization. | \[[Link](https://nvidia.github.io/Model-Optimizer/guides/_compress_quantized_models.html)\] | |
 | Framework Scripts | Example scripts demonstrating quantization techniques for optimizing Hugging Face / NeMo / Megatron-LM models | \[[Link](#framework-scripts)\] | |
 | Evaluate Accuracy | Evaluate your model's accuracy! | \[[Link](#evaluate-accuracy)\] | |
-| Exporting Checkpoints | Export to Hugging Face Unified Checkpoint and deploy on TRT-LLM/vLLM/SGLang | \[[Link](#exporting-checkpoints)\] | \[[docs](https://nvidia.github.io/TensorRT-Model-Optimizer/deployment/3_unified_hf.html)\] |
+| Exporting Checkpoints | Export to Hugging Face Unified Checkpoint and deploy on TRT-LLM/vLLM/SGLang | \[[Link](#exporting-checkpoints)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/deployment/3_unified_hf.html)\] |
 | Pre-Quantized Checkpoints | Ready to deploy Hugging Face pre-quantized checkpoints | \[[Link](#pre-quantized-checkpoints)\] | |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] | |
 
@@ -29,7 +29,7 @@ This section focuses on Post-training quantization, a technique that reduces mod
 
 For Hugging Face models, please use the TensorRT-LLM docker image (e.g., `nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc4`).
 For NeMo models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:25.09`).
-Visit our [installation docs](https://nvidia.github.io/TensorRT-Model-Optimizer/getting_started/2_installation.html) for more information.
+Visit our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html) for more information.
 
 Also follow the installation steps below to upgrade to the latest version of Model Optimizer and install example-specific dependencies.
 
@@ -49,7 +49,7 @@ Similarly, for vLLM or SGLang deployment, please use their installation docs.
 
 ### 1. Quantize (Post Training Quantization)
 
-With the simple API below, you can very easily use Model Optimizer to quantize your model. Model Optimizer achieves this by converting the precision of your model to the desired precision, and then using a small dataset (typically 128-512 samples) to [calibrate](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/_basic_quantization.html) the quantization scaling factors. The accuracy of PTQ is typically robust across different choices of calibration data, by default Model Optimizer uses a mix of [`cnn_dailymail`](https://huggingface.co/datasets/abisee/cnn_dailymail) and [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2). Users can try other datasets by easily modifying the `calib_set`.
+With the simple API below, you can very easily use Model Optimizer to quantize your model. Model Optimizer achieves this by converting the precision of your model to the desired precision, and then using a small dataset (typically 128-512 samples) to [calibrate](https://nvidia.github.io/Model-Optimizer/guides/_basic_quantization.html) the quantization scaling factors. The accuracy of PTQ is typically robust across different choices of calibration data, by default Model Optimizer uses a mix of [`cnn_dailymail`](https://huggingface.co/datasets/abisee/cnn_dailymail) and [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2). Users can try other datasets by easily modifying the `calib_set`.
 
 ```python
 import modelopt.torch.quantization as mtq
@@ -110,7 +110,7 @@ with torch.inference_mode():
 
 After the TensorRT-LLM checkpoint export, you can use the `trtllm-build` build command to build the engines from the exported checkpoints. Please check the [TensorRT-LLM Build API](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/architecture/workflow.md#build-apis) documentation for reference.
 
-Please reference our [framework scripts](#framework-scripts) and our [docs](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/1_quantization.html) for more details.
+Please reference our [framework scripts](#framework-scripts) and our [docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html) for more details.
 
 ## Support Matrix
 
@@ -143,7 +143,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 
 > *The accuracy loss after PTQ may vary depending on the actual model and the quantization method. Different models may have different accuracy loss and usually the accuracy loss is more significant when the base model is small. If the accuracy after PTQ is not meeting the requirement, please try either modifying [hf_ptq.py](./hf_ptq.py) and disabling the KV cache quantization or using the [QAT](./../llm_qat/README.md) instead.*
 
-> You can also create your own custom config using [this](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/_pytorch_quantization.html#custom-calibration-algorithm) guide.
+> You can also create your own custom config using [this](https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#custom-calibration-algorithm) guide.
 
 ### NeMo Supported Models
 
@@ -151,7 +151,7 @@ Please refer to the [NeMo 2.0 PTQ documentation](https://docs.nvidia.com/nemo-fr
 
 ## AutoQuantize
 
-[AutoQuantize (`mtq.auto_quantize`)](https://nvidia.github.io/TensorRT-Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.auto_quantize) is a PTQ algorithm which quantizes a model by searching for the best quantization format per-layer while meeting performance constraints specified by the user. `AutoQuantize` streamlines the trade-off of model accuracy and performance.
+[AutoQuantize (`mtq.auto_quantize`)](https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.auto_quantize) is a PTQ algorithm which quantizes a model by searching for the best quantization format per-layer while meeting performance constraints specified by the user. `AutoQuantize` streamlines the trade-off of model accuracy and performance.
 
 Currently `AutoQuantize` supports only `auto_quantize_bits` as the performance constraint (for both weight-only
 quantization and weight & activation quantization). `auto_quantize_bits` constraint specifies the effective number of bits for the quantized model.
@@ -160,7 +160,7 @@ You may specify an `auto_quantize_bits` constraint such as 4.8 for mixed precisi
 `AutoQuantize` will automatically quantize highly sensitive layers in `FP8_DEFAULT_CFG` while keeping less sensitive layers in `NVFP4_DEFAULT_CFG` (and even skip quantization for any extremely sensitive layers) so that
 the the final mixed precision quantized model has an effective quantized bits of 4.8. This model would give a better accuracy than the model quantized with vanilla `NVFP4_DEFAULT_CFG` configuration since the more aggressive `NVFP4_DEFAULT_CFG` quantization was not applied for the highly sensitive layers.
 
-Here is an example usage for `AutoQuantize` algorithm (Please see [auto_quantize](https://nvidia.github.io/TensorRT-Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.auto_quantize) API for more details):
+Here is an example usage for `AutoQuantize` algorithm (Please see [auto_quantize](https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.auto_quantize) API for more details):
 
 ```python
 
@@ -432,18 +432,18 @@ After the TensorRT-LLM checkpoint export, you can use the `trtllm-build` build c
 
 ## Pre-Quantized Checkpoints
 
-- Ready-to-deploy checkpoints \[[🤗 Hugging Face - Nvidia TensorRT Model Optimizer Collection](https://huggingface.co/collections/nvidia/inference-optimized-checkpoints-with-model-optimizer)\]
+- Ready-to-deploy checkpoints \[[🤗 Hugging Face - Nvidia Model Optimizer Collection](https://huggingface.co/collections/nvidia/inference-optimized-checkpoints-with-model-optimizer)\]
 - Deployable on [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang)
 - More models coming soon!
 
 ## Resources
 
-- 📅 [Roadmap](https://github.com/NVIDIA/TensorRT-Model-Optimizer/issues/146)
-- 📖 [Documentation](https://nvidia.github.io/TensorRT-Model-Optimizer)
+- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/146)
+- 📖 [Documentation](https://nvidia.github.io/Model-Optimizer)
 - 🎯 [Benchmarks](../benchmark.md)
-- 💡 [Release Notes](https://nvidia.github.io/TensorRT-Model-Optimizer/reference/0_changelog.html)
-- 🐛 [File a bug](https://github.com/NVIDIA/TensorRT-Model-Optimizer/issues/new?template=1_bug_report.md)
-- ✨ [File a Feature Request](https://github.com/NVIDIA/TensorRT-Model-Optimizer/issues/new?template=2_feature_request.md)
+- 💡 [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)
+- 🐛 [File a bug](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=1_bug_report.md)
+- ✨ [File a Feature Request](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=2_feature_request.md)
 
 ### Technical Resources
 

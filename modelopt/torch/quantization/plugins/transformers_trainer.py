@@ -276,7 +276,7 @@ class QATTrainer(ModelOptHFTrainer):
             if mto.ModeloptStateManager.is_converted(self.accelerator.unwrap_model(self.model)):
                 print_rank_0(
                     "Model saved. To restore, call mto.enable_huggingface_checkpointing() first before loading the "
-                    "model. See https://nvidia.github.io/TensorRT-Model-Optimizer/reference/generated/modelopt.torch.opt.plugins.huggingface.html#modelopt.torch.opt.plugins.huggingface.enable_huggingface_checkpointing"
+                    "model. See https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.opt.plugins.huggingface.html#modelopt.torch.opt.plugins.huggingface.enable_huggingface_checkpointing"
                 )
             self.accelerator.state.fsdp_plugin.set_state_dict_type(original_type)
         else:

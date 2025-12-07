@@ -1,6 +1,6 @@
 # Speculative Decoding
 
-[![Documentation](https://img.shields.io/badge/Docs-TensorRT--Model--Optimizer-blue?logo=readthedocs&style=flat-square)](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/5_speculative_decoding.html)
+[![Documentation](https://img.shields.io/badge/Docs-NVIDIA--Model--Optimizer-blue?logo=readthedocs&style=flat-square)](https://nvidia.github.io/Model-Optimizer/guides/5_speculative_decoding.html)
 
 Speculative decoding accelerates auto-regressive generation in large language models (LLMs) by leveraging a lightweight draft model to predict the next γ tokens. The main LLM then verifies these candidate tokens in a single forward pass. If the draft model correctly predicts α tokens, the LLM can accept and generate α+1 tokens per verification step, significantly improving generation speed.
 
@@ -30,7 +30,7 @@ This example focuses on training with Hugging Face. To train with Megatron‑LM,
 
 ### Docker
 
-Please use the PyTorch docker image (e.g., `nvcr.io/nvidia/pytorch:25.06-py3`) or visit our [installation docs](https://nvidia.github.io/TensorRT-Model-Optimizer/getting_started/2_installation.html) for more information.
+Please use the PyTorch docker image (e.g., `nvcr.io/nvidia/pytorch:25.06-py3`) or visit our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html) for more information.
 
 Also follow the installation steps below to upgrade to the latest version of Model Optimizer and install dataset and example-specific dependencies.
 
@@ -61,7 +61,7 @@ bash train_eagle3_and_export.sh --base_model meta-llama/Llama-3.2-1B-Instruct --
 
 This one-line command runs a minimal example workflow of training and exporting an EAGLE draft model in Modelopt. Specifically, it
 
-- Initializes the draft model with [default settings](https://github.com/NVIDIA/TensorRT-Model-Optimizer/blob/main/modelopt/torch/speculative/eagle/default_config.py#L18)
+- Initializes the draft model with [default settings](https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt/torch/speculative/eagle/default_config.py#L18)
 - Fine-tunes the model on the [Daring-Anteater](https://huggingface.co/datasets/nvidia/Daring-Anteater) dataset
 - Evaluates the acceptance rate on [MT-Bench](https://huggingface.co/datasets/HuggingFaceH4/mt_bench_prompts)
 - Exports a checkpoint ready for deployment
@@ -79,7 +79,7 @@ For small base models that fit in GPU memory, we can collocate them with draft m
             --eagle_config eagle_config.json
 ```
 
-This command will launch `main.py` with `accelerate`. See [section: interact with modelopt.torch.speculative](#interact-with-modelopttorchspeculative) for more details.  
+This command will launch `main.py` with `accelerate`. See [section: interact with modelopt.torch.speculative](#interact-with-modelopttorchspeculative) for more details.
 The saved modelopt checkpoint is similar in architecture to HF models. It can be further optimized through **ModelOpt**, e.g., PTQ and QAT.
 
 ## Training Draft Model with Offline Base Model
@@ -92,7 +92,7 @@ We support two backends for generating base model hidden states. For better effc
 
 ```bash
 python collect_hidden_states/compute_hidden_states_trtllm.py \
-            --model $BASE_MODEL \ 
+            --model $BASE_MODEL \
             --input-file input_conversations/daring-anteater.jsonl \
             --output-dir $HIDDEN_STATES_DIR
 ```
@@ -216,7 +216,7 @@ To use your own datasets, please preprocess your data into a `.jsonl` file with 
 
 ```json
 {
-    "conversation_id": <unique id>, 
+    "conversation_id": <unique id>,
     "conversations": [{"role":<user or assistant>, "content":<content>}]
 }
 ```
@@ -256,7 +256,7 @@ This will produce a `d2t.pt` file in `save_dir`, which is the mapping from draft
 
 ### Configuring Draft Model
 
-For EAGLE‑1 and EAGLE‑3 we provide a [default model architecture config](https://github.com/NVIDIA/TensorRT-Model-Optimizer/blob/main/modelopt/torch/speculative/config.py#L37) in ModelOpt. You can override default settings by providing an additional JSON dict. In this example, we override `draft_vocab_size` in `eagle_config.json`:
+For EAGLE‑1 and EAGLE‑3 we provide a [default model architecture config](https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt/torch/speculative/config.py#L37) in ModelOpt. You can override default settings by providing an additional JSON dict. In this example, we override `draft_vocab_size` in `eagle_config.json`:
 
 ```json
 {
@@ -336,9 +336,9 @@ More models coming soon!
 
 ## Resources
 
-- 📅 [Roadmap](https://github.com/NVIDIA/TensorRT-Model-Optimizer/issues/146)
-- 📖 [Documentation](https://nvidia.github.io/TensorRT-Model-Optimizer)
+- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/146)
+- 📖 [Documentation](https://nvidia.github.io/Model-Optimizer)
 - 🎯 [Benchmarks](../benchmark.md)
-- 💡 [Release Notes](https://nvidia.github.io/TensorRT-Model-Optimizer/reference/0_changelog.html)
-- 🐛 [File a bug](https://github.com/NVIDIA/TensorRT-Model-Optimizer/issues/new?template=1_bug_report.md)
-- ✨ [File a Feature Request](https://github.com/NVIDIA/TensorRT-Model-Optimizer/issues/new?template=2_feature_request.md)
+- 💡 [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)
+- 🐛 [File a bug](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=1_bug_report.md)
+- ✨ [File a Feature Request](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=2_feature_request.md)

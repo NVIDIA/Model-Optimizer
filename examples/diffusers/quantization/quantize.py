@@ -36,7 +36,7 @@ from config import (
 
 # This is a workaround for making the onnx export of models that use the torch RMSNorm work. We will
 # need to move on to use dynamo based onnx export to properly fix the problem. The issue has been hit
-# by both external users https://github.com/NVIDIA/TensorRT-Model-Optimizer/issues/262, and our
+# by both external users https://github.com/NVIDIA/Model-Optimizer/issues/262, and our
 # internal users from MLPerf Inference.
 #
 if __name__ == "__main__":
