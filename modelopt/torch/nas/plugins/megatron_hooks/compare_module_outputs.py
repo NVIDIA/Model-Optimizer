@@ -95,9 +95,9 @@ class OutputSaveHook:
         out = output[0] if isinstance(output, tuple) else output
         self.saved_outputs.append(out.detach().cpu())
 
-    def get_stacked_outputs(self) -> torch.Tensor:
-        """Stack all saved outputs into a single tensor."""
-        return torch.stack(self.saved_outputs)
+    def get_outputs_list(self) -> list[torch.Tensor]:
+        """Return saved outputs as a list."""
+        return self.saved_outputs
 
 
 def save_multi_layer_outputs(hooks: dict[str, OutputSaveHook], path: str) -> None:
@@ -107,7 +107,7 @@ def save_multi_layer_outputs(hooks: dict[str, OutputSaveHook], path: str) -> Non
         hooks: Dictionary mapping layer names to their hooks.
         path: Path to save the outputs.
     """
-    output_dict = {name: hook.get_stacked_outputs() for name, hook in hooks.items()}
+    output_dict = {name: hook.get_outputs_list() for name, hook in hooks.items()}
 
     # Add metadata
     output_dict["metadata"] = {
@@ -119,9 +119,9 @@ def save_multi_layer_outputs(hooks: dict[str, OutputSaveHook], path: str) -> Non
 
     torch.save(output_dict, path)
     print(f"\nSaved outputs from {len(hooks)} layers to {path}")
-    for name, tensor in output_dict.items():
+    for name, data in output_dict.items():
         if name != "metadata":
-            print(f"  {name}: {tensor.shape}")
+            print(f"  {name}: list of {len(data)} tensors")
 
 
 def compute_rmse(tensor1: torch.Tensor, tensor2: torch.Tensor) -> float:
@@ -187,6 +187,49 @@ def main():
     compare_multi_layer(ref_data, comp_data, args.output_json)
 
 
+def compute_layer_metrics(ref_data: list, comp_data: list) -> dict:
+    """Compute RMSE and cosine similarity for a layer's outputs.
+
+    Args:
+        ref_data: List of reference tensors.
+        comp_data: List of comparison tensors.
+
+    Returns:
+        Dictionary with metrics.
+
+    Raises:
+        ValueError: If lengths don't match or tensor shapes don't match.
+    """
+    if len(ref_data) != len(comp_data):
+        raise ValueError(
+            f"Length mismatch: reference has {len(ref_data)} samples, compare has {len(comp_data)}"
+        )
+
+    rmse_values = []
+    cos_sim_values = []
+
+    for ref_tensor, comp_tensor in zip(ref_data, comp_data):
+        if ref_tensor.shape != comp_tensor.shape:
+            raise ValueError(
+                f"Shape mismatch at index {len(rmse_values)}: "
+                f"reference {ref_tensor.shape} vs compare {comp_tensor.shape}"
+            )
+        rmse_values.append(compute_rmse(ref_tensor, comp_tensor))
+        cos_sim = compute_cosine_similarity(ref_tensor, comp_tensor)
+        cos_sim_values.append(cos_sim["mean"])
+
+    return {
+        "rmse": sum(rmse_values) / len(rmse_values),
+        "cosine_sim": {
+            "mean": sum(cos_sim_values) / len(cos_sim_values),
+            "min": min(cos_sim_values),
+            "max": max(cos_sim_values),
+            "std": torch.tensor(cos_sim_values).std().item() if len(cos_sim_values) > 1 else 0.0,
+        },
+        "num_samples": len(rmse_values),
+    }
+
+
 def compare_multi_layer(ref_data: dict, comp_data: dict, output_json: str | None = None):
     """Compare multi-layer outputs."""
     import json
@@ -204,19 +247,14 @@ def compare_multi_layer(ref_data: dict, comp_data: dict, output_json: str | None
 
     # Per-layer comparison
     for layer_name in sorted(ref_layers):
-        ref_tensor = ref_data[layer_name]
-        comp_tensor = comp_data[layer_name]
+        ref_layer_data = ref_data[layer_name]
+        comp_layer_data = comp_data[layer_name]
 
-        if ref_tensor.shape != comp_tensor.shape:
-            print(f"ERROR: {layer_name} shape mismatch! Skipping.")
-            continue
+        metrics = compute_layer_metrics(ref_layer_data, comp_layer_data)
 
-        rmse = compute_rmse(ref_tensor, comp_tensor)
-        cos_sim = compute_cosine_similarity(ref_tensor, comp_tensor)
-
-        results["per_layer"][layer_name] = {"rmse": rmse, "cosine_sim": cos_sim}
-        results["aggregated"]["rmse"].append(rmse)
-        results["aggregated"]["cosine_sim_mean"].append(cos_sim["mean"])
+        results["per_layer"][layer_name] = metrics
+        results["aggregated"]["rmse"].append(metrics["rmse"])
+        results["aggregated"]["cosine_sim_mean"].append(metrics["cosine_sim"]["mean"])
 
     # Aggregated statistics
     if results["aggregated"]["rmse"]:
