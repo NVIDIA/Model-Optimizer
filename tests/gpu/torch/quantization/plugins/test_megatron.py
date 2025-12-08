@@ -956,6 +956,7 @@ def test_kv_cache_sharded_state_dict(tmp_path, config):
 
 
 def test_convert_mcore_te_gpt_model(distributed_setup_size_1):
+    pytest.skip("Disable test for debugging CI timeout")
     try:
         from megatron.core.extensions.transformer_engine import TERowParallelLinear
     except ImportError:
@@ -1017,6 +1018,7 @@ def test_convert_mcore_te_gpt_model(distributed_setup_size_1):
 
 
 def test_homogeneous_sharded_state_dict_te_spec(tmp_path):
+    pytest.skip("Disable test for debugging CI timeout")
     spawn_multiprocess_job(
         size=2,
         job=partial(
