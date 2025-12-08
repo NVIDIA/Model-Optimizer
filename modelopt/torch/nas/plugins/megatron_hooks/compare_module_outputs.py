@@ -235,6 +235,8 @@ def compare_multi_layer(ref_data: dict, comp_data: dict, output_json: str | None
             "min": cos_sim_array.min().item(),
             "max": cos_sim_array.max().item(),
         }
+        results["aggregated"]["num_steps"] = ref_data.get("metadata", {}).get("num_steps", None)
+        results["aggregated"]["num_layers"] = len(rmse_array)
 
     # Save to JSON if requested
     if output_json:
