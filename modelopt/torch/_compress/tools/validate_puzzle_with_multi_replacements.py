@@ -32,6 +32,7 @@ import torch
 from tqdm import tqdm
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 from modelopt.torch._compress.replacement_library.build_replacement_library import infer_teacher_dir
 from modelopt.torch._compress.replacement_library.replacement_library import ReplacementLibrary
@@ -45,7 +46,6 @@ from modelopt.torch._compress.tools.checkpoint_utils_hf import (
     save_checkpoint,
     save_safetensors_index,
 )
-from modelopt.torch._compress.tools.runtime import IRuntime
 from modelopt.torch._compress.tools.validation_utils import (
     validate_model_and_extract_hidden_states,
     validate_model_with_teacher_similarity_metrics,
@@ -111,7 +111,7 @@ def parse_args() -> argparse.Namespace:
 
 
 @torch.no_grad()
-def validate_puzzle_solutions(args: argparse.Namespace, runtime: IRuntime) -> None:
+def validate_puzzle_solutions(args: argparse.Namespace) -> None:
     puzzle_solutions = load_puzzle_solutions(
         args.solutions_path, args.sort_solutions_by, args.bigger_is_better
     )
@@ -122,9 +122,7 @@ def validate_puzzle_solutions(args: argparse.Namespace, runtime: IRuntime) -> No
     tokenizer = _load_tokenizer(args)
     if not args.skip_validation:
         val_dataloader = (
-            validate_model.prepare_dataloader(args, tokenizer)
-            if (runtime is None or runtime.is_main_process)
-            else None
+            validate_model.prepare_dataloader(args, tokenizer) if dist.is_master() else None
         )
 
     output_dir = (
@@ -137,18 +135,16 @@ def validate_puzzle_solutions(args: argparse.Namespace, runtime: IRuntime) -> No
 
     teacher_hidden_states = None
     if (args.teacher_dir is not None) and (not args.skip_validation):
-        teacher_model = replacement_library.load_checkpoint(
-            args.teacher_dir, runtime.world_size, runtime.global_rank
-        )
-        teacher_model.to(runtime.device)
-        stitched_model = perform_pipeline_stitches(teacher_model, runtime)
+        teacher_model = replacement_library.load_checkpoint(args.teacher_dir)
+        teacher_model.to(torch.device(dist.local_rank()))
+        stitched_model = perform_pipeline_stitches(teacher_model)
         teacher_hidden_states = validate_model_and_extract_hidden_states(
             args,
             stitched_model,
             tokenizer,
             output_dir,
             model_name="teacher",
-            runtime=runtime,
+            pipeline_parallel=True,
             val_dataloader=val_dataloader,
         )
 
@@ -160,9 +156,7 @@ def validate_puzzle_solutions(args: argparse.Namespace, runtime: IRuntime) -> No
         # realizable_as_symlinks = False
         model_config = replacement_library.create_model_config(layer_replacements)
         if (args.save_models and not realizable_as_symlinks) or (not args.skip_validation):
-            model = replacement_library.load_model(
-                layer_replacements, runtime.world_size, runtime.global_rank
-            )
+            model = replacement_library.load_model(layer_replacements)
             model_config = model.config
 
         if args.save_models:
@@ -174,7 +168,7 @@ def validate_puzzle_solutions(args: argparse.Namespace, runtime: IRuntime) -> No
             model_config.dtype = "bfloat16"
             model_config.architectures = ["DeciLMForCausalLM"]
             if realizable_as_symlinks:
-                if runtime.global_rank == 0:
+                if dist.is_master():
                     save_checkpoint_as_symlinks(
                         layer_replacements, model_config, checkpoint_dir, replacement_library
                     )
@@ -184,13 +178,13 @@ def validate_puzzle_solutions(args: argparse.Namespace, runtime: IRuntime) -> No
             copy_tokenizer(args.tokenizer_name, checkpoint_dir)
             copy_hf_code(checkpoint_dir)
 
-            runtime.wait_for_everyone()
+            dist.barrier()
 
-        runtime.wait_for_everyone()
+        dist.barrier()
 
         if not args.skip_validation:
-            model.to(runtime.device)
-            stitched_model = perform_pipeline_stitches(model, runtime)
+            model.to(torch.device(dist.local_rank()))
+            stitched_model = perform_pipeline_stitches(model)
             validate_model_with_teacher_similarity_metrics(
                 args,
                 stitched_model,
@@ -199,11 +193,11 @@ def validate_puzzle_solutions(args: argparse.Namespace, runtime: IRuntime) -> No
                 output_dir,
                 model_name=f"solution_{i_solution}",
                 extra_payload={"i_solution": i_solution, "puzzle_solution": puzzle_solution},
-                runtime=runtime,
+                pipeline_parallel=True,
                 val_dataloader=val_dataloader,
             )
 
-        runtime.wait_for_everyone()
+        dist.barrier()
 
 
 def can_realize_as_symlinks(layer_replacements: list[dict]) -> bool:

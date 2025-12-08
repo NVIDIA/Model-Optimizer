@@ -37,6 +37,7 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME
 from transformers.utils.hub import cached_file, get_checkpoint_shard_files
 from typing_extensions import override
 
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 from modelopt.torch._compress.decilm.deci_lm_hf_code.modeling_decilm import (
     DeciLMDecoderLayer,
@@ -45,7 +46,6 @@ from modelopt.torch._compress.decilm.deci_lm_hf_code.modeling_decilm import (
 )
 from modelopt.torch._compress.tools.checkpoint_utils import load_model_config, load_state_dict
 from modelopt.torch._compress.tools.logger import mprint
-from modelopt.torch._compress.tools.runtime import IRuntime
 from modelopt.torch._compress.utils.utils import EmptyInitOnDevice
 
 
@@ -144,14 +144,13 @@ def create_dummy_model(
 
 
 def load_and_shard_model(
-    runtime: IRuntime,
     checkpoint_path: str | Path,
     owned_block_indexes: set[int] | Literal["auto"] = "auto",
     model_config: DeciLMConfig | None = None,
     model_config_overrides: Mapping | None = None,
 ) -> DeciLMForCausalLM:
     checkpoint_path = Path(checkpoint_path)
-    with runtime.device:
+    with torch.device(dist.local_rank()):
         if model_config is None:
             model_config = load_model_config(
                 checkpoint_path, model_config_overrides, ignore_unexpected_config_keys=True
@@ -159,14 +158,13 @@ def load_and_shard_model(
 
         if owned_block_indexes == "auto":
             owned_block_indexes = set(
-                np.array_split(np.arange(model_config.get_num_hidden_layers()), runtime.world_size)[
-                    runtime.global_rank
+                np.array_split(np.arange(model_config.get_num_hidden_layers()), dist.size())[
+                    dist.rank()
                 ]
             )
 
         mprint("Initializing model shards")
         model_shard = create_sharded_model(
-            runtime=runtime,
             model_config=model_config,
             owned_block_indexes=owned_block_indexes,
         )
@@ -182,7 +180,7 @@ def load_and_shard_model(
             shard_state_dict = load_sharded_state_dict(
                 model_name_or_path=str(checkpoint_path),
                 keys_to_load=shard_keys,
-                device=runtime.device,
+                device=torch.device(dist.local_rank()),
             )
 
             new_names = set(shard_state_dict.keys())
@@ -196,15 +194,13 @@ def load_and_shard_model(
                 model_shard.tie_weights()
         else:
             mprint("Loading state_dict in main process")
-            state_dict = load_state_dict(checkpoint_path) if runtime.is_main_process else None
+            state_dict = load_state_dict(checkpoint_path) if dist.is_master() else None
 
             mprint("Distributing model to shards")
-            load_state_dict_to_shards(
-                runtime=runtime, model_shard=model_shard, loaded_state_dict=state_dict
-            )
+            load_state_dict_to_shards(model_shard=model_shard, loaded_state_dict=state_dict)
             del state_dict
 
-        model_shard.type(runtime.dtype)
+        model_shard.type(torch.bfloat16)  # TODO: make this configurable
 
     params_on_meta_device = [
         param_name
@@ -212,14 +208,13 @@ def load_and_shard_model(
         if param.device == torch.device("meta")
     ]
     assert len(params_on_meta_device) == 0, (
-        f"[global_rank={runtime.global_rank}]  Couldn't load params {params_on_meta_device}"
+        f"[global_rank={dist.rank()}]  Couldn't load params {params_on_meta_device}"
     )
 
     return model_shard
 
 
 def create_sharded_model(
-    runtime: IRuntime,
     model_config: DeciLMConfig,
     owned_block_indexes: set[int],
     device: str | torch.device | None = "meta",
@@ -228,7 +223,7 @@ def create_sharded_model(
     if isinstance(device, str):
         device = torch.device(device)
 
-    runtime.wait_for_everyone()
+    dist.barrier()
 
     with EmptyInitOnDevice(device="meta", dtype=dtype):
         model = DeciLMForCausalLM(model_config)
@@ -245,15 +240,15 @@ def create_sharded_model(
 
 
 def load_state_dict_to_shards(
-    runtime: IRuntime, model_shard: torch.nn.Module, loaded_state_dict: dict | None = None
+    model_shard: torch.nn.Module, loaded_state_dict: dict | None = None
 ) -> None:
     from sewing_kit.utils import distributed_isend_obj, distributed_recv_obj
 
     model_shard.to("meta")
     local_state_dict_keys = list(model_shard.state_dict().keys())
 
-    if runtime.is_main_process:
-        gathered_state_dict_keys = [None] * runtime.world_size
+    if dist.is_master():
+        gathered_state_dict_keys = [None] * dist.size()
         torch.distributed.gather_object(local_state_dict_keys, gathered_state_dict_keys)
 
         assert loaded_state_dict is not None
@@ -276,7 +271,7 @@ def load_state_dict_to_shards(
         torch.distributed.gather_object(local_state_dict_keys)
         shard_state_dict = distributed_recv_obj()
 
-    print(f"{runtime.global_rank=} loaded state_dict shard")
+    print(f"{dist.rank()} loaded state_dict shard")
 
     missing_keys, unexpected_keys = model_shard.load_state_dict(
         shard_state_dict, strict=False, assign=True
@@ -284,20 +279,18 @@ def load_state_dict_to_shards(
     assert len(unexpected_keys) == 0
     assert all("dummy_param" in key for key in missing_keys)
 
-    model_shard.to(runtime.device)
+    model_shard.to(torch.device(dist.local_rank()))
 
-    runtime.wait_for_everyone()
+    dist.barrier()
 
 
 def save_sharded_model(
-    runtime: IRuntime,
-    model_shard: torch.nn.Module | dict[str, torch.Tensor],
-    out_path: str | Path,
+    model_shard: torch.nn.Module | dict[str, torch.Tensor], out_path: str | Path
 ):
     """
     out_path is usually output_checkpoint_path / "model.safetensors"
     """
-    runtime.wait_for_everyone()
+    dist.barrier()
 
     if isinstance(model_shard, torch.nn.Module):
         shard_state_dict = model_shard.state_dict()
@@ -311,8 +304,8 @@ def save_sharded_model(
         weight.numel() * weight.element_size() for weight in shard_state_dict.values()
     )
 
-    num_shards = runtime.world_size
-    idx = runtime.global_rank
+    num_shards = dist.size()
+    idx = dist.rank()
 
     out_path = Path(out_path)
     shard_file = out_path.with_stem(f"{out_path.stem}-{idx + 1:05d}-of-{num_shards:05d}")
@@ -323,8 +316,8 @@ def save_sharded_model(
         "shard_file": str(shard_file),
     }
 
-    if runtime.is_main_process:
-        shard_metadatas = [{} for _ in range(runtime.world_size)]
+    if dist.is_master():
+        shard_metadatas = [{} for _ in range(dist.size())]
         torch.distributed.gather_object(shard_metadata, shard_metadatas, dst=0)
         total_size = sum(x["total_shard_size"] for x in shard_metadatas)
         metadata = {"total_size": total_size}
@@ -346,7 +339,7 @@ def save_sharded_model(
     else:
         torch.save(shard_state_dict, shard_file)
 
-    runtime.wait_for_everyone()
+    dist.barrier()
 
 
 def load_sharded_state_dict(

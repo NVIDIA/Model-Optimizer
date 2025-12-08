@@ -29,18 +29,18 @@ Usage:
 """
 
 import argparse
-import datetime
+from datetime import timedelta
 from pathlib import Path
 
-import mip_and_realize_models
-import torch
-from puzzle_tools.hydra_utils import register_hydra_resolvers
-
+import modelopt.torch._compress.mip.mip_and_realize_models as mip_and_realize_models
 import modelopt.torch.nas as mtn
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress.nas.plugins.compress_nas_plugin import CompressModel
-from modelopt.torch._compress.runtime import NativeDdpRuntime
+from modelopt.torch._compress.tools.hydra_utils import (
+    initialize_hydra_config_for_dir,
+    register_hydra_resolvers,
+)
 from modelopt.torch._compress.tools.logger import mprint
-from tests.utils.test_utils import initialize_hydra_config_for_dir
 
 
 def parse_args():
@@ -70,50 +70,52 @@ def run_full_compress(hydra_config_path: str):
         config_path: Path to the YAML configuration file
     """
     mprint("Compress Progress 1/8: starting compression pipeline")
-    with NativeDdpRuntime(dtype=torch.bfloat16, torch_distributed_timeout=datetime.timedelta(10)):
-        # Register Hydra custom resolvers (needed for config resolution)
-        register_hydra_resolvers()
+    dist.setup(timeout=timedelta(10))
 
-        hydra_config_path = Path(hydra_config_path).resolve()
-        hydra_config_dir = str(hydra_config_path.parent)
-        hydra_config_name = hydra_config_path.stem
+    # Register Hydra custom resolvers (needed for config resolution)
+    register_hydra_resolvers()
 
-        # Load hydra config
-        hydra_cfg = initialize_hydra_config_for_dir(
-            config_dir=hydra_config_dir,
-            config_name=hydra_config_name,
-            overrides=[],
-        )
+    hydra_config_path = Path(hydra_config_path).resolve()
+    hydra_config_dir = str(hydra_config_path.parent)
+    hydra_config_name = hydra_config_path.stem
 
-        # Convert model (convert from HF to DeciLM, score pruning activations,
-        # prune the model and save pruned checkpoints)
-        input_model = CompressModel()
-        converted_model = mtn.convert(
-            input_model,
-            mode=[
-                (
-                    "compress",
-                    {
-                        "puzzle_dir": str(hydra_cfg.puzzle_dir),
-                        "input_model_path": hydra_cfg.input_hf_model_path,
-                        "hydra_config_dir": hydra_config_dir,
-                        "hydra_config_name": hydra_config_name,
-                        "dataset_path": str(hydra_cfg.dataset_path),
-                    },
-                )
-            ],
-        )
+    # Load hydra config
+    hydra_cfg = initialize_hydra_config_for_dir(
+        config_dir=hydra_config_dir,
+        config_name=hydra_config_name,
+        overrides=[],
+    )
 
-        # Run NAS search (build replacement library and compute stats,
-        # compute one block scores, run MIP and realize models)
-        mtn.search(
-            converted_model,
-            constraints={},  # this is not used as the search space is defined in the hydra config
-            dummy_input=None,  # Not used
-            config={},  # this is not used as the search space is defined in the hydra config
-        )
+    # Convert model (convert from HF to DeciLM, score pruning activations,
+    # prune the model and save pruned checkpoints)
+    input_model = CompressModel()
+    converted_model = mtn.convert(
+        input_model,
+        mode=[
+            (
+                "compress",
+                {
+                    "puzzle_dir": str(hydra_cfg.puzzle_dir),
+                    "input_model_path": hydra_cfg.input_hf_model_path,
+                    "hydra_config_dir": hydra_config_dir,
+                    "hydra_config_name": hydra_config_name,
+                    "dataset_path": str(hydra_cfg.dataset_path),
+                },
+            )
+        ],
+    )
 
-        mprint("Compress Progress 8/8: compression pipeline completed (multi-gpu)")
+    # Run NAS search (build replacement library and compute stats,
+    # compute one block scores, run MIP and realize models)
+    mtn.search(
+        converted_model,
+        constraints={},  # this is not used as the search space is defined in the hydra config
+        dummy_input=None,  # Not used
+        config={},  # this is not used as the search space is defined in the hydra config
+    )
+
+    dist.cleanup()
+    mprint("Compress Progress 8/8: compression pipeline completed (multi-gpu)")
 
 
 def run_mip_only(hydra_config_path: str):
@@ -125,30 +127,29 @@ def run_mip_only(hydra_config_path: str):
     Args:
         hydra_config_path: Path to the YAML configuration file
     """
+    dist.setup(timeout=timedelta(10))
 
-    with NativeDdpRuntime(
-        dtype=torch.bfloat16, torch_distributed_timeout=datetime.timedelta(10)
-    ) as runtime:
-        # Register Hydra custom resolvers (needed for config resolution)
-        register_hydra_resolvers()
+    # Register Hydra custom resolvers (needed for config resolution)
+    register_hydra_resolvers()
 
-        hydra_config_path = Path(hydra_config_path).resolve()
-        hydra_config_dir = str(hydra_config_path.parent)
-        hydra_config_name = hydra_config_path.stem
+    hydra_config_path = Path(hydra_config_path).resolve()
+    hydra_config_dir = str(hydra_config_path.parent)
+    hydra_config_name = hydra_config_path.stem
 
-        # Load hydra config
-        hydra_cfg = initialize_hydra_config_for_dir(
-            config_dir=hydra_config_dir,
-            config_name=hydra_config_name,
-            overrides=[],
-        )
+    # Load hydra config
+    hydra_cfg = initialize_hydra_config_for_dir(
+        config_dir=hydra_config_dir,
+        config_name=hydra_config_name,
+        overrides=[],
+    )
 
-        # mip_and_realize_models (distributed processing)
-        # TODO: How to make it part of mnt.search() api, similarly to run_full_compress() API
-        mprint("Compress Progress 7/8: running MIP and realizing models (multi-gpu)")
-        mip_and_realize_models.launch_mip_and_realize_model(hydra_cfg, runtime)
+    # mip_and_realize_models (distributed processing)
+    # TODO: How to make it part of mnt.search() api, similarly to run_full_compress() API
+    mprint("Compress Progress 7/8: running MIP and realizing models (multi-gpu)")
+    mip_and_realize_models.launch_mip_and_realize_model(hydra_cfg)
 
-        mprint("Compress Progress 8/8: compression pipeline completed (multi-gpu)")
+    dist.cleanup()
+    mprint("Compress Progress 8/8: compression pipeline completed (multi-gpu)")
 
 
 def main():

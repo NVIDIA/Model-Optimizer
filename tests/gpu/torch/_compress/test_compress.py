@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import datetime
 import os
+from datetime import timedelta
 from functools import partial
 from pathlib import Path
 
@@ -22,11 +22,11 @@ import torch
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from gpu.torch._compress.compress_test_utils import setup_test_model_and_data
 
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress import compress
 from modelopt.torch._compress.decilm.converters.convert_llama3_to_decilm import (
     convert_llama3_to_decilm,
 )
-from modelopt.torch._compress.tools.runtime import NativeDdpRuntime
 
 # The e2e test to compress a model based on Local Neural Architecture Search (Mixed Integer Programing NAS search)
 # using a one-click command.
@@ -43,66 +43,60 @@ def test_compress(project_root_path: Path, tmp_path: Path):
 
 
 def _test_compress_multiprocess_job(project_root_path: Path, tmp_path: Path, rank: int, size: int):
-    with NativeDdpRuntime(
-        dtype=torch.bfloat16, torch_distributed_timeout=datetime.timedelta(10)
-    ) as runtime:
-        # Setup the test model and data.
-        puzzle_dir, llama_checkpoint_path, dataset_path = setup_test_model_and_data(
-            project_root_path, tmp_path, rank, runtime
+    dist.setup(timeout=timedelta(10))
+    # Setup the test model and data.
+    puzzle_dir, llama_checkpoint_path, dataset_path = setup_test_model_and_data(
+        project_root_path, tmp_path, rank
+    )
+    hydra_config_dir = project_root_path / "tests/gpu/torch/_compress/resources/configs"
+    hydra_config_name = "Llama-3_1-8B-ffn-pruning"
+
+    # Convert the Llama model to DeciLM model.
+    if rank == 0:
+        convert_llama3_to_decilm(
+            input_dir=llama_checkpoint_path,
+            output_dir=puzzle_dir / "ckpts/teacher",
         )
-        hydra_config_dir = project_root_path / "tests/gpu/torch/_compress/resources/configs"
-        hydra_config_name = "Llama-3_1-8B-ffn-pruning"
+    dist.barrier()
 
-        # Convert the Llama model to DeciLM model.
-        if rank == 0:
-            convert_llama3_to_decilm(
-                input_dir=llama_checkpoint_path,
-                output_dir=puzzle_dir / "ckpts/teacher",
-            )
-        runtime.wait_for_everyone()
+    # Compress the model using a one-click approach
+    compress.compress(str(hydra_config_dir), hydra_config_name, str(puzzle_dir), str(dataset_path))
 
-        # Compress the model using a one-click approach
-        compress.compress(
-            str(hydra_config_dir), hydra_config_name, str(puzzle_dir), str(dataset_path), runtime
+    #
+    # Check assertions
+    #
+    if rank == 0:
+        # assertions for the score_pruning_activations step 1
+        rank = int(os.environ["RANK"])
+        rank_filepath = (
+            f"pruning/pruning_scores/ffn_iterative/100samples_diverse_mini/rank_{rank}.pth"
+        )
+        assert (puzzle_dir / rank_filepath).is_file()
+
+        # assertions for the pruning_ckpts step 2
+        assert (puzzle_dir / "ckpts/ffn_256_attn_no_op").exists()
+
+        # assertions for the build_library_and_stats step 4
+
+        assert (puzzle_dir / "replacement_library.json").is_file()
+        assert (puzzle_dir / "subblock_stats.json").is_file()
+
+        # assertions for the scoring step 5
+        solution_0_filepath = (
+            puzzle_dir / "single_sequence_replacement_solutions--validation/solution_0.json"
         )
 
-        #
-        # Check assertions
-        #
-        if rank == 0:
-            # assertions for the score_pruning_activations step 1
-            rank = int(os.environ["RANK"])
-            rank_filepath = (
-                f"pruning/pruning_scores/ffn_iterative/100samples_diverse_mini/rank_{rank}.pth"
-            )
-            assert (puzzle_dir / rank_filepath).is_file()
+        assert solution_0_filepath.exists()
 
-            # assertions for the pruning_ckpts step 2
-            assert (puzzle_dir / "ckpts/ffn_256_attn_no_op").exists()
+        # assertions for the mip_and_realize_models step 6
+        solution_0_ckpt_config_path = (
+            puzzle_dir
+            / "mip/puzzle_solutions/target_memory_780000MiB/solutions--checkpoints/solution_0/config.json"
+        )
 
-            # assertions for the build_library_and_stats step 4
+        assert solution_0_ckpt_config_path.exists()
+        assert (puzzle_dir / "mip/puzzle_solutions/target_memory_780000MiB/solutions.json").exists()
 
-            assert (puzzle_dir / "replacement_library.json").is_file()
-            assert (puzzle_dir / "subblock_stats.json").is_file()
-
-            # assertions for the scoring step 5
-            solution_0_filepath = (
-                puzzle_dir / "single_sequence_replacement_solutions--validation/solution_0.json"
-            )
-
-            assert solution_0_filepath.exists()
-
-            # assertions for the mip_and_realize_models step 6
-            solution_0_ckpt_config_path = (
-                puzzle_dir
-                / "mip/puzzle_solutions/target_memory_780000MiB/solutions--checkpoints/solution_0/config.json"
-            )
-
-            assert solution_0_ckpt_config_path.exists()
-            assert (
-                puzzle_dir / "mip/puzzle_solutions/target_memory_780000MiB/solutions.json"
-            ).exists()
-
-        runtime.wait_for_everyone()
+    dist.cleanup()
 
     print("PYTEST SUMMARY: test_compress_model() test has finished successfully")

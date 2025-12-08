@@ -29,11 +29,11 @@ from omegaconf import DictConfig, OmegaConf
 from torch import nn
 from transformers import PreTrainedTokenizerBase
 
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress.sewing_kit import StitchedModule
 from modelopt.torch._compress.tools import validate_model
 from modelopt.torch._compress.tools.logger import mprint
 from modelopt.torch._compress.tools.robust_json import json_dump
-from modelopt.torch._compress.tools.runtime import IRuntime
 from modelopt.torch._compress.utils.validation import LowMemorySparseTensor
 
 
@@ -44,7 +44,7 @@ def validate_model_and_extract_hidden_states(
     output_dir: Union[str, Path],
     model_name: str,
     extra_payload: Optional[dict[str, Any]] = None,
-    runtime: Optional[IRuntime] = None,
+    pipeline_parallel: bool = False,
     val_dataloader=None,
 ) -> list[torch.Tensor | LowMemorySparseTensor]:
     mprint(f"""
@@ -59,10 +59,10 @@ validate_model_and_extract_token_probs({model_name=})
         model,
         tokenizer,
         return_hidden_states=True,
-        runtime=runtime,
+        pipeline_parallel=pipeline_parallel,
         val_dataloader=val_dataloader,
     )
-    if runtime is None or runtime.is_last_process:
+    if dist.is_last_process():
         output_dir = output_dir if (output_dir is not None) else args.bypass_dir
         extra_payload = extra_payload if (extra_payload is not None) else dict()
         write_results(output_dir, model_name, args, {**losses, **extra_payload})
@@ -77,7 +77,7 @@ def validate_model_with_teacher_similarity_metrics(
     output_dir: Union[str, Path],
     model_name: str,
     extra_payload: Optional[dict[str, Any]] = None,
-    runtime: Optional[IRuntime] = None,
+    pipeline_parallel: bool = False,
     calculate_full_score_ablations: bool = False,
     val_dataloader=None,
 ) -> None:
@@ -94,11 +94,11 @@ validate_model_with_kl_div({model_name=}, {is_calc_kl_div=})
         model,
         tokenizer,
         target_hidden_states_per_batch=target_hidden_states_per_batch,
-        runtime=runtime,
+        pipeline_parallel=pipeline_parallel,
         calculate_full_score_ablations=calculate_full_score_ablations,
         val_dataloader=val_dataloader,
     )
-    if runtime is None or runtime.is_last_process:
+    if dist.is_last_process():
         extra_payload = extra_payload if (extra_payload is not None) else dict()
         write_results(output_dir, model_name, args, {**losses, **extra_payload})
 

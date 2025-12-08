@@ -27,9 +27,9 @@ import pandas as pd
 import torch
 from omegaconf import DictConfig
 
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress.tools.hydra_utils import register_hydra_resolvers
 from modelopt.torch._compress.tools.logger import mprint
-from modelopt.torch._compress.tools.runtime import IRuntime, get_runtime
 from modelopt.torch._compress.tools.validate_puzzle_with_multi_replacements import (
     validate_puzzle_solutions,
 )
@@ -72,19 +72,19 @@ def get_solutions_to_validate(cfg: DictConfig):
     return _solutions_to_validate
 
 
-def launch_scoring(cfg: DictConfig, runtime: IRuntime):
+def launch_scoring(cfg: DictConfig):
     cfg.scoring.solutions_to_validate = get_solutions_to_validate(cfg)
     mprint(f"Solutions to validate: {cfg.scoring.solutions_to_validate}")
-    validate_puzzle_solutions(args=cfg.scoring, runtime=runtime)
+    validate_puzzle_solutions(args=cfg.scoring)
 
 
 @hydra.main("", version_base="1.3")
 def main(cfg: DictConfig) -> None:
     cfg = hydra.utils.instantiate(cfg)
     mprint(cfg)
-
-    with get_runtime(torch_distributed_timeout=cfg.nccl_timeout_minutes) as runtime:
-        launch_scoring(cfg, runtime)
+    dist.setup(timeout=cfg.nccl_timeout_minutes)
+    launch_scoring(cfg)
+    dist.cleanup()
 
 
 if __name__ == "__main__":

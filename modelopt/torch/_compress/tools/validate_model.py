@@ -36,12 +36,12 @@ from transformers import (
     PreTrainedTokenizerBase,
 )
 
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress.activation_scoring.activation_hooks.utils import (
     register_activation_hooks,
 )
 from modelopt.torch._compress.tools.checkpoint_utils_hf import load_checkpoint
 from modelopt.torch._compress.tools.logger import aprint, mprint
-from modelopt.torch._compress.tools.runtime import IRuntime, NativeDdpRuntime
 from modelopt.torch._compress.tools.sharded_checkpoint_utils import load_and_shard_model
 from modelopt.torch._compress.utils.data.dataloaders import create_validation_dataloader
 from modelopt.torch._compress.utils.parsing import simple_parse_args_string
@@ -128,21 +128,17 @@ def validate_model(
     tokenizer: PreTrainedTokenizerBase | None = None,
     target_hidden_states_per_batch: list[torch.Tensor] | None = None,
     return_hidden_states: bool = False,
-    runtime: IRuntime | None = None,
+    pipeline_parallel: bool = False,
     calculate_full_score_ablations: bool = False,
     val_dataloader: DataLoader | None = None,
 ) -> tuple[dict[str, dict], HiddenStatesAndLMHead | None] | tuple[None, None]:
     if val_dataloader is None:
-        val_dataloader = (
-            prepare_dataloader(args, tokenizer)
-            if (runtime is None or runtime.is_main_process)
-            else None
-        )
+        val_dataloader = prepare_dataloader(args, tokenizer) if dist.is_master() else None
     validation_full_iters = (
         args.eval_samples // args.micro_batch_size
     )  # model pipeline, single data rank
 
-    model = prepare_model(args, model, runtime)
+    model = prepare_model(args, model, pipeline_parallel)
 
     just_model_forward = False
     checkpoint_manager = None
@@ -169,7 +165,6 @@ def validate_model(
         )
         checkpoint_manager = ScoringCheckpointManager(
             checkpoint_dir=args.activations_log_dir,
-            runtime=runtime,
             activation_hooks=activation_hooks,
             checkpoint_interval=50,  # Save every 50 batches
         )
@@ -184,7 +179,7 @@ def validate_model(
         just_model_forward = True
         model.lm_head = nn.Identity()
 
-    if runtime is None:
+    if not pipeline_parallel:
         losses, hidden_states_per_batch = calculate_losses(
             model=model,
             dataloader=val_dataloader,
@@ -192,7 +187,6 @@ def validate_model(
         )
     else:
         losses, hidden_states_per_batch = calculate_losses_pipeline(
-            runtime=runtime,
             stitched_model=model,
             dataloader=val_dataloader,
             target_hidden_states_per_batch=target_hidden_states_per_batch,
@@ -219,23 +213,19 @@ def validate_model(
             Path(f"{args.model_name_or_path}/validate_model_results.txt").write_text(results_str)
 
     if activation_hooks is not None:
-        hook_class.dump_activations_logs(activation_hooks, args.activations_log_dir, args, runtime)
+        hook_class.dump_activations_logs(activation_hooks, args.activations_log_dir, args)
 
     return losses, hidden_states_per_batch
 
 
 def prepare_model(
-    args: argparse.Namespace,
-    model: PreTrainedModel | None = None,
-    runtime: IRuntime | None = None,
+    args: argparse.Namespace, model: PreTrainedModel | None = None, pipeline_parallel: bool = False
 ) -> nn.Module:
     if model is None:
         assert args.model_name_or_path is not None
-        if runtime is not None:
+        if pipeline_parallel:
             model = load_and_shard_model(
-                runtime,
-                args.model_name_or_path,
-                model_config_overrides={"block_size": args.block_size},
+                args.model_name_or_path, model_config_overrides={"block_size": args.block_size}
             )
         else:
             try:
@@ -293,10 +283,9 @@ def prepare_dataloader(
 def main():
     args = parse_args()
     if args.pipeline_parallel:
-        with NativeDdpRuntime(dtype=torch.bfloat16) as runtime:
-            validate_model(args=args, runtime=runtime)
-    else:
-        validate_model(args=args, runtime=None)
+        dist.setup(timeout=args.nccl_timeout_minutes)
+    validate_model(args=args, pipeline_parallel=args.pipeline_parallel)
+    dist.cleanup()
 
 
 if __name__ == "__main__":
