@@ -25,7 +25,12 @@ from typing import Any, Hashable, Iterable, Optional, TypeAlias
 
 from mip import BINARY, Model, maximize, minimize, xsum
 
-from .utils import InfeasibleError, consecutive_ngrams, get_nested_key, sort_replacements
+from modelopt.torch._compress.mip.utils import (
+    InfeasibleError,
+    consecutive_ngrams,
+    get_nested_key,
+    sort_replacements,
+)
 
 ReplacementID: TypeAlias = Hashable
 Replacement: TypeAlias = dict[str, Any]

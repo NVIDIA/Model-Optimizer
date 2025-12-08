@@ -28,7 +28,6 @@ import numpy as np
 import yaml
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
-import modelopt.torch._compress.mip.constrain_search_space as css
 from modelopt.torch._compress.decilm.deci_lm_hf_code.block_config import (
     AttentionConfig,
     BlockConfig,
@@ -222,9 +221,6 @@ def parse_args() -> argparse.Namespace:
         help="Set this if using accuracy objective, don't set if using loss objective",
     )
 
-    parser.add_argument("--constrain_search_func", type=str, default=None)
-    parser.add_argument("--constrain_search_args", type=parse_json, default=dict())
-
     args = parser.parse_args()
     return args
 
@@ -389,8 +385,6 @@ def _override_args_from_profile(args, puzzle_profile):
         if arg_name in puzzle_profile:
             if arg_name not in ("mip_constraints", "human_constraints", "subblock_stats_args"):
                 setattr(args, arg_name, puzzle_profile[arg_name])
-    if isinstance(args.constrain_search_args, str):
-        args.constrain_search_args = parse_json(args.constrain_search_args)
 
 
 def _assert_valid_config(args, puzzle_profile):
@@ -453,12 +447,6 @@ def run_puzzle(args: argparse.Namespace) -> List[str]:
 
     if args.metric_overrides is not None:
         gathered_metrics = {**gathered_metrics, **args.metric_overrides}
-
-    if args.constrain_search_func is not None:
-        mprint(f"{args.constrain_search_args=}")
-        gathered_metrics = css.apply(
-            args.constrain_search_func, gathered_metrics, args.constrain_search_args
-        )
 
     subblock_stats = json.loads(args.subblock_stats_path.read_text())
 

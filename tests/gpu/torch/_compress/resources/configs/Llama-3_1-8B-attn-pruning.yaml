@@ -78,7 +78,6 @@ mip:
 
   mip_constraints:
   metric_overrides:
-  constrain_search_func:
   max_seconds_per_solution: 60
 
 realize_model:
