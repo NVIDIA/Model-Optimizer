@@ -30,7 +30,7 @@ from transformers.trainer_pt_utils import LabelSmoother
 
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import is_master
-from modelopt.torch.utils.plugins.transformers_datasetse import LanguageDataCollator, ShardedDataset
+from modelopt.torch.utils.plugins.transformers_dataset import LanguageDataCollator, ShardedDataset
 
 try:
     import wandb
