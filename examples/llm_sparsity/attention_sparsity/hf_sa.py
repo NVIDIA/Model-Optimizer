@@ -295,8 +295,8 @@ if __name__ == "__main__":
         "--backend",
         type=str,
         default="pytorch",
-        choices=["pytorch", "triton"],
-        help="Backend to use for sparse attention computation (default: pytorch)",
+        choices=["pytorch"],
+        help="Backend for sparse attention (default: pytorch). More backends coming soon.",
     )
 
     # Sequence length arguments

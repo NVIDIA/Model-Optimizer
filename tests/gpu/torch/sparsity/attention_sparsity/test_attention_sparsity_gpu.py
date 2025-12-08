@@ -29,9 +29,6 @@ from _test_utils.torch_sparsity.sparse_attention_common import (
 
 import modelopt.torch.sparsity.attention_sparsity as sparse_attn
 
-# Skip all tests if GPU is not available
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU not available")
-
 
 class TestAttentionSparsityGPU:
     """GPU tests for attention sparsity."""

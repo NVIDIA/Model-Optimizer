@@ -17,7 +17,6 @@
 
 import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
-from _test_utils.torch.misc import minimum_gpu
 
 
 def run_attention_sparsity_command(*, model: str, method: str = "skip_softmax", **kwargs):
@@ -42,7 +41,6 @@ def run_attention_sparsity_command(*, model: str, method: str = "skip_softmax", 
     run_example_command(cmd_parts, "llm_sparsity/attention_sparsity")
 
 
-@minimum_gpu(1)
 @pytest.mark.parametrize("method", ["skip_softmax"])
 def test_attention_sparsity(tiny_llama_path, tmp_path, method):
     """Test sparse attention with TinyLlama."""
