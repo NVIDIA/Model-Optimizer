@@ -56,6 +56,7 @@ from modelopt.torch.utils.plugins import megatron_prefill
 
 try:
     from megatron.core.extensions.transformer_engine import TERowParallelLinear
+
     HAS_TE = True
 except ImportError:
     HAS_TE = False
