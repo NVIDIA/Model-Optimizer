@@ -730,9 +730,9 @@ def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
         if isinstance(root_model, FSDPModule):
             # Update FSDPParam list
             for module in modules_to_update:
-                for n, p in module.named_parameters():
+                for param_name, param in module.named_parameters():
                     name = _get_module_name(module, root_model)
-                    name = f"{name}.{n}"
+                    name = f"{name}.{param_name}"
                     if name not in fsdp_param_mapping:
                         continue
 
@@ -740,7 +740,7 @@ def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
 
                     # Update mp policy to reflect the new dtype
                     new_mp_policy = MixedPrecisionPolicy(
-                        param_dtype=p.dtype,
+                        param_dtype=param.dtype,
                         reduce_dtype=None,
                         output_dtype=None,
                         cast_forward_inputs=False,
@@ -748,10 +748,10 @@ def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
 
                     with no_requires_grad(), enable_fake_quant(module):
                         # Create a new QFSDPParam or FSDPParam based on weight type
-                        param_class = QFSDPParam if isinstance(p, QTensorWrapper) else FSDPParam
+                        param_class = QFSDPParam if isinstance(param, QTensorWrapper) else FSDPParam
 
                         new_param = param_class(
-                            p,
+                            param,
                             old_fsdp_param._module_info,
                             old_fsdp_param.mesh_info,
                             old_fsdp_param.post_forward_mesh_info,
