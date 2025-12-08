@@ -60,7 +60,7 @@ def drop_attentions_only(gathered_metrics, teacher_intermediate_size, teacher_n_
         for key in to_delete:
             del block_variants[key]
 
-    print("new search space in block 0", gathered_metrics["block_0"])
+    print(f"new search space in block 0 {gathered_metrics['block_0']}")
     return gathered_metrics
 
 
@@ -108,7 +108,7 @@ def reduce_only_ffns(
         for key in to_delete:
             del block_variants[key]
 
-    print("new search space in block 0", gathered_metrics["block_0"])
+    print(f"new search space in block 0 {gathered_metrics['block_0']}")
     return gathered_metrics
 
 
@@ -128,7 +128,7 @@ def drop_entire_blocks_only(gathered_metrics):
         for key in to_delete:
             del block_variants[key]
 
-    print("new search space in block 0", gathered_metrics["block_0"])
+    print(f"new search space in block 0 {gathered_metrics['block_0']}")
     return gathered_metrics
 
 
@@ -169,7 +169,7 @@ def css_to_reference_attention(gathered_metrics, attention_pruned_arch):
         for key in to_delete:
             del block_variants[key]
 
-    print("new search space in block 0", gathered_metrics["block_0"])
+    print(f"new search space in block 0 {gathered_metrics['block_0']}")
     return gathered_metrics
 
 
@@ -200,7 +200,7 @@ def css_to_reference_ffn(gathered_metrics, ffn_pruned_arch, allow_linear_attn=Tr
         for key in to_delete:
             del block_variants[key]
 
-    print("new search space in block 0", gathered_metrics["block_0"])
+    print(f"new search space in block 0 {gathered_metrics['block_0']}")
     return gathered_metrics
 
 
@@ -217,54 +217,33 @@ def avoid_variable_gqa(
 
     This reducer affects only the attention layers: FFNs are allowed their entire search space.
     """
-    is_multi_layer_puzzle = is_replacement_gathered_metrics(gathered_metrics)
-    if is_multi_layer_puzzle:
-        teacher_block_config = infer_teacher_replacement_config(gathered_metrics)
-    else:
-        teacher_block_config = _infer_teacher_config(gathered_metrics)
+    teacher_block_config = infer_teacher_replacement_config(gathered_metrics)
 
     if target_n_heads_in_group is None:
         target_n_heads_in_group = teacher_block_config.attention.n_heads_in_group
 
-    if not is_multi_layer_puzzle:
-        for block_name, block_variants in gathered_metrics.items():
-            to_delete = []  # Collect keys to delete after the loop
+    to_delete = []  # Collect keys to delete after the loop
+    for replacement_id, replacement in gathered_metrics.items():
+        variant_config = replacement["block_config"]
+        if not (
+            (variant_config.attention.n_heads_in_group == target_n_heads_in_group)
+            or (variant_config.attention.no_op and allow_no_op_attn)
+            or (variant_config.attention.replace_with_linear and allow_linear_attn)
+        ):
+            to_delete.append(replacement_id)
 
-            for variant_config, variant_metrics in block_variants.items():
-                if not (
-                    (variant_config.attention.n_heads_in_group == target_n_heads_in_group)
-                    or (variant_config.attention.no_op and allow_no_op_attn)
-                    or (variant_config.attention.replace_with_linear and allow_linear_attn)
-                ):
-                    to_delete.append(variant_config)
+    for key in to_delete:
+        del gathered_metrics[key]
 
-            for key in to_delete:
-                del block_variants[key]
-    else:
-        to_delete = []  # Collect keys to delete after the loop
-        for replacement_id, replacement in gathered_metrics.items():
-            variant_config = replacement["block_config"]
-            if not (
-                (variant_config.attention.n_heads_in_group == target_n_heads_in_group)
-                or (variant_config.attention.no_op and allow_no_op_attn)
-                or (variant_config.attention.replace_with_linear and allow_linear_attn)
-            ):
-                to_delete.append(replacement_id)
-
-        for key in to_delete:
-            del gathered_metrics[key]
-    if not is_multi_layer_puzzle:
-        print("new search space in block 0", gathered_metrics["block_0"])
-    else:
-        parent_layer_idx = 0
-        print(
-            "new search space in block {parent_layer_idx}",
-            [
-                replacement["block_config"]
-                for replacement_id, replacement in gathered_metrics.items()
-                if replacement["parent_layer_indices"][0] == parent_layer_idx
-            ],
-        )
+    parent_layer_idx = 0
+    print(
+        f"new search space in block {parent_layer_idx}",
+        [
+            replacement["block_config"]
+            for replacement_id, replacement in gathered_metrics.items()
+            if replacement["parent_layer_indices"][0] == parent_layer_idx
+        ],
+    )
     return gathered_metrics
 
 
@@ -280,11 +259,7 @@ def reduce_in_range(
     assert layer_start < layer_end, (
         f"Wrong input arguments: {layer_start=} must be less than {layer_end=}"
     )
-    is_multi_layer_puzzle = is_replacement_gathered_metrics(gathered_metrics)
-    if is_multi_layer_puzzle:
-        teacher_block_config = infer_teacher_replacement_config(gathered_metrics)
-    else:
-        teacher_block_config = _infer_teacher_config(gathered_metrics)
+    teacher_block_config = infer_teacher_replacement_config(gathered_metrics)
 
     to_delete = []  # Collect keys to delete after the loop
     for replacement_id, replacement in gathered_metrics.items():
@@ -297,18 +272,15 @@ def reduce_in_range(
     for key in to_delete:
         del gathered_metrics[key]
 
-    if not is_multi_layer_puzzle:
-        print("new search space in block 0", gathered_metrics["block_0"])
-    else:
-        parent_layer_idx = 0
-        print(
-            "new search space in block {parent_layer_idx}",
-            [
-                replacement["block_config"]
-                for replacement_id, replacement in gathered_metrics.items()
-                if replacement["parent_layer_indices"][0] == parent_layer_idx
-            ],
-        )
+    parent_layer_idx = 0
+    print(
+        f"new search space in block {parent_layer_idx}",
+        [
+            replacement["block_config"]
+            for replacement_id, replacement in gathered_metrics.items()
+            if replacement["parent_layer_indices"][0] == parent_layer_idx
+        ],
+    )
     return gathered_metrics
 
 
@@ -322,14 +294,6 @@ dispatcher = {
     for method_name, method_callable in globals().items()
     if callable(method_callable)
 }
-
-
-def is_replacement_gathered_metrics(gathered_metrics) -> bool:
-    # if the gathered metrics is a replacement, then it is a dictionary of the form {'replacement_{id}': replacement_metrics}
-
-    return isinstance(gathered_metrics, dict) and all(
-        key.startswith("replacement_") for key in gathered_metrics
-    )
 
 
 def _infer_teacher_config(gathered_metrics) -> BlockConfig:

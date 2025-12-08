@@ -33,20 +33,6 @@ from modelopt.torch._compress.tools.runtime import NativeDdpRuntime
 #
 # Note: Bypass is disabled now in the test.
 
-# How to run this test (currently only supported internally at Nvidia).
-#
-# Have both modelopt and puzzle source code in the same directory:
-# /workspace/modelopt
-# /workspace/puzzletron
-#
-# submit_job --partition interactive --time 0 \
-# --image gitlab-master.nvidia.com/deci/puzzletron:modelopt_main \
-# --workdir $MODELOPT SRC DIRECTORY --interactive --gpu 1
-#
-# export PYTHONPATH=$PYTHONPATH:.:/workspace/puzzletron/v1
-#
-# pytest -s -v ./tests/gpu/torch/_compress/test_compress.py::test_compress -o addopts=""
-
 
 def test_compress(project_root_path: Path, tmp_path: Path):
     spawn_multiprocess_job(

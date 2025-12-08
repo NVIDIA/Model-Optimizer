@@ -105,13 +105,13 @@ optional_deps = {
     "compress": [
         "fire",
         "hydra-core==1.3.2",
-        "omegaconf==2.3.0",
-        "wandb~=0.17.5",
-        "lru-dict",
-        "typeguard",
-        "pandas",
         "immutabledict",
+        "lru-dict",
         "mip",
+        "omegaconf==2.3.0",
+        "pandas",
+        "typeguard",
+        "wandb~=0.17.5",
     ],
 }
 

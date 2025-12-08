@@ -29,11 +29,7 @@ def setup_test_model_and_data(
     tmp_path: Path,
     rank: int,
     runtime,
-) -> tuple[
-    Path,
-    Path,
-    Path,
-]:
+) -> tuple[Path, Path, Path]:
     """
     Setup the test model and data for the compress NAS search.
 
@@ -132,7 +128,7 @@ def setup_puzzle_dir(puzzle_dir: str):
         Path(puzzle_dir).mkdir(parents=True, exist_ok=True)
 
 
-def save_dummy_dataset(dataset_path: str):
+def save_dummy_dataset(dataset_path: Path | str):
     """
     Save a dummy dataset for testing purposes.
     """
@@ -170,4 +166,4 @@ def save_dummy_dataset(dataset_path: str):
 
     # For train-val splits
     data_dict = DatasetDict({"train": Dataset.from_list(data), "valid": Dataset.from_list(data)})
-    data_dict.save_to_disk(dataset_path)
+    data_dict.save_to_disk(str(dataset_path))

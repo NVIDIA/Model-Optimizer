@@ -44,12 +44,19 @@ def launch_realize_model(cfg: DictConfig, runtime: IRuntime):
 
 
 def launch_mip_and_realize_model(cfg: DictConfig, runtime: IRuntime):
+    # Determine device for distributed operations (NCCL requires CUDA tensors)
+    device = "cpu"
+    if runtime.world_size > 1 and dist.is_initialized():
+        backend = dist.get_backend()
+        if backend == "nccl":
+            device = torch.cuda.current_device()
+
     if runtime.is_main_process:
         solution_paths = launch_mip(cfg)
-        length_tensor = torch.tensor([len(solution_paths)], dtype=torch.long)
+        length_tensor = torch.tensor([len(solution_paths)], dtype=torch.long, device=device)
     else:
         solution_paths = None
-        length_tensor = torch.tensor([0], dtype=torch.long)
+        length_tensor = torch.tensor([0], dtype=torch.long, device=device)
 
     if not cfg.skip_realize_model:
         if runtime.world_size > 1:
@@ -75,7 +82,7 @@ def main(cfg: DictConfig) -> None:
     cfg = hydra.utils.instantiate(cfg)
 
     _runtime = (
-        NativeDDP_Runtime(
+        NativeDdpRuntime(
             dtype=torch.bfloat16, torch_distributed_timeout=getattr(cfg, "nccl_timeout_minutes")
         )
         if is_distributed()

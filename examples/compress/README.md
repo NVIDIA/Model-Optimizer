@@ -13,7 +13,7 @@ In this example, we compress the [meta-llama/Llama-3.1-8B-Instruct](https://hugg
 
 ## Environment
 
-- Install TensorRT-Model-Optimizer in editable mode with the corresponding dependencies:
+- Install Model-Optimizer in editable mode with the corresponding dependencies:
 
 ```bash
 pip install -e .[hf,compress]
@@ -94,7 +94,7 @@ pip install -e .[hf,compress]
    block_29:  attention  gqa_4   ffn  intermediate_14336
    block_30:  attention  gqa_4   ffn  intermediate_14336
    block_31:  attention  gqa_4   ffn  intermediate_14336
-   
+
    [2025-11-02 04:53:11,332]^[[92m[rank-0]^[[0m[run_puzzle.py:295] Total costs: {'stats.memory_mib': 75796.4140625, 'stats.ffn_num_params': 5637275648, 'stats.num_kv_heads': 160, 'stats.kv_cache_memory_mib': 61440.0, 'stats.ffn_memory_mib': 10752.25, 'stats.attention_memory_mib': 63040.15625, 'stats.attention_num_params': 838942720, 'stats.num_params': 7526895616, 'stats.has_attention': 20, 'stats.has_ffn': 32}
    ...
    ################################################################

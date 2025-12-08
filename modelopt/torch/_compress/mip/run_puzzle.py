@@ -34,9 +34,6 @@ from modelopt.torch._compress.decilm.deci_lm_hf_code.block_config import (
     BlockConfig,
     FFNConfig,
 )
-from modelopt.torch._compress.mip.greedy_search_with_multi_layer_replacements import (
-    run_greedy_search,
-)
 from modelopt.torch._compress.mip.mip_with_multi_layer_replacements import (
     run_mip as run_multi_layer_replacement_mip,
 )
@@ -211,8 +208,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--human_constraints", type=parse_json)
     parser.add_argument("--report_additional_costs", type=str, action="append", default=[])
 
-    parser.add_argument("--num_solutions", type=int)
-    parser.add_argument("--minimal_diversity", type=int)
     parser.add_argument(
         "--output_path",
         type=parse_path,
@@ -230,18 +225,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--constrain_search_func", type=str, default=None)
     parser.add_argument("--constrain_search_args", type=parse_json, default=dict())
 
-    parser.add_argument(
-        "--is_multi_layer_puzzle",
-        action="store_true",
-        default=True,
-        help="[DEPRECATED] This flag is now always True. Kept for backward compatibility.",
-    )
-    parser.add_argument(
-        "--use_greedy_search",
-        action="store_true",
-        help="Use greedy search instead of mip. Only supported for multi-layer puzzle.",
-    )
-
     args = parser.parse_args()
     return args
 
@@ -254,17 +237,14 @@ def run_single_puzzle_config(
     constraints: PuzzleConstraints,
     output_folder,
 ) -> None:
-    from modelopt.torch._compress.mip.grouped_knapsack import multi_solution_grouped_knapsack
-
-    args = deepcopy(
-        args
-    )  # we override the constraints and subblock_stats_args for this run to keep reporting out the same way.
+    # we override the constraints and subblock_stats_args for this run to keep reporting out the same way.
+    args = deepcopy(args)
 
     subblock_stats = filter_subblock_stats_by_args(subblock_stats, subblock_stats_args)
     _add_block_stats_to_gathered_metrics(gathered_metrics, subblock_stats)
 
     output_folder.mkdir(parents=True, exist_ok=True)
-    _dump_gathered_metrics(gathered_metrics, output_folder, args.is_multi_layer_puzzle)
+    _dump_gathered_metrics(gathered_metrics, output_folder)
 
     non_block_stats = {"stats": _get_block_stats(subblock_stats, "non_block")}
     batch_size = subblock_stats["args"]["batch_size"]
@@ -304,40 +284,13 @@ def run_single_puzzle_config(
 
     mprint(f"After non-block adjustments: {mip_constraints=}")
 
-    if args.is_multi_layer_puzzle:
-        if not args.use_greedy_search:
-            solutions = run_multi_layer_replacement_mip(
-                replacements=gathered_metrics,
-                objective=args.objective,
-                constraints=mip_constraints,
-                bigger_is_better=args.bigger_is_better,
-                max_seconds_per_solution=args.max_seconds_per_solution,
-            )
-        else:
-            teacher_replacements, student_replacements = [], []
-            for replacement in gathered_metrics.values():
-                if replacement["is_teacher"]:
-                    teacher_replacements.append(replacement)
-                else:
-                    student_replacements.append(replacement)
-
-            solutions = run_greedy_search(
-                teacher_replacements=teacher_replacements,
-                student_replacements=student_replacements,
-                objective=args.objective,
-                constraints=mip_constraints,
-                bigger_is_better=args.bigger_is_better,
-            )
-    else:
-        solutions = multi_solution_grouped_knapsack(
-            groups=gathered_metrics,
-            objective=args.objective,
-            constraints=mip_constraints,
-            bigger_is_better=args.bigger_is_better,
-            num_solutions=args.num_solutions,
-            minimal_diversity=args.minimal_diversity,
-            max_seconds_per_solution=args.max_seconds_per_solution,
-        )
+    solutions = run_multi_layer_replacement_mip(
+        replacements=gathered_metrics,
+        objective=args.objective,
+        constraints=mip_constraints,
+        bigger_is_better=args.bigger_is_better,
+        max_seconds_per_solution=args.max_seconds_per_solution,
+    )
 
     for solution in solutions:
         for stat_name in set([*orig_mip_constraints.keys(), *args.report_additional_costs]):
@@ -379,25 +332,10 @@ def run_single_puzzle_config(
     return solutions_file
 
 
-def _dump_gathered_metrics(
-    gathered_metrics: PuzzleMetrics, output_folder: Path, is_multi_layer_puzzle: bool = False
-) -> None:
-    if is_multi_layer_puzzle:
-        for replacement_id, replacement_info in gathered_metrics.items():
-            replacement_info["block_repr"] = block_config_to_str(replacement_info["block_config"])
-        gathered_metrics_for_dump = gathered_metrics
-    else:
-        gathered_metrics_for_dump = {
-            block_name: {
-                block_config_to_str(variant_config).strip(): {
-                    **variant_metrics,
-                    "block_config": variant_config,
-                    "block_repr": block_config_to_str(variant_config).strip(),
-                }
-                for variant_config, variant_metrics in block_variants.items()
-            }
-            for block_name, block_variants in gathered_metrics.items()
-        }
+def _dump_gathered_metrics(gathered_metrics: PuzzleMetrics, output_folder: Path) -> None:
+    for replacement_id, replacement_info in gathered_metrics.items():
+        replacement_info["block_repr"] = block_config_to_str(replacement_info["block_config"])
+    gathered_metrics_for_dump = gathered_metrics
 
     json_dump(gathered_metrics_for_dump, output_folder / "replacement_metrics_and_stats.json")
 
@@ -453,15 +391,12 @@ def _override_args_from_profile(args, puzzle_profile):
                 setattr(args, arg_name, puzzle_profile[arg_name])
     if isinstance(args.constrain_search_args, str):
         args.constrain_search_args = parse_json(args.constrain_search_args)
-    assert args.is_multi_layer_puzzle, "multi-layer puzzle is now the only supported mode."
 
 
 def _assert_valid_config(args, puzzle_profile):
     required_args = (
         "subblock_stats_path",
         "objective",
-        "num_solutions",
-        "minimal_diversity",
         "output_path",
     )
     missing_args = [arg for arg in required_args if arg not in args or getattr(args, arg) is None]
@@ -488,11 +423,6 @@ def _assert_valid_config(args, puzzle_profile):
         )
         exit(1)
 
-    if args.use_greedy_search:
-        assert args.is_multi_layer_puzzle, (
-            "--use_greedy_search is only supported for multi layer puzzle"
-        )
-
 
 def _get_minimal_unique_names(dicts: List[dict]) -> List[str]:
     all_keys = set(k for d in dicts for k in d.keys())
@@ -517,19 +447,15 @@ def run_puzzle(args: argparse.Namespace) -> List[str]:
     if args.gathered_metrics_path is not None:
         gathered_metrics = json.loads(args.gathered_metrics_path.read_text())
     else:
-        gather_func = (
-            gather_puzzle_metrics
-            if not args.is_multi_layer_puzzle
-            else gather_multi_layer_puzle_metrics
+        gathered_metrics = gather_multi_layer_puzle_metrics(
+            args.single_block_replacement_validation_dir
         )
-        gathered_metrics = gather_func(args.single_block_replacement_validation_dir)
 
     if args.metric_overrides is not None:
         gathered_metrics = {**gathered_metrics, **args.metric_overrides}
 
     if args.constrain_search_func is not None:
         mprint(f"{args.constrain_search_args=}")
-        # assert not args.is_multi_layer_puzzle, "conditional search is not implementd yet for multi-layer puzzles, did you implement it?"
         gathered_metrics = css.apply(
             args.constrain_search_func, gathered_metrics, args.constrain_search_args
         )

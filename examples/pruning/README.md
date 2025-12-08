@@ -23,7 +23,7 @@ This section focuses on applying Model Optimizer's state-of-the-art complementar
 
 </div>
 
-For more advanced pruning strategies, such as the [Puzzle methodology](https://arxiv.org/pdf/2411.19146), please see [Puzzle pruning example](https://github.com/NVIDIA/TensorRT-Model-Optimizer/tree/feature/compress/examples/compress).
+For more advanced pruning strategies, such as the [Puzzle methodology](https://arxiv.org/pdf/2411.19146), please see [Puzzle pruning example](../compress/README.md).
 
 ## Pre-Requisites
 

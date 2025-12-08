@@ -9,7 +9,7 @@ defaults:
 puzzle_dir: ???
 teacher_dir: ${puzzle_dir}/ckpts/teacher/
 replacement_library_path: ${puzzle_dir}/replacement_library.json
-dataset_path: ???     # path to v0.4_mini
+dataset_path: ??? # path to v0.4_mini
 
 skip_realize_model: false
 
@@ -21,10 +21,10 @@ calc_subblock_stats:
   batch_sizes: [64, 96, 128]
   prefill_seq_len: 4096
   generation_seq_len: 4096
-  num_active_tokens_override:       # Optional override for sequence lengths
+  num_active_tokens_override: # Optional override for sequence lengths
   prefill_queue_size: 0
   allocate_prefill_query: false
-  benchmark_iterations:       # Set to a number (e.g., 1000) to enable runtime benchmarking
+  benchmark_iterations: # Set to a number (e.g., 1000) to enable runtime benchmarking
   merge_with_existing_stats: false
   subblock_stats_filename: "subblock_stats.json"
   moe_stats_filename: "moe_stats.json"
@@ -56,8 +56,6 @@ mip:
   # puzzle_profile:
   objective: metrics.cosine_embedding_loss_hidden_states
   bigger_is_better: false
-  num_solutions: 1
-  minimal_diversity: 2
 
   subblock_stats_args:
     - batch_size: 96
@@ -81,8 +79,6 @@ mip:
     target_memory: 78_000
 
   mip_constraints:
-  use_greedy_search: false
-  is_multi_layer_puzzle: true
   metric_overrides:
   constrain_search_func:
   max_seconds_per_solution: 60
@@ -92,10 +88,10 @@ realize_model:
   tokenizer_name: ${to_path:${teacher_dir}}
   replacement_library_path: ${replacement_library_path}
   save_models: true
-  solutions_path:     # Filled dynamically
+  solutions_path: # Filled dynamically
 
   # Validate params
-  skip_validation: false    # To enable validation of the model solution set `skip_validation` as False
+  skip_validation: false # To enable validation of the model solution set `skip_validation` as False
   eval_samples: 128
   micro_batch_size: 1
   seed: 42

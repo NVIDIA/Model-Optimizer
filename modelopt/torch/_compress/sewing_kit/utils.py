@@ -447,13 +447,33 @@ def get_parent_module_names(module_name: str):
     return parent_module_names
 
 
+def _get_device_for_distributed(
+    group: Optional[torch.distributed.ProcessGroup] = None,
+) -> str:
+    """
+    Determine the appropriate device for distributed communication based on the backend.
+    NCCL backend requires CUDA tensors, while Gloo supports both CPU and CUDA.
+    """
+    if not torch.distributed.is_initialized():
+        return "cpu"
+
+    backend = torch.distributed.get_backend(group)
+    if backend == "nccl":
+        # NCCL requires CUDA tensors
+        return torch.cuda.current_device()
+    else:
+        # Gloo and other backends support CPU tensors
+        return "cpu"
+
+
 def distributed_isend_obj(
     obj: Any,
     dst: int = 0,
     group: Optional[torch.distributed.ProcessGroup] = None,
 ) -> list[Optional[torch.distributed.Work]]:
+    device = _get_device_for_distributed(group)
     obj_tensor, obj_size_tensor = torch.distributed.distributed_c10d._object_to_tensor(
-        obj, device="cpu", **_get_group_kwarg_if_necessary()
+        obj, device=device, **_get_group_kwarg_if_necessary()
     )
     works: list[Optional[torch.distributed.Work]] = [
         torch.distributed.isend(obj_size_tensor, dst, group),
@@ -484,11 +504,12 @@ def distributed_recv_obj(
     src: Optional[int] = None,
     group: Optional[torch.distributed.ProcessGroup] = None,
 ) -> Any:
-    obj_size_tensor = torch.LongTensor(1, device="cpu")
+    device = _get_device_for_distributed(group)
+    obj_size_tensor = torch.LongTensor(1).to(device)
     torch.distributed.recv(obj_size_tensor, src=src, group=group)
     obj_size = int(obj_size_tensor.item())
 
-    obj_tensor = torch.ByteTensor(obj_size, device="cpu")
+    obj_tensor = torch.ByteTensor(obj_size).to(device)
     torch.distributed.recv(obj_tensor, src=src, group=group)
 
     obj = torch.distributed.distributed_c10d._tensor_to_object(
