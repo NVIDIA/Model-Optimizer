@@ -490,17 +490,21 @@ class _QuantDbrxExpertGLU(QuantModule):
 class _QuantQwen3VLMoeTextDecoderLayer(QuantModule):
     def _setup(self):
         from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
-        from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextSparseMoeBlock
+        from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
+            Qwen3VLMoeTextSparseMoeBlock,
+        )
+
         if not isinstance(self.mlp, Qwen3VLMoeTextSparseMoeBlock):
             print(f"Skipping {type(self.mlp)}")
             return
         q_proj_weight = self.self_attn.q_proj.weight
         dtype, device = q_proj_weight.dtype, q_proj_weight.device
+
         def _copy_weight(module, weight):
             module.to(dtype=dtype, device=device)
             with torch.no_grad():
                 module.weight.copy_(weight.detach())
-        
+
         new_moe_layer = Qwen3MoeSparseMoeBlock(self.self_attn.config)
         new_moe_layer.gate = self.mlp.gate
         experts = self.mlp.experts
@@ -509,10 +513,10 @@ class _QuantQwen3VLMoeTextDecoderLayer(QuantModule):
             _copy_weight(expert.gate_proj, experts.gate_up_proj[idx, :, :expert_dim].T)
             _copy_weight(expert.up_proj, experts.gate_up_proj[idx, :, expert_dim:].T)
             _copy_weight(expert.down_proj, experts.down_proj[idx, :].T)
-        
+
         delattr(self, "mlp")
         self.mlp = new_moe_layer
-        
+
 
 class _QuantDbrxFFN(_QuantMoeSparseMoe):
     @property
@@ -613,6 +617,7 @@ try:
         )
 except ImportError:
     pass
+
 
 class _QuantGptOssExperts(_QuantFunctionalMixin):
     """Quantized wrapper for `transformers.GptOssExperts`.
