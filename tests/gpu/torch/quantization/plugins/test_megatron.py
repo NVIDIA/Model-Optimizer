@@ -54,6 +54,12 @@ from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins.megatron import _QuantTEMCoreRowParallelLinear
 from modelopt.torch.utils.plugins import megatron_prefill
 
+try:
+    from megatron.core.extensions.transformer_engine import TERowParallelLinear
+    HAS_TE = True
+except ImportError:
+    HAS_TE = False
+
 SEED = 1234
 
 
@@ -956,12 +962,8 @@ def test_kv_cache_sharded_state_dict(tmp_path, config):
 
 
 def test_convert_mcore_te_gpt_model(distributed_setup_size_1):
-    pytest.skip("Disable test for debugging CI timeout")
-    try:
-        from megatron.core.extensions.transformer_engine import TERowParallelLinear
-    except ImportError:
+    if not HAS_TE:
         pytest.skip("Transformer Engine is not installed")
-
     initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
     model = get_mcore_gpt_model(tensor_model_parallel_size=1, transformer_impl="transformer_engine")
 
@@ -1018,7 +1020,8 @@ def test_convert_mcore_te_gpt_model(distributed_setup_size_1):
 
 
 def test_homogeneous_sharded_state_dict_te_spec(tmp_path):
-    pytest.skip("Disable test for debugging CI timeout")
+    if not HAS_TE:
+        pytest.skip("Transformer Engine is not installed")
     spawn_multiprocess_job(
         size=2,
         job=partial(
