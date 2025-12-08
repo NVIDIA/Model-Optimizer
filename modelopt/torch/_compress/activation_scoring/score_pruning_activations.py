@@ -21,9 +21,8 @@ from omegaconf import DictConfig
 
 from modelopt.torch._compress.tools.hydra_utils import register_hydra_resolvers
 from modelopt.torch._compress.tools.logger import mprint
-from modelopt.torch._compress.tools.runtime import BaseRuntime, NativeDdpRuntime
+from modelopt.torch._compress.tools.runtime import get_runtime
 from modelopt.torch._compress.tools.validate_model import validate_model
-from modelopt.torch._compress.utils.dist_utils import is_distributed
 from modelopt.torch._compress.utils.parsing import format_global_config
 
 
@@ -157,14 +156,7 @@ def main(cfg: DictConfig) -> None:
     cfg = hydra.utils.instantiate(cfg)
     mprint(format_global_config(cfg, title="Score Pruning Activations"))
 
-    _runtime = (
-        NativeDdpRuntime(
-            dtype=torch.bfloat16, torch_distributed_timeout=getattr(cfg, "nccl_timeout_minutes")
-        )
-        if is_distributed()
-        else BaseRuntime(dtype=torch.bfloat16)
-    )
-    with _runtime as runtime:
+    with get_runtime(torch_distributed_timeout=cfg.nccl_timeout_minutes) as runtime:
         launch_score_activations(cfg, runtime)
         runtime.wait_for_everyone()
 

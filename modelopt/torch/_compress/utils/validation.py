@@ -24,14 +24,10 @@ and similarity losses for knowledge distillation.
 import functools
 import math
 from enum import Enum
-from statistics import mean
 
 import numpy as np
 import torch
-import torch.distributed
 import torch.nn.functional as F
-import wandb
-from accelerate import Accelerator
 from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -39,159 +35,6 @@ from transformers.generation.logits_process import TopKLogitsWarper, TopPLogitsW
 from typing_extensions import Self
 
 from modelopt.torch._compress.tools import kd_model
-from modelopt.torch._compress.utils.data.dataloaders import create_padded_tensor
-
-
-@torch.no_grad()
-def _validate_single(
-    accelerator: Accelerator,
-    model: torch.nn.Module,
-    rope_cache: torch.Tensor | None,
-    val_dataloader: DataLoader,
-    pad_to_batchsize: bool = True,
-    compute_kl_div: bool = False,
-    varlen: bool = False,
-    concat_token_id: int | None = None,
-) -> list[float]:
-    assert val_dataloader.batch_sampler.batch_size is not None
-    desired_batch_size = val_dataloader.batch_sampler.batch_size
-
-    with accelerator.device, accelerator.autocast():
-        model.eval()
-
-        losses: list[float] = []
-
-        input_ids: torch.LongTensor
-        targets: torch.LongTensor
-        is_first_batch = True
-        for batch in tqdm(val_dataloader, disable=not accelerator.is_main_process):
-            if is_first_batch:
-                print(
-                    f"First batch, device {accelerator.device}, input_ids: {batch['input_ids'][:4]}"
-                )
-                is_first_batch = False
-            input_ids, targets = (
-                batch["input_ids"].to(accelerator.device),
-                batch["targets"].to(accelerator.device),
-            )
-            batch_size = input_ids.size(0)
-
-            if pad_to_batchsize:
-                input_ids = create_padded_tensor(
-                    input_ids, (desired_batch_size, *input_ids.shape[1:])
-                )
-                targets = create_padded_tensor(targets, (desired_batch_size, *targets.shape[1:]))
-
-            if rope_cache is not None:
-                logits = model(
-                    input_ids, rope_cache=rope_cache, varlen=varlen, concat_token_id=concat_token_id
-                )
-            else:
-                logits = model(input_ids)
-
-            if hasattr(logits, "logits"):  # For HF models
-                logits = logits.logits
-
-            if isinstance(logits, tuple):  # For KD
-                logits, teacher_logits, kd_block_loss, kd_logits_loss = logits
-
-            if compute_kl_div:
-                # assumes kd_logits_loss has entry for each batch item
-                batch_losses = kd_logits_loss[:batch_size]
-            else:
-                batch_losses = torch.nn.functional.cross_entropy(
-                    logits.transpose(1, 2), targets, ignore_index=-1, reduction="none"
-                )[:batch_size].mean(dim=-1)
-
-            losses.extend(batch_losses.tolist())
-
-        model.train()
-
-    return losses
-
-
-@torch.no_grad()
-def validate_parallel(
-    accelerator: Accelerator,
-    model: torch.nn.Module,
-    rope_cache: torch.Tensor | None,
-    val_dataloader: DataLoader,
-    pad_to_batchsize: bool = True,
-    compute_kl_div: bool = False,
-    varlen: bool = False,
-    concat_token_id: int | None = None,
-) -> float:
-    losses = _validate_single(
-        accelerator=accelerator,
-        model=model,
-        rope_cache=rope_cache,
-        val_dataloader=val_dataloader,
-        pad_to_batchsize=pad_to_batchsize,
-        compute_kl_div=compute_kl_div,
-        varlen=varlen,
-        concat_token_id=concat_token_id,
-    )
-
-    results = [float("nan")]
-    if accelerator.is_main_process:
-        gathered_results = [[float("nan")]] * accelerator.num_processes
-        torch.distributed.gather_object(losses, gathered_results)
-        gathered_losses = [l for result in gathered_results for l in result]
-        results[0] = mean(gathered_losses)
-    else:
-        torch.distributed.gather_object(losses)
-
-    torch.distributed.broadcast_object_list(results)
-    val_loss = results[0]
-
-    return val_loss
-
-
-@torch.no_grad()
-def validate(
-    accelerator: Accelerator,
-    model: torch.nn.Module,
-    rope_cache: torch.Tensor | None,
-    val_dataloader: DataLoader,
-    iter_num: int | None = None,
-    max_iters: int | None = None,
-    model_name: str | None = None,
-    enable_print: bool = True,
-    enable_wandb_log: bool = False,
-    pad_to_batchsize: bool = True,
-    compute_kl_div: bool = False,
-    varlen: bool = False,
-    concat_token_id: int | None = None,
-) -> float:
-    if enable_print:
-        accelerator.print("Validating ...")
-
-    val_loss = validate_parallel(
-        accelerator=accelerator,
-        model=model,
-        rope_cache=rope_cache,
-        val_dataloader=val_dataloader,
-        pad_to_batchsize=pad_to_batchsize,
-        compute_kl_div=compute_kl_div,
-        varlen=varlen,
-        concat_token_id=concat_token_id,
-    )
-
-    if accelerator.is_main_process:
-        key = "val/loss" if model_name is None else f"val/{model_name}_loss"
-        if enable_print:
-            prefix = ""
-            if iter_num is not None:
-                prefix += f"iter {iter_num}"
-                if max_iters is not None:
-                    prefix += f"/{max_iters}"
-                prefix += " - "
-            accelerator.print(f"{prefix}{key}: {val_loss:.4f}", show_delta=True)
-        if enable_wandb_log:
-            wandb.log({key: val_loss}, step=iter_num)
-    accelerator.wait_for_everyone()
-
-    return val_loss
 
 
 class UnshardedLowMemorySparseTensor:
@@ -325,37 +168,6 @@ def calculate_losses(
     return losses, None
 
 
-def calc_entropy(logits: torch.Tensor) -> torch.Tensor:
-    """
-    Returns per-token entropy given a logits tensor of shape [batch_size x seq_len x vocab_size].
-    The output will have shape [batch_size x seq_len].
-    """
-    # Convert logits to log-probabilities
-    log_probs = F.log_softmax(logits, dim=-1)  # shape: [B x T x V]
-
-    # Compute probabilities from log-probabilities
-    probs = torch.exp(log_probs)  # shape: [B x T x V]
-
-    # Entropy calculation: sum over V of (- p * log p)
-    ent = -torch.sum(probs * log_probs, dim=-1)  # shape: [B x T]
-
-    return ent
-
-
-def confidence_max_softmax(logits: torch.Tensor) -> torch.Tensor:
-    """
-    Returns per-token max-softmax confidence given a logits tensor of shape [batch_size x seq_len x vocab_size].
-    The output will have shape [batch_size x seq_len].
-    """
-    # Compute softmax probabilities
-    probs = F.softmax(logits, dim=-1)  # shape: [B x T x V]
-
-    # Take the maximum probability along the vocabulary dimension
-    max_confidence = torch.max(probs, dim=-1).values  # shape: [B x T]
-
-    return max_confidence
-
-
 def calculate_batch_outputs(
     hidden_states: torch.Tensor | None,
     target_hidden_states: torch.Tensor | None,
@@ -380,8 +192,6 @@ def calculate_batch_outputs(
 
     batch_outputs = _calculate_ground_truth_based_scores(logits, targets)
 
-    # _DEBUG_calculate_per_token_entropy(batch_outputs, logits)
-
     if (target_hidden_states is not None) or (target_logits is not None):
         batch_outputs.update(
             _calculate_teacher_similarity_scores(
@@ -397,20 +207,6 @@ def calculate_batch_outputs(
         batch_outputs["hidden_states_per_batch"] = hidden_states.cpu()
 
     return batch_outputs
-
-
-def _DEBUG_calculate_per_token_entropy(batch_outputs, logits, i_batch):
-    import os
-
-    # calculate the per token entropy and per token top p
-    entropy = calc_entropy(logits).cpu()  # .view(-1)#.tolist()
-    msftm = confidence_max_softmax(logits).cpu()  # .view(-1)#.tolist()
-    teacher_dir = ".../meta-llama/Meta-Llama-3.1-70B-Instruct-new_rope/"
-    file_path = f"{teacher_dir}/validation/per_token_stats_{i_batch}.pth"
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    torch.save({"entropy": entropy, "max_softmax": msftm}, file_path)
-    batch_outputs["entropy"] = entropy
-    batch_outputs["max_softmax"] = msftm
 
 
 def _organize_outputs(
@@ -471,28 +267,6 @@ def _calculate_ground_truth_based_scores(
         scores[f"token_accuracy_top_{top_k}"] = fraction_model_predicted_target.tolist()
 
     return scores
-
-
-def _calculate_per_sample_kl_div_loss(
-    logits: torch.Tensor,
-    batch_target_probs: torch.Tensor | LowMemorySparseTensor,
-) -> list[float]:
-    if isinstance(batch_target_probs, LowMemorySparseTensor):
-        logits = top_p_top_k(logits)
-    curr_target_probs = batch_target_probs.to_dense().to(logits.device)  # .float()
-    per_sample_kl_div = [
-        F.kl_div(
-            logits[i_sample].log_softmax(-1),
-            curr_target_probs[i_sample],
-            reduction="none",
-            log_target=False,
-        )
-        .sum(-1)
-        .mean(-1)
-        .item()
-        for i_sample in range(logits.shape[0])
-    ]
-    return per_sample_kl_div
 
 
 def cosine_embedding_loss(
@@ -760,49 +534,6 @@ DEFAULT_TOP_P = 0.999
 # 1700 = percentile 0.95 for top_p=0.99 and percentile 0.75 for top_p=0.999
 # For top_p=0.999 and top_k=1700 you take about 75 GB for 2048*8192 tokens
 DEFAULT_TOP_K = 1000
-
-
-def calculate_sparse_probs(
-    logits: torch.Tensor,
-    top_p: float | None = DEFAULT_TOP_P,
-    top_k: int | None = DEFAULT_TOP_K,
-    verbose: bool = False,
-) -> LowMemorySparseTensor:
-    warped_logits = top_p_top_k(logits, top_p, top_k)
-    probs = warped_logits.softmax(-1)
-    sparse_probs = LowMemorySparseTensor(probs)
-    if True:  # Always calculate these metrics (was: if verbose or True:)
-        probs_unfiltered = logits.softmax(-1)
-        num_active_per_token = (warped_logits > -1000).sum(-1).float()
-        prob_density = torch.tensor(
-            [
-                probs_unfiltered[i, j, warped_logits[i, j] > -1000].sum(-1).float()
-                for j in range(probs_unfiltered.shape[1])
-                for i in range(probs_unfiltered.shape[0])
-            ]
-        )
-
-        print(f"""
-            Sparsity:
-            {num_active_per_token.mean().item()=}
-            {num_active_per_token.quantile(0.25).item()=}
-            {num_active_per_token.quantile(0.5).item()=}
-            {num_active_per_token.quantile(0.75).item()=}
-            {num_active_per_token.quantile(0.9).item()=}
-            {num_active_per_token.quantile(0.95).item()=}
-            {num_active_per_token.max().item()=}
-
-            {probs_unfiltered.shape=}
-            {prob_density.shape=}
-            {prob_density.mean().item()=}
-            {prob_density.quantile(0.25).item()=}
-            {prob_density.quantile(0.5).item()=}
-            {prob_density.quantile(0.75).item()=}
-            {prob_density.quantile(0.9).item()=}
-            {prob_density.quantile(0.95).item()=}
-            {prob_density.max().item()=}
-        """)
-    return sparse_probs
 
 
 def top_p_top_k(

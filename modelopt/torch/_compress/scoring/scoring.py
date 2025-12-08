@@ -29,11 +29,10 @@ from omegaconf import DictConfig
 
 from modelopt.torch._compress.tools.hydra_utils import register_hydra_resolvers
 from modelopt.torch._compress.tools.logger import mprint
-from modelopt.torch._compress.tools.runtime import BaseRuntime, IRuntime, NativeDdpRuntime
+from modelopt.torch._compress.tools.runtime import IRuntime, get_runtime
 from modelopt.torch._compress.tools.validate_puzzle_with_multi_replacements import (
     validate_puzzle_solutions,
 )
-from modelopt.torch._compress.utils.dist_utils import is_distributed
 
 
 def extract_solution_id(filename):
@@ -84,14 +83,7 @@ def main(cfg: DictConfig) -> None:
     cfg = hydra.utils.instantiate(cfg)
     mprint(cfg)
 
-    _runtime = (
-        NativeDdpRuntime(
-            dtype=torch.bfloat16, torch_distributed_timeout=getattr(cfg, "nccl_timeout_minutes")
-        )
-        if is_distributed()
-        else BaseRuntime(dtype=torch.bfloat16)
-    )
-    with _runtime as runtime:
+    with get_runtime(torch_distributed_timeout=cfg.nccl_timeout_minutes) as runtime:
         launch_scoring(cfg, runtime)
 
 

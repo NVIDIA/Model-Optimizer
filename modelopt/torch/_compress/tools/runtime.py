@@ -26,7 +26,6 @@ from typing import Literal, TypeVar, cast
 
 import numpy as np
 import torch
-import torch.distributed
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -554,3 +553,15 @@ class BaseRuntime(IRuntime):
     @property
     def master_port(self) -> int | None:
         return None
+
+
+def get_runtime(
+    dtype: torch.dtype = torch.bfloat16, torch_distributed_timeout: timedelta | None = None
+) -> IRuntime:
+    if (
+        torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+        and torch.distributed.get_world_size() > 1
+    ):
+        return NativeDdpRuntime(dtype=dtype, torch_distributed_timeout=torch_distributed_timeout)
+    return BaseRuntime(dtype=dtype)

@@ -349,32 +349,6 @@ def save_sharded_model(
     runtime.wait_for_everyone()
 
 
-def save_sharded_state_dict(
-    state_dict: dict[str, torch.Tensor],
-    save_directory: str | Path,
-    max_shard_size: str = "10GB",
-) -> None:
-    save_directory = Path(save_directory)
-    save_directory.mkdir(exist_ok=True, parents=True)
-    state_dict = {k: v.cpu() for k, v in state_dict.items()}
-
-    state_dict_split = split_torch_state_dict_into_shards(state_dict, max_shard_size=max_shard_size)
-
-    for shard_filename, param_names in tqdm(
-        state_dict_split.filename_to_tensors.items(), desc="saving sharded state dict"
-    ):
-        shard_path = save_directory / shard_filename
-        shard = {param_name: state_dict[param_name] for param_name in param_names}
-        safe_save_file(shard, shard_path, metadata={"format": "pt"})
-
-    index = {
-        "metadata": state_dict_split.metadata,
-        "weight_map": state_dict_split.tensor_to_filename,
-    }
-    index_path = save_directory / SAFE_WEIGHTS_INDEX_NAME
-    index_path.write_text(json.dumps(index, indent=2))
-
-
 def load_sharded_state_dict(
     model_name_or_path: str | Path,
     keys_to_load: Iterable[str] | None = None,
@@ -410,13 +384,3 @@ def _resolve_shard_paths(model_name_or_path: str) -> list[str]:
 
 def is_in_safetensors_format(checkpoint_dir: Path) -> bool:
     return len(list(checkpoint_dir.glob("*.safetensors"))) > 0
-
-
-def load_state_dict_shapes(model_name_or_path: str | Path) -> dict[str, tuple]:
-    shard_paths = _resolve_shard_paths(model_name_or_path)
-    state_dict_shapes = {}
-    for safetensors_path in shard_paths:
-        with safe_open(safetensors_path, framework="pt") as f:
-            for key in f.keys():  # noqa: SIM118 - safe_open objects require .keys(), not directly iterable
-                state_dict_shapes[key] = tuple(f.get_tensor(key).shape)
-    return state_dict_shapes

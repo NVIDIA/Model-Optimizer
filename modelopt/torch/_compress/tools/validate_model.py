@@ -51,12 +51,6 @@ from modelopt.torch._compress.utils.validate_runtime_pipeline import (
 )
 from modelopt.torch._compress.utils.validation import calculate_losses
 
-# #TODO:Import slack from root utils directory
-# root_path = os.path.join(os.path.dirname(__file__), "..", "..")
-# if root_path not in sys.path:
-#     sys.path.append(root_path)
-# from utils.slack import send_slack_message
-
 """
 Two goals:
 1) Calculate lm loss and token accuracy for a model.
@@ -223,7 +217,6 @@ def validate_model(
         aprint(results_str)
         if args.write_results:
             Path(f"{args.model_name_or_path}/validate_model_results.txt").write_text(results_str)
-            # TODO: send_slack_message(results_str)
 
     if activation_hooks is not None:
         hook_class.dump_activations_logs(activation_hooks, args.activations_log_dir, args, runtime)
