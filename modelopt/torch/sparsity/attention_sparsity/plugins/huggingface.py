@@ -15,16 +15,12 @@
 
 """Dynamic sparse attention registration for HuggingFace models."""
 
-import logging
-
 import torch.nn as nn
 import transformers
 
 from modelopt.torch.opt.dynamic import DynamicModule
 
 from ..sparse_attention import SparseAttentionModule, SparseAttentionRegistry
-
-logger = logging.getLogger(__name__)
 
 
 class _GenericSparseAttention(SparseAttentionModule):
@@ -94,12 +90,10 @@ def register_sparse_attention_on_the_fly(model: nn.Module) -> bool:
                 SparseAttentionRegistry.register({module_type: type_name})(_GenericSparseAttention)
                 attention_types.add(module_type)
                 registered_count += 1
-                logger.info(f"Registered {type_name} for sparse attention optimization")
+                print(f"Registered {type_name} for sparse attention optimization")
 
     if registered_count > 0:
-        logger.info(
-            f"Dynamically registered {registered_count} attention module types for sparsity"
-        )
+        print(f"Dynamically registered {registered_count} attention module types for sparsity")
 
     return registered_count > 0
 

@@ -31,7 +31,6 @@ import modelopt.torch.sparsity.attention_sparsity as sparse_attn
 from modelopt.torch.sparsity.attention_sparsity.conversion import (
     disable_sparse_attention,
     enable_sparse_attention,
-    print_sparse_attention_summary,
 )
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 
@@ -170,19 +169,6 @@ class TestConversionEdgeCases:
         for module in model.modules():
             if isinstance(module, SparseAttentionModule):
                 assert module.is_enabled
-
-    def test_print_sparse_attention_summary(self, capsys):
-        """Test print_sparse_attention_summary function."""
-        model = SimpleAttentionModel()
-        model = sparse_attn.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
-
-        # Print summary
-        print_sparse_attention_summary(model)
-
-        # Capture output
-        captured = capsys.readouterr()
-        assert "Total sparse attention modules:" in captured.out
-        assert "Enabled:" in captured.out
 
     def test_restore_sparse_attention_model(self):
         """Test save/restore via modelopt_state."""

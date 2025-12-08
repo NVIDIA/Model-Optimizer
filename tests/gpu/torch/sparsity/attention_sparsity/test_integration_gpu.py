@@ -24,9 +24,6 @@ import modelopt.torch.sparsity.attention_sparsity as sparse_attn
 from modelopt.torch.sparsity.attention_sparsity import SparseAttentionConfig
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 
-# Skip all tests if GPU is not available
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU not available")
-
 
 @pytest.fixture(scope="module")
 def tiny_llama_dir(tmp_path_factory):
@@ -35,8 +32,8 @@ def tiny_llama_dir(tmp_path_factory):
         tmp_path_factory.mktemp("tiny_llama"),
         with_tokenizer=True,
         num_hidden_layers=2,  # Minimal layers for fast testing
-        hidden_size=512,
-        intermediate_size=1024,
+        hidden_size=32,
+        intermediate_size=64,
     )
 
 
