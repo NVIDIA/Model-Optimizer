@@ -746,7 +746,7 @@ def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
                         cast_forward_inputs=False,
                     )
 
-                    with no_requires_grad():
+                    with no_requires_grad(), enable_fake_quant(module):
                         # Create a new QFSDPParam or FSDPParam based on weight type
                         param_class = QFSDPParam if isinstance(p, QTensorWrapper) else FSDPParam
 
