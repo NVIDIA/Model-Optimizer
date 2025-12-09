@@ -138,7 +138,7 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from omegaconf import DictConfig, OmegaConf
 from pydantic import ValidationInfo, field_validator, model_validator
@@ -829,6 +829,16 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         _validate_recursive(values)
         return values
 
+    @field_validator("num_bits", mode="before")
+    @classmethod
+    def tuple_num_bits(cls, num_bits: int | list[int] | tuple[int, int]) -> int | tuple[int, int]:
+        """Convert num_bits to tuple if list."""
+        if isinstance(num_bits, list):
+            assert len(num_bits) == 2
+            return cast("tuple[int, int]", tuple(num_bits))
+
+        return num_bits
+
     @model_validator(mode="after")
     def validate_num_bits(self):
         """Validate `num_bits`."""
@@ -836,9 +846,6 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
 
         if isinstance(num_bits, int) and num_bits < 1:
             raise ValueError("num_bits must be a positive integer or a tuple of positive integers.")
-
-        if isinstance(num_bits, list):
-            num_bits = tuple(num_bits)
 
         if not isinstance(num_bits, tuple):
             return self
@@ -986,6 +993,16 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
             for k, v in block_sizes.items()
             if k not in ["type", "scale_bits", "scale_block_sizes"]
         }
+
+    @field_validator("block_sizes", mode="before")
+    @classmethod
+    def tuple_block_sizes_scale_bits(cls, v) -> int | tuple[int, int]:
+        """Convert num_bits to tuple if list."""
+        if v and v.get("scale_bits"):
+            scale_bits = v.get("scale_bits")
+            if isinstance(scale_bits, list):
+                v["scale_bits"] = tuple(scale_bits)
+        return v
 
     @field_validator("block_sizes")
     @classmethod
