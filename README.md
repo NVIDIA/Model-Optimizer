@@ -119,7 +119,7 @@ more fine-grained control on installed dependencies or for alternative docker im
 | LLM Quantization | [View Support Matrix](./examples/llm_ptq/README.md#support-matrix) |
 | Diffusers Quantization | [View Support Matrix](./examples/diffusers/README.md#support-matrix) |
 | VLM Quantization | [View Support Matrix](./examples/vlm_ptq/README.md#support-matrix) |
-| ONNX Quantization | [View Support Matrix](./examples/onnx_ptq/README.md#onnx-export-supported-llm-models) |
+| ONNX Quantization | [View Support Matrix](./examples/torch_onnx/README.md#onnx-export-supported-llm-models) |
 | Windows Quantization | [View Support Matrix](./examples/windows/README.md#support-matrix) |
 | Quantization Aware Training | [View Support Matrix](./examples/llm_qat/README.md#support-matrix) |
 | Pruning | [View Support Matrix](./examples/pruning/README.md#support-matrix) |

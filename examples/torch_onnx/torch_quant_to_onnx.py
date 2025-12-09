@@ -15,6 +15,11 @@
 
 import argparse
 import re
+import sys
+from pathlib import Path
+
+# Add onnx_ptq to path for shared modules
+sys.path.insert(0, str(Path(__file__).parent.parent / "onnx_ptq"))
 
 import timm
 import torch

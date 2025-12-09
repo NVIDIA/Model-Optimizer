@@ -38,4 +38,4 @@ def test_torch_onnx(quantize_mode, onnx_save_path, calib_size, num_score_steps):
         calibration_data_size=calib_size,
         num_score_steps=num_score_steps,
     )
-    run_example_command(cmd_parts, "onnx_ptq")
+    run_example_command(cmd_parts, "torch_onnx")
