@@ -32,16 +32,16 @@ from modelopt.torch._compress.tools.validate_puzzle_with_multi_replacements impo
 )
 
 
-def launch_mip(cfg: DictConfig) -> List[str]:
+def launch_mip(cfg: DictConfig, dtype: torch.dtype = torch.bfloat16) -> List[str]:
     solution_paths = run_puzzle(args=cfg.mip)
     return solution_paths
 
 
-def launch_realize_model(cfg: DictConfig):
-    validate_puzzle_solutions(args=cfg.realize_model)
+def launch_realize_model(cfg: DictConfig, dtype: torch.dtype = torch.bfloat16):
+    validate_puzzle_solutions(args=cfg.realize_model, dtype=dtype)
 
 
-def launch_mip_and_realize_model(cfg: DictConfig):
+def launch_mip_and_realize_model(cfg: DictConfig, dtype: torch.dtype = torch.bfloat16):
     # Determine device for distributed operations (NCCL requires CUDA tensors)
     device = "cpu"
     if dist.size() > 1:
@@ -49,7 +49,7 @@ def launch_mip_and_realize_model(cfg: DictConfig):
             device = torch.cuda.current_device()
 
     if dist.is_master():
-        solution_paths = launch_mip(cfg)
+        solution_paths = launch_mip(cfg, dtype=dtype)
         length_tensor = torch.tensor([len(solution_paths)], dtype=torch.long, device=device)
     else:
         solution_paths = None
@@ -70,7 +70,7 @@ def launch_mip_and_realize_model(cfg: DictConfig):
         for solution_path in solution_paths:
             mprint(f"Realize model for the solution: {solution_path}")
             cfg.realize_model.solutions_path = Path(solution_path)
-            launch_realize_model(cfg)
+            launch_realize_model(cfg, dtype=dtype)
             dist.barrier()
 
 
@@ -78,7 +78,7 @@ def launch_mip_and_realize_model(cfg: DictConfig):
 def main(cfg: DictConfig) -> None:
     cfg = hydra.utils.instantiate(cfg)
     dist.setup(timeout=cfg.nccl_timeout_minutes)
-    launch_mip_and_realize_model(cfg)
+    launch_mip_and_realize_model(cfg, dtype=torch.bfloat16)
     dist.cleanup()
 
 

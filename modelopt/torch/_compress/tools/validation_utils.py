@@ -22,7 +22,7 @@ TODO: Consider moving this a separate module dedicated for scoring.
 
 import argparse
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
 from omegaconf import DictConfig, OmegaConf
@@ -30,22 +30,25 @@ from torch import nn
 from transformers import PreTrainedTokenizerBase
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch._compress.sewing_kit import StitchedModule
 from modelopt.torch._compress.tools import validate_model
 from modelopt.torch._compress.tools.logger import mprint
 from modelopt.torch._compress.tools.robust_json import json_dump
 from modelopt.torch._compress.utils.validation import LowMemorySparseTensor
 
+if TYPE_CHECKING:
+    from modelopt.torch._compress.sewing_kit import StitchedModule
+
 
 def validate_model_and_extract_hidden_states(
     args: argparse.Namespace,
-    model: nn.Module | StitchedModule,
+    model: "nn.Module | StitchedModule",
     tokenizer: PreTrainedTokenizerBase,
     output_dir: Union[str, Path],
     model_name: str,
     extra_payload: Optional[dict[str, Any]] = None,
     pipeline_parallel: bool = False,
     val_dataloader=None,
+    dtype: torch.dtype = torch.bfloat16,
 ) -> list[torch.Tensor | LowMemorySparseTensor]:
     mprint(f"""
 
@@ -61,6 +64,7 @@ validate_model_and_extract_token_probs({model_name=})
         return_hidden_states=True,
         pipeline_parallel=pipeline_parallel,
         val_dataloader=val_dataloader,
+        dtype=dtype,
     )
     if dist.is_last_process():
         output_dir = output_dir if (output_dir is not None) else args.bypass_dir
@@ -71,7 +75,7 @@ validate_model_and_extract_token_probs({model_name=})
 
 def validate_model_with_teacher_similarity_metrics(
     args: argparse.Namespace,
-    model: nn.Module | StitchedModule,
+    model: "nn.Module | StitchedModule",
     tokenizer: PreTrainedTokenizerBase,
     target_hidden_states_per_batch: list[torch.Tensor],
     output_dir: Union[str, Path],
@@ -80,6 +84,7 @@ def validate_model_with_teacher_similarity_metrics(
     pipeline_parallel: bool = False,
     calculate_full_score_ablations: bool = False,
     val_dataloader=None,
+    dtype: torch.dtype = torch.bfloat16,
 ) -> None:
     is_calc_kl_div = target_hidden_states_per_batch is not None
     mprint(f"""
@@ -97,6 +102,7 @@ validate_model_with_kl_div({model_name=}, {is_calc_kl_div=})
         pipeline_parallel=pipeline_parallel,
         calculate_full_score_ablations=calculate_full_score_ablations,
         val_dataloader=val_dataloader,
+        dtype=dtype,
     )
     if dist.is_last_process():
         extra_payload = extra_payload if (extra_payload is not None) else dict()

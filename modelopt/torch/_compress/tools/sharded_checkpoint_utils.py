@@ -148,6 +148,7 @@ def load_and_shard_model(
     owned_block_indexes: set[int] | Literal["auto"] = "auto",
     model_config: DeciLMConfig | None = None,
     model_config_overrides: Mapping | None = None,
+    dtype: torch.dtype | None = torch.bfloat16,
 ) -> DeciLMForCausalLM:
     checkpoint_path = Path(checkpoint_path)
     with torch.device(dist.local_rank()):
@@ -200,7 +201,7 @@ def load_and_shard_model(
             load_state_dict_to_shards(model_shard=model_shard, loaded_state_dict=state_dict)
             del state_dict
 
-        model_shard.type(torch.bfloat16)  # TODO: make this configurable
+        model_shard.type(dtype)
 
     params_on_meta_device = [
         param_name
@@ -242,7 +243,10 @@ def create_sharded_model(
 def load_state_dict_to_shards(
     model_shard: torch.nn.Module, loaded_state_dict: dict | None = None
 ) -> None:
-    from sewing_kit.utils import distributed_isend_obj, distributed_recv_obj
+    from modelopt.torch._compress.sewing_kit.utils import (
+        distributed_isend_obj,
+        distributed_recv_obj,
+    )
 
     model_shard.to("meta")
     local_state_dict_keys = list(model_shard.state_dict().keys())

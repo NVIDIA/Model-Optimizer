@@ -131,6 +131,7 @@ def validate_model(
     pipeline_parallel: bool = False,
     calculate_full_score_ablations: bool = False,
     val_dataloader: DataLoader | None = None,
+    dtype: torch.dtype = torch.bfloat16,
 ) -> tuple[dict[str, dict], HiddenStatesAndLMHead | None] | tuple[None, None]:
     if val_dataloader is None:
         val_dataloader = prepare_dataloader(args, tokenizer) if dist.is_master() else None
@@ -138,7 +139,7 @@ def validate_model(
         args.eval_samples // args.micro_batch_size
     )  # model pipeline, single data rank
 
-    model = prepare_model(args, model, pipeline_parallel)
+    model = prepare_model(args, model, pipeline_parallel, dtype=dtype)
 
     just_model_forward = False
     checkpoint_manager = None
@@ -219,13 +220,18 @@ def validate_model(
 
 
 def prepare_model(
-    args: argparse.Namespace, model: PreTrainedModel | None = None, pipeline_parallel: bool = False
+    args: argparse.Namespace,
+    model: PreTrainedModel | None = None,
+    pipeline_parallel: bool = False,
+    dtype: torch.dtype = torch.bfloat16,
 ) -> nn.Module:
     if model is None:
         assert args.model_name_or_path is not None
         if pipeline_parallel:
             model = load_and_shard_model(
-                args.model_name_or_path, model_config_overrides={"block_size": args.block_size}
+                args.model_name_or_path,
+                model_config_overrides={"block_size": args.block_size},
+                dtype=dtype,
             )
         else:
             try:
@@ -284,7 +290,7 @@ def main():
     args = parse_args()
     if args.pipeline_parallel:
         dist.setup(timeout=args.nccl_timeout_minutes)
-    validate_model(args=args, pipeline_parallel=args.pipeline_parallel)
+    validate_model(args=args, pipeline_parallel=args.pipeline_parallel, dtype=torch.bfloat16)
     dist.cleanup()
 
 

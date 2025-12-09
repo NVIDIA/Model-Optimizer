@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from contextlib import contextmanager
 from typing import (
     Any,
@@ -74,65 +74,6 @@ TModule = TypeVar("TModule", bound=nn.Module)
 class ModuleRef(Generic[TModule]):
     def __init__(self, module: TModule):
         self.module = module
-
-
-Reduction = Literal["none", "mean", "sum"]
-
-
-def normalized_mse_loss(
-    input: Tensor, target: Tensor, reduction: Reduction = "mean", epsilon: float = 1e-6
-):
-    loss = F.mse_loss(input, target, reduction=reduction) / F.mse_loss(
-        target, torch.zeros_like(target) + epsilon, reduction=reduction
-    )
-    return loss
-
-
-def mse_loss(input: Tensor, target: Tensor, reduction: Reduction = "mean", epsilon: float = 1e-6):
-    loss = F.mse_loss(input, target, reduction=reduction)
-    return loss
-
-
-class NormalizedMSELoss(nn.modules.loss._Loss):
-    __constants__ = ["reduction", "epsilon"]
-
-    def __init__(self, reduction: Reduction = "mean", epsilon: float = 1e-6) -> None:
-        super().__init__(None, None, reduction)
-        self.epsilon = epsilon
-
-    def forward(self, input: Tensor, target: Tensor) -> Tensor:
-        loss = normalized_mse_loss(
-            input,
-            target,
-            cast(Reduction, self.reduction),
-            self.epsilon,
-        )
-        return loss
-
-
-def vectorwise_normalized_mse_loss(input: Tensor, target: Tensor, epsilon: float = 1e-6):
-    """
-    Like normalized_mse_loss, but the input is treated as a multi-dimensional batch of vectors.
-    Normalization is done on each vector separately (the last dim), then results are averaged.
-    """
-    return batched_normalized_mse_loss(input, target, epsilon, batch_dims=range(input.ndim - 1))
-
-
-def batched_normalized_mse_loss(
-    input: Tensor, target: Tensor, epsilon: float = 1e-6, batch_dims: Sequence[int] = (0,)
-):
-    """
-    Like normalized_mse_loss, but the input is treated as a batch of tensors.
-    Normalization is done on the non-batch dims, then results are averaged.
-    """
-    norm_dims = list(set(range(input.ndim)) - set(batch_dims))
-    norm_of_target_vectors = F.mse_loss(
-        target, torch.zeros_like(target) + epsilon, reduction="none"
-    ).mean(dim=norm_dims)
-    vectorwise_mse = F.mse_loss(input, target, reduction="none").mean(dim=norm_dims)
-    normalized_vectorwise_mse = vectorwise_mse / norm_of_target_vectors
-    loss = normalized_vectorwise_mse.mean()
-    return loss
 
 
 class ActivityContextMaxDepthException(Exception):
@@ -214,20 +155,6 @@ def is_submodule_of(module_name: str, other_module_name: str) -> bool:
 def is_submodule_or_same(module_name: str, other_module_name: str) -> bool:
     result = module_name == other_module_name or is_submodule_of(module_name, other_module_name)
     return result
-
-
-def reduce_losses(losses: Iterable[Tensor]) -> Tensor:
-    total_loss = None
-    for loss in losses:
-        if total_loss is None:
-            total_loss = loss
-        else:
-            total_loss += loss
-
-    if total_loss is None:
-        return torch.Tensor(torch.nan)
-
-    return total_loss
 
 
 fake_mode = FakeTensorMode(
@@ -421,30 +348,6 @@ def is_fake_tensor(t: Any) -> bool:
 def has_fake_tensor(v: Any) -> bool:
     result = pytree.tree_any(is_fake_tensor, v)
     return result
-
-
-@dynamo_skip
-def is_real_tensor(t: Any) -> bool:
-    return isinstance(t, Tensor) and not t.is_meta and not isinstance(t, FakeTensor)
-
-
-@dynamo_skip
-def get_parent_module_name(module_name: str):
-    if "." not in module_name:
-        return ""
-    else:
-        return module_name.rsplit(".", 1)[0]
-
-
-@dynamo_skip
-def get_parent_module_names(module_name: str):
-    parent_module_names = set[str]()
-
-    while len(module_name) > 0:
-        module_name = get_parent_module_name(module_name)
-        parent_module_names.add(module_name)
-
-    return parent_module_names
 
 
 def _get_device_for_distributed(
