@@ -16,8 +16,10 @@
 """Megatron hooks module for NAS plugin."""
 
 from .megatron_hooks import IterativeChannelContributionHook, MegatronL2NormHook
+from .megatron_hooks_analysis import evaluate_importance_scores
 
 __all__ = [
     "IterativeChannelContributionHook",
     "MegatronL2NormHook",
+    "evaluate_importance_scores",
 ]
