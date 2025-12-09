@@ -176,6 +176,14 @@ The `auto` mode enables mixed precision quantization by searching for the optima
 2. **Format Search**: Searches across specified quantization formats for each layer
 3. **Constraint Optimization**: Finds the optimal format assignment that satisfies the effective bits constraint while minimizing accuracy loss
 
+#### Key Parameters
+
+| Parameter | Default | Description |
+| :--- | :---: | :--- |
+| `--effective_bits` | 4.8 | Target average bits per weight across the model. Lower values = more compression but potentially lower accuracy. The search algorithm finds the optimal per-layer format assignment that meets this constraint while minimizing accuracy loss. For example, 4.8 means an average of 4.8 bits per weight (mix of FP4 and FP8 layers). |
+| `--num_score_steps` | 128 | Number of forward/backward passes used to compute per-layer sensitivity scores via gradient-based analysis. Higher values provide more accurate sensitivity estimates but increase search time. Recommended range: 64-256. |
+| `--calibration_data_size` | 512 | Number of calibration samples used for both sensitivity scoring and calibration. For auto mode, labels are required for loss computation. |
+
 #### Usage
 
 ```bash
@@ -189,6 +197,14 @@ python torch_quant_to_onnx.py \
     --evaluate \
     --onnx_save_path=vit_base_patch16_224.auto_quant.onnx
 ```
+
+#### Results (ViT-Base)
+
+| | Top-1 accuracy (torch) | Top-5 accuracy (torch) |
+| :--- | :---: | :---: |
+| Torch autocast (FP16) | 85.11% | 97.53% |
+| NVFP4 Quantized | 84.558% | 97.36% |
+| Auto Quantized (FP8 + NVFP4, 4.78 effective bits) | 84.726% | 97.434% |
 
 ### ONNX Export Supported LLM Models
 
