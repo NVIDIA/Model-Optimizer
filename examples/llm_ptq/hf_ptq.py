@@ -423,9 +423,6 @@ def plain_quantize(
         quant_cfg["quant_cfg"]["*visual*"] = {"enable": False}
 
     if not model_is_already_quantized or calibration_only:
-        if model_type == "gptoss" and args.qformat == "nvfp4_mlp_only":
-            print("Applying nvfp4 quantization (MoE only) for gpt-oss")
-
         # quantize the model
 
         use_calibration = need_calibration(quant_cfg)
@@ -580,8 +577,6 @@ def pre_quantize(
     else:
         # Standard generation for non-Nemotron VL models
         generated_ids_before_ptq = full_model.generate(preview_input_ids, max_new_tokens=100)
-    if model_type == "gptoss" and args.qformat == "nvfp4_mlp_only":
-        print("Applying nvfp4 quantization (MoE only) for gpt-oss")
 
     return preview_input_ids, generated_ids_before_ptq
 
@@ -739,22 +734,6 @@ def quantize_main(
             "Plain quantization supports only one quantization format."
         )
 
-        assert (
-            args.qformat
-            in [
-                "int8_wo",
-                "int4_awq",
-                "fp8",
-                "nvfp4",
-                "nvfp4_awq",
-                "w4a8_awq",
-                "fp8_pb_wo",
-                "w4a8_mxfp4_fp8",
-                "nvfp4_mlp_only",
-            ]
-            or args.kv_cache_qformat in KV_QUANT_CFG_CHOICES
-        ), f"Plain quantization format {args.qformat} not supported for HF export path"
-
         quant_cfg = build_quant_cfg(
             args.qformat,
             args.kv_cache_qformat,
@@ -764,20 +743,16 @@ def quantize_main(
             KV_QUANT_CFG_CHOICES,
         )
 
-        if args.qformat in QUANT_CFG_CHOICES:
-            plain_quantize(
-                args,
-                quant_cfg,
-                full_model,
-                language_model,
-                model_type,
-                calibration_only,
-                calib_dataloader,
-                is_nemotron_vl_model,
-            )
-        else:
-            assert model_type != "dbrx", f"Does not support export {model_type} without quantizaton"
-            print(f"qformat: {args.qformat}. No quantization applied, export {device} model")
+        plain_quantize(
+            args,
+            quant_cfg,
+            full_model,
+            language_model,
+            model_type,
+            calibration_only,
+            calib_dataloader,
+            is_nemotron_vl_model,
+        )
 
     post_quantize(
         args,
