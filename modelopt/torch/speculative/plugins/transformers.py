@@ -465,6 +465,17 @@ class HFEagleModel(EagleModel):
             eagle_architecture_config=eagle_architecture_config,
         )
         self.eagle_config = PretrainedConfig.from_dict(eagle_architecture_config)
+        # Hidden size and vocab size must match base model
+        llm_config = self.config.llm_config if hasattr(self.config, "llm_config") else self.config
+        self.eagle_config.hidden_size = llm_config.hidden_size
+        self.eagle_config.vocab_size = llm_config.vocab_size
+        self.eagle_config.max_position_embeddings = llm_config.max_position_embeddings
+        self.eagle_config.draft_vocab_size = (
+            self.eagle_config.vocab_size
+            if self.eagle_config.draft_vocab_size is None
+            else self.eagle_config.draft_vocab_size
+        )
+
         if self.eagle_config._attn_implementation is None:
             self.eagle_config._attn_implementation = "sdpa"
         decoder_cls = (

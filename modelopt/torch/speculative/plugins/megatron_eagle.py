@@ -88,7 +88,6 @@ def dict_to_config(
         params_dtype=getattr(torch, architecture_config["torch_dtype"]),
         pipeline_dtype=getattr(torch, architecture_config["torch_dtype"]),
         num_layers=architecture_config.get("num_hidden_layers"),
-        hidden_size=architecture_config.get("hidden_size"),
         ffn_hidden_size=architecture_config.get("intermediate_size"),
         num_attention_heads=architecture_config.get("num_attention_heads"),
         kv_channels=architecture_config.get(
@@ -106,8 +105,6 @@ def dict_to_config(
     config.transformer_layer_spec = None
     config.seq_length = 8192
     config.gradient_accumulation_fusion = False
-    config.vocab_size = architecture_config.get("vocab_size")
-    config.max_sequence_length = architecture_config.get("max_position_embeddings")
     config.position_embedding_type = architecture_config.get("position_embedding_type")
     config.rotary_percent = 1.0
     config.rotary_base = architecture_config.get("rope_theta")
@@ -675,6 +672,14 @@ class _DynamicEagleGPTModel(EagleModel):
             self.config.fp16,
             self.config.bf16,
             self.config.sequence_parallel,
+        )
+        self.eagle_config.hidden_size = self.config.hidden_size
+        self.eagle_config.vocab_size = self.vocab_size
+        self.eagle_config.max_sequence_length = self.max_sequence_length
+        self.eagle_config.draft_vocab_size = (
+            self.vocab_size
+            if self.eagle_config.draft_vocab_size is None
+            else self.eagle_config.draft_vocab_size
         )
 
         if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size:

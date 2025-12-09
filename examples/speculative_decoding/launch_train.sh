@@ -90,6 +90,10 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       VLM_IMG_DIR="${1#*=}"
       ;;
+    --estimate_ar*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      ESTIMATE_AR="${1#*=}"
+      ;;
     --ar_validate_steps*)
       if [[ "$1" != *=* ]]; then shift; fi
       AR_VALIDATE_STEPS="${1#*=}"
@@ -128,6 +132,7 @@ DISABLE_TQDM=${DISABLE_TQDM:-False}
 VLM_PROCESSOR=${VLM_PROCESSOR:-}
 VLM_IMG_DIR=${VLM_IMG_DIR:-}
 AR_VALIDATE_STEPS=${AR_VALIDATE_STEPS:-1000}
+ESTIMATE_AR=${ESTIMATE_AR:-False}
 
 if [[ "$MODE" == "medusa" ]]; then
   SPECULATIVE_ARGS="--medusa_num_heads $MEDUSA_NUM_HEADS --medusa_num_layers $MEDUSA_NUM_LAYERS"
@@ -190,6 +195,7 @@ CMD="accelerate launch $MULTI_GPU --mixed_precision bf16 main.py \
     --tf32 True \
     --data_path $DATA \
     --disable_tqdm $DISABLE_TQDM \
+    --estimate_ar $ESTIMATE_AR \
     --ar_validate_steps $AR_VALIDATE_STEPS \
     $VLM_ARGS \
     $OFFLINE_TRAINING_ARGS \
