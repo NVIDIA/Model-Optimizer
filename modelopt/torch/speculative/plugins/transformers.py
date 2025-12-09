@@ -810,7 +810,7 @@ class HFEagleModel(EagleModel):
 
         # ====Run eagle forward====
         eagle_loss = None
-        train_accs = [[] * self.eagle_config.parallel_draft_step]
+        train_accs = [[] for _ in range(self.eagle_config.parallel_draft_step)]
         # In EAGLE-3, we have an additional FC layer to concentrate hidden states from multiple base model layers
         b, seq_length, h = base_model_hidden_states.shape
         if self.eagle_config.use_aux_hidden_state:
