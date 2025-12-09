@@ -43,14 +43,14 @@ def test_evaluate_importance_scores_basic():
     hook = SyntheticImportanceHook(num_features=50)
 
     # Use shared helper to run evaluation
-    metrics = _run_hook_and_evaluate(layer, hook, num_iterations=100, prune_ratio=0.4)
+    metrics = _run_hook_and_evaluate(layer, hook, num_iterations=1000, prune_ratio=0.4)
 
     print(f"[SyntheticImportanceHook] Metrics: {metrics}")
 
     # Check values with deterministic seed
     assert metrics["num_pruned"] == 20  # 40% of 50 = 20
-    assert metrics["rmse"] == pytest.approx(0.36862491607666015, rel=1e-5)
-    assert metrics["cosine_similarity"] == pytest.approx(0.7710041701793671, rel=1e-5)
+    assert metrics["rmse"] == pytest.approx(0.3689444, rel=1e-5)
+    assert metrics["cosine_similarity"] == pytest.approx(0.77117118, rel=1e-5)
 
 
 def _test_evaluate_importance_scores_with_l2_norm_hook(rank, size):
@@ -65,14 +65,14 @@ def _test_evaluate_importance_scores_with_l2_norm_hook(rank, size):
     hook = MegatronL2NormHook(max_size=None)
 
     # Run evaluation
-    metrics = _run_hook_and_evaluate(layer, hook, num_iterations=100, prune_ratio=0.4)
+    metrics = _run_hook_and_evaluate(layer, hook, num_iterations=1000, prune_ratio=0.4)
 
     print(f"[L2NormHook] Metrics: {metrics}")
 
     # L2NormHook specific assertions
     assert metrics["num_pruned"] == 20  # 40% of 50 = 20
-    assert metrics["rmse"] == pytest.approx(0.35592776149511335, rel=1e-5)
-    assert metrics["cosine_similarity"] == pytest.approx(0.7885629451274871, rel=1e-5)
+    assert metrics["rmse"] == pytest.approx(0.3616334, rel=1e-5)
+    assert metrics["cosine_similarity"] == pytest.approx(0.7814186, rel=1e-5)
 
 
 def _test_evaluate_importance_scores_with_iterative_channel_contribution_hook(rank, size):
@@ -85,21 +85,21 @@ def _test_evaluate_importance_scores_with_iterative_channel_contribution_hook(ra
     # Create layer and hook
     layer = nn.Linear(in_features=50, out_features=30, bias=False)
     activation_hooks_kwargs = {
-        "validation_full_iters": 100,
+        "validation_full_iters": 1000,
         "clear_gpu_memory": False,
         "calibration_method": None,
     }
     hook = IterativeChannelContributionHook(layer, activation_hooks_kwargs)
 
     # Run evaluation
-    metrics = _run_hook_and_evaluate(layer, hook, num_iterations=100, prune_ratio=0.4)
+    metrics = _run_hook_and_evaluate(layer, hook, num_iterations=1000, prune_ratio=0.4)
 
     print(f"[IterativeChannelContributionHook] Metrics: {metrics}")
 
     # Iterative channel contribution hook specific assertions
     assert metrics["num_pruned"] == 20  # 40% of 50 = 20
-    assert metrics["rmse"] == pytest.approx(0.3448416778445244, rel=1e-5)
-    assert metrics["cosine_similarity"] == pytest.approx(0.8031367003917694, rel=1e-5)
+    assert metrics["rmse"] == pytest.approx(0.339014, rel=1e-5)
+    assert metrics["cosine_similarity"] == pytest.approx(0.8110392, rel=1e-5)
 
 
 def test_evaluate_importance_scores_with_l2_norm_hook():

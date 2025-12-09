@@ -309,10 +309,11 @@ class IterativeChannelContributionHook(ForwardHook):
         del contribution, contribution_squared
         clear_gpu_memory(clear=self.clear_gpu_memory)
 
-        if n_channels_to_prune == 0:
-            self.agg_cont_per_channel += mean_cont_per_channel
-        else:
-            _, worst_indices = torch.topk(mean_cont_per_channel, n_channels_to_prune, largest=False)
+        self.agg_cont_per_channel += mean_cont_per_channel
+        if n_channels_to_prune > 0:
+            _, worst_indices = torch.topk(
+                self.agg_cont_per_channel, n_channels_to_prune, largest=False
+            )
             worst_indices_list = worst_indices.tolist()
             assert not set(self.pruned_channels).intersection(set(worst_indices_list))
             self.pruned_channels.extend(worst_indices_list)
