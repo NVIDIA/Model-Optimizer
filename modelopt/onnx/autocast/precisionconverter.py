@@ -296,6 +296,8 @@ class PrecisionConverter:
                 return helper.tensor_dtype_to_np_dtype(node.attrs["to"])
             elif node.op == "DequantizeLinear":
                 return node.inputs[1].dtype  # scale type
+            elif node.op == "QuantizeLinear":
+                return node.inputs[2].dtype  # zero_point type
             elif not inp.dtype or inp.dtype == onnx.TensorProto.UNDEFINED:
                 return None
             elif node.op not in self.custom_ops:
