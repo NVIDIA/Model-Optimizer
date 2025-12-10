@@ -387,6 +387,112 @@ NVFP4_DEFAULT_CFG = {
     "algorithm": "max",
 }
 
+NVFP4_WEIGHT_MAX_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "enable": False,
+        },
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": "max",
+}
+
+NVFP4_WEIGHT_MSE_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "enable": False,
+        },
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": {
+        "method": "mse",
+        "num_steps": 8,
+        "start_multiplier": 0.25,
+        "stop_multiplier": 2.0,
+    },
+}
+
+NVFP4_WEIGHT_MSE_4_6_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "enable": False,
+        },
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": {
+        "method": "mse",
+        "num_steps": 8,
+        "start_multiplier": 0.375,
+        "stop_multiplier": 3.0,
+    },
+}
+
+NVFP4_WEIGHT_ACT_MSE_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": {
+        "method": "mse",
+        "num_steps": 8,
+        "start_multiplier": 0.25,
+        "stop_multiplier": 2.0,
+    },
+}
+
+NVFP4_WEIGHT_ACT_MSE_4_6_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": {
+        "method": "mse",
+        "num_steps": 8,
+        "start_multiplier": 0.375,
+        "stop_multiplier": 3.0,
+    },
+}
+
 
 NVFP4_AWQ_LITE_CFG = {
     "quant_cfg": {
@@ -720,7 +826,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         if not all(x > 0 for x in num_bits):
             raise ValueError("num_bits must be a positive integer or a tuple of positive integers.")
 
-        block_sizes = self.block_sizes
+        # block_sizes = self.block_sizes
         if num_bits not in [
             (4, 3),
             (5, 2),
@@ -734,13 +840,13 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
             raise ValueError(
                 "Supported FPx quantization formats: FP8 (E4M3, E5M2), FP6(E3M2, E2M3), FP4(E2M1)."
             )
-        elif num_bits != (4, 3) and (
-            block_sizes is None or block_sizes.get("type", None) != "dynamic"
-        ):
-            raise ValueError(
-                "Only blockwise dynamic quantization is supported with quantization "
-                "formats E{num_bis[0]}M{num_bits[1]}."
-            )
+        # elif num_bits != (4, 3) and (
+        #     block_sizes is None or block_sizes.get("type", None) != "dynamic"
+        # ):
+        #     raise ValueError(
+        #         "Only blockwise dynamic quantization is supported with quantization "
+        #         "formats E{num_bis[0]}M{num_bits[1]}."
+        #     )
         return self
 
     axis: int | tuple[int, ...] | None = ModeloptField(

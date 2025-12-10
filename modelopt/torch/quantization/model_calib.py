@@ -256,7 +256,7 @@ def mse_calibrate(
                             weight_amax = reduce_amax(
                                 x, axis=None, keepdims=False, squeeze_scalar=True
                             )
-                            quantizer._amax = scaled_e4m3_impl(amax, weight_amax)
+                            quantizer._amax = scaled_e4m3_impl(amax / 6.0, weight_amax / 6.0) * 6.0
 
                     if original_amax is not None:
                         quantizer._amax = original_amax

@@ -79,18 +79,10 @@ class MseCalibrator(_Calibrator):
         x = x.detach().to(dtype=torch.float32)
 
         device = x.device
-        # Split steps between _start_multiplier to 1.0 and 1.0 to _stop_multiplier
-        # to ensure balanced exploration on both sides of the original amax (1.0)
-        steps_first_half = self._num_steps // 2 + 1  # Include 1.0
-        steps_second_half = self._num_steps - self._num_steps // 2  # For second range
-        multipliers = torch.cat(
-            [
-                torch.linspace(self._start_multiplier, 1.0, steps=steps_first_half, device=device),
-                torch.linspace(1.0, self._stop_multiplier, steps=steps_second_half, device=device)[
-                    1:
-                ],  # Skip duplicate 1.0
-            ]
+        multipliers = torch.linspace(
+            self._start_multiplier, self._stop_multiplier, steps=self._num_steps, device=device
         )
+        print(f"Multipliers: {multipliers}")
 
         # Get reduce axis for per-channel quantization
         reduce_axis = quant_utils.convert_quantization_axis_to_reduce_axis(x, self._axis)
