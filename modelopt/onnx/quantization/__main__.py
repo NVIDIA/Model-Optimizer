@@ -53,6 +53,11 @@ def get_parser() -> argparse.ArgumentParser:
         help="Calibration data in npz/npy format. If None, random data for calibration will be used.",
     )
     group.add_argument(
+        "--trust_calibration_data",
+        action="store_true",
+        help="If True, trust the calibration data and allow pickle deserialization.",
+    )
+    group.add_argument(
         "--calibration_cache_path",
         type=str,
         help="Pre-calculated activation tensor scaling factors aka calibration cache path.",
@@ -263,10 +268,23 @@ def main():
     args = get_parser().parse_args()
     calibration_data = None
     if args.calibration_data_path:
-        calibration_data = np.load(args.calibration_data_path, allow_pickle=True)
-        if args.calibration_data_path.endswith(".npz"):
-            # Convert the NpzFile object to a Python dictionary
-            calibration_data = {key: calibration_data[key] for key in calibration_data.files}
+        # Security: Disable pickle deserialization for untrusted sources to prevent RCE attacks
+        try:
+            calibration_data = np.load(
+                args.calibration_data_path, allow_pickle=args.trust_calibration_data
+            )
+            if args.calibration_data_path.endswith(".npz"):
+                # Convert the NpzFile object to a Python dictionary
+                calibration_data = {key: calibration_data[key] for key in calibration_data.files}
+        except ValueError as e:
+            if "allow_pickle" in str(e) and not args.trust_calibration_data:
+                raise ValueError(
+                    "Calibration data file contains pickled objects which pose a security risk. "
+                    "For trusted sources, you may enable pickle deserialization by setting the "
+                    "--trust_calibration_data flag."
+                ) from e
+            else:
+                raise
 
     quantize(
         args.onnx_path,
