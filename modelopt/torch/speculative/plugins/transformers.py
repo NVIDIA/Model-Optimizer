@@ -473,6 +473,10 @@ class HFEagleModel(EagleModel):
         self.eagle_config.draft_vocab_size = getattr(
             self.eagle_config, "draft_vocab_size", self.eagle_config.vocab_size
         )
+        if getattr(self.eagle_config, "head_dim", None) is None:
+            self.eagle_config.head_dim = (
+                self.eagle_config.hidden_size // self.eagle_config.num_attention_heads
+            )
 
         if self.eagle_config._attn_implementation is None:
             self.eagle_config._attn_implementation = "sdpa"

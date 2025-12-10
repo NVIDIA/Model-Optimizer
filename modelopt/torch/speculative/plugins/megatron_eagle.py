@@ -90,11 +90,7 @@ def dict_to_config(
         num_layers=architecture_config.get("num_hidden_layers"),
         ffn_hidden_size=architecture_config.get("intermediate_size"),
         num_attention_heads=architecture_config.get("num_attention_heads"),
-        kv_channels=architecture_config.get(
-            "head_dim",
-            architecture_config.get("hidden_size")
-            // architecture_config.get("num_attention_heads"),
-        ),
+        kv_channels=architecture_config.get("head_dim"),
         num_query_groups=architecture_config.get("num_key_value_heads"),
         init_method_std=architecture_config.get("initializer_range"),
         layernorm_epsilon=architecture_config.get("rms_norm_eps"),
@@ -681,6 +677,10 @@ class _DynamicEagleGPTModel(EagleModel):
             if self.eagle_config.draft_vocab_size is None
             else self.eagle_config.draft_vocab_size
         )
+        if self.eagle_config.kv_channels is None:
+            self.eagle_config.kv_channels = (
+                self.eagle_config.hidden_size // self.eagle_config.num_attention_heads
+            )
 
         if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size:
             assert eagle_self_logit_distillation, (
