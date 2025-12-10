@@ -140,7 +140,7 @@ def validate_puzzle_solutions(
     teacher_hidden_states = None
     if (args.teacher_dir is not None) and (not args.skip_validation):
         teacher_model = replacement_library.load_checkpoint(args.teacher_dir)
-        teacher_model.to(torch.device(dist.local_rank()))
+        teacher_model.cuda(dist.local_rank())
         stitched_model = perform_pipeline_stitches(teacher_model)
         teacher_hidden_states = validate_model_and_extract_hidden_states(
             args,
@@ -187,7 +187,7 @@ def validate_puzzle_solutions(
         dist.barrier()
 
         if not args.skip_validation:
-            model.to(torch.device(dist.local_rank()))
+            model.cuda(dist.local_rank())
             stitched_model = perform_pipeline_stitches(model)
             validate_model_with_teacher_similarity_metrics(
                 args,

@@ -283,7 +283,7 @@ def load_state_dict_to_shards(
     assert len(unexpected_keys) == 0
     assert all("dummy_param" in key for key in missing_keys)
 
-    model_shard.to(torch.device(dist.local_rank()))
+    model_shard.cuda(dist.local_rank())
 
     dist.barrier()
 
