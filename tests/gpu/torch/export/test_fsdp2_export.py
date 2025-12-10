@@ -118,11 +118,11 @@ def _compare_parameters_and_buffers(model1, model2):
         )
 
 
-def _fuse_layers(rank, size, quant_config):
+def _fuse_layers(rank, size, quant_config, bias):
     with patch_fsdp_mp_dtypes():
         # Initialize model
-        model = SmallQKVModel(dim=32).to("cuda")
-        non_fsdp_model = SmallQKVModel(dim=32).to("cuda")
+        model = SmallQKVModel(dim=32, bias=bias).to("cuda")
+        non_fsdp_model = SmallQKVModel(dim=32, bias=bias).to("cuda")
         non_fsdp_model.load_state_dict(copy.deepcopy(model.state_dict()))
         model.eval()
         non_fsdp_model.eval()
@@ -159,15 +159,15 @@ def _fuse_layers(rank, size, quant_config):
         _compare_parameters_and_buffers(model, non_fsdp_model)
 
 
-def _export_quantized_weight_test(rank, size, quant_config):
+def _export_quantized_weight_test(rank, size, quant_config, bias):
     import copy
 
     from torch.distributed._composable.fsdp import fully_shard
 
     with patch_fsdp_mp_dtypes():
         # Initialize model
-        model = SmallQKVModel(dim=32).to("cuda")
-        non_fsdp_model = SmallQKVModel(dim=32).to("cuda")
+        model = SmallQKVModel(dim=32, bias=bias).to("cuda")
+        non_fsdp_model = SmallQKVModel(dim=32, bias=bias).to("cuda")
         non_fsdp_model.load_state_dict(copy.deepcopy(model.state_dict()))
         model.eval()
         non_fsdp_model.eval()
@@ -247,10 +247,11 @@ def test_fsdp2_weight_update_context_for_export(device_count):
     ],
 )
 @pytest.mark.parametrize("device_count", get_device_counts())
-def test_fsdp2_weight_update_context_for_fuse_layers(device_count, quant_config):
+@pytest.mark.parametrize("bias", [True, False])
+def test_fsdp2_weight_update_context_for_fuse_layers(device_count, quant_config, bias):
     spawn_multiprocess_job(
         size=device_count,
-        job=partial(_fuse_layers, quant_config=quant_config),
+        job=partial(_fuse_layers, quant_config=quant_config, bias=bias),
         backend="nccl",
     )
 
@@ -270,9 +271,10 @@ def test_fsdp2_weight_update_context_for_fuse_layers(device_count, quant_config)
     ],
 )
 @pytest.mark.parametrize("device_count", get_device_counts())
-def test_fsdp2_weight_update_context_for_export_quantized_weight(device_count, quant_config):
+@pytest.mark.parametrize("bias", [True, False])
+def test_fsdp2_weight_update_context_for_export_quantized_weight(device_count, quant_config, bias):
     spawn_multiprocess_job(
         size=device_count,
-        job=partial(_export_quantized_weight_test, quant_config=quant_config),
+        job=partial(_export_quantized_weight_test, quant_config=quant_config, bias=bias),
         backend="nccl",
     )
