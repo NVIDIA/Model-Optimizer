@@ -40,5 +40,6 @@ class MTBench(Dataset):
         with open(self.path) as f:
             for json_line in f:
                 line = json.loads(json_line)
-                self.data.append(Request(system_prompt=None, turns=line["turns"]))
+                key = "turns" if "turns" in line else "prompt"
+                self.data.append(Request(system_prompt=None, turns=line[key]))
         self.data = self.data[: self.num_samples]
