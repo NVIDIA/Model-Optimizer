@@ -216,8 +216,10 @@ class CompressSearcher(BaseSearcher):
 
         # Calc_one_block_scores (distributed processing)
         mprint("Compress Progress 6/8: calculating one block scores (multi-gpu)")
-        scoring.launch_scoring(hydra_cfg, dtype=torch.bfloat16)
+        scoring.launch_scoring(hydra_cfg, model_dtype=torch.bfloat16, autocast_dtype=torch.bfloat16)
 
         # mip_and_realize_models (distributed processing)
         mprint("Compress Progress 7/8: running MIP and realizing models (multi-gpu)")
-        mip_and_realize_models.launch_mip_and_realize_model(hydra_cfg, dtype=torch.bfloat16)
+        mip_and_realize_models.launch_mip_and_realize_model(
+            hydra_cfg, model_dtype=torch.bfloat16, autocast_dtype=torch.bfloat16
+        )

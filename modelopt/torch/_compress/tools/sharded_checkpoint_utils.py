@@ -148,7 +148,7 @@ def load_and_shard_model(
     owned_block_indexes: set[int] | Literal["auto"] = "auto",
     model_config: DeciLMConfig | None = None,
     model_config_overrides: Mapping | None = None,
-    dtype: torch.dtype | None = torch.bfloat16,
+    model_dtype: torch.dtype = torch.bfloat16,
 ) -> DeciLMForCausalLM:
     checkpoint_path = Path(checkpoint_path)
     with torch.device(dist.local_rank()):
@@ -201,7 +201,7 @@ def load_and_shard_model(
             load_state_dict_to_shards(model_shard=model_shard, loaded_state_dict=state_dict)
             del state_dict
 
-        model_shard.type(dtype)
+        model_shard.type(model_dtype)
 
     params_on_meta_device = [
         param_name

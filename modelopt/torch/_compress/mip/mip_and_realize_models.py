@@ -32,16 +32,26 @@ from modelopt.torch._compress.tools.validate_puzzle_with_multi_replacements impo
 )
 
 
-def launch_mip(cfg: DictConfig, dtype: torch.dtype = torch.bfloat16) -> List[str]:
+def launch_mip(cfg: DictConfig) -> List[str]:
     solution_paths = run_puzzle(args=cfg.mip)
     return solution_paths
 
 
-def launch_realize_model(cfg: DictConfig, dtype: torch.dtype = torch.bfloat16):
-    validate_puzzle_solutions(args=cfg.realize_model, dtype=dtype)
+def launch_realize_model(
+    cfg: DictConfig,
+    model_dtype: torch.dtype = torch.bfloat16,
+    autocast_dtype: torch.dtype = torch.bfloat16,
+):
+    validate_puzzle_solutions(
+        args=cfg.realize_model, model_dtype=model_dtype, autocast_dtype=autocast_dtype
+    )
 
 
-def launch_mip_and_realize_model(cfg: DictConfig, dtype: torch.dtype = torch.bfloat16):
+def launch_mip_and_realize_model(
+    cfg: DictConfig,
+    model_dtype: torch.dtype = torch.bfloat16,
+    autocast_dtype: torch.dtype = torch.bfloat16,
+):
     # Determine device for distributed operations (NCCL requires CUDA tensors)
     device = "cpu"
     if dist.size() > 1:
@@ -49,7 +59,7 @@ def launch_mip_and_realize_model(cfg: DictConfig, dtype: torch.dtype = torch.bfl
             device = torch.cuda.current_device()
 
     if dist.is_master():
-        solution_paths = launch_mip(cfg, dtype=dtype)
+        solution_paths = launch_mip(cfg)
         length_tensor = torch.tensor([len(solution_paths)], dtype=torch.long, device=device)
     else:
         solution_paths = None
@@ -70,7 +80,7 @@ def launch_mip_and_realize_model(cfg: DictConfig, dtype: torch.dtype = torch.bfl
         for solution_path in solution_paths:
             mprint(f"Realize model for the solution: {solution_path}")
             cfg.realize_model.solutions_path = Path(solution_path)
-            launch_realize_model(cfg, dtype=dtype)
+            launch_realize_model(cfg, model_dtype=model_dtype, autocast_dtype=autocast_dtype)
             dist.barrier()
 
 
@@ -78,7 +88,7 @@ def launch_mip_and_realize_model(cfg: DictConfig, dtype: torch.dtype = torch.bfl
 def main(cfg: DictConfig) -> None:
     cfg = hydra.utils.instantiate(cfg)
     dist.setup(timeout=cfg.nccl_timeout_minutes)
-    launch_mip_and_realize_model(cfg, dtype=torch.bfloat16)
+    launch_mip_and_realize_model(cfg, model_dtype=torch.bfloat16, autocast_dtype=torch.bfloat16)
     dist.cleanup()
 
 

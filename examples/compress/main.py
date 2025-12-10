@@ -148,7 +148,9 @@ def run_mip_only(hydra_config_path: str):
     # mip_and_realize_models (distributed processing)
     # TODO: How to make it part of mnt.search() api, similarly to run_full_compress() API
     mprint("Compress Progress 7/8: running MIP and realizing models (multi-gpu)")
-    mip_and_realize_models.launch_mip_and_realize_model(hydra_cfg, dtype=torch.bfloat16)
+    mip_and_realize_models.launch_mip_and_realize_model(
+        hydra_cfg, model_dtype=torch.bfloat16, autocast_dtype=torch.bfloat16
+    )
 
     dist.cleanup()
     mprint("Compress Progress 8/8: compression pipeline completed (multi-gpu)")
