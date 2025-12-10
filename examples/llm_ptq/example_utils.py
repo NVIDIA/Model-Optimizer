@@ -330,7 +330,6 @@ def get_model(
         elif hf_config.quantization_config.get("format", None) == "pack-quantized":
             model = AutoModelForCausalLM.from_pretrained(
                 ckpt_path,
-                torch_dtype=torch.float16,
                 device_map="auto",
                 trust_remote_code=trust_remote_code,
             )
@@ -353,9 +352,9 @@ def get_model(
                 from_config = auto_model_module._from_config
 
             with init_empty_weights():
-                # When computing the device_map, assuming half precision by default,
+                # When computing the device_map, assuming bfloat16 precision by default,
                 # unless specified by the hf_config.
-                torch_dtype = getattr(hf_config, "torch_dtype", torch.float16)
+                torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)
                 model_kwargs2 = model_kwargs.copy()
                 if auto_model_module != AutoModelForCausalLM:
                     model_kwargs2.pop("trust_remote_code", None)
