@@ -26,6 +26,7 @@ from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from megatron.core.parallel_state import initialize_model_parallel
 
 from modelopt.torch.nas.plugins.megatron_hooks import (
+    IndependentChannelContributionHook,
     IterativeChannelContributionHook,
     MegatronL2NormHook,
     evaluate_importance_scores,
@@ -102,6 +103,28 @@ def _test_evaluate_importance_scores_with_iterative_channel_contribution_hook(ra
     assert metrics["cosine_similarity"] == pytest.approx(0.8110392, rel=1e-5)
 
 
+def _test_evaluate_importance_scores_with_independent_channel_contribution_hook(rank, size):
+    """Test evaluate_importance_scores with IndependentChannelContributionHook."""
+    # Initialize Megatron parallel state
+    initialize_model_parallel(tensor_model_parallel_size=1, pipeline_model_parallel_size=1)
+
+    torch.manual_seed(42)
+
+    # Create layer and hook
+    layer = nn.Linear(in_features=50, out_features=30, bias=False)
+    hook = IndependentChannelContributionHook(layer)
+
+    # Run evaluation
+    metrics = _run_hook_and_evaluate(layer, hook, num_iterations=1000, prune_ratio=0.4)
+
+    print(f"[IndependentChannelContributionHook] Metrics: {metrics}")
+
+    # Independent channel contribution hook specific assertions
+    assert metrics["num_pruned"] == 20  # 40% of 50 = 20
+    assert metrics["rmse"] == pytest.approx(0.3385471, rel=1e-5)
+    assert metrics["cosine_similarity"] == pytest.approx(0.8116209, rel=1e-5)
+
+
 def test_evaluate_importance_scores_with_l2_norm_hook():
     """Test evaluate_importance_scores using MegatronL2NormHook."""
     spawn_multiprocess_job(
@@ -116,6 +139,15 @@ def test_evaluate_importance_scores_with_iterative_channel_contribution_hook():
     spawn_multiprocess_job(
         size=1,
         job=_test_evaluate_importance_scores_with_iterative_channel_contribution_hook,
+        backend="gloo",
+    )
+
+
+def test_evaluate_importance_scores_with_independent_channel_contribution_hook():
+    """Test evaluate_importance_scores using IndependentChannelContributionHook."""
+    spawn_multiprocess_job(
+        size=1,
+        job=_test_evaluate_importance_scores_with_independent_channel_contribution_hook,
         backend="gloo",
     )
 
