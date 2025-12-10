@@ -80,7 +80,7 @@ class ReferenceRunner:
             if sorted(self.input_names) != sorted(data_loader[0].keys()):
                 raise ValueError("Input names from ONNX model do not match provided input names.")
             for inp_name, inp_shape in data_loader[0].items():
-                if self.input_shapes[inp_name] != inp_shape.shape:
+                if self.input_shapes[inp_name] != list(inp_shape.shape):
                     raise ValueError(
                         f"Input shape from '{inp_name}' does not match provided input shape: "
                         f"{self.input_shapes[inp_name]} vs {list(inp_shape.shape)}. "
