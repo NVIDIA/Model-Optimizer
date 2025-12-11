@@ -81,7 +81,10 @@ def run_mcore_inference(
         if HAS_MAMBA and isinstance(model.decoder.layers[0], MambaLayer):
             active_hidden_size = model.decoder.layers[0].mixer.d_model
         elif isinstance(model.decoder.layers[0].self_attention, SelfAttention):
-            active_hidden_size = model.decoder.layers[0].self_attention.linear_qkv.input_size
+            if hasattr(model.decoder.layers[0].self_attention.linear_qkv, "in_features"):
+                active_hidden_size = model.decoder.layers[0].self_attention.linear_qkv.in_features
+            else:
+                active_hidden_size = model.decoder.layers[0].self_attention.linear_qkv.input_size
         elif isinstance(model.decoder.layers[0].mlp, MLP):
             active_hidden_size = model.decoder.layers[0].mlp.linear_fc1.input_size
         else:
