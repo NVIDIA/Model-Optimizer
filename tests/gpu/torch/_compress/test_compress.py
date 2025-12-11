@@ -70,12 +70,7 @@ def _test_compress_multiprocess_job(project_root_path: Path, tmp_path: Path, ran
         # Check assertions
         #
         if rank == 0:
-            # assertions for the score_pruning_activations step 1
-            rank = int(os.environ["RANK"])
-            rank_filepath = (
-                f"pruning/pruning_scores/ffn_iterative/100samples_diverse_mini/rank_{rank}.pth"
-            )
-            assert (puzzle_dir / rank_filepath).is_file()
+            _assert_score_pruning_activations(puzzle_dir)
 
             # assertions for the pruning_ckpts step 2
             assert (puzzle_dir / "ckpts/ffn_256_attn_no_op").exists()
@@ -105,4 +100,29 @@ def _test_compress_multiprocess_job(project_root_path: Path, tmp_path: Path, ran
 
         runtime.wait_for_everyone()
 
-    print("PYTEST SUMMARY: test_compress_model() test has finished successfully")
+    print(
+        "PYTEST SUMMARY: test_compress_model() test has finished successfully. Puzzle directory: ",
+        puzzle_dir,
+    )
+
+
+def _assert_score_pruning_activations(puzzle_dir: Path):
+    """Assertions for the score_pruning_activations step 1."""
+    rank = int(os.environ["RANK"])
+    rank_filepath = f"pruning/pruning_scores/ffn_iterative/100samples_diverse_mini/rank_{rank}.pth"
+    assert (puzzle_dir / rank_filepath).is_file()
+
+    pruning_scores = torch.load(puzzle_dir / rank_filepath)
+
+    layer_names = list(pruning_scores.keys())
+    assert len(layer_names) == 2
+
+    # Check specific values for layer 0
+    layer_0 = pruning_scores[layer_names[0]]
+    assert layer_0["score"][0].item() == 371
+    assert layer_0["channels_importance_ascending"][0].item() == 140
+
+    # Check specific values for layer 1
+    layer_1 = pruning_scores[layer_names[1]]
+    assert layer_1["score"][0].item() == 269
+    assert layer_1["channels_importance_ascending"][0].item() == 366
