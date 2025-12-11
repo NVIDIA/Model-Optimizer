@@ -18,6 +18,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+__all__ = ["evaluate_importance_scores"]
+
 
 def evaluate_importance_scores(
     linear_layer: nn.Linear,

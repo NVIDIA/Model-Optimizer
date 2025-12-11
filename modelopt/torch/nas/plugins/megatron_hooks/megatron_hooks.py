@@ -23,6 +23,12 @@ from megatron.core.tensor_parallel import gather_from_tensor_model_parallel_regi
 from megatron.core.tensor_parallel.layers import RowParallelLinear
 from torch import nn
 
+__all__ = [
+    "IndependentChannelContributionHook",
+    "IterativeChannelContributionHook",
+    "MegatronL2NormHook",
+]
+
 
 def clear_gpu_memory(clear: bool) -> None:
     """Clear GPU memory cache if requested.
