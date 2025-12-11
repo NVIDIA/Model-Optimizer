@@ -466,17 +466,12 @@ class HFEagleModel(EagleModel):
         )
         self.eagle_config = PretrainedConfig.from_dict(eagle_architecture_config)
         # Hidden size and vocab size must match base model
-        llm_config = self.config.llm_config if hasattr(self.config, "llm_config") else self.config
-        self.eagle_config.hidden_size = llm_config.hidden_size
-        self.eagle_config.vocab_size = llm_config.vocab_size
-        self.eagle_config.max_position_embeddings = llm_config.max_position_embeddings
+        self.eagle_config.hidden_size = self._base_llm_config.hidden_size
+        self.eagle_config.vocab_size = self._base_llm_config.vocab_size
+        self.eagle_config.max_position_embeddings = self._base_llm_config.max_position_embeddings
         self.eagle_config.draft_vocab_size = getattr(
             self.eagle_config, "draft_vocab_size", self.eagle_config.vocab_size
         )
-        if getattr(self.eagle_config, "head_dim", None) is None:
-            self.eagle_config.head_dim = (
-                self.eagle_config.hidden_size // self.eagle_config.num_attention_heads
-            )
 
         if self.eagle_config._attn_implementation is None:
             self.eagle_config._attn_implementation = "sdpa"
@@ -992,7 +987,7 @@ class HFEagleModel(EagleModel):
             eagle_input_hidden_states = base_model_hidden_states
 
         draft_tokens = []
-        for _ in range(steps):
+        for step in range(steps):
             # Get eagle inputs for the first eagle forward pass
             _, eagle_attention_mask, eagle_position_ids = self._get_eagle_module_inputs(
                 input_ids,
@@ -1017,7 +1012,8 @@ class HFEagleModel(EagleModel):
                     position_embeddings,
                 )
 
-            if self.eagle_config.parallel_draft_step > 1:
+            # parallel logits are only used after the last step
+            if step == steps - 1 and self.eagle_config.parallel_draft_step > 1:
                 parallel_logits = [
                     eagle_logits[i][:, -1:, :]
                     for i in range(1, self.eagle_config.parallel_draft_step)

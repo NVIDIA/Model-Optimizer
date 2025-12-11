@@ -677,10 +677,6 @@ class _DynamicEagleGPTModel(EagleModel):
             if self.eagle_config.draft_vocab_size is None
             else self.eagle_config.draft_vocab_size
         )
-        if self.eagle_config.kv_channels is None:
-            self.eagle_config.kv_channels = (
-                self.eagle_config.hidden_size // self.eagle_config.num_attention_heads
-            )
 
         if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size:
             assert eagle_self_logit_distillation, (
@@ -1203,7 +1199,7 @@ class _DynamicEagleGPTModel(EagleModel):
         hidden_states = hidden_states[:seq_len, :, :]
 
         draft_tokens = []
-        for _ in range(steps):
+        for step in range(steps):
             padded_eagle_ids, seq_len, padded_hidden_states = right_padding(
                 eagle_ids, hidden_states
             )
@@ -1232,7 +1228,8 @@ class _DynamicEagleGPTModel(EagleModel):
                 output_weight,
             )
 
-            if self.eagle_config.parallel_draft_step > 1:
+            # parallel_logits are only used after the last step
+            if step == steps - 1 and self.eagle_config.parallel_draft_step > 1:
                 parallel_logits = [
                     eagle_logits[i][seq_len - 1 : seq_len]
                     for i in range(1, self.eagle_config.parallel_draft_step)

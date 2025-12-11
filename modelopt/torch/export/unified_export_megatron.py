@@ -212,26 +212,14 @@ class GPTModelExporter:
                     )
 
                     eagle_config = {
-                        "use_input_layernorm_in_first_layer": mode_cfg["config"][
-                            "eagle_architecture_config"
-                        ]["use_input_layernorm_in_first_layer"],
-                        "use_last_layernorm": mode_cfg["config"]["eagle_architecture_config"][
-                            "use_last_layernorm"
-                        ],
-                        "use_mtp_layernorm": mode_cfg["config"]["eagle_architecture_config"][
-                            "use_mtp_layernorm"
-                        ],
-                        "use_aux_hidden_state": mode_cfg["config"]["eagle_architecture_config"][
-                            "use_aux_hidden_state"
-                        ],
+                        "use_input_layernorm_in_first_layer": model.eagle_config.use_input_layernorm_in_first_layer,
+                        "use_last_layernorm": model.eagle_config.use_last_layernorm,
+                        "use_mtp_layernorm": model.eagle_config.use_mtp_layernorm,
+                        "use_aux_hidden_state": model.eagle_config.use_aux_hidden_state,
                         "eagle_aux_hidden_state_layer_ids": model.eagle_config.eagle_aux_hidden_state_layer_ids,
                         "next_layer_regular": True,
-                        "parallel_draft_step": mode_cfg["config"]["eagle_architecture_config"][
-                            "parallel_draft_step"
-                        ],
-                        "parallel_draft_heads_num_layers": mode_cfg["config"][
-                            "eagle_architecture_config"
-                        ]["parallel_draft_heads_num_layers"],
+                        "parallel_draft_step": model.eagle_config.parallel_draft_step,
+                        "parallel_draft_heads_num_layers": model.eagle_config.parallel_draft_heads_num_layers,
                     }
 
                     eagle_config_update = {
@@ -243,9 +231,7 @@ class GPTModelExporter:
                         "max_position_embeddings": self._hf_text_config.max_position_embeddings,
                         "num_attention_heads": model.eagle_module.config.num_attention_heads,
                         "num_key_value_heads": model.eagle_module.config.num_query_groups,
-                        "num_hidden_layers": mode_cfg["config"]["eagle_architecture_config"][
-                            "num_hidden_layers"
-                        ],
+                        "num_hidden_layers": model.eagle_config.num_hidden_layers,
                         "vocab_size": self._hf_text_config.vocab_size,
                         # Unset any special token ids given that the tokenizer can change here.
                         "bos_token_id": None,
@@ -254,9 +240,7 @@ class GPTModelExporter:
                         "sep_token_id": None,
                         # The following attributes are EAGLE specific
                         "eagle_config": eagle_config,
-                        "draft_vocab_size": mode_cfg["config"]["eagle_architecture_config"][
-                            "draft_vocab_size"
-                        ],
+                        "draft_vocab_size": model.eagle_config.draft_vocab_size,
                     }
 
                     self._hf_extra_config.update(eagle_config_update)
