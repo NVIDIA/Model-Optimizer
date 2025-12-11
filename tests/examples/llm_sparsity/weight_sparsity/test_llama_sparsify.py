@@ -31,7 +31,7 @@ def run_llm_sparsity_command(
     kwargs.setdefault("model_max_length", 1024)
 
     cmd_parts = extend_cmd_parts(["python", "hf_pts.py"], **kwargs)
-    run_example_command(cmd_parts, "llm_sparsity")
+    run_example_command(cmd_parts, "llm_sparsity/weight_sparsity")
 
 
 def run_llm_sparsity_ft_command(
@@ -51,13 +51,15 @@ def run_llm_sparsity_ft_command(
     kwargs.setdefault("eval_bs", 1)
 
     cmd_parts = extend_cmd_parts(["bash", "launch_finetune.sh"], **kwargs)
-    run_example_command(cmd_parts, "llm_sparsity")
+    run_example_command(cmd_parts, "llm_sparsity/weight_sparsity")
 
 
 @pytest.fixture(scope="session")
 def data_path(tmp_path_factory):
     data_path = tmp_path_factory.mktemp("data")
-    run_example_command(["python", "data_prep.py", "--save_path", data_path], "llm_sparsity")
+    run_example_command(
+        ["python", "data_prep.py", "--save_path", data_path], "llm_sparsity/weight_sparsity"
+    )
 
     # Copy eval data to train path for faster test
     run_example_command(
