@@ -1,6 +1,13 @@
 NVIDIA Model Optimizer Changelog (Linux)
 ========================================
 
+0.41 (2026-01-XX)
+^^^^^^^^^^^^^^^^^
+
+**New Features**
+
+- Add support for dynamically linked TensorRT plugins in the ONNX quantization workflow.
+
 0.40 (2025-12-15)
 ^^^^^^^^^^^^^^^^^
 
