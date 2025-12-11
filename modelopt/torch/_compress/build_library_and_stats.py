@@ -88,22 +88,3 @@ def launch_build_library_and_stats(cfg: DictConfig) -> None:
     mprint(f"  - {cfg.puzzle_dir}/{cfg.calc_subblock_stats.subblock_stats_filename}")
     if hasattr(cfg.calc_subblock_stats, "moe_stats_filename"):
         mprint(f"  - {cfg.puzzle_dir}/{cfg.calc_subblock_stats.moe_stats_filename}")
-
-
-@hydra.main("", version_base="1.3")
-def main(cfg: DictConfig) -> None:
-    """
-    Main entry point for the unified build library and stats command.
-
-    This function uses Hydra for configuration management and runs both
-    build_replacement_library and calc_subblock_stats in sequence.
-    """
-    cfg = hydra.utils.instantiate(cfg)
-    mprint("Unified Build Library and Stats Configuration:")
-    mprint(format_global_config(cfg))
-    launch_build_library_and_stats(cfg)
-
-
-if __name__ == "__main__":
-    register_hydra_resolvers()
-    main()

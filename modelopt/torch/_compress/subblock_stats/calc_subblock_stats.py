@@ -16,20 +16,16 @@
 
 """Calc subblock stats to compute memory and runtime statistics for subblocks."""
 
-import os
-from itertools import product
-
-from modelopt.torch._compress.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
-
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
 import dataclasses
 import json
+import os
 from functools import partial
+from itertools import product
 from pathlib import Path
 from typing import Iterable, Optional, Type, TypeVar
 
-import hydra
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import pandas as pd
 import torch
 from immutabledict import immutabledict
@@ -42,6 +38,7 @@ from modelopt.torch._compress.decilm.deci_lm_hf_code.block_config import (
     FFNConfig,
     SubblockConfig,
 )
+from modelopt.torch._compress.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 from modelopt.torch._compress.replacement_library.replacement_utils import parse_layer_replacement
 from modelopt.torch._compress.subblock_stats.calc_subblock_params_and_memory import (
     calc_subblock_active_params,
@@ -51,7 +48,6 @@ from modelopt.torch._compress.subblock_stats.calc_subblock_params_and_memory imp
     calculate_subblock_params,
 )
 from modelopt.torch._compress.tools.checkpoint_utils import load_model_config
-from modelopt.torch._compress.tools.hydra_utils import register_hydra_resolvers
 from modelopt.torch._compress.tools.logger import mprint
 from modelopt.torch._compress.tools.robust_json import json_dump
 from modelopt.torch._compress.utils.parsing import format_global_config
@@ -91,9 +87,7 @@ def calculate_subblock_stats(
 ) -> dict:
     is_calc_runtime = benchmark_iterations is not None
     if is_calc_runtime:
-        from puzzle_tools.subblock_stats.runtime_stats.calc_runtime_stats import (
-            calc_runtime_ms_for_subblocks,
-        )
+        raise NotImplementedError("Runtime stats calculation is not implemented yet")
 
     gpu = None if not torch.cuda.is_available() else torch.cuda.get_device_name()
     subblock_stats = {
@@ -540,15 +534,3 @@ def _find_corresponding_bf16_stats(args: dict, subblock_stats: list[dict]) -> di
     if len(matching_bf16_stats) == 1:
         return matching_bf16_stats[0]
     raise ValueError(f"Found more than 1 matching bf16 stats for {args=}")
-
-
-@hydra.main("configs", version_base="1.3", config_name="search_space")
-def main(cfg: DictConfig) -> None:
-    cfg = hydra.utils.instantiate(cfg)
-    mprint(format_global_config(cfg))
-    launch_calc_subblock_stats(cfg)
-
-
-if __name__ == "__main__":
-    register_hydra_resolvers()
-    main()

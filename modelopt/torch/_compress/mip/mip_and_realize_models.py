@@ -19,13 +19,11 @@
 from pathlib import Path
 from typing import List
 
-import hydra
 import torch
 from omegaconf import DictConfig
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress.mip.run_puzzle import run_puzzle
-from modelopt.torch._compress.tools.hydra_utils import register_hydra_resolvers
 from modelopt.torch._compress.tools.logger import mprint
 from modelopt.torch._compress.tools.validate_puzzle_with_multi_replacements import (
     validate_puzzle_solutions,
@@ -72,16 +70,3 @@ def launch_mip_and_realize_model(cfg: DictConfig):
             cfg.realize_model.solutions_path = Path(solution_path)
             launch_realize_model(cfg)
             dist.barrier()
-
-
-@hydra.main("", version_base="1.3")
-def main(cfg: DictConfig) -> None:
-    cfg = hydra.utils.instantiate(cfg)
-    dist.setup(timeout=cfg.nccl_timeout_minutes)
-    launch_mip_and_realize_model(cfg)
-    dist.cleanup()
-
-
-if __name__ == "__main__":
-    register_hydra_resolvers()
-    main()

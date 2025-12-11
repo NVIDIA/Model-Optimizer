@@ -40,7 +40,6 @@ import json
 from pathlib import Path
 from typing import Any, Type
 
-import hydra
 import pandas as pd
 from omegaconf import DictConfig
 
@@ -59,7 +58,6 @@ from modelopt.torch._compress.tools.checkpoint_utils import (
     is_valid_decilm_checkpoint,
     load_model_config,
 )
-from modelopt.torch._compress.tools.hydra_utils import register_hydra_resolvers
 from modelopt.torch._compress.tools.logger import mprint
 from modelopt.torch._compress.tools.robust_json import json_dump
 from modelopt.torch._compress.utils.parsing import format_global_config
@@ -591,15 +589,3 @@ def _build_single_sequence_replacement_solutions(
         )
 
     return solutions
-
-
-@hydra.main("", version_base="1.3")
-def main(cfg: DictConfig) -> None:
-    cfg = hydra.utils.instantiate(cfg)
-    mprint(format_global_config(cfg))
-    launch_build_replacement_library(cfg)
-
-
-if __name__ == "__main__":
-    register_hydra_resolvers()
-    main()

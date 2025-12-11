@@ -18,7 +18,6 @@
 activation scoring for pruning.
 """
 
-import argparse
 import gc
 import json
 from abc import ABC, abstractmethod
@@ -98,7 +97,7 @@ class ActivationsHook(ABC):
         cls: type["ActivationsHook"],
         activation_hooks: dict[str, "ActivationsHook"],
         activations_log_dir: Path | str,
-        args: argparse.Namespace,
+        args: DictConfig,
     ) -> None:
         """
         Default implementation for dumping final activation scores logs to disk.
@@ -116,12 +115,7 @@ class ActivationsHook(ABC):
 
         if rank == 0:
             args.activation_hooks_kwargs.pop("model")
-            json_dump(
-                OmegaConf.to_container(args, resolve=True)
-                if isinstance(args, DictConfig)
-                else vars(args),
-                activations_log_dir / "args.json",
-            )
+            json_dump(OmegaConf.to_container(args, resolve=True), activations_log_dir / "args.json")
         dist.barrier()
 
         aprint(f"Dumped final activations log to {activations_log_path}")
@@ -459,7 +453,7 @@ class LayerNormContributionHook(ActivationsHook):
         cls: type["LayerNormContributionHook"],
         activation_hooks: dict[str, "ActivationsHook"],
         activations_log_dir: Path | str,
-        args: argparse.Namespace,
+        args: DictConfig,
     ) -> None:
         """
         At the end of the default implementation of dumping activation scores to disc,
@@ -480,7 +474,7 @@ class LayerNormContributionHook(ActivationsHook):
     def _save_channel_importance_results(
         activation_hooks: dict[str, ActivationsHook],
         activations_log_dir: Path,
-        args: argparse.Namespace,
+        args: DictConfig,
     ) -> None:
         """
         Save channel importance results from activation hooks.

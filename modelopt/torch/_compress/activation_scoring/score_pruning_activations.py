@@ -15,15 +15,12 @@
 
 from pathlib import Path
 
-import hydra
 import torch
 from omegaconf import DictConfig
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch._compress.tools.hydra_utils import register_hydra_resolvers
 from modelopt.torch._compress.tools.logger import mprint
 from modelopt.torch._compress.tools.validate_model import validate_model
-from modelopt.torch._compress.utils.parsing import format_global_config
 
 
 def has_checkpoint_support(activation_hooks_kwargs: dict) -> bool:
@@ -145,17 +142,3 @@ def launch_score_activations(cfg: DictConfig):
 
     # The checkpoint manager inside validate_model handles all progress tracking
     validate_model(args=cfg.pruning, pipeline_parallel=True)
-
-
-@hydra.main("", version_base="1.3")
-def main(cfg: DictConfig) -> None:
-    cfg = hydra.utils.instantiate(cfg)
-    mprint(format_global_config(cfg, title="Score Pruning Activations"))
-    dist.setup(timeout=cfg.nccl_timeout_minutes)
-    launch_score_activations(cfg)
-    dist.cleanup()
-
-
-if __name__ == "__main__":
-    register_hydra_resolvers()
-    main()

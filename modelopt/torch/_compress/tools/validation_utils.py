@@ -20,7 +20,6 @@ TODO: Consider moving this a separate module dedicated for scoring.
 
 # mypy: ignore-errors
 
-import argparse
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Union
 
@@ -40,10 +39,10 @@ if TYPE_CHECKING:
 
 
 def validate_model_and_extract_hidden_states(
-    args: argparse.Namespace,
+    args: DictConfig,
     model: "nn.Module | StitchedModule",
     tokenizer: PreTrainedTokenizerBase,
-    output_dir: Union[str, Path],
+    output_dir: str | Path,
     model_name: str,
     extra_payload: Optional[dict[str, Any]] = None,
     pipeline_parallel: bool = False,
@@ -72,11 +71,11 @@ validate_model_and_extract_token_probs({model_name=})
 
 
 def validate_model_with_teacher_similarity_metrics(
-    args: argparse.Namespace,
+    args: DictConfig,
     model: "nn.Module | StitchedModule",
     tokenizer: PreTrainedTokenizerBase,
     target_hidden_states_per_batch: list[torch.Tensor],
-    output_dir: Union[str, Path],
+    output_dir: str | Path,
     model_name: str,
     extra_payload: Optional[dict[str, Any]] = None,
     pipeline_parallel: bool = False,
@@ -106,10 +105,7 @@ validate_model_with_kl_div({model_name=}, {is_calc_kl_div=})
 
 
 def write_results(
-    output_dir: Union[str, Path],
-    result_name: str,
-    args: argparse.Namespace,
-    payload: dict[str, Any],
+    output_dir: str | Path, result_name: str, args: DictConfig, payload: dict[str, Any]
 ) -> None:
     output_path = Path(output_dir) / f"{result_name}.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
