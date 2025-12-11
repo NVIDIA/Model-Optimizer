@@ -536,8 +536,8 @@ def _export_hf_checkpoint(
                     quantizer_attrs=["gate_up_proj_input_quantizer", "down_proj_input_quantizer"],
                 )
                 # Export the quantized weights
-                for weight_name in ["gate_up_proj", "down_proj"]:
-                    with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                    for weight_name in ["gate_up_proj", "down_proj"]:
                         _export_quantized_weight(sub_module, dtype, weight_name)
 
     if accelerator is not None:

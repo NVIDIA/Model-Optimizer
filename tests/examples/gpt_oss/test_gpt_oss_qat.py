@@ -47,7 +47,10 @@ class GPTOSS:
         self.model_path = model_path
 
     def gpt_oss_sft_training(self, tmp_path):
-        """Test supervised fine-tuning (SFT) of GPT-OSS-20B model - Step 1."""
+        """Test supervised fine-tuning (SFT) of GPT-OSS-20B model - Step 1.
+        Returns:
+            Path to SFT output directory if successful, None otherwise
+        """
         model_name = self.model_path.split("/")[-1]
         output_dir = tmp_path / f"{model_name}-sft"
 
@@ -70,9 +73,16 @@ class GPTOSS:
         # Verify SFT output directory exists
         assert output_dir.exists(), "SFT output directory should exist after training"
 
+        # Return the path to the SFT checkpoint
+        return output_dir
+
     def gpt_oss_qat_training_lora(self, tmp_path):
+        """Test QAT training with LoRA for GPT-OSS-120B model - Step 1.
+        Returns:
+            Path to QAT-LoRA output directory if successful, None otherwise
+        """
         model_name = self.model_path.split("/")[-1]
-        qat_output_dir = tmp_path / f"{model_name}-qat"
+        qat_output_dir = tmp_path / f"{model_name}-qat-lora"
         cmd_parts = [
             "python",
             "sft.py",
@@ -90,13 +100,22 @@ class GPTOSS:
 
         # Verify QAT output directory exists
         assert qat_output_dir.exists(), "QAT output directory should exist after training"
+        # Return the path to the QAT-LoRA checkpoint
+        return qat_output_dir
 
-    def gpt_oss_qat_training(self, tmp_path):
-        """Test quantization-aware training (QAT) with MXFP4 configuration - Step 2."""
+    def gpt_oss_qat_training(self, tmp_path, sft_dir=None):
+        """Test quantization-aware training (QAT) with MXFP4 configuration - Step 2.
+        Args:
+            tmp_path: Base path for outputs
+            sft_dir: Path to SFT checkpoint from Step 1. If None, creates a mock one for standalone testing
+        Returns:
+            Path to QAT output directory if successful, None otherwise
+        """
         # This test assumes test_gpt_oss_sft_training has been run first
         # Look for the SFT output directory from step 1
         model_name = self.model_path.split("/")[-1]
-        sft_dir = tmp_path / f"{model_name}-sft"
+        if sft_dir is None:
+            sft_dir = tmp_path / f"{model_name}-sft"
 
         # If SFT directory doesn't exist, create a mock one for standalone testing
         if not sft_dir.exists():
@@ -140,32 +159,24 @@ class GPTOSS:
 
         # Verify QAT output directory exists
         assert qat_output_dir.exists(), "QAT output directory should exist after training"
+        # Return the path to the QAT checkpoint
+        return qat_output_dir
 
-    def gpt_oss_mxfp4_conversion(self, tmp_path):
-        """Test conversion to MXFP4 weight-only format - Step 3."""
+    def gpt_oss_mxfp4_conversion(self, tmp_path, qat_dir=None):
+        """Test conversion to MXFP4 weight-only format - Step 3.
+        Args:
+            tmp_path: Base path for outputs
+            qat_dir: Path to QAT checkpoint from Step 2. If None, creates a mock one for standalone testing
+
+        Returns:
+            Path to MXFP4 conversion output directory if successful, None otherwise
+        """
         # This test assumes test_gpt_oss_qat_training has been run first
         # Look for the QAT output directory from step 2
         model_name = self.model_path.split("/")[-1]
-        qat_dir = tmp_path / f"{model_name}-qat"
 
-        # If QAT directory doesn't exist, create a mock one for standalone testing
-        if not qat_dir.exists():
-            qat_dir.mkdir()
-
-            # Create minimal config.json for the mock model
-            config_content = {
-                "model_type": "gpt_oss",
-                "hidden_size": 5120,
-                "num_attention_heads": 40,
-                "num_hidden_layers": 44,
-                "vocab_size": 100000,
-                "torch_dtype": "bfloat16",
-            }
-
-            import json
-
-            with open(qat_dir / "config.json", "w") as f:
-                json.dump(config_content, f)
+        if qat_dir is None:
+            qat_dir = tmp_path / f"{model_name}-qat"
 
         conversion_output_dir = tmp_path / f"{model_name}-qat-real-mxfp4"
 
@@ -183,11 +194,56 @@ class GPTOSS:
 
         # Verify conversion output directory exists
         assert conversion_output_dir.exists(), "MXFP4 conversion output directory should exist"
+        # Return the path to the MXFP4 checkpoint
+        return conversion_output_dir
 
-    def deploy_gpt_oss_trtllm(self, tmp_path):
-        """Deploy GPT-OSS model with TensorRT-LLM."""
+    def gpt_oss_mxfp4_conversion_lora(self, tmp_path, qat_lora_dir=None):
+        """Test conversion to MXFP4 weight-only format for LoRA model - Step 2.
+        Args:
+            tmp_path: Base path for outputs
+            qat_lora_dir: Path to QAT-LoRA checkpoint from Step 1. If None, uses default path
+        Returns:
+            Path to MXFP4 conversion output directory if successful, None otherwise
+        """
+        # This test assumes test_gpt_oss_qat_training has been run first
+        # Look for the QAT output directory from step 2
+        model_name = self.model_path.split("/")[-1]
+        if qat_lora_dir is None:
+            qat_lora_dir = tmp_path / f"{model_name}-qat-lora"
+
+        conversion_output_dir = tmp_path / f"{model_name}-qat-real-mxfp4"
+
+        # Command for MXFP4 conversion (Step 3)
+        cmd_parts = [
+            "python",
+            "convert_oai_mxfp4_weight_only.py",
+            "--lora_path",
+            str(qat_lora_dir),
+            "--base_path",
+            self.model_path,
+            "--output_path",
+            str(conversion_output_dir),
+        ]
+
+        run_example_command(cmd_parts, "gpt-oss")
+
+        # Verify conversion output directory exists
+        assert conversion_output_dir.exists(), "MXFP4 conversion output directory should exist"
+        # Return the path to the MXFP4 checkpoint
+        return conversion_output_dir
+
+    def deploy_gpt_oss_trtllm(self, tmp_path, model_path_override=None):
+        """Deploy GPT-OSS model with TensorRT-LLM.
+        Args:
+            tmp_path: Path for temporary files (benchmark data, reports)
+            model_path_override: Optional path to the model to deploy (e.g., MXFP4 checkpoint).
+                                If None, uses self.model_path
+        """
         # Skip if tensorrt_llm is not available
         pytest.importorskip("tensorrt_llm")
+
+        # Use override path if provided, otherwise use original model path
+        deploy_model_path = model_path_override if model_path_override else self.model_path
 
         # Prepare benchmark data
         tensorrt_llm_workspace = "/app/tensorrt_llm"
@@ -214,6 +270,8 @@ class GPTOSS:
             "trtllm-bench",
             "--model",
             self.model_path,
+            "--model_path",
+            str(deploy_model_path),
             "throughput",
             "--backend",
             "pytorch",
@@ -236,32 +294,58 @@ class GPTOSS:
 )
 def test_gpt_oss_complete_pipeline(model_path, tmp_path):
     """Test the complete GPT-OSS optimization pipeline by executing all 3 steps in sequence."""
+    import pathlib
+
+    # Use current directory instead of tmp_path for checkpoints
+    current_dir = pathlib.Path.cwd()
     # Create GPTOSS instance with model path
     gpt_oss = GPTOSS(model_path)
-    model_name = model_path.split("/")[-1]
 
-    # Execute Step 1: SFT Training
     if model_path == "openai/gpt-oss-20b":
-        gpt_oss.gpt_oss_sft_training(tmp_path)
-        # Execute Step 2: QAT Training
-        gpt_oss.gpt_oss_qat_training(tmp_path)
+        # Step 1: SFT Training
+        sft_checkpoint = gpt_oss.gpt_oss_sft_training(current_dir)
+        if not sft_checkpoint or not sft_checkpoint.exists():
+            print("Step 1 failed: SFT checkpoint not found, stopping pipeline.")
+            return
+        print(f"Step 1 completed: SFT checkpoint at {sft_checkpoint}")
+
+        # Step 2: QAT Training (depends on Step 1)
+        qat_checkpoint = gpt_oss.gpt_oss_qat_training(current_dir, sft_dir=sft_checkpoint)
+        if not qat_checkpoint or not qat_checkpoint.exists():
+            print("Step 2 failed: QAT checkpoint not found, stopping pipeline.")
+            return
+        print(f"Step 2 completed: QAT checkpoint at {qat_checkpoint}")
+
+        # Step 3: MXFP4 Conversion (depends on Step 2)
+        mxfp4_checkpoint = gpt_oss.gpt_oss_mxfp4_conversion(current_dir, qat_dir=qat_checkpoint)
+        if not mxfp4_checkpoint or not mxfp4_checkpoint.exists():
+            print("Step 3 failed: MXFP4 checkpoint not found, stopping pipeline.")
+            return
+        print(f"Step 3 completed: MXFP4 checkpoint at {mxfp4_checkpoint}")
+
+        # Step 4: Deploy with TensorRT-LLM (depends on Step 3)
+        print("Step 4: Running deployment with MXFP4 checkpoint...")
+        gpt_oss.deploy_gpt_oss_trtllm(current_dir, model_path_override=mxfp4_checkpoint)
+        print("Step 4 completed: Deployment successful")
+
     elif model_path == "openai/gpt-oss-120b":
-        # Execute QAT Training with LoRA
-        gpt_oss.gpt_oss_qat_training_lora(tmp_path)
+        # Step 1: QAT Training with LoRA
+        qat_lora_checkpoint = gpt_oss.gpt_oss_qat_training_lora(current_dir)
+        if not qat_lora_checkpoint or not qat_lora_checkpoint.exists():
+            print("Step 1 failed: QAT-LoRA checkpoint not found, stopping pipeline.")
+            return
+        print(f"Step 1 completed: QAT-LoRA checkpoint at {qat_lora_checkpoint}")
 
-    # Execute Step 3: MXFP4 Conversion
-    gpt_oss.gpt_oss_mxfp4_conversion(tmp_path)
+        # Step 2: MXFP4 Conversion for LoRA model (depends on Step 1)
+        mxfp4_checkpoint = gpt_oss.gpt_oss_mxfp4_conversion_lora(
+            current_dir, qat_lora_dir=qat_lora_checkpoint
+        )
+        if not mxfp4_checkpoint or not mxfp4_checkpoint.exists():
+            print("Step 2 failed: MXFP4 checkpoint not found, stopping pipeline.")
+            return
+        print(f"Step 2 completed: MXFP4 checkpoint at {mxfp4_checkpoint}")
 
-    # Verify all output directories exist
-    qat_dir = tmp_path / f"{model_name}-qat"
-    conversion_dir = tmp_path / f"{model_name}-qat-real-mxfp4"
-
-    assert qat_dir.exists(), "QAT output directory should exist after Step 2"
-    assert conversion_dir.exists(), "MXFP4 conversion output directory should exist after Step 3"
-
-    print(f"Complete pipeline executed successfully for {model_path}!")
-    print(f"QAT output: {qat_dir}")
-    print(f"MXFP4 conversion output: {conversion_dir}")
-
-    # Deploy with TensorRT-LLM
-    gpt_oss.deploy_gpt_oss_trtllm(tmp_path)
+        # Step 3: Deploy with TensorRT-LLM (depends on Step 2)
+        print("Step 3: Running deployment with MXFP4 checkpoint...")
+        gpt_oss.deploy_gpt_oss_trtllm(current_dir, model_path_override=mxfp4_checkpoint)
+        print("Step 3 completed: Deployment successful")
