@@ -29,6 +29,7 @@ MODEL_NAME_TO_TYPE = {
     "MPT": "mpt",
     "Bloom": "bloom",
     "ChatGLM": "chatglm",
+    "Qwen3OmniMoeForConditionalGeneration": "qwen3omni",
     "QWen": "qwen",
     "RecurrentGemma": "recurrentgemma",
     "Gemma3": "gemma3",
