@@ -381,7 +381,7 @@ def _create_trt_dynamic_shapes(dynamic_shapes):
     }
 
 
-def generate_dummy_inputs_and_dynamic_axes_and_shapes(model_id, backbone):
+def generate_dummy_kwargs_and_dynamic_axes_and_shapes(model_id, backbone):
     """Generate dummy inputs, dynamic axes, and dynamic shapes for the given model."""
     if model_id in ["sdxl-1.0", "sdxl-turbo"]:
         dummy_kwargs, dynamic_shapes = _gen_dummy_inp_and_dyn_shapes_sdxl(
@@ -474,7 +474,7 @@ def modelopt_export_sd(backbone, onnx_dir, model_name, precision):
         configure_linear_module_onnx_quantizers(backbone) if precision == "fp4" else nullcontext()
     )
 
-    dummy_kwargs, dynamic_axes, _ = generate_dummy_inputs_and_dynamic_axes_and_shapes(
+    dummy_kwargs, dynamic_axes, _ = generate_dummy_kwargs_and_dynamic_axes_and_shapes(
         model_name, backbone
     )
 
