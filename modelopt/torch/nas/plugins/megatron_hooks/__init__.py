@@ -9,22 +9,5 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-"""Megatron hooks module for NAS plugin."""
-
-from .megatron_hooks import (
-    IndependentChannelContributionHook,
-    IterativeChannelContributionHook,
-    MegatronL2NormHook,
-)
-from .megatron_hooks_analysis import evaluate_importance_scores
-
-__all__ = [
-    "IndependentChannelContributionHook",
-    "IterativeChannelContributionHook",
-    "MegatronL2NormHook",
-    "evaluate_importance_scores",
-]
+from .megatron_hooks import *
+from .megatron_hooks_analysis import *
