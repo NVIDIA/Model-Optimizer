@@ -47,6 +47,7 @@ class ModelDeployer:
             model_id: Path to the model
             tensor_parallel_size: Tensor parallel size for distributed inference
             mini_sm: Minimum SM (Streaming Multiprocessor) requirement for the model
+            attn_backend: is for TRT LLM deployment
         """
         self.backend = backend
         self.model_id = model_id
@@ -130,12 +131,12 @@ class ModelDeployer:
             )
 
         outputs = llm.generate(COMMON_PROMPTS, sampling_params)
-
         # Print outputs
         for output in outputs:
             prompt = output.prompt
             generated_text = output.outputs[0].text
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        del llm
 
     def _deploy_vllm(self):
         """Deploy a model using vLLM."""
@@ -172,6 +173,7 @@ class ModelDeployer:
             print(f"Model: {self.model_id}")
             print(f"Prompt: {output.prompt!r}, Generated text: {output.outputs[0].text!r}")
             print("-" * 50)
+        del llm
 
     def _deploy_sglang(self):
         """Deploy a model using SGLang."""
@@ -182,14 +184,29 @@ class ModelDeployer:
         quantization_method = "modelopt"
         if "FP4" in self.model_id:
             quantization_method = "modelopt_fp4"
-        llm = sgl.Engine(
-            model_path=self.model_id,
-            quantization=quantization_method,
-            tp_size=self.tensor_parallel_size,
-            trust_remote_code=True,
-        )
+        if "eagle" in self.model_id.lower():
+            llm = sgl.Engine(
+                model_path=self.base_model,
+                speculative_algorithm="EAGLE3",
+                speculative_num_steps=3,
+                speculative_eagle_topk=1,
+                speculative_num_draft_tokens=4,
+                speculative_draft_model_path=self.model_id,
+                tp_size=self.tensor_parallel_size,
+                trust_remote_code=True,
+                mem_fraction_static=0.7,
+                context_length=1024,
+            )
+        else:
+            llm = sgl.Engine(
+                model_path=self.model_id,
+                quantization=quantization_method,
+                tp_size=self.tensor_parallel_size,
+                trust_remote_code=True,
+            )
         print(llm.generate(["What's the age of the earth? "]))
         llm.shutdown()
+        del llm
 
 
 class ModelDeployerList:
