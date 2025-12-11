@@ -48,8 +48,6 @@ def validate_model_and_extract_hidden_states(
     extra_payload: Optional[dict[str, Any]] = None,
     pipeline_parallel: bool = False,
     val_dataloader=None,
-    model_dtype: torch.dtype = torch.bfloat16,
-    autocast_dtype: torch.dtype = torch.bfloat16,
 ) -> list[torch.Tensor | LowMemorySparseTensor]:
     mprint(f"""
 
@@ -65,8 +63,6 @@ validate_model_and_extract_token_probs({model_name=})
         return_hidden_states=True,
         pipeline_parallel=pipeline_parallel,
         val_dataloader=val_dataloader,
-        model_dtype=model_dtype,
-        autocast_dtype=autocast_dtype,
     )
     if dist.is_last_process():
         output_dir = output_dir if (output_dir is not None) else args.bypass_dir
@@ -86,8 +82,6 @@ def validate_model_with_teacher_similarity_metrics(
     pipeline_parallel: bool = False,
     calculate_full_score_ablations: bool = False,
     val_dataloader=None,
-    model_dtype: torch.dtype = torch.bfloat16,
-    autocast_dtype: torch.dtype = torch.bfloat16,
 ) -> None:
     is_calc_kl_div = target_hidden_states_per_batch is not None
     mprint(f"""
@@ -105,8 +99,6 @@ validate_model_with_kl_div({model_name=}, {is_calc_kl_div=})
         pipeline_parallel=pipeline_parallel,
         calculate_full_score_ablations=calculate_full_score_ablations,
         val_dataloader=val_dataloader,
-        model_dtype=model_dtype,
-        autocast_dtype=autocast_dtype,
     )
     if dist.is_last_process():
         extra_payload = extra_payload if (extra_payload is not None) else dict()

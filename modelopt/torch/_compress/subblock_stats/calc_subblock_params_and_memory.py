@@ -50,7 +50,7 @@ def calculate_subblock_memory(
     prefill_queue_size: int,
     n_embd: int,
     n_head: int,
-    weights_dtype: torch.dtype | str,
+    weights_dtype: torch.dtype,
     kv_cache_dtype: torch.dtype,
     allocate_prefill_query: bool,
 ) -> float | dict[str, float]:
@@ -174,7 +174,7 @@ def calculate_attention_memory(
     prefill_queue_size: int,
     n_embd: int,
     n_head: int,
-    weights_dtype: torch.dtype | str,
+    weights_dtype: torch.dtype,
     kv_cache_dtype: torch.dtype,
     allocate_prefill_query: bool,
 ) -> dict[str, float]:
@@ -221,8 +221,8 @@ def calculate_mamba_memory(
     mamba_config: MambaConfig,
     n_embd: int,
     batch_size: int,
-    weights_dtype: torch.dtype | str,
-    kv_cache_dtype: torch.dtype | str,
+    weights_dtype: torch.dtype,
+    kv_cache_dtype: torch.dtype,
 ) -> int:
     return (
         calculate_mamba_params(mamba_config, n_embd) * sizeof_dtype(weights_dtype)
@@ -274,7 +274,7 @@ def _calculate_mamba_intermediates(mamba_config: MambaConfig) -> tuple[int, ...]
 
 def calculate_linear_memory(
     n_embd: int,
-    weights_dtype: torch.dtype | str,
+    weights_dtype: torch.dtype,
 ) -> float:
     return calculate_linear_params(n_embd) * sizeof_dtype(weights_dtype) / 2**20
 
@@ -288,7 +288,7 @@ def calculate_linear_params(
 def calculate_ffn_memory(
     ffn_config: FFNConfig,
     n_embd: int,
-    weights_dtype: torch.dtype | str,
+    weights_dtype: torch.dtype,
 ) -> float:
     num_params = calculate_ffn_params(ffn_config, n_embd)
     return num_params * sizeof_dtype(weights_dtype) / 2**20

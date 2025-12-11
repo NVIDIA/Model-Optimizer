@@ -72,16 +72,10 @@ def get_solutions_to_validate(cfg: DictConfig):
     return _solutions_to_validate
 
 
-def launch_scoring(
-    cfg: DictConfig,
-    model_dtype: torch.dtype = torch.bfloat16,
-    autocast_dtype: torch.dtype = torch.bfloat16,
-):
+def launch_scoring(cfg: DictConfig):
     cfg.scoring.solutions_to_validate = get_solutions_to_validate(cfg)
     mprint(f"Solutions to validate: {cfg.scoring.solutions_to_validate}")
-    validate_puzzle_solutions(
-        args=cfg.scoring, model_dtype=model_dtype, autocast_dtype=autocast_dtype
-    )
+    validate_puzzle_solutions(args=cfg.scoring)
 
 
 @hydra.main("", version_base="1.3")
@@ -89,7 +83,7 @@ def main(cfg: DictConfig) -> None:
     cfg = hydra.utils.instantiate(cfg)
     mprint(cfg)
     dist.setup(timeout=cfg.nccl_timeout_minutes)
-    launch_scoring(cfg, model_dtype=torch.bfloat16, autocast_dtype=torch.bfloat16)
+    launch_scoring(cfg)
     dist.cleanup()
 
 

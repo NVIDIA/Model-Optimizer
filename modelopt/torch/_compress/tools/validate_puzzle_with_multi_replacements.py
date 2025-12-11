@@ -111,11 +111,7 @@ def parse_args() -> argparse.Namespace:
 
 
 @torch.no_grad()
-def validate_puzzle_solutions(
-    args: argparse.Namespace,
-    model_dtype: torch.dtype = torch.bfloat16,
-    autocast_dtype: torch.dtype = torch.bfloat16,
-) -> None:
+def validate_puzzle_solutions(args: argparse.Namespace) -> None:
     puzzle_solutions = load_puzzle_solutions(
         args.solutions_path, args.sort_solutions_by, args.bigger_is_better
     )
@@ -150,8 +146,6 @@ def validate_puzzle_solutions(
             model_name="teacher",
             pipeline_parallel=True,
             val_dataloader=val_dataloader,
-            model_dtype=model_dtype,
-            autocast_dtype=autocast_dtype,
         )
 
     for i_solution, puzzle_solution in tqdm(
@@ -171,7 +165,7 @@ def validate_puzzle_solutions(
                 / f"solution_{i_solution}"
             )
 
-            model_config.dtype = model_dtype
+            model_config.dtype = args.model_dtype
             model_config.architectures = ["DeciLMForCausalLM"]
             if realizable_as_symlinks:
                 if dist.is_master():
@@ -199,8 +193,6 @@ def validate_puzzle_solutions(
                 extra_payload={"i_solution": i_solution, "puzzle_solution": puzzle_solution},
                 pipeline_parallel=True,
                 val_dataloader=val_dataloader,
-                model_dtype=model_dtype,
-                autocast_dtype=autocast_dtype,
             )
 
         dist.barrier()

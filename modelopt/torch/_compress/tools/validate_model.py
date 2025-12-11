@@ -74,6 +74,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Required unless a model is passed to the function",
     )
+    parser.add_argument("--model_dtype", type=str, default="torch.bfloat16")
+    parser.add_argument("--autocast_dtype", type=str, default="torch.bfloat16")
     parser.add_argument("--dataset_path", type=str, required=True)
 
     parser.add_argument("--output_dir_name", type=str, default="validation")
@@ -131,16 +133,20 @@ def validate_model(
     pipeline_parallel: bool = False,
     calculate_full_score_ablations: bool = False,
     val_dataloader: DataLoader | None = None,
-    model_dtype: torch.dtype = torch.bfloat16,
-    autocast_dtype: torch.dtype = torch.bfloat16,
 ) -> tuple[dict[str, dict], HiddenStatesAndLMHead | None] | tuple[None, None]:
+    # convert model_dtype and autocast_dtype from string to torch.dtype
+    if isinstance(args.model_dtype, str):
+        args.model_dtype = getattr(torch, args.model_dtype.strip("torch."))
+    if isinstance(args.autocast_dtype, str):
+        args.autocast_dtype = getattr(torch, args.autocast_dtype.strip("torch."))
+
     if val_dataloader is None:
         val_dataloader = prepare_dataloader(args, tokenizer) if dist.is_master() else None
     validation_full_iters = (
         args.eval_samples // args.micro_batch_size
     )  # model pipeline, single data rank
 
-    model = prepare_model(args, model, pipeline_parallel, model_dtype=model_dtype)
+    model = prepare_model(args, model, pipeline_parallel)
 
     just_model_forward = False
     checkpoint_manager = None
@@ -197,7 +203,7 @@ def validate_model(
             calc_on_cpu=args.calc_losses_on_cpu,
             just_model_forward=just_model_forward,
             checkpoint_manager=checkpoint_manager,
-            autocast_dtype=autocast_dtype,
+            autocast_dtype=args.autocast_dtype,
         )
 
     if losses is not None:
@@ -222,10 +228,7 @@ def validate_model(
 
 
 def prepare_model(
-    args: argparse.Namespace,
-    model: PreTrainedModel | None = None,
-    pipeline_parallel: bool = False,
-    model_dtype: torch.dtype = torch.bfloat16,
+    args: argparse.Namespace, model: PreTrainedModel | None = None, pipeline_parallel: bool = False
 ) -> nn.Module:
     if model is None:
         assert args.model_name_or_path is not None
@@ -233,7 +236,7 @@ def prepare_model(
             model = load_and_shard_model(
                 args.model_name_or_path,
                 model_config_overrides={"block_size": args.block_size},
-                model_dtype=model_dtype,
+                model_dtype=args.model_dtype,
             )
         else:
             try:
@@ -292,12 +295,7 @@ def main():
     args = parse_args()
     if args.pipeline_parallel:
         dist.setup(timeout=args.nccl_timeout_minutes)
-    validate_model(
-        args=args,
-        pipeline_parallel=args.pipeline_parallel,
-        model_dtype=torch.bfloat16,
-        autocast_dtype=torch.bfloat16,
-    )
+    validate_model(args=args, pipeline_parallel=args.pipeline_parallel)
     dist.cleanup()
 
 

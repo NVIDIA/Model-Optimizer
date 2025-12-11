@@ -37,21 +37,11 @@ def launch_mip(cfg: DictConfig) -> List[str]:
     return solution_paths
 
 
-def launch_realize_model(
-    cfg: DictConfig,
-    model_dtype: torch.dtype = torch.bfloat16,
-    autocast_dtype: torch.dtype = torch.bfloat16,
-):
-    validate_puzzle_solutions(
-        args=cfg.realize_model, model_dtype=model_dtype, autocast_dtype=autocast_dtype
-    )
+def launch_realize_model(cfg: DictConfig):
+    validate_puzzle_solutions(args=cfg.realize_model)
 
 
-def launch_mip_and_realize_model(
-    cfg: DictConfig,
-    model_dtype: torch.dtype = torch.bfloat16,
-    autocast_dtype: torch.dtype = torch.bfloat16,
-):
+def launch_mip_and_realize_model(cfg: DictConfig):
     # Determine device for distributed operations (NCCL requires CUDA tensors)
     device = "cpu"
     if dist.size() > 1:
@@ -80,7 +70,7 @@ def launch_mip_and_realize_model(
         for solution_path in solution_paths:
             mprint(f"Realize model for the solution: {solution_path}")
             cfg.realize_model.solutions_path = Path(solution_path)
-            launch_realize_model(cfg, model_dtype=model_dtype, autocast_dtype=autocast_dtype)
+            launch_realize_model(cfg)
             dist.barrier()
 
 
@@ -88,7 +78,7 @@ def launch_mip_and_realize_model(
 def main(cfg: DictConfig) -> None:
     cfg = hydra.utils.instantiate(cfg)
     dist.setup(timeout=cfg.nccl_timeout_minutes)
-    launch_mip_and_realize_model(cfg, model_dtype=torch.bfloat16, autocast_dtype=torch.bfloat16)
+    launch_mip_and_realize_model(cfg)
     dist.cleanup()
 
 

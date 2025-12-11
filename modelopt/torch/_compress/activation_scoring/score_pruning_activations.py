@@ -136,11 +136,7 @@ def should_skip_scoring_completely(cfg: DictConfig) -> bool:
 # Old progress tracking removed - checkpoint manager handles all progress tracking
 
 
-def launch_score_activations(
-    cfg: DictConfig,
-    model_dtype: torch.dtype = torch.bfloat16,
-    autocast_dtype: torch.dtype = torch.bfloat16,
-):
+def launch_score_activations(cfg: DictConfig):
     # Check if we should skip scoring entirely (only if 100% complete)
     if should_skip_scoring_completely(cfg):
         return
@@ -148,12 +144,7 @@ def launch_score_activations(
     mprint("Starting pruning activation scoring...")
 
     # The checkpoint manager inside validate_model handles all progress tracking
-    validate_model(
-        args=cfg.pruning,
-        pipeline_parallel=True,
-        model_dtype=model_dtype,
-        autocast_dtype=autocast_dtype,
-    )
+    validate_model(args=cfg.pruning, pipeline_parallel=True)
 
 
 @hydra.main("", version_base="1.3")
@@ -161,7 +152,7 @@ def main(cfg: DictConfig) -> None:
     cfg = hydra.utils.instantiate(cfg)
     mprint(format_global_config(cfg, title="Score Pruning Activations"))
     dist.setup(timeout=cfg.nccl_timeout_minutes)
-    launch_score_activations(cfg, model_dtype=torch.bfloat16, autocast_dtype=torch.bfloat16)
+    launch_score_activations(cfg)
     dist.cleanup()
 
 
