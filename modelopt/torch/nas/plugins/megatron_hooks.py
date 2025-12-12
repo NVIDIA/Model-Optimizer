@@ -96,6 +96,15 @@ class ForwardHook(ABC):
         """
         ...
 
+    def get_progress_info(self) -> dict:
+        """Get progress information for this hook.
+
+        Returns:
+            dict: Progress information (e.g., current iteration, samples processed).
+                  Default implementation returns empty dict.
+        """
+        return {}
+
 
 class MegatronL2NormHook(ForwardHook):
     """Hook for accumulating activation statistics for importance estimation.
@@ -366,3 +375,18 @@ class IterativeChannelContributionHook(ForwardHook):
         assert self.num_channels == state_dict["num_channels"], "Channel count mismatch"
         assert self.pruning_iters == state_dict["pruning_iters"], "Iteration count mismatch"
         assert self.pruning_schedule == state_dict["pruning_schedule"], "Pruning schedule mismatch"
+
+    def get_progress_info(self) -> dict:
+        """Get progress information for this hook.
+
+        Returns:
+            dict: Progress information including iteration count and pruned channels.
+        """
+        progress = self.curr_iter / self.pruning_iters if self.pruning_iters > 0 else 0.0
+        return {
+            "curr_iter": self.curr_iter,
+            "total_iters": self.pruning_iters,
+            "progress": progress,
+            "pruned_channels_count": len(self.pruned_channels),
+            "total_channels": self.num_channels,
+        }
