@@ -231,7 +231,7 @@ class GPTModelExporter:
                         "max_position_embeddings": self._hf_text_config.max_position_embeddings,
                         "num_attention_heads": model.eagle_module.config.num_attention_heads,
                         "num_key_value_heads": model.eagle_module.config.num_query_groups,
-                        "num_hidden_layers": model.eagle_config.num_hidden_layers,
+                        "num_hidden_layers": model.eagle_config.num_layers,
                         "vocab_size": self._hf_text_config.vocab_size,
                         # Unset any special token ids given that the tokenizer can change here.
                         "bos_token_id": None,

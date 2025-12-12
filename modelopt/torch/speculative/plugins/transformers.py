@@ -254,7 +254,12 @@ class EagleModule(nn.Module):
         if self.config.parallel_draft_step > 1:
             self.parallel_draft_heads = torch.nn.ModuleList(
                 nn.Sequential(
-                    *([ResBlock(config.hidden_size)] * self.config.parallel_draft_heads_num_layers),
+                    *(
+                        [
+                            ResBlock(config.hidden_size)
+                            for _ in range(self.config.parallel_draft_heads_num_layers)
+                        ]
+                    ),
                     nn.Linear(config.hidden_size, config.draft_vocab_size, bias=False),
                 )
                 for _ in range(self.config.parallel_draft_step - 1)

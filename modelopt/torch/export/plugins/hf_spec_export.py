@@ -78,6 +78,21 @@ def export_spec_ckpt_state_dict(model: nn.Module):
     if "eagle_lm_head.weight" not in eagle_state:
         export_state_dict["lm_head.weight"] = model.state_dict()["lm_head.weight"]
 
+    # Add parallel draft weights
+    if model.eagle_config.parallel_draft_step > 1:
+        for i in range(model.eagle_config.parallel_draft_step - 1):
+            for j in range(model.eagle_config.parallel_draft_heads_num_layers):
+                export_state_dict[f"parallel_draft_heads.{i}.medusa_layers.{j}.linear.weight"] = (
+                    eagle_state[f"parallel_draft_heads.{i}.{j}.linear.weight"]
+                )
+                if f"parallel_draft_heads.{i}.{j}.linear.bias" in eagle_state:
+                    export_state_dict[f"parallel_draft_heads.{i}.medusa_layers.{j}.linear.bias"] = (
+                        eagle_state[f"parallel_draft_heads.{i}.{j}.linear.bias"]
+                    )
+            export_state_dict[f"parallel_draft_heads.{i}.lm_head.weight"] = eagle_state[
+                f"parallel_draft_heads.{i}.{model.eagle_config.parallel_draft_heads_num_layers}.weight"
+            ]
+
     return export_state_dict
 
 
