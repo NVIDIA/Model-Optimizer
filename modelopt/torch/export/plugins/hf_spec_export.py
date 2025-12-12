@@ -42,8 +42,8 @@ def eagle_state_dict_key_convert(num_hidden_layers: int = 1) -> dict[str, dict[s
     else:
         eagle_modelopt_to_official["required"].update(
             {
-                "hidden_norm.weight": "layers.0.hidden_norm.weight",
-                "input_embeds_norm.weight": "layers.0.input_layernorm.weight",
+                "hidden_norm.weight": "midlayer.0.hidden_norm.weight",
+                "input_embeds_norm.weight": "midlayer.0.input_layernorm.weight",
             }
         )
     for i in range(num_hidden_layers):
