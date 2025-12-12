@@ -499,3 +499,106 @@ class IterativeChannelContributionHook(ForwardHook):
             "pruned_channels_count": len(self.pruned_channels),
             "total_channels": self.num_channels,
         }
+
+
+class IndependentKvHeadContributionHook(ForwardHook):
+    """Hook for estimating KV head importance based on contribution analysis.
+
+    Measures the contribution of each KV head group to the output projection
+    by computing L2 norms of per-head outputs.
+
+    Args:
+        linear_layer: The output projection layer (o_proj).
+        activation_hooks_kwargs: Configuration dict with:
+            - model: The model instance (to get config).
+            - block_config: Block configuration with attention settings.
+            - optimize_for (str, optional): "latency" or "memory". Defaults to "memory".
+    """
+
+    def __init__(self, linear_layer: nn.Linear, activation_hooks_kwargs: dict):
+        """Initialize the KV head contribution hook."""
+        model_config = activation_hooks_kwargs["model"].config
+        block_config = activation_hooks_kwargs["block_config"]
+
+        self.optimize_for = activation_hooks_kwargs.get("optimize_for", "memory")
+        assert self.optimize_for in ["latency", "memory"]
+
+        self.hidden_size = model_config.hidden_size
+        self.n_heads_in_group = block_config.attention.n_heads_in_group
+        self.num_q_heads = model_config.num_attention_heads
+        self.num_kv_heads = self.num_q_heads // self.n_heads_in_group
+        self.head_dim = getattr(model_config, "head_dim", self.hidden_size // self.num_q_heads)
+
+        self.agg_kv_head_contributions = torch.zeros(
+            size=(self.num_kv_heads,),
+            dtype=torch.float32,
+            device=linear_layer.weight.device,
+        )
+
+        # Reshape weight matrix to group by KV heads
+        self.weight_grouped = linear_layer.weight.view(
+            self.hidden_size, self.num_kv_heads, self.head_dim * self.n_heads_in_group
+        ).permute((1, 0, 2))
+        # weight_grouped.shape: (kv_heads, hidden_dim, head_dim * n_heads_in_group)
+
+    def __call__(self, module: nn.Module, args: tuple[torch.Tensor], output: torch.Tensor) -> None:
+        """Compute KV head contributions from the forward pass."""
+        attn_out = args[0]  # Shape: (B, T, num_q_heads * head_dim)
+        batch_size, seq_len, _ = attn_out.shape
+
+        # Reshape attention output to group by KV heads
+        attn_out_grouped = attn_out.view(
+            batch_size,
+            seq_len,
+            self.num_kv_heads,
+            self.head_dim * self.n_heads_in_group,
+        ).unsqueeze(-2)
+        # attn_out_grouped.shape: (B, T, kv_heads, 1, head_dim * n_heads_in_group)
+
+        if self.optimize_for == "latency":
+            # Compute contribution per KV head group
+            # First compute the projection for each KV head group
+            layer_out_grouped = attn_out_grouped @ self.weight_grouped.transpose(-1, -2)
+            layer_out_grouped = layer_out_grouped.squeeze(-2)
+            # layer_out_grouped.shape: (B, T, kv_heads, hidden_dim)
+
+        else:
+            layer_out_grouped = []
+            for i in range(self.num_kv_heads):
+                _layer_out = attn_out_grouped[:, :, i] @ self.weight_grouped[i].transpose(-1, -2)
+                layer_out_grouped.append(_layer_out)
+            layer_out_grouped = torch.cat(layer_out_grouped, dim=2)
+
+        # Compute L2 norm of each group's contribution
+        contrib_per_kv_head = torch.linalg.vector_norm(layer_out_grouped, dim=-1)
+        # contrib_per_kv_head.shape: (B, T, kv_heads)
+
+        contrib_per_kv_head = contrib_per_kv_head.mean(dim=(0, 1))
+        # contrib_per_kv_head.shape: (kv_heads,)
+
+        # Accumulate contributions
+        self.agg_kv_head_contributions += contrib_per_kv_head
+
+    def accumulate(self) -> torch.Tensor:
+        """Return accumulated KV head importance scores.
+
+        Returns:
+            Tensor of importance scores, one per KV head.
+        """
+        return self.agg_kv_head_contributions
+
+    def to_dict(self) -> dict[str, torch.Tensor]:
+        """Convert to dict format for saving.
+
+        Returns:
+            Dict with "score" tensor containing KV head importance scores.
+        """
+        return {
+            "score": self.agg_kv_head_contributions.cpu(),
+        }
+
+    def state_dict(self) -> dict:
+        raise NotImplementedError("Saving state dict is not supported for this hook.")
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        raise NotImplementedError("Loading state dict is not supported for this hook.")
