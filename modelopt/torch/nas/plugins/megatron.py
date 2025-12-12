@@ -81,7 +81,7 @@ from ..modules.utils import get_sliced_tensor, get_sliced_tensor_by_slices
 from ..registry import DMRegistry
 from ..search_space import SampleFunc
 from ..traced_hp import TracedHp
-from .megatron_hooks import MegatronL2NormHook
+from .megatron_hooks.base_hooks import MegatronL2NormHook
 
 SUPPORTED_MODELS = {GPTModel: "megatron.core.models.gpt.GPTModel"}
 

@@ -14,5 +14,5 @@
 # limitations under the License.
 """Forward hooks for estimating importance scores for pruning."""
 
-from .megatron_hooks import *
+from .base_hooks import *
 from .megatron_hooks_analysis import *

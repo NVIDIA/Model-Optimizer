@@ -20,7 +20,7 @@ Activation hooks are used to compute activation scores for pruning."""
 import re
 
 from modelopt.torch._compress.decilm.deci_lm_hf_code.modeling_decilm import DeciLMForCausalLM
-from modelopt.torch.nas.plugins.megatron_hooks.megatron_hooks import (
+from modelopt.torch.nas.plugins.megatron_hooks.base_hooks import (
     ForwardHook,
     IndependentChannelContributionHook,
     IndependentKvHeadContributionHook,
