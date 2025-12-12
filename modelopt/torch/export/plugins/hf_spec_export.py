@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 
 
-def eagle_state_dict_key_convert(num_hidden_layers: int = 1) -> list[str]:
+def eagle_state_dict_key_convert(num_hidden_layers: int = 1) -> dict[str, dict[str, str]]:
     """Convert our eagle model state dict key to official format key(s)."""
     assert num_hidden_layers >= 1, "num_hidden_layers should be at least 1."
     eagle_modelopt_to_official = {
