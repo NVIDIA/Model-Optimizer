@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Forward hooks for activation-based importance estimation (megatron NAS plugin)."""
+"""Forward hooks for activation-based importance estimation."""
 
 import gc
 import json
@@ -22,7 +22,6 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from megatron.core.tensor_parallel import gather_from_tensor_model_parallel_region
 from megatron.core.tensor_parallel.layers import RowParallelLinear
 from omegaconf import DictConfig, OmegaConf
 from torch import nn
@@ -36,8 +35,8 @@ __all__ = [
     "IndependentChannelContributionHook",
     "IndependentKvHeadContributionHook",
     "IterativeChannelContributionHook",
+    "L2NormHook",
     "LayerNormContributionHook",
-    "MegatronL2NormHook",
 ]
 
 
@@ -180,11 +179,14 @@ class ForwardHook(ABC):
         torch.save(hook_states, hook_states_path)
 
 
-class MegatronL2NormHook(ForwardHook):
+class L2NormHook(ForwardHook):
     """Hook for accumulating activation statistics for importance estimation.
 
     Activations are computed as mean over seq_len and then squared and summed over batch_size.
     In the accumulate() method we take the square root of the sum to get the L2 norm.
+
+    This is the base version without tensor parallelism support.
+    For megatron with TP > 1, use MegatronL2NormHook instead.
 
     Args:
         max_size: Optional maximum expected size to validate against (skips if mismatch).
@@ -195,6 +197,10 @@ class MegatronL2NormHook(ForwardHook):
         """Initialize the L2NormHook."""
         self.max_size = max_size
         self._activations: torch.Tensor | None = None
+
+    def _get_input_tensor(self, args: tuple[torch.Tensor, ...]) -> torch.Tensor:
+        """Get input tensor from args. Override in subclass for TP gathering."""
+        return args[0].detach()
 
     def __call__(
         self, module: nn.Module, args: tuple[torch.Tensor, ...], output: torch.Tensor
@@ -207,9 +213,7 @@ class MegatronL2NormHook(ForwardHook):
                   (Megatron sequence-first format).
             output: Output tensor from the module's forward pass.
         """
-        # Gather input [seq_len, batch_size, hidden_size] over all TP regions
-        # NOTE: This is not used at the moment since we restrict to TP=1
-        input_tensor = gather_from_tensor_model_parallel_region(args[0]).detach()
+        input_tensor = self._get_input_tensor(args)
 
         if input_tensor.dim() == 2:
             # For sparse experts, there is no batch dimension.
