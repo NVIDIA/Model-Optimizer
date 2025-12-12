@@ -53,22 +53,22 @@ def eagle_state_dict_key_convert(num_hidden_layers: int = 1) -> list[str]:
             index = f".{i}"
         eagle_modelopt_to_official["required"].update(
             {
-                "layers.{i}.self_attn.q_proj.weight": "midlayer"
+                f"layers.{i}.self_attn.q_proj.weight": "midlayer"
                 + index
                 + ".self_attn.q_proj.weight",
-                "layers.{i}.self_attn.k_proj.weight": "midlayer"
+                f"layers.{i}.self_attn.k_proj.weight": "midlayer"
                 + index
                 + ".self_attn.k_proj.weight",
-                "layers.{i}.self_attn.v_proj.weight": "midlayer"
+                f"layers.{i}.self_attn.v_proj.weight": "midlayer"
                 + index
                 + ".self_attn.v_proj.weight",
-                "layers.{i}.self_attn.o_proj.weight": "midlayer"
+                f"layers.{i}.self_attn.o_proj.weight": "midlayer"
                 + index
                 + ".self_attn.o_proj.weight",
-                "layers.{i}.mlp.gate_proj.weight": "midlayer" + index + ".mlp.gate_proj.weight",
-                "layers.{i}.mlp.up_proj.weight": "midlayer" + index + ".mlp.up_proj.weight",
-                "layers.{i}.mlp.down_proj.weight": "midlayer" + index + ".mlp.down_proj.weight",
-                "layers.{i}.post_attention_layernorm.weight": "midlayer"
+                f"layers.{i}.mlp.gate_proj.weight": "midlayer" + index + ".mlp.gate_proj.weight",
+                f"layers.{i}.mlp.up_proj.weight": "midlayer" + index + ".mlp.up_proj.weight",
+                f"layers.{i}.mlp.down_proj.weight": "midlayer" + index + ".mlp.down_proj.weight",
+                f"layers.{i}.post_attention_layernorm.weight": "midlayer"
                 + index
                 + ".post_attention_layernorm.weight",
             }
