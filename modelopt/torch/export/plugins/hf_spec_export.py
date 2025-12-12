@@ -18,26 +18,62 @@
 import torch
 import torch.nn as nn
 
-EAGLE_MODELOPT_TO_OFFICIAL = {
-    "required": {
-        "layers.0.self_attn.q_proj.weight": "midlayer.self_attn.q_proj.weight",
-        "layers.0.self_attn.k_proj.weight": "midlayer.self_attn.k_proj.weight",
-        "layers.0.self_attn.v_proj.weight": "midlayer.self_attn.v_proj.weight",
-        "layers.0.self_attn.o_proj.weight": "midlayer.self_attn.o_proj.weight",
-        "layers.0.mlp.gate_proj.weight": "midlayer.mlp.gate_proj.weight",
-        "layers.0.mlp.up_proj.weight": "midlayer.mlp.up_proj.weight",
-        "layers.0.mlp.down_proj.weight": "midlayer.mlp.down_proj.weight",
-        "hidden_norm.weight": "midlayer.hidden_norm.weight",
-        "input_embeds_norm.weight": "midlayer.input_layernorm.weight",
-        "layers.0.post_attention_layernorm.weight": "midlayer.post_attention_layernorm.weight",
-        "norm.weight": "norm.weight",
-        "fc.weight": "fc.weight",
-    },
-    "optional": {
-        "d2t": "d2t",
-        "eagle_lm_head.weight": "lm_head.weight",
-    },
-}
+
+def eagle_state_dict_key_convert(num_hidden_layers: int = 1) -> list[str]:
+    """Convert our eagle model state dict key to official format key(s)."""
+    assert num_hidden_layers >= 1, "num_hidden_layers should be at least 1."
+    eagle_modelopt_to_official = {
+        "required": {
+            "norm.weight": "norm.weight",
+            "fc.weight": "fc.weight",
+        },
+        "optional": {
+            "d2t": "d2t",
+            "eagle_lm_head.weight": "lm_head.weight",
+        },
+    }
+    if num_hidden_layers == 1:
+        eagle_modelopt_to_official["required"].update(
+            {
+                "hidden_norm.weight": "midlayer.hidden_norm.weight",
+                "input_embeds_norm.weight": "midlayer.input_layernorm.weight",
+            }
+        )
+    else:
+        eagle_modelopt_to_official["required"].update(
+            {
+                "hidden_norm.weight": "layers.0.hidden_norm.weight",
+                "input_embeds_norm.weight": "layers.0.input_layernorm.weight",
+            }
+        )
+    for i in range(num_hidden_layers):
+        if num_hidden_layers == 1:
+            index = ""
+        else:
+            index = f".{i}"
+        eagle_modelopt_to_official["required"].update(
+            {
+                "layers.{i}.self_attn.q_proj.weight": "midlayer"
+                + index
+                + ".self_attn.q_proj.weight",
+                "layers.{i}.self_attn.k_proj.weight": "midlayer"
+                + index
+                + ".self_attn.k_proj.weight",
+                "layers.{i}.self_attn.v_proj.weight": "midlayer"
+                + index
+                + ".self_attn.v_proj.weight",
+                "layers.{i}.self_attn.o_proj.weight": "midlayer"
+                + index
+                + ".self_attn.o_proj.weight",
+                "layers.{i}.mlp.gate_proj.weight": "midlayer" + index + ".mlp.gate_proj.weight",
+                "layers.{i}.mlp.up_proj.weight": "midlayer" + index + ".mlp.up_proj.weight",
+                "layers.{i}.mlp.down_proj.weight": "midlayer" + index + ".mlp.down_proj.weight",
+                "layers.{i}.post_attention_layernorm.weight": "midlayer"
+                + index
+                + ".post_attention_layernorm.weight",
+            }
+        )
+    return eagle_modelopt_to_official
 
 
 def _check_state_dict_keys_match(draft_model: nn.Module, required_items: dict):
@@ -61,15 +97,16 @@ def export_spec_ckpt_state_dict(model: nn.Module):
     # check the model has only speculative decoding
     assert spec_opt_only(model), "Not purely eagle model."
 
+    eagle_modelopt_to_official = eagle_state_dict_key_convert(model.eagle_config.num_hidden_layers)
     # Check if the state dict keys match
-    _check_state_dict_keys_match(model.eagle_module, EAGLE_MODELOPT_TO_OFFICIAL["required"])
+    _check_state_dict_keys_match(model.eagle_module, eagle_modelopt_to_official["required"])
 
     # Convert key names and save the state dict
     eagle_state = model.eagle_module.state_dict()
     export_state_dict = {}
     for ours_key, export_key in {
-        **EAGLE_MODELOPT_TO_OFFICIAL["required"],
-        **EAGLE_MODELOPT_TO_OFFICIAL["optional"],
+        **eagle_modelopt_to_official["required"],
+        **eagle_modelopt_to_official["optional"],
     }.items():
         if ours_key in eagle_state:
             export_state_dict[export_key] = eagle_state[ours_key]
