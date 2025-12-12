@@ -89,7 +89,7 @@ def test_export_hf_checkpoint(eagle_output_dir):
     )
     # Check the exported checkpoints have required keys
     state_dict = safetensors.torch.load_file(eagle_output_dir / "eagle-tinyllama-export" / "model.safetensors")
-    eagle_modelopt_to_official = eagle_state_dict_key_convert(num_layers=1)
+    eagle_modelopt_to_official = eagle_state_dict_key_convert(num_hidden_layers=1)
     for required_key in eagle_modelopt_to_official["required"].values():
         assert required_key in state_dict, f"Missing key '{required_key}' in state_dict"
 
