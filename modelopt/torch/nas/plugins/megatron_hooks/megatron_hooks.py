@@ -31,4 +31,6 @@ class MegatronL2NormHook(L2NormHook):
 
     def _get_input_tensor(self, args: tuple[torch.Tensor, ...]) -> torch.Tensor:
         """Gather input tensor from all TP regions."""
+        # Gather input [seq_len, batch_size, hidden_size] over all TP regions
+        # NOTE: This is not used at the moment since we restrict to TP=1
         return gather_from_tensor_model_parallel_region(args[0]).detach()
