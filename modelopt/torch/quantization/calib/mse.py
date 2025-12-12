@@ -82,6 +82,7 @@ class MseCalibrator(_Calibrator):
         multipliers = torch.linspace(
             self._start_multiplier, self._stop_multiplier, steps=self._num_steps, device=device
         )
+        print(f"Multipliers: {multipliers}")
 
         # Get reduce axis for per-channel quantization
         reduce_axis = quant_utils.convert_quantization_axis_to_reduce_axis(x, self._axis)

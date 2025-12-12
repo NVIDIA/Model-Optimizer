@@ -345,3 +345,157 @@ def fp4_dequantize(
     )
 
     return output
+
+
+@triton.jit
+def static_blockwise_fp4_fake_quant_kernel(
+    x_ptr,  # [NUM_FP4_BLOCKS * BLOCK_SIZE]
+    y_ptr,  # [NUM_FP4_BLOCKS * BLOCK_SIZE]
+    scale_ptr,  # [NUM_FP4_BLOCKS]
+    NUM_FP4_BLOCKS,
+    BLOCK_SIZE: tl.constexpr,
+    OUT_DTYPE: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    if pid >= NUM_FP4_BLOCKS:
+        return
+
+    block_offset = pid * BLOCK_SIZE
+    idx = block_offset + tl.arange(0, BLOCK_SIZE)
+
+    scale = tl.load(scale_ptr + pid).to(tl.float32)
+
+    x = tl.load(x_ptr + idx).to(tl.float32)
+
+    x_abs = tl.abs(x)
+    scale_safe = tl.where(scale >= 1e-5, scale, 1.0)
+    abs_scaled = x_abs / scale_safe
+
+    # FP4 values: 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0
+    q_val = tl.where(
+        abs_scaled <= 0.25,
+        0.0,
+        tl.where(
+            abs_scaled < 0.75,
+            0.5,
+            tl.where(
+                abs_scaled <= 1.25,
+                1.0,
+                tl.where(
+                    abs_scaled < 1.75,
+                    1.5,
+                    tl.where(
+                        abs_scaled <= 2.5,
+                        2.0,
+                        tl.where(
+                            abs_scaled < 3.5,
+                            3.0,
+                            tl.where(abs_scaled <= 5.0, 4.0, 6.0),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    x_rescaled = q_val * scale_safe
+    x_dequant = tl.where(x >= 0, x_rescaled, -x_rescaled)
+
+    tl.store(y_ptr + idx, x_dequant.to(OUT_DTYPE))
+
+
+def launch_static_blockwise_fp4_fake_quant(
+    x: torch.Tensor,
+    scale: torch.Tensor,
+    out_dtype: torch.dtype = torch.float16,
+):
+    """Launch Triton kernel for blockwise FP4 fake quantization.
+
+    x: [NUM_FP4_BLOCKS, BLOCK_SIZE] on CUDA.
+    scale: [NUM_FP4_BLOCKS] or [NUM_FP4_BLOCKS, 1] on CUDA.
+    """
+    assert x.ndim == 2
+    NUM_FP4_BLOCKS, BLOCK_SIZE = x.shape
+
+    x_flat = x.contiguous().view(-1)
+    y_flat = torch.empty_like(x_flat, dtype=out_dtype)
+    scale_flat = scale.view(NUM_FP4_BLOCKS).contiguous()
+
+    tl_out_dtype = _torch_dtype_to_tl(out_dtype)
+
+    grid = (NUM_FP4_BLOCKS,)
+
+    # Ensure we're running on the correct CUDA device
+    with torch.cuda.device(x.device):
+        static_blockwise_fp4_fake_quant_kernel[grid](
+            x_flat,
+            y_flat,
+            scale_flat,
+            NUM_FP4_BLOCKS,
+            BLOCK_SIZE,
+            OUT_DTYPE=tl_out_dtype,
+        )
+
+    return y_flat.view_as(x)
+
+
+def blockwise_fp4_fake_quant_reference(
+    x: torch.Tensor,
+    scale: torch.Tensor,
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Reference implementation of blockwise FP4 fake quantization.
+
+    x: [NUM_FP4_BLOCKS, BLOCK_SIZE].
+    scale: [NUM_FP4_BLOCKS] or [NUM_FP4_BLOCKS, 1].
+
+    Uses FP4 quantization levels: 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0.
+    """
+    assert x.ndim == 2
+    num_blocks, block_size = x.shape
+
+    if scale.ndim == 1:
+        scale = scale.view(num_blocks, 1)
+    assert scale.shape == (num_blocks, 1)
+
+    x_f = x.to(torch.float32)
+    s_f = scale.to(torch.float32)
+
+    s_f = torch.where(s_f >= 1e-5, s_f, torch.ones_like(s_f))
+
+    x_abs = torch.abs(x_f)
+    abs_scaled = x_abs / s_f
+
+    q_val = torch.where(
+        abs_scaled <= 0.25,
+        torch.zeros_like(abs_scaled),
+        torch.where(
+            abs_scaled < 0.75,
+            torch.full_like(abs_scaled, 0.5),
+            torch.where(
+                abs_scaled <= 1.25,
+                torch.ones_like(abs_scaled),
+                torch.where(
+                    abs_scaled < 1.75,
+                    torch.full_like(abs_scaled, 1.5),
+                    torch.where(
+                        abs_scaled <= 2.5,
+                        torch.full_like(abs_scaled, 2.0),
+                        torch.where(
+                            abs_scaled < 3.5,
+                            torch.full_like(abs_scaled, 3.0),
+                            torch.where(
+                                abs_scaled <= 5.0,
+                                torch.full_like(abs_scaled, 4.0),
+                                torch.full_like(abs_scaled, 6.0),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    x_rescaled = q_val * s_f
+    x_dequant = torch.where(x_f >= 0, x_rescaled, -x_rescaled)
+    return x_dequant.to(out_dtype)
