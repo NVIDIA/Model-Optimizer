@@ -50,6 +50,7 @@ modelopt/torch/utils @NVIDIA/modelopt-torch-utils-codeowners
 /examples/pruning @NVIDIA/modelopt-torch-nas-prune-codeowners
 /examples/specdec_bench @NVIDIA/modelopt-torch-speculative-codeowners
 /examples/speculative_decoding @NVIDIA/modelopt-torch-speculative-codeowners
+/examples/torch_onnx @NVIDIA/modelopt-onnx-codeowners
 /examples/vlm_ptq @NVIDIA/modelopt-examples-vlm-codeowners
 /examples/vllm_serve @NVIDIA/modelopt-examples-llm_ptq-codeowners
 /examples/windows @NVIDIA/modelopt-windows-codeowners

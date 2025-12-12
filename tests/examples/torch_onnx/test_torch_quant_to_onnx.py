@@ -20,18 +20,22 @@ from _test_utils.examples.run_command import extend_cmd_parts, run_example_comma
 
 # TODO: Add accuracy evaluation after we upgrade TRT version to 10.12
 @pytest.mark.parametrize(
-    ("quantize_mode", "onnx_save_path", "calib_size"),
+    ("quantize_mode", "onnx_save_path", "calib_size", "num_score_steps"),
     [
-        ("nvfp4", "vit_base_patch16_224.nvfp4.onnx", "1"),
-        ("mxfp8", "vit_base_patch16_224.mxfp8.onnx", "1"),
-        ("int4_awq", "vit_base_patch16_224.int4_awq.onnx", "1"),
+        ("fp8", "vit_base_patch16_224.fp8.onnx", "1", "1"),
+        ("int8", "vit_base_patch16_224.int8.onnx", "1", "1"),
+        ("nvfp4", "vit_base_patch16_224.nvfp4.onnx", "1", "1"),
+        ("mxfp8", "vit_base_patch16_224.mxfp8.onnx", "1", "1"),
+        ("int4_awq", "vit_base_patch16_224.int4_awq.onnx", "1", "1"),
+        ("auto", "vit_base_patch16_224.auto.onnx", "1", "1"),
     ],
 )
-def test_torch_onnx(quantize_mode, onnx_save_path, calib_size):
+def test_torch_onnx(quantize_mode, onnx_save_path, calib_size, num_score_steps):
     cmd_parts = extend_cmd_parts(
         ["python", "torch_quant_to_onnx.py"],
         quantize_mode=quantize_mode,
         onnx_save_path=onnx_save_path,
         calibration_data_size=calib_size,
+        num_score_steps=num_score_steps,
     )
-    run_example_command(cmd_parts, "onnx_ptq")
+    run_example_command(cmd_parts, "torch_onnx")

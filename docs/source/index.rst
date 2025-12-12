@@ -9,6 +9,7 @@ Welcome to Model Optimizer (ModelOpt) documentation!
    getting_started/[0-9]*
    Quick Start: PTQ - PyTorch <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq>
    Quick Start: PTQ - ONNX <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq>
+   Quick Start: PTQ - PyTorch to ONNX <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/torch_onnx>
    Quick Start: PTQ - Windows <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows>
    Quick Start: QAT <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_qat>
    Quick Start: Pruning <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning>
