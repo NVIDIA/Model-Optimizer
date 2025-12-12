@@ -15,17 +15,28 @@
 """Forward hooks for activation-based importance estimation (megatron NAS plugin)."""
 
 import gc
+import json
 from abc import ABC, abstractmethod
+from datetime import datetime
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 from megatron.core.tensor_parallel import gather_from_tensor_model_parallel_region
 from megatron.core.tensor_parallel.layers import RowParallelLinear
+from omegaconf import DictConfig, OmegaConf
 from torch import nn
 
+import modelopt.torch.utils.distributed as dist
+from modelopt.torch._compress.tools.logger import aprint
+from modelopt.torch._compress.tools.robust_json import json_dump
+
 __all__ = [
+    "ForwardHook",
     "IndependentChannelContributionHook",
+    "IndependentKvHeadContributionHook",
     "IterativeChannelContributionHook",
+    "LayerNormContributionHook",
     "MegatronL2NormHook",
 ]
 
@@ -111,6 +122,63 @@ class ForwardHook(ABC):
         """
         return {}
 
+    @abstractmethod
+    def to_dict(self) -> dict[str, torch.Tensor]:
+        """Convert hook results to dictionary format for saving.
+
+        Returns:
+            dict: Dictionary containing result tensors (e.g., "score", "channels_importance_ascending").
+        """
+        ...
+
+    @classmethod
+    def dump_activations_logs(
+        cls: type["ForwardHook"],
+        activation_hooks: dict[str, "ForwardHook"],
+        activations_log_dir: Path | str,
+        args: DictConfig,
+    ) -> None:
+        """Default implementation for dumping final activation scores logs to disk.
+
+        This is called only at the end of scoring to save final results.
+        """
+        activations_log_dir = Path(activations_log_dir)
+        activations_log_dir.mkdir(exist_ok=True, parents=True)
+        rank = dist.rank()
+        activations_log_path = activations_log_dir / f"rank_{rank}.pth"
+        activations_log = {
+            module_name: hook.to_dict() for module_name, hook in activation_hooks.items()
+        }
+        torch.save(activations_log, activations_log_path)
+
+        if rank == 0:
+            args.activation_hooks_kwargs.pop("model")
+            json_dump(OmegaConf.to_container(args, resolve=True), activations_log_dir / "args.json")
+        dist.barrier()
+
+        aprint(f"Dumped final activations log to {activations_log_path}")
+
+    @classmethod
+    def save_hook_states(
+        cls: type["ForwardHook"],
+        activation_hooks: dict[str, "ForwardHook"],
+        activations_log_dir: Path | str,
+    ) -> None:
+        """Save hook states for checkpointing (separate from final results).
+
+        This can be called periodically during scoring.
+        Note: Synchronization should be handled at a higher level to avoid deadlocks.
+        """
+        activations_log_dir = Path(activations_log_dir)
+        activations_log_dir.mkdir(exist_ok=True, parents=True)
+        rank = dist.rank()
+
+        hook_states_path = activations_log_dir / f"hook_states_rank_{rank}.pth"
+        hook_states = {
+            module_name: hook.state_dict() for module_name, hook in activation_hooks.items()
+        }
+        torch.save(hook_states, hook_states_path)
+
 
 class MegatronL2NormHook(ForwardHook):
     """Hook for accumulating activation statistics for importance estimation.
@@ -172,6 +240,10 @@ class MegatronL2NormHook(ForwardHook):
         assert self._activations is not None, "No activations collected for importance estimation."
         # Convert squared sum to L2 norm
         return self._activations.pow(0.5)
+
+    def to_dict(self) -> dict[str, torch.Tensor]:
+        """Convert to dict format for saving."""
+        return {"score": self.accumulate().cpu()}
 
     def state_dict(self) -> dict:
         """Return the state dictionary containing activations."""
@@ -598,7 +670,152 @@ class IndependentKvHeadContributionHook(ForwardHook):
         }
 
     def state_dict(self) -> dict:
+        """Return the internal state for checkpointing."""
         raise NotImplementedError("Saving state dict is not supported for this hook.")
 
     def load_state_dict(self, state_dict: dict) -> None:
+        """Load the internal state from a checkpoint."""
         raise NotImplementedError("Loading state dict is not supported for this hook.")
+
+
+class LayerNormContributionHook(ForwardHook):
+    """Hook for estimating channel importance based on layer normalization activations.
+
+    Aggregates mean absolute activation values per channel for a layer normalization layer.
+
+    Args:
+        layernorm_layer: The layer normalization layer.
+        activation_hooks_kwargs: The activation hooks kwargs (not used).
+    """
+
+    def __init__(self, layernorm_layer: nn.Module, activation_hooks_kwargs: dict):
+        """Aggregates mean absolute activation values per channel for a layer normalization layer.
+
+        Args:
+            layernorm_layer: The layer normalization layer
+            activation_hooks_kwargs: The activation hooks kwargs (not used)
+        """
+        self.agg_embedding_activations = torch.zeros(
+            size=(layernorm_layer.weight.shape[0],),
+            dtype=torch.float32,
+            device=layernorm_layer.weight.device,
+        )
+
+    def __call__(self, module: nn.Module, args: tuple[torch.Tensor], output: torch.Tensor) -> None:
+        """Accumulate activation statistics from the forward pass."""
+        self.agg_embedding_activations += (
+            output.abs().float().mean(dim=list(range(output.ndim - 1)))
+        )
+
+    def accumulate(self) -> torch.Tensor:
+        """Return accumulated channel importance scores."""
+        return self.agg_embedding_activations
+
+    def to_dict(self) -> dict[str, torch.Tensor]:
+        """Convert to dict format for saving."""
+        return {
+            "score": self.agg_embedding_activations.cpu(),
+            "channels_importance_ascending": self.agg_embedding_activations.sort()[1].cpu(),
+        }
+
+    def state_dict(self) -> dict:
+        """Return the internal state for checkpointing."""
+        raise NotImplementedError("Saving state dict is not supported for this hook.")
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        """Load the internal state from a checkpoint."""
+        raise NotImplementedError("Loading state dict is not supported for this hook.")
+
+    @classmethod
+    def dump_activations_logs(
+        cls: type["LayerNormContributionHook"],
+        activation_hooks: dict[str, "ForwardHook"],
+        activations_log_dir: Path | str,
+        args: DictConfig,
+    ) -> None:
+        """At the end of the default implementation of dumping activation scores to disc.
+
+        Save aggregated channel importance results.
+        """
+        super().dump_activations_logs(activation_hooks, activations_log_dir, args)
+
+        rank = dist.rank()
+        if rank == 0:
+            LayerNormContributionHook._save_channel_importance_results(
+                activation_hooks, activations_log_dir, args
+            )
+
+        dist.barrier()
+
+    @staticmethod
+    def _save_channel_importance_results(
+        activation_hooks: dict[str, "ForwardHook"],
+        activations_log_dir: Path | str,
+        args: DictConfig,
+    ) -> None:
+        """Save channel importance results from activation hooks."""
+        # Find all activation files (for multi-rank scenarios)
+        activations_log_dir = Path(activations_log_dir)
+        activation_files = list(activations_log_dir.glob("rank_*.pth"))
+        if not activation_files:
+            aprint(f"Warning: No activation files found in {activations_log_dir}")
+            return
+
+        # Load and aggregate activation data from all ranks
+        all_scores = []
+        for activation_file in activation_files:
+            aprint(f"Loading activations from {activation_file}")
+            activation_data = torch.load(activation_file, map_location="cpu")
+
+            # Extract scores from the activation data
+            for module_name, hook_data in activation_data.items():
+                if "score" in hook_data:
+                    scores = hook_data["score"]
+                    all_scores.append(scores)
+                    aprint(f"Loaded {len(scores)} channel scores from {module_name}")
+
+        if not all_scores:
+            aprint("Warning: No valid activation data found")
+            return
+
+        # Average scores across all ranks and modules
+        avg_scores = torch.stack(all_scores).mean(dim=0)
+        aprint(f"Averaged {len(all_scores)} score sets into {len(avg_scores)} channels")
+
+        # Create channel importance ranking (descending order)
+        ranked_channels = torch.argsort(avg_scores, descending=True).tolist()
+
+        # Create output data structure
+        timestamp = datetime.now().strftime("%Y_%m_%d__%H_%M_%S")
+        output_data = {
+            "model_path": getattr(args, "model_name_or_path", "unknown"),
+            "dataset_path": getattr(args, "dataset_path", "unknown"),
+            "experiment_id": getattr(args, "experiment_id", f"experiment_{timestamp}"),
+            "eval_samples": getattr(args, "eval_samples", 0),
+            "micro_batch_size": getattr(args, "micro_batch_size", 0),
+            "timestamp": timestamp,
+            "total_channels": len(ranked_channels),
+            "channel_importance_ranking": ranked_channels,
+            "channel_scores": avg_scores.tolist(),
+            "score_statistics": {
+                "min": float(avg_scores.min()),
+                "max": float(avg_scores.max()),
+                "mean": float(avg_scores.mean()),
+                "std": float(avg_scores.std()),
+            },
+        }
+
+        # Save the output
+        output_path = activations_log_dir / "channel_importance_results.json"
+        aprint(f"Saving channel importance data to {output_path}")
+        with open(output_path, "w") as f:
+            json.dump(output_data, f, indent=2)
+
+        # Print summary statistics
+        aprint("=== Channel Importance Summary ===")
+        aprint(f"Total channels: {len(ranked_channels)}")
+        aprint(f"Top 10 most important channels: {ranked_channels[:10]}")
+        aprint(f"Bottom 10 least important channels: {ranked_channels[-10:]}")
+        aprint(f"Score range: {avg_scores.min():.4f} to {avg_scores.max():.4f}")
+        aprint(f"Score mean: {avg_scores.mean():.4f}")
+        aprint(f"Score std: {avg_scores.std():.4f}")
