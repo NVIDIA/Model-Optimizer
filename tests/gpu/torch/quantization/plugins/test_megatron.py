@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import copy
 from functools import partial
 
@@ -50,9 +51,34 @@ import modelopt
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.nn import QuantModuleRegistry
+from modelopt.torch.quantization.plugins.megatron import _QuantTEMCoreRowParallelLinear
 from modelopt.torch.utils.plugins import megatron_prefill
 
+try:
+    from megatron.core.extensions.transformer_engine import TERowParallelLinear
+
+    HAS_TE = True
+except ImportError:
+    HAS_TE = False
+
 SEED = 1234
+
+
+def get_batch(model, batch_size=2):
+    seq_length = model.max_sequence_length
+    vocab_size = model.vocab_size
+
+    input_ids = torch.randint(0, vocab_size, (batch_size, seq_length)).cuda()
+    labels = torch.randint(0, vocab_size, (batch_size, seq_length)).cuda()
+    position_ids = (
+        torch.arange(seq_length, dtype=torch.int64).unsqueeze(0).repeat(batch_size, 1).cuda()
+    )
+    attention_mask = torch.tril(
+        torch.ones((batch_size, 1, seq_length, seq_length), dtype=torch.bool)
+    ).cuda()
+    loss_mask = torch.ones((batch_size, seq_length), dtype=torch.float32).cuda()
+
+    return input_ids, labels, position_ids, attention_mask, loss_mask
 
 
 def test_convert_megatron_parallel_linear(distributed_setup_size_1):
@@ -535,6 +561,7 @@ def test_fp8_real_quantize():
     spawn_multiprocess_job(size=size, job=_test_fp8_real_quantize_helper, backend="nccl")
 
 
+@pytest.mark.skip(reason="TODO: etp requires sequence parallelism now in Megatron due to a bug;")
 @pytest.mark.parametrize(
     "config",
     [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG],
@@ -727,6 +754,7 @@ def _test_expert_model_parallel_amax_sync(
     assert final_sync, f"Inconsistent amax for expert {quantizer_type} across ranks: {rank_values}"
 
 
+@pytest.mark.skip(reason="TODO: etp requires sequence parallelism now in Megatron due to a bug;")
 @pytest.mark.parametrize("config", [mtq.FP8_DEFAULT_CFG, mtq.INT8_DEFAULT_CFG])
 @pytest.mark.parametrize(("ep_size", "etp_size"), [(1, 2), (2, 1), (2, 2)])
 @pytest.mark.parametrize("moe_grouped_gemm", [True, False])
@@ -930,5 +958,81 @@ def test_kv_cache_sharded_state_dict(tmp_path, config):
     spawn_multiprocess_job(
         size=size,
         job=partial(_test_kv_cache_sharded_state_dict_helper, tmp_path, config),
+        backend="nccl",
+    )
+
+
+def test_convert_mcore_te_gpt_model(distributed_setup_size_1):
+    if not HAS_TE:
+        pytest.skip("Transformer Engine is not installed")
+    initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
+    model = get_mcore_gpt_model(tensor_model_parallel_size=1, transformer_impl="transformer_engine")
+
+    input_ids, labels, position_ids, attention_mask, loss_mask = get_batch(model)
+
+    def forward(model):
+        return model.forward(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            loss_mask=loss_mask,
+        )
+
+    for name, param in model.named_parameters():
+        param.requires_grad = True
+
+    # Set to eval mode to disable dropout for deterministic outputs
+    model.eval()
+    ref_output = forward(model)
+
+    model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward)
+
+    for n, m in model.named_modules():
+        if isinstance(m, TERowParallelLinear):
+            assert isinstance(m, _QuantTEMCoreRowParallelLinear)
+            assert m.input_quantizer.amax is not None
+            assert m.weight_quantizer.amax is not None
+
+    # Save which quantizers are enabled before disabling
+    enabled_quantizers = {
+        name
+        for name, m in model.named_modules()
+        if isinstance(m, mtq.nn.TensorQuantizer) and m.is_enabled
+    }
+
+    mtq.disable_quantizer(model, "*")
+    disabled_output = forward(model)
+    assert torch.allclose(ref_output, disabled_output, atol=1e-5), (
+        "Output with quantizers disabled should match reference output"
+    )
+
+    mtq.enable_quantizer(model, lambda name: name in enabled_quantizers)
+    enabled_output = forward(model)
+    assert not torch.allclose(ref_output, enabled_output, atol=1e-5), (
+        "Output with quantizers enabled should differ from reference output"
+    )
+    # enable model for training to test backward pass
+    model.train()
+    loss = forward(model).sum()
+    loss.backward()
+
+    destroy_model_parallel()
+
+
+def test_homogeneous_sharded_state_dict_te_spec(tmp_path):
+    pytest.skip("The test is temporarily disabled to avoid CI timeout")
+    spawn_multiprocess_job(
+        size=2,
+        job=partial(
+            _test_sharded_state_dict,
+            tmp_path,
+            mtq.INT8_DEFAULT_CFG,
+            256,
+            None,
+            False,
+            False,
+            {"transformer_impl": "transformer_engine"},
+        ),
         backend="nccl",
     )

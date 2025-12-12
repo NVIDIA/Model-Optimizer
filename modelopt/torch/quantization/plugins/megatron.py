@@ -47,11 +47,14 @@ from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear
 try:
     from megatron.core.extensions.transformer_engine import (
         TEColumnParallelGroupedLinear,
+        TEColumnParallelLinear,
         TEDotProductAttention,
+        TELayerNormColumnParallelLinear,
         TERowParallelGroupedLinear,
+        TERowParallelLinear,
     )
 
-    from .transformer_engine import _QuantTEGroupedLinear
+    from .transformer_engine import _QuantTEGroupedLinear, _QuantTELayerNormLinear, _QuantTELinear
 
     HAS_TE = True
 except ImportError:
@@ -549,6 +552,23 @@ class _MegatronSequentialMLP(_MegatronMLP):
 
 
 if HAS_TE:
+
+    @QuantModuleRegistry.register({TERowParallelLinear: "te_mcore_RowParallelLinear"})
+    class _QuantTEMCoreRowParallelLinear(_QuantTELinear, _MegatronRowParallelLinear):
+        pass
+
+    @QuantModuleRegistry.register({TEColumnParallelLinear: "te_mcore_ColumnParallelLinear"})
+    class _QuantTEMCoreColumnParallelLinear(_QuantTELinear, _MegatronColumnParallelLinear):
+        pass
+
+    @QuantModuleRegistry.register(
+        {TELayerNormColumnParallelLinear: "te_mcore_LayerNormColumnParallelLinear"}
+    )
+    class _QuantTELayerNormColumnParallelLinear(
+        _QuantTELayerNormLinear, _MegatronColumnParallelLinear
+    ):
+        pass
+
     # Quantized subclasses to support TEGroupedMLP quantization
     class _QuantMegatronTEGroupedLinear(_QuantTEGroupedLinear, _MegatronParallelLinear):
         def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):

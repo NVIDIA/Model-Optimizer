@@ -1,7 +1,14 @@
 NVIDIA Model Optimizer Changelog (Linux)
 ========================================
 
-0.40 (2025-12-15)
+0.41 (2026-01-19)
+^^^^^^^^^^^^^^^^^
+
+**New Features**
+
+- Add support for Transformer Engine quantization for Megatron Core models.
+
+0.40 (2025-12-12)
 ^^^^^^^^^^^^^^^^^
 
 **Bug Fixes**

@@ -44,6 +44,10 @@ class ReferenceRunner:
         """Initialize with ONNX model path."""
         self.model = model
         self.input_names = [input.name for input in self.model.graph.input]
+        self.input_shapes = {
+            input.name: [s.dim_value for s in input.type.tensor_type.shape.dim]
+            for input in self.model.graph.input
+        }
         self.providers = self._prepare_ep_list_with_trt_plugin_path(providers, trt_plugins)
 
     def _prepare_ep_list_with_trt_plugin_path(self, providers, trt_plugins):
@@ -69,12 +73,19 @@ class ReferenceRunner:
         return [np.load(input_data_path)]
 
     def _validate_inputs(self, data_loader):
-        """Validate that input names match the model."""
+        """Validate that input names and shapes match the model."""
         if isinstance(data_loader, list) and (
             isinstance(data_loader[0], (dict, np.lib.npyio.NpzFile))
         ):
             if sorted(self.input_names) != sorted(data_loader[0].keys()):
                 raise ValueError("Input names from ONNX model do not match provided input names.")
+            for inp_name, inp_shape in data_loader[0].items():
+                if self.input_shapes[inp_name] != list(inp_shape.shape):
+                    raise ValueError(
+                        f"Input shape from '{inp_name}' does not match provided input shape: "
+                        f"{self.input_shapes[inp_name]} vs {list(inp_shape.shape)}. "
+                        f"Please make sure that your calibration data matches the ONNX input shapes."
+                    )
         else:
             raise ValueError("Invalid input file.")
 
