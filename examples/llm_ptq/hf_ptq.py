@@ -504,12 +504,6 @@ def main(args):
             quant_cfg["quant_cfg"]["*radio*"] = {"enable": False}
             quant_cfg["quant_cfg"]["*visual*"] = {"enable": False}
 
-        if model_type == "qwen3next" and args.qformat == "nvfp4":
-            quant_cfg["quant_cfg"]["model*.*attn*in_proj*"] = {"enable": False}
-            quant_cfg["quant_cfg"]["model*.*attn*q_proj*"] = {"enable": False}
-            quant_cfg["quant_cfg"]["model*.*attn*k_proj*"] = {"enable": False}
-            quant_cfg["quant_cfg"]["model*.*attn*v_proj*"] = {"enable": False}
-
         if not model_is_already_quantized or calibration_only:
             # Only run single sample for preview
             input_ids = next(iter(calib_dataloader))[
