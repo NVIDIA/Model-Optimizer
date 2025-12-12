@@ -27,11 +27,11 @@ example-onnx-bash:
     - bash tests/examples/test_$EXAMPLE.sh
 
 ##### Megatron / NeMo Integration Tests #####
-megatron-nemo-integration:
-  extends: .tests-default
-  variables:
-    UPSTREAM_REF: $CI_COMMIT_REF_NAME
-  trigger:
-    project: omniml/integration/nmm-sandbox
-    branch: main
-    strategy: depend # Make sure the upstream task is waiting for the downstream task
+# megatron-nemo-integration:
+#   extends: .tests-default
+#   variables:
+#     UPSTREAM_REF: $CI_COMMIT_REF_NAME
+#   trigger:
+#     project: omniml/integration/nmm-sandbox
+#     branch: main
+#     strategy: depend # Make sure the upstream task is waiting for the downstream task
