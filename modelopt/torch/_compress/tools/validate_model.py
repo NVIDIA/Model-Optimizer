@@ -21,11 +21,10 @@ of pytorch modules that are used for activation scoring for pruning.
 TODO: Consider moving this a separate module dedicated for scoring.
 """
 
-import argparse
 import textwrap
 from pathlib import Path
 
-import torch.distributed
+import torch
 from omegaconf import DictConfig
 from torch import nn
 from torch.utils.data import DataLoader
@@ -36,12 +35,12 @@ from transformers import (
     PreTrainedTokenizerBase,
 )
 
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress.activation_scoring.activation_hooks.utils import (
     register_activation_hooks,
 )
 from modelopt.torch._compress.tools.checkpoint_utils_hf import load_checkpoint
 from modelopt.torch._compress.tools.logger import aprint, mprint
-from modelopt.torch._compress.tools.runtime import IRuntime, NativeDdpRuntime
 from modelopt.torch._compress.tools.sharded_checkpoint_utils import load_and_shard_model
 from modelopt.torch._compress.utils.data.dataloaders import create_validation_dataloader
 from modelopt.torch._compress.utils.parsing import simple_parse_args_string
@@ -50,12 +49,6 @@ from modelopt.torch._compress.utils.validate_runtime_pipeline import (
     calculate_losses_pipeline,
 )
 from modelopt.torch._compress.utils.validation import calculate_losses
-
-# #TODO:Import slack from root utils directory
-# root_path = os.path.join(os.path.dirname(__file__), "..", "..")
-# if root_path not in sys.path:
-#     sys.path.append(root_path)
-# from utils.slack import send_slack_message
 
 """
 Two goals:
@@ -67,88 +60,89 @@ Automatically uses pipeline parallelism via device_map="auto".
 2) Register hooks to capture the inputs and the outputs of pytorch modules.
 For example, to collect activations scores for various layers (ffn, layer_norm, etc.)
 that are used for pruning (ffn_hidden_size, embedding_pruning, etc).
-See --activations_log_dir and --activation_hooks_kwargs args arguments.
-
+See activations_log_dir and activation_hooks_kwargs arguments.
 """
-
-
-def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--model_name_or_path",
-        type=str,
-        default=None,
-        help="Required unless a model is passed to the function",
-    )
-    parser.add_argument("--dataset_path", type=str, required=True)
-
-    parser.add_argument("--output_dir_name", type=str, default="validation")
-    parser.add_argument(
-        "--calculate_full_score_ablations",
-        action="store_true",
-        help="Calculates a diverse suite of teacher similarity scores. "
-        "By default only a small suite is calculated, which is good for most use-cases.",
-    )
-
-    parser.add_argument("--tokenizer_name", type=str, default=None)
-    parser.add_argument("--data_column", type=str, default="content")
-    # TODO: Add help text for FIM rate, also for others less obvious args
-    parser.add_argument("--fim_rate", type=float, default=0)
-    parser.add_argument("--fim_spm_rate", type=float, default=0)
-    parser.add_argument("--eval_samples", type=int, default=None)
-    parser.add_argument("--block_size", type=int, default=4096)
-    parser.add_argument("--micro_batch_size", type=int, default=4)
-    parser.add_argument("--val_dataset_name", type=str, default="__auto__")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--source_datasets_to_discard", nargs="+", type=str)
-    parser.add_argument("--bos_rate", type=float, default=1.0)
-    parser.add_argument("--shuffle_seed", type=int, default=None)
-    parser.add_argument("--varlen", action="store_true")
-    parser.add_argument("--pipeline_parallel", action="store_true")
-    parser.add_argument("--write_results", action="store_true")
-    parser.add_argument("--activations_log_dir", type=str, default=None)
-    parser.add_argument(
-        "--activation_hooks_kwargs",
-        type=str,
-        default=None,
-        help="Comma separated string arguments, e.g. `arg1=val1,arg2=val2`",
-    )
-    parser.add_argument(
-        "--calc_losses_on_cpu",
-        action="store_true",
-        help="Very slow, not recommended. Can help avoid OOM.",
-    )
-    return parser
-
-
-def parse_args() -> argparse.Namespace:
-    parser = build_arg_parser()
-    args, unknown_args = parser.parse_known_args()
-    return args
 
 
 @torch.no_grad()
 def validate_model(
-    args: argparse.Namespace | DictConfig,
+    args: DictConfig,
     model: PreTrainedModel | None = None,
     tokenizer: PreTrainedTokenizerBase | None = None,
     target_hidden_states_per_batch: list[torch.Tensor] | None = None,
     return_hidden_states: bool = False,
-    runtime: IRuntime | None = None,
+    pipeline_parallel: bool = False,
     calculate_full_score_ablations: bool = False,
     val_dataloader: DataLoader | None = None,
 ) -> tuple[dict[str, dict], HiddenStatesAndLMHead | None] | tuple[None, None]:
+    """Validate a language model on a dataset by calculating loss and optionally capturing activations.
+
+    Args:
+        args: Configuration object containing the following attributes:
+
+            Model Configuration:
+            - model_name_or_path (str): Path to model checkpoint or HuggingFace model name.
+                                        Required unless model is passed directly.
+            - model_dtype (str or torch.dtype): Model data type (e.g., "torch.bfloat16", torch.float16).
+            - autocast_dtype (str or torch.dtype): Autocast data type for mixed precision.
+
+            Dataset Configuration:
+            - dataset_path (str): Path to the validation dataset.
+            - tokenizer_name (str, optional): Tokenizer name/path. Uses model_name_or_path if not specified.
+            - data_column (str): Column name in dataset containing text data.
+            - block_size (int): Maximum sequence length for tokenization.
+            - eval_samples (int, optional): Number of samples to evaluate. Uses all if None.
+            - val_dataset_name (str): Name of validation dataset split.
+            - source_datasets_to_discard (list[str], optional): List of source datasets to exclude.
+            - load_dataset_fn (callable, optional): Custom function to load the dataset.
+
+            Data Processing:
+            - micro_batch_size (int): Batch size for evaluation.
+            - seed (int): Random seed for reproducibility.
+            - shuffle_seed (int, optional): Seed for shuffling data. Uses seed if None.
+            - varlen (bool): Enable variable-length sequences.
+            - bos_rate (float): Rate of adding BOS token.
+            - fim_rate (float): Fill-in-the-middle rate for code completion tasks.
+            - fim_spm_rate (float): SPM-based fill-in-the-middle rate.
+
+            Activation Hooks:
+            - activations_log_dir (str, optional): Directory to log activation scores. If provided,
+                                                   hooks will be registered to capture activations.
+            - activation_hooks_kwargs (str or dict, optional): Arguments for activation hooks.
+                                                               If string, comma-separated format: "arg1=val1,arg2=val2".
+
+            Execution Options:
+            - calc_losses_on_cpu (bool): Calculate losses on CPU to avoid OOM. Very slow, not recommended.
+            - write_results (bool): Write validation results to file.
+
+        model: Pre-loaded model. If None, will be loaded from args.model_name_or_path.
+        tokenizer: Pre-loaded tokenizer. If None, will be loaded based on args.
+        target_hidden_states_per_batch: Target hidden states for pipeline parallel evaluation.
+        return_hidden_states: Whether to return hidden states from the model.
+        pipeline_parallel: Enable pipeline parallelism for large models.
+        calculate_full_score_ablations: Calculate comprehensive teacher similarity scores.
+                                         False calculates only a small suite for efficiency.
+        val_dataloader: Pre-created validation dataloader. If None, will be created from args.
+
+    Returns:
+        A tuple containing:
+        - losses: Dictionary mapping loss names to loss statistics (avg, per_sample).
+        - hidden_states_per_batch: Hidden states and LM head outputs if return_hidden_states is True, else None.
+        Returns (None, None) if not on master rank.
+    """
+    # convert model_dtype and autocast_dtype from string to torch.dtype
+    if isinstance(args.model_dtype, str):
+        args.model_dtype = getattr(torch, args.model_dtype.strip("torch."))
+    if isinstance(args.autocast_dtype, str):
+        args.autocast_dtype = getattr(torch, args.autocast_dtype.strip("torch."))
+
     if val_dataloader is None:
-        val_dataloader = (
-            prepare_dataloader(args, tokenizer)
-            if (runtime is None or runtime.is_main_process)
-            else None
-        )
+        val_dataloader = prepare_dataloader(args, tokenizer) if dist.is_master() else None
     validation_full_iters = (
         args.eval_samples // args.micro_batch_size
     )  # model pipeline, single data rank
 
-    model = prepare_model(args, model, runtime)
+    model = prepare_model(args, model, pipeline_parallel)
 
     just_model_forward = False
     checkpoint_manager = None
@@ -175,7 +169,6 @@ def validate_model(
         )
         checkpoint_manager = ScoringCheckpointManager(
             checkpoint_dir=args.activations_log_dir,
-            runtime=runtime,
             activation_hooks=activation_hooks,
             checkpoint_interval=50,  # Save every 50 batches
         )
@@ -190,7 +183,7 @@ def validate_model(
         just_model_forward = True
         model.lm_head = nn.Identity()
 
-    if runtime is None:
+    if not pipeline_parallel:
         losses, hidden_states_per_batch = calculate_losses(
             model=model,
             dataloader=val_dataloader,
@@ -198,7 +191,6 @@ def validate_model(
         )
     else:
         losses, hidden_states_per_batch = calculate_losses_pipeline(
-            runtime=runtime,
             stitched_model=model,
             dataloader=val_dataloader,
             target_hidden_states_per_batch=target_hidden_states_per_batch,
@@ -207,6 +199,7 @@ def validate_model(
             calc_on_cpu=args.calc_losses_on_cpu,
             just_model_forward=just_model_forward,
             checkpoint_manager=checkpoint_manager,
+            autocast_dtype=args.autocast_dtype,
         )
 
     if losses is not None:
@@ -223,26 +216,23 @@ def validate_model(
         aprint(results_str)
         if args.write_results:
             Path(f"{args.model_name_or_path}/validate_model_results.txt").write_text(results_str)
-            # TODO: send_slack_message(results_str)
 
     if activation_hooks is not None:
-        hook_class.dump_activations_logs(activation_hooks, args.activations_log_dir, args, runtime)
+        hook_class.dump_activations_logs(activation_hooks, args.activations_log_dir, args)
 
     return losses, hidden_states_per_batch
 
 
 def prepare_model(
-    args: argparse.Namespace,
-    model: PreTrainedModel | None = None,
-    runtime: IRuntime | None = None,
+    args: DictConfig, model: PreTrainedModel | None = None, pipeline_parallel: bool = False
 ) -> nn.Module:
     if model is None:
         assert args.model_name_or_path is not None
-        if runtime is not None:
+        if pipeline_parallel:
             model = load_and_shard_model(
-                runtime,
                 args.model_name_or_path,
                 model_config_overrides={"block_size": args.block_size},
+                model_dtype=args.model_dtype,
             )
         else:
             try:
@@ -265,8 +255,7 @@ def prepare_model(
 
 
 def prepare_dataloader(
-    args: argparse.Namespace,
-    tokenizer: PreTrainedTokenizerBase | None = None,
+    args: DictConfig, tokenizer: PreTrainedTokenizerBase | None = None
 ) -> DataLoader:
     if tokenizer is None:
         tokenizer_name = getattr(args, "tokenizer_name", None)
@@ -295,16 +284,3 @@ def prepare_dataloader(
     )
 
     return val_dataloader
-
-
-def main():
-    args = parse_args()
-    if args.pipeline_parallel:
-        with NativeDdpRuntime(dtype=torch.bfloat16) as runtime:
-            validate_model(args=args, runtime=runtime)
-    else:
-        validate_model(args=args, runtime=None)
-
-
-if __name__ == "__main__":
-    main()

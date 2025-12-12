@@ -23,6 +23,12 @@ from megatron.core.tensor_parallel import gather_from_tensor_model_parallel_regi
 from megatron.core.tensor_parallel.layers import RowParallelLinear
 from torch import nn
 
+__all__ = [
+    "IndependentChannelContributionHook",
+    "IterativeChannelContributionHook",
+    "MegatronL2NormHook",
+]
+
 
 def clear_gpu_memory(clear: bool) -> None:
     """Clear GPU memory cache if requested.
@@ -176,6 +182,108 @@ class MegatronL2NormHook(ForwardHook):
         self._activations = state_dict["activations"]
 
 
+class IndependentChannelContributionHook(ForwardHook):
+    """Hook for channel importance estimation using weight norms and activation magnitudes.
+
+    Computes channel importance as the product of:
+    - L2 norm of each column in the weight matrix (how much each input channel affects output)
+    - Mean absolute activation for each channel (how strongly each channel is activated)
+
+    Args:
+        linear_layer: The linear projection layer to analyze. Can be either nn.Linear or
+            RowParallelLinear from megatron.core.tensor_parallel.layers.
+        max_size: Optional maximum expected size to validate against (skips if mismatch).
+                Useful for skipping non-max subnets during profiling.
+    """
+
+    def __init__(
+        self,
+        linear_layer: nn.Linear | RowParallelLinear,
+        max_size: int | None = None,
+    ):
+        """Initialize the independent channel contribution hook."""
+        self.max_size = max_size
+
+        weight_matrix = linear_layer.weight.float()
+        self.weight_norm = torch.linalg.vector_norm(weight_matrix, dim=0)
+
+        # Check if it's a RowParallelLinear (Megatron-Core) or nn.Linear (PyTorch)
+        if hasattr(linear_layer, "input_size"):
+            self.num_channels = linear_layer.input_size  # Megatron-Core
+        else:
+            self.num_channels = linear_layer.in_features  # PyTorch
+
+        self.agg_channel_activations = torch.zeros(
+            size=(self.num_channels,),
+            dtype=torch.float32,
+            device=weight_matrix.device,
+        )
+
+    def __call__(
+        self, module: nn.Module, args: tuple[torch.Tensor, ...], output: torch.Tensor | tuple
+    ) -> None:
+        """Accumulate mean absolute activations per channel.
+
+        Args:
+            module: The module this hook is registered on.
+            args: Tuple with single input tensor. args[0] expected shape: [batch_size, seq_len, input_channels]
+                  (PyTorch batch-first format).
+            output: Output tensor of shape [batch_size, seq_len, output_channels], or tuple (output_tensor, bias)
+                    for parallel layers.
+        """
+        activations = args[0]
+
+        # Don't aggregate activations from non-max subnets (e.g. from profiling)
+        if self.max_size is not None and activations.shape[-1] != self.max_size:
+            return
+
+        mean_abs_channel_activations = (
+            activations.abs().float().mean(dim=list(range(activations.ndim - 1)))
+        )
+        self.agg_channel_activations[:] += mean_abs_channel_activations  # shape [input_channels]
+
+    def to_dict(self) -> dict[str, torch.Tensor]:
+        """Convert results to dict with channel importance scores.
+
+        Returns:
+            Dict with "score" (weight_norm * activations), "weight_norm", and
+            "agg_channel_activations".
+        """
+        return {
+            "score": (self.weight_norm * self.agg_channel_activations).cpu(),
+            "weight_norm": self.weight_norm.cpu(),
+            "agg_channel_activations": self.agg_channel_activations.cpu(),
+        }
+
+    def accumulate(self) -> torch.Tensor:
+        """Return importance scores as a tensor.
+
+        Returns:
+            Tensor of importance scores (weight_norm * activations), one per channel.
+        """
+        return self.to_dict()["score"]
+
+    def state_dict(self) -> dict:
+        """Save the internal state for checkpointing."""
+        return {
+            "agg_channel_activations": self.agg_channel_activations.cpu().clone(),
+            "weight_norm": self.weight_norm.cpu().clone(),
+        }
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        """Load the internal state from a checkpoint."""
+        self.agg_channel_activations = state_dict["agg_channel_activations"].to(
+            self.agg_channel_activations.device
+        )
+        # weight_norm should be the same as it's derived from the model weights
+        # but we can verify it matches
+        expected_weight_norm = state_dict["weight_norm"].to(self.weight_norm.device)
+        if not torch.allclose(self.weight_norm, expected_weight_norm, rtol=1e-5):
+            raise AssertionError(
+                "weight_norm mismatch during state loading - model weights may have changed"
+            )
+
+
 def get_pruning_schedule(num_channels, pruning_iters):
     """Spending decreases monotonically when num_channels >= pruning_iters.
 
@@ -318,10 +426,11 @@ class IterativeChannelContributionHook(ForwardHook):
         del contribution, contribution_squared
         clear_gpu_memory(clear=self.clear_gpu_memory)
 
-        if n_channels_to_prune == 0:
-            self.agg_cont_per_channel += mean_cont_per_channel
-        else:
-            _, worst_indices = torch.topk(mean_cont_per_channel, n_channels_to_prune, largest=False)
+        self.agg_cont_per_channel += mean_cont_per_channel
+        if n_channels_to_prune > 0:
+            _, worst_indices = torch.topk(
+                self.agg_cont_per_channel, n_channels_to_prune, largest=False
+            )
             worst_indices_list = worst_indices.tolist()
             assert not set(self.pruned_channels).intersection(set(worst_indices_list))
             self.pruned_channels.extend(worst_indices_list)

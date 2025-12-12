@@ -226,7 +226,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def run_single_puzzle_config(
-    args: argparse.Namespace,
+    args: argparse.Namespace | DictConfig,
     gathered_metrics: dict,
     subblock_stats: dict,
     subblock_stats_args: dict,
@@ -426,7 +426,7 @@ def _get_minimal_unique_names(dicts: List[dict]) -> List[str]:
     return ["-".join(f"{k}_{d[k]}".replace(".", "_") for k in non_common_keys) for d in dicts]
 
 
-def run_puzzle(args: argparse.Namespace) -> List[str]:
+def run_puzzle(args: argparse.Namespace | DictConfig) -> List[str]:
     # Loads config from args/puzzle_profile
     if args.puzzle_profile is not None:
         with open(args.puzzle_profile) as f:

@@ -15,16 +15,12 @@
 
 from pathlib import Path
 
-import hydra
 import torch
 from omegaconf import DictConfig
 
-from modelopt.torch._compress.tools.hydra_utils import register_hydra_resolvers
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress.tools.logger import mprint
-from modelopt.torch._compress.tools.runtime import BaseRuntime, NativeDdpRuntime
 from modelopt.torch._compress.tools.validate_model import validate_model
-from modelopt.torch._compress.utils.dist_utils import is_distributed
-from modelopt.torch._compress.utils.parsing import format_global_config
 
 
 def has_checkpoint_support(activation_hooks_kwargs: dict) -> bool:
@@ -50,23 +46,20 @@ def has_checkpoint_support(activation_hooks_kwargs: dict) -> bool:
     return method in supported_methods
 
 
-def check_scoring_completion(
-    activations_log_dir: str, runtime, activation_hooks_kwargs=None
-) -> bool:
+def check_scoring_completion(activations_log_dir: str, activation_hooks_kwargs=None) -> bool:
     """
     Check if scoring is already completed by looking for the expected output files.
     Also checks if the scoring method is safe for resume.
 
     Args:
         activations_log_dir: Directory where activation logs should be stored
-        runtime: Runtime object for distributed processing
         activation_hooks_kwargs: Hook configuration to check if resume is safe
 
     Returns:
         bool: True if scoring is completed (has rank files and args.json)
     """
-    # Only check completion on main process (or if no distributed runtime)
-    if runtime is None or runtime.is_main_process:
+    # Only check completion on main process
+    if dist.is_master():
         log_dir = Path(activations_log_dir)
 
         # Check if directory exists
@@ -95,14 +88,13 @@ def check_scoring_completion(
     return False
 
 
-def should_skip_scoring_completely(cfg: DictConfig, runtime) -> bool:
+def should_skip_scoring_completely(cfg: DictConfig) -> bool:
     """
     Determine if we should skip scoring entirely (only if 100% complete).
     Partial progress should proceed to validate_model for proper resume.
 
     Args:
         cfg: Configuration object
-        runtime: Runtime object for distributed processing
 
     Returns:
         bool: True if we should skip scoring (100% completed), False if we should run/resume it
@@ -123,11 +115,11 @@ def should_skip_scoring_completely(cfg: DictConfig, runtime) -> bool:
 
     # Check if scoring is already completed
     is_completed = check_scoring_completion(
-        cfg.pruning.activations_log_dir, runtime, activation_hooks_kwargs
+        cfg.pruning.activations_log_dir, activation_hooks_kwargs
     )
 
     # Broadcast the result to all processes in distributed mode
-    if runtime is not None and runtime.world_size > 1:
+    if dist.size() > 1:
         should_skip = [is_completed]  # Use list for mutable object
         torch.distributed.broadcast_object_list(should_skip, src=0)
         is_completed = should_skip[0]
@@ -141,34 +133,12 @@ def should_skip_scoring_completely(cfg: DictConfig, runtime) -> bool:
 # Old progress tracking removed - checkpoint manager handles all progress tracking
 
 
-def launch_score_activations(cfg: DictConfig, runtime):
+def launch_score_activations(cfg: DictConfig):
     # Check if we should skip scoring entirely (only if 100% complete)
-    if should_skip_scoring_completely(cfg, runtime):
+    if should_skip_scoring_completely(cfg):
         return
 
     mprint("Starting pruning activation scoring...")
 
     # The checkpoint manager inside validate_model handles all progress tracking
-    validate_model(args=cfg.pruning, runtime=runtime)
-
-
-@hydra.main("", version_base="1.3")
-def main(cfg: DictConfig) -> None:
-    cfg = hydra.utils.instantiate(cfg)
-    mprint(format_global_config(cfg, title="Score Pruning Activations"))
-
-    _runtime = (
-        NativeDdpRuntime(
-            dtype=torch.bfloat16, torch_distributed_timeout=getattr(cfg, "nccl_timeout_minutes")
-        )
-        if is_distributed()
-        else BaseRuntime(dtype=torch.bfloat16)
-    )
-    with _runtime as runtime:
-        launch_score_activations(cfg, runtime)
-        runtime.wait_for_everyone()
-
-
-if __name__ == "__main__":
-    register_hydra_resolvers()
-    main()
+    validate_model(args=cfg.pruning, pipeline_parallel=True)

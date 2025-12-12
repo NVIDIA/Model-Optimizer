@@ -20,6 +20,8 @@ import io
 import os
 import time
 from collections.abc import Callable
+from contextlib import suppress
+from datetime import timedelta
 from typing import Any
 
 import torch
@@ -70,9 +72,21 @@ def rank(group=None) -> int:
     return 0
 
 
+def local_rank() -> int:
+    """Returns the local rank of the current process."""
+    if "LOCAL_RANK" in os.environ:
+        return int(os.environ["LOCAL_RANK"])
+    raise RuntimeError("LOCAL_RANK environment variable not found.")
+
+
 def is_master(group=None) -> bool:
     """Returns whether the current process is the master process."""
     return rank(group=group) == 0
+
+
+def is_last_process(group=None) -> bool:
+    """Returns whether the current process is the last process."""
+    return rank(group=group) == size(group=group) - 1
 
 
 def _serialize(obj: Any) -> torch.Tensor:
@@ -182,6 +196,21 @@ def master_only(func):
         return broadcast(func(*args, **kwargs) if is_master() else None)
 
     return wrapper
+
+
+def setup(timeout: timedelta | None = None):
+    """Sets up the distributed environment."""
+    torch.cuda.set_device(local_rank())
+    if not is_initialized():
+        torch.distributed.init_process_group("cpu:gloo,cuda:nccl", timeout=timeout)
+
+
+def cleanup():
+    """Cleans up the distributed environment."""
+    if is_initialized():
+        with suppress(Exception):
+            barrier()
+        torch.distributed.destroy_process_group()
 
 
 class DistributedProcessGroup:

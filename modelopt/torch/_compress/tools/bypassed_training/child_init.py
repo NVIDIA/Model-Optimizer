@@ -39,7 +39,6 @@ from modelopt.torch._compress.decilm.deci_lm_hf_code.block_config import (
 )
 from modelopt.torch._compress.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 from modelopt.torch._compress.tools.logger import aprint, mprint
-from modelopt.torch._compress.tools.runtime import IRuntime
 
 
 class GQAInitMode(Enum):
@@ -331,7 +330,6 @@ def create_child_state_dict(
     new_config: DeciLMConfig,
     gqa_init_mode: GQAInitMode,
     ignore_fn: IgnoreFn = default_ignore_fn,
-    runtime: Optional[IRuntime] = Printer,
     mlp_init_mode: MlpInitMode = MlpInitMode.CopyAsIs,
     mlp_init_config: Optional[dict[str, Any]] = None,
     owned_block_indexes: Optional[set[int]] = None,

@@ -20,7 +20,6 @@ TODO: Consider moving this a separate module dedicated for scoring.
 
 # mypy: ignore-errors
 
-import argparse
 import json
 import shutil
 import warnings
@@ -29,11 +28,12 @@ from pathlib import Path
 from typing import Optional
 
 import torch
+from omegaconf import DictConfig
 from tqdm import tqdm
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
-from modelopt.torch._compress.replacement_library.build_replacement_library import infer_teacher_dir
 from modelopt.torch._compress.replacement_library.replacement_library import ReplacementLibrary
 from modelopt.torch._compress.replacement_library.replacement_utils import parse_layer_replacement
 from modelopt.torch._compress.tools import validate_model
@@ -45,7 +45,6 @@ from modelopt.torch._compress.tools.checkpoint_utils_hf import (
     save_checkpoint,
     save_safetensors_index,
 )
-from modelopt.torch._compress.tools.runtime import IRuntime
 from modelopt.torch._compress.tools.validation_utils import (
     validate_model_and_extract_hidden_states,
     validate_model_with_teacher_similarity_metrics,
@@ -54,64 +53,71 @@ from modelopt.torch._compress.utils.parsing import get_nested_key, parse_path
 from modelopt.torch._compress.utils.validate_runtime_pipeline import perform_pipeline_stitches
 
 """
-Usage:
-======
+Usage Example:
+==============
 
-Validate single_block_replacement_solutions
-===========================================
-
-(
-export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True";
-PUZZLE_DIR=".../Llama-3_2-1B-Instruct/parallel_puzzle";
-
-torchrun --nproc-per-node=8  \
-  -m  modelopt.torch._compress.tools.validate_puzzle_with_multi_replacements  \
-  --replacement_library_path  ${PUZZLE_DIR}/replacement_library.json  \
-  --solutions_path  ${PUZZLE_DIR}/single_sequence_replacement_solutions.json  \
-  --solutions_to_validate  0  \
-  \
-  --dataset_path .../v0.4/valid  \
-  --data_column  conversation  --block_size 8192  --seed 42  --shuffle_seed 444  --bos_rate 0.5  \
-  --eval_samples 32  --micro_batch_size 1  \
-  \
-  --save_models  \
-
-)
-
+Validate single_block_replacement_solutions by calling validate_puzzle_solutions() directly
+with an args object containing the required attributes. See the function docstring for details.
 
 """
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--replacement_library_path", type=parse_path, required=True)
-    parser.add_argument("--solutions_path", type=parse_path, required=True)
-    parser.add_argument("--teacher_dir", type=parse_path, default=None)
-    parser.add_argument("--solutions_to_validate", type=int, nargs="+", default=None)
-    parser.add_argument("--sort_solutions_by", type=str, default=None)
-    parser.add_argument("--bigger_is_better", action="store_true")
-    parser.add_argument("--skip_validation", action="store_true")
-    parser.add_argument("--save_models", action="store_true")
-    args, unknown_args = parser.parse_known_args()
-    if not args.skip_validation:
-        validation_args = validate_model.build_arg_parser().parse_args(unknown_args)
-        args = argparse.Namespace(
-            **{**validation_args.__dict__, **args.__dict__}
-        )  # if arg names overlap, the latter one wins
-    else:
-        args.block_size = None
-
-    args.teacher_dir = _try_infer_teacher_dir(args.replacement_library_path, args.teacher_dir)
-
-    args.tokenizer_name = getattr(args, "tokenizer_name", None)
-    if args.tokenizer_name is None:
-        args.tokenizer_name = args.teacher_dir
-
-    return args
-
-
 @torch.no_grad()
-def validate_puzzle_solutions(args: argparse.Namespace, runtime: IRuntime) -> None:
+def validate_puzzle_solutions(args: DictConfig) -> None:
+    """Validate puzzle solutions by applying layer replacements and evaluating model performance.
+
+    Args:
+        args: Configuration object containing the following attributes:
+
+            Puzzle Configuration (Required):
+            - replacement_library_path (Path): Path to the replacement library JSON file.
+            - solutions_path (Path): Path to puzzle solutions JSON file or directory containing solution files.
+            - solutions_to_validate (list[int], optional): Indices of specific solutions to validate.
+                                                           Validates all solutions if None.
+            - sort_solutions_by (str, optional): JSON field path to sort solutions by before validation.
+            - bigger_is_better (bool): If True, sort solutions in descending order. Used with sort_solutions_by.
+            - skip_validation (bool): If True, skip model validation and only save models if requested.
+            - save_models (bool): If True, save realized model checkpoints for each solution.
+
+            Teacher/Tokenizer Configuration:
+            - teacher_dir (Path, optional): Path to teacher model directory. Auto-inferred if not provided.
+            - tokenizer_name (str, optional): Tokenizer name/path. Uses teacher_dir if not specified.
+
+            Model Configuration (Required if skip_validation=False):
+            - model_dtype (str or torch.dtype): Model data type (e.g., "torch.bfloat16", torch.float16).
+            - autocast_dtype (str or torch.dtype): Autocast data type for mixed precision.
+
+            Dataset Configuration (Required if skip_validation=False):
+            - dataset_path (str): Path to the validation dataset.
+            - data_column (str): Column name in dataset containing text data.
+            - block_size (int): Maximum sequence length for tokenization.
+            - eval_samples (int, optional): Number of samples to evaluate.
+            - val_dataset_name (str): Name of validation dataset split.
+            - source_datasets_to_discard (list[str], optional): List of source datasets to exclude.
+            - load_dataset_fn (callable, optional): Custom function to load the dataset.
+
+            Data Processing (Required if skip_validation=False):
+            - micro_batch_size (int): Batch size for evaluation.
+            - seed (int): Random seed for reproducibility.
+            - shuffle_seed (int, optional): Seed for shuffling data.
+            - varlen (bool): Enable variable-length sequences.
+            - bos_rate (float): Rate of adding BOS token.
+            - fim_rate (float): Fill-in-the-middle rate for code completion tasks.
+            - fim_spm_rate (float): SPM-based fill-in-the-middle rate.
+
+            Output Configuration:
+            - output_dir (Path, optional): Directory to save validation results.
+                                           Auto-generated from solutions_path if not provided.
+
+            Execution Options (Optional if skip_validation=False):
+            - calc_losses_on_cpu (bool): Calculate losses on CPU to avoid OOM.
+            - write_results (bool): Write validation results to file.
+            - activations_log_dir (str, optional): Directory to log activation scores.
+            - activation_hooks_kwargs (str or dict, optional): Arguments for activation hooks.
+
+    Returns:
+        None. Saves validation results and optionally model checkpoints to disk.
+    """
     puzzle_solutions = load_puzzle_solutions(
         args.solutions_path, args.sort_solutions_by, args.bigger_is_better
     )
@@ -122,9 +128,7 @@ def validate_puzzle_solutions(args: argparse.Namespace, runtime: IRuntime) -> No
     tokenizer = _load_tokenizer(args)
     if not args.skip_validation:
         val_dataloader = (
-            validate_model.prepare_dataloader(args, tokenizer)
-            if (runtime is None or runtime.is_main_process)
-            else None
+            validate_model.prepare_dataloader(args, tokenizer) if dist.is_master() else None
         )
 
     output_dir = (
@@ -137,18 +141,16 @@ def validate_puzzle_solutions(args: argparse.Namespace, runtime: IRuntime) -> No
 
     teacher_hidden_states = None
     if (args.teacher_dir is not None) and (not args.skip_validation):
-        teacher_model = replacement_library.load_checkpoint(
-            args.teacher_dir, runtime.world_size, runtime.global_rank
-        )
-        teacher_model.to(runtime.device)
-        stitched_model = perform_pipeline_stitches(teacher_model, runtime)
+        teacher_model = replacement_library.load_checkpoint(args.teacher_dir)
+        teacher_model.cuda(dist.local_rank())
+        stitched_model = perform_pipeline_stitches(teacher_model)
         teacher_hidden_states = validate_model_and_extract_hidden_states(
             args,
             stitched_model,
             tokenizer,
             output_dir,
             model_name="teacher",
-            runtime=runtime,
+            pipeline_parallel=True,
             val_dataloader=val_dataloader,
         )
 
@@ -160,9 +162,7 @@ def validate_puzzle_solutions(args: argparse.Namespace, runtime: IRuntime) -> No
         # realizable_as_symlinks = False
         model_config = replacement_library.create_model_config(layer_replacements)
         if (args.save_models and not realizable_as_symlinks) or (not args.skip_validation):
-            model = replacement_library.load_model(
-                layer_replacements, runtime.world_size, runtime.global_rank
-            )
+            model = replacement_library.load_model(layer_replacements)
             model_config = model.config
 
         if args.save_models:
@@ -171,10 +171,10 @@ def validate_puzzle_solutions(args: argparse.Namespace, runtime: IRuntime) -> No
                 / f"solution_{i_solution}"
             )
 
-            model_config.dtype = "bfloat16"
+            model_config.dtype = args.model_dtype
             model_config.architectures = ["DeciLMForCausalLM"]
             if realizable_as_symlinks:
-                if runtime.global_rank == 0:
+                if dist.is_master():
                     save_checkpoint_as_symlinks(
                         layer_replacements, model_config, checkpoint_dir, replacement_library
                     )
@@ -184,13 +184,11 @@ def validate_puzzle_solutions(args: argparse.Namespace, runtime: IRuntime) -> No
             copy_tokenizer(args.tokenizer_name, checkpoint_dir)
             copy_hf_code(checkpoint_dir)
 
-            runtime.wait_for_everyone()
-
-        runtime.wait_for_everyone()
+        dist.barrier()
 
         if not args.skip_validation:
-            model.to(runtime.device)
-            stitched_model = perform_pipeline_stitches(model, runtime)
+            model.cuda(dist.local_rank())
+            stitched_model = perform_pipeline_stitches(model)
             validate_model_with_teacher_similarity_metrics(
                 args,
                 stitched_model,
@@ -199,11 +197,11 @@ def validate_puzzle_solutions(args: argparse.Namespace, runtime: IRuntime) -> No
                 output_dir,
                 model_name=f"solution_{i_solution}",
                 extra_payload={"i_solution": i_solution, "puzzle_solution": puzzle_solution},
-                runtime=runtime,
+                pipeline_parallel=True,
                 val_dataloader=val_dataloader,
             )
 
-        runtime.wait_for_everyone()
+        dist.barrier()
 
 
 def can_realize_as_symlinks(layer_replacements: list[dict]) -> bool:
@@ -255,23 +253,7 @@ def copy_hf_code(checkpoint_dir: Path) -> None:
         shutil.copy(file, checkpoint_dir / file.name)
 
 
-def _try_infer_teacher_dir(
-    replacement_library_path: str | Path,
-    teacher_dir: str | Path | None,
-) -> Path | None:
-    if teacher_dir is not None:
-        return teacher_dir
-
-    try:
-        teacher_dir = infer_teacher_dir(
-            master_puzzle_dir=Path(replacement_library_path).parent, teacher_checkpoint_dir=None
-        )
-        return teacher_dir
-    except:
-        return None
-
-
-def _load_tokenizer(args: argparse.Namespace) -> PreTrainedTokenizerBase:
+def _load_tokenizer(args: DictConfig) -> PreTrainedTokenizerBase:
     tokenizer = None
     if (tokenizer_name := getattr(args, "tokenizer_name", None)) is not None:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
@@ -324,7 +306,3 @@ def load_puzzle_solutions(
         print(f"sorted solutions by {sort_solutions_by}. {vals[:10]=} {vals[-10:]=}")
 
     return puzzle_solutions
-
-
-if __name__ == "__main__":
-    validate_puzzle_solutions(args=parse_args())

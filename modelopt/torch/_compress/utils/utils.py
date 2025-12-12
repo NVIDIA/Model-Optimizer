@@ -63,7 +63,7 @@ def raise_unknown_subblock_config_error(subblock_config: Any) -> None:
     )
 
 
-def sizeof_dtype(dtype: torch.dtype | str) -> int | float:
+def sizeof_dtype(dtype: torch.dtype) -> int | float:
     """Return the size in bytes of the given data type.
 
     TODO: Consider a better place for this function.

@@ -27,12 +27,12 @@ import modelopt.torch._compress.build_library_and_stats as build_library_and_sta
 import modelopt.torch._compress.mip.mip_and_realize_models as mip_and_realize_models
 import modelopt.torch._compress.pruning.pruning_ckpts as pruning_ckpts
 import modelopt.torch._compress.scoring.scoring as scoring
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress.tools.hydra_utils import initialize_hydra_config_for_dir
-from modelopt.torch._compress.tools.runtime import IRuntime
 
 
 def compress(
-    hydra_config_dir: str, hydra_config: str, puzzle_dir: str, dataset_path: str, runtime: IRuntime
+    hydra_config_dir: str, hydra_config: str, puzzle_dir: str, dataset_path: str
 ) -> DictConfig:
     """Compress a puzzletron model using the MIP-based NAS search algorithm.
 
@@ -41,8 +41,6 @@ def compress(
         hydra_config (str): the corresponding hydra config file
         puzzle_dir (str): directory with a puzzletron model to compress
         dataset_path (str): dataset used for scoring and distillation
-        runtime: distributed runtime to use to run the compression steps, e.g.,
-                 NativeDdpRuntime(dtype=torch.bfloat16, torch_distributed_timeout=datetime.timedelta(10))
 
     Returns:
         Hydra config object after compressing the model.
@@ -60,22 +58,22 @@ def compress(
     )
 
     # Step 1: score_pruning_activations (distributed processing)
-    score_pruning_activations.launch_score_activations(hydra_cfg, runtime)
+    score_pruning_activations.launch_score_activations(hydra_cfg)
 
     # Step 2: pruning_ckpts (single process)
-    if runtime.global_rank == 0:
+    if dist.is_master():
         pruning_ckpts.launch_prune_ckpt(hydra_cfg)
-    runtime.wait_for_everyone()
+    dist.barrier()
 
     # Step 4: build_library_and_stats (single process)
-    if runtime.global_rank == 0:
+    if dist.is_master():
         build_library_and_stats.launch_build_library_and_stats(hydra_cfg)
-    runtime.wait_for_everyone()
+    dist.barrier()
 
     # Step 5: calc_one_block_scores (distributed processing)
-    scoring.launch_scoring(hydra_cfg, runtime)
+    scoring.launch_scoring(hydra_cfg)
 
     # Step 6: mip_and_realize_models (distributed processing)
-    mip_and_realize_models.launch_mip_and_realize_model(hydra_cfg, runtime)
+    mip_and_realize_models.launch_mip_and_realize_model(hydra_cfg)
 
     return hydra_cfg

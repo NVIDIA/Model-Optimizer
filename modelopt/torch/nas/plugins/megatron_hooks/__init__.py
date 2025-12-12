@@ -12,8 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Forward hooks for estimating importance scores for pruning."""
 
-import logging
-
-logger = logging.getLogger("sewing_kit")
-logger.setLevel(logging.WARN)
+from .megatron_hooks import *
+from .megatron_hooks_analysis import *

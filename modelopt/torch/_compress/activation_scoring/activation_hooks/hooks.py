@@ -18,7 +18,6 @@
 activation scoring for pruning.
 """
 
-import argparse
 import gc
 import json
 from abc import ABC, abstractmethod
@@ -30,6 +29,8 @@ import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 from torch import nn
 
+import modelopt.torch.utils.distributed as dist
+
 # BlockConfig used at runtime, not just type hints (lines 680, 790)
 from modelopt.torch._compress.decilm.deci_lm_hf_code.block_config import BlockConfig  # noqa: TC001
 from modelopt.torch._compress.decilm.deci_lm_hf_code.configuration_decilm import (
@@ -38,7 +39,6 @@ from modelopt.torch._compress.decilm.deci_lm_hf_code.configuration_decilm import
 from modelopt.torch._compress.decilm.deci_lm_hf_code.modeling_decilm import DeciLMRMSNorm
 from modelopt.torch._compress.tools.logger import aprint
 from modelopt.torch._compress.tools.robust_json import json_dump
-from modelopt.torch._compress.tools.runtime import IRuntime
 
 
 def clear_gpu_memory(clear: bool) -> None:
@@ -97,9 +97,8 @@ class ActivationsHook(ABC):
         cls: type["ActivationsHook"],
         activation_hooks: dict[str, "ActivationsHook"],
         activations_log_dir: Path | str,
-        args: argparse.Namespace,
-        runtime: IRuntime | None,
-    ):
+        args: DictConfig,
+    ) -> None:
         """
         Default implementation for dumping final activation scores logs to disk.
         This is called only at the end of scoring to save final results.
@@ -107,7 +106,7 @@ class ActivationsHook(ABC):
 
         activations_log_dir = Path(activations_log_dir)
         activations_log_dir.mkdir(exist_ok=True, parents=True)
-        rank = runtime.global_rank if runtime is not None else 0
+        rank = dist.rank()
         activations_log_path = activations_log_dir / f"rank_{rank}.pth"
         activations_log = {
             module_name: hook.to_dict() for module_name, hook in activation_hooks.items()
@@ -116,14 +115,8 @@ class ActivationsHook(ABC):
 
         if rank == 0:
             args.activation_hooks_kwargs.pop("model")
-            json_dump(
-                OmegaConf.to_container(args, resolve=True)
-                if isinstance(args, DictConfig)
-                else vars(args),
-                activations_log_dir / "args.json",
-            )
-        if runtime is not None:
-            runtime.wait_for_everyone()  # rank 0 will not wait before dumping args.json
+            json_dump(OmegaConf.to_container(args, resolve=True), activations_log_dir / "args.json")
+        dist.barrier()
 
         aprint(f"Dumped final activations log to {activations_log_path}")
 
@@ -132,8 +125,7 @@ class ActivationsHook(ABC):
         cls: type["ActivationsHook"],
         activation_hooks: dict[str, "ActivationsHook"],
         activations_log_dir: Path | str,
-        runtime: IRuntime | None,
-    ):
+    ) -> None:
         """
         Save hook states for checkpointing (separate from final results).
         This can be called periodically during scoring.
@@ -141,7 +133,7 @@ class ActivationsHook(ABC):
         """
         activations_log_dir = Path(activations_log_dir)
         activations_log_dir.mkdir(exist_ok=True, parents=True)
-        rank = runtime.global_rank if runtime is not None else 0
+        rank = dist.rank()
 
         hook_states_path = activations_log_dir / f"hook_states_rank_{rank}.pth"
         hook_states = {
@@ -461,29 +453,28 @@ class LayerNormContributionHook(ActivationsHook):
         cls: type["LayerNormContributionHook"],
         activation_hooks: dict[str, "ActivationsHook"],
         activations_log_dir: Path | str,
-        args: argparse.Namespace,
-        runtime: IRuntime | None,
-    ):
+        args: DictConfig,
+    ) -> None:
         """
         At the end of the default implementation of dumping activation scores to disc,
         save aggregated channel importance results.
         """
 
-        super().dump_activations_logs(activation_hooks, activations_log_dir, args, runtime)
+        super().dump_activations_logs(activation_hooks, activations_log_dir, args)
 
-        rank = runtime.global_rank if runtime is not None else 0
+        rank = dist.rank()
         if rank == 0:
             LayerNormContributionHook._save_channel_importance_results(
                 activation_hooks, activations_log_dir, args
             )
 
-        runtime.wait_for_everyone()
+        dist.barrier()
 
     @staticmethod
     def _save_channel_importance_results(
         activation_hooks: dict[str, ActivationsHook],
         activations_log_dir: Path,
-        args: argparse.Namespace,
+        args: DictConfig,
     ) -> None:
         """
         Save channel importance results from activation hooks.

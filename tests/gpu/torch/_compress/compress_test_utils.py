@@ -21,14 +21,12 @@ import torch
 from datasets import Dataset, DatasetDict
 from transformers import AutoTokenizer, LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerBase
 
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress.tools.hydra_utils import register_hydra_resolvers
 
 
 def setup_test_model_and_data(
-    project_root_path: Path,
-    tmp_path: Path,
-    rank: int,
-    runtime,
+    project_root_path: Path, tmp_path: Path, rank: int
 ) -> tuple[Path, Path, Path]:
     """
     Setup the test model and data for the compress NAS search.
@@ -37,7 +35,6 @@ def setup_test_model_and_data(
         project_root_path (Path): the root path of the project
         tmp_path (Path): the temporary path to use for the test
         rank (int): the rank of the process
-        runtime: the runtime to use for the test
 
     Returns:
         tuple[Path, Path, Path]:
@@ -63,7 +60,7 @@ def setup_test_model_and_data(
         create_and_save_small_llama_model(
             llama_checkpoint_path, vocab_size=tokenizer.vocab_size, tokenizer=tokenizer
         )
-    runtime.wait_for_everyone()
+    dist.barrier()
 
     return (
         puzzle_dir,

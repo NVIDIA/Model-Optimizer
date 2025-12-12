@@ -18,7 +18,8 @@ import os
 import datasets
 import fire
 import numpy as np
-from logger import mprint
+
+from modelopt.torch._compress.tools.logger import mprint
 
 
 def process_and_save_dataset(

@@ -111,7 +111,6 @@ optional_deps = {
         "omegaconf==2.3.0",
         "pandas",
         "typeguard",
-        "wandb~=0.17.5",
     ],
 }
 

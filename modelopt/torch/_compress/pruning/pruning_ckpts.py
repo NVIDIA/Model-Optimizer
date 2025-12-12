@@ -337,15 +337,3 @@ def launch_prune_ckpt(cfg: DictConfig):
         raise NotImplementedError(
             f"checkpoint pruning is not currently supported for target layer: {target_layer}"
         )
-
-
-@hydra.main("", version_base="1.3")
-def main(cfg: DictConfig) -> None:
-    cfg = hydra.utils.instantiate(cfg)
-    mprint(cfg)
-    launch_prune_ckpt(cfg)
-
-
-if __name__ == "__main__":
-    register_hydra_resolvers()
-    main()

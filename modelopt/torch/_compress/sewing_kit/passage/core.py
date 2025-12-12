@@ -16,20 +16,13 @@
 # mypy: ignore-errors
 from __future__ import annotations
 
-import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, ContextManager, Iterable, Mapping, Optional, Union
 
-try:
-    from typing import Self
-except ImportError:
-    from typing_extensions import Self
-
 import torch.nn as nn
 from typing_extensions import override
 
-from ..common import logger
 from ..utils import (
     ActivityContext,
     dynamo_skip,

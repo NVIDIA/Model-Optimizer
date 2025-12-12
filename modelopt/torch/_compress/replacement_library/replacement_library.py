@@ -30,6 +30,7 @@ from lru import LRU
 from safetensors.torch import load_file as safe_load_file
 from torch import nn
 
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 from modelopt.torch._compress.decilm.deci_lm_hf_code.modeling_decilm import (
     DeciLMDecoderLayer,
@@ -124,18 +125,11 @@ class ReplacementLibrary:
         model_config = self.model_config.set_block_configs(block_configs)
         return model_config
 
-    def load_model(
-        self,
-        layer_replacements: list[dict],
-        world_size: int,
-        global_rank: int,
-    ) -> DeciLMForCausalLM:
+    def load_model(self, layer_replacements: list[dict]) -> DeciLMForCausalLM:
         block_configs, block_locations = extract_block_configs_and_locations(layer_replacements)
         model_config = self.model_config.set_block_configs(block_configs)
 
-        owned_block_indexes = _get_owned_block_indexes(
-            model_config.get_num_hidden_layers(), world_size, global_rank
-        )
+        owned_block_indexes = _get_owned_block_indexes(model_config.get_num_hidden_layers())
         model = create_dummy_model(model_config, self.dtype)
 
         is_first_shard = 0 in owned_block_indexes
@@ -157,15 +151,10 @@ class ReplacementLibrary:
         self._move_inactive_blocks_to_cpu(active_blocks)
         return model
 
-    def load_checkpoint(
-        self,
-        checkpoint_dir: str | Path,
-        world_size: int,
-        global_rank: int,
-    ) -> DeciLMForCausalLM:
+    def load_checkpoint(self, checkpoint_dir: str | Path) -> DeciLMForCausalLM:
         checkpoint_dir = Path(checkpoint_dir).resolve()
         layer_replacements = self._locate_replacements_of_entire_checkpoint(checkpoint_dir)
-        model = self.load_model(layer_replacements, world_size, global_rank)
+        model = self.load_model(layer_replacements)
         return model
 
     def _locate_replacements_of_entire_checkpoint(self, checkpoint_dir: str | Path) -> list[dict]:
@@ -371,18 +360,18 @@ def _error_message_ensure_split(checkpoint_dir: Path) -> str:
     )
 
 
-def _get_owned_block_indexes(n_layer: int, world_size: int, global_rank: int) -> list[int]:
+def _get_owned_block_indexes(n_layer: int) -> list[int]:
     last_process_blocks = np.array([n_layer - 1])  # less params in last gpu, leave room for logits
 
-    if world_size == 1:
+    if dist.size() == 1:
         # Only one process: assign everything (including the "last process" block) to rank 0
         owned_block_indexes_per_process = [
             np.concatenate([np.arange(n_layer - 1), last_process_blocks])
         ]
     else:
         # Multiple processes: split n_layer-1 blocks, reserve the last for "last process"
-        owned_block_indexes_per_process = np.array_split(range(n_layer - 1), world_size - 1)
+        owned_block_indexes_per_process = np.array_split(range(n_layer - 1), dist.size() - 1)
         owned_block_indexes_per_process.append(last_process_blocks)
 
-    owned_block_indexes = owned_block_indexes_per_process[global_rank].tolist()
+    owned_block_indexes = owned_block_indexes_per_process[dist.rank()].tolist()
     return owned_block_indexes

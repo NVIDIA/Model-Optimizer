@@ -19,19 +19,15 @@
 from pathlib import Path
 from typing import List
 
-import hydra
 import torch
-import torch.distributed as dist
 from omegaconf import DictConfig
 
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress.mip.run_puzzle import run_puzzle
-from modelopt.torch._compress.tools.hydra_utils import register_hydra_resolvers
 from modelopt.torch._compress.tools.logger import mprint
-from modelopt.torch._compress.tools.runtime import BaseRuntime, IRuntime, NativeDdpRuntime
 from modelopt.torch._compress.tools.validate_puzzle_with_multi_replacements import (
     validate_puzzle_solutions,
 )
-from modelopt.torch._compress.utils.dist_utils import is_distributed
 
 
 def launch_mip(cfg: DictConfig) -> List[str]:
@@ -39,19 +35,18 @@ def launch_mip(cfg: DictConfig) -> List[str]:
     return solution_paths
 
 
-def launch_realize_model(cfg: DictConfig, runtime: IRuntime):
-    validate_puzzle_solutions(args=cfg.realize_model, runtime=runtime)
+def launch_realize_model(cfg: DictConfig):
+    validate_puzzle_solutions(args=cfg.realize_model)
 
 
-def launch_mip_and_realize_model(cfg: DictConfig, runtime: IRuntime):
+def launch_mip_and_realize_model(cfg: DictConfig):
     # Determine device for distributed operations (NCCL requires CUDA tensors)
     device = "cpu"
-    if runtime.world_size > 1 and dist.is_initialized():
-        backend = dist.get_backend()
-        if backend == "nccl":
+    if dist.size() > 1:
+        if torch.distributed.get_backend() == "nccl":
             device = torch.cuda.current_device()
 
-    if runtime.is_main_process:
+    if dist.is_master():
         solution_paths = launch_mip(cfg)
         length_tensor = torch.tensor([len(solution_paths)], dtype=torch.long, device=device)
     else:
@@ -59,39 +54,19 @@ def launch_mip_and_realize_model(cfg: DictConfig, runtime: IRuntime):
         length_tensor = torch.tensor([0], dtype=torch.long, device=device)
 
     if not cfg.skip_realize_model:
-        if runtime.world_size > 1:
-            dist.broadcast(length_tensor, src=0)
+        if dist.size() > 1:
+            torch.distributed.broadcast(length_tensor, src=0)
 
         list_length = length_tensor.item()
 
-        if runtime.global_rank != 0:
+        if not dist.is_master():
             solution_paths = [None] * list_length
 
-        if runtime.world_size > 1:
-            dist.broadcast_object_list(solution_paths, src=0)
+        if dist.size() > 1:
+            torch.distributed.broadcast_object_list(solution_paths, src=0)
 
         for solution_path in solution_paths:
             mprint(f"Realize model for the solution: {solution_path}")
             cfg.realize_model.solutions_path = Path(solution_path)
-            launch_realize_model(cfg, runtime=runtime)
-            runtime.wait_for_everyone()
-
-
-@hydra.main("", version_base="1.3")
-def main(cfg: DictConfig) -> None:
-    cfg = hydra.utils.instantiate(cfg)
-
-    _runtime = (
-        NativeDdpRuntime(
-            dtype=torch.bfloat16, torch_distributed_timeout=getattr(cfg, "nccl_timeout_minutes")
-        )
-        if is_distributed()
-        else BaseRuntime(dtype=torch.bfloat16)
-    )
-    with _runtime as runtime:
-        launch_mip_and_realize_model(cfg, runtime)
-
-
-if __name__ == "__main__":
-    register_hydra_resolvers()
-    main()
+            launch_realize_model(cfg)
+            dist.barrier()

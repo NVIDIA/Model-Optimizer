@@ -17,7 +17,6 @@
 DataLoader utilities for language model training and validation.
 """
 
-import os
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from typing import Protocol, TypeVar
@@ -72,58 +71,6 @@ def load_streaming_fn(
     )
 
     return dataset
-
-
-def create_train_dataloader(
-    accelerator: Accelerator,
-    seed: int,
-    tokenizer: PreTrainedTokenizerBase,
-    block_size: int,
-    dataset: str | Mapping[str, Dataset],
-    content_field: str,
-    fim_rate: float,
-    fim_spm_rate: float,
-    micro_batch_size: int,
-    load_dataset_fn: LoadDatasetFn = load_from_disk_fn,
-    dataset_name="train",
-    keep_in_memory: bool = False,
-    shuffle_train_data_seed: int | None = None,
-    source_datasets_to_discard: Sequence[str] = (),
-    bos_rate: float = 1.0,
-    varlen: bool = True,
-):
-    mprint(f"\ncreate_train_dataloader on rank {accelerator.process_index}")
-    if isinstance(dataset, str):
-        dataset = load_dataset_fn(dataset, content_field, keep_in_memory)
-
-    train_data = dataset[dataset_name]
-    if shuffle_train_data_seed is not None:
-        train_data = train_data.shuffle(seed=shuffle_train_data_seed)
-
-    train_dataset = ConstantLengthDataset(
-        tokenizer,
-        train_data,
-        infinite=True,
-        seq_length=block_size * micro_batch_size if varlen else block_size,
-        content_field=content_field,
-        fim_rate=fim_rate,
-        fim_spm_rate=fim_spm_rate,
-        seed=seed,
-        source_datasets_to_discard=source_datasets_to_discard,
-        bos_rate=bos_rate,
-        # return_cu_seqlens=varlen,
-        # seqlen_cap=block_size if varlen else None
-    )
-
-    train_dataloader = DataLoader(
-        train_dataset,
-        batch_size=1 if varlen else micro_batch_size,
-        pin_memory=True,
-        collate_fn=collate_fn_with_none_support,
-        num_workers=os.cpu_count() // 2 // 8,
-    )
-
-    return train_dataloader
 
 
 def create_validation_dataloader(
@@ -229,75 +176,6 @@ def realize_dataset_in_memory(dataset: IterableDataset, eval_samples: int | None
         val_iter = iter(dataset)
         offloaded_dataset = [next(val_iter) for _ in tqdm(range(eval_samples), desc=tqdm_desc)]
     return offloaded_dataset
-
-
-def create_dataloaders(
-    accelerator: Accelerator,
-    seed: int,
-    tokenizer: PreTrainedTokenizerBase,
-    block_size: int,
-    dataset_path: str,
-    content_field: str,
-    fim_rate: float,
-    fim_spm_rate: float,
-    micro_batch_size: int,
-    val_micro_batch_size: int | None = None,
-    eval_samples: int | None = None,
-    load_dataset_fn: LoadDatasetFn = load_from_disk_fn,
-    train_dataset_name: str = "train",
-    val_dataset_name: str = "__auto__",
-    disable_validation: bool = False,
-    keep_in_memory: bool = False,
-    shuffle_train_data_seed: int | None = None,
-    source_datasets_to_discard: Sequence[str] = (),
-    bos_rate: float = 1.0,
-    varlen: bool = True,
-):
-    if val_micro_batch_size is None:
-        val_micro_batch_size = micro_batch_size
-
-    dataset = load_dataset_fn(dataset_path, content_field, keep_in_memory=keep_in_memory)
-
-    train_dataloader = create_train_dataloader(
-        accelerator,
-        seed,
-        tokenizer,
-        block_size,
-        dataset,
-        content_field,
-        fim_rate,
-        fim_spm_rate,
-        micro_batch_size,
-        load_dataset_fn,
-        train_dataset_name,
-        shuffle_train_data_seed=shuffle_train_data_seed,
-        source_datasets_to_discard=source_datasets_to_discard,
-        bos_rate=bos_rate,
-        varlen=varlen,
-    )
-
-    if not disable_validation:
-        val_dataloader = create_validation_dataloader(
-            accelerator,
-            seed,
-            tokenizer,
-            block_size,
-            dataset,
-            content_field,
-            fim_rate,
-            fim_spm_rate,
-            val_micro_batch_size,
-            eval_samples,
-            load_dataset_fn,
-            val_dataset_name,
-            source_datasets_to_discard=source_datasets_to_discard,
-            bos_rate=bos_rate,
-            varlen=varlen,
-        )
-    else:
-        val_dataloader = None
-
-    return train_dataloader, val_dataloader
 
 
 TensorT = TypeVar("TensorT", bound=torch.Tensor)

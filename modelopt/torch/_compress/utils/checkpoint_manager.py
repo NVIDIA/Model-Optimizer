@@ -22,30 +22,27 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress.tools.logger import aprint, mprint
 
 
 class ScoringCheckpointManager:
     """Manages checkpointing for activation hook scoring with periodic saves."""
 
-    def __init__(
-        self, checkpoint_dir: str, runtime, activation_hooks=None, checkpoint_interval: int = 100
-    ):
+    def __init__(self, checkpoint_dir: str, activation_hooks=None, checkpoint_interval: int = 100):
         """
         Initialize checkpoint manager.
 
         Args:
             checkpoint_dir: Directory to save checkpoints
-            runtime: Runtime object for distributed processing
             activation_hooks: Dictionary of activation hooks to manage
             checkpoint_interval: Save checkpoint every N batches
         """
         self.checkpoint_dir = Path(checkpoint_dir)
-        self.runtime = runtime
         self.activation_hooks = activation_hooks
         self.checkpoint_interval = checkpoint_interval
-        self.rank = runtime.global_rank if runtime is not None else 0
-        self.is_main_process = runtime is None or runtime.is_main_process
+        self.rank = dist.rank()
+        self.is_main_process = dist.is_master()
 
         # Debug: Log checkpoint manager initialization
         hook_count = len(activation_hooks) if activation_hooks else 0
@@ -200,9 +197,7 @@ class ScoringCheckpointManager:
                         ActivationsHook,
                     )
 
-                    saved_path = ActivationsHook.save_hook_states(
-                        self.activation_hooks, self.checkpoint_dir, self.runtime
-                    )
+                    ActivationsHook.save_hook_states(self.activation_hooks, self.checkpoint_dir)
                 except Exception as e:
                     mprint(f"Warning: Failed to save hook states: {e}")
 
@@ -211,8 +206,7 @@ class ScoringCheckpointManager:
                 self.save_checkpoint()
 
             # Synchronize all ranks after checkpointing
-            if self.runtime is not None:
-                self.runtime.wait_for_everyone()
+            dist.barrier()
 
     def save_checkpoint(self):
         """
@@ -260,7 +254,7 @@ class ScoringCheckpointManager:
                 )
 
                 saved_path = ActivationsHook.save_hook_states(
-                    self.activation_hooks, self.checkpoint_dir, self.runtime
+                    self.activation_hooks, self.checkpoint_dir
                 )
                 mprint(f"Final hook states saved to {saved_path}")
             except Exception as e:
@@ -273,5 +267,4 @@ class ScoringCheckpointManager:
             mprint(f"Scoring completed and finalized: {self.total_batches} batches processed")
 
         # Synchronize all ranks after finalization
-        if self.runtime is not None:
-            self.runtime.wait_for_everyone()
+        dist.barrier()
