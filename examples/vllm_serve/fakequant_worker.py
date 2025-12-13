@@ -150,7 +150,7 @@ quant_config: dict[str, Any] = {
     "dataset": os.environ.get("QUANT_DATASET", "cnn_dailymail"),
     "calib_size": int(os.environ.get("QUANT_CALIB_SIZE", 512)),
     "quant_cfg": os.environ.get("QUANT_CFG", "NVFP4_DEFAULT_CFG"),
-    "kv_quant_cfg": os.environ.get("KV_QUANT_CFG", None),
+    "kv_quant_cfg": os.environ.get("KV_CACHE_QUANT_CFG", None),
     "amax_file_path": os.environ.get("AMAX_FILE_PATH", None),
 }
 
@@ -295,13 +295,8 @@ def _fakequant_run_prolog_worker(self) -> None:
         model.load_state_dict(current_state_dict)
         torch.distributed.barrier()
 
-    # if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-    #     mtq.print_quant_summary(model)
-    from modelopt.torch.quantization.nn import TensorQuantizer
-
-    for name, module in model.named_modules():
-        if isinstance(module, TensorQuantizer):
-            print(f"rank: {torch.distributed.get_rank()}, name: {name}, module: {module}")
+    if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+        mtq.print_quant_summary(model)
 
     mtq.fold_weight(model)
     for name, module in model.named_modules():
