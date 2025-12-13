@@ -15,6 +15,7 @@
 
 """Support quantization for megatron linear layers."""
 
+import pickle
 import logging
 import warnings
 from typing import Any
@@ -88,7 +89,7 @@ def real_quant_module_get_extra_state(self) -> dict:
 def quant_module_get_extra_state(self) -> dict:
     """Populating the extra_state when state_dict() is called.
 
-    quantizer_state, real_quantizer_state, and q_tensor_state are usually stored
+    quantizer_state, real_quantizer_state, and q_tensor_state used to be stored (before 0.29)
     with in the modelopt_state metadata where the keys are the full module name. The issue
     is that NeMo-MCore model's full module name can change
     if pipeline-parallelism (PP) and expert-parallelism (EP)
@@ -98,7 +99,11 @@ def quant_module_get_extra_state(self) -> dict:
     """
     extra_state = {}
 
-    is_enabled = self.weight_quantizer.is_enabled if hasattr(self, "weight_quantizer") else False
+    weight_quantizer_enabled = self.weight_quantizer.is_enabled if hasattr(self, "weight_quantizer") else False
+    # TODO is checking just k enough?
+    k_bmm_quantizer_enabled = self.k_bmm_quantizer.is_enabled if hasattr(self, "k_bmm_quantizer") else False
+    v_bmm_quantizer_enabled = self.v_bmm_quantizer.is_enabled if hasattr(self, "v_bmm_quantizer") else False
+    is_enabled = weight_quantizer_enabled or k_bmm_quantizer_enabled or v_bmm_quantizer_enabled
 
     if not is_enabled:
         return extra_state
@@ -112,7 +117,6 @@ def quant_module_get_extra_state(self) -> dict:
 
     # Handle real_quantizer_state and q_tensor_state
     extra_state.update(real_quant_module_get_extra_state(self))
-
     return extra_state
 
 
@@ -672,7 +676,7 @@ if HAS_TE:
             ]
 
             for _, quantizer in quantizers:
-                if quantizer is not None and quantizer.is_enabled():
+                if quantizer is not None and quantizer.is_enabled:
                     if not hasattr(quantizer, "_amax") or quantizer._amax is None:
                         quantizer.reset_amax()
                         max_calibrate(quantizer, lambda q: q(dummy_tensor), distributed_sync=False)
@@ -729,7 +733,7 @@ if HAS_TE:
             """Handle loading state dict for quantizers."""
             for quantizer_name in ["q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"]:
                 full_prefix = f"{prefix}{quantizer_name}."
-                amax_key = f"{prefix}{quantizer_name}._amax"
+                amax_key = f"{full_prefix}_amax"
 
                 # If amax is in state_dict, rename it to the format expected by TensorQuantizer
                 if amax_key in state_dict:
@@ -768,7 +772,7 @@ if HAS_TE:
                 ("k_bmm_quantizer", self.k_bmm_quantizer),
                 ("v_bmm_quantizer", self.v_bmm_quantizer),
             ]:
-                if not hasattr(self, quantizer_name) or not quantizer.is_enabled():
+                if not hasattr(self, quantizer_name) or not quantizer.is_enabled:
                     continue
 
                 _check_unsupported_states(quantizer)
