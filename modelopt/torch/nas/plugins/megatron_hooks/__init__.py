@@ -15,5 +15,5 @@
 """Forward hooks for estimating importance scores for pruning."""
 
 from .base_hooks import *
+from .base_hooks_analysis import *
 from .megatron_hooks import *
-from .megatron_hooks_analysis import *
