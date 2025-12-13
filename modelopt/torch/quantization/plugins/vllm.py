@@ -18,8 +18,12 @@
 import importlib
 
 import torch
+import vllm.attention as vllm_attention
 import vllm.model_executor.layers.fused_moe.layer as vllm_fused_moe_layer
 import vllm.model_executor.layers.linear as vllm_linear
+from vllm.attention.layers.cross_attention import CrossAttention
+from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
+from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_tp_group
 
 from ...utils.distributed import ParallelState
 from ..nn import QuantLinearConvBase, QuantModule, QuantModuleRegistry, TensorQuantizer
@@ -37,6 +41,23 @@ for module_path in [
         continue
 
 vllm_fused_moe_package = importlib.import_module("vllm.model_executor.layers.fused_moe.fused_moe")
+
+
+def create_parallel_state():
+    """Create a parallel state for vLLM."""
+    try:
+        dp_group = get_dp_group().device_group
+    except Exception:
+        dp_group = -1
+    try:
+        tp_group = get_tp_group().device_group
+    except Exception:
+        tp_group = -1
+    try:
+        ep_group = get_ep_group().device_group
+    except Exception:
+        ep_group = -1
+    return ParallelState(dp_group, tp_group, ep_group)
 
 
 class FakeQuantMethod:
@@ -100,7 +121,7 @@ class _VLLMParallelLinear(QuantModule):
             f"quant_method is {type(self.quant_method)}"
         )
         self.fake_quant_method = FakeQuantMethod(self.quant_method)
-        self.parallel_state = ParallelState(-1, -1)
+        self.parallel_state = create_parallel_state()
 
     def forward(self, input_):
         # This context manager will conflict with torch.compile
@@ -151,7 +172,7 @@ class _QuantFusedMoEBase(QuantModule):
         assert type(self.quant_method) is vllm_fused_moe_layer.UnquantizedFusedMoEMethod, (
             f"quant_method is {type(self.quant_method)}"
         )
-        self.parallel_state = ParallelState(-1, -1)
+        self.parallel_state = create_parallel_state()
 
     def invoke_fused_moe_quantized(
         self,
@@ -243,3 +264,29 @@ if vllm_shared_fused_moe_layer is not None:
     )
     class _QuantVLLMSharedFusedMoE(_QuantFusedMoEBase):
         pass
+
+
+@QuantModuleRegistry.register({vllm_attention.Attention: "vllm_Attention"})
+class _QuantVLLMAttention(QuantModule):
+    def _setup(self):
+        self.q_bmm_quantizer = TensorQuantizer()
+        self.k_bmm_quantizer = TensorQuantizer()
+        self.v_bmm_quantizer = TensorQuantizer()
+        self.parallel_state = create_parallel_state()
+
+    def forward(self, query, key, value, *args, **kwargs):
+        query = self.q_bmm_quantizer(query)
+        key = self.k_bmm_quantizer(key)
+        value = self.v_bmm_quantizer(value)
+
+        return super().forward(query, key, value, *args, **kwargs)
+
+
+@QuantModuleRegistry.register({CrossAttention: "vllm_CrossAttention"})
+class _QuantVLLMCrossAttention(_QuantVLLMAttention):
+    pass
+
+
+@QuantModuleRegistry.register({EncoderOnlyAttention: "vllm_EncoderOnlyAttention"})
+class _QuantVLLMEncoderOnlyAttention(_QuantVLLMAttention):
+    pass
