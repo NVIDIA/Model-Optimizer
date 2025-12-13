@@ -172,6 +172,9 @@ def export_spec_ckpt_config(model: nn.Module):
             "use_input_layernorm_in_first_layer": None,
             "use_last_layernorm": None,
             "use_mtp_layernorm": None,
+            "next_layer_regular": True,
+            "parallel_draft_step": None,
+            "parallel_draft_heads_num_layers": None,
         },
     }
 
