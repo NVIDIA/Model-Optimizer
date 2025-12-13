@@ -393,7 +393,7 @@ def sparsity_main(
     mts.export(full_model)
 
 
-def plain_quantize(
+def mono_quantize(
     args: argparse.Namespace,
     quant_cfg: dict[str, Any],
     full_model: torch.nn.Module,
@@ -734,7 +734,7 @@ def quantize_main(
         )
 
     else:
-        # plain quantization
+        # mono quantization
         assert len(args.qformat.split(",")) == 1, (
             "Plain quantization supports only one quantization format."
         )
@@ -765,7 +765,7 @@ def quantize_main(
         )
 
         if args.qformat in QUANT_CFG_CHOICES:
-            plain_quantize(
+            mono_quantize(
                 args,
                 quant_cfg,
                 full_model,
