@@ -1,0 +1,15 @@
+defaults:
+  - quantization/default_disabled
+
+algorithm:
+  method: awq_lite
+  alpha_step: 0.1
+quant_cfg:
+  '*weight_quantizer':
+    num_bits: 4
+    block_sizes:
+      -1: 128
+      type: static
+    enable: true
+  '*input_quantizer':
+    enable: false

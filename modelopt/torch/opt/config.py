@@ -18,9 +18,13 @@
 import fnmatch
 import json
 from collections.abc import Callable, ItemsView, Iterator, KeysView, ValuesView
+from importlib.resources import files
+from pathlib import Path
 from typing import Any, TypeAlias
 
 import pydantic
+import yaml
+from omegaconf import OmegaConf
 from pydantic import (
     BaseModel,
     Field,
@@ -381,3 +385,45 @@ def get_kwargs_for_create_model_with_rules(
         "__cls_kwargs__": {"registry": registry},
         **field_specs,
     }
+
+
+BUITIN_CONFIG_PATH = files("modelopt.config")
+
+
+def load_config(config_name_path: str | Path):
+    """Load a config yaml.
+
+    config_name_path:
+
+    Could be an internal predefined config name or a OS file path to a user specified config yaml file.
+
+    A config name is simply the sub path to an built-in config yaml file without the yml/yaml suffix.
+
+    For example, for the built-in FP8 default quantization config, the config name is "quantization/fp8_default".
+    It simply points to the config file modelopt/config/quantization/fp8_default.yml
+
+    """
+    if isinstance(config_name_path, str):
+        if not config_name_path.endswith(".yml") or config_name_path.endswith(".yaml"):
+            # config name case
+            config_name = config_name_path.lower()
+            config_file = BUITIN_CONFIG_PATH.joinpath(f"{config_name}.yml")
+            if not config_file.is_file():
+                config_file = BUITIN_CONFIG_PATH.joinpath(f"{config_name}.yaml")
+        else:
+            config_file = Path(config_name_path)
+    else:
+        config_file = config_name_path
+
+    if not config_file.is_file():
+        raise ValueError(f"Cannot find config file of {config_name_path}")
+
+    content = config_file.read_text(encoding="utf-8")
+
+    config_data = yaml.safe_load(content)
+
+    defaults = [load_config(default_cfg) for default_cfg in config_data.pop("defaults", [])]
+
+    defaults.append(config_data)
+
+    return OmegaConf.merge(*defaults)
