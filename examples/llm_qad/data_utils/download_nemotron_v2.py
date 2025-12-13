@@ -54,8 +54,8 @@ import os
 from datasets import load_dataset, get_dataset_config_names, load_dataset_builder
 from tqdm import tqdm
 
-DEFAULT_OUTPUT_DIR = "/lustre/fsw/coreai_dlalgo_modelopt/weimingc/datasets/nemotron_v2"
-DATABLEND_DIR = "/lustre/fsw/coreai_dlalgo_modelopt/weimingc/datasets"
+DEFAULT_OUTPUT_DIR = None  # Must be specified via --output-dir
+DEFAULT_DATABLEND_DIR = None  # Must be specified via --datablend-dir
 DATASET_NAME = "nvidia/Nemotron-Post-Training-Dataset-v2"
 
 # Known splits (actual sizes will be fetched from HuggingFace)
@@ -283,7 +283,7 @@ def download_split(split_name: str, max_samples: int, output_dir: str,
     }
 
 
-def create_datablend_config(split_info: dict, output_dir: str, pct_str: str) -> str:
+def create_datablend_config(split_info: dict, output_dir: str, pct_str: str, datablend_dir: str) -> str:
     """Create datablend config for a single split."""
     split_name = split_info['split_name']
     
@@ -297,7 +297,7 @@ def create_datablend_config(split_info: dict, output_dir: str, pct_str: str) -> 
         "test": [1.0, f"{split_preprocessed_dir}/{split_name}{pct_str}_test_text_document"]
     }
     
-    blend_file = os.path.join(DATABLEND_DIR, f"datablend_nemotron_v2_{split_name}{pct_str}.json")
+    blend_file = os.path.join(datablend_dir, f"datablend_nemotron_v2_{split_name}{pct_str}.json")
     with open(blend_file, 'w') as f:
         json.dump(blend_config, f, indent=2)
     
@@ -305,7 +305,7 @@ def create_datablend_config(split_info: dict, output_dir: str, pct_str: str) -> 
 
 
 def create_combined_datablend(all_split_infos: list, output_dir: str, pct_str: str, 
-                               suffix: str = "all_en") -> str:
+                               datablend_dir: str, suffix: str = "all_en") -> str:
     """Create combined datablend config for multiple splits with equal weighting."""
     
     preprocessed_dir = output_dir.replace("nemotron_v2", "nemotron_v2_preprocessed")
@@ -334,7 +334,7 @@ def create_combined_datablend(all_split_infos: list, output_dir: str, pct_str: s
         "test": test_blend
     }
     
-    blend_file = os.path.join(DATABLEND_DIR, f"datablend_nemotron_v2_{suffix}{pct_str}.json")
+    blend_file = os.path.join(datablend_dir, f"datablend_nemotron_v2_{suffix}{pct_str}.json")
     with open(blend_file, 'w') as f:
         json.dump(blend_config, f, indent=2)
     
@@ -343,8 +343,10 @@ def create_combined_datablend(all_split_infos: list, output_dir: str, pct_str: s
 
 def main():
     parser = argparse.ArgumentParser(description="Download Nemotron-v2 for QAD (per-split folders)")
-    parser.add_argument("--output-dir", type=str, default=DEFAULT_OUTPUT_DIR,
-                        help="Output directory for JSONL files")
+    parser.add_argument("--output-dir", type=str, required=True,
+                        help="Output directory for JSONL files (required)")
+    parser.add_argument("--datablend-dir", type=str, required=True,
+                        help="Directory for datablend config files (required)")
     parser.add_argument("--splits", type=str, default="stem,math,code,chat",
                         help="Comma-separated list of English splits to download")
     parser.add_argument("--include-multilingual", action="store_true",
@@ -353,24 +355,24 @@ def main():
                         help="Percentage of each split to use (1-100). Default: 30%%")
     parser.add_argument("--max-samples", type=int, default=None,
                         help="Maximum samples per split (absolute cap)")
-    parser.add_argument("--include-reasoning", action="store_true", default=True,
-                        help="Include chain-of-thought reasoning in output (default: True)")
-    parser.add_argument("--no-reasoning", action="store_true",
-                        help="Exclude chain-of-thought reasoning from output")
+    parser.add_argument("--include-reasoning", action="store_true", default=False,
+                        help="Include chain-of-thought reasoning in output (for Thinking models)")
     parser.add_argument("--tokenizer", type=str, default=None,
                         help="HuggingFace tokenizer to use for chat template (e.g., Qwen/Qwen3-8B). "
                              "If not specified, uses simple role-based formatting.")
     args = parser.parse_args()
     
-    # Handle reasoning flag (--no-reasoning overrides default)
-    include_reasoning = args.include_reasoning and not args.no_reasoning
+    # Handle reasoning flag
+    include_reasoning = args.include_reasoning
     
     # Initialize tokenizer if specified
     if args.tokenizer:
         init_tokenizer(args.tokenizer)
     
     output_dir = args.output_dir
+    datablend_dir = args.datablend_dir
     os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(datablend_dir, exist_ok=True)
     
     # Build list of splits to download
     splits_to_download = [s.strip() for s in args.splits.split(",")]
@@ -447,7 +449,7 @@ def main():
             all_split_infos.append(split_info)
             
             # Create per-split datablend config
-            blend_file = create_datablend_config(split_info, output_dir, pct_str + reasoning_str + chat_str)
+            blend_file = create_datablend_config(split_info, output_dir, pct_str + reasoning_str + chat_str, datablend_dir)
             print(f"  📝 Datablend config: {blend_file}")
     
     if not all_split_infos:
@@ -462,12 +464,12 @@ def main():
     full_suffix = pct_str + reasoning_str + chat_str
     en_splits = [info for info in all_split_infos if "multilingual" not in info['split_name']]
     if en_splits:
-        combined_file = create_combined_datablend(en_splits, output_dir, full_suffix, "all_en")
+        combined_file = create_combined_datablend(en_splits, output_dir, full_suffix, datablend_dir, "all_en")
         print(f"📝 Combined English datablend: {combined_file}")
     
     # All splits combined (if multilingual included)
     if len(all_split_infos) > len(en_splits):
-        combined_all_file = create_combined_datablend(all_split_infos, output_dir, full_suffix, "all_multilingual")
+        combined_all_file = create_combined_datablend(all_split_infos, output_dir, full_suffix, datablend_dir, "all_multilingual")
         print(f"📝 Combined all datablend: {combined_all_file}")
     
     # Save metadata JSON with sample counts
