@@ -31,6 +31,7 @@ import modelopt.torch.sparsity.attention_sparsity as sparse_attn
 from modelopt.torch.sparsity.attention_sparsity.conversion import (
     disable_sparse_attention,
     enable_sparse_attention,
+    print_sparse_attention_summary,
 )
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 
@@ -170,6 +171,19 @@ class TestConversionEdgeCases:
             if isinstance(module, SparseAttentionModule):
                 assert module.is_enabled
 
+    def test_print_sparse_attention_summary(self, capsys):
+        """Test print_sparse_attention_summary function."""
+        model = SimpleAttentionModel()
+        model = sparse_attn.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
+
+        # Print summary
+        print_sparse_attention_summary(model)
+
+        # Capture output
+        captured = capsys.readouterr()
+        assert "Total sparse attention modules:" in captured.out
+        assert "Enabled:" in captured.out
+
     def test_restore_sparse_attention_model(self):
         """Test save/restore via modelopt_state."""
         # Create and sparsify original model
@@ -192,3 +206,100 @@ class TestConversionEdgeCases:
             if isinstance(module, SparseAttentionModule):
                 assert hasattr(module, "_method")
                 assert module._method == "flash_skip_softmax"
+
+
+class TestSparseAttentionModuleMethods:
+    """Test SparseAttentionModule methods."""
+
+    def test_get_stats_with_stats_manager(self):
+        """Test get_stats() when stats manager exists and is enabled."""
+        model = SimpleAttentionModel()
+        config = {
+            "sparse_cfg": {
+                "*attention*": {
+                    "method": "flash_skip_softmax",
+                    "threshold": 0.001,
+                    "br": 64,
+                    "bc": 64,
+                    "collect_stats": True,  # Enable stats collection
+                    "enable": True,
+                }
+            },
+        }
+
+        sparse_model = sparse_attn.sparsify(model, config)
+
+        # Find sparse module
+        sparse_module = None
+        for module in sparse_model.modules():
+            if isinstance(module, SparseAttentionModule):
+                sparse_module = module
+                break
+
+        assert sparse_module is not None
+        assert sparse_module._stats_manager is not None
+
+        # Get stats (should return summary)
+        stats = sparse_module.get_stats()
+
+        assert isinstance(stats, dict)
+        assert "module" in stats
+        assert "total_calls" in stats
+        assert "average_sparsity" in stats
+
+    def test_get_stats_without_stats_manager(self):
+        """Test get_stats() when stats manager is None."""
+        model = SimpleAttentionModel()
+        config = {
+            "sparse_cfg": {
+                "*attention*": {
+                    "method": "flash_skip_softmax",
+                    "threshold": 0.001,
+                    "br": 64,
+                    "bc": 64,
+                    "collect_stats": False,  # Disable stats collection
+                    "enable": True,
+                }
+            },
+        }
+
+        sparse_model = sparse_attn.sparsify(model, config)
+
+        # Find sparse module
+        for module in sparse_model.modules():
+            if isinstance(module, SparseAttentionModule):
+                # Stats manager should be None
+                assert module._stats_manager is None
+
+                # get_stats should return empty dict
+                stats = module.get_stats()
+                assert stats == {}
+                break
+
+    def test_get_threshold_info(self):
+        """Test get_threshold_info() method."""
+        model = SimpleAttentionModel()
+        config = {
+            "sparse_cfg": {
+                "*attention*": {
+                    "method": "flash_skip_softmax",
+                    "threshold": 0.005,
+                    "br": 64,
+                    "bc": 64,
+                    "enable": True,
+                }
+            },
+        }
+
+        sparse_model = sparse_attn.sparsify(model, config)
+
+        # Find sparse module and test threshold info
+        for module in sparse_model.modules():
+            if isinstance(module, SparseAttentionModule):
+                info = module.get_threshold_info()
+
+                assert isinstance(info, dict)
+                assert "type" in info
+                assert info["type"] == "static"
+                assert info["value"] == 0.005
+                break

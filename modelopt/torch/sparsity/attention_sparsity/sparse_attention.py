@@ -15,6 +15,8 @@
 
 """Extensible sparse attention module."""
 
+from typing import Any
+
 import torch
 import torch.nn.functional as F
 
@@ -23,6 +25,7 @@ from modelopt.torch.quantization.utils import replace_function
 
 from .config import SparseAttentionAttributeConfig
 from .methods import get_sparse_method
+from .stats_manager import SparseAttentionStatsManager
 
 
 class SparseAttentionModule(DynamicModule):
@@ -103,6 +106,17 @@ class SparseAttentionModule(DynamicModule):
         # Initialize sparse method instance
         self._init_sparse_method()
 
+        # Create stats manager based on config
+        if self._method_config.get("collect_stats", False):
+            self._stats_manager = SparseAttentionStatsManager(
+                module_name="sparse_attention", enabled=True
+            )
+        else:
+            self._stats_manager = None
+
+        # Initialize stats storage for collecting stats from sparse_softmax
+        self._last_stats: dict | None = None
+
     def _init_sparse_method(self):
         """Initialize the sparse method instance."""
         method_class = get_sparse_method(self._method)
@@ -129,10 +143,21 @@ class SparseAttentionModule(DynamicModule):
 
         Returns:
             Dictionary with sparsity statistics including 'average_sparsity' if available.
-            Returns empty dict (statistics collection will be added in calibration PR).
+            Returns empty dict if stats manager is not enabled.
         """
-        # TODO: Statistics collection will be added in calibration PR
+        if self._stats_manager is not None and self._stats_manager.enabled:
+            return self._stats_manager.get_summary()
         return {}
+
+    def get_threshold_info(self) -> dict[str, Any]:
+        """Get threshold information from the sparse method instance.
+
+        Returns:
+            Dictionary with threshold information from the sparse method.
+        """
+        if hasattr(self, "_sparse_method_instance") and self._sparse_method_instance is not None:
+            return self._sparse_method_instance.get_threshold_info()
+        return {"type": "none", "value": None}
 
     def _setup(self):
         """Setup called by DynamicModule."""
@@ -157,6 +182,11 @@ class SparseAttentionModule(DynamicModule):
         with context:
             result = super().forward(*args, **kwargs)
 
+        # Collect stats if manager is available
+        if self._stats_manager is not None and self._last_stats is not None:
+            self._stats_manager.collect(self._last_stats)
+            self._last_stats = None  # Clear after collection
+
         return result
 
     def _get_sparse_context(self):
@@ -172,14 +202,12 @@ class SparseAttentionModule(DynamicModule):
         original_softmax = F.softmax
 
         def sparse_softmax(input, dim=-1, *args, **kwargs):
-            # Let the method handle the sparsification
-            _, _, _, sparse_input = self._sparse_method_instance.apply_sparsity(
-                None, None, None, input
-            )
+            # Calculate sparsity mask and collect statistics
+            sparse_mask, stats = self._sparse_method_instance.calculate_sparsity(input)
 
-            # Use sparse input if modified, otherwise use original
-            if sparse_input is not None:
-                return original_softmax(sparse_input, dim, *args, **kwargs)
+            # Store stats for collection
+            self._last_stats = stats
+
             return original_softmax(input, dim, *args, **kwargs)
 
         return sparse_softmax
