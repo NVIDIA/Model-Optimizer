@@ -19,28 +19,34 @@ Activation hooks are used to compute activation scores for pruning."""
 
 import re
 
-from modelopt.torch._compress.activation_scoring.activation_hooks import hooks
 from modelopt.torch._compress.decilm.deci_lm_hf_code.modeling_decilm import DeciLMForCausalLM
+from modelopt.torch.nas.plugins.megatron_hooks.base_hooks import (
+    ForwardHook,
+    IndependentChannelContributionHook,
+    IndependentKvHeadContributionHook,
+    IterativeChannelContributionHook,
+    LayerNormContributionHook,
+)
 
 
 def register_activation_hooks(
     model: DeciLMForCausalLM, activation_hooks_kwargs: dict
-) -> tuple[dict[str, hooks.ActivationsHook], hooks.ActivationsHook]:
+) -> tuple[dict[str, ForwardHook], type[ForwardHook]]:
     hook_class_map = {
         "mlp.down_proj": {
-            "independent": hooks.IndependentChannelContributionHook,
-            "iterative": hooks.IterativeChannelContributionHook,
+            "independent": IndependentChannelContributionHook,
+            "iterative": IterativeChannelContributionHook,
         },
         "self_attn.o_proj": {
-            "independent_kv_head_contribution": hooks.IndependentKvHeadContributionHook,
+            "independent_kv_head_contribution": IndependentKvHeadContributionHook,
         },
         r"regex:experts\.\d+\.down_proj$": {  # For MoE
-            "independent": hooks.IndependentChannelContributionHook,
+            "independent": IndependentChannelContributionHook,
         },
         # TODO: maybe this is too generic, and we should have it specifically for
         # input_layernorm and post_attention_layernorm; now it might select qk_norms
         "layernorm": {
-            "layer_norm_contribution": hooks.LayerNormContributionHook,
+            "layer_norm_contribution": LayerNormContributionHook,
         },
     }
 

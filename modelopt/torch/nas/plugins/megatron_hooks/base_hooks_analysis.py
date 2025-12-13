@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Analysis tools for evaluating importance scores from megatron hooks."""
+"""Analysis tools for evaluating importance scores from hooks."""
 
 import torch
 import torch.nn.functional as F
@@ -36,7 +36,7 @@ def evaluate_importance_scores(
         linear_layer: The linear layer to analyze with shape (out_features, in_features).
                      For example: nn.Linear(in_features=1024, out_features=4096)
         activations_batches: List of input activation tensors.
-                            Each tensor has shape [seq_len, batch_size, in_features] (Megatron format).
+                            Each tensor has shape [seq_len, batch_size, in_features].
                             The last dimension must match linear_layer.in_features.
                             Example: List of [16, 8, 1024] tensors
         importance_scores: Importance score for each input channel (feature).

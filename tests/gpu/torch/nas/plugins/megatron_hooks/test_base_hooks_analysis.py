@@ -13,22 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for megatron hooks analysis tools."""
+"""Unit tests for base hooks analysis tools."""
 
 import pytest
 import torch
 import torch.nn as nn
-from _test_utils.import_helper import skip_if_no_megatron
-
-skip_if_no_megatron()
-
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
-from megatron.core.parallel_state import initialize_model_parallel
 
 from modelopt.torch.nas.plugins.megatron_hooks import (
     IndependentChannelContributionHook,
     IterativeChannelContributionHook,
-    MegatronL2NormHook,
+    L2NormHook,
     evaluate_importance_scores,
 )
 
@@ -54,16 +48,13 @@ def test_evaluate_importance_scores_basic():
     assert metrics["cosine_similarity"] == pytest.approx(0.77117118, rel=1e-5)
 
 
-def _test_evaluate_importance_scores_with_l2_norm_hook(rank, size):
-    """Test evaluate_importance_scores with MegatronL2NormHook."""
-    # Initialize Megatron parallel state
-    initialize_model_parallel(tensor_model_parallel_size=1, pipeline_model_parallel_size=1)
-
+def test_evaluate_importance_scores_with_l2_norm_hook():
+    """Test evaluate_importance_scores with L2NormHook."""
     torch.manual_seed(42)
 
     # Create layer and hook
     layer = nn.Linear(in_features=50, out_features=30, bias=False)
-    hook = MegatronL2NormHook(max_size=None)
+    hook = L2NormHook(max_size=None)
 
     # Run evaluation
     metrics = _run_hook_and_evaluate(layer, hook, num_iterations=1000, prune_ratio=0.4)
@@ -76,11 +67,8 @@ def _test_evaluate_importance_scores_with_l2_norm_hook(rank, size):
     assert metrics["cosine_similarity"] == pytest.approx(0.7814186, rel=1e-5)
 
 
-def _test_evaluate_importance_scores_with_iterative_channel_contribution_hook(rank, size):
+def test_evaluate_importance_scores_with_iterative_channel_contribution_hook():
     """Test evaluate_importance_scores with IterativeChannelContributionHook."""
-    # Initialize Megatron parallel state
-    initialize_model_parallel(tensor_model_parallel_size=1, pipeline_model_parallel_size=1)
-
     torch.manual_seed(42)
 
     # Create layer and hook
@@ -103,11 +91,8 @@ def _test_evaluate_importance_scores_with_iterative_channel_contribution_hook(ra
     assert metrics["cosine_similarity"] == pytest.approx(0.8110392, rel=1e-5)
 
 
-def _test_evaluate_importance_scores_with_independent_channel_contribution_hook(rank, size):
+def test_evaluate_importance_scores_with_independent_channel_contribution_hook():
     """Test evaluate_importance_scores with IndependentChannelContributionHook."""
-    # Initialize Megatron parallel state
-    initialize_model_parallel(tensor_model_parallel_size=1, pipeline_model_parallel_size=1)
-
     torch.manual_seed(42)
 
     # Create layer and hook
@@ -123,33 +108,6 @@ def _test_evaluate_importance_scores_with_independent_channel_contribution_hook(
     assert metrics["num_pruned"] == 20  # 40% of 50 = 20
     assert metrics["rmse"] == pytest.approx(0.3385471, rel=1e-5)
     assert metrics["cosine_similarity"] == pytest.approx(0.8116209, rel=1e-5)
-
-
-def test_evaluate_importance_scores_with_l2_norm_hook():
-    """Test evaluate_importance_scores using MegatronL2NormHook."""
-    spawn_multiprocess_job(
-        size=1,
-        job=_test_evaluate_importance_scores_with_l2_norm_hook,
-        backend="gloo",
-    )
-
-
-def test_evaluate_importance_scores_with_iterative_channel_contribution_hook():
-    """Test evaluate_importance_scores using IterativeChannelContributionHook."""
-    spawn_multiprocess_job(
-        size=1,
-        job=_test_evaluate_importance_scores_with_iterative_channel_contribution_hook,
-        backend="gloo",
-    )
-
-
-def test_evaluate_importance_scores_with_independent_channel_contribution_hook():
-    """Test evaluate_importance_scores using IndependentChannelContributionHook."""
-    spawn_multiprocess_job(
-        size=1,
-        job=_test_evaluate_importance_scores_with_independent_channel_contribution_hook,
-        backend="gloo",
-    )
 
 
 def _run_hook_and_evaluate(
@@ -174,9 +132,7 @@ def _run_hook_and_evaluate(
     # Run forward passes
     all_activations = []
     for _ in range(num_iterations):
-        activations = torch.randn(
-            16, 8, layer.in_features
-        )  # seq=16, batch=8, in_features=50 (Megatron format)
+        activations = torch.randn(16, 8, layer.in_features)  # seq=16, batch=8, in_features=50
         all_activations.append(activations)
         _ = layer(activations)
 
