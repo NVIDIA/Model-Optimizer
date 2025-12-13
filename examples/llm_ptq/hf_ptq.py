@@ -66,6 +66,11 @@ from modelopt.torch.utils.image_processor import (
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
+from modelopt.torch.utils.video_dataset_utils import (
+    Qwen3OmniVideoProcessor,
+    get_supported_video_datasets,
+    get_video_dataset_dataloader,
+)
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
@@ -464,18 +469,37 @@ def main(args):
                 num_samples=args.calib_size[0],
             )
         elif model_type == "qwen3omni":
-            assert processor is not None and isinstance(processor, Qwen3OmniImageProcessor), (
-                "The Qwen3OmniImageProcessor must be set."
-            )
             assert len(args.calib_size) == 1, (
                 "qwen3omni only supports one dataset for calibration, can extend this in the future"
             )
-            calib_dataloader = get_vlm_dataset_dataloader(
-                dataset_name=args.dataset[0] if args.dataset else "scienceqa",
-                processor=processor,
-                batch_size=args.batch_size,
-                num_samples=args.calib_size[0],
-            )
+            assert processor is not None, "The processor must be set for qwen3omni model."
+            dataset_name = args.dataset[0] if args.dataset else "scienceqa"
+            # Check if using video dataset (e.g., finevideo)
+            if dataset_name in get_supported_video_datasets():
+                video_processor = Qwen3OmniVideoProcessor(
+                    processor.tokenizer if hasattr(processor, "tokenizer") else processor,
+                    device=device,
+                    dtype=model.dtype,
+                    use_audio_in_video=True,
+                )
+                calib_dataloader = get_video_dataset_dataloader(
+                    dataset_name=dataset_name,
+                    processor=video_processor,
+                    batch_size=args.batch_size,
+                    num_samples=args.calib_size[0],
+                )
+            else:
+                assert processor is not None and isinstance(processor, Qwen3OmniImageProcessor), (
+                    "The Qwen3OmniImageProcessor must be set."
+                )
+                # Set the dtype for proper tensor conversion in collate_function
+                processor.dtype = model.dtype
+                calib_dataloader = get_vlm_dataset_dataloader(
+                    dataset_name=dataset_name,
+                    processor=processor,
+                    batch_size=args.batch_size,
+                    num_samples=args.calib_size[0],
+                )
         elif model_type == "whisper":
             assert processor is not None and isinstance(processor, WhisperProcessor), (
                 "The AutoProcessor must be set."
@@ -529,9 +553,10 @@ def main(args):
 
         if not model_is_already_quantized or calibration_only:
             # Only run single sample for preview
-            input_ids = next(iter(calib_dataloader))[
-                "input_features" if model_type == "whisper" else "input_ids"
-            ][0:1]
+            calib_batch = next(iter(calib_dataloader))
+            input_ids = calib_batch["input_features" if model_type == "whisper" else "input_ids"][
+                0:1
+            ]
 
             # Generate preview before quantization
             if is_nemotron_vl_model and tokenizer is not None:
@@ -545,7 +570,8 @@ def main(args):
                 )
             elif model_type == "qwen3omni":
                 # Qwen3Omni returns (text_ids, audio) tuple; text_ids has .sequences
-                result = full_model.generate(input_ids, max_new_tokens=100)
+                # Pass full batch with all multimodal inputs
+                result = full_model.generate(**calib_batch, max_new_tokens=100)
                 if isinstance(result, tuple):
                     text_ids, _ = result
                     generated_ids_before_ptq = (
@@ -583,7 +609,8 @@ def main(args):
             generated_ids_after_ptq = None
             if model_type == "qwen3omni":
                 # Qwen3Omni returns (text_ids, audio) tuple; text_ids has .sequences
-                result = full_model.generate(input_ids, max_new_tokens=100)
+                # Pass full batch with all multimodal inputs
+                result = full_model.generate(**calib_batch, max_new_tokens=100)
                 if isinstance(result, tuple):
                     text_ids, _ = result
                     generated_ids_after_ptq = (
