@@ -36,7 +36,7 @@ class MedusaLayer(MegatronModule):
     Medusa layer consists of a column parallel linear following a silu.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, bias=True):
         """Constructor.
 
         Args:
@@ -53,6 +53,7 @@ class MedusaLayer(MegatronModule):
         self.linear = torch.nn.Linear(
             config.hidden_size,
             config.hidden_size,
+            bias=bias,
             dtype=config.params_dtype,
             device=device,
         )
