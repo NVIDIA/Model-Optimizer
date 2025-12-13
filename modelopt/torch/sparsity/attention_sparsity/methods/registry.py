@@ -18,6 +18,7 @@
 import re
 import warnings
 from abc import ABC, abstractmethod
+from typing import Any
 
 import torch
 
@@ -26,24 +27,48 @@ class SparseAttentionMethod(ABC):
     """Base class for sparse attention methods."""
 
     @abstractmethod
-    def apply_sparsity(
+    def calculate_sparsity(
         self,
-        query: torch.Tensor | None = None,
-        key: torch.Tensor | None = None,
-        value: torch.Tensor | None = None,
-        attention_scores: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-        """Apply sparsity to attention computation.
+        attention_scores: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict]:
+        """Calculate sparsity mask and statistics without applying.
 
         Args:
-            query: Query tensor
-            key: Key tensor
-            value: Value tensor
-            attention_scores: Pre-computed attention scores
+            attention_scores: Pre-softmax attention scores [batch, heads, seq_q, seq_k]
 
         Returns:
-            Tuple of (query, key, value, attention_scores) with sparsity applied
+            Tuple of (sparse_mask, stats_dict) where:
+            - sparse_mask: Boolean tensor indicating which elements to keep
+            - stats_dict: Dictionary with sparsity statistics
         """
+
+    @abstractmethod
+    def apply_sparsity(
+        self,
+        attention_scores: torch.Tensor,
+        sparse_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Apply sparsity mask to attention scores.
+
+        Args:
+            attention_scores: Pre-softmax attention scores [batch, heads, seq_q, seq_k]
+            sparse_mask: Optional pre-computed mask. If None, calculates internally.
+
+        Returns:
+            Masked attention scores with sparse elements set to -inf
+        """
+
+    def get_threshold_info(self) -> dict[str, Any]:
+        """Get threshold information for display/debugging.
+
+        Returns:
+            Dictionary with threshold information. Should include:
+            - 'type': 'static', 'dynamic', or 'none'
+            - 'value': threshold value (for static)
+            - 'scale_factor': scale factor (for dynamic)
+            - Other method-specific info
+        """
+        return {"type": "none", "value": None}
 
     @property
     @abstractmethod

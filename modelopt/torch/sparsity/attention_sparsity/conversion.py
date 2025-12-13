@@ -228,6 +228,8 @@ def update_sparse_attention_metadata(
 
             # Save the method configuration that was used
             # _method_config already contains the validated config dict
+            # Save the method configuration that was used
+            # _method_config already contains the validated config dict
             module_state = {
                 "method": module._sparse_method_instance.name,
                 "method_config": module._method_config.copy(),
@@ -299,3 +301,44 @@ def enable_sparse_attention(model: nn.Module, wildcard_or_filter_func: str | Cal
 
         if matched:
             module.enable()
+
+
+def _format_threshold(info: dict) -> str:
+    """Format threshold info for display."""
+    t = info.get("type")
+    if t == "dynamic":
+        return f"λ={info.get('scale_factor', 0):.2f}"
+    if t == "static":
+        v = info.get("value")
+        if isinstance(v, dict):
+            return f"threshold={v}"
+        return f"threshold={v:.2e}" if isinstance(v, float) else f"threshold={v}"
+    return "threshold=N/A"
+
+
+def print_sparse_attention_summary(model: nn.Module):
+    """Print summary of sparse attention modules in the model.
+
+    Args:
+        model: Model with sparse attention applied
+    """
+    sparse_modules = [
+        (name, m) for name, m in model.named_modules() if isinstance(m, SparseAttentionModule)
+    ]
+
+    if not sparse_modules:
+        print("No sparse attention modules found")
+        return
+
+    enabled = sum(1 for _, m in sparse_modules if m.is_enabled)
+    print(f"Sparse attention: {enabled}/{len(sparse_modules)} modules enabled")
+
+    # Group by (method, threshold)
+    groups: dict[tuple[str, str], int] = {}
+    for _, module in sparse_modules:
+        method = getattr(module, "_method", "unknown")
+        threshold = _format_threshold(module.get_threshold_info())
+        groups[(method, threshold)] = groups.get((method, threshold), 0) + 1
+
+    for (method, threshold), count in sorted(groups.items()):
+        print(f"  {method}: {count} layers, {threshold}")

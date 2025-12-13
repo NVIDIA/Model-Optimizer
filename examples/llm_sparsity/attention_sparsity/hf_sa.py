@@ -28,9 +28,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import modelopt.torch.opt as mto
 import modelopt.torch.sparsity.attention_sparsity as mtsa
 from modelopt.torch.export import export_hf_checkpoint
-from modelopt.torch.sparsity.attention_sparsity import SparseAttentionConfig
-from modelopt.torch.sparsity.attention_sparsity.config import SKIP_SOFTMAX_DEFAULT
-from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
+from modelopt.torch.sparsity.attention_sparsity.config import (
+    SKIP_SOFTMAX_CALIB,
+    SKIP_SOFTMAX_DEFAULT,
+)
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 
 RAND_SEED = 1234
@@ -38,9 +39,10 @@ RAND_SEED = 1234
 # Enable HuggingFace checkpointing support
 mto.enable_huggingface_checkpointing()
 
-# You can define custom configurations or use the default
+# Sparse attention configuration choices
 SPARSE_ATTN_CFG_CHOICES = {
     "skip_softmax": SKIP_SOFTMAX_DEFAULT,
+    "skip_softmax_calib": SKIP_SOFTMAX_CALIB,
 }
 
 
@@ -116,30 +118,23 @@ def truncate_text(text: str, tokenizer, max_length: int):
     return begin_text + " [...] " + end_text
 
 
-def verify_outputs(model, tokenizer, args):
-    """Compare outputs between baseline and sparse attention models."""
-    # Update seq_len to match calibration max_seqlen if calibration was used
-    base_config = SPARSE_ATTN_CFG_CHOICES.get(args.sparse_attn, {})
-    if "calibration" in base_config and "max_seqlen" in base_config["calibration"]:
-        calib_max_seqlen = base_config["calibration"]["max_seqlen"]
-        if args.seq_len != calib_max_seqlen:
-            print(
-                f"\nNote: Updating test seq_len from {args.seq_len} to {calib_max_seqlen} "
-                f"to match calibration config"
-            )
-            args.seq_len = calib_max_seqlen
+def generate_sample_output(model, tokenizer, args):
+    """Generate sample output for comparison.
 
-    # Load and prepare a single test prompt
-    print(f"\nLoading test sample (will be tokenized up to {args.seq_len} tokens)")
+    Args:
+        model: The model to generate with
+        tokenizer: Tokenizer for encoding/decoding
+        args: Command line arguments
+
+    Returns:
+        Tuple of (generated_text, input_prompt, input_ids)
+    """
+    # Load test sample
     prompts = get_narrativeqa_samples(num_samples=1)
     prompt = prompts[0]
 
     # Prepare inputs
     truncated_prompt = truncate_text(prompt, tokenizer, args.seq_len)
-    display_prompt = (
-        truncated_prompt[:150] + "..." if len(truncated_prompt) > 150 else truncated_prompt
-    )
-
     inputs = tokenizer(
         truncated_prompt,
         return_tensors="pt",
@@ -150,14 +145,7 @@ def verify_outputs(model, tokenizer, args):
     if torch.cuda.is_available():
         inputs = {k: v.cuda() for k, v in inputs.items()}
 
-    print("\n" + "=" * 60)
-    print("BASELINE vs SPARSE ATTENTION COMPARISON")
-    print("=" * 60)
-    print(f"\nTest prompt: {display_prompt}")
-    print(f"Input tokens: {inputs['input_ids'].shape[1]}")
-
-    # Helper function to generate text
-    def generate_text(model, inputs, args, tokenizer):
+        # Generate
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
@@ -168,60 +156,9 @@ def verify_outputs(model, tokenizer, args):
             )
             input_length = inputs["input_ids"].shape[1]
             generated_ids = outputs[0][input_length:]
-            return tokenizer.decode(generated_ids, skip_special_tokens=True)
+        generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
 
-    # Find all sparse attention modules
-    sparse_modules = [m for m in model.modules() if isinstance(m, SparseAttentionModule)]
-
-    # Generate baseline by temporarily disabling sparse attention
-    print("\n" + "-" * 60)
-    print("Generating baseline (sparse attention disabled)...")
-    for module in sparse_modules:
-        module.disable()
-    baseline_text = generate_text(model, inputs, args, tokenizer)
-
-    # Generate with sparse attention enabled
-    print("\nGenerating with sparse attention (calibrated thresholds)...")
-    for module in sparse_modules:
-        module.enable()
-    sparse_text = generate_text(model, inputs, args, tokenizer)
-
-    # Display comparison
-    print("\n" + "-" * 60)
-    print("RESULTS:")
-    baseline_display = baseline_text[:300] + "..." if len(baseline_text) > 300 else baseline_text
-    sparse_display = sparse_text[:300] + "..." if len(sparse_text) > 300 else sparse_text
-
-    print(f"\nBaseline:    {baseline_display}")
-    print(f"With Sparse: {sparse_display}")
-
-    if baseline_text == sparse_text:
-        print("\nOutputs are identical")
-    else:
-        print("\nOutputs differ")
-
-
-def sparsify_model(model, args):
-    """Apply sparse attention to the model with optional calibration."""
-    print(f"\nApplying sparse attention: {args.sparse_attn} with backend: {args.backend}")
-    base_config = SPARSE_ATTN_CFG_CHOICES[args.sparse_attn]
-
-    # Create modified config with selected backend
-    modified_sparse_cfg = {}
-    for pattern, cfg in base_config["sparse_cfg"].items():
-        modified_cfg = cfg.copy()
-        modified_cfg["backend"] = args.backend
-        modified_sparse_cfg[pattern] = modified_cfg
-
-    # Create new config with modified settings
-    sparse_config = SparseAttentionConfig(sparse_cfg=modified_sparse_cfg)
-
-    # Sparsify the model
-    model = mtsa.sparsify(model, config=sparse_config)
-
-    print("Sparse attention applied successfully!")
-
-    return model
+    return generated_text, truncated_prompt, inputs["input_ids"]
 
 
 def main(args):
@@ -254,12 +191,40 @@ def main(args):
         model = model.cuda()
         print("Model moved to CUDA")
 
-    # Apply sparse attention to the model (with calibration if configured)
-    model = sparsify_model(model, args)
+    # Generate sample output BEFORE sparse attention
+    print("\nGenerating sample output before sparse attention...")
+    output_before, test_prompt, input_ids = generate_sample_output(model, tokenizer, args)
 
-    # Verify outputs if requested (compares baseline vs calibrated sparse model)
-    if args.verify_output:
-        verify_outputs(model, tokenizer, args)
+    # Apply sparse attention with optional calibration
+    print(f"\nApplying sparse attention: {args.sparse_attn}")
+    sparse_config = SPARSE_ATTN_CFG_CHOICES[args.sparse_attn]
+    model = mtsa.sparsify(model, config=sparse_config)
+    print("Sparse attention applied successfully!")
+
+    # Generate sample output AFTER sparse attention
+    print("\nGenerating sample output after sparse attention...")
+    output_after, _, _ = generate_sample_output(model, tokenizer, args)
+
+    # Display comparison
+    print("\n" + "=" * 60)
+    print("OUTPUT COMPARISON (Before vs After Sparse Attention)")
+    print("=" * 60)
+    display_prompt = test_prompt[:150] + "..." if len(test_prompt) > 150 else test_prompt
+    print(f"\nTest prompt: {display_prompt}")
+    print(f"Input tokens: {input_ids.shape[1]}")
+
+    output_before_display = (
+        output_before[:300] + "..." if len(output_before) > 300 else output_before
+    )
+    output_after_display = output_after[:300] + "..." if len(output_after) > 300 else output_after
+
+    print(f"\nBefore sparse attention: {output_before_display}")
+    print(f"After sparse attention:  {output_after_display}")
+
+    if output_before == output_after:
+        print("\nOutputs are identical")
+    else:
+        print("\nOutputs differ")
 
     # Export if requested
     if args.export_dir:
@@ -306,12 +271,6 @@ if __name__ == "__main__":
         default=2048,
         help="Maximum sequence length for input prompts (will be truncated if longer)",
     )
-    parser.add_argument(
-        "--num_samples",
-        type=int,
-        default=3,
-        help="Number of samples to use from NarrativeQA dataset",
-    )
 
     # Generation arguments
     parser.add_argument(
@@ -321,11 +280,6 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.7, help="Temperature for sampling")
 
     # Operation arguments
-    parser.add_argument(
-        "--verify_output",
-        action="store_true",
-        help="Verify that sparse attention outputs match baseline",
-    )
     parser.add_argument(
         "--export_dir",
         type=str,
