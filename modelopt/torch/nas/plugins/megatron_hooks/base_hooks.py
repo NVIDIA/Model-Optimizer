@@ -22,7 +22,6 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from megatron.core.tensor_parallel.layers import RowParallelLinear
 from omegaconf import DictConfig, OmegaConf
 from torch import nn
 
@@ -266,15 +265,15 @@ class IndependentChannelContributionHook(ForwardHook):
     - Mean absolute activation for each channel (how strongly each channel is activated)
 
     Args:
-        linear_layer: The linear projection layer to analyze. Can be either nn.Linear or
-            RowParallelLinear from megatron.core.tensor_parallel.layers.
+        linear_layer: The linear projection layer to analyze. Must have a `weight` attribute
+            and either `in_features` (nn.Linear) or `input_size` (Megatron RowParallelLinear).
         max_size: Optional maximum expected size to validate against (skips if mismatch).
                 Useful for skipping non-max subnets during profiling.
     """
 
     def __init__(
         self,
-        linear_layer: nn.Linear | RowParallelLinear,
+        linear_layer: nn.Module,
         max_size: int | None = None,
     ):
         """Initialize the independent channel contribution hook."""
@@ -397,8 +396,8 @@ class IterativeChannelContributionHook(ForwardHook):
     by measuring channel contribution as the L2 norm of output change when removed.
 
     Args:
-        linear_layer: The linear projection layer to analyze. Can be either nn.Linear or
-            RowParallelLinear from megatron.core.tensor_parallel.layers.
+        linear_layer: The linear projection layer to analyze. Must have a `weight` attribute
+            and either `in_features` (nn.Linear) or `input_size` (Megatron RowParallelLinear).
         activation_hooks_kwargs: Configuration dict with:
             - validation_full_iters (int): Number of pruning iterations.
             - clear_gpu_memory (bool, optional): Clear GPU memory during computation.
@@ -409,7 +408,7 @@ class IterativeChannelContributionHook(ForwardHook):
 
     def __init__(
         self,
-        linear_layer: nn.Linear | RowParallelLinear,
+        linear_layer: nn.Module,
         activation_hooks_kwargs: dict,
         max_size: int | None = None,
     ):
