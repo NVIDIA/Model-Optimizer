@@ -26,4 +26,5 @@ from .network import *
 from .perf import *
 from .regex import *
 from .tensor import *
+from .video_dataset_utils import *
 from .vlm_dataset_utils import *

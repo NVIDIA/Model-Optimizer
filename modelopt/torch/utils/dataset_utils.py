@@ -283,7 +283,8 @@ def get_max_batch_size(
 
     free_mem_before, max_allocated_before = _get_free_gpu_mem()
     is_enc_dec = model_type_is_enc_dec(model)
-    infer_method = model.generate if is_enc_dec else model.forward
+    requires_generate = _model_requires_generate(model)
+    infer_method = model.generate if (is_enc_dec or requires_generate) else model.forward
 
     if sample_input_single_batch is None:
         sample_input_single_batch = (
@@ -349,11 +350,15 @@ def _process_batch(batch_data, infer_method, max_working_batch_size=None):
     Returns:
         The maximum batch size that worked successfully
     """
-    assert all(torch.is_tensor(data) or data is None for data in batch_data.values()), (
-        "batch_data values must be tensors"
+    # Separate tensor values from scalar parameters (like max_new_tokens)
+    tensor_data = {k: v for k, v in batch_data.items() if torch.is_tensor(v) or v is None}
+    scalar_data = {k: v for k, v in batch_data.items() if not torch.is_tensor(v) and v is not None}
+
+    assert all(torch.is_tensor(data) or data is None for data in tensor_data.values()), (
+        "tensor_data values must be tensors"
     )
     # Get the batch size of current data
-    batch_size = batch_data[next(iter(batch_data.keys()))].shape[0]
+    batch_size = tensor_data[next(iter(tensor_data.keys()))].shape[0]
 
     # If we know a smaller batch size works, preemptively split
     if max_working_batch_size is not None and batch_size > max_working_batch_size:
@@ -361,11 +366,13 @@ def _process_batch(batch_data, infer_method, max_working_batch_size=None):
         for i in range(0, batch_size, max_working_batch_size):
             end_idx = min(i + max_working_batch_size, batch_size)
             split_data = {}
-            for key in batch_data:
-                if batch_data[key] is None:
+            for key in tensor_data:
+                if tensor_data[key] is None:
                     split_data[key] = None
                 else:
-                    split_data[key] = batch_data[key][i:end_idx, ...]
+                    split_data[key] = tensor_data[key][i:end_idx, ...]
+            # Add back scalar data (non-tensor params like max_new_tokens)
+            split_data.update(scalar_data)
 
             max_working_batch_size = _process_batch(
                 split_data, infer_method, max_working_batch_size
@@ -392,8 +399,11 @@ def _process_batch(batch_data, infer_method, max_working_batch_size=None):
     # Split the batch in half
     mid = (batch_size + 1) // 2
     warn(f"CUDA out of memory with batch size {batch_size}, trying with batch size {mid}")
-    split_data_1 = {key: batch_data[key][:mid, ...] for key in batch_data}
-    split_data_2 = {key: batch_data[key][mid:, ...] for key in batch_data}
+    split_data_1 = {key: tensor_data[key][:mid, ...] for key in tensor_data}
+    split_data_2 = {key: tensor_data[key][mid:, ...] for key in tensor_data}
+    # Add back scalar data (non-tensor params like max_new_tokens)
+    split_data_1.update(scalar_data)
+    split_data_2.update(scalar_data)
 
     # Recursively process each half and track max working batch size
     max_working_batch_size = _process_batch(split_data_1, infer_method)
@@ -412,10 +422,15 @@ def _forward_loop(model: torch.nn.Module, dataloader: DataLoader) -> None:
     """
     with torch.no_grad():
         is_enc_dec = model_type_is_enc_dec(model)
-        infer_method = model.generate if is_enc_dec else model.forward
+        requires_generate = _model_requires_generate(model)
+        use_generate = is_enc_dec or requires_generate
+        infer_method = model.generate if use_generate else model.forward
         max_working_batch_size = None  # Initialize max working batch size as None
 
         for _, data in enumerate(tqdm(dataloader)):
+            # For generate(), add max_new_tokens to prevent indefinite generation during calibration
+            if use_generate:
+                data["max_new_tokens"] = 1
             # Process batch and update max working batch size
             max_working_batch_size = _process_batch(data, infer_method, max_working_batch_size)
 
@@ -493,3 +508,15 @@ def create_forward_loop(
 def model_type_is_enc_dec(model):
     enc_dec_model_list = ["t5", "bart", "whisper"]
     return any(model_name in model.__class__.__name__.lower() for model_name in enc_dec_model_list)
+
+
+def _model_requires_generate(model):
+    """Check if model requires generate() instead of forward() for calibration.
+
+    Some conditional generation models (like Qwen3-Omni) don't have a standard
+    forward(input_ids, ...) signature and need to use generate() for calibration.
+    """
+    # Models that require generate() for calibration instead of forward()
+    generate_model_list = ["qwen3omni"]
+    model_name = model.__class__.__name__.lower()
+    return any(name in model_name for name in generate_model_list)

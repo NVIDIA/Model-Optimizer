@@ -59,9 +59,18 @@ from modelopt.torch.utils.dataset_utils import (
     get_max_batch_size,
     get_supported_datasets,
 )
-from modelopt.torch.utils.image_processor import MllamaImageProcessor
+from modelopt.torch.utils.image_processor import (
+    BaseImageProcessor,
+    MllamaImageProcessor,
+    Qwen3OmniImageProcessor,
+)
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
+from modelopt.torch.utils.video_dataset_utils import (
+    Qwen3OmniVideoProcessor,
+    get_supported_video_datasets,
+    get_video_dataset_dataloader,
+)
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
@@ -305,10 +314,16 @@ def main(args):
     model_is_already_quantized = is_quantized(model)
 
     model_type = get_model_type(model)
+    if model_type == "qwen3omni":
+        model.disable_talker()
 
     device = model.device
     if hasattr(model, "model"):
         device = model.model.device
+    # For multi-GPU models with device_map="auto", model.device may return 'meta' or 'cpu'
+    # since parameters are distributed. Force cuda:0 for input tensors.
+    if device is None or str(device) in ("meta", "cpu"):
+        device = "cuda"
     processor = None
     tokenizer = None
 
@@ -317,7 +332,7 @@ def main(args):
     # Detect if this is a Nemotron VL model using architecture-based detection
     is_nemotron_vl_model = is_nemotron_vl(full_model)
 
-    if model_type == "mllama":
+    if model_type in ["mllama", "qwen3omni"]:
         processor = get_processor(
             args.pyt_ckpt_path,
             model_type,
@@ -453,6 +468,38 @@ def main(args):
                 batch_size=args.batch_size,
                 num_samples=args.calib_size[0],
             )
+        elif model_type == "qwen3omni":
+            assert len(args.calib_size) == 1, (
+                "qwen3omni only supports one dataset for calibration, can extend this in the future"
+            )
+            assert processor is not None, "The processor must be set for qwen3omni model."
+            dataset_name = args.dataset[0] if args.dataset else "scienceqa"
+            # Check if using video dataset (e.g., finevideo)
+            if dataset_name in get_supported_video_datasets():
+                video_processor = Qwen3OmniVideoProcessor(
+                    processor.tokenizer if hasattr(processor, "tokenizer") else processor,
+                    device=device,
+                    dtype=model.dtype,
+                    use_audio_in_video=True,
+                )
+                calib_dataloader = get_video_dataset_dataloader(
+                    dataset_name=dataset_name,
+                    processor=video_processor,
+                    batch_size=args.batch_size,
+                    num_samples=args.calib_size[0],
+                )
+            else:
+                assert processor is not None and isinstance(processor, Qwen3OmniImageProcessor), (
+                    "The Qwen3OmniImageProcessor must be set."
+                )
+                # Set the dtype for proper tensor conversion in collate_function
+                processor.dtype = model.dtype
+                calib_dataloader = get_vlm_dataset_dataloader(
+                    dataset_name=dataset_name,
+                    processor=processor,
+                    batch_size=args.batch_size,
+                    num_samples=args.calib_size[0],
+                )
         elif model_type == "whisper":
             assert processor is not None and isinstance(processor, WhisperProcessor), (
                 "The AutoProcessor must be set."
@@ -506,9 +553,10 @@ def main(args):
 
         if not model_is_already_quantized or calibration_only:
             # Only run single sample for preview
-            input_ids = next(iter(calib_dataloader))[
-                "input_features" if model_type == "whisper" else "input_ids"
-            ][0:1]
+            calib_batch = next(iter(calib_dataloader))
+            input_ids = calib_batch["input_features" if model_type == "whisper" else "input_ids"][
+                0:1
+            ]
 
             # Generate preview before quantization
             if is_nemotron_vl_model and tokenizer is not None:
@@ -520,6 +568,17 @@ def main(args):
                     "before quantization",
                     allow_fallback=True,
                 )
+            elif model_type == "qwen3omni":
+                # Qwen3Omni returns (text_ids, audio) tuple; text_ids has .sequences
+                # Pass full batch with all multimodal inputs
+                result = full_model.generate(**calib_batch, max_new_tokens=100)
+                if isinstance(result, tuple):
+                    text_ids, _ = result
+                    generated_ids_before_ptq = (
+                        text_ids.sequences if hasattr(text_ids, "sequences") else text_ids
+                    )
+                else:
+                    generated_ids_before_ptq = result
             else:
                 # Standard generation for non-Nemotron VL models
                 generated_ids_before_ptq = full_model.generate(input_ids, max_new_tokens=100)
@@ -536,13 +595,30 @@ def main(args):
                     print("Updating full_model with quantized language_model...")
                     language_model_lineage[-2].language_model = model
 
+            # if args.verbose:
+            #     mtq.print_quant_summary(full_model)
+
+            import contextlib
+
             if args.verbose:
-                mtq.print_quant_summary(full_model)
+                with open("./quant_summary.txt", "w") as f, contextlib.redirect_stdout(f):
+                    mtq.print_quant_summary(full_model)
 
             # Run some samples
             torch.cuda.empty_cache()
             generated_ids_after_ptq = None
-            if model_type != "llama4" and not is_nemotron_vl_model:
+            if model_type == "qwen3omni":
+                # Qwen3Omni returns (text_ids, audio) tuple; text_ids has .sequences
+                # Pass full batch with all multimodal inputs
+                result = full_model.generate(**calib_batch, max_new_tokens=100)
+                if isinstance(result, tuple):
+                    text_ids, _ = result
+                    generated_ids_after_ptq = (
+                        text_ids.sequences if hasattr(text_ids, "sequences") else text_ids
+                    )
+                else:
+                    generated_ids_after_ptq = result
+            elif model_type != "llama4" and not is_nemotron_vl_model:
                 # Our fake quantizer may not be fully compatible with torch.compile.
                 generated_ids_after_ptq = full_model.generate(input_ids, max_new_tokens=100)
             elif is_nemotron_vl_model and tokenizer is not None:
@@ -560,7 +636,8 @@ def main(args):
                 )
 
             def input_decode(input_ids):
-                if processor is not None and isinstance(processor, MllamaImageProcessor):
+                # BaseImageProcessor covers MllamaImageProcessor and Qwen3OmniImageProcessor
+                if processor is not None and isinstance(processor, BaseImageProcessor):
                     return processor.tokenizer.batch_decode(input_ids)
                 elif processor is not None and isinstance(processor, WhisperProcessor):
                     return first_text
@@ -579,6 +656,12 @@ def main(args):
                         return tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
                 elif processor is not None and isinstance(processor, MllamaImageProcessor):
                     return processor.tokenizer.batch_decode(generated_ids[:, input_shape:])
+                elif processor is not None and isinstance(processor, Qwen3OmniImageProcessor):
+                    return processor.tokenizer.batch_decode(
+                        generated_ids[:, input_shape:],
+                        skip_special_tokens=True,
+                        clean_up_tokenization_spaces=False,
+                    )
                 elif tokenizer is not None:
                     return tokenizer.batch_decode(generated_ids[:, input_shape:])
                 else:
