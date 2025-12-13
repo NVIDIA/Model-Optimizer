@@ -77,6 +77,12 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         ),
     )
 
+    collect_stats: bool = ModeloptField(
+        default=False,
+        title="Collect statistics.",
+        description="Whether to collect sparsity statistics during forward pass for monitoring.",
+    )
+
     is_causal: bool = ModeloptField(
         default=True,
         title="Causal attention flag.",
@@ -84,16 +90,6 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
             "Whether the model uses causal (autoregressive) attention. "
             "If True, sparsity statistics are calculated over the lower triangle only. "
             "Defaults to True for decoder-only models like GPT, LLaMA, etc."
-        ),
-    )
-
-    calibration: dict | None = ModeloptField(
-        default=None,
-        title="Calibration configuration",
-        description=(
-            "Calibration settings for this pattern. "
-            "If provided, enables automatic threshold calibration. "
-            "Only one pattern should have calibration enabled."
         ),
     )
 
@@ -150,24 +146,113 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         return v
 
 
-# Pre-defined Sparse Attention Configuration
-# Default configuration with block-wise sparsity optimized for Flash Attention
-SKIP_SOFTMAX_DEFAULT = {
-    "sparse_cfg": {
-        "*attn*": {
-            "method": "flash_skip_softmax",
-            "threshold": {
-                "prefill": 1e-3,  # More aggressive during prefill
-                "decode": 1e-4,  # Conservative during decode
-            },
-            "br": 128,  # Flash Attention block rows
-            "bc": 128,  # Flash Attention block columns
-            "backend": "pytorch",  # Only pytorch backend supported
-            "enable": True,
-        },
-        "default": {"enable": False},
-    },
-}
+class CalibrationConfig(ModeloptBaseConfig):
+    """Configuration for automatic threshold calibration using RULER dataset.
+
+    Calibration learns a dynamic threshold λ = scale_factor / sequence_length that
+    achieves target sparsity. Only supports prefill phase (seq_len > 1).
+    """
+
+    target_sparse_ratio: float = ModeloptField(
+        default=0.5,
+        title="Target sparsity ratio",
+        description="Target ratio of sparse attention blocks (0.0 to 1.0).",
+    )
+
+    samples: int = ModeloptField(
+        default=24,
+        title="Calibration samples",
+        description="Total number of RULER samples for calibration (distributed across length bins).",
+    )
+
+    max_seqlen: int = ModeloptField(
+        default=32768,
+        title="Maximum sequence length",
+        description="Maximum sequence length for calibration (length bins auto-generated as powers of 2).",
+    )
+
+    num_length_bins: int = ModeloptField(
+        default=4,
+        title="Number of length bins",
+        description="Number of length bins to generate (hidden parameter, default: 4).",
+    )
+
+    chunk_size: int = ModeloptField(
+        default=2048,
+        title="Chunk size for prefill",
+        description=(
+            "Chunk size for chunked prefill to avoid OOM with long sequences. "
+            "When sequence length exceeds chunk_size, prefill is done in chunks using KV cache. "
+            "Set to -1 to disable chunking (full prefill)."
+        ),
+    )
+
+    threshold_trials: list[float] | None = ModeloptField(
+        default=None,
+        title="Threshold trials",
+        description=(
+            "List of threshold values to test during calibration. "
+            "If None, uses default: [1e-6, 5e-6, 1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2, 1e-1, 5e-1]"
+        ),
+    )
+
+    @field_validator("threshold_trials")
+    @classmethod
+    def validate_threshold_trials(cls, v):
+        """Validate threshold_trials are in valid range."""
+        if v is not None:
+            if not isinstance(v, list):
+                raise ValueError(f"threshold_trials must be a list, got {type(v)}")
+            if len(v) == 0:
+                raise ValueError("threshold_trials must not be empty")
+            for threshold in v:
+                if not isinstance(threshold, (int, float)):
+                    raise ValueError(f"All threshold_trials must be numbers, got {type(threshold)}")
+                if threshold <= 0 or threshold >= 1:
+                    raise ValueError(
+                        f"All threshold_trials must be in range (0, 1), got {threshold}"
+                    )
+        return v
+
+    @field_validator("target_sparse_ratio")
+    @classmethod
+    def validate_target_sparse_ratio(cls, v):
+        """Validate target sparsity ratio is between 0 and 1."""
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"target_sparse_ratio must be between 0.0 and 1.0, got {v}")
+        return v
+
+    @field_validator("samples")
+    @classmethod
+    def validate_samples(cls, v):
+        """Validate samples is positive."""
+        if v <= 0:
+            raise ValueError(f"samples must be positive, got {v}")
+        return v
+
+    @field_validator("max_seqlen")
+    @classmethod
+    def validate_max_seqlen(cls, v):
+        """Validate max_seqlen is at least 1024."""
+        if v < 1024:
+            raise ValueError(f"max_seqlen must be >= 1024, got {v}")
+        return v
+
+    @field_validator("num_length_bins")
+    @classmethod
+    def validate_num_length_bins(cls, v):
+        """Validate num_length_bins is positive."""
+        if v <= 0:
+            raise ValueError(f"num_length_bins must be positive, got {v}")
+        return v
+
+    @field_validator("chunk_size")
+    @classmethod
+    def validate_chunk_size(cls, v):
+        """Validate chunk_size is positive or -1 (disabled)."""
+        if v != -1 and v <= 0:
+            raise ValueError(f"chunk_size must be positive or -1 (disabled), got {v}")
+        return v
 
 
 class SparseAttentionConfig(ModeloptBaseConfig):
@@ -184,8 +269,9 @@ class SparseAttentionConfig(ModeloptBaseConfig):
             "default": {"enable": False},
         },
         title="Sparse attention configuration",
-        description="Pattern-based configuration for sparse attention. Keys are patterns to match module names, "
-        "values are configuration dicts with parameters like 'threshold', 'enable', and 'calibration'.",
+        description="Pattern-based configuration for sparse attention. Keys are patterns to match module names "
+        "(or 'calibration' for global calibration settings), values are configuration dicts with parameters like "
+        "'threshold', 'enable', etc.",
         validate_default=True,
     )
 
@@ -199,14 +285,16 @@ class FlashSkipSoftmaxConfig(SparseAttentionConfig):
     """Configuration for Flash Attention-aware softmax skip sparse attention."""
 
     # Override sparse_cfg with flash_skip_softmax specific defaults
+    # Override sparse_cfg with flash_skip_softmax specific defaults
     sparse_cfg: SparseAttentionCfgType = ModeloptField(
         default={
             "*attention*": {
                 "method": "flash_skip_softmax",
-                "threshold": {"prefill": 1e-3, "decode": 1e-4},
+                "threshold": {"prefill": 1e-3, "decode": 1e-5},
                 "br": 128,  # Flash Attention block rows
                 "bc": 128,  # Flash Attention block columns
                 "backend": "pytorch",  # Only pytorch backend supported
+                "collect_stats": True,  # Enable statistics collection
                 "enable": True,
             },
             "default": {"enable": False},
@@ -218,8 +306,55 @@ class FlashSkipSoftmaxConfig(SparseAttentionConfig):
     )
 
 
+# Pre-defined Sparse Attention Configuration
+# Default configuration with block-wise sparsity optimized for Flash Attention
+SKIP_SOFTMAX_DEFAULT = {
+    "sparse_cfg": {
+        "*attn*": {
+            "method": "flash_skip_softmax",
+            "threshold": {
+                "prefill": 1e-3,  # More aggressive during prefill
+                "decode": 1e-4,  # Conservative during decode
+            },
+            "br": 128,  # Flash Attention block rows
+            "bc": 128,  # Flash Attention block columns
+            "backend": "pytorch",  # Only pytorch backend supported
+            "collect_stats": True,
+            "enable": True,
+        },
+        "default": {"enable": False},
+    },
+}
+
+
+# Configuration with RULER calibration
+# Note: threshold field is omitted - calibration determines dynamic threshold λ = a / length
+# The calibrated threshold adapts to sequence length for optimal sparsity
+SKIP_SOFTMAX_CALIB = {
+    "sparse_cfg": {
+        "calibration": {
+            "target_sparse_ratio": 0.75,
+            "samples": 16,
+            "max_seqlen": 16384,
+        },
+        "*attn*": {
+            "method": "flash_skip_softmax",
+            "br": 128,
+            "bc": 128,
+            "backend": "pytorch",  # Only pytorch backend supported
+            "collect_stats": True,
+            "enable": True,
+        },
+        "default": {"enable": False},
+    },
+}
+
+
 __all__ = [
+    "SKIP_SOFTMAX_CALIB",
     "SKIP_SOFTMAX_DEFAULT",
+    "CalibrationConfig",
+    "FlashSkipSoftmaxConfig",
     "FlashSkipSoftmaxConfig",
     "SparseAttentionAttributeConfig",
     "SparseAttentionCfgType",
