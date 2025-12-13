@@ -8,6 +8,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 
 - Add support for Transformer Engine quantization for Megatron Core models.
 - Add support for dynamically linked TensorRT plugins in the ONNX quantization workflow.
+- Add support for KV Cache Quantization for vLLM FakeQuant PTQ script. See `examples/vllm_serve/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/vllm_serve#Calibrate-and-serve-fake-quant-model-in-vLLM>`_ for more details.
 
 **Deprecations**
 
