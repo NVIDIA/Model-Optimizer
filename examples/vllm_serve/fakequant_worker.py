@@ -150,6 +150,7 @@ quant_config: dict[str, Any] = {
     "dataset": os.environ.get("QUANT_DATASET", "cnn_dailymail"),
     "calib_size": int(os.environ.get("QUANT_CALIB_SIZE", 512)),
     "quant_cfg": os.environ.get("QUANT_CFG", "NVFP4_DEFAULT_CFG"),
+    "kv_quant_cfg": os.environ.get("KV_QUANT_CFG", None),
     "amax_file_path": os.environ.get("AMAX_FILE_PATH", None),
 }
 
@@ -236,6 +237,10 @@ def _fakequant_run_prolog_worker(self) -> None:
                     self.sample_tokens(None)
 
     quant_cfg = getattr(mtq, quant_config["quant_cfg"])
+    if quant_config["kv_quant_cfg"] is not None:
+        quant_cfg = mtq.utils.update_quant_cfg_with_kv_cache_quant(
+            quant_cfg, getattr(mtq, quant_config["kv_quant_cfg"])["quant_cfg"]
+        )
 
     model = self.model_runner.model
     if hasattr(model, "unwrap"):
@@ -289,17 +294,6 @@ def _fakequant_run_prolog_worker(self) -> None:
 
         model.load_state_dict(current_state_dict)
         torch.distributed.barrier()
-
-    if amax_file_path is None:
-        # Sync amax across TP can be done here if needed
-        pass
-        # for name, buffer in model.named_buffers():
-        #     if name.endswith("_amax"):
-        #         print("syncing amax across TP for", name)
-        #         torch.distributed.all_reduce(
-        #             buffer, op=torch.distributed.ReduceOp.MAX, group=get_tp_group().device_group
-        #         )
-        # torch.distributed.barrier()
 
     if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
         mtq.print_quant_summary(model)
