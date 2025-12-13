@@ -191,7 +191,8 @@ def export_spec_ckpt_config(model: nn.Module):
         if isinstance(value, dict):
             # for eagle config, we find it in model.eagle_config
             for sub_key in value:
-                value[sub_key] = _get_config_from_eagle_config_or_base_config(sub_key, model)
+                if value[sub_key] is None:
+                    value[sub_key] = _get_config_from_eagle_config_or_base_config(sub_key, model)
         elif value is None:
             # First, we try to load fron eagle config.
             new_value = _get_config_from_eagle_config_or_base_config(key, model)
