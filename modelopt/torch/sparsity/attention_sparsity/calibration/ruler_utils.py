@@ -331,7 +331,7 @@ def generate_niah_sample(
 
         context = " ".join(document_sents_list)
 
-    if type_haystack == "noise":
+    elif type_haystack == "noise":
         haystack_sent = "The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again."
         sentences = [haystack_sent] * num_haystack
         indexes = sorted(random.sample(range(num_haystack), len(needles)), reverse=True)
@@ -353,6 +353,9 @@ def generate_niah_sample(
         for index, element in zip(indexes, needles):
             sentences.insert(index, element)
         context = "\n".join(sentences)
+
+    else:
+        raise ValueError(f"Unknown haystack type: {type_haystack}")
 
     # Generate query and answer
     indices = random.sample(range(num_needle_k), num_needle_q)
