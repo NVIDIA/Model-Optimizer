@@ -72,5 +72,5 @@ AMAX_FILE_PATH=<vllm_amax.pth> QUANT_CFG=<quant_config> python vllm_serve_fakequ
 ## Known Problems
 
 1. AWQ is not yet supported in vLLM.
-2. QAT checkpoint doesn't work with KV Cache quantization enabled. KV Cache fake quantization is enabled for PTQ.
+2. QAT checkpoint export doesn't have KV Cache quantization enabled. KV Cache fake quantization works for PTQ.
 3. Mixed precision checkpoint doesn't work currently.
