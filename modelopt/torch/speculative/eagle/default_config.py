@@ -18,9 +18,6 @@
 default_eagle_config = {
     "hidden_act": "silu",
     "torch_dtype": "bfloat16",
-    "vocab_size": 128256,
-    "draft_vocab_size": 128256,
-    "max_position_embeddings": 8192,
     "position_embedding_type": "rope",
     "rope_scaling": {
         "factor": 8.0,
@@ -31,7 +28,6 @@ default_eagle_config = {
     },
     "rope_theta": 500000.0,
     "num_hidden_layers": 1,
-    "hidden_size": 4096,
     "intermediate_size": 14336,
     "num_attention_heads": 32,
     "num_key_value_heads": 8,

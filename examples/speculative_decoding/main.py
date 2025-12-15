@@ -92,6 +92,9 @@ class TrainingArguments(transformers.TrainingArguments):
     dataloader_drop_last: bool = field(default=True)
     bf16: bool = field(default=True)
     mode: Literal["eagle1", "eagle3", "medusa"] = "eagle3"
+    estimate_ar: bool = field(
+        default=False, metadata={"help": "Whether to estimate AR during training for logging."}
+    )
     ar_validate_steps: int = field(default=1000, metadata={"help": "Steps between AR validation."})
     disable_tqdm: bool = field(default=False, metadata={"help": "Disable tqdm progress bar."})
     remove_unused_columns: bool = field(
@@ -193,22 +196,6 @@ def train():
                     custom_config = json.load(f)
                 config["eagle_architecture_config"].update(custom_config)
 
-            # Hidden size and vocab size must match base model
-            llm_config = (
-                model.config.llm_config if hasattr(model.config, "llm_config") else model.config
-            )
-            config["eagle_architecture_config"].update(
-                {
-                    "hidden_size": llm_config.hidden_size,
-                    "vocab_size": llm_config.vocab_size,
-                    # we also overwrite max_pos_embedding for deployment compatibility
-                    "max_position_embeddings": llm_config.max_position_embeddings,
-                    "draft_vocab_size": custom_config["draft_vocab_size"]
-                    if eagle_args.eagle_config and "draft_vocab_size" in custom_config
-                    else llm_config.vocab_size,
-                }
-            )
-
             mtsp.convert(model, [("eagle", config)])
 
             # read draft vocab cache
@@ -238,7 +225,7 @@ def train():
         model=model,
         processing_class=tokenizer,
         args=training_args,
-        callbacks=[EagleTrainingPlot(training_args.ar_validate_steps)],
+        callbacks=[EagleTrainingPlot(training_args.ar_validate_steps, training_args.estimate_ar)],
         **data_module,
     )
 

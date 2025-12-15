@@ -251,6 +251,20 @@ class EagleModule(nn.Module):
             # Disable input norm in first layer. We normed embeds and h individually before.
             self.layers[0].input_layernorm = nn.Identity()
 
+        if self.config.parallel_draft_step > 1:
+            self.parallel_draft_heads = torch.nn.ModuleList(
+                nn.Sequential(
+                    *(
+                        [
+                            ResBlock(config.hidden_size)
+                            for _ in range(self.config.parallel_draft_heads_num_layers)
+                        ]
+                    ),
+                    nn.Linear(config.hidden_size, config.draft_vocab_size, bias=False),
+                )
+                for _ in range(self.config.parallel_draft_step - 1)
+            )
+
     def _eagle3_attention_forward_pre_hook(self, module, args, kwargs):
         """Concat input_embeds and hidden_states for EAGLE-3's first attention layer."""
         if "hidden_states" not in kwargs:
@@ -456,6 +470,14 @@ class HFEagleModel(EagleModel):
             eagle_architecture_config=eagle_architecture_config,
         )
         self.eagle_config = PretrainedConfig.from_dict(eagle_architecture_config)
+        # Hidden size and vocab size must match base model
+        self.eagle_config.hidden_size = self._base_llm_config.hidden_size
+        self.eagle_config.vocab_size = self._base_llm_config.vocab_size
+        self.eagle_config.max_position_embeddings = self._base_llm_config.max_position_embeddings
+        self.eagle_config.draft_vocab_size = getattr(
+            self.eagle_config, "draft_vocab_size", self.eagle_config.vocab_size
+        )
+
         if self.eagle_config._attn_implementation is None:
             self.eagle_config._attn_implementation = "sdpa"
         decoder_cls = (
@@ -669,8 +691,6 @@ class HFEagleModel(EagleModel):
         labels,
         **kwargs,
     ):
-        # TODO: This function still use eagle_module. Ideally we should remove it,
-        # so we can del model.eagle_module on the base model ranks to save memory.
         with torch.no_grad() if freeze_base_model else contextlib.nullcontext():
             outputs = super().forward(
                 input_ids=input_ids,
@@ -691,11 +711,6 @@ class HFEagleModel(EagleModel):
                 loss_logits = base_model_logits.view(-1, base_model_logits.shape[-1])
                 labels = labels.view(-1)
                 base_model_loss = loss_fct(loss_logits, labels)
-
-        # Map the base model logits to the draft vocab
-        if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size and self.training:
-            assert hasattr(self.eagle_module, "d2t"), "d2t buffer not initialized"
-            base_model_logits = self._map_logits_to_draft_vocab(base_model_logits)
 
         return base_model_hidden_states, base_model_logits, base_model_loss, past_key_values
 
@@ -731,7 +746,14 @@ class HFEagleModel(EagleModel):
         )
         eagle_logits = eagle_lm_head(eagle_postnorm_h)
 
-        return eagle_postnorm_h, eagle_prenorm_h, eagle_logits, eagle_cache
+        draft_logits_list = [eagle_logits]
+        if self.eagle_config.parallel_draft_step > 1:
+            # Get additional draft logits from parallel draft heads
+            for draft_head in self.eagle_module.parallel_draft_heads:
+                draft_logits = draft_head(eagle_postnorm_h)
+                draft_logits_list.append(draft_logits)
+
+        return eagle_postnorm_h, eagle_prenorm_h, draft_logits_list, eagle_cache
 
     def forward(
         self,
@@ -778,8 +800,6 @@ class HFEagleModel(EagleModel):
                 base_model_logits = base_outputs["base_model_logits"]
             else:
                 base_model_logits = self.lm_head(base_model_hidden_states)
-                if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size:
-                    base_model_logits = self._map_logits_to_draft_vocab(base_model_logits)
             base_model_loss = None
             past_key_values = DynamicCache()  # Dummy cache
 
@@ -803,7 +823,7 @@ class HFEagleModel(EagleModel):
 
         # ====Run eagle forward====
         eagle_loss = None
-        train_accs = []
+        train_accs = [[] for _ in range(self.eagle_config.parallel_draft_step)]
         # In EAGLE-3, we have an additional FC layer to concentrate hidden states from multiple base model layers
         b, seq_length, h = base_model_hidden_states.shape
         if self.eagle_config.use_aux_hidden_state:
@@ -855,24 +875,31 @@ class HFEagleModel(EagleModel):
                 ),
                 dim=1,
             )
-            classification_loss, acc = self._eagle_loss(
-                # base model predict +1 tok, while eagle predict +2
-                # so we shift base model outputs compared to eagle outputs
-                base_model_logits[:, 1:],
-                eagle_logits[:, :-1],
-                # additionally, we mask the first n tok of eagle outputs at nth TTT step
-                torch.cat(
-                    (
-                        torch.zeros(b, ttt_step, dtype=loss_mask.dtype, device=loss_mask.device),
-                        loss_mask[:, 1 + ttt_step :],
+            for i in range(self.eagle_config.parallel_draft_step):
+                eagle_logit = eagle_logits[i]
+                classification_loss, acc = self._eagle_loss(
+                    # base model predict +1 tok, while eagle predict +2
+                    # so we shift base model outputs compared to eagle outputs
+                    base_model_logits[:, 1 + i :],
+                    eagle_logit[:, : -(1 + i)],
+                    # additionally, we mask the first n tok of eagle outputs at nth TTT step
+                    torch.cat(
+                        (
+                            torch.zeros(
+                                b, ttt_step, dtype=loss_mask.dtype, device=loss_mask.device
+                            ),
+                            loss_mask[:, 1 + ttt_step :]
+                            if i == 0
+                            else loss_mask[:, 1 + ttt_step : -i],
+                        ),
+                        dim=1,
                     ),
-                    dim=1,
-                ),
-            )
-            eagle_loss = (
-                classification_loss if eagle_loss is None else eagle_loss + classification_loss
-            )
-            train_accs.append(acc)
+                )
+                classification_loss *= self.eagle_loss_decay_factor ** (ttt_step + i)
+                eagle_loss = (
+                    classification_loss if eagle_loss is None else eagle_loss + classification_loss
+                )
+                train_accs[i].append(acc)
             if not self.training:
                 break
         # Finally, we merge base model loss and eagle loss, raise error if both are None
@@ -903,6 +930,9 @@ class HFEagleModel(EagleModel):
         loss_mask,
     ):
         """Function for EAGLE loss computing."""
+        if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size:
+            assert hasattr(self.eagle_module, "d2t"), "d2t buffer not initialized"
+            base_model_logits = self._map_logits_to_draft_vocab(base_model_logits)
         loss_mask = loss_mask[:, :, None]
         classification_loss = nn.Softmax(dim=2)(base_model_logits) * nn.LogSoftmax(dim=2)(
             eagle_logits
@@ -962,7 +992,7 @@ class HFEagleModel(EagleModel):
             eagle_input_hidden_states = base_model_hidden_states
 
         draft_tokens = []
-        for _ in range(steps):
+        for step in range(steps):
             # Get eagle inputs for the first eagle forward pass
             _, eagle_attention_mask, eagle_position_ids = self._get_eagle_module_inputs(
                 input_ids,
@@ -987,7 +1017,13 @@ class HFEagleModel(EagleModel):
                     position_embeddings,
                 )
 
-            draft_token = eagle_logits[:, -1:, :].argmax(dim=-1)
+            # parallel logits are only used after the last step
+            if step == steps - 1 and self.eagle_config.parallel_draft_step > 1:
+                parallel_logits = [
+                    eagle_logits[i][:, -1:, :]
+                    for i in range(1, self.eagle_config.parallel_draft_step)
+                ]
+            draft_token = eagle_logits[0][:, -1:, :].argmax(dim=-1)
             if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size:
                 draft_token += self.eagle_module.d2t[draft_token]
             draft_tokens.append(draft_token)
@@ -998,6 +1034,12 @@ class HFEagleModel(EagleModel):
             )
 
         draft_tokens = torch.cat(draft_tokens, dim=-1).to(base_token.device)
+        if self.eagle_config.parallel_draft_step > 1:
+            parallel_logits = torch.cat(parallel_logits, dim=1)
+            parallel_tokens = parallel_logits.argmax(dim=-1)
+            if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size:
+                parallel_tokens += self.eagle_module.d2t[parallel_tokens]
+            draft_tokens = torch.cat((draft_tokens, parallel_tokens), dim=-1).to(base_token.device)
 
         return base_token, draft_tokens
 
