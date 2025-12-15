@@ -518,18 +518,25 @@ class EagleTrainingPlot(TrainerCallback):
         average_acc = np.mean(state.training_accs, axis=0)
         if self.estimate_ar:
             # Calculate mean training AR since last log
-            # NOTE: This is only a estimate of the real AR.
+            # NOTE: This is only an estimate of the real AR.
             est_ar = 1
             acc_cumprod = 1
-            for step_acc in average_acc:
-                est_ar += acc_cumprod * step_acc
+            for step_acc in average_acc[0]:
                 acc_cumprod *= step_acc
+                est_ar += acc_cumprod
+            # Parallel draft tokens only used after all eagle tokens
+            for draft_acc in average_acc[1:]:
+                acc_cumprod *= draft_acc[-1]
+                est_ar += acc_cumprod
             print_rank_0(f"Step {state.global_step} Estimated Training AR: {est_ar:.4f}")
 
         # log to wandb
         if wandb and is_master():
-            for i, step_acc in enumerate(average_acc):
-                wandb.log({f"step_{i}_train_acc": step_acc}, step=state.global_step)
+            for i, draft_acc in enumerate(average_acc):
+                for j, step_acc in enumerate(draft_acc):
+                    wandb.log(
+                        {f"parallel_{i}_step_{j}_train_acc": step_acc}, step=state.global_step
+                    )
             if self.estimate_ar:
                 wandb.log({"estimated_training_ar": est_ar}, step=state.global_step)
 

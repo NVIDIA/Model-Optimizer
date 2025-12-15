@@ -12,10 +12,8 @@ Model Optimizer enables highly performant quantization formats including NVFP4, 
 | :------------: | :------------: | :------------: | :------------: |
 | Pre-Requisites | Required & optional packages to use this technique | [Link](#pre-requisites) | |
 | Getting Started | Learn how to optimize your models using PTQ to reduce precision and improve inference efficiency | [Link](#getting-started) | [docs](https://nvidia.github.io/Model-Optimizer/guides/_onnx_quantization.html) |
-| Support Matrix | View the ONNX export supported LLM models | [Link](#onnx-export-supported-llm-models) | |
-| PyTorch to ONNX | Example scripts demonstrating how to quantize with PyTorch and then convert to ONNX | [Link](#torch-quantization-to-onnx-export-example) | |
+| PyTorch to ONNX | Example scripts demonstrating how to quantize with PyTorch and then convert to ONNX | [Link](../torch_onnx/) | |
 | Advanced Features | Examples demonstrating use advanced ONNX quantization features | [Link](#advanced-features) | |
-| Pre-Quantized Checkpoints | Ready to deploy Hugging Face pre-quantized checkpoints | [Link](#pre-quantized-checkpoints) | |
 | Resources | Extra links to relevant resources | [Link](#resources) | |
 
 </div>
@@ -80,7 +78,7 @@ python image_prep.py \
 
 The model can be quantized as an FP8, INT8 or INT4 model using either the CLI or Python API. For FP8 and INT8 quantization, you have a choice between `max` and `entropy` calibration algorithms. For INT4 quantization, [awq_clip](https://arxiv.org/abs/2306.00978) or [rtn_dq](https://ar5iv.labs.arxiv.org/html/2301.12017) algorithms can be chosen.
 
-> *For NVFP4 and MXFP8 ONNX, see the [PyTorch to ONNX section](#torch-quantization-to-onnx-export-example).*
+> *For NVFP4 and MXFP8 ONNX, see the [PyTorch to ONNX example](../torch_onnx/).*
 
 > *Minimum opset requirements: int8 (13+), fp8 (21+), int4 (21+). ModelOpt will automatically upgrade lower opset versions to meet these requirements.*
 
@@ -128,58 +126,6 @@ The top1 accuracy of the model is <accuracy score between 0-100%>
 The top5 accuracy of the model is <accuracy score between 0-100%>
 Inference latency of the model is <X> ms
 ```
-
-## Torch quantization to ONNX export example
-
-This example demonstrates how to quantize a [timm](https://github.com/huggingface/pytorch-image-models) vision model for various precision formats followed by export to ONNX. The script leverages the ModelOpt toolkit for both quantization and ONNX export.
-
-> *Opset 20 is used to export the torch models to ONNX.*
-
-### What it does
-
-- Loads a pretrained timm torch model (default: ViT-Base).
-- Quantizes the torch model to MXFP8, INT4 or NVFP4 using ModelOpt.
-- Exports the quantized model to ONNX.
-- Postprocesses the ONNX model to be compatible with TensorRT.
-- Saves the final ONNX model.
-
-### Usage
-
-```bash
-python torch_quant_to_onnx.py \
-    --timm_model_name=vit_base_patch16_224 \
-    --quantize_mode=<fp8|mxfp8|int8|nvfp4|int4_awq> \
-    --onnx_save_path=<path to save the exported ONNX model>
-```
-
-### Evaluation
-
-If the input model is of type image classification, use the following script to evaluate it. The script automatically downloads and uses the [ILSVRC/imagenet-1k](https://huggingface.co/datasets/ILSVRC/imagenet-1k) dataset from Hugging Face. This gated repository requires authentication via Hugging Face access token. See <https://huggingface.co/docs/hub/en/security-tokens> for details.
-
-> *Note: TensorRT 10.11 or later is required to evaluate the MXFP8 or NVFP4 ONNX models.*
-
-```bash
-python evaluate.py \
-    --onnx_path=<path to the exported ONNX model> \
-    --imagenet_path=<HF dataset card or local path to the ImageNet dataset> \
-    --engine_precision=stronglyTyped \
-    --model_name=vit_base_patch16_224
-```
-
-### ONNX Export Supported LLM Models
-
-| Model | FP16 | INT4 | FP8 | NVFP4 |
-| :---: | :---: | :---: | :---: | :---: |
-| [Llama-3-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) | ✅ | ✅ | ✅ | ✅ |
-| [Llama3.1-8B](https://huggingface.co/meta-llama/Llama-3.1-8B) | ✅ | ✅ | ✅ | ✅ |
-| [Llama3.2-3B](https://huggingface.co/meta-llama/Llama-3.2-3B) | ✅ | ✅ | ✅ | ✅ |
-| [Qwen2-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2-0.5B-Instruct) | ✅ | ✅ | ✅ | ✅ |
-| [Qwen2-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2-1.5B-Instruct) | ✅ | ✅ | ✅ | ✅ |
-| [Qwen2-7B-Instruct](https://huggingface.co/Qwen/Qwen2-7B-Instruct) | ✅ | ✅ | ✅ | ✅ |
-| [Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) | ✅ | ✅ | ✅ | ✅ |
-| [Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct) | ✅ | ✅ | ✅ | ✅ |
-| [Qwen2.5-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct) | ✅ | ✅ | ✅ | ✅ |
-| [Qwen2.5-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct) | ✅ | ✅ | ✅ | ✅ |
 
 ## Advanced Features
 
@@ -272,10 +218,6 @@ python -m modelopt.onnx.quantization \
 trtexec --onnx=/path/to/identity_neural_network.quant.onnx \
     --staticPlugins=/path/to/libidentity_conv_iplugin_v2_io_ext.so
 ```
-
-## Pre-Quantized Checkpoints
-
-- Ready-to-deploy checkpoints that can be exported to ONNX format (if supported as per the [Support Matrix](#onnx-export-supported-llm-models)) \[[🤗 Hugging Face - Nvidia Model Optimizer Collection](https://huggingface.co/collections/nvidia/inference-optimized-checkpoints-with-model-optimizer)\]
 
 ## Resources
 
