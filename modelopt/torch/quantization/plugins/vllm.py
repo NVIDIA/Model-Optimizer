@@ -96,18 +96,9 @@ class FakeQuantMethod:
 
 def create_parallel_state():
     """Create a parallel state for vLLM."""
-    try:
-        dp_group = get_dp_group().device_group
-    except Exception:
-        dp_group = -1
-    try:
-        tp_group = get_tp_group().device_group
-    except Exception:
-        tp_group = -1
-    try:
-        ep_group = get_ep_group().device_group
-    except Exception:
-        ep_group = -1
+    dp_group = get_dp_group().device_group
+    tp_group = get_tp_group().device_group
+    ep_group = get_ep_group().device_group
     return ParallelState(dp_group, tp_group, ep_group)
 
 
