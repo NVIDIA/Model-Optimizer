@@ -228,8 +228,6 @@ def update_sparse_attention_metadata(
 
             # Save the method configuration that was used
             # _method_config already contains the validated config dict
-            # Save the method configuration that was used
-            # _method_config already contains the validated config dict
             module_state = {
                 "method": module._sparse_method_instance.name,
                 "method_config": module._method_config.copy(),
@@ -241,6 +239,29 @@ def update_sparse_attention_metadata(
     metadata["sparse_attention_config"] = (
         config.model_dump() if hasattr(config, "model_dump") else vars(config)
     )
+
+
+def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
+    """Extract sparse attention config for export to config.json.
+
+    Extracts the global threshold_scale_factor from the first sparse attention
+    module that has calibrated thresholds.
+
+    Args:
+        model: Model with sparse attention applied
+
+    Returns:
+        Dictionary with sparse attention config, or None if no calibrated config found.
+        Format: {"threshold_scale_factor": {"prefill": float, "decode": float}}
+    """
+    for module in model.modules():
+        if isinstance(module, SparseAttentionModule):
+            threshold_scale_factor = getattr(
+                module._sparse_method_instance, "threshold_scale_factor", None
+            )
+            if threshold_scale_factor is not None:
+                return {"threshold_scale_factor": threshold_scale_factor}
+    return None
 
 
 def disable_sparse_attention(model: nn.Module, wildcard_or_filter_func: str | Callable):

@@ -136,7 +136,7 @@ def sparsify(
 
                     from transformers import AutoModelForCausalLM
 
-                    model = AutoModelForCausalLM.from_pretrained(b
+                    model = AutoModelForCausalLM.from_pretrained(
                         model_path,
                         attn_implementation="eager",  # Required for sparse attention
                         torch_dtype=torch.bfloat16,

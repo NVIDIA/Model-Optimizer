@@ -79,20 +79,6 @@ def _extract_calibration_config(config: dict[str, Any]) -> CalibrationConfig | N
     return CalibrationConfig(**calib_dict)
 
 
-def _parse_target_sparse_ratio(
-    target_sparse_ratio: dict[str, float],
-) -> dict[str, float]:
-    """Parse target_sparse_ratio dict.
-
-    Args:
-        target_sparse_ratio: Target sparsity ratio dict with 'prefill' and 'decode' keys
-
-    Returns:
-        Dict with 'prefill' and 'decode' keys
-    """
-    return target_sparse_ratio
-
-
 def create_calibration_forward_loop(
     calibration_data: list[dict[str, Any]],
     tokenizer_name_or_path: str,
@@ -185,30 +171,31 @@ def create_decode_calibration_forward_loop(
             original_attn_impl = getattr(model.config, "_attn_implementation", "eager")
 
             with torch.no_grad():
-                # Step 1: Fast prefill with flash attention (no measurement)
-                model.config._attn_implementation = "flash_attention_2"
-                outputs = model(input_ids, use_cache=True)
-                past_key_values = outputs.past_key_values
-
-                # Step 2: Switch to eager for decode (enables softmax hook)
-                model.config._attn_implementation = "eager"
-
-                # Step 3: Manual decode loop for explicit control over token generation
-                # model.generate() method is not used here because it doesn't allow explicit control over KV cache
-                # Get the last token's logits and sample next token
-                next_token = outputs.logits[:, -1:, :].argmax(dim=-1)
-
-                for _ in range(num_decode_tokens):
-                    outputs = model(
-                        next_token,
-                        past_key_values=past_key_values,
-                        use_cache=True,
-                    )
+                try:
+                    # Step 1: Fast prefill with flash attention (no measurement)
+                    model.config._attn_implementation = "flash_attention_2"
+                    outputs = model(input_ids, use_cache=True)
                     past_key_values = outputs.past_key_values
+
+                    # Step 2: Switch to eager for decode (enables softmax hook)
+                    model.config._attn_implementation = "eager"
+
+                    # Step 3: Manual decode loop for explicit control over token generation
+                    # model.generate() method is not used here because it doesn't allow explicit control over KV cache
+                    # Get the last token's logits and sample next token
                     next_token = outputs.logits[:, -1:, :].argmax(dim=-1)
 
-            # Restore original attention implementation
-            model.config._attn_implementation = original_attn_impl
+                    for _ in range(num_decode_tokens):
+                        outputs = model(
+                            next_token,
+                            past_key_values=past_key_values,
+                            use_cache=True,
+                        )
+                        past_key_values = outputs.past_key_values
+                        next_token = outputs.logits[:, -1:, :].argmax(dim=-1)
+                finally:
+                    # Restore original attention implementation
+                    model.config._attn_implementation = original_attn_impl
 
             # Clean up
             del past_key_values
@@ -242,8 +229,8 @@ def calibrate_sparse_attention(
     if calib_config is None:
         return {}
 
-    # Parse target_sparse_ratio into per-phase targets
-    target_dict = _parse_target_sparse_ratio(calib_config.target_sparse_ratio)
+    # Get per-phase targets
+    target_dict = calib_config.target_sparse_ratio
     calibrate_prefill = target_dict.get("prefill", 0.0) > 0.0
     calibrate_decode = target_dict.get("decode", 0.0) > 0.0
 
@@ -288,7 +275,8 @@ def calibrate_sparse_attention(
         print("PREFILL PHASE CALIBRATION")
         print("=" * 60)
 
-        assert calibration_data is not None, "calibration_data must be built before prefill"
+        if calibration_data is None:
+            raise RuntimeError("calibration_data must be built before prefill")
         prefill_forward_loop = forward_loop or create_calibration_forward_loop(
             calibration_data, tokenizer, chunk_size=calib_config.chunk_size
         )
@@ -311,7 +299,8 @@ def calibrate_sparse_attention(
         print("DECODE PHASE CALIBRATION")
         print("=" * 60)
 
-        assert calibration_data is not None, "calibration_data must be built before decode"
+        if calibration_data is None:
+            raise RuntimeError("calibration_data must be built before decode")
         decode_forward_loop = create_decode_calibration_forward_loop(
             calibration_data, tokenizer, num_decode_tokens=calib_config.num_decode_tokens
         )

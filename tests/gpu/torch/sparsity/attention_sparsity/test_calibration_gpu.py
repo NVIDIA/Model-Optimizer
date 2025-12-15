@@ -124,7 +124,7 @@ class TestCalibrationGPU:
                     "backend": "pytorch",
                     "enable": True,
                     "calibration": {
-                        "target_sparse_ratio": 0.5,
+                        "target_sparse_ratio": {"prefill": 0.5, "decode": 0.0},
                         "samples": 4,
                         "max_seqlen": 1024,
                     },
@@ -162,7 +162,7 @@ class TestCalibrationGPU:
                     "backend": "pytorch",
                     "enable": True,
                     "calibration": {
-                        "target_sparse_ratio": 0.5,
+                        "target_sparse_ratio": {"prefill": 0.5, "decode": 0.0},
                         "samples": 2,
                         "max_seqlen": 1024,
                     },
@@ -193,7 +193,7 @@ class TestCalibrationGPU:
                     "threshold": 1e-3,
                     "enable": True,
                     "calibration": {
-                        "target_sparse_ratio": 0.5,
+                        "target_sparse_ratio": {"prefill": 0.5, "decode": 0.0},
                         "samples": 4,
                         "max_seqlen": 1024,
                     },
@@ -220,7 +220,7 @@ class TestCalibrationGPU:
                     "threshold": 1e-3,
                     "enable": True,
                     "calibration": {
-                        "target_sparse_ratio": 0.5,
+                        "target_sparse_ratio": {"prefill": 0.5, "decode": 0.0},
                         "samples": 2,
                         "max_seqlen": 1024,
                     },
@@ -268,7 +268,7 @@ class TestCalibrationEndToEnd:
                     "backend": "pytorch",
                     "enable": True,
                     "calibration": {
-                        "target_sparse_ratio": 0.5,
+                        "target_sparse_ratio": {"prefill": 0.5, "decode": 0.0},
                         "samples": 2,
                         "max_seqlen": 1024,
                     },
@@ -303,7 +303,7 @@ class TestCalibrationEndToEnd:
                     "threshold": 1e-3,
                     "enable": True,
                     "calibration": {
-                        "target_sparse_ratio": 0.5,
+                        "target_sparse_ratio": {"prefill": 0.5, "decode": 0.0},
                         "samples": 2,
                         "max_seqlen": 1024,
                     },
@@ -362,7 +362,7 @@ class TestCalibrationEndToEnd:
                     "threshold": 1e-3,
                     "enable": True,
                     "calibration": {
-                        "target_sparse_ratio": 0.5,
+                        "target_sparse_ratio": {"prefill": 0.5, "decode": 0.0},
                         "samples": 2,
                         "max_seqlen": 1024,
                     },

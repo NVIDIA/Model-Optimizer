@@ -45,7 +45,4 @@
     ],
     "git.alwaysSignOff": true,
     "git.enableCommitSigning": true,
-    "cursorpyright.analysis.extraPaths": [
-        "./tests/"
-    ],
 }
