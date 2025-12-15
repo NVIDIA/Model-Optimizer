@@ -79,6 +79,20 @@ def _extract_calibration_config(config: dict[str, Any]) -> CalibrationConfig | N
     return CalibrationConfig(**calib_dict)
 
 
+def _parse_target_sparse_ratio(
+    target_sparse_ratio: dict[str, float],
+) -> dict[str, float]:
+    """Parse target_sparse_ratio dict.
+
+    Args:
+        target_sparse_ratio: Target sparsity ratio dict with 'prefill' and 'decode' keys
+
+    Returns:
+        Dict with 'prefill' and 'decode' keys
+    """
+    return target_sparse_ratio
+
+
 def create_calibration_forward_loop(
     calibration_data: list[dict[str, Any]],
     tokenizer_name_or_path: str,
@@ -136,6 +150,73 @@ def create_calibration_forward_loop(
     return forward_loop
 
 
+def create_decode_calibration_forward_loop(
+    calibration_data: list[dict[str, Any]],
+    tokenizer_name_or_path: str,
+    num_decode_tokens: int = 10,
+) -> Callable:
+    """Create forward loop for decode phase calibration.
+
+    Uses flash attention for fast prefill, then switches to eager attention
+    for decode token generation with softmax hook measurement.
+
+    Args:
+        calibration_data: List of samples with 'input' and 'length' fields
+        tokenizer_name_or_path: HuggingFace tokenizer path
+        num_decode_tokens: Number of decode tokens to generate per sample
+
+    Returns:
+        Forward loop function that takes model as argument
+    """
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
+    if not tokenizer.pad_token:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    def forward_loop(model: nn.Module) -> None:
+        device = next(model.parameters()).device
+
+        for sample in calibration_data:
+            inputs = tokenizer(
+                sample["input"], return_tensors="pt", truncation=True, max_length=sample["length"]
+            )
+            input_ids = inputs["input_ids"].to(device)
+
+            # Save original attention implementation
+            original_attn_impl = getattr(model.config, "_attn_implementation", "eager")
+
+            with torch.no_grad():
+                # Step 1: Fast prefill with flash attention (no measurement)
+                model.config._attn_implementation = "flash_attention_2"
+                outputs = model(input_ids, use_cache=True)
+                past_key_values = outputs.past_key_values
+
+                # Step 2: Switch to eager for decode (enables softmax hook)
+                model.config._attn_implementation = "eager"
+
+                # Step 3: Manual decode loop for explicit control over token generation
+                # model.generate() method is not used here because it doesn't allow explicit control over KV cache
+                # Get the last token's logits and sample next token
+                next_token = outputs.logits[:, -1:, :].argmax(dim=-1)
+
+                for _ in range(num_decode_tokens):
+                    outputs = model(
+                        next_token,
+                        past_key_values=past_key_values,
+                        use_cache=True,
+                    )
+                    past_key_values = outputs.past_key_values
+                    next_token = outputs.logits[:, -1:, :].argmax(dim=-1)
+
+            # Restore original attention implementation
+            model.config._attn_implementation = original_attn_impl
+
+            # Clean up
+            del past_key_values
+            torch.cuda.empty_cache()
+
+    return forward_loop
+
+
 def calibrate_sparse_attention(
     model: nn.Module,
     config: dict[str, Any],
@@ -143,14 +224,16 @@ def calibrate_sparse_attention(
 ) -> dict[str, Any]:
     """Calibrate sparse attention parameters for optimal sparsity.
 
+    Supports both prefill and decode phase calibration with per-phase target sparsity.
+
     Args:
         model: Model with sparse attention modules
         config: Sparse attention configuration dict
         forward_loop: Callable that forwards calibration data through model.
-                     If None, auto-generates RULER dataset.
+                     If None, auto-generates RULER dataset. Only used for prefill.
 
     Returns:
-        Dictionary with calibration results
+        Dictionary with calibration results for each phase
     """
     # Extract and validate calibration config
     calib_config = _extract_calibration_config(config)
@@ -159,21 +242,15 @@ def calibrate_sparse_attention(
     if calib_config is None:
         return {}
 
-    # Generate forward_loop if not provided
-    if not forward_loop:
-        tokenizer = _extract_tokenizer_from_model(model)
-        builder = RulerDatasetBuilder(
-            samples=calib_config.samples,
-            max_seqlen=calib_config.max_seqlen,
-            tokenizer_name_or_path=tokenizer,
-            num_length_bins=calib_config.num_length_bins,
-            max_length_filter=int(calib_config.max_seqlen * 1.5),
-        )
-        calibration_data = builder.build_calibration_dataset()
-        print(f"Generated {len(calibration_data)} calibration samples")
-        forward_loop = create_calibration_forward_loop(
-            calibration_data, tokenizer, chunk_size=calib_config.chunk_size
-        )
+    # Parse target_sparse_ratio into per-phase targets
+    target_dict = _parse_target_sparse_ratio(calib_config.target_sparse_ratio)
+    calibrate_prefill = target_dict.get("prefill", 0.0) > 0.0
+    calibrate_decode = target_dict.get("decode", 0.0) > 0.0
+
+    # Skip if both phases are disabled
+    if not calibrate_prefill and not calibrate_decode:
+        print("Both prefill and decode target sparsity are 0.0, skipping calibration")
+        return {}
 
     # Get sparse attention modules
     sparse_modules = [
@@ -186,26 +263,92 @@ def calibrate_sparse_attention(
 
     print(f"Calibrating {len(sparse_modules)} sparse attention modules together...")
 
-    # Run calibration
-    calibrator = DynamicThresholdCalibrator(
-        target_sparse_ratio=calib_config.target_sparse_ratio,
-        threshold_trials=calib_config.threshold_trials,
-    )
-    calibration_result = calibrator.calibrate(model, forward_loop)
+    # Extract tokenizer and build calibration data if needed
+    tokenizer = _extract_tokenizer_from_model(model)
+    calibration_data = None
 
-    # Print calibration statistics (regardless of success/failure for debugging)
+    if calibrate_prefill or calibrate_decode:
+        builder = RulerDatasetBuilder(
+            samples=calib_config.samples,
+            max_seqlen=calib_config.max_seqlen,
+            tokenizer_name_or_path=tokenizer,
+            num_length_bins=calib_config.num_length_bins,
+            max_length_filter=int(calib_config.max_seqlen * 1.5),
+        )
+        calibration_data = builder.build_calibration_dataset()
+        print(f"Generated {len(calibration_data)} calibration samples")
+
+    # Initialize results
+    threshold_scale_factor: dict[str, float] = {}
+    calibration_results: dict[str, Any] = {}
+
+    # Run prefill calibration if enabled
+    if calibrate_prefill:
+        print("\n" + "=" * 60)
+        print("PREFILL PHASE CALIBRATION")
+        print("=" * 60)
+
+        assert calibration_data is not None, "calibration_data must be built before prefill"
+        prefill_forward_loop = forward_loop or create_calibration_forward_loop(
+            calibration_data, tokenizer, chunk_size=calib_config.chunk_size
+        )
+
+        prefill_calibrator = DynamicThresholdCalibrator(
+            target_sparse_ratio=target_dict,
+            threshold_trials=calib_config.threshold_trials,
+        )
+        prefill_result = prefill_calibrator.calibrate(model, prefill_forward_loop, phase="prefill")
+
+        if "scale_factor" in prefill_result:
+            threshold_scale_factor["prefill"] = prefill_result["scale_factor"]
+            calibration_results["prefill"] = prefill_result
+        else:
+            warnings.warn("Prefill calibration did not produce valid results")
+
+    # Run decode calibration if enabled
+    if calibrate_decode:
+        print("\n" + "=" * 60)
+        print("DECODE PHASE CALIBRATION")
+        print("=" * 60)
+
+        assert calibration_data is not None, "calibration_data must be built before decode"
+        decode_forward_loop = create_decode_calibration_forward_loop(
+            calibration_data, tokenizer, num_decode_tokens=calib_config.num_decode_tokens
+        )
+
+        decode_calibrator = DynamicThresholdCalibrator(
+            target_sparse_ratio=target_dict,
+            threshold_trials=calib_config.threshold_trials,
+        )
+        decode_result = decode_calibrator.calibrate(model, decode_forward_loop, phase="decode")
+
+        if "scale_factor" in decode_result:
+            threshold_scale_factor["decode"] = decode_result["scale_factor"]
+            calibration_results["decode"] = decode_result
+        else:
+            warnings.warn("Decode calibration did not produce valid results")
+
+    # Check if any calibration succeeded
+    if not threshold_scale_factor:
+        warnings.warn("No calibration produced valid results")
+        return {}
+
+    # Apply combined threshold_scale_factor dict to all modules
+    print("\n" + "=" * 60)
+    print("APPLYING CALIBRATION RESULTS")
+    print("=" * 60)
+    print(f"Applying threshold_scale_factor to {len(sparse_modules)} modules:")
+    for phase, scale_factor in threshold_scale_factor.items():
+        print(f"  {phase}: {scale_factor:.6f}")
+
+    for module_name, module in sparse_modules:
+        module._sparse_method_instance.threshold_scale_factor = threshold_scale_factor
+
+    # Print final summary
     print("\nCalibration complete!")
     print_sparse_attention_summary(model)
 
-    if "scale_factor" not in calibration_result:
-        warnings.warn("Calibration did not produce valid results")
-        return {}
-
-    # Apply calibrated scale factor to all modules
-    scale_factor = calibration_result["scale_factor"]
-    print(f"\nApplying calibrated scale factor={scale_factor:.6f} to {len(sparse_modules)} modules")
-
-    for module_name, module in sparse_modules:
-        module._sparse_method_instance.threshold_scale_factor = scale_factor
-
-    return {"calibration_results": {name: calibration_result for name, _ in sparse_modules}}
+    return {
+        "threshold_scale_factor": threshold_scale_factor,
+        "calibration_results": calibration_results,
+    }
