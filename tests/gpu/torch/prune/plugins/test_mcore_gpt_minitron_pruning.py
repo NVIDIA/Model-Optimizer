@@ -38,7 +38,6 @@ def _test_mcore_gpt_pruning(
     normalization,
     pruned_ffn_div,
     pruned_num_attention_heads_div,
-    pruned_num_query_groups_div,
     pruned_hidden_size_div,
     pruned_num_layers_div,
     uneven_pp,
@@ -99,17 +98,15 @@ def _test_mcore_gpt_pruning(
 
     pruned_ffn = ffn_hidden_size // pruned_ffn_div
     pruned_num_attention_heads = num_attention_heads // pruned_num_attention_heads_div
-    pruned_num_query_groups = num_query_groups // pruned_num_query_groups_div
-    pruned_num_heads_per_group = pruned_num_attention_heads // pruned_num_query_groups
+    pruned_num_heads_per_group = pruned_num_attention_heads // num_query_groups
     pruned_hidden_size = hidden_size // pruned_hidden_size_div
     pruned_num_layers = num_layers // pruned_num_layers_div
 
     export_config = {}
     if pruned_ffn_div != 1:
         export_config["ffn_hidden_size"] = pruned_ffn
-    if pruned_num_attention_heads_div != 1 or pruned_num_query_groups_div != 1:
+    if pruned_num_attention_heads_div != 1:
         export_config["num_attention_heads"] = pruned_num_attention_heads
-        export_config["num_query_groups"] = pruned_num_query_groups
     if pruned_hidden_size_div != 1:
         export_config["hidden_size"] = pruned_hidden_size
     if pruned_num_layers_div != 1:
@@ -142,18 +139,18 @@ def _test_mcore_gpt_pruning(
         )
         assert layer.mlp.linear_fc2.weight.shape == (pruned_hidden_size, pruned_ffn)
         assert layer.self_attention.linear_qkv.weight.shape == (
-            (pruned_num_heads_per_group + 2) * pruned_num_query_groups * model.config.kv_channels,
+            (pruned_num_heads_per_group + 2) * num_query_groups * model.config.kv_channels,
             pruned_hidden_size,
         )
         assert layer.self_attention.linear_proj.weight.shape == (
             pruned_hidden_size,
-            pruned_num_heads_per_group * pruned_num_query_groups * model.config.kv_channels,
+            pruned_num_heads_per_group * num_query_groups * model.config.kv_channels,
         )
 
     # Assert model.config is updated for correct save/restoring
     assert model.config.ffn_hidden_size == pruned_ffn
     assert model.config.num_attention_heads == pruned_num_attention_heads
-    assert model.config.num_query_groups == pruned_num_query_groups
+    assert model.config.num_query_groups == num_query_groups
     assert model.config.hidden_size == pruned_hidden_size
     assert model.config.num_layers == pruned_num_layers
 
@@ -185,7 +182,6 @@ def _test_mcore_gpt_pruning(
         "normalization",
         "ffn_div",
         "num_attention_heads_div",
-        "num_query_groups_div",
         "hidden_size_div",
         "num_layers_div",
         "uneven_pp",
@@ -195,15 +191,15 @@ def _test_mcore_gpt_pruning(
     ),
     [
         # MHA - pruned ffn/4
-        (8, 8, "squared_relu", "LayerNorm", 4, 1, 1, 1, 1, False, "rope", False, False),
+        (8, 8, "squared_relu", "LayerNorm", 4, 1, 1, 1, False, "rope", False, False),
         # GQA - pruned attention/2
-        (8, 4, "squared_relu", "RMSNorm", 1, 2, 2, 1, 1, False, "rope", False, False),
+        (8, 4, "squared_relu", "RMSNorm", 1, 2, 1, 1, False, "rope", False, False),
         # GQA - pruned hidden_size/4
-        (8, 4, "swiglu", "RMSNorm", 1, 1, 1, 4, 1, False, "rope", True, False),
+        (8, 4, "swiglu", "RMSNorm", 1, 1, 4, 1, False, "rope", True, False),
         # MHA - pruned num_layers/2
-        (8, 8, "swiglu", "LayerNorm", 1, 1, 1, 1, 2, False, "rope", False, False),
+        (8, 8, "swiglu", "LayerNorm", 1, 1, 1, 2, False, "rope", False, False),
         # GQA - pruned all/2, uneven pp
-        (8, 4, "swiglu", "RMSNorm", 2, 2, 2, 2, 2, True, "yarn", False, True),
+        (8, 4, "swiglu", "RMSNorm", 2, 2, 2, 2, True, "yarn", False, True),
     ],
 )
 def test_mcore_gpt_pruning(
@@ -214,7 +210,6 @@ def test_mcore_gpt_pruning(
     normalization,
     ffn_div,
     num_attention_heads_div,
-    num_query_groups_div,
     hidden_size_div,
     num_layers_div,
     uneven_pp,
@@ -232,7 +227,6 @@ def test_mcore_gpt_pruning(
             normalization,
             ffn_div,
             num_attention_heads_div,
-            num_query_groups_div,
             hidden_size_div,
             num_layers_div,
             uneven_pp,

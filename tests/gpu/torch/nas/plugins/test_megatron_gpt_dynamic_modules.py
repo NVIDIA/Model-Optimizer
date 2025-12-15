@@ -40,6 +40,7 @@ import modelopt.torch.nas as mtn
 from modelopt.torch.nas.conversion import export_searchspace
 from modelopt.torch.nas.modules import DynamicModuleList
 from modelopt.torch.nas.plugins.megatron import (
+    NumAttentionHeadsHp,
     _DynamicColumnParallelLinear,
     _DynamicEmbedding,
     _DynamicLanguageModelEmbedding,
@@ -109,12 +110,13 @@ def _test_gpt_search_space(
 
     # NOTE: `search_space_size` does not reduce across TP/PP groups
     ss_size_per_pp = search_space_size(model)
+    num_heads_choices = num_attention_heads // num_query_groups
     ffn_hidden_size_choices = ffn_hidden_size // channel_divisor
     hidden_size_choices = hidden_size // channel_divisor
     num_layers_per_pp = num_layers // size
     assert (
         ss_size_per_pp
-        == (num_attention_heads * ffn_hidden_size_choices) ** num_layers_per_pp
+        == (num_heads_choices * ffn_hidden_size_choices) ** num_layers_per_pp
         * num_layers
         * hidden_size_choices
     )
@@ -197,12 +199,12 @@ def _test_gpt_parameter_sorting(activation_func, rank, size):
 
     mtn.utils.sort_parameters(model)
 
-    # check if all ffn_hidden_size, num_heads_per_group, num_query_groups, hidden_size have been sorted
+    # check if all ffn_hidden_size, num_attention_heads, hidden_size have been sorted
     sortable_per_pp = [
         n for n, hp in dynamic_space.named_hparams(configurable=True) if hp.importance is not None
     ]
-    # 3 hps per layer + 1 for hidden_size (num_layers is not sorted!)
-    assert len(sortable_per_pp) == 3 * num_layers // size + 1
+    # 2 hps per layer (num_attention_heads, ffn_hidden_size) + 1 for hidden_size (num_layers is not sorted!)
+    assert len(sortable_per_pp) == 2 * num_layers // size + 1
 
     # sanity check if the model functionality is preserved after sorting
     y2 = run_mcore_inference(model, prompt_tokens)
@@ -247,32 +249,37 @@ def test_self_attention_head_sorting(distributed_setup_size_1):
     assert isinstance(self_attn.linear_qkv, _DynamicQKVColumnParallelLinear)
     assert isinstance(self_attn.linear_proj, _DynamicProjRowParallelLinear)
 
-    hp_num_heads_per_group = self_attn.get_hparam("num_heads_per_group")
-    hp_num_query_groups = self_attn.get_hparam("num_query_groups")
+    hp_num_attention_heads = self_attn.get_hparam("num_attention_heads")
+    assert isinstance(hp_num_attention_heads, NumAttentionHeadsHp)
 
-    assert hp_num_heads_per_group.choices == [1, 2, 3, 4]
-    assert hp_num_query_groups.choices == [1, 2]
+    # Choices are multiples of num_query_groups (2): [2, 4, 6, 8]
+    assert hp_num_attention_heads.choices == [2, 4, 6, 8]
+    assert hp_num_attention_heads._num_query_groups == 2
 
     # Set importance and slice order
-    hp_num_heads_per_group._get_importance = lambda: torch.tensor(
+    # Importance per head (group-aware): [2.2, 0.1, 1.1, 2.1, 3.0, 2.0, 0.0, 1.0]
+    # Group 0 (heads 0-3): [2.2, 0.1, 1.1, 2.1] → sorted: [0, 3, 2, 1]
+    # Group 1 (heads 4-7): [3.0, 2.0, 0.0, 1.0] → sorted: [4, 5, 7, 6]
+    # Global ranking (group-aware, flattened): [0, 3, 2, 1, 4, 5, 7, 6]
+    hp_num_attention_heads._get_importance = lambda: torch.tensor(
         [2.2, 0.1, 1.1, 2.1, 3.0, 2.0, 0.0, 1.0]
     )
-    hp_num_query_groups._get_importance = lambda: torch.tensor([0.0, 3.0])
-    hp_num_heads_per_group.enforce_order(
-        torch.argsort(hp_num_heads_per_group.importance, descending=True)
-    )
-    hp_num_query_groups.enforce_order(
-        torch.argsort(hp_num_query_groups.importance, descending=True)
-    )
-    assert hp_num_heads_per_group._slice_order.tolist() == [4, 0, 3, 5, 2, 7, 1, 6]
-    assert hp_num_query_groups._slice_order.tolist() == [1, 0]
+    # _estimate_head_ranking returns ranking as 1D tensor
+    expected_ranking = torch.tensor([0, 3, 2, 1, 4, 5, 7, 6])
+    hp_num_attention_heads.enforce_order(expected_ranking)
+
+    assert hp_num_attention_heads.active_slice.tolist() == [0, 3, 2, 1, 4, 5, 7, 6]
 
     # check if we get correct selection of sorted + pruned heads after setting active values
-    hp_num_heads_per_group.active = 2  # top 2 query and their k,v heads per group (based on imp)
-    hp_num_query_groups.active = 2  # top 2 query groups
+    hp_num_attention_heads.active = 4  # top 2 heads per group (2 groups * 2 heads = 4 total)
 
-    expected_q_heads = [4, 5, 0, 3]
-    expected_qkv_heads = [6, 7, 10, 11, 0, 3, 4, 5]  # 4 heads / group -> 6 qkv heads / group
+    # Expected: Top 2 heads from each group: [0, 3] from group 0, [4, 5] from group 1
+    expected_q_heads = [0, 3, 4, 5]
+    # In QKV layout (4 heads/group → 6 QKV heads/group):
+    # Group 0: Q=[0, 3], K=4, V=5 → QKV indices [0, 3, 4, 5]
+    # Group 1: Q=[4, 5], K=10, V=11 → QKV indices [6, 7, 10, 11]
+    expected_qkv_heads = [0, 3, 4, 5, 6, 7, 10, 11]
+
     assert (
         self_attn.linear_qkv._get_output_size_indices().tolist()
         == expand_head_indices(
@@ -333,6 +340,7 @@ def _test_gpt_moe_search_space(rank, size):
 
     # NOTE: `search_space_size` does not reduce across TP/PP groups
     ss_size_per_pp = search_space_size(model)
+    num_heads_choices = num_attention_heads // num_query_groups
     moe_ffn_choices = moe_ffn_hidden_size // channel_divisor
     moe_shared_ffn_choices = moe_shared_expert_intermediate_size // channel_divisor
     hidden_size_choices = hidden_size // channel_divisor
@@ -340,7 +348,7 @@ def _test_gpt_moe_search_space(rank, size):
     assert (
         ss_size_per_pp
         == (
-            num_attention_heads
+            num_heads_choices
             * num_moe_experts
             * moe_ffn_choices**num_moe_experts
             * moe_shared_ffn_choices
@@ -415,13 +423,14 @@ def _test_gpt_moe_parameter_sorting(rank, size):
 
     mtn.utils.sort_parameters(model)
 
-    # check if all num_moe_experts, moe_ffn, moe_shared_ffn, num_heads_per_group, num_query_groups, hidden_size
+    # check if all num_moe_experts, moe_ffn, moe_shared_ffn, num_attention_heads, hidden_size
     # have been sorted
     sortable_per_pp = [
         n for n, hp in dynamic_space.named_hparams(configurable=True) if hp.importance is not None
     ]
-    # (num_moe_experts + 4) hps per layer + 1 for hidden_size (num_layers is not sorted!)
-    assert len(sortable_per_pp) == (num_moe_experts + 4) * num_layers // size + 1
+    # (num_moe_experts + 3) hps per layer + 1 for hidden_size (num_layers is not sorted!)
+    # Per layer: num_attention_heads, num_moe_experts, moe_ffn (per expert), moe_shared_ffn
+    assert len(sortable_per_pp) == (num_moe_experts + 3) * num_layers // size + 1
 
     # sanity check if the model functionality is preserved after sorting
     export_searchspace(model, mtn.get_subnet_config(model))

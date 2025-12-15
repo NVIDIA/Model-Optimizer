@@ -77,7 +77,6 @@ def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
     # Traditional GPT pruning parameters
     pruned_ffn_hidden_size = ffn_hidden_size // 2
     pruned_num_attention_heads = num_attention_heads // 2
-    pruned_num_query_groups = num_query_groups // 2
     pruned_hidden_size = hidden_size // 2
     pruned_num_moe_experts = num_moe_experts // 2
 
@@ -89,7 +88,6 @@ def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
     export_config = {
         "ffn_hidden_size": pruned_ffn_hidden_size,
         "num_attention_heads": pruned_num_attention_heads,
-        "num_query_groups": pruned_num_query_groups,
         "hidden_size": pruned_hidden_size,
         "mamba_num_heads": pruned_mamba_num_heads,
         "mamba_head_dim": pruned_mamba_head_dim,
@@ -120,7 +118,6 @@ def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
     # Assert model.config is updated for correct save/restoring
     assert model.config.ffn_hidden_size == pruned_ffn_hidden_size
     assert model.config.num_attention_heads == pruned_num_attention_heads
-    assert model.config.num_query_groups == pruned_num_query_groups
     assert model.config.hidden_size == pruned_hidden_size
     assert model.config.mamba_num_heads == pruned_mamba_num_heads
     assert model.config.mamba_head_dim == pruned_mamba_head_dim
