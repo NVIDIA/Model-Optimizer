@@ -106,7 +106,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 | Llama-Nemotron Ultra | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Gemma 3 | ✅<sup>2</sup> | - | ✅ | - | - |
 | QWen 2, 2.5 <sup>4</sup> | ✅ | ✅ | ✅ | ✅ | ✅ |
-| QWen3 MOE <sup>6</sup> | ✅ | - | - | - | ✅ |
+| QWen3 MOE, Next <sup>6</sup> | ✅ | - | - | - | ✅ |
 | QwQ | ✅ | - | - | - | ✅ |
 | DeepSeek V3, R1, V3.1, V3.2<sup>7</sup> | - | - | - | - | ✅ |
 | T5 | ✅ | ✅ | ✅ | ✅ | - |

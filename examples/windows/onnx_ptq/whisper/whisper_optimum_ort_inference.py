@@ -64,6 +64,10 @@ def main(args):
         use_merged=USE_MERGED,
     )
 
+    # Fix for latest transformers: Disable the new Dynamic Cache Format
+    # that optimum 1.23 doesn't support. This forces the legacy tuple format
+    model._supports_default_dynamic_cache = lambda: False
+
     # print(model.encoder)
     # print(model.decoder)
 
