@@ -499,6 +499,11 @@ class HFEagleModel(EagleModel):
                 f"{self._base_llm_config.hidden_size}!"
             )
 
+        # Freeze all parameters
+        if self.eagle_freeze_base_model:
+            for name, param in self.named_parameters():
+                param.requires_grad = False
+
         self.eagle_module = EagleModule(
             self.eagle_config,
             decoder_cls,
@@ -508,12 +513,6 @@ class HFEagleModel(EagleModel):
         # find base model, lm head, and embeddings paths
         self._find_base_model_parts()
         self.eagle_module.to(self._base_model.dtype).to(self._get_eagle_device())
-
-        # Make sure word embedding and lm head are frozen
-        for param in self._base_model_embeddings.parameters():
-            param.requires_grad = False
-        for param in self._base_model_lm_head.parameters():
-            param.requires_grad = False
 
         # EAGLE-3 auxiliary hidden_states
         if (not eagle_offline) and self.eagle_config.use_aux_hidden_state:
