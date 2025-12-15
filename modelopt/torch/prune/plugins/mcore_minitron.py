@@ -25,6 +25,7 @@ Actual dynamic module implementations are at :mod:`modelopt.torch.nas.plugins.me
 """
 
 import copy
+from warnings import warn
 
 import torch
 import torch.nn as nn
@@ -66,7 +67,6 @@ SUPPORTED_HPARAMS = {
     "ffn_hidden_size",
     # Attention
     "num_attention_heads",
-    "num_query_groups",
     # Mamba
     "mamba_num_heads",
     "mamba_head_dim",
@@ -126,39 +126,25 @@ class MCoreMinitronSearcher(BaseSearcher):
 
         self.constraints["export_config"] = copy.deepcopy(self.constraints["export_config"])
         export_config = self.constraints["export_config"]
+        if "num_query_groups" in export_config:
+            warn("num_query_groups is no longer supported (since 0.41)! It will be ignored.")
+            if export_config["num_query_groups"] != self.model.config.num_query_groups:  # type: ignore[index]
+                raise ValueError(f"num_query_groups must be {self.model.config.num_query_groups}!")
+            export_config.pop("num_query_groups")  # type: ignore[union-attr]
         assert isinstance(export_config, dict)  # to keep mypy happy
         assert export_config.keys() <= SUPPORTED_HPARAMS, (
             f"Only {SUPPORTED_HPARAMS} are supported for pruning! Received: {export_config.keys()}"
         )
 
-        assert ("num_attention_heads" in export_config and "num_query_groups" in export_config) or (
-            "num_attention_heads" not in export_config and "num_query_groups" not in export_config
-        ), "Both `num_attention_heads` and `num_query_groups` should be provided together!"
-
         # Only sort the parameters that are to be pruned
         # If a user only prunes depth, we should not sort width parameters
         self.hps_to_sort = SUPPORTED_HPARAMS & export_config.keys()
 
-        # Convert `num_attention_heads` to `num_heads_per_group`
-        # Still keep `num_attention_heads` for updating model_cfg below
-        if "num_attention_heads" in export_config and "num_query_groups" in export_config:
-            assert export_config["num_attention_heads"] % export_config["num_query_groups"] == 0, (
-                f"num_attention_heads ({export_config['num_attention_heads']}) must be divisible by"
-                f" num_query_groups ({export_config['num_query_groups']})!"
-            )
-            export_config["num_heads_per_group"] = (
-                export_config["num_attention_heads"] // export_config["num_query_groups"]
-            )
-            self.hps_to_sort.add("num_heads_per_group")
-
-        configurable_hp_names = (SUPPORTED_HPARAMS | {"num_heads_per_group"}) - {
-            "num_attention_heads"
-        }
         for n, hp in named_hparams(self.model, unique=True):
             hp_name = n.split(".")[-1]
             if hp.is_configurable:
                 # Make sure configurable hparams are the ones with right names else implementation needs to be fixed!
-                assert hp_name in configurable_hp_names, f"[ImplError] Invalid hparam {hp_name}!"
+                assert hp_name in SUPPORTED_HPARAMS, f"[ImplError] Invalid hparam {hp_name}!"
                 if hp_name in export_config:
                     assert export_config[hp_name] in hp.choices, (
                         f"Invalid choice {export_config[hp_name]} for {n}! Available choices: {hp.choices}"
@@ -228,8 +214,6 @@ MCoreMinitronConfig: type[ModeloptBaseConfig] = create_model(
         default_rules={
             "megatron.core.models.gpt.GPTModel": {
                 "hidden_size_divisor": 64,
-                "num_heads_per_group_divisor": 1,
-                "num_query_groups_divisor": 1,
                 "ffn_hidden_size_divisor": 64,
                 "num_moe_experts_divisor": 1,
             },
@@ -237,8 +221,6 @@ MCoreMinitronConfig: type[ModeloptBaseConfig] = create_model(
                 {
                     "megatron.core.models.mamba.MambaModel": {
                         "hidden_size_divisor": 64,
-                        "num_heads_per_group_divisor": 1,
-                        "num_query_groups_divisor": 1,
                         "ffn_hidden_size_divisor": 64,
                         "mamba_num_heads_divisor": 4,
                         "mamba_head_dim_divisor": 4,
