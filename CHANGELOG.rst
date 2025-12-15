@@ -9,6 +9,10 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add support for Transformer Engine quantization for Megatron Core models.
 - Add support for dynamically linked TensorRT plugins in the ONNX quantization workflow.
 
+**Deprecations**
+
+- Deprecate ``num_query_groups`` parameter in Minitron pruning (``mcore_minitron``). You can use ModelOpt 0.40.0 or earlier instead if you need to prune it.
+
 0.40 (2025-12-12)
 ^^^^^^^^^^^^^^^^^
 
