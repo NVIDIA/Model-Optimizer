@@ -43,23 +43,6 @@ for module_path in [
 vllm_fused_moe_package = importlib.import_module("vllm.model_executor.layers.fused_moe.fused_moe")
 
 
-def create_parallel_state():
-    """Create a parallel state for vLLM."""
-    try:
-        dp_group = get_dp_group().device_group
-    except Exception:
-        dp_group = -1
-    try:
-        tp_group = get_tp_group().device_group
-    except Exception:
-        tp_group = -1
-    try:
-        ep_group = get_ep_group().device_group
-    except Exception:
-        ep_group = -1
-    return ParallelState(dp_group, tp_group, ep_group)
-
-
 class FakeQuantMethod:
     """A class that implements fake quantization methods for vLLM models.
 
@@ -109,6 +92,23 @@ class FakeQuantMethod:
             output = self.quant_method.apply(layer, x, bias)
         output = layer.output_quantizer(output)
         return output
+
+
+def create_parallel_state():
+    """Create a parallel state for vLLM."""
+    try:
+        dp_group = get_dp_group().device_group
+    except Exception:
+        dp_group = -1
+    try:
+        tp_group = get_tp_group().device_group
+    except Exception:
+        tp_group = -1
+    try:
+        ep_group = get_ep_group().device_group
+    except Exception:
+        ep_group = -1
+    return ParallelState(dp_group, tp_group, ep_group)
 
 
 class _VLLMParallelLinear(QuantModule):
