@@ -107,7 +107,6 @@ except ImportError:
 __all__ = ["drop_mcore_language_model_layers"]
 
 
-# TODO: Allow passing setup_kwargs to DM.convert so we can reuse hparams directly during setup
 class _DynamicParallelLinear(DynamicModule):
     """A parallel linear layer with dynamic hyperparams."""
 
@@ -326,19 +325,59 @@ def expand_head_indices(heads: torch.LongTensor, hidden_size_per_head: int) -> t
     ).flatten()
 
 
+class NumAttentionHeadsHp(TracedHp):
+    """Configurable hparam for total number of attention heads.
+
+    Choices are constrained to be multiples of num_query_groups to maintain valid GQA configurations.
+    Provides group-aware sorting and slicing through active_slice property.
+    """
+
+    def __init__(self, num_attention_heads: int, num_query_groups: int) -> None:
+        """Initialize with choices that are multiples of num_query_groups."""
+        choices = [
+            h * num_query_groups for h in range(1, num_attention_heads // num_query_groups + 1)
+        ]
+        super().__init__(choices)
+        self._num_query_groups = num_query_groups
+
+    @property
+    def num_heads_per_group(self) -> int:
+        """Return the active number of heads per group."""
+        active = self.active
+        assert isinstance(active, int)
+        return active // self._num_query_groups
+
+    @property
+    def active_slice(self) -> torch.LongTensor:
+        """Return sorted indices for attention heads with group-aware sorting.
+
+        Heads are sorted within each query group to maintain GQA structure.
+        """
+        max_heads_per_group = self.max // self._num_query_groups
+
+        if self._slice_order is None:
+            all_head_ranking = torch.arange(self.max).view(self._num_query_groups, -1)
+        else:
+            # Reshape to 2D if needed: [num_query_groups, max_heads_per_group]
+            all_head_ranking = self._slice_order.view(self._num_query_groups, max_heads_per_group)
+
+        # Select active heads per group (keep all query groups, trim heads within each group)
+        selected_attn_heads = all_head_ranking[:, : self.num_heads_per_group].flatten()
+
+        return selected_attn_heads
+
+
 # NOTE: We provide a parent class since we do not register to DMRegistry.
 class _DynamicQKVColumnParallelLinear(DynamicModule, ColumnParallelLinear):
     """An mcore ColumnParallelLinear layer for linear_qkv with dynamic attributes."""
 
-    def _setup(
-        self, *, num_heads_per_group: TracedHp, num_query_groups: TracedHp, hidden_size: TracedHp
-    ):
+    def _setup(self, *, num_attention_heads: NumAttentionHeadsHp, hidden_size: TracedHp):
         """Setup the _DynamicQKVColumnParallelLinear dynamic module with global hidden_size hparam."""
         self._register_hparam("input_size", hidden_size)
+        self._register_hparam("num_attention_heads", num_attention_heads)
         self._register_dynamic_attribute(
             "output_size",
-            lambda mod, val: (num_heads_per_group.active + 2)
-            * num_query_groups.active
+            lambda mod, val: (num_attention_heads.active + 2 * mod.config.num_query_groups)
             * mod.config.kv_channels,
         )
         self._register_dynamic_attribute(
@@ -347,64 +386,66 @@ class _DynamicQKVColumnParallelLinear(DynamicModule, ColumnParallelLinear):
         self._register_dynamic_attribute("weight", self._get_weight)
         self._register_dynamic_attribute("bias", self._get_bias)
 
-        self._register_temp_attribute(
-            "_parent_hparams_refs",
-            {"num_heads_per_group": num_heads_per_group, "num_query_groups": num_query_groups},
+    def _get_output_size_indices(self) -> torch.LongTensor:
+        """Get the indices of the output size based on sorted + pruned attention heads.
+
+        QKV layout: For each query group: [Q_head_0, ..., Q_head_n, K_head, V_head]
+
+        Example: 32 attention heads (8 groups x 4 heads/group) → 48 QKV heads (8 groups x 6)
+
+        Attention layout (8 groups x 4 heads/group):
+            Group 0: [0, 1, 2, 3],  Group 1: [4, 5, 6, 7],  ...,  Group 7: [28, 29, 30, 31]
+
+        QKV layout (8 groups x 6 heads/group):
+            Group 0: [0, 1, 2, 3, 4, 5]    (Q0, Q1, Q2, Q3, K, V)
+            Group 1: [6, 7, 8, 9, 10, 11]  (Q0, Q1, Q2, Q3, K, V)
+            ...
+            Group 7: [42, 43, 44, 45, 46, 47]
+
+        If active_slice returns top-2 ranked Q heads per group (by importance):
+            E.g., [3, 1, 7, 4, 9, 11, ...] (ranked by importance within each group)
+            Reshaped per-group: [[3, 1], [7, 4], [9, 11], ...]
+            Group IDs: [[0, 0], [1, 1], [2, 2], ...]
+            Local positions: [[3, 1], [3, 0], [1, 3], ...]
+            After mapping to QKV: [[3, 1], [9, 6], [13, 15], ...]
+            With K,V added: [[3, 1, 4, 5], [9, 6, 10, 11], [13, 15, 16, 17], ...]
+        """
+        nheads_hp: NumAttentionHeadsHp = self.get_hparam("num_attention_heads")
+        nquery_groups = self.config.num_query_groups
+        max_nheads_per_group = nheads_hp.max // nquery_groups
+        nheads_per_group = nheads_hp.num_heads_per_group
+        qkv_heads_per_group = max_nheads_per_group + 2  # Q heads + K head + V head
+
+        if nheads_hp.active == nheads_hp.max:
+            return slice((max_nheads_per_group + 2) * nquery_groups * self.config.kv_channels)
+
+        # Get sorted and pruned Q head indices: [nquery_groups * active_num_heads_per_group]
+        q_head_indices = nheads_hp.active_slice
+        assert isinstance(q_head_indices, torch.LongTensor)
+
+        q_head_indices_per_group = q_head_indices.view(nquery_groups, nheads_per_group).cpu()
+
+        # Map from attention layout to QKV layout
+        # Determine which group each Q head belongs to
+        group_ids = q_head_indices_per_group // max_nheads_per_group
+
+        # Subtract old offset to get local position within attention group
+        local_pos_in_attn = q_head_indices_per_group - group_ids * max_nheads_per_group
+
+        # Add new offset to map to QKV layout (same local position, different group stride)
+        q_head_indices = group_ids * qkv_heads_per_group + local_pos_in_attn
+
+        # Add K,V head indices for each group (always at fixed positions within each group)
+        # K head is at position max_nheads_per_group, V head at max_nheads_per_group + 1
+        kv_head_indices = (
+            torch.arange(nquery_groups)[:, None] * qkv_heads_per_group
+            + torch.arange(max_nheads_per_group, qkv_heads_per_group)[None, :]
         )
 
-    def _get_output_size_indices(self) -> torch.LongTensor:
-        """Get the indices of the output size based on sorted + pruned heads and query groups."""
-        num_heads_per_group_hp: TracedHp = self._parent_hparams_refs["num_heads_per_group"]
-        num_query_groups_hp: TracedHp = self._parent_hparams_refs["num_query_groups"]
-        num_heads_per_group: int = num_heads_per_group_hp.active
-        num_query_groups: int = num_query_groups_hp.active
-        max_num_heads_per_group: int = num_heads_per_group_hp.max
-        max_num_query_groups: int = num_query_groups_hp.max
+        # Concatenate Q and K,V heads: [nquery_groups, active_num_heads_per_group + 2]
+        selected_qkv_heads = torch.cat([q_head_indices, kv_head_indices], dim=1).flatten()
 
-        if num_heads_per_group_hp._slice_order is not None:
-            # Sort heads per group
-            # NOTE: We use the importance instead of slice order which is sorted without the notion of groups
-            attn_head_scores_per_group = num_heads_per_group_hp.importance.view(
-                max_num_query_groups, max_num_heads_per_group
-            )
-            attn_head_ranking_per_group = attn_head_scores_per_group.argsort(descending=True)
-            qkv_head_ranking_per_group = torch.hstack(
-                (
-                    attn_head_ranking_per_group,
-                    torch.arange(
-                        max_num_heads_per_group,
-                        max_num_heads_per_group + 2,
-                        device=attn_head_ranking_per_group.device,
-                    ).repeat(max_num_query_groups, 1),
-                )
-            )
-            qkv_head_ranking_global = (
-                qkv_head_ranking_per_group
-                + torch.arange(
-                    0,
-                    (max_num_heads_per_group + 2) * max_num_query_groups,
-                    max_num_heads_per_group + 2,
-                    device=attn_head_ranking_per_group.device,
-                )[:, None]
-            )
-        else:
-            qkv_head_ranking_global = torch.arange(
-                max_num_query_groups * (max_num_heads_per_group + 2)
-            ).view(max_num_query_groups, max_num_heads_per_group + 2)
-
-        if num_query_groups_hp._slice_order is not None:
-            # Sort query groups
-            qkv_head_ranking_global = qkv_head_ranking_global[num_query_groups_hp._slice_order]
-
-        selected_qkv_heads = qkv_head_ranking_global[
-            :num_query_groups,  # Q groups
-            torch.cat(
-                (
-                    torch.arange(num_heads_per_group),  # Q heads
-                    torch.arange(max_num_heads_per_group, max_num_heads_per_group + 2),  # KV heads
-                )
-            ),
-        ].flatten()
+        # Expand to dimension indices
         selected_indices = expand_head_indices(selected_qkv_heads, self.config.kv_channels)
 
         return selected_indices.cpu()
@@ -430,16 +471,12 @@ class _DynamicQKVColumnParallelLinear(DynamicModule, ColumnParallelLinear):
 class _DynamicProjRowParallelLinear(DynamicModule, RowParallelLinear):
     """An mcore RowParallelLinear layer for linear_qkv with dynamic attributes."""
 
-    def _setup(
-        self, *, num_heads_per_group: TracedHp, num_query_groups: TracedHp, hidden_size: TracedHp
-    ):
+    def _setup(self, *, num_attention_heads: NumAttentionHeadsHp, hidden_size: TracedHp):
         """Setup the _DynamicProjRowParallelLinear dynamic module with global hidden_size hparam."""
         self._register_hparam("output_size", hidden_size)
+        self._register_hparam("num_attention_heads", num_attention_heads)
         self._register_dynamic_attribute(
-            "input_size",
-            lambda mod, val: (num_heads_per_group.active)
-            * num_query_groups.active
-            * mod.config.kv_channels,
+            "input_size", lambda mod, val: num_attention_heads.active * mod.config.kv_channels
         )
         self._register_dynamic_attribute(
             "input_size_per_partition", lambda mod, val: mod.input_size
@@ -447,51 +484,14 @@ class _DynamicProjRowParallelLinear(DynamicModule, RowParallelLinear):
         self._register_dynamic_attribute("weight", self._get_weight)
         self._register_dynamic_attribute("bias", self._get_bias)
 
-        self._register_temp_attribute(
-            "_parent_hparams_refs",
-            {"num_heads_per_group": num_heads_per_group, "num_query_groups": num_query_groups},
-        )
-
     def _get_input_size_indices(self) -> torch.LongTensor:
         """Get the indices of the input size based on sorted + pruned heads and query groups."""
-        num_heads_per_group_hp: TracedHp = self._parent_hparams_refs["num_heads_per_group"]
-        num_query_groups_hp: TracedHp = self._parent_hparams_refs["num_query_groups"]
-        num_heads_per_group: int = num_heads_per_group_hp.active
-        num_query_groups: int = num_query_groups_hp.active
-        max_num_heads_per_group: int = num_heads_per_group_hp.max
-        max_num_query_groups: int = num_query_groups_hp.max
+        nheads_hp = self.get_hparam("num_attention_heads")
+        if nheads_hp.active == nheads_hp.max:
+            return slice(nheads_hp.max * self.config.kv_channels)
 
-        if num_heads_per_group_hp._slice_order is not None:
-            # Sort heads per group
-            # NOTE: We use the importance instead of slice order which is sorted without the notion of groups
-            attn_head_scores_per_group = num_heads_per_group_hp.importance.view(
-                max_num_query_groups, max_num_heads_per_group
-            )
-            attn_head_ranking_per_group = attn_head_scores_per_group.argsort(
-                dim=-1, descending=True
-            )
-            attn_head_ranking_global = (
-                attn_head_ranking_per_group
-                + torch.arange(
-                    0,
-                    max_num_heads_per_group * max_num_query_groups,
-                    max_num_heads_per_group,
-                    device=attn_head_ranking_per_group.device,
-                )[:, None]
-            )
-        else:
-            attn_head_ranking_global = torch.arange(
-                max_num_query_groups * max_num_heads_per_group
-            ).view(max_num_query_groups, max_num_heads_per_group)
-
-        if num_query_groups_hp._slice_order is not None:
-            # Sort query groups
-            attn_head_ranking_global = attn_head_ranking_global[num_query_groups_hp._slice_order]
-
-        selected_attn_heads = attn_head_ranking_global[
-            :num_query_groups,  # Q groups
-            :num_heads_per_group,  # Q heads
-        ].flatten()
+        selected_attn_heads = nheads_hp.active_slice
+        assert isinstance(selected_attn_heads, torch.LongTensor)
         selected_indices = expand_head_indices(selected_attn_heads, self.config.kv_channels)
 
         return selected_indices.cpu()
@@ -521,27 +521,14 @@ class _DynamicSelfAttention(DynamicModule):
     def _setup(self, *, hidden_size: TracedHp):
         """Setup the SelfAttention dynamic module with global hidden_size hparam."""
         # Register hparams
-        num_heads_per_group = TracedHp(
-            list(
-                range(
-                    1,
-                    self.num_attention_heads_per_partition // self.num_query_groups_per_partition
-                    + 1,
-                )
-            )
+        num_attention_heads = NumAttentionHeadsHp(
+            self.num_attention_heads_per_partition, self.num_query_groups_per_partition
         )
-        num_heads_per_group._strict_len = False  # allow for different length for imp and order
-        num_query_groups = TracedHp(list(range(1, self.num_query_groups_per_partition + 1)))
-        self._register_hparam("num_heads_per_group", num_heads_per_group)
-        self._register_hparam("num_query_groups", num_query_groups)
+        self._register_hparam("num_attention_heads", num_attention_heads)
 
         # Register dynamic attributes
         self._register_dynamic_attribute(
-            "num_attention_heads_per_partition",
-            lambda mod, val: self.num_heads_per_group * self.num_query_groups,
-        )
-        self._register_dynamic_attribute(
-            "num_query_groups_per_partition", lambda mod, val: self.num_query_groups
+            "num_attention_heads_per_partition", lambda mod, val: self.num_attention_heads
         )
 
         # Convert the Dot Product Attention to dynamic module
@@ -561,10 +548,6 @@ class _DynamicSelfAttention(DynamicModule):
                 "num_attention_heads_per_partition",
                 lambda mod, val: self.num_attention_heads_per_partition,
             )
-            self.core_attention._register_dynamic_attribute(
-                "num_query_groups_per_partition",
-                lambda mod, val: self.num_query_groups_per_partition,
-            )
         else:
             assert HAS_TE and isinstance(self.core_attention, TEDotProductAttention)
 
@@ -578,35 +561,22 @@ class _DynamicSelfAttention(DynamicModule):
             self.core_attention._register_dynamic_attribute(
                 "num_attention_heads", lambda mod, val: self.num_attention_heads_per_partition
             )
-            self.core_attention._register_dynamic_attribute(
-                "num_gqa_groups", lambda mod, val: self.num_query_groups_per_partition
-            )
-            self.core_attention._register_dynamic_attribute(
-                "num_gqa_groups_per_partition", lambda mod, val: self.num_query_groups_per_partition
-            )
 
         # Convert the fused qkv and output projection linear layer to dynamic module
         _DynamicQKVColumnParallelLinear.convert(
-            self.linear_qkv,
-            num_heads_per_group=num_heads_per_group,
-            num_query_groups=num_query_groups,
-            hidden_size=hidden_size,
+            self.linear_qkv, num_attention_heads=num_attention_heads, hidden_size=hidden_size
         )
         _DynamicProjRowParallelLinear.convert(
-            self.linear_proj,
-            num_heads_per_group=num_heads_per_group,
-            num_query_groups=num_query_groups,
-            hidden_size=hidden_size,
+            self.linear_proj, num_attention_heads=num_attention_heads, hidden_size=hidden_size
         )
 
         # register importance estimator for linear_qkv.output_size and linear_proj.input_size
         self._register_temp_attribute("_activations", None)
         self.hook_handle = self.linear_proj.register_forward_hook(self._linear_proj_forward_hook)
-        # NOTE: num_heads_per_group's slice_order will be of length num_attention_heads to be able to sort heads,
-        # otherwise we would only have aggregated importance of heads per group.
-        # While enforcing order during `sort_parameters`, we dont check the shape of the slice_order
-        num_heads_per_group.register_importance(self._estimate_all_head_importance)
-        num_query_groups.register_importance(self._estimate_query_group_importance)
+        # [HACK] Return ranking (group-aware) instead of importance for sort_parameters()
+        # NOTE: Trimming should also happen within each group. This is handled in NumAttentionHeadsHp
+        num_attention_heads._importance_is_order = True
+        num_attention_heads.register_importance(self._estimate_head_ranking)
 
     def _linear_proj_forward_hook(self, module, input, output):
         """Hook to collect activations for importance estimation.
@@ -619,12 +589,7 @@ class _DynamicSelfAttention(DynamicModule):
         input = gather_from_tensor_model_parallel_region(input[0]).detach()
 
         # Dont aggregate activations from non-max subnets (e.g. from profiling)
-        if (
-            input.shape[-1]
-            != self.get_hparam("num_heads_per_group").max
-            * self.get_hparam("num_query_groups").max
-            * self.config.kv_channels
-        ):
+        if input.shape[-1] != self.get_hparam("num_attention_heads").max * self.config.kv_channels:
             return
 
         input = input.to(torch.float32)  # use full precision to avoid overflow
@@ -635,37 +600,30 @@ class _DynamicSelfAttention(DynamicModule):
         else:
             self._activations += activations
 
-    def _estimate_all_head_importance(self) -> TracedHp.Importance:
+    def _estimate_head_ranking(self) -> TracedHp.Importance:
         """Return the importance for num_attention_heads (num_heads_per_group * num_query_groups)."""
         assert self._activations is not None, "No activations collected for importance estimation."
-        # Convert squared sum to L2 norm
-        scores = self._activations.pow(0.5)
-        attn_head_importance = torch.linalg.vector_norm(
-            scores.view(
-                self.get_hparam("num_heads_per_group").max
-                * self.get_hparam("num_query_groups").max,
-                self.config.kv_channels,
-            ),
-            ord=2,
-            dim=1,
-        )
-        return attn_head_importance
+        n_groups = self.num_query_groups_per_partition
+        max_nheads = self.get_hparam("num_attention_heads").max
+        max_heads_per_group = max_nheads // n_groups
 
-    def _estimate_query_group_importance(self) -> TracedHp.Importance:
-        """Return the importance of the ``num_query_groups`` hparam."""
-        assert self._activations is not None, "No activations collected for importance estimation."
         # Convert squared sum to L2 norm
-        scores = self._activations.pow(0.5)
-        group_importance = torch.linalg.vector_norm(
-            scores.view(
-                self.get_hparam("num_heads_per_group").max,
-                self.get_hparam("num_query_groups").max,
-                self.config.kv_channels,
-            ),
-            ord=2,
-            dim=(0, 2),
-        )
-        return group_importance
+        scores = self._activations.pow(0.5).view(max_nheads, self.config.kv_channels).cpu()
+        attn_head_importance = torch.linalg.vector_norm(scores, ord=2, dim=1)
+        # group_importance = torch.linalg.vector_norm(scores, ord=2, dim=(0, 2))
+
+        attn_head_ranking_per_group = attn_head_importance.view(
+            n_groups, max_heads_per_group
+        ).argsort(dim=1, descending=True)
+
+        # Convert to global indices by adding offset
+        attn_head_ranking_global = (
+            attn_head_ranking_per_group + torch.arange(0, max_nheads, max_heads_per_group)[:, None]
+        ).flatten()
+        assert torch.equal(attn_head_ranking_global.sort().values, torch.arange(max_nheads))
+        # Return group-aware ranking of all attention heads
+        # Actual group-aware trimming happens in NumAttentionHeadsHp
+        return attn_head_ranking_global
 
     def export(self) -> torch.nn.Module:
         """Export the dynamic module to a torch.nn.Module."""
@@ -922,23 +880,11 @@ class _DynamicTransformerLayer(DynamicModule, MambaTransformerLayerMixin):
     def modify(
         self,
         *,
-        num_heads_per_group_divisor: int = 1,
-        num_query_groups_divisor: int = 1,
         ffn_hidden_size_divisor: int = 1,
         num_moe_experts_divisor: int = 1,
         **kwargs,  # Unused hparams
     ) -> None:
         """Modify TransformerLayer hparam choices based on search space config."""
-        # Modify SelfAttention hparam
-        if isinstance(self.self_attention, SelfAttention):
-            for hp_name, divisor in [
-                ("num_heads_per_group", num_heads_per_group_divisor),
-                ("num_query_groups", num_query_groups_divisor),
-            ]:
-                hp = self.self_attention.get_hparam(hp_name)
-                choices = {int(make_divisible(c, divisor)) for c in hp.choices}
-                hp.choices = list(set(hp.choices) & choices | {hp.original})
-
         # Modify MLP hparam (regular or MoE)
         if isinstance(self.mlp, (MLP, MoELayer)):
             self.mlp.modify(
@@ -969,19 +915,19 @@ class MambaNumHeadsHp(TracedHp):
         self, choices: Sequence[HPType], original: HPType | None = None, ngroups: int = 1
     ) -> None:
         super().__init__(choices, original)
-        self.ngroups = ngroups
+        self._ngroups = ngroups
 
     @property
     def active_slice(self) -> TracedHp.ActiveSlice:
         """Return the currently active sorted indices by trimming heads within each group."""
         if self._slice_order is None:
             if self.active == self.max:
-                return slice(self.active)
+                return slice(self.max)
             slice_order = torch.arange(self.max)
         else:
             slice_order = self._slice_order
-        target_nheads_per_group = self.active // self.ngroups
-        return slice_order.view(self.ngroups, -1)[:, :target_nheads_per_group].flatten()  # type: ignore[misc]
+        target_nheads_per_group = self.active // self._ngroups
+        return slice_order.view(self._ngroups, -1)[:, :target_nheads_per_group].flatten()  # type: ignore[misc]
 
 
 class MambaDInnerHp(TracedHp):
@@ -1194,10 +1140,12 @@ class _DynamicMambaMixer(DynamicModule):
         # Register importance estimator for mamba heads
         self._register_temp_attribute("_activations", None)
         self.hook_handle = self.in_proj.register_forward_hook(self._mamba_in_proj_forward_hook)
+        # [HACK] Return ranking (group-aware) instead of importance for sort_parameters()
+        # NOTE: Trimming should also happen within each group. This is handled in MambaNumHeadsHp.
         mamba_num_heads._importance_is_order = True
-        mamba_num_heads.register_importance(self._estimate_head_importance)
+        mamba_num_heads.register_importance(lambda: self._estimate_head_and_head_dim_rankings()[0])
         mamba_head_dim._importance_is_order = True
-        mamba_head_dim.register_importance(self._estimate_head_dim_importance)
+        mamba_head_dim.register_importance(lambda: self._estimate_head_and_head_dim_rankings()[1])
 
     @staticmethod
     def _get_dt_bias_A_log_D(mod: "_DynamicMambaMixer", data: torch.Tensor) -> torch.Tensor:  # noqa: N802
@@ -1273,19 +1221,6 @@ class _DynamicMambaMixer(DynamicModule):
         all_head_ranking = (groupwise_head_ranking + group_offsets).flatten()
 
         return all_head_ranking, all_head_dim_ranking
-
-    def _estimate_head_importance(self):
-        """Get the importance of Mamba heads for sort_parameters()."""
-        head_ranking, _ = self._estimate_head_and_head_dim_rankings()
-        # [HACK] Return ranking instead of importance for sort_parameters()
-        # NOTE: Trimming should also happen within each group. This is handled in MambaNumHeadsHp.
-        return head_ranking
-
-    def _estimate_head_dim_importance(self):
-        """Get the importance of Mamba head dimensions for sort_parameters()."""
-        _, head_dim_ranking = self._estimate_head_and_head_dim_rankings()
-        # [HACK] Return ranking instead of importance for sort_parameters()
-        return head_dim_ranking
 
     def export(self) -> torch.nn.Module:
         """Export the dynamic module to a torch.nn.Module."""
@@ -1461,8 +1396,6 @@ class _DynamicMCoreLanguageModel(DynamicModule):
         self,
         *,
         hidden_size_divisor: int = 1,
-        num_heads_per_group_divisor: int = 1,
-        num_query_groups_divisor: int = 1,
         ffn_hidden_size_divisor: int = 1,
         mamba_num_heads_divisor: int = 1,
         mamba_head_dim_divisor: int = 1,
@@ -1472,8 +1405,6 @@ class _DynamicMCoreLanguageModel(DynamicModule):
 
         Args:
             hidden_size_divisor: The divisor of the hidden_size.
-            num_heads_per_group_divisor: The divisor of the self-attention num_heads_per_group.
-            num_query_groups_divisor: The divisor of the self-attention num_query_groups.
             ffn_hidden_size_divisor: The divisor of the mlp ffn_hidden_size.
             mamba_num_heads_divisor: The divisor of the mamba num_heads.
             mamba_head_dim_divisor: The divisor of the mamba head_dim.
@@ -1485,8 +1416,6 @@ class _DynamicMCoreLanguageModel(DynamicModule):
 
         for layer in self.decoder.layers:
             layer.modify(
-                num_heads_per_group_divisor=num_heads_per_group_divisor,
-                num_query_groups_divisor=num_query_groups_divisor,
                 ffn_hidden_size_divisor=ffn_hidden_size_divisor,
                 mamba_num_heads_divisor=mamba_num_heads_divisor,
                 mamba_head_dim_divisor=mamba_head_dim_divisor,
