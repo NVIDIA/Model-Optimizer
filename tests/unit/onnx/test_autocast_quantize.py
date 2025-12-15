@@ -36,12 +36,13 @@ def assert_nodes_are_quantized(nodes):
 
 
 @pytest.mark.parametrize("keep_io_types", [True, False])
-def test_autocast_quantize_int8(tmp_path, keep_io_types):
-    model_torch = SimpleMLP()
+@pytest.mark.parametrize("bias_add", [True, False])
+def test_autocast_quantize_int8(tmp_path, keep_io_types, bias_add):
+    model_torch = SimpleMLP(bias_add=bias_add)
     input_tensor = torch.randn(2, 16, 16)
     low_precision_type = "fp16"
 
-    onnx_path = os.path.join(tmp_path, "model.onnx")
+    onnx_path = os.path.join(tmp_path, f"model{'_biasAdd' if bias_add else ''}.onnx")
     export_as_onnx(model_torch, input_tensor, onnx_filename=onnx_path)
 
     # Convert model to low precision
@@ -49,7 +50,7 @@ def test_autocast_quantize_int8(tmp_path, keep_io_types):
         onnx_path, keep_io_types=keep_io_types, low_precision_type=low_precision_type
     )
     converted_model_path = onnx_path.replace(
-        ".onnx", f".{low_precision_type}.{'keepIOTypes' if keep_io_types else ''}.onnx"
+        ".onnx", f".{low_precision_type}{'_keepIOTypes' if keep_io_types else ''}.onnx"
     )
     onnx.save(converted_model, converted_model_path)
 

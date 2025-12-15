@@ -75,7 +75,7 @@ class UNet(nn.Module):
 class SimpleMLP(nn.Module):
     """Simple toy model."""
 
-    def __init__(self, fi=16, f1=18, f2=20, fo=22):
+    def __init__(self, fi=16, f1=18, f2=20, fo=22, bias_add=False):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(fi, f1, bias=False),
@@ -84,10 +84,13 @@ class SimpleMLP(nn.Module):
             nn.ReLU(),
             nn.Linear(f2, fo, bias=False),
         )
+        self.bias_add = bias_add
 
     def forward(self, x):
         for mod in self.net:
             x = mod(x)
+        if self.bias_add:
+            x += 1e-4
         return x
 
 

@@ -1221,10 +1221,6 @@ class PrecisionConverter:
         else:
             casted_data = original_data.astype(cast_dtype)
 
-        # Workaround for 0-dimensional tensors (scalars)
-        if casted_data.ndim == 0:
-            casted_data = casted_data.reshape(1)
-
         # Create a new constant node with casted data
         if cast_to_type == onnx.TensorProto.BFLOAT16:
             # Create TensorProto manually for bfloat16
