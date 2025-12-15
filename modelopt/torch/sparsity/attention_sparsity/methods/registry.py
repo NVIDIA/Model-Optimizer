@@ -26,6 +26,9 @@ import torch
 class SparseAttentionMethod(ABC):
     """Base class for sparse attention methods."""
 
+    # Flag to indicate calibration mode (set by calibrator)
+    _calibration_mode: bool = False
+
     @abstractmethod
     def calculate_sparsity(
         self,

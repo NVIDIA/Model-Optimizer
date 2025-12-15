@@ -141,11 +141,11 @@ class FlashSkipSoftmax(SparseAttentionMethod):
 
         # Calculate threshold
         threshold_scale_factor = getattr(self, "threshold_scale_factor", None)
-        if threshold_scale_factor:
-            # Use calibrated dynamic threshold: λ = scale_factor / length
-            log_threshold = np.log(threshold_scale_factor / seq_k)
+        if threshold_scale_factor is not None and phase in threshold_scale_factor:
+            # Per-phase calibrated threshold: λ = scale_factor[phase] / length
+            log_threshold = np.log(threshold_scale_factor[phase] / seq_k)
         else:
-            # Use static threshold from config
+            # Use static threshold from config (no calibration or phase not calibrated)
             log_threshold = np.log(self.threshold)
 
         if phase == "prefill":
@@ -191,15 +191,16 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             element_mask = element_mask[:, :, :seq_q, :seq_k]
 
             # Step 8: Calculate sparsity statistics
-            # density = sum(mask) / numel(mask) * N / (N+1) for causal
             if self.is_causal:
-                density = float(block_mask.sum() / block_mask.numel()) * (
-                    num_block_rows / (num_block_rows + 1)
-                )
+                # For causal attention, only count lower triangle blocks (including diagonal)
+                num_causal_blocks = num_block_rows * (2 * num_block_cols - num_block_rows + 1) // 2
+                total_valid_blocks = batch_size * num_heads * num_causal_blocks
+                density = float(block_mask.sum()) / total_valid_blocks
+                total_blocks = num_causal_blocks
             else:
                 density = float(block_mask.sum() / block_mask.numel())
+                total_blocks = num_block_rows * num_block_cols
             sparsity = 1 - density
-            total_blocks = num_block_rows * num_block_cols
         else:  # decode
             blocked_attn, _, num_block_cols, _, padded_seq_k = self._reshape_to_blocks(
                 attn_weights, 1, self.bc
@@ -315,17 +316,21 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         threshold_scale_factor = getattr(self, "threshold_scale_factor", None)
 
         if threshold_scale_factor is not None:
-            # Calibrated dynamic threshold
+            # Per-phase calibrated dynamic threshold
+            example_lengths = [1024, 2048, 4096, 8192]
+            phase_info = {}
+            for phase, scale_factor in threshold_scale_factor.items():
+                phase_info[phase] = {
+                    "scale_factor": scale_factor,
+                    "example_thresholds": {
+                        length: scale_factor / length for length in example_lengths
+                    },
+                }
             return {
                 "type": "dynamic",
-                "scale_factor": threshold_scale_factor,
-                "formula": "λ / length",
-                "example_lengths": {
-                    1024: threshold_scale_factor / 1024,
-                    2048: threshold_scale_factor / 2048,
-                    4096: threshold_scale_factor / 4096,
-                    8192: threshold_scale_factor / 8192,
-                },
+                "scale_factors": threshold_scale_factor,
+                "formula": "λ[phase] / length",
+                "phases": phase_info,
             }
         else:
             # Static threshold (single value or phase-specific dict)
