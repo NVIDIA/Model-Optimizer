@@ -44,6 +44,7 @@ optional_deps = {
     "onnx": [
         "cppimport",
         "cupy-cuda12x; platform_machine != 'aarch64' and platform_system != 'Darwin'",
+        "lief",
         "ml_dtypes",  # for bfloat16 conversion
         "onnx-graphsurgeon",
         "onnx~=1.19.0",
