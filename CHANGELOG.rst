@@ -7,6 +7,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 **New Features**
 
 - Add support for Transformer Engine quantization for Megatron Core models.
+- Add automated QDQ placement tool to search optimial QDQ insertion points.
 
 0.40 (2025-12-12)
 ^^^^^^^^^^^^^^^^^
