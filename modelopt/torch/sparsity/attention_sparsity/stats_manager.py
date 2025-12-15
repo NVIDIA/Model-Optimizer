@@ -127,11 +127,17 @@ class SparseAttentionStatsManager:
         }
         self.per_sample_stats = []
 
-    def get_calibration_stats(self) -> list[dict]:
-        """Get per-sample calibration statistics.
+    def get_calibration_stats(self, phase: str | None = None) -> list[dict]:
+        """Get per-sample calibration statistics, optionally filtered by phase.
+
+        Args:
+            phase: Optional phase to filter by ('prefill' or 'decode').
+                   If None, returns all stats.
 
         Returns:
             List of per-sample statistics dictionaries.
-            Empty list if not in calibration mode.
+            Empty list if not in calibration mode or no stats for that phase.
         """
-        return self.per_sample_stats
+        if phase is None:
+            return self.per_sample_stats
+        return [s for s in self.per_sample_stats if s.get("phase") == phase]
