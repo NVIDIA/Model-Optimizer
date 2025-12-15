@@ -43,6 +43,7 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             method_config: Configuration dict with threshold, br, bc, is_causal, etc.
                           All required fields should have defaults from SparseAttentionAttributeConfig.
         """
+        super().__init__()
         config = method_config or {}
 
         # Extract configuration
@@ -54,9 +55,6 @@ class FlashSkipSoftmax(SparseAttentionMethod):
 
         # Optional parameters not in Pydantic config
         self.phase = config.get("phase", None)
-
-        # Calibration mode: when True, prevent threshold updates to preserve calibrator's test threshold
-        self._calibration_mode = False
 
         # Initialize threshold
         if isinstance(self.threshold_config, dict):

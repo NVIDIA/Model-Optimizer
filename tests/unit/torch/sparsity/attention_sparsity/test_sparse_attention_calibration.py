@@ -203,30 +203,7 @@ class TestRulerDatasetBuilder:
 
 
 class TestDynamicThresholdCalibrator:
-    """Test calibration algorithm correctness."""
-
-    def test_calibrator_initialization(self):
-        """Test that calibrator initializes correctly."""
-        calibrator = DynamicThresholdCalibrator(
-            target_sparse_ratio=0.5,
-            threshold_trials=[1e-4, 1e-3, 1e-2],
-        )
-
-        assert calibrator.target_sparse_ratio == 0.5
-        assert len(calibrator.threshold_trials) == 3
-
-    def test_calibrator_default_threshold_trials(self):
-        """Test that calibrator has default threshold trials."""
-        calibrator = DynamicThresholdCalibrator(
-            target_sparse_ratio=0.5,
-        )
-
-        # Should have default threshold trials
-        assert calibrator.threshold_trials is not None
-        assert len(calibrator.threshold_trials) == 12
-        # Check they are positive and in valid range
-        trials = calibrator.threshold_trials
-        assert all(0 < t < 1 for t in trials)
+    """Test calibration algorithm correctness (regression calculations)."""
 
     def test_regression_calculation_synthetic(self):
         """Test 'a' parameter calculation with synthetic data."""
@@ -344,7 +321,7 @@ class TestCalibrationIntegration:
         config = {
             "sparse_cfg": {
                 "calibration": {
-                    "target_sparse_ratio": 0.5,
+                    "target_sparse_ratio": {"prefill": 0.5, "decode": 0.5},
                     "samples": 4,
                     "max_seqlen": 1024,
                 },
@@ -384,41 +361,49 @@ class TestCalibrationIntegration:
         """Test CalibrationConfig validation."""
         # Valid config
         config = CalibrationConfig(
-            target_sparse_ratio=0.5,
+            target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
             samples=48,
             max_seqlen=32768,
         )
-        assert config.target_sparse_ratio == 0.5
+        assert config.target_sparse_ratio == {"prefill": 0.5, "decode": 0.5}
         assert config.samples == 48
         assert config.max_seqlen == 32768
 
         # Invalid target_sparse_ratio (> 1.0)
-        with pytest.raises(ValueError, match="target_sparse_ratio must be between"):
-            CalibrationConfig(target_sparse_ratio=1.5, samples=48, max_seqlen=32768)
+        with pytest.raises(ValueError, match="target_sparse_ratio.*must be between 0.0 and 1.0"):
+            CalibrationConfig(
+                target_sparse_ratio={"prefill": 1.5, "decode": 0.5}, samples=48, max_seqlen=32768
+            )
 
         # Invalid target_sparse_ratio (< 0.0)
-        with pytest.raises(ValueError, match="target_sparse_ratio must be between"):
-            CalibrationConfig(target_sparse_ratio=-0.1, samples=48, max_seqlen=32768)
+        with pytest.raises(ValueError, match="target_sparse_ratio.*must be between 0.0 and 1.0"):
+            CalibrationConfig(
+                target_sparse_ratio={"prefill": -0.1, "decode": 0.5}, samples=48, max_seqlen=32768
+            )
 
         # Invalid samples
         with pytest.raises(ValueError, match="samples must be positive"):
-            CalibrationConfig(target_sparse_ratio=0.5, samples=0, max_seqlen=32768)
+            CalibrationConfig(
+                target_sparse_ratio={"prefill": 0.5, "decode": 0.5}, samples=0, max_seqlen=32768
+            )
 
         # Invalid max_seqlen
         with pytest.raises(ValueError, match="max_seqlen must be >= 1024"):
-            CalibrationConfig(target_sparse_ratio=0.5, samples=48, max_seqlen=512)
+            CalibrationConfig(
+                target_sparse_ratio={"prefill": 0.5, "decode": 0.5}, samples=48, max_seqlen=512
+            )
 
     def test_threshold_trials_validation(self):
         """Test threshold_trials validation."""
         # Valid custom threshold_trials
         config = CalibrationConfig(
-            target_sparse_ratio=0.5,
+            target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
             threshold_trials=[1e-5, 1e-4, 1e-3, 1e-2],
         )
         assert config.threshold_trials == [1e-5, 1e-4, 1e-3, 1e-2]
 
         # None (use defaults)
-        config_default = CalibrationConfig(target_sparse_ratio=0.5)
+        config_default = CalibrationConfig(target_sparse_ratio={"prefill": 0.5, "decode": 0.5})
         assert config_default.threshold_trials is None
 
         # Invalid: empty list
@@ -462,7 +447,7 @@ class TestDynamicThresholdCalibratorMethods:
         assert len(modules) > 0
 
         # Create calibrator and set threshold
-        calibrator = DynamicThresholdCalibrator(target_sparse_ratio=0.5)
+        calibrator = DynamicThresholdCalibrator(target_sparse_ratio={"prefill": 0.5, "decode": 0.5})
         calibrator._set_threshold(modules, 0.05)
 
         # Verify threshold was set
@@ -487,7 +472,7 @@ class TestDynamicThresholdCalibratorMethods:
 
         modules = [m for m in sparse_model.modules() if isinstance(m, SparseAttentionModule)]
 
-        calibrator = DynamicThresholdCalibrator(target_sparse_ratio=0.5)
+        calibrator = DynamicThresholdCalibrator(target_sparse_ratio={"prefill": 0.5, "decode": 0.5})
 
         # Enable calibration mode
         calibrator._enable_calibration_mode(modules)
@@ -523,7 +508,7 @@ class TestDynamicThresholdCalibratorMethods:
 
         modules = [m for m in sparse_model.modules() if isinstance(m, SparseAttentionModule)]
 
-        calibrator = DynamicThresholdCalibrator(target_sparse_ratio=0.5)
+        calibrator = DynamicThresholdCalibrator(target_sparse_ratio={"prefill": 0.5, "decode": 0.5})
 
         # Extract stats without running any forward passes
         stats = calibrator._extract_calibration_stats(modules)
@@ -531,16 +516,213 @@ class TestDynamicThresholdCalibratorMethods:
         # Should return empty list
         assert stats == []
 
-    def test_calibrator_with_single_sample(self):
-        """Test calibrator edge case with only one sample."""
+    def test_enable_calibration_mode_with_existing_stats_manager(self):
+        """Test _enable_calibration_mode when stats manager already exists."""
+        model = SimpleAttentionModel(hidden_size=64, num_heads=4)
+        config = {
+            "sparse_cfg": {
+                "*attention*": {
+                    "method": "flash_skip_softmax",
+                    "threshold": 0.1,
+                    "br": 64,
+                    "bc": 64,
+                    "enable": True,
+                    "collect_stats": True,  # Enable stats manager initially
+                }
+            },
+        }
+        sparse_model = sparsify(model, config)
+
+        modules = [m for m in sparse_model.modules() if isinstance(m, SparseAttentionModule)]
+
+        # Stats manager should already exist
+        for module in modules:
+            assert module._stats_manager is not None
+
+        calibrator = DynamicThresholdCalibrator(target_sparse_ratio={"prefill": 0.5, "decode": 0.5})
+
+        # Disable stats manager first
+        for module in modules:
+            module._stats_manager.enabled = False
+
+        # Enable calibration mode - should re-enable existing stats manager
+        calibrator._enable_calibration_mode(modules)
+
+        for module in modules:
+            assert module._stats_manager.enabled is True
+            assert module._stats_manager.calibration_mode is True
+
+    def test_extract_calibration_stats_with_phase_filter(self):
+        """Test _extract_calibration_stats with phase filtering."""
+        model = SimpleAttentionModel(hidden_size=64, num_heads=4)
+        config = {
+            "sparse_cfg": {
+                "*attention*": {
+                    "method": "flash_skip_softmax",
+                    "threshold": 0.1,
+                    "br": 64,
+                    "bc": 64,
+                    "enable": True,
+                }
+            },
+        }
+        sparse_model = sparsify(model, config)
+
+        modules = [m for m in sparse_model.modules() if isinstance(m, SparseAttentionModule)]
+
+        calibrator = DynamicThresholdCalibrator(target_sparse_ratio={"prefill": 0.5, "decode": 0.5})
+
+        # Enable calibration mode and manually add some stats
+        calibrator._enable_calibration_mode(modules)
+
+        for module in modules:
+            # Manually add stats for different phases
+            module._stats_manager.per_sample_stats = [
+                {"sparsity": 0.3, "sample_length": 1024, "phase": "prefill"},
+                {"sparsity": 0.4, "sample_length": 2048, "phase": "prefill"},
+                {"sparsity": 0.5, "sample_length": 100, "phase": "decode"},
+            ]
+
+        # Extract only prefill stats
+        prefill_stats = calibrator._extract_calibration_stats(modules, phase="prefill")
+        assert len(prefill_stats) == 2
+        assert prefill_stats[0]["sample_length"] == 1024
+        assert prefill_stats[1]["sample_length"] == 2048
+
+        # Extract only decode stats
+        decode_stats = calibrator._extract_calibration_stats(modules, phase="decode")
+        assert len(decode_stats) == 1
+        assert decode_stats[0]["sample_length"] == 100
+
+    def test_extract_calibration_stats_module_without_stats_manager(self):
+        """Test _extract_calibration_stats with module missing stats manager."""
+        model = SimpleAttentionModel(hidden_size=64, num_heads=4)
+        config = {
+            "sparse_cfg": {
+                "*attention*": {
+                    "method": "flash_skip_softmax",
+                    "threshold": 0.1,
+                    "br": 64,
+                    "bc": 64,
+                    "enable": True,
+                    "collect_stats": False,  # No stats manager
+                }
+            },
+        }
+        sparse_model = sparsify(model, config)
+
+        modules = [m for m in sparse_model.modules() if isinstance(m, SparseAttentionModule)]
+
+        calibrator = DynamicThresholdCalibrator(target_sparse_ratio={"prefill": 0.5, "decode": 0.5})
+
+        # Stats manager should be None
+        for module in modules:
+            assert module._stats_manager is None
+
+        # Should return empty list
+        stats = calibrator._extract_calibration_stats(modules)
+        assert stats == []
+
+    def test_calibrate_no_sparse_modules(self):
+        """Test calibrate raises error when no sparse modules found."""
+        model = SimpleAttentionModel(hidden_size=64, num_heads=4)
+
+        # Don't apply sparse attention
         calibrator = DynamicThresholdCalibrator(
-            target_sparse_ratio=0.5,
-            threshold_trials=[0.001, 0.01, 0.1],
+            target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
+            threshold_trials=[0.001, 0.01],
         )
 
-        # Even with one sample, regression should work
-        assert calibrator.target_sparse_ratio == 0.5
-        assert len(calibrator.threshold_trials) == 3
+        def dummy_forward_loop(m):
+            pass
+
+        with pytest.raises(ValueError, match="No sparse attention modules found"):
+            calibrator.calibrate(model, dummy_forward_loop, "prefill")
+
+    def test_calibrate_empty_stats(self):
+        """Test calibrate handles empty stats gracefully."""
+        model = SimpleAttentionModel(hidden_size=64, num_heads=4)
+        config = {
+            "sparse_cfg": {
+                "*attention*": {
+                    "method": "flash_skip_softmax",
+                    "threshold": 0.1,
+                    "br": 64,
+                    "bc": 64,
+                    "enable": True,
+                }
+            },
+        }
+        sparse_model = sparsify(model, config)
+
+        calibrator = DynamicThresholdCalibrator(
+            target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
+            threshold_trials=[0.001],  # Only one threshold for speed
+        )
+
+        # Forward loop that doesn't generate any stats
+        def empty_forward_loop(m):
+            pass
+
+        # Should return empty dict
+        result = calibrator.calibrate(sparse_model, empty_forward_loop, "prefill")
+        assert result == {}
+
+    def test_calibrator_default_threshold_trials_values(self):
+        """Test that default threshold trials have expected values."""
+        calibrator = DynamicThresholdCalibrator(
+            target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
+        )
+
+        # Should have 12 default trials
+        assert len(calibrator.threshold_trials) == 12
+
+        # Check specific values
+        expected_trials = [
+            1e-6,
+            5e-6,
+            1e-5,
+            5e-5,
+            1e-4,
+            5e-4,
+            1e-3,
+            5e-3,
+            1e-2,
+            5e-2,
+            1e-1,
+            5e-1,
+        ]
+        assert calibrator.threshold_trials == expected_trials
+
+    def test_calibrator_custom_threshold_trials(self):
+        """Test calibrator with custom threshold trials."""
+        custom_trials = [0.001, 0.005, 0.01, 0.05, 0.1]
+        calibrator = DynamicThresholdCalibrator(
+            target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
+            threshold_trials=custom_trials,
+        )
+
+        assert calibrator.threshold_trials == custom_trials
+
+    def test_calibrator_sparsity_results_initialization(self):
+        """Test that sparsity_results is initialized as empty list."""
+        calibrator = DynamicThresholdCalibrator(
+            target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
+        )
+
+        assert calibrator.sparsity_results == []
+
+    def test_sample_sparsity_dataclass(self):
+        """Test SampleSparsity dataclass."""
+        sample = DynamicThresholdCalibrator.SampleSparsity(
+            length=1024,
+            threshold_sparsities={0.001: 0.3, 0.01: 0.5, 0.1: 0.7},
+        )
+
+        assert sample.length == 1024
+        assert sample.threshold_sparsities[0.001] == 0.3
+        assert sample.threshold_sparsities[0.01] == 0.5
+        assert sample.threshold_sparsities[0.1] == 0.7
 
 
 class TestCalibrateFunction:
@@ -574,7 +756,7 @@ class TestCalibrateFunction:
         config = {
             "sparse_cfg": {
                 "calibration": {
-                    "target_sparse_ratio": 0.3,
+                    "target_sparse_ratio": {"prefill": 0.3, "decode": 0.3},
                     "samples": 12,
                     "max_seqlen": 2048,
                 },
@@ -587,7 +769,7 @@ class TestCalibrateFunction:
         calib_config = _extract_calibration_config(config)
 
         assert calib_config is not None
-        assert calib_config.target_sparse_ratio == 0.3
+        assert calib_config.target_sparse_ratio == {"prefill": 0.3, "decode": 0.3}
         assert calib_config.samples == 12
         assert calib_config.max_seqlen == 2048
 

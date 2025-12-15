@@ -60,28 +60,6 @@ class TestSparseAttentionReplacement:
         # Verify replacement occurred
         assert sparse_attention_count > 0
 
-    def test_enable_disable_toggle(self):
-        """Test enabling and disabling sparse attention."""
-        model = SimpleAttentionModel()
-        model = sparse_attn.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
-
-        # Check initially enabled
-        for module in model.modules():
-            if isinstance(module, SparseAttentionModule):
-                assert module.is_enabled
-
-        # Disable all sparse attention modules
-        disable_sparse_attention(model, "*")
-        for module in model.modules():
-            if isinstance(module, SparseAttentionModule):
-                assert not module.is_enabled
-
-        # Re-enable all sparse attention modules
-        enable_sparse_attention(model, "*")
-        for module in model.modules():
-            if isinstance(module, SparseAttentionModule):
-                assert module.is_enabled
-
     def test_pattern_based_replacement(self):
         """Test pattern-based selective replacement."""
         model = SimpleTransformerEncoderLayer()
@@ -151,10 +129,6 @@ class TestConversionEdgeCases:
 
     def test_disable_enable_functions(self):
         """Test disable/enable utility functions."""
-        from modelopt.torch.sparsity.attention_sparsity.conversion import (
-            disable_sparse_attention,
-            enable_sparse_attention,
-        )
 
         model = SimpleAttentionModel()
         model = sparse_attn.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
@@ -181,8 +155,8 @@ class TestConversionEdgeCases:
 
         # Capture output
         captured = capsys.readouterr()
-        assert "Total sparse attention modules:" in captured.out
-        assert "Enabled:" in captured.out
+        assert "Sparse attention:" in captured.out
+        assert "modules enabled" in captured.out
 
     def test_restore_sparse_attention_model(self):
         """Test save/restore via modelopt_state."""
