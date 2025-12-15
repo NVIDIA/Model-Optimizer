@@ -59,7 +59,6 @@ class DynamicThresholdCalibrator:
             threshold_trials: List of thresholds to try during calibration
         """
         self.target_sparse_ratio = target_sparse_ratio
-        self._target_sparse_ratio_dict = self.target_sparse_ratio
 
         # Default threshold trials if not provided
         self.threshold_trials = threshold_trials or [
@@ -96,8 +95,9 @@ class DynamicThresholdCalibrator:
         Returns:
             Dict with calibration results including scale_factor, or empty dict if failed
         """
-        assert self._target_sparse_ratio_dict is not None, "target_sparse_ratio must be provided"
-        target_sparsity = self._target_sparse_ratio_dict[phase]
+        if self.target_sparse_ratio is None:
+            raise RuntimeError("target_sparse_ratio must be provided")
+        target_sparsity = self.target_sparse_ratio[phase]
 
         # Extract attention modules
         attention_modules = [m for m in model.modules() if isinstance(m, SparseAttentionModule)]

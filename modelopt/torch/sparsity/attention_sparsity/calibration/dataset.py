@@ -435,11 +435,12 @@ class RulerDatasetBuilder:
 
         # Create a simple QA pair
         answer = self._generate_random_phrase()
-        question = f"What is the special code mentioned in document {random.randint(1, num_docs)}?"
+        answer_doc_idx = random.randint(0, num_docs - 1)
+        question = f"What is the special code mentioned in document {answer_doc_idx + 1}?"
 
         for i in range(num_docs):
             doc_text = self._generate_document_text(200)  # Base document
-            if i == 2:  # Insert answer in one document
+            if i == answer_doc_idx:  # Insert answer in the correct document
                 doc_text += f" The special code is {answer}. "
             documents.append(f"Document {i + 1}:\n{doc_text}\n")
 

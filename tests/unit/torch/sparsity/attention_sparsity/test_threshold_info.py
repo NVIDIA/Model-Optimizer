@@ -47,7 +47,7 @@ class TestFlashSkipSoftmaxThresholdInfo:
         assert info["value"] == 0.001
 
     def test_phased_threshold(self):
-        """Test threshold info for phase-specific thresholds."""
+        """Test threshold info for phase-specific static thresholds."""
         method = FlashSkipSoftmax(
             method_config={
                 "threshold": {"prefill": 0.001, "decode": 0.0001},
@@ -60,11 +60,11 @@ class TestFlashSkipSoftmaxThresholdInfo:
 
         info = method.get_threshold_info()
 
-        assert info["type"] == "static_phased"
-        assert "thresholds" in info
-        assert info["thresholds"]["prefill"] == 0.001
-        assert info["thresholds"]["decode"] == 0.0001
-        assert "current" in info
+        # Static phased thresholds are reported as type "static" with dict value
+        assert info["type"] == "static"
+        assert isinstance(info["value"], dict)
+        assert info["value"]["prefill"] == 0.001
+        assert info["value"]["decode"] == 0.0001
 
     def test_dynamic_calibrated_threshold(self):
         """Test threshold info for calibrated dynamic threshold."""
@@ -78,17 +78,21 @@ class TestFlashSkipSoftmaxThresholdInfo:
             }
         )
 
-        # Simulate calibration setting scale factor
-        method.threshold_scale_factor = 437.5
+        # Simulate calibration setting per-phase scale factors
+        method.threshold_scale_factor = {"prefill": 437.5, "decode": 500.0}
 
         info = method.get_threshold_info()
 
         assert info["type"] == "dynamic"
-        assert info["scale_factor"] == 437.5
-        assert info["formula"] == "λ / length"
-        assert "example_lengths" in info
-        assert abs(info["example_lengths"][1024] - 437.5 / 1024) < 1e-6
-        assert abs(info["example_lengths"][2048] - 437.5 / 2048) < 1e-6
+        assert info["scale_factors"] == {"prefill": 437.5, "decode": 500.0}
+        assert info["formula"] == "λ[phase] / length"
+        assert "phases" in info
+        assert "prefill" in info["phases"]
+        assert "decode" in info["phases"]
+        # Check example thresholds for prefill
+        prefill_examples = info["phases"]["prefill"]["example_thresholds"]
+        assert abs(prefill_examples[1024] - 437.5 / 1024) < 1e-6
+        assert abs(prefill_examples[2048] - 437.5 / 2048) < 1e-6
 
     def test_threshold_info_structure(self):
         """Test that threshold info has expected structure."""
@@ -163,17 +167,22 @@ class TestSparseAttentionModuleThresholdInfo:
 
         sparse_model = sparsify(model, config)
 
-        # Find module and set calibrated threshold
+        # Find module and set calibrated threshold (per-phase dict format)
+        module = None
         for module in sparse_model.modules():
             if isinstance(module, SparseAttentionModule):
-                module._sparse_method_instance.threshold_scale_factor = 500.0
+                module._sparse_method_instance.threshold_scale_factor = {
+                    "prefill": 500.0,
+                    "decode": 500.0,
+                }
                 break
 
+        assert module is not None, "No SparseAttentionModule found"
         # Get threshold info
         info = module.get_threshold_info()
 
         assert info["type"] == "dynamic"
-        assert info["scale_factor"] == 500.0
+        assert info["scale_factors"] == {"prefill": 500.0, "decode": 500.0}
 
     def test_module_without_method_instance(self):
         """Test get_threshold_info when sparse method instance doesn't exist."""
@@ -233,7 +242,7 @@ class TestPrintSparseAttentionSummaryIntegration:
         print_sparse_attention_summary(sparse_model)
 
         captured = capsys.readouterr()
-        assert "Static (1.00e-03)" in captured.out
+        assert "threshold=1.00e-03" in captured.out
         assert "flash_skip_softmax" in captured.out
 
     def test_summary_displays_dynamic_threshold(self, capsys):
@@ -258,13 +267,19 @@ class TestPrintSparseAttentionSummaryIntegration:
 
         sparse_model = sparsify(model, config)
 
-        # Set calibrated threshold
+        # Set calibrated threshold (per-phase dict format)
         for module in sparse_model.modules():
             if isinstance(module, SparseAttentionModule):
-                module._sparse_method_instance.threshold_scale_factor = 437.5
+                module._sparse_method_instance.threshold_scale_factor = {
+                    "prefill": 437.5,
+                    "decode": 500.0,
+                }
 
         print_sparse_attention_summary(sparse_model)
 
         captured = capsys.readouterr()
-        assert "Dynamic (λ=437.500000)" in captured.out
+        # Output format: λ={prefill=437.50, decode=500.00}
+        assert "λ=" in captured.out
+        assert "prefill=" in captured.out
+        assert "decode=" in captured.out
         assert "flash_skip_softmax" in captured.out
