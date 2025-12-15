@@ -48,20 +48,18 @@ class DynamicThresholdCalibrator:
 
     def __init__(
         self,
-        target_sparse_ratio: float = 0.5,
+        target_sparse_ratio: dict[str, float] | None = None,
         threshold_trials: list[float] | None = None,
     ):
         """Initialize dynamic threshold calibrator.
 
         Args:
-            target_sparse_ratio: Target sparsity ratio (0.0 to 1.0)
+            target_sparse_ratio: Target sparsity ratio dict with 'prefill' and 'decode' keys.
+                Each value should be in range (0.0 to 1.0). Set to 0.0 to skip that phase.
             threshold_trials: List of thresholds to try during calibration
-
-        Note:
-            Calibration only supports prefill phase (seq_len > 1).
-            Decode phase uses the same calibrated threshold.
         """
         self.target_sparse_ratio = target_sparse_ratio
+        self._target_sparse_ratio_dict = self.target_sparse_ratio
 
         # Default threshold trials if not provided
         self.threshold_trials = threshold_trials or [
@@ -82,7 +80,7 @@ class DynamicThresholdCalibrator:
         # Statistics tracking
         self.sparsity_results = []
 
-    def calibrate(self, model: nn.Module, forward_loop: Callable) -> dict[str, Any]:
+    def calibrate(self, model: nn.Module, forward_loop: Callable, phase: str) -> dict[str, Any]:
         """Find optimal 'a' parameter for length-based threshold.
 
         Algorithm:
@@ -93,27 +91,38 @@ class DynamicThresholdCalibrator:
         Args:
             model: The model with sparse attention modules
             forward_loop: Callable that takes model and forwards calibration data
+            phase: Phase to calibrate ('prefill' or 'decode')
+
+        Returns:
+            Dict with calibration results including scale_factor, or empty dict if failed
         """
+        assert self._target_sparse_ratio_dict is not None, "target_sparse_ratio must be provided"
+        target_sparsity = self._target_sparse_ratio_dict[phase]
+
         # Extract attention modules
         attention_modules = [m for m in model.modules() if isinstance(m, SparseAttentionModule)]
 
         if not attention_modules:
             raise ValueError("No sparse attention modules found for calibration")
 
-        print("Starting dynamic threshold calibration")
-        print(f"Target sparsity: {self.target_sparse_ratio}")
+        print(f"Starting dynamic threshold calibration ({phase} phase)")
+        print(f"Target sparsity: {target_sparsity}")
         print(f"Threshold trials: {len(self.threshold_trials)}")
 
         # Stage 1: Collect sparsity for all sample-threshold pairs
-        print("\nStage 1: Collecting sparsity data...")
+        print(f"\nStage 1: Collecting {phase} sparsity data...")
 
         # Run first threshold to discover samples and initialize results
         self._set_threshold(attention_modules, self.threshold_trials[0])
         self._enable_calibration_mode(attention_modules)
         with torch.no_grad():
             forward_loop(model)
-        per_sample_stats = self._extract_calibration_stats(attention_modules)
+        per_sample_stats = self._extract_calibration_stats(attention_modules, phase=phase)
         self._disable_calibration_mode(attention_modules)
+
+        if not per_sample_stats:
+            warnings.warn(f"No {phase} phase statistics collected. Check forward loop.")
+            return {}
 
         # Initialize sparsity_results with sample info
         self.sparsity_results = [
@@ -125,29 +134,28 @@ class DynamicThresholdCalibrator:
         ]
 
         # Collect remaining thresholds
-        for threshold in tqdm(self.threshold_trials[1:], desc="Testing thresholds"):
+        for threshold in tqdm(self.threshold_trials[1:], desc=f"Testing thresholds ({phase})"):
             self._set_threshold(attention_modules, threshold)
             self._enable_calibration_mode(attention_modules)
             with torch.no_grad():
                 forward_loop(model)
-            per_sample_stats = self._extract_calibration_stats(attention_modules)
+            per_sample_stats = self._extract_calibration_stats(attention_modules, phase=phase)
             self._disable_calibration_mode(attention_modules)
 
             for sample_idx, sample_stat in enumerate(per_sample_stats):
-                self.sparsity_results[sample_idx].threshold_sparsities[threshold] = sample_stat[
-                    "sparsity"
-                ]
+                if sample_idx < len(self.sparsity_results):
+                    self.sparsity_results[sample_idx].threshold_sparsities[threshold] = sample_stat[
+                        "sparsity"
+                    ]
 
         if not self.sparsity_results:
-            warnings.warn("No valid sparsity measurements collected during calibration")
+            warnings.warn(f"No valid {phase} sparsity measurements collected during calibration")
             return {}
 
         print(f"Collected statistics for {len(self.sparsity_results)} samples")
 
         # Stage 2: Find optimal threshold for each sample and compute 'a'
-        print(
-            f"\nStage 2: Finding 'a' parameter for target sparsity {self.target_sparse_ratio:.2f}"
-        )
+        print(f"\nStage 2: Finding 'a' parameter for target sparsity {target_sparsity:.2f}")
 
         # Find optimal threshold for each sample
         optimal_pairs = []
@@ -155,7 +163,7 @@ class DynamicThresholdCalibrator:
             # Find threshold closest to target sparsity
             best_threshold, achieved_sparsity = min(
                 sample_result.threshold_sparsities.items(),
-                key=lambda item: abs(item[1] - self.target_sparse_ratio),
+                key=lambda item: abs(item[1] - target_sparsity),
             )
 
             optimal_pairs.append(
@@ -163,13 +171,13 @@ class DynamicThresholdCalibrator:
                     "length": sample_result.length,
                     "optimal_threshold": best_threshold,
                     "achieved_sparsity": achieved_sparsity,
-                    "target_sparsity": self.target_sparse_ratio,
+                    "target_sparsity": target_sparsity,
                 }
             )
 
         if not optimal_pairs:
             warnings.warn(
-                f"No optimal threshold pairs found for target sparsity {self.target_sparse_ratio}. "
+                f"No optimal threshold pairs found for {phase} target sparsity {target_sparsity}. "
                 f"Collected {len(self.sparsity_results)} samples but none achieved target sparsity."
             )
             return {}
@@ -198,39 +206,27 @@ class DynamicThresholdCalibrator:
         # Calculate average achieved sparsity
         avg_achieved_sparsity = np.mean([p["achieved_sparsity"] for p in optimal_pairs])
 
-        print("\nCalibration Results:")
+        print(f"\n{phase.capitalize()} Calibration Results:")
         print(f"  Threshold scale factor: {scale_factor:.6f} (std: {scale_factor_std:.6f})")
         print(f"  R-squared: {r_squared:.4f}")
         print(
-            f"  Average achieved sparsity: {avg_achieved_sparsity:.2%} (target: {self.target_sparse_ratio:.2%})"
+            f"  Average achieved sparsity: {avg_achieved_sparsity:.2%} (target: {target_sparsity:.2%})"
         )
         print(f"\nExample thresholds with λ = {scale_factor:.6f} / length:")
         for length in [1024, 2048, 4096, 8192, 16384]:
             print(f"  Length {length:5d}: threshold = {scale_factor / length:.2e}")
 
-        # Apply the calibrated scale factor to modules
-        self._apply_length_based_calibration(attention_modules, scale_factor)
-
         return {
+            "phase": phase,
             "scale_factor": scale_factor,
             "scale_factor_std": scale_factor_std,
             "r_squared": r_squared,
             "num_samples": len(optimal_pairs),
-            "target_sparsity": self.target_sparse_ratio,
+            "target_sparsity": target_sparsity,
             "avg_achieved_sparsity": avg_achieved_sparsity,
             "optimal_pairs": optimal_pairs,
             "calibration_type": "length_based_dynamic",
         }
-
-    def _apply_length_based_calibration(self, modules: list[nn.Module], scale_factor: float):
-        """Apply calibrated threshold scale factor to modules.
-
-        Args:
-            modules: List of attention modules
-            scale_factor: Calibrated scale factor for λ = scale_factor / length
-        """
-        for module in modules:
-            module._sparse_method_instance.threshold_scale_factor = scale_factor
 
     def _enable_calibration_mode(self, modules: list[nn.Module]):
         """Enable calibration mode on sparse attention modules."""
@@ -256,11 +252,15 @@ class DynamicThresholdCalibrator:
 
             module._sparse_method_instance.set_calibration_mode(False)
 
-    def _extract_calibration_stats(self, modules: list[nn.Module]) -> list[dict]:
+    def _extract_calibration_stats(
+        self, modules: list[nn.Module], phase: str | None = None
+    ) -> list[dict]:
         """Extract per-sample calibration statistics from modules.
 
         Args:
             modules: List of attention modules
+            phase: Optional phase to filter by ('prefill' or 'decode').
+                   If None, returns all stats.
 
         Returns:
             List of per-sample statistics across all modules
@@ -273,7 +273,7 @@ class DynamicThresholdCalibrator:
             if not hasattr(module, "_stats_manager") or module._stats_manager is None:
                 continue
 
-            manager_stats = module._stats_manager.get_calibration_stats()
+            manager_stats = module._stats_manager.get_calibration_stats(phase)
             if manager_stats:
                 all_per_sample_stats.append(manager_stats)
 

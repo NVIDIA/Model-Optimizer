@@ -208,6 +208,11 @@ class SparseAttentionModule(DynamicModule):
             # Store stats for collection
             self._last_stats = stats
 
+            # Only apply sparsity mask after calibration (not during calibration)
+            # During calibration, we measure sparsity without modifying the output
+            if not self._sparse_method_instance._calibration_mode:
+                input = self._sparse_method_instance.apply_sparsity(input, sparse_mask)
+
             return original_softmax(input, dim, *args, **kwargs)
 
         return sparse_softmax
