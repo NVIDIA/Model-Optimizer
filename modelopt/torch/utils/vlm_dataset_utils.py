@@ -19,7 +19,7 @@ from typing import Any
 
 from torch.utils.data import DataLoader
 
-from .image_processor import MllamaImageProcessor
+from .image_processor import BaseImageProcessor
 
 # Use dict to store the config for each dataset.
 # If we want to export more options to user like target languages, we need more standardized approach like dataclass.
@@ -75,7 +75,7 @@ def get_supported_vlm_datasets() -> list[str]:
 
 def get_vlm_dataset_dataloader(
     dataset_name: str = "scienceqa",
-    processor: MllamaImageProcessor = None,
+    processor: BaseImageProcessor = None,
     batch_size: int = 1,
     num_samples: int = 512,
 ) -> DataLoader:

@@ -25,6 +25,9 @@ class BaseImageProcessor:
     def __init__(self, tokenizer, device="auto"):
         """Constructor."""
         self.tokenizer = tokenizer
+        # Handle invalid device values that can come from multi-GPU models with device_map="auto"
+        if device is None or str(device) in ("auto", "meta", "cpu"):
+            device = "cuda"
         self.device = device
 
     def __call__(self, **kwargs):
@@ -110,3 +113,116 @@ class MllamaImageProcessor(BaseImageProcessor):
             ).to(self.device)
 
         return batch[0]
+
+
+class Qwen3OmniImageProcessor(BaseImageProcessor):
+    """Image processor for Qwen3-Omni multimodal model."""
+
+    def __init__(self, tokenizer, device="auto", use_audio_in_video=False):
+        """Constructor."""
+        super().__init__(tokenizer, device)
+        self.use_audio_in_video = use_audio_in_video
+        # Try to import qwen_omni_utils for multimodal processing
+        try:
+            from qwen_omni_utils import process_mm_info
+
+            self.process_mm_info = process_mm_info
+        except ImportError:
+            raise ImportError(
+                "qwen_omni_utils is required for Qwen3OmniImageProcessor. "
+                "Please install it from https://github.com/QwenLM/Qwen3-Omni"
+            )
+
+    def preprocess_function(self, examples):
+        """Preprocess function for Qwen3-Omni."""
+        question = examples.get("question", "Describe this image.")
+
+        # Build conversation in Qwen format
+        content = []
+        if examples.get("image") is not None:
+            content.append({"type": "image", "image": examples["image"]})
+        if examples.get("audio") is not None:
+            content.append({"type": "audio", "audio": examples["audio"]})
+        if examples.get("video") is not None:
+            content.append({"type": "video", "video": examples["video"]})
+        content.append({"type": "text", "text": question})
+
+        conversation = [{"role": "user", "content": content}]
+
+        # Apply chat template (tokenize=False to get string)
+        text = self.tokenizer.apply_chat_template(
+            conversation, add_generation_prompt=True, tokenize=False
+        )
+
+        # Extract multimodal info using qwen_omni_utils
+        audios, images, videos = self.process_mm_info(
+            conversation, use_audio_in_video=self.use_audio_in_video
+        )
+
+        # Process inputs with the processor
+        values = self.tokenizer(
+            text=text,
+            audio=audios,
+            images=images,
+            videos=videos,
+            return_tensors="pt",
+            padding=True,
+            use_audio_in_video=self.use_audio_in_video,
+        )
+
+        # Define all possible keys to ensure consistent schema for Arrow serialization
+        all_keys = [
+            "input_ids",
+            "attention_mask",
+            "pixel_values",
+            "image_grid_thw",
+            "audio_features",
+            "audio_feature_lens",
+            "video_grid_thw",
+        ]
+
+        # Convert tensors to lists for Arrow serialization compatibility
+        # Tensor conversion back happens in collate_function
+        result = dict.fromkeys(all_keys)  # Initialize all keys to None
+        for key, val in values.items():
+            if val is not None and hasattr(val, "tolist"):
+                result[key] = val.tolist()
+            elif val is not None:
+                result[key] = val
+
+        return result
+
+    def collate_function(self, batch):
+        """Collate function to process inputs during data loading."""
+        result = {}
+
+        # Take first item from batch (batch_size handling)
+        first = batch[0]
+
+        # Convert lists to tensors and move to device
+        if "input_ids" in first and first["input_ids"] is not None:
+            result["input_ids"] = torch.LongTensor(first["input_ids"]).to(self.device)
+        if "attention_mask" in first and first["attention_mask"] is not None:
+            result["attention_mask"] = torch.LongTensor(first["attention_mask"]).to(self.device)
+
+        # Handle pixel values for images
+        if first.get("pixel_values") is not None:
+            result["pixel_values"] = torch.tensor(first["pixel_values"]).to(self.device)
+
+        # Handle image grid thw (tile height width info)
+        if first.get("image_grid_thw") is not None:
+            result["image_grid_thw"] = torch.LongTensor(first["image_grid_thw"]).to(self.device)
+
+        # Handle audio features if present
+        if first.get("audio_feature_lens") is not None:
+            result["audio_feature_lens"] = torch.LongTensor(first["audio_feature_lens"]).to(
+                self.device
+            )
+        if first.get("audio_features") is not None:
+            result["audio_features"] = torch.tensor(first["audio_features"]).to(self.device)
+
+        # Handle video features if present
+        if first.get("video_grid_thw") is not None:
+            result["video_grid_thw"] = torch.LongTensor(first["video_grid_thw"]).to(self.device)
+
+        return result

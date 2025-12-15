@@ -33,7 +33,7 @@ except ImportError:
     snapshot_download = None
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.utils.image_processor import MllamaImageProcessor
+from modelopt.torch.utils.image_processor import MllamaImageProcessor, Qwen3OmniImageProcessor
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
@@ -240,6 +240,19 @@ def get_processor(
         )
 
         return MllamaImageProcessor(processor, device)
+    elif model_type == "qwen3omni":
+        processor = AutoProcessor.from_pretrained(
+            ckpt_path,
+            padding_side="left",
+            **model_kwargs,
+        )
+        if processor.tokenizer.pad_token is None:
+            processor.tokenizer.pad_token = processor.tokenizer.eos_token
+        assert processor.tokenizer.pad_token is not None, (
+            f"Pad token for {ckpt_path} cannot be set!"
+        )
+
+        return Qwen3OmniImageProcessor(processor, device)
 
 
 def get_dtype(dtype):
