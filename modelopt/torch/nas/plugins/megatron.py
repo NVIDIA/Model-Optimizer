@@ -19,7 +19,7 @@ import types
 from abc import ABC
 from collections.abc import Callable, Sequence
 from typing import Any
-
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -734,26 +734,45 @@ class _DynamicSequentialMLP(DynamicModule):
         output_local_list = torch.split(output_local, tokens_per_expert_list) # list of len 128, [(312 x h_dim), (45 x h_dim), .., (8644 x h_dim)]
         probs_split = torch.split(input[2], tokens_per_expert_list)
 
-        # Compute L2 norm for each expert's output
-        for expert_idx, expert_output in enumerate(output_local_list):
-            # Guard: if expert_output is empty tensor, add zero score
-            if expert_output.numel() == 0:
-                l2_norm = 0.0
-            else:
-                # Compute L2 norm of expert output (router_prob * expert_output)
-                l2_norm = torch.linalg.vector_norm(expert_output, ord=2, dim=-1) * probs_split[expert_idx]
-                self._activations["expert_l2_scores"][expert_idx].extend(l2_norm.tolist())
+        moe_sorting_metric = os.environ.get("MOE_SORTING_METRIC", "REAP").upper()
+        if moe_sorting_metric == "REAP":
+            # Compute L2 norm for each expert's output
+            for expert_idx, expert_output in enumerate(output_local_list):
+                # Guard: if expert_output is empty tensor, add zero score
+                if expert_output.numel() == 0:
+                    l2_norm = 0.0
+                else:
+                    # Compute L2 norm of expert output (router_prob * expert_output)
+                    l2_norm = torch.linalg.vector_norm(expert_output, ord=2, dim=-1) * probs_split[expert_idx]
+                    self._activations["expert_l2_scores"][expert_idx].extend(l2_norm.tolist())
+        
+        elif moe_sorting_metric == "VOTING":
+            for expert_idx, expert_output in enumerate(output_local_list):
+                self._activations["expert_sample_counts"][expert_idx] += tokens_per_expert_list[expert_idx]
+
+        else:
+            raise ValueError(f"Invalid MOE sorting metric: {moe_sorting_metric}")
 
 
     def _estimate_expert_importance(self) -> TracedHp.Importance:
         """Estimate expert importance based on accumulated L2 norms."""
-        avg_l2_scores = []
-        for i in range(len(self._activations["expert_l2_scores"])):
-            if self._activations["expert_l2_scores"][i] == []:
-                avg_l2_scores.append(torch.tensor(0.0))
-            else:
-                avg_l2_scores.append(torch.mean(torch.tensor(self._activations["expert_l2_scores"][i])))
-        avg_l2_scores = torch.tensor(avg_l2_scores)
+        
+        moe_sorting_metric = os.environ.get("MOE_SORTING_METRIC", "").upper()
+        if moe_sorting_metric == "REAP":
+            avg_l2_scores = []
+            for i in range(len(self._activations["expert_l2_scores"])):
+                if self._activations["expert_l2_scores"][i] == []:
+                    avg_l2_scores.append(torch.tensor(0.0))
+                else:
+                    avg_l2_scores.append(torch.mean(torch.tensor(self._activations["expert_l2_scores"][i])))
+            avg_l2_scores = torch.tensor(avg_l2_scores)
+
+        elif moe_sorting_metric == "VOTING":
+            avg_l2_scores = torch.tensor(self._activations["expert_sample_counts"]).float()
+        
+        else:
+            raise ValueError(f"Invalid MOE sorting metric: {moe_sorting_metric}")
+
         return avg_l2_scores
 
     def export(self) -> torch.nn.Module:
