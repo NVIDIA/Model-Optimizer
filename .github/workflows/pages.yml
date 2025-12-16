@@ -33,7 +33,7 @@ jobs:
         run: pip install tox && tox -e build-docs
       - name: Upload docs artifact
         if: github.event_name == 'push'
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v4
         with:
           path: docs/build/html
 
