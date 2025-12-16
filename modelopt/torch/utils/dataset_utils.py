@@ -74,7 +74,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
     },
     "cnn_dailymail": {
         "config": {"path": "abisee/cnn_dailymail", "name": "3.0.0", "split": ["train"]},
-        "preprocess": lambda sample: sample["article"],
+        "preprocess": lambda sample: "/no_think " + sample["article"],
     },
     "pile": {
         "config": {"path": "monology/pile-uncopyrighted", "name": "v1.0", "split": ["train"]},
