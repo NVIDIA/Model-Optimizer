@@ -22,6 +22,8 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
+from torch import Tensor
+from torch.nn.functional import linear
 
 try:
     from torch.distributed.tensor import Shard
@@ -501,6 +503,22 @@ class _QuantDbrxFFN(_QuantSparseMoe):
         self.router.moe_top_k = value
 
 
+class _QuantCompressedLinear(QuantModule):
+    def _setup(self):
+        self.input_quantizer = TensorQuantizer()
+        self.weight_quantizer = TensorQuantizer()
+
+    def forward(self, input: Tensor) -> Tensor:
+        from compressed_tensors.quantization import QuantizationStatus
+
+        if self.quantization_status == QuantizationStatus.COMPRESSED:
+            weight_data = self.compressor.decompress_module(self)
+        else:
+            weight_data = self.weight
+
+        return linear(self.input_quantizer(input), self.weight_quantizer(weight_data), self.bias)
+
+
 try:
     from transformers.models.llama4.modeling_llama4 import Llama4TextExperts, Llama4TextMoe
 
@@ -572,6 +590,16 @@ try:
     if Qwen3NextSparseMoeBlock not in QuantModuleRegistry:
         QuantModuleRegistry.register({Qwen3NextSparseMoeBlock: "hf.Qwen3NextSparseMoeBlock"})(
             _QuantSparseMoe
+        )
+except ImportError:
+    pass
+
+try:
+    from compressed_tensors.linear.compressed_linear import CompressedLinear
+
+    if CompressedLinear not in QuantModuleRegistry:
+        QuantModuleRegistry.register({CompressedLinear: "hf.CompressedLinear"})(
+            _QuantCompressedLinear
         )
 except ImportError:
     pass
