@@ -95,8 +95,6 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "nvfp4_mlp_only": mtq.NVFP4_MLP_ONLY_CFG,
     "qwen3_nvfp4_qkv_disabled": mtq.NVFP4_DEFAULT_CFG,
     "qwen3_nvfp4_qkvo_disabled": mtq.NVFP4_DEFAULT_CFG,
-    "qwen3_nvfp4_first_n_disabled": mtq.NVFP4_DEFAULT_CFG,
-    "qwen3_nvfp4_last_n_disabled": mtq.NVFP4_DEFAULT_CFG,
     "qwen3_first_and_last_n_disabled": mtq.NVFP4_DEFAULT_CFG,
 }
 
@@ -317,17 +315,6 @@ def main(args):
                 quant_cfg["quant_cfg"][f"*thinker.model.layers.*.self_attn.{proj}*"] = {
                     "enable": False
                 }
-        elif args.qformat == "qwen3_nvfp4_first_n_disabled":
-            # Disable first N layers (e.g., layers 0-7)
-            n_layers_to_disable = 8
-            for i in range(n_layers_to_disable):
-                quant_cfg["quant_cfg"][f"*thinker.model.layers.{i}.*"] = {"enable": False}
-        elif args.qformat == "qwen3_nvfp4_last_n_disabled":
-            # Disable last N layers (e.g., layers 40-47 for 48 total layers)
-            total_layers = 48
-            n_layers_to_disable = 8
-            for i in range(total_layers - n_layers_to_disable, total_layers):
-                quant_cfg["quant_cfg"][f"*thinker.model.layers.{i}.*"] = {"enable": False}
         elif args.qformat == "qwen3_first_and_last_n_disabled":
             # Disable both first N and last N layers
             total_layers = 48
