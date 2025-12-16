@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
@@ -103,7 +102,7 @@ def _test_compress_multiprocess_job(project_root_path: Path, tmp_path: Path, ran
 
 def _assert_score_pruning_activations(puzzle_dir: Path):
     """Assertions for the score_pruning_activations step 1."""
-    rank = int(os.environ["RANK"])
+    rank = dist.rank()
     rank_filepath = f"pruning/pruning_scores/ffn_iterative/100samples_diverse_mini/rank_{rank}.pth"
     assert (puzzle_dir / rank_filepath).is_file()
 
