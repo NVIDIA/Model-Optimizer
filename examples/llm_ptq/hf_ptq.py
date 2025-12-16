@@ -72,7 +72,10 @@ from modelopt.torch.utils.video_dataset_utils import (
     get_supported_video_datasets,
     get_video_dataset_dataloader,
 )
-from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
+from modelopt.torch.utils.vlm_dataset_utils import (
+    get_supported_vlm_datasets,
+    get_vlm_dataset_dataloader,
+)
 
 RAND_SEED = 1234
 
@@ -90,6 +93,11 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "w4a8_nvfp4_fp8": mtq.W4A8_NVFP4_FP8_CFG,
     "w4a8_mxfp4_fp8": mtq.W4A8_MXFP4_FP8_CFG,
     "nvfp4_mlp_only": mtq.NVFP4_MLP_ONLY_CFG,
+    "qwen3_nvfp4_qkv_disabled": mtq.NVFP4_DEFAULT_CFG,
+    "qwen3_nvfp4_qkvo_disabled": mtq.NVFP4_DEFAULT_CFG,
+    "qwen3_nvfp4_first_n_disabled": mtq.NVFP4_DEFAULT_CFG,
+    "qwen3_nvfp4_last_n_disabled": mtq.NVFP4_DEFAULT_CFG,
+    "qwen3_first_and_last_n_disabled": mtq.NVFP4_DEFAULT_CFG,
 }
 
 KV_QUANT_CFG_CHOICES = {
@@ -295,6 +303,40 @@ def main(args):
             f"Quantization format is not supported for low memory mode. Supported formats: {QUANT_CFG_CHOICES.keys()}"
         )
         quant_cfg = QUANT_CFG_CHOICES[args.qformat]
+
+        # Qwen3 specific quantizer disabling patterns (thinker.model.layers only)
+        if args.qformat == "qwen3_nvfp4_qkv_disabled":
+            # Disable q_proj, k_proj, v_proj quantizers
+            for proj in ["q_proj", "k_proj", "v_proj"]:
+                quant_cfg["quant_cfg"][f"*thinker.model.layers.*.self_attn.{proj}*"] = {
+                    "enable": False
+                }
+        elif args.qformat == "qwen3_nvfp4_qkvo_disabled":
+            # Disable q_proj, k_proj, v_proj, o_proj quantizers
+            for proj in ["q_proj", "k_proj", "v_proj", "o_proj"]:
+                quant_cfg["quant_cfg"][f"*thinker.model.layers.*.self_attn.{proj}*"] = {
+                    "enable": False
+                }
+        elif args.qformat == "qwen3_nvfp4_first_n_disabled":
+            # Disable first N layers (e.g., layers 0-7)
+            n_layers_to_disable = 8
+            for i in range(n_layers_to_disable):
+                quant_cfg["quant_cfg"][f"*thinker.model.layers.{i}.*"] = {"enable": False}
+        elif args.qformat == "qwen3_nvfp4_last_n_disabled":
+            # Disable last N layers (e.g., layers 40-47 for 48 total layers)
+            total_layers = 48
+            n_layers_to_disable = 8
+            for i in range(total_layers - n_layers_to_disable, total_layers):
+                quant_cfg["quant_cfg"][f"*thinker.model.layers.{i}.*"] = {"enable": False}
+        elif args.qformat == "qwen3_first_and_last_n_disabled":
+            # Disable both first N and last N layers
+            total_layers = 48
+            n_layers_to_disable = 4
+            for i in range(n_layers_to_disable):
+                quant_cfg["quant_cfg"][f"*thinker.model.layers.{i}.*"] = {"enable": False}
+            for i in range(total_layers - n_layers_to_disable, total_layers):
+                quant_cfg["quant_cfg"][f"*thinker.model.layers.{i}.*"] = {"enable": False}
+
         if args.kv_cache_qformat != "none":
             quant_cfg = mtq.utils.update_quant_cfg_with_kv_cache_quant(
                 quant_cfg, getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"]
@@ -316,6 +358,7 @@ def main(args):
 
     model_type = get_model_type(model)
     if model_type == "qwen3omni" and os.environ.get("DISABLE_TALKER", "0") == "1":
+        print("Disabling talker for Qwen3Omni model")
         model.disable_talker()
 
     device = model.device
@@ -474,7 +517,7 @@ def main(args):
                 "qwen3omni only supports one dataset for calibration, can extend this in the future"
             )
             assert processor is not None, "The processor must be set for qwen3omni model."
-            dataset_name = args.dataset[0] if args.dataset else "scienceqa"
+            dataset_name = args.dataset[0] if args.dataset else "cnn_dailymail"
             # Check if using video dataset (e.g., finevideo)
             if dataset_name in get_supported_video_datasets():
                 video_processor = Qwen3OmniVideoProcessor(
@@ -489,7 +532,7 @@ def main(args):
                     batch_size=args.batch_size,
                     num_samples=args.calib_size[0],
                 )
-            else:
+            elif dataset_name in get_supported_vlm_datasets():
                 assert processor is not None and isinstance(processor, Qwen3OmniImageProcessor), (
                     "The Qwen3OmniImageProcessor must be set."
                 )
@@ -501,6 +544,17 @@ def main(args):
                     batch_size=args.batch_size,
                     num_samples=args.calib_size[0],
                 )
+            else:
+                # Text-only datasets (e.g., cnn_dailymail)
+                qwen3omni_tokenizer = processor.tokenizer.tokenizer
+                calib_dataloader = get_dataset_dataloader(
+                    dataset_name=dataset_name,
+                    tokenizer=qwen3omni_tokenizer,
+                    batch_size=args.batch_size,
+                    num_samples=args.calib_size[0],
+                    device=device,
+                )
+            print(f"Selected dataset for calibration: {dataset_name}")
         elif model_type == "whisper":
             assert processor is not None and isinstance(processor, WhisperProcessor), (
                 "The AutoProcessor must be set."
