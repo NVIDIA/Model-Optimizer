@@ -20,7 +20,7 @@ jobs:
     outputs:
       any_changed: ${{ steps.changed-tests.outputs.any_changed }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - id: get-pr-info
