@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import argparse
+import os
 import random
 import time
 import warnings
@@ -314,7 +315,7 @@ def main(args):
     model_is_already_quantized = is_quantized(model)
 
     model_type = get_model_type(model)
-    if model_type == "qwen3omni":
+    if model_type == "qwen3omni" and os.environ.get("DISABLE_TALKER", "0") == "1":
         model.disable_talker()
 
     device = model.device
