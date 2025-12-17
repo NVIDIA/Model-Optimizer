@@ -58,12 +58,14 @@ from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
     get_dataset_dataloader,
     get_max_batch_size,
+    get_qwen3omni_text_dataloader,
     get_supported_datasets,
 )
 from modelopt.torch.utils.image_processor import (
     BaseImageProcessor,
     MllamaImageProcessor,
     Qwen3OmniImageProcessor,
+    Qwen3OmniTextProcessor,
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
@@ -533,12 +535,19 @@ def main(args):
                 )
             else:
                 # Text-only datasets (e.g., cnn_dailymail)
-                qwen3omni_tokenizer = processor.tokenizer.tokenizer
-                calib_dataloader = get_dataset_dataloader(
+                # Use Qwen3OmniTextProcessor to apply proper conversation template
+                # See: https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Thinking
+                text_processor = Qwen3OmniTextProcessor(
+                    processor=processor.tokenizer,  # Pass the underlying HF processor
+                    device=device,
+                    dtype=model.dtype,
+                )
+                calib_dataloader = get_qwen3omni_text_dataloader(
                     dataset_name=dataset_name,
-                    tokenizer=qwen3omni_tokenizer,
+                    processor=text_processor,
                     batch_size=args.batch_size,
                     num_samples=args.calib_size[0],
+                    max_sample_length=args.calib_seq,
                     device=device,
                 )
             print(f"Selected dataset for calibration: {dataset_name}")

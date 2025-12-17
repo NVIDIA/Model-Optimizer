@@ -74,7 +74,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
     },
     "cnn_dailymail": {
         "config": {"path": "cnn_dailymail", "name": "3.0.0", "split": ["train"]},
-        "preprocess": lambda sample: "/no_think " + sample["article"],
+        "preprocess": lambda sample: sample["article"],
     },
     "pile": {
         "config": {"path": "monology/pile-uncopyrighted", "name": "v1.0", "split": ["train"]},
@@ -98,6 +98,7 @@ __all__ = [
     "create_forward_loop",
     "get_dataset_dataloader",
     "get_max_batch_size",
+    "get_qwen3omni_text_dataloader",
     "get_supported_datasets",
 ]
 
@@ -239,6 +240,88 @@ def get_dataset_dataloader(
         tokenized_dataset = _CustomDataset({"input_ids": batch_encoded["input_ids"]})
 
     calib_dataloader = DataLoader(tokenized_dataset, batch_size=batch_size, shuffle=False)
+
+    return calib_dataloader
+
+
+def get_qwen3omni_text_dataloader(
+    dataset_name: str | list[str] = "cnn_dailymail",
+    processor=None,
+    batch_size: int = 1,
+    num_samples: int | list[int] = 512,
+    max_sample_length: int = 512,
+    device: str | None = None,
+) -> DataLoader:
+    """Get a text-only dataloader for Qwen3-Omni with proper conversation template applied.
+
+    This function applies the Qwen3-Omni chat template to text samples before tokenization,
+    which is required for proper calibration of Qwen3-Omni models with text-only datasets.
+
+    See: https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Thinking
+
+    Args:
+        dataset_name: Name of the dataset(s) to load.
+        processor: Qwen3OmniTextProcessor instance wrapping the Qwen3OmniMoeProcessor.
+        batch_size: Batch size of the returned dataloader.
+        num_samples: Number of samples from the dataset.
+        max_sample_length: Maximum length of a sample (for truncation).
+        device: Target device for the returned dataloader.
+
+    Returns:
+        A DataLoader with properly formatted inputs for Qwen3-Omni.
+    """
+    assert processor is not None, "Please provide a Qwen3OmniTextProcessor."
+
+    if isinstance(num_samples, int):
+        num_samples = [num_samples]
+
+    if isinstance(dataset_name, str):
+        dataset_name = [dataset_name]
+
+    assert len(dataset_name) == len(num_samples), (
+        "dataset_name and num_samples must be the same length"
+    )
+
+    # Get raw text samples
+    all_samples = []
+    for ds_name, num_sample in zip(dataset_name, num_samples):
+        samples = _get_dataset_samples(ds_name, num_sample)
+        all_samples.extend(samples)
+
+    # Preprocess each sample with the conversation template
+    processed_samples = []
+    for text in all_samples:
+        # Apply conversation template and tokenize
+        values = processor.preprocess_function(text)
+
+        # Convert to lists for dataset compatibility
+        sample_dict = {}
+        for key, val in values.items():
+            if val is not None and hasattr(val, "tolist"):
+                sample_dict[key] = val.tolist()
+            elif val is not None:
+                sample_dict[key] = val
+        processed_samples.append(sample_dict)
+
+    # Create dataset
+    class _Qwen3OmniTextDataset(torch.utils.data.Dataset):
+        def __init__(self, samples):
+            self.samples = samples
+
+        def __getitem__(self, idx):
+            return self.samples[idx]
+
+        def __len__(self):
+            return len(self.samples)
+
+    dataset = _Qwen3OmniTextDataset(processed_samples)
+
+    calib_dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=processor.collate_function,
+    )
 
     return calib_dataloader
 

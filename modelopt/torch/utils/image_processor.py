@@ -115,6 +115,70 @@ class MllamaImageProcessor(BaseImageProcessor):
         return batch[0]
 
 
+class Qwen3OmniTextProcessor(BaseImageProcessor):
+    """Text-only processor for Qwen3-Omni that applies proper conversation template.
+
+    This processor wraps raw text in the Qwen3-Omni conversation format and applies
+    the chat template before tokenization. Use this for text-only calibration datasets.
+
+    See: https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Thinking
+    """
+
+    def __init__(self, processor, device="auto", dtype=None):
+        """Constructor.
+
+        Args:
+            processor: The Qwen3OmniMoeProcessor (from AutoProcessor.from_pretrained).
+            device: Device to move tensors to.
+            dtype: dtype for float tensors (e.g., torch.bfloat16). If None, uses default.
+        """
+        super().__init__(processor, device)
+        self.dtype = dtype
+
+    def preprocess_function(self, text: str) -> dict:
+        """Preprocess a single text sample by applying conversation template.
+
+        Args:
+            text: Raw text string from dataset.
+
+        Returns:
+            Dictionary with tokenized inputs.
+        """
+        # Build conversation in Qwen format (text-only)
+        conversation = [
+            {"role": "user", "content": [{"type": "text", "text": "/no_think " + text}]}
+        ]
+
+        # Apply chat template (tokenize=False to get formatted string)
+        formatted_text = self.tokenizer.apply_chat_template(
+            conversation, add_generation_prompt=True, tokenize=False
+        )
+
+        # Tokenize with the processor (no multimodal inputs)
+        values = self.tokenizer(
+            text=formatted_text,
+            audio=None,
+            images=None,
+            videos=None,
+            return_tensors="pt",
+            padding=True,
+        )
+
+        return values
+
+    def collate_function(self, batch):
+        """Collate function to process text inputs during data loading."""
+        result = {}
+        first = batch[0]
+
+        if "input_ids" in first and first["input_ids"] is not None:
+            result["input_ids"] = torch.LongTensor(first["input_ids"]).to(self.device)
+        if "attention_mask" in first and first["attention_mask"] is not None:
+            result["attention_mask"] = torch.LongTensor(first["attention_mask"]).to(self.device)
+
+        return result
+
+
 class Qwen3OmniImageProcessor(BaseImageProcessor):
     """Image processor for Qwen3-Omni multimodal model."""
 
