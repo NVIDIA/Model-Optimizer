@@ -562,6 +562,13 @@ def pre_quantize(
     calib_dataloader: DataLoader,
     is_nemotron_vl_model: bool,
 ):
+    """
+    Processing before the quantization.
+
+    Currently we run one round of generation for a sample prompt, to be compared with
+    post-quantize generation.
+
+    """
     # Only run single sample for preview
     preview_input_ids = next(iter(calib_dataloader))[
         "input_features" if model_type == "whisper" else "input_ids"
@@ -597,6 +604,14 @@ def post_quantize(
     is_nemotron_vl_model,
     first_text_speech_dataset,
 ):
+    """
+    Processing after the quantization.
+
+    Currently we run one round of generation using the quantized model for a sample prompt,
+    and compare it with pre-quantize generation.
+
+    """
+
     if args.verbose:
         mtq.print_quant_summary(full_model)
 
