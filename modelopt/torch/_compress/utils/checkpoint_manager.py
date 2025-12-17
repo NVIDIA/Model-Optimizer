@@ -193,11 +193,9 @@ class ScoringCheckpointManager:
             # All ranks save their hook states
             if self.activation_hooks is not None:
                 try:
-                    from modelopt.torch._compress.activation_scoring.activation_hooks.hooks import (
-                        ActivationsHook,
-                    )
+                    from modelopt.torch.nas.plugins.megatron_hooks.base_hooks import ForwardHook
 
-                    ActivationsHook.save_hook_states(self.activation_hooks, self.checkpoint_dir)
+                    ForwardHook.save_hook_states(self.activation_hooks, self.checkpoint_dir)
                 except Exception as e:
                     mprint(f"Warning: Failed to save hook states: {e}")
 
@@ -249,11 +247,9 @@ class ScoringCheckpointManager:
         # All ranks save their final hook states
         if self.activation_hooks is not None:
             try:
-                from modelopt.torch._compress.activation_scoring.activation_hooks.hooks import (
-                    ActivationsHook,
-                )
+                from modelopt.torch.nas.plugins.megatron_hooks.base_hooks import ForwardHook
 
-                saved_path = ActivationsHook.save_hook_states(
+                saved_path = ForwardHook.save_hook_states(
                     self.activation_hooks, self.checkpoint_dir
                 )
                 mprint(f"Final hook states saved to {saved_path}")

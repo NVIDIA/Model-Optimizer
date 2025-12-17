@@ -13,21 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for megatron hooks."""
+"""Unit tests for base hooks."""
 
 import torch
 import torch.nn as nn
-from _test_utils.import_helper import skip_if_no_megatron
 
-skip_if_no_megatron()
-
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
-from megatron.core.parallel_state import initialize_model_parallel
-
-from modelopt.torch.nas.plugins.megatron_hooks import (
-    IterativeChannelContributionHook,
-    MegatronL2NormHook,
-)
+from modelopt.torch.nas.plugins.megatron_hooks import IterativeChannelContributionHook, L2NormHook
 
 
 def _test_iterative_channel_contribution_hook_with_shape(dim1: int, dim2: int):
@@ -81,15 +72,12 @@ def test_iterative_channel_contribution_hook_bsi():
     _test_iterative_channel_contribution_hook_with_shape(dim1=8, dim2=32)
 
 
-def _test_l2_norm_hook(rank, size):
-    """Internal test function that runs in spawned process with distributed setup."""
-    # Initialize Megatron parallel state (distributed is already initialized by spawn_multiprocess_job)
-    initialize_model_parallel(tensor_model_parallel_size=1, pipeline_model_parallel_size=1)
-
+def test_l2_norm_hook():
+    """Test L2NormHook returns correct scores after accumulating activations."""
     torch.manual_seed(42)
 
     linear_layer = nn.Linear(in_features=6, out_features=4, bias=False)
-    hook = MegatronL2NormHook(max_size=None)
+    hook = L2NormHook(max_size=None)
     linear_layer.register_forward_hook(hook)
 
     num_iterations = 3
@@ -109,13 +97,4 @@ def _test_l2_norm_hook(rank, size):
     )
     assert torch.allclose(scores, expected_scores, atol=1e-4), (
         f"Expected scores {expected_scores}, got {scores}"
-    )
-
-
-def test_l2_norm_hook():
-    """Test MegatronL2NormHook returns correct scores after accumulating activations."""
-    spawn_multiprocess_job(
-        size=1,
-        job=_test_l2_norm_hook,
-        backend="gloo",
     )
