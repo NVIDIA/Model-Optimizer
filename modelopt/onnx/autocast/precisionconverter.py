@@ -156,6 +156,10 @@ class PrecisionConverter:
         # Custom mapping of op types to indices of inputs that should not be converted to low precision
         self.skip_inputs_map = self._create_skip_inputs_mapping(tensor_block_dict)
 
+        # Flags to log initializer value range warnings only once
+        self._warned_values_clamp_max = False
+        self._warned_values_clamp_min = False
+
     def convert(
         self,
         high_precision_nodes: list[str],
@@ -751,16 +755,20 @@ class PrecisionConverter:
                 np.finfo(to_type.numpy_type).smallest_subnormal,
             )
             if np.any(np.abs(np_array) > data_max):
-                logger.warning(
-                    f"Initializer {init.name} contains values larger than largest "
-                    f"{to_type.str_short} value, values will be clamped to {data_max}."
-                )
+                if not self._warned_values_clamp_max:
+                    logger.warning(
+                        f"Some initializers contain values larger than largest "
+                        f"{to_type.str_short} value, values will be clamped to {data_max}."
+                    )
+                    self._warned_values_clamp_max = True
                 np_array = np.clip(np_array, -1 * data_max, data_max)
             if np.any((np_array != 0.0) & (np.abs(np_array) < data_lowest)):
-                logger.warning(
-                    f"Initializer {init.name} contains values smaller than smallest "
-                    f"{to_type.str_short} value, values will be replaced with {data_lowest:.1e}."
-                )
+                if not self._warned_values_clamp_min:
+                    logger.warning(
+                        f"Some initializers contain values smaller than smallest "
+                        f"{to_type.str_short} value, values will be replaced with {data_lowest:.1e}."
+                    )
+                    self._warned_values_clamp_min = True
                 np_array = np.where(
                     (np_array != 0.0) & (np.abs(np_array) < data_lowest),
                     data_lowest,

@@ -37,7 +37,6 @@ required_deps = [
     "regex",
     "safetensors",
     "torch>=2.6",
-    "torchprofile>=0.0.4",
 ]
 
 optional_deps = {
@@ -59,11 +58,11 @@ optional_deps = {
     "hf": [
         "accelerate>=1.0.0",
         "datasets>=3.0.0",
+        "deepspeed>=0.9.6 ; platform_system != 'Darwin' and platform_system != 'Windows'",
         "diffusers>=0.32.2",
         "huggingface_hub>=0.24.0",
         "peft>=0.17.0",
         "transformers>=4.53,<5.0",  # Should match modelopt/torch/__init__.py and tox.ini
-        "deepspeed>=0.9.6 ; platform_system != 'Darwin' and platform_system != 'Windows'",
     ],
     # linter tools
     "dev-lint": [
@@ -80,6 +79,7 @@ optional_deps = {
         "pytest-instafail",
         "pytest-timeout",
         "timm",
+        "torchprofile>=0.0.4",  # For computing flops of CV models
         "torchvision",
         "torch-geometric",
         "tox>4.18",
