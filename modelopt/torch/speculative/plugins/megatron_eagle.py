@@ -55,7 +55,7 @@ from packaging.version import Version
 from ..eagle.conversion import EagleDMRegistry
 from ..eagle.eagle_model import EagleModel
 from ..utils import AcceptanceRateValidation, get_default_attention_mask_and_position_ids
-from .megatron_medusa import MedusaHead
+from .megatron_medusa import MedusaLayer
 
 try:
     from megatron.core.post_training.modelopt.gpt.model_specs import get_gpt_modelopt_spec
@@ -233,6 +233,83 @@ def set_multi_step_attention_mask(attn_mask, step):
         attn_mask = torch.cat((mask_0, mask_1), dim=-1)
 
     return attn_mask
+
+
+class ParallelDraft(MegatronModule):
+    """ParallelDraft module with multiple Medusa heads and a shared lm head."""
+
+    def __init__(
+        self,
+        config,
+        vocab_size: int,
+        num_heads: int = 1,
+        num_layers: int = 1,
+        parallel_output: bool = True,
+    ):
+        """Constructor.
+
+        Args:
+            config: MCore transformer config
+            vocab_size: vocabulary size
+            num_heads: number of draft heads
+            num_layers: number of Medusa layers
+            parallel_output: if False, then all_gather the logits
+        """
+        super().__init__(config=config)
+
+        self.medusa_heads = torch.nn.ModuleList(
+            [
+                torch.nn.ModuleList([MedusaLayer(config) for _ in range(num_layers)])
+                for _ in range(num_heads)
+            ]
+        )
+
+        self.lm_head = tensor_parallel.ColumnParallelLinear(
+            config.hidden_size,
+            vocab_size,
+            config=config,
+            init_method=config.init_method,
+            bias=False,
+            skip_bias_add=False,
+            gather_output=not parallel_output,
+            skip_weight_param_allocation=False,
+        )
+
+        def load_state_dict_post_hook(module, incompatible_keys):
+            incompatible_keys.missing_keys.clear()
+            incompatible_keys.unexpected_keys.clear()
+
+        self.register_load_state_dict_post_hook(load_state_dict_post_hook)
+
+    def forward(self, x):
+        """Forward function."""
+        output = []
+        for head in self.medusa_heads:
+            x_head = x
+            for layer in head:
+                x_head, _ = layer(x_head)
+            output.append(self.lm_head(x_head)[0])
+        return output
+
+    def sharded_state_dict(
+        self, prefix: str = "", sharded_offsets: tuple = (), metadata: dict | None = None
+    ) -> ShardedStateDict:
+        """Return MCore sharded_state_dict."""
+        assert not sharded_offsets, "Unexpected sharded offsets"
+        sharded_state_dict = {}
+        layer_prefix = f"{prefix}medusa_heads."
+        for i, head in enumerate(self.medusa_heads):
+            for j, layer in enumerate(head):
+                state_dict_prefix = f"{layer_prefix}{i}.{j}."
+                sharded_pp_offset = []
+                layer_sharded_state_dict = layer.sharded_state_dict(
+                    state_dict_prefix, sharded_pp_offset, metadata
+                )
+                sharded_state_dict.update(layer_sharded_state_dict)
+        sharded_state_dict.update(
+            self.lm_head.sharded_state_dict(f"{prefix}lm_head.", sharded_offsets, metadata)
+        )
+        return sharded_state_dict
 
 
 class EagleLanguageModelEmbedding(LanguageModelEmbedding):
@@ -439,13 +516,11 @@ class EagleModule(MegatronModule):
             )
 
         if self.config.parallel_draft_step > 1:
-            self.parallel_draft_heads = torch.nn.ModuleList(
-                MedusaHead(
-                    self.config,
-                    self.config.draft_vocab_size,
-                    num_layers=self.config.parallel_draft_heads_num_layers,
-                )
-                for _ in range(self.config.parallel_draft_step - 1)
+            self.parallel_draft_heads = ParallelDraft(
+                config=self.config,
+                vocab_size=self.config.draft_vocab_size,
+                num_heads=self.config.parallel_draft_step - 1,
+                num_layers=self.config.parallel_draft_heads_num_layers,
             )
 
     def _get_eagle_transformer_layer_spec(self, config):
@@ -553,39 +628,6 @@ class EagleModule(MegatronModule):
             self._next_hidden_states_input = None
 
         return hidden_states, next_hidden_states_input
-
-    def sharded_state_dict(
-        self, prefix: str = "", sharded_offsets: tuple = (), metadata: dict | None = None
-    ) -> ShardedStateDict:
-        """Override the shared_state_dict to take care parallel_draft_heads."""
-        assert not sharded_offsets, "Unexpected sharded offsets"
-
-        sharded_state_dict = MegatronModule.sharded_state_dict(
-            self, prefix, sharded_offsets, metadata
-        )
-
-        if not hasattr(self, "parallel_draft_heads") or self.parallel_draft_heads is None:
-            return sharded_state_dict
-
-        # This is a remedy for nn.ModuleList.
-        # MegatronModule.sharded_state_dict() requires all children to implement
-        # sharded_state_dict(). parallel_draft_heads is an nn.ModuleList which only has state_dict()
-        # implemented. As a result, all the submodules will not be sharded.
-        #
-        # The remedy is to pop all parallel_draft_heads* out and call the MedusaHead sharded_state_dict()
-        # again to populate the correct sharded_staet_dict.
-        extra_keys = []
-        for key in sharded_state_dict:
-            if "parallel_draft_heads" in key:
-                extra_keys += [key]
-        for key in extra_keys:
-            sharded_state_dict.pop(key, None)
-
-        head_prefix = f"{prefix}parallel_draft_heads."
-        for i, head in enumerate(self.parallel_draft_heads):
-            head_sharded_state_dict = head.sharded_state_dict(f"{head_prefix}{i}.", [], metadata)
-            sharded_state_dict.update(head_sharded_state_dict)
-        return sharded_state_dict
 
 
 @EagleDMRegistry.register({GPTModel: "megatron.core.models.gpt.GPTModel"})
@@ -943,9 +985,8 @@ class _DynamicEagleGPTModel(EagleModel):
         draft_logits_list = [eagle_logits]
         if self.eagle_config.parallel_draft_step > 1:
             # Get additional draft logits from parallel draft heads
-            for draft_head in self.eagle_module.parallel_draft_heads:
-                draft_logits, _ = draft_head(eagle_hidden_states)
-                draft_logits_list.append(draft_logits)
+            draft_logits = self.eagle_module.parallel_draft_heads(eagle_hidden_states)
+            draft_logits_list += draft_logits
 
         return (
             eagle_hidden_states,

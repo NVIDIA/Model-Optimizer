@@ -10,6 +10,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add support for Qwen3-Next model quantization.
 - Add support for dynamically linked TensorRT plugins in the ONNX quantization workflow.
 - Add support for KV Cache Quantization for vLLM FakeQuant PTQ script. See `examples/vllm_serve/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/vllm_serve#Calibrate-and-serve-fake-quant-model-in-vLLM>`__ for more details.
+- Add support for parallel draft heads in Eagle speculative decoding.
 
 **Deprecations**
 
