@@ -303,19 +303,19 @@ def main(args):
         quant_cfg = QUANT_CFG_CHOICES[args.qformat]
 
         # Qwen3 specific quantizer disabling patterns (thinker.model.layers only)
-        if args.qformat == "qwen3_nvfp4_qkv_disabled":
+        if "qkv_disabled" in args.qformat:
             # Disable q_proj, k_proj, v_proj quantizers
             for proj in ["q_proj", "k_proj", "v_proj"]:
                 quant_cfg["quant_cfg"][f"*thinker.model.layers.*.self_attn.{proj}*"] = {
                     "enable": False
                 }
-        elif args.qformat == "qwen3_nvfp4_qkvo_disabled":
+        if "qkvo_disabled" in args.qformat:
             # Disable q_proj, k_proj, v_proj, o_proj quantizers
-            for proj in ["q_proj", "k_proj", "v_proj", "o_proj"]:
+            for proj in ["o_proj"]:
                 quant_cfg["quant_cfg"][f"*thinker.model.layers.*.self_attn.{proj}*"] = {
                     "enable": False
                 }
-        elif args.qformat == "qwen3_first_and_last_n_disabled":
+        if "first_and_last_n_disabled" in args.qformat:
             # Disable both first N and last N layers
             total_layers = 48
             n_layers_to_disable = 4
