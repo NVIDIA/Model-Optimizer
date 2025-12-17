@@ -23,7 +23,7 @@ from copy import deepcopy
 from random import random
 from typing import Any, Hashable, Iterable, Optional, TypeAlias
 
-from mip import BINARY, Model, maximize, minimize, xsum
+import pulp
 
 from modelopt.torch._compress.mip.utils import (
     InfeasibleError,
@@ -57,13 +57,15 @@ def run_mip(
         )
         print("\n\n\n")
 
-    mip_model = Model()
+    # Create pulp problem with appropriate sense (minimize or maximize)
+    sense = pulp.LpMaximize if bigger_is_better else pulp.LpMinimize
+    problem = pulp.LpProblem(name="multi_layer_replacement", sense=sense)
 
     objective_vars = []
     constraint_vars = {constraint_key: [] for constraint_key in constraints.keys()}
     choice_indicators_by_layer = defaultdict(list)
-    for replacement_id, replacement in replacements.items():
-        is_chosen = mip_model.add_var(var_type=BINARY)
+    for i, (replacement_id, replacement) in enumerate(replacements.items()):
+        is_chosen = pulp.LpVariable(f"choice_{i}", cat=pulp.LpBinary)
         replacement["is_chosen"] = is_chosen
 
         for parent_layer_idx in replacement["parent_layer_indices"]:
@@ -78,7 +80,7 @@ def run_mip(
 
     # MIP constraints: each parent layer must come from exactly one chosen replacement
     for parent_layer_idx, curr_choice_indicators in choice_indicators_by_layer.items():
-        mip_model += xsum(curr_choice_indicators) == 1
+        problem += pulp.lpSum(curr_choice_indicators) == 1
 
     # MIP constraints: the sum of chosen replacement costs must be lower than the max cost
     for constraint_key, max_cost in constraints.items():
@@ -86,22 +88,21 @@ def run_mip(
         if isinstance(max_cost, Iterable):
             min_cost, max_cost = max_cost
 
-        if max_cost is not None:
-            mip_model += xsum(constraint_vars[constraint_key]) <= max_cost
-        if min_cost is not None:
-            mip_model += xsum(constraint_vars[constraint_key]) >= min_cost
+        # PuLP is stricter than mip - it doesn't allow NaN/inf in constraints
+        if max_cost is not None and math.isfinite(max_cost):
+            problem += pulp.lpSum(constraint_vars[constraint_key]) <= max_cost
+        if min_cost is not None and math.isfinite(min_cost):
+            problem += pulp.lpSum(constraint_vars[constraint_key]) >= min_cost
 
     # MIP objective
-    mip_model.objective = (
-        maximize(xsum(objective_vars)) if bigger_is_better else minimize(xsum(objective_vars))
-    )
+    problem += (pulp.lpSum(objective_vars), "objective")
 
-    if max_seconds_per_solution is not None:
-        mip_model.max_seconds = max_seconds_per_solution
+    # Configure and run solver
+    solver = pulp.PULP_CBC_CMD(msg=True, timeLimit=max_seconds_per_solution)
+    problem.solve(solver)
 
-    mip_model.optimize()
-
-    if is_chosen.x is None:
+    # Check if solution is feasible
+    if problem.status != pulp.LpStatusOptimal:
         return []
         # raise InfeasibleError()
 
@@ -111,7 +112,7 @@ def run_mip(
     chosen_replacements: ChosenReplacements = []
     chosen_layers = []
     for replacement_id, replacement in replacements.items():
-        is_chosen = replacement["is_chosen"].x >= 0.99
+        is_chosen = replacement["is_chosen"].varValue >= 0.99
         if is_chosen:
             assert replacement not in chosen_replacements
             chosen_replacements.append(replacement)

@@ -73,8 +73,6 @@ jobs:
       - name: Setup environment variables
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
-      - name: Install dependencies for mip
-        run: apt-get update && apt-get install -y libffi-dev
       - name: Run gpu tests
         run: pip install tox-current-env && tox -e py312-cuda12-gpu --current-env
   gpu-tests-non-pr:
