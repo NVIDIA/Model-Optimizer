@@ -16,18 +16,15 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install tox
+        run: |
+          pip install tox
+          apt-get update && apt-get install -y curl jq
       # - name: Run basic unit tests
       #   run: tox -e py312-torch29-tf_latest-unit
       - name: Build Wheel
         run: |
           tox -e build-wheel
-
-          WHEEL_PATH=$(find dist -name "*.whl" | head -n 1)
-          WHEEL_NAME=$(basename $WHEEL_PATH)
-
-          echo "WHEEL_PATH=$WHEEL_PATH" >> $GITHUB_ENV
-          echo "WHEEL_NAME=$WHEEL_NAME" >> $GITHUB_ENV
+          echo "WHEEL_PATH=$(find dist -name "*.whl" | head -n 1)" >> $GITHUB_ENV
       - name: Upload GitHub Release Artifact
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -35,7 +32,8 @@ jobs:
           gh release upload ${{ github.event.release.tag_name }} ${{ env.WHEEL_PATH }}
       - name: Publish to PyPI via KitMaker
         run: |
-          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.event.release.tag_name }}/${{ env.WHEEL_NAME }}"
+          WHEEL_NAME=$(basename $WHEEL_PATH)
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.event.release.tag_name }}/${WHEEL_NAME}"
 
           echo "Releasing wheel to Kitmaker Portal..."
           RESPONSE=$(curl -s -X POST \
