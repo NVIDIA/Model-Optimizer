@@ -31,7 +31,7 @@ if parse_version(diffusers.__version__) >= parse_version("0.35.0"):
     from diffusers.models.attention import AttentionModuleMixin
     from diffusers.models.attention_dispatch import AttentionBackendName, attention_backend
     from diffusers.models.transformers.transformer_flux import FluxAttention
-    from diffusers.models.transformers.transformer_flux2 import Flux2Attention
+    from diffusers.models.transformers.transformer_flux2 import Flux2Attention, Flux2ParallelSelfAttention
     from diffusers.models.transformers.transformer_ltx import LTXAttention
     from diffusers.models.transformers.transformer_wan import WanAttention
 else:
@@ -192,6 +192,8 @@ if AttentionModuleMixin.__module__.startswith(diffusers.__name__):
     QuantModuleRegistry.register({WanAttention: "WanAttention"})(_QuantAttentionModuleMixin)
     QuantModuleRegistry.register({LTXAttention: "LTXAttention"})(_QuantAttentionModuleMixin)
     QuantModuleRegistry.register({Flux2Attention: "Flux2Attention"})(_QuantAttentionModuleMixin)
+    QuantModuleRegistry.register({Flux2ParallelSelfAttention: "Flux2ParallelSelfAttention"})(_QuantAttentionModuleMixin)
+    
 
 
 
