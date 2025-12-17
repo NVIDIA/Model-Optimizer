@@ -174,6 +174,21 @@ def build_quant_cfg(
             quant_cfg["quant_cfg"]["*image*"] = {"enable": False}
             quant_cfg["quant_cfg"]["*vision*"] = {"enable": False}
 
+        # Qwen3 specific quantizer disabling patterns (thinker.model.layers only)
+        if "qkv_disabled" in qformat:
+            quant_cfg = copy.deepcopy(quant_cfg)  # Don't modify global config
+            for proj in ["q_proj", "k_proj", "v_proj"]:
+                quant_cfg["quant_cfg"][f"*thinker.model.layers.*.self_attn.{proj}*"] = {
+                    "enable": False
+                }
+        if "qkvo_disabled" in qformat:
+            if "qkv_disabled" not in qformat:  # Avoid double deepcopy
+                quant_cfg = copy.deepcopy(quant_cfg)
+            for proj in ["o_proj"]:
+                quant_cfg["quant_cfg"][f"*thinker.model.layers.*.self_attn.{proj}*"] = {
+                    "enable": False
+                }
+
     return quant_cfg
 
 

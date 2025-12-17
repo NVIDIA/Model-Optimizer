@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import argparse
+import contextlib
 import os
 import random
 import time
@@ -298,12 +299,8 @@ def main(args):
             use_seq_device_map=args.use_seq_device_map,
             attn_implementation=args.attn_implementation,
         )
-    else:
-        assert args.qformat in QUANT_CFG_CHOICES, (
-            f"Quantization format is not supported for low memory mode. Supported formats: {QUANT_CFG_CHOICES.keys()}"
-        )
-        quant_cfg = QUANT_CFG_CHOICES[args.qformat]
 
+        quant_cfg = QUANT_CFG_CHOICES[args.qformat]
         # Qwen3 specific quantizer disabling patterns (thinker.model.layers only)
         if "qkv_disabled" in args.qformat:
             # Disable q_proj, k_proj, v_proj quantizers
@@ -325,6 +322,11 @@ def main(args):
                 quant_cfg["quant_cfg"][f"*thinker.model.layers.{i}.*"] = {"enable": False}
             for i in range(total_layers - n_layers_to_disable, total_layers):
                 quant_cfg["quant_cfg"][f"*thinker.model.layers.{i}.*"] = {"enable": False}
+    else:
+        assert args.qformat in QUANT_CFG_CHOICES, (
+            f"Quantization format is not supported for low memory mode. Supported formats: {QUANT_CFG_CHOICES.keys()}"
+        )
+        quant_cfg = QUANT_CFG_CHOICES[args.qformat]
 
         if args.kv_cache_qformat != "none":
             quant_cfg = mtq.utils.update_quant_cfg_with_kv_cache_quant(
@@ -357,6 +359,8 @@ def main(args):
     # since parameters are distributed. Force cuda:0 for input tensors.
     if device is None or str(device) in ("meta", "cpu"):
         device = "cuda"
+        print(f"Overriding device to {device}")
+
     processor = None
     tokenizer = None
 
@@ -646,11 +650,6 @@ def main(args):
                     print("Updating full_model with quantized language_model...")
                     language_model_lineage[-2].language_model = model
 
-            # if args.verbose:
-            #     mtq.print_quant_summary(full_model)
-
-            import contextlib
-
             if args.verbose:
                 with open("./quant_summary.txt", "w") as f, contextlib.redirect_stdout(f):
                     mtq.print_quant_summary(full_model)
@@ -745,6 +744,10 @@ def main(args):
     else:
         assert model_type != "dbrx", f"Does not support export {model_type} without quantizaton"
         print(f"qformat: {args.qformat}. No quantization applied, export {device} model")
+
+    if model_type == "qwen3omni":
+        print("Export of Qwen3Omni model is not supported yet")
+        return
 
     with torch.inference_mode():
         if model_type is None:
