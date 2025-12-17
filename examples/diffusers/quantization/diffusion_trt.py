@@ -52,7 +52,7 @@ MODEL_ID = {
     "sdxl-turbo": ModelType.SDXL_TURBO,
     "sd3-medium": ModelType.SD3_MEDIUM,
     "flux-dev": ModelType.FLUX_DEV,
-    "flux-2-dev": ModelType.FLUX_DEV,
+    "flux-2-dev": ModelType.FLUX_2_DEV,
     "flux-schnell": ModelType.FLUX_SCHNELL,
 }
 
