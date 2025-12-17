@@ -18,7 +18,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install tox
-          apt-get update && apt-get install -y curl jq
+          sudo apt-get update && sudo apt-get install -y curl jq
       # - name: Run basic unit tests
       #   run: tox -e py312-torch29-tf_latest-unit
       - name: Build Wheel
