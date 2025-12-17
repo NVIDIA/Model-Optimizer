@@ -153,7 +153,7 @@ def train():
     # Save checkpoint
     logger.info("Saving checkpoint...")
     trainer.save_state()
-    trainer.save_model(trainer.args.output_dir, export_student=True)
+    trainer.save_model(trainer.args.output_dir)
     logger.info("Checkpoint saved.")
 
 
