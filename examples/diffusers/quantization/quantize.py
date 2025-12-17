@@ -48,6 +48,7 @@ if __name__ == "__main__":
 from diffusers import (
     DiffusionPipeline,
     FluxPipeline,
+    Flux2Pipeline,
     LTXConditionPipeline,
     LTXLatentUpsamplePipeline,
     StableDiffusion3Pipeline,
@@ -77,6 +78,7 @@ class ModelType(str, Enum):
     SD35_MEDIUM = "sd3.5-medium"
     FLUX_DEV = "flux-dev"
     FLUX_SCHNELL = "flux-schnell"
+    FLUX_DEV_2 = "flux-2-dev"
     LTX_VIDEO_DEV = "ltx-video-dev"
     WAN22_T2V = "wan2.2-t2v-14b"
 
@@ -138,6 +140,7 @@ def get_model_filter_func(model_type: ModelType) -> Callable[[str], bool]:
     """
     filter_func_map = {
         ModelType.FLUX_DEV: filter_func_default,
+        ModelType.FLUX_DEV_2: filter_func_default,
         ModelType.FLUX_SCHNELL: filter_func_default,
         ModelType.SDXL_BASE: filter_func_default,
         ModelType.SDXL_TURBO: filter_func_default,
@@ -157,6 +160,7 @@ MODEL_REGISTRY: dict[ModelType, str] = {
     ModelType.SD3_MEDIUM: "stabilityai/stable-diffusion-3-medium-diffusers",
     ModelType.SD35_MEDIUM: "stabilityai/stable-diffusion-3.5-medium",
     ModelType.FLUX_DEV: "black-forest-labs/FLUX.1-dev",
+    ModelType.FLUX_DEV_2: "black-forest-labs/FLUX.2-dev",
     ModelType.FLUX_SCHNELL: "black-forest-labs/FLUX.1-schnell",
     ModelType.LTX_VIDEO_DEV: "Lightricks/LTX-Video-0.9.7-dev",
     ModelType.WAN22_T2V: "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
@@ -168,6 +172,7 @@ MODEL_PIPELINE: dict[ModelType, type[DiffusionPipeline]] = {
     ModelType.SD3_MEDIUM: StableDiffusion3Pipeline,
     ModelType.SD35_MEDIUM: StableDiffusion3Pipeline,
     ModelType.FLUX_DEV: FluxPipeline,
+    ModelType.FLUX_DEV: Flux2Pipeline,
     ModelType.FLUX_SCHNELL: FluxPipeline,
     ModelType.LTX_VIDEO_DEV: LTXConditionPipeline,
     ModelType.WAN22_T2V: WanPipeline,
@@ -211,6 +216,20 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
         "backbone": "transformer",
         "dataset": {
             "name": "Gustavosta/Stable-Diffusion-Prompts",
+            "split": "train",
+            "column": "Prompt",
+        },
+        "inference_extra_args": {
+            "height": 1024,
+            "width": 1024,
+            "guidance_scale": 3.5,
+            "max_sequence_length": 512,
+        },
+    },
+    ModelType.FLUX_DEV_2: {
+        "backbone": "transformer",
+        "dataset": {
+            "name": "nateraw/parti-prompts",
             "split": "train",
             "column": "Prompt",
         },
