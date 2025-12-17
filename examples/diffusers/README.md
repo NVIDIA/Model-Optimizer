@@ -71,6 +71,7 @@ mtq.quantize(model=transformer, config=quant_config, forward_func=forward_pass)
 | Model | fp8 | int8_sq | int4_awq | w4a8_awq<sup>1</sup> | nvfp4<sup>2</sup> | nvfp4_svdquant<sup>3</sup> | Cache Diffusion |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | [FLUX](https://huggingface.co/black-forest-labs/FLUX.1-dev) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | - |
+| [FLUX 2](https://huggingface.co/black-forest-labs/FLUX.2-dev) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | - |
 | [Stable Diffusion 3](https://huggingface.co/stabilityai/stable-diffusion-3-medium) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [Stable Diffusion XL](https://huggingface.co/papers/2307.01952) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [SDXL-Turbo](https://huggingface.co/stabilityai/sdxl-turbo) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | - |
@@ -103,24 +104,24 @@ bash build_sdxl_8bit_engine.sh --format {FORMAT} # FORMAT can be int8 or fp8
 
 If you prefer to customize parameters in calibration or run other models, please follow the instructions below.
 
-#### FLUX-Dev|SD3-Medium|SDXL|SDXL-Turbo INT8 [Script](./quantization/quantize.py)
+#### FLUX-Dev|FLUX-2-Dev|SD3-Medium|SDXL|SDXL-Turbo INT8 [Script](./quantization/quantize.py)
 
 ```sh
 python quantize.py \
-    --model {flux-dev|sdxl-1.0|sdxl-turbo|sd3-medium} \
+    --model {flux-dev|fux-2-dev|sdxl-1.0|sdxl-turbo|sd3-medium} \
     --format int8 --batch-size 2 \
     --calib-size 32 --alpha 0.8 --n-steps 20 \
     --model-dtype {Half/BFloat16} --trt-high-precision-dtype {Half|BFloat16} \
     --quantized-torch-ckpt-save-path ./{MODEL_NAME}.pt --onnx-dir {ONNX_DIR}
 ```
 
-#### FLUX-Dev|SDXL|SDXL-Turbo|LTX-Video FP8/FP4 [Script](./quantization/quantize.py)
+#### FLUX-Dev|FLUX-2-Dev|SDXL|SDXL-Turbo|LTX-Video FP8/FP4 [Script](./quantization/quantize.py)
 
 *In our example code, FP4 is only supported for Flux. However, you can modify our script to enable FP4 format support for your own model.*
 
 ```sh
 python quantize.py \
-    --model {flux-dev|sdxl-1.0|sdxl-turbo|ltx-video-dev} --model-dtype {Half|BFloat16} --trt-high-precision-dtype {Half|BFloat16} \
+    --model {flux-dev|flux-2-dev|sdxl-1.0|sdxl-turbo|ltx-video-dev} --model-dtype {Half|BFloat16} --trt-high-precision-dtype {Half|BFloat16} \
     --format {fp8|fp4} --batch-size 2 --calib-size {128|256} --quantize-mha \
     --n-steps 20 --quantized-torch-ckpt-save-path ./{MODEL_NAME}.pt --collect-method default \
     --onnx-dir {ONNX_DIR}
@@ -252,6 +253,14 @@ trtexec --onnx=./model.onnx --fp8 --bf16 --stronglyTyped \
     --optShapes=hidden_states:1x4096x64,img_ids:4096x3,encoder_hidden_states:1x512x4096,txt_ids:512x3,timestep:1,pooled_projections:1x768,guidance:1 \
     --maxShapes=hidden_states:1x4096x64,img_ids:4096x3,encoder_hidden_states:1x512x4096,txt_ids:512x3,timestep:1,pooled_projections:1x768,guidance:1 \
     --saveEngine=model.plan
+
+# # For FLUX-2-Dev FP8
+trtexec --onnx=./model.onnx --fp8 --bf16 --stronglyTyped \
+    --minShapes=hidden_states:1x4096x128,img_ids:4096x4,encoder_hidden_states:1x512x15360,txt_ids:512x4,timestep:1,guidance:1 \
+    --optShapes=hidden_states:1x4096x128,img_ids:4096x4,encoder_hidden_states:1x512x15360,txt_ids:512x4,timestep:1,guidance:1 \
+    --maxShapes=hidden_states:1x4096x128,img_ids:4096x4,encoder_hidden_states:1x512x15360,txt_ids:512x4,timestep:1,guidance:1 \
+    --saveEngine=model.plan
+
 ```
 
 **Please note that `maxShapes` represents the maximum shape of the given tensor. If you want to use a larger batch size or any other dimensions, feel free to adjust the value accordingly.**
@@ -293,7 +302,7 @@ Generate a quantized torch checkpoint using the [Script](./quantization/quantize
 
 ```bash
 python quantize.py \
-    --model {sdxl-1.0|sdxl-turbo|sd3-medium|flux-dev} \
+    --model {sdxl-1.0|sdxl-turbo|sd3-medium|flux-dev|flux-2-dev} \
     --format fp8 \
     --batch-size {1|2} \
     --calib-size 128 \
