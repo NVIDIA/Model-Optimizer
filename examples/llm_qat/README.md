@@ -147,7 +147,7 @@ trainer = QADTrainer(
 trainer.train()  # Train the quantized model using distillation (i.e, QAD)
 
 # Save the final student model weights; An example usage
-trainer.save_model(export_student=True)
+trainer.save_model()
 ```
 
 ### NeMo QAT/QAD Simplified Flow Example

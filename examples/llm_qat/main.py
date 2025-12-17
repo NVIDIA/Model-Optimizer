@@ -270,8 +270,7 @@ def train():
     if training_args.do_train or quant_args.quant_cfg is not None:
         print_rank_0("Saving the model...")
         trainer.save_state()
-        kwargs = {"export_student": True} if training_args.distill else {}
-        trainer.save_model(training_args.output_dir, **kwargs)
+        trainer.save_model(training_args.output_dir)
 
 
 if __name__ == "__main__":

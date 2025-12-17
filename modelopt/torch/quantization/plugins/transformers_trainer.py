@@ -255,8 +255,7 @@ class QATTrainer(ModelOptHFTrainer):
         """Train the model."""
         outputs = super().train(*args, **kwargs)
         print_rank_0(
-            "Training completed. Please save the final model using `Trainer.save_model()` "
-            "to preserve ModelOpt states."
+            "Training completed. Please save the final model using `Trainer.save_model()` to preserve ModelOpt states."
         )
         return outputs
 
@@ -271,8 +270,7 @@ class QATTrainer(ModelOptHFTrainer):
             original_type = self.accelerator.state.fsdp_plugin.state_dict_type
             self.accelerator.state.fsdp_plugin.set_state_dict_type("FULL_STATE_DICT")
             outputs = super().save_model(*args, **kwargs)
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
+            self.accelerator.wait_for_everyone()
             if mto.ModeloptStateManager.is_converted(self.accelerator.unwrap_model(self.model)):
                 print_rank_0(
                     "Model saved. To restore, call mto.enable_huggingface_checkpointing() first before loading the "
@@ -414,7 +412,6 @@ class QADTrainer(QATTrainer, KDTrainer):
         self,
         output_dir: str | None = None,
         _internal_call: bool = False,
-        export_student: bool = False,
         *args,
         **kwargs,
     ):
@@ -422,15 +419,12 @@ class QADTrainer(QATTrainer, KDTrainer):
 
         Args:
             output_dir: The directory to save the model and ModelOpt states.
-            export_student: Whether to export the student model.
         """
         if self.accelerator.is_fsdp2 and "SHARDED_STATE_DICT" in str(
             self.accelerator.state.fsdp_plugin.state_dict_type
         ):
-            if export_student:
-                model = self.accelerator.unwrap_model(self.model)
-                model = model.export()
-            return QATTrainer.save_model(self, output_dir, _internal_call, *args, **kwargs)
-        return KDTrainer.save_model(
-            self, output_dir, _internal_call, export_student, *args, **kwargs
-        )
+            model = self.accelerator.unwrap_model(self.model)
+            with model.hide_teacher_model(), model.hide_loss_modules(enable=not _internal_call):
+                return QATTrainer.save_model(self, output_dir, _internal_call, *args, **kwargs)
+        else:
+            return KDTrainer.save_model(self, output_dir, _internal_call, *args, **kwargs)

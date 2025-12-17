@@ -249,11 +249,9 @@ def create_patch_modelcard_and_push(module):
     ) -> None:
         original_fn(trainer, *args, **kwargs)
 
-        # export the student model for quantization aware distillation
-        kwargs = {"export_student": True} if hasattr(trainer, "distill_config") else {}
         # save the model in the output directory
         trainer.save_state()
-        trainer.save_model(output_dir=trainer.args.output_dir, **kwargs)
+        trainer.save_model(output_dir=trainer.args.output_dir)
 
     module.create_modelcard_and_push = create_modelcard_and_push
 
