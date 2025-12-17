@@ -234,3 +234,39 @@ def test_gptq_weight_folding(quant_cfg):
             )
 
     print(f"Successfully verified weight folding for {len(qdq_weights_before)} layers")
+
+
+def test_verify_activations_match(
+    activations_path1="/workspace/mount/work/TensorRT-Model-Optimizer/examples/vllm_serve/activations-run9",
+    activations_path2="/workspace/mount/work/TensorRT-Model-Optimizer/examples/vllm_serve/activations-run10",
+):
+    run1_act = torch.load(activations_path1, map_location="cpu")
+    run2_act = torch.load(activations_path2, map_location="cpu")
+
+    orig_weights1 = run1_act["original_weights"]
+    orig_act1 = run1_act["activation_storage"]
+    updated_act1 = run1_act["updated_activation_storage"]
+    orig_weights2 = run2_act["original_weights"]
+    orig_act2 = run2_act["activation_storage"]
+
+    for name, tensor in orig_weights1.items():
+        if name not in orig_weights2:
+            raise ValueError(f"Original weight {name} not found in run2")
+        assert torch.allclose(tensor, orig_weights2[name], rtol=0, atol=0), (
+            f"Original weight not matched for {name}"
+        )
+        print(f"Original weight {name} matched")
+
+    for name, tensor in orig_act1.items():
+        if name not in orig_act2:
+            raise ValueError(f"Original activation {name} not found in run2")
+
+        assert torch.allclose(tensor, orig_act2[name], rtol=0, atol=0), (
+            f"Original weight not matched for {name}"
+        )
+        print(f"Original activation {name} matched")
+
+    for name, tensor in updated_act1.items():
+        if name not in orig_act1:
+            raise ValueError(f"Updated activation {name} not found in run1")
+        breakpoint()

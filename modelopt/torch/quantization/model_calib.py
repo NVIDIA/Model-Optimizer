@@ -15,6 +15,7 @@
 
 """Calibration utilities."""
 
+import datetime
 import gc
 import math
 import os
@@ -1262,6 +1263,9 @@ def quantize_block(full_weight, block_start, block_end, h_inv, quantizer):
         errors[:, group_cols] = error
 
         # Propagate error to remaining columns in block
+        print(
+            f"DEBUG LOG: Propagating errors to remaining weights within block {group_start}:{group_end}"
+        )
         block_weight[:, group_start:] -= error @ block_hinv[group_start:group_end, group_start:]
 
     return quantized_block, losses, errors
@@ -1320,6 +1324,9 @@ def blockwise_weight_update(module, h, block_size, percdamp):
         losses[:, block_start:block_end] = block_losses
 
         # Propagate errors to remaining weights
+        print(
+            f"DEBUG LOG: Propagating errors to remaining weights for block {block_start}:{block_end}"
+        )
         weight[:, block_end:] -= block_errors @ h_inv[block_start:block_end, block_end:]
 
     # Print relative mse error
@@ -1336,6 +1343,7 @@ def gptq_lite(
     percdamp: float = 0.01,
     block_size: int = 128,
     hessian_state_path: str | None = None,
+    store_activations: bool = True,
 ):
     """GPTQ-lite quantization - a simplified GPTQ variant.
 
@@ -1356,6 +1364,8 @@ def gptq_lite(
     """
     # Dictionary to store hessian matrices: {layer_name: {"hessian": Tensor, "n_samples": int}}
     hessian_state = {}
+    activation_storage = {}  # NEW LINE
+    updated_activation_storage = {}  # NEW LINE
 
     def initialize_hessian_state(tensor_mapping):
         """Initialize hessian state with zeros."""
@@ -1402,13 +1412,65 @@ def gptq_lite(
             print_rank_0(f"Error saving hessian state: {e}")
             print_rank_0("Continuing execution...")
 
+    def save_activation_storage(path):
+        """Save activation storage dictionaries to file."""
+        print_rank_0(f"Saving activation storage to {path}")
+        try:
+            # Prepare data for saving (ensure all tensors are on CPU)
+            save_dict = {
+                "activation_storage": {
+                    name: tensor.cpu() if isinstance(tensor, torch.Tensor) else tensor
+                    for name, tensor in activation_storage.items()
+                },
+                "updated_activation_storage": {
+                    name: tensor.cpu() if isinstance(tensor, torch.Tensor) else tensor
+                    for name, tensor in updated_activation_storage.items()
+                },
+                "original_weights": {
+                    name: tensor.cpu() if isinstance(tensor, torch.Tensor) else tensor
+                    for name, tensor in original_weights.items()
+                },
+                "gptq_weights": {
+                    name: tensor.cpu() if isinstance(tensor, torch.Tensor) else tensor
+                    for name, tensor in gptq_weights.items()
+                },
+                "metadata": {
+                    "timestamp": str(datetime.datetime.now()),
+                    "num_layers": len(activation_storage),
+                },
+            }
+
+            os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
+            torch.save(save_dict, path)
+            print_rank_0(f"Successfully saved activation storage to {path}")
+            print_rank_0(f"  - {len(activation_storage)} layers in activation_storage")
+            print_rank_0(
+                f"  - {len(updated_activation_storage)} layers in updated_activation_storage"
+            )
+        except Exception as e:
+            print_rank_0(f"Error saving activation storage: {e}")
+            print_rank_0("Continuing execution...")
+
     def hessian_hook(module, input, output):
         """Hook to intercept activations and update hessian matrix."""
+        if module.name not in activation_storage:
+            activation_storage[module.name] = []
+        inp = input[0]
+        print(f"DEBUG LOG: Hooking {module.name} activation storage with input shape {inp.shape}")
+        activation_storage[module.name].append(inp.detach().cpu())
+
         state = hessian_state[module.name]
         hessian, n_samples = update_hessian(input[0], state["hessian"], state["n_samples"])
         hessian_state[module.name] = {"hessian": hessian, "n_samples": n_samples}
         torch.cuda.empty_cache()
         gc.collect()
+
+    def updated_activation_hook(module, input, output):
+        """Hook to intercept activations and update hessian matrix."""
+        if module.name not in updated_activation_storage:
+            updated_activation_storage[module.name] = []
+        inp = input[0]
+        updated_activation_storage[module.name].append(inp.detach().cpu())
 
     # Phase 1: Collect statistics for quantizers
     enable_stats_collection(model)
@@ -1447,13 +1509,26 @@ def gptq_lite(
         print_rank_0("Computing Hessian matrices...")
         forward_loop(model)
 
-        # Remove hooks
-        for handle in handles:
-            handle.remove()
+    # After Phase 3 (around line 1385), concatenate original activations:
+    # Remove hooks
+    for handle in handles:
+        handle.remove()
 
-        # Save if path provided
-        if hessian_state_path is not None:
-            save_hessian_state(hessian_state_path)
+    # Concatenate original activations if collected
+    print_rank_0("Concatenating original activations...")
+    for layer_name in activation_storage:
+        act_list = activation_storage[layer_name]
+        print(
+            f"DEBUG LOG: Concatenating {layer_name} activation with shape {act_list[0].shape} {act_list[1].shape}"
+        )
+        activation_storage[layer_name] = torch.cat(act_list, dim=0)
+        print_rank_0(
+            f"  {layer_name}: {len(act_list)} batches -> {activation_storage[layer_name].shape}"
+        )
+
+    # Save if path provided
+    if hessian_state_path is not None:
+        save_hessian_state(hessian_state_path)
 
     # Phase 4: Update weights using computed Hessians
     print_rank_0("Updating weights using GPTQ-lite algorithm...")
@@ -1464,11 +1539,83 @@ def gptq_lite(
         if is_quantized_linear(module) and module.weight_quantizer.is_enabled
     ]
 
+    # NEW: Save original weights before quantization
+    original_weights = {}
+    for name, module in quantized_modules:
+        original_weights[name] = module.weight.data.clone().cpu()
+
+    # Perform blockwise weight updates
     for name, module in tqdm(quantized_modules, desc="Quantizing layers"):
         state = hessian_state[module.name]
         hessian = state["hessian"].to(module.weight.device)
         blockwise_weight_update(module, hessian, block_size, percdamp)
         torch.cuda.empty_cache()
+
+    # NEW: Save original weights before quantization
+    gptq_weights = {}
+    for name, module in quantized_modules:
+        gptq_weights[name] = module.weight.data.clone().cpu()
+
+    # Collect updated activations
+    # Register hooks to collect updated activations
+    handles = []
+    for name, module in model.named_modules():
+        if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
+            handles.append(module.register_forward_hook(updated_activation_hook))
+
+    print_rank_0("Computing updated activations...")
+    if forward_loop is None:
+        raise ValueError("forward_loop must be provided when updating activations")
+    else:
+        forward_loop(model)
+
+    # Remove hooks
+    for handle in handles:
+        handle.remove()
+
+    # Concatenate updated activations
+    print_rank_0("Concatenating updated activations...")
+    for layer_name in updated_activation_storage:
+        act_list = updated_activation_storage[layer_name]
+        updated_activation_storage[layer_name] = torch.cat(act_list, dim=0)
+        print_rank_0(
+            f"  {layer_name}: {len(act_list)} batches -> {updated_activation_storage[layer_name].shape}"
+        )
+
+    # NEW: Compute MSE between old and new outputs
+    print_rank_0("\nComputing MSE: (W_old @ X_old) - (W_new @ X_new)")
+    print_rank_0("=" * 80)
+
+    for name, module in quantized_modules:
+        if name not in original_weights or name not in activation_storage:
+            continue
+
+        # Get tensors
+        w_old = original_weights[name]  # On CPU
+        w_new = module.weight.data.cpu()  # Move to CPU
+        # x_old = activation_storage[name]  # On CPU: (batch, ..., in_features)
+        x_new = updated_activation_storage[name]  # On CPU: (batch, ..., in_features)
+
+        # Flatten batch and sequence dimensions: (..., in_features) -> (N, in_features)
+        # x_old_flat = x_old.flatten(0, -2)  # (N, in_features)
+        x_new_flat = x_new.flatten(0, -2)  # (N, in_features)
+
+        # Compute outputs: (N, in_features) @ (in_features, out_features) = (N, out_features)
+        out_old = x_new_flat @ w_old.T  # (N, out_features)
+        out_new = x_new_flat @ w_new.T  # (N, out_features)
+
+        # Compute MSE
+        mse = ((out_old - out_new) ** 2).mean().item()
+
+        # Compute relative MSE (normalized by output magnitude)
+        output_scale = (out_old**2).mean().item()
+        relative_mse = mse / (output_scale + 1e-8)
+
+        print_rank_0("-" * 80)
+        print_rank_0(f"[{name}]")
+        print_rank_0(f"  MSE: {mse:.6e}")
+        print_rank_0(f"  Relative MSE: {relative_mse:.6e}")
+        print_rank_0(f"  Output scale: {output_scale:.6e}")
 
     # Phase 5: Reset and recalibrate quantizer statistics
     for name, module in model.named_modules():

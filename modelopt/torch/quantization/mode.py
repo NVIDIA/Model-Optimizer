@@ -56,7 +56,7 @@ from .conversion import (
     restore_svdquant_model,
     update_quantize_metadata,
 )
-from .model_calib import awq, max_calibrate, mse_calibrate, smoothquant, svdquant, gptq_lite
+from .model_calib import awq, gptq_lite, max_calibrate, mse_calibrate, smoothquant, svdquant
 
 __all__ = ["BaseCalibrateModeDescriptor"]
 
