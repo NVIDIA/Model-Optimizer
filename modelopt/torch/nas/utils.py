@@ -29,7 +29,6 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-import torchprofile.profile as profile
 from torch.autograd.grad_mode import _DecoratorContextManager
 
 from modelopt.torch.utils import (
@@ -64,6 +63,8 @@ __all__ = [  # noqa: RUF022
 
 @contextmanager
 def batch_norm_ignored_flops():
+    import torchprofile.profile as profile
+
     handlers_bck = profile.handlers
     handlers_new = []
     for op_names, op in profile.handlers:
@@ -98,6 +99,11 @@ def inference_flops(
     Returns:
         The number of inference FLOPs in the given unit as either string or float.
     """
+    try:
+        import torchprofile.profile as profile
+    except ImportError as e:
+        raise ImportError("Please run `pip install torchprofile` to use this function.") from e
+
     if is_parallel(network):
         network = network.module
     if data_shape is not None and dummy_input is not None:

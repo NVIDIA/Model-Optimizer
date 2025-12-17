@@ -17,6 +17,8 @@ import pytest
 import torch
 import torch.nn as nn
 
+pytest.importorskip("torchprofile")
+
 import modelopt.torch.nas as mtn
 from modelopt.torch.nas.algorithms import ConstraintsFunc
 

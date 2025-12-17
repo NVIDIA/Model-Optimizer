@@ -15,6 +15,10 @@ NVIDIA Model Optimizer Changelog (Linux)
 
 - Deprecate ``num_query_groups`` parameter in Minitron pruning (``mcore_minitron``). You can use ModelOpt 0.40.0 or earlier instead if you need to prune it.
 
+**Backward Breaking Changes**
+
+- Remove ``torchprofile`` as a default dependency from ModelOpt as its used only for flops-based FastNAS pruning (computer vision models). It can be installed separately if needed.
+
 0.40 (2025-12-12)
 ^^^^^^^^^^^^^^^^^
 
