@@ -93,6 +93,14 @@ MODEL_ID_TO_DYNAMIC_AXES = {
         "guidance": {0: "batch_size"},
         "latent": {0: "batch_size"},
     },
+    "flux-2-dev": {
+        "hidden_states": {0: "batch_size", 1: "latent_dim"},
+        "encoder_hidden_states": {0: "batch_size"},
+        "timestep": {0: "batch_size"},
+        "img_ids": {0: "latent_dim"},
+        "guidance": {0: "batch_size"},
+        "latent": {0: "batch_size"}
+    },
     "flux-schnell": {
         "hidden_states": {0: "batch_size", 1: "latent_dim"},
         "encoder_hidden_states": {0: "batch_size"},
@@ -265,6 +273,70 @@ def _gen_dummy_inp_and_dyn_shapes_flux(backbone, min_bs=1, opt_bs=1):
     return dummy_kwargs, dynamic_shapes
 
 
+def _gen_dummy_inp_and_dyn_shapes_flux2(backbone, min_bs=1, opt_bs=1, max_bs=1):
+    assert isinstance(backbone, Flux2Transformer2DModel) or isinstance(
+        backbone._orig_mod, Flux2Transformer2DModel
+    )
+    cfg = backbone.config
+
+    text_maxlen = 512 # constant
+    
+    min_img_dim = 256   # 256x256
+    opt_img_dim = 4096  # 1024x1024
+    max_img_dim = 16384 # 2048x2048 (Safe upper bound)
+
+    rope_dim = 4
+    
+    dynamic_shapes = {
+        "hidden_states": {
+            "min": [min_bs, min_img_dim, cfg.in_channels],
+            "opt": [opt_bs, opt_img_dim, cfg.in_channels],
+            "max": [max_bs, max_img_dim, cfg.in_channels],
+        },
+        "encoder_hidden_states": {
+            "min": [min_bs, text_maxlen, cfg.joint_attention_dim],
+            "opt": [opt_bs, text_maxlen, cfg.joint_attention_dim],
+            "max": [max_bs, text_maxlen, cfg.joint_attention_dim],
+        },
+        "timestep": {
+            "min": [min_bs], 
+            "opt": [opt_bs],
+            "max": [max_bs]
+        },
+        "guidance": {
+            "min": [min_bs], 
+            "opt": [opt_bs],
+            "max": [max_bs]
+        },
+        "img_ids": {
+            "min": [min_img_dim, rope_dim], 
+            "opt": [opt_img_dim, rope_dim],
+            "max": [max_img_dim, rope_dim]
+        },
+        "txt_ids": {
+            "min": [text_maxlen, rope_dim], 
+            "opt": [text_maxlen, rope_dim],
+            "max": [text_maxlen, rope_dim]
+        },
+    }
+    
+
+    dtype = backbone.dtype
+    device = backbone.device
+
+    dummy_kwargs = {
+        "hidden_states": torch.randn(*dynamic_shapes["hidden_states"]["opt"], dtype=dtype, device=device),
+        "encoder_hidden_states": torch.randn(*dynamic_shapes["encoder_hidden_states"]["opt"], dtype=dtype, device=device),
+        "timestep": torch.ones(*dynamic_shapes["timestep"]["opt"], dtype=dtype, device=device),
+        "img_ids": torch.randn(*dynamic_shapes["img_ids"]["opt"], dtype=dtype, device=device),
+        "txt_ids": torch.randn(*dynamic_shapes["txt_ids"]["opt"], dtype=dtype, device=device),
+        "guidance": torch.full(dynamic_shapes["guidance"]["opt"], 3.5, dtype=dtype, device=device),
+        "return_dict": False
+    }
+
+    return dummy_kwargs, dynamic_shapes
+
+
 def _gen_dummy_inp_and_dyn_shapes_ltx(backbone, min_bs=2, opt_bs=2):
     assert isinstance(backbone, LTXVideoTransformer3DModel) or isinstance(
         backbone._orig_mod, LTXVideoTransformer3DModel
@@ -356,7 +428,7 @@ def _gen_dummy_inp_and_dyn_shapes_wan(backbone, min_bs=1, opt_bs=2):
 
 
 def update_dynamic_axes(model_id, dynamic_axes):
-    if model_id in ["flux-dev", "flux-schnell"]:
+    if model_id in ["flux-dev", "flux-schnell", "flux-2-dev"]:
         dynamic_axes["out.0"] = dynamic_axes.pop("latent")
     elif model_id in ["sdxl-1.0", "sdxl-turbo"]:
         dynamic_axes["added_cond_kwargs.text_embeds"] = dynamic_axes.pop("text_embeds")
@@ -395,6 +467,10 @@ def generate_dummy_kwargs_and_dynamic_axes_and_shapes(model_id, backbone):
         dummy_kwargs, dynamic_shapes = _gen_dummy_inp_and_dyn_shapes_flux(
             backbone, min_bs=1, opt_bs=1
         )
+    elif model_id == "flux-2-dev":
+        dummy_kwargs, dynamic_shapes = _gen_dummy_inp_and_dyn_shapes_flux2(
+            backbone, min_bs=1, opt_bs=1
+        )
     elif model_id == "ltx-video-dev":
         dummy_kwargs, dynamic_shapes = _gen_dummy_inp_and_dyn_shapes_ltx(
             backbone, min_bs=2, opt_bs=2
@@ -421,7 +497,7 @@ def get_io_shapes(model_id, onnx_load_path, trt_dynamic_shapes):
             output_name = "sample"
         elif model_id in ["sd3.5-medium"]:
             output_name = "out_hidden_states"
-        elif model_id in ["flux-dev", "flux-schnell"]:
+        elif model_id in ["flux-dev", "flux-schnell", "flux-2-dev"]:
             output_name = "output"
         else:
             raise NotImplementedError(f"Unsupported model_id: {model_id}")
@@ -430,7 +506,7 @@ def get_io_shapes(model_id, onnx_load_path, trt_dynamic_shapes):
         io_shapes = {output_name: trt_dynamic_shapes["minShapes"]["sample"]}
     elif model_id in ["sd3-medium", "sd3.5-medium"]:
         io_shapes = {output_name: trt_dynamic_shapes["minShapes"]["hidden_states"]}
-    elif model_id in ["flux-dev", "flux-schnell"]:
+    elif model_id in ["flux-dev", "flux-schnell", "flux-2-dev"]:
         io_shapes = {}
 
     return io_shapes
@@ -498,6 +574,16 @@ def modelopt_export_sd(backbone, onnx_dir, model_name, precision):
         ]
         if model_name == "flux-dev":
             input_names.append("guidance")
+        output_names = ["latent"]
+    elif model_name == "flux-2-dev":
+        input_names = [
+            "hidden_states",
+            "encoder_hidden_states",
+            "timestep",
+            "img_ids",
+            "txt_ids",
+            "guidance",
+        ]
         output_names = ["latent"]
     elif model_name in ["ltx-video-dev"]:
         input_names = [
