@@ -37,20 +37,6 @@ jobs:
         run: |
           DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.event.release.tag_name }}/${{ env.WHEEL_NAME }}"
 
-          # Simple retry loop (5 attempts) to allow for asset propagation delay
-          echo "Verifying URL: $DOWNLOAD_URL"
-          for i in {1..5}; do
-            if curl --output /dev/null --head --fail "$DOWNLOAD_URL"; then
-              echo "✅ Success: Link is accessible (HTTP 200)."
-              exit 0
-            fi
-            echo "Attempt $i: Asset not ready yet. Waiting 5 seconds..."
-            sleep 5
-          done
-
-          echo "❌ Error: Link was not accessible after retries."
-          exit 1
-
           echo "Releasing wheel to Kitmaker Portal..."
           RESPONSE=$(curl -s -X POST \
             "${{ secrets.KITMAKER_RELEASE_URL }}" \
