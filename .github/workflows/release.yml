@@ -16,9 +16,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: |
-          pip install tox
-          sudo apt-get update && sudo apt-get install -y curl jq
+        run: pip install tox
       # - name: Run basic unit tests
       #   run: tox -e py312-torch29-tf_latest-unit
       - name: Build Wheel
@@ -36,7 +34,9 @@ jobs:
           DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.event.release.tag_name }}/${WHEEL_NAME}"
 
           echo "Releasing wheel to Kitmaker Portal..."
-          RESPONSE=$(curl -s -X POST \
+          echo "URL: $DOWNLOAD_URL"
+
+          RESPONSE=$(curl -X POST \
             "${{ secrets.KITMAKER_RELEASE_URL }}" \
             -H "Authorization: Bearer ${{ secrets.KITMAKER_API_TOKEN }}" \
             -H "Content-Type: application/json" \
@@ -53,12 +53,21 @@ jobs:
                 }
               ]
             }")
+          CURL_EXIT=$?
+
+          echo "Curl exit code: $CURL_EXIT"
           echo "Release response: $RESPONSE"
+
+          # Check if curl succeeded
+          if [ $CURL_EXIT -ne 0 ]; then
+            echo "❌ Curl command failed with exit code $CURL_EXIT"
+            exit 1
+          fi
 
           # Check if release was successful
           if echo "$RESPONSE" | jq -e '.release_uuid' > /dev/null; then
             echo "✅ Release created successfully"
           else
-            echo "❌ Release failed"
+            echo "❌ Release failed - no release_uuid in response"
             exit 1
           fi
