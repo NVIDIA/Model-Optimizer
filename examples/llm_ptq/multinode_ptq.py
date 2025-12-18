@@ -332,7 +332,6 @@ def main(args):
         args.qformat,
         args.kv_cache_qformat,
         args.awq_block_size,
-        None,
         model_type,
         QUANT_CFG_CHOICES,
         KV_QUANT_CFG_CHOICES,
