@@ -57,7 +57,10 @@ KIMIK2_EAGLE_SINGLE_LAYER = {
         "norm.weight",
         "fc.weight",
     },
-    "optional": {"d2t", "lm_head.weight",},
+    "optional": {
+        "d2t",
+        "lm_head.weight",
+    },
 }
 
 
@@ -129,14 +132,19 @@ def export_spec_ckpt_state_dict(model: nn.Module):
     if model.eagle_config.parallel_draft_step > 1:
         for i in range(model.eagle_config.parallel_draft_step - 1):
             for j in range(model.eagle_config.parallel_draft_heads_num_layers):
-                export_sd[f"parallel_draft_heads.{i}.medusa_layers.{j}.linear.weight"] = export_sd.pop(f"parallel_draft_heads.medusa_heads.{i}.{j}.linear.weight")
+                export_sd[f"parallel_draft_heads.{i}.medusa_layers.{j}.linear.weight"] = (
+                    export_sd.pop(f"parallel_draft_heads.medusa_heads.{i}.{j}.linear.weight")
+                )
                 if f"parallel_draft_heads.medusa_heads.{i}.{j}.linear.bias" in export_sd:
-                    export_sd[f"parallel_draft_heads.{i}.medusa_layers.{j}.linear.bias"] = export_sd.pop(f"parallel_draft_heads.medusa_heads.{i}.{j}.linear.bias")
-                    
-        export_sd["parallel_draft_heads.lm_head.weight"] = export_sd.pop("parallel_draft_heads.lm_head.weight")
-        #NOTE: tmp: bypassing format check for parallel draft
-        return export_sd
+                    export_sd[f"parallel_draft_heads.{i}.medusa_layers.{j}.linear.bias"] = (
+                        export_sd.pop(f"parallel_draft_heads.medusa_heads.{i}.{j}.linear.bias")
+                    )
 
+        export_sd["parallel_draft_heads.lm_head.weight"] = export_sd.pop(
+            "parallel_draft_heads.lm_head.weight"
+        )
+        # NOTE: tmp: bypassing format check for parallel draft
+        return export_sd
 
     _check_valid_sd(
         export_sd, model.eagle_config.eagle_decoder_type, model.eagle_config.num_hidden_layers
