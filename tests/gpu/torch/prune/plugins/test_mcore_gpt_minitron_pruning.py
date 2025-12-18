@@ -50,6 +50,7 @@ SEED = 1234
 
 
 def _test_mcore_gpt_parameter_sorting(activation_func, rank, size):
+    # Use relatively bigger model here for more accurate test for sorting
     num_layers = size
     hidden_size = 128
     num_attention_heads = 8
@@ -202,10 +203,12 @@ def _test_mcore_gpt_pruning(
     rank,
     size,
 ):
-    hidden_size = 256
-    ffn_hidden_size = 256
-    max_sequence_length = 16
-    vocab_size = 64
+    channel_divisor = 4
+
+    hidden_size = channel_divisor * 4
+    ffn_hidden_size = channel_divisor * 4
+    max_sequence_length = 8
+    vocab_size = 16
     batch_size = 2
 
     num_layers = min(size * 2, 8)
@@ -359,6 +362,7 @@ def _test_mcore_gpt_pruning(
 )
 def test_mcore_gpt_pruning(
     tmp_path,
+    use_minitron_channel_div_4,
     num_attention_heads,
     num_query_groups,
     activation_func,
@@ -394,6 +398,7 @@ def test_mcore_gpt_pruning(
 
 
 def _test_mcore_gpt_moe_parameter_sorting(rank, size):
+    # Use relatively bigger model here for more accurate test for sorting
     num_layers = min(size * 2, 8)
     hidden_size = 256
     num_attention_heads = 8
@@ -469,13 +474,15 @@ def test_mcore_gpt_moe_parameter_sorting(need_2_gpus):
 
 
 def _test_mcore_gpt_pruning_moe(ckpt_path, rank, size):
+    channel_divisor = 4
+
     num_layers = size
-    hidden_size = 128
-    moe_ffn_hidden_size = 128
+    hidden_size = channel_divisor * 4
+    moe_ffn_hidden_size = channel_divisor * 2
     num_moe_experts = 4
-    moe_shared_expert_intermediate_size = 256
-    max_sequence_length = 16
-    vocab_size = 64
+    moe_shared_expert_intermediate_size = channel_divisor * 4
+    max_sequence_length = 8
+    vocab_size = 16
     batch_size = 2
 
     def _get_model(initialize_megatron=True):
@@ -566,7 +573,7 @@ def _test_mcore_gpt_pruning_moe(ckpt_path, rank, size):
     assert torch.allclose(output, output_rerun, atol=1e-5)
 
 
-def test_mcore_gpt_pruning_moe(tmp_path):
+def test_mcore_gpt_pruning_moe(tmp_path, use_minitron_channel_div_4):
     spawn_multiprocess_job(
         size=torch.cuda.device_count(),
         job=partial(_test_mcore_gpt_pruning_moe, tmp_path / "minitron_scores.pth"),

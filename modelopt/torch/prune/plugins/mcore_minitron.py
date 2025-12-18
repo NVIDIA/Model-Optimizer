@@ -25,6 +25,7 @@ Actual dynamic module implementations are at :mod:`modelopt.torch.nas.plugins.me
 """
 
 import copy
+import os
 from collections.abc import Callable
 from functools import partial
 from typing import Any
@@ -295,21 +296,23 @@ class MCoreMinitronSearcher(BaseSearcher):
         registry.cleanup()
 
 
+# Allow overriding the SS channel divisor for unit testing on smaller models
+MINITRON_SS_CHANNEL_DIVISOR = int(os.getenv("MINITRON_SS_CHANNEL_DIVISOR", 64))
 MCoreMinitronConfig: type[ModeloptBaseConfig] = create_model(
     "MCoreMinitronConfig",
     **get_kwargs_for_create_model_with_rules(
         registry=DMRegistry,
         default_rules={
             "megatron.core.models.gpt.GPTModel": {
-                "hidden_size_divisor": 64,
-                "ffn_hidden_size_divisor": 64,
+                "hidden_size_divisor": MINITRON_SS_CHANNEL_DIVISOR,
+                "ffn_hidden_size_divisor": MINITRON_SS_CHANNEL_DIVISOR,
                 "num_moe_experts_divisor": 1,
             },
             **(
                 {
                     "megatron.core.models.mamba.MambaModel": {
-                        "hidden_size_divisor": 64,
-                        "ffn_hidden_size_divisor": 64,
+                        "hidden_size_divisor": MINITRON_SS_CHANNEL_DIVISOR,
+                        "ffn_hidden_size_divisor": MINITRON_SS_CHANNEL_DIVISOR,
                         "mamba_num_heads_divisor": 4,
                         "mamba_head_dim_divisor": 4,
                         "num_moe_experts_divisor": 1,

@@ -42,6 +42,7 @@ SEED = 1234
 
 
 def _test_mcore_mamba_parameter_sorting(rank, size):
+    # Use relatively bigger model here for more accurate test for sorting
     num_layers = size
     hybrid_override_pattern = "M" * size
     hidden_size = 256
@@ -111,15 +112,18 @@ def test_mcore_mamba_parameter_sorting(need_2_gpus):
 
 
 def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
+    channel_divisor = 4
+
     num_layers = min(size * 2, 8)
-    hidden_size = 256
-    ffn_hidden_size = 128
+    hidden_size = channel_divisor * 8
+    ffn_hidden_size = channel_divisor * 2
     num_attention_heads = 8
     num_query_groups = 4
-    mamba_state_dim = 64
-    mamba_head_dim = 16
+    mamba_state_dim = channel_divisor * 2
+    mamba_head_dim = channel_divisor * 2
     mamba_num_groups = 2
     num_moe_experts = 8
+    vocab_size = 32
     batch_size = 2
 
     def _get_model(initialize_megatron=True):
@@ -138,6 +142,7 @@ def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
             moe_ffn_hidden_size=ffn_hidden_size,
             moe_shared_expert_intermediate_size=ffn_hidden_size,
             num_moe_experts=num_moe_experts,
+            vocab_size=vocab_size,
         ).cuda()
         return model
 
@@ -220,7 +225,7 @@ def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
     )
 
 
-def test_mcore_mamba_hybrid_pruning(tmp_path):
+def test_mcore_mamba_hybrid_pruning(tmp_path, use_minitron_channel_div_4):
     spawn_multiprocess_job(
         size=torch.cuda.device_count(),
         job=partial(_test_mcore_mamba_hybrid_pruning, tmp_path / "modelopt_minitron_scores.pth"),

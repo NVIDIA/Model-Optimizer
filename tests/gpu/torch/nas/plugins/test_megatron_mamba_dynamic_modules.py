@@ -46,17 +46,17 @@ SEED = 1234
 
 
 def _test_mamba_search_space(rank, size):
-    channel_divisor = 64
+    channel_divisor = 4
     mamba_num_heads_divisor = 4
     mamba_head_dim_divisor = 4
 
     num_layers = size
     hybrid_override_pattern = "M" * size
-    hidden_size = 256
-    mamba_state_dim = 64
-    mamba_head_dim = 16
+    hidden_size = channel_divisor * 4
+    mamba_state_dim = channel_divisor
+    mamba_head_dim = mamba_head_dim_divisor * 2
     mamba_num_groups = 2
-    max_sequence_length = 16
+    max_sequence_length = 8
     vocab_size = 32
     batch_size = 2
 
@@ -118,7 +118,7 @@ def _test_mamba_search_space(rank, size):
     assert not any(named_dynamic_modules(model))
 
 
-def test_mamba_search_space():
+def test_mamba_search_space(use_minitron_channel_div_4):
     spawn_multiprocess_job(
         size=torch.cuda.device_count(), job=_test_mamba_search_space, backend="nccl"
     )
