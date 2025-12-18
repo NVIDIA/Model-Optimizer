@@ -218,10 +218,6 @@ class EagleModule(nn.Module):
         self.layers = nn.ModuleList(
             [decoder_layer_cls(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
-
-        if decoder_layer_cls.__name__ == "LlamaDecoderLayer":
-            self.rotary_emb = LlamaRotaryEmbedding(config=config)
-
         if config.use_last_layernorm:
             self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
 
@@ -359,7 +355,10 @@ class EagleModule(nn.Module):
         else:  # EAGLE-1
             hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
 
-        if hasattr(self, "rotary_emb"):
+        if self.config.eagle_decoder_type == "llama":
+            # Lazy init rope to avoid save/load meta tensor error
+            if not hasattr(self, "rotary_emb"):
+                self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
         else:
             position_embeddings = None
