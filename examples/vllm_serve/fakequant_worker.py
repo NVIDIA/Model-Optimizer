@@ -149,7 +149,7 @@ def disable_compilation(model):
 quant_config: dict[str, Any] = {
     "dataset": os.environ.get("QUANT_DATASET", "cnn_dailymail"),
     "calib_size": int(os.environ.get("QUANT_CALIB_SIZE", 512)),
-    "quant_cfg": os.environ.get("QUANT_CFG", "NVFP4_DEFAULT_CFG"),
+    "quant_cfg": os.environ.get("QUANT_CFG", None),
     "kv_quant_cfg": os.environ.get("KV_QUANT_CFG", None),
     "amax_file_path": os.environ.get("AMAX_FILE_PATH", None),
 }
@@ -237,9 +237,10 @@ def _fakequant_run_prolog_worker(self) -> None:
                     self.sample_tokens(None)
 
     quant_cfg = getattr(mtq, quant_config["quant_cfg"])
-    if quant_config["kv_quant_cfg"] is not None:
+    quant_kv_cfg = getattr(mtq, quant_config["kv_quant_cfg"])
+    if quant_kv_cfg:
         quant_cfg = mtq.utils.update_quant_cfg_with_kv_cache_quant(
-            quant_cfg, getattr(mtq, quant_config["kv_quant_cfg"])["quant_cfg"]
+            quant_cfg, quant_kv_cfg["quant_cfg"]
         )
 
     model = self.model_runner.model
@@ -314,6 +315,6 @@ class FakeQuantWorker(BaseWorker):
             return super().determine_available_memory()
 
     def compile_or_warm_up_model(self) -> None:
-        if quant_config["quant_cfg"]:
+        if quant_config["quant_cfg"] or quant_config["kv_quant_cfg"]:
             _fakequant_run_prolog_worker(self)
         super().compile_or_warm_up_model()

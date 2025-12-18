@@ -40,6 +40,11 @@ for module_path in [
     except ImportError:
         continue
 
+try:
+    from vllm.attention.layer import MLAAttention as VllmMLAAttention
+except ImportError:
+    VllmMLAAttention = None
+
 vllm_fused_moe_package = importlib.import_module("vllm.model_executor.layers.fused_moe.fused_moe")
 
 
@@ -262,13 +267,17 @@ class _QuantVLLMAttention(QuantModule):
     def _setup(self):
         self.q_bmm_quantizer = TensorQuantizer()
         self.k_bmm_quantizer = TensorQuantizer()
-        self.v_bmm_quantizer = TensorQuantizer()
+        # required for vllm < 0.11.1
+        if not self.use_mla:
+            self.v_bmm_quantizer = TensorQuantizer()
         self.parallel_state = create_parallel_state()
 
     def forward(self, query, key, value, *args, **kwargs):
         query = self.q_bmm_quantizer(query)
         key = self.k_bmm_quantizer(key)
-        value = self.v_bmm_quantizer(value)
+        # required for vllm < 0.11.1
+        if not self.use_mla:
+            value = self.v_bmm_quantizer(value)
 
         return super().forward(query, key, value, *args, **kwargs)
 
@@ -281,3 +290,18 @@ class _QuantVLLMCrossAttention(_QuantVLLMAttention):
 @QuantModuleRegistry.register({EncoderOnlyAttention: "vllm_EncoderOnlyAttention"})
 class _QuantVLLMEncoderOnlyAttention(_QuantVLLMAttention):
     pass
+
+
+if VllmMLAAttention is not None:
+
+    @QuantModuleRegistry.register({VllmMLAAttention: "vllm_MLAAttention"})
+    class _QuantVLLMMLAAttention(QuantModule):
+        def _setup(self):
+            self.q_bmm_quantizer = TensorQuantizer()
+            self.kv_c_bmm_quantizer = TensorQuantizer()
+            self.parallel_state = create_parallel_state()
+
+        def forward(self, query, kv_c, *args, **kwargs):
+            query = self.q_bmm_quantizer(query)
+            kv_c = self.kv_c_bmm_quantizer(kv_c)
+            return super().forward(query, kv_c, *args, **kwargs)
