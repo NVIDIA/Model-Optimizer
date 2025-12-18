@@ -495,7 +495,6 @@ class _QuantQwen3VLMoeTextDecoderLayer(QuantModule):
         )
 
         if not isinstance(self.mlp, Qwen3VLMoeTextSparseMoeBlock):
-            print(f"Skipping {type(self.mlp)}")
             return
         q_proj_weight = self.self_attn.q_proj.weight
         dtype, device = q_proj_weight.dtype, q_proj_weight.device
