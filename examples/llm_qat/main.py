@@ -228,7 +228,6 @@ def train():
         distill_config = {
             "teacher_model": teacher_model,
             "criterion": LMLogitsLoss(),
-            "expose_minimal_state_dict": False,  # FSDP forces us to disable this
         }
         distill_kwargs["distill_config"] = distill_config
     trainer_cls = QADTrainer if training_args.distill else QATTrainer

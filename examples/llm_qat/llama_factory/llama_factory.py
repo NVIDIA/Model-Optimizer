@@ -220,7 +220,6 @@ def create_patch_module(quant_args=None, distill_args=None):
                     distill_config = {
                         "teacher_model": teacher_model,
                         "criterion": LMLogitsLoss(),
-                        "expose_minimal_state_dict": False,  # FSDP requires this to be False
                     }
                     modelopt_trainer_args["distill_config"] = distill_config
                 super().__init__(*args, **modelopt_trainer_args, **kwargs)

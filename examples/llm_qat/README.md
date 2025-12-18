@@ -125,7 +125,6 @@ from modelopt.torch.quantization.plugins.transformers_trainer import QADTrainer
 distill_config = {
    "teacher_model": teacher_model,
    "criterion": LMLogitsLoss(),
-   "expose_minimal_state_dict": False,
 }
 
 trainer = QADTrainer(
