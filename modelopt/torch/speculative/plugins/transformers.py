@@ -807,7 +807,12 @@ class HFEagleModel(EagleModel):
             assert past_key_values is None, "past_key_values should be None in training"
 
         if loss_mask is None:
-            loss_mask = torch.ones_like(input_ids, dtype=torch.bool, device=input_ids.device)
+            # By default, mask out padding tokens in loss computation
+            loss_mask = (
+                attention_mask.clone().detach()
+                if attention_mask is not None
+                else torch.ones_like(input_ids, dtype=torch.bool)
+            )
 
         # ====First, we run base model forward====
         if "base_model_outputs" in kwargs:
