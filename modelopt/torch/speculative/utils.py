@@ -428,13 +428,14 @@ def _setup_kimi_k2_decoder():
 
     # Patch Kimi Attention to init rope lazily to avoid save/load meta tensor error
     original_init_rope = kimi_k2_module.DeepseekV3Attention._init_rope
+    original_forward = kimi_k2_module.DeepseekV3Attention.forward
 
     def patched_fwd_with_lazy_rope_init(self, *args, **kwargs):
         if not hasattr(self, "rotary_emb"):
-            self.rotary_emb = original_init_rope()
-        return self.forward(*args, **kwargs)
+            original_init_rope(self)
+        return original_forward(self, *args, **kwargs)
 
-    kimi_k2_module.DeepseekV3Attention._init_rope = lambda self, *args, **kwargs: None
+    kimi_k2_module.DeepseekV3Attention._init_rope = lambda self: None
     kimi_k2_module.DeepseekV3Attention.forward = patched_fwd_with_lazy_rope_init
 
     return getattr(kimi_k2_module, "DeepseekV3DecoderLayer")
