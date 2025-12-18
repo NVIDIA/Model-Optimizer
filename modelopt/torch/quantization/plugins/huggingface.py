@@ -487,7 +487,34 @@ class _QuantDbrxExpertGLU(QuantModule):
         return self.w2_linear[expert_idx](x1)
 
 
-class _QuantDbrxFFN(_QuantSparseMoe):
+class _QuantQwen3VLMoeTextDecoderLayer(QuantModule):
+    def _setup(self):
+        from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
+        from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextSparseMoeBlock
+        if not isinstance(self.mlp, Qwen3VLMoeTextSparseMoeBlock):
+            print(f"Skipping {type(self.mlp)}")
+            return
+        q_proj_weight = self.self_attn.q_proj.weight
+        dtype, device = q_proj_weight.dtype, q_proj_weight.device
+        def _copy_weight(module, weight):
+            module.to(dtype=dtype, device=device)
+            with torch.no_grad():
+                module.weight.copy_(weight.detach())
+        
+        new_moe_layer = Qwen3MoeSparseMoeBlock(self.self_attn.config)
+        new_moe_layer.gate = self.mlp.gate
+        experts = self.mlp.experts
+        expert_dim = experts.expert_dim
+        for idx, expert in enumerate(new_moe_layer.experts):
+            _copy_weight(expert.gate_proj, experts.gate_up_proj[idx, :, :expert_dim].T)
+            _copy_weight(expert.up_proj, experts.gate_up_proj[idx, :, expert_dim:].T)
+            _copy_weight(expert.down_proj, experts.down_proj[idx, :].T)
+        
+        delattr(self, "mlp")
+        self.mlp = new_moe_layer
+        
+
+class _QuantDbrxFFN(_QuantMoeSparseMoe):
     @property
     def num_experts(self):
         return self.router.moe_num_experts
@@ -576,6 +603,16 @@ try:
 except ImportError:
     pass
 
+
+try:
+    from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextDecoderLayer
+
+    if Qwen3VLMoeTextDecoderLayer not in QuantModuleRegistry:
+        QuantModuleRegistry.register({Qwen3VLMoeTextDecoderLayer: "hf.Qwen3VLMoeTextDecoderLayer"})(
+            _QuantQwen3VLMoeTextDecoderLayer
+        )
+except ImportError:
+    pass
 
 class _QuantGptOssExperts(_QuantFunctionalMixin):
     """Quantized wrapper for `transformers.GptOssExperts`.
