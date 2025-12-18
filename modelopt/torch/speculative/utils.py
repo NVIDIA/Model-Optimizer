@@ -411,7 +411,7 @@ def _setup_kimi_k2_decoder():
     # Download repository files
     kimi_k2_path = snapshot_download(repo_id=KIMI_K2_REPO_ID, allow_patterns="*.py")
 
-    # Apply compatibility patches
+    # Patch deprecated usage in Kimi implementation
     _patch_dynamic_cache_compatibility()
 
     # Import required modules
@@ -425,5 +425,16 @@ def _setup_kimi_k2_decoder():
     kimi_k2_module = _import_module_from_path(
         model_module_path, f"{KIMI_K2_PACKAGE_NAME}.modeling_deepseek", KIMI_K2_PACKAGE_NAME
     )
+
+    # Patch Kimi Attention to init rope lazily to avoid save/load meta tensor error
+    original_init_rope = kimi_k2_module.DeepseekV3Attention._init_rope
+
+    def patched_fwd_with_lazy_rope_init(self, *args, **kwargs):
+        if not hasattr(self, "rotary_emb"):
+            self.rotary_emb = original_init_rope()
+        return self.forward(*args, **kwargs)
+
+    kimi_k2_module.DeepseekV3Attention._init_rope = lambda self, *args, **kwargs: None
+    kimi_k2_module.DeepseekV3Attention.forward = patched_fwd_with_lazy_rope_init
 
     return getattr(kimi_k2_module, "DeepseekV3DecoderLayer")
