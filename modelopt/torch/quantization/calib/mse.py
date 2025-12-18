@@ -79,10 +79,18 @@ class MseCalibrator(_Calibrator):
         x = x.detach().to(dtype=torch.float32)
 
         device = x.device
-        multipliers = torch.linspace(
-            self._start_multiplier, self._stop_multiplier, steps=self._num_steps, device=device
+        # Split steps between _start_multiplier to 1.0 and 1.0 to _stop_multiplier
+        # to ensure balanced exploration on both sides of the original amax (1.0)
+        steps_first_half = self._num_steps // 2 + 1  # Include 1.0
+        steps_second_half = self._num_steps - self._num_steps // 2  # For second range
+        multipliers = torch.cat(
+            [
+                torch.linspace(self._start_multiplier, 1.0, steps=steps_first_half, device=device),
+                torch.linspace(1.0, self._stop_multiplier, steps=steps_second_half, device=device)[
+                    1:
+                ],  # Skip duplicate 1.0
+            ]
         )
-        print(f"Multipliers: {multipliers}")
 
         # Get reduce axis for per-channel quantization
         reduce_axis = quant_utils.convert_quantization_axis_to_reduce_axis(x, self._axis)
@@ -111,6 +119,18 @@ class MseCalibrator(_Calibrator):
         self._losses_sum = [None] * self._num_steps
         self._candidate_amaxs = [None] * self._num_steps
         self._amax = None
+
+    def clear(self):
+        """Clear all cached data to free GPU memory.
+
+        Call this after compute_amax() and load_calib_amax() are done.
+        """
+        self._losses_sum = []
+        self._candidate_amaxs = []
+
+        if self._initial_amax is not None:
+            del self._initial_amax
+            self._initial_amax = None
 
     @torch.no_grad()
     def compute_amax(self, verbose: bool = False):

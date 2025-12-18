@@ -319,6 +319,13 @@ def mse_calibrate(
     # Step 7: Compute optimal amax and load it for all quantizers (weights + activations)
     finish_stats_collection(model, method="mse")
 
+    # Step 8: Free GPU memory by clearing calibrator data
+    for name, module in model.named_modules():
+        if isinstance(module, TensorQuantizer) and not module._disabled:
+            if hasattr(module, "_calibrator") and module._calibrator is not None:
+                if hasattr(module._calibrator, "clear"):
+                    module._calibrator.clear()
+
     # TODO: Sync amax across distributed processes
 
 
