@@ -518,7 +518,7 @@ class _QuantQwen3VLMoeTextDecoderLayer(QuantModule):
         self.mlp = new_moe_layer
 
 
-class _QuantDbrxFFN(_QuantMoeSparseMoe):
+class _QuantDbrxFFN(_QuantSparseMoe):
     @property
     def num_experts(self):
         return self.router.moe_num_experts
