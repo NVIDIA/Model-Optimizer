@@ -139,7 +139,7 @@ esac
 DISTILLATION_ARGS=""
 if [[ "${DISTILL,,}" == "true" ]]; then
   DISTILLATION_ARGS="--distill $DISTILL --teacher_model $TEACHER_MODEL"
-  if [[ "${BACKEND,,}" == "fsdp1"]]; then
+  if [[ "${BACKEND,,}" == "fsdp1" ]]; then
     echo "Error: Distillation does not support FSDP1. Use FSDP2 instead."
     exit 1
   elif [[ "${BACKEND,,}" == "fsdp2" ]]; then

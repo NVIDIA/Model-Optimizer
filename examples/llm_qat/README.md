@@ -237,7 +237,7 @@ You could also add your own customized quantization format to `CUSTOM_QUANT_CFG`
 
 > **_NOTE:_** `launch.sh` defaults to use `LlamaDecoderLayer` as the transformer layer class. If your model uses a different class, you need to pass `--fsdp_transformer_layer_cls_to_wrap <your_layer_class>` to the `launch.sh` script. For example, for `Qwen/Qwen3-8B`, specify `--fsdp_transformer_layer_cls_to_wrap Qwen3DecoderLayer` as an additional argument.
 
-> **_NOTE:_** The script defaults to using FSDP1. To use FSDP2, pass "--use_fsdp2 True" to the `launch.sh` script. Note that FSDP2 is less stable than FSDP1 currently. Use it with caution.
+> **_NOTE:_** The script defaults to using FSDP1. To use FSDP2, pass "--backend=fsdp2" to the `launch.sh` script. Note that FSDP2 is less stable than FSDP1 currently. Use it with caution.
 
 ### Results
 
@@ -268,10 +268,11 @@ To perform QAD with logits loss, run:
    --quant_cfg NVFP4_DEFAULT_CFG \
    --do_train True \
    --output_dir llama-qad \
-   --distill True
+   --distill True \
+   --backend fsdp2
 ```
 
-> **_NOTE:_** QAD currently requires quantization to be applied before the FSDP wrapper. Training is not supported for models that exceed single GPU memory capacity.
+> **_NOTE:_** QAD doesn't support original FSDP - only FSDP2. It also requires quantization to be applied before the FSDP wrapper.
 
 ## Testing QAT model with LLM benchmarks for accuracy evaluation
 

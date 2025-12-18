@@ -58,6 +58,9 @@ class KDTrainer(ModelOptHFTrainer):
     ):
         """Dumps model and ModelOpt states to disk.
 
+        Note: Will save pretrained model in safetensors format if called manually, otherwise will
+            save in training checkpointformat (when called internally by transformers Trainer).
+
         Args:
             output_dir: The directory to save the model and ModelOpt states.
         """
