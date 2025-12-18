@@ -358,7 +358,9 @@ class EagleModule(nn.Module):
         if self.config.eagle_decoder_type == "llama":
             # Lazy init rope to avoid save/load meta tensor error
             if not hasattr(self, "rotary_emb"):
-                self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
+                self.rotary_emb = LlamaRotaryEmbedding(
+                    config=self.config, device=hidden_states.device
+                )
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
         else:
             position_embeddings = None
