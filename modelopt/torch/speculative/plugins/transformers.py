@@ -39,20 +39,25 @@ from torch.nn import CrossEntropyLoss
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 from transformers import Cache, DynamicCache, PretrainedConfig, PreTrainedModel
 from transformers.models.llama.modeling_llama import (
-    LlamaAttention,
     LlamaDecoderLayer,
     LlamaRMSNorm,
     LlamaRotaryEmbedding,
 )
 from transformers.trainer_pt_utils import LabelSmoother
 from transformers.utils import ModelOutput
+from transformers.utils.quantization_config import QuantizationMethod
 
 from ..eagle.conversion import EagleDMRegistry
 from ..eagle.eagle_model import EagleModel
 from ..eagle.utils import RMSNorm, expand_mask, make_causal_mask
 from ..medusa.conversion import MedusaDMRegistry
 from ..medusa.medusa_model import MedusaModel
-from ..utils import AcceptanceRateValidation, ResBlock, temporary_set_config_value
+from ..utils import (
+    AcceptanceRateValidation,
+    ResBlock,
+    _setup_kimi_k2_decoder,
+    temporary_set_config_value,
+)
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 
@@ -213,6 +218,10 @@ class EagleModule(nn.Module):
         self.layers = nn.ModuleList(
             [decoder_layer_cls(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
+
+        if decoder_layer_cls.__name__ == "LlamaDecoderLayer":
+            self.rotary_emb = LlamaRotaryEmbedding(config=config)
+
         if config.use_last_layernorm:
             self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
 
@@ -227,7 +236,7 @@ class EagleModule(nn.Module):
             # Their values depend on specific tokenzier and calibrate dataset, and should be set in training script.
             if config.draft_vocab_size < config.vocab_size:
                 self.register_buffer("d2t", torch.zeros(config.draft_vocab_size, dtype=torch.int64))
-            self.eagle_lm_head = nn.Linear(
+            self.lm_head = nn.Linear(
                 config.hidden_size,
                 config.draft_vocab_size,
                 bias=False,
@@ -245,37 +254,20 @@ class EagleModule(nn.Module):
             )
 
             first_layer_attn = self.layers[0].self_attn
-            if not isinstance(first_layer_attn, LlamaAttention):
-                raise ValueError("EAGLE-3 only support LlamaAttention.")
+
+            # Expand first attn input dim since it accepts cat(input_embeds, hidden_states)
+            self._expand_first_attn_in_dim(first_layer_attn)
 
             # EAGLE-3's first attention require [input_layernorm_output, aux_hidden_states]
             first_layer_attn.register_forward_pre_hook(
                 self._eagle3_attention_forward_pre_hook, with_kwargs=True
             )
 
-            # Modify qkv projection in first layer to accept 2h hidden size.
-            first_layer_attn.q_proj = nn.Linear(
-                first_layer_attn.q_proj.in_features * 2,
-                first_layer_attn.q_proj.out_features,
-                bias=first_layer_attn.config.attention_bias,
-            )
-            first_layer_attn.k_proj = nn.Linear(
-                first_layer_attn.k_proj.in_features * 2,
-                first_layer_attn.k_proj.out_features,
-                bias=first_layer_attn.config.attention_bias,
-            )
-            first_layer_attn.v_proj = nn.Linear(
-                first_layer_attn.v_proj.in_features * 2,
-                first_layer_attn.v_proj.out_features,
-                bias=first_layer_attn.config.attention_bias,
-            )
-
             # In EAGLE-3, input_embeds and hidden_states are normalized separately before concatenation.
-            self.input_embeds_norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-            self.hidden_norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-
-            # Disable input norm in first layer. We normed embeds and h individually before.
-            self.layers[0].input_layernorm = nn.Identity()
+            self.layers[0].input_layernorm = LlamaRMSNorm(
+                config.hidden_size, eps=config.rms_norm_eps
+            )
+            self.layers[0].hidden_norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         if self.config.parallel_draft_step > 1:
             self.parallel_draft_heads = ParallelDraft(
@@ -283,6 +275,34 @@ class EagleModule(nn.Module):
                 config.draft_vocab_size,
                 num_heads=self.config.parallel_draft_step - 1,
                 num_layers=self.config.parallel_draft_heads_num_layers,
+            )
+
+    def _expand_first_attn_in_dim(self, first_layer_attn):
+        """Modify qkv projection in first layer to accept 2h hidden size."""
+        # Find Linear modules to expand
+        eagle_attn_type = type(first_layer_attn)
+        if eagle_attn_type.__name__ == "LlamaAttention":
+            expand_modules = ["q_proj", "k_proj", "v_proj"]
+        elif eagle_attn_type.__name__ == "DeepseekV3Attention":
+            if first_layer_attn.q_lora_rank is None:
+                expand_modules = ["q_proj", "kv_a_proj_with_mqa"]
+            else:
+                expand_modules = ["q_a_proj", "kv_a_proj_with_mqa"]
+        else:
+            raise ValueError(f"Unsupported attention type: {eagle_attn_type}")
+
+        # Replace Linear with 2x input dim
+        for module in expand_modules:
+            original_linear = getattr(first_layer_attn, module)
+            assert isinstance(original_linear, nn.Linear), f"Module {module} is not a Linear"
+            setattr(
+                first_layer_attn,
+                module,
+                nn.Linear(
+                    original_linear.in_features * 2,
+                    original_linear.out_features,
+                    bias=first_layer_attn.config.attention_bias,
+                ),
             )
 
     def _eagle3_attention_forward_pre_hook(self, module, args, kwargs):
@@ -295,7 +315,7 @@ class EagleModule(nn.Module):
         input_embeds = self._input_embeds
         self._input_embeds = None
         kwargs["hidden_states"] = torch.cat(
-            (input_embeds, self.hidden_norm(kwargs["hidden_states"])), dim=-1
+            (input_embeds, self.layers[0].hidden_norm(kwargs["hidden_states"])), dim=-1
         )
 
         return args, kwargs
@@ -305,13 +325,10 @@ class EagleModule(nn.Module):
         hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor,
         attention_mask: torch.Tensor,
-        loss_mask: torch.Tensor | None = None,
-        logits: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
         past_key_values: Cache | None = None,
         use_cache: bool | None = None,
         output_attentions: bool | None = False,
-        position_embeddings: torch.Tensor | None = None,
     ):
         """Forward function for EagleModule."""
         batch_size, seq_length, _ = hidden_states.shape
@@ -338,9 +355,14 @@ class EagleModule(nn.Module):
             # In EAGLE-3, we save input embeddings to attribute, and use it in first decoder layer by hook function
             # Also, we normalize input embeddings and hidden states before concatenating them.
             # The default input norm in first layer attn will be disabled.
-            self._input_embeds = self.input_embeds_norm(inputs_embeds)
+            self._input_embeds = self.layers[0].input_layernorm(inputs_embeds)
         else:  # EAGLE-1
             hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
+
+        if hasattr(self, "rotary_emb"):
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        else:
+            position_embeddings = None
 
         for decoder_layer in self.layers:
             layer_outputs = decoder_layer(
@@ -473,6 +495,7 @@ class HFEagleModel(EagleModel):
         eagle_reuse_base_decoder,
         eagle_loss_decay_factor,
         eagle_architecture_config,
+        eagle_decoder_type,
     ):
         """Constructor.
 
@@ -488,8 +511,17 @@ class HFEagleModel(EagleModel):
             eagle_reuse_base_decoder=eagle_reuse_base_decoder,
             eagle_loss_decay_factor=eagle_loss_decay_factor,
             eagle_architecture_config=eagle_architecture_config,
+            eagle_decoder_type=eagle_decoder_type,
         )
+
+        if eagle_decoder_type == "llama":
+            # Use default eagle config
+            decoder_cls = LlamaDecoderLayer
+        elif eagle_decoder_type == "kimik2":
+            decoder_cls = _setup_kimi_k2_decoder()
+
         self.eagle_config = PretrainedConfig.from_dict(eagle_architecture_config)
+        self.eagle_config.eagle_decoder_type = eagle_decoder_type
         # Hidden size and vocab size must match base model
         self.eagle_config.hidden_size = self._base_llm_config.hidden_size
         self.eagle_config.vocab_size = self._base_llm_config.vocab_size
@@ -500,9 +532,14 @@ class HFEagleModel(EagleModel):
 
         if self.eagle_config._attn_implementation is None:
             self.eagle_config._attn_implementation = "sdpa"
-        decoder_cls = (
-            type(self.model.layers[-1]) if self.eagle_reuse_base_decoder else LlamaDecoderLayer
-        )
+
+        # Patch for Kimi-K2-Thinking, avoid quantizing drafter
+        if (
+            hasattr(self.config, "quantization_config")
+            and self.config.quantization_config.quant_method
+            == QuantizationMethod.COMPRESSED_TENSORS
+        ):
+            self.config.quantization_config.quantization_config.ignore.append("re:.*eagle_module.*")
 
         # Use default aux_hidden_state layers if use_aux_hidden_state is True
         # but no layer id is given
@@ -528,7 +565,6 @@ class HFEagleModel(EagleModel):
             self.eagle_config,
             decoder_cls,
         )
-        self.eagle_rotary_emb = LlamaRotaryEmbedding(config=self.eagle_config)
 
         # find base model, lm head, and embeddings paths
         self._find_base_model_parts()
@@ -552,11 +588,11 @@ class HFEagleModel(EagleModel):
         self.num_ttt_steps = 4  # NOTE: (hg) hardcoded for now. Might add to config later.
         self._cached_attn_blk_masks = {}
 
-    def _get_ttt_attention_mask(self, seq_length, ttt_step):
+    def _get_ttt_attention_mask(self, batch_size, seq_length, ttt_step):
         # compile and cached flex attention masks in first call
         if ttt_step not in self._cached_attn_blk_masks:
             self._cached_attn_blk_masks.update(
-                {ttt_step: self._compute_ttt_attention_mask(seq_length, ttt_step)}
+                {ttt_step: self._compute_ttt_attention_mask(batch_size, seq_length, ttt_step)}
             )
         return self._cached_attn_blk_masks[ttt_step]
 
@@ -637,7 +673,9 @@ class HFEagleModel(EagleModel):
 
         return eagle_input_ids, attention_mask, position_ids
 
-    def _compute_ttt_attention_mask(self, seq_length, ttt_step) -> BlockMask | torch.Tensor:
+    def _compute_ttt_attention_mask(
+        self, batch_size, seq_length, ttt_step
+    ) -> BlockMask | torch.Tensor:
         """Return TTT attention_mask tensor of type BlockMask or Tensor depends on eagle attn impl."""
 
         def msk_func(b, h, q_idx, kv_idx):
@@ -667,6 +705,8 @@ class HFEagleModel(EagleModel):
             tensor_mask = torch.full_like(
                 tensor_mask, 0, dtype=self._base_llm_config.dtype, device=self.device
             ).masked_fill(~tensor_mask, dtypemin)
+
+            tensor_mask = tensor_mask.repeat(batch_size, 1, 1, 1)
             return tensor_mask
 
     def _llm_or_vlm_embedding(self, input_ids, kwargs):
@@ -746,7 +786,6 @@ class HFEagleModel(EagleModel):
         inputs_embeds,
         attention_mask,
         position_ids,
-        position_embeddings,
         eagle_cache=None,
     ):
         eagle_postnorm_h, eagle_prenorm_h, eagle_cache = self.eagle_module(
@@ -755,12 +794,11 @@ class HFEagleModel(EagleModel):
             attention_mask=attention_mask,
             position_ids=position_ids,
             use_cache=True,
-            position_embeddings=position_embeddings,
             past_key_values=eagle_cache,
         )
         eagle_lm_head = (
-            self.eagle_module.eagle_lm_head
-            if hasattr(self.eagle_module, "eagle_lm_head")
+            self.eagle_module.lm_head
+            if hasattr(self.eagle_module, "lm_head")
             else self._base_model_lm_head
         )
         eagle_logits = eagle_lm_head(eagle_postnorm_h)
@@ -864,7 +902,6 @@ class HFEagleModel(EagleModel):
         with torch.no_grad():
             inputs_embeds = self._llm_or_vlm_embedding(eagle_input_ids, kwargs)
 
-        position_embeddings = self.eagle_rotary_emb(eagle_input_hidden_states, position_ids)
         past_key_values.eagle_cache = eagle_cache
 
         # ====Perform training-time-testing with 3 extra eagle forward passes====
@@ -872,14 +909,13 @@ class HFEagleModel(EagleModel):
             attention_mask = (
                 attention_mask_0
                 if ttt_step == 0
-                else self._get_ttt_attention_mask(seq_length, ttt_step)
+                else self._get_ttt_attention_mask(b, seq_length, ttt_step)
             )
             _, eagle_input_hidden_states, eagle_logits, eagle_cache = self._eagle_forward(
                 eagle_input_hidden_states,
                 inputs_embeds,
                 attention_mask,
                 position_ids,
-                position_embeddings,
                 eagle_cache,
             )
             eagle_input_hidden_states = torch.cat(
@@ -1019,9 +1055,6 @@ class HFEagleModel(EagleModel):
                 None,
                 None,
             )
-            position_embeddings = self.eagle_rotary_emb(
-                eagle_input_hidden_states, eagle_position_ids
-            )
 
             # Use SDPA attention during generation for both stability and performance
             with temporary_set_config_value(
@@ -1032,7 +1065,6 @@ class HFEagleModel(EagleModel):
                     self._base_model_embeddings(eagle_ids),
                     eagle_attention_mask,
                     eagle_position_ids,
-                    position_embeddings,
                 )
 
             # parallel logits are only used after the last step

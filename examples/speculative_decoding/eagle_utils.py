@@ -259,15 +259,6 @@ class OfflineSupervisedDataset(Dataset):
     def __getitem__(self, i) -> dict[str, torch.Tensor]:
         # Load the conversational data, using the cache
         raw_data, offline_file_path = self.data_entries[i]
-        if i in self.cached_data_dict:
-            preprocessed_base = self.cached_data_dict[i]
-        else:
-            ret = self.preprocess_fn(
-                [raw_data], self.tokenizer, processor=self.vlm_processor, img_dir=self.img_dir
-            )
-            preprocessed_base = {k: ret[k][0] for k in ret}
-            self.cached_data_dict[i] = preprocessed_base
-
         # Extend the data sample with the hidden states from the .pt file
         max_length = self.tokenizer.model_max_length
         offline_data = torch.load(offline_file_path)
@@ -275,19 +266,17 @@ class OfflineSupervisedDataset(Dataset):
         offline_data["hidden_states"] = offline_data["hidden_states"][:max_length, :]
         offline_data["aux_hidden_states"] = offline_data["aux_hidden_states"][:max_length, :]
 
-        # Make sure the input_ids have the same shape
-        if preprocessed_base["input_ids"].shape != offline_data["input_ids"].shape:
-            msg = f"""Input IDs from offline data do not match the preprocessed input IDs
-                                for offline data sample at {offline_file_path}."""
-            raise ValueError(msg)
-
-        ret = {**preprocessed_base}  # Shallow copy so we don't accidentally modify the cache
-        ret["input_ids"] = offline_data["input_ids"]
-        ret["kwargs"] = {
-            "base_model_outputs": {
-                "base_model_hidden_states": offline_data["hidden_states"],
-                "aux_hidden_states": offline_data["aux_hidden_states"],
-            }
+        ret = {
+            "input_ids": offline_data["input_ids"],
+            "attention_mask": torch.ones_like(offline_data["input_ids"]),
+            "loss_mask": torch.ones_like(offline_data["input_ids"]),
+            "labels": torch.full_like(offline_data["input_ids"], IGNORE_TOKEN_ID),
+            "kwargs": {
+                "base_model_outputs": {
+                    "base_model_hidden_states": offline_data["hidden_states"],
+                    "aux_hidden_states": offline_data["aux_hidden_states"],
+                }
+            },
         }
         return ret
 
@@ -338,12 +327,24 @@ def make_eagle_supervised_data_module(
             "offline_data_path must be provided for offline training."
         )
         offline_data_path = Path(data_args.offline_data_path)
+        # Collect all pt file paths
         all_files = {str(p) for p in offline_data_path.glob("*.pt")}
+        all_files |= {str(p) for p in offline_data_path.glob("**/*.pt")}
         if not all_files:
             raise ValueError(f"No .pt files found in {data_args.offline_data_path}")
 
-        # Filter to conversations that exist in the offline data and in the provided json
+        # Build a map from conv_id to file_path for fast lookup
+        print("building conv_id_to_file map...")
+        conv_id_to_file = {}
+        for pt_path in all_files:
+            pt_name = Path(pt_path).name
+            # Expect conv_id.pt
+            if pt_name.endswith(".pt"):
+                conv_id = pt_name[:-3]
+                conv_id_to_file[conv_id] = pt_path
+
         valid_entries = []
+        print("filtering valid entries...")
         for entry in data_json:
             conv_id = entry.get("conversation_id")
             if conv_id is None:
@@ -352,9 +353,11 @@ def make_eagle_supervised_data_module(
                 conv_id = entry.get("id")
             if conv_id is None:
                 raise ValueError(f"Conversation ID required but not found for entry {entry}")
-            file_path = str(offline_data_path / f"{conv_id}.pt")
-            if file_path in all_files:
-                valid_entries.append((entry, file_path))
+
+            file_path = conv_id_to_file.get(str(conv_id))
+            if file_path is None:
+                continue
+            valid_entries.append((entry, file_path))
 
         if len(valid_entries) == 0:
             msg = """No valid files found in the offline data path that match the conversation IDs
