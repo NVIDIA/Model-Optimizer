@@ -491,13 +491,14 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
     def _setup(self):
         """Modify the Qwen3VLMoeTextExperts by using nn.Linear layers."""
         from accelerate import init_empty_weights
+
         dtype, device = self.gate_up_proj.dtype, self.gate_up_proj.device
 
         def _copy_weight(module, weight):
             module.to_empty(device=device)
             with torch.no_grad():
                 module.weight.data = weight.detach().data.to(dtype=dtype, device=device)
-        
+
         with init_empty_weights():
             gate_proj = nn.ModuleList(
                 [
@@ -519,10 +520,10 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
             )
 
         for idx in range(self.num_experts):
-            _copy_weight(gate_proj[idx], self.gate_up_proj[idx, :, :self.expert_dim].T)
-            _copy_weight(up_proj[idx], self.gate_up_proj[idx, :, self.expert_dim:].T)
+            _copy_weight(gate_proj[idx], self.gate_up_proj[idx, :, : self.expert_dim].T)
+            _copy_weight(up_proj[idx], self.gate_up_proj[idx, :, self.expert_dim :].T)
             _copy_weight(down_proj[idx], self.down_proj[idx, :].T)
-        
+
         delattr(self, "gate_up_proj")
         delattr(self, "down_proj")
         self.gate_proj = gate_proj
@@ -530,7 +531,10 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
         self.down_proj = down_proj
 
     def forward(
-        self, hidden_states: torch.Tensor, routing_weights: torch.Tensor, router_indices: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        routing_weights: torch.Tensor,
+        router_indices: torch.Tensor,
     ) -> torch.Tensor:
         batch_size = hidden_states.shape[0]
         hidden_states = hidden_states.reshape(-1, self.hidden_size)
@@ -552,8 +556,7 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
             next_states.index_add_(0, token_idx, weighted_output.to(hidden_states.dtype))
         next_states = next_states.view(batch_size, -1, self.hidden_size)
 
-        return next_states        
-
+        return next_states
 
 
 class _QuantDbrxFFN(_QuantSparseMoe):
@@ -649,9 +652,9 @@ try:
     from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextSparseMoeBlock
 
     if Qwen3VLMoeTextSparseMoeBlock not in QuantModuleRegistry:
-        QuantModuleRegistry.register({Qwen3VLMoeTextSparseMoeBlock: "hf.Qwen3VLMoeTextSparseMoeBlock"})(
-            _QuantSparseMoe
-        )
+        QuantModuleRegistry.register(
+            {Qwen3VLMoeTextSparseMoeBlock: "hf.Qwen3VLMoeTextSparseMoeBlock"}
+        )(_QuantSparseMoe)
 except ImportError:
     pass
 
