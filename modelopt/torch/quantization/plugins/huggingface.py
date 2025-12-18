@@ -489,6 +489,8 @@ class _QuantDbrxExpertGLU(QuantModule):
 
 class _QuantQwen3VLMoeTextDecoderLayer(QuantModule):
     def _setup(self):
+        """Modify the Qwen3VLMoeTextDecoderLayer by using Qwen3MoeSparseMoeBlock."""
+        from accelerate import init_empty_weights
         from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
         from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
             Qwen3VLMoeTextSparseMoeBlock,
@@ -500,11 +502,12 @@ class _QuantQwen3VLMoeTextDecoderLayer(QuantModule):
         dtype, device = q_proj_weight.dtype, q_proj_weight.device
 
         def _copy_weight(module, weight):
-            module.to(dtype=dtype, device=device)
+            module.to_empty(device=device)
             with torch.no_grad():
-                module.weight.copy_(weight.detach())
+                module.weight.data = weight.detach().data.to(dtype=dtype, device=device)
 
-        new_moe_layer = Qwen3MoeSparseMoeBlock(self.self_attn.config)
+        with init_empty_weights():
+            new_moe_layer = Qwen3MoeSparseMoeBlock(self.self_attn.config)
         new_moe_layer.gate = self.mlp.gate
         experts = self.mlp.experts
         expert_dim = experts.expert_dim
