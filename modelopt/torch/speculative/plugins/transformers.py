@@ -81,7 +81,7 @@ class HFMedusaModel(MedusaModel):
         self.medusa_heads = nn.ModuleList(
             [
                 nn.Sequential(
-                    *([ResBlock(hidden_size)] * self.medusa_num_layers),
+                    *([ResBlock(hidden_size) for _ in range(self.medusa_num_layers)]),
                     nn.Linear(hidden_size, vocab_size, bias=False),
                 )
                 for _ in range(self.medusa_num_heads)
@@ -176,6 +176,32 @@ class HFMedusaModel(MedusaModel):
         )
 
 
+class ParallelDraft(nn.Module):
+    """ParallelDraft module with multiple Medusa heads and a shared lm head."""
+
+    def __init__(self, hidden_size: int, vocab_size: int, num_heads: int = 1, num_layers: int = 1):
+        """Init function for ParallelDraft."""
+        super().__init__()
+
+        self.medusa_heads = torch.nn.ModuleList(
+            [
+                nn.Sequential(
+                    *([ResBlock(hidden_size) for _ in range(num_layers)]),
+                )
+                for _ in range(num_heads)
+            ]
+        )
+        self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
+
+    def forward(self, x):
+        """Forward function."""
+        output = []
+        for head in self.medusa_heads:
+            x_head = head(x)
+            output.append(self.lm_head(x_head))
+        return output
+
+
 class EagleModule(nn.Module):
     """Eagle module used in EAGLE model."""
 
@@ -252,17 +278,11 @@ class EagleModule(nn.Module):
             self.layers[0].input_layernorm = nn.Identity()
 
         if self.config.parallel_draft_step > 1:
-            self.parallel_draft_heads = torch.nn.ModuleList(
-                nn.Sequential(
-                    *(
-                        [
-                            ResBlock(config.hidden_size)
-                            for _ in range(self.config.parallel_draft_heads_num_layers)
-                        ]
-                    ),
-                    nn.Linear(config.hidden_size, config.draft_vocab_size, bias=False),
-                )
-                for _ in range(self.config.parallel_draft_step - 1)
+            self.parallel_draft_heads = ParallelDraft(
+                config.hidden_size,
+                config.draft_vocab_size,
+                num_heads=self.config.parallel_draft_step - 1,
+                num_layers=self.config.parallel_draft_heads_num_layers,
             )
 
     def _eagle3_attention_forward_pre_hook(self, module, args, kwargs):
@@ -748,9 +768,8 @@ class HFEagleModel(EagleModel):
         draft_logits_list = [eagle_logits]
         if self.eagle_config.parallel_draft_step > 1:
             # Get additional draft logits from parallel draft heads
-            for draft_head in self.eagle_module.parallel_draft_heads:
-                draft_logits = draft_head(eagle_postnorm_h)
-                draft_logits_list.append(draft_logits)
+            draft_logits = self.eagle_module.parallel_draft_heads(eagle_postnorm_h)
+            draft_logits_list += draft_logits
 
         return eagle_postnorm_h, eagle_prenorm_h, draft_logits_list, eagle_cache
 
