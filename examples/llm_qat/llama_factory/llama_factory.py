@@ -73,13 +73,6 @@ def _get_init_kwargs(model_args: ModelArguments) -> dict[str, Any]:
 mto.enable_huggingface_checkpointing()
 
 
-def _teacher_factory(model_name_or_path):
-    """Function to create a teacher model."""
-    return transformers.AutoModelForCausalLM.from_pretrained(
-        model_name_or_path,
-    )
-
-
 def parse_args():
     """Parse configuration file and extract ModelOpt quantization/distillation arguments.
 
@@ -221,12 +214,11 @@ def create_patch_module(quant_args=None, distill_args=None):
                 # Initialize parent classes
                 modelopt_trainer_args = {"quant_args": quant_args}
                 if distill_args and distill_args.distill:
+                    teacher_model = transformers.AutoModelForCausalLM.from_pretrained(
+                        distill_args.teacher_model,
+                    )
                     distill_config = {
-                        "teacher_model": (
-                            _teacher_factory,
-                            (distill_args.teacher_model,),
-                            {},
-                        ),
+                        "teacher_model": teacher_model,
                         "criterion": LMLogitsLoss(),
                         "expose_minimal_state_dict": False,  # FSDP requires this to be False
                     }

@@ -123,14 +123,7 @@ from modelopt.torch.quantization.plugins.transformers_trainer import QADTrainer
 # [Not shown] load model, tokenizer, data loaders etc
 # Create the distillation config
 distill_config = {
-   "teacher_model": (
-         _teacher_factory,
-         (
-            model_args.teacher_model,
-            training_args.cache_dir,
-         ),
-         {},
-   ),
+   "teacher_model": teacher_model,
    "criterion": LMLogitsLoss(),
    "expose_minimal_state_dict": False,
 }

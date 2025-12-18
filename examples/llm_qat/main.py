@@ -152,15 +152,6 @@ class QuantizationArguments:
     )
 
 
-def _teacher_factory(model_name_or_path, cache_dir=None):
-    """Function to create a teacher model."""
-    return transformers.AutoModelForCausalLM.from_pretrained(
-        model_name_or_path,
-        cache_dir=cache_dir,
-        torch_dtype=torch.bfloat16,
-    )
-
-
 def train():
     parser = transformers.HfArgumentParser(
         (ModelArguments, TrainingArguments, DataArguments, QuantizationArguments)
@@ -228,15 +219,14 @@ def train():
     distill_kwargs = {}
     if training_args.distill:
         assert model_args.teacher_model is not None, "Teacher model is required for distillation."
+
+        teacher_model = transformers.AutoModelForCausalLM.from_pretrained(
+            model_args.teacher_model,
+            cache_dir=training_args.cache_dir,
+            torch_dtype=torch.bfloat16,
+        )
         distill_config = {
-            "teacher_model": (
-                _teacher_factory,
-                (
-                    model_args.teacher_model,
-                    training_args.cache_dir,
-                ),
-                {},
-            ),
+            "teacher_model": teacher_model,
             "criterion": LMLogitsLoss(),
             "expose_minimal_state_dict": False,  # FSDP forces us to disable this
         }
