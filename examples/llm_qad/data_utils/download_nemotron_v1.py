@@ -45,8 +45,8 @@ import random
 from datasets import load_dataset
 from tqdm import tqdm
 
-DEFAULT_OUTPUT_DIR = "/lustre/fsw/coreai_dlalgo_modelopt/weimingc/datasets/nemotron_v1"
-DATABLEND_DIR = "/lustre/fsw/coreai_dlalgo_modelopt/weimingc/datasets"
+DEFAULT_OUTPUT_DIR = None  # Must be specified via --output-dir
+DEFAULT_DATABLEND_DIR = None  # Must be specified via --datablend-dir
 
 # Available splits and their sizes
 AVAILABLE_SPLITS = {
@@ -205,13 +205,13 @@ def download_split(split_name: str, max_samples: int, output_dir: str,
 
 
 def create_datablend_configs(output_dir: str, splits_downloaded: list, suffix: str, 
-                             sample_counts: dict):
+                             sample_counts: dict, datablend_dir: str):
     """Create datablend JSON configs for each split and combined."""
     preprocessed_dir = output_dir.replace("nemotron_v1", "nemotron_v1_preprocessed")
     
     # Create individual datablend for each split
     for split_name in splits_downloaded:
-        blend_file = os.path.join(DATABLEND_DIR, f"datablend_nemotron_v1_{split_name}_{suffix}.json")
+        blend_file = os.path.join(datablend_dir, f"datablend_nemotron_v1_{split_name}_{suffix}.json")
         blend_config = {
             "train": [1.0, f"{preprocessed_dir}/{split_name}/{split_name}_{suffix}_train_text_document"],
             "valid": [1.0, f"{preprocessed_dir}/{split_name}/{split_name}_{suffix}_validation_text_document"],
@@ -229,7 +229,7 @@ def create_datablend_configs(output_dir: str, splits_downloaded: list, suffix: s
             # Calculate weights based on sample counts
             total_samples = sum(sample_counts.get(s, {}).get("train", 0) for s in english_splits)
             
-            blend_file = os.path.join(DATABLEND_DIR, f"datablend_nemotron_v1_all_en_{suffix}.json")
+            blend_file = os.path.join(datablend_dir, f"datablend_nemotron_v1_all_en_{suffix}.json")
             
             train_entries = []
             valid_entries = []
@@ -265,8 +265,10 @@ def create_datablend_configs(output_dir: str, splits_downloaded: list, suffix: s
 
 def main():
     parser = argparse.ArgumentParser(description="Download Nemotron-v1 for QAD")
-    parser.add_argument("--output-dir", type=str, default=DEFAULT_OUTPUT_DIR,
-                        help="Output directory for JSONL files")
+    parser.add_argument("--output-dir", type=str, required=True,
+                        help="Output directory for JSONL files (required)")
+    parser.add_argument("--datablend-dir", type=str, required=True,
+                        help="Directory for datablend config files (required)")
     parser.add_argument("--splits", type=str, default="stem,math,code,chat",
                         help="Comma-separated list of splits to download (stem,math,code,chat,tool_calling)")
     parser.add_argument("--sample-percent", type=float, default=30.0,
@@ -290,7 +292,9 @@ def main():
         init_tokenizer(args.tokenizer)
     
     output_dir = args.output_dir
+    datablend_dir = args.datablend_dir
     os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(datablend_dir, exist_ok=True)
     
     splits_to_download = [s.strip() for s in args.splits.split(",")]
     
@@ -341,7 +345,7 @@ def main():
     
     if args.combined:
         # Legacy combined mode
-        download_combined_mode(args, splits_to_download, samples_per_split, suffix)
+        download_combined_mode(args, splits_to_download, samples_per_split, suffix, datablend_dir)
     else:
         # New split mode (default)
         sample_counts = {}
@@ -385,7 +389,7 @@ def main():
         # Create datablend configs
         print("\n" + "=" * 70)
         print("Creating datablend configs...")
-        create_datablend_configs(output_dir, list(sample_counts.keys()), suffix, sample_counts)
+        create_datablend_configs(output_dir, list(sample_counts.keys()), suffix, sample_counts, datablend_dir)
         
         # Print summary
         print("\n" + "=" * 70)
@@ -419,7 +423,7 @@ def main():
         print("=" * 70)
 
 
-def download_combined_mode(args, splits_to_download, samples_per_split, suffix):
+def download_combined_mode(args, splits_to_download, samples_per_split, suffix, datablend_dir):
     """Legacy combined mode - all splits in single files."""
     output_dir = args.output_dir
     
@@ -505,7 +509,7 @@ def download_combined_mode(args, splits_to_download, samples_per_split, suffix):
         print(f"✓ Saved {split_name}")
     
     # Create datablend config
-    blend_file = os.path.join(DATABLEND_DIR, f"datablend_nemotron_{split_suffix}{full_suffix}.json")
+    blend_file = os.path.join(datablend_dir, f"datablend_nemotron_{split_suffix}{full_suffix}.json")
     
     preprocessed_dir = output_dir.replace("nemotron_v1", "nemotron_v1_preprocessed")
     blend_config = {

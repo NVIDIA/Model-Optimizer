@@ -1,19 +1,92 @@
 #!/bin/bash
-# Preprocess OpenScience dataset for Qwen3 QAD training
+# Preprocess OpenScience dataset for QAD training (general, model-agnostic)
 #
 # Usage:
-#   bash process_openscience_qwen3-8B.sh [suffix] [tokenizer]
+#   bash process_openscience.sh --output-dir <path> --mlm-path <path> --tokenizer <model> [options]
 #
-# Examples:
-#   bash process_openscience_qwen3-8B.sh                                          # Simple format, Qwen3-8B
-#   bash process_openscience_qwen3-8B.sh chat                                     # Chat template, Qwen3-8B
-#   bash process_openscience_qwen3-8B.sh chat Qwen/Qwen3-30B-A3B-Thinking-2507    # Chat template, Thinking model
+# Required arguments:
+#   --output-dir    Output directory for preprocessed files
+#   --mlm-path      Path to Megatron-LM directory
+#   --tokenizer     HuggingFace tokenizer model (e.g., Qwen/Qwen3-8B)
+#
+# Optional arguments:
+#   --input-dir     Input directory (default: derived from output-dir)
+#   --suffix        Suffix for file naming (empty for simple format, "chat" for chat template)
+#   --workers       Number of parallel workers (default: 32)
+#   --datablend-dir Directory for datablend configs (default: parent of output-dir)
 
 set -e
 
-# Arguments
-SUFFIX="${1:-}"  # empty for simple format, "chat" for chat template
-TOKENIZER_MODEL="${2:-Qwen/Qwen3-8B}"  # Can override with any HuggingFace tokenizer
+# Parse arguments
+OUTPUT_DIR=""
+MLM_DIR=""
+TOKENIZER_MODEL=""
+INPUT_DIR=""
+SUFFIX=""
+WORKERS=32
+DATABLEND_DIR=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --output-dir)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --mlm-path)
+            MLM_DIR="$2"
+            shift 2
+            ;;
+        --tokenizer)
+            TOKENIZER_MODEL="$2"
+            shift 2
+            ;;
+        --input-dir)
+            INPUT_DIR="$2"
+            shift 2
+            ;;
+        --suffix)
+            SUFFIX="$2"
+            shift 2
+            ;;
+        --workers)
+            WORKERS="$2"
+            shift 2
+            ;;
+        --datablend-dir)
+            DATABLEND_DIR="$2"
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+# Validate required arguments
+if [ -z "$OUTPUT_DIR" ]; then
+    echo "Error: --output-dir is required"
+    exit 1
+fi
+
+if [ -z "$MLM_DIR" ]; then
+    echo "Error: --mlm-path is required"
+    exit 1
+fi
+
+if [ -z "$TOKENIZER_MODEL" ]; then
+    echo "Error: --tokenizer is required"
+    exit 1
+fi
+
+# Set defaults for optional arguments
+if [ -z "$INPUT_DIR" ]; then
+    INPUT_DIR="${OUTPUT_DIR//_preprocessed/}"
+fi
+
+if [ -z "$DATABLEND_DIR" ]; then
+    DATABLEND_DIR="$(dirname "$OUTPUT_DIR")"
+fi
 
 # Normalize suffix
 if [ -n "$SUFFIX" ]; then
@@ -22,23 +95,21 @@ else
     FILE_SUFFIX=""
 fi
 
-# Paths
-MLM_DIR="/lustre/fsw/coreai_dlalgo_modelopt/weimingc/workspace/Megatron-LM"
-INPUT_DIR="/lustre/fsw/coreai_dlalgo_modelopt/weimingc/datasets/openscience_splits"
-OUTPUT_DIR="/lustre/fsw/coreai_dlalgo_modelopt/weimingc/datasets/openscience_splits_preprocessed"
-
 mkdir -p ${OUTPUT_DIR}
+mkdir -p ${DATABLEND_DIR}
 
 # Tokenizer settings
 TOKENIZER_TYPE="HuggingFaceTokenizer"
 
-# Number of workers for parallel processing
-WORKERS=32
-
 echo "=========================================="
 echo "Preprocessing OpenScience Dataset"
+echo "=========================================="
 echo "Format suffix: ${FILE_SUFFIX:-none (simple format)}"
 echo "Tokenizer: ${TOKENIZER_MODEL}"
+echo "MLM Path: ${MLM_DIR}"
+echo "Input dir: ${INPUT_DIR}"
+echo "Output dir: ${OUTPUT_DIR}"
+echo "Datablend dir: ${DATABLEND_DIR}"
 echo "=========================================="
 
 # Process training split
@@ -91,7 +162,7 @@ else
 fi
 
 # Create datablend config
-BLEND_FILE="/lustre/fsw/coreai_dlalgo_modelopt/weimingc/datasets/datablend_openscience${FILE_SUFFIX}.json"
+BLEND_FILE="${DATABLEND_DIR}/datablend_openscience${FILE_SUFFIX}.json"
 echo "Creating datablend config: ${BLEND_FILE}"
 cat > ${BLEND_FILE} << EOF
 {
@@ -115,3 +186,4 @@ ls -lh ${OUTPUT_DIR}/openscience${FILE_SUFFIX}*.idx 2>/dev/null || echo "No .idx
 echo ""
 echo "To use in QAD training:"
 echo "  DATASET_NAME=openscience${FILE_SUFFIX} bash qwen_qad.sh --config configs/your-config.conf"
+
