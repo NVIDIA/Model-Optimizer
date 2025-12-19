@@ -283,7 +283,7 @@ def _gen_dummy_inp_and_dyn_shapes_flux2(backbone, min_bs=1, opt_bs=1, max_bs=1):
     
     min_img_dim = 256   # 256x256
     opt_img_dim = 4096  # 1024x1024
-    max_img_dim = 16384 # 2048x2048 (Safe upper bound)
+    max_img_dim = 16384 # 2048x2048
 
     rope_dim = 4
     
