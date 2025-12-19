@@ -16,4 +16,3 @@
 
 from .base_hooks import *
 from .base_hooks_analysis import *
-from .megatron_hooks import *

@@ -471,7 +471,6 @@ def create_child_state_dict(
     copy_start_time = time.time()
     keys_to_copy_from_orig_model = set(keys.values()) - ignored_keys
     for key in keys_to_copy_from_orig_model:
-        aprint(f"copying {key} from original_state_dict")
         # Memory optimization: avoid unnecessary copies
         tensor = original_state_dict[key]
         if not tensor.is_contiguous():
@@ -877,7 +876,6 @@ def _cache_activations_log(mlp_init_config: dict[str, Any]) -> None:
     if len(ACTIVATIONS_LOG) == 0:
         assert "activations_log_dir" in mlp_init_config
         activations_log_dir = mlp_init_config["activations_log_dir"]
-        print(f"Loading activations_log from {activations_log_dir}")
         ACTIVATIONS_LOG.update(
             {
                 module_name: module_log

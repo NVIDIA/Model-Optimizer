@@ -9,7 +9,7 @@ The supported modifications are:
 
 To use the Puzzle algorithm effectively, we need to specify the target number of parameters and/or the memory. The final stage is based on Mixed-Integer Programming (MIP) algorithm to find the most optimal combination of layer modifications that satisfy the target requirements.
 
-In this example, we compress the [meta-llama/Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) model reducing GPU memory usage from 113 GiB to 96 GiB (15% reduction) with less than 1% regression in the token_accuracy_top_10 metric.
+In this example, we compress the [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) model reducing GPU memory usage from 113 GiB to 96 GiB (15% reduction) with less than 1% regression in the token_accuracy_top_10 metric.
 
 ## Environment
 
@@ -21,17 +21,15 @@ pip install -e .[hf,compress]
 
 - For this example we are using 2x NVIDIA H100 80GB HBM3 to show multi-GPU steps. You can use also use s single GPU.
 
+- To make use of [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) and [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2), you need to accept the terms and conditions for the corresponding model and the dataset in the Huggingface Hub. Log in to the Huggingface Hub and enter your HF token.
+
+```bash
+hf auth login
+```
+
 ## Compress the Model
 
-1. Specify the `puzzle_dir`, `input_hf_model_path`, `dataset_path`, `intermediate_size_list`, and `target_memory` arguments in the [llama-3_1-8B_pruneffn_memory.yaml](./configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml) configuration file.
-
-   **_NOTE:_**
-   How to choose `intermediate_size_list`?
-   The list specifies the candidate FFN sizes that we wish to search over. It is recommended to choose several pruning sizes (e.g. 15%, 20%, 30% etc of the original). Note that the values must be hardware-friendly (divisible by a 256) to avoid issues with tensor operations in subsequent steps.
-
-   Let's first shoot for 32% GPU memory reduction setting `target_memory = 78_000` MiB. This means that the algorithm will choose the candidates with highest accuracy that also meet the specified requirements.
-
-2. Download and prepare the [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2).
+1. Download and prepare the [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2).
 
    dataset split: "code", "math", "stem", "chat", excluding reasoning samples (2.62GB)
 
@@ -39,10 +37,24 @@ pip install -e .[hf,compress]
    python -m modelopt.torch._compress.dataset.prepare_dataset --dataset_name nvidia/Nemotron-Post-Training-Dataset-v2 --output_dir path/to/Nemotron-Post-Training-Dataset-v2
    ```
 
+2. Specify the `puzzle_dir`, `input_hf_model_path`, `dataset_path`, `intermediate_size_list`, and `target_memory` arguments in the [llama-3_1-8B_pruneffn_memory.yaml](./configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml) configuration file.
+
+   - `puzzle_dir` indicates a new directory for saving the resulting model.
+   - `input_hf_model_path` indicates the local directory with the input model checkpoint.
+   - `dataset_path` indicates the directory with the dataset downloaded earlier.
+
+   **_NOTE:_**
+   How to choose `intermediate_size_list`?
+   The list specifies the candidate FFN sizes that we wish to search over. It is recommended to choose several pruning sizes (e.g. 15%, 20%, 30% etc of the original). Note that the values must be hardware-friendly (divisible by a 256) to avoid issues with tensor operations in subsequent steps.
+
+   Let's first shoot for 32% GPU memory reduction setting `target_memory = 78_000` MiB. This means that the algorithm will choose the candidates with highest accuracy that also meet the specified requirements.
+
+   We can also set the target size of the resulting model using `num_parameters = 7_000_000_000`. This will be used as an upper bound for the number of parameters of the model.
+
 3. Run the compression script.
 
    ```bash
-   torchrun --nproc_per_node 2 examples/compress/main.py --config path/to/llama-3_1-8B_pruneffn_memory.yaml 2>&1 | tee ./log.txt | grep "Compress Progress"
+   torchrun --nproc_per_node 2 examples/compress/main.py --config examples/compress/configs/llama-3_1-8B_pruneffn_memory.yaml 2>&1 | tee ./log.txt | grep "Compress Progress"
    ```
 
    This will save the full output to `log.txt` and display the following progress on screen:
@@ -110,7 +122,7 @@ pip install -e .[hf,compress]
    Average losses = {'lm_loss': 1.7577573340386152, 'token_accuracy_top_1': 0.6225490570068359, 'token_accuracy_top_5': 0.846257209777832, 'token_accuracy_top_10': 0.8987817764282227}
    ```
 
-   30% GPU memory reduction leads to nearly 5% regression in token_accuracy_top_10 metric (0.898 / 0.942). Let's rerun MIP search aiming for 15% memory reduction.
+   30% GPU memory reduction leads to nearly 5% regression in token_accuracy_top_10 metric (0.898 / 0.942).
 
 ## Re-run MIP Search with different constraints
 
@@ -196,4 +208,4 @@ lm_eval --model hf \
 
 ## Advanced usage
 
-Modify `path/to/Llama-3_1-8B yaml` file for advanced compression scenarios.
+Modify `llama-3_1-8B_pruneffn_memory.yaml` file for advanced compression scenarios.

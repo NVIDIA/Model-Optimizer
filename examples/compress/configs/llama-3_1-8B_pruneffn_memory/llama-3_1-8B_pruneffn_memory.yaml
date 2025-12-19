@@ -14,7 +14,7 @@ puzzle_dir: /workspace/puzzle_dir
 # MIP memory constraint (in MiB) 
 mip:
   human_constraints:
-    target_memory: 96_000 # 96 GiB
+    target_memory: 78_000 # 78 GiB
 
 # FFN intermediate sizes to search over (heterogeneous architecture)
 pruning:

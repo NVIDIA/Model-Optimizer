@@ -1020,6 +1020,9 @@ class DeciLMDecoderLayer(nn.Module):
         self.ffn_config = self.block_config.ffn
         self.layer_idx = layer_idx
 
+        if not config._attn_implementation:
+            config._attn_implementation = "eager"
+
         if not self.attention_config.no_op:
             self.input_layernorm = DeciLMRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             if self.attention_config.replace_with_linear:

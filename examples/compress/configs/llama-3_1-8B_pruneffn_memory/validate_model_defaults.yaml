@@ -14,4 +14,4 @@ write_results: false
 calc_losses_on_cpu: false
 activations_log_dir:
 model_name_or_path:
-load_dataset_fn: ${get_object:utils.data.dataloaders.load_from_disk_fn}
+load_dataset_fn: ${get_object:modelopt.torch._compress.utils.data.dataloaders.load_from_disk_fn}
