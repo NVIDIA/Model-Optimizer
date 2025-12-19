@@ -13,28 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-"""
-Unified dataset downloader for QAD training.
-
-Supports:
-  - nvidia/OpenScience (OS-Q3-235B-4)
-  - nvidia/Nemotron-Post-Training-Dataset-v2 (stem, math, code, chat)
-
-Usage:
-    # Download OpenScience
-    python download_dataset.py --dataset openscience --output-dir /path/to/data --tokenizer Qwen/Qwen3-8B
-
-    # Download Nemotron-v2 (all English splits)
-    python download_dataset.py --dataset nemotron-v2 --output-dir /path/to/data --tokenizer Qwen/Qwen3-8B
-
-    # Download specific Nemotron-v2 splits
-    python download_dataset.py --dataset nemotron-v2 --splits stem,math --sample-percent 30 ...
-
-NOTE: Nemotron-v2 is GATED. You need:
-  1. Request access at: https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2
-  2. Login with: huggingface-cli login
-"""
+"""Download datasets for QAD training (OpenScience, Nemotron-v2)."""
 
 from __future__ import annotations
 
@@ -46,252 +25,51 @@ from typing import Any
 
 from tqdm import tqdm
 
-# Constants
-TRAIN_RATIO = 0.95
-VALID_RATIO = 0.025
-TEST_RATIO = 0.025
-RANDOM_SEED = 42
-
-DATASET_CONFIGS: dict[str, dict[str, Any]] = {
-    "openscience": {
-        "hf_name": "nvidia/OpenScience",
-        "hf_config": "OS-Q3-235B-4",
-        "format": "input_output",  # Has input/output fields
-        "gated": False,
-    },
-    "nemotron-v2": {
-        "hf_name": "nvidia/Nemotron-Post-Training-Dataset-v2",
-        "hf_config": None,  # Uses split names directly
-        "format": "messages",  # Has messages field
-        "gated": True,
-        "default_splits": ["stem", "math", "code", "chat"],
-        "all_splits": [
-            "stem",
-            "math",
-            "code",
-            "chat",
-            "multilingual_ja",
-            "multilingual_de",
-            "multilingual_it",
-            "multilingual_es",
-            "multilingual_fr",
-        ],
-    },
-}
-
-# Global tokenizer
+SEED = 42
+TRAIN_RATIO, VALID_RATIO = 0.95, 0.025
 _TOKENIZER = None
 
 
-def init_tokenizer(tokenizer_name: str) -> None:
-    """Initialize tokenizer for chat template formatting."""
+def init_tokenizer(name: str) -> None:
+    """Load HuggingFace tokenizer for chat template."""
     global _TOKENIZER
-    if tokenizer_name:
+    if name:
         from transformers import AutoTokenizer
 
-        print(f"Loading tokenizer: {tokenizer_name}")
-        _TOKENIZER = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
+        print(f"Loading tokenizer: {name}")
+        _TOKENIZER = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
 
 
-def format_input_output(input_text: str, output_text: str) -> str:
-    """Format input/output pair (OpenScience format)."""
-    global _TOKENIZER
+def format_text(messages: list[dict], reasoning: str = "") -> str:
+    """Format messages to text using tokenizer chat template or simple format."""
+    # Add reasoning as thinking block if provided
+    if reasoning.strip():
+        messages = messages.copy()
+        for i, m in enumerate(messages):
+            if m.get("role") == "assistant" and i == len(messages) - 1:
+                messages[i] = {
+                    "role": "assistant",
+                    "content": f"<think>\n{reasoning}\n</think>\n{m.get('content', '')}",
+                }
 
-    if _TOKENIZER is not None:
-        messages = [
-            {"role": "user", "content": input_text},
-            {"role": "assistant", "content": output_text},
-        ]
+    if _TOKENIZER:
         try:
             return _TOKENIZER.apply_chat_template(messages, tokenize=False)
-        except Exception as e:
-            print(f"Warning: Chat template failed: {e}")
+        except Exception:
+            pass
 
-    return f"User: {input_text}\n\nAssistant: {output_text}"
-
-
-def format_messages(messages: list, reasoning: str | None = None) -> str:
-    """Format messages list (Nemotron-v2 format)."""
-    global _TOKENIZER
-
-    # Optionally prepend reasoning as thinking block
-    if reasoning and reasoning.strip():
-        messages_with_cot = []
-        for i, msg in enumerate(messages):
-            if msg.get("role") == "assistant" and i == len(messages) - 1:
-                thinking_content = f"<think>\n{reasoning}\n</think>\n{msg.get('content', '')}"
-                messages_with_cot.append({"role": "assistant", "content": thinking_content})
-            else:
-                messages_with_cot.append(msg)
-        messages = messages_with_cot
-
-    if _TOKENIZER is not None:
-        try:
-            return _TOKENIZER.apply_chat_template(messages, tokenize=False)
-        except Exception as e:
-            print(f"Warning: Chat template failed: {e}")
-
-    # Fallback: simple format
-    text_parts = []
-    for msg in messages:
-        role = msg.get("role", "")
-        content = msg.get("content", "")
-        if role == "system":
-            text_parts.append(f"System: {content}")
-        elif role == "user":
-            text_parts.append(f"User: {content}")
-        elif role == "assistant":
-            text_parts.append(f"Assistant: {content}")
-
-    return "\n\n".join(text_parts)
+    # Fallback
+    return "\n\n".join(f"{m['role'].title()}: {m['content']}" for m in messages if m.get("content"))
 
 
-def download_openscience(output_dir: str, datablend_dir: str, use_chat: bool) -> dict[str, Any]:
-    """Download and split OpenScience dataset."""
-    from datasets import load_dataset
-
-    config = DATASET_CONFIGS["openscience"]
-    chat_suffix = "_chat" if use_chat else ""
-
-    print(f"\nDownloading {config['hf_name']}...")
-    dataset = load_dataset(config["hf_name"], config["hf_config"])
-
-    # Get the data
-    if "train" in dataset:
-        full_data = dataset["train"]
-    else:
-        first_split = next(iter(dataset.keys()))
-        print(f"Using '{first_split}' split")
-        full_data = dataset[first_split]
-
-    print(f"Shuffling {len(full_data)} examples...")
-    shuffled_data = full_data.shuffle(seed=RANDOM_SEED)
-
-    # Split
-    total = len(shuffled_data)
-    train_end = int(total * TRAIN_RATIO)
-    valid_end = train_end + int(total * VALID_RATIO)
-
-    splits = {
-        "train": shuffled_data.select(range(train_end)),
-        "validation": shuffled_data.select(range(train_end, valid_end)),
-        "test": shuffled_data.select(range(valid_end, total)),
-    }
-
-    print(
-        f"Splits: train={len(splits['train'])}, valid={len(splits['validation'])}, test={len(splits['test'])}"
-    )
-
-    # Save
-    os.makedirs(output_dir, exist_ok=True)
-    saved_files = {}
-
-    for split_name, split_data in splits.items():
-        output_file = os.path.join(output_dir, f"openscience{chat_suffix}_{split_name}.jsonl")
-
-        with open(output_file, "w", encoding="utf-8") as f:
-            for example in tqdm(split_data, desc=split_name):
-                text = format_input_output(example.get("input", ""), example.get("output", ""))
-                f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
-
-        saved_files[split_name] = output_file
-        print(f"Saved {split_name}: {len(split_data)} examples")
-
-    # Datablend config
-    preprocessed_dir = output_dir.replace("openscience_splits", "openscience_splits_preprocessed")
-    blend_file = os.path.join(datablend_dir, f"datablend_openscience{chat_suffix}.json")
-    blend_config = {
-        "train": [1.0, f"{preprocessed_dir}/openscience{chat_suffix}_train_text_document"],
-        "valid": [1.0, f"{preprocessed_dir}/openscience{chat_suffix}_validation_text_document"],
-        "test": [1.0, f"{preprocessed_dir}/openscience{chat_suffix}_test_text_document"],
-    }
-    os.makedirs(datablend_dir, exist_ok=True)
-    with open(blend_file, "w") as f:
-        json.dump(blend_config, f, indent=2)
-    print(f"Created datablend: {blend_file}")
-
-    return {
-        "dataset": "openscience",
-        "total": total,
-        "train": len(splits["train"]),
-        "validation": len(splits["validation"]),
-        "test": len(splits["test"]),
-        "files": saved_files,
-        "datablend": blend_file,
-    }
-
-
-def download_nemotron_v2_split(
-    split_name: str,
-    output_dir: str,
-    datablend_dir: str,
-    sample_percent: float,
-    suffix: str,
-    include_reasoning: bool,
-) -> dict[str, Any] | None:
-    """Download a single Nemotron-v2 split."""
-    from datasets import load_dataset, load_dataset_builder
-
-    config = DATASET_CONFIGS["nemotron-v2"]
-    split_dir = os.path.join(output_dir, split_name)
-    os.makedirs(split_dir, exist_ok=True)
-
-    # Get split size
-    try:
-        builder = load_dataset_builder(config["hf_name"], split_name)
-        available = builder.info.splits[split_name].num_examples if builder.info.splits else None
-        if available:
-            target = int(available * sample_percent / 100)
-            print(f"\n{split_name}: downloading {target:,} of {available:,} ({sample_percent}%)")
-        else:
-            target = None
-            print(f"\n{split_name}: size unknown, downloading all then sampling")
-    except Exception as e:
-        if "gated" in str(e).lower() or "access" in str(e).lower():
-            print("\nACCESS DENIED - Request access at:")
-            print(f"  https://huggingface.co/datasets/{config['hf_name']}")
-            print("Then login with: huggingface-cli login")
-            raise
-        target = None
-        print(f"\n{split_name}: could not get size ({e})")
-
-    # Download
-    examples = []
-    dataset = load_dataset(config["hf_name"], split=split_name, streaming=True)
-
-    count = 0
-    for example in tqdm(dataset, desc=split_name, total=target):
-        if target is not None and count >= target:
-            break
-
-        messages = example.get("messages", [])
-        reasoning = example.get("reasoning", "") if include_reasoning else ""
-        text = format_messages(messages, reasoning)
-
-        if text.strip():
-            examples.append({"text": text})
-            count += 1
-
-    print(f"Collected {count:,} examples")
-
-    # If downloaded all, sample
-    if target is None and sample_percent < 100:
-        random.seed(RANDOM_SEED)
-        target_count = int(len(examples) * sample_percent / 100)
-        examples = random.sample(examples, target_count)
-        print(f"Sampled to {len(examples):,}")
-
-    if not examples:
-        print(f"Warning: No examples from {split_name}")
-        return None
-
-    # Shuffle and split
-    random.seed(RANDOM_SEED)
+def split_and_save(examples: list[dict], output_dir: str, prefix: str) -> dict[str, int]:
+    """Shuffle, split into train/valid/test, and save as JSONL."""
+    random.seed(SEED)
     random.shuffle(examples)
 
-    total = len(examples)
-    train_end = int(total * TRAIN_RATIO)
-    valid_end = train_end + int(total * VALID_RATIO)
+    n = len(examples)
+    train_end = int(n * TRAIN_RATIO)
+    valid_end = train_end + int(n * VALID_RATIO)
 
     splits = {
         "train": examples[:train_end],
@@ -299,180 +77,124 @@ def download_nemotron_v2_split(
         "test": examples[valid_end:],
     }
 
-    # Save
-    saved_files = {}
-    for data_split, data in splits.items():
-        output_file = os.path.join(split_dir, f"{split_name}_{suffix}_{data_split}.jsonl")
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.writelines(json.dumps(ex, ensure_ascii=False) + "\n" for ex in data)
-        saved_files[data_split] = output_file
-        print(f"  {data_split}: {len(data):,} examples")
+    os.makedirs(output_dir, exist_ok=True)
+    counts = {}
+    for name, data in splits.items():
+        path = os.path.join(output_dir, f"{prefix}_{name}.jsonl")
+        with open(path, "w") as f:
+            f.writelines(json.dumps(d, ensure_ascii=False) + "\n" for d in data)
+        counts[name] = len(data)
+        print(f"  {name}: {len(data):,}")
 
-    # Datablend config
-    preprocessed_dir = output_dir.replace("nemotron_v2", "nemotron_v2_preprocessed")
-    split_preprocessed_dir = os.path.join(preprocessed_dir, split_name)
+    return counts
 
-    blend_file = os.path.join(datablend_dir, f"datablend_nemotron_v2_{split_name}_{suffix}.json")
-    blend_config = {
-        "train": [1.0, f"{split_preprocessed_dir}/{split_name}_{suffix}_train_text_document"],
-        "valid": [1.0, f"{split_preprocessed_dir}/{split_name}_{suffix}_validation_text_document"],
-        "test": [1.0, f"{split_preprocessed_dir}/{split_name}_{suffix}_test_text_document"],
-    }
-    os.makedirs(datablend_dir, exist_ok=True)
-    with open(blend_file, "w") as f:
-        json.dump(blend_config, f, indent=2)
-    print(f"  Datablend: {blend_file}")
 
-    return {
-        "split_name": split_name,
-        "total": total,
-        "train": len(splits["train"]),
-        "validation": len(splits["validation"]),
-        "test": len(splits["test"]),
-        "files": saved_files,
-        "datablend": blend_file,
-    }
+def download_openscience(output_dir: str, use_chat: bool) -> dict[str, Any]:
+    """Download nvidia/OpenScience dataset."""
+    from datasets import load_dataset
+
+    print("\nDownloading nvidia/OpenScience...")
+    ds = load_dataset("nvidia/OpenScience", "OS-Q3-235B-4")
+    data = ds["train"] if "train" in ds else ds[next(iter(ds.keys()))]
+
+    print(f"Processing {len(data)} examples...")
+    suffix = "_chat" if use_chat else ""
+    examples = []
+    for ex in tqdm(data.shuffle(seed=SEED), desc="openscience"):
+        msgs = [
+            {"role": "user", "content": ex.get("input", "")},
+            {"role": "assistant", "content": ex.get("output", "")},
+        ]
+        examples.append({"text": format_text(msgs)})
+
+    counts = split_and_save(examples, output_dir, f"openscience{suffix}")
+    return {"dataset": "openscience", "total": len(examples), **counts}
 
 
 def download_nemotron_v2(
-    output_dir: str,
-    datablend_dir: str,
-    splits: list[str],
-    sample_percent: float,
-    suffix: str,
-    include_reasoning: bool,
+    output_dir: str, splits: list[str], sample_pct: float, suffix: str, include_reasoning: bool
 ) -> list[dict[str, Any]]:
-    """Download Nemotron-v2 dataset (multiple splits)."""
-    print(f"\nDownloading Nemotron-v2: {splits}")
-    print(f"Sample: {sample_percent}%, Reasoning: {include_reasoning}")
-    print("=" * 60)
-    print("NOTE: This dataset is GATED. You need HuggingFace access.")
-    print("=" * 60)
+    """Download nvidia/Nemotron-Post-Training-Dataset-v2 splits."""
+    from datasets import load_dataset
 
-    os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(datablend_dir, exist_ok=True)
+    print(f"\nDownloading Nemotron-v2 ({', '.join(splits)}) @ {sample_pct}%...")
+    results = []
 
-    all_infos = []
-    for split_name in splits:
-        info = download_nemotron_v2_split(
-            split_name=split_name,
-            output_dir=output_dir,
-            datablend_dir=datablend_dir,
-            sample_percent=sample_percent,
-            suffix=suffix,
-            include_reasoning=include_reasoning,
-        )
-        if info:
-            all_infos.append(info)
+    for split in splits:
+        print(f"\n{split}:")
+        ds = load_dataset("nvidia/Nemotron-Post-Training-Dataset-v2", split=split, streaming=True)
 
-    # Create combined datablend
-    if all_infos:
-        preprocessed_dir = output_dir.replace("nemotron_v2", "nemotron_v2_preprocessed")
-        total_train = sum(info["train"] for info in all_infos)
+        examples = []
+        for ex in tqdm(ds, desc=split):
+            msgs = ex.get("messages", [])
+            reasoning = ex.get("reasoning", "") if include_reasoning else ""
+            text = format_text(msgs, reasoning)
+            if text.strip():
+                examples.append({"text": text})
 
-        train_blend = []
-        valid_blend = []
-        test_blend = []
+        # Sample if needed
+        if sample_pct < 100:
+            random.seed(SEED)
+            target = int(len(examples) * sample_pct / 100)
+            examples = random.sample(examples, min(target, len(examples)))
+            print(f"  Sampled to {len(examples):,}")
 
-        for info in all_infos:
-            sn = info["split_name"]
-            weight = info["train"] / total_train if total_train > 0 else 1.0 / len(all_infos)
-            split_path = os.path.join(preprocessed_dir, sn)
+        if not examples:
+            continue
 
-            train_blend.extend([weight, f"{split_path}/{sn}_{suffix}_train_text_document"])
-            valid_blend.extend([weight, f"{split_path}/{sn}_{suffix}_validation_text_document"])
-            test_blend.extend([weight, f"{split_path}/{sn}_{suffix}_test_text_document"])
+        split_dir = os.path.join(output_dir, split)
+        counts = split_and_save(examples, split_dir, f"{split}_{suffix}")
+        results.append({"split_name": split, "total": len(examples), **counts})
 
-        combined_file = os.path.join(datablend_dir, f"datablend_nemotron_v2_combined_{suffix}.json")
-        with open(combined_file, "w") as f:
-            json.dump({"train": train_blend, "valid": valid_blend, "test": test_blend}, f, indent=2)
-        print(f"\nCombined datablend: {combined_file}")
-
-    return all_infos
+    return results
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Download datasets for QAD training")
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        required=True,
-        choices=["openscience", "nemotron-v2", "all"],
-        help="Dataset to download",
+    p = argparse.ArgumentParser(description="Download QAD datasets")
+    p.add_argument("--dataset", required=True, choices=["openscience", "nemotron-v2", "all"])
+    p.add_argument("--output-dir", required=True)
+    p.add_argument("--tokenizer", help="HuggingFace tokenizer for chat template")
+    p.add_argument("--splits", default="stem,math,code,chat", help="Nemotron-v2 splits")
+    p.add_argument("--sample-percent", type=float, default=30.0)
+    p.add_argument(
+        "--include-reasoning", action="store_true", help="Include COT for Thinking models"
     )
-    parser.add_argument("--output-dir", type=str, required=True, help="Output directory")
-    parser.add_argument(
-        "--datablend-dir",
-        type=str,
-        default=None,
-        help="Datablend config directory (default: output-dir)",
-    )
-    parser.add_argument(
-        "--tokenizer", type=str, default=None, help="HuggingFace tokenizer for chat template"
-    )
-
-    # Nemotron-v2 specific
-    parser.add_argument(
-        "--splits",
-        type=str,
-        default="stem,math,code,chat",
-        help="Nemotron-v2 splits to download (comma-separated)",
-    )
-    parser.add_argument(
-        "--sample-percent",
-        type=float,
-        default=30.0,
-        help="Percentage of data to sample (default: 30)",
-    )
-    parser.add_argument(
-        "--include-reasoning",
-        action="store_true",
-        help="Include chain-of-thought reasoning (for Thinking models)",
-    )
-
-    args = parser.parse_args()
-
-    output_dir = args.output_dir
-    datablend_dir = args.datablend_dir or output_dir
-    use_chat = args.tokenizer is not None
+    args = p.parse_args()
 
     if args.tokenizer:
         init_tokenizer(args.tokenizer)
 
     # Build suffix
-    pct_str = f"{int(args.sample_percent)}pct"
-    cot_str = "_cot" if args.include_reasoning else ""
-    chat_str = "_chat" if use_chat else ""
-    suffix = f"{pct_str}{cot_str}{chat_str}"
+    suffix = f"{int(args.sample_percent)}pct"
+    if args.include_reasoning:
+        suffix += "_cot"
+    if args.tokenizer:
+        suffix += "_chat"
 
     results = []
 
     if args.dataset in ["openscience", "all"]:
-        os_dir = os.path.join(output_dir, "openscience_splits")
-        info = download_openscience(os_dir, datablend_dir, use_chat)
+        info = download_openscience(
+            os.path.join(args.output_dir, "openscience_splits"), args.tokenizer is not None
+        )
         results.append(info)
 
     if args.dataset in ["nemotron-v2", "all"]:
-        nv2_dir = os.path.join(output_dir, "nemotron_v2")
-        splits = [s.strip() for s in args.splits.split(",")]
         infos = download_nemotron_v2(
-            output_dir=nv2_dir,
-            datablend_dir=datablend_dir,
-            splits=splits,
-            sample_percent=args.sample_percent,
-            suffix=suffix,
-            include_reasoning=args.include_reasoning,
+            os.path.join(args.output_dir, "nemotron_v2"),
+            [s.strip() for s in args.splits.split(",")],
+            args.sample_percent,
+            suffix,
+            args.include_reasoning,
         )
         results.extend(infos)
 
-    # Summary
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 50)
     print("Download complete!")
-    print("=" * 60)
     for r in results:
         name = r.get("dataset") or r.get("split_name")
-        print(f"  {name}: {r['total']:,} samples (train={r['train']:,})")
-    print("=" * 60)
+        print(f"  {name}: {r['total']:,} (train={r['train']:,})")
+    print("=" * 50)
 
 
 if __name__ == "__main__":

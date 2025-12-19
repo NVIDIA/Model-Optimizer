@@ -14,193 +14,74 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# =============================================================================
 # QAD (Quantization-Aware Distillation) Training Script
-# =============================================================================
-#
-# This script trains quantized language models using knowledge distillation
-# from a teacher model. Supports both dense and MoE (Mixture of Experts) models.
-#
-# USAGE:
-#   bash qad.sh --config configs/qwen3-8b.conf
-#   bash qad.sh --config configs/qwen3-30b-a3b-instruct-2507-moe.conf
-#   bash qad.sh --hf-token hf_xxx --config configs/qwen3-8b.conf
-#
-# REQUIRED CONFIG VARIABLES:
-#   Model:      STUDENT_MODEL, TEACHER_MODEL, IS_MOE, TOKENIZER_MODEL
-#   Training:   LR, GBS, MIN_LR, LR_DECAY_STYLE, SAVE_INTERVAL, LOG_INTERVAL
-#   Data:       DATASET_NAME, BLEND_PATH, TRAIN_SAMPLES
-#   Parallel:   TP_SIZE, MBS
-#   Paths:      STUDENT_CKPT, TEACHER_CKPT, TEACHER_MODEL_CONFIG,
-#               STUDENT_CONFIG_FILE, MLM_DIR, MODELOPT_DIR,
-#               QAD_CHECKPOINT_ROOT, DATACACHE_DIR
-#
-# =============================================================================
+# Usage: bash qad.sh --config configs/your-config.conf
 
 set -euo pipefail
 
-# =============================================================================
-# HELPER FUNCTIONS
-# =============================================================================
+# === Helpers ===
+die() { echo "[ERROR] $*" >&2; exit 1; }
+log_info() { echo "[INFO] $*"; }
+log_warn() { echo "[WARN] $*"; }
+require_var() { [[ -n "${!1:-}" ]] || die "$1 must be set in config"; }
+require_file() { [[ -f "$1" ]] || die "${2:-File} not found: $1"; }
+require_dir() { [[ -d "$1" ]] || die "${2:-Directory} not found: $1"; }
+sanitize() { echo "$1" | sed -e 's/[\/ :]/_/g' -e 's/[=]/_/g'; }
 
-log_info()  { echo "[INFO] $*"; }
-log_warn()  { echo "[WARN] $*"; }
-log_error() { echo "[ERROR] $*" >&2; }
-
-die() {
-    log_error "$@"
-    exit 1
-}
-
-require_var() {
-    local var_name="$1"
-    local var_value="${!var_name:-}"
-    if [[ -z "$var_value" ]]; then
-        die "$var_name must be set in config"
-    fi
-}
-
-require_file() {
-    local path="$1"
-    local desc="${2:-File}"
-    [[ -f "$path" ]] || die "$desc not found: $path"
-}
-
-require_dir() {
-    local path="$1"
-    local desc="${2:-Directory}"
-    [[ -d "$path" ]] || die "$desc not found: $path"
-}
-
-sanitize_for_path() {
-    echo "$1" | sed -e 's/[\/ :]/_/g' -e 's/[=]/_/g'
-}
-
-# =============================================================================
-# ENVIRONMENT SETUP
-# =============================================================================
-
-# NCCL and distributed training settings
+# === Environment ===
 export NCCL_IB_SL=1
 export NCCL_IB_TIMEOUT=19
 export NCCL_P2P_NET_CHUNKSIZE=2097152
 export NCCL_DEBUG=WARN
 export NCCL_SHM_DISABLE=1
 export NCCL_NVLS_ENABLE=0
-
-# CUDA settings
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export UB_TIMEOUT=720
-
-# Transformer Engine margins
 export NVTE_FWD_LAYERNORM_SM_MARGIN=16
 export NVTE_BWD_LAYERNORM_SM_MARGIN=16
-
-# PyTorch settings (disable features that cause issues during training)
 export TORCHINDUCTOR_COMPILE_THREADS=1
 export TORCH_COMPILE_DISABLE=1
 export PYTORCH_NO_CUDA_MEMORY_CACHING=0
 export TORCH_DISTRIBUTED_DEBUG=OFF
 export PYTORCH_JIT=0
 export TORCH_USE_CUDA_DSA=0
-
-# Network interface
 export GLOO_SOCKET_IFNAME=ibp26s0
 
-# =============================================================================
-# ARGUMENT PARSING
-# =============================================================================
-
+# === Argument Parsing ===
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE=""
 HF_TOKEN_ARG=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --config|-c)
-            CONFIG_FILE="$2"
-            shift 2
-            ;;
-        --hf-token)
-            HF_TOKEN_ARG="$2"
-            shift 2
-            ;;
-        *)
-            die "Unknown argument: $1"
-            ;;
+        --config|-c) CONFIG_FILE="$2"; shift 2;;
+        --hf-token) HF_TOKEN_ARG="$2"; shift 2;;
+        *) die "Unknown argument: $1";;
     esac
 done
 
-# HuggingFace token (from arg takes precedence)
-if [[ -n "$HF_TOKEN_ARG" ]]; then
-    export HF_TOKEN="$HF_TOKEN_ARG"
-fi
+# HuggingFace token
+[[ -n "$HF_TOKEN_ARG" ]] && export HF_TOKEN="$HF_TOKEN_ARG"
+[[ -n "${HF_TOKEN:-}" ]] && export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN" && log_info "HuggingFace token configured"
 
-if [[ -n "${HF_TOKEN:-}" ]]; then
-    export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN"
-    log_info "HuggingFace token configured"
-fi
-
-# =============================================================================
-# CONFIG LOADING
-# =============================================================================
-
+# === Load Config ===
 if [[ -z "$CONFIG_FILE" ]]; then
-    log_error "Config file is required. Use --config <path>"
-    echo "Available configs:"
-    ls -1 "${SCRIPT_DIR}/configs/"*.conf 2>/dev/null || echo "  (none found)"
-    exit 1
+    die "Config file required. Use --config <path>\nAvailable: $(ls -1 "${SCRIPT_DIR}/configs/"*.conf 2>/dev/null | tr '\n' ' ')"
 fi
-
-# Handle relative paths
 [[ "$CONFIG_FILE" = /* ]] || CONFIG_FILE="${SCRIPT_DIR}/${CONFIG_FILE}"
-
 require_file "$CONFIG_FILE" "Config file"
-log_info "Loading config from: ${CONFIG_FILE}"
+log_info "Loading config: ${CONFIG_FILE}"
 source "$CONFIG_FILE"
 
-# =============================================================================
-# CONFIG VALIDATION
-# =============================================================================
+# === Validate Required Config ===
+for v in LR GBS MIN_LR LR_DECAY_STYLE SAVE_INTERVAL LOG_INTERVAL \
+         STUDENT_MODEL TEACHER_MODEL DATASET_NAME BLEND_PATH TRAIN_SAMPLES IS_MOE TOKENIZER_MODEL \
+         TP_SIZE MBS STUDENT_CKPT TEACHER_CKPT TEACHER_MODEL_CONFIG \
+         STUDENT_CONFIG_FILE MLM_DIR MODELOPT_DIR QAD_CHECKPOINT_ROOT DATACACHE_DIR; do
+    require_var "$v"
+done
 
-# Required: Training hyperparameters
-require_var LR
-require_var GBS
-require_var MIN_LR
-require_var LR_DECAY_STYLE
-require_var SAVE_INTERVAL
-require_var LOG_INTERVAL
-
-# Required: Model and data
-require_var STUDENT_MODEL
-require_var TEACHER_MODEL
-require_var DATASET_NAME
-require_var BLEND_PATH
-require_var TRAIN_SAMPLES
-require_var IS_MOE
-require_var TOKENIZER_MODEL
-
-# Required: Parallelism
-require_var TP_SIZE
-require_var MBS
-
-# Required: Checkpoints
-require_var STUDENT_CKPT
-require_var TEACHER_CKPT
-require_var TEACHER_MODEL_CONFIG
-
-# Required: Paths
-require_var STUDENT_CONFIG_FILE
-require_var MLM_DIR
-require_var MODELOPT_DIR
-require_var QAD_CHECKPOINT_ROOT
-require_var DATACACHE_DIR
-
-# =============================================================================
-# OPTIONAL CONFIG WITH DEFAULTS
-# =============================================================================
-
-# Parallelism defaults
+# === Defaults for Optional Config ===
 EP_SIZE="${EP_SIZE:-1}"
 PP_SIZE="${PP_SIZE:-1}"
 NUM_GPUS="${NUM_GPUS:-8}"
@@ -208,154 +89,88 @@ NNODES="${NNODES:-1}"
 NODE_RANK="${NODE_RANK:-0}"
 MASTER_ADDR="${MASTER_ADDR:-localhost}"
 MASTER_PORT="${MASTER_PORT:-29500}"
-
-# Training schedule (derived from TRAIN_SAMPLES if not set)
 LR_DECAY_SAMPLES="${LR_DECAY_SAMPLES:-$(( TRAIN_SAMPLES * 99 / 100 ))}"
 LR_WARMUP_SAMPLES="${LR_WARMUP_SAMPLES:-$(( TRAIN_SAMPLES / 100 ))}"
-
-# Checkpoint intervals
 SAVE_RETAIN_INTERVAL="${SAVE_RETAIN_INTERVAL:-$SAVE_INTERVAL}"
 EVAL_INTERVAL="${EVAL_INTERVAL:-$SAVE_INTERVAL}"
 EVAL_ITERS="${EVAL_ITERS:-20}"
-
-# Optional overrides
 MAX_SEQ="${MAX_SEQ:-}"
 RUN_TAG="${RUN_TAG:-}"
 KD_CFG_PATH="${KD_CFG_PATH:-}"
 ITERATIONS_TO_SKIP="${ITERATIONS_TO_SKIP:-}"
-
-# MoE performance flags
 ENABLE_MOE_PERF="${ENABLE_MOE_PERF:-1}"
 ENABLE_MOE_EXPERIMENTAL="${ENABLE_MOE_EXPERIMENTAL:-0}"
-
-# Logging
 LOG_PARAMS_NORM="${LOG_PARAMS_NORM:-}"
 
-# =============================================================================
-# MODEL CONFIGURATION
-# =============================================================================
-
+# === Load Student Model Config ===
 require_file "$STUDENT_CONFIG_FILE" "Student model config"
-log_info "Loading student model config from: ${STUDENT_CONFIG_FILE}"
-
-# Temporarily disable strict mode for external config (may use unset vars)
-set +u
-source "$STUDENT_CONFIG_FILE"
-set -u
-
+log_info "Loading student model config: ${STUDENT_CONFIG_FILE}"
+set +u; source "$STUDENT_CONFIG_FILE"; set -u
 STUDENT_MODEL_ARGS="${MODEL_ARGS}"
 
-# Log params norm setting
+# Log params norm (disabled for MoE to save memory)
 if [[ "${LOG_PARAMS_NORM}" == "1" ]]; then
     LOG_PARAMS_NORM_ARG="--log-params-norm"
 elif [[ "$IS_MOE" == "true" ]]; then
     LOG_PARAMS_NORM_ARG=""
-    log_warn "log-params-norm disabled for MoE model to save memory"
+    warn "log-params-norm disabled for MoE model"
 else
     LOG_PARAMS_NORM_ARG="--log-params-norm"
 fi
 
-log_info "Model: ${STUDENT_MODEL}"
-log_info "Parallelism: TP=${TP_SIZE}, PP=${PP_SIZE}, EP=${EP_SIZE}, MBS=${MBS}, MoE=${IS_MOE}"
+log_info "Model: ${STUDENT_MODEL} | TP=${TP_SIZE} PP=${PP_SIZE} EP=${EP_SIZE} MBS=${MBS} MoE=${IS_MOE}"
 
-# =============================================================================
-# CHECKPOINT VALIDATION
-# =============================================================================
-
+# === Validate Checkpoints ===
 require_dir "$STUDENT_CKPT" "Student checkpoint"
 require_dir "$TEACHER_CKPT" "Teacher checkpoint"
 require_file "$TEACHER_MODEL_CONFIG" "Teacher model config"
+log_info "Student: ${STUDENT_CKPT}"
+log_info "Teacher: ${TEACHER_CKPT}"
 
-log_info "Student checkpoint: ${STUDENT_CKPT}"
-log_info "Teacher checkpoint: ${TEACHER_CKPT}"
-
-# =============================================================================
-# OUTPUT PATH SETUP
-# =============================================================================
-
+# === Output Paths ===
 DATETIME=$(date +'date_%y-%m-%d_time_%H-%M-%S')
 STUDENT_CKPT_NAME=$(basename "${STUDENT_CKPT}")
 TEACHER_CKPT_NAME=$(basename "${TEACHER_CKPT}")
 
-# Build descriptive run name from hyperparameters
-TAG_PARTS="lr$(sanitize_for_path "$LR")"
-TAG_PARTS="${TAG_PARTS}-minlr$(sanitize_for_path "$MIN_LR")"
-TAG_PARTS="${TAG_PARTS}-decay$(sanitize_for_path "$LR_DECAY_STYLE")"
+TAG_PARTS="lr$(sanitize "$LR")-minlr$(sanitize "$MIN_LR")-decay$(sanitize "$LR_DECAY_STYLE")"
 [[ -n "$MAX_SEQ" ]] && TAG_PARTS="${TAG_PARTS}-seq${MAX_SEQ}"
-[[ -n "$RUN_TAG" ]] && TAG_PARTS="${TAG_PARTS}-tag$(sanitize_for_path "$RUN_TAG")"
+[[ -n "$RUN_TAG" ]] && TAG_PARTS="${TAG_PARTS}-tag$(sanitize "$RUN_TAG")"
 
 OUTPUT_ROOT="${QAD_CHECKPOINT_ROOT}/${STUDENT_CKPT_NAME}-Teacher-${TEACHER_CKPT_NAME}-Data-${DATASET_NAME}-${TAG_PARTS}"
-NAME="${STUDENT_CKPT_NAME}"
-
-RUN_DIR="${OUTPUT_ROOT}"
-LOGS_DIR="${RUN_DIR}/logs"
-CHECKPOINT_DIR="${RUN_DIR}/checkpoints/${NAME}"
-TENSORBOARD_DIR="${RUN_DIR}/tensorboard/${NAME}"
-
-# Create directories
+CHECKPOINT_DIR="${OUTPUT_ROOT}/checkpoints/${STUDENT_CKPT_NAME}"
+TENSORBOARD_DIR="${OUTPUT_ROOT}/tensorboard/${STUDENT_CKPT_NAME}"
+LOGS_DIR="${OUTPUT_ROOT}/logs"
 mkdir -p "${LOGS_DIR}" "${CHECKPOINT_DIR}" "${DATACACHE_DIR}" "${TENSORBOARD_DIR}"
 
-# =============================================================================
-# RESUME LOGIC
-# =============================================================================
-
+# === Resume Logic ===
 if [[ -f "${CHECKPOINT_DIR}/latest_checkpointed_iteration.txt" ]]; then
-    log_info "Resuming from existing checkpoint: ${CHECKPOINT_DIR}"
+    log_info "Resuming from: ${CHECKPOINT_DIR}"
     LOAD_CHECKPOINT_DIR="${CHECKPOINT_DIR}"
     FINETUNE_FLAG=""
     LOAD_OPTIM_ARGS=""
     CKPT_PARALLEL_LOAD_ARG="--ckpt-fully-parallel-load"
 else
-    log_info "Starting fresh from base student checkpoint"
+    log_info "Starting fresh from base checkpoint"
     LOAD_CHECKPOINT_DIR="${STUDENT_CKPT}"
     FINETUNE_FLAG="--finetune"
     LOAD_OPTIM_ARGS="--no-load-optim --no-load-rng"
     CKPT_PARALLEL_LOAD_ARG=""
 fi
 
-# =============================================================================
-# TRAINING CONFIGURATION LOGGING
-# =============================================================================
-
-ENV_LOG="${LOGS_DIR}/${NAME}_${DATETIME}.env.log"
-
+# === Log Configuration ===
+ENV_LOG="${LOGS_DIR}/${STUDENT_CKPT_NAME}_${DATETIME}.env.log"
 {
-    echo "========================================"
-    echo "QAD Training: ${STUDENT_MODEL}"
+    echo "=== QAD Training: ${STUDENT_MODEL} ==="
     echo "Time: ${DATETIME}"
-    echo "========================================"
-    echo ""
-    echo "MODEL CONFIG"
-    echo "  Student: ${STUDENT_MODEL}"
-    echo "  Teacher: ${TEACHER_MODEL}"
-    echo "  Config: ${STUDENT_CONFIG_FILE}"
-    echo "  MoE: ${IS_MOE}"
-    echo ""
-    echo "TRAINING HYPERPARAMETERS"
-    echo "  LR: ${LR}, Min LR: ${MIN_LR}"
-    echo "  LR Decay: ${LR_DECAY_STYLE}"
-    echo "  GBS: ${GBS}, MBS: ${MBS}"
-    echo "  Train Samples: ${TRAIN_SAMPLES}"
-    echo "  Save Interval: ${SAVE_INTERVAL}, Log Interval: ${LOG_INTERVAL}"
-    echo ""
-    echo "PARALLELISM"
-    echo "  TP: ${TP_SIZE}, PP: ${PP_SIZE}, EP: ${EP_SIZE}"
-    echo "  Nodes: ${NNODES}, GPUs/node: ${NUM_GPUS}"
-    echo "  Total GPUs: $((NNODES * NUM_GPUS))"
-    echo ""
-    echo "PATHS"
-    echo "  MLM_DIR: ${MLM_DIR}"
-    echo "  Checkpoint: ${CHECKPOINT_DIR}"
-    echo "  TensorBoard: ${TENSORBOARD_DIR}"
-    echo ""
-    echo "ENVIRONMENT"
+    echo "LR=${LR} MinLR=${MIN_LR} Decay=${LR_DECAY_STYLE} GBS=${GBS} MBS=${MBS}"
+    echo "TrainSamples=${TRAIN_SAMPLES} SaveInterval=${SAVE_INTERVAL} LogInterval=${LOG_INTERVAL}"
+    echo "TP=${TP_SIZE} PP=${PP_SIZE} EP=${EP_SIZE} Nodes=${NNODES} GPUs/node=${NUM_GPUS}"
+    echo "Checkpoint: ${CHECKPOINT_DIR}"
+    echo "TensorBoard: ${TENSORBOARD_DIR}"
     env
-    echo "========================================"
-} | tee "$ENV_LOG"
+} > "$ENV_LOG"
 
-# =============================================================================
-# BUILD TRAINING ARGUMENTS
-# =============================================================================
+# === Build Training Arguments ===
 
 # Checkpoint loading
 CHECKPOINT_ARGS=" \
@@ -514,17 +329,13 @@ ALL_ARGS=" \
 # Optional: iterations to skip
 [[ -n "$ITERATIONS_TO_SKIP" ]] && ALL_ARGS="${ALL_ARGS} --iterations-to-skip ${ITERATIONS_TO_SKIP}"
 
-# =============================================================================
-# LAUNCH TRAINING
-# =============================================================================
-
+# === Launch Training ===
 export PYTHONPATH="${MODELOPT_DIR}:${MLM_DIR}:${PYTHONPATH:-}"
-
-LOG_FILE="${LOGS_DIR}/${NAME}_qad_${DATETIME}.log"
+LOG_FILE="${LOGS_DIR}/${STUDENT_CKPT_NAME}_qad_${DATETIME}.log"
 
 log_info "Starting training..."
 log_info "Log file: ${LOG_FILE}"
-log_info "Distributed: ${NNODES} nodes × ${NUM_GPUS} GPUs = $((NNODES * NUM_GPUS)) total"
+log_info "Distributed: ${NNODES} nodes x ${NUM_GPUS} GPUs = $((NNODES * NUM_GPUS)) total"
 
 torchrun \
     --nproc_per_node="${NUM_GPUS}" \
