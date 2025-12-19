@@ -77,6 +77,7 @@ mip:
 
   human_constraints:
     target_memory: 78_000
+    num_params: 7_000_000_000
 
   mip_constraints:
   metric_overrides:

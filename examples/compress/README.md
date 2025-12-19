@@ -49,7 +49,7 @@ hf auth login
 
    Let's first shoot for 32% GPU memory reduction setting `target_memory = 78_000` MiB. This means that the algorithm will choose the candidates with highest accuracy that also meet the specified requirements.
 
-   We can also set the target size of the resulting model using `num_parameters = 7_000_000_000`. This will be used as an upper bound for the number of parameters of the model.
+   We can also set the target size of the resulting model using `num_params = 7_000_000_000`. This will be used as an upper bound for the number of parameters of the model.
 
 3. Run the compression script.
 
