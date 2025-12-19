@@ -40,6 +40,7 @@ from modelopt.torch.nas.plugins.megatron import (
 )
 from modelopt.torch.nas.traced_hp import TracedHp
 from modelopt.torch.opt.utils import named_dynamic_modules, search_space_size
+from modelopt.torch.prune.plugins.mcore_minitron import get_mcore_minitron_config
 from modelopt.torch.utils.random import centroid
 
 SEED = 1234
@@ -75,7 +76,7 @@ def _test_mamba_search_space(rank, size):
     ).cuda()
     mamba_num_heads = model.decoder.layers[0].mixer.nheads
 
-    model = mtn.convert(model, "mcore_minitron")
+    model = mtn.convert(model, [("mcore_minitron", get_mcore_minitron_config(channel_divisor))])
 
     assert isinstance(model, _DynamicMCoreLanguageModel)
     if is_pipeline_first_stage():
@@ -118,7 +119,7 @@ def _test_mamba_search_space(rank, size):
     assert not any(named_dynamic_modules(model))
 
 
-def test_mamba_search_space(use_minitron_channel_div_4):
+def test_mamba_search_space():
     spawn_multiprocess_job(
         size=torch.cuda.device_count(), job=_test_mamba_search_space, backend="nccl"
     )

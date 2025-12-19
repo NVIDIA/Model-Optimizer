@@ -28,11 +28,11 @@ from _test_utils.torch.megatron.utils import (
     run_mcore_inference_with_dummy_input,
 )
 from _test_utils.torch.misc import compare_outputs, set_seed
+from _test_utils.torch.nas_prune.minitron_common import prune_minitron
 from megatron.core.parallel_state import destroy_model_parallel
 from megatron.core.transformer.identity_op import IdentityOp
 
 import modelopt.torch.nas as mtn
-import modelopt.torch.prune as mtp
 from modelopt.torch.nas.conversion import export_searchspace
 from modelopt.torch.nas.plugins.megatron import (
     NumAttentionHeadsHp,
@@ -44,6 +44,7 @@ from modelopt.torch.nas.plugins.megatron import (
 from modelopt.torch.prune.plugins.mcore_minitron import (
     ImportanceEstimatorRegistry,
     _convert_model_to_dynamic_space,
+    get_mcore_minitron_config,
 )
 
 SEED = 1234
@@ -51,13 +52,15 @@ SEED = 1234
 
 def _test_mcore_gpt_parameter_sorting(activation_func, rank, size):
     # Use relatively bigger model here for more accurate test for sorting
+    channel_divisor = 64
+
     num_layers = size
-    hidden_size = 128
+    hidden_size = channel_divisor * 2
     num_attention_heads = 8
     num_query_groups = 4
-    ffn_hidden_size = 64
+    ffn_hidden_size = channel_divisor * 2
     max_sequence_length = 32
-    vocab_size = 128
+    vocab_size = channel_divisor * 2
     batch_size = 2
 
     model = get_mcore_gpt_model(
@@ -81,7 +84,9 @@ def _test_mcore_gpt_parameter_sorting(activation_func, rank, size):
             m.weight.data = torch.randn_like(m.weight)
 
     model.eval()
-    dynamic_space = _convert_model_to_dynamic_space(model)
+    dynamic_space = _convert_model_to_dynamic_space(
+        model, get_mcore_minitron_config(channel_divisor)
+    )
     registry = ImportanceEstimatorRegistry(model)  # register imp estimators and forward hooks
 
     # Compute activations for sorting
@@ -110,7 +115,7 @@ def _test_mcore_gpt_parameter_sorting(activation_func, rank, size):
 
 
 @pytest.mark.parametrize("activation_func", ["swiglu"])
-def test_mcore_gpt_parameter_sorting(activation_func, need_2_gpus):
+def test_mcore_gpt_parameter_sorting(activation_func):
     set_seed(SEED)
     spawn_multiprocess_job(
         size=torch.cuda.device_count(),
@@ -278,13 +283,7 @@ def _test_mcore_gpt_pruning(
         assert ckpt_path is None
     else:
         config["forward_loop"] = forward_loop
-    model, pruning_scores = mtp.prune(
-        model,
-        mode="mcore_minitron",
-        constraints={"export_config": export_config},
-        dummy_input=None,  # Not used
-        config=config,
-    )
+    model, pruning_scores = prune_minitron(model, export_config, config, channel_divisor)
     if not skip_sorting:
         assert pruning_scores["layer_scores"]
         assert pruning_scores["activations_per_rank"]
@@ -320,12 +319,8 @@ def _test_mcore_gpt_pruning(
     if ckpt_path:
         model_rerun = _get_model(initialize_megatron=False)
         model_rerun.load_state_dict(sd)
-        mtp.prune(
-            model_rerun,
-            mode="mcore_minitron",
-            constraints={"export_config": export_config},
-            dummy_input=None,  # Not used
-            config={"scores_path": ckpt_path},
+        model_rerun, pruning_scores = prune_minitron(
+            model_rerun, export_config, {"scores_path": ckpt_path}, channel_divisor
         )
 
         output_rerun = run_mcore_inference(model_rerun, prompt_tokens, pruned_hidden_size)
@@ -362,7 +357,6 @@ def _test_mcore_gpt_pruning(
 )
 def test_mcore_gpt_pruning(
     tmp_path,
-    use_minitron_channel_div_4,
     num_attention_heads,
     num_query_groups,
     activation_func,
@@ -399,13 +393,15 @@ def test_mcore_gpt_pruning(
 
 def _test_mcore_gpt_moe_parameter_sorting(rank, size):
     # Use relatively bigger model here for more accurate test for sorting
+    channel_divisor = 64
+
     num_layers = min(size * 2, 8)
-    hidden_size = 256
+    hidden_size = channel_divisor * 4
     num_attention_heads = 8
     num_query_groups = 4
-    moe_ffn_hidden_size = 128
+    moe_ffn_hidden_size = channel_divisor * 2
     num_moe_experts = 4
-    moe_shared_expert_intermediate_size = 256
+    moe_shared_expert_intermediate_size = channel_divisor * 4
     max_sequence_length = 16
     vocab_size = 64
     batch_size = 2
@@ -433,7 +429,9 @@ def _test_mcore_gpt_moe_parameter_sorting(rank, size):
             m.weight.data = torch.randn_like(m.weight)
 
     model.eval()
-    dynamic_space = _convert_model_to_dynamic_space(model)
+    dynamic_space = _convert_model_to_dynamic_space(
+        model, get_mcore_minitron_config(channel_divisor)
+    )
     registry = ImportanceEstimatorRegistry(model)  # register imp estimators and forward hooks
 
     # Compute activations for sorting
@@ -464,7 +462,7 @@ def _test_mcore_gpt_moe_parameter_sorting(rank, size):
     compare_outputs(y1, y2, rtol=1e-5, atol=1e-3)
 
 
-def test_mcore_gpt_moe_parameter_sorting(need_2_gpus):
+def test_mcore_gpt_moe_parameter_sorting():
     set_seed(SEED)
     spawn_multiprocess_job(
         size=torch.cuda.device_count(),
@@ -520,12 +518,11 @@ def _test_mcore_gpt_pruning_moe(ckpt_path, rank, size):
         "num_moe_experts": pruned_num_moe_experts,
     }
 
-    mtp.prune(
+    prune_minitron(
         model,
-        mode="mcore_minitron",
-        constraints={"export_config": export_config},
-        dummy_input=None,  # Not used
-        config={"scores_path": ckpt_path, "forward_loop": forward_loop},
+        export_config,
+        {"scores_path": ckpt_path, "forward_loop": forward_loop},
+        channel_divisor,
     )
 
     # Assert weights are pruned correctly
@@ -561,19 +558,13 @@ def _test_mcore_gpt_pruning_moe(ckpt_path, rank, size):
     # Assert re-pruning from scores_path works without running the forward loop again
     model_rerun = _get_model(initialize_megatron=False)
     model_rerun.load_state_dict(sd)
-    mtp.prune(
-        model_rerun,
-        mode="mcore_minitron",
-        constraints={"export_config": export_config},
-        dummy_input=None,  # Not used
-        config={"scores_path": ckpt_path},
-    )
+    prune_minitron(model_rerun, export_config, {"scores_path": ckpt_path}, channel_divisor)
 
     output_rerun = run_mcore_inference(model_rerun, prompt_tokens, pruned_hidden_size)
     assert torch.allclose(output, output_rerun, atol=1e-5)
 
 
-def test_mcore_gpt_pruning_moe(tmp_path, use_minitron_channel_div_4):
+def test_mcore_gpt_pruning_moe(tmp_path):
     spawn_multiprocess_job(
         size=torch.cuda.device_count(),
         job=partial(_test_mcore_gpt_pruning_moe, tmp_path / "minitron_scores.pth"),

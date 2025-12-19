@@ -28,14 +28,15 @@ from _test_utils.torch.megatron.utils import (
     run_mcore_inference_with_dummy_input,
 )
 from _test_utils.torch.misc import compare_outputs, set_seed
+from _test_utils.torch.nas_prune.minitron_common import prune_minitron
 from megatron.core.ssm.mamba_layer import MambaLayer
 from megatron.core.transformer.identity_op import IdentityOp
 
 import modelopt.torch.nas as mtn
-import modelopt.torch.prune as mtp
 from modelopt.torch.prune.plugins.mcore_minitron import (
     ImportanceEstimatorRegistry,
     _convert_model_to_dynamic_space,
+    get_mcore_minitron_config,
 )
 
 SEED = 1234
@@ -43,10 +44,12 @@ SEED = 1234
 
 def _test_mcore_mamba_parameter_sorting(rank, size):
     # Use relatively bigger model here for more accurate test for sorting
+    channel_divisor = 64
+
     num_layers = size
     hybrid_override_pattern = "M" * size
-    hidden_size = 256
-    mamba_state_dim = 64
+    hidden_size = channel_divisor * 4
+    mamba_state_dim = channel_divisor
     mamba_head_dim = 16
     mamba_num_groups = 2
     max_sequence_length = 32
@@ -74,7 +77,9 @@ def _test_mcore_mamba_parameter_sorting(rank, size):
             m.weight.data = torch.randn_like(m.weight)
 
     model.eval()
-    dynamic_space = _convert_model_to_dynamic_space(model)
+    dynamic_space = _convert_model_to_dynamic_space(
+        model, get_mcore_minitron_config(channel_divisor)
+    )
     registry = ImportanceEstimatorRegistry(model)  # register imp estimators and forward hooks
 
     # Compute activations for sorting
@@ -102,7 +107,7 @@ def _test_mcore_mamba_parameter_sorting(rank, size):
     compare_outputs(y1, y2, rtol=1e-5, atol=1e-3)
 
 
-def test_mcore_mamba_parameter_sorting(need_2_gpus):
+def test_mcore_mamba_parameter_sorting():
     set_seed(SEED)
     spawn_multiprocess_job(
         size=torch.cuda.device_count(),
@@ -181,12 +186,11 @@ def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
         "moe_shared_expert_intermediate_size": pruned_ffn_hidden_size,
         "num_moe_experts": pruned_num_moe_experts,
     }
-    mtp.prune(
+    prune_minitron(
         model,
-        mode="mcore_minitron",
-        constraints={"export_config": export_config},
-        dummy_input=None,  # Not used
-        config={"forward_loop": forward_loop, "scores_path": ckpt_path},
+        export_config,
+        {"forward_loop": forward_loop, "scores_path": ckpt_path},
+        channel_divisor,
     )
 
     # Assert weights are pruned correctly
@@ -216,16 +220,10 @@ def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
 
     # Assert re-pruning from scores_path works without running the forward loop again
     model = _get_model(initialize_megatron=False)
-    mtp.prune(
-        model,
-        mode="mcore_minitron",
-        constraints={"export_config": export_config},
-        dummy_input=None,  # Not used
-        config={"scores_path": ckpt_path},
-    )
+    prune_minitron(model, export_config, {"scores_path": ckpt_path}, channel_divisor)
 
 
-def test_mcore_mamba_hybrid_pruning(tmp_path, use_minitron_channel_div_4):
+def test_mcore_mamba_hybrid_pruning(tmp_path):
     spawn_multiprocess_job(
         size=torch.cuda.device_count(),
         job=partial(_test_mcore_mamba_hybrid_pruning, tmp_path / "modelopt_minitron_scores.pth"),

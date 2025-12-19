@@ -48,6 +48,7 @@ from modelopt.torch.nas.plugins.megatron import (
     expand_head_indices,
 )
 from modelopt.torch.opt.utils import named_dynamic_modules, search_space_size
+from modelopt.torch.prune.plugins.mcore_minitron import get_mcore_minitron_config
 from modelopt.torch.utils.random import centroid
 
 SEED = 1234
@@ -80,7 +81,7 @@ def _test_gpt_search_space(
         normalization=normalization,
     ).cuda()
 
-    model = mtn.convert(model, "mcore_minitron")
+    model = mtn.convert(model, [("mcore_minitron", get_mcore_minitron_config(channel_divisor))])
 
     assert isinstance(model, _DynamicMCoreLanguageModel)
     for m in model.modules():
@@ -132,13 +133,7 @@ def _test_gpt_search_space(
         # (8, 1, "swiglu", "RMSNorm"),  # MQA
     ],
 )
-def test_gpt_search_space(
-    use_minitron_channel_div_4,
-    num_attention_heads,
-    num_query_groups,
-    activation_func,
-    normalization,
-):
+def test_gpt_search_space(num_attention_heads, num_query_groups, activation_func, normalization):
     spawn_multiprocess_job(
         size=torch.cuda.device_count(),
         job=partial(
@@ -188,7 +183,7 @@ def _test_gpt_moe_search_space(rank, size):
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
     ).cuda()
 
-    model = mtn.convert(model, "mcore_minitron")
+    model = mtn.convert(model, [("mcore_minitron", get_mcore_minitron_config(channel_divisor))])
 
     moe = model.decoder.layers[0].mlp
     assert isinstance(moe, _DynamicMoELayer)
@@ -231,7 +226,7 @@ def _test_gpt_moe_search_space(rank, size):
     assert not any(named_dynamic_modules(model))
 
 
-def test_gpt_moe_search_space(use_minitron_channel_div_4):
+def test_gpt_moe_search_space():
     spawn_multiprocess_job(
         size=torch.cuda.device_count(), job=_test_gpt_moe_search_space, backend="nccl"
     )

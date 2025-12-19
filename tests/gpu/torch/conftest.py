@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
 
 import pytest
 import torch
@@ -58,11 +57,3 @@ def set_torch_dtype(request):
 @pytest.fixture(scope="session", autouse=True)
 def enable_hf_checkpointing():
     mto.enable_huggingface_checkpointing()
-
-
-@pytest.fixture
-def use_minitron_channel_div_4():
-    """NOTE: This only works for tests that spawn processes."""
-    os.environ["MINITRON_SS_CHANNEL_DIVISOR"] = "4"
-    yield
-    del os.environ["MINITRON_SS_CHANNEL_DIVISOR"]
