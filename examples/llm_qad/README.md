@@ -33,7 +33,7 @@ You need the following checkpoints before training:
 2. **Teacher checkpoint**: Full-precision (BF16) model in Megatron-LM format
 3. **Teacher config YAML**: Model architecture configuration
 
-See [Megatron-LM ModelOpt examples](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt) for checkpoint conversion from HuggingFace format. 
+See [Megatron-LM ModelOpt examples](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt) for checkpoint conversion from HuggingFace format.
 
 ## Creating a Configuration
 
@@ -47,6 +47,7 @@ See [Megatron-LM ModelOpt examples](https://github.com/NVIDIA/Megatron-LM/tree/m
 ### Create Your Config
 
 1. Copy a template:
+
    ```bash
    # For MoE models
    cp configs/qwen3-30b-a3b-instruct-2507-moe_template.conf configs/my-experiment.conf
@@ -58,6 +59,7 @@ See [Megatron-LM ModelOpt examples](https://github.com/NVIDIA/Megatron-LM/tree/m
 2. Fill in required fields:
 
    **Checkpoints** (required):
+
    | Variable | Description |
    |----------|-------------|
    | `STUDENT_CKPT` | Path to quantized student MLM checkpoint |
@@ -65,12 +67,14 @@ See [Megatron-LM ModelOpt examples](https://github.com/NVIDIA/Megatron-LM/tree/m
    | `TEACHER_MODEL_CONFIG` | Path to teacher YAML config (see below) |
 
    **Paths** (required):
+
    | Variable | Description |
    |----------|-------------|
    | `MLM_DIR` | Path to Megatron-LM directory |
    | `BLEND_PATH` | Path to datablend JSON (from dataset generation) |
 
    **Parallelism** (adjust for your hardware):
+
    | Variable | Dense Model | MoE Model |
    |----------|-------------|-----------|
    | `IS_MOE` | `false` | `true` |
@@ -79,6 +83,7 @@ See [Megatron-LM ModelOpt examples](https://github.com/NVIDIA/Megatron-LM/tree/m
    | `MBS` | `4` | `2` |
 
    **Training** (tune as needed):
+
    | Variable | Default | Description |
    |----------|---------|-------------|
    | `LR` | `1e-5` | Learning rate |
@@ -120,6 +125,7 @@ bash generate_dataset.sh \
 ### SLURM Batch Submission (Recommended)
 
 First, update `sbatch_qad.sh` SLURM header with your cluster settings:
+
 - `--account=<your-account>`
 - `--nodes`, `--gres=gpu`, `-t` as needed
 
@@ -150,6 +156,7 @@ bash qad.sh --config configs/qwen3-8b.conf
 ## Resuming Training
 
 Training automatically resumes from checkpoints. To force a fresh start:
+
 ```bash
 rm -rf /path/to/checkpoints/*/latest_checkpointed_iteration.txt
 ```
@@ -157,6 +164,7 @@ rm -rf /path/to/checkpoints/*/latest_checkpointed_iteration.txt
 ## Troubleshooting
 
 ### OOM Errors
+
 - Reduce `MBS` to `1`
-- Increase `EP_SIZE`,`TP_SIZE`,`PP_SIZE`
+- Increase `EP_SIZE`, `TP_SIZE`, `PP_SIZE`
 - Add more nodes
