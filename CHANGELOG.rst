@@ -13,6 +13,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add support for subgraphs in ONNX autocast.
 - Add support for parallel draft heads in Eagle speculative decoding.
 - Add support to enable custom emulated quantization backend. See :meth:`register_quant_backend <modelopt.torch.quantization.nn.modules.tensor_quantizer.register_quant_backend>`` for more details. See an example in ``tests/unit/torch/quantization/test_custom_backend.py``.
+- Add ``examples/llm_qad`` for QAD training with Megatron-LM.
 
 **Deprecations**
 
