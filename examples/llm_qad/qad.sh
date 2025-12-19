@@ -113,7 +113,7 @@ if [[ "${LOG_PARAMS_NORM}" == "1" ]]; then
     LOG_PARAMS_NORM_ARG="--log-params-norm"
 elif [[ "$IS_MOE" == "true" ]]; then
     LOG_PARAMS_NORM_ARG=""
-    warn "log-params-norm disabled for MoE model"
+    log_warn "log-params-norm disabled for MoE model"
 else
     LOG_PARAMS_NORM_ARG="--log-params-norm"
 fi
