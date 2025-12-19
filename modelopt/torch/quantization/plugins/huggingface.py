@@ -69,7 +69,7 @@ class _QuantAttention(QuantModule):
 
     def _init_kitchen_attn_fn(self):
         if not self.softmax_quantizer.is_enabled:
-            self.use_kitchen = False
+            self.kitchen_attn_fn = "disabled"
             return
         self.use_kitchen = True
         if self.softmax_quantizer.is_mxfp8:
@@ -94,7 +94,7 @@ class _QuantAttention(QuantModule):
             attention_dropout=self.config.attention_dropout,
             qkv_format="sbhd",  # this is not used at all, but in forward, this is the only supported format.
             attn_mask_type="causal",
-            window_size=self.config.sliding_window,
+            window_size=getattr(self.config, "sliding_window", None),
             sequence_parallel=False,
             get_rng_state_tracker=None,
             layer_number=None,
