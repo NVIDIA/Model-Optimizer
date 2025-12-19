@@ -84,6 +84,8 @@ optional_deps = {
         "torch-geometric",
         "tox>4.18",
         "tox-current-env>=0.0.12",
+        "nltk",
+        "wonderwords",
     ],
     # docs
     "dev-docs": [
