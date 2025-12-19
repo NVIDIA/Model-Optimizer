@@ -48,7 +48,6 @@ SEED = 1234
 
 def _test_mamba_search_space(rank, size):
     channel_divisor = 4
-    mamba_num_heads_divisor = 4
     mamba_head_dim_divisor = 4
 
     num_layers = size
@@ -95,7 +94,7 @@ def _test_mamba_search_space(rank, size):
 
     # NOTE: `search_space_size` does not reduce across TP/PP groups
     ss_size_per_pp = search_space_size(model)
-    num_heads_choices = mamba_num_heads // mamba_num_heads_divisor
+    num_heads_choices = mamba_num_heads // mamba_num_groups
     head_dim_choices = mamba_head_dim // mamba_head_dim_divisor
     hidden_size_choices = hidden_size // channel_divisor
     num_layers_per_pp = num_layers // size
@@ -126,7 +125,7 @@ def test_mamba_search_space():
 
 
 def test_mamba_num_heads_hp():
-    num_heads = MambaNumHeadsHp([2, 4, 6, 8], ngroups=2)  # 4 heads per group
+    num_heads = MambaNumHeadsHp(8, ngroups=2)  # 4 heads per group
     assert num_heads.choices == [2, 4, 6, 8]
     assert num_heads.active_slice == slice(8)
 

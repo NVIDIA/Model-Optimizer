@@ -311,7 +311,6 @@ MCoreMinitronConfig: type[ModeloptBaseConfig] = create_model(
                     "megatron.core.models.mamba.MambaModel": {
                         "hidden_size_divisor": 64,
                         "ffn_hidden_size_divisor": 64,
-                        "mamba_num_heads_divisor": 4,
                         "mamba_head_dim_divisor": 4,
                         "num_moe_experts_divisor": 1,
                     }
@@ -327,7 +326,6 @@ MCoreMinitronConfig: type[ModeloptBaseConfig] = create_model(
 
 def get_mcore_minitron_config(
     channel_divisor: int = 64,
-    mamba_num_heads_divisor: int = 4,
     mamba_head_dim_divisor: int = 4,
     num_moe_experts_divisor: int = 1,
 ) -> ModeloptBaseConfig:
@@ -340,8 +338,6 @@ def get_mcore_minitron_config(
                 _set_divisors(v)
             elif k in ["hidden_size_divisor", "ffn_hidden_size_divisor"]:
                 c[k] = channel_divisor
-            elif k == "mamba_num_heads_divisor":
-                c[k] = mamba_num_heads_divisor
             elif k == "mamba_head_dim_divisor":
                 c[k] = mamba_head_dim_divisor
             elif k == "num_moe_experts_divisor":
