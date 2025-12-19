@@ -1,198 +1,316 @@
-# Qwen QAD Training Scripts
+# QAD Training Scripts
 
-Quantization-Aware Distillation (QAD) training scripts for Qwen models using Megatron-LM. These scripts enable training quantized (NVFP4) student models with knowledge distillation from full-precision teacher models.
+Quantization-Aware Distillation (QAD) training scripts for language models using Megatron-LM. These scripts enable training quantized (NVFP4) student models with knowledge distillation from full-precision teacher models.
 
 ## Overview
 
 | Script | Purpose |
 |--------|---------|
-| `qwen_qad.sh` | Main training script (interactive/Docker) |
-| `sbatch_qwen_qad.sh` | SLURM batch submission wrapper |
+| `qad.sh` | Main training script (run inside container) |
+| `sbatch_qad.sh` | SLURM batch submission wrapper |
 | `configs/*.conf` | Model-specific configuration files |
+
+## Requirements
+
+### Software Dependencies
+
+- **Container**: Nvidia PyTorch container (tested with `nvcr.io/nvidia/pytorch:25.06-py3`)
+- **Python**: 3.10+
+- **transformers**: 4.54+ (installed automatically)
+
+### Clone Required Repositories
+
+```bash
+# Set your workspace directory
+export WORKSPACE=/path/to/your/workspace
+
+# Clone Megatron-LM (with ModelOpt integration)
+git clone https://github.com/NVIDIA/Megatron-LM.git ${WORKSPACE}/Megatron-LM
+cd ${WORKSPACE}/Megatron-LM
+git checkout <modelopt-branch>  # Use branch with ModelOpt support
+
+# Clone Model-Optimizer
+git clone https://github.com/NVIDIA/TensorRT-Model-Optimizer.git ${WORKSPACE}/Model-Optimizer
+```
+
+### Prepare Container
+
+For SLURM with Pyxis/Enroot, create a squashfs container:
+
+```bash
+# Pull and convert Docker image to sqsh
+enroot import docker://nvcr.io/nvidia/pytorch:25.06-py3
+mv nvidia+pytorch+25.06-py3.sqsh /path/to/containers/pytorch_25.06.sqsh
+```
+
+### Prepare Checkpoints
+
+You need the following checkpoints before training:
+
+1. **Student checkpoint**: Quantized (NVFP4) model in Megatron-LM format
+2. **Teacher checkpoint**: Full-precision (BF16) model in Megatron-LM format
+3. **Teacher config YAML**: Model architecture configuration
+
+See [Megatron-LM ModelOpt examples](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt) for checkpoint conversion from HuggingFace format. 
+
+## Creating a Configuration
+
+### Use Template Configs
+
+Template configurations are provided in `configs/`:
+
+| Config | Model | Description |
+|--------|-------|-------------|
+| `qwen3-30b-a3b-instruct-2507-moe_template.conf` | Qwen3-30B-A3B-Instruct | MoE template (start here) |
+| `qwen3-8b.conf` | Qwen3-8B | Dense model example |
+
+### Create Your Config
+
+1. Copy the template:
+   ```bash
+   cp configs/qwen3-30b-a3b-instruct-2507-moe_template.conf configs/my-experiment.conf
+   ```
+
+2. Fill in required empty fields:
+   - `STUDENT_CKPT` - Path to quantized student MLM checkpoint
+   - `TEACHER_CKPT` - Path to teacher MLM checkpoint  
+   - `TEACHER_MODEL_CONFIG` - Path to teacher YAML config (see below)
+   - `MLM_DIR` - Path to your Megatron-LM clone
+
+3. Optionally adjust:
+   - `QAD_CHECKPOINT_ROOT`, `DATACACHE_DIR` - output paths
+   - `CONTAINER_IMAGE`, `CONTAINER_MOUNTS` - container settings
+   - `BLEND_PATH` - dataset path
+
+### Teacher Model Config (YAML)
+
+Create a YAML file with teacher model architecture (example: `configs/Qwen3-30B-A3B-teacher.yaml`):
+
+```yaml
+num_layers: 48
+hidden_size: 2048
+num_attention_heads: 32
+num_query_groups: 4
+kv_channels: 128
+ffn_hidden_size: 6144
+```
+
+Set `TEACHER_MODEL_CONFIG` in your config to point to this file.
+
+## Dataset Generation
+
+QAD training requires preprocessed datasets in Megatron-LM format. Use the one-button script to generate datasets:
+
+```bash
+cd data_utils/
+
+bash generate_dataset.sh \
+    --output-dir /path/to/datasets \
+    --mlm-path /path/to/Megatron-LM \
+    --tokenizer <HF-model> (e.g., Qwen/Qwen3-30B-A3B-Instruct-2507)
+```
+
+### Requirements
+
+- HuggingFace token to access `nvidia/Nemotron-Post-Training-Dataset-v2`
+- Login first: `huggingface-cli login`
+
+### What It Does
+
+1. Downloads OpenScience + Nemotron-v2 datasets
+2. Preprocesses to Megatron-LM format
+3. Creates combined datablend JSON with weights:
+   - 30% Nemotron-v2 code
+   - 20% Nemotron-v2 math
+   - 20% Nemotron-v2 stem
+   - 10% Nemotron-v2 chat
+   - 20% OpenScience
+
+### Output
+
+```
+/path/to/datasets/
+├── openscience_splits_preprocessed/  # Megatron format
+├── nemotron_v2_preprocessed/         # Megatron format
+└── datablend_combined.json           # Combined config
+```
+
+Set `BLEND_PATH` in your config to point to `datablend_combined.json`.
 
 ## Quick Start
 
-### SLURM Batch Submission (Recommended) for H100 x 8
+### SLURM Batch Submission (Recommended)
 
 ```bash
+# Submit training job
+sbatch sbatch_qad.sh --config configs/qwen3-30b-a3b-instruct-2507-moe.conf
+
 # With HuggingFace token (for gated models)
-sbatch sbatch_qwen_qad.sh --hf-token $HF_TOKEN --config configs/qwen3-30b-a3b-thinking-2507-moe.conf
+sbatch sbatch_qad.sh --hf-token $HF_TOKEN --config configs/qwen3-30b-a3b-thinking-2507-moe.conf
+
+# Multi-node (override SLURM header)
+sbatch --nodes=4 sbatch_qad.sh --config configs/qwen3-30b-a3b-instruct-2507-moe.conf
 ```
 
 ### Interactive Mode
 
 ```bash
 # Get interactive node first
-srun -A coreai_dlalgo_modelopt --nodes=1 -p batch --mpi=pmix \
-    -J qwen-qad:dev \
-    --container-image=/lustre/.../pytorch_25.06-py3.sqsh \
-    --container-mounts="/lustre/fsw:/lustre/fsw" \
+srun -A <account> --nodes=1 -p batch --mpi=pmix \
+    -J qad:dev \
+    --container-image=nvcr.io/nvidia/pytorch:25.06-py3 \
+    --container-mounts="..." \
     -t 4:0:0 --pty bash
 
 # Run training
-bash qwen_qad.sh --config configs/qwen3-8b-default.conf
+bash qad.sh --config configs/qwen3-8b.conf
 ```
 
-## Configuration Files
+## Required Config Variables
 
-Configuration files in `configs/` define model architecture, parallelism, and checkpoint paths.
-
-### Required Config Variables
+### Model Configuration
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `STUDENT_MODEL` | Student model name | `Qwen3-8B` |
-| `TEACHER_MODEL` | Teacher model name | `Qwen3-8B` |
-| `STUDENT_CKPT` | Path to quantized student checkpoint | `/path/to/Qwen3-8B-NVFP4-TP1-MLM` |
-| `TEACHER_CKPT` | Path to teacher checkpoint | `/path/to/Qwen3-8B-TP1-MLM` |
-| `TEACHER_MODEL_CONFIG` | Teacher model YAML config | `/path/to/Qwen3-8B-teacher.yaml` |
-| `TP_SIZE` | Tensor parallelism size | `1`, `4`, `8` |
-| `MBS` | Micro-batch size | `1`, `2`, `4` |
+| `STUDENT_MODEL` | Student model name (for logging) | `Qwen3-30B-A3B` |
+| `TEACHER_MODEL` | Teacher model name (for logging) | `Qwen3-30B-A3B` |
+| `TOKENIZER_MODEL` | HuggingFace tokenizer path | `Qwen/Qwen3-30B-A3B-Instruct-2507` |
+| `IS_MOE` | Whether model is Mixture of Experts | `true` or `false` |
 
-### Optional Config Variables
+### Checkpoint Paths
+
+| Variable | Description |
+|----------|-------------|
+| `STUDENT_CKPT` | Path to quantized student MLM checkpoint |
+| `TEACHER_CKPT` | Path to teacher MLM checkpoint |
+| `TEACHER_MODEL_CONFIG` | Path to teacher model YAML config |
+| `STUDENT_CONFIG_FILE` | Path to student model args script (in Megatron-LM) |
+
+### Training Hyperparameters
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `LR` | Learning rate | `1e-5` |
+| `GBS` | Global batch size | `256` |
+| `MIN_LR` | Minimum learning rate | `0.0` |
+| `LR_DECAY_STYLE` | LR decay schedule | `constant`, `cosine` |
+| `SAVE_INTERVAL` | Checkpoint save interval (iterations) | `200` |
+| `LOG_INTERVAL` | Logging interval (iterations) | `10` |
+
+### Data Configuration
+
+| Variable | Description |
+|----------|-------------|
+| `DATASET_NAME` | Dataset identifier (for output naming) |
+| `BLEND_PATH` | Path to datablend JSON file |
+| `TRAIN_SAMPLES` | Number of training samples |
+
+### Parallelism
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `TP_SIZE` | Tensor parallelism size | `1`, `2`, `4` |
+| `PP_SIZE` | Pipeline parallelism size | `1` |
+| `EP_SIZE` | Expert parallelism (MoE only) | `4`, `8` |
+| `MBS` | Micro-batch size | `1`, `2` |
+| `NUM_GPUS` | GPUs per node | `4`, `8` |
+
+### Required Paths
+
+| Variable | Description |
+|----------|-------------|
+| `MLM_DIR` | Path to Megatron-LM directory |
+| `MODELOPT_DIR` | Path to Model-Optimizer directory |
+| `QAD_CHECKPOINT_ROOT` | Root directory for checkpoints |
+| `DATACACHE_DIR` | Directory for data cache |
+
+### Container Configuration
+
+| Variable | Description |
+|----------|-------------|
+| `CONTAINER_IMAGE` | Path to container sqsh file |
+| `CONTAINER_MOUNTS` | Container mount points |
+| `CONTAINER_WORKDIR` | Working directory inside container |
+
+## Optional Config Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PP_SIZE` | `1` | Pipeline parallelism size |
-| `EP_SIZE` | `1` | Expert parallelism (MoE models) |
-| `NUM_GPUS` | `8` | GPUs per node |
-| `LR` | `1e-6` | Learning rate |
-| `DATASET_NAME` | `openscience` | Training dataset |
-| `TRAIN_SAMPLES` | Auto | Override training samples |
-| `BLEND_PATH` | Auto | Override datablend path |
-
-### Example Config Structure
-
-```bash
-# configs/qwen3-8b-default.conf
-export STUDENT_MODEL="Qwen3-8B"
-export TEACHER_MODEL="Qwen3-8B"
-export STUDENT_CKPT="/path/to/Qwen3-8B-NVFP4-TP1-MLM"
-export TEACHER_CKPT="/path/to/Qwen3-8B-TP1-MLM"
-export TEACHER_MODEL_CONFIG="/path/to/Qwen3-8B-teacher.yaml"
-export TP_SIZE=1
-export PP_SIZE=1
-export MBS=4
-export NUM_GPUS=8
-export DATASET_NAME="combined_v2_cot_chat"
-```
-
-## Dataset Options
-
-### Naming Convention
-
-Datasets follow this naming pattern:
-
-- **Plain text**: `datablend_<dataset>.json`
-- **With COT** (chain-of-thought): `datablend_<dataset>_cot.json`
-- **With chat template**: `datablend_<dataset>_chat.json`
-- **COT + chat**: `datablend_<dataset>_cot_chat.json`
-
-### Available Datasets
-
-#### Nemotron-v1 (Large scale, ~25M samples full)
-
-| Name | Samples | Description |
-|------|---------|-------------|
-| `nemotron_30pct` | ~7.5M | ALL subjects @ 30% |
-| `nemotron_30pct_cot_chat` | ~7.5M | ALL @ 30% + COT + Chat |
-| `nemotron_stem_cot_chat` | ~5M | STEM only + COT + Chat |
-| `nemotron_v1_math_30pct_cot_chat` | ~583K | Math split |
-| `nemotron_v1_code_30pct_cot_chat` | ~540K | Code split |
-
-#### Nemotron-v2 (High quality, ~400K samples @ 30%)
-
-| Name | Samples | Description |
-|------|---------|-------------|
-| `nemotron_v2_30pct` | ~398K | English @ 30% |
-| `nemotron_v2_cot_chat` | ~398K | English + COT + Chat |
-| `nemotron_v2_stem_30pct_cot_chat` | ~101K | STEM split |
-| `nemotron_v2_math_30pct_cot_chat` | ~68K | Math split |
-| `nemotron_v2_code_30pct_cot_chat` | ~50K | Code split |
-
-#### OpenScience
-
-| Name | Samples | Description |
-|------|---------|-------------|
-| `openscience` | ~300K | Plain text |
-| `openscience_chat` | ~300K | With chat template |
-
-#### Combined Datasets (Recommended)
-
-| Name | Samples | Description |
-|------|---------|-------------|
-| `combined_cot_chat` | ~8.2M | 20% OpenScience + 50% v1 + 30% v2 |
-| `combined_v2_cot_chat` | ~1M | Code & Math focused blend |
+| `MASTER_PORT` | `29500` | Distributed training port |
+| `MAX_SEQ` | Model default | Override sequence length |
+| `KD_CFG_PATH` | Auto-generated | Custom KD config YAML |
+| `RUN_TAG` | Empty | Custom tag for output naming |
 
 ## Parallelism Settings
 
-### Dense Models (Qwen3-8B)
+### Dense Models (e.g., Qwen3-8B)
 
 ```bash
-TP_SIZE=1   # Single GPU per tensor
-PP_SIZE=1   # No pipeline parallelism
-EP_SIZE=1   # Not MoE
-MBS=4       # Can use larger micro-batch
+export IS_MOE=false
+export TP_SIZE=1
+export EP_SIZE=1
+export MBS=4
 ```
 
-### MoE Models (Qwen3-30B-A3B)
+### MoE Models (e.g., Qwen3-30B-A3B)
 
 ```bash
-TP_SIZE=4   # Tensor parallel across 4 GPUs
-PP_SIZE=1   # No pipeline parallelism  
-EP_SIZE=8   # 128 experts / 8 = 16 experts per rank
-MBS=1       # Small MBS for large vocab KD loss
+export IS_MOE=true
+export TP_SIZE=2
+export EP_SIZE=4
+export MBS=2
 ```
 
-**Note**: MoE models with EP=8 require 4 nodes (32 GPUs total).
+**Note**: MoE models require loading both student and teacher models, which increases memory requirements significantly.
 
 ### GPU Requirements
 
-| Model | TP | EP | Nodes | Total GPUs |
-|-------|----|----|-------|------------|
-| Qwen3-8B | 1 | 1 | 1 | 8 |
-| Qwen3-30B-A3B | 4 | 4 | 2 | 16 |
-| Qwen3-30B-A3B | 4 | 8 | 4 | 32 |
+| Model | TP | EP | Nodes (4 GPU/node) | Total GPUs |
+|-------|----|----|---------------------|------------|
+| Qwen3-8B | 1 | 1 | 1 | 4-8 |
+| Qwen3-30B-A3B | 2 | 4 | 2-4 | 8-16 |
 
-## Multi-Node Training
+## MoE Performance Optimizations
 
-### SLURM Multi-Node
+For MoE models, the script automatically enables performance optimizations:
 
+- `--moe-token-dispatcher-type alltoall`
+- `--moe-shared-expert-overlap`
+- `--moe-permute-fusion`
+- `--moe-grouped-gemm`
+- `--cross-entropy-loss-fusion`
+
+To disable (if causing issues):
 ```bash
-# Set nodes in sbatch header or command line
-#SBATCH --nodes=4
-
-# Or override at submission
-sbatch --nodes=4 sbatch_qwen_qad.sh --config configs/qwen3-30b-a3b-thinking-2507-moe.conf
+export ENABLE_MOE_PERF=0
 ```
 
-The script automatically:
+## Output Structure
 
-- Detects `SLURM_NNODES` and `SLURM_JOB_NODELIST`
-- Sets `MASTER_ADDR` to first node
-- Exports `NODE_RANK` per process
-
-### Manual Multi-Node (Interactive)
-
-On each node, set:
-
-```bash
-export NNODES=4
-export NODE_RANK=0  # 0, 1, 2, 3 for each node
-export MASTER_ADDR=<first-node-hostname>
-export MASTER_PORT=29500
-bash qwen_qad.sh --config configs/your-config.conf
+```
+$QAD_CHECKPOINT_ROOT/
+├── <student>-NVFP4-Teacher-<teacher>-Data-<dataset>-lr<lr>-minlr<min>-decay<style>-gbs<gbs>-si<save>-li<log>/
+│   ├── checkpoints/<model>/
+│   │   ├── iter_0000200/
+│   │   ├── iter_0000400/
+│   │   └── latest_checkpointed_iteration.txt
+│   ├── tensorboard/<model>/
+│   └── logs/
+│       ├── _qad_<datetime>.log
+│       └── _<datetime>.env.log
+└── logs_slurm/
+    ├── <job-name>_<jobid>_<datetime>.log
+    └── err_<job-name>_<jobid>_<datetime>.log
 ```
 
 ## Resuming Training
 
 Training automatically resumes from checkpoints:
 
-1. **Fresh start**: Loads from `STUDENT_CKPT` with `--finetune`
-2. **Resume**: If `CHECKPOINT_DIR/latest_checkpointed_iteration.txt` exists, loads from there
+1. **Fresh start**: If no checkpoint exists, loads from `STUDENT_CKPT` with `--finetune`
+2. **Resume**: If `latest_checkpointed_iteration.txt` exists, resumes from there
 
-To force fresh start, remove the checkpoint directory:
-
+To force a fresh start:
 ```bash
 rm -rf /path/to/checkpoints/*/latest_checkpointed_iteration.txt
 ```
@@ -203,158 +321,32 @@ Chain jobs to run sequentially:
 
 ```bash
 # Submit first job
-JOB1=$(sbatch --parsable sbatch_qwen_qad.sh --config ...)
+JOB1=$(sbatch --parsable sbatch_qad.sh --config ...)
 
-# Submit dependent job (runs after JOB1 finishes, regardless of success/failure)
-sbatch --dependency=afterany:$JOB1 sbatch_qwen_qad.sh --config ...
-```
-
-Dependency options:
-
-- `afterany:jobid` - Run after job finishes (success or failure)
-- `afterok:jobid` - Run only if job succeeds
-- `afternotok:jobid` - Run only if job fails
-
-## Environment Variables
-
-### HuggingFace Authentication
-
-```bash
-# Via argument (recommended - not logged)
-sbatch sbatch_qwen_qad.sh --hf-token $HF_TOKEN --config ...
-
-# Via environment
-export HF_TOKEN=hf_xxx
-sbatch sbatch_qwen_qad.sh --config ...
-```
-
-### Path Overrides
-
-```bash
-export MLM_DIR=/path/to/Megatron-LM
-export MODELOPT_DIR=/path/to/TensorRT-Model-Optimizer
-export MODELS_ROOT=/path/to/models
-export QAD_CHECKPOINT_ROOT=/path/to/checkpoints
-export DATACACHE_DIR=/path/to/data_cache
-```
-
-### Training Overrides
-
-```bash
-export LR=1e-5                    # Learning rate
-export DATASET_NAME=nemotron_v2   # Dataset
-export TRAIN_SAMPLES=100000       # Override sample count
-export ITERATIONS_TO_SKIP=100     # Skip first N iterations
-```
-
-## Output Structure
-
-```bash
-$QAD_CHECKPOINT_ROOT/
-├── <student>-Teacher-<teacher>-Data-<dataset>-lr<lr>/
-│   ├── checkpoints/<model-name>/
-│   │   ├── iter_0000200/
-│   │   ├── iter_0000400/
-│   │   └── latest_checkpointed_iteration.txt
-│   ├── tensorboard/<model-name>/
-│   └── logs/
-│       ├── <model>_qad_<datetime>.log
-│       └── <model>_<datetime>.env.log
-└── logs_slurm/
-    ├── coreai_dlalgo_modelopt-qwen.qad_<jobid>_<datetime>.log
-    └── err_coreai_dlalgo_modelopt-qwen.qad_<jobid>_<datetime>.log
-```
-
-## Monitoring
-
-### TensorBoard
-
-```bash
-tensorboard --logdir /path/to/tensorboard/ --port 6006 --bind_all
-```
-
-### Check Job Status
-
-```bash
-squeue -u $USER                    # List your jobs
-squeue -j <jobid>                  # Check specific job
-sacct -j <jobid> --format=...      # Job accounting info
-```
-
-### Estimated Time
-
-```bash
-squeue -j <jobid> -o "%.18i %.9P %.30j %.8u %.2t %.10M %.10L %.6D %R"
-# %.10L shows time left
+# Submit dependent job (runs after JOB1 finishes)
+sbatch --dependency=afterany:$JOB1 sbatch_qad.sh --config ...
 ```
 
 ## Troubleshooting
 
 ### OOM Errors
 
-1. **Reduce MBS**: Set `MBS=1` in config
-2. **Increase EP**: For MoE, increase `EP_SIZE` (requires more nodes)
-3. **Disable log-params-norm**: Set `LOG_PARAMS_NORM=0` in config
+1. **Reduce MBS**: Set `MBS=1`
+2. **Increase parallelism**: Increase `EP_SIZE` or `TP_SIZE`
+3. **Add more nodes**: Increase `SLURM --nodes`
+4. **Disable log-params-norm**: Set `LOG_PARAMS_NORM=0`
 
-### Rate Limiting (429 Errors)
+### Triton Cache Errors
 
-Use HuggingFace token:
-
+Clear corrupted cache:
 ```bash
-sbatch sbatch_qwen_qad.sh --hf-token $HF_TOKEN --config ...
+rm -rf ~/.triton/cache
 ```
 
-### Shape Mismatch Errors
-
-Ensure teacher model config has correct GQA settings:
-
-```yaml
-num_query_groups: 4    # For Qwen3-30B-A3B
-kv_channels: 128
-```
-
-### Gradient Norm Spikes
-
-Isolated spikes are normal with heterogeneous data. Monitor if:
-
-- Spikes are persistent (every few iterations)
-- Loss doesn't recover after spike
-- Training diverges
-
-## Advanced Usage
-
-### Custom KD Config
-
-```bash
-bash qwen_qad.sh --config configs/... 1e-6 Qwen3-8B dataset Qwen3-8B /path/to/kd_config.yaml
-```
-
-### Skip Iterations
-
-Resume but skip specific iterations:
-
-```bash
-export ITERATIONS_TO_SKIP=100
-sbatch sbatch_qwen_qad.sh --config ...
-```
-
-### Custom Datablend
-
-```bash
-export BLEND_PATH=/path/to/custom_datablend.json
-export TRAIN_SAMPLES=500000
-sbatch sbatch_qwen_qad.sh --config ...
-```
-
-## Requirements
-
-- **Container**: PyTorch 25.06+ with CUDA support
-- **Megatron-LM**: With ModelOpt integration
-- **TensorRT-Model-Optimizer**: Latest version
-- **transformers**: 4.54+
+The scripts automatically use per-job Triton cache directories.
 
 ## See Also
 
 - [Megatron-LM Documentation](https://github.com/NVIDIA/Megatron-LM)
-- [TensorRT-Model-Optimizer](https://github.com/NVIDIA/TensorRT-Model-Optimizer)
+- [Model-Optimizer](https://github.com/NVIDIA/TensorRT-Model-Optimizer)
 - [MoE Optimization Guide](https://docs.nvidia.com/megatron-core/developer-guide/latest/api-guide/moe.html)

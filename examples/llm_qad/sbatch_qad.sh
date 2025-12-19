@@ -6,25 +6,17 @@
 #SBATCH -t 4:00:00
 #SBATCH --exclusive
 #SBATCH --mem=0
+#SBATCH --gres=gpu:4
 #SBATCH --ntasks-per-node=1
 #SBATCH --job-name=coreai_dlalgo_modelopt-qwen.qad
 
 # Usage:
-#   sbatch sbatch_qwen_qad.sh --config configs/qwen3-8b-default.conf
-#   sbatch sbatch_qwen_qad.sh --config configs/qwen3-8b-nemotron.conf
-#   sbatch sbatch_qwen_qad.sh --config configs/qwen3-30b-a3b-moe.conf
+#   sbatch sbatch_qad.sh --config configs/qwen3-8b.conf
+#   sbatch sbatch_qad.sh --config configs/qwen3-30b-a3b-instruct-2507-moe.conf
 #
 # With HuggingFace token:
-#   sbatch sbatch_qwen_qad.sh --hf-token hf_xxx --config configs/qwen3-8b-default.conf
+#   sbatch sbatch_qad.sh --hf-token hf_xxx --config configs/qwen3-8b.conf
 #
-# Override config values:
-#   LR=1e-5 sbatch sbatch_qwen_qad.sh --config configs/qwen3-8b-default.conf
-#   STUDENT_FP4_CKPT=/path/to/ckpt sbatch sbatch_qwen_qad.sh --config ...
-#
-# Command line usage:
-#   sbatch sbatch_qwen_qad.sh [LR] [TEACHER_MODEL] [DATASET_NAME] [STUDENT_MODEL] [KD_CFG_PATH]
-#   sbatch sbatch_qwen_qad.sh 1e-6 Qwen3-8B nemotron Qwen3-8B
-#   sbatch sbatch_qwen_qad.sh 1e-6 Qwen3-8B nemotron Qwen3-8B /path/to/kd_config.yaml
 
 set -x -e
 
@@ -98,17 +90,17 @@ STUDENT_MODEL="${4:-${STUDENT_MODEL:-Qwen3-8B}}"
 KD_CFG_PATH="${5:-${KD_CFG_PATH:-}}"
 
 # Paths
-MLM_DIR="${MLM_DIR:-/lustre/fsw/coreai_dlalgo_modelopt/weimingc/workspace/Megatron-LM}"
-MODELOPT_DIR="${MODELOPT_DIR:-/lustre/fsw/coreai_dlalgo_modelopt/weimingc/workspace/TensorRT-Model-Optimizer}"
-MODELS_ROOT="${MODELS_ROOT:-/lustre/fsw/coreai_dlalgo_modelopt/weimingc/models}"
-QAD_CHECKPOINT_ROOT="${QAD_CHECKPOINT_ROOT:-/lustre/fsw/coreai_dlalgo_modelopt/weimingc/checkpoints}"
-DATACACHE_DIR="${DATACACHE_DIR:-/lustre/fsw/coreai_dlalgo_modelopt/weimingc/data_cache}"
+MLM_DIR="${MLM_DIR:-/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/weimingc/workspace/Megatron-LM}"
+MODELOPT_DIR="${MODELOPT_DIR:-/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/weimingc/workspace/TensorRT-Model-Optimizer}"
+MODELS_ROOT="${MODELS_ROOT:-/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/weimingc/models}"
+QAD_CHECKPOINT_ROOT="${QAD_CHECKPOINT_ROOT:-/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/weimingc/checkpoints}"
+DATACACHE_DIR="${DATACACHE_DIR:-/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/weimingc/data_cache}"
 LOG_DIR="${LOG_DIR:-${QAD_CHECKPOINT_ROOT}/logs_slurm}"
 
 # Container
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fsw/coreai_dlalgo_modelopt/weimingc/containers/pytorch_25.06-py3.sqsh}"
-CONTAINER_MOUNTS="${CONTAINER_MOUNTS:-/lustre/fsw:/lustre/fsw}"
-CONTAINER_WORKDIR="${CONTAINER_WORKDIR:-/lustre/fsw/coreai_dlalgo_modelopt/weimingc/workspace/TensorRT-Model-Optimizer/examples/llm_qad}"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/weimingc/containers/pytorch_25.06-py3.sqsh}"
+CONTAINER_MOUNTS="${CONTAINER_MOUNTS:-/lustre/fs1:/lustre/fs1}"
+CONTAINER_WORKDIR="${CONTAINER_WORKDIR:-/lustre/fs1/portfolios/coreai/projects/coreai_dlalgo_modelopt/users/weimingc/workspace/TensorRT-Model-Optimizer/examples/llm_qad}"
 
 # Parallelism settings (from config, required)
 TP_SIZE="${TP_SIZE:?ERROR: TP_SIZE must be set in config}"
@@ -200,21 +192,44 @@ fi
 # Build Container Environment Exports
 ########################################################
 
-# Core exports
-EXPORTS="export NODE_RANK=\${SLURM_PROCID} && \
+# Core exports (environment variables that qwen_qad.sh will read)
+# Use local /tmp for Triton cache to avoid race conditions on shared filesystem
+EXPORTS="export TRITON_CACHE_DIR=/tmp/triton_cache_\${SLURM_JOB_ID}_\${SLURM_PROCID} && \
+export NODE_RANK=\${SLURM_PROCID} && \
 export NNODES=${NNODES} && \
 export NUM_GPUS=${NUM_GPUS} && \
 export TP_SIZE=${TP_SIZE} && \
 export PP_SIZE=${PP_SIZE} && \
 export EP_SIZE=${EP_SIZE} && \
 export MBS=${MBS} && \
+export IS_MOE=${IS_MOE:-false} && \
 export MASTER_ADDR=${MASTER_ADDR} && \
 export MASTER_PORT=${MASTER_PORT} && \
 export MLM_DIR=${MLM_DIR} && \
 export MODELOPT_DIR=${MODELOPT_DIR} && \
-export MODELS_ROOT=${MODELS_ROOT} && \
 export QAD_CHECKPOINT_ROOT=${QAD_CHECKPOINT_ROOT} && \
 export DATACACHE_DIR=${DATACACHE_DIR}"
+
+# Training hyperparameters (required by qwen_qad.sh)
+EXPORTS="${EXPORTS} && export LR=${LR:-}"
+EXPORTS="${EXPORTS} && export GBS=${GBS:-}"
+EXPORTS="${EXPORTS} && export MIN_LR=${MIN_LR:-}"
+EXPORTS="${EXPORTS} && export LR_DECAY_STYLE=${LR_DECAY_STYLE:-}"
+EXPORTS="${EXPORTS} && export SAVE_INTERVAL=${SAVE_INTERVAL:-}"
+EXPORTS="${EXPORTS} && export LOG_INTERVAL=${LOG_INTERVAL:-}"
+EXPORTS="${EXPORTS} && export STUDENT_MODEL=${STUDENT_MODEL:-}"
+EXPORTS="${EXPORTS} && export TEACHER_MODEL=${TEACHER_MODEL:-}"
+EXPORTS="${EXPORTS} && export DATASET_NAME=${DATASET_NAME:-}"
+
+# Student config file (required)
+if [ -n "${STUDENT_CONFIG_FILE:-}" ]; then
+    EXPORTS="${EXPORTS} && export STUDENT_CONFIG_FILE=${STUDENT_CONFIG_FILE}"
+fi
+
+# Tokenizer model (optional - defaults to Qwen/${STUDENT_MODEL} in qad.sh)
+if [ -n "${TOKENIZER_MODEL:-}" ]; then
+    EXPORTS="${EXPORTS} && export TOKENIZER_MODEL=${TOKENIZER_MODEL}"
+fi
 
 # Checkpoint exports (required)
 EXPORTS="${EXPORTS} && export STUDENT_CKPT=${STUDENT_CKPT}"
@@ -249,12 +264,21 @@ fi
 # Launch Training
 ########################################################
 
-SCRIPT_NAME="qwen_qad.sh"
+SCRIPT_NAME="qad.sh"
+
+# Build config args for qwen_qad.sh
+CONFIG_ARGS=""
+if [ -n "${CONFIG_FILE}" ]; then
+    CONFIG_ARGS="--config ${CONFIG_FILE}"
+fi
+if [ -n "${HF_TOKEN:-}" ]; then
+    CONFIG_ARGS="${CONFIG_ARGS} --hf-token ${HF_TOKEN}"
+fi
 
 run_cmd="pip install transformers==4.54 && \
 ${EXPORTS} && \
 cd ${CONTAINER_WORKDIR} && \
-bash ${SCRIPT_NAME} ${LR} ${TEACHER_MODEL} ${DATASET_NAME} ${STUDENT_MODEL} ${KD_CFG_PATH}"
+bash ${SCRIPT_NAME} ${CONFIG_ARGS}"
 
 echo ""
 echo "Running command:"
