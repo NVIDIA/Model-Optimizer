@@ -54,7 +54,7 @@ hf auth login
 3. Run the compression script.
 
    ```bash
-   torchrun --nproc_per_node 2 examples/compress/main.py --config examples/compress/configs/llama-3_1-8B_pruneffn_memory.yaml 2>&1 | tee ./log.txt | grep "Compress Progress"
+   torchrun --nproc_per_node 2 examples/compress/main.py --config examples/compress/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml 2>&1 | tee ./log.txt | grep "Compress Progress"
    ```
 
    This will save the full output to `log.txt` and display the following progress on screen:

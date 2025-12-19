@@ -16,3 +16,7 @@
 
 from .base_hooks import *
 from .base_hooks_analysis import *
+from modelopt.torch.utils import import_plugin
+
+with import_plugin("megatron_hooks"):
+    from .megatron_hooks import *
