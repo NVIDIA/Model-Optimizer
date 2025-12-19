@@ -1,0 +1,37 @@
+algorithm: max
+quant_cfg:
+  default:
+    enable: false
+  '*weight_quantizer':
+    num_bits: [2, 1]
+    block_sizes:
+      -1: 16
+      type: dynamic
+      scale_bits: [4, 3]
+    axis:
+    enable: true
+  '*input_quantizer':
+    num_bits: [2, 1]
+    block_sizes:
+      -1: 16
+      type: dynamic
+      scale_bits: [4, 3]
+    axis:
+    enable: true
+  '*output_quantizer':
+    enable: false
+  '*q_bmm_quantizer':
+    num_bits: [4, 3]
+    axis:
+  '*k_bmm_quantizer':
+    num_bits: [4, 3]
+    axis:
+  '*v_bmm_quantizer':
+    num_bits: [4, 3]
+    axis:
+  '*softmax_quantizer':
+    num_bits: [4, 3]
+    axis:
+  'transformer_blocks*bmm2_output_quantizer':
+    num_bits: [4, 3]
+    axis:

@@ -423,9 +423,6 @@ def mono_quantize(
         quant_cfg["quant_cfg"]["*visual*"] = {"enable": False}
 
     if not model_is_already_quantized or calibration_only:
-        if model_type == "gptoss" and args.qformat == "nvfp4_mlp_only":
-            print("Applying nvfp4 quantization (MoE only) for gpt-oss")
-
         # quantize the model
 
         use_calibration = need_calibration(quant_cfg)
@@ -587,8 +584,6 @@ def pre_quantize(
     else:
         # Standard generation for non-Nemotron VL models
         generated_ids_before_ptq = full_model.generate(preview_input_ids, max_new_tokens=100)
-    if model_type == "gptoss" and args.qformat == "nvfp4_mlp_only":
-        print("Applying nvfp4 quantization (MoE only) for gpt-oss")
 
     return preview_input_ids, generated_ids_before_ptq
 
@@ -754,22 +749,6 @@ def quantize_main(
             "Plain quantization supports only one quantization format."
         )
 
-        assert (
-            args.qformat
-            in [
-                "int8_wo",
-                "int4_awq",
-                "fp8",
-                "nvfp4",
-                "nvfp4_awq",
-                "w4a8_awq",
-                "fp8_pb_wo",
-                "w4a8_mxfp4_fp8",
-                "nvfp4_mlp_only",
-            ]
-            or args.kv_cache_qformat in KV_QUANT_CFG_CHOICES
-        ), f"Plain quantization format {args.qformat} not supported for HF export path"
-
         quant_cfg = build_quant_cfg(
             args.qformat,
             args.kv_cache_qformat,
@@ -819,8 +798,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--qformat",
         help=(
-            "Quantization format. If --auto_quantize_bits is set, this argument specifies the quantization "
-            "format for optimal per-layer auto_quantize search."
+            "Quantization format. Multiple possible choices: "
+            f"A. In mono-quantize case, i.e. non-auto: "
+            f"1. it can be a format name, valid names are: {QUANT_CFG_CHOICES.keys()}. "
+            "2. it can be a built-in quantization configuration name, they are equivalent to "
+            "file names without suffix under modelopt/config/quantization/. "
+            "3. It can be a path to a quantization configuration yaml file for custom quantization formats. "
+            "B. In auto-quantize case, i.e. --auto_quantize_bits is set: "
+            "it is a list of format names, separated by semicolon. "
         ),
         default="fp8",
     )

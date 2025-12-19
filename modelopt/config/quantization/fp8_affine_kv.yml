@@ -1,0 +1,11 @@
+algorithm: max
+quant_cfg:
+  '*[kv]_bmm_quantizer':
+    bias:
+      -2:
+      -4:
+      type: static
+    num_bits: [4, 3]
+    axis:
+  default:
+    enable: false

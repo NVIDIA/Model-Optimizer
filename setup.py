@@ -37,6 +37,8 @@ required_deps = [
     "regex",
     "safetensors",
     "torch>=2.6",
+    "PyYAML>=6.0",
+    "omegaconf>=2.3.0",
 ]
 
 optional_deps = {
@@ -133,5 +135,7 @@ if __name__ == "__main__":
         extras_require=optional_deps,
         packages=setuptools.find_namespace_packages(include=["modelopt*"]),
         package_dir={"": "."},
-        package_data={"modelopt": ["**/*.h", "**/*.cpp", "**/*.cu"]},
+        package_data={
+            "modelopt": ["**/*.h", "**/*.cpp", "**/*.cu", "config/**/*.yml", "config/**/*.yaml"],
+        },
     )

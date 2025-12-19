@@ -1,0 +1,8 @@
+algorithm: max
+quant_cfg:
+  '*[kv]_bmm_quantizer':
+    num_bits: [4, 3]
+    axis:
+    enable: true
+  default:
+    enable: false

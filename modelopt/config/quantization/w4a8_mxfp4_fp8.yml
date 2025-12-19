@@ -1,0 +1,15 @@
+defaults:
+  - quantization/default_disabled
+
+algorithm:
+quant_cfg:
+  '*weight_quantizer':
+    num_bits: [2, 1]
+    block_sizes:
+      -1: 32
+      type: dynamic
+      scale_bits: [8, 0]
+    enable: true
+  '*input_quantizer':
+    num_bits: [4, 3]
+    axis:

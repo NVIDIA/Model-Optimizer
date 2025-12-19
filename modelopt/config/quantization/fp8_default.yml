@@ -1,0 +1,11 @@
+defaults:
+  - quantization/default_disabled
+
+algorithm: max
+quant_cfg:
+  '*input_quantizer':
+    num_bits: [4, 3]
+    axis:
+  '*weight_quantizer':
+    num_bits: [4, 3]
+    axis:

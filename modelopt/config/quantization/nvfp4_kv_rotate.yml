@@ -1,0 +1,22 @@
+algorithm: max
+quant_cfg:
+  '*q_bmm_quantizer':
+    enable: false
+    rotate: true
+  '*k_bmm_quantizer':
+    num_bits: [2, 1]
+    block_sizes:
+      -1: 16
+      type: dynamic
+      scale_bits: [4, 3]
+    axis:
+    enable: true
+    rotate: true
+  '*v_bmm_quantizer':
+    num_bits: [2, 1]
+    block_sizes:
+      -1: 16
+      type: dynamic
+      scale_bits: [4, 3]
+    axis:
+    enable: true

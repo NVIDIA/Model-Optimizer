@@ -1,0 +1,13 @@
+defaults:
+  - quantization/default_disabled
+
+algorithm: max
+quant_cfg:
+  '*weight_quantizer':
+    num_bits: [4, 3]
+    block_sizes:
+      -1: 128
+      -2: 128
+    enable: true
+  '*input_quantizer':
+    enable: false

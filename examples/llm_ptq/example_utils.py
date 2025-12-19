@@ -20,12 +20,13 @@ import shutil
 import sys
 import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import torch
 import transformers
 from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
+from omegaconf import OmegaConf
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -41,6 +42,7 @@ except ImportError:
     snapshot_download = None
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.config import load_quant_config
 from modelopt.torch.utils.image_processor import BaseImageProcessor, MllamaImageProcessor
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
@@ -139,15 +141,14 @@ def build_quant_cfg(
     quant_cfg_choices,
     kv_quant_cfg_choices,
 ) -> dict[str, Any]:
-    quant_cfg = {}
-    assert qformat in quant_cfg_choices, (
-        f"Unsupported quantization format: {qformat} with {kv_cache_qformat} KV cache"
-    )
+    if qformat in quant_cfg_choices:
+        quant_cfg = quant_cfg_choices[qformat]
+    else:
+        quant_cfg = OmegaConf.to_container(load_quant_config(qformat))
 
-    quant_cfg = quant_cfg_choices[qformat]
-
-    if "awq" in qformat:
-        quant_cfg = copy.deepcopy(quant_cfg_choices[qformat])
+    quant_cfg = cast("dict[str, Any]", quant_cfg)
+    if "awq" in quant_cfg.get("algorithm"):
+        quant_cfg = copy.deepcopy(quant_cfg)
         weight_quantizer = quant_cfg["quant_cfg"]["*weight_quantizer"]
         if isinstance(weight_quantizer, list):
             weight_quantizer = weight_quantizer[0]

@@ -89,8 +89,8 @@ To get the string representation of a module class, do:
 
     from modelopt.torch.quantization import QuantModuleRegistry
 
-    # Get the class name for nn.Conv2d
-    class_name = QuantModuleRegistry.get_key(nn.Conv2d)
+    # Get the class name for torch.nn.Conv2d
+    class_name = QuantModuleRegistry.get_key(torch.nn.Conv2d)
 
 Here is an example of a quantization config:
 
@@ -103,7 +103,7 @@ Here is an example of a quantization config:
             "*input_quantizer": {"num_bits": 8, "axis": None},
 
             # Module class names mapping to quantizer configurations
-            "nn.LeakyReLU": {"*input_quantizer": {"enable": False}},
+            "torch.nn.LeakyReLU": {"*input_quantizer": {"enable": False}},
 
         }
     }
@@ -137,18 +137,40 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 """
 
 from collections.abc import Callable
-from typing import Literal
+from pathlib import Path
+from typing import Literal, cast
 
+from omegaconf import DictConfig, OmegaConf
 from pydantic import ValidationInfo, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
+from modelopt.torch.opt.config import load_config as load_config
 from modelopt.torch.utils.network import ConstructorLike
 
+
+def load_quant_config(quant_config_name_path: str | Path) -> DictConfig:
+    """Load a quantization config yaml.
+
+    quant_config_name_path:
+
+    Could be an internal predefined config name or a user manually specified config yaml file.
+    """
+    if isinstance(quant_config_name_path, str):
+        if not quant_config_name_path.endswith(".yml") or not quant_config_name_path.endswith(
+            ".yaml"
+        ):
+            # config name case
+            if not quant_config_name_path.startswith("quantization/"):
+                quant_config_name_path = f"quantization/{quant_config_name_path}"
+
+    return load_config(quant_config_name_path)
+
+
 _default_disabled_quantizer_cfg = {
-    "nn.BatchNorm1d": {"*": {"enable": False}},
-    "nn.BatchNorm2d": {"*": {"enable": False}},
-    "nn.BatchNorm3d": {"*": {"enable": False}},
-    "nn.LeakyReLU": {"*": {"enable": False}},
+    "torch.nn.BatchNorm1d": {"*": {"enable": False}},
+    "torch.nn.BatchNorm2d": {"*": {"enable": False}},
+    "torch.nn.BatchNorm3d": {"*": {"enable": False}},
+    "torch.nn.LeakyReLU": {"*": {"enable": False}},
     "*lm_head*": {"enable": False},
     "*proj_out.*": {"enable": False},  # In Whisper model, lm_head has key name proj_out
     "*block_sparse_moe.gate*": {"enable": False},  # Skip the MOE router
@@ -161,6 +183,9 @@ _default_disabled_quantizer_cfg = {
     "output.*": {"enable": False},
     "default": {"enable": False},
 }
+assert OmegaConf.to_container(
+    OmegaConf.create({"quant_cfg": _default_disabled_quantizer_cfg}), resolve=True
+) == OmegaConf.to_container(load_quant_config("DEFAULT_DISABLED"), resolve=True)
 
 INT8_DEFAULT_CFG = {
     "quant_cfg": {
@@ -170,6 +195,9 @@ INT8_DEFAULT_CFG = {
     },
     "algorithm": "max",
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(INT8_DEFAULT_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("INT8_DEFAULT"), resolve=True)
 
 INT8_SMOOTHQUANT_CFG = {
     "quant_cfg": {
@@ -179,6 +207,9 @@ INT8_SMOOTHQUANT_CFG = {
     },
     "algorithm": "smoothquant",
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(INT8_SMOOTHQUANT_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("INT8_SMOOTHQUANT"), resolve=True)
 
 INT8_WEIGHT_ONLY_CFG = {
     "quant_cfg": {
@@ -188,6 +219,10 @@ INT8_WEIGHT_ONLY_CFG = {
     },
     "algorithm": "max",
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(INT8_WEIGHT_ONLY_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("INT8_WEIGHT_ONLY"), resolve=True)
+
 
 FP8_DEFAULT_CFG = {
     "quant_cfg": {
@@ -197,6 +232,10 @@ FP8_DEFAULT_CFG = {
     },
     "algorithm": "max",
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(FP8_DEFAULT_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("FP8_DEFAULT"), resolve=True)
+
 
 FP8_PER_CHANNEL_PER_TOKEN_CFG = {
     "quant_cfg": {
@@ -210,6 +249,10 @@ FP8_PER_CHANNEL_PER_TOKEN_CFG = {
     },
     "algorithm": "max",
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(FP8_PER_CHANNEL_PER_TOKEN_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("FP8_PER_CHANNEL_PER_TOKEN"), resolve=True)
+
 
 # FP8 2D blockwise fake quantization config for deepseek models
 FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG = {
@@ -224,6 +267,10 @@ FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG = {
     },
     "algorithm": "max",
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("FP8_2D_BLOCKWISE_WEIGHT_ONLY"), resolve=True)
+
 
 INT4_BLOCKWISE_WEIGHT_ONLY_CFG = {
     "quant_cfg": {
@@ -233,6 +280,10 @@ INT4_BLOCKWISE_WEIGHT_ONLY_CFG = {
     },
     "algorithm": "max",
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(INT4_BLOCKWISE_WEIGHT_ONLY_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("INT4_BLOCKWISE_WEIGHT_ONLY"), resolve=True)
+
 
 INT4_AWQ_CFG = {
     "quant_cfg": {
@@ -248,6 +299,10 @@ INT4_AWQ_CFG = {
     # "algorithm": {"method": "awq_full", "alpha_step": 0.1, "max_co_batch_size": 1024},
     # "algorithm": {"method": "awq_clip", "max_co_batch_size": 2048},
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(INT4_AWQ_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("INT4_AWQ"), resolve=True)
+
 
 # W4A8 currently uses INT4 blockwise quantization (block size = 128) followed by FP8 quantization
 # for weights. This could change in the future
@@ -262,6 +317,9 @@ W4A8_AWQ_BETA_CFG = {
     },
     "algorithm": "awq_lite",
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(W4A8_AWQ_BETA_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("W4A8_AWQ_BETA"), resolve=True)
 
 MXFP8_DEFAULT_CFG = {
     "quant_cfg": {
@@ -279,6 +337,9 @@ MXFP8_DEFAULT_CFG = {
     },
     "algorithm": None,
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(MXFP8_DEFAULT_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("MXFP8_DEFAULT"), resolve=True)
 
 MXFP6_DEFAULT_CFG = {
     "quant_cfg": {
@@ -296,6 +357,10 @@ MXFP6_DEFAULT_CFG = {
     },
     "algorithm": None,
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(MXFP6_DEFAULT_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("MXFP6_DEFAULT"), resolve=True)
+
 
 MXFP4_DEFAULT_CFG = {
     "quant_cfg": {
@@ -313,6 +378,9 @@ MXFP4_DEFAULT_CFG = {
     },
     "algorithm": None,
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(MXFP4_DEFAULT_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("MXFP4_DEFAULT"), resolve=True)
 
 W4A8_MXFP4_FP8_CFG = {
     "quant_cfg": {
@@ -326,6 +394,10 @@ W4A8_MXFP4_FP8_CFG = {
     },
     "algorithm": None,
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(W4A8_MXFP4_FP8_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("W4A8_MXFP4_FP8"), resolve=True)
+
 
 MXINT8_DEFAULT_CFG = {
     "quant_cfg": {
@@ -343,6 +415,9 @@ MXINT8_DEFAULT_CFG = {
     },
     "algorithm": None,
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(MXINT8_DEFAULT_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("MXINT8_DEFAULT"), resolve=True)
 
 FP8_KV_CFG = {
     "quant_cfg": {
@@ -355,6 +430,10 @@ FP8_KV_CFG = {
     },
     "algorithm": "max",
 }
+assert OmegaConf.to_container(OmegaConf.create(FP8_KV_CFG), resolve=True) == OmegaConf.to_container(
+    load_quant_config("FP8_KV"), resolve=True
+)
+
 
 FP8_AFFINE_KV_CFG = {
     "quant_cfg": {
@@ -367,6 +446,10 @@ FP8_AFFINE_KV_CFG = {
     },
     "algorithm": "max",
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(FP8_AFFINE_KV_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("FP8_AFFINE_KV"), resolve=True)
+
 
 NVFP4_DEFAULT_CFG = {
     "quant_cfg": {
@@ -386,6 +469,9 @@ NVFP4_DEFAULT_CFG = {
     },
     "algorithm": "max",
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(NVFP4_DEFAULT_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("NVFP4_DEFAULT"), resolve=True)
 
 
 NVFP4_AWQ_LITE_CFG = {
@@ -406,6 +492,9 @@ NVFP4_AWQ_LITE_CFG = {
     },
     "algorithm": "awq_lite",
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(NVFP4_AWQ_LITE_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("NVFP4_AWQ_LITE"), resolve=True)
 
 NVFP4_AWQ_CLIP_CFG = {
     "quant_cfg": {
@@ -425,6 +514,9 @@ NVFP4_AWQ_CLIP_CFG = {
     },
     "algorithm": {"method": "awq_clip"},
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(NVFP4_AWQ_CLIP_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("NVFP4_AWQ_CLIP"), resolve=True)
 
 NVFP4_AWQ_FULL_CFG = {
     "quant_cfg": {
@@ -444,7 +536,9 @@ NVFP4_AWQ_FULL_CFG = {
     },
     "algorithm": {"method": "awq_full", "alpha_step": 0.1},
 }
-
+assert OmegaConf.to_container(
+    OmegaConf.create(NVFP4_AWQ_FULL_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("NVFP4_AWQ_FULL"), resolve=True)
 
 NVFP4_AFFINE_KV_CFG = {
     "quant_cfg": {
@@ -459,6 +553,9 @@ NVFP4_AFFINE_KV_CFG = {
     },
     "algorithm": "max",
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(NVFP4_AFFINE_KV_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("NVFP4_AFFINE_KV"), resolve=True)
 
 NVFP4_KV_CFG = {
     "quant_cfg": {
@@ -472,6 +569,10 @@ NVFP4_KV_CFG = {
     },
     "algorithm": "max",
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(NVFP4_KV_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("NVFP4_KV"), resolve=True)
+
 
 # Moved from examples/diffusers/quantization/config.py to here
 NVFP4_FP8_MHA_CONFIG = {
@@ -513,6 +614,10 @@ NVFP4_FP8_MHA_CONFIG = {
     },
     "algorithm": "max",
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(NVFP4_FP8_MHA_CONFIG), resolve=True
+) == OmegaConf.to_container(load_quant_config("NVFP4_FP8_MHA"), resolve=True)
+
 
 NVFP4_KV_ROTATE_CFG = {
     "quant_cfg": {
@@ -536,6 +641,9 @@ NVFP4_KV_ROTATE_CFG = {
     },
     "algorithm": "max",
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(NVFP4_KV_ROTATE_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("NVFP4_KV_ROTATE"), resolve=True)
 
 NVFP4_SVDQUANT_DEFAULT_CFG = {
     "quant_cfg": {
@@ -555,6 +663,9 @@ NVFP4_SVDQUANT_DEFAULT_CFG = {
     },
     "algorithm": {"method": "svdquant", "lowrank": 32},
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(NVFP4_SVDQUANT_DEFAULT_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("NVFP4_SVDQUANT_DEFAULT"), resolve=True)
 
 W4A8_NVFP4_FP8_CFG = {
     "quant_cfg": {
@@ -573,6 +684,9 @@ W4A8_NVFP4_FP8_CFG = {
     },
     "algorithm": "max",
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(W4A8_NVFP4_FP8_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("W4A8_NVFP4_FP8"), resolve=True)
 
 MXFP4_MLP_WEIGHT_ONLY_CFG = {
     "quant_cfg": {
@@ -586,6 +700,9 @@ MXFP4_MLP_WEIGHT_ONLY_CFG = {
     },
     "algorithm": None,
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(MXFP4_MLP_WEIGHT_ONLY_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("MXFP4_MLP_WEIGHT_ONLY"), resolve=True)
 
 NVFP4_MLP_WEIGHT_ONLY_CFG = {
     "quant_cfg": {
@@ -603,6 +720,9 @@ NVFP4_MLP_WEIGHT_ONLY_CFG = {
     },
     "algorithm": "max",
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(NVFP4_MLP_WEIGHT_ONLY_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("NVFP4_MLP_WEIGHT_ONLY"), resolve=True)
 
 NVFP4_MLP_ONLY_CFG = {
     "quant_cfg": {
@@ -622,6 +742,9 @@ NVFP4_MLP_ONLY_CFG = {
     },
     "algorithm": "max",
 }
+assert OmegaConf.to_container(
+    OmegaConf.create(NVFP4_MLP_ONLY_CFG), resolve=True
+) == OmegaConf.to_container(load_quant_config("NVFP4_MLP_ONLY"), resolve=True)
 
 choices: set[str] = {
     "FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG",
@@ -667,7 +790,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         description="""If True, enables the quantizer. If False, by-pass the quantizer and returns the input tensor.""",
     )
 
-    num_bits: int | tuple[int, int] = ModeloptField(
+    num_bits: int | tuple[int, int] | list[int] = ModeloptField(
         default=8,
         title="An integer or a tuple of two integers specifying the number of quantization bits.",
         description="""`num_bits` can be:
@@ -705,6 +828,16 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
 
         _validate_recursive(values)
         return values
+
+    @field_validator("num_bits", mode="before")
+    @classmethod
+    def tuple_num_bits(cls, num_bits: int | list[int] | tuple[int, int]) -> int | tuple[int, int]:
+        """Convert num_bits to tuple if list."""
+        if isinstance(num_bits, list):
+            assert len(num_bits) == 2
+            return cast("tuple[int, int]", tuple(num_bits))
+
+        return num_bits
 
     @model_validator(mode="after")
     def validate_num_bits(self):
@@ -860,6 +993,16 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
             for k, v in block_sizes.items()
             if k not in ["type", "scale_bits", "scale_block_sizes"]
         }
+
+    @field_validator("block_sizes", mode="before")
+    @classmethod
+    def tuple_block_sizes_scale_bits(cls, v) -> int | tuple[int, int]:
+        """Convert block_sizes.scale_bits to tuple if list."""
+        if v and v.get("scale_bits"):
+            scale_bits = v.get("scale_bits")
+            if isinstance(scale_bits, list):
+                v["scale_bits"] = tuple(scale_bits)
+        return v
 
     @field_validator("block_sizes")
     @classmethod

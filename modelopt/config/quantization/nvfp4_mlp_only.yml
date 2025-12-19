@@ -1,0 +1,21 @@
+defaults:
+  - quantization/default_disabled
+
+algorithm: max
+quant_cfg:
+  '*mlp*weight_quantizer':
+    block_sizes:
+      -1: 16
+      type: dynamic
+      scale_bits: [4, 3]
+    num_bits: [2, 1]
+    enable: true
+    pass_through_bwd: true
+  '*mlp*input_quantizer':
+    block_sizes:
+      -1: 16
+      type: dynamic
+      scale_bits: [4, 3]
+    num_bits: [2, 1]
+    enable: true
+    pass_through_bwd: true

@@ -1,0 +1,16 @@
+algorithm: max
+quant_cfg:
+  '*[kv]_bmm_quantizer':
+    num_bits: [2, 1]
+    block_sizes:
+      -1: 16
+      type: dynamic
+      scale_bits: [4, 3]
+    axis:
+    bias:
+      -2:
+      -4:
+      type: static
+    enable: true
+  default:
+    enable: false

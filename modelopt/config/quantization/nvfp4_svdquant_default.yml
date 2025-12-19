@@ -1,0 +1,23 @@
+defaults:
+  - quantization/default_disabled
+
+algorithm:
+  method: svdquant
+  lowrank: 32
+quant_cfg:
+  '*weight_quantizer':
+    block_sizes:
+      -1: 16
+      type: dynamic
+      scale_bits: [4, 3]
+    num_bits: [2, 1]
+    enable: true
+    axis:
+  '*input_quantizer':
+    block_sizes:
+      -1: 16
+      type: dynamic
+      scale_bits: [4, 3]
+    num_bits: [2, 1]
+    enable: true
+    axis:
