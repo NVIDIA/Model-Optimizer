@@ -1,14 +1,22 @@
 #!/bin/bash
+# =============================================================================
+# QAD SLURM Batch Submission Script
+# =============================================================================
+#
+# Override these SLURM settings via command line:
+#   sbatch --nodes=4 --account=<your-account> sbatch_qad.sh --config ...
+#
+# Or set defaults below for your cluster:
 
 #SBATCH -p batch
-#SBATCH --account=coreai_dlalgo_modelopt
+#SBATCH --account=<your-account>
 #SBATCH --nodes=4
 #SBATCH -t 4:00:00
 #SBATCH --exclusive
 #SBATCH --mem=0
 #SBATCH --gres=gpu:4
 #SBATCH --ntasks-per-node=1
-#SBATCH --job-name=coreai_dlalgo_modelopt-qwen.qad
+#SBATCH --job-name=qad-training
 
 # Usage:
 #   sbatch sbatch_qad.sh --config configs/qwen3-8b.conf
