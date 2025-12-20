@@ -155,6 +155,28 @@ quant_config: dict[str, Any] = {
 }
 
 
+def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: dict[str, Any]) -> dict[str, Any]:
+    """Update KV cache quantization config for MLA models.
+
+    MLA uses `kv_c_bmm_quantizer` (compressed KV) instead of separate
+    `k_bmm_quantizer` and `v_bmm_quantizer`. This function copies the
+    config from `*[kv]_bmm_quantizer` to also cover `*kv_c_bmm_quantizer`.
+    """
+    try:
+        from vllm.attention.layer import MLAAttention
+    except ImportError:
+        return kv_quant_cfg
+
+    if not any(isinstance(m, MLAAttention) for m in model.modules()):
+        return kv_quant_cfg
+
+    if kv_config := kv_quant_cfg.get("*[kv]_bmm_quantizer"):
+        kv_quant_cfg["*kv_c_bmm_quantizer"] = kv_config
+        print("MLA detected: added *kv_c_bmm_quantizer config")
+
+    return kv_quant_cfg
+
+
 def _create_new_data_cls(data_cls, **kwargs):
     """vLLM's low-level API changes frequently. This function creates a class with parameters
     compatible with the different vLLM versions."""
@@ -238,14 +260,19 @@ def _fakequant_run_prolog_worker(self) -> None:
 
     quant_cfg = getattr(mtq, quant_config["quant_cfg"])
     quant_kv_cfg = getattr(mtq, quant_config["kv_quant_cfg"])
-    if quant_kv_cfg:
-        quant_cfg = mtq.utils.update_quant_cfg_with_kv_cache_quant(
-            quant_cfg, quant_kv_cfg["quant_cfg"]
-        )
 
     model = self.model_runner.model
     if hasattr(model, "unwrap"):
         model = model.unwrap()
+
+    # Check if model has MLA and update KV config accordingly
+    if quant_kv_cfg:
+        quant_kv_cfg["quant_cfg"] = update_kv_cfg_for_mla(model, quant_kv_cfg["quant_cfg"])
+
+    if quant_kv_cfg:
+        quant_cfg = mtq.utils.update_quant_cfg_with_kv_cache_quant(
+            quant_cfg, quant_kv_cfg["quant_cfg"]
+        )
 
     with disable_compilation(model):
         print("quantizing model...")
