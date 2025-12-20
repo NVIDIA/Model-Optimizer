@@ -4,7 +4,7 @@
 
 Speculative decoding accelerates auto-regressive generation in large language models (LLMs) by leveraging a lightweight draft model to predict the next γ tokens. The main LLM then verifies these candidate tokens in a single forward pass. If the draft model correctly predicts α tokens, the LLM can accept and generate α+1 tokens per verification step, significantly improving generation speed.
 
-This folder contains an end-to-end runnable speculative decoding fine‑tuning pipeline in which Llama‑3.2‑1B (Hugging Face) is trained on the Daring‑Anteater dataset.
+This folder contains an end-to-end runnable speculative decoding fine‑tuning pipeline in which Llama‑3.2‑1B (Hugging Face) is trained on the [UltraChat-200k](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k) dataset.
 
 This example focuses on training with Hugging Face. To train with Megatron‑LM, see the [Megatron‑LM example](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt).
 
@@ -45,13 +45,15 @@ pip install -r requirements.txt
 
 ### Data Preparation
 
-We use [Daring-Anteater](https://huggingface.co/datasets/nvidia/Daring-Anteater) dataset in this example. Prepare data by:
+We support a range of input datasets. In this example, we will use the [UltraChat-200k](https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k) dataset.
 
 ```bash
-python prepare_input_conversations/add_daring_anteater.py
+python prepare_input_conversations/make_dataset.py -f prepare_input_conversations/example_data_config.yaml --full-conversations
 ```
 
 See [other-datasets](#other-datasets) section for other dataset options and instruction for user-provided data.
+
+Omit `--full-conversations` if you plan to run synthetic data generation (see [data-synthesis](#data-synthesis)).
 
 ## Getting Started: Simplified Workflow
 
@@ -62,7 +64,7 @@ bash train_eagle3_and_export.sh --base_model meta-llama/Llama-3.2-1B-Instruct --
 This one-line command runs a minimal example workflow of training and exporting an EAGLE draft model in Modelopt. Specifically, it
 
 - Initializes the draft model with [default settings](https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt/torch/speculative/eagle/default_config.py#L18)
-- Fine-tunes the model on the [Daring-Anteater](https://huggingface.co/datasets/nvidia/Daring-Anteater) dataset
+- Fine-tunes the model on the dataset
 - Evaluates the acceptance rate on [MT-Bench](https://huggingface.co/datasets/HuggingFaceH4/mt_bench_prompts)
 - Exports a checkpoint ready for deployment
 
@@ -73,7 +75,7 @@ For small base models that fit in GPU memory, we can collocate them with draft m
 ```bash
 ./launch_train.sh --model $BASE_MODEL \
             --output_dir $OUTPUT_DIR \
-            --data input_conversations/daring-anteater.jsonl  \
+            --data input_conversations/train.jsonl  \
             --num_gpu $NUM_GPU \
             --num_epochs $NUM_EPOCH \
             --eagle_config eagle_config.json
@@ -93,7 +95,7 @@ We support two backends for generating base model hidden states. For better effc
 ```bash
 python collect_hidden_states/compute_hidden_states_trtllm.py \
             --model $BASE_MODEL \
-            --input-file input_conversations/daring-anteater.jsonl \
+            --input-file input_conversations/train.jsonl \
             --output-dir $HIDDEN_STATES_DIR
 ```
 
@@ -104,7 +106,7 @@ Alternatively, you can generate the same hidden states with HF:
 ```bash
 python collect_hidden_states/compute_hidden_states_hf.py \
             --model $BASE_MODEL \
-            --input-file input_conversations/daring-anteater.jsonl  \
+            --input-file input_conversations/train.jsonl  \
             --output-dir $HIDDEN_STATES_DIR
 ```
 
@@ -201,16 +203,14 @@ See more details on deployment of quantized model to TRTLLM [here](../llm_ptq/RE
 
 ### Other Datasets
 
-In addition to `daring-anteater`, we provide scripts for adding several other commonly used datasets in `prepare_input_conversations`:
+In addition to the default dataset, we support adding several other commonly used datasets in `prepare_input_conversations/make_dataset.py`:
 
-```text
-prepare_input_conversations/
-    ├── add_daring_anteater.py
-    ├── add_mtbench.py
-    ├── add_sharegpt.py
-    ├── add_ultrachat.py
-    └── example_make_prompt_dataset.sh
-```
+- MTBench (for debugging)
+- ShareGPT
+- UltraChat
+- Daring-Anteater
+- Magpie (Full 1M, and 500k and 300k filtered)
+- Nemotron Post-Training Dataset V2
 
 To use your own datasets, please preprocess your data into a `.jsonl` file with each line in the format:
 
@@ -234,10 +234,10 @@ vllm serve meta-llama/Llama-3.2-1B-Instruct --api-key token-abc123 --port 8000  
 
 Note: Add `--quantization=modelopt` flag for quantized models.
 
-Then, we generate conversations with the base model using prompts from Daring-Anteater:
+Then, we generate conversations with the base model using the prepared prompts:
 
 ```bash
-python scripts/server_generate.py --data_path input_conversations/daring-anteater.jsonl --output_path synthetic/train.jsonl
+python scripts/server_generate.py --data_path input_conversations/train.jsonl --output_path synthetic/train.jsonl
 ```
 
 To add a system prompt, use the `--system_prompt <system_prompt_text>` argument.
@@ -249,7 +249,7 @@ For large scale data generation, please see [SLURM prepare data](SLURM_prepare_d
 We can optionally use smaller vocab size for the draft model for faster training and inference. E.g. Llama3.2-1B has a vocab size of 128256. In this example, we construct a draft vocab mapping of size 32k by finding the most commonly appeared vocabs in our training set:
 
 ```bash
-python scripts/calibrate_draft_vocab.py --model meta-llama/Llama-3.2-1B-Instruct --data input_conversations/daring-anteater.jsonl --draft_vocab_size 32000 --save_dir draft_vocab_cache
+python scripts/calibrate_draft_vocab.py --model meta-llama/Llama-3.2-1B-Instruct --data input_conversations/train.jsonl --draft_vocab_size 32000 --save_dir draft_vocab_cache
 ```
 
 This will produce a `d2t.pt` file in `save_dir`, which is the mapping from draft token to target token. During inference, draft tokens can be mapped back to target tokens by `target_token = draft_token + d2t[draft_token]`.
