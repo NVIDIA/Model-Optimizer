@@ -32,6 +32,7 @@ from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_me
 from .calib import MseCalibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
 from .nn import QuantModule, SequentialQuantizer, TensorQuantizer
+from .tensor_quant import scaled_e4m3_impl
 from .utils import (
     disable_calib,
     enable_fake_quant,
@@ -41,6 +42,7 @@ from .utils import (
     is_quantized_linear,
     is_quantized_row_parallel_linear,
     quantizer_attr_names,
+    reduce_amax,
     weight_attr_names,
 )
 
@@ -216,14 +218,18 @@ def mse_calibrate(
     max_calibrate(model, forward_loop, distributed_sync)
 
     # Step 2: Replace calibrators with MseCalibrator for enabled quantizers
+    # and identify weight quantizers
+    weight_quantizers = []
+    seen_modules = set()
+
     for name, module in model.named_modules():
         if isinstance(module, TensorQuantizer) and not module._disabled:
             # Static block quantization is not supported by MseCalibrator
-            if module.is_static_block_quant:
-                raise ValueError(
-                    f"MSE calibration does not support static block quantization. "
-                    f"Found static block quantization at {name}."
-                )
+            # if module.is_static_block_quant:
+            #     raise ValueError(
+            #         f"MSE calibration does not support static block quantization. "
+            #         f"Found static block quantization at {name}."
+            #     )
             if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
                 # Get the initial amax from max calibration
                 initial_amax = module._amax.clone().detach()
@@ -237,7 +243,20 @@ def mse_calibrate(
                         disable_calib(quantizer),
                         enable_fake_quant(quantizer),
                     ):
+                        quantizer._keep_shape = True
                         xq = quantizer(x)
+                        quantizer._keep_shape = False
+
+                        # FP8 quantization of NVFP4 static per-block scales
+                        if (
+                            quantizer.is_static_block_quant
+                            and quantizer._num_bits == (2, 1)
+                            and quantizer._block_sizes.get("scale_bits") == (4, 3)
+                        ):
+                            weight_amax = reduce_amax(
+                                x, axis=None, keepdims=False, squeeze_scalar=True
+                            )
+                            quantizer._amax = scaled_e4m3_impl(amax / 6.0, weight_amax / 6.0) * 6.0
 
                     if original_amax is not None:
                         quantizer._amax = original_amax
@@ -256,15 +275,56 @@ def mse_calibrate(
                     quant_func=quant_func,
                 )
 
-    # Step 3: Collect data with MSE calibrators
+    # Identify weight quantizers by checking if they have corresponding weight parameters
+    for name, parent_module in model.named_modules():
+        if parent_module in seen_modules:
+            continue
+        for weight_name in weight_attr_names(parent_module):
+            weight_quantizer_name = quantizer_attr_names(weight_name).weight_quantizer
+            weight_quantizer = getattr(parent_module, weight_quantizer_name, None)
+            if isinstance(weight_quantizer, TensorQuantizer) and not weight_quantizer._disabled:
+                if weight_quantizer._calibrator is not None:
+                    weight_quantizers.append((parent_module, weight_name, weight_quantizer))
+        seen_modules.add(parent_module)
+
+    # Step 3: Calibrate weight quantizers once with MSE calibration
+    # This ensures weights are only calibrated once, not during every forward pass
+    for parent_module, weight_name, weight_quantizer in weight_quantizers:
+        # Enable calibration mode for the weight quantizer
+        weight_quantizer.disable_quant()
+        weight_quantizer.enable_calib()
+
+        with enable_weight_access_and_writeback(parent_module, model):
+            weight = getattr(parent_module, weight_name)
+            weight_quantizer(weight)
+
+    # Step 4: Disable weight quantizers during forward loop
+    for _, _, weight_quantizer in weight_quantizers:
+        weight_quantizer.disable()
+
+    # Step 5: Collect data with MSE calibrators for activation quantizers only
     enable_stats_collection(model)
     if forward_loop is None:
-        weight_only_quantize(model)
+        # If no forward loop, nothing else to do since weights are already calibrated
+        pass
     else:
+        # Run forward loop - only activation quantizers will collect data
         forward_loop(model)
 
-    # Step 4: Compute optimal amax and load it
+    # Step 6: Re-enable weight quantizers before finalizing calibration
+    # This ensures finish_stats_collection processes them correctly
+    for _, _, weight_quantizer in weight_quantizers:
+        weight_quantizer.enable()
+
+    # Step 7: Compute optimal amax and load it for all quantizers (weights + activations)
     finish_stats_collection(model, method="mse")
+
+    # Step 8: Free GPU memory by clearing calibrator data
+    for name, module in model.named_modules():
+        if isinstance(module, TensorQuantizer) and not module._disabled:
+            if hasattr(module, "_calibrator") and module._calibrator is not None:
+                if hasattr(module._calibrator, "clear"):
+                    module._calibrator.clear()
 
     # TODO: Sync amax across distributed processes
 
