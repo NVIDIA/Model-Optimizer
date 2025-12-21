@@ -283,6 +283,8 @@ class PrecisionConverter:
         """Recursively clear type/shape information for a graph and all its subgraphs.
 
         This is necessary for control flow operators (Scan, If, Loop) which have subgraphs.
+        For subgraphs, preserve value_info for outer scope variables (not produced by nodes in subgraph).
+        For main graph, clear all value_info.
 
         Args:
             graph: The ONNX graph to clear types and shapes for.
@@ -303,13 +305,27 @@ class PrecisionConverter:
                             if d.dim_value:
                                 inp.type.tensor_type.shape.dim[idx].dim_param = "unk"
 
-            # Clear type/shape information for intermediates and outputs
-            for vi in g.value_info:
-                vi.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
-                for idx, d in enumerate(vi.type.tensor_type.shape.dim):
-                    if d.dim_value:
-                        vi.type.tensor_type.shape.dim[idx].dim_param = "unk"
+            if is_sub:
+                # Identify which tensors are produced by nodes in this subgraph
+                subgraph_outputs = set()
+                for node in g.node:
+                    subgraph_outputs.update(node.output)
 
+                # Clear value_info only for intermediates produced by nodes in this subgraph
+                for vi in g.value_info:
+                    if vi.name in subgraph_outputs:
+                        vi.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
+                        for idx, d in enumerate(vi.type.tensor_type.shape.dim):
+                            if d.dim_value:
+                                vi.type.tensor_type.shape.dim[idx].dim_param = "unk"
+            else:
+                for vi in g.value_info:
+                    vi.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
+                    for idx, d in enumerate(vi.type.tensor_type.shape.dim):
+                        if d.dim_value:
+                            vi.type.tensor_type.shape.dim[idx].dim_param = "unk"
+
+            # Clear outputs for both main graph and subgraphs
             for out in g.output:
                 out.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
                 for idx, d in enumerate(out.type.tensor_type.shape.dim):
