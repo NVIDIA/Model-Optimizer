@@ -113,7 +113,9 @@ class EagleArguments:
     eagle_config: str = field(default=None, metadata={"help": "Path to eagle_config.json"})
     eagle_decoder_type: str = field(
         default="llama",
-        metadata={"help": "The class of eagle decoder to use. Available options: llama, kimik2"},
+        metadata={
+            "help": "The class of eagle decoder to use. Available options: llama, deepseek_v3, kimik2"
+        },
     )
 
 
@@ -189,12 +191,15 @@ def train():
             mtsp.convert(model, [("medusa", config)])
         elif training_args.mode in ["eagle1", "eagle3"]:
             from modelopt.torch.speculative.config import (
+                deepseek_v3_eagle_default_config,
                 default_eagle_config,
                 eagle3_default_config,
                 kimik2_eagle_default_config,
             )
 
-            if eagle_args.eagle_decoder_type == "kimik2":
+            if eagle_args.eagle_decoder_type == "deepseek_v3":
+                eagle_architecture_config = deepseek_v3_eagle_default_config
+            elif eagle_args.eagle_decoder_type == "kimik2":
                 eagle_architecture_config = kimik2_eagle_default_config
             else:
                 eagle_architecture_config = {
