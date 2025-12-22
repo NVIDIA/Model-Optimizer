@@ -115,7 +115,7 @@ case "${BACKEND,,}" in
     FSDP_ARGS="--fsdp_transformer_layer_cls_to_wrap $FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP"
     ;;
   "fsdp2")
-    echo "Using FSDP2 instead of FSDP1. FSDP2 is not mature yet! Please use it with latest torch and transformers."
+    echo "Using FSDP2 instead of FSDP1."
     CONFIG_FILE="fsdp2.yaml"
     FSDP_ARGS="--fsdp_transformer_layer_cls_to_wrap $FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP"
     ;;
