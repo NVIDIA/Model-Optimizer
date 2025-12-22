@@ -30,6 +30,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add support for parallel draft heads in Eagle speculative decoding.
 - Add support to enable custom emulated quantization backend. See :meth:`register_quant_backend <modelopt.torch.quantization.nn.modules.tensor_quantizer.register_quant_backend>`` for more details. See an example in ``tests/unit/torch/quantization/test_custom_backend.py``.
 - Add ``examples/llm_qad`` for QAD training with Megatron-LM.
+- Add support for ``params`` constraint based automatic neural architecture search in Minitron pruning (``mcore_minitron``) as an alternative to manual pruning using ``export_config``. See `examples/pruning/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning>`_ for more details on its usage.
 
 **Deprecations**
 
@@ -96,7 +97,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 
 **Documentation**
 
-- Add general guidelines for Minitron pruning and distillation. See `examples/pruning/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning#pruning-guidelines>`_ for more details.
+- Add general guidelines for Minitron pruning and distillation. See `pruning guidelines <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning#pruning-guidelines>`_ for more details.
 - Added example for exporting QLoRA checkpoint for vLLM deployment. Refer to `examples/llm_qat/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/79ef31bc7269ba4da0cfab446da5b64509cbfcef/examples/llm_qat/README.md#qlora-deployment>`_ for more details
 
 0.37 (2025-10-08)

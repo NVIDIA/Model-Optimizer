@@ -78,7 +78,7 @@ def _test_mcore_mamba_parameter_sorting(rank, size):
 
     model.eval()
     dynamic_space = _convert_model_to_dynamic_space(
-        model, get_mcore_minitron_config(channel_divisor)
+        model, get_mcore_minitron_config(channel_divisor=channel_divisor, mamba_head_dim_divisor=4)
     )
     registry = ImportanceEstimatorRegistry(model)  # register imp estimators and forward hooks
 

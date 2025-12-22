@@ -142,7 +142,7 @@ def param_num_from_forward(
     Returns:
         The number of parameters from the model's forward pass in the given unit.
 
-    This can helpful for dynamic modules, where the state dict might contain extra parameters that
+    This can helpful for MoE or dynamic modules, where the state dict might contain extra parameters that
     is not actively used in the model, e.g., because of a DynamicModule that is deactivated for the
     forward pass. We circumvent this issue by just counting parameters of modules that appear in a
     forward pass.

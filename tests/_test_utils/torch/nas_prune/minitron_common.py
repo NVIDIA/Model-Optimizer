@@ -19,7 +19,16 @@ import modelopt.torch.prune as mtp
 def prune_minitron(model, export_config, config, channel_divisor=64):
     return mtp.prune(
         model,
-        mode=[("mcore_minitron", mtp.mcore_minitron.get_mcore_minitron_config(channel_divisor))],
+        mode=[
+            (
+                "mcore_minitron",
+                mtp.mcore_minitron.get_mcore_minitron_config(
+                    channel_divisor=channel_divisor,
+                    mamba_head_dim_divisor=4,
+                    num_moe_experts_divisor=1,
+                ),
+            )
+        ],
         constraints={"export_config": export_config},
         dummy_input=None,  # Not used
         config=config,
