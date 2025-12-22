@@ -139,11 +139,11 @@ class Nvfp4Linear(Function):
         ctx.save_for_backward(
             input_tensor if weight.requires_grad else None,
             weight if input_tensor.requires_grad else None,
-            torch.empty(0, dtype=torch.uint8) if bias is not None and bias.requires_grad else None,
             getattr(quant_module.weight_quantizer, "_scale", None),
             getattr(quant_module.weight_quantizer, "_double_scale", None),
         )
 
+        ctx.compute_bias_grad = bias is not None and bias.requires_grad
         ctx.allreduce_dgrad = allreduce_dgrad
         ctx.tp_group = tp_group
         ret = nvfp4_gemm(quant_module, input_tensor, bias)
@@ -158,7 +158,7 @@ class Nvfp4Linear(Function):
         dequantize it to compute the input gradient. If the weight is not compressed, we will save
         the unquantized weight and use it directly to compute the input gradient.
         """
-        input_tensor, weight, compute_bias_grad, scale, double_scale = ctx.saved_tensors
+        input_tensor, weight, scale, double_scale = ctx.saved_tensors
         grad_input = grad_weight = grad_bias = None
         if weight is not None:
             if isinstance(weight, QTensorWrapper):
@@ -173,8 +173,10 @@ class Nvfp4Linear(Function):
                 )
             grad_input = grad_outputs @ weight
         if input_tensor is not None:
-            grad_weight = grad_outputs.transpose(-2, -1) @ input_tensor
-        if compute_bias_grad is not None:
+            grad_weight = grad_outputs.reshape(-1, grad_outputs.shape[-1]).T @ input_tensor.reshape(
+                -1, input_tensor.shape[-1]
+            )
+        if ctx.compute_bias_grad is not None:
             # Sum all dimensions except the last one
             grad_bias = grad_outputs.sum(dim=list(range(grad_outputs.dim() - 1)))
 

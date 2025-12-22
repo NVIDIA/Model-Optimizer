@@ -64,9 +64,21 @@ from modelopt.torch.quantization.utils import (
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 from modelopt.torch.utils.distributed import ParallelState
 
-sys.path.append(str(Path(__file__).resolve().parent / "DeepSeek-V3/inference"))
-import model as deekseep_model
-from kernel import act_quant, fp8_gemm, weight_dequant
+DS_V3_PATH = Path(__file__).resolve().parent / "DeepSeek-V3/inference"
+DS_V3_2_PATH = Path(__file__).resolve().parent / "DeepSeek-V3.2-Exp/inference"
+
+if DS_V3_2_PATH.exists():
+    sys.path.append(str(DS_V3_2_PATH))
+elif DS_V3_PATH.exists():
+    sys.path.append(str(DS_V3_PATH))
+else:
+    raise ValueError(
+        f"DeepSeek-V3 or DeepSeek-V3.2-Exp not found in {Path(__file__).resolve().parent}"
+    )
+
+import model as deekseep_model  # noqa: E402
+from ds_kernel import weight_dequant  # noqa: E402
+from kernel import act_quant, fp8_gemm  # noqa: E402
 
 
 def monkey_patch_deepseek_model():
@@ -186,6 +198,26 @@ def monkey_patch_deepseek_model():
             self.kv_bmm_quantizer = TensorQuantizer()
             self.pe_bmm_quantizer = TensorQuantizer()
 
+    class CalibMoe(deekseep_model.MoE):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._setup()
+
+        def _setup(self):
+            self._original_topk = self.gate.topk
+            self._original_topk_groups = self.gate.topk_groups
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            # Forward all tokens to all experts for calibration
+            self.gate.topk = self.n_routed_experts
+            self.gate.topk_groups = self.gate.n_groups
+            super().forward(x)
+            # Restore the original topk and topk_groups
+            self.gate.topk = self._original_topk
+            self.gate.topk_groups = self._original_topk_groups
+
+            return super().forward(x)
+
     mtq.register(
         original_cls=deekseep_model.RowParallelLinear,
         quantized_cls=QuantRowParallelLinear,
@@ -196,6 +228,7 @@ def monkey_patch_deepseek_model():
     )
     mtq.register(original_cls=deekseep_model.Linear, quantized_cls=QuantLinear)
     mtq.register(original_cls=deekseep_model.MLA, quantized_cls=QuantMLA)
+    mtq.register(original_cls=deekseep_model.MoE, quantized_cls=CalibMoe)
 
 
 def load_deepseek_model(model_config: str, model_path: str, batch_size: int):
@@ -224,7 +257,18 @@ def load_deepseek_model(model_config: str, model_path: str, batch_size: int):
     # load model
     checkpoint_path = os.path.join(model_path, f"model{rank}-mp{world_size}.safetensors")
     print(f"Loading {checkpoint_path}")
+
+    # Temporary fix for fp32 params
+    fp32_params = {}
+    for name, param in model.named_parameters():
+        if param.dtype == torch.float32 and (
+            "head.weight" in name or "attn.indexer.weights_proj.weight" in name
+        ):
+            param.data = param.data.to(torch.get_default_dtype())
+            fp32_params[name] = param
     load_model(model, checkpoint_path)
+    for param in fp32_params.values():
+        param.data = param.data.to(torch.float32)
     print(f"Loaded {checkpoint_path}")
     return model
 
@@ -250,10 +294,10 @@ def ptq(
     ## create dataset
     device = next(model.parameters()).device
     calib_dataset = get_dataset_dataloader(
-        dataset_name="cnn_dailymail",
+        dataset_name=["cnn_dailymail", "nemotron-post-training-dataset-v2"],
         tokenizer=tokenizer,
         batch_size=batch_size,
-        num_samples=calib_size,
+        num_samples=[calib_size, calib_size],
         device=device,
     )
 
@@ -314,7 +358,14 @@ def save_amax_and_quant_config(model, output_path: str, enable_fp8_kvcache: bool
         os.path.join(output_path, f"amax_dict_rank{rank}-mp{world_size}.pt"),
     )
 
-    quant_config = get_quant_config(model.named_modules())
+    # if rank == 0:
+    #     with open("expert_activation_counts.txt", "w") as f:
+    #         for name, module in model.named_modules():
+    #             if isinstance(module, deekseep_model.MoE):
+    #                 counts = module.activated_expert_counts()
+    #                 f.writelines(f"{name}: {count}\n" for count in counts)
+
+    quant_config = get_quant_config(model)
 
     if enable_fp8_kvcache:
         quant_config["quantization"]["kv_cache_quant_algo"] = KV_CACHE_FP8

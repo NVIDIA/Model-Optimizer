@@ -19,11 +19,11 @@ import fnmatch
 
 import pytest
 import torch
-from _test_utils.torch_dist.dist_utils import get_device_counts, spawn_multiprocess_job
-from _test_utils.torch_model.transformers_models import create_tiny_llama_dir
-from _test_utils.torch_quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
-from _test_utils.torch_quantization.quant_utils import get_model_size
-from _test_utils.torch_quantization.quantize_common import save_restore_test
+from _test_utils.torch.distributed.utils import get_device_counts, spawn_multiprocess_job
+from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
+from _test_utils.torch.quantization.quant_utils import get_model_size
+from _test_utils.torch.quantization.quantize_common import save_restore_test
+from _test_utils.torch.transformers_models import create_tiny_llama_dir
 from torch.distributed.fsdp import FSDPModule, fully_shard
 from torch.distributed.tensor import DTensor
 

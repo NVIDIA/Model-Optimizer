@@ -37,14 +37,13 @@ required_deps = [
     "regex",
     "safetensors",
     "torch>=2.6",
-    "torchprofile>=0.0.4",
-    "torchvision",
 ]
 
 optional_deps = {
     "onnx": [
         "cppimport",
         "cupy-cuda12x; platform_machine != 'aarch64' and platform_system != 'Darwin'",
+        "lief",
         "ml_dtypes",  # for bfloat16 conversion
         "onnx-graphsurgeon",
         "onnx~=1.19.0",
@@ -52,18 +51,18 @@ optional_deps = {
         "onnxruntime~=1.22.0 ; platform_machine == 'aarch64' or platform_system == 'Darwin'",
         "onnxruntime-gpu~=1.22.0 ; platform_machine != 'aarch64' and platform_system != 'Darwin' and platform_system != 'Windows'",  # noqa: E501
         "onnxruntime-directml==1.20.0; platform_system == 'Windows'",
-        "onnxscript",  # For test_onnx_dynamo_export unit test
-        "onnxsim ; python_version < '3.12' and platform_machine != 'aarch64'",
+        "onnxscript",  # For autocast opset conversion and test_onnx_dynamo_export unit test
+        "onnxslim>=0.1.76",
         "polygraphy>=0.49.22",
     ],
     "hf": [
         "accelerate>=1.0.0",
         "datasets>=3.0.0",
+        "deepspeed>=0.9.6 ; platform_system != 'Darwin' and platform_system != 'Windows'",
         "diffusers>=0.32.2",
         "huggingface_hub>=0.24.0",
         "peft>=0.17.0",
-        "transformers>=4.48,<5.0",  # Should match modelopt/torch/__init__.py and tox.ini
-        "deepspeed>=0.9.6 ; platform_system != 'Darwin' and platform_system != 'Windows'",
+        "transformers>=4.53,<5.0",  # Should match modelopt/torch/__init__.py and tox.ini
     ],
     # linter tools
     "dev-lint": [
@@ -77,8 +76,12 @@ optional_deps = {
         "coverage",
         "pytest",
         "pytest-cov",
+        "pytest-instafail",
         "pytest-timeout",
         "timm",
+        "torchprofile>=0.0.4",  # For computing flops of CV models
+        "torchvision",
+        "torch-geometric",
         "tox>4.18",
         "tox-current-env>=0.0.12",
     ],
@@ -112,11 +115,11 @@ if __name__ == "__main__":
     setuptools.setup(
         name="nvidia-modelopt",
         version=version,
-        description="Nvidia TensorRT Model Optimizer: a unified model optimization and deployment toolkit.",
-        long_description="Checkout https://github.com/nvidia/TensorRT-Model-Optimizer for more information.",
+        description="Nvidia Model Optimizer: a unified model optimization and deployment toolkit.",
+        long_description="Checkout https://github.com/nvidia/Model-Optimizer for more information.",
         long_description_content_type="text/markdown",
         author="NVIDIA Corporation",
-        url="https://github.com/NVIDIA/TensorRT-Model-Optimizer",
+        url="https://github.com/NVIDIA/Model-Optimizer",
         license="Apache 2.0",
         license_files=("LICENSE_HEADER",),
         classifiers=[

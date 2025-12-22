@@ -38,6 +38,7 @@ from .config import (
     AWQLiteCalibConfig,
     CompressConfig,
     MaxCalibConfig,
+    MseCalibConfig,
     QuantizeAlgoCfgType,
     QuantizeAlgorithmConfig,
     QuantizeConfig,
@@ -54,7 +55,7 @@ from .conversion import (
     restore_svdquant_model,
     update_quantize_metadata,
 )
-from .model_calib import awq, max_calibrate, smoothquant, svdquant
+from .model_calib import awq, max_calibrate, mse_calibrate, smoothquant, svdquant
 
 __all__ = ["BaseCalibrateModeDescriptor"]
 
@@ -361,6 +362,18 @@ class MaxCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
         return MaxCalibConfig
 
     _calib_func = max_calibrate
+
+
+@CalibrateModeRegistry.register_mode
+class MseCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for mse calibration algorithm."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return MseCalibConfig
+
+    _calib_func = mse_calibrate
 
 
 @CalibrateModeRegistry.register_mode

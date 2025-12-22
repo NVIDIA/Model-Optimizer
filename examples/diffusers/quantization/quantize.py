@@ -16,8 +16,9 @@
 import argparse
 import logging
 import sys
+import time as time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -32,12 +33,25 @@ from config import (
     reset_set_int8_config,
     set_quant_config_attr,
 )
+
+# This is a workaround for making the onnx export of models that use the torch RMSNorm work. We will
+# need to move on to use dynamo based onnx export to properly fix the problem. The issue has been hit
+# by both external users https://github.com/NVIDIA/Model-Optimizer/issues/262, and our
+# internal users from MLPerf Inference.
+#
+if __name__ == "__main__":
+    from diffusers.models.normalization import RMSNorm as DiffuserRMSNorm
+
+    torch.nn.RMSNorm = DiffuserRMSNorm
+    torch.nn.modules.normalization.RMSNorm = DiffuserRMSNorm
+
 from diffusers import (
     DiffusionPipeline,
     FluxPipeline,
     LTXConditionPipeline,
     LTXLatentUpsamplePipeline,
     StableDiffusion3Pipeline,
+    WanPipeline,
 )
 from onnx_utils.export import generate_fp8_scales, modelopt_export_sd
 from tqdm import tqdm
@@ -46,6 +60,7 @@ from utils import (
     check_lora,
     filter_func_default,
     filter_func_ltx_video,
+    filter_func_wan_video,
     load_calib_prompts,
 )
 
@@ -59,9 +74,11 @@ class ModelType(str, Enum):
     SDXL_BASE = "sdxl-1.0"
     SDXL_TURBO = "sdxl-turbo"
     SD3_MEDIUM = "sd3-medium"
+    SD35_MEDIUM = "sd3.5-medium"
     FLUX_DEV = "flux-dev"
     FLUX_SCHNELL = "flux-schnell"
     LTX_VIDEO_DEV = "ltx-video-dev"
+    WAN22_T2V = "wan2.2-t2v-14b"
 
 
 class DataType(str, Enum):
@@ -70,6 +87,17 @@ class DataType(str, Enum):
     HALF = "Half"
     BFLOAT16 = "BFloat16"
     FLOAT = "Float"
+
+    @property
+    def torch_dtype(self) -> torch.dtype:
+        return self._dtype_map[self.value]
+
+
+DataType._dtype_map = {
+    DataType.HALF: torch.float16,
+    DataType.BFLOAT16: torch.bfloat16,
+    DataType.FLOAT: torch.float32,
+}
 
 
 class QuantFormat(str, Enum):
@@ -114,7 +142,9 @@ def get_model_filter_func(model_type: ModelType) -> Callable[[str], bool]:
         ModelType.SDXL_BASE: filter_func_default,
         ModelType.SDXL_TURBO: filter_func_default,
         ModelType.SD3_MEDIUM: filter_func_default,
+        ModelType.SD35_MEDIUM: filter_func_default,
         ModelType.LTX_VIDEO_DEV: filter_func_ltx_video,
+        ModelType.WAN22_T2V: filter_func_wan_video,
     }
 
     return filter_func_map.get(model_type, filter_func_default)
@@ -125,30 +155,122 @@ MODEL_REGISTRY: dict[ModelType, str] = {
     ModelType.SDXL_BASE: "stabilityai/stable-diffusion-xl-base-1.0",
     ModelType.SDXL_TURBO: "stabilityai/sdxl-turbo",
     ModelType.SD3_MEDIUM: "stabilityai/stable-diffusion-3-medium-diffusers",
+    ModelType.SD35_MEDIUM: "stabilityai/stable-diffusion-3.5-medium",
     ModelType.FLUX_DEV: "black-forest-labs/FLUX.1-dev",
     ModelType.FLUX_SCHNELL: "black-forest-labs/FLUX.1-schnell",
     ModelType.LTX_VIDEO_DEV: "Lightricks/LTX-Video-0.9.7-dev",
+    ModelType.WAN22_T2V: "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+}
+
+MODEL_PIPELINE: dict[ModelType, type[DiffusionPipeline]] = {
+    ModelType.SDXL_BASE: DiffusionPipeline,
+    ModelType.SDXL_TURBO: DiffusionPipeline,
+    ModelType.SD3_MEDIUM: StableDiffusion3Pipeline,
+    ModelType.SD35_MEDIUM: StableDiffusion3Pipeline,
+    ModelType.FLUX_DEV: FluxPipeline,
+    ModelType.FLUX_SCHNELL: FluxPipeline,
+    ModelType.LTX_VIDEO_DEV: LTXConditionPipeline,
+    ModelType.WAN22_T2V: WanPipeline,
 }
 
 # Model-specific default arguments for calibration
 MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
+    ModelType.SDXL_BASE: {
+        "backbone": "unet",
+        "dataset": {
+            "name": "Gustavosta/Stable-Diffusion-Prompts",
+            "split": "train",
+            "column": "Prompt",
+        },
+    },
+    ModelType.SDXL_TURBO: {
+        "backbone": "unet",
+        "dataset": {
+            "name": "Gustavosta/Stable-Diffusion-Prompts",
+            "split": "train",
+            "column": "Prompt",
+        },
+    },
+    ModelType.SD3_MEDIUM: {
+        "backbone": "transformer",
+        "dataset": {
+            "name": "Gustavosta/Stable-Diffusion-Prompts",
+            "split": "train",
+            "column": "Prompt",
+        },
+    },
+    ModelType.SD35_MEDIUM: {
+        "backbone": "transformer",
+        "dataset": {
+            "name": "Gustavosta/Stable-Diffusion-Prompts",
+            "split": "train",
+            "column": "Prompt",
+        },
+    },
     ModelType.FLUX_DEV: {
-        "height": 1024,
-        "width": 1024,
-        "guidance_scale": 3.5,
-        "max_sequence_length": 512,
+        "backbone": "transformer",
+        "dataset": {
+            "name": "Gustavosta/Stable-Diffusion-Prompts",
+            "split": "train",
+            "column": "Prompt",
+        },
+        "inference_extra_args": {
+            "height": 1024,
+            "width": 1024,
+            "guidance_scale": 3.5,
+            "max_sequence_length": 512,
+        },
     },
     ModelType.FLUX_SCHNELL: {
-        "height": 1024,
-        "width": 1024,
-        "guidance_scale": 3.5,
-        "max_sequence_length": 512,
+        "backbone": "transformer",
+        "dataset": {
+            "name": "Gustavosta/Stable-Diffusion-Prompts",
+            "split": "train",
+            "column": "Prompt",
+        },
+        "inference_extra_args": {
+            "height": 1024,
+            "width": 1024,
+            "guidance_scale": 3.5,
+            "max_sequence_length": 512,
+        },
     },
     ModelType.LTX_VIDEO_DEV: {
-        "height": 512,
-        "width": 704,
-        "num_frames": 121,
-        "negative_prompt": "worst quality, inconsistent motion, blurry, jittery, distorted",
+        "backbone": "transformer",
+        "dataset": {
+            "name": "Gustavosta/Stable-Diffusion-Prompts",
+            "split": "train",
+            "column": "Prompt",
+        },
+        "inference_extra_args": {
+            "height": 512,
+            "width": 704,
+            "num_frames": 121,
+            "negative_prompt": "worst quality, inconsistent motion, blurry, jittery, distorted",
+        },
+    },
+    ModelType.WAN22_T2V: {
+        "backbone": "transformer",
+        "dataset": {"name": "nkp37/OpenVid-1M", "split": "train", "column": "caption"},
+        "from_pretrained_extra_args": {
+            "boundary_ratio": 0.875,
+        },
+        "inference_extra_args": {
+            "height": 720,
+            "width": 1280,
+            "num_frames": 81,
+            "fps": 16,
+            "guidance_scale": 4.0,
+            "guidance_scale_2": 3.0,
+            "negative_prompt": (
+                "vivid colors, overexposed, static, blurry details, subtitles, style, "
+                "work of art, painting, picture, still, overall grayish, worst quality, "
+                "low quality, JPEG artifacts, ugly, deformed, extra fingers, poorly drawn hands, "
+                "poorly drawn face, deformed, disfigured, deformed limbs, fused fingers, "
+                "static image, cluttered background, three legs, many people in the background, "
+                "walking backwards"
+            ),
+        },
     },
 }
 
@@ -164,6 +286,7 @@ class QuantizationConfig:
     alpha: float = 1.0  # SmoothQuant alpha
     lowrank: int = 32  # SVDQuant lowrank
     quantize_mha: bool = False
+    compress: bool = False
 
     def validate(self) -> None:
         """Validate configuration consistency."""
@@ -171,16 +294,18 @@ class QuantizationConfig:
             raise NotImplementedError("Only 'default' collect method is implemented for FP8.")
         if self.quantize_mha and self.format == QuantFormat.INT8:
             raise ValueError("MHA quantization is only supported for FP8, not INT8.")
+        if self.compress and self.format == QuantFormat.INT8:
+            raise ValueError("Compression is only supported for FP8 and FP4, not INT8.")
 
 
 @dataclass
 class CalibrationConfig:
     """Configuration for calibration process."""
 
+    prompts_dataset: dict | Path
     batch_size: int = 2
     calib_size: int = 128
     n_steps: int = 30
-    prompts_dataset: str = "Gustavosta/Stable-Diffusion-Prompts"
 
     def validate(self) -> None:
         """Validate calibration configuration."""
@@ -202,21 +327,12 @@ class ModelConfig:
     """Configuration for model loading and inference."""
 
     model_type: ModelType = ModelType.FLUX_DEV
-    model_dtype: DataType = DataType.HALF
+    model_dtype: dict[str, torch.dtype] = field(default_factory=lambda: {"default": torch.float16})
+    backbone: str = ""
     trt_high_precision_dtype: DataType = DataType.HALF
     override_model_path: Path | None = None
     cpu_offloading: bool = False
     ltx_skip_upsampler: bool = False  # Skip upsampler for LTX-Video (faster calibration)
-
-    @property
-    def torch_dtype(self) -> torch.dtype:
-        """Convert DataType enum to torch.dtype."""
-        dtype_map = {
-            DataType.HALF: torch.float16,
-            DataType.BFLOAT16: torch.bfloat16,
-            DataType.FLOAT: torch.float32,
-        }
-        return dtype_map[self.model_dtype]
 
     @property
     def model_path(self) -> str:
@@ -224,16 +340,6 @@ class ModelConfig:
         if self.override_model_path:
             return str(self.override_model_path)
         return MODEL_REGISTRY[self.model_type]
-
-    @property
-    def uses_transformer(self) -> bool:
-        """Check if model uses transformer backbone (vs UNet)."""
-        return self.model_type in [
-            ModelType.SD3_MEDIUM,
-            ModelType.FLUX_DEV,
-            ModelType.FLUX_SCHNELL,
-            ModelType.LTX_VIDEO_DEV,
-        ]
 
 
 @dataclass
@@ -310,7 +416,7 @@ class PipelineManager:
     @staticmethod
     def create_pipeline_from(
         model_type: ModelType,
-        torch_dtype: torch.dtype = torch.bfloat16,
+        torch_dtype: torch.dtype | dict[str, str | torch.dtype] = torch.bfloat16,
         override_model_path: str | None = None,
     ) -> DiffusionPipeline:
         """
@@ -326,17 +432,12 @@ class PipelineManager:
             model_id = (
                 MODEL_REGISTRY[model_type] if override_model_path is None else override_model_path
             )
-            if model_type == ModelType.SD3_MEDIUM:
-                pipe = StableDiffusion3Pipeline.from_pretrained(model_id, torch_dtype=torch_dtype)
-            elif model_type in [ModelType.FLUX_DEV, ModelType.FLUX_SCHNELL]:
-                pipe = FluxPipeline.from_pretrained(model_id, torch_dtype=torch_dtype)
-            else:
-                # SDXL models
-                pipe = DiffusionPipeline.from_pretrained(
-                    model_id,
-                    torch_dtype=torch_dtype,
-                    use_safetensors=True,
-                )
+            pipe = MODEL_PIPELINE[model_type].from_pretrained(
+                model_id,
+                torch_dtype=torch_dtype,
+                use_safetensors=True,
+                **MODEL_DEFAULTS[model_type].get("from_pretrained_extra_args", {}),
+            )
             pipe.set_progress_bar_config(disable=True)
             return pipe
         except Exception as e:
@@ -354,39 +455,27 @@ class PipelineManager:
         """
         self.logger.info(f"Creating pipeline for {self.config.model_type.value}")
         self.logger.info(f"Model path: {self.config.model_path}")
-        self.logger.info(f"Data type: {self.config.model_dtype.value}")
+        self.logger.info(f"Data type: {self.config.model_dtype}")
 
         try:
-            if self.config.model_type == ModelType.SD3_MEDIUM:
-                self.pipe = StableDiffusion3Pipeline.from_pretrained(
-                    self.config.model_path, torch_dtype=self.config.torch_dtype
-                )
-            elif self.config.model_type in [ModelType.FLUX_DEV, ModelType.FLUX_SCHNELL]:
-                self.pipe = FluxPipeline.from_pretrained(
-                    self.config.model_path, torch_dtype=self.config.torch_dtype
-                )
-            elif self.config.model_type == ModelType.LTX_VIDEO_DEV:
-                self.pipe = LTXConditionPipeline.from_pretrained(
-                    self.config.model_path, torch_dtype=self.config.torch_dtype
-                )
+            self.pipe = MODEL_PIPELINE[self.config.model_type].from_pretrained(
+                self.config.model_path,
+                torch_dtype=self.config.model_dtype,
+                use_safetensors=True,
+                **MODEL_DEFAULTS[self.config.model_type].get("from_pretrained_extra_args", {}),
+            )
+            if self.config.model_type == ModelType.LTX_VIDEO_DEV:
                 # Optionally load the upsampler pipeline for LTX-Video
                 if not self.config.ltx_skip_upsampler:
                     self.logger.info("Loading LTX-Video upsampler pipeline...")
                     self.pipe_upsample = LTXLatentUpsamplePipeline.from_pretrained(
                         "Lightricks/ltxv-spatial-upscaler-0.9.7",
                         vae=self.pipe.vae,
-                        torch_dtype=self.config.torch_dtype,
+                        torch_dtype=self.config.model_dtype,
                     )
                     self.pipe_upsample.set_progress_bar_config(disable=True)
                 else:
                     self.logger.info("Skipping upsampler pipeline for faster calibration")
-            else:
-                # SDXL models
-                self.pipe = DiffusionPipeline.from_pretrained(
-                    self.config.model_path,
-                    torch_dtype=self.config.torch_dtype,
-                    use_safetensors=True,
-                )
             self.pipe.set_progress_bar_config(disable=True)
 
             self.logger.info("Pipeline created successfully")
@@ -428,9 +517,7 @@ class PipelineManager:
         if not self.pipe:
             raise RuntimeError("Pipeline not created. Call create_pipeline() first.")
 
-        if self.config.uses_transformer:
-            return self.pipe.transformer
-        return self.pipe.unet
+        return getattr(self.pipe, self.config.backbone)
 
 
 class Calibrator:
@@ -459,34 +546,48 @@ class Calibrator:
         self.model_type = model_type
         self.logger = logger
 
-    def load_prompts(self) -> list[str]:
+    def load_and_batch_prompts(self) -> list[list[str]]:
         """
         Load calibration prompts from file.
 
         Returns:
-            List of calibration prompts
+            List of batched calibration prompts
         """
         self.logger.info(f"Loading calibration prompts from {self.config.prompts_dataset}")
-        return load_calib_prompts(self.config.batch_size, self.config.prompts_dataset)
+        if isinstance(self.config.prompts_dataset, Path):
+            return load_calib_prompts(
+                self.config.batch_size,
+                self.config.prompts_dataset,
+            )
 
-    def run_calibration(self, prompts: list[str]) -> None:
+        return load_calib_prompts(
+            self.config.batch_size,
+            self.config.prompts_dataset["name"],
+            self.config.prompts_dataset["split"],
+            self.config.prompts_dataset["column"],
+        )
+
+    def run_calibration(self, batched_prompts: list[list[str]]) -> None:
         """
         Run calibration steps on the pipeline.
 
         Args:
-            prompts: List of calibration prompts
+            batched_prompts: List of batched calibration prompts
         """
         self.logger.info(f"Starting calibration with {self.config.num_batches} batches")
-        extra_args = MODEL_DEFAULTS.get(self.model_type, {})
+        extra_args = MODEL_DEFAULTS.get(self.model_type, {}).get("inference_extra_args", {})
 
         with tqdm(total=self.config.num_batches, desc="Calibration", unit="batch") as pbar:
-            for i, prompt_batch in enumerate(prompts):
+            for i, prompt_batch in enumerate(batched_prompts):
                 if i >= self.config.num_batches:
                     break
 
                 if self.model_type == ModelType.LTX_VIDEO_DEV:
                     # Special handling for LTX-Video
-                    self._run_ltx_video_calibration(prompt_batch, extra_args)  # type: ignore[arg-type]
+                    self._run_ltx_video_calibration(prompt_batch, extra_args)
+                elif self.model_type == ModelType.WAN22_T2V:
+                    # Special handling for LTX-Video
+                    self._run_wan_video_calibration(prompt_batch, extra_args)
                 else:
                     common_args = {
                         "prompt": prompt_batch,
@@ -496,6 +597,27 @@ class Calibrator:
                 pbar.update(1)
                 self.logger.debug(f"Completed calibration batch {i + 1}/{self.config.num_batches}")
         self.logger.info("Calibration completed successfully")
+
+    def _run_wan_video_calibration(
+        self, prompt_batch: list[str], extra_args: dict[str, Any]
+    ) -> None:
+        negative_prompt = extra_args["negative_prompt"]
+        height = extra_args["height"]
+        width = extra_args["width"]
+        num_frames = extra_args["num_frames"]
+        guidance_scale = extra_args["guidance_scale"]
+        guidance_scale_2 = extra_args["guidance_scale_2"]
+
+        self.pipe(
+            prompt=prompt_batch,
+            negative_prompt=negative_prompt,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            guidance_scale=guidance_scale,
+            guidance_scale_2=guidance_scale_2,
+            num_inference_steps=self.config.n_steps,
+        ).frames  # type: ignore[misc]
 
     def _run_ltx_video_calibration(
         self, prompt_batch: list[str], extra_args: dict[str, Any]
@@ -568,7 +690,7 @@ class Quantizer:
         self.model_config = model_config
         self.logger = logger
 
-    def get_quant_config(self, n_steps: int, backbone: nn.Module) -> Any:
+    def get_quant_config(self, n_steps: int, backbone: torch.nn.Module) -> Any:
         """
         Build quantization configuration based on format.
 
@@ -692,7 +814,6 @@ class ExportManager:
         backbone: torch.nn.Module,
         model_type: ModelType,
         quant_format: QuantFormat,
-        quantize_mha: bool,
     ) -> None:
         """
         Export model to ONNX format.
@@ -707,7 +828,6 @@ class ExportManager:
             return
 
         self.logger.info(f"Starting ONNX export to {self.config.onnx_dir}")
-        check_conv_and_mha(backbone, quant_format == QuantFormat.FP4, quantize_mha)
 
         if quant_format == QuantFormat.FP8 and self._has_conv_layers(backbone):
             self.logger.info(
@@ -728,7 +848,7 @@ class ExportManager:
 
         self.logger.info("ONNX export completed successfully")
 
-    def restore_checkpoint(self, backbone: torch.nn.Module) -> None:
+    def restore_checkpoint(self, backbone: nn.Module) -> None:
         """
         Restore a previously quantized model.
 
@@ -761,6 +881,9 @@ def create_argument_parser() -> argparse.ArgumentParser:
             # FP8 quantization with ONNX export
             %(prog)s --model sd3-medium --format fp8 --onnx-dir ./onnx_models/
 
+            # FP8 quantization with weight compression (reduces memory footprint)
+            %(prog)s --model flux-dev --format fp8 --compress
+
             # Quantize LTX-Video model with full multi-stage pipeline
             %(prog)s --model ltx-video-dev --format fp8 --batch-size 1 --calib-size 32
 
@@ -780,11 +903,26 @@ def create_argument_parser() -> argparse.ArgumentParser:
         help="Model to load and quantize",
     )
     model_group.add_argument(
+        "--backbone",
+        type=str,
+        default=None,
+        help="model backbone in the DiffusionPipeline to work on, if not provided use default based on model type",
+    )
+    model_group.add_argument(
         "--model-dtype",
         type=str,
         default="Half",
         choices=[d.value for d in DataType],
-        help="Precision for loading the model",
+        help="Precision for loading the pipeline. If you want different dtypes for separate components, "
+        "please specify using --component-dtype",
+    )
+    model_group.add_argument(
+        "--component-dtype",
+        action="append",
+        default=[],
+        help="Precision for loading each component of the model by format of name:dtype. "
+        "You can specify multiple components. "
+        "Example: --component-dtype vae:Half --component-dtype transformer:BFloat16",
     )
     model_group.add_argument(
         "--override-model-path", type=str, help="Custom path to model (overrides default)"
@@ -830,6 +968,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
     quant_group.add_argument(
         "--quantize-mha", action="store_true", help="Quantizing MHA into FP8 if its True"
     )
+    quant_group.add_argument(
+        "--compress",
+        action="store_true",
+        help="Compress quantized weights to reduce memory footprint (FP8/FP4 only)",
+    )
 
     calib_group = parser.add_argument_group("Calibration Configuration")
     calib_group.add_argument("--batch-size", type=int, default=2, help="Batch size for calibration")
@@ -837,6 +980,12 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "--calib-size", type=int, default=128, help="Total number of calibration samples"
     )
     calib_group.add_argument("--n-steps", type=int, default=30, help="Number of denoising steps")
+    calib_group.add_argument(
+        "--prompts-file",
+        type=str,
+        default=None,
+        help="Calibrate using prompts in the file instead of the default dataset.",
+    )
 
     export_group = parser.add_argument_group("Export Configuration")
     export_group.add_argument(
@@ -864,13 +1013,24 @@ def main() -> None:
     parser = create_argument_parser()
     args = parser.parse_args()
 
+    model_type = ModelType(args.model)
+    if args.backbone is None:
+        args.backbone = MODEL_DEFAULTS[model_type]["backbone"]
+    s = time.time()
+
+    model_dtype = {"default": DataType(args.model_dtype).torch_dtype}
+    for component_dtype in args.component_dtype:
+        component, dtype = component_dtype.split(":")
+        model_dtype[component] = DataType(dtype).torch_dtype
+
     logger = setup_logging(args.verbose)
     logger.info("Starting Enhanced Diffusion Model Quantization")
 
     try:
         model_config = ModelConfig(
-            model_type=ModelType(args.model),
-            model_dtype=DataType(args.model_dtype),
+            model_type=model_type,
+            model_dtype=model_dtype,
+            backbone=args.backbone,
             trt_high_precision_dtype=DataType(args.trt_high_precision_dtype),
             override_model_path=Path(args.override_model_path)
             if args.override_model_path
@@ -887,10 +1047,22 @@ def main() -> None:
             alpha=args.alpha,
             lowrank=args.lowrank,
             quantize_mha=args.quantize_mha,
+            compress=args.compress,
         )
 
+        if args.prompts_file is not None:
+            prompts_file = Path(args.prompts_file)
+            assert prompts_file.exists(), (
+                f"User specified prompts file {prompts_file} does not exist."
+            )
+            prompts_dataset = prompts_file
+        else:
+            prompts_dataset = MODEL_DEFAULTS[model_type]["dataset"]
         calib_config = CalibrationConfig(
-            batch_size=args.batch_size, calib_size=args.calib_size, n_steps=args.n_steps
+            prompts_dataset=prompts_dataset,
+            batch_size=args.batch_size,
+            calib_size=args.calib_size,
+            n_steps=args.n_steps,
         )
 
         export_config = ExportConfig(
@@ -914,34 +1086,48 @@ def main() -> None:
         backbone = pipeline_manager.get_backbone()
         export_manager = ExportManager(export_config, logger)
 
-        if export_config.restore_from:
+        if export_config.restore_from and export_config.restore_from.exists():
             export_manager.restore_checkpoint(backbone)
+
+            if export_config.quantized_torch_ckpt_path and not export_config.restore_from.samefile(
+                export_config.restore_from
+            ):
+                export_manager.save_checkpoint(backbone)
         else:
             logger.info("Initializing calibration...")
             calibrator = Calibrator(pipeline_manager, calib_config, model_config.model_type, logger)
-            prompts = calibrator.load_prompts()
+            batched_prompts = calibrator.load_and_batch_prompts()
 
             quantizer = Quantizer(quant_config, model_config, logger)
             backbone_quant_config = quantizer.get_quant_config(calib_config.n_steps, backbone)
 
             def forward_loop(mod):
-                if model_config.uses_transformer:
-                    pipe.transformer = mod
-                else:
-                    pipe.unet = mod
-                calibrator.run_calibration(prompts)
+                calibrator.run_calibration(batched_prompts)
 
             quantizer.quantize_model(backbone, backbone_quant_config, forward_loop)
 
-        export_manager.save_checkpoint(backbone)
+            # Compress model weights if requested (only for FP8/FP4)
+            if quant_config.compress:
+                logger.info("Compressing model weights to reduce memory footprint...")
+                mtq.compress(backbone)
+                logger.info("Model compression completed")
+
+            export_manager.save_checkpoint(backbone)
+
+        check_conv_and_mha(
+            backbone, quant_config.format == QuantFormat.FP4, quant_config.quantize_mha
+        )
+        mtq.print_quant_summary(backbone)
+
         export_manager.export_onnx(
             pipe,
             backbone,
             model_config.model_type,
             quant_config.format,
-            quantize_mha=QuantizationConfig.quantize_mha,
         )
-        logger.info("Quantization process completed successfully!")
+        logger.info(
+            f"Quantization process completed successfully! Time taken = {time.time() - s} seconds"
+        )
 
     except Exception as e:
         logger.error(f"Quantization failed: {e}", exc_info=True)

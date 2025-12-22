@@ -62,8 +62,66 @@ class QuantLinear(_LegacyQuantLinearConvBaseMixin, nn.Linear):
 Linear = QuantLinear
 
 
+class SVDQuantTensorQuantizer(TensorQuantizer):
+    """TensorQuantizer with svdquant LoRA support."""
+
+    @property
+    def svdquant_lora_a(self):
+        """Lora a weights for svdquant."""
+        if not hasattr(self, "_svdquant_lora_a"):
+            return None
+        return self._svdquant_lora_a
+
+    @svdquant_lora_a.setter
+    def svdquant_lora_a(self, value):
+        """Lora a weights for svdquant."""
+        assert value is not None, "svdquant_lora_a cannot be set to None."
+
+        if not isinstance(value, torch.Tensor):
+            value = torch.tensor(value)
+
+        if not hasattr(self, "_svdquant_lora_a"):
+            self.register_buffer("_svdquant_lora_a", value.clone().detach())
+        else:
+            if self._svdquant_lora_a.shape != value.shape:
+                raise RuntimeError("Changing shape when setting svdquant_lora_a is not allowed.")
+            self._svdquant_lora_a.data.copy_(
+                value.clone().detach().to(self._svdquant_lora_a.device)
+            )
+
+    @property
+    def svdquant_lora_b(self):
+        """Lora b weights for svdquant."""
+        if not hasattr(self, "_svdquant_lora_b"):
+            return None
+        return self._svdquant_lora_b
+
+    @svdquant_lora_b.setter
+    def svdquant_lora_b(self, value):
+        """Lora b weights for svdquant."""
+        assert value is not None, "svdquant_lora_b cannot be set to None."
+
+        if not isinstance(value, torch.Tensor):
+            value = torch.tensor(value)
+
+        if not hasattr(self, "_svdquant_lora_b"):
+            self.register_buffer("_svdquant_lora_b", value.clone().detach())
+        else:
+            if self._svdquant_lora_b.shape != value.shape:
+                raise RuntimeError("Changing shape when setting svdquant_lora_b is not allowed.")
+            self._svdquant_lora_b.data.copy_(
+                value.clone().detach().to(self._svdquant_lora_b.device)
+            )
+
+
 class SVDQuantLinear(QuantLinearConvBase):
     """Base class for quantized linear modules with SVDQuant."""
+
+    def _setup(self):
+        """Overrides and bypass the _setup function."""
+        if isinstance(self.weight_quantizer, SVDQuantTensorQuantizer):
+            return
+        self.weight_quantizer.__class__ = SVDQuantTensorQuantizer
 
     def _not_sequential_quantizers(self):
         return isinstance(self.weight_quantizer, TensorQuantizer) and isinstance(
@@ -103,9 +161,6 @@ class SVDQuantLinear(QuantLinearConvBase):
         else:
             output = super().forward(input, *args, **kwargs)
         return output
-
-    def _setup(self):
-        """Overrides and bypass the _setup function."""
 
     def fold_weight(self):
         """Fold the weight for faster eval."""
@@ -148,7 +203,7 @@ class RealQuantLinear(QuantModule):
             and self.allow_real_quant_gemm
         )
 
-    def get_real_quant_gemm_impl(self, input, *args, **kwargs) -> bool:
+    def has_real_quant_gemm_impl(self, input, *args, **kwargs) -> bool:
         """Get the real quant GEMM implementation base on input arguments."""
         if not hasattr(self, "_real_quant_gemm_impl"):
             self._real_quant_gemm_impl = backends.gemm_registry.find_match(
@@ -166,20 +221,19 @@ class RealQuantLinear(QuantModule):
             return super().forward(input, *args, **kwargs)
 
         # Check if real-quant GEMM is available
-        if self._should_run_real_quant_gemm and input.numel() > 1:
-            # If the input is not quantized, we use the default GEMM.
-            self.get_real_quant_gemm_impl(input, *args, **kwargs)
-
+        if (
+            self._should_run_real_quant_gemm
+            and input.numel() > 1
+            and self.has_real_quant_gemm_impl(input, *args, **kwargs)
+        ):
             # Note: We cache the real-quant GEMM function to avoid matching overhead.
             # This assumes that the function will not change after the first call.
-            if self._real_quant_gemm_impl:
-                with torch.cuda.nvtx.range("RealQuantLinear gemm"):
-                    output = self._real_quant_gemm_impl(
-                        self, input, self.weight, self.bias, *args, **kwargs
-                    )
-                return (
-                    self.output_quantizer(output) if hasattr(self, "output_quantizer") else output
+            assert self._real_quant_gemm_impl is not None
+            with torch.cuda.nvtx.range("RealQuantLinear gemm"):
+                output = self._real_quant_gemm_impl(
+                    self, input, self.weight, self.bias, *args, **kwargs
                 )
+            return self.output_quantizer(output) if hasattr(self, "output_quantizer") else output
 
         # Otherwise, fallback to the default GEMM
         return super().forward(input, *args, **kwargs)

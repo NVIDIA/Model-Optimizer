@@ -14,6 +14,8 @@
 # limitations under the License.
 """Utility functions for model type detection and classification."""
 
+import torch.nn as nn
+
 MODEL_NAME_TO_TYPE = {
     "GPT2": "gpt",
     "Mllama": "mllama",
@@ -27,6 +29,7 @@ MODEL_NAME_TO_TYPE = {
     "MPT": "mpt",
     "Bloom": "bloom",
     "ChatGLM": "chatglm",
+    "Qwen3Next": "qwen3next",
     "QWen": "qwen",
     "RecurrentGemma": "recurrentgemma",
     "Gemma3": "gemma3",
@@ -60,7 +63,7 @@ __doc__ = f"""Utility functions for model type detection and classification.
         {MODEL_NAME_TO_TYPE=}
 """
 
-__all__ = ["get_model_type", "is_multimodal_model"]
+__all__ = ["get_language_model_from_vl", "get_model_type", "is_multimodal_model"]
 
 
 def get_model_type(model):
@@ -109,3 +112,33 @@ def is_multimodal_model(model):
             hasattr(config, "embd_layer") and hasattr(config.embd_layer, "image_embd_layer")
         )  # Image embedding layers
     )
+
+
+def get_language_model_from_vl(model) -> list[nn.Module] | None:
+    """Extract the language model lineage from a Vision-Language Model (VLM).
+
+    This function handles the common patterns for accessing the language model component
+    in various VLM architectures. It checks multiple possible locations where the
+    language model might be stored.
+
+    Args:
+        model: The VLM model instance to extract the language model from
+
+    Returns:
+        list: the lineage path towards the language model
+
+    Examples:
+        >>> # For LLaVA-style models
+        >>> lineage = get_language_model_from_vl(vlm_model)
+        >>> # lineage[0] is vlm_model
+        >>> # lineage[1] is vlm_model.language_model
+    """
+    # always prioritize model.model.langauge_model
+    if hasattr(model, "model") and hasattr(model.model, "language_model"):
+        return [model, model.model, model.model.language_model]
+
+    if hasattr(model, "language_model"):
+        return [model, model.language_model]
+
+    # Pattern 3: No language_model found
+    return None

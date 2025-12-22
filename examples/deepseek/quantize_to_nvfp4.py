@@ -41,18 +41,14 @@ import argparse
 import glob
 import json
 import os
-import sys
-from pathlib import Path
 from typing import Any
 
 import torch
+from ds_kernel import weight_dequant
 from safetensors.torch import load_file, save_file
 from tqdm import tqdm
 
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
-
-sys.path.append(str(Path(__file__).resolve().parent / "DeepSeek-V3/inference"))
-from kernel import weight_dequant
 
 
 def _remap_key(key_dict: dict[str, Any]):
@@ -155,7 +151,7 @@ def convert_fp8_ckpt_to_nvfp4(
     per_layer_quant_config,
 ):
     def amax_to_nvfp4_scaling_factor_2(amax):
-        return amax.float() / 6.0 / 448.0
+        return amax.float() / (6.0 * 448.0)
 
     def amax_to_fp8_scaling_factor(amax):
         return amax.float() / 448.0

@@ -1,16 +1,105 @@
-Model Optimizer Changelog (Linux)
-=================================
+NVIDIA Model Optimizer Changelog (Linux)
+========================================
 
-0.37 (2025-09-xx)
+0.41 (2026-01-19)
 ^^^^^^^^^^^^^^^^^
 
+**New Features**
+
+- Add support for Transformer Engine quantization for Megatron Core models.
+- Add support for Qwen3-Next model quantization.
+- Add support for dynamically linked TensorRT plugins in the ONNX quantization workflow.
+- Add support for KV Cache Quantization for vLLM FakeQuant PTQ script. See `examples/vllm_serve/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/vllm_serve#Calibrate-and-serve-fake-quant-model-in-vLLM>`__ for more details.
+- Add support for subgraphs in ONNX autocast.
+- Add support for parallel draft heads in Eagle speculative decoding.
+- Add support to enable custom emulated quantization backend. See :meth:`register_quant_backend <modelopt.torch.quantization.nn.modules.tensor_quantizer.register_quant_backend>`` for more details. See an example in ``tests/unit/torch/quantization/test_custom_backend.py``.
+
 **Deprecations**
-- Deprecated ``quantize_mode`` argument in ``examples/onnx_ptq/evaluate.py`` to support strongly typing. Use ``engine_precision`` instead.
+
+- Deprecate ``num_query_groups`` parameter in Minitron pruning (``mcore_minitron``). You can use ModelOpt 0.40.0 or earlier instead if you need to prune it.
+
+**Backward Breaking Changes**
+
+- Remove ``torchprofile`` as a default dependency from ModelOpt as its used only for flops-based FastNAS pruning (computer vision models). It can be installed separately if needed.
+
+0.40 (2025-12-12)
+^^^^^^^^^^^^^^^^^
 
 **Bug Fixes**
 
+- Fix a bug in FastNAS pruning (computer vision models) where the model parameters were sorted twice messing up the ordering.
+- Fix Q/DQ/Cast node placements in 'FP32 required' tensors in custom ops in the ONNX quantization workflow.
+
 **New Features**
+
+- Add MoE (e.g. Qwen3-30B-A3B, gpt-oss-20b) pruning support for ``num_moe_experts``, ``moe_ffn_hidden_size`` and ``moe_shared_expert_intermediate_size`` parameters in Minitron pruning (``mcore_minitron``).
+- Add ``specdec_bench`` example to benchmark speculative decoding performance. See `examples/specdec_bench/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/specdec_bench#speculative-decoding-benchmark>`_ for more details.
+- Add FP8/NVFP4 KV cache quantization support for Megatron Core models.
+- Add KL Divergence loss based auto_quantize method. See `auto_quantize API docs <https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.auto_quantize>`_ for more details.
+- Add support for saving and resuming auto_quantize search state. This speeds up the auto_quantize process by skipping the score estimation step if the search state is provided.
+- Add flag ``trt_plugins_precision`` in ONNX autocast to indicate custom ops precision. This is similar to the flag already existing in the quantization workflow.
+- Add support for PyTorch Geometric quantization.
+- Add per tensor and per channel MSE calibrator support.
+- Added support for PTQ/QAT checkpoint export and loading for running fakequant evaluation in vLLM. See `examples/vllm_serve/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/vllm_serve#load-qatptq-model-and-serve-in-vllm-wip>`_ for more details.
+
+**Documentation**
+
+- Deprecate ``examples/megatron-lm`` in favor of more detailed documentation in `Megatron-LM/examples/post_training/modelopt <https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt>`_.
+
+**Misc**
+
+- NVIDIA TensorRT Model Optimizer is now officially rebranded as NVIDIA Model Optimizer. GitHub will automatically redirect the old repository path (``NVIDIA/TensorRT-Model-Optimizer``) to the new one (``NVIDIA/Model-Optimizer``). Documentation URL is also changed to `nvidia.github.io/Model-Optimizer <https://nvidia.github.io/Model-Optimizer>`_.
+- Bump TensorRT-LLM docker to 1.2.0rc4.
+- Bump minimum recommended transformers version to 4.53.
+- Replace ONNX simplification package from ``onnxsim`` to ``onnxslim``.
+
+0.39 (2025-11-11)
+^^^^^^^^^^^^^^^^^
+
+**Deprecations**
+
+- Deprecated ``modelopt.torch._deploy.utils.get_onnx_bytes`` API. Please use ``modelopt.torch._deploy.utils.get_onnx_bytes_and_metadata`` instead to access the ONNX model bytes with external data. see `examples/onnx_ptq/download_example_onnx.py <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/onnx_ptq/download_example_onnx.py>`_ for example usage.
+
+**New Features**
+
+- Add flag ``op_types_to_exclude_fp16`` in ONNX quantization to exclude ops from being converted to FP16/BF16. Alternatively, for custom TensorRT ops, this can also be done by indicating ``'fp32'`` precision in ``trt_plugins_precision``.
+- Add LoRA mode support for MCore in a new peft submodule: ``modelopt.torch.peft.update_model(model, LORA_CFG)``.
+- Support PTQ and fakequant in vLLM for fast evaluation of arbitrary quantization formats. See ``examples/vllm_serve`` for more details.
+- Add support for ``nemotron-post-training-dataset-v2`` and ``nemotron-post-training-dataset-v1`` in ``examples/llm_ptq``. Default to a mix of ``cnn_dailymail`` and ``nemotron-post-training-dataset-v2`` (gated dataset accessed using ``HF_TOKEN`` environment variable) if no dataset is specified.
+- Allow specifying ``calib_seq`` in ``examples/llm_ptq`` to set the maximum sequence length for calibration.
+- Add support for MCore MoE PTQ/QAT/QAD.
+- Add support for multi-node PTQ and export with FSDP2 in ``examples/llm_ptq/multinode_ptq.py``. See `examples/llm_ptq/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq#multi-node-post-training-quantization-with-fsdp2>`_ for more details.
+- Add support for Nemotron Nano VL v1 & v2 models in FP8/NVFP4 PTQ workflow.
+- Add flags ``nodes_to_include`` and ``op_types_to_include`` in AutoCast to force-include nodes in low precision, even if they would otherwise be excluded by other rules.
+- Add support for ``torch.compile`` and benchmarking in ``examples/diffusers/quantization/diffusion_trt.py``.
+- Enabled native Modelopt quantization support for FP8 and NVFP4 formats in SGLang. See `SGLang quantization documentation <https://github.com/sgl-project/sglang/blob/main/docs/advanced_features/quantization.md#using-nvidia-modelopt>`_ for more details.
+- Added modelopt quantized checkpoints in vLLM/SGLang CI/CD pipelines (PRs are under review).
+- Add support for exporting QLoRA checkpoint fintuned using ModelOpt.
+- Update NVFP4 AWQ checkpoint export. It now fuses scaling factors of o_proj and down_proj layers into the model when possible to facilitate deployment.
+
+**Documentation**
+
+- Add general guidelines for Minitron pruning and distillation. See `examples/pruning/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning#pruning-guidelines>`_ for more details.
+- Added example for exporting QLoRA checkpoint for vLLM deployment. Refer to `examples/llm_qat/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/79ef31bc7269ba4da0cfab446da5b64509cbfcef/examples/llm_qat/README.md#qlora-deployment>`_ for more details
+
+0.37 (2025-10-08)
+^^^^^^^^^^^^^^^^^
+
+**Deprecations**
+
+- Deprecated ModelOpt's custom docker images. Please use the PyTorch, TensorRT-LLM or TensorRT docker image directly or refer to the `installation guide <https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html>`_ for more details.
+- Deprecated ``quantize_mode`` argument in ``examples/onnx_ptq/evaluate.py`` to support strongly typing. Use ``engine_precision`` instead.
+- Deprecated TRT-LLM's TRT backend in ``examples/llm_ptq`` and ``examples/vlm_ptq``. Tasks ``build`` and ``benchmark`` support are removed and replaced with ``quant``. ``engine_dir`` is replaced with ``checkpoint_dir`` in ``examples/llm_ptq`` and ``examples/vlm_ptq``. For performance evaluation, please use ``trtllm-bench`` directly.
+- ``--export_fmt`` flag in ``examples/llm_ptq`` is removed. By default we export to the unified Hugging Face checkpoint format.
+- Deprecated ``examples/vlm_eval`` as it depends on the deprecated TRT-LLM's TRT backend.
+
+**New Features**
+
 - ``high_precision_dtype`` default to fp16 in ONNX quantization, i.e. quantized output model weights are now FP16 by default.
+- Upgrade TensorRT-LLM dependency to 1.1.0rc2.
+- Support Phi-4-multimodal and Qwen2.5-VL quantized HF checkpoint export in ``examples/vlm_ptq``.
+- Support storing and restoring Minitron pruning activations and scores for re-pruning without running the forward loop again.
+- Add Minitron pruning example for Megatron-LM framework. See `Megatron-LM/examples/post_training/modelopt <https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt>`_ for more details.
 
 0.35 (2025-09-04)
 ^^^^^^^^^^^^^^^^^
@@ -165,8 +254,8 @@ Model Optimizer Changelog (Linux)
 - Disabled saving modelopt state in unified hf export APIs by default, i.e., added ``save_modelopt_state`` flag in ``export_hf_checkpoint`` API and by default set to False.
 - Add FP8 and NVFP4 real quantization support with LLM QLoRA example.
 - The :class:`modelopt.deploy.llm.LLM` now support use the :class:`tensorrt_llm._torch.LLM` backend for the quantized HuggingFace checkpoints.
-- Add `NVFP4 PTQ example for DeepSeek-R1 <https://github.com/NVIDIA/TensorRT-Model-Optimizer/tree/main/examples/deepseek>`_.
-- Add end-to-end `AutoDeploy example for AutoQuant LLM models <https://github.com/NVIDIA/TensorRT-Model-Optimizer/tree/main/examples/llm_autodeploy>`_.
+- Add `NVFP4 PTQ example for DeepSeek-R1 <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/deepseek>`_.
+- Add end-to-end `AutoDeploy example for AutoQuant LLM models <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_autodeploy>`_.
 
 0.23 (2025-01-29)
 ^^^^^^^^^^^^^^^^^
@@ -174,7 +263,7 @@ Model Optimizer Changelog (Linux)
 **Backward Breaking Changes**
 
 - Support TensorRT-LLM to 0.17. Examples (e.g. benchmark task in llm_ptq) may not be fully compatible with TensorRT-LLM 0.15.
-- Nvidia TensorRT Model Optimizer has changed its LICENSE from NVIDIA Proprietary (library wheel) and MIT (examples) to Apache 2.0 in this first full OSS release.
+- Nvidia Model Optimizer has changed its LICENSE from NVIDIA Proprietary (library wheel) and MIT (examples) to Apache 2.0 in this first full OSS release.
 - Deprecate Python 3.8, Torch 2.0, and Cuda 11.x support.
 - ONNX Runtime dependency upgraded to 1.20 which no longer supports Python 3.9.
 - In the Huggingface examples, the ``trust_remote_code`` is by default set to false and require users to explicitly turning it on with ``--trust_remote_code`` flag.
@@ -222,7 +311,7 @@ Model Optimizer Changelog (Linux)
 **Backward Breaking Changes**
 
 - Deprecated the summarize task in the ``llm_ptq`` example.
-- Deprecated the ``type`` flag in the `huggingface_example.sh <https://github.com/NVIDIA/TensorRT-Model-Optimizer/tree/main/examples/llm_ptq/scripts/huggingface_example.sh>`_
+- Deprecated the ``type`` flag in the `huggingface_example.sh <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq/scripts/huggingface_example.sh>`_
 - Deprecated Python plugin support in ONNX.
 - Support TensorRT-LLM 0.13. Examples not compatible with TensorRT-LLM 0.12.
 - :meth:`mtq.auto_quantize <modelopt.torch.quantization.model_quant.auto_quantize>` API has been updated. The API now
@@ -259,7 +348,7 @@ Model Optimizer Changelog (Linux)
 - New APIs and examples: :mod:`modelopt.torch.prune` for pruning Conv, Linear, and Attention heads for
   NVIDIA Megatron-core GPT-style models (e.g. Llama 3), PyTorch Computer Vision models, and HuggingFace Bert/GPT-J models.
 - New API: :mod:`modelopt.torch.distill` for knowledge distillation, along with guides and example.
-- New Example: `HF BERT Prune, Distill & Quantize <https://github.com/NVIDIA/TensorRT-Model-Optimizer/blob/main/examples/chained_optimizations>`_
+- New Example: `HF BERT Prune, Distill & Quantize <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/chained_optimizations>`_
   showcasing how to chain pruning, distillation, and quantization to achieve the best performance on a given model.
 - Added INT8/FP8 DQ-only support for ONNX model.
 - New API: :mod:`modelopt.torch.speculative` for end-to-end support of Medusa models.
@@ -322,13 +411,13 @@ Model Optimizer Changelog (Linux)
 
 **Backward Breaking Changes**
 
-- `PTQ examples <https://github.com/NVIDIA/TensorRT-Model-Optimizer/tree/main/examples/llm_ptq>`_ have been
+- `PTQ examples <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq>`_ have been
   upgraded to use TensorRT-LLM 0.10.
 
 **New Features**
 
 - Adding TensorRT-LLM checkpoint export support for Medusa decoding (official ``MedusaModel`` and Megatron Core ``GPTModel``).
-- Enable support for mixtral, recurrentgemma, starcoder, qwen in `PTQ examples <https://github.com/NVIDIA/TensorRT-Model-Optimizer/tree/main/examples/llm_ptq>`_.
+- Enable support for mixtral, recurrentgemma, starcoder, qwen in `PTQ examples <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq>`_.
 - Adding TensorRT-LLM checkpoint export and engine building support for sparse models.
 - Import scales from TensorRT calibration cache and use them for quantization.
 - (Experimental) Enable low GPU memory FP8 calibration for the Hugging Face models when the original model size does not fit into the GPU memory.
@@ -342,7 +431,7 @@ Model Optimizer Changelog (Linux)
 **Backward Breaking Changes**
 
 - [!!!] The package was renamed from ``ammo`` to ``modelopt``. The new full product
-  name is *Nvidia TensorRT Model Optimizer*. PLEASE CHANGE ALL YOUR REFERENCES FROM ``ammo`` to
+  name is *Nvidia Model Optimizer*. PLEASE CHANGE ALL YOUR REFERENCES FROM ``ammo`` to
   ``modelopt`` including any paths and links!
 - Default installation ``pip install nvidia-modelopt`` will now only install minimal core
   dependencies. Following optional dependencies are available depending on the features that are

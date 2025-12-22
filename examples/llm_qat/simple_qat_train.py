@@ -74,7 +74,7 @@ def train(model, optimizer, train_dataloader, tokenizer, epochs, output_dir, dev
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="CNN QAT using ModelOpt")
+    parser = argparse.ArgumentParser(description="QAT Training Script")
     # Data paths
     parser.add_argument("--model-path", type=str, required=True, help="Path to the model")
     parser.add_argument("--train-size", type=int, default=2048, help="Train size")
@@ -87,7 +87,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--quant-cfg",
         type=str,
-        default=mtq.NVFP4_DEFAULT_CFG,
+        default="NVFP4_DEFAULT_CFG",
         choices=mtq.config.choices,
         help="Quantization configuration",
     )
@@ -121,7 +121,7 @@ def main() -> None:
             m(batch["input_ids"].to(device))
 
     # Quantize the model
-    model = mtq.quantize(model, args.quant_cfg, calibrate)
+    model = mtq.quantize(model, getattr(mtq, args.quant_cfg), calibrate)
 
     # Initialize optimizer
     optimizer = AdamW(model.parameters(), lr=args.lr)

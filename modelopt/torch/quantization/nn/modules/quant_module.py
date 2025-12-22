@@ -37,24 +37,6 @@ __all__ = [
 class QuantModule(DynamicModule):
     """A base class for quantized modules."""
 
-    @property
-    def mopt_ckpt_versn(self):
-        """Checkpoint version of the modelopt."""
-        for module in self.modules():
-            if isinstance(module, TensorQuantizer):
-                return module.mopt_ckpt_versn
-        return None
-
-    @mopt_ckpt_versn.setter
-    def mopt_ckpt_versn(self, version: str):
-        """Set the checkpoint version for the TensorQuantizer states."""
-
-        def _set_ckpt_version(module):
-            if isinstance(module, TensorQuantizer):
-                module.mopt_ckpt_versn = version
-
-        self.apply(_set_ckpt_version)
-
     def modelopt_post_restore(self, prefix: str = ""):
         """Post-restore to correctly configure the TensorQuantizer states.
 
@@ -158,8 +140,10 @@ class QuantLinearConvBase(QuantInputBase):
     def quantize_weight(self):
         """Context in which `self.weight` is quantized."""
         self._enable_weight_quantization = True
-        yield
-        self._enable_weight_quantization = False
+        try:
+            yield
+        finally:
+            self._enable_weight_quantization = False
 
     @staticmethod
     def _get_quantized_weight(module: "QuantLinearConvBase", weight: torch.Tensor) -> torch.Tensor:

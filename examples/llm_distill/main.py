@@ -13,15 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
 import os
 from dataclasses import dataclass
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import datasets
 import torch
 import torch.distributed
 import transformers
-from accelerate import PartialState
 from accelerate.logging import get_logger
 from transformers import AutoTokenizer
 from trl import SFTTrainer
@@ -30,17 +30,13 @@ import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
 from modelopt.torch.distill.plugins.huggingface import KDTrainer, LMLogitsLoss
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
-
-logger = get_logger(__name__)
-logging.basicConfig(level=logging.INFO)
+logger = get_logger(__name__, log_level="INFO")
 
 
 @dataclass
 class ModelArguments:
     teacher_name_or_path: str | None = None
     student_name_or_path: str | None = None
-    single_model: bool = False
 
 
 @dataclass
@@ -48,36 +44,28 @@ class TrainingArguments(transformers.TrainingArguments):
     do_train: bool = True
     do_eval: bool = True
     save_strategy: str = "no"
-    max_seq_length: int = 1024
+    max_length: int = 1024
     optim: str = "adamw_torch"
     learning_rate: float = 1e-5
     lr_scheduler_type: str = "cosine"
     dataloader_drop_last: bool = True
     dataset_num_proc: int = 8
-    dataset_batch_size: int = 500
     bf16: bool = True
     tf32: bool = True
 
 
-def llama_text_format_func(sample):
-    texts = []
-    for p, q, r in zip(sample["system_prompt"], sample["question"], sample["response"]):
-        if not p:
-            texts.append(f"<s>[INST] {q}[/INST]\n{r}</s>")
-        else:
-            texts.append(f"<s>[INST] <<SYS>>{p}<</SYS>>\n{q}[/INST]\n{r}</s>")
-    return texts
+def _format_smoltalk_chat_template(sample, tokenizer):
+    # smol-smoltalk-Interaction-SFT dataset has "query" and "answer" fields
+    # Convert them to messages format and use tokenizer's apply_chat_template
+    messages = [
+        {"role": "user", "content": sample["query"]},
+        {"role": "assistant", "content": sample["answer"]},
+    ]
+    return tokenizer.apply_chat_template(messages, tokenize=False)
 
 
 class KDSFTTrainer(SFTTrainer, KDTrainer):
     pass
-
-
-def _teacher_factory(model_name_or_path):
-    return transformers.AutoModelForCausalLM.from_pretrained(
-        model_name_or_path,
-        device_map=PartialState().process_index,
-    )
 
 
 def train():
@@ -102,12 +90,14 @@ def train():
         f"Using {int(num_accum_steps)} grad accumulation steps for effective batchsize of {total_batch_size}."
     )
 
+    # Dataset
     logger.info("Loading dataset...")
-    dset = datasets.load_dataset("Open-Orca/OpenOrca", split="train")
-    dset_splits = dset.train_test_split(train_size=25600, test_size=1700, seed=420)
+    dset = datasets.load_dataset("ReactiveAI/smol-smoltalk-Interaction-SFT", split="train")
+    dset_splits = dset.train_test_split(train_size=12800, test_size=1280, seed=420)
     dset_train, dset_eval = dset_splits["train"], dset_splits["test"]
     logger.info("Dataset loaded.")
 
+    # Tokenizer
     logger.info("Loading tokenizer...")
     model_path = model_args.teacher_name_or_path or model_args.student_name_or_path
     tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
@@ -115,45 +105,35 @@ def train():
     tokenizer.padding_side = "right"
     logger.info("Tokenizer loaded.")
 
-    if model_args.single_model:
-        logger.info("Loading single model only...")
-        model = _teacher_factory(model_path)
-        logger.info("Model loaded.")
-    else:
-        logger.info("Loading student model...")
-        model = transformers.AutoModelForCausalLM.from_pretrained(
-            model_args.student_name_or_path,
-            device_map=PartialState().process_index,
-        )
-        logger.info("Student loaded.")
-        # Load checkpoint
-        logger.info("Loading teacher model and converting to Distillation model...")
-        kd_config = {
-            "teacher_model": (
-                _teacher_factory,
-                (model_args.teacher_name_or_path,),
-                {},
-            ),
-            "criterion": LMLogitsLoss(),
-            "expose_minimal_state_dict": False,  # FSDP forces us to disable this
-        }
-        model = mtd.convert(model, mode=[("kd_loss", kd_config)])
-        logger.info("Models converted.")
+    # Model
+    logger.info("Loading student model...")
+    model = transformers.AutoModelForCausalLM.from_pretrained(
+        model_args.student_name_or_path, dtype=torch.bfloat16 if training_args.bf16 else None
+    )
+    logger.info("Student loaded.")
+    # Load checkpoint
+    logger.info("Loading teacher model and converting to Distillation model...")
+    teacher_model = transformers.AutoModelForCausalLM.from_pretrained(
+        model_args.teacher_name_or_path, dtype=torch.bfloat16 if training_args.bf16 else None
+    )
+    kd_config = {
+        "teacher_model": teacher_model,
+        "criterion": LMLogitsLoss(),
+    }
+    model = mtd.convert(model, mode=[("kd_loss", kd_config)])
+    logger.info("Models converted.")
 
     # Fix problematic settings that logger.info excessive warnings
     model.generation_config.temperature = None
     model.generation_config.top_p = None
-    if training_args.gradient_checkpointing:
-        training_args.gradient_checkpointing_kwargs = {"use_reentrant": False}
 
     # Trainer
-    trainer_cls = SFTTrainer if model_args.single_model else KDSFTTrainer
-    trainer = trainer_cls(
+    trainer = KDSFTTrainer(
         model,
         training_args,
         train_dataset=dset_train,
         eval_dataset=dset_eval,
-        formatting_func=llama_text_format_func,
+        formatting_func=lambda sample: _format_smoltalk_chat_template(sample, tokenizer),
         processing_class=tokenizer,
     )
 
@@ -173,8 +153,7 @@ def train():
     # Save checkpoint
     logger.info("Saving checkpoint...")
     trainer.save_state()
-    kwargs = {"export_student": True} if not model_args.single_model else {}
-    trainer.save_model(trainer.args.output_dir, **kwargs)
+    trainer.save_model(trainer.args.output_dir, export_student=True)
     logger.info("Checkpoint saved.")
 
 

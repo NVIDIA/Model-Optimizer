@@ -15,8 +15,8 @@
 
 import pytest
 import torch
-from _test_utils.torch_model.transformers_models import create_tiny_llama_dir
-from _test_utils.torch_quantization.quantize_common import INT4_AWQ_CLIP_CFG
+from _test_utils.torch.quantization.quantize_common import INT4_AWQ_CLIP_CFG
+from _test_utils.torch.transformers_models import create_tiny_llama_dir
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 from transformers import AutoConfig, AutoModelForCausalLM
 

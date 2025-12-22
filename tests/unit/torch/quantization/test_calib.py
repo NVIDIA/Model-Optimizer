@@ -19,7 +19,7 @@ from functools import partial
 
 import torch
 import torch.nn as nn
-from _test_utils.torch_quantization.quantize_common import get_awq_config
+from _test_utils.torch.quantization.quantize_common import get_awq_config
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.config import QuantizerAttributeConfig

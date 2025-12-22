@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import torch.nn as nn
-from _test_utils.torch_quantization.models import SimpleConv
+from _test_utils.torch.quantization.models import SimpleConv
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization import QuantModuleRegistry

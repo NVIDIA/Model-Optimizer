@@ -17,9 +17,9 @@ import copy
 
 import pytest
 import torch
-from _test_utils.torch_misc import set_seed
-from _test_utils.torch_quantization.models import OneLayerLinear, SimpleLinear
-from _test_utils.torch_quantization.quantize_common import compute_backward_grad
+from _test_utils.torch.misc import set_seed
+from _test_utils.torch.quantization.models import OneLayerLinear, SimpleLinear
+from _test_utils.torch.quantization.quantize_common import compute_backward_grad
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.backends.fp8_per_tensor_gemm import Fp8PerTensorLinear

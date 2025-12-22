@@ -41,7 +41,7 @@ class _DynamicLinear(DynamicModule):
         return get_sliced_tensor(mod, bias, "out_features")
 
     def _estimate_importance(self) -> TracedHp.Importance:
-        return torch.linalg.vector_norm(self._parameters["weight"].detach(), dim=0)
+        return torch.linalg.vector_norm(self.weight.detach(), dim=0)
 
     def _setup(self):
         # register hyperparameters

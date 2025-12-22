@@ -271,25 +271,44 @@ def _create_quantized_class_from_ast(
         # The exec path can handle decorated methods, but the safety compliance disallows exec
         closure = original_method.__closure__
         globals = original_method.__globals__
+
         if method_code.co_freevars != original_method.__code__.co_freevars:
             warn(f"{new_class_name}.{method_name} is a decorated method. Ignoring the decorator!")
 
+            # Search for the actual undecorated method in the closure
+            actual_method = None
+            if original_method.__closure__:
+                for closure_item in original_method.__closure__:
+                    if (
+                        not hasattr(closure_item, "cell_contents")
+                        or closure_item.cell_contents is None
+                    ):
+                        continue
+                    item = closure_item.cell_contents
+                    if isinstance(item, types.FunctionType) and item.__name__ == method_name:
+                        # Check if this is the method with the right freevars
+                        if all(var in item.__code__.co_freevars for var in method_code.co_freevars):
+                            actual_method = item
+                            globals = item.__globals__
+                            break
+
+            if actual_method is None:
+                raise ValueError(
+                    f"Cannot find undecorated method {method_name} with required free variables "
+                    f"{method_code.co_freevars} in closure"
+                )
+
+            # Build closure from actual method
+            assert actual_method.__closure__ is not None, (
+                "Actual method must have closure for freevars"
+            )
             new_closure = ()
             for freevar in method_code.co_freevars:
-                assert freevar in original_method.__closure__
+                assert freevar in actual_method.__code__.co_freevars
                 new_closure += (
-                    original_method.__closure__[  # type: ignore[index]
-                        original_method.__code__.co_freevars.index(freevar)
-                    ],
+                    actual_method.__closure__[actual_method.__code__.co_freevars.index(freevar)],
                 )
             closure = new_closure
-            for closure_item in original_method.__closure__:  # type: ignore[union-attr]
-                item = closure_item.cell_contents
-                if isinstance(item, types.FunctionType) and item.__name__ == method_name:
-                    globals = item.__globals__
-                    break
-            else:
-                raise ValueError(f"Cannot find the original method {method_name} in the closure")
 
         # Create a new class method from bytecode
         new_method = types.FunctionType(method_code, globals=globals, closure=closure)

@@ -66,7 +66,7 @@ repos:
           - --comment-style
           - "#"
           - --allow-past-years
-        types: [python, shell]
+        types_or: [python, shell]
         # NOTE: Exclude files that have copyright or license headers from another company or individual
         # since we want to keep those above the license header added by this hook.
         # Instead, we should manually add the license header to those files *after* the original header.
@@ -92,7 +92,7 @@ repos:
               examples/llm_eval/mmlu.py|
               examples/llm_eval/modeling.py|
               examples/llm_qat/main.py|
-              examples/llm_sparsity/finetune.py|
+              examples/llm_sparsity/weight_sparsity/finetune.py|
               examples/speculative_decoding/main.py|
               examples/speculative_decoding/medusa_utils.py|
               examples/speculative_decoding/server_generate.py|

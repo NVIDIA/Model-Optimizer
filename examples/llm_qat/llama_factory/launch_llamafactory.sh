@@ -256,4 +256,3 @@ else
     echo "Modified FSDP args: $FSDP_ARGS"
     accelerate launch --config_file $ACCELERATE_CONFIG $FSDP_ARGS $SCRIPT_DIR/llama_factory.py $CONFIG_FILE
 fi
-python $SCRIPT_DIR/../convert_sharded_ckpt.py --hf_model_path $MODEL --sharded_ckpt_path $OUTPUT_DIR --output_path $OUTPUT_DIR

@@ -15,8 +15,8 @@
 
 import pytest
 import torch
-from _test_utils.torch_misc import compare_outputs
-from _test_utils.torch_model.nas_trace_models import BaseExampleModel, get_example_models
+from _test_utils.torch.misc import compare_outputs
+from _test_utils.torch.nas_prune.models import BaseExampleModel, get_example_models
 
 from modelopt.torch.nas.search_space import generate_search_space
 from modelopt.torch.utils.random import _set_deterministic_seed

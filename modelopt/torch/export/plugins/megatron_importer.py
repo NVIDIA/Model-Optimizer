@@ -77,11 +77,18 @@ class GPTModelImporter:
         dequantize: bool = True,
         trust_remote_code: bool = True,
         verbose: bool = False,
+        moe_router_dtype: torch.dtype | None = None,
     ):
         """Create a GPTModel importer instance."""
         self._hf_config = transformers.AutoConfig.from_pretrained(
             pretrained_model_name_or_path, trust_remote_code=trust_remote_code
         )
+        self.moe_router_dtype = None
+        if moe_router_dtype == "fp32":
+            self.moe_router_dtype = torch.float32
+        elif moe_router_dtype == "fp64":
+            self.moe_router_dtype = torch.float64
+
         pretrained_model_path = Path(pretrained_model_name_or_path)
         if not pretrained_model_path.is_dir():
             if workspace_dir is None:
@@ -118,7 +125,9 @@ class GPTModelImporter:
             func = method_map[mapping.func_name]
             prefix = mapping.target_name_or_prefix
             func_kwargs = mapping.func_kwargs
-            return lambda m, *args: func(m, prefix.format(*args), **func_kwargs)
+            return lambda m, *args, **kwargs: func(
+                m, prefix.format(*args), **{**func_kwargs, **kwargs}
+            )
 
         for arch, mappings in all_mcore_hf_import_mapping.items():
             all_rules[arch] = {
@@ -140,7 +149,10 @@ class GPTModelImporter:
         prefix,
         mapping={},
         parallel_config: ParallelConfig | None = None,
+        dtype: torch.dtype | None = None,
     ):
+        if dtype is None:
+            dtype = self.dtype
         if isinstance(module, torch.Tensor):
             tensor = self._get_safetensor(prefix, parallel_config=parallel_config)
             module.data.copy_(tensor)
@@ -193,7 +205,7 @@ class GPTModelImporter:
                     tensor = self._get_safetensor(
                         prefix + source_key, parallel_config=parallel_config
                     )
-                state_dict[key] = tensor.to(dtype=self.dtype).to(device=val.device)
+                state_dict[key] = tensor.to(dtype=dtype).to(device=val.device)
 
         module.load_state_dict(state_dict)
 
@@ -512,7 +524,7 @@ class GPTModelImporter:
                             self.rules["k_layernorm"](attention.k_layernorm, layer_id)
                         self.rules["linear_qkv"](attention.linear_qkv, layer_id)
                         self.rules["linear_proj"](attention.linear_proj, layer_id)
-                        if hasattr(attention.core_attention, "softmax_offset"):
+                        if getattr(attention.core_attention, "softmax_offset", None) is not None:
                             self.rules["softmax_offset"](
                                 attention.core_attention.softmax_offset, layer_id
                             )
@@ -523,7 +535,9 @@ class GPTModelImporter:
                 if not isinstance(layer.mlp, IdentityOp):
                     if "MoE" in str(type(layer.mlp)):
                         layer_pbar.set_description("Importing MoE")
-                        self.rules["router"](layer.mlp.router, layer_id)
+                        self.rules["router"](
+                            layer.mlp.router, layer_id, dtype=self.moe_router_dtype
+                        )
                         if (
                             hasattr(layer.mlp, "shared_experts")
                             and layer.mlp.shared_experts is not None

@@ -53,6 +53,9 @@ def create_from_arg_obj(cls: type[T], arg_dict: dict, additional_config: dict | 
 
     quant_cfg = arg_dict.pop("quant_cfg", None)
     auto_quantize_bits = arg_dict.pop("auto_quantize_bits", None)
+    auto_quantize_method = arg_dict.pop("auto_quantize_method", "gradient")
+    auto_quantize_score_size = arg_dict.pop("auto_quantize_score_size", 128)
+    auto_quantize_checkpoint = arg_dict.pop("auto_quantize_checkpoint", None)
     calib_batch_size = arg_dict.pop("calib_batch_size", None)
     calib_size = arg_dict.pop("calib_size", 512)
     compress = arg_dict.pop("compress", False)
@@ -81,8 +84,11 @@ def create_from_arg_obj(cls: type[T], arg_dict: dict, additional_config: dict | 
             batch_size=calib_batch_size,
             calib_size=calib_size,
             auto_quantize_bits=auto_quantize_bits,
+            auto_quantize_method=auto_quantize_method,
+            auto_quantize_score_size=auto_quantize_score_size,
             test_generated=False,
             compress=compress,
+            auto_quantize_checkpoint=auto_quantize_checkpoint,
         )
 
     return model_obj
@@ -102,6 +108,12 @@ def setup_parser_with_modelopt_args():
         ),
     )
     parser.add_argument(
+        "--calib_batch_size", type=int, help="Batch size for quantization calibration"
+    )
+    parser.add_argument(
+        "--calib_size", type=int, help="Calibration size for quantization", default=512
+    )
+    parser.add_argument(
         "--auto_quantize_bits",
         type=float,
         help=(
@@ -110,10 +122,30 @@ def setup_parser_with_modelopt_args():
         ),
     )
     parser.add_argument(
-        "--calib_batch_size", type=int, help="Batch size for quantization calibration"
+        "--auto_quantize_method",
+        type=str,
+        default="gradient",
+        choices=["gradient", "kl_div"],
+        help=(
+            "Method for auto_quantize sensitivity analysis. 'gradient' uses gradient-based method "
+            "(requires labels in dataset). 'kl_div' uses KL divergence between original and "
+            "quantized model outputs (no labels required). Default: 'gradient'"
+        ),
     )
     parser.add_argument(
-        "--calib_size", type=int, help="Calibration size for quantization", default=512
+        "--auto_quantize_score_size",
+        type=int,
+        default=128,
+        help=(
+            "Number of samples to use for auto_quantize scoring. Most of auto_quantize time is spent on "
+            "sensitivity score estimation, so reducing this speeds it up while only minimally affecting "
+            "final model accuracy compared to lowering --calib_size (the number of samples used for calibration)."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_checkpoint",
+        type=str,
+        help=("Path to checkpoint file for saving/restoring auto_quantize search state. "),
     )
     parser.add_argument(
         "--compress",
@@ -139,6 +171,9 @@ if __name__ == "__main__":
         {
             "quant_cfg": args.quant_cfg,
             "auto_quantize_bits": args.auto_quantize_bits,
+            "auto_quantize_method": args.auto_quantize_method,
+            "auto_quantize_score_size": args.auto_quantize_score_size,
+            "auto_quantize_checkpoint": args.auto_quantize_checkpoint,
             "calib_batch_size": args.calib_batch_size,
             "calib_size": args.calib_size,
             "compress": args.compress,

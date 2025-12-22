@@ -18,8 +18,8 @@ import sys
 
 import pytest
 import torch
+from _test_utils.examples.models import PIXART_PATH, SXDL_PATH
 from _test_utils.examples.run_command import MODELOPT_ROOT
-from _test_utils.model import PIXART_PATH, SXDL_PATH
 from diffusers import DiffusionPipeline, PixArtAlphaPipeline
 
 sys.path.append(str(MODELOPT_ROOT / "examples/diffusers/cache_diffusion"))

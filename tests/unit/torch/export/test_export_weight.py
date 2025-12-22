@@ -16,7 +16,7 @@
 
 import pytest
 import torch
-from _test_utils.torch_export.export_utils import ToyModel, partial_fp8_config, partial_w4a8_config
+from _test_utils.torch.export.utils import ToyModel, partial_fp8_config, partial_w4a8_config
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight

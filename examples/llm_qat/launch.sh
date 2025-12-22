@@ -18,96 +18,37 @@ set -eo pipefail
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+# Helper function to parse a single argument value
+parse_value() {
+    if [[ "$1" != *=* ]]; then shift; fi
+    echo "${1#*=}"
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
-    --model*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      MODEL="${1#*=}"
-      ;;
-    --output_dir*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      OUTPUT_DIR="${1#*=}"
-      ;;
-    --dataset*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      DATASET="${1#*=}"
-      ;;
-    --train_size*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      TRAIN_SIZE="${1#*=}"
-      ;;
-    --eval_size*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      EVAL_SIZE="${1#*=}"
-      ;;
-    --num_epochs*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      NUM_EPOCHS="${1#*=}"
-      ;;
-    --max_steps*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      MAX_STEPS="${1#*=}"
-      ;;
-    --save_steps*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      SAVE_STEPS="${1#*=}"
-      ;;
-    --accum_steps*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      ACCUM_STEPS="${1#*=}"
-      ;;
-    --lr*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      LR="${1#*=}"
-      ;;
-    --quant_cfg*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      QUANT_CFG="${1#*=}"
-      ;;
-    --compress*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      COMPRESS="${1#*=}"
-      ;;
-    --calib_size*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      CALIB_SIZE="${1#*=}"
-      ;;
-    --train_bs*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      TRAIN_BS="${1#*=}"
-      ;;
-    --eval_bs*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      EVAL_BS="${1#*=}"
-      ;;
-    --do_train*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      DO_TRAIN="${1#*=}"
-      ;;
-    --lora*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      LORA="${1#*=}"
-      ;;
-    --teacher_model*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      TEACHER_MODEL="${1#*=}"
-      ;;
-    --distill*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      DISTILL="${1#*=}"
-      ;;
-    --fsdp_transformer_layer_cls_to_wrap*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP="${1#*=}"
-      ;;
-    --use_fsdp2*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      USE_FSDP2="${1#*=}"
-      ;;
-    --max_seq_length*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      MAX_SEQ_LENGTH="${1#*=}"
-      ;;
+    --model*)                                   MODEL=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --output_dir*)                              OUTPUT_DIR=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --dataset*)                                 DATASET=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --train_size*)                              TRAIN_SIZE=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --eval_size*)                               EVAL_SIZE=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --num_epochs*)                              NUM_EPOCHS=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --max_steps*)                               MAX_STEPS=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --save_steps*)                              SAVE_STEPS=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --accum_steps*)                             ACCUM_STEPS=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --lr*)                                      LR=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --quant_cfg*)                               QUANT_CFG=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --compress*)                                COMPRESS=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --calib_size*)                              CALIB_SIZE=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --train_bs*)                                TRAIN_BS=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --eval_bs*)                                 EVAL_BS=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --do_train*)                                DO_TRAIN=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --lora*)                                    LORA=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --teacher_model*)                           TEACHER_MODEL=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --distill*)                                 DISTILL=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --fsdp_transformer_layer_cls_to_wrap*)      FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --max_seq_length*)                          MAX_SEQ_LENGTH=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --backend*)                                 BACKEND=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --use_fsdp2*)                               USE_FSDP2=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
     *)
       >&2 printf "Error: Invalid argument ${1#*=}\n"
       exit 1
@@ -142,6 +83,7 @@ COMPRESS=${COMPRESS:-"False"}
 DISTILL=${DISTILL:-"False"}
 TEACHER_MODEL=${TEACHER_MODEL:-$MODEL}
 FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP=${FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP:-"LlamaDecoderLayer"}
+BACKEND=${BACKEND:-"fsdp1"}
 
 if [ -z $QUANT_CFG ]; then
   QUANT_ARGS=""
@@ -154,30 +96,54 @@ if [ ! -z $MAX_STEPS ]; then
   OPTIONAL_ARGS="$OPTIONAL_ARGS --max_steps $MAX_STEPS"
 fi
 
-CONFIG_FILE="fsdp1.yaml"
-FSDP_ARGS="--fsdp_transformer_layer_cls_to_wrap $FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP"
-GRADIENT_CHECKPOINTING_ARGS="--gradient_checkpointing True"
-
+# Set backend based on --backend parameter, with backward compatibility for --use_fsdp2
 if [[ "${USE_FSDP2,,}" == "true" ]]; then
-  echo "Using FSDP2 instead of FSDP1. FSDP2 is not mature yet! Please use it with latest torch and transformers."
-  CONFIG_FILE="fsdp2.yaml"
-  GRADIENT_CHECKPOINTING_ARGS=""
+  echo "Warning: --use_fsdp2 is deprecated. Use --backend=fsdp2 instead."
+  BACKEND="fsdp2"
 fi
 
+# if compress is true, set backend to ddp
+if [[ "${COMPRESS,,}" == "true" ]]; then
+  BACKEND="ddp"
+fi
+
+# Configure backend-specific settings
+GRADIENT_CHECKPOINTING_ARGS=""
+case "${BACKEND,,}" in
+  "fsdp1"|"fsdp")
+    CONFIG_FILE="fsdp1.yaml"
+    FSDP_ARGS="--fsdp_transformer_layer_cls_to_wrap $FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP"
+    ;;
+  "fsdp2")
+    echo "Using FSDP2 instead of FSDP1. FSDP2 is not mature yet! Please use it with latest torch and transformers."
+    CONFIG_FILE="fsdp2.yaml"
+    FSDP_ARGS="--fsdp_transformer_layer_cls_to_wrap $FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP"
+    ;;
+  "ddp")
+    CONFIG_FILE="ddp.yaml"
+    FSDP_ARGS=""
+    GRADIENT_CHECKPOINTING_ARGS="--gradient_checkpointing True"
+    ;;
+  "deepspeed")
+    CONFIG_FILE="deepspeed.yaml"
+    FSDP_ARGS=""
+    GRADIENT_CHECKPOINTING_ARGS="--gradient_checkpointing True"
+    ;;
+  *)
+    echo "Error: Invalid backend '$BACKEND'. Supported backends: fsdp1, fsdp2, ddp, deepspeed"
+    exit 1
+    ;;
+esac
+
+# TODO: Remove this after simple distillation is supported
 DISTILLATION_ARGS=""
 if [[ "${DISTILL,,}" == "true" ]]; then
   DISTILLATION_ARGS="--distill $DISTILL --teacher_model $TEACHER_MODEL"
-  # Distillation does not work with memory efficient loading
-  FSDP_ARGS="$FSDP_ARGS --fsdp_cpu_ram_efficient_loading False"
+  # Distillation does not work with memory efficient loading for FSDP
+  if [[ "${BACKEND,,}" == "fsdp1" || "${BACKEND,,}" == "fsdp2" ]]; then
+    FSDP_ARGS="$FSDP_ARGS --fsdp_cpu_ram_efficient_loading False"
+  fi
 fi
-
-# real quantization does not work with FSDP, only works with FSDP2
-if [[ "${COMPRESS,,}" == "true" && "${USE_FSDP2,,}" != "true" ]]; then
-  echo "Compression is not supported with FSDP. Disabling FSDP and using DDP."
-  FSDP_ARGS=""
-  CONFIG_FILE="ddp.yaml"
-fi
-
 
 CMD="accelerate launch --config-file accelerate_config/$CONFIG_FILE $FSDP_ARGS \
     main.py \
@@ -209,10 +175,9 @@ CMD="accelerate launch --config-file accelerate_config/$CONFIG_FILE $FSDP_ARGS \
     --report_to tensorboard \
     --lora $LORA \
     --compress $COMPRESS \
-    $QUANT_ARGS $OPTIONAL_ARGS $GRADIENT_CHECKPOINTING_ARGS $DISTILLATION_ARGS
+      $GRADIENT_CHECKPOINTING_ARGS $QUANT_ARGS $OPTIONAL_ARGS $DISTILLATION_ARGS
 "
 
 start_time=$(date +%s)
 sh -c "$CMD"
 echo "Total time taken: $(( $(date +%s) - $start_time )) seconds"
-python convert_sharded_ckpt.py --hf_model_path $MODEL --sharded_ckpt_path $OUTPUT_DIR --output_path $OUTPUT_DIR

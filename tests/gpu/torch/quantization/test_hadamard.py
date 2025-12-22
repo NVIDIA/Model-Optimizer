@@ -20,7 +20,7 @@ import torch.nn as nn
 
 pytest.importorskip("fast_hadamard_transform")
 
-from _test_utils.torch_quantization.models import SDPAAttention
+from _test_utils.torch.quantization.models import SDPAAttention
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.conversion import (

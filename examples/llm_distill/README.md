@@ -11,24 +11,34 @@ This section focuses on demonstrating how to apply Model Optimizer to perform kn
 | **Section** | **Description** | **Link** | **Docs** |
 | :------------: | :------------: | :------------: | :------------: |
 | Pre-Requisites | Required & optional packages to use this technique | \[[Link](#pre-requisites)\] | |
-| Getting Started | Learn how to optimize your models using distillation to produce more intellegant smaller models | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/4_distillation.html)\] |
+| Getting Started | Learn how to optimize your models using distillation to produce more intellegant smaller models | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/4_distillation.html)\] |
 | Support Matrix | View the support matrix to see compatibility and feature availability across different models | \[[Link](#support-matrix)\] | |
-| Distillation with NeMo | Learn how to distill your models with NeMo Framework | \[[Link](#knowledge-distillation-kd-for-nvidia-nemo-models)\] | \[[docs](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/4_distillation.html)\] |
-| Distillation with Huggingface | Learn how to distill your models with Hugging Face | \[[Link](#knowledge-distillation-kd-for-huggingface-models)\] | \[[docs](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/4_distillation.html)\] |
+| Distillation with Megatron-LM | Learn how to distill your models with Megatron-LM Framework | \[[Link](#knowledge-distillation-kd-in-nvidia-megatron-lm-framework)\] | |
+| Distillation with NeMo | Learn how to distill your models with NeMo Framework | \[[Link](#knowledge-distillation-kd-in-nvidia-nemo-framework)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/4_distillation.html)\] |
+| Distillation with Huggingface | Learn how to distill your models with Hugging Face | \[[Link](#knowledge-distillation-kd-for-huggingface-models)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/4_distillation.html)\] |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] | |
+| NeMo Prune + Distill Simplified Flow | Example script demonstrating end-to-end pruning plus distillation in NeMo | \[[Link](../nemo_run/prune_distill/README.md)\] | |
 
 </div>
 
 ## Pre-Requisites
 
+### Docker
+
+For Hugging Face models, please use the PyTorch docker image (e.g., `nvcr.io/nvidia/pytorch:25.06-py3`).
+For NeMo models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:25.09`) which has all the dependencies installed.
+Visit our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html) for more information.
+
+Also follow the installation steps below to upgrade to the latest version of Model Optimizer and install example-specific dependencies.
+
+### Local Installation
+
 For Hugging Face models, install Model Optimizer with `hf` dependencies using `pip` from [PyPI](https://pypi.org/project/nvidia-modelopt/) and install the requirements for the example:
 
 ```bash
-pip install nvidia-modelopt[hf]
+pip install -U nvidia-modelopt[hf]
 pip install -r requirements.txt
 ```
-
-For NeMo models, use the NeMo container `nvcr.io/nvidia/nemo:25.07` or later which has all the dependencies installed.
 
 ## Getting Started
 
@@ -39,13 +49,9 @@ First obtain both a pretrained model to act as the teacher and a (usually smalle
 ```python
 from transformers import AutoModelForCausalLM
 
-# Define student
-student_model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.1-8B-Instruct")
-
-# Define callable which returns teacher
-def teacher_factory():
-    teacher_model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.1-70B-Instruct")
-    return teacher_model
+# Define student & teacher
+student_model = AutoModelForCausalLM.from_pretrained("student-model-id-or-path")
+teacher_model = AutoModelForCausalLM.from_pretrained("teacher-model-id-or-path")
 ```
 
 ### Set up the meta model
@@ -58,7 +64,7 @@ Please see an example Distillation setup below. This example assumes the outputs
 import modelopt.torch.distill as mtd
 
 distillation_config = {
-    "teacher_model": teacher_factory,  # model initializer
+    "teacher_model": teacher_model,
     "criterion": mtd.LogitsDistillationLoss(),  # callable receiving student and teacher outputs, in order
     "loss_balancer": mtd.StaticLossBalancer(),  # combines multiple losses; omit if only one distillation loss used
 }
@@ -66,9 +72,9 @@ distillation_config = {
 distillation_model = mtd.convert(student_model, mode=[("kd_loss", distillation_config)])
 ```
 
-The `teacher_model` can be either a callable which returns an `nn.Module` or a tuple of `(model_cls, args, kwargs)`. The `criterion` is the distillation loss used between student and teacher tensors. The `loss_balancer` determines how the original and distillation losses are combined (if needed).
+The `teacher_model` can be either a `nn.Module`, a callable which returns an `nn.Module`, or a tuple of `(model_cls, args, kwargs)`. The `criterion` is the distillation loss used between student and teacher tensors. The `loss_balancer` determines how the original and distillation losses are combined (if needed).
 
-See [Distillation](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/4_distillation.html) for more info.
+See [Distillation](https://nvidia.github.io/Model-Optimizer/guides/4_distillation.html) for more info.
 
 ### Distill during training
 
@@ -132,71 +138,48 @@ Loss balancers:
 | Gemma 2 | gemma | ✅ |
 | Gemma 3 | gemma | ✅ |
 | Phi 3 | phi | ✅ |
-| Qwen 2 | phi | ✅ |
-| Qwen 3 | phi | ✅ |
+| Qwen 2 | qwen2 | ✅ |
+| Qwen 3 | qwen3 | ✅ |
 | Mamba | mamba | ✅ |
 
-## Knowledge Distillation (KD) for NVIDIA NeMo Models
+## Knowledge Distillation (KD) in NVIDIA Megatron-LM Framework
 
-Checkout the stand-alone distillation script in the [NVIDIA NeMo repository](https://docs.nvidia.com/nemo-framework/user-guide/latest/model-optimization/distillation/distillation.html).
+Checkout the Knowledge Distillation example in the [Megatron-LM repository](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt).
 
-You can also look at the tutorial notebooks [here](https://github.com/NVIDIA-NeMo/NeMo/tree/main/tutorials/llm/llama/pruning-distillation) which showcase the usage of Minitron pruning followed by distillation for Llama 3.1 8B step-by-step in NeMo framework.
+## Knowledge Distillation (KD) in NVIDIA NeMo Framework
+
+Checkout the stand-alone distillation script in the [NeMo documentation](https://docs.nvidia.com/nemo-framework/user-guide/latest/model-optimization/distillation/distillation.html).
+
+You can also look at the NeMo tutorial notebooks [here](https://github.com/NVIDIA-NeMo/NeMo/tree/main/tutorials/llm/qwen/pruning-distillation) which showcase the usage of Minitron pruning followed by distillation for Qwen 3 8B step-by-step in NeMo framework. Hugging Face models can also be converted to NeMo format and used subsequently as shown in the tutorial.
 
 ## Knowledge Distillation (KD) for HuggingFace Models
 
-In this e2e example we finetune Llama-2 models on the [OpenOrca](https://huggingface.co/datasets/Open-Orca/OpenOrca)
-question-answer dataset as a minimal example to demonstrate a simple way of integrating Model Optimizer's KD feature.
+In this e2e example we finetune Llama-3.2 models on the [smol-smoltalk-Interaction-SFT](https://huggingface.co/datasets/ReactiveAI/smol-smoltalk-Interaction-SFT)
+dataset as a minimal example to demonstrate a simple way of integrating Model Optimizer's KD feature.
 
-First we do supervised finetuning (SFT) of a Llama-2-7b on OpenOrca dataset as the teacher, then distill it into
-a 1B-parameter model.
-
-Keep in mind the training loss of the distillation run is not directly comparable to the training loss of the teacher run.
+We replace normal supervised finetuning (SFT) of a Llama-3.2-1B base model by distilling information from Llama-3.2-3B-Instruct which has already been instruction-finetuned.
 
 > [!NOTE]
 > We can fit the following in memory using [FSDP](https://huggingface.co/docs/accelerate/en/usage_guides/fsdp) enabled on 8x RTX 6000 (total ~400GB VRAM)
 
-### Train teacher
-
 ```bash
-accelerate launch --multi_gpu --mixed_precision bf16  main.py \
-    --single_model \
-    --teacher_name_or_path 'meta-llama/Llama-2-7b-hf' \
-    --output_dir ./llama2-7b-sft \
-    --logging_steps 5 \
-    --max_steps 400 \
-    --max_seq_length 2048 \
-    --per_device_train_batch_size 1 \
-    --per_device_eval_batch_size 4 \
-    --gradient_checkpointing True \
-    --fsdp 'full_shard auto_wrap' \
-    --fsdp_transformer_layer_cls_to_wrap LlamaDecoderLayer
-```
-
-### Distill teacher into student
-
-```bash
-accelerate launch --multi_gpu --mixed_precision bf16  main.py \
-    --teacher_name_or_path ./llama2-7b-sft \
-    --student_name_or_path 'TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T' \
-    --output_dir ./llama2-distill \
-    --logging_steps 5 \
+accelerate launch --config-file ./accelerate_config/fsdp2.yaml \
+    main.py \
+    --teacher_name_or_path 'meta-llama/Llama-3.2-3B-Instruct' \
+    --student_name_or_path 'meta-llama/Llama-3.2-1B' \
+    --output_dir ./llama3.2-distill \
+    --max_length 2048 \
+    --per_device_train_batch_size 4 \
+    --per_device_eval_batch_size 8 \
     --max_steps 200 \
-    --max_seq_length 2048 \
-    --per_device_train_batch_size 1 \
-    --per_device_eval_batch_size 4 \
-    --gradient_checkpointing False \
-    --fsdp 'full_shard auto_wrap' \
-    --fsdp_transformer_layer_cls_to_wrap LlamaDecoderLayer
+    --logging_steps 5
 ```
-
-> [!NOTE]
-> If you receive a `RuntimeError: unable to open file <...> in read-only mode: No such file or directory` simply re-run the command a second time.
 
 ## Resources
 
-- 📅 [Roadmap](https://github.com/NVIDIA/TensorRT-Model-Optimizer/issues/146)
-- 📖 [Documentation](https://nvidia.github.io/TensorRT-Model-Optimizer)
+- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/146)
+- 📖 [Documentation](https://nvidia.github.io/Model-Optimizer)
 - 🎯 [Benchmarks](../benchmark.md)
-- 💡 [Release Notes](https://nvidia.github.io/TensorRT-Model-Optimizer/reference/0_changelog.html)
-- 🐛 [File a bug](https://github.com/NVIDIA/TensorRT-Model-Optimizer/issues/new?template=1_bug_report.md)
-- ✨ [File a Feature Request](https://github.com/NVIDIA/TensorRT-Model-Optimizer/issues/new?template=2_feature_request.md)
+- 💡 [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)
+- 🐛 [File a bug](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=1_bug_report.md)
+- ✨ [File a Feature Request](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=2_feature_request.md)

@@ -18,15 +18,29 @@
 import contextlib
 import os
 import re
+import sys
+import threading
 import warnings
-from contextlib import contextmanager
+from collections.abc import Iterator
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from functools import wraps
 from inspect import signature
+from io import StringIO
 
 import tqdm
 
 from . import distributed as dist
 
-__all__ = ["DeprecatedError", "no_stdout", "num2hrb", "print_rank_0", "silence_matched_warnings"]
+__all__ = [
+    "DeprecatedError",
+    "atomic_print",
+    "capture_io",
+    "no_stdout",
+    "num2hrb",
+    "print_rank_0",
+    "silence_matched_warnings",
+    "warn_rank_0",
+]
 
 
 def num2hrb(num: float, suffix="") -> str:
@@ -93,6 +107,67 @@ def print_rank_0(*args, **kwargs):
     """Prints only on the master process."""
     if dist.is_master():
         print(*args, **kwargs, flush=True)
+
+
+def warn_rank_0(message, *args, **kwargs):
+    """Issues a warning only on the master process."""
+    if dist.is_master():
+        warnings.warn(message, *args, **kwargs)
+
+
+# Global reentrant lock for thread-safe printing (allows nested @atomic_print decorators)
+_print_lock = threading.RLock()
+
+
+def atomic_print(func):
+    """Decorator to prevent interleaved output in distributed/multi-threaded environments."""
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # Capture stdout to prevent interleaved printing
+        with _print_lock:
+            old_stdout = sys.stdout
+            sys.stdout = captured_output = StringIO()
+
+            try:
+                result = func(*args, **kwargs)
+                output = captured_output.getvalue()
+            finally:
+                # Always restore stdout, even if there's an exception
+                sys.stdout = old_stdout
+
+            # Print all at once atomically
+            if output:
+                print(output, end="", flush=True)
+
+            return result
+
+    return wrapper
+
+
+@contextmanager
+def capture_io(capture_stderr: bool = True) -> Iterator[StringIO]:
+    """Capture stdout and stderr within the invoked context.
+
+    Args:
+        capture_stderr (bool): Whether to capture stderr. Defaults to True.
+
+    Returns:
+        Iterator[StringIO]: An iterator that yields a StringIO object that contains the captured output.
+
+    Example::
+
+        with capture_io() as buf:
+            print("Hello, world!")
+        print(buf.getvalue())
+    """
+    buf = StringIO()
+    if capture_stderr:
+        with redirect_stdout(buf), redirect_stderr(buf):
+            yield buf
+    else:
+        with redirect_stdout(buf):
+            yield buf
 
 
 @contextlib.contextmanager

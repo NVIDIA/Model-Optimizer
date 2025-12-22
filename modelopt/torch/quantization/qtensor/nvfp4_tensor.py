@@ -81,7 +81,9 @@ class NVFP4QTensor(BaseQuantizedTensor):
         # Get per block amax
         per_block_amax = reduce_block_amax(input, block_sizes={-1: block_size}).float()
         # Get per-block-scale
-        per_block_scale = per_block_amax / (6.0 * weights_scaling_factor_2)
+        per_block_scale = per_block_amax / (
+            6.0 * weights_scaling_factor_2.to(per_block_amax.device)
+        )
         # Set all zero values in scale to 1.0
         per_block_scale[per_block_scale == 0] = 1.0
         # Convert to torch.float8_e4m3fn

@@ -1,0 +1,164 @@
+name: Example tests
+
+on:
+  push:
+    branches: ["pull-request/[0-9]+"]
+    # NOTE: paths cannot be used since push happens to copied PR and only latest commit to PR is used
+  schedule:
+    - cron: "0 0 * * *" # Nightly
+  workflow_dispatch: # On-demand
+
+# Cancel previous runs if new commit is pushed to the same PR
+concurrency:
+  group: ${{ github.workflow }}-${{ startsWith(github.ref, 'refs/heads/pull-request/') && github.ref || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  check-file-changes:
+    if: startsWith(github.ref, 'refs/heads/pull-request/')
+    runs-on: ubuntu-latest
+    outputs:
+      any_changed: ${{ steps.changed-tests.outputs.any_changed }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: get-pr-info
+        uses: nv-gha-runners/get-pr-info@main
+      # Get commit from main branch that is present in the PR to use as base for changed files
+      - id: calculate-merge-base
+        env:
+          PR_SHA: ${{ fromJSON(steps.get-pr-info.outputs.pr-info).head.sha }}
+          BASE_SHA: ${{ fromJSON(steps.get-pr-info.outputs.pr-info).base.sha }}
+        run: |
+          (echo -n "merge-base="; git merge-base "$BASE_SHA" "$PR_SHA") | tee --append "${GITHUB_OUTPUT}"
+      - name: Check for changes in test-relevant directories
+        id: changed-tests
+        uses: step-security/changed-files@v46.0.5
+        with:
+          base_sha: ${{ steps.calculate-merge-base.outputs.merge-base }}
+          sha: ${{ fromJSON(steps.get-pr-info.outputs.pr-info).head.sha }}
+          files: |
+            .github/workflows/example_tests.yml
+            examples/**
+            modelopt/**
+            setup.py
+            tests/examples/**
+          fail_on_initial_diff_error: true
+  wait-checks:
+    needs: [check-file-changes]
+    if: needs.check-file-changes.outputs.any_changed == 'true'
+    uses: ./.github/workflows/_wait_for_checks.yml
+    permissions:
+      checks: read
+    secrets: inherit
+    with:
+      match_pattern: "^DCO$|^linux$" # Wait for DCO and Unit tests / linux to pass
+      delay: 300s
+
+  ##### PyTorch Example Tests #####
+  torch-pr:
+    needs: [check-file-changes, wait-checks]
+    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [llm_distill, llm_qat, llm_sparsity, speculative_decoding]
+    uses: ./.github/workflows/_example_tests_runner.yml
+    secrets: inherit
+    with:
+      docker_image: "nvcr.io/nvidia/pytorch:25.06-py3"
+      example: ${{ matrix.example }}
+      pip_install_extras: "[hf,dev-test]"
+      runner: linux-amd64-gpu-l4-latest-1
+
+  torch-non-pr:
+    if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [llm_distill, llm_qat, llm_sparsity, speculative_decoding]
+    uses: ./.github/workflows/_example_tests_runner.yml
+    secrets: inherit
+    with:
+      docker_image: "nvcr.io/nvidia/pytorch:25.06-py3"
+      example: ${{ matrix.example }}
+      pip_install_extras: "[hf,dev-test]"
+      runner: linux-amd64-gpu-h100-latest-2
+
+  ##### TensorRT-LLM Example Tests #####
+  trtllm-pr:
+    needs: [check-file-changes, wait-checks]
+    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [llm_ptq]  # vlm_ptq temporarily disabled due to pipeline error
+    uses: ./.github/workflows/_example_tests_runner.yml
+    secrets: inherit
+    with:
+      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc4"
+      example: ${{ matrix.example }}
+      pip_install_extras: "[hf,dev-test]"
+      runner: linux-amd64-gpu-h100-latest-1
+
+  trtllm-non-pr:
+    if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [llm_autodeploy, llm_eval, llm_ptq, vlm_ptq]
+    uses: ./.github/workflows/_example_tests_runner.yml
+    secrets: inherit
+    with:
+      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc4"
+      example: ${{ matrix.example }}
+      pip_install_extras: "[hf,dev-test]"
+      runner: linux-amd64-gpu-h100-latest-2
+
+  ##### ONNX/TensorRT Example Tests #####
+  onnx-pr:
+    needs: [check-file-changes, wait-checks]
+    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [diffusers, torch_onnx]
+    uses: ./.github/workflows/_example_tests_runner.yml
+    secrets: inherit
+    with:
+      docker_image: "nvcr.io/nvidia/tensorrt:25.08-py3"
+      example: ${{ matrix.example }}
+      pip_install_extras: "[all,dev-test]"
+      runner: linux-amd64-gpu-l4-latest-1
+
+  onnx-non-pr:
+    if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [diffusers, torch_onnx]
+    uses: ./.github/workflows/_example_tests_runner.yml
+    secrets: inherit
+    with:
+      docker_image: "nvcr.io/nvidia/tensorrt:25.08-py3"
+      example: ${{ matrix.example }}
+      pip_install_extras: "[all,dev-test]"
+      runner: linux-amd64-gpu-l4-latest-1
+
+  ##### Required Check for PR #####
+  example-pr-required-check:
+    # Run even if example tests are skipped
+    if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
+    needs: [check-file-changes, torch-pr, trtllm-pr, onnx-pr]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Required GPU tests did not succeed
+        if: |
+          needs.check-file-changes.result != 'success' ||
+          (needs.check-file-changes.outputs.any_changed == 'true' && (
+            needs.torch-pr.result != 'success' ||
+            needs.trtllm-pr.result != 'success' ||
+            needs.onnx-pr.result != 'success'
+          ))
+        run: exit 1

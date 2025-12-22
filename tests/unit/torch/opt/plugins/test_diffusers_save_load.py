@@ -14,11 +14,11 @@
 # limitations under the License.
 
 import pytest
-from _test_utils.opt_utils import apply_mode_with_sampling
-from _test_utils.torch_model.diffusers_models import (
+from _test_utils.torch.diffusers_models import (
     create_tiny_unet_dir,
     df_modelopt_state_and_output_tester,
 )
+from _test_utils.torch.opt.utils import apply_mode_with_sampling
 from diffusers import UNet2DConditionModel
 
 

@@ -14,7 +14,7 @@
 # limitations under the License.
 import pytest
 import torch
-from _test_utils.torch_quantization.models import OneLayerLinear
+from _test_utils.torch.quantization.models import OneLayerLinear
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.backends.utils import fp4_compatible

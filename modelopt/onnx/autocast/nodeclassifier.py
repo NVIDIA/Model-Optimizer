@@ -93,6 +93,28 @@ class DisabledOpTypes(NodeRuleBase):
         return node.op_type in self.op_types_to_exclude
 
 
+class IncludeNodeNameRegexRule(DisabledNodeNameRegexRule):
+    """Rule for force-including nodes with matching names in low precision.
+
+    Inherits matching behavior from DisabledNodeNameRegexRule but overrides logging.
+    """
+
+    def _log_skipped(self, node, **kwargs):
+        # For include rules, a positive match means we will force-include the node in low precision
+        logger.info(f"Force-including node {node.name}: {self.__class__.__name__}")
+
+
+class IncludeOpTypes(DisabledOpTypes):
+    """Rule for force-including specific operation types in low precision.
+
+    Inherits matching behavior from DisabledOpTypes but overrides logging.
+    """
+
+    def _log_skipped(self, node, **kwargs):
+        # For include rules, a positive match means we will force-include the node in low precision
+        logger.info(f"Force-including node {node.name}: {self.__class__.__name__}")
+
+
 class InitializerRangeRule(NodeRuleBase):
     """Rule for keeping nodes with out-of-range initializers in high precision."""
 
@@ -332,10 +354,13 @@ class NodeClassifier:
         initializer_map: dict[str, onnx.TensorProto] | None = None,
         nodes_to_exclude: list[str] | None = None,
         op_types_to_exclude: list[str] | None = None,
+        nodes_to_include: list[str] | None = None,
+        op_types_to_include: list[str] | None = None,
         custom_rule: NodeRuleBase | None = None,
         data_max: float | None = 1000.0,
         init_max: float | None = np.finfo(np.float16).max,
         max_depth_of_reduction: int | None = None,
+        custom_ops_low_precision_nodes: list[str] | None = None,
     ):
         """Initialize the node classifier.
 
@@ -345,22 +370,28 @@ class NodeClassifier:
             initializer_map: Mapping from initializer names to their tensors.
             nodes_to_exclude: List of regex patterns for node names to keep in high precision.
             op_types_to_exclude: List of operation types to keep in high precision.
+            nodes_to_include: List of regex patterns for node names to force-include in low precision.
+            op_types_to_include: List of operation types to force-include in low precision.
             custom_rule: Optional custom classification rule.
             data_max: Maximum absolute value allowed for node I/O.
             init_max: Maximum absolute value allowed for initializers.
             max_depth_of_reduction: Maximum depth of reduction allowed in low precision.
+            custom_ops_low_precision_nodes: List of custom op node names to convert to low precision.
         """
         self.model = model
         self.node_to_init_map = node_to_init_map
         self.initializer_map = initializer_map
         self.nodes_to_exclude = nodes_to_exclude
         self.op_types_to_exclude = op_types_to_exclude
+        self.nodes_to_include = nodes_to_include
+        self.op_types_to_include = op_types_to_include
         self.custom_rule = custom_rule
         self.data_max = data_max
         self.init_max = init_max
         self.max_depth_of_reduction = max_depth_of_reduction
+        self.custom_ops_low_precision_nodes = custom_ops_low_precision_nodes
 
-    def _gen_block_node_rules(self, reference_data):
+    def _gen_exclude_node_rules(self, reference_data):
         """Generate list of rules for blocking nodes from precision conversion.
 
         Args:
@@ -393,6 +424,20 @@ class NodeClassifier:
             block_node_rules.append(self.custom_rule)
         return block_node_rules
 
+    def _gen_include_node_rules(self):
+        """Generate list of rules for force-including nodes in low precision.
+
+        Returns:
+            list[NodeRuleBase]: List of rules to apply.
+        """
+        include_node_rules: list[NodeRuleBase] = []
+        if self.nodes_to_include:
+            include_node_rules.append(IncludeNodeNameRegexRule(self.nodes_to_include))
+        if self.op_types_to_include:
+            include_node_rules.append(IncludeOpTypes(self.op_types_to_include))
+
+        return include_node_rules
+
     def run(self, ref_outputs_dict=None):
         """Run node classification.
 
@@ -402,12 +447,17 @@ class NodeClassifier:
         Returns:
             tuple: Lists of node names (low_precision_nodes, high_precision_nodes).
         """
-        block_node_rules = self._gen_block_node_rules(ref_outputs_dict)
-        low_precision_nodes = []
+        exclude_node_rules = self._gen_exclude_node_rules(ref_outputs_dict)
+        include_node_rules = self._gen_include_node_rules()
+        low_precision_nodes = self.custom_ops_low_precision_nodes or []
         high_precision_nodes = []
         for node in self.model.graph.node:
             # If any condition is met - node will be executed in high precision
-            if any(rule.check(node) for rule in block_node_rules):
+            if (
+                node.name not in low_precision_nodes
+                and any(rule.check(node) for rule in exclude_node_rules)
+                and not any(rule.check(node) for rule in include_node_rules)
+            ):
                 high_precision_nodes.append(node.name)
             else:
                 low_precision_nodes.append(node.name)

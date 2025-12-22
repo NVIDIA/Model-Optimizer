@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import pytest
-from _test_utils.torch_model.transformers_models import (
+from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
     get_tiny_qwen3,
     tf_output_tester,
@@ -23,15 +23,6 @@ from transformers import AutoModelForCausalLM
 
 import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
-
-
-def _teacher_factory(model_name_or_path, teacher_model_type):
-    if teacher_model_type == "qwen3":
-        return get_tiny_qwen3()
-    else:
-        return AutoModelForCausalLM.from_pretrained(
-            model_name_or_path,
-        )
 
 
 @pytest.mark.parametrize(
@@ -46,12 +37,13 @@ def test_nested_model_save_restore(tmp_path, model_cls, teacher_model_type):
 
     model_ref = model_cls.from_pretrained(tiny_llama_dir)
 
+    if teacher_model_type == "qwen3":
+        teacher_model = get_tiny_qwen3()
+    else:
+        teacher_model = AutoModelForCausalLM.from_pretrained(tiny_llama_dir)
+
     kd_config = {
-        "teacher_model": (
-            _teacher_factory,
-            (tiny_llama_dir, teacher_model_type),
-            {},
-        ),
+        "teacher_model": teacher_model,
         "criterion": mtd.LogitsDistillationLoss(),
         "expose_minimal_state_dict": False,
     }
@@ -61,6 +53,5 @@ def test_nested_model_save_restore(tmp_path, model_cls, teacher_model_type):
     model_test = model_cls.from_pretrained(tiny_llama_dir / "modelopt_model")
 
     tf_output_tester(model, model_test)
-    # since distill model contains loss function, we compare state of model and teacher model manually
-    assert mto.modelopt_state(model.model) == mto.modelopt_state(model_test.model)
-    assert mto.modelopt_state(model._teacher_model) == mto.modelopt_state(model_test._teacher_model)
+    # KD state is not saved and it should be empty
+    assert not mto.ModeloptStateManager(model_test).has_state

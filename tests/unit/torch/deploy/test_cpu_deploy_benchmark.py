@@ -14,8 +14,8 @@
 # limitations under the License.
 
 import pytest
-from _test_utils.torch_deploy.device_model import device_model_tester
-from _test_utils.torch_model.deploy_models import BaseDeployModel, get_deploy_models
+from _test_utils.torch.deploy.device_model import device_model_tester
+from _test_utils.torch.deploy.lib_test_models import BaseDeployModel, get_deploy_models
 
 deploy_benchmark = get_deploy_models()
 

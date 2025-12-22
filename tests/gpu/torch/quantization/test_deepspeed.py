@@ -28,7 +28,7 @@ pytest.importorskip("accelerate")
 import deepspeed
 import torch
 import torch.nn as nn
-from _test_utils.torch_dist.dist_utils import spawn_multiprocess_job, synchronize_state_dict
+from _test_utils.torch.distributed.utils import spawn_multiprocess_job, synchronize_state_dict
 from accelerate import Accelerator
 from accelerate.utils import DeepSpeedPlugin
 

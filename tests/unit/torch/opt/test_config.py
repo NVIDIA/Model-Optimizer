@@ -18,8 +18,8 @@ from contextlib import nullcontext
 import pytest
 import torch.nn as nn
 
-from modelopt.torch.sparsity.config import SparseMagnitudeConfig
-from modelopt.torch.sparsity.module import SparseModule, SpDMRegistry
+from modelopt.torch.sparsity.weight_sparsity.config import SparseMagnitudeConfig
+from modelopt.torch.sparsity.weight_sparsity.module import SparseModule, SpDMRegistry
 
 
 def test_rule_based_config():

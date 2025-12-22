@@ -1,17 +1,17 @@
-# Contributing to TensorRT Model Optimizer
+# Contributing to Model Optimizer
 
-Thanks for your interest in contributing to TensorRT Model Optimizer (ModelOpt)!
+Thanks for your interest in contributing to Model Optimizer (ModelOpt)!
 
 ## 🛠️ Setting up your environment
 
-Ensure that TensorRT Model Optimizer (ModelOpt) is installed in editable mode and that all `dev` optional requirements are installed:
+Ensure that Model Optimizer (ModelOpt) is installed in editable mode and that all `dev` optional requirements are installed:
 
 ```bash
 pip install -e ".[dev]"
 ```
 
 If you are working on features that require dependencies like TensorRT-LLM or Megatron-Core, consider using a docker container to simplify the setup process.
-See [docker README](./README.md#installation--docker) for more details.
+Visit our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html) for more information.
 
 ## 🧹 Code linting and formatting
 

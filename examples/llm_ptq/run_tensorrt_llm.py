@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""An example script to run the tensorrt_llm engine."""
+"""An example script to run the tensorrt_llm inference."""
 
 import argparse
 
@@ -28,7 +28,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tokenizer", type=str, default="")
     parser.add_argument("--max_output_len", type=int, default=100)
-    parser.add_argument("--engine_dir", type=str, default="/tmp/modelopt")
+    parser.add_argument("--checkpoint_dir", type=str)
     parser.add_argument(
         "--input_texts",
         type=str,
@@ -49,8 +49,8 @@ def parse_arguments():
 
 def run(args):
     if not args.tokenizer:
-        # Assume the tokenizer files are saved in the engine_dr.
-        args.tokenizer = args.engine_dir
+        # Assume the tokenizer files are saved in the checkpoint_dir.
+        args.tokenizer = args.checkpoint_dir
 
     if isinstance(args.tokenizer, PreTrainedTokenizerBase):
         tokenizer = args.tokenizer
@@ -66,7 +66,7 @@ def run(args):
 
     print("TensorRT-LLM example outputs:")
 
-    llm = LLM(args.engine_dir, tokenizer=tokenizer, max_batch_size=len(input_texts))
+    llm = LLM(args.checkpoint_dir, tokenizer=tokenizer, max_batch_size=len(input_texts))
     torch.cuda.cudart().cudaProfilerStart()
     outputs = llm.generate_text(input_texts, args.max_output_len)
     torch.cuda.cudart().cudaProfilerStop()
@@ -80,9 +80,8 @@ def run(args):
     outputs = llm.generate_tokens(input_texts, args.max_output_len)
     print(f"Generated tokens: {outputs}")
 
-    if llm.gather_context_logits:
-        logits = llm.generate_context_logits(input_texts)
-        print(f"Generated logits: {logits}")
+    logits = llm.generate_context_logits(input_texts)
+    print(f"Generated logits: {logits}")
 
 
 if __name__ == "__main__":

@@ -19,9 +19,6 @@ from modelopt.torch.utils import import_plugin
 
 from .huggingface import *
 
-with import_plugin("megatron core model config"):
-    from .megatron_model_config import *
-
 with import_plugin("megatron core dist checkpointing"):
     from .mcore_dist_checkpointing import *
 

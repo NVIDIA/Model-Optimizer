@@ -19,9 +19,8 @@
 # It prepares calibration data, quantizes the models at different precisions,
 # and evaluates all models in a specified folder on the ImageNet validation dataset.
 # It is recommended to execute this script inside the Model Optimization Toolkit TensorRT Docker container.
-# Please ensure that the ImageNet dataset is available in the container at the specified path.
 
-# Usage: ./test_onnx_ptq.sh /path/to/imagenet /path/to/models
+# Usage: ./test_onnx_ptq.sh [--no-clean] [--eval] [/path/to/models] [/path/to/timing_cache]
 
 set -exo pipefail
 
@@ -34,13 +33,42 @@ cuda_capability=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | hea
 
 
 pushd $public_example_dir
+
+# Parse arguments
+clean_mode=true
+eval_mode=false
+models_folder=""
+timing_cache_path=""
+
+for arg in "$@"; do
+    case $arg in
+        --no-clean)
+            clean_mode=false
+            shift
+            ;;
+        --eval)
+            eval_mode=true
+            shift
+            ;;
+        *)
+            if [ -z "$models_folder" ]; then
+                models_folder="$arg"
+            elif [ -z "$timing_cache_path" ]; then
+                timing_cache_path="$arg"
+            fi
+            shift
+            ;;
+    esac
+done
+
 export TQDM_DISABLE=1
 
 
-# Setting image and model paths (contains 8 models)
-imagenet_path=${1:-/data/imagenet/}
-models_folder=${2:-/models/onnx}
-calib_size=64
+# Setting model paths (contains 8 models)
+models_folder=${models_folder:-/models/onnx}
+timing_cache_path=${timing_cache_path:-/models/onnx/build/timing.cache}
+calib_size=1
+eval_size=100
 batch_size=1
 
 
@@ -88,8 +116,8 @@ declare -A timm_model_name=(
 latency_models=("efficientnet_b0" "efficientnet_b3" "efficientnet-lite4-11" "faster_vit_timm_opset13_simplified" "faster_vit_timm_opset17_simplified" "inception-v1-12" "inception-v2-9")
 
 # Create build directory to store all the results
+rm -rf build
 mkdir -p build
-
 
 # Iterate over each model path to create directories for all modes for each model
 for model_path in "${model_paths[@]}"; do
@@ -114,102 +142,83 @@ for model_path in "${model_paths[@]}"; do
     model_name=$(basename "$model_path" .onnx)
     model_dir=build/$model_name
 
-
-    echo "Quantizing model $model_name for all quantization modes in parallel"
-    pids=()
-    for i in "${!quant_modes[@]}"; do
-        quant_mode="${quant_modes[$i]}"
-        gpu_id=$((i % nvidia_gpu_count))
+    echo "Quantizing model $model_name for all quantization modes"
+    for quant_mode in "${quant_modes[@]}"; do
         if [ "$quant_mode" == "int8_iq" ]; then
             continue
         fi
 
-        echo "Starting quantization of $model_name for mode: $quant_mode on GPU $gpu_id"
-        CUDA_VISIBLE_DEVICES=$gpu_id python -m modelopt.onnx.quantization \
+        echo "Starting quantization of $model_name for mode: $quant_mode"
+        python -m modelopt.onnx.quantization \
             --onnx_path=$model_dir/fp16/model.onnx \
             --quantize_mode=$quant_mode \
             --calibration_data=$calib_data_path \
-            --output_path=$model_dir/$quant_mode/model.quant.onnx &
-        pids+=($!)
+            --output_path=$model_dir/$quant_mode/model.quant.onnx \
+            --calibration_eps=cuda
     done
-
-    # Wait for all quantization processes to complete for this model
-    error_occurred=false
-    for pid in "${pids[@]}"; do
-        if ! wait $pid; then
-            echo "ERROR: Quantization process (PID: $pid) failed"
-            error_occurred=true
-        fi
-    done
-    if [ "$error_occurred" = true ]; then
-        echo "Stopping execution due to quantization failure for model: $model_name"
-        exit 1
-    fi
 
     echo "Completed quantization of all modes for model: $model_name"
 done
 
 
 # Evaluate the quantized models for each mode
-for model_path in "${model_paths[@]}"; do
-    model_name=$(basename "$model_path" .onnx)
-    model_dir=build/$model_name
+if [ "$eval_mode" = true ]; then
+    for model_path in "${model_paths[@]}"; do
+        model_name=$(basename "$model_path" .onnx)
+        model_dir=build/$model_name
 
-    echo "Evaluating model $model_name for all quantization modes in parallel"
-    pids=()
-    for i in "${!all_modes[@]}"; do
-        quant_mode="${all_modes[$i]}"
-        gpu_id=$((i % nvidia_gpu_count))
+        echo "Evaluating model $model_name for all quantization modes"
+        for quant_mode in "${all_modes[@]}"; do
+            if [ "$quant_mode" == "fp16" ]; then
+                eval_model_path=$model_dir/fp16/model.onnx
+                engine_path=$model_dir/fp16/model.engine
+                precision="fp16"
+            elif [ "$quant_mode" == "int8_iq" ]; then
+                eval_model_path=$model_dir/fp16/model.onnx
+                engine_path=$model_dir/int8_iq/model.engine
+                precision="best"
+            else
+                eval_model_path=$model_dir/$quant_mode/model.quant.onnx
+                engine_path=$model_dir/$quant_mode/model.quant.engine
+                precision="stronglyTyped"
+            fi
 
-        if [ "$quant_mode" == "fp16" ]; then
-            eval_model_path=$model_dir/fp16/model.onnx
-            precision="fp16"
-        elif [ "$quant_mode" == "int8_iq" ]; then
-            eval_model_path=$model_dir/fp16/model.onnx
-            precision="best"
-        else
-            eval_model_path=$model_dir/$quant_mode/model.quant.onnx
-            precision="stronglyTyped"
-        fi
+            echo "Starting evaluation of $model_name for mode: $quant_mode"
+            if [[ " ${latency_models[@]} " =~ " $model_name " ]]; then
+                python evaluate.py \
+                    --onnx_path=$eval_model_path \
+                    --engine_path=$engine_path \
+                    --model_name="${timm_model_name[$model_name]}" \
+                    --engine_precision=$precision \
+                    --results_path=$model_dir/$quant_mode/${model_name}_${quant_mode}.csv \
+                    --timing_cache_path=$timing_cache_path
+            else
+                python evaluate.py \
+                    --onnx_path=$eval_model_path \
+                    --engine_path=$engine_path \
+                    --eval_data_size=$eval_size \
+                    --batch_size $batch_size \
+                    --model_name="${timm_model_name[$model_name]}" \
+                    --engine_precision=$precision \
+                    --results_path=$model_dir/$quant_mode/${model_name}_${quant_mode}.csv \
+                    --timing_cache_path=$timing_cache_path
+            fi
+        done
 
-        echo "Starting evaluation of $model_name for mode: $quant_mode on GPU $gpu_id"
-        if [[ " ${latency_models[@]} " =~ " $model_name " ]]; then
-            CUDA_VISIBLE_DEVICES=$gpu_id python evaluate.py \
-                --onnx_path=$eval_model_path \
-                --model_name="${timm_model_name[$model_name]}" \
-                --engine_precision=$precision \
-                --results_path=$model_dir/$quant_mode/${model_name}_${quant_mode}.csv &
-        else
-            CUDA_VISIBLE_DEVICES=$gpu_id python evaluate.py \
-                --onnx_path=$eval_model_path \
-                --imagenet_path=$imagenet_path \
-                --eval_data_size=$calib_size \
-                --batch_size $batch_size \
-                --model_name="${timm_model_name[$model_name]}" \
-                --engine_precision=$precision \
-                --results_path=$model_dir/$quant_mode/${model_name}_${quant_mode}.csv &
-        fi
-        pids+=($!)
+        echo "Completed evaluation of all modes for model: $model_name"
     done
 
-    # Wait for all evaluation processes to complete for this model
-    error_occurred=false
-    for pid in "${pids[@]}"; do
-        if ! wait $pid; then
-            echo "ERROR: Evaluation process (PID: $pid) failed"
-            error_occurred=true
-        fi
-    done
-    if [ "$error_occurred" = true ]; then
-        echo "Stopping execution due to evaluation failure for model: $model_name"
-        exit 1
-    fi
+    python $test_utils_dir/aggregate_results.py --results_dir=build
+fi
 
-    echo "Completed evaluation of all modes for model: $model_name"
-done
+if [ "$clean_mode" = true ]; then
+    echo "Cleaning build artifacts..."
+    rm -rf build/
+    echo "Build artifacts cleaned successfully."
+fi
 
-python $test_utils_dir/aggregate_results.py --results_dir=build
 popd
 
 
-echo "Total wall time: $(($(date +%s) - start_time)) seconds"
+total_seconds=$(($(date +%s) - start_time))
+printf "Total wall time: %02d:%02d:%02d\n" $((total_seconds/3600)) $(((total_seconds%3600)/60)) $((total_seconds%60))

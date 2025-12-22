@@ -20,7 +20,6 @@ from typing import Any
 from torch import nn
 
 import modelopt.torch.nas as mtn
-from modelopt.torch.opt.conversion import apply_mode
 from modelopt.torch.opt.mode import ModeLike, _ModeRegistryCls
 from modelopt.torch.opt.searcher import ConstraintsDict, SearchConfig
 
@@ -199,8 +198,8 @@ def prune(
         search algorithm. The returned subnet is thus a reference to the same model instance as the
         input model.
     """
-    # apply prune mode(s) to model
-    model = apply_mode(model, mode, registry=PruneModeRegistry)
+    # apply prune mode(s) to model and convert it to DynamicModule
+    model = mtn.convert(model, mode, registry=PruneModeRegistry)
 
     # now run the search and return the result
     return mtn.search(

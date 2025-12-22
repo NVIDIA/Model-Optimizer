@@ -18,12 +18,12 @@ from functools import partial
 import pytest
 import torch
 import torch.nn as nn
-from _test_utils.torch_dist.dist_utils import spawn_multiprocess_job
-from _test_utils.torch_misc import set_seed
-from _test_utils.torch_quantization.models import RegularQuantModelForTP
-from _test_utils.torch_quantization.quantize_common import (
+from _test_utils.torch.distributed.utils import spawn_multiprocess_job
+from _test_utils.torch.misc import set_seed
+from _test_utils.torch.quantization.models import RegularQuantModelForTP
+from _test_utils.torch.quantization.quantize_common import (
     auto_quantize_helper,
-    tensor_parallel_test_helper,
+    data_tensor_context_parallel_test_helper,
 )
 
 import modelopt.torch.quantization as mtq
@@ -58,7 +58,11 @@ class ApexModel(nn.Module):
                 x = x[0]
         return x
 
-    def get_dummy_input(self):
+    def get_dummy_input(self, seed: int | None = None):
+        if seed is not None:
+            gen = torch.Generator()
+            gen.manual_seed(seed)
+            return torch.randn(1, 4, 32, generator=gen)
         return torch.randn(1, 4, 32)
 
 
@@ -106,8 +110,11 @@ def _test_tensor_parallel_helper(config, rank, size):
     model_parallel_cuda_manual_seed(SEED)
     model = ApexModel().cuda()
 
-    tensor_parallel_test_helper(
-        model, config, get_tensor_model_parallel_group(), get_data_parallel_group()
+    data_tensor_context_parallel_test_helper(
+        model,
+        config,
+        tp_group=get_tensor_model_parallel_group(),
+        dp_group=get_data_parallel_group(),
     )
 
 

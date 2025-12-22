@@ -57,14 +57,9 @@ def _new_save_pretrained_peft(self, save_directory, *args, **kwargs):
     # So we need to save the quantizer state_dict separately
 
     # TODO: Move this to modelopt.torch.quantization.plugins.peft
-    from modelopt.torch.quantization.nn import TensorQuantizer
+    from modelopt.torch.quantization.utils import get_quantizer_state_dict
 
-    # We should not call self/model.state_dict() here. HF Trainer calls model.save_pretrained() only from process 0
-    # With FSDP, model.state_dict() will hang if it is not called from all processes
-    quantizer_state_dict = {}
-    for name, module in self.named_modules():
-        if isinstance(module, TensorQuantizer):
-            quantizer_state_dict[get_unwrapped_name(name)] = module.state_dict()
+    quantizer_state_dict = get_quantizer_state_dict(self)
     if len(quantizer_state_dict) > 0:
         torch.save(quantizer_state_dict, _get_quantizer_state_save_path(save_directory))
     return outputs
@@ -95,7 +90,7 @@ def _new_load_adapter(self, model_id, adapter_name, *args, **kwargs):
         )
         for name, module in self.named_modules():
             if isinstance(module, TensorQuantizer):
-                module.load_state_dict(quantizer_state_dict[get_unwrapped_name(name)])
+                module.load_state_dict(quantizer_state_dict[get_unwrapped_name(name, self)])
 
     return outputs
 

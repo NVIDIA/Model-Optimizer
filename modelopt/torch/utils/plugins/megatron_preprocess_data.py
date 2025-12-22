@@ -31,11 +31,14 @@ megatron_preprocess_data(
 ```
 """
 
+import argparse
 import json
 import multiprocessing
 import sys
 from pathlib import Path
 
+import requests
+from datasets import load_dataset
 from megatron.core.datasets import indexed_dataset
 from transformers import AutoTokenizer
 
@@ -198,3 +201,92 @@ def megatron_preprocess_data(
         final_enc_len += num_tokens
 
     print(f">>> Total number of tokens: {final_enc_len}")
+
+
+def main():
+    """Sample main function to process large data for pretraining.
+
+    Example usage:
+
+    >>> python megatron_preprocess_data.py \
+            --dataset "nvidia/Nemotron-Pretraining-Dataset-sample" \
+            --tokenizer "meta-llama/Llama-3.2-1B-Instruct" \
+            --output_dir "./processed_data"
+    """
+    parser = argparse.ArgumentParser(prog="megatron_preprocess_data")
+    parser.add_argument("--input_path", type=str, default=None, help="Input path.")
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="nvidia/Nemotron-Pretraining-Dataset-sample",
+        help="Hugging Face Hub dataset name or path",
+    )
+    parser.add_argument("--subset", type=str, default=None, help="Hugging Face Hub dataset subset")
+    parser.add_argument("--split", type=str, default="train", help="Hugging Face Hub dataset split")
+    parser.add_argument(
+        "--output_dir", type=str, default="./processed_data", help="Output directory"
+    )
+    parser.add_argument("--tokenizer", type=str, required=True, help="Tokenizer name or path")
+    parser.add_argument("--json_keys", nargs="+", default=["text"], help="JSON keys to tokenize")
+    parser.add_argument("--append_eod", action="store_true", help="Append <eod> token")
+    parser.add_argument(
+        "--max_sequence_length", type=int, default=None, help="Maximum sequence length"
+    )
+    parser.add_argument("--workers", type=int, default=8, help="Number of worker processes")
+    parser.add_argument("--log_interval", type=int, default=1000, help="Log interval")
+    args = parser.parse_args()
+
+    if args.input_path is None:
+        args.input_path = []
+
+        try:
+            response = requests.get(
+                f"https://datasets-server.huggingface.co/splits?dataset={args.dataset}",
+                timeout=10,
+            )
+            response.raise_for_status()
+        except requests.RequestException as e:
+            print(f"Failed to fetch dataset splits for {args.dataset}: {e}")
+            return
+
+        for entry in response.json()["splits"]:
+            skip_processing = False
+            name = entry["dataset"]
+            subset = entry.get("config", None)
+            split = entry["split"]
+
+            if args.subset is not None and args.subset != subset:
+                skip_processing = True
+            if args.split is not None and args.split != split:
+                skip_processing = True
+
+            print(f"Loading dataset {name} with subset {subset} and split {split}")
+            dataset = load_dataset(name, subset, split=split)
+
+            for key in args.json_keys:
+                if key not in dataset.features:
+                    print(f"Key {key} not found in dataset features. Skipping...")
+                    skip_processing = True
+                    break
+
+            if skip_processing:
+                continue
+
+            json_file_path = args.output_dir + "/" + name + "_" + subset + "_" + split + ".jsonl"
+            dataset.to_json(json_file_path)
+            args.input_path += [json_file_path]
+
+    megatron_preprocess_data(
+        input_path=args.input_path,
+        output_dir=args.output_dir,
+        tokenizer_name_or_path=args.tokenizer,
+        json_keys=args.json_keys,
+        append_eod=args.append_eod,
+        max_sequence_length=args.max_sequence_length,
+        workers=args.workers,
+        log_interval=args.log_interval,
+    )
+
+
+if __name__ == "__main__":
+    main()

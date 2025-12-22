@@ -3,14 +3,13 @@ name: Unit tests
 
 on:
   pull_request:
-    branches: [main, release/*]
+    branches: [main, release/*, feature/*]
   push:
-    branches: [main, release/*]
+    branches: [main, release/*, feature/*]
     paths:
       - ".github/workflows/unit_tests.yml"
       - "modelopt/**"
       - "tests/unit/**"
-      - "pyproject.toml"
       - "setup.py"
       - "tox.ini"
   schedule:
@@ -29,18 +28,18 @@ jobs:
       checks: read
     secrets: inherit
     with:
-      match_pattern: '^DCO$'
+      match_pattern: "^DCO$"
   linux:
     needs: [check-dco]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Run unit tests
-        run: pip install tox && COV_ARGS="--cov" tox -e py312-torch28-tf_latest-unit
+        run: pip install tox && COV_ARGS="--cov" tox -e py312-torch29-tf_latest-unit
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
         with:
@@ -53,12 +52,12 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Run unit tests (without coverage)
-        run: pip install tox && tox -e py312-torch28-tf_latest-unit
+        run: pip install tox && tox -e py312-torch29-tf_latest-unit
   multi-py:
     if: github.event_name == 'pull_request'
     needs: [linux]
@@ -68,12 +67,12 @@ jobs:
       matrix:
         py: [10, 11]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.${{ matrix.py }}"
       - name: Run unit tests
-        run: pip install tox && tox -e py3${{ matrix.py }}-torch28-tf_latest-unit
+        run: pip install tox && tox -e py3${{ matrix.py }}-torch29-tf_latest-unit
   multi-torch:
     if: github.event_name == 'pull_request'
     needs: [linux]
@@ -81,10 +80,10 @@ jobs:
     timeout-minutes: 30
     strategy:
       matrix:
-        torch: [26, 27]
+        torch: [26, 27, 28]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Run unit tests
@@ -98,12 +97,12 @@ jobs:
       matrix:
         tf: [min]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Run unit tests
-        run: pip install tox && tox -e py312-torch28-tf_${{ matrix.tf }}-unit
+        run: pip install tox && tox -e py312-torch29-tf_${{ matrix.tf }}-unit
   partial-install:
     if: github.event_name == 'pull_request'
     needs: [linux]
@@ -113,15 +112,24 @@ jobs:
       matrix:
         test-env: [onnx, torch]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Run unit tests
         run: pip install tox && tox -e py312-partial-unit-${{ matrix.test-env }}
   unit-pr-required-check:
-    if: github.event_name == 'pull_request'
+    # Run even if some jobs are skipped
+    if: ${{ github.event_name == 'pull_request' && always() }}
     needs: [linux, windows, multi-py, multi-torch, multi-transformers, partial-install]
     runs-on: ubuntu-latest
     steps:
-      - run: echo "All PR unit test jobs completed"
+      - name: Required unit tests did not succeed
+        if: >-
+          ${{ needs.linux.result != 'success' ||
+          needs.windows.result != 'success' ||
+          needs.multi-py.result != 'success' ||
+          needs.multi-torch.result != 'success' ||
+          needs.multi-transformers.result != 'success' ||
+          needs.partial-install.result != 'success' }}
+        run: exit 1

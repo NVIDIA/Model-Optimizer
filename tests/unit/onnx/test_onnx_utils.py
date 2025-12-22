@@ -18,7 +18,7 @@ import os
 import numpy as np
 import onnx
 import pytest
-from _test_utils.torch_model.vision_models import get_tiny_resnet_and_input
+from _test_utils.torch.vision_models import get_tiny_resnet_and_input
 from onnx.helper import (
     make_graph,
     make_model,
@@ -28,6 +28,7 @@ from onnx.helper import (
     make_tensor_value_info,
 )
 
+from modelopt.onnx.trt_utils import load_onnx_model
 from modelopt.onnx.utils import (
     get_input_names_from_bytes,
     get_output_names_from_bytes,
@@ -37,7 +38,7 @@ from modelopt.onnx.utils import (
     save_onnx_bytes_to_dir,
     validate_onnx,
 )
-from modelopt.torch._deploy.utils import get_onnx_bytes
+from modelopt.torch._deploy.utils import OnnxBytes, get_onnx_bytes_and_metadata
 
 
 @pytest.mark.parametrize(
@@ -102,20 +103,24 @@ def test_random_onnx_weights():
     model, args, kwargs = get_tiny_resnet_and_input()
     assert not kwargs
 
-    onnx_bytes = get_onnx_bytes(model, args)
-    original_avg_var_dict = _get_avg_var_of_weights(onnx.load_from_string(onnx_bytes))
-    original_model_size = len(onnx_bytes)
+    onnx_bytes, _ = get_onnx_bytes_and_metadata(model, args)
+    onnx_bytes_obj = OnnxBytes.from_bytes(onnx_bytes)
+    model_bytes = onnx_bytes_obj.get_onnx_model_file_bytes()
+    model = onnx.load_from_string(model_bytes)
 
-    onnx_bytes = remove_weights_data(onnx_bytes)
+    original_avg_var_dict = _get_avg_var_of_weights(model)
+    original_model_size = len(model_bytes)
+
+    onnx_model_wo_weights = remove_weights_data(model_bytes)
     # Removed model weights should be greater than 18 MB
-    assert original_model_size - len(onnx_bytes) > 18e6
+    assert original_model_size - len(onnx_model_wo_weights) > 18e6
 
     # After assigning random weights, model size should be slightly greater than the the original
     # size due to some extra metadata
-    onnx_bytes = randomize_weights_onnx_bytes(onnx_bytes)
-    assert len(onnx_bytes) > original_model_size
+    onnx_model_randomized = randomize_weights_onnx_bytes(onnx_model_wo_weights)
+    assert len(onnx_model_randomized) > original_model_size
 
-    randomized_avg_var_dict = _get_avg_var_of_weights(onnx.load_from_string(onnx_bytes))
+    randomized_avg_var_dict = _get_avg_var_of_weights(onnx.load_from_string(onnx_model_randomized))
     for key, value in original_avg_var_dict.items():
         assert abs(value - randomized_avg_var_dict[key]) < 0.1
 
@@ -124,12 +129,14 @@ def test_reproducible_random_weights():
     model, args, kwargs = get_tiny_resnet_and_input()
     assert not kwargs
 
-    original_onnx_bytes = get_onnx_bytes(model, args)
-    onnx_bytes_wo_weights = remove_weights_data(original_onnx_bytes)
+    onnx_bytes, _ = get_onnx_bytes_and_metadata(model, args)
+    onnx_bytes_obj = OnnxBytes.from_bytes(onnx_bytes)
+    model_bytes = onnx_bytes_obj.get_onnx_model_file_bytes()
+    model = onnx.load_from_string(model_bytes)
 
     # Check if the randomization produces the same weights
-    onnx_bytes_1 = randomize_weights_onnx_bytes(onnx_bytes_wo_weights)
-    onnx_bytes_2 = randomize_weights_onnx_bytes(onnx_bytes_wo_weights)
+    onnx_bytes_1 = randomize_weights_onnx_bytes(model_bytes)
+    onnx_bytes_2 = randomize_weights_onnx_bytes(model_bytes)
     assert onnx_bytes_1 == onnx_bytes_2
 
 
@@ -253,3 +260,72 @@ def test_remove_node_extra_training_outputs():
     value_info_names = [vi.name for vi in result_model.graph.value_info]
     assert "saved_mean" not in value_info_names
     assert "saved_inv_std" not in value_info_names
+
+
+def _make_matmul_relu_model(ir_version=12):
+    # Define your model inputs and outputs
+    input_names = ["input_0"]
+    output_names = ["output_0"]
+    input_shapes = [(1, 1024, 1024)]
+    output_shapes = [(1, 1024, 16)]
+
+    inputs = [
+        make_tensor_value_info(input_name, onnx.TensorProto.FLOAT, input_shape)
+        for input_name, input_shape in zip(input_names, input_shapes)
+    ]
+    outputs = [
+        make_tensor_value_info(output_name, onnx.TensorProto.FLOAT, output_shape)
+        for output_name, output_shape in zip(output_names, output_shapes)
+    ]
+
+    # Create the ONNX graph with the nodes
+    nodes = [
+        make_node(
+            op_type="MatMul",
+            inputs=["input_0", "weights_1"],
+            outputs=["matmul1_matmul/MatMul:0"],
+            name="matmul1_matmul/MatMul",
+        ),
+        make_node(
+            op_type="Relu",
+            inputs=["matmul1_matmul/MatMul:0"],
+            outputs=["output_0"],
+            name="relu1_relu/Relu",
+        ),
+    ]
+
+    # Create the ONNX initializers
+    initializers = [
+        make_tensor(
+            name="weights_1",
+            data_type=onnx.TensorProto.FLOAT,
+            dims=(1024, 16),
+            vals=np.random.uniform(low=0.5, high=1.0, size=1024 * 16),
+        ),
+    ]
+
+    # Create the ONNX graph with the nodes and initializers
+    graph = make_graph(
+        nodes, f"matmul_relu_ir_{ir_version}", inputs, outputs, initializer=initializers
+    )
+
+    # Create the ONNX model
+    model = make_model(graph)
+    model.opset_import[0].version = 13
+    model.ir_version = ir_version
+
+    # Check the ONNX model
+    model_inferred = onnx.shape_inference.infer_shapes(model)
+    onnx.checker.check_model(model_inferred)
+
+    return model_inferred
+
+
+def test_ir_version_support(tmp_path):
+    model = _make_matmul_relu_model(ir_version=12)
+    model_path = os.path.join(tmp_path, "test_matmul_relu.onnx")
+    onnx.save(model, model_path)
+    model_reload, _, _, _, _ = load_onnx_model(model_path, intermediate_generated_files=[])
+    assert model_reload.ir_version == 10, (
+        f"The maximum supported IR version is 10, but version {model_reload.ir_version} was detected."
+    )

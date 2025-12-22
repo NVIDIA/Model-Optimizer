@@ -7,10 +7,11 @@ Quantization Aware Training (QAT) helps to improve the model accuracy beyond pos
 | **Section** | **Description** | **Link** | **Docs** |
 | :------------: | :------------: | :------------: | :------------: |
 | Pre-Requisites | Required & optional packages to use this technique | \[[Link](#pre-requisites)\] | |
-| Getting Started | Learn how to optimize your models using QAT to reduce precision and improve model accuracy post quantization | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/1_quantization.html)\] |
+| Getting Started | Learn how to optimize your models using QAT to reduce precision and improve model accuracy post quantization | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Support Matrix | View the support matrix to see quantization compatibility and feature availability across different models | \[[Link](#support-matrix)\] | |
-| End to End QAT | Example scripts demonstrating quantization techniques for optimizing Hugging Face models | \[[Link](#end-to-end-qat-example)\] | \[[docs](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/1_quantization.html)\] |
-| End to End QAD | Example scripts demonstrating quantization aware distillation techniques for optimizing Hugging Face models | \[[Link](#end-to-end-qad-example)\] | \[[docs](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/1_quantization.html)\] |
+| End to End QAT | Example scripts demonstrating quantization techniques for optimizing Hugging Face models | \[[Link](#end-to-end-qat-example)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
+| End to End QAD | Example scripts demonstrating quantization aware distillation techniques for optimizing Hugging Face models | \[[Link](#end-to-end-qad-example)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
+| NeMo QAT/QAD Simplified Flow | Example script demonstrating end-to-end QAT/QAD in NeMo | \[[Link](../nemo_run/qat/README.md)\] | |
 | Evaluate Accuracy | Evaluating model accuracy after QAT/QAD (with fake quantization) | \[[Link](#testing-qat-model-with-llm-benchmarks-for-accuracy-evaluation)\] | |
 | Deployment | Deploying the model after QAT/QAD | \[[Link](#deployment)\] | |
 | QLoRA | Model training with reduced GPU memory | \[[Link](#end-to-end-qlora-with-real-quantization)\] | |
@@ -21,22 +22,13 @@ Quantization Aware Training (QAT) helps to improve the model accuracy beyond pos
 
 ## Pre-Requisites
 
-For Hugging Face models, install Model Optimizer with `hf` dependencies using `pip` from [PyPI](https://pypi.org/project/nvidia-modelopt/) and install the requirements for the example:
-
-```bash
-pip install nvidia-modelopt[hf]
-pip install -r requirements.txt
-```
-
-If you want to deploy the quantized model on TRT-LLM, you will also need to install the TRT-LLM dependencies as per the [TRT-LLM documentation](https://nvidia.github.io/TensorRT-LLM/quick-start-guide.html#installation). Alternatively you can use the ModelOpt docker image built from the [ModelOpt docker build step](../../docker/Dockerfile) which has all the dependencies including TRT-LLM installed.
-
-For NeMo models, use the NeMo container `nvcr.io/nvidia/nemo:25.04` or later which has all the dependencies including TRT-LLM installed.
+Please refer to the [llm_ptq/README.md](../llm_ptq/README.md#pre-requisites) for the pre-requisites.
 
 ## Getting Started
 
-In QAT, a model quantized using [mtq.quantize()](https://nvidia.github.io/TensorRT-Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.quantize) can be directly fine-tuned with the original training pipeline. During QAT, the scaling factors inside quantizers are frozen and the model weights are fine-tuned.
+In QAT, a model quantized using [mtq.quantize()](https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.quantize) can be directly fine-tuned with the original training pipeline. During QAT, the scaling factors inside quantizers are frozen and the model weights are fine-tuned.
 
-To learn more about the QAT feature, please refer to the [documentation](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/_pytorch_quantization.html#quantization-aware-training-qat).
+To learn more about the QAT feature, please refer to the [documentation](https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#quantization-aware-training-qat).
 
 Quantization aware distillation (QAD) can be used to further improve accuracy of the model using the original full precision model as a teacher model in cases where QAT is not enough.
 
@@ -50,7 +42,7 @@ The Llama3-8B fine-tuning and QAT below requires a minimum of 2 x 80GB GPUs per 
 
 #### QAT Example Workflow
 
-In QAT, a model quantized using [mtq.quantize()](https://nvidia.github.io/TensorRT-Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.quantize) can be directly fine-tuned with the original training pipeline. During QAT, the scaling factors inside quantizers are frozen and the model weights are fine-tuned.
+In QAT, a model quantized using [mtq.quantize()](https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.quantize) can be directly fine-tuned with the original training pipeline. During QAT, the scaling factors inside quantizers are frozen and the model weights are fine-tuned.
 
 Here is the recommended QAT workflow:
 
@@ -82,7 +74,6 @@ def forward_loop(model):
 
 
 # Quantize the model in-place; The model should be unwrapped from any distributed wrapper
-# The model may be wrapped in a DataParallel or DistributedDataParallel after `mtq.quantize`
 model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop)
 
 # Save the modelopt quantizer states
@@ -100,10 +91,10 @@ trainer.train()  # Train the quantized model (i.e, QAT)
 trainer.save_model()
 ```
 
-> **_NOTE:_** The example above uses [mto.modelopt_state](https://nvidia.github.io/TensorRT-Model-Optimizer/reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.modelopt_state) and [mto.restore_from_modelopt_state](https://nvidia.github.io/TensorRT-Model-Optimizer/reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.restore_from_modelopt_state) for saving and restoring of ModelOpt
-> modified model. ModelOpt provides additional methods/workflows for saving and restoring ModelOpt modified model. Please see [saving & restoring](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/2_save_load.html) to learn more.
+> **_NOTE:_** The example above uses [mto.modelopt_state](https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.modelopt_state) and [mto.restore_from_modelopt_state](https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.opt.conversion.html#modelopt.torch.opt.conversion.restore_from_modelopt_state) for saving and restoring of ModelOpt
+> modified model. ModelOpt provides additional methods/workflows for saving and restoring ModelOpt modified model. Please see [saving & restoring](https://nvidia.github.io/Model-Optimizer/guides/2_save_load.html) to learn more.
 
-> **_NOTE:_** ModelOpt provides accelerated quantization kernels using Triton that significantly speed up NVFP4 format QAT. For details, see the [installation guide](https://nvidia.github.io/TensorRT-Model-Optimizer/getting_started/_installation_for_Linux.html#accelerated-quantization-with-triton-kernels).
+> **_NOTE:_** ModelOpt provides accelerated quantization kernels using Triton that significantly speed up NVFP4 format QAT. For details, see the [installation guide](https://nvidia.github.io/Model-Optimizer/getting_started/_installation_for_Linux.html#accelerated-quantization-with-triton-kernels).
 
 A simple QAT training example can be found in [simple_qat_train.py](simple_qat_train.py). It can train the model using a single GPU on [Daring-Anteater](https://huggingface.co/datasets/nvidia/Daring-Anteater) dataset. To run:
 
@@ -178,7 +169,7 @@ This script supports the following models out of the box.
 
 ### Supported quantization configuration for QAT
 
-Current quantization configs can be found [here](https://github.com/NVIDIA/TensorRT-Model-Optimizer/blob/main/modelopt/torch/quantization/config.py).
+Current quantization configs can be found [here](https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt/torch/quantization/config.py).
 
 These are the recommended quantization configurations for QAT:
 
@@ -194,7 +185,7 @@ mtq.NVFP4_DEFAULT_CFG  # NVFP4 dynamic block weight & activation quantization
 mtq.MXFP8_DEFAULT_CFG  # MXFP8 per-tensor weight and activation quantization
 ```
 
-You can also create your own custom config using [this](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/_pytorch_quantization.html#custom-calibration-algorithm) guide.
+You can also create your own custom config using [this](https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#custom-calibration-algorithm) guide.
 
 ## End-to-end QAT Example
 
@@ -310,14 +301,12 @@ See more details on running LLM evaluation benchmarks [here](../llm_eval/README.
 
 ## Deployment
 
-The final model after QAT is similar in architecture to that of PTQ model. QAT model simply have updated weights as compared to the PTQ model. It can be deployed to TensorRT-LLM (TRTLLM) or to TensorRT just like a regular **ModelOpt** PTQ model if the quantization format is supported for deployment.
+The final model after QAT/QAD is similar in architecture to that of PTQ model. QAT model simply have updated weights as compared to the PTQ model. It can be deployed to TensorRT-LLM (TRTLLM)/TensorRT/vLLM/SGLang just like a regular **ModelOpt** PTQ model if the quantization format is supported for deployment.
 
-To run QAT model with TRTLLM, run:
+To export TRTLLM/vLLM/SGLang compatible checkpoint for the model after QAT (or QAD) model, run:
 
 ```sh
-cd ../llm_ptq
-
-./scripts/huggingface_example.sh --model ../llm_qat/llama3-qat --quant w4a8_awq
+python export.py --pyt_ckpt_path llama3-qat --export_path llama3-qat-deploy
 ```
 
 Note: The QAT checkpoint for `w4a8_awq` config can be created by using `--quant_cfg W4A8_AWQ_BETA_CFG` in [QAT example](#end-to-end-qat-example).
@@ -354,19 +343,36 @@ To perform QLoRA training, run:
    --lora True
 ```
 
-> **_NOTE:_** QLoRA is currently an experimental feature designed to reduce the memory footprint during training. Deployment functionality is not yet available.
+## QLoRA deployment
 
+After performing QLoRA training the final checkpoint can be exported for deployment with vLLM using the following command.
+
+```sh
+python export.py \
+   --pyt_ckpt_path llama3-fp4-qlora \
+   --export_path llama3-fp4-qlora-hf \
+
+```
+
+To deploy with vLLM, run the following command. For more details about QLoRA deployment using vLLM refer to the documentation [here](https://docs.vllm.ai/en/latest/features/lora.html).
+
+```sh
+vllm serve llama3-fp4-qlora-hf/base_model --enable-lora --lora-modules adapter=llama3-fp4-qlora-hf --port 8000 --tokenizer llama3-fp4-qlora-hf
+```
+
+> _Note: We currently do not support export option for QLoRA models generated using FSDP2._
+>
 ## Pre-Quantized Checkpoints
 
-- Ready-to-deploy checkpoints \[[🤗 Hugging Face - Nvidia TensorRT Model Optimizer Collection](https://huggingface.co/collections/nvidia/model-optimizer-66aa84f7966b3150262481a4)\]
+- Ready-to-deploy checkpoints \[[🤗 Hugging Face - Nvidia Model Optimizer Collection](https://huggingface.co/collections/nvidia/inference-optimized-checkpoints-with-model-optimizer)\]
 - Deployable on [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang)
 - More models coming soon!
 
 ## Resources
 
-- 📅 [Roadmap](https://github.com/NVIDIA/TensorRT-Model-Optimizer/issues/146)
-- 📖 [Documentation](https://nvidia.github.io/TensorRT-Model-Optimizer)
+- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/146)
+- 📖 [Documentation](https://nvidia.github.io/Model-Optimizer)
 - 🎯 [Benchmarks](../benchmark.md)
-- 💡 [Release Notes](https://nvidia.github.io/TensorRT-Model-Optimizer/reference/0_changelog.html)
-- 🐛 [File a bug](https://github.com/NVIDIA/TensorRT-Model-Optimizer/issues/new?template=1_bug_report.md)
-- ✨ [File a Feature Request](https://github.com/NVIDIA/TensorRT-Model-Optimizer/issues/new?template=2_feature_request.md)
+- 💡 [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)
+- 🐛 [File a bug](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=1_bug_report.md)
+- ✨ [File a Feature Request](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=2_feature_request.md)

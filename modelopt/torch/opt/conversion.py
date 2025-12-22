@@ -380,7 +380,7 @@ def apply_mode(
         return model.init_modellike() if isinstance(model, ModelLikeModule) else model
 
     # check if the model is in a wrapper
-    model = unwrap_model(model, raise_error=True)
+    model = unwrap_model(model, force_unwrap=True)
 
     # standardize mode to ModeConfigList
     mode_and_config = get_mode_config(mode)
@@ -476,11 +476,16 @@ def modelopt_state(model: nn.Module) -> dict[str, Any]:
     # update metadata of current mode as needed
     manager.update_last_state_before_save(model)
 
+    # filter out modes that should not be saved in the state
+    skip_idx = []
+    for i, (m, _, _) in enumerate(manager.modes_with_states()):
+        if not m.save_mode_in_state:
+            skip_idx.append(i)
+    state_dict = [state for i, state in enumerate(manager.state_dict()) if i not in skip_idx]
+
     # construct state dict and return it
     objs = {
-        "modelopt_state_dict": (
-            manager.state_dict()
-        ),  # empty state_dict is okay (saving regular models)
+        "modelopt_state_dict": state_dict,  # empty state_dict is okay (saving regular models)
         "modelopt_version": __version__,
     }
     return objs
@@ -493,10 +498,6 @@ def save(model: nn.Module, f: str | os.PathLike | BinaryIO, **kwargs) -> None:
         model: Any model.
         f: Target file location.
         **kwargs: additional args for ``torch.save()``.
-
-    .. note::
-
-        If model is a wrapper such as DistributedDataParallel, it will be unwrapped for saving.
     """
     # unwrap model
     model = unwrap_model(model, warn=True)
@@ -545,11 +546,6 @@ def restore_from_modelopt_state(model: ModelLike, modelopt_state: dict[str, Any]
     Returns:
         A modified model architecture based on the restored modifications with the unmodified
         weights as stored in the provided ``model`` argument.
-
-    .. note::
-
-        Note that wrappers such as DistributedDataParallel are `not` supported during the restore
-        process. Please wrap the model after the restore process.
     """
     # initialize ModelLikeModule if needed.
     model = model if isinstance(model, nn.Module) else ModelLikeModule(model)
@@ -590,12 +586,14 @@ def restore(model: ModelLike, f: str | os.PathLike | BinaryIO, **kwargs) -> nn.M
         The model with original weights and stored architecture.
 
     .. note::
-
         Note that wrappers such as DistributedDataParallel are `not` supported during the restore
         process. Please wrap the model after the restore process.
     """
     # initialize ModelLikeModule if needed.
     model = model if isinstance(model, nn.Module) else ModelLikeModule(model)
+
+    # check if the model is in a wrapper; we dont support restoring with wrappers
+    model = unwrap_model(model, raise_error=True)
 
     # load checkpoint
     kwargs.setdefault("map_location", "cpu")

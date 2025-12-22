@@ -18,7 +18,7 @@ from collections import OrderedDict
 import pytest
 import torch
 import torchvision
-from _test_utils.torch_model.vision_models import TinyMobileNetFeatures
+from _test_utils.torch.vision_models import TinyMobileNetFeatures
 from torch import nn
 from torchvision.models.mobilenetv2 import InvertedResidual
 from torchvision.models.resnet import BasicBlock, Bottleneck

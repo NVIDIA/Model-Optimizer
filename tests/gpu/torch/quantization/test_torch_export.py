@@ -18,7 +18,7 @@
 import pytest
 import torch
 import torch.nn.functional as F
-from _test_utils.torch_misc import set_seed
+from _test_utils.torch.misc import set_seed
 from torch import nn
 
 import modelopt.torch.quantization as mtq

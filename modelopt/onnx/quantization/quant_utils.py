@@ -15,6 +15,7 @@
 
 """Provides some basic utilities that can be used in quantize() methods."""
 
+import math
 from collections.abc import Sequence
 
 import numpy as np
@@ -23,6 +24,9 @@ INT4_MIN = -8
 INT4_MAX = 7
 UINT4_MIN = 0
 UINT4_MAX = 15
+# following min-value for clip is taken from AutoAWQ where zero-point based quantization is
+# supported and working
+CLIP_MIN = 1e-5
 
 
 def pack_float32_to_4bit_optimized(array: np.ndarray | Sequence, signed: bool) -> np.ndarray:
@@ -151,6 +155,278 @@ def get_weights_scaling_factor(
     zero_mask = per_block_scale == 0
     q_per_block_scale[zero_mask] = 1.0
     return q_per_block_scale.astype(np.float32)
+
+
+def update_block_size(
+    block_size: int,
+    layer_info: dict[str, dict] | None = None,
+    name: str | None = None,
+    quantize_axis: int = 0,
+    w: np.ndarray = None,
+) -> int:
+    """Update the block size for quantization.
+
+    Args:
+        num_bits (int): Number of bits for quantization.
+        layer_info (dict[str, dict] | None): Optional dictionary mapping tensor names
+            to layer configuration dict.
+        name (str | None): Name of the tensor.
+        block_size (int): Current block size.
+        quantize_axis (int): Axis along which to quantize.
+        w (np.ndarray): Weight tensor to be quantized.
+
+    Returns:
+        int: Updated block size.
+    """
+    if layer_info and name in layer_info:
+        block_size = layer_info[name]["block_size"]
+        quantize_axis = layer_info[name]["axis"]
+    if block_size is not None and block_size == -1:
+        return w.shape[quantize_axis]
+    return block_size
+
+
+def get_num_bits(layer_info: dict[str, dict] | None = None, name: str | None = None) -> int:
+    """Determine the layer configuration for quantization from layer_info.
+
+    Args:
+        layer_info (dict[str, dict] | None): Optional dictionary mapping tensor names
+            to layer configuration dict.
+        name (str | None): Name of the tensor.
+
+    Returns:
+        int: Number of bits to use for quantization. Defaults to 4 if not specified.
+    """
+    if layer_info and name in layer_info:
+        num_bits = layer_info[name]["precision"]
+    else:
+        num_bits = 4
+    return num_bits
+
+
+def get_layer_block_size(
+    layer_info: dict[str, dict] | None = None,
+    name: str | None = None,
+    default_block_size: int | None = None,
+) -> int | None:
+    """Get the block size for a specific layer from layer_info.
+
+    Args:
+        layer_info (dict[str, dict] | None): Optional dictionary mapping tensor names to layer configuration.
+        name (str | None): Name of the tensor.
+        default_block_size (int | None): Default block size if not specified. Defaults to None.
+
+    Returns:
+        int: Block size to use for quantization.
+    """
+    if layer_info and name in layer_info:
+        return layer_info[name].get("block_size", default_block_size)
+    return default_block_size
+
+
+def get_layer_axis(
+    layer_info: dict[str, dict] | None = None,
+    name: str | None = None,
+    default_axis: int | None = None,
+) -> int | None:
+    """Get the quantization axis for a specific layer from layer_info.
+
+    Args:
+        layer_info (dict[str, dict] | None): Optional dictionary mapping tensor names to layer configuration.
+        name (str | None): Name of the tensor.
+        default_axis (int | None): Default axis if not specified. Defaults to None.
+
+    Returns:
+        int: Quantization axis to use.
+    """
+    if layer_info and name in layer_info:
+        return layer_info[name].get("axis", default_axis)
+    return default_axis
+
+
+def _next_block_size_multiple(x: float, block_size: int) -> float:
+    return math.ceil(x / block_size) * block_size
+
+
+def _pad(w: np.ndarray, block_size: int, quantize_axis: int = 0) -> np.ndarray:
+    """Pads `w` to next largest multiple of block_size, on quantize_axis."""
+    assert 0 <= quantize_axis < len(w.shape), (
+        f"incorrect quantize-axis {quantize_axis}, w-shape={w.shape}"
+    )
+
+    if w.shape[quantize_axis] % block_size == 0:
+        return w
+
+    pad_width = (
+        _next_block_size_multiple(w.shape[quantize_axis], block_size) - w.shape[quantize_axis]
+    )
+    pads = [(0, 0) for _ in range(len(w.shape))]
+    pads[quantize_axis] = (0, pad_width)
+    return np.pad(w, pads, mode="constant", constant_values=0)
+
+
+def _depad(w: np.ndarray, orig_shape: tuple, quantize_axis: int = 0) -> np.ndarray:
+    """Depad quantize_axis to original shape."""
+    if w.shape == orig_shape:
+        return w
+    ans = None
+    if quantize_axis == 0:
+        ans = w[0 : orig_shape[0], ...]
+    elif quantize_axis == 1:
+        ans = w[..., 0 : orig_shape[1]]
+    else:
+        raise ValueError("Incorrect Quantize-axis: it must be 0 or 1 for a 2D array")
+    return ans
+
+
+def reshape_scales_for_per_channel_nodes(
+    scales_map: dict[str, np.ndarray],
+    block_size: int,
+    layer_info: dict[str, dict] | None = None,
+):
+    """Update the scale map for per-channel nodes. For per channel quantization the scale needs to be 1D.
+
+    Args:
+        scales_map (dict[str, np.ndarray]): Dictionary mapping weight names to scale arrays.
+        layer_info (dict[str, dict] | None): Optional dictionary mapping tensor names
+            to layer configuration dict.
+
+    Returns:
+        dict[str, np.ndarray]: Updated scales map.
+    """
+    for name in scales_map:
+        layer_block_size = block_size
+        if layer_info and name in layer_info and isinstance(layer_info[name], dict):
+            layer_block_size = layer_info[name].get("block_size", block_size)
+        is_per_channel = layer_block_size == -1
+        scales_map[name] = scales_map[name].reshape(-1) if is_per_channel else scales_map[name]
+    return scales_map
+
+
+def find_scales(
+    w: np.ndarray,
+    block_size: int,
+    quantize_axis: int = 0,
+    alpha: float = 1.0,
+    use_zero_point: bool = False,
+    num_bits: int = 4,
+):
+    """Find scale factors for `w` via `s = max(w.block(block_size)) / 7`."""
+    w = _pad(w, block_size, quantize_axis)
+    if quantize_axis == 0:
+        w = w.T
+
+    s_last_dim = w.shape[-1] // block_size
+    s_shape = list(w.shape)
+    s_shape[-1] = s_last_dim
+    z = None
+    if not use_zero_point:
+        scale = 2 ** (num_bits - 1) - 1
+        w_amax = np.abs(w.reshape(-1, block_size)).max(axis=-1)
+        s = (w_amax * alpha) / scale
+        s = np.clip(s, CLIP_MIN, None).reshape(s_shape)
+    else:
+        max_val = w.reshape(-1, block_size).max(axis=-1)
+        min_val = w.reshape(-1, block_size).min(axis=-1)
+        max_int = (2**num_bits) - 1
+        min_int = 0
+        s = (max_val - min_val).clip(min=CLIP_MIN) / max_int
+        # z = -np.round(temp).clip(min=min_int, max=max_int)    # gives 0 - need to check
+        temp = min_val / s
+        temp = np.round(temp)
+        temp = -temp
+        temp = temp.clip(min=min_int, max=max_int)
+        z = temp
+        # Validate zero-point values are within expected range
+        if not np.all((z >= min_int) & (z <= max_int)):
+            raise ValueError(
+                f"Zero-point values out of range [{min_int}, {max_int}]: min={np.min(z)}, max={np.max(z)}"
+            )
+        assert s.shape == z.shape, "s and z shape mismatch"
+        s = s.reshape(s_shape)
+        z = z.reshape(s_shape)
+    assert z is None or use_zero_point is True, "zero-point value and use-zero-point not in sync"
+    if quantize_axis == 0:
+        s = s.T
+        if z is not None:
+            z = z.T
+    return s, z
+
+
+def rtn(
+    w: np.ndarray,
+    s: np.ndarray,
+    block_size: int,
+    quantize_axis: int = 0,
+    zp: np.ndarray = None,
+    num_bits: int = 4,
+) -> np.ndarray:
+    """Quantizes `w` with scale factors `s` via Round-to-Nearest.
+
+    Ties are broken by rounding to the nearest even number.
+    """
+    w_padded = _pad(w, block_size, quantize_axis)
+    num_blocks = w_padded.shape[quantize_axis] // s.shape[quantize_axis]
+    if zp is None:
+        maxq = 2 ** (num_bits - 1) - 1
+        minq = -(2 ** (num_bits - 1))
+        w_padded = (
+            np.rint(w_padded / s.repeat(num_blocks, axis=quantize_axis))
+            .clip(minq, maxq)
+            .astype(np.int8)
+        )
+    else:
+        maxq = (2**num_bits) - 1
+        minq = 0
+        w_padded = (
+            (
+                np.rint(w_padded / s.repeat(num_blocks, axis=quantize_axis))
+                + zp.repeat(num_blocks, axis=quantize_axis)
+            )
+            .clip(minq, maxq)
+            .astype(np.int8)
+        )
+    return _depad(w_padded, w.shape, quantize_axis)
+
+
+def dq_tensor(
+    w: np.ndarray,
+    s: np.ndarray,
+    block_size: int,
+    quantize_axis: int = 0,
+    zp: np.ndarray = None,
+) -> np.ndarray:
+    """Dequantizes `w` with scale factors `s`."""
+    w_padded = _pad(w, block_size, quantize_axis)
+    num_blocks = w_padded.shape[quantize_axis] // s.shape[quantize_axis]
+    if zp is None:
+        w_padded = w_padded * s.repeat(num_blocks, axis=quantize_axis)
+    else:
+        w_padded = (w_padded - zp.repeat(num_blocks, axis=quantize_axis)) * s.repeat(
+            num_blocks, axis=quantize_axis
+        )
+    return _depad(w_padded, w.shape, quantize_axis)
+
+
+def quant_tensor(
+    w: np.ndarray,
+    block_size: int,
+    quantize_axis: int = 0,
+    alpha: float = 1.0,
+    use_zero_point: bool = False,
+    num_bits: int = 4,
+):
+    """Quantize a tensor using alpha etc. and return the quantized tensor.
+
+    Returns:
+        tuple: A tuple containing:
+            - wq: The quantized weight tensor (np.ndarray)
+            - scale: The scale factors used for quantization (np.ndarray)
+            - zp: The zero-point values (np.ndarray or None if not using zero-point)
+    """
+    scale, zp = find_scales(w, block_size, quantize_axis, alpha, use_zero_point, num_bits)
+    wq = rtn(w, scale, block_size, quantize_axis, zp, num_bits)
+    return wq, scale, zp
 
 
 def quantize(

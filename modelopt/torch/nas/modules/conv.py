@@ -137,7 +137,7 @@ class _DynamicConvNd(DynamicModule):
         # for group > 1, we do not know how to handle it yet
         if self.groups > 1:
             return None
-        weight = self._parameters["weight"]  # retrieve full weight tensor
+        weight = self.weight
         c_in = weight.shape[1]
         return torch.linalg.vector_norm(
             torch.reshape(weight.detach().transpose(0, 1), (c_in, -1)), dim=1
@@ -249,6 +249,6 @@ class _DynamicConvTransposeNd(_DynamicConvNd):
         # for group > 1, we do not know how to handle it yet
         if self.groups > 1:
             return None
-        weight = self._parameters["weight"]  # retrieve full weight tensor
+        weight = self.weight
         c_in = weight.shape[0]
         return torch.linalg.vector_norm(torch.reshape(weight.detach(), (c_in, -1)), dim=1)

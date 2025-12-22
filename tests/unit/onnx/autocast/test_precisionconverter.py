@@ -25,6 +25,8 @@ from modelopt.onnx.autocast.precisionconverter import PrecisionConverter
 
 configure_logging("DEBUG")
 
+LATEST_IR_VERSION_SUPPORTED_BY_ORT = 10
+
 
 def low_precision_onnx_type(low_precision_type_str):
     return TensorProto.FLOAT16 if low_precision_type_str == "fp16" else TensorProto.BFLOAT16
@@ -177,7 +179,7 @@ def test_get_tensors_to_cast(simple_model, keep_io_types, low_precision_type):
     )
 
     # Test when relu node is in low precision
-    cast_down, cast_up = converter._get_tensors_to_cast(["relu"])
+    cast_down, cast_up, _ = converter._get_tensors_to_cast(["relu"])
     assert "add_output" in cast_down  # Input to relu should be cast down
     assert "Y" in cast_up  # Output of relu should be cast up
     if not keep_io_types:
@@ -186,7 +188,7 @@ def test_get_tensors_to_cast(simple_model, keep_io_types, low_precision_type):
         )  # Input to gemm should be cast up, because network input are converted to FP16
 
     # Test when add node is in low precision
-    cast_down, cast_up = converter._get_tensors_to_cast(["add"])
+    cast_down, cast_up, _ = converter._get_tensors_to_cast(["add"])
     assert "gemm_output" in cast_down  # Input to add should be cast down
     assert "add_init" not in cast_down  # Initializer should not be in cast list
     assert "add_output" in cast_up  # Output of add should be cast up
@@ -312,13 +314,13 @@ def test_get_tensors_to_cast_multiple_consumers(
     )
 
     # Test when gemm2 and add1 nodes are in low precision
-    cast_down, cast_up = converter._get_tensors_to_cast(["gemm2", "add1"])
+    cast_down, cast_up, _ = converter._get_tensors_to_cast(["gemm2", "add1"])
     assert "X" in cast_down  # Input to gemm2 should be cast down
     assert "gemm2_output" in cast_up  # Output of gemm2 should be cast up
     assert "Y1" in cast_up  # Output of add1 should be cast up
 
     # Test when all nodes except gemm1 are in low precision
-    cast_down, cast_up = converter._get_tensors_to_cast(["gemm2", "add1", "add2"])
+    cast_down, cast_up, _ = converter._get_tensors_to_cast(["gemm2", "add1", "add2"])
     assert "gemm1_output" in cast_down  # Input to gemm2 should be cast down
     assert "Y1" in cast_up  # Output of add1 should be cast up
     assert "Y2" in cast_up  # Output of add2 should be cast up
@@ -1101,3 +1103,420 @@ def test_multiple_output_node_casted_to_output(
         high_precision_nodes=[], low_precision_nodes=["concat_1", "concat_2"]
     )
     onnx.checker.check_model(converted_model)
+
+
+@pytest.fixture
+def model_with_casted_input_to_output():
+    """Create a model with an output produced by a Cast node."""
+    # Create input and outputs
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 3])
+    y1 = helper.make_tensor_value_info("Y1", TensorProto.FLOAT, [2, 3])  # Intermediate output
+    y2 = helper.make_tensor_value_info("Y2", TensorProto.FLOAT, [2, 3])  # Final output
+
+    # Create constant value
+    const = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
+
+    # Create constant node
+    const_node = helper.make_node(
+        "Constant",
+        [],
+        ["const"],
+        name="const",
+        value=numpy_helper.from_array(const, name="const_value"),
+    )
+
+    # Create computation nodes
+    add1 = helper.make_node("Add", ["X", "const"], ["add1_out"], name="add1")
+    add2 = helper.make_node("Add", ["add1_out", "const"], ["Y2"], name="add2")
+
+    # Create cast node that feeds directly from input to output
+    cast_input = helper.make_node("Cast", ["X"], ["Y1"], name="cast_input", to=TensorProto.FLOAT)
+
+    graph = helper.make_graph(
+        [const_node, add1, add2, cast_input],
+        "model_with_casted_output",
+        [x],
+        [y1, y2],
+        [],
+    )
+
+    model = helper.make_model(graph, producer_name="model_with_casted_output")
+    model.opset_import[0].version = 20
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+
+    model = onnx_utils.infer_shapes(model)
+    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+
+    return model, value_info_map, initializer_map, node_to_init_map
+
+
+@pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+@pytest.mark.parametrize("keep_io_types", [True, False])
+def test_casted_input_to_output_model(
+    model_with_casted_input_to_output, low_precision_type, keep_io_types
+):
+    model, value_info_map, initializer_map, node_to_init_map = model_with_casted_input_to_output
+
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=keep_io_types,
+        low_precision_type=low_precision_type,
+        min_opset=22 if low_precision_type == "bf16" else 13,
+        max_ir_version=LATEST_IR_VERSION_SUPPORTED_BY_ORT,
+        trt_plugins=[],
+    )
+    converted_model = converter.convert(
+        high_precision_nodes=["cast_input"], low_precision_nodes=["add1", "add2"]
+    )
+    onnx.checker.check_model(converted_model)
+
+
+@pytest.fixture
+def create_model_with_resize_op():
+    """
+    Creates an ONNX model that contains a resize operation in the middle of the computation flow.
+
+    The model structure:
+    X -> Add -> Resize -> Relu -> Y
+    """
+    # Create inputs and outputs
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 32, 32])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3, 64, 64])
+
+    # Create initializer for add operation
+    add_const = np.ones((1, 3, 32, 32), dtype=np.float32)
+    add_init = numpy_helper.from_array(add_const, name="add_const")
+
+    # Create resize parameters
+    roi_empty = numpy_helper.from_array(np.array([], dtype=np.float32), name="roi")
+    scales = numpy_helper.from_array(
+        np.array([1.0, 1.0, 2.0, 2.0], dtype=np.float32), name="scales"
+    )
+
+    # Create nodes: Add -> Resize -> Relu
+    add_node = helper.make_node("Add", ["X", "add_const"], ["add_out"], name="add")
+    resize_node = helper.make_node(
+        "Resize", ["add_out", "roi", "scales"], ["resize_out"], name="resize", mode="nearest"
+    )
+    relu_node = helper.make_node("Relu", ["resize_out"], ["Y"], name="relu")
+
+    # Build the graph
+    graph = helper.make_graph(
+        [add_node, resize_node, relu_node],
+        "model_with_resize",
+        [x],
+        [y],
+        [add_init, roi_empty, scales],
+    )
+
+    model = helper.make_model(graph, producer_name="model_with_resize")
+    model.opset_import[0].version = 20
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+
+    model = onnx_utils.infer_shapes(model)
+    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+
+    return model, value_info_map, initializer_map, node_to_init_map
+
+
+@pytest.fixture
+def create_model_with_resize_op_tensor_scales():
+    """
+    Creates an ONNX model that contains a resize operation where the scales
+    are computed from a second network input through an Add operation.
+
+    The model structure:
+    X -> Add -> Resize -> Relu -> Y
+    scales_input -> Add -> scales_tensor /
+    """
+    # Create inputs and outputs
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 3, 32, 32])
+    scales_input = helper.make_tensor_value_info("scales_input", TensorProto.FLOAT, [4])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 3, 64, 64])
+
+    # Create initializers
+    add_const = np.ones((1, 3, 32, 32), dtype=np.float32)
+    add_init = numpy_helper.from_array(add_const, name="add_const")
+
+    # Create scales computation initializer (add small offset to input scales)
+    scales_offset = np.array(
+        [0.0, 0.0, 1.0, 1.0], dtype=np.float32
+    )  # Will result in [1,1,2,2] when added to [1,1,1,1] input
+    scales_offset_init = numpy_helper.from_array(scales_offset, name="scales_offset")
+
+    # Create resize parameters
+    roi_empty = numpy_helper.from_array(np.array([], dtype=np.float32), name="roi")
+
+    # Create nodes
+    add_node = helper.make_node("Add", ["X", "add_const"], ["add_out"], name="add")
+    scales_add_node = helper.make_node(
+        "Add", ["scales_input", "scales_offset"], ["scales_tensor"], name="scales_add"
+    )
+    resize_node = helper.make_node(
+        "Resize", ["add_out", "roi", "scales_tensor"], ["resize_out"], name="resize", mode="nearest"
+    )
+    relu_node = helper.make_node("Relu", ["resize_out"], ["Y"], name="relu")
+
+    # Build the graph
+    graph = helper.make_graph(
+        [add_node, scales_add_node, resize_node, relu_node],
+        "model_with_resize_tensor_scales",
+        [x, scales_input],  # Two network inputs
+        [y],
+        [add_init, scales_offset_init, roi_empty],
+    )
+
+    model = helper.make_model(graph, producer_name="model_with_resize_tensor_scales")
+    model.opset_import[0].version = 20
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+
+    model = onnx_utils.infer_shapes(model)
+    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+
+    return model, value_info_map, initializer_map, node_to_init_map
+
+
+@pytest.mark.parametrize("keep_io_types", [True, False])
+@pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+def test_resize_op_initializer_conversion(
+    create_model_with_resize_op, keep_io_types, low_precision_type
+):
+    model, value_info_map, initializer_map, node_to_init_map = create_model_with_resize_op
+
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=keep_io_types,
+        low_precision_type=low_precision_type,
+    )
+    converted_model = converter.convert(
+        high_precision_nodes=[], low_precision_nodes=[node.name for node in model.graph.node]
+    )
+    onnx.checker.check_model(converted_model)
+
+
+@pytest.mark.parametrize("keep_io_types", [True, False])
+@pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+def test_resize_op_tensor_scales_conversion(
+    create_model_with_resize_op_tensor_scales, keep_io_types, low_precision_type
+):
+    model, value_info_map, initializer_map, node_to_init_map = (
+        create_model_with_resize_op_tensor_scales
+    )
+
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=keep_io_types,
+        low_precision_type=low_precision_type,
+    )
+    converted_model = converter.convert(
+        high_precision_nodes=[], low_precision_nodes=[node.name for node in model.graph.node]
+    )
+    onnx.checker.check_model(converted_model)
+
+
+####################################################################################################
+# Testing subgraph support, using If - Then Else subgraphs with initializers
+####################################################################################################
+@pytest.fixture
+def model_with_if_subgraph():
+    """Create a model with an If operation containing subgraphs with initializers.
+
+    The model has a preprocessing Add on X, then If branches use initializers.
+    This tests both external inputs (X flows through Add) and subgraph initializers.
+    """
+    # Main graph inputs/outputs
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 3])
+    condition = helper.make_tensor_value_info("condition", TensorProto.BOOL, [])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 4])
+
+    # Add a preprocessing node in main graph to use external input X
+    preprocess_weight = numpy_helper.from_array(
+        np.ones((2, 3), dtype=np.float32), name="preprocess_weight"
+    )
+    preprocess_node = helper.make_node(
+        "Add", ["X", "preprocess_weight"], ["X_processed"], name="preprocess"
+    )
+
+    # Create "then" branch subgraph with initializers
+    then_y = helper.make_tensor_value_info("then_y", TensorProto.FLOAT, [2, 4])
+
+    w_true = np.random.randn(2, 4).astype(np.float32)
+    b_true = np.random.randn(2, 4).astype(np.float32)
+    w_true_init = numpy_helper.from_array(w_true, name="W_true")
+    b_true_init = numpy_helper.from_array(b_true, name="b_true")
+
+    then_add = helper.make_node("Add", ["W_true", "b_true"], ["then_y"], name="then_add")
+
+    then_graph = helper.make_graph(
+        [then_add],
+        "then_branch",
+        [],
+        [then_y],
+        [w_true_init, b_true_init],
+    )
+
+    # Create "else" branch subgraph with different initializers
+    else_y = helper.make_tensor_value_info("else_y", TensorProto.FLOAT, [2, 4])
+
+    w_false = np.random.randn(2, 4).astype(np.float32) * 2  # Different values
+    b_false = np.random.randn(2, 4).astype(np.float32) * 2
+    w_false_init = numpy_helper.from_array(w_false, name="W_false")
+    b_false_init = numpy_helper.from_array(b_false, name="b_false")
+
+    else_add = helper.make_node("Add", ["W_false", "b_false"], ["else_y"], name="else_add")
+
+    else_graph = helper.make_graph(
+        [else_add],
+        "else_branch",
+        [],
+        [else_y],
+        [w_false_init, b_false_init],
+    )
+
+    # Create If node
+    if_node = helper.make_node(
+        "If",
+        inputs=["condition"],
+        outputs=["Y"],
+        name="if_node",
+        then_branch=then_graph,
+        else_branch=else_graph,
+    )
+
+    # Create main graph with preprocessing using external input
+    main_graph = helper.make_graph(
+        [preprocess_node, if_node],
+        "model_with_if",
+        [x, condition],
+        [y],
+        [preprocess_weight],
+    )
+
+    model = helper.make_model(main_graph, producer_name="model_with_if")
+    model.opset_import[0].version = 20
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+
+    model = onnx_utils.infer_shapes(model)
+    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+    return model, value_info_map, initializer_map, node_to_init_map
+
+
+@pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+@pytest.mark.parametrize("if_precision", ["low", "high"])
+def test_if_subgraph_initializer_conversion(
+    model_with_if_subgraph, low_precision_type, if_precision
+):
+    """Test that initializers in If subgraphs are converted based on parent node precision."""
+    model, value_info_map, initializer_map, node_to_init_map = model_with_if_subgraph
+
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=True,
+        low_precision_type=low_precision_type,
+    )
+
+    # Classify the If node based on test parameter
+    if if_precision == "low":
+        high_precision_nodes = []
+        low_precision_nodes = ["if_node"]
+        expected_init_type = low_precision_onnx_type(low_precision_type)
+    else:
+        high_precision_nodes = ["if_node"]
+        low_precision_nodes = []
+        expected_init_type = TensorProto.FLOAT
+
+    converted_model = converter.convert(high_precision_nodes, low_precision_nodes)
+
+    # Verify the model is valid
+    onnx.checker.check_model(converted_model)
+
+    # Find the If node and check its subgraph initializers
+    if_node = next(n for n in converted_model.graph.node if n.op_type == "If")
+
+    then_branch = None
+    else_branch = None
+    for attr in if_node.attribute:
+        if attr.name == "then_branch":
+            then_branch = attr.g
+        elif attr.name == "else_branch":
+            else_branch = attr.g
+
+    assert then_branch is not None, "If node should have a then_branch attribute"
+    assert else_branch is not None, "If node should have an else_branch attribute"
+
+    # Check that subgraph initializers in both branches were converted
+    assert len(then_branch.initializer) == 2, (
+        "Then branch should have 2 initializers (W_true, b_true)"
+    )
+    assert len(else_branch.initializer) == 2, (
+        "Else branch should have 2 initializers (W_false, b_false)"
+    )
+
+    for init in then_branch.initializer:
+        assert init.data_type == expected_init_type, (
+            f"Then branch initializer '{init.name}' should be {expected_init_type}, "
+            f"but is {init.data_type}"
+        )
+
+    for init in else_branch.initializer:
+        assert init.data_type == expected_init_type, (
+            f"Else branch initializer '{init.name}' should be {expected_init_type}, "
+            f"but is {init.data_type}"
+        )
+
+
+@pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+def test_if_subgraph_mixed_precision_boundary(model_with_if_subgraph, low_precision_type):
+    """Test that types are correctly handled at If subgraph boundaries in mixed precision."""
+    model, value_info_map, initializer_map, node_to_init_map = model_with_if_subgraph
+
+    # Add another node after the If to create a mixed precision scenario
+    add_weight = numpy_helper.from_array(np.ones((2, 4), dtype=np.float32), name="add_weight")
+    model.graph.initializer.append(add_weight)
+
+    add_node = helper.make_node("Add", ["Y", "add_weight"], ["output"], name="add_after_if")
+    model.graph.node.append(add_node)
+
+    # Update output
+    output_tensor = helper.make_tensor_value_info("output", TensorProto.FLOAT, [2, 4])
+    model.graph.output.append(output_tensor)
+
+    # Refresh mappings
+    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=True,
+        low_precision_type=low_precision_type,
+    )
+
+    # If in low precision, Add in high precision
+    converted_model = converter.convert(
+        high_precision_nodes=["add_after_if"], low_precision_nodes=["if_node"]
+    )
+
+    # Verify the model is valid (this tests type inference through subgraph boundaries)
+    onnx.checker.check_model(converted_model)
+
+    # Verify a cast was inserted between If output and Add input
+    cast_nodes = [n for n in converted_model.graph.node if n.op_type == "Cast"]
+    assert len(cast_nodes) > 0, "Should have cast nodes for mixed precision"

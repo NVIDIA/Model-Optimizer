@@ -122,6 +122,8 @@ def _update_dynamic_shapes(dynamic_shapes: dict, cmd: list[str]) -> None:
 def build_engine(
     onnx_bytes: OnnxBytes,
     trt_mode: str = TRTMode.FLOAT32,
+    engine_path: Path | None = None,
+    timing_cache_path: Path | None = None,
     calib_cache: str | None = None,
     dynamic_shapes: dict | None = None,
     plugin_config: dict | None = None,
@@ -133,6 +135,8 @@ def build_engine(
 
     Args:
         onnx_bytes: Data of the ONNX model stored as an OnnxBytes object.
+        engine_path: Path to save the TensorRT engine.
+        timing_cache_path: Path to save/load the TensorRT timing cache.
         trt_mode: The precision with which the TensorRT engine will be built. Supported modes are:
             - TRTMode.FLOAT32
             - TRTMode.FLOAT16
@@ -202,6 +206,8 @@ def build_engine(
 
     def _setup_files_and_paths(
         tmp_dir_path: Path,
+        engine_path: Path | None,
+        timing_cache_path: Path | None,
     ) -> tuple[Path, Path, Path | None, Path | None, Path]:
         tmp_onnx_dir = tmp_dir_path / "onnx"
         onnx_bytes.write_to_disk(str(tmp_onnx_dir))
@@ -209,15 +215,22 @@ def build_engine(
 
         final_output_dir = Path(output_dir or Path(gettempdir()) / DEFAULT_ARTIFACT_DIR)
         final_output_dir.mkdir(parents=True, exist_ok=True)
-        engine_path = final_output_dir / f"{onnx_bytes.model_name}.engine"
+        engine_path = (
+            Path(engine_path)
+            if engine_path
+            else final_output_dir / f"{onnx_bytes.model_name}.engine"
+        )
+        engine_path.parent.mkdir(parents=True, exist_ok=True)
         calib_cache_path = final_output_dir / "calib_cache" if calib_cache else None
-        timing_cache_path = final_output_dir / "timing.cache"
+        timing_cache_path = (
+            Path(timing_cache_path) if timing_cache_path else final_output_dir / "timing.cache"
+        )
 
         return onnx_path, engine_path, calib_cache_path, timing_cache_path, final_output_dir
 
     with TemporaryDirectory() as tmp_dir:
         onnx_path, engine_path, calib_cache_path, timing_cache_path, final_output_dir = (
-            _setup_files_and_paths(Path(tmp_dir))
+            _setup_files_and_paths(Path(tmp_dir), engine_path, timing_cache_path)
         )
         cmd = _build_command(onnx_path, engine_path, calib_cache_path, timing_cache_path)
 

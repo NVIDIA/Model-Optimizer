@@ -18,7 +18,7 @@
 import pytest
 import torch
 import torch.nn as nn
-from _test_utils.torch_quantization.models import (
+from _test_utils.torch.quantization.models import (
     SDPAAttention,
     SimpleConv,
     SimpleConvLinear,

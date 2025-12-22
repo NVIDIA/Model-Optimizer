@@ -19,7 +19,7 @@ from collections.abc import Sequence
 import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
-from _test_utils.onnx_quantization.lib_test_models import find_init
+from _test_utils.onnx.lib_test_models import find_init
 
 import modelopt.onnx.quantization as moq
 from modelopt.onnx.quantization.int4 import quantize as quantize_int4

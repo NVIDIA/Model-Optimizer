@@ -21,18 +21,16 @@ from _test_utils.examples.run_command import run_example_command
 def test_llama_distill(tiny_llama_path, tmp_path):
     run_example_command(
         [
-            "accelerate", "launch", "--multi_gpu", "--mixed_precision", "bf16", "main.py",
+            "accelerate", "launch", "--config-file", "./accelerate_config/fsdp2.yaml",
+            "main.py",
             "--teacher_name_or_path", tiny_llama_path,
             "--student_name_or_path", tiny_llama_path,
             "--output_dir", tmp_path,
-            "--logging_steps", "5",
-            "--max_steps", "10",
-            "--max_seq_length", "1024",
+            "--max_length", "1024",
             "--per_device_train_batch_size", "2",
             "--per_device_eval_batch_size", "8",
-            "--gradient_checkpointing", "True",
-            "--fsdp", "full_shard auto_wrap",
-            "--fsdp_transformer_layer_cls_to_wrap", "LlamaDecoderLayer",
+            "--max_steps", "10",
+            "--logging_steps", "5",
         ],
         "llm_distill",
     )

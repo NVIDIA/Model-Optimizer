@@ -16,6 +16,7 @@
 """Quantization conversion/restore utilities."""
 
 import fnmatch
+import warnings
 from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any
@@ -123,12 +124,12 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
 
     for name, module in model.named_modules():
         if isinstance(module, TensorQuantizer):
-            name = get_unwrapped_name(name)
+            name = get_unwrapped_name(name, model)
             module.set_from_modelopt_state(quantizer_state_dict[name])
 
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
-            name = get_unwrapped_name(name)
+            name = get_unwrapped_name(name, model)
             module.modelopt_post_restore(name)
 
     return model
@@ -166,7 +167,7 @@ def update_quantize_metadata(
 def quantizer_state(model: nn.Module) -> dict[str, Any]:
     """Returns the quantizer state dict describing the quantizer states in the model."""
     return {
-        get_unwrapped_name(n): m.get_modelopt_state()
+        get_unwrapped_name(n, model): m.get_modelopt_state()
         for n, m in model.named_modules()
         if isinstance(m, (TensorQuantizer, SequentialQuantizer))
     }
@@ -198,7 +199,6 @@ def _replace_quant_module(model: nn.Module, version=None, registry=QuantModuleRe
             # REPLACE on the parent (model), not on child
             quantized = registry.convert(child)
             setattr(model, name, quantized)
-            quantized.mopt_ckpt_versn = version
 
         # now recurse into whichever module is now at `model.name`
         _replace_quant_module(getattr(model, name), version=version, registry=registry)
@@ -289,11 +289,15 @@ def set_quantizer_attribute(
             ):
                 continue
 
-            if isinstance(attribute, list):
+            if isinstance(attribute, list) and not isinstance(module, SequentialQuantizer):
                 parent_module = quant_model.get_submodule(name.rpartition(".")[0])
                 module = SequentialQuantizer(*(TensorQuantizer() for _ in range(len(attribute))))
                 setattr(parent_module, name.split(".")[-1], module)
-
+            elif isinstance(attribute, list) and len(attribute) != len(module):
+                warnings.warn(
+                    f"The number of attributes ({len(attribute)}) does not match the number of "
+                    f"quantizers of {module} leading to partial assignment.",
+                )
             module.set_from_attribute_config(attribute)
 
 

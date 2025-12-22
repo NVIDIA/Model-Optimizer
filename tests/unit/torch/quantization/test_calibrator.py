@@ -18,7 +18,7 @@
 import numpy as np
 import pytest
 import torch
-from _test_utils.torch_quantization.models import QuantConvLinear
+from _test_utils.torch.quantization.models import QuantConvLinear
 
 from modelopt.torch.quantization import calib
 from modelopt.torch.quantization import nn as qnn

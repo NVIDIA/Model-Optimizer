@@ -17,14 +17,13 @@ import os
 
 import pytest
 from _test_utils.examples.run_command import run_example_command
-from _test_utils.torch_misc import minimum_gpu
+from _test_utils.torch.misc import minimum_gpu
 
 imagenet_path = os.getenv("IMAGENET_PATH")
-if not imagenet_path or not os.path.isdir(imagenet_path):
-    pytest.skip(
-        "IMAGENET_PATH environment variable is not set or does not point to a valid directory",
-        allow_module_level=True,
-    )
+skip_no_imagenet = pytest.mark.skipif(
+    not imagenet_path or not os.path.isdir(imagenet_path),
+    reason="IMAGENET_PATH environment variable is not set or does not point to a valid directory",
+)
 
 
 def _build_common_command():
@@ -59,6 +58,7 @@ def _run_qat_command(base_cmd, common_args, output_dir, example_dir="cnn_qat"):
     run_example_command(full_command, example_dir)
 
 
+@skip_no_imagenet
 @minimum_gpu(1)
 def test_cnn_qat_single_gpu(tmp_path):
     """Test CNN QAT on single GPU."""
@@ -68,6 +68,7 @@ def test_cnn_qat_single_gpu(tmp_path):
     _run_qat_command(base_command, common_args, tmp_path)
 
 
+@skip_no_imagenet
 @minimum_gpu(2)
 def test_cnn_qat_multi_gpu(tmp_path):
     """Test CNN QAT on multiple GPUs."""

@@ -13,12 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-import subprocess
-from pathlib import Path
 
 import pytest
 import torch
-from _test_utils.torch_model.transformers_models import create_tiny_llama_dir, create_tiny_t5_dir
+from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
+from _test_utils.torch.transformers_models import create_tiny_llama_dir, create_tiny_t5_dir
 from safetensors import safe_open
 
 
@@ -38,7 +37,7 @@ from safetensors import safe_open
         ("nvfp4_awq", "tiny_llama-nvfp4-awq", True, False, True, True),
         ("int4_awq", "tiny_llama-int4-awq", True, False, True, True),
         ("w4a8_awq", "tiny_llama-w4a8-awq", True, False, True, True),
-        ("fp8", "t5_tiny-fp8", True, False, True, True),
+        ("int8_wo", "tiny_llama-int8-wo", False, False, False, False),
     ],
 )
 def test_unified_hf_export_and_check_safetensors(
@@ -67,37 +66,25 @@ def test_unified_hf_export_and_check_safetensors(
     else:
         tiny_model_dir = create_tiny_llama_dir(tmp_path, with_tokenizer=True, num_hidden_layers=1)
 
-    current_file_dir = Path(__file__).parent
-    hf_ptq_script_path = (current_file_dir / "../../../../examples/llm_ptq/hf_ptq.py").resolve()
-
     # Create an output directory in tmp_path
     # We'll replicate the naming convention, e.g. "tiny_llama-fp8"
     output_dir = tmp_path / expected_suffix
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Command to generate .safetensors
-    cmd = [
-        "python",
-        str(hf_ptq_script_path),
-        "--pyt_ckpt_path",
-        str(tiny_model_dir),
-        "--qformat",
-        qformat,
-        "--export_fmt",
-        "hf",
-        "--export_path",
-        str(output_dir),
-    ]
+    cmd_parts = extend_cmd_parts(
+        ["python", "hf_ptq.py"],
+        pyt_ckpt_path=tiny_model_dir,
+        qformat=qformat,
+        export_path=output_dir,
+    )
 
+    # Run the command
     # current transformers T5 model seem to be incompatible with multiple GPUs
     # https://github.com/huggingface/transformers/issues/30280
-    env = (
-        {**os.environ, "CUDA_VISIBLE_DEVICES": "0"}
-        if expected_suffix.startswith("t5_tiny")
-        else {**os.environ}
-    )
-    # Run the command
-    subprocess.run(cmd, env=env, check=True)
+    env = os.environ.copy()
+    if expected_suffix.startswith("t5_tiny"):
+        env["CUDA_VISIBLE_DEVICES"] = "0"
+    run_example_command(cmd_parts, "llm_ptq", env=env)
 
     # Now we expect a file named model.safetensors in output_dir
     generated_file = output_dir / "model.safetensors"

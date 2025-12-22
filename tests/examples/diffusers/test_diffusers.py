@@ -17,9 +17,9 @@ from pathlib import Path
 from typing import NamedTuple
 
 import pytest
-from _test_utils.examples.run_command import run_diffusers_cmd
-from _test_utils.model import FLUX_SCHNELL_PATH, SD3_PATH, SDXL_1_0_PATH
-from _test_utils.torch_misc import minimum_sm
+from _test_utils.examples.models import FLUX_SCHNELL_PATH, SD3_PATH, SDXL_1_0_PATH
+from _test_utils.examples.run_command import run_example_command
+from _test_utils.torch.misc import minimum_sm
 
 
 class DiffuserModel(NamedTuple):
@@ -38,11 +38,9 @@ class DiffuserModel(NamedTuple):
             self.name,
             "--override-model-path",
             self.path,
-            "--model-dtype",
-            self.dtype,
         ]
         cmd_args.extend(args)
-        run_diffusers_cmd(cmd_args)
+        run_example_command(cmd_args, "diffusers/quantization")
 
     def _format_args(self) -> list[str]:
         return [
@@ -94,6 +92,7 @@ class DiffuserModel(NamedTuple):
             "--onnx-load-path",
             str(tmp_path / f"{self.name}_{self.format_type}_onnx/model.onnx"),
             "--dq-only",
+            "--torch-autocast",
         )
 
 
@@ -150,3 +149,41 @@ def test_diffusers_quantization(
     model.quantize(tmp_path)
     model.restore(tmp_path)
     model.inference(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("model_name", "model_path", "torch_compile"),
+    [
+        ("flux-schnell", FLUX_SCHNELL_PATH, False),
+        ("flux-schnell", FLUX_SCHNELL_PATH, True),
+        ("sd3-medium", SD3_PATH, False),
+        ("sd3-medium", SD3_PATH, True),
+        ("sdxl-1.0", SDXL_1_0_PATH, False),
+        ("sdxl-1.0", SDXL_1_0_PATH, True),
+    ],
+    ids=[
+        "flux_schnell_torch",
+        "flux_schnell_torch_compile",
+        "sd3_medium_torch",
+        "sd3_medium_torch_compile",
+        "sdxl_1.0_torch",
+        "sdxl_1.0_torch_compile",
+    ],
+)
+def test_diffusion_trt_torch(
+    model_name: str,
+    model_path: str,
+    torch_compile: bool,
+) -> None:
+    cmd_args = [
+        "python",
+        "diffusion_trt.py",
+        "--model",
+        model_name,
+        "--override-model-path",
+        model_path,
+        "--torch",
+    ]
+    if torch_compile:
+        cmd_args.append("--torch-compile")
+    run_example_command(cmd_args, "diffusers/quantization")

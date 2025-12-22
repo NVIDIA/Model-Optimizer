@@ -11,12 +11,12 @@ Cache Diffusion is a technique that reuses cached outputs from previous diffusio
 | **Section** | **Description** | **Link** | **Docs** |
 | :------------: | :------------: | :------------: | :------------: |
 | Pre-Requisites | Required & optional packages to use this technique | \[[Link](#pre-requisites)\] | |
-| Getting Started | Learn how to optimize your models using quantization/cache diffusion to reduce precision and improve inference efficiency | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/1_quantization.html)\] |
-| Support Matrix | View the support matrix to see quantization/cahce diffusion compatibility and feature availability across different models | \[[Link](#support-matrix)\] | \[[docs](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/1_quantization.html)\] |
+| Getting Started | Learn how to optimize your models using quantization/cache diffusion to reduce precision and improve inference efficiency | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
+| Support Matrix | View the support matrix to see quantization/cahce diffusion compatibility and feature availability across different models | \[[Link](#support-matrix)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Cache Diffusion | Caching technique to accelerate inference without compromising quality | \[[Link](#cache-diffusion)\] | |
-| Post Training Quantization (PTQ) | Example scripts on how to run PTQ on diffusion models | \[[Link](#post-training-quantization-ptq)\] | \[[docs](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/1_quantization.html)\] |
-| Quantization Aware Training (QAT) | Example scripts on how to run QAT on diffusion models | \[[Link](#quantization-aware-training-qat)\] | \[[docs](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/1_quantization.html)\] |
-| Quantization Aware Distillation (QAD) | Example scripts on how to run QAD on diffusion models | \[[Link](#quantization-aware-distillation-qad)\] | \[[docs](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/1_quantization.html)\] |
+| Post Training Quantization (PTQ) | Example scripts on how to run PTQ on diffusion models | \[[Link](#post-training-quantization-ptq)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
+| Quantization Aware Training (QAT) | Example scripts on how to run QAT on diffusion models | \[[Link](#quantization-aware-training-qat)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
+| Quantization Aware Distillation (QAD) | Example scripts on how to run QAD on diffusion models | \[[Link](#quantization-aware-distillation-qad)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Build and Run with TensorRT | How to build and run your quantized model with TensorRT | \[[Link](#build-and-run-with-tensorrt-compiler-framework)\] | |
 | LoRA | Fuse your LoRA weights prior to quantization | \[[Link](#lora)\] | |
 | Evaluate Accuracy | Evaluate your model's accuracy! | \[[Link](#evaluate-accuracy)\] | |
@@ -27,23 +27,32 @@ Cache Diffusion is a technique that reuses cached outputs from previous diffusio
 
 ## Pre-Requisites
 
+### Docker
+
+Please use the TensorRT docker image (e.g., `nvcr.io/nvidia/tensorrt:25.08-py3`) or visit our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html) for more information.
+
+Also follow the installation steps below to upgrade to the latest version of Model Optimizer and install example-specific dependencies.
+
+### Local Installation
+
 Install Model Optimizer with `onnx` and `hf` dependencies using `pip` from [PyPI](https://pypi.org/project/nvidia-modelopt/):
 
 ```bash
 pip install nvidia-modelopt[onnx,hf]
+pip install -r requirements.txt
 ```
 
-Each subsection (cache_diffusion, quantization, etc.) have their own `requirements.txt` file that needs to be installed separately.
+Each subsection (eval, etc.) may have their own `requirements.txt` file that needs to be installed separately.
 
 You can find the latest TensorRT [here](https://developer.nvidia.com/tensorrt/download).
 
-Visit our [installation guide](https://nvidia.github.io/TensorRT-Model-Optimizer/getting_started/2_installation.html) or view our pre-made [dockerfiles](../../docker/Dockerfile) for more information.
+Visit our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html) for more information.
 
 ## Getting Started
 
 ### Quantization
 
-With the simple API below, you can very easily use Model Optimizer to quantize your model. Model Optimizer achieves this by converting the precision of your model to the desired precision, and then using a small dataset (typically 128-512 samples) to [calibrate](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/_basic_quantization.html) the quantization scaling factors.
+With the simple API below, you can very easily use Model Optimizer to quantize your model. Model Optimizer achieves this by converting the precision of your model to the desired precision, and then using a small dataset (typically 128-512 samples) to [calibrate](https://nvidia.github.io/Model-Optimizer/guides/_basic_quantization.html) the quantization scaling factors.
 
 ```python
 import modelopt.torch.quantization as mtq
@@ -160,7 +169,7 @@ Once the model is loaded in its quantized state through ModelOPT, you can procee
 
 Distillation is a powerful approach where a high-precision model (the teacher) guides the training of a quantized model (the student). ModelOPT simplifies the process of combining distillation with QAT by handling most of the complexity for you.
 
-For more details about distillation, please refer to this [link](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/4_distillation.html).
+For more details about distillation, please refer to this [link](https://nvidia.github.io/Model-Optimizer/guides/4_distillation.html).
 
 ```diff
 import modelopt.torch.opt as mto
@@ -299,11 +308,16 @@ Generate images for the quantized checkpoint with the following [Script](./quant
 python diffusion_trt.py \
     --model {sdxl-1.0|sdxl-turbo|sd3-medium|flux-dev} \
     --prompt "A cat holding a sign that says hello world" \
+    [--override-model-path /path/to/model] \
     [--restore-from ./{MODEL}_fp8.pt] \
     [--onnx-load-path {ONNX_DIR}] \
     [--trt-engine-load-path {ENGINE_DIR}] \
-    [--dq_only] \
-    [--torch]
+    [--dq-only] \
+    [--torch] \
+    [--save-image-as /path/to/image] \
+    [--benchmark] \
+    [--torch-compile] \
+    [--skip-image]
 ```
 
 This script will save the output image as `./{MODEL}.png` and report the latency of the TensorRT backbone.
@@ -530,9 +544,9 @@ Example metrics obtained with 30 sampling steps on a set of 1K prompts (values w
 
 ## Resources
 
-- 📅 [Roadmap](https://github.com/NVIDIA/TensorRT-Model-Optimizer/issues/146)
-- 📖 [Documentation](https://nvidia.github.io/TensorRT-Model-Optimizer)
+- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/146)
+- 📖 [Documentation](https://nvidia.github.io/Model-Optimizer)
 - 🎯 [Benchmarks](../benchmark.md)
-- 💡 [Release Notes](https://nvidia.github.io/TensorRT-Model-Optimizer/reference/0_changelog.html)
-- 🐛 [File a bug](https://github.com/NVIDIA/TensorRT-Model-Optimizer/issues/new?template=1_bug_report.md)
-- ✨ [File a Feature Request](https://github.com/NVIDIA/TensorRT-Model-Optimizer/issues/new?template=2_feature_request.md)
+- 💡 [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)
+- 🐛 [File a bug](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=1_bug_report.md)
+- ✨ [File a Feature Request](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=2_feature_request.md)

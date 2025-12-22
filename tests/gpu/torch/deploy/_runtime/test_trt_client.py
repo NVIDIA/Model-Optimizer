@@ -15,14 +15,14 @@
 
 import pytest
 from _test_utils.import_helper import skip_if_no_tensorrt, skip_if_no_trtexec
-from _test_utils.torch_misc import compare_outputs
-from _test_utils.torch_model.deploy_models import (
+from _test_utils.torch.deploy.lib_test_models import (
     LeNet5,
     LeNet5Ooo,
     LeNet5TwoInputs,
     LeNet5TwoOutputs,
 )
-from _test_utils.torch_model.vision_models import get_vision_models, process_model_and_inputs
+from _test_utils.torch.misc import compare_outputs
+from _test_utils.torch.vision_models import get_vision_models, process_model_and_inputs
 
 skip_if_no_tensorrt()
 skip_if_no_trtexec()

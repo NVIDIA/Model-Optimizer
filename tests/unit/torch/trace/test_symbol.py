@@ -139,20 +139,6 @@ def test_sym_map_registry():
     except ImportError:
         pass
 
-    try:
-        from megatron.core.models.gpt import GPTModel
-
-        mods_in_registry.add(GPTModel)
-    except ImportError:
-        pass
-
-    try:
-        from megatron.core.models.mamba import MambaModel
-
-        mods_in_registry.add(MambaModel)
-    except ImportError:
-        pass
-
     not_a_leaf = {nn.Sequential}
     dependent_registry = set()
 

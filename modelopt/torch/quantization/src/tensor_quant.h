@@ -22,7 +22,6 @@ void fake_tensor_quant_cuda_inplace(at::Tensor, at::Tensor, int, bool, bool);
 at::Tensor fake_tensor_quant_cuda(at::Tensor, at::Tensor, int, bool, bool);
 at::Tensor fake_tensor_quant_with_axis_cuda(at::Tensor, at::Tensor, int, int, bool, bool);
 float bits_to_bound(int, int);
-at::Tensor fake_e4m3fy_cuda(at::Tensor inputs);
 
 // Dequantizes data using NF4 quantization scheme and per-block scaling factors.
 //

@@ -25,6 +25,7 @@ write your own one. Currently, we support plugins for
 - :meth:`huggingface<modelopt.torch.quantization.plugins.huggingface>`
 - :meth:`megatron<modelopt.torch.quantization.plugins.megatron>`
 - :meth:`peft<modelopt.torch.quantization.plugins.peft>`
+- :meth:`pytorch_geometric<modelopt.torch.quantization.plugins.pytorch_geometric>`
 - :meth:`transformer_engine<modelopt.torch.quantization.plugins.transformer_engine>`
 """
 
@@ -56,6 +57,9 @@ with import_plugin("nemo"):
 
 with import_plugin("peft"):
     from .peft import *
+
+with import_plugin("torch_geometric"):
+    from .pytorch_geometric import *
 
 with import_plugin("transformer_engine"):
     from .transformer_engine import *

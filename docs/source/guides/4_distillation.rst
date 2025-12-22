@@ -16,9 +16,9 @@ a more powerful teacher model using :mod:`modelopt.torch.distill <modelopt.torch
     interaction between the two.
 #.  **Distillation training**: Seamlessly use the meta-model in place of the original model and run
     the original script with only one additional line of code for loss calculation.
-#.  **Checkpoint and re-load**: Save the model via :meth:`mto.save <modelopt.torch.opt.conversion.save>` and
-    restore via :meth:`mto.restore <modelopt.torch.opt.conversion.restore>`. See :ref:`saving and restoring <save-restore>`
-    to learn more.
+#.  **Checkpoint and re-load**: Save the model via :meth:`mto.save <modelopt.torch.opt.conversion.save>`
+    Note that restoring the model (via :meth:`mto.restore <modelopt.torch.opt.conversion.restore>`)
+    will not reinstantiate the distillation meta-model, in order to avoid unpickling issues.
 
 *To find out more about Distillation and related concepts, please refer to the below section*
 :ref:`Distillation Concepts <distillation-concepts>`.
@@ -44,7 +44,7 @@ Example usage:
 
     # Configure and convert for distillation
     distillation_config = {
-        # `teacher_model` is a model class or callable, or a tuple.
+        # `teacher_model` is a model, model class, callable, or a tuple.
         # If a tuple, it must be of the form (model_cls_or_callable,) or
         # (model_cls_or_callable, args) or (model_cls_or_callable, args, kwargs).
         "teacher_model": teacher_model,
@@ -53,14 +53,8 @@ Example usage:
     }
     distillation_model = mtd.convert(model, mode=[("kd_loss", distillation_config)])
 
-    # Export model in original class form
+    # Export model in original class, with only previously-present attributes
     model_exported = mtd.export(distillation_model)
-
-.. note::
-    The config requires a (non-lambda) Callable to return a teacher model in place of the model
-    itself. This is to avoid re-saving the teacher state dict upon saving the Distillation
-    meta model. Thus, the same callable must be available in the namespace when restoring via
-    the :meth:`mto.restore <modelopt.torch.opt.conversion.restore>` utility.
 
 .. tip::
     When training the student on a small corpus of ground truth data, consider using :class:`MFTLoss <modelopt.torch.distill.MFTLoss>` for to perform Minifinetuning in lieu of the standard
@@ -170,10 +164,12 @@ outputs in the same order as well:
 The intermediate outputs for the losses are captured by the
 :class:`DistillationModel <modelopt.torch.distill.distillation_model.DistillationModel>` and then the loss(es) are
 invoked using :meth:`DistillationModel.compute_kd_loss() <modelopt.torch.distill.distillation_model.DistillationModel.compute_kd_loss>`.
-If present, the original student's non-distillation loss is passed in as an argument.
+If present, the original student's non-distillation loss can be passed in as an argument.
 
 Writing a custom loss function is often necessary, especially to handle outputs that need to be processed
-to obtain the logits and activations.
+to obtain the logits and activations. Additional arguments to the loss function can be passed in to
+:meth:`DistillationModel.compute_kd_loss() <modelopt.torch.distill.distillation_model.DistillationModel.compute_kd_loss>`
+as ``kwargs``.
 
 Loss Balancer
 ^^^^^^^^^^^^^

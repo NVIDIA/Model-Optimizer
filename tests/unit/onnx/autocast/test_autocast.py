@@ -13,15 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from pathlib import Path
 
 import numpy as np
 import onnx
+import onnx_graphsurgeon as gs
 import pytest
+from _test_utils.onnx.lib_test_models import build_conv_isinf_model
 
 import modelopt.onnx.autocast.utils as utils
 import modelopt.onnx.utils as onnx_utils
 from modelopt.onnx.autocast import convert_to_mixed_precision
+from modelopt.onnx.autocast.__main__ import get_parser, main
 from modelopt.onnx.autocast.logging_config import configure_logging
 
 configure_logging("DEBUG")
@@ -146,3 +150,150 @@ def test_convert_simple_model(temp_model_path, temp_output_path, keep_io_types):
     assert loaded_model.graph.output[0].type.tensor_type.elem_type == expected_io_type
 
     onnx.checker.check_model(loaded_model)
+
+
+def assert_input_precision(nodes, dtype="float16"):
+    for node in nodes:
+        for inp in node.inputs:
+            assert inp.dtype == dtype, (
+                f"Node of type {node.op} has type {inp.dtype} but should have type {dtype}"
+            )
+    return True
+
+
+@pytest.mark.parametrize("opset_version", [13, 21])
+def test_conv_isinf_conversion(tmp_path, opset_version):
+    onnx_model = build_conv_isinf_model(opset_version)
+    onnx_path = os.path.join(tmp_path, f"conv_isinf_model_opset{opset_version}.onnx")
+    onnx.save(onnx_model, onnx_path)
+
+    # Convert the model
+    converted_model = convert_to_mixed_precision(onnx_path=onnx_path, keep_io_types=True)
+
+    # Output model should be produced in the same tmp_path
+    output_onnx_path = onnx_path.replace(".onnx", ".fp16.onnx")
+    onnx.save(converted_model, output_onnx_path)
+
+    # Load the output model and check QDQ node placements
+    graph = gs.import_onnx(converted_model)
+
+    # Check that Conv is converted
+    conv_nodes = [n for n in graph.nodes if "Conv" in n.op]
+    assert assert_input_precision(conv_nodes)
+
+    # Check that IsInf is running in the lowest supported precision:
+    # - FP32 if opset < 20, or
+    # - FP16 if opset >= 20
+    isinf_nodes = [n for n in graph.nodes if n.op == "IsInf"]
+    opset_version = onnx_utils.get_opset_version(converted_model)
+    supported_dtype = "float32" if opset_version < 20 else "float16"
+    assert assert_input_precision(isinf_nodes, dtype=supported_dtype)
+
+
+@pytest.mark.parametrize("target_opset", [13, 17, 19, 21])
+def test_opset_parameter(temp_model_path, target_opset):
+    """Test that the opset parameter correctly sets the output model's opset version."""
+    # Convert with specific opset
+    converted_model = convert_to_mixed_precision(
+        onnx_path=temp_model_path, low_precision_type="fp16", opset=target_opset
+    )
+
+    # Verify the output model has the correct opset
+    output_opset = onnx_utils.get_opset_version(converted_model)
+    assert output_opset >= target_opset, f"Expected opset >= {target_opset}, got {output_opset}"
+
+    # Validate the model
+    onnx.checker.check_model(converted_model)
+
+
+def test_opset_fp16_warning(temp_model_path, caplog):
+    """Test that a warning is issued when using fp16 with opset < 13."""
+    # Convert with fp16 and very low opset
+    converted_model = convert_to_mixed_precision(
+        onnx_path=temp_model_path, low_precision_type="fp16", opset=11
+    )
+
+    # Check that a warning was logged
+    assert "limited FP16 support" in caplog.text, (
+        "Expected warning about FP16 support with low opset"
+    )
+    assert "Recommended minimum opset is 13" in caplog.text
+
+    # Model should still be created
+    assert isinstance(converted_model, onnx.ModelProto)
+
+
+def test_opset_bf16_warning(temp_model_path, caplog):
+    """Test that a warning is issued when using bf16 with opset < 22."""
+    # Convert with bf16 and low opset
+    converted_model = convert_to_mixed_precision(
+        onnx_path=temp_model_path, low_precision_type="bf16", opset=13
+    )
+
+    # Check that a warning was logged
+    assert "limited BF16 support" in caplog.text, (
+        "Expected warning about BF16 support with low opset"
+    )
+    assert "Recommended minimum opset is 22" in caplog.text
+
+    # Model should still be created
+    assert isinstance(converted_model, onnx.ModelProto)
+
+
+def test_opset_downgrade_warning(temp_model_path, caplog):
+    """Test that a warning is issued when specified opset is lower than original model's opset."""
+    # temp_model_path fixture creates a model with opset 20
+    # Convert with lower opset
+    converted_model = convert_to_mixed_precision(
+        onnx_path=temp_model_path, low_precision_type="fp16", opset=13
+    )
+
+    # Check that a warning was logged about downgrading
+    assert "lower than the original model's opset" in caplog.text, (
+        "Expected warning about downgrading opset"
+    )
+
+    # Model should still be created
+    assert isinstance(converted_model, onnx.ModelProto)
+
+
+def test_opset_cli_argument(temp_model_path, tmp_path):
+    """Test that the --opset CLI argument is properly parsed and used."""
+    # Test the CLI with opset argument
+    output_path = tmp_path / "test_output.onnx"
+    args = [
+        "--onnx_path",
+        temp_model_path,
+        "--output_path",
+        str(output_path),
+        "--opset",
+        "21",
+        "--low_precision_type",
+        "fp16",
+    ]
+
+    result_model = main(args)
+
+    # Verify the output model has the correct opset
+    output_opset = onnx_utils.get_opset_version(result_model)
+    assert output_opset >= 21, f"Expected opset >= 21, got {output_opset}"
+
+    # Verify the file was created
+    assert output_path.exists()
+
+    # Load and validate the saved model
+    saved_model = onnx.load(str(output_path))
+    onnx.checker.check_model(saved_model)
+
+
+def test_opset_parser_argument():
+    """Test that the parser correctly accepts the --opset argument."""
+    parser = get_parser()
+
+    # Test parsing with opset
+    args = parser.parse_args(["--onnx_path", "test.onnx", "--opset", "19"])
+    assert args.opset == 19
+
+    # Test parsing without opset (should be None)
+    args = parser.parse_args(["--onnx_path", "test.onnx"])
+    assert args.opset is None

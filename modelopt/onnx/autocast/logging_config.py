@@ -42,14 +42,6 @@ def configure_logging(level=logging.INFO, log_file=None):
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)
 
-    # Create console handler with formatting
-    console_handler = logging.StreamHandler()
-    formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(filename)s - %(message)s"
-    )
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-
     # Add file handler if log_file is specified
     if log_file:
         try:
@@ -58,15 +50,20 @@ def configure_logging(level=logging.INFO, log_file=None):
             if log_dir:
                 os.makedirs(log_dir, exist_ok=True)
 
+            formatter = logging.Formatter(
+                "%(asctime)s - %(name)s - %(levelname)s - %(filename)s - %(message)s"
+            )
             file_handler = logging.FileHandler(log_file)
             file_handler.setFormatter(formatter)
             logger.addHandler(file_handler)
             logger.info(f"Logging configured to write to file: {log_file}")
         except Exception as e:
-            logger.error(f"Failed to setup file logging to {log_file}: {e!s}")
+            logging.error(f"Failed to setup file logging to {log_file}: {e!s}")
 
-    # Prevent log messages from propagating to the root logger
-    logger.propagate = False
+    # Allow log messages to propagate to the root logger for testing compatibility
+    # This enables pytest's caplog fixture to capture logs while still maintaining
+    # our custom formatting through the handlers above
+    logger.propagate = True
 
     # Ensure all child loggers inherit the level setting
     for name in logging.root.manager.loggerDict:

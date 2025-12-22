@@ -169,13 +169,16 @@ def export_onnx(backbone, onnx_path: Path):
                 output_names = ONNX_CONFIG[backbone.__class__][f"{name}"]["output_names"]
                 onnx_export(
                     module,
-                    args=dummy_input,
+                    args=tuple(dummy_input.values())
+                    if isinstance(dummy_input, dict)
+                    else dummy_input,
                     f=_onnx_file.as_posix(),
                     input_names=input_names,
                     output_names=output_names,
                     dynamic_axes=ONNX_CONFIG[backbone.__class__][f"{name}"]["dynamic_axes"],
                     do_constant_folding=True,
                     opset_version=17,
+                    dynamo=False,
                 )
             else:
                 print(f"{_onnx_file!s} already exists!")

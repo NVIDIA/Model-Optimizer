@@ -56,6 +56,10 @@ The table below lists key command-line arguments of the ONNX PTQ example script.
 | `--awqclip_bsz_col` | 1024 (default) | Chunk size in columns during weight clipping, user-defined |
 | `--calibration_eps` | dml, cuda, cpu, NvTensorRtRtx (default: [dml,cpu]) | List of execution-providers to use for session run during calibration |
 | `--no_position_ids` | Default: position_ids input enabled | Use this option to disable position_ids input in calibration data|
+| `--enable_mixed_quant` | Default: disabled mixed quant | Use this option to enable mixed precsion quantization|
+| `--layers_8bit` | Default: None | Use this option to Overrides default mixed quant strategy|
+| `--gather_quantize_axis` | Default: None | Use this option to enable INT4 quantization of Gather nodes - choose 0 or 1|
+| `--gather_block_size` | Default: 32 | Block-size for Gather node's INT4 quantization (when its enabled using gather_quantize_axis option)|
 
 Run the following command to view all available parameters in the script:
 
@@ -93,7 +97,7 @@ Refer to the following example scripts and tutorials for deployment:
 
 ### Model Support Matrix
 
-Please refer to [support matrix](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/0_support_matrix.html) for a full list of supported features and models.
+Please refer to [support matrix](https://nvidia.github.io/Model-Optimizer/guides/0_support_matrix.html) for a full list of supported features and models.
 
 ### Troubleshoot
 

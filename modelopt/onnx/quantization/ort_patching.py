@@ -1248,15 +1248,12 @@ def _augment_graph_min_max_calibrater_single_node_calibration(calibrater):
             value_info_found = False
             # If a node input is not an initializer, set it as a model input
             if not is_input_initializer:
-                if input_name in value_info_name_map:
-                    single_node_model_inputs.append(value_info_name_map[input_name])
-                    single_node_model_input_names.append(input_name)
-                    value_info_found = True
-
-                if not value_info_found and input_name in input_name_map:
-                    single_node_model_inputs.append(input_name_map[input_name])
-                    single_node_model_input_names.append(input_name)
-                    value_info_found = True
+                for name_map in [value_info_name_map, input_name_map, output_name_map]:
+                    if input_name in name_map:
+                        single_node_model_inputs.append(name_map[input_name])
+                        single_node_model_input_names.append(input_name)
+                        value_info_found = True
+                        break
 
                 if not value_info_found:
                     raise ValueError(
@@ -1266,15 +1263,12 @@ def _augment_graph_min_max_calibrater_single_node_calibration(calibrater):
         # Process each output for node
         for output_name in node.output:
             value_info_found = False
-            if output_name in value_info_name_map:
-                single_node_model_outputs.append(value_info_name_map[output_name])
-                single_node_model_output_names.append(output_name)
-                value_info_found = True
-
-            if not value_info_found and output_name in output_name_map:
-                single_node_model_outputs.append(output_name_map[output_name])
-                single_node_model_output_names.append(output_name)
-                value_info_found = True
+            for name_map in [value_info_name_map, output_name_map]:
+                if output_name in name_map:
+                    single_node_model_outputs.append(name_map[output_name])
+                    single_node_model_output_names.append(output_name)
+                    value_info_found = True
+                    break
 
             if not value_info_found:
                 raise ValueError(
@@ -1363,15 +1357,12 @@ def _augment_graph_histogram_calibrater_single_node_calibration(calibrater):
             # If a node input is not an initializer, set it as a model input
             if not is_input_initializer:
                 value_info_found = False
-                if input_name in value_info_name_map:
-                    single_node_model_inputs.append(value_info_name_map[input_name])
-                    single_node_model_input_names.append(input_name)
-                    value_info_found = True
-
-                if not value_info_found and input_name in input_name_map:
-                    single_node_model_inputs.append(input_name_map[input_name])
-                    single_node_model_input_names.append(input_name)
-                    value_info_found = True
+                for name_map in [value_info_name_map, input_name_map, output_name_map]:
+                    if input_name in name_map:
+                        single_node_model_inputs.append(name_map[input_name])
+                        single_node_model_input_names.append(input_name)
+                        value_info_found = True
+                        break
 
                 if not value_info_found:
                     raise ValueError(
@@ -1381,15 +1372,12 @@ def _augment_graph_histogram_calibrater_single_node_calibration(calibrater):
         # Process each output for node
         for output_name in node.output:
             value_info_found = False
-            if output_name in value_info_name_map:
-                single_node_model_outputs.append(value_info_name_map[output_name])
-                single_node_model_output_names.append(output_name)
-                value_info_found = True
-
-            if not value_info_found and output_name in output_name_map:
-                single_node_model_outputs.append(output_name_map[output_name])
-                single_node_model_output_names.append(output_name)
-                value_info_found = True
+            for name_map in [value_info_name_map, output_name_map]:
+                if output_name in name_map:
+                    single_node_model_outputs.append(name_map[output_name])
+                    single_node_model_output_names.append(output_name)
+                    value_info_found = True
+                    break
 
             if not value_info_found:
                 raise ValueError(
@@ -1612,6 +1600,7 @@ def _quantize_static(
         ("TrtExtraPluginLibraryPaths", "trt_extra_plugin_lib_paths"),
         ("ExecutionProviders", "execution_providers"),
         ("group_qdq_tensors", "group_qdq_tensors"),
+        ("QDQDisableWeightAdjustForInt32Bias", "disable_int32_weight_adjustment"),
         # ==========================================================
     ]
     calib_extra_options = {

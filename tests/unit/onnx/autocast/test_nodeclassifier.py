@@ -330,3 +330,55 @@ def test_node_classifier_op_types_to_exclude(test_model):
     assert len(fp16_nodes) + len(fp32_nodes) == 2
     # Test that no node is in both fp16 and fp32 lists
     assert not set(fp16_nodes).intersection(set(fp32_nodes))
+
+
+# Test that nodes_to_include and op_types_to_include force nodes into low precision,
+# even if they would otherwise be excluded by other rules.
+def test_node_classifier_force_include(test_model):
+    node_to_init_map = {
+        "add_node": [
+            numpy_helper.from_array(np.array([[10.0, 20.0], [30.0, 40.0]], dtype=np.float32))
+        ],
+        "mul_node": [numpy_helper.from_array(np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32))],
+    }
+
+    # Set init_max low so both nodes would normally be excluded (kept in FP32)
+    # Force add_node to low precision, despite exceeding init_max
+    classifier = NodeClassifier(
+        model=test_model,
+        node_to_init_map=node_to_init_map,
+        init_max=1.0,
+        nodes_to_include=["add_node"],
+    )
+    fp16_nodes, fp32_nodes = classifier.run()
+    # add_node should be in fp16_nodes due to nodes_to_include, despite exceeding data_max
+    assert "add_node" in fp16_nodes
+    assert "mul_node" in fp32_nodes
+    assert "add_node" not in fp32_nodes
+    assert len(fp16_nodes) + len(fp32_nodes) == 2
+    assert not set(fp16_nodes).intersection(set(fp32_nodes))
+
+    # Test that include op rule override exclude op rule
+    classifier2 = NodeClassifier(
+        model=test_model,
+        node_to_init_map=node_to_init_map,
+        op_types_to_exclude=["Add"],
+        nodes_to_include=["add_node"],  # Should override op_types_to_exclude
+    )
+    fp16_nodes, fp32_nodes = classifier2.run()
+    assert "add_node" in fp16_nodes
+    assert "add_node" not in fp32_nodes
+    assert not set(fp16_nodes).intersection(set(fp32_nodes))
+
+    # Set init_max low so both nodes would normally be excluded (kept in FP32)
+    # Force op type Mul to low precision, despite exceeding init_max
+    classifier3 = NodeClassifier(
+        model=test_model,
+        node_to_init_map=node_to_init_map,
+        init_max=1.0,
+        op_types_to_include=["Mul"],
+    )
+    fp16_nodes, fp32_nodes = classifier3.run()
+    assert "mul_node" in fp16_nodes
+    assert "add_node" in fp32_nodes
+    assert not set(fp16_nodes).intersection(set(fp32_nodes))

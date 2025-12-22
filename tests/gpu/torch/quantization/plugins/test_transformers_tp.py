@@ -18,14 +18,12 @@ from functools import partial
 
 import pytest
 import torch
-from _test_utils.torch_dist.dist_utils import spawn_multiprocess_job
-from packaging.version import Version
+from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 
 import modelopt.torch.quantization as mtq
 
 pytest.importorskip("transformers")
-import transformers
-from _test_utils.torch_model.transformers_models import create_tiny_llama_dir
+from _test_utils.torch.transformers_models import create_tiny_llama_dir
 from transformers import AutoModelForCausalLM
 
 
@@ -44,7 +42,5 @@ def _test_transformers_tp(model_path, rank, size):
 
 
 def test_transformers_tp(need_2_gpus, tmp_path):
-    if Version(transformers.__version__) < Version("4.52.0"):
-        pytest.skip("This test requires transformers>=4.52.0")
     model_path = create_tiny_llama_dir(tmp_path)
     spawn_multiprocess_job(size=2, job=partial(_test_transformers_tp, model_path), backend="nccl")

@@ -78,7 +78,9 @@ fi
 
 # Copy miscellaneous files to the quantized checkpoint
 mkdir -p $FP4_PATH
-cp $FP8_HF_PATH/*.json $FP8_HF_PATH/*.py $FP4_PATH/
+cp $FP8_HF_PATH/*.json $FP4_PATH/
+cp $FP8_HF_PATH/*.py $FP4_PATH/ || true
+cp -r $FP8_HF_PATH/assets $FP4_PATH/ || true
 
 # Run the quantization command
 echo "Running quantization..."

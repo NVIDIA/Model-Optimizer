@@ -13,7 +13,7 @@ build-backend = "setuptools.build_meta"
 ####################################################################################################
 [tool.ruff]
 target-version = "py310"
-line-length = 100 # Line length limit for code
+line-length = 100        # Line length limit for code
 fix = true
 
 [tool.ruff.format]
@@ -35,7 +35,7 @@ select = [
     "I",    # isort
     "ISC",  # flake8-implicit-str-concat
     "N",    # pep8 naming
-    "PERF",  # Perflint
+    "PERF", # Perflint
     "PGH",  # pygrep-hooks
     "PIE",  # flake8-pie
     "PLE",  # pylint errors
@@ -44,17 +44,30 @@ select = [
     "RUF",  # ruff
     "SIM",  # flake8-simplify
     "TC",   # flake8-type-checking
-    "UP",    # pyupgrade
+    "UP",   # pyupgrade
     "W",    # pycodestyle warnings
 ]
 extend-ignore = [
-    "D105", "D417",
+    "D105",
+    "D417",
     "N812",
-    "PLR0402", "PLR0912", "PLR0913", "PLR0915", "PLR2004", "PLR0911",
-    "PT011", "PT018", "PT028", "PT030",
-    "RUF002", "RUF012",
-    "SIM102", "SIM108", "SIM115",
-    "UP032", "UP038",
+    "PLR0402",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLR2004",
+    "PLR0911",
+    "PT011",
+    "PT018",
+    "PT028",
+    "PT030",
+    "RUF002",
+    "RUF012",
+    "SIM102",
+    "SIM108",
+    "SIM115",
+    "UP032",
+    "UP038",
 ]
 
 
@@ -62,10 +75,13 @@ extend-ignore = [
 "__init__.py" = ["F401", "F403"]
 "examples/*" = ["D"]
 "tests/*" = ["B017", "D", "E402", "PT012"]
-"*/_[a-zA-Z]*" = ["D"]           # Private packages (_abc/*.py) or modules (_xyz.py)
-"*.ipynb" = ["D", "E501"]        # Ignore missing docstrings or line length for Jupyter notebooks
-"modelopt/torch/quantization/triton/*" = ["N803", "N806", "E731"]  # triton style
-
+"*/_[a-zA-Z]*" = ["D"] # Private packages (_abc/*.py) or modules (_xyz.py)
+"*.ipynb" = [
+    "D",
+    "E501",
+] # Ignore missing docstrings or line length for Jupyter notebooks
+"modelopt/torch/quantization/triton/*" = ["N803", "N806", "E731"] # triton style
+"examples/deepseek/ds_kernel.py" = ["N803", "N806", "E731"] # triton style
 
 [tool.ruff.lint.pycodestyle]
 max-line-length = 120 # Line length limit for comments and docstrings
@@ -90,6 +106,7 @@ disable_error_code = [
     "operator",
     "has-type",
     "var-annotated",
+    "override",
 ]
 explicit_package_bases = true
 namespace_packages = true
@@ -116,9 +133,12 @@ disable_error_code = ["attr-defined"]
 # Default additional options
 # Show a short test summary info for all except passed tests with -ra flag
 # print execution time for 20 slowest tests and generate coverage reports
-addopts = "-ra --cov-report=term-missing --cov-report=html --cov-report=xml:coverage.xml --cov-config=pyproject.toml --durations=20 --strict-markers"
+addopts = "-v -ra --instafail --cov-report=term-missing --cov-report=html --cov-report=xml:coverage.xml --cov-config=pyproject.toml --durations=20 --strict-markers"
 pythonpath = ["tests/"]
-markers = ["manual: Only run when --run-manual is given"]
+markers = [
+    "manual: Only run when --run-manual is given",
+    "release: Regression tests that should be run before every release",
+]
 
 
 [tool.coverage.run]
@@ -154,7 +174,7 @@ exclude_lines = [
 
 
 [tool.bandit]
-exclude_dirs = ["examples/", "tests/"]
+exclude_dirs = [".github/", "examples/", "tests/"]
 # Do not change `skips`. It should be consistent with NVIDIA's Wheel-CI-CD bandit.yml config.
 # Use of `# nosec BXXX` requires special approval
 skips = [

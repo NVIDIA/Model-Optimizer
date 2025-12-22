@@ -343,12 +343,12 @@ class FastNASModeDescriptor(ModeDescriptor):
     @property
     def next_modes(self) -> set[str] | None:
         """Modes that must immediately follow this mode."""
-        return {"export", "kd_loss", "quantize", "sparse_magnitude", "sparse_gpt"}
+        return {"export_nas", "kd_loss", "quantize", "sparse_magnitude", "sparse_gpt"}
 
     @property
     def export_mode(self) -> str | None:
         """The mode that corresponds to the export mode of this mode."""
-        return "export"
+        return "export_nas"
 
     @property
     def search_algorithm(self) -> type[BaseSearcher]:

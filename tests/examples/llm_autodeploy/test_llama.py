@@ -13,10 +13,55 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import subprocess
+import time
 
-from _test_utils.examples.run_command import run_llm_autodeploy_command
-from _test_utils.torch_misc import minimum_sm
+from _test_utils.examples.run_command import (
+    extend_cmd_parts,
+    run_command_in_background,
+    run_example_command,
+)
+from _test_utils.torch.distributed.utils import get_free_port
+from _test_utils.torch.misc import minimum_sm
+
+
+def run_llm_autodeploy_command(
+    model: str, quant: str, effective_bits: float, output_dir: str, **kwargs
+):
+    # Create temporary directory for saving the quantized checkpoint
+    port = get_free_port()
+    quantized_ckpt_dir = os.path.join(output_dir, "quantized_model")
+    kwargs.update(
+        {
+            "hf_ckpt": model,
+            "quant": quant,
+            "effective_bits": effective_bits,
+            "save_quantized_ckpt": quantized_ckpt_dir,
+            "port": port,
+        }
+    )
+
+    server_handler = None
+    try:
+        # Quantize and deploy the model to the background
+        cmd_parts = extend_cmd_parts(["scripts/run_auto_quant_and_deploy.sh"], **kwargs)
+        # Pass None to stdout and stderr to see the output in the console
+        server_handler = run_command_in_background(
+            cmd_parts, "llm_autodeploy", stdout=None, stderr=None
+        )
+
+        # Wait for the server to start. We might need to build
+        time.sleep(100)
+
+        # Test the deployment
+        run_example_command(
+            ["python", "api_client.py", "--prompt", "What is AI?", "--port", str(port)],
+            "llm_autodeploy",
+        )
+    finally:
+        if server_handler:
+            server_handler.terminate()
 
 
 @minimum_sm(89)

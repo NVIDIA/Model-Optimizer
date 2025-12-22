@@ -20,9 +20,9 @@ import os
 from functools import partial
 
 import torch
-from _test_utils.import_helper import skip_if_no_libcudnn, skip_if_onnx_version_above_1_18
-from _test_utils.onnx_quantization.lib_test_models import SimpleMLP, export_as_onnx, find_init
-from _test_utils.torch_quantization.quantize_common import get_awq_config
+from _test_utils.import_helper import skip_if_no_libcudnn
+from _test_utils.onnx.lib_test_models import SimpleMLP, export_as_onnx, find_init
+from _test_utils.torch.quantization.quantize_common import get_awq_config
 
 import modelopt.onnx.quantization.int4 as int4
 import modelopt.torch.quantization as mtq
@@ -39,9 +39,45 @@ else:
 #       test_qdq_utils_fp8.py::test_fused_q[bf16,fp16] fails if this script runs after the int4 test, but not before.
 
 
-def test_int4_awq(tmp_path):
-    skip_if_onnx_version_above_1_18()
+def test_safe_cupy_array(monkeypatch):
+    """Comprehensive test for safe_cupy_array covering all code paths."""
+    import builtins
 
+    import numpy  # Import actual numpy for creating int4 tensors
+
+    # Test 1: Regular numpy array (should hit line 122)
+    result = int4.safe_cupy_array(numpy.array([1, 2, 3, 4], dtype=numpy.float32))
+    assert isinstance(result, np.ndarray)
+
+    # Test 2: With real ml_dtypes.int4 (covers lines 117-118)
+    try:
+        import ml_dtypes
+
+        int4_tensor = numpy.array([1, 2, -3, 4], dtype=numpy.float32).astype(ml_dtypes.int4)
+        result = int4.safe_cupy_array(int4_tensor)
+        assert isinstance(result, np.ndarray) and result.dtype == numpy.int8
+        expected = int4_tensor.astype(numpy.int8)
+        actual = result.get() if int4.has_cupy else result
+        np.testing.assert_array_equal(actual, expected)
+    except ImportError:
+        pass  # ml_dtypes not available
+
+    # Test 3: When ml_dtypes import fails (covers ImportError catch and line 122)
+    original_import = builtins.__import__
+
+    def mock_import(name, *args, **kwargs):
+        if name == "ml_dtypes":
+            raise ImportError("ml_dtypes not available")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", mock_import)
+
+    # Use actual numpy for creating the array
+    result = int4.safe_cupy_array(numpy.array([5, 6, 7, 8], dtype=numpy.int8))
+    assert isinstance(result, np.ndarray)
+
+
+def test_int4_awq(tmp_path):
     def _forward_loop(model, dataloader):
         """Forward loop for calibration."""
         for data in dataloader:
@@ -94,11 +130,10 @@ def test_int4_awq(tmp_path):
         scale_awq_lite = find_init(onnx_model_awq_lite, scale_names[i])
 
         if int4.has_cupy:
-            wq_onnx_awq_lite = np.array(wq_onnx_awq_lite)
-            scale_awq_lite = np.array(scale_awq_lite)
+            wq_onnx_awq_lite = int4.safe_cupy_array(wq_onnx_awq_lite)
+            scale_awq_lite = int4.safe_cupy_array(scale_awq_lite)
 
         wq_onnx_awq_lite = dq_tensor(wq_onnx_awq_lite, scale_awq_lite, block_size)
-
         wq_torch_awq_clip = model_torch_copy.net[i * 2].weight_quantizer(
             model_torch_copy.net[i * 2].weight
         )
@@ -106,17 +141,16 @@ def test_int4_awq(tmp_path):
         scale_awq_clip = find_init(onnx_model_awq_clip, scale_names[i])
 
         if int4.has_cupy:
-            wq_onnx_awq_clip = np.array(wq_onnx_awq_clip)
-            scale_awq_clip = np.array(scale_awq_clip)
+            wq_onnx_awq_clip = int4.safe_cupy_array(wq_onnx_awq_clip)
+            scale_awq_clip = int4.safe_cupy_array(scale_awq_clip)
 
         wq_onnx_awq_clip = dq_tensor(wq_onnx_awq_clip, scale_awq_clip, block_size)
 
-        assert np.allclose(wq_torch_awq_lite.detach(), wq_onnx_awq_lite.T, atol=1e-3)
-        assert np.allclose(wq_torch_awq_clip.detach(), wq_onnx_awq_clip.T, atol=1e-3)
+        assert np.allclose(wq_torch_awq_lite.detach().cpu(), wq_onnx_awq_lite.T, atol=1e-3)
+        assert np.allclose(wq_torch_awq_clip.detach().cpu(), wq_onnx_awq_clip.T, atol=1e-3)
 
 
 def test_int4_awq_cuda(tmp_path):
-    skip_if_onnx_version_above_1_18()
     skip_if_no_libcudnn()
     block_size = 128
 

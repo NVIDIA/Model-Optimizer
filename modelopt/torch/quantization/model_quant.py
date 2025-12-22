@@ -30,9 +30,9 @@ from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.opt.utils import forward_with_reshard
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
+from modelopt.torch.utils import atomic_print
 
-from . import config
-from .algorithms import AutoQuantizeSearcher
+from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher, QuantRecipe
 from .config import QuantizeAlgoCfgType
 from .conversion import set_quantizer_attribute
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
@@ -105,6 +105,11 @@ def calibrate(
             mode=get_modelike_from_algo_cfg(algorithm),
             mode_kwargs={"forward_loop": forward_loop},
         )
+
+    for name, module in model.named_modules():
+        if isinstance(module, TensorQuantizer):
+            for attr_name in ["_amax", "_pre_quant_scale"]:
+                module.validate_attr(attr_name=attr_name, warn_error=True, name=name)
 
     # TODO: Re-enable when the CUDA error: unspecified launch failure is fixed.
     # clear_cuda_cache()
@@ -224,9 +229,15 @@ def quantize(
     Returns: A pytorch model which has been quantized and calibrated.
     """
     model = apply_mode(model, mode=[("quantize", config)], registry=QuantizeModeRegistry)
-    return calibrate(model, config["algorithm"], forward_loop=forward_loop)
+    return calibrate(model, config.get("algorithm"), forward_loop=forward_loop)
 
 
+# TODO: create a config interface for auto_quantize and expose setting
+# quant_grouping_rules and score_module_rules as part of the config.
+# This will allow users to customize the grouping and scoring rules for their models.
+# This way wecan limit the granularity of quantization search. For example,
+#  - limit the quantization format search to decoder block level (instead of each linear layer level)
+#  - Same format for all self attention layers of a model etc.
 def auto_quantize(
     model: nn.Module,
     constraints: dict[str, float | str] = {"effective_bits": 4.8},
@@ -242,11 +253,23 @@ def auto_quantize(
     num_calib_steps: int = 512,
     num_score_steps: int = 128,
     verbose: bool = False,
+    method: str = "gradient",
+    checkpoint: str | None = None,
 ):
     r"""Perform optimal per-layer quantization by searching for the best quantization formats per-layer.
 
-    ``auto_quantize`` uses a gradient based sensitivity score to rank the per-layer quantization formats and search
-    for the best quantization formats per-layer.
+    ``auto_quantize`` uses sensitivity scores to rank the per-layer quantization formats and search
+    for the best quantization formats per-layer. The sensitivity score can be computed using gradient-based
+    methods (default) or KL divergence loss, controlled by the ``method`` parameter.
+
+    Internally this API runs two main phases:
+
+    #. Calibrate the quantized model exactly like :func:`quantize` would.
+    #. Estimate per-layer sensitivity scores to decide which format to keep.
+
+    The sensitivity scoring phase typically dominates the runtime of ``auto_quantize``, so decreasing the number of
+    samples used for scoring (see ``num_score_steps``) is the recommended way for improving overall auto_quantize time
+    with minimal accuracy impact.
 
     Args:
         model: A pytorch model with quantizer modules.
@@ -365,10 +388,20 @@ def auto_quantize(
                 disabled_layers = "*lm_head*"
                 disabled_layers = ["*lm_head*", "*mlp*"]
 
-        num_calib_steps: Number of batches to use for calibrating the quantized model. Suggested value is 512.
+        num_calib_steps: Number of batches to use for calibrating each candidate quantization format. Suggested value
+            is 512.
         num_score_steps: Number of batches to use for estimating ``auto_quantize`` scores. Suggested value is 128.
-            A higher value could increase the time taken for performing ``auto_quantize``.
+            A higher value could increase the time taken for performing ``auto_quantize``; reducing it speeds up the
+            sensitivity score estimation phase and typically affects accuracy less than lowering ``num_calib_steps``.
         verbose: If True, prints the search progress/intermediate results.
+        method: Method to use for estimating sensitivity loss. Higher loss indicates greater sensitivity
+            to quantization. Options are ``"gradient"`` (default; uses gradient-based loss estimation,
+            linear programming search, and requires ``loss_func`` or ``forward_backward_step``) and
+            ``"kl_div"`` (uses KL divergence between unquantized and quantized outputs, relies on
+            threshold-based binary search, and only requires ``forward_step`` returning logits).
+        checkpoint: (Optional) Path to checkpoint file for saving/restoring auto_quantize search state.
+            If the checkpoint file exists, the search state will be restored from it, skipping the
+            expensive score estimation step.
 
     Returns: A tuple (model, state_dict) where ``model`` is the searched and quantized model and
         ``state_dict`` contains the history and detailed stats of the search procedure.
@@ -380,23 +413,32 @@ def auto_quantize(
         This is to ensure compatibility with TensorRT-LLM which fuses these three linear layers into a single linear
         layer.
 
-        A list of regex pattern rules as defined in :attr:`rules <.algorithms.AutoQuantizeSearcher.rules>`
-        are used to specify the group of layers. The first captured group
-        in the regex pattern (i.e, ``pattern.match(name).group(1)``) is used to group the layers. All the layers
-        that share the same first captured group will have the same quantization format..
+        Grouping rules are defined in :attr:`quant_grouping_rules
+        <.algorithms.AutoQuantizeSearcher.quant_grouping_rules>`.
+        Each rule can be either a regex pattern or a callable function.
 
-        For example, the rule ``r"^(.*?)\.(q_proj|k_proj|v_proj)$"``
-        groups the `q_proj`, `k_proj`, `v_proj` linear layers belonging to the same transformer layer.
+        - **Regex patterns**: The first captured group (e.g.,
+          ``pattern.match(name).group(1)``) determines the group key.
+          Layers with the same group key share the same quantization format.
+        - **Functions**: Should take a module name and return a group key
+          (or ``None`` if the rule doesn't apply).
 
-        You may modify the rules to group the layers as per your requirement.
+        Example regex rule: ``r"^(.*?)\.(q_proj|k_proj|v_proj)$"`` groups the
+        `q_proj`, `k_proj`, `v_proj` layers belonging to the same transformer layer.
+
+        You can customize the rules as needed:
 
         .. code-block:: python
 
             from modelopt.torch.quantization.algorithms import AutoQuantizeSearcher
 
-            # To additionally group the layers belonging to same `mlp` layer,
-            # add the following rule
-            AutoQuantizeSearcher.rules.append(r"^(.*?)\.mlp")
+            # Add a regex rule to group layers in the same `mlp` module
+            AutoQuantizeSearcher.quant_grouping_rules.append(r"^(.*?)\.mlp")
+
+            # Or add a function rule for custom logic
+            AutoQuantizeSearcher.quant_grouping_rules.append(
+                lambda name: name.rsplit(".", 1)[0] if "expert" in name else None
+            )
 
             # Perform `auto_quantize`
             model, state_dict = auto_quantize(model, ...)
@@ -411,22 +453,31 @@ def auto_quantize(
     for i, quant_cfg in enumerate(quantization_formats):
         if quant_cfg is None:
             continue
-        if isinstance(quant_cfg, str):
-            assert quant_cfg in config.choices, f"Invalid quantization format: {quant_cfg}"
-            quant_cfg = getattr(config, quant_cfg)
-        elif not any(quant_cfg is getattr(config, choice) for choice in config.choices):
+
+        name = QuantRecipe.get_auto_name_for_config(quant_cfg)
+        if name is None:
+            name = f"CUSTOM_{i}"
             warnings.warn(
-                "Received custom quantization formats for search, auto_quantize results may not be optimal."
+                f"Received custom quantization formats for search, auto_quantize results may not be optimal. "
+                f"This config will be displayed as {name}"
             )
-        processed_quantization_formats.append(quant_cfg)
+        processed_quantization_formats.append((quant_cfg, name))
 
     assert len(processed_quantization_formats) > 0, "`quantization_formats` should not be empty"
+
+    # Select the appropriate searcher based on method
+    if method == "gradient":
+        searcher = AutoQuantizeGradientSearcher()
+    elif method == "kl_div":
+        searcher = AutoQuantizeKLDivSearcher()
+    else:
+        raise ValueError(f"Invalid method: {method}. Valid options are 'gradient' or 'kl_div'.")
+
     model = apply_mode(
         model,
         mode="auto_quantize",
         registry=QuantizeModeRegistry,
     )
-    searcher = AutoQuantizeSearcher()
     search_config = {
         "quantization_formats": processed_quantization_formats,
         "data_loader": data_loader,
@@ -435,17 +486,13 @@ def auto_quantize(
         "forward_backward_step": forward_backward_step,
         "num_calib_steps": num_calib_steps,
         "num_score_steps": num_score_steps,
+        "disabled_layers": disabled_layers,
         "verbose": verbose,
+        "checkpoint": checkpoint,
     }
     # Disable all quantizers; AutoQuantize will enable the needed ones
     set_quantizer_by_cfg(model, {"*": {"enable": False}})
     searcher.search(model, constraints, config=search_config)  # type: ignore[arg-type]
-
-    if disabled_layers:
-        if isinstance(disabled_layers, str):
-            disabled_layers = [disabled_layers]
-        for layer_pattern in disabled_layers:
-            disable_quantizer(model, layer_pattern)
 
     return model, searcher.state_dict()
 
@@ -460,6 +507,7 @@ def enable_quantizer(model: nn.Module, wildcard_or_filter_func: str | Callable):
     set_quantizer_attribute(model, wildcard_or_filter_func, {"enable": True})
 
 
+@atomic_print
 def print_quant_summary(model: nn.Module):
     """Print summary of all quantizer modules in the model."""
     count = 0

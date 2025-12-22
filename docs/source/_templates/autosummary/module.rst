@@ -11,7 +11,7 @@
    :recursive:
 {% for item in modules %}
 {% set full_item = fullname + '.' + item.split('.')[-1] %}
-{% if '.plugins.' not in full_item or full_item == 'modelopt.torch.opt.plugins.huggingface' %}
+{% if ('.plugins.' not in full_item or full_item == 'modelopt.torch.opt.plugins.huggingface') and full_item != 'modelopt.torch.quantization.backends.fp8_per_tensor_gemm' %}
    {{ full_item }}
 {% endif %}
 {%- endfor %}

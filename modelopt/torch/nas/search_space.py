@@ -162,10 +162,6 @@ class SearchSpace(DynamicSpace):
                     f"{'order' if hp._importance_is_order else 'importance'}={importance}"
                 )
 
-        # now that we have enforced an order we can force reassign all parameters/buffers!
-        for _, mod in self.named_dynamic_modules():
-            mod.force_assign()
-
         # go back to old config
         self.select(config)
 

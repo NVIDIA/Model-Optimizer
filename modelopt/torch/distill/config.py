@@ -16,20 +16,18 @@
 """Configurations for distillation modes."""
 
 import warnings
-from collections.abc import Callable
 from typing import Any, Union
 
 import pydantic
-import torch.nn as nn
 from torch.nn.modules.loss import _Loss as Loss
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
+from modelopt.torch.utils.network import ModelLike
 
 from .loss_balancers import DistillationLossBalancer
 
 __all__ = ["KDLossConfig"]
 
-TeacherModel = type[nn.Module] | tuple | Callable
 Criterion = Union[Loss, dict[tuple[str, str], Loss]]  # noqa: UP007
 
 
@@ -42,14 +40,13 @@ class KDLossConfig(ModeloptBaseConfig):
     # TODO: we should really think about a better to configure KDLossConfig
     model_config = pydantic.ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
-    teacher_model: TeacherModel | None = ModeloptField(
+    teacher_model: ModelLike | None = ModeloptField(
         default=None,
         title="Teacher model",
         description=(
-            "The class or callable or tuple to initialize the teacher model using"
+            "The module, class, callable, or tuple to initialize the teacher model using"
             " :meth:`init_model_from_model_like"
-            " <modelopt.torch.utils.network.init_model_from_model_like>`. This cannot already be an"
-            " instance of nn.Module."
+            " <modelopt.torch.utils.network.init_model_from_model_like>`."
         ),
     )
     criterion: Criterion | None = ModeloptField(

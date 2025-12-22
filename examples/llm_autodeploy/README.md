@@ -2,13 +2,13 @@
 
 This guide demonstrates how to deploy mixed-precision models using ModelOpt's AutoQuant and TRT-LLM's AutoDeploy.
 
-[ModelOpt's AutoQuant](https://nvidia.github.io/TensorRT-Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.auto_quantize) is a post-training quantization (PTQ) algorithm that optimizes model quantization by selecting the best quantization format for each layer while adhering to user-defined compression constraints. This approach allows users to balance model accuracy and performance effectively.
+[ModelOpt's AutoQuant](https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.auto_quantize) is a post-training quantization (PTQ) algorithm that optimizes model quantization by selecting the best quantization format for each layer while adhering to user-defined compression constraints. This approach allows users to balance model accuracy and performance effectively.
 
 [TRT-LLM's AutoDeploy](https://github.com/NVIDIA/TensorRT-LLM/tree/main/examples/auto_deploy) is designed to simplify and accelerate the deployment of PyTorch models, including off-the-shelf models like those from Hugging Face, to optimized inference environments with TRT-LLM. It automates graph transformations to integrate inference optimizations such as tensor parallelism, KV-caching and quantization. AutoDeploy supports optimized in-framework deployment, minimizing the amount of manual modification needed.
 
 ## Prerequisites
 
-AutoDeploy is currently available on the main branch of TRT-LLM. Follow the [docker setup instructions](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/installation/build-from-source-linux.md#option-1-build-tensorrt-llm-in-one-step) to get started.
+AutoDeploy is available in TensorRT-LLM docker images. Please refer to our [Installation Guide](../../README.md#installation) for more details.
 
 ### 1. Quantize and Deploy Model
 

@@ -157,8 +157,7 @@ class HistogramCalibrator(_Calibrator):
         """
         if dist.is_initialized():
             warnings.warn(
-                "This method does not perform any synchronization across DistributedDataParallel"
-                " (DDP) https://pytorch.org/docs/stable/notes/ddp.html modules. The recommended"
+                "This method does not perform any synchronization across distributed processes. The recommended"
                 " method is to use the same calibration dataset across all distributed data"
                 " parallel groups so that `amax` is the same for all DDP modules."
             )

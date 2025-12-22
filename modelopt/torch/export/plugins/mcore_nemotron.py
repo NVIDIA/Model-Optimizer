@@ -17,8 +17,10 @@
 """Custom mapping from Nemotron Hugging Face models to Megatron Core models."""
 
 from .mcore_custom import (
+    COL_ETP,
     COL_TP,
     REPLICATE,
+    ROW_ETP,
     ROW_TP,
     CustomModuleMapping,
     NameRemapping,
@@ -63,6 +65,22 @@ nemotron_h_causal_lm_import: dict[str, CustomModuleMapping] = {
     "pre_mlp_layernorm": NameRemapping("backbone.layers.{}.norm.", REPLICATE),
     "linear_fc1": NameRemapping("backbone.layers.{}.mixer.up_proj.", COL_TP),
     "linear_fc2": NameRemapping("backbone.layers.{}.mixer.down_proj.", ROW_TP),
+    # MoE
+    "router": NameRemapping(
+        "backbone.layers.{}.mixer.gate.", {"mapping": {"expert_bias": "e_score_correction_bias"}}
+    ),
+    "local_experts.linear_fc1": NameRemapping(
+        "backbone.layers.{}.mixer.experts.{}.up_proj.", COL_ETP
+    ),
+    "local_experts.linear_fc2": NameRemapping(
+        "backbone.layers.{}.mixer.experts.{}.down_proj.", ROW_ETP
+    ),
+    "shared_experts.linear_fc1": NameRemapping(
+        "backbone.layers.{}.mixer.shared_experts.up_proj.", COL_TP
+    ),
+    "shared_experts.linear_fc2": NameRemapping(
+        "backbone.layers.{}.mixer.shared_experts.down_proj.", ROW_TP
+    ),
 }
 
 
@@ -87,4 +105,14 @@ nemotron_h_causal_lm_export: dict[str, CustomModuleMapping] = {
     "pre_mlp_layernorm": NameRemapping("backbone.layers.{}.norm."),
     "linear_fc1": NameRemapping("backbone.layers.{}.mixer.up_proj."),
     "linear_fc2": NameRemapping("backbone.layers.{}.mixer.down_proj."),
+    # MoE
+    "router": NameRemapping(
+        "backbone.layers.{}.mixer.gate.", {"mapping": {"expert_bias": "e_score_correction_bias"}}
+    ),
+    "local_experts.linear_fc1": NameRemapping("backbone.layers.{}.mixer.experts.{}.up_proj."),
+    "local_experts.linear_fc2": NameRemapping("backbone.layers.{}.mixer.experts.{}.down_proj."),
+    "shared_experts.linear_fc1": NameRemapping("backbone.layers.{}.mixer.shared_experts.up_proj."),
+    "shared_experts.linear_fc2": NameRemapping(
+        "backbone.layers.{}.mixer.shared_experts.down_proj."
+    ),
 }

@@ -15,8 +15,8 @@
 
 import torch
 import torch.distributed as dist
-from _test_utils.torch_dist.dist_utils import spawn_multiprocess_job
-from _test_utils.torch_quantization.models import SimpleLinear
+from _test_utils.torch.distributed.utils import spawn_multiprocess_job
+from _test_utils.torch.quantization.models import SimpleLinear
 from torch.nn.parallel import DistributedDataParallel
 
 import modelopt.torch.quantization as mtq

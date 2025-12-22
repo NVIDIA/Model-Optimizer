@@ -71,7 +71,7 @@ import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
 import modelopt.torch.prune as mtp
 import modelopt.torch.quantization as mtq
-from modelopt.torch._deploy.utils import get_onnx_bytes
+from modelopt.torch._deploy.utils import OnnxBytes, get_onnx_bytes_and_metadata
 
 # Enable automatic save/load of modelopt_state with huggingface checkpointing
 mto.enable_huggingface_checkpointing()
@@ -1221,8 +1221,12 @@ def main(input_args: list[str] | None = None) -> None:
         model = model.to(accelerator.device)
         dummy_input = dummy_input.to(accelerator.device)
 
-        with open(args.onnx_export_path, "wb") as f:
-            f.write(get_onnx_bytes(model, dummy_input, onnx_opset=14))
+        model_name = os.path.basename(args.onnx_export_path).replace(".onnx", "")
+        onnx_bytes, _ = get_onnx_bytes_and_metadata(
+            model, dummy_input, model_name=model_name, onnx_opset=14
+        )
+        onnx_bytes_obj = OnnxBytes.from_bytes(onnx_bytes)
+        onnx_bytes_obj.write_to_disk(os.path.dirname(args.onnx_export_path), clean_dir=False)
 
     logger.info("Done!")
 

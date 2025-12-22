@@ -1,0 +1,64 @@
+# Reusable workflow for running example tests
+name: Example Tests Runner
+
+on:
+  workflow_call:
+    inputs:
+      docker_image:
+        description: "Docker image to use for tests"
+        required: true
+        type: string
+      example:
+        description: "Example name to test (e.g. 'llm_ptq')"
+        required: true
+        type: string
+      timeout_minutes:
+        description: "Timeout in minutes for the job"
+        required: false
+        type: number
+        default: 60
+      pip_install_extras:
+        description: "Pip install extras (e.g. '[hf,dev-test]' or '[all,dev-test]')"
+        required: false
+        type: string
+        default: "[all,dev-test]"
+      runner:
+        description: "GitHub runner to use"
+        required: false
+        type: string
+        default: "linux-amd64-gpu-h100-latest-1"
+
+jobs:
+  run-test:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    container:
+      image: ${{ inputs.docker_image }}
+      env:
+        PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: nv-gha-runners/setup-proxy-cache@main
+      - name: Setup environment variables
+        run: |
+          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu:/usr/local/tensorrt/targets/x86_64-linux-gnu/lib" >> $GITHUB_ENV
+          echo "PATH=${PATH}:/usr/local/tensorrt/targets/x86_64-linux-gnu/bin" >> $GITHUB_ENV
+      - name: Install dependencies
+        run: |
+          # Install git-lfs for Daring-Anteater dataset
+          apt-get update && apt-get install -y git-lfs
+          git lfs install --system
+
+          pip install ".${{ inputs.pip_install_extras }}"
+
+          if [[ "${{ inputs.example }}" == *"diffusers"* ]]; then
+            echo "Uninstalling apex for diffusers: T5 Int8 (PixArt) + Apex is not supported as per https://github.com/huggingface/transformers/issues/21391"
+            pip uninstall -y apex || true
+          fi
+
+          find examples/${{ inputs.example }} -name "requirements.txt" | while read req_file; do pip install -r "$req_file" || exit 1; done
+      - name: Run tests
+        run: |
+          echo "Running tests for: ${{ inputs.example }}"
+          pytest tests/examples/${{ inputs.example }}

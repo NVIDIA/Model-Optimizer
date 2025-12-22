@@ -16,6 +16,8 @@
 import pytest
 import torch.nn as nn
 
+pytest.importorskip("torchprofile")
+
 from modelopt.torch.nas.utils import inference_flops
 
 
@@ -36,5 +38,5 @@ def test_flops(in_channel, out_channel, kernel_size, groups, data_x, data_y) -> 
     input_data_shape = (1, in_channel, data_x, data_y)
     out_elements = out_channel * data_x * data_y
     per_element_filters = in_channel * kernel_size * kernel_size // groups
-    desired_output = out_elements * per_element_filters
+    desired_output = 2 * out_elements * per_element_filters
     assert inference_flops(conv_module, data_shape=input_data_shape, unit=1) == desired_output

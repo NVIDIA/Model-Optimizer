@@ -22,14 +22,13 @@ import onnxruntime as ort
 import pytest
 import torch
 import torch.nn as nn
-from _test_utils.torch_model.deploy_models import BaseDeployModel, get_deploy_models
+from _test_utils.torch.deploy.lib_test_models import BaseDeployModel, get_deploy_models
 
 from modelopt.onnx.utils import get_batch_size_from_bytes, validate_batch_size
 from modelopt.torch._deploy.utils import (
     OnnxBytes,
     flatten_tree,
     generate_onnx_input,
-    get_onnx_bytes,
     get_onnx_bytes_and_metadata,
 )
 from modelopt.torch._deploy.utils.torch_onnx import _to_expected_onnx_type
@@ -53,13 +52,13 @@ def test_onnx_dynamo_export(skip_on_windows, model: BaseDeployModel):
         with pytest.raises(AssertionError) if model.compile_fail else nullcontext():
             onnx_bytes, _ = get_onnx_bytes_and_metadata(model, args, dynamo_export=True)
             onnx_bytes_obj = OnnxBytes.from_bytes(onnx_bytes)
-            onnx_bytes = onnx_bytes_obj.onnx_model[f"{onnx_bytes_obj.model_name}.onnx"]
+            model_bytes = onnx_bytes_obj.get_onnx_model_file_bytes()
 
         if model.compile_fail:
             continue
 
-        assert onnx_bytes != b""
-        assert onnx.load_model_from_string(onnx_bytes)
+        assert model_bytes != b""
+        assert onnx.load_model_from_string(model_bytes)
 
 
 @pytest.mark.parametrize("model", deploy_benchmark_all.values(), ids=deploy_benchmark_all.keys())
@@ -160,7 +159,9 @@ class DoubleArgModel(nn.Module):
 )
 def test_get_and_validate_batch_size(model, n_args, batch_size):
     inputs = (torch.randn([batch_size, 3, 32, 32]),) * n_args
-    onnx_bytes = get_onnx_bytes(model, inputs)
+    onnx_bytes, _ = get_onnx_bytes_and_metadata(model, inputs)
+    onnx_bytes_obj = OnnxBytes.from_bytes(onnx_bytes)
+    onnx_bytes = onnx_bytes_obj.onnx_model[f"{onnx_bytes_obj.model_name}.onnx"]
 
     assert validate_batch_size(onnx_bytes, batch_size)
     assert validate_batch_size(onnx_bytes, 3) is False

@@ -1,79 +1,37 @@
-# NOTE: Make sure this file is consistent with .github/workflows/{unit,gpu}_tests.yml
+# NOTE: Make sure this file is consistent with .github/workflows/{unit,gpu,example}_tests.yml
 .tests-default:
+  variables:
+    PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
   stage: tests
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
-      when: always
-    - if: $CI_PIPELINE_SOURCE != "schedule"
+    - if: $CI_COMMIT_TAG =~ /^\d+\.\d+\.\d+$/
+    - if: $CI_PIPELINE_SOURCE == "web" || $CI_MERGE_REQUEST_TARGET_BRANCH_PROTECTED == "true"
       when: manual
 
-##### Unit Tests #####
-unit:
-  extends: .tests-default
-  timeout: 30m
-  variables:
-    PYTHON: 12
-    TORCH: 28
-    TRANSFORMERS: latest
-  image: python:3.$PYTHON
-  before_script:
-    # Install cmake to build onnxsim from sdists for Python 3.12 until http://github.com/daquexian/onnx-simplifier/pull/353
-    - if [ "$PYTHON" = "12" ]; then apt-get update && apt-get install -y cmake; fi
-    - pip install tox
-  script:
-    - tox -e py3$PYTHON-torch$TORCH-tf_$TRANSFORMERS-unit
-
-##### GPU Tests #####
-gpu:
-  extends: .tests-default
-  timeout: 60m
-  image: nvcr.io/nvidia/pytorch:25.06-py3
-  variables:
-    GIT_DEPTH: 1000 # For correct version for tests/gpu/torch/quantization/plugins/test_megatron.py
-    LD_LIBRARY_PATH: "/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}" # Add libcudnn*.so and libnv*.so to path.
-    PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
-  tags: [docker, linux, 2-gpu]
-  script:
-    # Use pre-installed packages without a new venv with tox-current-env
-    - pip install tox-current-env
-    - tox -e py312-cuda12-gpu --current-env
-
 ##### Example Tests #####
-example:
+example-onnx-bash:
   extends: .tests-default
-  stage: tests
-  timeout: 45m
-  image: gitlab-master.nvidia.com:5005/omniml/modelopt/modelopt_examples:latest
-  variables:
-    TEST_TYPE: pytest
-  tags: [docker, linux, 2-gpu, sm<89]
-  parallel:
-    matrix:
-      - TEST: [diffusers, llm_distill, llm_qat, llm_sparsity, onnx_ptq, speculative_decoding]
-  allow_failure: true # Allow to continue next stages even if job is canceled (e.g. during release)
-  before_script:
-    - pip install ".[all]" -U
-  script:
-    # Uninstall apex since T5 Int8 (PixArt) + Apex is not supported as per https://github.com/huggingface/transformers/issues/21391
-    - if [ "$TEST" = "diffusers" ]; then pip uninstall -y apex; fi
-    - if [ "$TEST_TYPE" = "pytest" ]; then pytest -s tests/examples/$TEST; else bash tests/examples/test_$TEST.sh; fi
-
-example-ada:
-  extends: example
-  timeout: 60m
+  timeout: 90m
+  image: nvcr.io/nvidia/tensorrt:25.08-py3
   tags: [docker, linux, 2-gpu, sm>=89]
   parallel:
     matrix:
-      - TEST: [llm_eval, llm_ptq, vlm_ptq, llm_autodeploy]
-      - TEST: [onnx_ptq]
-        TEST_TYPE: bash
+      - EXAMPLE: [onnx_ptq]
+  before_script:
+    # Add libcudnn*.so and libnv*.so to path
+    - export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu"
+  script:
+    - pip install ".[all,dev-test]"
+    - find examples/$EXAMPLE -name "requirements.txt" | while read req_file; do pip install -r "$req_file" || exit 1; done
+    - bash tests/examples/test_$EXAMPLE.sh
 
 ##### Megatron / NeMo Integration Tests #####
-megatron-nemo-integration:
-  extends: .tests-default
-  variables:
-    UPSTREAM_REF: $CI_COMMIT_REF_NAME
-  trigger:
-    project: omniml/integration/nmm-sandbox
-    branch: main
-    strategy: depend # Make sure the upstream task is waiting for the downstream task
+# megatron-nemo-integration:
+#   extends: .tests-default
+#   variables:
+#     UPSTREAM_REF: $CI_COMMIT_REF_NAME
+#   trigger:
+#     project: omniml/integration/nmm-sandbox
+#     branch: main
+#     strategy: depend # Make sure the upstream task is waiting for the downstream task

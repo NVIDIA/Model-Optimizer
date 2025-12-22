@@ -17,7 +17,7 @@
 import onnx
 import pytest
 import torch
-from _test_utils.onnx_quantization.lib_test_models import UNet, export_as_onnx
+from _test_utils.onnx.lib_test_models import UNet, export_as_onnx
 
 from modelopt.onnx.quantization import quantize
 

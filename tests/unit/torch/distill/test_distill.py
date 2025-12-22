@@ -19,7 +19,7 @@ import warnings
 import pytest
 import torch
 import torch.nn as nn
-from _test_utils.torch_model.vision_models import get_tiny_mobilenet_and_input
+from _test_utils.torch.vision_models import get_tiny_mobilenet_and_input
 from torch.nn.modules.loss import _Loss as Loss
 from torchvision.models import alexnet
 
@@ -147,19 +147,20 @@ def test_distillation_save_restore(distillation_model, tmp_path):
     new_student = tiny_mobilenet()
     distillation_model_new = mto.restore(new_student, tmp_path / "ckpt.pt")
 
-    assert isinstance(distillation_model_new, mtd.DistillationModel)
-    assert distillation_model_new.teacher_model is not None
+    # Ensure state is not actually restored
+    manager = mto.ModeloptStateManager(distillation_model_new)
+    assert not manager.has_state
+    assert isinstance(distillation_model_new, type(new_student))
 
-    input = get_input_tensor()
-
-    # disable dropout for deterministic results
-    distillation_model.eval()
-    distillation_model_new.eval()
-
-    out = distillation_model(input)
-    out_new = distillation_model_new(input)
-
-    assert torch.allclose(out, out_new)
+    # Subsequent convert should behave normally
+    config = {
+        "teacher_model": distillation_model.teacher_model,
+        "criterion": mtd.LogitsDistillationLoss(),
+    }
+    distillation_model_newer = mtd.convert(new_student, mode=[("kd_loss", config)])
+    manager = mto.ModeloptStateManager(distillation_model_newer)
+    assert manager.has_state
+    assert isinstance(distillation_model_newer, mtd.DistillationModel)
 
 
 def test_distillation_export(distillation_model, tmp_path):

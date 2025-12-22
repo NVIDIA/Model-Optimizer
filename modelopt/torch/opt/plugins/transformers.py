@@ -15,12 +15,10 @@
 
 """ModelOpt plugin for enabling automatic save/restore of ModelOpt state for HuggingFace models."""
 
-import os
 import types
 from contextlib import contextmanager
 
 import torch
-import transformers
 from transformers import PreTrainedModel, Trainer, TrainerCallback
 from transformers import modeling_utils as tf_modeling_utils
 
@@ -64,13 +62,6 @@ def _undo_torch_init_override_by_transformers():
 
 def _new_from_pretrained(cls, /, pretrained_model_name_or_path, *args, **kwargs):
     """Patch for `cls.from_pretrained` method to restore ModelOpt state."""
-    if kwargs.get("tp_plan") is not None or (
-        kwargs.get("device_map") == "auto" and os.environ.get("WORLD_SIZE")
-    ):
-        assert transformers.__version__ >= "4.52.0", (
-            "Tensor parallelism with ModelOpt requires transformers >= 4.52.0"
-        )
-
     with _patch_model_init_for_modelopt(
         cls, pretrained_model_name_or_path, extra_context=_undo_torch_init_override_by_transformers
     ):

@@ -64,13 +64,13 @@ class KDTrainer(ModelOptHFTrainer):
             output_dir = self.args.output_dir
         model = self.accelerator.unwrap_model(self.model)
         if not _internal_call and self.is_fsdp_enabled:
-            state_dict = self.accelerator.get_state_dict(self.model)
+            with model.hide_teacher_model(enable=export_student):
+                state_dict = self.accelerator.get_state_dict(self.model)
             modelopt_state = mto.modelopt_state(model)
             if export_student:
+                # Need to wait, otherwise FSDP weights may be deleted before rank 0 can gather them
+                self.accelerator.wait_for_everyone()
                 model = model.export()
-                # remove teacher model from state dict since FSDP forces
-                # expose_minimal_state_dict to be False
-                state_dict = {k: v for k, v in state_dict.items() if "_teacher_model" not in k}
 
             if self.accelerator.is_main_process:
                 model.save_pretrained(
@@ -80,12 +80,6 @@ class KDTrainer(ModelOptHFTrainer):
                     state_dict=state_dict,
                 )
                 self.processing_class.save_pretrained(output_dir)
-                if export_student:
-                    modelopt_state["modelopt_state_dict"] = [
-                        state
-                        for state in modelopt_state["modelopt_state_dict"]
-                        if "kd_loss" not in state and "export_student" not in state
-                    ]
                 torch.save(modelopt_state, f"{output_dir}/modelopt_state.pth")
         else:
             model = model.export() if export_student else model

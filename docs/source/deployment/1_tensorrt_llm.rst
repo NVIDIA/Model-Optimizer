@@ -2,10 +2,13 @@
 TensorRT-LLM
 ==========================
 
+**Deprecation Notice**: The export_tensorrt_llm_checkpoint API will be deprecated in future releases. Users are encouraged to transition to the :doc:`unified HF export API <3_unified_hf>`, which provides enhanced functionality and flexibility for exporting models to multiple inference frameworks including TensorRT-LLM, vLLM, and SGLang.
+
 .. note::
 
-    Please read the `TensorRT-LLM checkpoint workflow <https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/architecture/checkpoint.md>`_
+    Please read the `TensorRT-LLM checkpoint workflow <https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/legacy/architecture/checkpoint.md>`_
     first before going through this section.
+
 
 
 ModelOpt toolkit supports automatic conversion of ModelOpt exported LLM to the TensorRT-LLM checkpoint and the engines for accelerated inferencing.
@@ -144,4 +147,4 @@ If the :meth:`export_tensorrt_llm_checkpoint <modelopt.torch.export.model_config
 Convert to TensorRT-LLM
 =======================
 
-Once the TensorRT-LLM checkpoint is available, please follow the `TensorRT-LLM build API <https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/architecture/workflow.md#build-apis>`_ to build and deploy the quantized LLM.
+Once the TensorRT-LLM checkpoint is available, please follow the `TensorRT-LLM build API <https://github.com/NVIDIA/TensorRT-LLM/blob/main/docs/source/legacy/architecture/workflow.md#build-apis>`_ to build and deploy the quantized LLM.

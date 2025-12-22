@@ -37,10 +37,6 @@ def get_tokenizer(ckpt_path, max_seq_len=MAX_SEQ_LEN, trust_remote_code=False):
         padding_side="left",
         trust_remote_code=trust_remote_code,
     )
-    if type(tokenizer).__name__ == "QWenTokenizer":
-        # qwen use token id 151643 as pad and eos tokens
-        tokenizer.pad_token = tokenizer.convert_ids_to_tokens(151643)
-        tokenizer.eos_token = tokenizer.convert_ids_to_tokens(151643)
 
     # can't set attribute 'pad_token' for "<unk>"
     if tokenizer.pad_token != "<unk>":

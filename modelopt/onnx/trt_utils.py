@@ -18,6 +18,7 @@
 import ctypes
 import platform
 
+import lief
 import onnx
 import onnx_graphsurgeon as gs
 
@@ -35,6 +36,52 @@ try:
     TRT_PYTHON_AVAILABLE = True
 except ImportError:
     TRT_PYTHON_AVAILABLE = False
+
+MAX_IR_VERSION = 10
+
+
+def _is_static_plugin(plugin_path: str) -> bool:
+    """Check if a plugin is statically linked against 'libnvinfer'.
+
+    Args:
+        plugin_path: Path to the plugin .so file.
+
+    Returns:
+        True if plugin is statically linked, False otherwise.
+    """
+    try:
+        return any(dep.startswith("libnvinfer.so") for dep in lief.parse(plugin_path).libraries)
+    except Exception as e:
+        logger.debug(
+            f"Could not find 'libnvinfer.so' link in {plugin_path}: {e}. Assuming it's dynamically linked."
+        )
+        return False
+
+
+def _load_trt_plugin(plugin_path: str, registry) -> None:
+    """Load a TensorRT plugin using the appropriate method.
+
+    Static plugins (linked against 'libnvinfer') are loaded with ctypes.CDLL to avoid double-loading TensorRT and
+    thus avoid SegFault error. Dynamic plugins use registry.load_library for proper TensorRT registration.
+
+    Args:
+        plugin_path: Path to the plugin .so file.
+        registry: TensorRT plugin registry.
+    """
+    is_static = _is_static_plugin(plugin_path)
+    logger.debug(f"Loading {'static' if is_static else 'dynamic'} plugin: {plugin_path}")
+
+    if is_static:
+        # Static plugins: use ctypes.CDLL to avoid double-loading 'libnvinfer'.
+        ctypes.CDLL(plugin_path)
+    else:
+        # Dynamic plugins: use registry.load_library for proper TensorRT registration, falling back to ctypes.CDLL
+        # as needed.
+        try:
+            registry.load_library(plugin_path)
+        except Exception as e:
+            logger.warning(f"registry.load_library() failed: {e}, falling back to ctypes.CDLL()")
+            ctypes.CDLL(plugin_path)
 
 
 def get_custom_layers(
@@ -55,15 +102,19 @@ def get_custom_layers(
     """
     logger.debug("Checking for custom TensorRT ops")
 
-    # Initialize TensorRT plugins
-    if trt_plugins:
-        logger.debug(f"Loading TensorRT plugins: {trt_plugins}")
-        for plugin in trt_plugins:
-            ctypes.CDLL(plugin)
-
-    # Create builder and network
+    # Initialize TensorRT logger and plugins
     trt_logger = trt.Logger(trt.Logger.WARNING)
     trt.init_libnvinfer_plugins(trt_logger, "")
+
+    # Load custom TensorRT plugins
+    if trt_plugins:
+        logger.debug(f"Loading {len(trt_plugins)} TensorRT plugin(s)")
+        registry = trt.get_plugin_registry()
+
+        for plugin in trt_plugins:
+            _load_trt_plugin(plugin, registry)
+
+        logger.debug(f"Total registered plugin creators: {len(registry.plugin_creator_list)}")
     builder = trt.Builder(trt_logger)
     network = (
         builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
@@ -266,6 +317,9 @@ def load_onnx_model(
     custom_ops = []
     has_custom_op = False
 
+    # Infer shapes
+    onnx.shape_inference.infer_shapes_path(onnx_path)
+
     # Load the model and weights
     onnx_model = onnx.load(onnx_path, load_external_data=True)
     size_threshold = 2 * (1024**3)  # 2GB
@@ -293,7 +347,8 @@ def load_onnx_model(
 
             static_shaped_onnx_path = onnx_path.replace(".onnx", "_static.onnx")
             save_onnx(onnx_model, static_shaped_onnx_path, use_external_data_format)
-            intermediate_generated_files.append(static_shaped_onnx_path)  # type: ignore[union-attr]
+            if intermediate_generated_files is not None:
+                intermediate_generated_files.append(static_shaped_onnx_path)
 
     if TRT_PYTHON_AVAILABLE and platform.system() != "Windows":
         # Check if there's a custom TensorRT op in the ONNX model. If so, make it ORT compatible by adding
@@ -315,11 +370,38 @@ def load_onnx_model(
             # Infer types and shapes in the graph for ORT compatibility
             onnx_model = infer_types_shapes_tensorrt(onnx_model, trt_plugins or [], all_tensor_info)
 
+    # Ensure nodes are topologically sorted
+    graph = gs.import_onnx(onnx_model)
+    graph.toposort()
+    onnx_model = gs.export_onnx(graph)
+
+    # Enforce IR version = 10
+    ir_version_onnx_path = None
+    if onnx_model.ir_version > MAX_IR_VERSION:
+        onnx_model.ir_version = MAX_IR_VERSION
+        ir_version_onnx_path = (
+            static_shaped_onnx_path.replace(".onnx", f"_ir{MAX_IR_VERSION}.onnx")
+            if static_shaped_onnx_path
+            else onnx_path.replace(".onnx", f"_ir{MAX_IR_VERSION}.onnx")
+        )
+        save_onnx(onnx_model, ir_version_onnx_path, use_external_data_format)
+        if intermediate_generated_files is not None:
+            intermediate_generated_files.append(ir_version_onnx_path)
+
+    # Check that the model is valid
+    if use_external_data_format:
+        # For large models, use the file path to avoid protobuf size limitation
+        model_path_to_check = ir_version_onnx_path or static_shaped_onnx_path or onnx_path
+        onnx.checker.check_model(model_path_to_check)
+    else:
+        # For smaller models, checking the model object is fine
+        onnx.checker.check_model(onnx_model)
+
     return (
         onnx_model,
         has_custom_op,
         custom_ops,
-        static_shaped_onnx_path or onnx_path,
+        ir_version_onnx_path or static_shaped_onnx_path or onnx_path,
         use_external_data_format,
     )
 
@@ -327,7 +409,7 @@ def load_onnx_model(
 def interpret_trt_plugins_precision_flag(
     onnx_model: onnx.ModelProto,
     trt_plugins_precision: list[str],
-    quantize_mode: str,
+    quantize_mode: str = "int8",
 ) -> tuple[dict, dict]:
     """Convert custom ops precision flag to dictionaries with custom op and I/O indices to be cast/quantized.
 
@@ -367,10 +449,12 @@ def interpret_trt_plugins_precision_flag(
         if trt_plugin_precision.count(":") == 1:
             if precision not in supported_precisions:
                 logger.warning(f"Precision {precision} is not supported. Skipping.")
-            if precision == "fp16":
-                custom_ops_to_cast[op_type] = {
-                    "inp": list(range(num_inps)),
-                    "out": list(range(num_outs)),
+            if precision in ["fp16", "fp32"]:
+                custom_ops_to_cast[precision] = {
+                    op_type: {
+                        "inp": list(range(num_inps)),
+                        "out": list(range(num_outs)),
+                    }
                 }
             if precision in ["int8", "fp8"]:
                 if precision != quantize_mode:
@@ -408,10 +492,14 @@ def interpret_trt_plugins_precision_flag(
                     f"Setting the custom op precision to be the same as quantize mode."
                 )
 
-            # Will cast the inputs to FP16 and the outputs back to FP32
-            inp_precision_cast = [i for i, p in enumerate(inp_precision) if p == "fp16"]
-            out_precision_cast = [i for i, p in enumerate(out_precision) if p in ["fp16", "fp32"]]
-            custom_ops_to_cast[op_type] = {"inp": inp_precision_cast, "out": out_precision_cast}
+            # Will cast the inputs to FP16/FP32 and the outputs back to FP32
+            for precision in ["fp16", "fp32"]:
+                inp_precision_cast = [i for i, p in enumerate(inp_precision) if p == precision]
+                out_precision_cast = [i for i, p in enumerate(out_precision) if p == precision]
+                if inp_precision_cast:
+                    custom_ops_to_cast[precision] = {
+                        op_type: {"inp": inp_precision_cast, "out": out_precision_cast}
+                    }
 
             # Will add Q/DQ nodes in the requested I/O indices
             inp_precision_quant = [i for i, p in enumerate(inp_precision) if p in ["int8", "fp8"]]

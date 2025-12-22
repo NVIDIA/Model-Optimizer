@@ -24,7 +24,6 @@ from modelopt.torch.opt.mode import ConvertReturnType, MetadataDict
 from ..config import EagleConfig
 
 EagleDMRegistry = _DMRegistryCls(prefix="Eagle")  # global instance for the registry
-OfflineEagleDMRegistry = _DMRegistryCls(prefix="DetachedEagle")  # global instance for the registry
 
 
 def convert_to_eagle_model(model: nn.Module, config: EagleConfig) -> ConvertReturnType:
@@ -32,16 +31,14 @@ def convert_to_eagle_model(model: nn.Module, config: EagleConfig) -> ConvertRetu
     # initialize the true module if necessary
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
 
-    registry = OfflineEagleDMRegistry if config.eagle_offline else EagleDMRegistry
-
     original_cls = type(model)
-    if original_cls not in registry:
-        for cls in registry._registry:
+    if original_cls not in EagleDMRegistry:
+        for cls in EagleDMRegistry._registry:
             if issubclass(original_cls, cls):
-                registry.register({original_cls: "base_model_class"})(registry[cls])
+                EagleDMRegistry.register({original_cls: "base_model_class"})(EagleDMRegistry[cls])
                 break
 
-    eagle_model = registry.convert(model)
+    eagle_model = EagleDMRegistry.convert(model)
     eagle_model.modify(
         eagle_offline=config.eagle_offline,
         eagle_hidden_state_distillation=config.eagle_hidden_state_distillation,
@@ -51,6 +48,7 @@ def convert_to_eagle_model(model: nn.Module, config: EagleConfig) -> ConvertRetu
         eagle_reuse_base_decoder=config.eagle_reuse_base_decoder,
         eagle_loss_decay_factor=config.eagle_loss_decay_factor,
         eagle_architecture_config=config.eagle_architecture_config,
+        eagle_decoder_type=config.eagle_decoder_type,
     )
 
     # no metadata, all specified via config.

@@ -17,37 +17,17 @@
 
 import pytest
 import torch
-from _test_utils.torch_quantization.quant_utils import quant
-from _test_utils.torch_quantization.tensor_quant_common import (
-    FakeAffineTensorQuantTester,
-    FakeTensorQuantTester,
-    TensorQuantTester,
-)
+from _test_utils.torch.quantization.quant_utils import quant
+from _test_utils.torch.quantization.tensor_quant_common import FakeTensorQuantTester
 
 import modelopt.torch.quantization.triton as triton_kernel
 import modelopt.torch.quantization.utils as quant_utils
 from modelopt.torch.quantization import tensor_quant
-from modelopt.torch.quantization.extensions import get_cuda_ext, get_cuda_ext_fp8, get_cuda_ext_mx
+from modelopt.torch.quantization.extensions import get_cuda_ext, get_cuda_ext_mx
 from modelopt.torch.quantization.tensor_quant import mx_format_map
 
 
-class TestTensorQuantCuda(TensorQuantTester):
-    device = "cuda"
-
-
 class TestFakeTensorQuantCuda(FakeTensorQuantTester):
-    device = "cuda"
-
-    def test_non_current_gpu(self, need_2_gpus):
-        device = torch.cuda.device_count() - 1
-        assert torch.cuda.current_device() != device
-        x = torch.randn(3, 4).cuda(device)
-        quant_x = tensor_quant.fake_tensor_quant(x, torch.max(torch.abs(x)), None)
-        quant_x_ref = quant(x, torch.max(torch.abs(x)), fake=True)
-        assert torch.allclose(quant_x, quant_x_ref)
-
-
-class TestFakeAffineTensorQuantCuda(FakeAffineTensorQuantTester):
     device = "cuda"
 
 
@@ -120,48 +100,27 @@ class TestCudaExt:
 
 
 class TestScaledE4M3:
-    x = [
-        [-2.0000, -1.8000, -1.6000, -1.4000, -1.2000],
-        [-1.0000, -0.8000, -0.6000, -0.4000, -0.2000],
-        [-0.0000, 0.2000, 0.4000, 0.6000, 0.8000],
-        [1.0000, 1.2000, 1.4000, 1.6000, 1.8000],
-    ]
-
-    xq_unscaled = [
-        [-2.0000, -1.7500, -1.6250, -1.3750, -1.2500],
-        [-1.0000, -0.8125, -0.6250, -0.4062, -0.2031],
-        [0.0000, 0.2031, 0.4062, 0.6250, 0.8125],
-        [1.0000, 1.2500, 1.3750, 1.6250, 1.7500],
-    ]
-
-    xq_scaled = [
-        [-2.0000, -1.8571, -1.5714, -1.4286, -1.1429],
-        [-1.0000, -0.7857, -0.5714, -0.3929, -0.1964],
-        [0.0000, 0.1964, 0.3929, 0.5714, 0.7857],
-        [1.0000, 1.1429, 1.4286, 1.5714, 1.8571],
-    ]
-
     @pytest.mark.parametrize("device", ["cuda", "cpu"])
     def test_e4m3_no_scale(self, device):
-        x = torch.tensor(TestScaledE4M3.x).to(device)
-        xq_ref = torch.tensor(TestScaledE4M3.xq_unscaled).to(device)
+        x = torch.randn(4, 4, device=device, dtype=torch.float32)
+        xq_ref = tensor_quant.fp8_eager(x, torch.tensor(448.0, device=x.device))
         e4m3_x = tensor_quant.scaled_e4m3(x, None, None, 4, 3)
         assert torch.allclose(e4m3_x, xq_ref, atol=1e-4, rtol=1e-4)
 
     @pytest.mark.parametrize("device", ["cuda", "cpu"])
-    def test_with_amax(self, device):
-        x = torch.tensor(TestScaledE4M3.x).to(device).unsqueeze(-1)
-        xq_ref = torch.tensor(TestScaledE4M3.xq_scaled).to(device).unsqueeze(-1)
-
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+    def test_with_amax(self, device, dtype):
+        if device == "cpu" and dtype != torch.float32:
+            pytest.skip("CPU does not support non-float32 dtype")
+        x = torch.randn(4, 4, device=device, dtype=dtype)
         amax = quant_utils.reduce_amax(x, axis=None, keepdims=True)
-
-        e4m3_x = tensor_quant.scaled_e4m3(x, amax, None, 4, 3)
-
-        assert torch.allclose(e4m3_x, xq_ref, atol=1e-4, rtol=1e-4)
+        xq_ref = tensor_quant.fp8_eager(x, amax)
+        xq_test = tensor_quant.scaled_e4m3(x, amax, None, 4, 3)
+        assert torch.allclose(xq_test, xq_ref)
 
     def test_e4m3_incontiguous(self):
-        x = torch.tensor(TestScaledE4M3.x).cuda().transpose(1, 0)
-        xq_ref = torch.tensor(TestScaledE4M3.xq_unscaled).cuda().transpose(1, 0)
+        x = torch.randn(4, 4).cuda().transpose(1, 0)
+        xq_ref = tensor_quant.fp8_eager(x, torch.tensor(448.0, device=x.device))
         assert not x.is_contiguous()
         e4m3_x = tensor_quant.scaled_e4m3(x, None, None, 4, 3)
         assert torch.allclose(e4m3_x, xq_ref, atol=1e-4, rtol=1e-4)
@@ -178,29 +137,13 @@ class TestScaledE4M3:
         loss.backward()
         assert torch.allclose(quant_x.grad, x.grad)
 
-    def test_non_current_gpu(self, need_2_gpus):
-        device = torch.cuda.device_count() - 1
-        assert torch.cuda.current_device() != device
-        x = torch.randn(3, 4).cuda()
-        quant_x_ref = tensor_quant.scaled_e4m3(x, x.amax(), None, 4, 3)
-        x = x.cuda(device)
-        quant_x = tensor_quant.scaled_e4m3(x, x.amax(), None, 4, 3)
-        assert torch.allclose(quant_x, quant_x_ref.cuda(device))
-
-    def test_fused_e4m3_kernel(self):
-        cuda_ext_fp8 = get_cuda_ext_fp8()
-        x = torch.tensor(TestScaledE4M3.x).cuda()
-        xq_ref = torch.tensor(TestScaledE4M3.xq_scaled).cuda()
-        amax = torch.ones(1, x.shape[-1]).cuda() * x.abs().amax()
-        e4m3_x = cuda_ext_fp8.fused_fake_e4m3fy(x, amax.float(), 1.0 / (1 << 24))
-        assert torch.allclose(e4m3_x, xq_ref, atol=1e-4, rtol=1e-4)
-
-    def test_e4m3_kernel_non_last_axis(self):
-        x = torch.tensor(TestScaledE4M3.x).cuda()
-        xq_ref = torch.tensor(TestScaledE4M3.xq_scaled).cuda()
-        amax = torch.ones(x.shape[0], 1).cuda() * x.abs().amax()
-        e4m3_x = tensor_quant.scaled_e4m3(x, amax, None, 4, 3)
-        assert torch.allclose(e4m3_x, xq_ref, atol=1e-4, rtol=1e-4)
+    @pytest.mark.parametrize("axis", [0, 1, 2])
+    def test_e4m3_per_channel(self, axis):
+        x = torch.randn(4, 4, 4, dtype=torch.float32).cuda()
+        amax = x.abs().amax(dim=[ax for ax in range(x.ndim) if ax != axis], keepdim=True)
+        xq_ref = tensor_quant.fp8_eager(x, amax)
+        xq_test = tensor_quant.scaled_e4m3(x, amax, None, 4, 3)
+        assert torch.allclose(xq_test, xq_ref)
 
 
 class Testfp4:

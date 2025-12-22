@@ -15,8 +15,8 @@
 
 
 import pytest
-from _test_utils.torch_misc import set_seed
-from _test_utils.torch_quantization.models import SimpleLinear
+from _test_utils.torch.misc import set_seed
+from _test_utils.torch.quantization.models import SimpleLinear
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.backends import gemm_registry

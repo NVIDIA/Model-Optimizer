@@ -165,9 +165,7 @@ def get_dynamic_graph_inputs(onnx_model: onnx.ModelProto):
         List of dynamic inputs.
     """
     graph = gs.import_onnx(onnx_model)
-    return [
-        inp for inp in graph.inputs if -1 in inp.shape or any(isinstance(s, str) for s in inp.shape)
-    ]
+    return [inp for inp in graph.inputs if any(isinstance(s, str) or s <= 0 for s in inp.shape)]
 
 
 def _get_all_shapes(container: Any) -> dict[str, list[int]]:
@@ -686,6 +684,16 @@ def update_domain(onnx_model: onnx.ModelProto, op_type: str, domain: str) -> onn
             node.domain = domain
 
     return onnx_model
+
+
+def get_opset_version(model: onnx.ModelProto) -> int:
+    """Returns the opset version of the given model."""
+    ai_onnx_domain = [
+        opset
+        for opset in model.opset_import
+        if not opset.domain or opset.domain in ["ai.onnx", "ai.onnx.contrib", "trt.plugins"]
+    ]
+    return ai_onnx_domain[0].version
 
 
 def bfloat16_to_float32(bf16_array):

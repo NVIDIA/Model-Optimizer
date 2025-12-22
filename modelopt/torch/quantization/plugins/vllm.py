@@ -18,11 +18,27 @@
 import importlib
 
 import torch
+import vllm.attention as vllm_attention
 import vllm.model_executor.layers.fused_moe.layer as vllm_fused_moe_layer
 import vllm.model_executor.layers.linear as vllm_linear
+from vllm.attention.layers.cross_attention import CrossAttention
+from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
+from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_tp_group
 
 from ...utils.distributed import ParallelState
 from ..nn import QuantLinearConvBase, QuantModule, QuantModuleRegistry, TensorQuantizer
+
+# Try multiple import paths for vLLM compatibility across versions
+vllm_shared_fused_moe_layer = None
+for module_path in [
+    "vllm.model_executor.layers.fused_moe.shared_fused_moe",  # 0.11.0+
+    "vllm.model_executor.layers.shared_fused_moe.shared_fused_moe",  # 0.10.2
+]:
+    try:
+        vllm_shared_fused_moe_layer = importlib.import_module(module_path)
+        break
+    except ImportError:
+        continue
 
 vllm_fused_moe_package = importlib.import_module("vllm.model_executor.layers.fused_moe.fused_moe")
 
@@ -61,13 +77,29 @@ class FakeQuantMethod:
         x = layer.input_quantizer(x)
         if layer.weight_quantizer.is_enabled:
             original_weight = layer.weight
-            layer.weight = layer.weight_quantizer(layer.weight)
+            quantized_tensor = layer.weight_quantizer(layer.weight)
+            # parameterize the quantized weight
+            if isinstance(original_weight, torch.nn.Parameter) and not isinstance(
+                quantized_tensor, torch.nn.Parameter
+            ):
+                quantized_tensor = torch.nn.Parameter(
+                    quantized_tensor, requires_grad=original_weight.requires_grad
+                )
+            layer.weight = quantized_tensor
             output = self.quant_method.apply(layer, x, bias)
             layer.weight = original_weight
         else:
             output = self.quant_method.apply(layer, x, bias)
         output = layer.output_quantizer(output)
         return output
+
+
+def create_parallel_state():
+    """Create a parallel state for vLLM."""
+    dp_group = get_dp_group().device_group
+    tp_group = get_tp_group().device_group
+    ep_group = get_ep_group().device_group
+    return ParallelState(dp_group, tp_group, ep_group)
 
 
 class _VLLMParallelLinear(QuantModule):
@@ -80,7 +112,7 @@ class _VLLMParallelLinear(QuantModule):
             f"quant_method is {type(self.quant_method)}"
         )
         self.fake_quant_method = FakeQuantMethod(self.quant_method)
-        self.parallel_state = ParallelState(-1, -1)
+        self.parallel_state = create_parallel_state()
 
     def forward(self, input_):
         # This context manager will conflict with torch.compile
@@ -118,9 +150,7 @@ class _QuantVLLMQKVParallelLinear(_VLLMParallelLinear):
 # ReplicatedLinear is for MoE router and should not be quantized
 
 
-# FusedMoE layer requires handling for UnquantizedFusedMoEMethod
-@QuantModuleRegistry.register({vllm_fused_moe_layer.FusedMoE: "vllm_FusedMoE"})
-class _QuantVLLMFusedMoE(QuantModule):
+class _QuantFusedMoEBase(QuantModule):
     def _setup(self):
         self.w13_input_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_input)
         self.w2_input_quantizer = TensorQuantizer(QuantLinearConvBase.default_quant_desc_input)
@@ -133,7 +163,7 @@ class _QuantVLLMFusedMoE(QuantModule):
         assert type(self.quant_method) is vllm_fused_moe_layer.UnquantizedFusedMoEMethod, (
             f"quant_method is {type(self.quant_method)}"
         )
-        self.parallel_state = ParallelState(-1, -1)
+        self.parallel_state = create_parallel_state()
 
     def invoke_fused_moe_quantized(
         self,
@@ -180,20 +210,74 @@ class _QuantVLLMFusedMoE(QuantModule):
         #     "invoke_fused_moe_kernel",
         #     self.invoke_fused_moe_quantized,
         # ):
-        self._invoke_fused_moe_quantized = self.invoke_fused_moe_quantized
-        self.invoke_fused_moe_quantized = self.invoke_fused_moe_quantized
-        output = super().forward(hidden_states, router_logits)
-        self.invoke_fused_moe_quantized = self._invoke_fused_moe_quantized
-        return output
+        try:
+            vllm_fused_moe_package._invoke_fused_moe_kernel = (  # type: ignore[attr-defined]
+                vllm_fused_moe_package.invoke_fused_moe_kernel
+            )
+            vllm_fused_moe_package.invoke_fused_moe_kernel = self.invoke_fused_moe_quantized  # type: ignore[attr-defined]
+            output = super().forward(hidden_states, router_logits)
+            return output
+        finally:
+            vllm_fused_moe_package.invoke_fused_moe_kernel = (  # type: ignore[attr-defined]
+                vllm_fused_moe_package._invoke_fused_moe_kernel
+            )
 
-    @property
-    def mopt_ckpt_versn(self):
-        """Checkpoint version of the modelopt."""
-        return None
+    @torch.no_grad()
+    def fold_weight(self):
+        # the MoE weights can be super large, it consumes too much memory, so we need to fold the weight one by one
+        for i in range(self.w13_weight.shape[0]):
+            self.w13_weight[i].copy_(
+                self.w13_weight_quantizer(self.w13_weight[i].float().contiguous()).to(
+                    self.w13_weight.dtype
+                )
+            )
+        self.w13_weight_quantizer.disable()
+        for i in range(self.w2_weight.shape[0]):
+            self.w2_weight[i].copy_(
+                self.w2_weight_quantizer(self.w2_weight[i].float().contiguous()).to(
+                    self.w2_weight.dtype
+                )
+            )
+        self.w2_weight_quantizer.disable()
 
-    @mopt_ckpt_versn.setter
-    def mopt_ckpt_versn(self, version: str):
-        """Set the checkpoint version for the TensorQuantizer states."""
-        # vLLM defined an apply method that overwrites nn.Module.apply
-        # To avoid conflicting, disable the apply call here
-        # self.apply(_set_ckpt_version)
+        torch.cuda.empty_cache()
+
+
+@QuantModuleRegistry.register({vllm_fused_moe_layer.FusedMoE: "vllm_FusedMoE"})
+class _QuantVLLMFusedMoE(_QuantFusedMoEBase):
+    pass
+
+
+if vllm_shared_fused_moe_layer is not None:
+
+    @QuantModuleRegistry.register(
+        {vllm_shared_fused_moe_layer.SharedFusedMoE: "vllm_SharedFusedMoE"}
+    )
+    class _QuantVLLMSharedFusedMoE(_QuantFusedMoEBase):
+        pass
+
+
+@QuantModuleRegistry.register({vllm_attention.Attention: "vllm_Attention"})
+class _QuantVLLMAttention(QuantModule):
+    def _setup(self):
+        self.q_bmm_quantizer = TensorQuantizer()
+        self.k_bmm_quantizer = TensorQuantizer()
+        self.v_bmm_quantizer = TensorQuantizer()
+        self.parallel_state = create_parallel_state()
+
+    def forward(self, query, key, value, *args, **kwargs):
+        query = self.q_bmm_quantizer(query)
+        key = self.k_bmm_quantizer(key)
+        value = self.v_bmm_quantizer(value)
+
+        return super().forward(query, key, value, *args, **kwargs)
+
+
+@QuantModuleRegistry.register({CrossAttention: "vllm_CrossAttention"})
+class _QuantVLLMCrossAttention(_QuantVLLMAttention):
+    pass
+
+
+@QuantModuleRegistry.register({EncoderOnlyAttention: "vllm_EncoderOnlyAttention"})
+class _QuantVLLMEncoderOnlyAttention(_QuantVLLMAttention):
+    pass

@@ -19,7 +19,7 @@ import contextlib
 
 import pytest
 import torch
-from _test_utils.torch_quantization.tensor_quantizer_common import (
+from _test_utils.torch.quantization.tensor_quantizer_common import (
     BlockQuantTester,
     TensorQuantizerTester,
 )
@@ -54,6 +54,14 @@ class TestTensorQuantizerE4M3:
             e4m3_x = e4m3_quantizer(x)
             ref = tensor_quant.scaled_e4m3(x, e4m3_quantizer._get_amax(x), None, E, M)
             assert torch.allclose(e4m3_x, ref)
+
+    def test_non_current_gpu(self, need_2_gpus):
+        x = torch.randn(3, 4)
+        e4m3_desc = QuantizerAttributeConfig(num_bits=(4, 3), axis=None)
+        quantizer = tensor_quantizer.TensorQuantizer(e4m3_desc).cuda()
+        xq_ref = quantizer(x.to("cuda:0"))
+        xq_test = quantizer(x.to("cuda:1"))
+        assert torch.allclose(xq_ref, xq_test.to("cuda:0"))
 
 
 @pytest.mark.skipif(get_cuda_ext_mx() is None, reason="cuda_ext_mx is not available")

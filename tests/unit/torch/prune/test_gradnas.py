@@ -25,7 +25,7 @@ from modelopt.torch.opt.utils import named_hparams
 from modelopt.torch.prune.gradnas import GradientBinarySearcher
 
 try:
-    from _test_utils.torch_deploy.runtime import FAKE_DEPLOYMENT, fake_latency
+    from _test_utils.torch.deploy.runtime import FAKE_DEPLOYMENT, fake_latency
 
     import modelopt.torch._deploy  # noqa: F401
 

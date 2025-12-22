@@ -29,22 +29,25 @@ import torch
 import torch.nn as nn
 from onnx import ModelProto
 from onnxconverter_common import convert_float_to_float16
-from packaging.version import Version
 from torch.nn.parallel import DataParallel, DistributedDataParallel
 
 from modelopt.onnx.autocast.convert import convert_to_f16
-from modelopt.onnx.quantization.qdq_utils import (
-    fp4qdq_to_2dq,
-    qdq_to_dq,
-    quantize_weights_to_int4,
-    quantize_weights_to_mxfp8,
+from modelopt.onnx.export import (
+    FP8QuantExporter,
+    INT4QuantExporter,
+    INT8QuantExporter,
+    MXFP8QuantExporter,
+    NVFP4QuantExporter,
+    ONNXQuantExporter,
 )
+from modelopt.onnx.quantization.qdq_utils import qdq_to_dq, replace_zero_scale_with_smallest_nonzero
 from modelopt.onnx.utils import (
     get_input_names,
     get_input_shapes,
     get_node_names,
     get_output_names,
     get_output_shapes,
+    infer_shapes,
     remove_node_training_mode,
 )
 from modelopt.torch.quantization.export_onnx import configure_linear_module_onnx_quantizers
@@ -52,7 +55,7 @@ from modelopt.torch.utils import flatten_tree, standardize_named_model_args
 from modelopt.torch.utils._pytree import TreeSpec
 
 from ..utils.onnx_optimizer import Optimizer
-from .onnx_utils import _get_onnx_external_data_tensors, check_model_uses_external_data
+from .onnx_utils import check_model_uses_external_data
 
 ModelMetadata = dict[str, Any]
 ModelType = Any
@@ -83,15 +86,8 @@ class OnnxBytes:
         self.onnx_load_path = os.path.abspath(onnx_load_path)
         self.onnx_model = {}
         self.model_name = ""
-        onnx_model = onnx.load(self.onnx_load_path, load_external_data=False)
 
-        # Check for external data
-        external_data_format = False
-        for initializer in onnx_model.graph.initializer:
-            if initializer.external_data:
-                external_data_format = True
-
-        if external_data_format:
+        if has_external_data(onnx_load_path):
             onnx_model_dir = os.path.dirname(self.onnx_load_path)
             for onnx_model_file in os.listdir(onnx_model_dir):
                 with open(os.path.join(onnx_model_dir, onnx_model_file), "rb") as f:
@@ -108,16 +104,29 @@ class OnnxBytes:
                 self.onnx_model[onnx_model_file] = f.read()
             self.model_name = onnx_model_file.replace(".onnx", "")
 
-    def write_to_disk(self, onnx_save_dir: str) -> None:
-        """Writes the onnx model into the specified directory."""
-        if os.path.exists(onnx_save_dir):
-            print(f"Removing existing directory: {onnx_save_dir}")
-            shutil.rmtree(onnx_save_dir)
-        os.makedirs(onnx_save_dir)
-        print("Writing onnx model to path:", onnx_save_dir)
-        for onnx_model_file, onnx_model_bytes in self.onnx_model.items():
-            with open(os.path.join(onnx_save_dir, onnx_model_file), "wb") as f:
-                f.write(onnx_model_bytes)
+    def write_to_disk(self, onnx_save_dir: str = "", clean_dir: bool = True) -> None:
+        """Write ONNX model(s) to the specified directory.
+
+        Args:
+            onnx_save_dir: Directory path for saving. Defaults to current directory if empty.
+            clean_dir: Whether to remove existing directory first.
+        """
+        # Determine save directory
+        save_dir = os.path.abspath(onnx_save_dir) if onnx_save_dir else os.getcwd()
+
+        # Clean existing directory if requested
+        if clean_dir and os.path.exists(save_dir) and onnx_save_dir:
+            print(f"Removing existing directory: {save_dir}")
+            shutil.rmtree(save_dir)
+
+        # Ensure directory exists
+        os.makedirs(save_dir, exist_ok=True)
+
+        # Write model files
+        print(f"Writing ONNX model to directory: {save_dir}")
+        for filename, file_bytes in self.onnx_model.items():
+            with open(os.path.join(save_dir, filename), "wb") as f:
+                f.write(file_bytes)
 
     def to_bytes(self) -> bytes:
         """Returns the bytes of the object that can be restored using the OnnxBytes.from_bytes method."""
@@ -135,7 +144,11 @@ class OnnxBytes:
         return json.dumps(data).encode("utf-8")
 
     def get_onnx_model_file_bytes(self) -> bytes:
-        """Returns the bytes of the onnx model file."""
+        """Returns the bytes of the onnx model file.
+
+        Note: Even if the model has external data, this function will return the bytes of the main onnx model file.
+        To get the bytes of the external data, use the get_external_data_bytes() method.
+        """
         return self.onnx_model[self.model_name + ".onnx"]
 
     @classmethod
@@ -326,9 +339,91 @@ def is_mxfp8_quantized(model: nn.Module) -> bool:
     return False
 
 
+def is_int8_quantized(model: nn.Module) -> bool:
+    """Check if the model is quantized in INT8 mode."""
+    for _, module in model.named_modules():
+        if (
+            hasattr(module, "weight_quantizer")
+            and hasattr(module, "input_quantizer")
+            and module.weight_quantizer.is_enabled
+            and module.input_quantizer.is_enabled
+            and module.weight_quantizer._num_bits == 8
+            and module.input_quantizer._num_bits == 8
+        ):
+            return True
+    return False
+
+
+def is_fp8_quantized(model: nn.Module) -> bool:
+    """Check if the model is quantized in FP8 mode."""
+    for _, module in model.named_modules():
+        if (
+            hasattr(module, "weight_quantizer")
+            and hasattr(module, "input_quantizer")
+            and module.weight_quantizer.is_enabled
+            and module.input_quantizer.is_enabled
+            and module.weight_quantizer._num_bits == (4, 3)
+            and module.input_quantizer._num_bits == (4, 3)
+            # Exclude MXFP8 which also uses (4,3) but has block_sizes with scale_bits
+            and not (
+                module.input_quantizer.block_sizes
+                and module.input_quantizer.block_sizes.get("scale_bits", None) == (8, 0)
+            )
+        ):
+            return True
+    return False
+
+
+def quantize_weights(model: nn.Module, onnx_model: onnx.ModelProto) -> onnx.ModelProto:
+    """Real quantizes the weights in the onnx model.
+
+    Applies weight quantization to an ONNX model based on the quantization scheme detected
+    in the PyTorch model. Supports INT4, FP4, and MXFP8 quantization formats.
+
+    The function performs a four-stage process for each detected quantization type:
+    1. Pre-process - Restructure the graph for quantization
+    2. Compute scales - Calculate quantization scaling factors
+    3. Compress weights - Convert weights to the target quantized format
+    4. Post-process - Apply any final transformations or cleanup
+
+    Args:
+        model (nn.Module): The original PyTorch model used to detect quantization schemes.
+            This model should have been quantized using modelopt's quantization APIs.
+        onnx_model (onnx.ModelProto): The ONNX model whose weights will be quantized.
+
+    Returns:
+        onnx.ModelProto: The ONNX model with quantized weights applied. The returned model
+            contains compressed weight tensors in the appropriate quantization format.
+
+    Notes:
+        - Multiple quantization formats can be applied sequentially if the model contains
+          different quantization schemes for different layers
+        - The function checks for INT4, FP4, and MXFP8 quantization in the PyTorch model
+        - Each quantization exporter modifies the ONNX graph in-place before returning
+    """
+
+    onnx_exporters: list[type[ONNXQuantExporter]] = []
+    if is_int4_quantized(model):
+        onnx_exporters.append(INT4QuantExporter)
+    if is_fp4_quantized(model):
+        onnx_exporters.append(NVFP4QuantExporter)
+    if is_mxfp8_quantized(model):
+        onnx_exporters.append(MXFP8QuantExporter)
+    if is_fp8_quantized(model):
+        onnx_exporters.append(FP8QuantExporter)
+    if is_int8_quantized(model):
+        onnx_exporters.append(INT8QuantExporter)
+
+    for onnx_exporter in onnx_exporters:
+        onnx_model = onnx_exporter.process_model(onnx_model)
+
+    return onnx_model
+
+
 def get_onnx_bytes_and_metadata(
     model: nn.Module,
     dummy_input: Any | tuple,
+    model_name: str = "",
     onnx_load_path: str = "",
     dynamic_axes: dict = {},
     remove_exported_model: bool = True,
@@ -344,6 +439,7 @@ def get_onnx_bytes_and_metadata(
         dummy_input: A tuple of args/kwargs or torch.Tensor, see
             `torch.onnx.export <https://pytorch.org/docs/stable/onnx.html#torch.onnx.export>`_
             for more info on the convention.
+        model_name: The name of the model. If not provided, the model name will be inferred from the model class name.
         onnx_load_path: The path to load the onnx model.
         dynamic_axes: A dictionary of dynamic shapes used for exporting the torch model to onnx.
         remove_exported_model: If True, the onnx model will be cleared from the disk after the
@@ -418,10 +514,8 @@ def get_onnx_bytes_and_metadata(
 
     # Export onnx model from pytorch model
     # As the maximum size of protobuf is 2GB, we cannot use io.BytesIO() buffer during export.
-    model_name = model.__class__.__name__
-    onnx_build_folder = os.path.join(tempfile.gettempdir(), "modelopt_build/onnx/")
-    onnx_path = os.path.join(onnx_build_folder, model_name)
-    os.makedirs(onnx_path, exist_ok=True)
+    model_name = model_name or model.__class__.__name__
+    onnx_path = tempfile.mkdtemp(prefix=f"modelopt_{model_name}_")
     onnx_save_path = os.path.join(onnx_path, f"{model_name}.onnx")
 
     # Configure quantizers if the model is quantized in NVFP4 or MXFP8 mode
@@ -432,7 +526,7 @@ def get_onnx_bytes_and_metadata(
     )
     with torch.inference_mode(), autocast, quantizer_context:
         additional_kwargs = {}
-        if not dynamo_export and Version(torch.__version__) >= Version("2.8"):
+        if not dynamo_export:
             additional_kwargs["dynamic_axes"] = dynamic_axes
         torch.onnx.export(
             model,
@@ -452,7 +546,7 @@ def get_onnx_bytes_and_metadata(
     onnx_graph = onnx.load(onnx_save_path, load_external_data=True)
 
     try:
-        onnx_graph = onnx.shape_inference.infer_shapes(onnx_graph)
+        onnx_graph = infer_shapes(onnx_graph)
     except Exception as e:
         print(f"Shape inference failed: {e}")
 
@@ -471,12 +565,8 @@ def get_onnx_bytes_and_metadata(
 
     # Convert dummy TRT_FP4QDQ nodes to 2DQ format if the model is quantized in FP4 mode
     # Or convert weights to MXFP8 format if the model is quantized in MXFP8 mode
-    if is_int4_quantized(model):
-        onnx_opt_graph = quantize_weights_to_int4(onnx_opt_graph)
-    elif is_fp4_quantized(model):
-        onnx_opt_graph = fp4qdq_to_2dq(onnx_opt_graph)
-    elif is_mxfp8_quantized(model):
-        onnx_opt_graph = quantize_weights_to_mxfp8(onnx_opt_graph)
+    if is_int4_quantized(model) or is_fp4_quantized(model) or is_mxfp8_quantized(model):
+        onnx_opt_graph = quantize_weights(model, onnx_opt_graph)
 
     if dq_only:
         onnx_opt_graph = qdq_to_dq(onnx_opt_graph)
@@ -487,7 +577,7 @@ def get_onnx_bytes_and_metadata(
     except StopIteration:
         param_dtype = torch.float32
     if weights_dtype in ["fp16", "bf16"] and param_dtype == torch.float32:
-        if is_mxfp8_quantized(model) or is_int4_quantized(model):
+        if is_int4_quantized(model) or is_mxfp8_quantized(model):
             assert weights_dtype == "fp16", "BF16 + MXFP8/INT4 mixed precision is not supported yet"
             onnx_opt_graph = convert_float_to_float16(
                 onnx_opt_graph,
@@ -500,9 +590,12 @@ def get_onnx_bytes_and_metadata(
                 onnx_opt_graph, low_precision_type=weights_dtype, keep_io_types=False
             )
 
+        # TensorRT expects all scales to be postive
+        onnx_opt_graph = replace_zero_scale_with_smallest_nonzero(onnx_opt_graph)
+
     # If the onnx model contains external data store the external tensors in one file and save the onnx model
     if has_external_data(onnx_save_path):
-        tensor_paths = _get_onnx_external_data_tensors(onnx_opt_graph)
+        tensor_paths = get_external_tensor_paths(onnx_path)
         onnx.save_model(
             onnx_opt_graph,
             onnx_save_path,
@@ -510,18 +603,27 @@ def get_onnx_bytes_and_metadata(
             all_tensors_to_one_file=True,
             location=f"{model_name}.onnx_data",
             size_threshold=1024,
+            convert_attribute=False,
         )
-        for tensor in tensor_paths:
-            tensor_path = os.path.join(onnx_path, tensor)
-            os.remove(tensor_path)
+        for path in tensor_paths:
+            os.remove(path)
     else:
         onnx.save_model(onnx_opt_graph, onnx_save_path)
 
     onnx_bytes = OnnxBytes(onnx_save_path)
 
     if remove_exported_model:
-        shutil.rmtree(os.path.dirname(onnx_build_folder))
+        shutil.rmtree(onnx_path)
     return onnx_bytes.to_bytes(), model_metadata
+
+
+def get_external_tensor_paths(model_dir: str) -> list[str]:
+    """Get the paths of the external data tensors in the model."""
+    return [
+        os.path.join(model_dir, file)
+        for file in os.listdir(model_dir)
+        if not file.endswith(".onnx")
+    ]
 
 
 def has_external_data(onnx_model_path: str):
@@ -562,13 +664,3 @@ def create_model_metadata(
         "is_bytes_pickled": onnx_graph.ByteSize() > TWO_GB,
         "config": model.config if hasattr(model, "config") else None,
     }
-
-
-def get_onnx_bytes(*args, **kwargs) -> bytes:
-    """Return onnx bytes only.
-
-    See ``get_onnx_bytes_and_metadata()`` for more info.
-    """
-    onnx_bytes = get_onnx_bytes_and_metadata(*args, **kwargs)[0]
-    onnx_bytes_obj = OnnxBytes.from_bytes(onnx_bytes)
-    return onnx_bytes_obj.get_onnx_model_file_bytes()

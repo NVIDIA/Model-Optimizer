@@ -29,6 +29,7 @@ from modelopt.torch.quantization.qtensor import NVFP4QTensor
 QUANTIZATION_NONE = None
 QUANTIZATION_FP8 = "fp8"
 QUANTIZATION_INT8_SQ = "int8_sq"
+QUANTIZATION_INT8_WO = "int8_wo"
 QUANTIZATION_INT4_AWQ = "int4_awq"
 QUANTIZATION_W4A8_AWQ = "w4a8_awq"
 QUANTIZATION_NVFP4 = "nvfp4"
@@ -201,7 +202,7 @@ class QKVConfig:
             return None
 
         if self.q.weights_scaling_factor.numel() != 1:
-            # for NVFP4, Int4 AWQ and Int8 SQ case, we concatenate the
+            # for NVFP4, Int4 AWQ, Int8 SQ and Int8 WO case, we concatenate the
             # q_weight_scaling_factor, k_weight_scaling_factor, v_weight_scaling_factor
             if self.q.weights_scaling_factor.dtype == torch.float8_e4m3fn:
                 # For NVFP4, we recompute the weights_scaling_factor using max weights_scaling_factor2

@@ -15,6 +15,5 @@
 
 """Quantization backends."""
 
-from .fp8_per_tensor_gemm import *
 from .gemm_registry import *
 from .nvfp4_gemm import *

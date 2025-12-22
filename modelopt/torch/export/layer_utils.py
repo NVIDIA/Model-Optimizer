@@ -90,7 +90,12 @@ def get_experts_list(module: torch.nn.Module, model_type: str):
         linear_names = ["w1", "w2", "w3"]
     elif any(
         qwen_variant in model_type
-        for qwen_variant in ["qwenmoeforcausallm", "qwen2moeforcausallm", "qwen3moeforcausallm"]
+        for qwen_variant in [
+            "qwenmoeforcausallm",
+            "qwen2moeforcausallm",
+            "qwen3moeforcausallm",
+            "qwen3nextforcausallm",
+        ]
     ):
         linear_names = ["gate_proj", "down_proj", "up_proj"]
     else:
@@ -333,6 +338,7 @@ def is_moe(module: nn.Module) -> bool:
             "DeepseekMoE".lower(),
             "Qwen2MoeSparseMoeBlock".lower(),
             "Qwen3MoeSparseMoeBlock".lower(),
+            "Qwen3NextSparseMoeBlock".lower(),
         ]
     )
 
@@ -987,7 +993,13 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
         return any(name.lower() in type(module).__name__.lower() for name in name_list)
 
     if module_match_name_list(
-        module, ["Qwen2MoeSparseMoeBlock", "Qwen3MoeSparseMoeBlock", "DeepseekMoE"]
+        module,
+        [
+            "Qwen2MoeSparseMoeBlock",
+            "Qwen3MoeSparseMoeBlock",
+            "Qwen3NextSparseMoeBlock",
+            "DeepseekMoE",
+        ],
     ):
         return ["gate_proj", "down_proj", "up_proj"]
     elif module_match_name_list(module, ["MixtralMoeSparseMoeBlock"]):

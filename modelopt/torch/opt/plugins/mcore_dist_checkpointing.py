@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import yaml
 from megatron.core import dist_checkpointing, mpu
 from megatron.core.dist_checkpointing.serialization import get_default_load_sharded_strategy
 from megatron.core.dist_checkpointing.strategies.common import COMMON_STATE_FNAME
@@ -34,6 +35,21 @@ import modelopt.torch.utils.distributed as dist
 from modelopt.torch.utils.network import SUPPORTED_WRAPPERS
 
 SUPPORTED_WRAPPERS[Float16Module] = "module"
+
+DROP_SUBSTRINGS = [
+    "fp4",
+    "fp8",
+    "tp_",
+    "parallel",
+    "cuda_graph",
+    "init_",
+    "cpu",
+    "recompute",
+    "inference",
+    "pipeline",
+    "comm",
+    "batch",
+]
 
 
 def remove_per_module_state(
@@ -122,6 +138,29 @@ def save_sharded_modelopt_state(
         sharded_strategy: configures sharded tensors saving behavior and backend
         prefix: the prefix to add to the modelopt_state keys ("model." for NeMo)
     """
+
+    def _parse_transformer_config(transformer_config: dict) -> dict:
+        config = {}
+
+        for k, v in transformer_config.items():
+            if any(substring in k for substring in DROP_SUBSTRINGS):
+                continue
+            if isinstance(v, (bool, int, str)):
+                config[k] = v
+            else:
+                config[k] = str(v)
+
+        return config
+
+    # Save own version of run config, if not already saved by the framework.
+    if dist.is_master() and not os.path.exists(f"{checkpoint_name}/run_config.yaml"):
+        run_config_name = f"{checkpoint_name}/modelopt_run_config.yaml"
+        # We avoid deepcopy since some attributes in Megatron-Bridge config cannot be deepcopied.
+        config_dict = _parse_transformer_config(model[0].config.__dict__)
+        config_dict["nvidia_modelopt_version"] = modelopt.__version__
+        with open(run_config_name, "w") as f:
+            yaml.dump(config_dict, f, default_flow_style=False)
+
     if not mto.ModeloptStateManager.is_converted(model[0]):
         return
     if len(model) > 1:
@@ -138,6 +177,7 @@ def _load_extra_state_from_sharded_checkpoint(
     model: torch.nn.Module,
     checkpoint_name: str | Path,
     prefix: str,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     """Load extra state from sharded checkpoint.
 
@@ -148,6 +188,12 @@ def _load_extra_state_from_sharded_checkpoint(
         model: the model to load extra state into
         checkpoint_name: the checkpoint folder path
         prefix: the prefix to add to the modelopt_state keys
+        metadata: the metadata for distributed checkpointing
+
+    Note:
+        The metadata includes several breaking changes. For example, `singleton_local_shards`
+        is set to `True` (was not set before) in megatron-core-0.15.0. This flag affects the
+        sharded state_dict format and must be consistent between saving and loading.
     """
     sharded_state_dict = model.sharded_state_dict(prefix=prefix)
     extra_sharded_state_dict = {k: v for k, v in sharded_state_dict.items() if "_extra_state" in k}
@@ -169,6 +215,7 @@ def restore_sharded_modelopt_state(
     model: list[torch.nn.Module],
     checkpoint_name: str | Path,
     prefix: str = "",
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     """Restore modelopt_state from the sharded state_dict format.
 
@@ -176,6 +223,12 @@ def restore_sharded_modelopt_state(
         model: the model to restore the modelopt optimization
         checkpoint_name: the checkpoint folder path
         prefix: the prefix to add to the modelopt_state keys ("model." for NeMo)
+        metadata: the metadata for distributed checkpointing
+
+    Note:
+        The metadata includes several breaking changes. For example, `singleton_local_shards`
+        is set to `True` (was not set before) in megatron-core-0.15.0. This flag affects the
+        sharded state_dict format and must be consistent between saving and loading.
     """
     if len(model) > 1:
         raise ValueError("sharded_modelopt_state does not support virtual pipeline parallel!")
@@ -208,4 +261,4 @@ def restore_sharded_modelopt_state(
     #
     model[0] = mto.restore_from_modelopt_state(model[0], common_modelopt_state)
 
-    _load_extra_state_from_sharded_checkpoint(model[0], checkpoint_name, prefix)
+    _load_extra_state_from_sharded_checkpoint(model[0], checkpoint_name, prefix, metadata=metadata)

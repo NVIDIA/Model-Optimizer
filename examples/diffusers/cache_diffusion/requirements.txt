@@ -1,5 +1,0 @@
-cuda-python
-opencv-python>=4.8.1.78,<4.12.0.88
-peft>=0.10.0
-polygraphy==0.49.9
-sentencepiece

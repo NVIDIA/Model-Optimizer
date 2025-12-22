@@ -15,8 +15,8 @@
 
 import pytest
 import torch
-from _test_utils.opt_utils import apply_mode_with_sampling
-from _test_utils.torch_misc import compare_outputs
+from _test_utils.torch.misc import compare_outputs
+from _test_utils.torch.opt.utils import apply_mode_with_sampling
 from torchvision.models.mobilenetv2 import InvertedResidual
 
 import modelopt.torch.distill as mtd
@@ -47,20 +47,28 @@ def get_kd_mode():
     "mode",
     [
         ["autonas"],
-        ["autonas", "export"],
-        ["autonas", "export", "fastnas"],
-        ["autonas", "export", "fastnas", "export"],
-        ["autonas", "export", "fastnas", "export", get_kd_mode()],
-        ["autonas", "export", "fastnas", "export", get_kd_mode(), "export_student"],
-        ["autonas", "export", "fastnas", "export", "quantize", get_kd_mode(), "export_student"],
-        [get_kd_mode(), "export_student", "fastnas", "export", get_kd_mode(), "export_student"],
+        ["autonas", "export_nas"],
+        ["autonas", "export_nas", "fastnas"],
+        ["autonas", "export_nas", "fastnas", "export_nas"],
+        ["autonas", "export_nas", "fastnas", "export_nas", get_kd_mode()],
+        ["autonas", "export_nas", "fastnas", "export_nas", get_kd_mode(), "export_student"],
+        [
+            "autonas",
+            "export_nas",
+            "fastnas",
+            "export_nas",
+            "quantize",
+            get_kd_mode(),
+            "export_student",
+        ],
+        [get_kd_mode(), "export_student", "fastnas", "export_nas", get_kd_mode(), "export_student"],
         ["quantize"],
-        ["fastnas", get_kd_mode(), "export_student", "export"],
+        ["fastnas", get_kd_mode(), "export_student", "export_nas"],
         ["sparse_magnitude", get_kd_mode(), "export_student", "export_sparse"],
         ["sparse_magnitude", "quantize", get_kd_mode(), "export_student"],
-        ["fastnas", "export", "sparse_magnitude", "quantize", get_kd_mode(), "export_student"],
+        ["fastnas", "export_nas", "sparse_magnitude", "quantize", get_kd_mode(), "export_student"],
         ["fastnas", "quantize", get_kd_mode(), "export_student"],
-        ["fastnas", "sparse_magnitude", "export_sparse", "export"],
+        ["fastnas", "sparse_magnitude", "export_sparse", "export_nas"],
     ],
 )
 def test_chained_save_restore(mode):
@@ -80,7 +88,9 @@ def test_chained_save_restore(mode):
     # compare serialized version since some configs may be objected...
     manager = mto.ModeloptStateManager(model)
     manager2 = mto.ModeloptStateManager(model2)
-    assert torch.equal(_serialize(manager.state_dict()), _serialize(manager2.state_dict()))
+    # NOTE: KD modes are skipped during restore and thus won't exist
+    state_minus_kd = [s for s in manager.state_dict() if s[0] not in ("kd_loss", "export_student")]
+    assert torch.equal(_serialize(state_minus_kd), _serialize(manager2.state_dict()))
 
     # run comparison in eval mode since there might be model randomization in train mode
     model.eval()
@@ -95,20 +105,20 @@ def test_chained_save_restore(mode):
     ("mode", "error_msg"),
     [
         (
-            ["export"],
-            [r"Cannot add export according to the current export stack: deque\(\[.*\]\)."],
+            ["export_nas"],
+            [r"Cannot add export_nas according to the current export stack: deque\(\[.*\]\)."],
         ),
         (
             ["autonas", "fastnas"],
             [r"Cannot add fastnas after autonas! Next modes of autonas are \{.*\}."],
         ),
         (
-            ["fastnas", "export", "export_student"],
+            ["fastnas", "export_nas", "export_student"],
             [r"Cannot add export_student according to the current export stack: deque\(\[.*\]\)."],
         ),
         (
-            ["quantize", "export"],
-            [r"Cannot add export according to the current export stack: deque\(\[.*\]\)."],
+            ["quantize", "export_nas"],
+            [r"Cannot add export_nas according to the current export stack: deque\(\[.*\]\)."],
         ),
         (
             ["quantize", "fastnas"],
@@ -117,8 +127,8 @@ def test_chained_save_restore(mode):
             ],
         ),
         (
-            ["fastnas", get_kd_mode(), "export", "export_student"],
-            [r"Cannot add export according to the current export stack: deque\(\[.*\]\)."],
+            ["fastnas", get_kd_mode(), "export_nas", "export_student"],
+            [r"Cannot add export_nas according to the current export stack: deque\(\[.*\]\)."],
         ),
     ],
 )

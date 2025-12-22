@@ -16,6 +16,7 @@
  */
 
 #include <ATen/ATen.h>
+#include <c10/cuda/CUDAStream.h>
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -74,8 +75,9 @@ __global__ void fake_tensor_quant_kernel(const T *inputs, size_t n, T *outputs, 
 void fake_tensor_quant_cuda_inplace(at::Tensor inputs, at::Tensor amax, int num_bits = 8,
                                     bool is_unsigned = false, bool narrow_range = true) {
   size_t numel = inputs.numel();
+  auto stream = c10::cuda::getCurrentCUDAStream();
   AT_DISPATCH_FLOATING_TYPES(inputs.type().scalarType(), "fake_tensor_quant_cuda_inplace", [&] {
-    fake_tensor_quant_kernel<<<numel / BLOCK_SIZE + 1, BLOCK_SIZE>>>(
+    fake_tensor_quant_kernel<<<numel / BLOCK_SIZE + 1, BLOCK_SIZE, 0, stream>>>(
         inputs.data_ptr<scalar_t>(), numel, inputs.data_ptr<scalar_t>(),
         amax.to(at::ScalarType::Float).data_ptr<float>(), num_bits, is_unsigned, narrow_range);
   });
@@ -85,8 +87,9 @@ at::Tensor fake_tensor_quant_cuda(at::Tensor inputs, at::Tensor amax, int num_bi
                                   bool is_unsigned = false, bool narrow_range = true) {
   size_t numel = inputs.numel();
   auto outputs = torch::empty_like(inputs);
+  auto stream = c10::cuda::getCurrentCUDAStream();
   AT_DISPATCH_FLOATING_TYPES(inputs.type().scalarType(), "fake_tensor_quant_cuda", [&] {
-    fake_tensor_quant_kernel<<<numel / BLOCK_SIZE + 1, BLOCK_SIZE>>>(
+    fake_tensor_quant_kernel<<<numel / BLOCK_SIZE + 1, BLOCK_SIZE, 0, stream>>>(
         inputs.data_ptr<scalar_t>(), numel, outputs.data_ptr<scalar_t>(),
         amax.to(at::ScalarType::Float).data_ptr<float>(), num_bits, is_unsigned, narrow_range);
   });
@@ -125,8 +128,10 @@ at::Tensor fake_tensor_quant_with_axis_cuda(at::Tensor inputs, at::Tensor amax, 
 
   int outer_size = inputs.stride(axis);
 
+  auto stream = c10::cuda::getCurrentCUDAStream();
   AT_DISPATCH_FLOATING_TYPES(inputs.type().scalarType(), "fake_tensor_quant_cuda_with_axis", [&] {
-    fake_tensor_quant_with_axis_cuda_kernel<<<numel / (BLOCK_SIZE * 4) + 1, BLOCK_SIZE>>>(
+    fake_tensor_quant_with_axis_cuda_kernel<<<numel / (BLOCK_SIZE * 4) + 1, BLOCK_SIZE, 0,
+                                              stream>>>(
         inputs.data_ptr<scalar_t>(), numel, outputs.data_ptr<scalar_t>(),
         amax.to(at::ScalarType::Float).data_ptr<float>(), axis_size, outer_size, num_bits,
         is_unsigned, narrow_range);

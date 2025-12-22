@@ -221,11 +221,7 @@ class ConcatNodeProcessor(NodeProcessor):
 
     def is_special_node(self, node: Node, target: NodeTarget) -> bool:
         """Return whether node is a concat node."""
-        aliases = [torch.cat]
-        if hasattr(torch, "concat"):  # torch>=1.10
-            aliases.append(torch.concat)
-        if hasattr(torch, "concatenate"):  # torch>=1.13
-            aliases.append(torch.concatenate)
+        aliases = [torch.cat, torch.concat, torch.concatenate]
         return self._is_from_node_list(target, aliases, self._gc)
 
     def process(self, node: Node, id: int, input_nodes: list[Node]) -> None:

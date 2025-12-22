@@ -15,21 +15,26 @@
 
 import argparse
 import os
-from pathlib import Path
+import sys
 
 import nemo_run as run
 from nemo.collections import llm
-from nemo.collections.llm.api import export_ckpt
 from nemo.collections.llm.gpt.data.chat import ChatDataModule
 from nemo.collections.llm.modelopt.quantization.quant_cfg_choices import get_quant_cfg_choices
 from nemo.collections.llm.modelopt.recipes.distillation_recipe import distillation_recipe
 from nemo.collections.nlp.modules.common.tokenizer_utils import get_nmt_tokenizer
-from nemo.utils import logging
+
+from modelopt.torch.export.plugins.nemo_run import export_most_recent_ckpt
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "common")))
+from utils import SlurmConfig, create_slurm_executor, get_finetune_recipe, read_chat_template
 
 
-def get_parser():
+def get_args():
     parser = argparse.ArgumentParser(
-        description="NeMo2.0 QAT/QAD simplified flow. Currently supports running model locally on 1 node with 8 GPUs."
+        description="""NeMo2.0 QAT/QAD simplified flow. Supports running model locally on 1 node with 8 GPUs
+                       or on a Slurm cluster with 1 or more nodes. Runs QAT on Qwen3-8B NVFP4 with the
+                       nvidia/OpenScience dataset by default."""
     )
     quant_cfg_choices_list = ["no_quant", *get_quant_cfg_choices()]
 
@@ -37,12 +42,12 @@ def get_parser():
         "--model-name",
         type=str,
         help="Name of the HF model",
-        default="meta-llama/Meta-Llama-3.1-8B-Instruct",
+        default="Qwen/Qwen3-8B",
     )
     parser.add_argument(
         "--finetune-recipe",
         type=str,
-        default="llama31_8b",
+        default="qwen3_8b",
         help=(
             "Choose NeMo 2.0 recipe. Recipes are named in the format of "
             "<model_name>_<model_size>(_<long_sequence_length> or other special settings)"
@@ -52,6 +57,12 @@ def get_parser():
         "--data-path",
         type=str,
         help="Path to the finetuning chat dataset. Can be either ShareGPT or HuggingFace/OpenAI chat format",
+    )
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        help="Learning rate",
+        default=1e-5,
     )
     parser.add_argument(
         "--distill",
@@ -71,15 +82,14 @@ def get_parser():
         required=False,
     )
     parser.add_argument(
-        "-algo",
         "--algorithm",
         type=str,
-        default="fp8",
+        default="nvfp4",
         choices=quant_cfg_choices_list,
-        help="TensorRT-Model-Optimizer quantization algorithm",
+        help="Model-Optimizer quantization algorithm",
     )
     parser.add_argument(
-        "--slurm",
+        "--use-slurm",
         action="store_true",
         help="Run on slurm using run.SlurmExecutor",
         default=False,
@@ -91,10 +101,31 @@ def get_parser():
         default="qat_flow_ckpts",
     )
     parser.add_argument(
-        "--ptq_gpus",
+        "--log-dir",
+        type=str,
+        help=(
+            "Path to the directory to store logs. Best to pass in a non-relative path so that "
+            "artifacts are stored in one location."
+        ),
+        default="logs",
+    )
+    parser.add_argument(
+        "--ptq-gpus",
         type=int,
         help="Number of GPUs for quantization. Some models require a different number of GPUs for PTQ vs training.",
+        default=4,
+    )
+    parser.add_argument(
+        "--train-gpus",
+        type=int,
+        help="Number of GPUs for training",
         default=8,
+    )
+    parser.add_argument(
+        "--train-nodes",
+        type=int,
+        help="Number of nodes for training. Does not apply to PTQ (assumes model will fit in 1 node)",
+        default=1,
     )
     parser.add_argument(
         "--kv-cache-qformat",
@@ -104,91 +135,58 @@ def get_parser():
         help="KV-cache quantization format",
     )
     parser.add_argument(
-        "--enable_kv_cache", help="Enables KV-cache quantization", action="store_true"
+        "--enable_kv_cache",
+        help="Enables KV-cache quantization",
+        action="store_true",
+        default=False,
     )
-    parser.add_argument("--disable_kv_cache", dest="enable_kv_cache", action="store_false")
-    parser.set_defaults(enable_kv_cache=None)
-    return parser
+    parser.add_argument("--tensor_parallelism", type=int, default=2)
+    parser.add_argument("--pipeline_parallelism", type=int, default=1)
+    return parser.parse_args()
 
 
-def get_finetune_recipe(recipe):
-    assert hasattr(llm, recipe), (
-        f"Recipe named {recipe} not found. General format is <model_name>_<model_size>(_<long_sequence_length> "
-        "or other special settings)"
-    )
-    finetune_recipe = getattr(llm, recipe).finetune_recipe
-    return finetune_recipe(peft_scheme=None)  # TODO add dir
-
-
-def get_most_recent_subdir(directory: str):
-    """
-    Find the most recent subdirectory in a given directory.
-
-    Args:
-        directory (str): Path to the directory to search in
-
-    Returns:
-        str: Path to the most recent subdirectory, or None if no subdirectories exist
-    """
-    dir_path = Path(directory)
-    # Get all subdirectories
-    subdirs = [d for d in dir_path.iterdir() if d.is_dir()]
-    if not subdirs:
-        return None
-
-    # Sort by modification time (most recent first)
-    most_recent = max(subdirs, key=lambda x: x.stat().st_mtime)
-    return str(most_recent)
-
-
-def export_most_recent_ckpt(exp_dir: str, output_path: str):
-    """
-    Args:
-        exp_dir: experiment directory
-        output_path: path to write exported model
-    """
-    most_recent_exp = get_most_recent_subdir(f"{exp_dir}/default/")
-    if "checkpoints" in most_recent_exp:
-        most_recent_ckpt = most_recent_exp
-    else:
-        most_recent_ckpt = get_most_recent_subdir(f"{most_recent_exp}/checkpoints/")
-    logging.info(f"Exporting checkpoint from {most_recent_ckpt}")
-    export_ckpt(most_recent_ckpt, "hf", output_path)
-
-
-def _read_chat_template(template_path: str):
-    with open(template_path) as f:
-        return f.read().strip()
-
-
-if __name__ == "__main__":
-    args = get_parser().parse_args()
+def main(args):
     if not args.distill and not args.finetune_recipe:
         raise ValueError("If distillation is not used, --finetune-recipe must be specified")
     model_name = args.finetune_recipe
     model_module = getattr(llm, model_name)
     if not model_name:
         model_name = os.path.basename(args.model_name)
+    exp_dir = f"{args.log_dir.rstrip('/')}/{args.experiment}"
 
     # 1. Process data
-    lima_data = run.Script("process_lima.py", entrypoint="python")
+    # TODO figure out path
+    # LOCALLY common/process.py works
+    # On slurm examples/nemo_run/common/process.py works
+
+    openscience_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "../common/process_openscience.py")
+    )
+    openscience_data = run.Script(
+        openscience_path
+        if not args.use_slurm
+        else "examples/nemo_run/common/process_openscience.py",
+        entrypoint="python",
+        args=["--output-dir", exp_dir],
+    )
 
     # 2. Import Model
-    nemo_ckpt_path = f"{model_name}-nemo"
+    bf16_ckpt_path = f"{exp_dir}/{model_name}-nemo"
     import_model = run.Partial(
         llm.import_ckpt,
         model=model_module.model(),
         source=f"hf://{args.model_name}",
-        output_path=nemo_ckpt_path,
+        output_path=bf16_ckpt_path,
+        overwrite=True,
     )
     # 3. PTQ
-    ptq_model_out = f"{model_name}-{args.algorithm}"
+    ptq_model_out = f"{exp_dir}/{model_name}-{args.algorithm}"
 
     ptq = run.Script(
         "/opt/NeMo/scripts/llm/ptq.py",
         args=[
             "-nc",
-            nemo_ckpt_path,
+            bf16_ckpt_path,
             "-out",
             ptq_model_out,
             "--export_format",
@@ -206,64 +204,179 @@ if __name__ == "__main__":
 
     # 4. Train
     if not args.hf_tokenizer:
-        tokenizer_path = os.path.join(nemo_ckpt_path, "context/nemo_tokenizer")
+        tokenizer_path = os.path.join(bf16_ckpt_path, "context/nemo_tokenizer")
         tokenizer = run.Config(
             get_nmt_tokenizer,
             library="huggingface",
             model_name=tokenizer_path,
-            chat_template=_read_chat_template(args.chat_template) if args.chat_template else None,
+            chat_template=read_chat_template(args.chat_template) if args.chat_template else None,
         )
     else:
         tokenizer = run.Config(
             get_nmt_tokenizer,
             library="huggingface",
             model_name=args.hf_tokenizer,
-            chat_template=_read_chat_template(args.chat_template) if args.chat_template else None,
+            chat_template=read_chat_template(args.chat_template) if args.chat_template else None,
         )
 
-    data_path = args.data_path if args.data_path is not None else "lima_processed"
+    data_path = args.data_path if args.data_path is not None else f"{exp_dir}/openscience_proc"
     data = run.Config(
         ChatDataModule,
         dataset_root=data_path,
-        seq_length=4096,
+        seq_length=SEQUENCE_LENGTH,
         tokenizer=tokenizer,
-        global_batch_size=64,
-        micro_batch_size=1,
+        global_batch_size=GBS,
+        micro_batch_size=MBS,
         use_hf_tokenizer_chat_template=True,
+        num_workers=1,
+        persistent_workers=True,
     )
     if args.distill:
-        train = distillation_recipe(ptq_model_out, nemo_ckpt_path)
+        train = distillation_recipe(ptq_model_out, bf16_ckpt_path)
     else:
         train = get_finetune_recipe(args.finetune_recipe)
         train.resume.restore_config.path = ptq_model_out
+        train.optim.config.lr = args.learning_rate
     train.tokenizer = "data"
     train.data = data
-    train.log.log_dir = args.experiment
-    train.trainer.val_check_interval = 200
-    train.trainer.max_steps = 200
+    train.log.log_dir = exp_dir
+    train.trainer.val_check_interval = VAL_INTERVAL
+    train.trainer.max_steps = TRAIN_STEPS
+    train.trainer.devices = args.train_gpus
+    train.trainer.num_nodes = args.train_nodes
+    train.trainer.limit_val_batches = 32
+    train.trainer.strategy.tensor_model_parallel_size = args.tensor_parallelism
+    train.trainer.strategy.pipeline_model_parallel_size = args.pipeline_parallelism
 
     # 5. Export
     export = run.Partial(
-        export_most_recent_ckpt, exp_dir=train.log.log_dir, output_path=f"{model_name}_hf"
+        export_most_recent_ckpt, train.log.log_dir, output_path=f"{exp_dir}/{model_name}_hf"
+    )
+    # 6. Evaluate MMLU
+
+    mmlu_script_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "../common/in_memory_mmlu.py")
+    )
+    if args.use_slurm:
+        mmlu_script_path = "examples/nemo_run/common/in_memory_mmlu.py"
+    eval_ptq = run.Script(
+        mmlu_script_path,
+        args=["--nemo_ckpt", ptq_model_out, "--tensor_parallelism", f"{args.ptq_gpus}"],
+        entrypoint="python",
+    )
+    eval_bf16 = run.Script(
+        mmlu_script_path,
+        args=["--nemo_ckpt", bf16_ckpt_path, "--tensor_parallelism", f"{args.ptq_gpus}"],
+        entrypoint="python",
+    )
+    eval_sft = run.Script(
+        mmlu_script_path,
+        args=["--finetuned_ckpt_dir", exp_dir, "--tensor_parallelism", f"{args.ptq_gpus}"],
+        entrypoint="python",
     )
 
-    with run.Experiment(args.experiment, log_level="INFO") as exp:
-        ptq_executor = run.LocalExecutor(ntasks_per_node=args.ptq_gpus, launcher="torchrun")
+    if args.use_slurm:
+        cpu_executor = create_slurm_executor(SLURM_CONFIG)
+        ptq_gpu_executor = create_slurm_executor(
+            SLURM_CONFIG, num_gpus=args.ptq_gpus, ntasks_per_node=args.ptq_gpus
+        )
+        train_gpu_executor = create_slurm_executor(
+            SLURM_CONFIG, num_gpus=args.train_gpus, ntasks_per_node=args.train_gpus
+        )
+        single_gpu_executor = create_slurm_executor(SLURM_CONFIG, num_gpus=1, ntasks_per_node=1)
+    else:
+        cpu_executor = single_gpu_executor = run.LocalExecutor()
+        ptq_gpu_executor = run.LocalExecutor(launcher="torchrun", ntasks_per_node=args.ptq_gpus)
+        train_gpu_executor = run.LocalExecutor(launcher="torchrun", ntasks_per_node=args.train_gpus)
+
+    with run.Experiment(exp_dir, log_level="INFO") as exp:
         if not args.data_path:
-            s0 = exp.add(lima_data, tail_logs=True, name="lima_data", executor=run.LocalExecutor())
+            s0 = exp.add(
+                openscience_data, tail_logs=True, name="00_openscience_data", executor=cpu_executor
+            )
+        # 1. Import BF16 model and evaluate MMLU
         s1 = exp.add(
-            import_model, tail_logs=True, name="import_model", executor=run.LocalExecutor()
+            import_model, tail_logs=True, name="01_import_model", executor=single_gpu_executor
         )
-        s2 = exp.add(ptq, tail_logs=True, name="ptq", executor=ptq_executor, dependencies=[s1])
-        train_executor = run.LocalExecutor(ntasks_per_node=8, launcher="torchrun")
+        exp.add(
+            eval_bf16,
+            tail_logs=True,
+            name="02_mmlu_bf16",
+            executor=ptq_gpu_executor,
+            dependencies=[s1],
+        )
+
+        # 2. PTQ model and evaluate PTQ model
+        s2 = exp.add(
+            ptq, tail_logs=True, name="03_ptq", executor=ptq_gpu_executor, dependencies=[s1]
+        )
         s3 = exp.add(
-            train, tail_logs=True, name="train", executor=train_executor, dependencies=[s2]
+            eval_ptq,
+            tail_logs=True,
+            name="04_mmlu_ptq",
+            executor=ptq_gpu_executor,
+            dependencies=[s2],
         )
+        # 3. Train PTQ model (QAT or QAD)
+        train_dep = [s3]
+        if not args.data_path:
+            train_dep.append(s0)
         s4 = exp.add(
+            train,
+            tail_logs=True,
+            name="05_train",
+            executor=train_gpu_executor,
+            dependencies=train_dep,
+        )
+        s5 = exp.add(
+            eval_sft,
+            tail_logs=True,
+            name="06_mmlu_sft",
+            executor=ptq_gpu_executor,
+            dependencies=[s4],
+        )
+        # WAR: Export needs access to all GPUs but only 1 task due to bug in NeMo
+        train_gpu_executor.ntasks_per_node = 1  # will throw error if more than 1 task during export
+        exp.add(
             export,
             tail_logs=True,
-            name="export_hf",
-            executor=run.LocalExecutor(),
-            dependencies=[s3],
+            name="07_export_hf",
+            executor=train_gpu_executor,
+            dependencies=[s5],
         )
-        exp.run(detach=False)
+        exp.run(detach=True)
+
+
+if __name__ == "__main__":
+    args = get_args()
+
+    # # # # # # # # SLURM SETUP # # # # # #
+    # # # # # # MODIFY THIS  # # # # # # #
+    if args.use_slurm:
+        SLURM_CONFIG = SlurmConfig(
+            account="",
+            partition_gpu="batch",
+            partition_cpu="cpu",
+            time="04:00:00",
+            container_image="nvcr.io/nvidia/nemo:25.07",
+            env_vars={
+                "HF_TOKEN": "",
+            },
+            use_local_tunnel=False,
+            host="",
+            user="",
+            container_mounts=[],
+            job_dir="/path/to/logs",
+            identity=None,
+        )
+
+    # # # # # # # # # # # # # # # # # # # # # #
+    # # # # # CONFIGURABLE PARAMETERS # # # # #
+    SEQUENCE_LENGTH = 4096
+    MBS = 1
+    GBS = 512
+    TRAIN_STEPS = 200
+    VAL_INTERVAL = 50
+    # # # # # # # # # # # # # # # # # # # # # #
+
+    main(args)

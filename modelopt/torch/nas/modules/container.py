@@ -26,7 +26,7 @@ from modelopt.torch.opt.dynamic import DynamicModule
 from ..registry import DMRegistry
 from ..traced_hp import TracedHp
 
-__all__ = ["_DynamicSequential"]
+__all__ = ["DynamicModuleList", "_DynamicSequential"]
 
 
 def _activate_depth(func: Callable) -> Callable:
@@ -97,3 +97,35 @@ class _DynamicSequential(DynamicModule):
         """
         hp = self.get_hparam("depth")
         hp.choices = [d for d in hp.choices if d >= min_depth]
+
+
+# NOTE: We provide a parent class since we do not register to DMRegistry and explicitly convert a module if needed.
+class DynamicModuleList(DynamicModule, nn.ModuleList):
+    """An ``nn.ModuleList`` container with dynamic hyperparams and variable ``depth``.
+
+    Unlike _DynamicSequential, this module supports sorting/reordering of modules based on
+    importance in addition to variable depth.
+    """
+
+    def _setup(self):
+        # register hyperparameters
+        self._register_hparam("depth", TracedHp(list(range(1, len(self) + 1))))
+
+        # register _modules as a dynamic attribute
+        self._register_dynamic_attribute("_modules", self._get_modules)
+
+    @staticmethod
+    def _get_modules(mod: "DynamicModuleList", modules: dict) -> dict:
+        """Get modules with dynamic depth and ordering applied based on active_slice."""
+        hp = mod.get_hparam("depth")
+        active_slice = hp.active_slice
+
+        items = list(modules.items())
+
+        if isinstance(active_slice, slice):
+            active_items = items[active_slice]
+        else:
+            active_items = [items[idx] for idx in active_slice.tolist()]
+
+        # Re-create dict with keys as str(index) from 0 to len(active_items)
+        return {str(i): module for i, (_, module) in enumerate(active_items)}

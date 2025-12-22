@@ -16,8 +16,8 @@
 """High-level tests for quantization."""
 
 import pytest
-from _test_utils.torch_quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
-from _test_utils.torch_quantization.quantize_common import (
+from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
+from _test_utils.torch.quantization.quantize_common import (
     FP4_SVDQUANT_CFG,
     INT4_AWQ_CLIP_CFG,
     INT4_AWQ_FULL_CFG,
@@ -92,8 +92,3 @@ def test_quantize(model_cls, config):
 )
 def test_save_restore(model_cls, quant_config):
     save_restore_test(model_cls, "cuda", quant_config)
-
-
-@pytest.mark.parametrize("version", [None, "0.29", "0.28"])
-def test_save_restore_all_versions(version):
-    save_restore_test(SimpleLinear, "cuda", mtq.INT8_DEFAULT_CFG, version=version)

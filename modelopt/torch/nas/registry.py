@@ -20,4 +20,4 @@ from modelopt.torch.opt.dynamic import _DMRegistryCls
 __all__ = ["DMRegistry"]
 
 
-DMRegistry = _DMRegistryCls(prefix="Dynamic")  # global instance for the registry
+DMRegistry = _DMRegistryCls(prefix="Dynamic")  # global instance for the NAS registry

@@ -13,12 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from _test_utils.sparsity_utils import sample_subnet_with_sparsity
-from _test_utils.torch_dist.plugins.megatron_common import (
-    MegatronModel,
-    initialize_for_megatron,
-    sharded_state_dict_test_helper,
-)
+from _test_utils.torch.megatron.models import MegatronModel
+from _test_utils.torch.megatron.utils import initialize_for_megatron, sharded_state_dict_test_helper
+from _test_utils.torch.sparsity.utils import sample_subnet_with_sparsity
 from megatron.core.parallel_state import destroy_model_parallel
 
 import modelopt.torch.quantization as mtq

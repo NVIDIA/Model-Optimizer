@@ -239,7 +239,7 @@ class DistillationModel(DynamicModule):
         student_loss: torch.Tensor | None = None,
         loss_reduction_fn: Callable | None = None,
         skip_balancer: bool = False,
-        labels: torch.Tensor | None = None,
+        **loss_fn_kwargs,
     ) -> torch.Tensor | dict[str, torch.Tensor]:
         """Compute total loss for distillation backpropagation.
 
@@ -248,8 +248,8 @@ class DistillationModel(DynamicModule):
             loss_reduction_fn: Callable to be called on each loss tensor prior to balancing. Useful for
                 loss-masking situations where the callable changes arguments each iteration.
             skip_balancer: Whether or not to use loss balancer to reduce the loss dict into a scalar.
-            labels: Labels to be passed to the loss function, if needed. This is necessary for losses that
-                require labels, such as MFTLoss.
+            **loss_fn_kwargs: Additional keyword arguments to be passed to the loss function, if needed.
+                This facilitates losses that require extras, such as labels for ``mtd.MFTLoss``.
 
         Returns:
             If reduce is True, the scalar total loss weighted between ``student_loss`` and the distillation losses.
@@ -268,8 +268,7 @@ class DistillationModel(DynamicModule):
             student_layer._intermediate_output = None
             teacher_layer._intermediate_output = None
 
-            extra_kwargs = {"labels": labels} if labels is not None else {}
-            loss = loss_fn(out_s, out_t, **extra_kwargs)  # Student is pred, Teacher is target
+            loss = loss_fn(out_s, out_t, **loss_fn_kwargs)  # Student is pred, Teacher is target
             if loss_reduction_fn is not None:
                 # Needed in cases where a loss mask is used on non-scalar loss-fn outputs, prior to
                 # reducing to a scalar loss value.

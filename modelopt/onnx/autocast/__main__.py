@@ -71,7 +71,7 @@ def get_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--nodes_to_exclude",
-        "-n",
+        "-ne",
         type=str,
         nargs="*",
         default=[],
@@ -79,11 +79,29 @@ def get_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--op_types_to_exclude",
-        "-op",
+        "-ope",
         type=str,
         nargs="*",
         default=[],
         help="List of op types that should remain in FP32",
+    )
+    parser.add_argument(
+        "--nodes_to_include",
+        "-ni",
+        type=str,
+        nargs="*",
+        default=[],
+        help="List of regex patterns to match node names that should be force-included in low precision, even if they "
+        "would otherwise be excluded",
+    )
+    parser.add_argument(
+        "--op_types_to_include",
+        "-opi",
+        type=str,
+        nargs="*",
+        default=[],
+        help="List of op types that should be force-included in low precision, even if they would otherwise be "
+        "excluded",
     )
     parser.add_argument(
         "--data_max",
@@ -112,7 +130,8 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--keep_io_types",
         action="store_true",
-        help="Keep the input and output types of the model, otherwise they will be converted to FP16",
+        help="Keep the input and output types of the model; otherwise they will be converted to reduced precision "
+        "(FP16/BF16)",
     )
     parser.add_argument(
         "--log_level",
@@ -143,6 +162,29 @@ def get_parser() -> argparse.ArgumentParser:
             "libraries are in the PATH or LD_LIBRARY_PATH variables."
         ),
     )
+    parser.add_argument(
+        "--trt_plugins_precision",
+        type=str,
+        default=[],
+        nargs="+",
+        help=(
+            "A space-separated list indicating the precision for each custom op. "
+            "Each item should have the format <op_type>:<precision> (all inputs and outputs have the same precision) "
+            "or <op_type>:[<inp1_precision>,<inp2_precision>,...]:[<out1_precision>,<out2_precision>,...] "
+            "(inputs and outputs can have different precisions), where precision can be fp32 (default) or fp16."
+            "For example: op_type_1:fp16 op_type_2:[fp16,fp32]:[fp16]."
+        ),
+    )
+    parser.add_argument(
+        "--opset",
+        type=int,
+        help=(
+            "Target ONNX opset version for the converted model. If not specified, uses default minimum opset "
+            "based on precision type (22 for bf16, 13 for fp16). Note: BF16 requires opset >= 22 for full support. "
+            "The opset may be automatically increased if certain operations (e.g., quantization nodes) require a "
+            "higher version."
+        ),
+    )
 
     return parser
 
@@ -164,6 +206,8 @@ def main(argv=None):
         low_precision_type=args.low_precision_type,
         nodes_to_exclude=args.nodes_to_exclude,
         op_types_to_exclude=args.op_types_to_exclude,
+        nodes_to_include=args.nodes_to_include,
+        op_types_to_include=args.op_types_to_include,
         data_max=args.data_max,
         init_max=args.init_max,
         keep_io_types=args.keep_io_types,
@@ -171,7 +215,9 @@ def main(argv=None):
         init_conversion_max_bytes=args.init_conversion_max_bytes,
         providers=args.providers,
         trt_plugins=args.trt_plugins,
+        trt_plugins_precision=args.trt_plugins_precision,
         max_depth_of_reduction=args.max_depth_of_reduction,
+        opset=args.opset,
     )
 
     output_path = args.output_path

@@ -20,8 +20,8 @@ import torch
 
 pytest.importorskip("onnxruntime")
 
-from _test_utils.torch_misc import set_seed
-from _test_utils.torch_quantization.onnx_export import TEST_MODELS, onnx_export_tester
+from _test_utils.torch.misc import set_seed
+from _test_utils.torch.quantization.onnx_export import TEST_MODELS, onnx_export_tester
 
 
 @pytest.mark.parametrize("model_cls", TEST_MODELS)

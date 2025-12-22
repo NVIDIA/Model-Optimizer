@@ -35,7 +35,7 @@ from transformers.models.t5.modeling_t5 import T5Attention
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.utils.distributed import ParallelState
 
-from ..algorithms import AutoQuantizeSearcher
+from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import register
 from ..nn import QuantInputBase, QuantModule, QuantModuleRegistry, TensorQuantizer
 from ..nn.modules.quant_linear import _QuantLinear
@@ -124,8 +124,6 @@ class _QuantAttention(QuantModule):
         # In addition, the new attention interface is not available for some models such as T5
         # Hence lets do a crude check here to see if the attention module is using the new_attention_interface
         # This is not foolproof but should work for most cases
-        if transformers.__version__ < "4.48.0":
-            return False
         module = inspect.getmodule(attn)
         return getattr(module, "ALL_ATTENTION_FUNCTIONS", None) is not None
 
@@ -228,7 +226,7 @@ def register_hf_attentions_on_the_fly(model):
             f"Could not create a quantized attention class for  {attention_cls} from this model. "
             "To enable KV Cache quantization, please create a custom quantized attention class for this model and "
             "register it to ModelOpt using `mtq.register` "
-            "(see https://nvidia.github.io/TensorRT-Model-Optimizer/guides/_pytorch_quantization.html#custom-quantized-module-and-quantizer-placement)"
+            "(see https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#custom-quantized-module-and-quantizer-placement)"
         )
 
 
@@ -345,7 +343,16 @@ class _TransposedQuantization(torch.autograd.Function):
 _transposed_quantize = _TransposedQuantization.apply
 
 
-class _QuantMoeSparseMoe(QuantModule):
+class _QuantSparseMoe(QuantModule):
+    """Module to support special handling of token dispatching during calibration.
+
+    During calibration, we forward all tokens to all experts so that all experts see sufficient tokens to calibrate.
+    However, even in calibration mode, the actual top_k routing is used to calculate the actual outputs this instance
+    returns.
+
+    If calibration is not enabled, this module behaves as a normal MoELayer.
+    """
+
     def _setup(self):
         pass
 
@@ -480,7 +487,7 @@ class _QuantDbrxExpertGLU(QuantModule):
         return self.w2_linear[expert_idx](x1)
 
 
-class _QuantDbrxFFN(_QuantMoeSparseMoe):
+class _QuantDbrxFFN(_QuantSparseMoe):
     @property
     def num_experts(self):
         return self.router.moe_num_experts
@@ -498,7 +505,7 @@ try:
     from transformers.models.llama4.modeling_llama4 import Llama4TextExperts, Llama4TextMoe
 
     if Llama4TextMoe not in QuantModuleRegistry:
-        QuantModuleRegistry.register({Llama4TextMoe: "hf.Llama4TextMoe"})(_QuantMoeSparseMoe)
+        QuantModuleRegistry.register({Llama4TextMoe: "hf.Llama4TextMoe"})(_QuantSparseMoe)
 
     if Llama4TextExperts not in QuantModuleRegistry:
         QuantModuleRegistry.register({Llama4TextExperts: "hf.Llama4TextExperts"})(
@@ -526,7 +533,7 @@ try:
 
     if MixtralSparseMoeBlock not in QuantModuleRegistry:
         QuantModuleRegistry.register({MixtralSparseMoeBlock: "hf.MixtralSparseMoeBlock"})(
-            _QuantMoeSparseMoe
+            _QuantSparseMoe
         )
 except ImportError:
     pass
@@ -544,7 +551,7 @@ try:
 
     if Qwen3MoeSparseMoeBlock not in QuantModuleRegistry:
         QuantModuleRegistry.register({Qwen3MoeSparseMoeBlock: "hf.Qwen3MoeSparseMoeBlock"})(
-            _QuantMoeSparseMoe
+            _QuantSparseMoe
         )
 except ImportError:
     pass
@@ -554,7 +561,17 @@ try:
 
     if Qwen2MoeSparseMoeBlock not in QuantModuleRegistry:
         QuantModuleRegistry.register({Qwen2MoeSparseMoeBlock: "hf.Qwen2MoeSparseMoeBlock"})(
-            _QuantMoeSparseMoe
+            _QuantSparseMoe
+        )
+except ImportError:
+    pass
+
+try:
+    from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextSparseMoeBlock
+
+    if Qwen3NextSparseMoeBlock not in QuantModuleRegistry:
+        QuantModuleRegistry.register({Qwen3NextSparseMoeBlock: "hf.Qwen3NextSparseMoeBlock"})(
+            _QuantSparseMoe
         )
 except ImportError:
     pass
@@ -722,8 +739,16 @@ def setup_model_for_gradient_checkpointing(model: nn.Module):
         model.config.use_cache = use_cache
 
 
-AutoQuantizeSearcher.register_gradient_checkpointing_enable_context(
-    _is_supported_hf_model, setup_model_for_gradient_checkpointing
+def _is_param_grad_enabled_for_auto_quantize(pname, model):
+    # Enable grad for embedding layers to propagate gradients through the model,
+    # allowing each layer to compute its input gradients during the backward pass.
+    return "embed" in pname
+
+
+AutoQuantizeGradientSearcher.register_custom_support(
+    _is_supported_hf_model,
+    setup_model_for_gradient_checkpointing,
+    _is_param_grad_enabled_for_auto_quantize,
 )
 
 CUSTOM_MODEL_PLUGINS.update(

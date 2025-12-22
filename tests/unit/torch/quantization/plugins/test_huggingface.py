@@ -15,14 +15,16 @@
 
 import os
 import warnings
+from contextlib import nullcontext
 
 import pytest
 import torch
 import torch.nn as nn
-from _test_utils.torch_misc import set_seed
-from _test_utils.torch_model.transformers_models import (
+from _test_utils.torch.misc import set_seed
+from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
     get_tiny_llama,
+    get_tiny_qwen3_moe,
     tf_modelopt_state_and_output_tester,
 )
 
@@ -136,28 +138,41 @@ def test_dbrx():
     assert torch.allclose(out_1[0], out_2[0])
 
 
-def test_autoquantize_huggingface():
-    model = get_tiny_llama()
+@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+@pytest.mark.parametrize("model_provider", [get_tiny_llama, get_tiny_qwen3_moe])
+def test_autoquantize_huggingface(model_provider, method):
+    model = model_provider()
     input_ids = model.dummy_inputs["input_ids"]
+
+    def forward_step(model, batch):
+        return model(**batch) if method == "gradient" else model(**batch).logits
 
     warnings.filterwarnings(
         "error", message="AutoQuantize: Error enabling gradient checkpointing for huggingface model"
     )
 
-    with pytest.warns(
-        UserWarning,
-        match="AutoQuantize: Huggingface model detected - Enabling gradient checkpointing. ",
-    ):
+    # Gradient checkpointing warning should only appear for gradient-based method
+    context = (
+        pytest.warns(
+            UserWarning,
+            match="AutoQuantize: Huggingface model detected - Enabling gradient checkpointing. ",
+        )
+        if method == "gradient"
+        else nullcontext()
+    )
+
+    with context:
         best_model, search_history = mtq.auto_quantize(
             model,
             constraints={"effective_bits": 11.0},
             quantization_formats=[mtq.INT8_DEFAULT_CFG],
             data_loader=[{"input_ids": input_ids, "labels": input_ids} for _ in range(2)],
-            forward_step=lambda model, batch: model(**batch),
+            forward_step=forward_step,
             loss_func=lambda output, data: output.loss,
             num_calib_steps=2,
             num_score_steps=2,
             verbose=True,
+            method=method,
         )
 
 

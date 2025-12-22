@@ -20,6 +20,7 @@
 
 import json
 import os
+import shutil
 import tempfile
 from collections import OrderedDict
 from pathlib import Path
@@ -29,7 +30,7 @@ from warnings import warn
 import torch
 import torch.distributed
 import torch.nn as nn
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download, snapshot_download
 from safetensors.torch import safe_open, save_file
 from tqdm import tqdm
 
@@ -38,9 +39,11 @@ from modelopt.torch.utils import import_plugin
 
 from .model_config import (
     KV_CACHE_FP8,
+    KV_CACHE_NVFP4,
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_REAL,
     QUANTIZATION_FP8_PB_WO,
+    QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
 )
 from .plugins.mcore_common import all_mcore_hf_export_mapping
@@ -77,7 +80,10 @@ with import_plugin("megatron"):
 
     has_mcore = True
 
-__all__ = ["export_mcore_gpt_to_hf", "import_mcore_gpt_from_hf"]
+__all__ = [
+    "export_mcore_gpt_to_hf",
+    "import_mcore_gpt_from_hf",
+]
 
 
 # This path uses output_quantizer for KV cache quantization.
@@ -107,60 +113,6 @@ def get_kv_cache_scaling_factor(kv_module: nn.Module) -> torch.Tensor:
     return scaling_factor
 
 
-def get_quantized_state(
-    module: torch.nn.Module,
-    dtype: torch.dtype = torch.float16,
-) -> tuple[dict[str, torch.Tensor], str, int]:
-    """Return a state_dict, quantization format, and block_size of the module.
-
-    Args:
-        module: The target module to perform real quantization.
-        dtype: The default data type.
-
-    Returns:
-        Tuple: state_dict, quantization format, and block_size of the module.
-    """
-    name_to_value = {}
-    qformat: str = get_quantization_format(module)
-    block_size = get_weight_block_size(module)
-
-    if hasattr(module, "weight") and module.weight is not None:
-        weight = module.weight.to(dtype).cpu()
-        name_to_value["weight"] = weight
-    else:
-        return name_to_value, qformat, block_size
-
-    if hasattr(module, "bias") and module.bias is not None:
-        name_to_value["bias"] = module.bias.to(dtype).cpu()
-
-    if hasattr(module, "expert_bias") and module.expert_bias is not None:
-        name_to_value["expert_bias"] = module.expert_bias.to(dtype).cpu()
-
-    # Getting the weight scales
-    weight_scale = get_weight_scaling_factor(module)
-    weight_scale_2 = get_weight_scaling_factor_2(module)
-    if weight_scale is not None:
-        name_to_value["weight_scale"] = weight_scale
-
-    if weight_scale_2 is not None:
-        name_to_value["weight_scale_2"] = weight_scale_2
-
-    # Getting the input scale
-    input_scale = get_activation_scaling_factor(module)
-    if input_scale is not None:
-        name_to_value["input_scale"] = input_scale
-        # TODO (chenhany): support AWQ with pre_quant_scale
-        if hasattr(module.input_quantizer, "_pre_quant_scale"):
-            raise ValueError("Detect pre_quant_scale! SmoothQuant/AWQ are not yet supported!")
-
-    if hasattr(module, "output_quantizer"):
-        output_scale = get_kv_cache_scaling_factor(module)
-        if output_scale is not None:
-            name_to_value["output_scale"] = output_scale
-
-    return name_to_value, qformat, block_size
-
-
 class GPTModelExporter:
     """Megatron Core GPTModel Exporter.
 
@@ -186,6 +138,7 @@ class GPTModelExporter:
         export_extra_modules: bool = False,
         dtype=torch.bfloat16,
         trust_remote_code: bool = True,
+        moe_router_dtype: torch.dtype | None = None,
     ):
         """Create a GPTModel exporter instance."""
         if not isinstance(model, (GPTModel, MambaModel, LLaVAModel)):
@@ -196,6 +149,12 @@ class GPTModelExporter:
         self._hf_config = transformers.AutoConfig.from_pretrained(
             pretrained_model_name_or_path, trust_remote_code=trust_remote_code
         )
+        self.moe_router_dtype = None
+        if moe_router_dtype == "fp32":
+            self.moe_router_dtype = torch.float32
+        elif moe_router_dtype == "fp64":
+            self.moe_router_dtype = torch.float64
+
         # If multimodal, extra the text_config
         self._hf_text_config = getattr(self._hf_config, "text_config", self._hf_config)
 
@@ -253,19 +212,14 @@ class GPTModelExporter:
                     )
 
                     eagle_config = {
-                        "use_input_layernorm_in_first_layer": mode_cfg["config"][
-                            "eagle_architecture_config"
-                        ]["use_input_layernorm_in_first_layer"],
-                        "use_last_layernorm": mode_cfg["config"]["eagle_architecture_config"][
-                            "use_last_layernorm"
-                        ],
-                        "use_mtp_layernorm": mode_cfg["config"]["eagle_architecture_config"][
-                            "use_mtp_layernorm"
-                        ],
-                        "use_aux_hidden_state": mode_cfg["config"]["eagle_architecture_config"][
-                            "use_aux_hidden_state"
-                        ],
+                        "use_input_layernorm_in_first_layer": model.eagle_config.use_input_layernorm_in_first_layer,
+                        "use_last_layernorm": model.eagle_config.use_last_layernorm,
+                        "use_mtp_layernorm": model.eagle_config.use_mtp_layernorm,
+                        "use_aux_hidden_state": model.eagle_config.use_aux_hidden_state,
                         "eagle_aux_hidden_state_layer_ids": model.eagle_config.eagle_aux_hidden_state_layer_ids,
+                        "next_layer_regular": True,
+                        "parallel_draft_step": model.eagle_config.parallel_draft_step,
+                        "parallel_draft_heads_num_layers": model.eagle_config.parallel_draft_heads_num_layers,
                     }
 
                     eagle_config_update = {
@@ -277,9 +231,7 @@ class GPTModelExporter:
                         "max_position_embeddings": self._hf_text_config.max_position_embeddings,
                         "num_attention_heads": model.eagle_module.config.num_attention_heads,
                         "num_key_value_heads": model.eagle_module.config.num_query_groups,
-                        "num_hidden_layers": mode_cfg["config"]["eagle_architecture_config"][
-                            "num_hidden_layers"
-                        ],
+                        "num_hidden_layers": model.eagle_config.num_layers,
                         "vocab_size": self._hf_text_config.vocab_size,
                         # Unset any special token ids given that the tokenizer can change here.
                         "bos_token_id": None,
@@ -288,9 +240,7 @@ class GPTModelExporter:
                         "sep_token_id": None,
                         # The following attributes are EAGLE specific
                         "eagle_config": eagle_config,
-                        "draft_vocab_size": mode_cfg["config"]["eagle_architecture_config"][
-                            "draft_vocab_size"
-                        ],
+                        "draft_vocab_size": model.eagle_config.draft_vocab_size,
                     }
 
                     self._hf_extra_config.update(eagle_config_update)
@@ -317,9 +267,9 @@ class GPTModelExporter:
 
         # Main export process
         state_dict = self.extra_state_dict if self.export_extra_modules else self.state_dict
-        quantization_format = get_quantization_format(self.model)
+        quantization_format = self._get_quantization_format(self.model)
+
         quantization = None
-        kv_cache_quantization = None
 
         if quantization_format in (
             QUANTIZATION_FP8_PB_REAL,
@@ -331,6 +281,11 @@ class GPTModelExporter:
         elif quantization_format == QUANTIZATION_NVFP4:
             quantization = "NVFP4"
 
+        kv_cache_quantization = None
+        kv_cache_dtype = get_kv_cache_dtype(self.model)
+        if kv_cache_dtype in (KV_CACHE_FP8, KV_CACHE_NVFP4):
+            # FP8 KV Cache is supported in VLLM; NVFP4 supported in TRTLLM
+            kv_cache_quantization = kv_cache_dtype
         # We use the last PP rank and the 1st EP rank to write the config because
         # medusa_heads and eagle_module only exist in the last stage.
         if is_last_stage_main_rank:
@@ -364,7 +319,7 @@ class GPTModelExporter:
                 except (OSError, ValueError, ImportError):
                     pass
 
-        if is_last_stage_main_rank:
+        if is_last_stage_main_rank and quantization is not None:
             hf_quant_config = {
                 "producer": {
                     "name": "modelopt",
@@ -459,6 +414,42 @@ class GPTModelExporter:
             torch.distributed.barrier()
             return
 
+        if (
+            is_last_stage_main_rank
+            and self._hf_config is not None
+            and pretrained_model_name_or_path is not None
+        ):
+            # For models that keep configuration and modeling files as part of the checkpoint,
+            # we need to copy them to the export directory for seamless integration with inference
+            # frameworks.
+            hf_checkpoint_path = Path(pretrained_model_name_or_path)
+            model_type = getattr(self._hf_config, "model_type", None)
+
+            if hf_checkpoint_path.is_dir():
+                # Local directory - files should be there
+                config_file = hf_checkpoint_path / f"configuration_{model_type}.py"
+                modeling_file = hf_checkpoint_path / f"modeling_{model_type}.py"
+            else:
+                # Remote model ID - download from HuggingFace Hub (cached automatically)
+                try:
+                    config_file = hf_hub_download(
+                        repo_id=pretrained_model_name_or_path,
+                        filename=f"configuration_{model_type}.py",
+                    )
+                except Exception:
+                    config_file = ""
+                try:
+                    modeling_file = hf_hub_download(
+                        repo_id=pretrained_model_name_or_path, filename=f"modeling_{model_type}.py"
+                    )
+                except Exception:
+                    modeling_file = ""
+
+            if config_file and os.path.exists(config_file):
+                shutil.copy(config_file, f"{save_directory}/configuration_{model_type}.py")
+            if modeling_file and os.path.exists(modeling_file):
+                shutil.copy(modeling_file, f"{save_directory}/modeling_{model_type}.py")
+
         save_safetensors(state_dict, save_directory)
 
     @property
@@ -489,7 +480,9 @@ class GPTModelExporter:
             func = method_map[mapping.func_name]
             prefix = mapping.target_name_or_prefix
             func_kwargs = mapping.func_kwargs
-            return lambda m, *args: func(m, prefix.format(*args), **func_kwargs)
+            return lambda m, *args, **kwargs: func(
+                m, prefix.format(*args), **{**func_kwargs, **kwargs}
+            )
 
         for arch, mappings in all_mcore_hf_export_mapping.items():
             all_rules[arch] = {
@@ -499,6 +492,65 @@ class GPTModelExporter:
             }
 
         return all_rules
+
+    def _get_quantized_state(
+        self,
+        module: torch.nn.Module,
+        dtype: torch.dtype = torch.float16,
+    ) -> tuple[dict[str, torch.Tensor], str, int]:
+        """Return a state_dict, quantization format, and block_size of the module.
+
+        Args:
+            module: The target module to perform real quantization.
+            dtype: The default data type.
+
+        Returns:
+            Tuple: state_dict, quantization format, and block_size of the module.
+        """
+        name_to_value = {}
+        qformat: str = self._get_quantization_format(module)
+        block_size = get_weight_block_size(module)
+
+        if hasattr(module, "weight") and module.weight is not None:
+            weight = module.weight.to(dtype).cpu()
+            name_to_value["weight"] = weight
+        else:
+            return name_to_value, qformat, block_size
+
+        if hasattr(module, "bias") and module.bias is not None:
+            name_to_value["bias"] = module.bias.to(dtype).cpu()
+
+        if hasattr(module, "expert_bias") and module.expert_bias is not None:
+            name_to_value["expert_bias"] = module.expert_bias.to(dtype).cpu()
+
+        if qformat == QUANTIZATION_NONE:
+            return name_to_value, qformat, block_size
+        # Getting the weight scales
+        weight_scale = get_weight_scaling_factor(module)
+        weight_scale_2 = get_weight_scaling_factor_2(module)
+        if weight_scale is not None:
+            name_to_value["weight_scale"] = weight_scale
+
+        if weight_scale_2 is not None:
+            name_to_value["weight_scale_2"] = weight_scale_2
+
+        # Getting the input scale
+        input_scale = get_activation_scaling_factor(module)
+        if input_scale is not None:
+            name_to_value["input_scale"] = input_scale
+            # TODO (chenhany): support AWQ with pre_quant_scale
+            if hasattr(module.input_quantizer, "_pre_quant_scale"):
+                raise ValueError("Detect pre_quant_scale! SmoothQuant/AWQ are not yet supported!")
+
+        if hasattr(module, "output_quantizer"):
+            output_scale = get_kv_cache_scaling_factor(module)
+            if output_scale is not None:
+                name_to_value["output_scale"] = output_scale
+
+        return name_to_value, qformat, block_size
+
+    def _get_quantization_format(self, module: torch.nn.Module):
+        return get_quantization_format(module)
 
     def _get_weight_scales(self, quantized_state: dict[str, Any], qformat: str):
         weight_scale = quantized_state.pop("weight_scale", None)
@@ -519,12 +571,16 @@ class GPTModelExporter:
         prefix: str,
         skip_output_scale: bool = True,
         mapping={},
+        dtype: torch.dtype | None = None,
     ):
+        if dtype is None:
+            dtype = self.dtype
+
         if isinstance(module, torch.Tensor):
             self._state_dict[prefix] = module
             return
 
-        name_to_value, qformat, block_size = get_quantized_state(module, self.dtype)
+        name_to_value, qformat, block_size = self._get_quantized_state(module, dtype)
 
         weight = name_to_value.pop("weight")
         weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
@@ -556,7 +612,7 @@ class GPTModelExporter:
     def _gated_mlp_slicing(
         self, module, prefix, gate_proj_name="gate_proj", up_proj_name="up_proj"
     ):
-        name_to_value, qformat, block_size = get_quantized_state(module, self.dtype)
+        name_to_value, qformat, block_size = self._get_quantized_state(module, self.dtype)
 
         weight = name_to_value.pop("weight")
         weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
@@ -621,7 +677,7 @@ class GPTModelExporter:
         k_scale_name="k_scale",
         v_scale_name="v_scale",
     ):
-        name_to_value, qformat, block_size = get_quantized_state(module, self.dtype)
+        name_to_value, qformat, block_size = self._get_quantized_state(module, self.dtype)
 
         q_proj_prefix = prefix + q_proj_name + "."
         k_proj_prefix = prefix + k_proj_name + "."
@@ -743,7 +799,7 @@ class GPTModelExporter:
 
         for expert in module:
             assert layer_type is not None, "layer_type is required for pack_name_remapping"
-            name_to_value, qformat, block_size = get_quantized_state(
+            name_to_value, qformat, block_size = self._get_quantized_state(
                 getattr(expert, layer_type), self.dtype
             )
             weight = name_to_value.pop("weight")
@@ -809,7 +865,7 @@ class GPTModelExporter:
 
         for expert in module:
             assert layer_type is not None, "layer_type is required for pack_name_remapping"
-            name_to_value, qformat, block_size = get_quantized_state(
+            name_to_value, qformat, block_size = self._get_quantized_state(
                 getattr(expert, layer_type), self.dtype
             )
             weight = name_to_value.pop("weight")
@@ -1011,6 +1067,15 @@ class GPTModelExporter:
                 self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id)
                 self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id)
 
+        parallel_draft_heads = getattr(eagle_module, "parallel_draft_heads", None)
+        if parallel_draft_heads is not None:
+            for head_id, head in enumerate(parallel_draft_heads.medusa_heads):
+                for layer_id, layer in enumerate(head):
+                    self.rules["parallel_draft_heads.medusa_layers"](
+                        layer.linear, head_id, layer_id
+                    )
+            self.rules["parallel_draft_heads.lm_head"](parallel_draft_heads.lm_head)
+
     def _get_state_dict(self):
         model = self.model
 
@@ -1085,7 +1150,10 @@ class GPTModelExporter:
                             self.rules["k_layernorm"](layer.self_attention.k_layernorm, layer_id)
                         self.rules["linear_qkv"](layer.self_attention.linear_qkv, layer_id)
                         self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
-                        if hasattr(layer.self_attention.core_attention, "softmax_offset"):
+                        if (
+                            getattr(layer.self_attention.core_attention, "softmax_offset", None)
+                            is not None
+                        ):
                             self.rules["softmax_offset"](
                                 layer.self_attention.core_attention.softmax_offset, layer_id
                             )
@@ -1095,7 +1163,9 @@ class GPTModelExporter:
 
                 if not isinstance(layer.mlp, IdentityOp):
                     if "MoE" in str(type(layer.mlp)):
-                        self.rules["router"](layer.mlp.router, layer_id)
+                        self.rules["router"](
+                            layer.mlp.router, layer_id, dtype=self.moe_router_dtype
+                        )
                         if (
                             hasattr(layer.mlp, "shared_experts")
                             and layer.mlp.shared_experts is not None
@@ -1133,8 +1203,9 @@ def export_mcore_gpt_to_hf(
     model: torch.nn.Module,
     pretrained_model_name_or_path: str | os.PathLike | None = None,
     export_extra_modules: bool = False,
-    dtype: torch.dtype = torch.float16,
+    dtype: torch.dtype = torch.bfloat16,
     export_dir: Path | str = tempfile.gettempdir(),
+    moe_router_dtype: torch.dtype | None = None,
 ):
     """Export Megatron Core GPTModel to unified checkpoint and save to export_dir.
 
@@ -1150,7 +1221,11 @@ def export_mcore_gpt_to_hf(
         export_dir: The target export path.
     """
     exporter = GPTModelExporter(
-        model, pretrained_model_name_or_path, export_extra_modules=export_extra_modules, dtype=dtype
+        model,
+        pretrained_model_name_or_path,
+        export_extra_modules=export_extra_modules,
+        dtype=dtype,
+        moe_router_dtype=moe_router_dtype,
     )
     exporter.save_pretrained(export_dir, pretrained_model_name_or_path)
 
@@ -1159,7 +1234,8 @@ def import_mcore_gpt_from_hf(
     model: torch.nn.Module,
     pretrained_model_path: str,
     workspace_dir: str | None = None,
-    dtype: torch.dtype = torch.float16,
+    dtype: torch.dtype = torch.bfloat16,
+    moe_router_dtype: torch.dtype | None = None,
 ):
     """Import GPTModel state_dict from supported HuggingFace pretrained model path.
 
@@ -1170,6 +1246,10 @@ def import_mcore_gpt_from_hf(
         dtype: The weights data type to import.
     """
     importer = GPTModelImporter(
-        model, pretrained_model_path, workspace_dir=workspace_dir, dtype=dtype
+        model,
+        pretrained_model_path,
+        workspace_dir=workspace_dir,
+        dtype=dtype,
+        moe_router_dtype=moe_router_dtype,
     )
     importer._import_state_dict()

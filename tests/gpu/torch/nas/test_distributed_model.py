@@ -18,12 +18,12 @@ from functools import partial
 import pytest
 import torch
 import torch.distributed
-from _test_utils.torch_dist.dist_utils import (
+from _test_utils.torch.distributed.fsdp_test import run_fsdp2_test, run_fsdp_test
+from _test_utils.torch.distributed.utils import (
     get_device_counts,
     spawn_multiprocess_job,
     synchronize_state_dict,
 )
-from _test_utils.torch_dist.fsdp_test import run_fsdp2_test, run_fsdp_test
 from torch import nn
 from torchvision.models.resnet import Bottleneck
 

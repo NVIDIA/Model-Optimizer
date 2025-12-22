@@ -21,17 +21,17 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+import tensorrt_llm
 import torch
+from packaging.version import parse as parse_version
 from tensorrt_llm import SamplingParams
-from tensorrt_llm.bindings.executor import DecodingConfig
 
 try:
     from tensorrt_llm.llmapi import CudaGraphConfig
     from tensorrt_llm.llmapi import KvCacheConfig as TRT_KvCacheConfig
-    from tensorrt_llm.llmapi.llm import _TorchLLM, _TrtLLM
-    from tensorrt_llm.llmapi.tokenizer import TokenizerBase, TransformersTokenizer
+    from tensorrt_llm.llmapi.llm import LLM as TRTLLM
 except ImportError:
-    print("Please upgrade tensorrt-llm to 1.0.0rc or later")
+    print("Please upgrade tensorrt-llm to 1.1.0rc2 or later")
     raise
 
 
@@ -50,53 +50,58 @@ def _sanitize_temperature_and_top_p(temperature, top_p):
     return kwargs
 
 
-class LLM:
+class LLM(TRTLLM):
     """A wrapper over the ``tensorrt_llm.llmapi.llm.LLM`` for LLM profiling and validation."""
 
-    def _build_trt_llm_from_config(
-        self, config, engine_dir, tokenizer, kv_cache_config, medusa_choices, max_batch_size
+    def __init__(
+        self,
+        checkpoint_dir: str | Path,
+        tokenizer: "str | Path | None" = None,
+        medusa_choices: Any = None,
+        tp: int = 0,
+        trust_remote_code: bool = False,
+        max_seq_len: int = 0,
+        max_batch_size: int = 0,
     ):
-        build_config = config["build_config"]
-        world_size = config.get("pretrained_config", {}).get("mapping", {}).get("world_size", 1)
-        max_batch_size = max(max_batch_size, build_config["max_batch_size"])
-        max_tokens_kv_cache = build_config["max_seq_len"] * max_batch_size
+        """Initializes the LLM runner class.
 
-        trt_kv_cache_config = TRT_KvCacheConfig(enable_block_reuse=False)
+        Args:
+            checkpoint_dir: the directory path of the model checkpoint.
+            tokenizer: the tokenizer. For example, a tokenizer from the Huggingface model.
+            medusa_choices: The medusa choices for the decoding config.
+            tp: the tensor parallel size (for the torch backend). If 0, it will be set to the number of GPUs.
+            trust_remote_code: whether to trust the remote code (for the torch backend).
+            max_seq_len: Max sequence length for the LLM backend. If 0, it is not specified.
+            max_batch_size: Max batch size for the LLM backend. If 0, it is not specified.
+        """
+        with open(Path(checkpoint_dir) / "config.json") as config_file:
+            config = json.load(config_file)
 
-        # If not specified, free_gpu_memory_fraction is set to the default TRT LLM value 0.9
-        trt_kv_cache_config.free_gpu_memory_fraction = kv_cache_config.get(
-            "free_gpu_memory_fraction", 0.9
-        )
+            assert medusa_choices is None, "medusa_choices is not supported with the torch llmapi"
 
-        # If not specified, max_tokens is set to the max value calculated above.
-        trt_kv_cache_config.max_tokens = kv_cache_config.get("max_tokens", max_tokens_kv_cache)
+        def _find_max_position_embeddings(cfg: dict) -> int | None:
+            if "max_position_embeddings" in cfg:
+                return cfg["max_position_embeddings"]
+            for v in cfg.values():
+                if isinstance(v, dict):
+                    res = _find_max_position_embeddings(v)
+                    if res is not None:
+                        return res
+            return None
 
-        kwargs = {}
-        if medusa_choices is not None:
-            decoding_config = DecodingConfig()
-            decoding_config.medusa_choices = medusa_choices
-            kwargs["decoding_config"] = decoding_config
-            assert world_size == 1, "decoding_config does not support multi TP in HLAPI."
+        # Some VLMs may have a sub-config for max_position_embeddings, so we need to find it.
+        if max_seq_len > 0:
+            self._max_seq_len = max_seq_len
+        else:
+            self._max_seq_len = _find_max_position_embeddings(config)
+            if self._max_seq_len is None:
+                warnings.warn(
+                    "max_position_embeddings not found in config.json, using default value 8192"
+                )
+                self._max_seq_len = 8192
+        print(f"max_position_embeddings: {self._max_seq_len}")
+        self._max_beam_width = 1
 
-        if tokenizer is None:
-            # Assume the tokenizer is stored in the engine_dir if not specified.
-            tokenizer = engine_dir
-
-        # CustomSentencePieceTokenizer will not be recognized by llmapi, wrapping it around TransformersTokenizer
-        if type(tokenizer).__name__ in ["CustomSentencePieceTokenizer"]:
-            tokenizer = TransformersTokenizer(tokenizer)
-
-        self.llm = _TrtLLM(
-            backend=None,
-            model=engine_dir,
-            tokenizer=tokenizer,
-            kv_cache_config=trt_kv_cache_config,
-            **kwargs,
-        )
-
-    def _build_torch_llm_from_config(
-        self, checkpoint_dir, tokenizer, tp, trust_remote_code, max_batch_size
-    ):
         kwargs = {}
         if tokenizer is not None:
             kwargs["tokenizer"] = tokenizer
@@ -104,9 +109,19 @@ class LLM:
         if tp < 1:
             tp = torch.cuda.device_count()
 
+        # Check if any key in config contains both "num" and "experts"
+        ep = 1
+        enable_attention_dp = False
+        for k in config:
+            if "num" in k and "experts" in k:
+                ep = torch.cuda.device_count()
+                enable_attention_dp = True
+                break
+
         # Sometimes 90% of the GPU memory is not enough for the TRT LLM torch engine.
-        trt_kv_cache_config = TRT_KvCacheConfig(
-            enable_block_reuse=False, free_gpu_memory_fraction=0.85
+        trt_kv_cache_config = TRT_KvCacheConfig(free_gpu_memory_fraction=0.7)
+        trt_kv_cache_config.max_tokens = self._max_seq_len * (
+            max_batch_size if max_batch_size > 0 else 8
         )
 
         cuda_graph_config = None
@@ -118,89 +133,23 @@ class LLM:
                 enable_padding=True,
             )
 
-        self.llm = _TorchLLM(
+        self._support_context_logits_and_stop_words = parse_version(
+            tensorrt_llm.__version__
+        ) >= parse_version("1.1.0rc2")
+
+        super().__init__(
             backend="pytorch",
             model=checkpoint_dir,
             tensor_parallel_size=tp,
+            moe_expert_parallel_size=ep,
             trust_remote_code=trust_remote_code,
             enable_chunked_prefill=True,
             kv_cache_config=trt_kv_cache_config,
             # pytorch backend configs
             cuda_graph_config=cuda_graph_config,
+            enable_attention_dp=enable_attention_dp,
             **kwargs,
         )
-
-    def __init__(
-        self,
-        checkpoint_dir: str | Path,
-        tokenizer: "str | Path | TokenizerBase | None" = None,
-        kv_cache_config: dict[str, int | float] = {},
-        medusa_choices: Any = None,
-        tp: int = 0,
-        trust_remote_code: bool = False,
-        max_batch_size: int = 0,
-    ):
-        """Initializes the LLM runner class.
-
-        Args:
-            engine_dir: the directory path of the TensorRT-LLM engine.
-            tokenizer: the tokenizer. For example, a tokenizer from the Huggingface model.
-            kv_cache_config: the kv cache config as a dict. Please refer to
-                https://nvidia.github.io/TensorRT-LLM/performance/performance-tuning-guide/
-            medusa_choices: The medusa choices for the decoding config.
-            tp: the tensor parallel size (for the torch backend). If 0, it will be set to the number of GPUs.
-            trust_remote_code: whether to trust the remote code (for the torch backend).
-            max_batch_size: Max batch size for the LLM backend. If 0, it will be set to the max batch size
-                in the engine config.
-        """
-        with open(Path(checkpoint_dir) / "config.json") as config_file:
-            config = json.load(config_file)
-
-            if "build_config" in config:
-                self._is_torch = False
-                self._build_trt_llm_from_config(
-                    config,
-                    checkpoint_dir,
-                    tokenizer,
-                    kv_cache_config,
-                    medusa_choices,
-                    max_batch_size,
-                )
-
-                self._max_seq_len = self.llm.args.build_config.max_seq_len
-                self._max_beam_width = self.llm.args.build_config.max_beam_width
-                self._gather_context_logits = self.llm.args.build_config.gather_context_logits
-            else:
-                self._is_torch = True
-                assert medusa_choices is None, (
-                    "medusa_choices is not supported with the torch llmapi"
-                )
-
-                self._build_torch_llm_from_config(
-                    checkpoint_dir, tokenizer, tp, trust_remote_code, max_batch_size
-                )
-
-                def _find_max_position_embeddings(cfg: dict) -> int | None:
-                    if "max_position_embeddings" in cfg:
-                        return cfg["max_position_embeddings"]
-                    for v in cfg.values():
-                        if isinstance(v, dict):
-                            res = _find_max_position_embeddings(v)
-                            if res is not None:
-                                return res
-                    return None
-
-                # Some VLMs may have a sub-config for max_position_embeddings, so we need to find it.
-                self._max_seq_len = _find_max_position_embeddings(config)
-                if self._max_seq_len is None:
-                    warnings.warn(
-                        "max_position_embeddings not found in config.json, using default value 8192"
-                    )
-                    self._max_seq_len = 8192
-                else:
-                    print(f"max_position_embeddings: {self._max_seq_len}")
-                self._max_beam_width = 1
-                self._gather_context_logits = False
 
     @property
     def max_seq_len(self):
@@ -215,7 +164,7 @@ class LLM:
     @property
     def gather_context_logits(self):
         """Returns whether the context_logits can be returned from the LLM instance."""
-        return self._gather_context_logits
+        return self._support_context_logits_and_stop_words
 
     def _generate(
         self,
@@ -227,10 +176,8 @@ class LLM:
     ):
         assert temperature >= 0.0, "Temperature must be greater than 0.0."
 
-        # TODO: Remove this once torch backend supports stop words
-        if self._is_torch:
+        if not self._support_context_logits_and_stop_words:
             stop_words = None
-
         beam_width = self.max_beam_width
         kwargs = _sanitize_temperature_and_top_p(temperature, top_p)
         sampling_config = SamplingParams(
@@ -241,7 +188,7 @@ class LLM:
             **kwargs,
         )
 
-        return self.llm.generate(prompts, sampling_params=sampling_config, use_tqdm=False)
+        return self.generate(prompts, sampling_params=sampling_config, use_tqdm=False)
 
     def generate_tokens(
         self,
@@ -330,8 +277,8 @@ class LLM:
         Returns:
             a tensor list of the context_logits.
         """
-        assert self.gather_context_logits, (
-            "Please enable gather_context_logits flag when building the engine."
+        assert self._support_context_logits_and_stop_words, (
+            "Context logits are not supported with the current tensorrt_llm version."
         )
         assert temperature >= 0.0, "Temperature must be greater than 0.0."
 
@@ -340,6 +287,6 @@ class LLM:
 
         sampling_config = SamplingParams(max_tokens=1, use_beam_search=True, best_of=1, **kwargs)
 
-        outputs = self.llm.generate(prompts, sampling_params=sampling_config, use_tqdm=False)
+        outputs = self.generate(prompts, sampling_params=sampling_config, use_tqdm=False)
 
         return [output.context_logits for output in outputs]

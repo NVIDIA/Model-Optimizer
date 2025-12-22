@@ -18,12 +18,12 @@ import os
 import onnx
 import onnx_graphsurgeon as gs
 import torch
-from _test_utils.onnx_quantization.lib_test_models import SimpleMLP, export_as_onnx
+from _test_utils.onnx.lib_test_models import SimpleMLP, export_as_onnx
 
 import modelopt.onnx.quantization as moq
 
 
-def _assert_nodes_are_quantized(nodes):
+def assert_nodes_are_quantized(nodes):
     for node in nodes:
         for inp_idx, inp in enumerate(node.inputs):
             if isinstance(inp, gs.Variable):
@@ -52,4 +52,4 @@ def test_fp8(tmp_path):
 
     #   Check that all MatMul nodes are quantized
     mm_nodes = [n for n in graph.nodes if n.op == "MatMul"]
-    assert _assert_nodes_are_quantized(mm_nodes)
+    assert assert_nodes_are_quantized(mm_nodes)

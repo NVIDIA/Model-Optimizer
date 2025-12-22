@@ -27,6 +27,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import nullcontext
 from typing import Any, final
+from warnings import warn
 
 import numpy as np
 import pulp
@@ -239,7 +240,11 @@ class BaseSearcher(ABC):
         """Load function for search checkpoint returning indicator whether checkpoint was loaded."""
         # check if checkpoint exists
         checkpoint: str | None = self.config["checkpoint"]
-        if checkpoint is None or not os.path.exists(checkpoint):
+        if checkpoint is None:
+            return False
+        if not os.path.exists(checkpoint):
+            if dist.is_master():
+                warn(f"Checkpoint {checkpoint} does not exist! Initializing from scratch.")
             return False
 
         # iterate through state dict and load keys
@@ -250,7 +255,7 @@ class BaseSearcher(ABC):
             setattr(self, key, state)
         return True
 
-    def save_search_checkpoint(self) -> None:
+    def save_search_checkpoint(self, verbose=False) -> None:
         """Save function for search checkpoint."""
         # check if save requirements are satisfied
         checkpoint: str | None = self.config["checkpoint"]
@@ -258,6 +263,8 @@ class BaseSearcher(ABC):
             return
 
         # save state dict
+        if verbose:
+            print(f"Saving searcher state to {checkpoint}...")
         save_dirname, _ = os.path.split(checkpoint)
         if save_dirname:
             os.makedirs(save_dirname, exist_ok=True)

@@ -18,12 +18,12 @@ import sys
 
 import onnx
 import onnx_graphsurgeon as gs
-from _test_utils.onnx_quantization.lib_test_models import build_conv_concat_model
+from _test_utils.onnx.lib_test_models import build_conv_concat_model
 
 from modelopt.onnx.quantization.quantize import quantize
 
 
-def _assert_nodes_are_quantized(nodes):
+def assert_nodes_are_quantized(nodes):
     for node in nodes:
         for inp_idx, inp in enumerate(node.inputs):
             if isinstance(inp, gs.Variable) and node.i(inp_idx).op != "Identity":
@@ -48,7 +48,7 @@ def _check_concat_qdq_status(onnx_path, quantize_mode):
 
     #   Check that all Conv nodes are quantized
     conv_nodes = [n for n in graph.nodes if n.op == "Conv"]
-    assert _assert_nodes_are_quantized(conv_nodes)
+    assert assert_nodes_are_quantized(conv_nodes)
 
     check_num = 0
     for node in graph.nodes:

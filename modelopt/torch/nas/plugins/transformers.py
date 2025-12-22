@@ -123,7 +123,7 @@ class _DynamicAttention(DynamicModule):
 
         assert isinstance(out, nn.Linear)
         hp_hidden_dim.register_importance(
-            lambda: torch.linalg.vector_norm(out._parameters["weight"].detach(), dim=0)
+            lambda: torch.linalg.vector_norm(out.weight.detach(), dim=0)
         )
 
     def modify(

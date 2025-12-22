@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from _test_utils.torch_model.nas_trace_models import DepthModel1
+from _test_utils.torch.nas_prune.models import DepthModel1
 
 import modelopt.torch.nas as mtn
 from modelopt.torch.nas.search_space import SearchSpace

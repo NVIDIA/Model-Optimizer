@@ -21,7 +21,7 @@ from functools import partial
 import pytest
 import torch
 import torch.nn as nn
-from _test_utils.torch_dist.dist_utils import (
+from _test_utils.torch.distributed.utils import (
     get_device_counts,
     spawn_multiprocess_job,
     synchronize_state_dict,

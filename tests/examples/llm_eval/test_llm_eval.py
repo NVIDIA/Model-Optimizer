@@ -15,21 +15,23 @@
 
 import subprocess
 
+from _test_utils.examples.models import TINY_LLAMA_PATH
 from _test_utils.examples.run_command import run_llm_ptq_command
-from _test_utils.torch_misc import minimum_sm
+from _test_utils.torch.misc import minimum_sm
 
 
 @minimum_sm(89)
-def test_llama_eval_fp8(tiny_llama_path):
+def test_llama_eval_fp8():
     try:
         run_llm_ptq_command(
-            model=tiny_llama_path,
+            model=TINY_LLAMA_PATH,
             quant="fp8",
-            tasks="mmlu,lm_eval,simple_eval,benchmark",
+            tasks="mmlu,lm_eval,simple_eval",
             calib=64,
             lm_eval_tasks="hellaswag,gsm8k",
             simple_eval_tasks="humaneval",
             lm_eval_limit=0.1,
+            batch=8,
         )
     finally:
         # Force kill llm-serve if it's still running

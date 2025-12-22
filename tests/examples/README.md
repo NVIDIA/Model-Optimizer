@@ -9,22 +9,17 @@ Make sure to use as small models and less data as possible to keep the tests fas
 
 ## Running the tests
 
-To run a test, use the [ModelOpt docker image](../../README.md#installation--docker) so all required dependencies are available.
-and mount your local modelopt directory to `/workspace/TensorRT-Model-Optimizer` and run this from the root of the repository.
+To run a test, start from the recommended docker image from our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html).
+Then mount your local modelopt directory to `/workspace/Model-Optimizer` and run this from the root of the repository.
 
 ```bash
+cd /workspace/Model-Optimizer
+pip install -e ".[all,dev-test]"
 pytest tests/examples/$TEST
-```
-
-NOTE: Some tests (e.g. `llm_ptq`) have an option to disable using a smaller proxy model, and instead use the original model by setting the `MODELOPT_FAST_TESTS` environment variable to `false`. This is useful in nightly tests to ensure the original model is used.
-
-```bash
-MODELOPT_FAST_TESTS=false ROOT_SAVE_PATH=/tmp/test_llm_ptq/ pytest tests/examples/llm_ptq/
 ```
 
 ## Environment variables
 
 The following environment variables can be set to control the behavior of the tests:
 
-- `MODELOPT_FAST_TESTS`: If set to `false`, the tests will use the original model instead of a smaller proxy model. Default is `true`.
 - `MODELOPT_LOCAL_MODEL_ROOT`: If set, the tests will use the local model directory instead of downloading the model from the internet. Default is not set, which means the model will be downloaded.

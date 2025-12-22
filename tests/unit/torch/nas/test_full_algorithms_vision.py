@@ -19,10 +19,9 @@ from contextlib import nullcontext
 
 import pytest
 import torch.nn as nn
-from _test_utils.torch_model.vision_models import (
-    get_tiny_mobilenet_and_input,
-    get_tiny_resnet_and_input,
-)
+from _test_utils.torch.vision_models import get_tiny_mobilenet_and_input, get_tiny_resnet_and_input
+
+pytest.importorskip("torchprofile")
 
 import modelopt.torch.nas as mtn
 from modelopt.torch.nas.algorithms import ConstraintsFunc

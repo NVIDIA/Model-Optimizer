@@ -167,3 +167,10 @@ def monkey_patch_training_step_to_fix_memory_leak(trainer):
         setattr(
             trainer, f_name, types.MethodType(partial(new_func, "_original_" + f_name), trainer)
         )
+
+
+def get_metrics_with_perplexity(metrics):
+    """Add perplexity to the metrics."""
+    if "eval_loss" in metrics:
+        metrics["perplexity"] = float(torch.exp(torch.tensor(metrics["eval_loss"])))
+    return metrics

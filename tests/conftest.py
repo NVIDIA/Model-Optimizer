@@ -30,14 +30,27 @@ def pytest_addoption(parser):
         default=False,
         help="Run manual tests",
     )
+    parser.addoption(
+        "--run-release",
+        action="store_true",
+        default=False,
+        help="Run release tests",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
-    if not config.getoption("--run-manual"):
-        skipper = pytest.mark.skip(reason="Only run when --run-manual is given")
-        for item in items:
-            if "manual" in item.keywords:
-                item.add_marker(skipper)
+    """Skip tests with specific markers unless their corresponding flag is provided."""
+    skip_marks = [
+        ("manual", "--run-manual"),
+        ("release", "--run-release"),
+    ]
+
+    for mark_name, option_name in skip_marks:
+        if not config.getoption(option_name):
+            skipper = pytest.mark.skip(reason=f"Only run when {option_name} is given")
+            for item in items:
+                if mark_name in item.keywords:
+                    item.add_marker(skipper)
 
 
 @pytest.fixture

@@ -1,0 +1,12 @@
+# PyTorch with CUDA 12.x support (compatible with CUDA 12.1-12.9)
+--extra-index-url https://download.pytorch.org/whl/cu129
+accelerate
+datasets
+numpy
+onnxruntime-genai
+pandas
+sentencepiece
+tokenizers>=0.14.1
+
+torch>=2.0.0
+transformers>=4.36

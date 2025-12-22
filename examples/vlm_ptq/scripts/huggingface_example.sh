@@ -29,76 +29,18 @@ for i in $(env | grep ^SLURM_ | cut -d"=" -f 1); do unset -v $i; done
 for i in $(env | grep ^PMI_ | cut -d"=" -f 1); do unset -v $i; done
 for i in $(env | grep ^PMIX_ | cut -d"=" -f 1); do unset -v $i; done
 
-case $MODEL_TYPE in
-    llava|phi|vila|mllama|qwen)
-        ;;
-    *)
-        echo "Unsupported type argument: Expected one of: [llava, phi, vila, mllama, qwen]" >&2
-        exit 1
-esac
-
 if [ -z "$MODEL_PATH" ]; then
     echo "Unsupported model argument: Expected a huggingface model path or model name or a nemo path" >&2
     exit 1
 fi
 
-# Check if ENABLE_SPARSITY environment variable is set to "true"
-if [ "$SPARSITY_FMT" = "dense" ]; then
-    ENABLE_SPARSITY=false
-else
-    ENABLE_SPARSITY=true
-fi
-
-case $SPARSITY_FMT in
-    dense|sparsegpt)
-        ;;
-    *)
-        echo "Unknown sparsity argument: Expected one of: [dense, sparsegpt]" >&2
-        exit 1
-esac
-
 case $QFORMAT in
-    fp8|nvfp4|int8_sq|int4_awq|w4a8_awq|fp16|bf16)
+    fp8|int8_sq|int4_awq|w4a8_awq|nvfp4)
         ;;
     *)
-        echo "Unknown quant argument: Expected one of: [fp8, nvfp4, int8_sq, int4_awq, w4a8_awq, fp16, bf16]" >&2
+        echo "Unknown quant argument: Expected one of: [fp8, int8_sq, int4_awq, w4a8_awq, nvfp4]" >&2
         exit 1
 esac
-
-case $TP in
-    1|2|4|8)
-        ;;
-    *)
-        echo "Unknown tp argument: Expected one of: [1, 2, 4, 8]" >&2
-        exit 1
-esac
-
-case $PP in
-    1|2|4|8)
-        ;;
-    *)
-        echo "Unknown pp argument: Expected one of: [1, 2, 4, 8]" >&2
-        exit 1
-esac
-
-GPU_NAME=$(nvidia-smi --id 0 --query-gpu=name --format=csv,noheader,nounits | sed 's/ /_/g')
-
-if [ "${MODEL_TYPE}" = "phi" ]; then
-    BUILD_MAX_INPUT_LEN=4096
-else
-    BUILD_MAX_INPUT_LEN=1024
-fi
-
-BUILD_MAX_OUTPUT_LEN=512
-
-if [ "$MODEL_TYPE" = "llava" ] || [ "$MODEL_TYPE" = "vila" ] || [ "$MODEL_TYPE" = "qwen" ]; then
-    BUILD_MAX_BATCH_SIZE=20
-else
-    BUILD_MAX_BATCH_SIZE=4
-fi
-
-
-echo "Using the following config: max input $BUILD_MAX_INPUT_LEN max output $BUILD_MAX_OUTPUT_LEN max batch $BUILD_MAX_BATCH_SIZE"
 
 script_dir="$(dirname "$(readlink -f "$0")")"
 
@@ -108,15 +50,10 @@ if [ -z "$ROOT_SAVE_PATH" ]; then
     ROOT_SAVE_PATH=$(pwd)
 fi
 
-MODEL_NAME=$(basename $MODEL_PATH | sed 's/[^0-9a-zA-Z\-]/_/g')
-SAVE_PATH=${ROOT_SAVE_PATH}/saved_models_${MODEL_NAME}_${SPARSITY_FMT}_${QFORMAT}_tp${TP}_pp${PP}
-
-if [ $EXPORT_FORMAT != "tensorrt_llm" ]; then
-    SAVE_PATH=${SAVE_PATH}_${EXPORT_FORMAT}
-fi
+MODEL_NAME=$(basename $MODEL_PATH | sed 's/[^0-9a-zA-Z\-]/_/g')_${QFORMAT}${KV_CACHE_QUANT:+_kv_${KV_CACHE_QUANT}}
+SAVE_PATH=${ROOT_SAVE_PATH}/saved_models_${MODEL_NAME}
 
 MODEL_CONFIG=${SAVE_PATH}/config.json
-ENGINE_DIR=${SAVE_PATH}/${MODEL_TYPE}_${TP}x${PP}x${GPU_NAME}_input${BUILD_MAX_INPUT_LEN}_output${BUILD_MAX_OUTPUT_LEN}_batch${BUILD_MAX_BATCH_SIZE}_engine
 
 if [ "${REMOVE_EXISTING_MODEL_CONFIG,,}" = "true" ]; then
     rm -f $MODEL_CONFIG
@@ -132,30 +69,21 @@ if $TRUST_REMOTE_CODE; then
     PTQ_ARGS+=" --trust_remote_code "
 fi
 
-case "${MODEL_TYPE}" in
-    "vila")
-        VISUAL_FEATURE=196
-        VLM_ARGS=" --max_multimodal_len=$((BUILD_MAX_BATCH_SIZE * VISUAL_FEATURE)) "
-        ;;
-    "phi")
-        VISUAL_FEATURE=4096
-        VLM_ARGS=" --max_multimodal_len=$((BUILD_MAX_BATCH_SIZE * VISUAL_FEATURE)) "
-        ;;
-    "llava")
-        VISUAL_FEATURE=576
-        VLM_ARGS=" --max_multimodal_len=$((BUILD_MAX_BATCH_SIZE * VISUAL_FEATURE)) "
-        ;;
-    "mllama")
-        PTQ_ARGS+=" --kv_cache_qformat none "
-        VLM_ARGS=" --max_encoder_input_len=6404 --skip_run"
-        ;;
-    "qwen")
-        PTQ_ARGS+=" --kv_cache_qformat none "
-        ;;
-esac
+if [ -n "$KV_CACHE_QUANT" ]; then
+    PTQ_ARGS+=" --kv_cache_qformat=$KV_CACHE_QUANT "
+fi
 
-if [ "${MODEL_TYPE}" = "vila" ]; then
-    # Install required dependency for VILA
+if [[ "${MODEL_NAME,,}" == *"vila"* ]]; then
+    # Check transformers version - must be <= 4.50.0
+    CURRENT_TRANSFORMERS_VERSION=$(pip show transformers | grep Version | cut -d' ' -f2)
+    if [ "$(printf '%s\n' "4.50.0" "$CURRENT_TRANSFORMERS_VERSION" | sort -V | head -n1)" = "4.50.0" ] && [ "$CURRENT_TRANSFORMERS_VERSION" != "4.50.0" ]; then
+        echo "ERROR: transformers version $CURRENT_TRANSFORMERS_VERSION is not supported." >&2
+        echo "VILA requires transformers<=4.50.0" >&2
+        echo "Please refer to examples/vlm_ptq/requirements-vila.txt for the supported versions." >&2
+        echo "You also need to download VILA repository from https://github.com/Efficient-Large-Model/VILA.git and checkout ec7fb2c264920bf004fd9fa37f1ec36ea0942db5" >&2
+        exit 1
+    fi
+
     pip install -r ../vlm_ptq/requirements-vila.txt
     # Clone original VILA repo
     if [ ! -d "$(dirname "$MODEL_PATH")/VILA" ]; then
@@ -167,102 +95,49 @@ if [ "${MODEL_TYPE}" = "vila" ]; then
     fi
 fi
 
-if [[ $TASKS =~ "build" ]] || [[ ! -d "$ENGINE_DIR" ]] || [[ ! $(ls -A $ENGINE_DIR) ]]; then
+if [[ $TASKS =~ "quant" ]] || [[ ! -d "$SAVE_PATH" ]] || [[ ! $(ls -A $SAVE_PATH) ]]; then
     if ! [ -f $MODEL_CONFIG ]; then
         echo "Quantizing original model..."
         python ../llm_ptq/hf_ptq.py \
             --pyt_ckpt_path=$MODEL_PATH \
             --export_path=$SAVE_PATH \
-            --sparsity_fmt=$SPARSITY_FMT \
             --qformat=$QFORMAT \
             --calib_size=$CALIB_SIZE \
             --batch_size=$CALIB_BATCH_SIZE \
             --inference_tensor_parallel=$TP \
             --inference_pipeline_parallel=$PP \
-            --export_fmt=$EXPORT_FORMAT \
-            --no-verbose \
             $PTQ_ARGS
     else
         echo "Quantized model config $MODEL_CONFIG exists, skipping the quantization stage"
     fi
+fi
 
-    if [ $EXPORT_FORMAT != "tensorrt_llm" ]; then
-        echo "Please continue deployment with $EXPORT_FORMAT. Checkpoint export_path: $SAVE_PATH"
+if [[ "$QFORMAT" != "fp8" ]]; then
+    echo "For quant format $QFORMAT, please refer to the TensorRT-LLM documentation for deployment. Checkpoint saved to $SAVE_PATH."
+    exit 0
+fi
+
+if [[ "$QFORMAT" == *"nvfp4"* ]] || [[ "$KV_CACHE_QUANT" == *"nvfp4"* ]]; then
+    cuda_major=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader -i 0 | cut -d. -f1)
+
+    if [ "$cuda_major" -lt 10 ]; then
+        echo "Please deploy the NVFP4 checkpoint on a Blackwell GPU. Checkpoint export_path: $SAVE_PATH"
         exit 0
     fi
-
-
-    echo "Building tensorrt_llm engine from Model Optimizer-quantized model..."
-
-    python ../llm_ptq/modelopt_to_tensorrt_llm.py \
-        --model_config=$MODEL_CONFIG \
-        --engine_dir=${ENGINE_DIR}/llm \
-        --tokenizer=$MODEL_PATH \
-        --max_input_len=$BUILD_MAX_INPUT_LEN \
-        --max_output_len=$BUILD_MAX_OUTPUT_LEN \
-        --max_batch_size=$BUILD_MAX_BATCH_SIZE \
-        --num_build_workers=$GPUS \
-        --enable_sparsity=$ENABLE_SPARSITY \
-        $VLM_ARGS
 fi
 
-
-VISUAL_ARGS=""
-VISION_ENCODER_DIR=${ENGINE_DIR}/vision
-VISUAL_MODEL_TYPE=$MODEL_TYPE
-case "${MODEL_TYPE}" in
-    "vila")
-        VISUAL_ARGS+=" --vila_path ${MODEL_PATH}/../VILA "
-        ;;
-    "phi")
-        VISUAL_MODEL_TYPE="phi-3-vision"
-        ;;
-    "qwen")
-        # Map generic type to TRT-LLM multimodal model type
-        VISUAL_MODEL_TYPE="qwen2_vl"
-        ;;
-esac
-
-
-VISUAL_MAX_BATCH_SIZE=$BUILD_MAX_BATCH_SIZE
-
-if [[ $TASKS =~ "build" ]] || [[ ! -d "$VISION_ENCODER_DIR" ]] || [[ ! $(ls -A $VISION_ENCODER_DIR) ]]; then
-    echo "Build visual engine"
-    python vlm_visual_engine.py \
-        --model_path $MODEL_PATH \
-        --model_type $VISUAL_MODEL_TYPE \
-        --output_dir $VISION_ENCODER_DIR \
-        --max_batch_size $VISUAL_MAX_BATCH_SIZE \
-        $VISUAL_ARGS
+# Prepare datasets for TRT-LLM benchmark
+if [ -z "$TRT_LLM_CODE_PATH" ]; then
+    TRT_LLM_CODE_PATH=/app/tensorrt_llm # default path for the TRT-LLM release docker image
+    echo "Setting default TRT_LLM_CODE_PATH to $TRT_LLM_CODE_PATH."
 fi
 
-VLM_RUN_ARGS=""
-case "${MODEL_TYPE}" in
-    "mllama")
-        VLM_RUN_ARGS+=" --image_path https://huggingface.co/datasets/huggingface/documentation-images/resolve/0052a70beed5bf71b92610a43a52df6d286cd5f3/diffusers/rabbit.jpg --input_text \"<|image|><|begin_of_text|>If I had to write a haiku for this one\" --max_new_tokens 50 --batch_size 2 "
-        ;;
-esac
-echo "Run inference example"
+QUICK_START_MULTIMODAL=$TRT_LLM_CODE_PATH/examples/llm-api/quickstart_multimodal.py
 
-mpirun -n $GPUS --allow-run-as-root python vlm_run.py  \
-    --hf_model_dir $MODEL_PATH \
-    --engine_dir $ENGINE_DIR \
-    --kv_cache_free_gpu_memory_fraction $KV_CACHE_FREE_GPU_MEMORY_FRACTION \
-    $VLM_RUN_ARGS
-
-if [[ $TASKS =~ "gqa" ]]; then
-    echo "Evaluating the TensorRT engine of the quantized model using GQA benchmark."
-    pushd ../vlm_eval/
-    if [[ "$MODEL_PATH" =~ ^/ ]]; then
-        # If MODEL_PATH is absolute path
-        source gqa.sh --hf_model $MODEL_PATH --engine_dir $ENGINE_DIR --kv_cache_free_gpu_memory_fraction $KV_CACHE_FREE_GPU_MEMORY_FRACTION
-    else
-        # If MODEL_PATH is absolute path
-        script_parent_dir=$(dirname "$script_dir")
-        source gqa.sh --hf_model $script_parent_dir/$MODEL_PATH --engine_dir $ENGINE_DIR --kv_cache_free_gpu_memory_fraction $KV_CACHE_FREE_GPU_MEMORY_FRACTION
-    fi
-
-    popd
+if [ -f "$QUICK_START_MULTIMODAL" ]; then
+    python3 $QUICK_START_MULTIMODAL --model_dir $SAVE_PATH --modality image
+else
+    echo "Warning: $QUICK_START_MULTIMODAL cannot be found. Please set TRT_LLM_CODE_PATH to the TRT-LLM code path or test the quantized checkpoint $SAVE_PATH with the TRT-LLM repo directly."
 fi
 
 popd

@@ -21,9 +21,9 @@ import pytest
 import torch
 import transformers
 from _test_utils.import_helper import skip_if_no_megatron
-from _test_utils.torch_dist.dist_utils import spawn_multiprocess_job
-from _test_utils.torch_dist.plugins.megatron_common import get_mcore_gpt_model
-from _test_utils.torch_model.transformers_models import create_tiny_llama_dir
+from _test_utils.torch.distributed.utils import spawn_multiprocess_job
+from _test_utils.torch.megatron.models import get_mcore_gpt_model
+from _test_utils.torch.transformers_models import create_tiny_llama_dir
 
 skip_if_no_megatron(apex_or_te_required=True)
 
@@ -61,7 +61,7 @@ def _test_unified_export_megatron(tmp_path, model_type, arch, algo, rank, size):
         activation_func=activation_func,
         normalization=normalization,
         transformer_impl="modelopt",
-    )
+    ).cuda()
 
     if algo == "medusa":
         config = {
@@ -150,7 +150,7 @@ def _test_unified_import_megatron(tiny_llama_dir, rank, size):
         vocab_size=vocab_size,
         activation_func=activation_func,
         normalization=normalization,
-    )
+    ).cuda()
 
     import_mcore_gpt_from_hf(model, tiny_llama_dir)
 

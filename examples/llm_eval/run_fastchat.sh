@@ -20,9 +20,9 @@
 # If you are using NIM, ensure that you export the NIM API key using:
 # export OPENAI_API_KEY=<NIM_API_KEY>
 #
-# Usage: bash run_fastchat.sh -h <HF model folder or model card> -e <engine_dir> -n <NIM model model card>
+# Usage: bash run_fastchat.sh -h <HF model folder or model card> -e <checkpoint_dir> -n <NIM model model card>
 # model_name: The HuggingFace handle or folder of the model to evaluate.
-# engine_dir: The directory where the TRT-LLM engine is stored.
+# checkpoint_dir: The directory where the checkpoint is stored.
 # nim_model_name: The handle of the NIM model to be used for evaluation.
 #
 # Example commands:
@@ -30,8 +30,8 @@
 # Evaluate "meta-llama/Meta-Llama-3-8B-Instruct" HF model:
 # bash run_fastchat.sh -h meta-llama/Meta-Llama-3-8B-Instruct
 #
-# Evaluate "meta-llama/Meta-Llama-3-8B-Instruct" HF model with TRT-LLM engine:
-# bash run_fastchat.sh -h meta-llama/Meta-Llama-3-8B-Instruct -e /path/to/engine_dir
+# Evaluate "meta-llama/Meta-Llama-3-8B-Instruct" HF model with TRT-LLM:
+# bash run_fastchat.sh -h meta-llama/Meta-Llama-3-8B-Instruct -e /path/to/checkpoint_dir
 #
 # Evaluate "meta-llama/Meta-Llama-3-8B-Instruct" HF model with NIM:
 # bash run_fastchat.sh -h meta-llama/Meta-Llama-3-8B-Instruct -n meta-llama/Meta-Llama-3-8B-Instruct
@@ -41,7 +41,7 @@ set -e
 set -x
 
 hf_model_name=""
-engine_dir=""
+checkpoint_dir=""
 nim_model_name=""
 answer_file=""
 quant_cfg=""
@@ -56,9 +56,9 @@ while [[ "$1" != "" ]]; do
             shift
             hf_model_name=$1
             ;;
-        -e | --engine_dir )
+        -e | --checkpoint_dir )
             shift
-            engine_dir=$1
+            checkpoint_dir=$1
             ;;
         -n | --nim_model_name )
             shift
@@ -96,8 +96,8 @@ if [ "$hf_model_name" == "" ]; then
     exit 1
 fi
 
-if [ "$engine_dir" != "" ]; then
-    engine_dir=" --engine-dir $engine_dir "
+if [ "$checkpoint_dir" != "" ]; then
+    checkpoint_dir=" --checkpoint-dir $checkpoint_dir "
 fi
 
 if [ "$nim_model_name" != "" ]; then
@@ -143,7 +143,7 @@ PYTHONPATH=FastChat:$PYTHONPATH python gen_model_answer.py \
     --model-id $hf_model_name \
     --temperature 0.0001 \
     --top-p 0.0001 \
-    $engine_dir \
+    $checkpoint_dir \
     $nim_model_name \
     $answer_file \
     $quant_args

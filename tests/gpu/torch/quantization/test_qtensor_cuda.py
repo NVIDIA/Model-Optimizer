@@ -17,7 +17,7 @@
 
 import pytest
 import torch
-from _test_utils.torch_misc import set_seed
+from _test_utils.torch.misc import set_seed
 
 from modelopt.torch.quantization.backends.utils import fp4_compatible
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
@@ -569,3 +569,36 @@ class TestQTensor:
             f"Fast and standard dequantization differ: "
             f"max diff = {(dequant_fast - dequant_standard).abs().max()}"
         )
+
+    @pytest.mark.parametrize("device", ["cuda"])
+    @pytest.mark.parametrize("input_dtype", [torch.float32, torch.float16, torch.bfloat16])
+    @pytest.mark.parametrize(
+        ("input_shape", "block_sizes"),
+        [
+            ((128, 1152), {-1: 128}),
+            ((256, 256), {-1: 64, -2: 64}),  # 2D block sizes
+        ],
+    )
+    def test_fp8_with_amax_and_block_sizes(self, device, input_dtype, input_shape, block_sizes):
+        """Test FP8 quantization with both amax and block_sizes specified."""
+        quant_cfg = QuantizerAttributeConfig(
+            num_bits=(4, 3),
+            block_sizes=block_sizes,
+            fake_quant=False,
+        )
+        quantizer = TensorQuantizer(quant_cfg).to(device)
+
+        # Set a mock amax (scalar) - this was causing the bug
+        mock_amax = torch.tensor(1.5, device=device)
+        quantizer.amax = mock_amax
+
+        # Create input tensor
+        x = torch.randn(input_shape, dtype=input_dtype, device=device)
+
+        # QDQ
+        q_x = quantizer(x)
+        deq_x = quantizer(q_x)
+
+        assert torch.allclose(deq_x, x, rtol=1e-1, atol=1e-1)
+        assert hasattr(quantizer, "_scale")
+        assert quantizer._scale.numel() > 1

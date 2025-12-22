@@ -30,7 +30,7 @@ from lm_eval.api.registry import register_model
 from lm_eval.models.api_models import TemplateAPI
 from transformers import BatchEncoding
 
-from modelopt.deploy.llm.generate import LLM
+from modelopt.deploy.llm import LLM
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ class TRTLLM(TemplateAPI):
     def __init__(
         self,
         tokenizer: str,
-        engine_dir: str,
+        checkpoint_dir: str,
         batch_size: int = 1,
         **kwargs,
     ):
@@ -56,11 +56,17 @@ class TRTLLM(TemplateAPI):
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        assert isinstance(engine_dir, str)
+        assert isinstance(checkpoint_dir, str)
 
-        self.llm = LLM(checkpoint_dir=engine_dir, tokenizer=self.tokenizer)
-        self.max_length = self.llm.max_seq_len - 1
-        logger.info("Loaded TRT-LLM engine")
+        max_length = kwargs.get("max_length", self._max_gen_toks + 4096)
+        self.llm = LLM(
+            checkpoint_dir=checkpoint_dir,
+            tokenizer=self.tokenizer,
+            max_batch_size=int(batch_size),
+            max_seq_len=max_length,
+        )
+        self.max_length = max_length - 1
+        logger.info("Loaded TRT-LLM")
 
     def model_call(
         self,

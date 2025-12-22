@@ -18,8 +18,8 @@ import pytest
 pytest.importorskip("transformers")
 from functools import partial
 
-from _test_utils.torch_dist.dist_utils import get_device_counts, spawn_multiprocess_job
-from _test_utils.torch_model.transformers_models import create_tiny_llama_dir
+from _test_utils.torch.distributed.utils import get_device_counts, spawn_multiprocess_job
+from _test_utils.torch.transformers_models import create_tiny_llama_dir
 from transformers import AutoModelForCausalLM
 
 from modelopt.torch.utils.distributed import is_dtensor_sharded

@@ -15,8 +15,8 @@
 
 import pytest
 import torch
-from _test_utils.torch_misc import compare_outputs, set_seed
-from _test_utils.torch_model.vision_models import get_vision_models
+from _test_utils.torch.misc import compare_outputs, set_seed
+from _test_utils.torch.vision_models import get_vision_models
 
 from modelopt.torch.nas.search_space import generate_search_space
 from modelopt.torch.utils import flatten_tree, zero_grad

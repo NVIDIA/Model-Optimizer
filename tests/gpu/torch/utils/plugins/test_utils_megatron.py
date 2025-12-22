@@ -13,14 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from functools import partial
 
 import torch
-from _test_utils.torch_dist.dist_utils import spawn_multiprocess_job
-from _test_utils.torch_dist.plugins.megatron_common import (
-    get_mcore_qwen3_600m,
-    initialize_for_megatron,
-)
+from _test_utils.torch.distributed.utils import spawn_multiprocess_job
+from _test_utils.torch.megatron.models import get_mcore_qwen3_600m
+from _test_utils.torch.megatron.utils import initialize_for_megatron
 from transformers import AutoTokenizer
 
 from modelopt.torch.utils.plugins import megatron_generate, megatron_mmlu
@@ -28,16 +25,10 @@ from modelopt.torch.utils.plugins import megatron_generate, megatron_mmlu
 SEED = 1234
 
 
-def _test_megatron_generate(hidden_size, rank, size):
+def _test_megatron_generate(rank, size):
     initialize_for_megatron(tensor_model_parallel_size=size, seed=SEED)
 
-    model = (
-        get_mcore_qwen3_600m(
-            tensor_model_parallel_size=size,
-        )
-        .cuda()
-        .eval()
-    )
+    model = get_mcore_qwen3_600m(tensor_model_parallel_size=size).cuda().eval()
 
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
 
@@ -63,6 +54,6 @@ def test_megatron_generate():
 
     spawn_multiprocess_job(
         size=size,
-        job=partial(_test_megatron_generate, 256),
+        job=_test_megatron_generate,
         backend="nccl",
     )

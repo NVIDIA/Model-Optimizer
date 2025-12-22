@@ -42,10 +42,26 @@ mx_format_map = {
 DISABLE_TRITON_KERNEL = False
 
 
+def _fp8_eager(x, amax=None):
+    dtype = x.dtype
+    if amax is not None:
+        scale = 448.0 / (amax.to(torch.float32))
+        scale_inv = 1 / scale
+        x = x.to(torch.float32) * scale
+    x = x.to(torch.float8_e4m3fn)
+    if amax is not None:
+        x = x.to(torch.float32) * scale_inv
+    return x.to(dtype)
+
+
+def fp8_eager(x, amax):
+    """Eager mode implementation of FP8 quantization."""
+    return _fp8_eager(x, amax)
+
+
 def scaled_e4m3_impl(
-    inputs: torch.Tensor,  # TODO: check support for multiple inputs
-    amax: torch.Tensor,
-    disable_fused_kernel=True,
+    inputs: torch.Tensor,
+    amax: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Implementation of fake quantizing input to FP8.
 
@@ -56,44 +72,19 @@ def scaled_e4m3_impl(
     Returns:
         Input tensors faked quantized to FP8.
     """
-    cuda_ext_fp8 = get_cuda_ext_fp8(raise_if_failed=True)
+    if (not inputs.is_cuda) or amax is None or amax.squeeze().ndim > 1:
+        return fp8_eager(inputs, amax)
 
-    def is_fusable():
-        # ignore no scaling and shape([]) cases
-        if amax is None or len(amax.shape) == 0:
-            return False
-        else:
-            # can't have amax.shape = [1, 1, 4, 1] and the like
-            amax_last_dim_only = amax.numel() == amax.shape[-1]
-            # must be cuda
-            all_cuda = inputs.is_cuda and amax.is_cuda
+    cuda_ext_fp8 = get_cuda_ext_fp8(raise_if_failed=False)
+    if cuda_ext_fp8 is None:
+        return fp8_eager(inputs, amax)
 
-            # also check explicit disable.
-            return amax_last_dim_only and all_cuda and (not disable_fused_kernel)
-
-    with torch.cuda.device(
-        None if inputs.device.index == torch.cuda.current_device() else inputs.device.index
-    ):
-        # differentiate between fused & unfused cases
-        if is_fusable():
-            zero_threshold = 1.0 / (1 << 24)
-            outputs = cuda_ext_fp8.fused_fake_e4m3fy(inputs, amax.float(), zero_threshold)
-        else:
-            zero_mask = inputs.abs() < 1.0 / (1 << 24)
-
-            if amax is None:
-                outputs = cuda_ext_fp8.fake_e4m3fy(inputs)
-            else:
-                scale = 448.0 / amax
-                outputs = cuda_ext_fp8.fake_e4m3fy(inputs * scale) / scale
-
-            # Zero out values that are tiny.
-            # Tiny values could lead to tiny amax and then large scale which cause overflow/saturation
-            # and won't go back to normal value after dividing by scale. The right behavior is to mark them
-            # as zero which also get rid of inf/nan
-            outputs[zero_mask] = 0.0
-
-        return outputs
+    if amax.numel() == 1:
+        outputs = cuda_ext_fp8.fake_e4m3fy(inputs, amax)
+    elif amax.squeeze().ndim == 1:
+        axis = amax.shape.index(amax.numel())
+        outputs = cuda_ext_fp8.fake_e4m3fy_with_axis(inputs, amax.squeeze(), axis)
+    return outputs
 
 
 def fake_quant_impl(
@@ -106,17 +97,14 @@ def fake_quant_impl(
     """Implementation of fake quantizing input according to number of bits."""
     cuda_ext = get_cuda_ext()
 
-    with torch.cuda.device(
-        None if inputs.device.index == torch.cuda.current_device() else inputs.device.index
-    ):
-        if amax.numel() == 1:
-            outputs = cuda_ext.fake_tensor_quant(inputs, amax, num_bits, unsigned, narrow_range)
-        else:
-            axis = amax.shape.index(amax.numel())
-            outputs = cuda_ext.fake_tensor_quant_with_axis(
-                inputs, amax.squeeze(), axis, num_bits, unsigned, narrow_range
-            )
-        return outputs
+    if amax.numel() == 1:
+        outputs = cuda_ext.fake_tensor_quant(inputs, amax, num_bits, unsigned, narrow_range)
+    else:
+        axis = amax.shape.index(amax.numel())
+        outputs = cuda_ext.fake_tensor_quant_with_axis(
+            inputs, amax.squeeze(), axis, num_bits, unsigned, narrow_range
+        )
+    return outputs
 
 
 def _quantize_impl(
@@ -179,25 +167,22 @@ def _dynamic_block_quantize_impl(
             assert amax.is_cuda, "amax must be a CUDA tensor for dynamic block quantization."
             if amax.numel() != 1:
                 amax = amax.amax()
-        with torch.cuda.device(
-            None if inputs.device.index == torch.cuda.current_device() else inputs.device.index
+        if (
+            num_bits == (2, 1)  # type: ignore[comparison-overlap]
+            and scale_bits == (4, 3)
+            and triton_kernel.IS_AVAILABLE
+            and not DISABLE_TRITON_KERNEL
+            and amax is not None
         ):
-            if (
-                num_bits == (2, 1)  # type: ignore[comparison-overlap]
-                and scale_bits == (4, 3)
-                and triton_kernel.IS_AVAILABLE
-                and not DISABLE_TRITON_KERNEL
-                and amax is not None
-            ):
-                return triton_kernel.fp4_fake_quant_block(inputs, amax)
-            cuda_ext_mx = get_cuda_ext_mx(raise_if_failed=True)
-            return cuda_ext_mx.fused_amax_convert(
-                inputs,
-                block_size,
-                getattr(cuda_ext_mx.Types, mx_format_map[num_bits]),
-                getattr(cuda_ext_mx.Types, mx_format_map[scale_bits]),
-                amax,
-            )
+            return triton_kernel.fp4_fake_quant_block(inputs, amax)
+        cuda_ext_mx = get_cuda_ext_mx(raise_if_failed=True)
+        return cuda_ext_mx.fused_amax_convert(
+            inputs,
+            block_size,
+            getattr(cuda_ext_mx.Types, mx_format_map[num_bits]),
+            getattr(cuda_ext_mx.Types, mx_format_map[scale_bits]),
+            amax,
+        )
     else:
         raise NotImplementedError(
             f"Unsupported num_bits: {num_bits}, scale_bits: {scale_bits} for dynamic block quantization."
@@ -377,8 +362,8 @@ class FakeTensorQuantFunction(Function):
 
         def legacy_quant_func():
             # The LegacyFakeTensorQuantFunction support cpu and amax with any shape that can be broadcasted to inputs.
-            outputs, scale = _tensor_quant(inputs, amax, num_bits, unsigned, narrow_range)
-            return outputs / scale.to(inputs.dtype)
+            outputs = _tensor_quant(inputs, amax, num_bits, unsigned, narrow_range)
+            return outputs
 
         if not inputs.is_cuda:
             outputs = legacy_quant_func()
@@ -577,136 +562,6 @@ class DynamicBlockQuantizationFunction(Function):
         return _fake_quant_backward_function(ctx, grad_outputs, num_args=9)
 
 
-class TensorQuantFunction(Function):
-    """A universal tensor quantization function.
-
-    Take an input tensor, output an quantized tensor. The granularity of scale can be interpreted from the
-    shape of amax.
-    output_dtype indicates whether the quantized value will be stored in integer or float. The reason we want to store
-    it in float is the pytorch function takes the quantized value may not accept integer input, e.g. Conv2D.
-
-    It uses 2^num_bits -1 values instead of 2^num_bits. e.g., for num_bits=8, it uses [-127, 127] instead of [-128, 127]
-    """
-
-    @staticmethod
-    @symbolic_helper.parse_args("v", "t", "t", "i", "b", "b", "s")
-    def symbolic(
-        g,
-        inputs,
-        amax,
-        bias=None,
-        num_bits=8,
-        unsigned=False,
-        narrow_range=True,
-        trt_high_precision_dtype=None,
-    ):
-        """ONNX symbolic function."""
-        from .export_onnx import export_int8
-
-        return export_int8(
-            g, inputs, amax, num_bits, unsigned, narrow_range, trt_high_precision_dtype
-        )
-
-    @staticmethod
-    def forward(
-        ctx,
-        inputs,
-        amax,
-        bias=None,
-        num_bits=8,
-        unsigned=False,
-        narrow_range=True,
-        trt_high_precision_dtype=None,
-    ):
-        """Forward method.
-
-        Follow tensorflow convention, max value is passed in and used to decide scale, instead of inputting scale
-        directly. Though inputting scale directly may be more natural to use.
-
-        Args:
-            ctx: A Context object to store tensors for backward.
-            inputs: A Tensor of type float32.
-            amax: A Tensor of type float32. Inputs will be quantized within range [-amax, amax]
-                amax will be broadcasted to inputs tensor.
-            num_bits: A integer used to calculate scaling factor, scale = (2^(num_bits-1) - 1) / max
-                Effectively, it indicates how many integer bits is used to represent the value. Default 8.
-            output_dtype: A type of Tensor. torch.int32 or torch.float32.
-            unsigned: A boolean. Use unsigned integer range. E.g. [0, 255] for num_bits=8. Default False.
-            narrow_range: A boolean. Use symmetric integer range for signed quantization
-                E.g. [-127,127] instead of [-128,127] for num_bits=8. Default True.
-
-        Returns:
-            outputs: A Tensor of type output_dtype.
-            scale: A Tensor of type float32. outputs / scale will dequantize outputs tensor.
-
-        Raises:
-            ValueError:
-        """
-        if bias is not None:
-            inputs = inputs - bias
-
-        ctx.save_for_backward(inputs, amax)
-
-        outputs, scale = _tensor_quant(inputs, amax, num_bits, unsigned, narrow_range)
-        # Check if scale overflows FP16
-        if outputs.dtype == torch.half and scale.max() > 65504:
-            raise ValueError(f"scale is too large for FP16 with amax={amax}")
-
-        if bias is not None:
-            outputs = outputs + bias
-
-        return outputs, scale.to(inputs.dtype)
-
-    @staticmethod
-    def backward(ctx, grad_outputs, grad_scale):
-        """Implements straight through estimation with clipping.
-
-        For -amax <= input <= amax the gradient passes straight through, otherwise the gradient is zero.
-
-        Args:
-            ctx: A Context object with saved tensors from forward.
-            grad_outputs: A tensor of gradient of outputs.
-            grad_scale: A tensor of gradient of scale.
-
-        Returns:
-            grad_inputs: A tensor of gradient.
-        """
-        inputs, amax = ctx.saved_tensors
-        zero = grad_outputs.new_zeros(1)  # create a zero tensor with the same type and device
-        grad_inputs = torch.where(inputs.abs() <= amax, grad_outputs, zero)
-        return grad_inputs, None, None, None, None, None, None
-
-
-class LegacyFakeTensorQuantFunction(Function):
-    """Fake version of TensorQuantFunction.
-
-    See comments of TensorQuantFunction, arguments are the same.
-    """
-
-    @staticmethod
-    def forward(ctx, inputs, amax, bias, num_bits=8, unsigned=False, narrow_range=True):
-        """Forward method."""
-        if bias is not None:
-            inputs = inputs - bias
-
-        ctx.save_for_backward(inputs, amax)
-
-        outputs, scale = _tensor_quant(inputs, amax, num_bits, unsigned, narrow_range)
-
-        if bias is not None:
-            outputs = outputs + bias
-
-        return outputs / scale.to(inputs.dtype)
-
-    @staticmethod
-    def backward(ctx, grad_outputs):
-        """Implements straight through estimation."""
-        inputs, amax = ctx.saved_tensors
-        zero = grad_outputs.new_zeros(1)
-        grad_inputs = torch.where(inputs.abs() <= amax, grad_outputs, zero)
-        return grad_inputs, None, None, None, None, None
-
-
 def _tensor_quant(inputs, amax, num_bits=8, unsigned=False, narrow_range=True):
     """Shared function body between TensorQuantFunction and FakeTensorQuantFunction."""
     # Fine scale, per channel scale will be handled by broadcasting, which could be tricky. Pop a warning.
@@ -715,10 +570,8 @@ def _tensor_quant(inputs, amax, num_bits=8, unsigned=False, narrow_range=True):
 
     # Computation can be done in FP32 to prevent potential over flow.
     input_dtype = inputs.dtype
-    if inputs.dtype == torch.half:
-        inputs = inputs.float()
-    if amax.dtype == torch.half:
-        amax = amax.float()
+    inputs = inputs.float()
+    amax = amax.float()
 
     min_amax = amax.min()
     if min_amax < 0:
@@ -744,73 +597,12 @@ def _tensor_quant(inputs, amax, num_bits=8, unsigned=False, narrow_range=True):
         scale[zero_amax_mask] = (
             1.0  # Return 1 makes more sense for values quantized to 0 with amax=0
         )
+    outputs = outputs / scale
 
-    if input_dtype == torch.half:
-        outputs = outputs.half()
-
-    return outputs, scale
-
-
-class FakeAffineTensorQuantFunction(Function):
-    """Fake version of affine quantization.
-
-    gemmlowp style scale+shift quantization. See more details in
-    https://github.com/google/gemmlowp/blob/master/doc/quantization.md.
-
-    We DO NOT recommend affine quantization on weights for performance reason. There might be value to affine quantize
-    activation as it can be cancelled by bias and comes with no performance penalty. This functionality is only added
-    for experimental purpose.
-    """
-
-    @staticmethod
-    def forward(ctx, inputs, min_range, max_range, num_bits=8):
-        """As it will be only applied on activation with per tensor granularity, broadcast is not needed.
-
-        Args:
-            ctx: Pytorch convention.
-            inputs: A Tensor of type float32.
-            min_range: A float.
-            max_range: A float.
-            num_bits: An integer
-
-        Returns:
-            outputs: A Tensor of type output_dtype
-        """
-        ctx.save_for_backward(inputs, min_range, max_range)
-
-        step_size = (max_range - min_range) / (2.0**num_bits - 1)
-
-        min_bound = -(2.0 ** (num_bits - 1))
-        max_bound = 2.0 ** (num_bits - 1) - 1
-
-        quant_zero = torch.round(min_range / step_size) - min_bound
-        quantized = torch.round(inputs / step_size) - quant_zero
-        quantized = torch.clamp(quantized, min_bound, max_bound)
-
-        outputs = (quantized + quant_zero) * step_size
-
-        return outputs
-
-    @staticmethod
-    def backward(ctx, grad_outputs):
-        """Implements straight through estimation with clipping.
-
-        Args:
-            ctx: Pytorch convention.
-            grad_output: A tensor of gradient of outputs.
-
-        Returns:
-            grad_inputs: A tensor of gradient
-        """
-        inputs, min_range, max_range = ctx.saved_tensors
-        zero = grad_outputs.new_zeros(1)
-        grad_inputs = torch.where((inputs <= max_range) * (inputs >= min_range), grad_outputs, zero)
-        return grad_inputs, None, None, None
+    outputs = outputs.to(input_dtype)
+    return outputs
 
 
-tensor_quant = TensorQuantFunction.apply
-legacy_fake_tensor_quant = LegacyFakeTensorQuantFunction.apply
 fake_tensor_quant = FakeTensorQuantFunction.apply
-fake_affine_tensor_quant = FakeAffineTensorQuantFunction.apply
 scaled_e4m3 = ScaledE4M3Function.apply
 dynamic_block_quant = DynamicBlockQuantizationFunction.apply

@@ -8,7 +8,7 @@ ModelOpt is based on simulated quantization in the original precision to simulat
 optimize for the best trade-off between the accuracy of the model and different low-precision
 formats. To achieve actual speedups and memory savings, the model with simulated quantization can be
 exported to deployment frameworks, like TensorRT or TensorRT-LLM. Please refer to the
-`TensorRT-Model-Optimizer GitHub repository <https://github.com/NVIDIA/TensorRT-Model-Optimizer>`_
+`Model-Optimizer GitHub repository <https://github.com/NVIDIA/Model-Optimizer>`_
 for more details and examples.
 
 Below, you can find the documentation for the quantization toolkit in ModelOpt:

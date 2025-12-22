@@ -15,7 +15,6 @@
 
 """Utility functions for getting samples and forward loop function for different vlm datasets."""
 
-import math
 from typing import Any
 
 from torch.utils.data import DataLoader
@@ -92,8 +91,6 @@ def get_vlm_dataset_dataloader(
         An instance of dataloader.
     """
     assert processor is not None, "Please provide a valid processor."
-
-    num_samples = math.ceil(num_samples / batch_size) * batch_size
 
     dataset = _get_vlm_dataset(dataset_name, num_samples=num_samples)
     # Apply the preprocessing function to the dataset

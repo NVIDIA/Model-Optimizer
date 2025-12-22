@@ -20,7 +20,7 @@ import subprocess
 import timm
 import torch
 
-from modelopt.torch._deploy.utils import get_onnx_bytes
+from modelopt.torch._deploy.utils import OnnxBytes, get_onnx_bytes_and_metadata
 
 
 def export_to_onnx(model, input_shape, onnx_save_path, device, weights_dtype="fp32"):
@@ -28,16 +28,18 @@ def export_to_onnx(model, input_shape, onnx_save_path, device, weights_dtype="fp
     # Create input tensor with same precision as model's first parameter
     input_dtype = model.parameters().__next__().dtype
     input_tensor = torch.randn(input_shape, dtype=input_dtype).to(device)
+    model_name = os.path.basename(onnx_save_path).replace(".onnx", "")
 
-    onnx_model_bytes = get_onnx_bytes(
+    onnx_bytes, _ = get_onnx_bytes_and_metadata(
         model=model,
         dummy_input=(input_tensor,),
         weights_dtype=weights_dtype,
+        model_name=model_name,
     )
+    onnx_bytes_obj = OnnxBytes.from_bytes(onnx_bytes)
 
-    # Write ONNX model to disk
-    with open(onnx_save_path, "wb") as f:
-        f.write(onnx_model_bytes)
+    # Write the onnx model to the specified directory without cleaning the directory
+    onnx_bytes_obj.write_to_disk(os.path.dirname(onnx_save_path), clean_dir=False)
 
 
 if __name__ == "__main__":

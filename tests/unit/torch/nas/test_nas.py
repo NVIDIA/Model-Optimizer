@@ -21,7 +21,7 @@ from collections import deque
 
 import pytest
 import torch
-from _test_utils.torch_model.vision_models import TinyMobileNetFeatures
+from _test_utils.torch.vision_models import TinyMobileNetFeatures
 from torch import nn
 from torch.nn.modules.batchnorm import _BatchNorm
 from torchvision.models.mobilenetv2 import InvertedResidual
@@ -378,7 +378,7 @@ def test_set_auto_mode(test_config):
             "",
             False,
             torch.randn(1, 16, 8, 8),
-            ["autonas", "export"],
+            ["autonas", "export_nas"],
         ),
         (
             InvertedResidual,
@@ -386,7 +386,7 @@ def test_set_auto_mode(test_config):
             "conv.1",
             True,
             torch.randn(1, 16, 8, 8),
-            ["autonas", "export"],
+            ["autonas", "export_nas"],
         ),
         (
             InvertedResidual,
@@ -410,9 +410,16 @@ def test_set_auto_mode(test_config):
             "",
             True,
             torch.randn(1, 16, 8, 8),
-            ["autonas", "export"],
+            ["autonas", "export_nas"],
         ),
-        (TinyMobileNetFeatures, (), "", False, torch.randn(1, 3, 64, 64), ["autonas", "export"]),
+        (
+            TinyMobileNetFeatures,
+            (),
+            "",
+            False,
+            torch.randn(1, 3, 64, 64),
+            ["autonas", "export_nas"],
+        ),
         (TinyMobileNetFeatures, (), "", False, torch.randn(1, 3, 64, 64), ["autonas"]),
         (TinyMobileNetFeatures, (), "", False, torch.randn(1, 3, 64, 64), []),
     ],
@@ -424,9 +431,9 @@ def test_save_restore_whole(
     # setup model
     model = cls(*args)
 
-    # check for "export"
-    if "export" in mode:
-        mode.remove("export")
+    # check for "export_nas"
+    if "export_nas" in mode:
+        mode.remove("export_nas")
         use_export = True
     else:
         use_export = False

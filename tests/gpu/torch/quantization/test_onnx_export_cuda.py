@@ -18,7 +18,7 @@
 import pytest
 import torch
 import torch.nn as nn
-from _test_utils.torch_quantization.onnx_export import TEST_MODELS, onnx_export_tester
+from _test_utils.torch.quantization.onnx_export import TEST_MODELS, onnx_export_tester
 
 
 @pytest.mark.parametrize("model_cls", TEST_MODELS)

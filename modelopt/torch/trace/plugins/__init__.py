@@ -15,20 +15,7 @@
 
 """Handles tracing plugins for third-party modules."""
 
-import warnings as _warnings
+from modelopt.torch.utils import import_plugin
 
-try:
-    from .megatron import *
-
-except ImportError:
-    pass
-except Exception as e:
-    _warnings.warn(f"Failed to import megatron plugin due to: {e!r}")
-
-try:
+with import_plugin("transformers"):
     from .transformers import *
-
-except ImportError:
-    pass
-except Exception as e:
-    _warnings.warn(f"Failed to import transformers plugin due to: {e!r}")

@@ -17,7 +17,7 @@
 """AutoCast module for converting ONNX models to mixed precision.
 
 AutoCast is a tool for converting FP32 ONNX models to mixed precision FP32-FP16 or FP32-BF16 models.
-While casting FP32 to FP6/BF16, some nodes might be more sensitive to effecting accuracy.
+While casting FP32 to FP16/BF16, some nodes might be more sensitive to affecting accuracy.
 AutoCast intelligently selects nodes to keep in FP32 precision to maintain model accuracy while benefiting from
 reduced precision on the rest of the nodes. AutoCast automatically injects cast operations around the selected
 nodes.
@@ -48,6 +48,8 @@ def convert_to_mixed_precision(
     low_precision_type: str = "fp16",
     nodes_to_exclude: list[str] | None = None,
     op_types_to_exclude: list[str] | None = None,
+    nodes_to_include: list[str] | None = None,
+    op_types_to_include: list[str] | None = None,
     data_max: float = DEFAULT_DATA_MAX,
     init_max: float = DEFAULT_INIT_MAX,
     keep_io_types: bool = False,
@@ -56,7 +58,9 @@ def convert_to_mixed_precision(
     init_conversion_max_bytes: int | None = None,
     providers: list[str] = ["cpu"],
     trt_plugins: list[str] = [],
+    trt_plugins_precision: list[str] = [],
     max_depth_of_reduction: int | None = None,
+    opset: int | None = None,
 ) -> onnx.ModelProto:
     """Convert model to mixed precision.
 
@@ -65,6 +69,8 @@ def convert_to_mixed_precision(
         low_precision_type: Target precision to reduce to ('fp16' or 'bf16').
         nodes_to_exclude: List of regex patterns to match node names that should remain in FP32.
         op_types_to_exclude: List of operation types that should remain in FP32.
+        nodes_to_include: List of regex patterns to match node names that should be included in low precision.
+        op_types_to_include: List of operation types that should be included in low precision.
         data_max: Maximum absolute value for node input and output values.
         init_max: Maximum absolute value for initializers.
         keep_io_types: Whether to preserve input/output types.
@@ -74,7 +80,11 @@ def convert_to_mixed_precision(
                                    runtime.
         providers: List of ORT execution providers.
         trt_plugins: List of TensorRT plugin library paths in .so format (compiled shared library).
+        trt_plugins_precision: List indicating the precision for each custom op.
         max_depth_of_reduction: Maximum depth of reduction for node classification.
+        opset: Target ONNX opset version. If None, uses default minimum opset based on low_precision_type
+               (22 for bf16, 13 for fp16). The opset may be automatically increased if certain operations
+               require a higher version.
 
     Returns:
         onnx.ModelProto: The converted mixed precision model.
@@ -83,12 +93,40 @@ def convert_to_mixed_precision(
     model = onnx.load(onnx_path, load_external_data=True)
     assert low_precision_type in ["fp16", "bf16"], "low_precision_type must be either fp16 or bf16"
 
+    # Get original model's opset version
+    original_opset = onnx_utils.get_opset_version(model)
+
     # Apply graph sanitization and optimizations
     # Opsets < 22 have a very limited support for bfloat16
     # Otherwise, prefer to keep the original opset version unless it's very old
-    min_opset = 22 if low_precision_type == "bf16" else 13
+    if opset is not None:
+        min_opset = opset
+        # Validate opset compatibility
+        if low_precision_type == "bf16" and opset < 22:
+            logger.warning(
+                f"Opset {opset} has limited BF16 support. Recommended minimum opset is 22. "
+                "The conversion may fail or produce unexpected results."
+            )
+        elif low_precision_type == "fp16" and opset < 13:
+            logger.warning(
+                f"Opset {opset} has limited FP16 support. Recommended minimum opset is 13. "
+                "The conversion may fail or produce unexpected results."
+            )
+        # Warn if user-specified opset is lower than original
+        if opset < original_opset:
+            logger.warning(
+                f"Specified opset {opset} is lower than the original model's opset {original_opset}. "
+                "Downgrading opset version may cause compatibility issues or conversion failures."
+            )
+    else:
+        min_opset = 22 if low_precision_type == "bf16" else 13
+
     graph_sanitizer = GraphSanitizer(
-        model, min_opset, trt_plugins=trt_plugins, max_ir_version=LATEST_IR_VERSION_SUPPORTED_BY_ORT
+        model,
+        min_opset,
+        trt_plugins=trt_plugins,
+        trt_plugins_precision=trt_plugins_precision,
+        max_ir_version=LATEST_IR_VERSION_SUPPORTED_BY_ORT,
     )
     graph_sanitizer.sanitize()
     model = graph_sanitizer.model
@@ -108,10 +146,13 @@ def convert_to_mixed_precision(
         initializer_map,
         nodes_to_exclude=nodes_to_exclude or [],
         op_types_to_exclude=op_types_to_exclude or [],
+        nodes_to_include=nodes_to_include or [],
+        op_types_to_include=op_types_to_include or [],
         data_max=data_max,
         init_max=init_max,
         custom_rule=custom_rule,
         max_depth_of_reduction=max_depth_of_reduction,
+        custom_ops_low_precision_nodes=graph_sanitizer.custom_ops_low_precision_nodes or [],
     )
 
     precision_converter = PrecisionConverter(
@@ -153,6 +194,7 @@ def convert_to_f16(
     low_precision_type: str = "fp16",
     keep_io_types: bool = True,
     op_block_list: list[str] = [],
+    tensor_block_dict: dict[str, dict[str, list[int]]] = {},
     trt_plugins: list[str] | None = [],
 ) -> onnx.ModelProto:
     """Convert model to mixed precision, using PrecisionConverter.
@@ -163,8 +205,8 @@ def convert_to_f16(
         model: ONNX model to convert.
         low_precision_type: Target precision to reduce to ('fp16' or 'bf16').
         keep_io_types: Whether to preserve input/output types.
-        disable_shape_infer: Whether to disable shape inference.
         op_block_list: List of operation types that should remain in FP32.
+        tensor_block_dict: Dictionary of tensors (operation type and I/O indices) that should remain in FP32.
         trt_plugins: List of TensorRT plugin library paths in .so format (compiled shared library).
     """
     assert low_precision_type in ["fp16", "bf16"], "low_precision_type must be either fp16 or bf16"
@@ -179,6 +221,7 @@ def convert_to_f16(
     sanitizer.find_custom_nodes()
     sanitizer.convert_opset()
     sanitizer.ensure_graph_name_exists()
+    sanitizer.convert_fp64_to_fp32()
     model = sanitizer.model
 
     # Setup internal mappings
@@ -193,6 +236,7 @@ def convert_to_f16(
         keep_io_types=keep_io_types,
         low_precision_type=low_precision_type,
         custom_ops=sanitizer.custom_ops,
+        tensor_block_dict=tensor_block_dict,
     )
     high_precision_nodes = [node.name for node in model.graph.node if node.op_type in op_block_list]
     low_precision_nodes = [

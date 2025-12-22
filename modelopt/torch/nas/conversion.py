@@ -13,20 +13,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Main APIs+entrypoints for model pruning."""
+"""Main APIs+entrypoints for NAS conversion and export."""
 
 from torch import nn
 
-from modelopt.torch.opt.conversion import apply_mode
-from modelopt.torch.opt.mode import ModeLike, _ModeRegistryCls
-from modelopt.torch.utils import ModelLike, unwrap_model
+from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
+from modelopt.torch.opt.conversion import ApplyModeError, apply_mode
+from modelopt.torch.opt.mode import (
+    ConvertEntrypoint,
+    ConvertReturnType,
+    MetadataDict,
+    ModeDescriptor,
+    ModeLike,
+    RestoreEntrypoint,
+    _ModeRegistryCls,
+)
+from modelopt.torch.utils import ModelLike, compare_dict, unwrap_model
 
-__all__ = ["convert", "export"]
+from .patch import PatchManager
+from .search_space import SearchSpace
+from .utils import get_subnet_config, select
+
+__all__ = ["ExportConfig", "ExportNASModeDescriptor", "convert", "export"]
 
 NASModeRegistry = _ModeRegistryCls("nas")
 
 
-def convert(model: ModelLike, mode: ModeLike) -> nn.Module:
+def convert(
+    model: ModelLike, mode: ModeLike, registry: _ModeRegistryCls = NASModeRegistry
+) -> nn.Module:
     """Convert a regular PyTorch model into a model that supports design space optimization.
 
     Args:
@@ -84,7 +99,109 @@ def convert(model: ModelLike, mode: ModeLike) -> nn.Module:
         #. Use ``*`` as a wildcard matching any layer.
     """
     # apply mode and handle model-like object with wrapper
-    return apply_mode(model, mode, registry=NASModeRegistry)
+    return apply_mode(model, mode, registry=registry)
+
+
+class ExportConfig(ModeloptBaseConfig):
+    """Configuration for the export mode.
+
+    This mode is used to export a model after NAS search.
+    """
+
+    strict: bool = ModeloptField(
+        default=True,
+        title="Strict export",
+        description="Enforces that the subnet configuration must exactly match during export.",
+    )
+
+    calib: bool = ModeloptField(
+        default=False,
+        title="Calibration",
+        description="Whether to calibrate the subnet before exporting.",
+    )
+
+
+def export_searchspace(model: nn.Module, config: ExportConfig) -> ConvertReturnType:
+    """Export a subnet configuration of the search space to a regular model."""
+    # sanity check to avoid DP/DDP here in the entrypoint
+    model = unwrap_model(model, raise_error=True)
+
+    # store config from model if we can find it for a future convert/restore process
+    subnet_config = get_subnet_config(model)
+
+    # Check for patching and calibration
+    if PatchManager.is_patched(model):
+        manager = PatchManager.get_manager(model)
+        if config.calib:
+            manager.call_post_eval()
+        manager.unpatch()
+
+    # export model in-place
+    model = SearchSpace(model).export()
+
+    # construct metadata
+    metadata = {
+        "subnet_config": subnet_config,
+    }
+
+    return model, metadata
+
+
+def restore_export(model: nn.Module, config: ExportConfig, metadata: MetadataDict) -> nn.Module:
+    """Restore & export the subnet configuration of the search space to a regular model."""
+    # Megatron save_sharded_modelopt_state does not save subnet_config
+    if "subnet_config" not in metadata:
+        return model
+
+    # select subnet config provided in metadata
+    select(model, metadata["subnet_config"], strict=config["strict"])
+
+    # run export
+    model, metadata_new = export_searchspace(model, config)
+
+    # double check metadata
+    unmatched_keys = compare_dict(metadata, metadata_new)
+    if unmatched_keys:
+        raise ApplyModeError(f"Unmatched metadata={unmatched_keys}!")
+
+    return model
+
+
+@NASModeRegistry.register_mode
+class ExportNASModeDescriptor(ModeDescriptor):
+    """Class to describe the ``"export_nas"`` mode.
+
+    The properties of this mode can be inspected via the source code.
+    """
+
+    @property
+    def name(self) -> str:
+        """Returns the value (str representation) of the mode."""
+        return "export_nas"
+
+    @property
+    def config_class(self) -> type[ModeloptBaseConfig]:
+        """Specifies the config class for the mode."""
+        return ExportConfig
+
+    @property
+    def is_export_mode(self) -> bool:
+        """Whether the mode is an export mode.
+
+        Returns:
+            True if the mode is an export mode, False otherwise. Defaults to False.
+        """
+        return True
+
+    @property
+    def convert(self) -> ConvertEntrypoint:
+        """The mode's entrypoint for converting a model."""
+        return export_searchspace
+
+    @property
+    def restore(self) -> RestoreEntrypoint:
+        """The mode's entrypoint for restoring a model."""
+        return restore_export
 
 
 def export(model: nn.Module, strict: bool = True, calib: bool = False) -> nn.Module:
@@ -116,4 +233,4 @@ def export(model: nn.Module, strict: bool = True, calib: bool = False) -> nn.Mod
 
     # apply export mode and return model
     config = {"strict": strict, "calib": calib}
-    return apply_mode(model, [("export", config)], registry=NASModeRegistry)
+    return apply_mode(model, [("export_nas", config)], registry=NASModeRegistry)

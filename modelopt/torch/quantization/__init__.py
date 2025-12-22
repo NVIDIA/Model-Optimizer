@@ -24,3 +24,4 @@ from .config import *
 from .conversion import *
 from .model_quant import *
 from .nn.modules.quant_module import QuantModuleRegistry
+from .utils import update_quant_cfg_with_kv_cache_quant

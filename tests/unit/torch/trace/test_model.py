@@ -16,7 +16,7 @@
 import itertools
 
 import pytest
-from _test_utils.torch_model.nas_trace_models import BaseExampleModel, get_example_models
+from _test_utils.torch.nas_prune.models import BaseExampleModel, get_example_models
 
 from modelopt.torch.trace import Symbol, SymDepth, SymMap, analyze_symbols
 

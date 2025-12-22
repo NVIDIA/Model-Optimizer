@@ -2,7 +2,7 @@ name: Code Quality
 
 on:
   pull_request:
-    branches: [main, release/*]
+    branches: [main, release/*, feature/*]
   schedule:
     - cron: "0 0 * * *" # Nightly
   workflow_dispatch: # On-demand
@@ -15,10 +15,10 @@ concurrency:
 jobs:
   code-quality:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Secret Scanning

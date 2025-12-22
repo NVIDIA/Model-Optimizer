@@ -20,7 +20,7 @@ set -eo pipefail
 # Set default values for BASE_MODEL, NUM_GPU, and DATA
 BASE_MODEL=meta-llama/Llama-3.2-1B-Instruct
 NUM_GPU=1
-DATA=Daring-Anteater/train.jsonl
+DATA=input_conversations/daring-anteater.jsonl
 
 # Parse input arguments --base_model, --num_gpu, and --data
 while [[ $# -gt 0 ]]; do
@@ -36,6 +36,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --data)
       DATA="$2"
+      shift; shift
+      ;;
+    --offline_data)
+      OFFLINE_DATA_PATH="$2"
       shift; shift
       ;;
     *)
@@ -54,6 +58,12 @@ else
   export CUDA_VISIBLE_DEVICES="$devs"
 fi
 
+if [[ "$OFFLINE_DATA_PATH" != "" ]]; then
+  OFFLINE_DATA_ARGS="--offline-data $OFFLINE_DATA_PATH"
+else
+  OFFLINE_DATA_ARGS=""
+fi
+
 MODEL_BASENAME=$(basename "$BASE_MODEL")
 
 echo "==== [1/3] Training draft model ===="
@@ -61,15 +71,16 @@ OUTPUT_DIR=ckpts/${MODEL_BASENAME}-$(date +%Y%m%d_%H%M)
 mkdir -p "$(dirname "$OUTPUT_DIR")"
 ./launch_train.sh --model $BASE_MODEL \
             --output_dir $OUTPUT_DIR \
+            $OFFLINE_DATA_ARGS \
             --data $DATA \
             --num_gpu $NUM_GPU \
             --num_epochs 2 \
             --eagle_config eagle_config.json
 
 echo "==== [2/3] Evaluating ModelOpt checkpoint on MT-Bench ===="
-python ar_validate.py --model_path $OUTPUT_DIR
+python scripts/ar_validate.py --model_path $OUTPUT_DIR
 
 echo "==== [3/3] Exporting checkpoint to deployment format ===="
 EXPORT_PATH=export/${MODEL_BASENAME}-$(date +%Y%m%d_%H%M)
 mkdir -p "$(dirname "$EXPORT_PATH")"
-python export_hf_checkpoint.py --model_path $OUTPUT_DIR --export_path $EXPORT_PATH
+python scripts/export_hf_checkpoint.py --model_path $OUTPUT_DIR --export_path $EXPORT_PATH

@@ -121,7 +121,7 @@ class ConcatTracedHp(TracedHp):
             active += hp.active
         return active
 
-    @active.setter  # type: ignore[override]
+    @active.setter
     def active(self, val: int | None):
         """Set the active value with a sanity check for choices and dynamic hparams."""
         val = self.original if val is None else val

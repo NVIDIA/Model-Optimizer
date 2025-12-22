@@ -16,7 +16,7 @@
 
 import pytest
 import torch
-from _test_utils.torch_model.transformers_models import create_tiny_llama_dir
+from _test_utils.torch.transformers_models import create_tiny_llama_dir
 
 
 @pytest.fixture(scope="session")

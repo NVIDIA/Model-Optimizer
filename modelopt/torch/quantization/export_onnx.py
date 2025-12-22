@@ -103,13 +103,18 @@
 """Utility to export a quantized torch model to quantized ONNX."""
 
 import contextlib
+from typing import TYPE_CHECKING
 
 import onnx
 import torch
-from torch.onnx import _type_utils, symbolic_helper
+from torch.onnx import symbolic_helper
 from torch.onnx import symbolic_helper as sym_help
-from torch.onnx._internal import jit_utils
-from torch.onnx.symbolic_opset14 import _attention_scale, _causal_attention_mask
+
+if TYPE_CHECKING:
+    if hasattr(torch.onnx._internal, "jit_utils"):
+        from torch.onnx._internal.jit_utils import GraphContext
+    else:  # torch >= 2.9
+        from torch.onnx._internal.torchscript_exporter.jit_utils import GraphContext
 
 onnx_dtype_map = {
     "BFloat16": onnx.TensorProto.BFLOAT16,
@@ -125,7 +130,7 @@ torch_dtype_map = {"Float": torch.float32, "Half": torch.float16, "BFloat16": to
 
 
 def export_int8(
-    g: torch.onnx._internal.jit_utils.GraphContext,
+    g: "GraphContext",
     inputs: torch.Value,
     amax: torch.Tensor,
     num_bits: int,
@@ -164,7 +169,7 @@ def export_int8(
     scale.masked_fill_(scale == 0, 1.0)
     scale = g.op("Constant", value_t=scale)
 
-    assert trt_high_precision_dtype in (input_type, "Float"), (
+    assert trt_high_precision_dtype in (input_type, "Float", "BFloat16"), (
         "TRT StronglyType requires both weights and amax to be in the BF16/FP16, or the QDQ in Float."
     )
 
@@ -184,7 +189,7 @@ def export_int8(
 
 
 def export_int4(
-    g: torch.onnx._internal.jit_utils.GraphContext,
+    g: "GraphContext",
     inputs: torch.Value,
     amax: torch.Tensor,
     num_bits: int,
@@ -208,7 +213,7 @@ def export_int4(
 
 
 def _fp8_quantize(
-    g: torch.onnx._internal.jit_utils.GraphContext,
+    g: "GraphContext",
     inputs: torch.Value,
     scale_inv: float,
     trt_high_precision_dtype: str,
@@ -236,7 +241,7 @@ def _fp8_quantize(
 
 
 def _fp8_dequantize(
-    g: torch.onnx._internal.jit_utils.GraphContext,
+    g: "GraphContext",
     inputs: torch.Value,
     scale_inv: float,
     trt_high_precision_dtype: str,
@@ -263,7 +268,7 @@ def _fp8_dequantize(
 
 
 def export_fp8(
-    g: torch.onnx._internal.jit_utils.GraphContext,
+    g: "GraphContext",
     inputs: torch.Value,
     amax: float,
     trt_high_precision_dtype: str | None,
@@ -279,17 +284,30 @@ def export_fp8(
 
 
 def scaled_dot_product_attention(
-    g: jit_utils.GraphContext,
-    query: torch._C.Value,
-    key: torch._C.Value,
-    value: torch._C.Value,
-    attn_mask: torch._C.Value | None = None,
+    g: "GraphContext",
+    query: "torch._C.Value",
+    key: "torch._C.Value",
+    value: "torch._C.Value",
+    attn_mask: "torch._C.Value | None" = None,
     dropout_p: float = 0.0,
     is_causal: bool = False,
-    scale: torch._C.Value | None = None,
+    scale: "torch._C.Value | None" = None,
     enable_gqa: bool = False,
 ):
     """Perform scaled dot product attention."""
+    if hasattr(torch.onnx, "_type_utils"):
+        from torch.onnx._type_utils import JitScalarType
+    else:  # torch >= 2.9
+        from torch.onnx._internal.torchscript_exporter import JitScalarType
+
+    if hasattr(torch.onnx, "symbolic_opset14"):
+        from torch.onnx.symbolic_opset14 import _attention_scale, _causal_attention_mask
+    else:  # torch >= 2.9
+        from torch.onnx._internal.torchscript_exporter.symbolic_opset14 import (
+            _attention_scale,
+            _causal_attention_mask,
+        )
+
     assert (not is_causal) or (is_causal and symbolic_helper._is_none(attn_mask)), (
         "is_causal and attn_mask cannot be set at the same time"
     )
@@ -322,22 +340,20 @@ def scaled_dot_product_attention(
 
     if symbolic_helper._is_none(attn_mask):
         mul_qk_add = mul_qk
-    elif _type_utils.JitScalarType.from_value(attn_mask) == _type_utils.JitScalarType.BOOL:
+    elif JitScalarType.from_value(attn_mask) == JitScalarType.BOOL:
         # Turn the Boolean mask to float: attn_mask.masked_fill(not attn_mask, -float('inf'))
         const_zero = g.op("Constant", value_t=torch.tensor([0.0]))
         const_neg_inf = g.op("Constant", value_t=torch.tensor([-float("inf")]))
         attn_mask = g.op("Where", attn_mask, const_zero, const_neg_inf)
         mul_qk_add = g.op("Add", mul_qk, attn_mask)
-    elif _type_utils.JitScalarType.from_value(attn_mask) in (
-        _type_utils.JitScalarType.FLOAT,
-        _type_utils.JitScalarType.HALF,
-        _type_utils.JitScalarType.BFLOAT16,
+    elif JitScalarType.from_value(attn_mask) in (
+        JitScalarType.FLOAT,
+        JitScalarType.HALF,
+        JitScalarType.BFLOAT16,
     ):
         mul_qk_add = g.op("Add", mul_qk, attn_mask)
     else:
-        raise ValueError(
-            f"Unsupported type for attn_mask: {_type_utils.JitScalarType.from_value(attn_mask)}"
-        )
+        raise ValueError(f"Unsupported type for attn_mask: {JitScalarType.from_value(attn_mask)}")
 
     attn_weight = g.op("Softmax", mul_qk_add, axis_i=-1)
 
@@ -352,14 +368,14 @@ def scaled_dot_product_attention(
 
 
 def export_fp8_mha(
-    g: torch.onnx._internal.jit_utils.GraphContext,
-    query: torch._C.Value,
-    key: torch._C.Value,
-    value: torch._C.Value,
-    attn_mask: torch._C.Value | None = None,
+    g: "GraphContext",
+    query: "torch._C.Value",
+    key: "torch._C.Value",
+    value: "torch._C.Value",
+    attn_mask: "torch._C.Value | None" = None,
     dropout_p: float = 0.0,
     is_causal: bool = False,
-    scale: torch._C.Value | None = None,
+    scale: "torch._C.Value | None" = None,
     q_quantized_scale: float = 1.0,
     k_quantized_scale: float = 1.0,
     v_quantized_scale: float = 1.0,
@@ -391,7 +407,18 @@ def export_fp8_mha(
                          |
                         Cast
     """
-    from torch.onnx.symbolic_opset14 import _attention_scale, _causal_attention_mask
+    if hasattr(torch.onnx, "_type_utils"):
+        from torch.onnx._type_utils import JitScalarType
+    else:  # torch >= 2.9
+        from torch.onnx._internal.torchscript_exporter._type_utils import JitScalarType
+
+    if hasattr(torch.onnx, "symbolic_opset14"):
+        from torch.onnx.symbolic_opset14 import _attention_scale, _causal_attention_mask
+    else:  # torch >= 2.9
+        from torch.onnx._internal.torchscript_exporter.symbolic_opset14 import (
+            _attention_scale,
+            _causal_attention_mask,
+        )
 
     # Pass all arguments, including x, to the custom ONNX operator
     assert (not is_causal) or (is_causal and sym_help._is_none(attn_mask)), (
@@ -442,22 +469,20 @@ def export_fp8_mha(
 
     if sym_help._is_none(attn_mask):
         mul_qk_add = mul_qk
-    elif _type_utils.JitScalarType.from_value(attn_mask) == _type_utils.JitScalarType.BOOL:
+    elif JitScalarType.from_value(attn_mask) == JitScalarType.BOOL:
         # Turn the Boolean mask to float: attn_mask.masked_fill(not attn_mask, -float('inf'))
         const_zero = g.op("Constant", value_t=torch.tensor([0.0]))
         const_neg_inf = g.op("Constant", value_t=torch.tensor([-float("inf")]))
         attn_mask = g.op("Where", attn_mask, const_zero, const_neg_inf)
         mul_qk_add = g.op("Add", mul_qk, attn_mask)
-    elif _type_utils.JitScalarType.from_value(attn_mask) in (
-        _type_utils.JitScalarType.FLOAT,
-        _type_utils.JitScalarType.HALF,
-        _type_utils.JitScalarType.BFLOAT16,
+    elif JitScalarType.from_value(attn_mask) in (
+        JitScalarType.FLOAT,
+        JitScalarType.HALF,
+        JitScalarType.BFLOAT16,
     ):
         mul_qk_add = g.op("Add", mul_qk, attn_mask)
     else:
-        raise ValueError(
-            f"Unsupported type for attn_mask: {_type_utils.JitScalarType.from_value(attn_mask)}"
-        )
+        raise ValueError(f"Unsupported type for attn_mask: {JitScalarType.from_value(attn_mask)}")
 
     attn_weight = g.op("Softmax", mul_qk_add, axis_i=-1)
 
@@ -485,7 +510,7 @@ def export_fp8_mha(
 
 
 def _fp4_dynamic_quantize(
-    g: torch.onnx._internal.jit_utils.GraphContext,
+    g: "GraphContext",
     inputs: torch.Value,
     scale: float,
     trt_high_precision_dtype: str | None,
@@ -521,7 +546,7 @@ def _fp4_dynamic_quantize(
 
 
 def _fp4_dequantize(
-    g: torch.onnx._internal.jit_utils.GraphContext,
+    g: "GraphContext",
     inputs: torch.Value,
     scale: float | torch.Value,
     trt_high_precision_dtype: str | None,
@@ -532,22 +557,22 @@ def _fp4_dequantize(
             "Constant",
             value_t=torch.tensor(scale, dtype=torch_dtype_map["Float"]),
         )
-    return g.op("trt::DequantizeLinear", inputs, scale)
+    return g.op("DequantizeLinear", inputs, scale)
 
 
 def _fp4_dequantize_2(
-    g: torch.onnx._internal.jit_utils.GraphContext,
+    g: "GraphContext",
     inputs: torch.Value,
     dyn_scale: torch.Value,
     block_size: int,
     axis: int = -1,
 ):
     """Helper Function for Dequantization."""
-    return g.op("trt::DequantizeLinear", inputs, dyn_scale, axis_i=axis, block_size_i=block_size)
+    return g.op("DequantizeLinear", inputs, dyn_scale, axis_i=axis, block_size_i=block_size)
 
 
 def _mxfp8_dynamic_quantize(
-    g: torch.onnx._internal.jit_utils.GraphContext,
+    g: "GraphContext",
     inputs: torch.Value,
     block_size: int,
     axis: int = -1,
@@ -565,7 +590,7 @@ def _mxfp8_dynamic_quantize(
 
 
 def _mxfp8_dequantize(
-    g: torch.onnx._internal.jit_utils.GraphContext,
+    g: "GraphContext",
     inputs: torch.Value,
     scale: torch.Value,
     block_size: int,
@@ -583,7 +608,7 @@ def _mxfp8_dequantize(
 
 
 def export_mxfp8(
-    g: torch.onnx._internal.jit_utils.GraphContext,
+    g: "GraphContext",
     inputs: torch.Tensor,
     onnx_quantizer_type: str,
     block_size: int,
@@ -601,7 +626,7 @@ def export_mxfp8(
 
 
 def export_fp4(
-    g: torch.onnx._internal.jit_utils.GraphContext,
+    g: "GraphContext",
     inputs: torch.Value,
     block_size: int,
     amax: torch.Value,

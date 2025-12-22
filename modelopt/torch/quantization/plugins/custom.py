@@ -21,9 +21,7 @@ from functools import partial
 from types import ModuleType
 
 import torch
-from packaging.version import Version
 
-from modelopt import __version__
 from modelopt.torch.utils.distributed import ParallelState
 
 from ..nn import QuantModule, SequentialQuantizer, TensorQuantizer
@@ -61,7 +59,7 @@ class _QuantFunctionalMixin(QuantModule):
     def functionals_to_replace(self) -> Iterator[tuple[ModuleType, str, Callable]]:
         return (
             (package, func_name, quantized_func)
-            for package, func_name, quantized_func in self._functionals_to_replace
+            for package, func_name, quantized_func in getattr(self, "_functionals_to_replace", [])
             if hasattr(package, func_name)
         )
 
@@ -174,19 +172,3 @@ class _ParallelLinear(_QuantFunctionalMixin, QuantModule):
             max_calibrate(self.output_quantizer, lambda oq: oq(dummy_input), distributed_sync=False)
         # If there are any other states, lets move them to the correct device
         super().modelopt_post_restore(prefix=prefix)
-
-    def is_version_less_than(self, version: str) -> bool:
-        self_version = (
-            Version(self.mopt_ckpt_versn)
-            if self.mopt_ckpt_versn is not None
-            else Version(__version__)
-        )
-
-        # version in NeMo container is 0.0.0 if installed from source without history
-        if self_version < Version(version) and self_version != Version("0.0.0"):
-            warnings.warn(
-                f"Checkpoint version {self_version} is less than {version}. "
-                "Please re-save model to avoid this warning."
-            )
-            return True
-        return False

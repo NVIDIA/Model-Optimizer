@@ -19,7 +19,7 @@ from unittest import mock
 
 import numpy as np
 import pytest
-from _test_utils.torch_model.deploy_models import LeNet5TwoInputs
+from _test_utils.torch.deploy.lib_test_models import LeNet5TwoInputs
 
 tensorrt = ModuleType("tensorrt")
 tensorrt.Logger = mock.Mock(name="tensorrt_logger")  # type: ignore[attr-defined]

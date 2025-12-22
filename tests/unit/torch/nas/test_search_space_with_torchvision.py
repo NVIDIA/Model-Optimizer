@@ -17,10 +17,7 @@ import copy
 
 import pytest
 import torch
-from _test_utils.torch_model.vision_models import (
-    get_tiny_mobilenet_and_input,
-    get_tiny_resnet_and_input,
-)
+from _test_utils.torch.vision_models import get_tiny_mobilenet_and_input, get_tiny_resnet_and_input
 from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
 
 from modelopt.torch.nas.search_space import generate_search_space

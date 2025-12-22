@@ -1,95 +1,102 @@
-# Pruning and Knowledge Distillation Nemo Run example
+<div align="center">
+
+# NeMo Pruning + Knowledge Distillation Simplified Flow Example
+
+</div>
 
 ## Overview
 
-This directory contains the NeMo 2.0 Pruning + Knowledge Distillation flow implementation. The main script `nemo_prune_kd_flow.py` enables model compression through structured pruning followed by knowledge distillation to recover performance.
+This directory contains an end-to-end Pruning + Knowledge Distillation Simplified Flow example using NeMo for model compression. It supports structured pruning followed by knowledge distillation to recover performance after compression.
+
+After structured pruning, the compressed model may show some accuracy degradation; the knowledge distillation stage aims to recover that loss by transferring knowledge from the full-precision teacher model to the pruned student model.
+
+## Flow Stages
+
+The Simplified Flow runs the following steps:
+
+1. 01_import — Import HuggingFace model to NeMo format
+1. 02a_eval_teacher — Evaluate teacher model on 5% of MMLU benchmark
+1. 02b_prune — Apply structured pruning to create a compressed student model
+1. 03_distill — Knowledge distillation from teacher to pruned student model
+1. 04a_eval_student — Evaluate student model on 5% of MMLU benchmark
+1. 04b_export — Export final compressed model to HuggingFace format
+
+```mermaid
+graph TD;
+01_import-->02a_eval_teacher;
+01_import-->02b_prune;
+02b_prune-->03_distill;
+03_distill-->04a_eval_student;
+03_distill-->04b_export;
+```
+
+## Results
+
+Pruning + Knowledge Distillation of Qwen3-8B achieves significant model compression while recovering most of the accuracy through distillation. We depth-prune the model from 32 to 24 layers (reducing from 8B to 6B parameters) and distill for ~28,000 steps (determined by sequence length, default 4096) with a learning rate of 1e-4 and global batch size of 768 using a 25% subset of the [ClimbMix dataset](https://huggingface.co/datasets/OptimalScale/ClimbMix). (This is about 90 billion tokens and takes a total of ~6k H100 GPU hours)
+
+|                                   | Tokens per Second * | MMLU |
+|-----------------------------------|---------------------|------|
+| Qwen3-8B Original                 | 4420                | 74.9 |
+| Qwen3-6B Pruned+Distilled from 8B | 6950                | 72.5 |
+| Qwen3-4B Original (comparison)    | 5210                | 70.0 |
+
+The resulting compressed student maintains competitive performance while being significantly faster with fewer parameters than the teacher. It also happens to have both better performance and throughput than the existing Qwen3-4B model!
+
+\* _Measured on H100 using TRT-LLM, FP8 precision_
 
 ## Usage
 
 ### Prerequisites
 
-#### Install NeMo 2.0 and related dependencies
+You can run the example either locally or on a [Slurm cluster](ADVANCED.md).
 
-To run the example, launch a [NeMo container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo) with version 25.04.01 or higher using Docker/Slurm. Mount your cloned `modelopt` repository to the container by adding this mount flag to your Docker/Slurm command: `-v <modelopt-path>:/workspace/modelopt -v <modelopt-path>/modelopt:/usr/local/lib/python3.12/dist-packages/modelopt`.
+To run the example locally, launch a [NeMo container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo) with version 25.09 or higher. Clone the `Model-Optimizer` repository and `NeMo` repository (checkout a specific commit for NeMo), then mount it onto your docker container.
 
-To run SFT properly you may also need to clone NeMo and Megatron-LM at the respective commits, and mount to `/opt/NeMo` and `/opt/megatron-lm`:
+- `git clone https://github.com/NVIDIA/Model-Optimizer.git`
 
-- `git clone https://github.com/NVIDIA-NeMo/NeMo && cd NeMo && git checkout d7b87b1`
-- `git clone https://github.com/NVIDIA/Megatron-LM.git && cd Megatron-LM && git checkout 8c15450`
-
-### Data Preparation
-
-The script supports chat datasets in ShareGPT or HuggingFace/OpenAI chat format. You can prepare your dataset in JSONL format with the required chat structure. To provide your own custom dataset, use the `--data-path` flag, otherwise the default [LIMA](https://huggingface.co/datasets/GAIR/lima) dataset will be used.
-
-### Running the Flow
-
-#### Standard Usage
-
-From the `nemo_run` folder, run:
+Example docker command:
 
 ```bash
-python prune_distill/nemo_prune_kd_flow.py --data_path your_dataset.jsonl
+docker run -v /home/user/:/home/user/ -v /home/user/NeMo:/opt/NeMo -v /home/user/Model-Optimizer:/opt/TensorRT-Model-Optimizer --gpus all -it --shm-size 20g --rm nvcr.io/nvidia/nemo:25.09 bash
 ```
 
-#### Mock Run (for testing)
+You will also need to set your Huggingface token with `export HF_TOKEN=<your-token>`. You may also need to enable write access to the docker container to the `examples/nemo_run` folder by doing `chmod 777 nemo_run` so that logs can be written.
 
-To test the flow without actual data, run the following command from the `nemo_run` folder:
+### Dataset Preparation
+
+Unlike the QAT flow, this workflow does not automatically download the dataset due to its large size and long tokenization time.
+You must first prepare the dataset by running:
 
 ```bash
-python prune_distill/nemo_prune_kd_flow.py --mock_run
+python ../common/process_climbmix.py --output-dir /path/to/save
 ```
 
-### Flow Stages
+This will download and process the ClimbMix dataset, creating the necessary data files for training.
 
-The script executes the following stages in sequence:
+### Running the Flow via Slurm
 
-1. Process LIMA data (if `--data-path` is not specified)
-1. **Import Model**: Imports the HuggingFace model to NeMo format
-1. **Fine-tuning**: Fine-tunes the model on the provided dataset
-1. **Pruning**: Prunes the fine-tuned model to create a smaller student model
-1. **Knowledge Distillation**: Distills knowledge from the teacher to the pruned student model
-1. **Export**: Exports the final compressed model
+After launching the NeMo container with the specified mounts, change the contents of the `SLURM_CONFIG` in `nemo_prune_kd_flow.py`
+to reflect your environment, and then perform the following:
 
-### Configuration Parameters
+Launch the example with the `nemo_prune_kd_flow.py` script. To use a different model than the default model (Qwen3-8B), you can add the `--model-name <hf-model-name> --base-recipe <recipe-name>` flags and use the model's HuggingFace name and NeMo recipe names listed [here](https://github.com/NVIDIA/NeMo/tree/main/nemo/collections/llm/recipes). Provide the processed dataset path using the `--data-dir` flag.
 
-The script includes several configurable parameters:
+To perform Pruning + Knowledge Distillation, run:
 
-- **GPUS**: Number of GPUs (default: 8)
-- **SEQUENCE_LENGTH**: Maximum sequence length (default: 8192)
-- **MBS**: Micro batch size (default: 2)
-- **GBS**: Global batch size (default: 2048 for real runs, 8 for mock runs)
-- **FINETUNE_STEPS**: Number of fine-tuning steps (default: 2500 for real runs, 20 for mock runs)
-- **DISTILL_STEPS**: Number of distillation steps (default: 7500 for real runs, 20 for mock runs)
-- **VAL_INTERVAL**: Validation interval (default: 500 for real runs, 10 for mock runs)
-- **PRUNE_SAMPLES**: Number of samples for pruning calibration (default: 1024 for real runs, 3 for mock runs)
+```bash
+python prune_distill/nemo_prune_kd_flow.py --log-dir /my/log/dir --data-dir /path/to/climbmix_proc --use-slurm
+```
 
-### Pruning Configuration
+> **_NOTE:_** You can omit the `--use-slurm` flag to run locally for testing, and optionally with `--mock-run` to use a mock dataset.
 
-- **Target Hidden Size**: Default is 3072 (configurable via `--prune_target_hidden_size`)
-- **Target FFN Hidden Size**: Automatically set to 3 × target_hidden_size
-- **Pruning Method**: Structured pruning to reduce model dimensions
+## Supported models
 
-### Output
+Locally this script currently supports models that can be trained on 1 node with 8 x 80GB GPUs. On Slurm you can configure the number of nodes/gpus for training and pruning with the following flags: `--nodes`, `--train-gpus`.
 
-The script generates the following outputs in the specified log directory:
+The default configuration works on 1 node with 8 H100 GPUs:
 
-- `{model_name}_initial/`: Initial NeMo checkpoint
-- `finetune_log_dir/`: Fine-tuning logs and checkpoints (teacher model)
-- `{model_name}_pruned/`: Pruned student model
-- `distill_log_dir/`: Knowledge distillation logs and checkpoints
-- `{model_name}_final/`: Final compressed model after distillation
+- **Model**: Qwen/Qwen3-8B
+- **Recipe**: qwen3_8b
 
-### Supported Models
+### Dataset limitations
 
-Currently supports models that can be trained on 1 node with 8 x 80GB GPUs. The default configuration uses:
-
-- **Model**: Meta-Llama-3.1-8B
-- **Recipe**: llama31_8b
-- **Pruning Strategy**: Structured pruning with knowledge distillation recovery
-
-### Troubleshooting
-
-1. **GPU Memory Issues**: Reduce batch sizes (MBS, GBS) if encountering OOM errors
-1. **Data Format**: Ensure your dataset follows the expected chat format
-1. **NeMo Installation**: If encountering NeMo-related errors, use the recommended docker container
-1. **Model Size**: Ensure your model fits within the 8-GPU configuration
+The current pruning + knowledge distillation recipe has been tuned for the Qwen3-8B model to achieve significant speedup while maintaining performance. Pruning and distillation results are highly dependent on the specific model, dataset, and hyperparameters. There is no guarantee that a given dataset will recover the accuracy of the pruned model. Feel free to try your own model and dataset combinations and test which combination works best.

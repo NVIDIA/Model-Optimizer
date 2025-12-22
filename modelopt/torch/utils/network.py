@@ -70,12 +70,19 @@ __all__ = [
 ]
 
 # NOTE: can be extended dynamically in appropriate plugin files if available (e.g. megatron core)
-SUPPORTED_WRAPPERS = {
+SUPPORTED_WRAPPERS: dict[type[nn.Module], str] = {
     nn.parallel.DataParallel: "module",  # indicating attribute key to unwrap
     nn.parallel.DistributedDataParallel: "module",
+    torch.distributed.fsdp.FullyShardedDataParallel: "module",
 }
-UNSUPPORTED_WRAPPERS = {torch.distributed.fsdp.FullyShardedDataParallel: "module"}
 
+try:
+    from deepspeed.runtime.engine import DeepSpeedEngine
+except:  # noqa: E722
+    DeepSpeedEngine = None
+
+if DeepSpeedEngine is not None:
+    SUPPORTED_WRAPPERS[DeepSpeedEngine] = "module"
 ModelLike = Union[nn.Module, type[nn.Module], tuple, Callable]  # noqa: UP007
 ConstructorLike = Callable | tuple
 
@@ -430,11 +437,8 @@ def unwrap_model(
     """Unwrap a model that is wrapped by supported wrapper module or return original model."""
     if force_unwrap:
         try:
-            if type(model) in SUPPORTED_WRAPPERS or type(model) in UNSUPPORTED_WRAPPERS:
-                return getattr(
-                    model,
-                    SUPPORTED_WRAPPERS.get(type(model), UNSUPPORTED_WRAPPERS.get(type(model))),  # type: ignore [arg-type]
-                )
+            if type(model) in SUPPORTED_WRAPPERS:
+                return getattr(model, SUPPORTED_WRAPPERS[type(model)])
         except AttributeError:
             raise ValueError(
                 f"Model of type {type(model)} could not be forcefully unwrapped! Please manually"
@@ -447,11 +451,6 @@ def unwrap_model(
         elif warn:
             warnings.warn(msg or f"Model {model} is wrapped by {type(model)}; unwrapping...")
         return getattr(model, SUPPORTED_WRAPPERS[type(model)])
-    elif type(model) in UNSUPPORTED_WRAPPERS:
-        raise ValueError(
-            f"Automatically unwrapping {type(model)} is not supported at this time! Please manually"
-            " unwrap the model before passing it in."
-        )
     return model
 
 
@@ -597,14 +596,17 @@ def create_param_grad_clear_hook(param):
     return accum_grad, handle
 
 
-def get_unwrapped_name(name: str) -> str:
+def get_unwrapped_name(name: str, model: nn.Module | None = None) -> str:
     """Get the cleaned module name (i.e, the name before wrapping with sharded modules)."""
     # The distributed sharded wrappers such as FSDP wraps the child modules as well
     # So unwrapping just the parent module is not enough
     # Instead of unwrapping the child modules and changing the model, we can just clean the name
     # _convert_to_wrapped_module_name is a Pytorch utility function to do this
+    if isinstance(model, (nn.parallel.DistributedDataParallel, nn.parallel.DataParallel)) or (
+        DeepSpeedEngine is not None and isinstance(model, DeepSpeedEngine)
+    ):
+        name = name.removeprefix("module.")
 
-    # TODO: Implement support for DeepSpeed Zero wrapped modules
     name = _convert_to_wrapped_module_name(name)
     name = name.removesuffix(".")
     return name

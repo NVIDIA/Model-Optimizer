@@ -30,11 +30,7 @@ import tqdm
 from pydantic import create_model
 from torch.nn.modules.batchnorm import _BatchNorm
 
-from modelopt.torch.opt.config import (
-    ModeloptBaseConfig,
-    ModeloptField,
-    get_kwargs_for_create_model_with_rules,
-)
+from modelopt.torch.opt.config import ModeloptBaseConfig, get_kwargs_for_create_model_with_rules
 from modelopt.torch.opt.conversion import ApplyModeError, ModelLikeModule
 from modelopt.torch.opt.mode import (
     ConvertEntrypoint,
@@ -56,33 +52,34 @@ from modelopt.torch.utils import (
     stats,
     torch_detach,
     torch_to,
-    unwrap_model,
 )
 
 from .algorithms import ConstraintsFunc, get_constraints_func
 from .conversion import NASModeRegistry
 from .patch import PatchData, PatchManager, _modelopt_eval_recursion_guard, prep_for_eval
 from .registry import DMRegistry
-from .search_space import SearchSpace, generate_search_space
-from .utils import MODELOPT_BN_CALIB_ITERS, MODELOPT_QUEUE_MAXLEN, get_subnet_config, sample, select
+from .search_space import generate_search_space
+from .utils import get_subnet_config, sample, select
 
 __all__ = [
     "AutoNASConfig",
     "AutoNASModeDescriptor",
     "AutoNASPatchManager",
     "EvolveSearcher",
-    "ExportConfig",
-    "ExportModeDescriptor",
     "IterativeSearcher",
     "RandomSearcher",
     "convert_autonas_searchspace",
     "convert_searchspace",
-    "export_searchspace",
     "restore_autonas_searchspace",
-    "restore_export",
     "restore_searchspace",
     "update_autonas_metadata",
 ]
+
+# we have two different numbers here since during training it might take longer to stabilize
+MODELOPT_QUEUE_MAXLEN = 50  # indicates length of modelopt data queue for BN calib
+MODELOPT_BN_CALIB_ITERS = (
+    100  # indicates # iters in train mode 'til we trust BN stats without calib
+)
 
 
 def _get_ratio_list():
@@ -130,25 +127,6 @@ AutoNASConfig: type[ModeloptBaseConfig] = create_model(
         doc='Configuration for the ``"autonas"`` mode.',
     ),
 )
-
-
-class ExportConfig(ModeloptBaseConfig):
-    """Configuration for the export mode.
-
-    This mode is used to export a model after NAS search.
-    """
-
-    strict: bool = ModeloptField(
-        default=True,
-        title="Strict export",
-        description="Enforces that the subnet configuration must exactly match during export.",
-    )
-
-    calib: bool = ModeloptField(
-        default=False,
-        title="Calibration",
-        description="Whether to calibrate the subnet before exporting.",
-    )
 
 
 class AutoNASPatchManager(PatchManager):
@@ -676,48 +654,6 @@ def update_autonas_metadata(
     metadata["subnet_config"] = get_subnet_config(model)
 
 
-def export_searchspace(model: nn.Module, config: ExportConfig) -> ConvertReturnType:
-    """Export a subnet configuration of the search space to a regular model."""
-    # sanity check to avoid DP/DDP here in the entrypoint
-    model = unwrap_model(model, raise_error=True)
-
-    # store config from model if we can find it for a future convert/restore process
-    subnet_config = get_subnet_config(model)
-
-    # Check for patching and calibration
-    if PatchManager.is_patched(model):
-        manager = PatchManager.get_manager(model)
-        if config.calib:
-            manager.call_post_eval()
-        manager.unpatch()
-
-    # export model in-place
-    model = SearchSpace(model).export()
-
-    # construct metadata
-    metadata = {
-        "subnet_config": subnet_config,
-    }
-
-    return model, metadata
-
-
-def restore_export(model: nn.Module, config: ExportConfig, metadata: MetadataDict) -> nn.Module:
-    """Restore & export the subnet configuration of the search space to a regular model."""
-    # select subnet config provided in metadata
-    select(model, metadata["subnet_config"], strict=config["strict"])
-
-    # run export
-    model, metadata_new = export_searchspace(model, config)
-
-    # double check metadata
-    unmatched_keys = compare_dict(metadata, metadata_new)
-    if unmatched_keys:
-        raise ApplyModeError(f"Unmatched metadata={unmatched_keys}!")
-
-    return model
-
-
 @NASModeRegistry.register_mode
 class AutoNASModeDescriptor(ModeDescriptor):
     """Class to describe the ``"autonas"`` mode.
@@ -738,12 +674,12 @@ class AutoNASModeDescriptor(ModeDescriptor):
     @property
     def next_modes(self) -> set[str] | None:
         """Modes that must immediately follow this mode."""
-        return {"export", "kd_loss", "quantize", "sparse_magnitude", "sparse_gpt"}
+        return {"export_nas", "kd_loss", "quantize", "sparse_magnitude", "sparse_gpt"}
 
     @property
     def export_mode(self) -> str | None:
         """The mode that corresponds to the export mode of this mode."""
-        return "export"
+        return "export_nas"
 
     @property
     def search_algorithm(self) -> type[BaseSearcher]:
@@ -769,40 +705,3 @@ class AutoNASModeDescriptor(ModeDescriptor):
     def update_for_new_mode(self) -> UpdateEntrypoint:
         """The mode's entrypoint for updating the models state before new mode."""
         return update_autonas_metadata
-
-
-@NASModeRegistry.register_mode
-class ExportModeDescriptor(ModeDescriptor):
-    """Class to describe the ``"export"`` mode.
-
-    The properties of this mode can be inspected via the source code.
-    """
-
-    @property
-    def name(self) -> str:
-        """Returns the value (str representation) of the mode."""
-        return "export"
-
-    @property
-    def config_class(self) -> type[ModeloptBaseConfig]:
-        """Specifies the config class for the mode."""
-        return ExportConfig
-
-    @property
-    def is_export_mode(self) -> bool:
-        """Whether the mode is an export mode.
-
-        Returns:
-            True if the mode is an export mode, False otherwise. Defaults to False.
-        """
-        return True
-
-    @property
-    def convert(self) -> ConvertEntrypoint:
-        """The mode's entrypoint for converting a model."""
-        return export_searchspace
-
-    @property
-    def restore(self) -> RestoreEntrypoint:
-        """The mode's entrypoint for restoring a model."""
-        return restore_export

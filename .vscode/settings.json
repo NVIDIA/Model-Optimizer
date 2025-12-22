@@ -42,5 +42,7 @@
     "evenBetterToml.schema.enabled": false, // disable toml/json schema since we have custom fields
     "python.analysis.extraPaths": [
         "./tests/" // add tests to python path just like pytest does in pyproject.toml
-    ]
+    ],
+    "git.alwaysSignOff": true,
+    "git.enableCommitSigning": true,
 }

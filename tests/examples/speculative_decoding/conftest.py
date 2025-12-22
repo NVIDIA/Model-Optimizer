@@ -23,10 +23,14 @@ from _test_utils.examples.run_command import MODELOPT_ROOT, run_example_command
 def tiny_daring_anteater_path(tmp_path_factory):
     dataset_path = MODELOPT_ROOT / "examples/speculative_decoding/Daring-Anteater"
     if not os.path.exists(dataset_path):
-        run_example_command(
-            ["git", "clone", "https://huggingface.co/datasets/nvidia/Daring-Anteater"],
-            "speculative_decoding",
-        )
+        try:
+            run_example_command(
+                ["git", "clone", "https://huggingface.co/datasets/nvidia/Daring-Anteater"],
+                "speculative_decoding",
+            )
+        except Exception as e:
+            # Ignore rate-limiting errors
+            pytest.skip(f"Failed to clone Daring-Anteater dataset: {e}")
     output_path = tmp_path_factory.mktemp("daring_anteater") / "train.jsonl"
     with open(dataset_path / "train.jsonl") as src, open(output_path, "w") as dst:
         for i, line in enumerate(src):

@@ -38,6 +38,7 @@ import transformers
 from transformers.trainer_utils import get_last_checkpoint
 from utils import (
     get_lora_config,
+    get_metrics_with_perplexity,
     make_supervised_data_module,
     monkey_patch_training_step_to_fix_memory_leak,
 )
@@ -45,11 +46,7 @@ from utils import (
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.distill.plugins.huggingface import LMLogitsLoss
-from modelopt.torch.quantization.plugins.transformers_trainer import (
-    QADTrainer,
-    QATTrainer,
-    get_metrics_with_perplexity,
-)
+from modelopt.torch.quantization.plugins.transformers_trainer import QADTrainer, QATTrainer
 from modelopt.torch.utils import print_rank_0
 
 # Enable automatic save/load of modelopt state huggingface checkpointing
@@ -263,16 +260,12 @@ def train():
 
     if training_args.do_train:
         trainer.train(resume_from_checkpoint=checkpoint)
+        print_rank_0("Training completed.")
 
     if training_args.do_eval:
-        if not training_args.do_train:
-            # trainer.evaluate() will not prepare the model properly, especially for FSDP2,
-            # so we use the ``eval_on_start`` flag to evaluate the model and skip the training.
-            trainer.train(resume_from_checkpoint=checkpoint, eval_only=True)
-        else:
-            metrics = trainer.evaluate()
-            metrics = get_metrics_with_perplexity(metrics)
-            print_rank_0(f"Evaluation results: \n{metrics}")
+        metrics = trainer.evaluate()
+        metrics = get_metrics_with_perplexity(metrics)
+        print_rank_0(f"Evaluation results: \n{metrics}")
 
     if training_args.do_train or quant_args.quant_cfg is not None:
         print_rank_0("Saving the model...")

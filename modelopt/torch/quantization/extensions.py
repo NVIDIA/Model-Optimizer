@@ -41,7 +41,7 @@ def get_cuda_ext_fp8(raise_if_failed: bool = False):
     if not hasattr(get_cuda_ext_fp8, "extension"):
         get_cuda_ext_fp8.extension = load_cpp_extension(  # type:ignore[attr-defined]
             name="modelopt_cuda_ext_fp8",
-            sources=[path / "src/tensor_quant_fp8.cpp", path / "src/tensor_quant_gpu_fp8.cu"],
+            sources=[path / "src/tensor_quant_gpu_fp8.cu"],
             cuda_version_specifiers=">=11.8",
             fail_msg=(
                 "CUDA extension for FP8 quantization could not be built and loaded, FP8 simulated"

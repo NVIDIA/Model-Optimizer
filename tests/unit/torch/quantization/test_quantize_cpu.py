@@ -19,8 +19,8 @@ import copy
 
 import pytest
 import torch
-from _test_utils.torch_quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
-from _test_utils.torch_quantization.quantize_common import (
+from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
+from _test_utils.torch.quantization.quantize_common import (
     INT4_AWQ_CLIP_CFG,
     INT4_AWQ_FULL_CFG,
     INT4_SVDQUANT_CFG,
@@ -43,6 +43,14 @@ WINT4INT8_CFG = {
         "*input_quantizer": {"num_bits": 8, "axis": None, "enable": True},
     },
     "algorithm": "awq_lite",
+}
+
+INT8_MSE_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {"num_bits": 8, "axis": 0},
+        "*input_quantizer": {"num_bits": 8, "axis": None},
+    },
+    "algorithm": "mse",
 }
 
 STATIC_WEIGHT_DYNAMIC_ACTIVATION_CFG = {
@@ -92,6 +100,7 @@ quant_cfg_custom_calib = {
         INT4_AWQ_CLIP_CFG,
         INT4_AWQ_FULL_CFG,
         WINT4INT8_CFG,
+        INT8_MSE_CFG,
     ],
 )
 def test_quantize(model_cls, config):
@@ -99,6 +108,10 @@ def test_quantize(model_cls, config):
     model = model_cls()
     calib_data = [model.get_input() for _ in range(2)]
     quantize_model_and_forward(model, config, calib_data)
+
+    # For fast testing, lets just test one config
+    if config == mtq.INT8_DEFAULT_CFG:
+        mtq.print_quant_summary(model)
 
 
 @pytest.mark.parametrize(

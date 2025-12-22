@@ -16,13 +16,13 @@
 """ModelOpt plugin for transformers Trainer."""
 
 import gc
+import json
 import os
-from contextlib import suppress
+import types
 from dataclasses import dataclass, field
 
 import torch
-import torch.distributed.checkpoint as dist_cp
-from accelerate.utils import save_fsdp_model
+from tqdm import tqdm
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -31,13 +31,17 @@ from modelopt.torch.distill.mode import _convert_for_kd
 from modelopt.torch.distill.plugins.huggingface import KDTrainer
 from modelopt.torch.opt.conversion import restore_from_modelopt_state
 from modelopt.torch.opt.plugins import ModelOptHFTrainer
-from modelopt.torch.quantization.config import QuantizeConfig
-from modelopt.torch.quantization.utils import (
+from modelopt.torch.utils import print_rank_0
+
+from ..config import QuantizeConfig
+from ..nn import TensorQuantizer
+from ..utils import (
     calibrate_with_adapters,
     disable_lora_quantizers_in_config,
+    get_quantizer_state_dict,
     is_quantized,
+    set_quantizer_state_dict,
 )
-from modelopt.torch.utils import print_rank_0
 
 # TODO: Enable documentation rendering for this class
 
@@ -98,10 +102,6 @@ class QuantizationArgumentsWithConfig(QuantizationArguments):
     )
 
 
-class EvalOnlyError(Exception):
-    """Exception to raise when evaluation is only needed."""
-
-
 def check_awq_smoothquant(quant_cfg):
     # TODO: Remove this once deepspeed for AWQ and SmoothQuant is added
     """Get the quantization type from the configuration."""
@@ -114,54 +114,6 @@ def check_awq_smoothquant(quant_cfg):
         is_awq_smoothquant = True
 
     return is_awq_smoothquant
-
-
-def get_metrics_with_perplexity(metrics):
-    """Add perplexity to the metrics."""
-    metrics = {"perplexity": float(torch.exp(torch.tensor(metrics["eval_loss"]))), **metrics}
-    return metrics
-
-
-def convert_sharded_model_to_hf_format(
-    model, model_path, modelopt_state_name="modelopt_state.pth", output_path=None
-):
-    """Convert a sharded model to HF format.
-
-    Args:
-        model: The original HF model.
-        model_path: The path to the sharded model with pytorch_model_fsdp_0 directory.
-        modelopt_state_name: The name of the modelopt state file. If not provided, the default name
-            "modelopt_state.pth" will be used.
-        output_path: The path to save the converted model. If not provided, the model will be saved
-            to the same directory as the sharded model.
-    """
-    if output_path is None:
-        output_path = model_path
-    os.makedirs(output_path, exist_ok=True)
-    state_dict = {"model": model.state_dict()}
-    sharded_model_path = os.path.join(model_path, "pytorch_model_fsdp_0")
-    modelopt_state_path = os.path.join(model_path, modelopt_state_name)
-    if not os.path.exists(sharded_model_path):
-        print_rank_0(f"Sharded model path does not exist: {sharded_model_path}")
-        return model
-    dist_cp.load_state_dict(
-        state_dict=state_dict,
-        storage_reader=dist_cp.FileSystemReader(sharded_model_path),
-        no_dist=True,
-    )
-    model.load_state_dict(state_dict["model"])
-    restore_modelopt_state_with_weights(model, modelopt_state_path)
-    model.save_pretrained(output_path)
-    return model
-
-
-def restore_modelopt_state_with_weights(model, modelopt_state_path):
-    """Restore the modelopt weights for fsdp2 models."""
-    _modelopt_state = torch.load(modelopt_state_path, weights_only=False)
-    modelopt_weights = _modelopt_state.pop("modelopt_state_weights", None)
-    restore_from_modelopt_state(model, _modelopt_state)
-    if modelopt_weights is not None:
-        model.load_state_dict(modelopt_weights, strict=False)
 
 
 class QATTrainer(ModelOptHFTrainer):
@@ -190,22 +142,13 @@ class QATTrainer(ModelOptHFTrainer):
                 else quant_args.quant_cfg
             )
         self.quant_cfg = quant_cfg
-        self._eval_without_training = False
-
-        self._is_fsdp2 = self.is_fsdp_enabled and (
-            getattr(self.accelerator.state.fsdp_plugin, "fsdp_version", 1) == 2
-        )
-        self.fsdp_state_dict_type = (
-            str(self.accelerator.state.fsdp_plugin.state_dict_type) if self.is_fsdp_enabled else ""
-        )
-        self._modelopt_state_path = os.path.join(self.args.output_dir, "modelopt_state_train.pth")
 
         # Add lora adapter before quantizing the model
         if getattr(self.args, "lora_config", None) is not None and not hasattr(
             self.model, "peft_config"
         ):
             # TODO: use get_peft_model here instead of add_adapter
-            self.model.add_adapter(self.args.lora_config, adapter_name="adapter")
+            self.model.add_adapter(self.args.lora_config)
             print_rank_0("Lora adapter added.")
 
         if hasattr(self.model, "peft_config") and self.quant_cfg is not None:
@@ -219,144 +162,209 @@ class QATTrainer(ModelOptHFTrainer):
                 f"QAT DeepSpeed does not currently support AWQ or SmoothQuant: {self.quant_cfg}"
             )
 
-        # FSDP1 requires pre-restoring the quantized model if the modelopt state exists.
-        if os.path.exists(self._modelopt_state_path) and not self._is_fsdp2:
-            self._quantize_model()
+        self._patch_accelerate_for_fsdp2_fix()
 
-    def _get_quantize_forward_loop(self, data_loader, use_eval_loop=True):
-        def forward_loop(_model):
-            print_rank_0("Calibrating...")
-            if use_eval_loop:
-                return self.evaluation_loop(
-                    data_loader,
-                    description="Calibration",
-                    prediction_loss_only=True,
-                    ignore_keys=None,
-                    metric_key_prefix="calibration",
-                )
-            else:
-                for batch in data_loader:
-                    batch = self._prepare_inputs(batch)
-                    _model(**batch)
-            print_rank_0("Calibration done!")
+        self._modelopt_state_path = os.path.join(self.args.output_dir, "modelopt_state_train.pth")
+        if os.path.exists(self._modelopt_state_path):
+            self._restore_modelopt_state_with_weights()
+        elif is_quantized(self.model):
+            self._save_modelopt_state_with_weights()
 
-        return forward_loop
+        self._original_dtype = getattr(
+            getattr(self.model, "config", None), "dtype", None
+        ) or getattr(getattr(self.model, "config", None), "torch_dtype", None)
 
-    def _save_modelopt_state_with_weights(self, model, modelopt_state_path, save_weights=False):
+    def _save_modelopt_state_with_weights(self):
         """Save the modelopt weights for fsdp2 models."""
-        modelopt_state = mto.modelopt_state(model)
-        modelopt_state["modelopt_state_dict"] = [
-            state
-            for state in modelopt_state["modelopt_state_dict"]
-            if "kd_loss" not in state and "export_student" not in state
-        ]
-        if save_weights:
-            state_dict = model.state_dict()
-            modelopt_weights = {}
-            for k, v in state_dict.items():
-                if "_quantizer" in k:
-                    modelopt_weights[k] = v.cpu()
-            modelopt_state["modelopt_state_weights"] = modelopt_weights
-
-        if self.args.should_save:
-            torch.save(modelopt_state, modelopt_state_path)
-
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
 
-    def _quantize_model(self, use_eval_loop=True):
+        modelopt_state = mto.modelopt_state(self.model)
+        modelopt_state["modelopt_state_weights"] = get_quantizer_state_dict(self.model)
+
+        if self.args.should_save:
+            torch.save(modelopt_state, self._modelopt_state_path)
+
+        print_rank_0(f"Saved modelopt state to {self._modelopt_state_path}")
+
+    def _restore_modelopt_state_with_weights(self):
+        modelopt_state = torch.load(self._modelopt_state_path, weights_only=False)
+        modelopt_weights = modelopt_state.pop("modelopt_state_weights", None)
+        restore_from_modelopt_state(self.model, modelopt_state)
+        if modelopt_weights is not None:
+            set_quantizer_state_dict(self.model, modelopt_weights)
+        print_rank_0("Restored modelopt state with weights.")
+
+    def _quantize_model(self):
         """Quantize the model. Restore the quantization state if it exists."""
-        model = self.accelerator.unwrap_model(self.model)
-        if os.path.exists(self._modelopt_state_path):
-            print_rank_0(f"Restoring modelopt state from {self._modelopt_state_path}...")
-            restore_modelopt_state_with_weights(self.model, self._modelopt_state_path)
-            print_rank_0("Restored model from modelopt state.")
-        else:
-            dataset = torch.utils.data.Subset(
-                self.eval_dataset,
-                list(range(min(self.quant_args.calib_size, len(self.eval_dataset)))),  # type: ignore [union-attr]
-            )
-            data_loader = self.get_eval_dataloader(dataset)
-            forward_loop = self._get_quantize_forward_loop(data_loader, use_eval_loop)
-            with calibrate_with_adapters(model, self.args):
-                print_rank_0("Quantizing the model...")
-                mtq.quantize(model, self.quant_cfg, forward_loop)  # type: ignore [arg-type]
-                print_rank_0("Quantization done!")
+        dataset = self.train_dataset if self.train_dataset is not None else self.eval_dataset
+        assert dataset is not None, "Calibration requires either eval or train dataset."
+        num_samples = min(self.quant_args.calib_size, len(dataset))  # type: ignore [union-attr]
+        dataset = torch.utils.data.Subset(dataset, list(range(num_samples)))
+        data_loader = self.get_eval_dataloader(dataset)
 
-            if getattr(self.quant_args, "compress", False):
-                print_rank_0("Compressing model after calibration")
-                mtq.compress(model)
+        def forward_loop(model):
+            for batch in tqdm(data_loader, desc="Calibrating", disable=not self.args.should_save):
+                batch = self._prepare_inputs(batch)
+                # Important: We should forward pass using the unwrapped model
+                # mtq.quantize will unwrap the model & pass to the forward_loop
+                self.model(**batch)
 
-            # Force garbage collection to free up memory
-            gc.collect()
+        # TODO: Remove calibrate_with_adapters - this should not be needed
+        with calibrate_with_adapters(self.model, self.args):
+            print_rank_0("Quantizing the model...")
+            mtq.quantize(self.model, self.quant_cfg, forward_loop)  # type: ignore [arg-type]
 
-            print_rank_0(f"Saving modelopt state to {self._modelopt_state_path}")
-            self._save_modelopt_state_with_weights(
-                model, self._modelopt_state_path, save_weights=True
-            )
-            torch.cuda.empty_cache()
-            if use_eval_loop:
-                self.callback_handler.on_evaluate(self, self.state, self.control, metrics=None)
+        # Save modelopt state
+        self._save_modelopt_state_with_weights()
+
+        if getattr(self.quant_args, "compress", False):
+            print_rank_0("Compressing model after calibration")
+            mtq.compress(self.model)
+
+        # Force garbage collection to free up memory
+        gc.collect()
+
+        torch.cuda.empty_cache()
 
         if self.accelerator.is_main_process:
-            mtq.print_quant_summary(model)
+            mtq.print_quant_summary(self.model)
 
-    def _evaluate(self, *args, **kwargs):
-        """Quantize the model before evaluation.
-
-        Note that we do not force to run the evaluation if the `eval_on_start` is False.
-        """
+    def training_step(self, *args, **kwargs):
+        """Training step."""
         if self.quant_cfg is not None and not is_quantized(self.model):
             self._quantize_model()
-            metrics = None
-            if self._original_evaluate_on_start:
-                metrics = super()._evaluate(*args, **kwargs)
-        else:
-            metrics = super()._evaluate(*args, **kwargs)
-        # used for eval without training
-        if self._eval_without_training:
-            metrics = get_metrics_with_perplexity(metrics)
-            print_rank_0(f"Evaluation results: \n{metrics}")
-            raise EvalOnlyError()
-        return metrics
+        return super().training_step(*args, **kwargs)
 
-    def train(self, *args, eval_only=False, **kwargs):
-        """Train the model with quantization."""
-        self._eval_without_training = eval_only
-        self._original_evaluate_on_start = (
-            self.args.eval_on_start if not self._eval_without_training else True
+    def prediction_step(self, *args, **kwargs):
+        """Prediction step."""
+        if self.quant_cfg is not None and not is_quantized(self.model):
+            self._quantize_model()
+        return super().prediction_step(*args, **kwargs)
+
+    def evaluate(self, *args, **kwargs):
+        """Evaluate the model."""
+        if self.args.do_eval and not self.args.do_train and self.accelerator.is_fsdp2:
+            # [Not related to ModelOpt] HF does not support eval only for FSDP2.
+            # This is a hack to make it work
+            dummy_optimizer = torch.optim.SGD([next(self.model.parameters())], lr=0.0)
+            self.model, _ = self.accelerator.prepare(self.model, dummy_optimizer)
+        return super().evaluate(*args, **kwargs)
+
+    def train(self, *args, **kwargs):
+        """Train the model."""
+        outputs = super().train(*args, **kwargs)
+        print_rank_0(
+            "Training completed. Please save the final model using `Trainer.save_model()` "
+            "to preserve ModelOpt states."
         )
-        if getattr(self.quant_args, "quant_cfg", None) is not None and not is_quantized(self.model):
-            self.args.eval_on_start = True
-        train_result = None
-        with suppress(EvalOnlyError):
-            train_result = super().train(*args, **kwargs)
-        self.args.eval_on_start = self._original_evaluate_on_start
-        return train_result
+        return outputs
 
-    def save_model(
-        self, output_dir: str | None = None, _internal_call: bool = False, *args, **kwargs
-    ):
+    def save_model(self, *args, **kwargs):
         """Save the quantized model."""
-        dict_type = (
-            str(self.accelerator.state.fsdp_plugin.state_dict_type) if self.is_fsdp_enabled else ""
-        )
-        if not _internal_call and self.is_fsdp_enabled and "SHARDED_STATE_DICT" in dict_type:
-            # The default save_model in Trainer doesn't save checkpoint with SHARDED_STATE_DICT + FSDP.
-            # We save the model manually at the end of the training in order to convert the last
-            # checkpoint from distcp to HF compatible format.
-            if output_dir is None:
-                output_dir = self.args.output_dir
-            save_fsdp_model(
-                self.accelerator.state.fsdp_plugin,
-                self.accelerator,
-                self.model,
-                output_dir,
-            )
-            self.processing_class.save_pretrained(output_dir)
-            self.model.config.save_pretrained(output_dir)
+        if (
+            (not self.is_in_train)
+            and self.is_fsdp_enabled
+            and self.accelerator.state.fsdp_plugin.state_dict_type != "FULL_STATE_DICT"
+        ):
+            print_rank_0("Setting state_dict_type to FULL_STATE_DICT for final checkpoint save.")
+            original_type = self.accelerator.state.fsdp_plugin.state_dict_type
+            self.accelerator.state.fsdp_plugin.set_state_dict_type("FULL_STATE_DICT")
+            outputs = super().save_model(*args, **kwargs)
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
+            if mto.ModeloptStateManager.is_converted(self.accelerator.unwrap_model(self.model)):
+                print_rank_0(
+                    "Model saved. To restore, call mto.enable_huggingface_checkpointing() first before loading the "
+                    "model. See https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.opt.plugins.huggingface.html#modelopt.torch.opt.plugins.huggingface.enable_huggingface_checkpointing"
+                )
+            self.accelerator.state.fsdp_plugin.set_state_dict_type(original_type)
         else:
-            super().save_model(output_dir, _internal_call, *args, **kwargs)
+            outputs = super().save_model(*args, **kwargs)
+        if (not self.is_in_train) and self.args.should_save:
+            out_dir = args[0]
+            # FSDP may upcast parameter dtype to float32 during mixed-precision training,
+            # we convert it back to original dtype by updating `torch-dtype` in `config.json`
+            self._update_config_json_dtype(out_dir, str(self._original_dtype).split(".")[1])
+        return outputs
+
+    def _load_best_model(self, *args, **kwargs):
+        """Load the best model for final evaluation."""
+        is_lora = getattr(self.args, "lora", None)
+        if is_lora and not self.is_fsdp_enabled:
+            # Custom logic for loading best model with LoRA
+            # TODO: Remove once we migrate to using get_peft_model()
+            # This custom logic only loads best adapters. Ensure base model is frozen
+            assert all(
+                not param.requires_grad
+                for name, param in self.model.base_model.named_parameters()
+                if "base_layer" in name
+            ), "Some base_layer parameters are not frozen"
+
+            adapter_name = self.model.active_adapters()[0]
+            self.model.delete_adapter(adapter_name)
+            self.model.load_adapter(self.state.best_model_checkpoint, adapter_name)
+        else:
+            super()._load_best_model(*args, **kwargs)
+
+    def _update_config_json_dtype(self, output_dir: str, dtype_str: str | None) -> None:
+        """Rewrite <output_dir>/config.json 'dtype' (preferred) or 'torch_dtype' to dtype_str."""
+        cfg_path = os.path.join(output_dir, "config.json")
+        if not os.path.isfile(cfg_path):
+            print_rank_0(f"[warn] config.json not found under {output_dir}; skip dtype rewrite.")
+            return
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                data = json.load(f)
+            # Prefer 'dtype', else fall back to 'torch_dtype'
+            key_to_update = (
+                "dtype" if "dtype" in data else ("torch_dtype" if "torch_dtype" in data else None)
+            )
+            if key_to_update is None:
+                print_rank_0(
+                    "[warn] Neither 'dtype' nor 'torch_dtype' present in config.json; skip dtype rewrite."
+                )
+                return
+            if data.get(key_to_update) != dtype_str:
+                data[key_to_update] = dtype_str
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                print_rank_0(f'Updated config.json: {key_to_update} -> "{dtype_str}"')
+        except Exception as e:
+            print_rank_0(f"[warn] Failed to update dtype in config.json: {e}")
+
+    def _patch_accelerate_for_fsdp2_fix(self):
+        """Fixes for accelerate prepare.
+
+        Accelerate fsdp2 prepare assumes that all parameters and buffers are sharded. This assumption
+        is causing issues with quantized models since quantization modules adds buffers which are not sharded.
+        This patch hides the buffers added by quantization modules from the original accelerate prepare.
+        """
+
+        def _modelopt_prepare(self, *args, **kwargs):
+            if not self.is_fsdp2:
+                return self._original_prepare(*args, **kwargs)
+
+            model = next((obj for obj in args if isinstance(obj, torch.nn.Module)), None)
+            if model is None:
+                return self._original_prepare(*args, **kwargs)
+
+            tq_og_non_prsist_buffers = {}
+            for tq in (m for m in model.modules() if isinstance(m, TensorQuantizer)):
+                tq.to_empty(device=self.device)
+                tq_og_non_prsist_buffers[tq] = tq._non_persistent_buffers_set.copy()
+                tq._non_persistent_buffers_set.update(tq._buffers.keys())
+
+            outputs = self._original_prepare(*args, **kwargs)
+
+            for tq in (m for m in model.modules() if isinstance(m, TensorQuantizer)):
+                tq._non_persistent_buffers_set.clear()
+                tq._non_persistent_buffers_set.update(tq_og_non_prsist_buffers[tq])
+
+            return outputs
+
+        self.accelerator._original_prepare = self.accelerator.prepare
+        self.accelerator.prepare = types.MethodType(_modelopt_prepare, self.accelerator)
 
 
 class QADTrainer(QATTrainer, KDTrainer):
@@ -385,9 +393,9 @@ class QADTrainer(QATTrainer, KDTrainer):
         # And memory efficient loading doesn't work.
         self.model.cuda()
         if self.quant_cfg is not None and not is_quantized(self.model):
-            self._quantize_model(use_eval_loop=False)
+            self._quantize_model()
         if getattr(self.args, "lora_config", None) is not None:
-            self.model.add_adapter(self.args.lora_config, adapter_name="adapter")
+            self.model.add_adapter(self.args.lora_config)
             print_rank_0("Lora adapter added.")
         self._convert_to_distillation_model()
 
@@ -416,7 +424,9 @@ class QADTrainer(QATTrainer, KDTrainer):
             output_dir: The directory to save the model and ModelOpt states.
             export_student: Whether to export the student model.
         """
-        if "SHARDED_STATE_DICT" in self.fsdp_state_dict_type and self._is_fsdp2:
+        if self.accelerator.is_fsdp2 and "SHARDED_STATE_DICT" in str(
+            self.accelerator.state.fsdp_plugin.state_dict_type
+        ):
             if export_student:
                 model = self.accelerator.unwrap_model(self.model)
                 model = model.export()

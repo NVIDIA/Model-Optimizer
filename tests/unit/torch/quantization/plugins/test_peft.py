@@ -15,11 +15,7 @@
 
 import pytest
 import torch
-from _test_utils.torch_model.transformers_models import (
-    get_tiny_gpt_oss,
-    get_tiny_llama,
-    tf_output_tester,
-)
+from _test_utils.torch.transformers_models import get_tiny_gpt_oss, get_tiny_llama, tf_output_tester
 from packaging.version import Version
 
 pytest.importorskip("peft")

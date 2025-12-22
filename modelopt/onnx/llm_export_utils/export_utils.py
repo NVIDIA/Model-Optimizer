@@ -21,7 +21,7 @@ import time
 from enum import Enum
 
 import torch
-from transformers import DynamicCache
+from transformers import AutoModelForCausalLM, DynamicCache
 
 
 class RopeType(Enum):
@@ -36,10 +36,10 @@ class RopeType(Enum):
 class ModelLoader:
     """A class to handle HuggingFace model loading and configuration."""
 
-    def __init__(self, torch_dir, config_path):
+    def __init__(self, hf_model_path: str, config_path: str):
         """Initialize the ModelLoader."""
         self.config_path = config_path
-        self.torch_dir = torch_dir
+        self.hf_model_path = hf_model_path
         self.model_type = self.get_model_type()
         self.hf_model = None
         self.rope_type = RopeType.K_ROPE_ROTATE_NEOX
@@ -49,16 +49,14 @@ class ModelLoader:
         with open(self.config_path) as f:
             return json.load(f).get("model_type")
 
-    def load_model(self):
+    def load_model(self, trust_remote_code: bool = False) -> AutoModelForCausalLM:
         """Load HuggingFace model based on model type."""
-        print(f"Loading HF model from {self.torch_dir} with model type {self.model_type}")
-        from transformers import AutoModelForCausalLM
-
+        print(f"Loading HF model from {self.hf_model_path} with model type {self.model_type}")
         self.hf_model = AutoModelForCausalLM.from_pretrained(
-            self.torch_dir, torch_dtype=torch.float16, trust_remote_code=True
+            self.hf_model_path, torch_dtype=torch.float16, trust_remote_code=trust_remote_code
         )
 
-        return self.hf_model.eval().cuda()
+        return self.hf_model.eval().cuda()  # type: ignore[attr-defined]
 
     def get_rope_type(self):
         """Get rope type."""
@@ -78,13 +76,14 @@ class WrapperModelForCausalLM(torch.nn.Module):
         self.lm_head = model.lm_head
         self.config = model.config
 
-    def forward(
-        self,
-        input_ids,
-        past_key_values,
-    ):
+    def forward(self, input_ids: torch.Tensor | None, past_key_values: tuple):
         """Forward pass."""
-        past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+        # Convert tuple cache to DynamicCache for models that require it (e.g., Qwen3)
+        cache = DynamicCache(config=self.config)
+        cache.key_cache = [kv[0] for kv in past_key_values]
+        cache.value_cache = [kv[1] for kv in past_key_values]
+        past_key_values = cache
+
         outputs = self.model(input_ids=input_ids, past_key_values=past_key_values, use_cache=True)
         hidden_states = outputs[0]
         past_key_values = outputs.past_key_values.to_legacy_cache()
@@ -159,4 +158,5 @@ def torch_to_onnx(model, inputs, onnx_dir, onnx_name, input_names, output_names,
             dynamic_axes=dynamic_axes,
             opset_version=19,
             do_constant_folding=True,
+            dynamo=False,
         )

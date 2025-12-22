@@ -15,8 +15,8 @@
 
 import pytest
 import torch
-from _test_utils.torch_export.export_utils import (
-    SmallQKVModel,
+from _test_utils.torch.export.utils import (
+    SmallLinearModelwithCustomWeight,
     ToyModel,
     only_input_quantizer_fp8_config,
     only_output_quantizer_fp8_config,
@@ -57,6 +57,7 @@ from modelopt.torch.quantization.config import (
     FP8_DEFAULT_CFG,
     INT4_AWQ_CFG,
     INT8_SMOOTHQUANT_CFG,
+    INT8_WEIGHT_ONLY_CFG,
     NVFP4_AWQ_LITE_CFG,
     NVFP4_DEFAULT_CFG,
     W4A8_AWQ_BETA_CFG,
@@ -305,7 +306,7 @@ def test_adjust_attn_amax_values(
     q_weight, k_weight, v_weight, o_weight, expected_qkv_amax, expected_o_amax, config
 ):
     # Initialize model and quantize to insert quantizers
-    model = SmallQKVModel([q_weight, k_weight, v_weight, o_weight]).to("cuda")
+    model = SmallLinearModelwithCustomWeight([q_weight, k_weight, v_weight, o_weight]).to("cuda")
     mtq.quantize(model, config, lambda x: x(torch.randn(1, 4, q_weight.shape[1], device="cuda")))
     adjust_attn_amax_values(model)
     # Weight quantizer amax must remain unchanged for non qkv layers
@@ -323,6 +324,7 @@ def test_adjust_attn_amax_values(
     ("config", "expected_block_size"),
     [
         (FP8_DEFAULT_CFG, 0),
+        (INT8_WEIGHT_ONLY_CFG, 0),
         (INT8_SMOOTHQUANT_CFG, 0),
         (NVFP4_DEFAULT_CFG, 16),
         (NVFP4_AWQ_LITE_CFG, 16),
@@ -373,11 +375,12 @@ def test_get_scaling_factor(
     q_weight, k_weight, v_weight, o_weight, config, expected_amax, maxbound
 ):
     # Initialize model and quantize to insert quantizers
-    model = SmallQKVModel([q_weight, k_weight, v_weight, o_weight]).to("cuda")
+    model = SmallLinearModelwithCustomWeight([q_weight, k_weight, v_weight, o_weight]).to("cuda")
     mtq.quantize(model, config, lambda x: x(torch.ones(1, 2, q_weight.shape[1], device="cuda")))
     for name, module in model.named_modules():
         if isinstance(module, TensorQuantizer) and module.is_enabled:
             scale = get_scaling_factor(module)
+            print(f"DEBUG LOG: Scale: {scale}, Expected: {expected_amax[0] / maxbound}")
             assert torch.allclose(
                 scale,
                 torch.tensor((expected_amax[0] / maxbound), dtype=scale.dtype),
@@ -461,5 +464,5 @@ def test_get_scaling_factor(
 def test_get_quant_config(config, expected):
     model = ToyModel().to("cuda")
     mtq.quantize(model, config, lambda x: x(torch.randn(1, 4, 10, device="cuda")))
-    quant_config = get_quant_config(model.named_modules())
+    quant_config = get_quant_config(model)
     assert quant_config["quantization"] == expected
