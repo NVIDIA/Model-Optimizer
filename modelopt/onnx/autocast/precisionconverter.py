@@ -115,6 +115,7 @@ class PrecisionConverter:
             max_ir_version: Max IR version for conversion.
             trt_plugins: List of custom TensorRT plugin library paths in .so format (compiled shared library).
             tensor_block_dict: Dictionary of tensors (operation type and I/O indices) that should remain in FP32.
+            use_local_type_inference: Use local type inference instead of ONNX's infer_shapes.
         """
         self.model = deepcopy(model)
         self.value_info_map = value_info_map
@@ -267,39 +268,13 @@ class PrecisionConverter:
             # Populate type information with inferred types
             self.model = self._propagate_types_shapes_custom_ops(self.model)
         else:
-            # Preserve original output types (before clearing)
-            # Store in instance variable so we can restore after cleanup
-            # Always preserve non-float types, and preserve all types if keep_io_types is True
-            self._original_output_types = {}
-            for out in self.model.graph.output:
-                if out.type.HasField("tensor_type"):
-                    original_type = out.type.tensor_type.elem_type
-                    # Always preserve non-float types (INT64, INT32, etc.)
-                    # Also preserve all types if keep_io_types is True
-                    if original_type not in ONNX_TYPES or self.keep_io_types:
-                        self._original_output_types[out.name] = original_type
-
             # Clear type/shape information for intermediates and outputs (including subgraphs)
             self._clear_types_and_shapes_recursive(self.model.graph)
-
             # Populate type information with inferred types
             self.model = self.infer_types(strict_mode=True, check_type=False)
             self._ensure_types_are_defined()
-
-            # Restore original output types (non-float types and all types if keep_io_types is True)
-            if hasattr(self, "_original_output_types"):
-                for out in self.model.graph.output:
-                    if out.name in self._original_output_types:
-                        out.type.tensor_type.elem_type = self._original_output_types[out.name]
-
-            # Sanity check: Verify type correctness (only when using ONNX's infer_shapes)
-            if not self.use_local_type_inference:
-                self.model = self.infer_types(strict_mode=True, check_type=True)
-                # Restore output types again after second inference
-                if hasattr(self, "_original_output_types"):
-                    for out in self.model.graph.output:
-                        if out.name in self._original_output_types:
-                            out.type.tensor_type.elem_type = self._original_output_types[out.name]
+            # Sanity check: Verify type correctness
+            self.model = self.infer_types(strict_mode=True, check_type=True)
 
         # Update value_info_map and initializer_map with casts we added
         self.value_info_map, self.initializer_map, self.node_to_init_map = utils.setup_mappings(
@@ -308,14 +283,6 @@ class PrecisionConverter:
 
         # Remove redundant casts
         self._cleanup()
-
-        # Restore original output types after cleanup
-        # (cleanup may have modified outputs, so we need to restore types again)
-        # Always restore non-float types, and all types if keep_io_types is True
-        if hasattr(self, "_original_output_types"):
-            for out in self.model.graph.output:
-                if out.name in self._original_output_types:
-                    out.type.tensor_type.elem_type = self._original_output_types[out.name]
 
         self._sanity_check()
 
