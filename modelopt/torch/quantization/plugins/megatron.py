@@ -667,6 +667,18 @@ if HAS_TE:
             TEDotProductAttention receives Q, K, V after RoPE is applied,
             so we quantize them directly for KV cache quantization.
             """
+            # Ensure tensors are contiguous before quantization
+            # This is a safety measure for potential non-contiguous tensor views
+            # from TE or Megatron operations with tensor parallelism
+            def materialize_if_needed(tensor):
+                if tensor is not None and hasattr(tensor, 'is_contiguous') and not tensor.is_contiguous():
+                    return tensor.contiguous()
+                return tensor
+            
+            query = materialize_if_needed(query)
+            key = materialize_if_needed(key)
+            value = materialize_if_needed(value)
+            
             # Quantize Q, K, V
             query = self.q_bmm_quantizer(query)
             key = self.k_bmm_quantizer(key)

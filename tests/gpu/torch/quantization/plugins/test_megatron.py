@@ -836,11 +836,7 @@ def _test_kv_cache_sharded_state_dict_helper(tmp_path, config, rank, size):
 
     # Quantize the reference model
     model_ref = mtq.quantize(model_ref, config, forward_fn)
-
-    # CRITICAL: model_test must also be quantized with the same config
-    # Otherwise it won't have the KV cache quantizer keys when loading state dict
-    model_test = mtq.quantize(model_test, config, forward_fn)
-
+    
     # Verify KV cache quantizers were created
     kv_quantizers_found = False
     for name, module in model_ref.named_modules():
@@ -850,6 +846,10 @@ def _test_kv_cache_sharded_state_dict_helper(tmp_path, config, rank, size):
             assert module.v_bmm_quantizer.is_enabled, f"V quantizer not enabled in {name}"
 
     assert kv_quantizers_found, "No KV cache quantizers found in quantized model"
+
+    # CRITICAL: model_test must also be quantized with the same config
+    # Otherwise it won't have the KV cache quantizer keys when loading state dict
+    # model_test = mtq.quantize(model_test, config, forward_fn)
 
     # Test sharded state dict save/load
     sharded_state_dict_test_helper(

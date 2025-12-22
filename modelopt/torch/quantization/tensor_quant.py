@@ -43,14 +43,29 @@ DISABLE_TRITON_KERNEL = False
 
 
 def _fp8_eager(x, amax=None):
+    """Eager mode implementation of FP8 E4M3 fake quantization.
+    
+    Args:
+        x: Input tensor.
+        amax: Absolute max value for scaling. If None, only dtype conversion is performed.
+    
+    Returns:
+        Fake-quantized tensor in original dtype.
+    """
     dtype = x.dtype
+    
     if amax is not None:
         scale = 448.0 / (amax.to(torch.float32))
         scale_inv = 1 / scale
         x = x.to(torch.float32) * scale
+        # Clamp to FP8 E4M3 range to prevent NaN/Inf during conversion
+        x = torch.clamp(x, min=-448.0, max=448.0)
+    
     x = x.to(torch.float8_e4m3fn)
+    
     if amax is not None:
         x = x.to(torch.float32) * scale_inv
+    
     return x.to(dtype)
 
 
@@ -76,7 +91,11 @@ def scaled_e4m3_impl(
         return fp8_eager(inputs, amax)
 
     cuda_ext_fp8 = get_cuda_ext_fp8(raise_if_failed=False)
-    if cuda_ext_fp8 is None:
+    # NOTE: CUDA extension disabled due to bug with GQA/MQA (singleton KV head dimension)
+    # and tensor parallelism. The fake_e4m3fy() kernel produces corrupted output for
+    # tensors with shape [seq_len, 1, head_dim] when TP > 1.
+    # Using eager fallback until kernel is fixed.
+    if cuda_ext_fp8 is None or True:  # Force eager fallback
         return fp8_eager(inputs, amax)
 
     with torch.cuda.device(
