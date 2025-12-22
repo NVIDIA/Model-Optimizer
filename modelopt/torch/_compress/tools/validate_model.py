@@ -18,7 +18,7 @@ Provides a function to validate a model. Runs a model forward pass on a dataset 
 the loss, and optionally registers hooks to capture the inputs and the outputs
 of pytorch modules that are used for activation scoring for pruning.
 
-TODO: Consider moving this a separate module dedicated for scoring.
+TODO: Consider moving this a separate module dedicated for scoring
 """
 
 import textwrap
@@ -130,11 +130,6 @@ def validate_model(
         - hidden_states_per_batch: Hidden states and LM head outputs if return_hidden_states is True, else None.
         Returns (None, None) if not on master rank.
     """
-    # convert model_dtype and autocast_dtype from string to torch.dtype
-    if isinstance(args.model_dtype, str):
-        args.model_dtype = getattr(torch, args.model_dtype.strip("torch."))
-    if isinstance(args.autocast_dtype, str):
-        args.autocast_dtype = getattr(torch, args.autocast_dtype.strip("torch."))
 
     if val_dataloader is None:
         val_dataloader = prepare_dataloader(args, tokenizer) if dist.is_master() else None
@@ -199,7 +194,7 @@ def validate_model(
             calc_on_cpu=args.calc_losses_on_cpu,
             just_model_forward=just_model_forward,
             checkpoint_manager=checkpoint_manager,
-            autocast_dtype=args.autocast_dtype,
+            autocast_dtype=getattr(torch, args.autocast_dtype.strip("torch.")),
         )
 
     if losses is not None:
@@ -232,7 +227,7 @@ def prepare_model(
             model = load_and_shard_model(
                 args.model_name_or_path,
                 model_config_overrides={"block_size": args.block_size},
-                model_dtype=args.model_dtype,
+                model_dtype=getattr(torch, args.model_dtype.strip("torch.")),
             )
         else:
             try:

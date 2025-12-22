@@ -15,7 +15,7 @@
 
 """Validates puzzle solutions by applying layer replacements and evaluating model performance.
 
-TODO: Consider moving this a separate module dedicated for scoring.
+TODO: Consider moving this a separate module dedicated for scoring
 """
 
 # mypy: ignore-errors
@@ -42,6 +42,7 @@ from modelopt.torch._compress.tools.checkpoint_utils import (
     copy_tokenizer,
 )
 from modelopt.torch._compress.tools.checkpoint_utils_hf import (
+    copy_deci_lm_hf_code,
     save_checkpoint,
     save_safetensors_index,
 )
@@ -182,7 +183,7 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
                 save_checkpoint(model, checkpoint_dir)
 
             copy_tokenizer(args.tokenizer_name, checkpoint_dir)
-            copy_hf_code(checkpoint_dir)
+            copy_deci_lm_hf_code(checkpoint_dir)
 
         dist.barrier()
 
@@ -244,13 +245,6 @@ def save_checkpoint_as_symlinks(
     force_create_symlink(
         embedding_path, checkpoint_dir / SAFETENSORS_SUBBLOCKS_DIR_NAME / embedding_path.name
     )
-
-
-def copy_hf_code(checkpoint_dir: Path) -> None:
-    code_dir = Path(__file__).parent / "deci_lm_hf_code"
-    print(f"copying hf code from {code_dir} ")
-    for file in code_dir.glob("*.py"):
-        shutil.copy(file, checkpoint_dir / file.name)
 
 
 def _load_tokenizer(args: DictConfig) -> PreTrainedTokenizerBase:
