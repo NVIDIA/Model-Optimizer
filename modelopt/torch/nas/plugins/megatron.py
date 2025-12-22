@@ -27,8 +27,6 @@ from megatron.core.models.common.embeddings.language_model_embedding import Lang
 from megatron.core.models.gpt import GPTModel
 from megatron.core.parallel_state import (
     get_data_parallel_group,
-    get_pipeline_model_parallel_group,
-    get_tensor_model_parallel_group,
     is_pipeline_first_stage,
     is_pipeline_last_stage,
 )
@@ -54,13 +52,8 @@ from modelopt.torch.opt.hparam import HPType
 from modelopt.torch.opt.searcher import ConstraintsDict
 from modelopt.torch.trace import Symbol
 from modelopt.torch.utils import distributed as dist
-from modelopt.torch.utils import (
-    get_module_device,
-    make_divisible,
-    param_num_from_forward,
-    print_rank_0,
-    random,
-)
+from modelopt.torch.utils import make_divisible, print_rank_0, random
+from modelopt.torch.utils.plugins import param_num_megatron
 
 from ..algorithms import (
     MODULE_TYPE_TO_CONSTRAINTS_FUNC,
@@ -1045,7 +1038,6 @@ class _DynamicMCoreLanguageModel(DynamicModule):
         *,
         hidden_size_divisor: int = 1,
         ffn_hidden_size_divisor: int = 1,
-        mamba_num_heads_divisor: int = 1,
         mamba_head_dim_divisor: int = 1,
         num_moe_experts_divisor: int = 1,
     ):
@@ -1054,7 +1046,6 @@ class _DynamicMCoreLanguageModel(DynamicModule):
         Args:
             hidden_size_divisor: The divisor of the hidden_size.
             ffn_hidden_size_divisor: The divisor of the mlp ffn_hidden_size.
-            mamba_num_heads_divisor: The divisor of the mamba num_heads.
             mamba_head_dim_divisor: The divisor of the mamba head_dim.
             num_moe_experts_divisor: The divisor of the number of MoE experts.
         """
@@ -1065,7 +1056,6 @@ class _DynamicMCoreLanguageModel(DynamicModule):
         for layer in self.decoder.layers:
             layer.modify(
                 ffn_hidden_size_divisor=ffn_hidden_size_divisor,
-                mamba_num_heads_divisor=mamba_num_heads_divisor,
                 mamba_head_dim_divisor=mamba_head_dim_divisor,
                 num_moe_experts_divisor=num_moe_experts_divisor,
             )
@@ -1142,11 +1132,7 @@ class MegatronConstraintsFunc(ConstraintsFunc):
 
     def _get_params(self, _: ConstraintsRes | None = None) -> float:
         """Get number of model parameters from forward pass."""
-        params = param_num_from_forward(self.model, args=self.dummy_input, unit=1.0)
-        reduced_params = torch.Tensor([params]).to(device=get_module_device(self.model))
-        torch.distributed.all_reduce(reduced_params, group=get_pipeline_model_parallel_group())
-        torch.distributed.all_reduce(reduced_params, group=get_tensor_model_parallel_group())
-        return reduced_params.item()
+        return param_num_megatron(self.model, from_forward=True, args=self.dummy_input)
 
     def _get_flops(self, _: ConstraintsRes | None = None) -> float:
         """Get inference FLOPs."""
