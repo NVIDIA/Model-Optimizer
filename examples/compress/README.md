@@ -208,19 +208,25 @@ lm_eval --model hf \
 
 ## Inference Performance Benchmarking
 
-Now let's evaluate how much speedup we get with the compressed model in terms of throughput and latency. 
+Now let's evaluate how much speedup we get with the compressed model in terms of throughput and latency.
+
 - Install [vLLM from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source).
 - Rearrange the model safetensors to be used for vLLM.
+
 ```bash
 cd path/to/model
 mv subblocks_safetensors/* .
 sed -i 's+subblocks_safetensors/++g' model.safetensors.index.json
 ```
+
 - Benchmark latency
+
 ```bash
 vllm bench latency --model path/to/model --load-format safetensors --trust-remote-code
 ```
+
 - Benchmark throughput
+
 ```bash
 vllm bench throughput --model path/to/model --input-len 2000 --output-len 100 --load-format safetensors --trust-remote-code
 ```
