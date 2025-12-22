@@ -165,6 +165,6 @@ rm -rf /path/to/checkpoints/*/latest_checkpointed_iteration.txt
 
 ### OOM Errors
 
-- Reduce `MBS` to `1`
+- Reduce `MBS`
 - Increase `EP_SIZE`, `TP_SIZE`, `PP_SIZE`
 - Add more nodes
