@@ -970,53 +970,111 @@ def infer_types(model: onnx.ModelProto) -> onnx.ModelProto:
                 # Split schema allows multiple outputs, but the schema only specifies one output type
                 output_types = [input_types[0]] * len(node.output)
             else:
-                default_type = input_types[0] if input_types else onnx.TensorProto.FLOAT
-                # Use ONNX operator schema to determine output types
-                try:
-                    schema = onnx.defs.get_schema(node.op_type, opset, domain=node.domain or "")
-                    assert schema.outputs and len(schema.outputs) >= len(node.output)
-                except Exception as e:
-                    # Fallback: if schema lookup fails, propagate first input type
-                    logger.debug(
-                        f"Node {node.name}: Failed to get schema for {node.op_type}: {e}, propagate first input type"
-                    )
+                # Check if this node has subgraphs (GRAPH or GRAPHS attributes)
+                # Common nodes with subgraphs: If, Loop, Scan
+                subgraphs = []
+                for attr in node.attribute:
+                    if attr.type == onnx.AttributeProto.GRAPH:
+                        subgraphs.append(attr.g)
+                    elif attr.type == onnx.AttributeProto.GRAPHS:
+                        subgraphs.extend(attr.graphs)
+
+                # If node has subgraphs, infer types for them first
+                if subgraphs:
+                    for subgraph in subgraphs:
+                        infer_types_for_graph(subgraph, parent_node=node, is_subgraph=True)
+
+                    # For nodes with subgraphs, try to infer output types from subgraph outputs
+                    # This avoids incorrectly matching to control inputs (e.g., condition for If, trip_count for Loop)
+                    output_types = []
+                    if len(node.output) > 0:
+                        # Use the first subgraph as reference (works for If, Loop, Scan)
+                        first_subgraph = subgraphs[0]
+                        for out_idx, out_name in enumerate(node.output):
+                            if out_idx < len(first_subgraph.output):
+                                subgraph_out = first_subgraph.output[out_idx]
+                                # Typically we only have one subgraph, but If nodes have two subgraphs
+                                # (then_branch and else_branch). In any case, the output types of the
+                                # subgraphs must be identical, so we check just the first one
+                                if (
+                                    subgraph_out.type.HasField("tensor_type")
+                                    and subgraph_out.type.tensor_type.elem_type
+                                    != onnx.TensorProto.UNDEFINED
+                                ):
+                                    output_types.append(subgraph_out.type.tensor_type.elem_type)
+                            else:
+                                output_types.append(onnx.TensorProto.FLOAT)
+                    else:
+                        # Fallback if we can't infer from subgraphs
+                        output_types = None
+
+                    # If we couldn't infer from subgraphs, fall through to schema-based inference
+                    if output_types is None or len(output_types) != len(node.output):
+                        output_types = None
+                else:
+                    # No subgraphs, proceed with normal inference
+                    output_types = None
+
+                # If output_types not set yet, use schema-based inference
+                if output_types is None:
                     default_type = input_types[0] if input_types else onnx.TensorProto.FLOAT
-                    output_types = [default_type] * len(node.output)
+                    # Use ONNX operator schema to determine output types
+                    try:
+                        schema = onnx.defs.get_schema(node.op_type, opset, domain=node.domain or "")
+                        assert schema.outputs and len(schema.outputs) >= len(node.output)
+                    except Exception as e:
+                        # Fallback: if schema lookup fails, propagate first input type
+                        logger.debug(
+                            f"Node {node.name}: Failed to get schema for {node.op_type}: {e}, "
+                            "propagate first input type"
+                        )
+                        default_type = input_types[0] if input_types else onnx.TensorProto.FLOAT
+                        output_types = [default_type] * len(node.output)
+                    else:
+                        # Try to infer from schema
+                        input_schemas = [
+                            schema.inputs[i].type_str for i in range(len(schema.inputs))
+                        ]
+                        output_schemas = [
+                            schema.outputs[i].type_str for i in range(len(schema.outputs))
+                        ]
+                        output_types = [None] * len(node.output)
 
-                # Try to infer from schema
-                input_schemas = [schema.inputs[i].type_str for i in range(len(schema.inputs))]
-                output_schemas = [schema.outputs[i].type_str for i in range(len(schema.outputs))]
-                output_types = [None] * len(node.output)
-
-                for output_idx in range(len(node.output)):
-                    # explicit type is set in schema, use it
-                    if "tensor" in output_schemas[output_idx]:
-                        found_type = str_to_tensor_dtype(output_schemas[output_idx])
-                        output_types[output_idx] = found_type
-                        continue
-                    # sometimes output type is set with a placeholder name despite supporting a single type
-                    # e.g. Shape operator is constrained to int64, but the type_str is "T1"
-                    for constraint in schema.type_constraints:
-                        # If output type constraint has only one allowed type, use it directly
-                        if constraint.type_param_str == output_schemas[output_idx]:
-                            if len(constraint.allowed_type_strs) == 1:
-                                found_type = str_to_tensor_dtype(constraint.allowed_type_strs[0])
+                        for output_idx in range(len(node.output)):
+                            # explicit type is set in schema, use it
+                            if "tensor" in output_schemas[output_idx]:
+                                found_type = str_to_tensor_dtype(output_schemas[output_idx])
                                 output_types[output_idx] = found_type
-                                break
-                    else:  # we have a placeholder name "T", "T1", "T2", etc that should match one of the input types
-                        try:
-                            input_match_idx = input_schemas.index(output_schemas[output_idx])
-                        except ValueError:
-                            input_match_idx = None
-                        if input_match_idx is not None:
-                            found_type = input_types[input_match_idx]
-                        else:
-                            found_type = default_type
-                            logger.debug(
-                                f"Node {node.name}: Failed to infer type for output #{output_idx}, propagate first "
-                                "input type"
-                            )
-                        output_types[output_idx] = found_type
+                                continue
+                            # sometimes output type is set with a placeholder name despite supporting a single type
+                            # e.g. Shape operator is constrained to int64, but the type_str is "T1"
+                            for constraint in schema.type_constraints:
+                                # If output type constraint has only one allowed type, use it directly
+                                if constraint.type_param_str == output_schemas[output_idx]:
+                                    if len(constraint.allowed_type_strs) == 1:
+                                        found_type = str_to_tensor_dtype(
+                                            constraint.allowed_type_strs[0]
+                                        )
+                                        output_types[output_idx] = found_type
+                                        break
+                            else:
+                                # We have a placeholder name "T", "T1", "T2", etc that should
+                                # match one of the input types
+                                try:
+                                    input_match_idx = input_schemas.index(
+                                        output_schemas[output_idx]
+                                    )
+                                except ValueError:
+                                    input_match_idx = None
+                                if input_match_idx is not None:
+                                    found_type = input_types[input_match_idx]
+                                else:
+                                    found_type = default_type
+                                    logger.debug(
+                                        f"Node {node.name}: Failed to infer type for output "
+                                        f"#{output_idx}, propagate first input type"
+                                    )
+                                output_types[output_idx] = found_type
 
             # Update output tensor types
             for out_idx, out_name in enumerate(node.output):
