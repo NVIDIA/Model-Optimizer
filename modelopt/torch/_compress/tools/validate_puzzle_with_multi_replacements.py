@@ -158,8 +158,8 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
         list(zip(args.solutions_to_validate, puzzle_solutions)), desc="Validating solutions"
     ):
         layer_replacements = _extract_layer_replacements_from_puzzle_solution(puzzle_solution)
-        realizable_as_symlinks = can_realize_as_symlinks(layer_replacements)
-        # realizable_as_symlinks = False
+        # realizable_as_symlinks = can_realize_as_symlinks(layer_replacements)
+        realizable_as_symlinks = False
         model_config = replacement_library.create_model_config(layer_replacements)
         if (args.save_models and not realizable_as_symlinks) or (not args.skip_validation):
             model = replacement_library.load_model(layer_replacements)
