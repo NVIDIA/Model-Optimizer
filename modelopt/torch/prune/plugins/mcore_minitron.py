@@ -98,6 +98,7 @@ __all__ = [
     "MCoreMinitronModeDescriptor",
     "MCoreMinitronSearcher",
     "drop_mcore_language_model_layers",
+    "get_mcore_minitron_config",
 ]
 
 
@@ -310,7 +311,6 @@ MCoreMinitronConfig: type[ModeloptBaseConfig] = create_model(
                     "megatron.core.models.mamba.MambaModel": {
                         "hidden_size_divisor": 64,
                         "ffn_hidden_size_divisor": 64,
-                        "mamba_num_heads_divisor": 4,
                         "mamba_head_dim_divisor": 4,
                         "num_moe_experts_divisor": 1,
                     }
@@ -322,6 +322,29 @@ MCoreMinitronConfig: type[ModeloptBaseConfig] = create_model(
         doc='Configuration for the ``"mcore_minitron"`` mode.',
     ),
 )
+
+
+def get_mcore_minitron_config(
+    channel_divisor: int = 64,
+    mamba_head_dim_divisor: int = 4,
+    num_moe_experts_divisor: int = 1,
+) -> ModeloptBaseConfig:
+    """Get a MCoreMinitronConfig with the given channel divisor instead of default."""
+    config = MCoreMinitronConfig()
+
+    def _set_divisors(c):
+        for k, v in c.items():
+            if isinstance(v, dict):
+                _set_divisors(v)
+            elif k in ["hidden_size_divisor", "ffn_hidden_size_divisor"]:
+                c[k] = channel_divisor
+            elif k == "mamba_head_dim_divisor":
+                c[k] = mamba_head_dim_divisor
+            elif k == "num_moe_experts_divisor":
+                c[k] = num_moe_experts_divisor
+
+    _set_divisors(config)
+    return config
 
 
 def _convert_model_to_dynamic_space(

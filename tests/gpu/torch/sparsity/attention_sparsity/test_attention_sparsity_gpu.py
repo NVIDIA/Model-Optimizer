@@ -17,7 +17,7 @@
 
 import pytest
 import torch
-from _test_utils.torch_sparsity.sparse_attention_common import (
+from _test_utils.torch.sparsity.sparse_attention_common import (
     FLASH_SKIP_SOFTMAX_DEFAULT_CFG,
     SimpleAttentionModel,
     SimpleTransformerEncoder,

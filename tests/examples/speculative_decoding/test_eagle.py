@@ -19,7 +19,7 @@ import pytest
 import safetensors.torch
 from _test_utils.examples.run_command import run_example_command
 
-from modelopt.torch.export.plugins.hf_spec_export import eagle_state_dict_key_convert
+from modelopt.torch.export.plugins.hf_spec_export import LLAMA_EAGLE_SINGLE_LAYER
 
 
 @pytest.fixture(scope="module")
@@ -89,8 +89,7 @@ def test_export_hf_checkpoint(eagle_output_dir):
     )
     # Check the exported checkpoints have required keys
     state_dict = safetensors.torch.load_file(eagle_output_dir / "eagle-tinyllama-export" / "model.safetensors")
-    eagle_modelopt_to_official = eagle_state_dict_key_convert(num_hidden_layers=1)
-    for required_key in eagle_modelopt_to_official["required"].values():
+    for required_key in LLAMA_EAGLE_SINGLE_LAYER["required"]:
         assert required_key in state_dict, f"Missing key '{required_key}' in state_dict"
 
 

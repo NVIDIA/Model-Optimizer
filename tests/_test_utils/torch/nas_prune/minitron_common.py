@@ -13,9 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Nvidia Model Optimizer (modelopt)."""
+import modelopt.torch.prune as mtp
 
-import warnings as _warnings
-from importlib.metadata import version as _version
 
-__version__ = _version("nvidia-modelopt")
+def prune_minitron(model, export_config, config, channel_divisor=64):
+    return mtp.prune(
+        model,
+        mode=[("mcore_minitron", mtp.mcore_minitron.get_mcore_minitron_config(channel_divisor))],
+        constraints={"export_config": export_config},
+        dummy_input=None,  # Not used
+        config=config,
+    )

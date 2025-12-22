@@ -111,6 +111,10 @@ class MedusaArguments:
 @dataclass
 class EagleArguments:
     eagle_config: str = field(default=None, metadata={"help": "Path to eagle_config.json"})
+    eagle_decoder_type: str = field(
+        default="llama",
+        metadata={"help": "The class of eagle decoder to use. Available options: llama, kimik2"},
+    )
 
 
 def train():
@@ -144,24 +148,29 @@ def train():
 
     if checkpoint:
         model = transformers.AutoModelForCausalLM.from_pretrained(checkpoint, torch_dtype="auto")
-        tokenizer = transformers.AutoTokenizer.from_pretrained(checkpoint)
+        tokenizer = transformers.AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
     else:
         # To avoid OOM for large models, we load and convert model on CPU first.
         # Model will be moved to GPU during HF trainer.init().
+        offline_kwargs = {"num_hidden_layers": 0} if use_offline_training else {}
         model = transformers.AutoModelForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             torch_dtype="auto",
             device_map="cpu",
             trust_remote_code=True,
+            **offline_kwargs,
         )
         if use_offline_training:
             # When doing offline training, we need to set num_hidden_layers
             # since we override it when loading the model for space savings
-            model_config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path)
+            model_config = transformers.AutoConfig.from_pretrained(
+                model_args.model_name_or_path, trust_remote_code=True
+            )
             model.config.num_orig_hidden_layers = model_config.num_hidden_layers
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_args.model_name_or_path,
             model_max_length=training_args.training_seq_len,
+            trust_remote_code=True,
         )
         if tokenizer.chat_template is None:
             tokenizer.chat_template = (
@@ -179,22 +188,30 @@ def train():
             }
             mtsp.convert(model, [("medusa", config)])
         elif training_args.mode in ["eagle1", "eagle3"]:
-            from modelopt.torch.speculative.config import EAGLE1_DEFAULT_CFG, EAGLE3_DEFAULT_CFG
+            from modelopt.torch.speculative.config import (
+                default_eagle_config,
+                eagle3_default_config,
+                kimik2_eagle_default_config,
+            )
 
-            # Load default config
-            config = {
-                "eagle1": EAGLE1_DEFAULT_CFG,
-                "eagle3": EAGLE3_DEFAULT_CFG,
-            }[training_args.mode]["config"]
-
-            # overwrite config with custom config
-            if use_offline_training:
-                config["eagle_offline"] = True
+            if eagle_args.eagle_decoder_type == "kimik2":
+                eagle_architecture_config = kimik2_eagle_default_config
+            else:
+                eagle_architecture_config = {
+                    "eagle1": default_eagle_config,
+                    "eagle3": eagle3_default_config,
+                }[training_args.mode]
 
             if eagle_args.eagle_config:
                 with open(eagle_args.eagle_config) as f:
                     custom_config = json.load(f)
-                config["eagle_architecture_config"].update(custom_config)
+                eagle_architecture_config.update(custom_config)
+
+            config = {
+                "eagle_decoder_type": eagle_args.eagle_decoder_type,
+                "eagle_offline": use_offline_training,
+                "eagle_architecture_config": eagle_architecture_config,
+            }
 
             mtsp.convert(model, [("eagle", config)])
 

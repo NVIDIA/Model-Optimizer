@@ -16,17 +16,29 @@
 """Utility functions for PyTorch tensors."""
 
 from collections import abc
+from contextlib import nullcontext
 
 import numpy as np
 import torch
 
 __all__ = [
     "numpy_to_torch",
+    "same_device_as",
     "to_empty_if_meta_device",
     "torch_detach",
     "torch_to",
     "torch_to_numpy",
 ]
+
+
+def same_device_as(inputs: torch.Tensor):
+    """Return a context manager that sets the CUDA device to be the same as the input tensor.
+
+    Returns a null context if the tensor is on CPU or on the same device as the current CUDA device.
+    """
+    if not inputs.is_cuda or inputs.device.index == torch.cuda.current_device():
+        return nullcontext()
+    return torch.cuda.device(inputs.device.index)
 
 
 def torch_to(data, *args, **kwargs):
