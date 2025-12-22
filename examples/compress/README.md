@@ -218,11 +218,11 @@ sed -i 's+subblocks_safetensors/++g' model.safetensors.index.json
 ```
 - Benchmark latency
 ```bash
-vllm bench latency --model path/to/model --trust-remote-code --load-format safetensors
+vllm bench latency --model path/to/model --load-format safetensors --trust-remote-code
 ```
 - Benchmark throughput
 ```bash
-vllm bench throughput --model path/to/model --trust-remote-code --load-format safetensors
+vllm bench throughput --model path/to/model --input-len 2000 --output-len 100 --load-format safetensors --trust-remote-code
 ```
 
 ## Advanced Usage
