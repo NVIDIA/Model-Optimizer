@@ -31,21 +31,22 @@
 
 import contextlib
 import copy
-from typing import Any
+from typing import Any, Optional, Unpack
 
 import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
-from transformers import Cache, DynamicCache, PretrainedConfig, PreTrainedModel
+from transformers import Cache, DynamicCache, GradientCheckpointingLayer, LlamaConfig, PretrainedConfig, PreTrainedModel
 from transformers.models.llama.modeling_llama import (
     LlamaAttention,
     LlamaDecoderLayer,
     LlamaRMSNorm,
     LlamaRotaryEmbedding,
 )
+from transformers.activations import ACT2FN
 from transformers.trainer_pt_utils import LabelSmoother
-from transformers.utils import ModelOutput
+from transformers.utils import ModelOutput, TransformersKwargs
 
 from ..eagle.conversion import EagleDMRegistry
 from ..eagle.eagle_model import EagleModel
@@ -175,6 +176,286 @@ class HFMedusaModel(MedusaModel):
             attentions=outputs.attentions,
         )
 
+class LlamaMLP(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
+        self.context_down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
+        self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(self, x):
+        inter_states = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+        token_out_h = self.down_proj(inter_states)
+        return token_out_h, token_out_h, None
+        context_out_h = self.context_down_proj(inter_states)
+        return token_out_h, context_out_h, None
+
+
+DS_CONFIG_FOR_NEMOTRON = {
+    "n_routed_experts": 128,
+    "n_shared_experts": 1,
+    "num_experts_per_tok": 6,
+    "moe_intermediate_size": 1856,
+    "moe_shared_expert_intermediate_size": 3712,
+    "n_group": 1,
+    "n_groups": 8,
+    "topk_group": 1,
+    "norm_topk_prob": True,
+    "routed_scaling_factor": 2.5,
+    "bias_update_speed": 0.001,
+    "moe_balancing_loss_weight": 0.0001,
+}
+
+import torch.nn.functional as F
+
+class DeepseekV3MLP(nn.Module):
+    def __init__(self, config, intermediate_size):
+        super().__init__()
+        self.config = config
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = intermediate_size
+        self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+        self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(self, x):
+        down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        return down_proj
+
+class DeepseekV3TopkRouter(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.n_routed_experts = DS_CONFIG_FOR_NEMOTRON["n_routed_experts"]
+        self.bias_update_speed = DS_CONFIG_FOR_NEMOTRON["bias_update_speed"]
+
+        self.weight = nn.Linear(config.hidden_size, self.n_routed_experts, bias=False, dtype=torch.float32)
+
+        # Temp accumulator for expert score correction bias between update steps
+        self.register_buffer("e_score_correction_bias_temp_acc", torch.zeros(self.n_routed_experts, dtype=torch.int64))
+        # Total net bias count for each expert. Tracking done in int64 to avoid accumulation errors.
+        self.register_buffer("e_score_correction_bias_total_count", torch.zeros(self.n_routed_experts, dtype=torch.int64))
+        # Bias scores calculated using the update speed
+        self.register_buffer("e_score_correction_bias_factor", torch.zeros(self.n_routed_experts, dtype=torch.float32))
+
+    def clear_temp_correction_accumulator(self):
+        self.e_score_correction_bias_temp_acc.data.zero_()
+
+    def apply_bias_update(self):
+        expert_usage_counts = self.e_score_correction_bias_temp_acc.data
+        total_selections = expert_usage_counts.sum().item()
+        usage_fraction = expert_usage_counts.to(torch.float32) / (total_selections + 1e-20)
+        target_fraction = 1.0 / self.n_routed_experts
+
+        error = usage_fraction - target_fraction
+        self.e_score_correction_bias_total_count.data -= error.sign().to(torch.int64)
+        min_count = self.e_score_correction_bias_total_count.data.min().item()
+        if min_count > 0:
+            # Prevent unbounded growth of the bias counts
+            self.e_score_correction_bias_total_count.data -= min_count
+        max_bias_magnitude = 1.0 / self.bias_update_speed
+        new_bias_scores = self.bias_update_speed * \
+            torch.clamp(self.e_score_correction_bias_total_count.data.to(torch.float32),
+                        None, max_bias_magnitude)
+        self.e_score_correction_bias_factor.data[:] = new_bias_scores
+
+        violation = error / target_fraction
+        return violation
+
+    def get_e_score_correction_bias(self):
+        return self.e_score_correction_bias_factor.data
+
+    def forward(self, hidden_states):
+        hidden_states = hidden_states.view(-1, self.config.hidden_size)
+        router_logits = self.weight(hidden_states.to(torch.float32))
+        return router_logits
+
+
+class DeepseekV3NaiveMoe(nn.Module):
+    """Collection of expert weights stored as 3D tensors."""
+
+    def __init__(self, config):
+        super().__init__()
+        self.num_experts = DS_CONFIG_FOR_NEMOTRON["n_routed_experts"]
+        self.hidden_dim = config.hidden_size
+        self.intermediate_dim = DS_CONFIG_FOR_NEMOTRON["moe_intermediate_size"]
+        self.gate_up_projections = nn.ModuleList([
+            nn.Linear(self.hidden_dim, 2 * self.intermediate_dim, bias=False)
+            for _ in range(self.num_experts)
+        ])
+        self.down_projections = nn.ModuleList([
+            nn.Linear(self.intermediate_dim, self.hidden_dim, bias=False)
+            for _ in range(self.num_experts)
+        ])
+        # self.gate_up_proj = nn.Linear(self.hidden_dim, 2 * self.intermediate_dim, bias=False)
+        # self.gate_up_proj = nn.Parameter(torch.empty(self.num_experts, 2 * self.intermediate_dim, self.hidden_dim))
+
+        # self.down_proj = nn.Parameter(torch.empty(self.num_experts, self.hidden_dim, self.intermediate_dim))
+        self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        top_k_index: torch.Tensor,
+        top_k_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        final_hidden_states = torch.zeros_like(hidden_states)
+        with torch.no_grad():
+            expert_mask = torch.nn.functional.one_hot(top_k_index, num_classes=self.num_experts)
+            expert_mask = expert_mask.permute(2, 1, 0)
+            expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+
+        for expert_idx in expert_hit:
+            expert_idx = expert_idx[0]
+            if expert_idx == self.num_experts:
+                continue
+            top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
+            current_state = hidden_states[token_idx]
+            gate, up = self.gate_up_projections[expert_idx](current_state).chunk(2, dim=-1)
+            current_hidden_states = self.act_fn(gate) * up
+            current_hidden_states = self.down_projections[expert_idx](current_hidden_states)
+            current_hidden_states = current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
+            final_hidden_states.index_add_(0, token_idx, current_hidden_states.to(final_hidden_states.dtype))
+
+        return final_hidden_states
+
+
+class DeepseekV3MoE(nn.Module):
+    """
+    A mixed expert module containing shared experts.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.experts = DeepseekV3NaiveMoe(config)
+        self.gate = DeepseekV3TopkRouter(config)
+        self.shared_experts = DeepseekV3MLP(
+            config=config, intermediate_size=DS_CONFIG_FOR_NEMOTRON["moe_shared_expert_intermediate_size"] * DS_CONFIG_FOR_NEMOTRON["n_shared_experts"]
+        )
+        self.n_routed_experts = DS_CONFIG_FOR_NEMOTRON["n_routed_experts"]
+        self.n_group = DS_CONFIG_FOR_NEMOTRON["n_group"]
+        self.topk_group = DS_CONFIG_FOR_NEMOTRON["topk_group"]
+        self.norm_topk_prob = DS_CONFIG_FOR_NEMOTRON["norm_topk_prob"]
+        self.routed_scaling_factor = DS_CONFIG_FOR_NEMOTRON["routed_scaling_factor"]
+        self.top_k = DS_CONFIG_FOR_NEMOTRON["num_experts_per_tok"]
+
+    def route_tokens_to_experts(self, router_logits):
+        router_probs = router_logits.to(torch.float32).softmax(dim=-1)
+        router_logits = router_logits.to(torch.float32).sigmoid()
+        router_logits_for_choice = router_logits.to(torch.float32) + self.gate.get_e_score_correction_bias()
+        group_scores = (
+            router_logits_for_choice.view(-1, self.n_group, self.n_routed_experts // self.n_group)
+            .topk(2, dim=-1)[0]
+            .sum(dim=-1)
+        )
+        group_idx = torch.topk(group_scores, k=self.topk_group, dim=-1, sorted=False)[1]
+        group_mask = torch.zeros_like(group_scores)
+        group_mask.scatter_(1, group_idx, 1)
+        score_mask = (
+            group_mask.unsqueeze(-1)
+            .expand(-1, self.n_group, self.n_routed_experts // self.n_group)
+            .reshape(-1, self.n_routed_experts)
+        )
+        scores_for_choice = router_logits_for_choice.masked_fill(~score_mask.bool(), 0.0)
+        topk_indices = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)[1]
+        topk_weights = router_logits.gather(1, topk_indices)
+        load_balancing_loss = None
+        if self.training:
+            # Update expert score correction bias
+            # 1. Calculate actual expert usage in this batch
+            # Shape: (batch_size * seq_len, top_k) -> flattened
+            with torch.no_grad():
+                chosen_experts = topk_indices.flatten()
+                # Count how many times each expert was selected
+                expert_usage = torch.bincount(
+                    chosen_experts, 
+                    minlength=self.n_routed_experts
+                )
+                fraction_of_tokens_per_expert = expert_usage.to(torch.float32) / router_logits.shape[0]
+
+            # Compute per-worker load-balancing loss
+            gate_probs_mean_per_expert = router_probs.mean(dim=0)
+            assert gate_probs_mean_per_expert.shape == fraction_of_tokens_per_expert.shape, \
+                f"Shape mismatch: {gate_probs_mean_per_expert.shape} vs {fraction_of_tokens_per_expert.shape}"
+            load_balancing_loss = torch.sum(
+                gate_probs_mean_per_expert.to(torch.float32) * fraction_of_tokens_per_expert.to(torch.float32)
+            ) * DS_CONFIG_FOR_NEMOTRON["moe_balancing_loss_weight"] / DS_CONFIG_FOR_NEMOTRON["n_routed_experts"]
+
+            if torch.distributed.is_initialized():
+                torch.distributed.all_reduce(expert_usage, op=torch.distributed.ReduceOp.SUM)
+            
+            self.gate.e_score_correction_bias_temp_acc.data += expert_usage.to(torch.int64)
+        if self.norm_topk_prob:
+            denominator = topk_weights.sum(dim=-1, keepdim=True) + 1e-20
+            topk_weights /= denominator
+        topk_weights = topk_weights * self.routed_scaling_factor
+        return topk_indices, topk_weights, load_balancing_loss
+
+    def forward(self, hidden_states):
+        residuals = hidden_states
+        orig_shape = hidden_states.shape
+        router_logits = self.gate(hidden_states)
+        topk_indices, topk_weights, aux_loss = self.route_tokens_to_experts(router_logits)
+        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+        hidden_states = self.experts(hidden_states, topk_indices, topk_weights).view(*orig_shape)
+        hidden_states = hidden_states + self.shared_experts(residuals)
+        return hidden_states, hidden_states, aux_loss
+
+class LlamaDecoderLayer(GradientCheckpointingLayer):
+    def __init__(self, config: LlamaConfig, layer_idx: int):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+
+        self.self_attn = LlamaAttention(config=config, layer_idx=layer_idx)
+
+        # self.mlp = LlamaMLP(config)
+        self.mlp = DeepseekV3MoE(config)
+        self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> torch.Tensor:
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        # Self Attention
+        hidden_states, _ = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+            **kwargs,
+        )
+        hidden_states = residual + hidden_states
+
+        # Fully Connected
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        mlp_output = self.mlp(hidden_states)
+        assert isinstance(mlp_output, tuple), \
+            f"MLP output should be a tuple, got {type(mlp_output)}"
+        hidden_states, context_out_h, aux_loss = mlp_output
+        hidden_states = residual + hidden_states
+        context_out_h = residual + context_out_h
+        return hidden_states, context_out_h, aux_loss
 
 class EagleModule(nn.Module):
     """Eagle module used in EAGLE model."""
@@ -185,7 +466,7 @@ class EagleModule(nn.Module):
         self.config = config
 
         self.layers = nn.ModuleList(
-            [decoder_layer_cls(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [LlamaDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         if config.use_last_layernorm:
             self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
@@ -208,16 +489,18 @@ class EagleModule(nn.Module):
             )
 
         if not config.use_aux_hidden_state:
-            # In Eagle-1, the FC concentrate input embeddings and hidden states
-            self.fc = nn.Linear(2 * config.hidden_size, config.hidden_size, bias=bias)
+            num_layer_features = 0
         else:
-            # In EAGLE-3, the FC concentrate hidden states from multiple base model layers
+            # In EAGLE3, the FC concatenates hidden states from multiple base model layers
+            num_layer_features = len(config.eagle_aux_hidden_state_layer_ids)
+        if num_layer_features > 0:
             self.fc = nn.Linear(
-                len(config.eagle_aux_hidden_state_layer_ids) * config.hidden_size,
+                num_layer_features * config.hidden_size,
                 config.hidden_size,
                 bias=bias,
             )
-
+        
+        if True:
             first_layer_attn = self.layers[0].self_attn
             if not isinstance(first_layer_attn, LlamaAttention):
                 raise ValueError("EAGLE-3 only support LlamaAttention.")
@@ -300,16 +583,19 @@ class EagleModule(nn.Module):
             position_ids = position_ids.view(-1, seq_length).long()
 
         inputs_embeds = inputs_embeds.to(hidden_states.dtype).to(hidden_states.device)
-        if self.config.use_aux_hidden_state:
+        if self.config.use_aux_hidden_state or not hasattr(self, "fc"):
             # In EAGLE-3, we save input embeddings to attribute, and use it in first decoder layer by hook function
             # Also, we normalize input embeddings and hidden states before concatenating them.
             # The default input norm in first layer attn will be disabled.
             self._input_embeds = self.input_embeds_norm(inputs_embeds)
-        else:  # EAGLE-1
+        else:
+            # EAGLE-1
             hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
 
+
+        aux_loss_acc = None
         for decoder_layer in self.layers:
-            layer_outputs = decoder_layer(
+            hidden_states, context_out_h, aux_loss = decoder_layer(
                 hidden_states,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
@@ -318,17 +604,16 @@ class EagleModule(nn.Module):
                 use_cache=use_cache,
                 position_embeddings=position_embeddings,
             )
-            # For HF>= 4.54.0, the layer_outputs is a tensor, for older, it is a tuple.
-            if isinstance(layer_outputs, tuple):
-                hidden_states = layer_outputs[0]
-            else:
-                hidden_states = layer_outputs
+            if aux_loss is not None:
+                if aux_loss_acc is None:
+                    aux_loss_acc = aux_loss
+                else:
+                    aux_loss_acc = aux_loss_acc + aux_loss
 
-        pre_norm_h = hidden_states
+        pre_norm_h = context_out_h
 
         post_norm_h = self.norm(hidden_states) if hasattr(self, "norm") else hidden_states
-
-        return post_norm_h, pre_norm_h, past_key_values
+        return post_norm_h, pre_norm_h, past_key_values, aux_loss_acc
 
 
 @EagleDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
@@ -458,9 +743,11 @@ class HFEagleModel(EagleModel):
         self.eagle_config = PretrainedConfig.from_dict(eagle_architecture_config)
         if self.eagle_config._attn_implementation is None:
             self.eagle_config._attn_implementation = "sdpa"
-        decoder_cls = (
-            type(self.model.layers[-1]) if self.eagle_reuse_base_decoder else LlamaDecoderLayer
-        )
+        assert not self.eagle_reuse_base_decoder, "EAGLE-3 does not support reusing base decoder."
+        decoder_cls = None
+        # decoder_cls = (
+        #     type(self.model.layers[-1]) if self.eagle_reuse_base_decoder else LlamaDecoderLayer
+        # )
 
         # Use default aux_hidden_state layers if use_aux_hidden_state is True
         # but no layer id is given
@@ -508,7 +795,7 @@ class HFEagleModel(EagleModel):
         # https://github.com/huggingface/transformers/blob/v4.56-release/src/transformers/trainer.py#L566
         self.is_quantized = False
 
-        self.num_ttt_steps = 4  # NOTE: (hg) hardcoded for now. Might add to config later.
+        self.num_ttt_steps = 3  # NOTE: (hg) hardcoded for now. Should add to cfg.
         self._cached_attn_blk_masks = {}
 
     def _get_ttt_attention_mask(self, seq_length, ttt_step):
@@ -715,7 +1002,7 @@ class HFEagleModel(EagleModel):
         position_embeddings,
         eagle_cache=None,
     ):
-        eagle_postnorm_h, eagle_prenorm_h, eagle_cache = self.eagle_module(
+        eagle_postnorm_h, eagle_prenorm_h, eagle_cache, aux_loss = self.eagle_module(
             eagle_input_hidden_states,
             inputs_embeds,
             attention_mask=attention_mask,
@@ -731,7 +1018,7 @@ class HFEagleModel(EagleModel):
         )
         eagle_logits = eagle_lm_head(eagle_postnorm_h)
 
-        return eagle_postnorm_h, eagle_prenorm_h, eagle_logits, eagle_cache
+        return eagle_postnorm_h, eagle_prenorm_h, eagle_logits, eagle_cache, aux_loss
 
     def forward(
         self,
@@ -777,12 +1064,11 @@ class HFEagleModel(EagleModel):
             if "base_model_logits" in base_outputs:
                 base_model_logits = base_outputs["base_model_logits"]
             else:
-                base_model_logits = self.lm_head(base_model_hidden_states)
+                base_model_logits = self.lm_head(self.backbone.norm_f(base_model_hidden_states))
                 if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size:
                     base_model_logits = self._map_logits_to_draft_vocab(base_model_logits)
             base_model_loss = None
             past_key_values = DynamicCache()  # Dummy cache
-
         else:
             base_model_hidden_states, base_model_logits, base_model_loss, past_key_values = (
                 self._base_model_forward(
@@ -802,7 +1088,8 @@ class HFEagleModel(EagleModel):
             eagle_cache = DynamicCache.from_legacy_cache(eagle_cache)
 
         # ====Run eagle forward====
-        eagle_loss = None
+        eagle_losses = []
+        aux_losses = []
         train_accs = []
         # In EAGLE-3, we have an additional FC layer to concentrate hidden states from multiple base model layers
         b, seq_length, h = base_model_hidden_states.shape
@@ -811,9 +1098,23 @@ class HFEagleModel(EagleModel):
                 aux_hidden_states = kwargs["base_model_outputs"]["aux_hidden_states"]
             else:
                 aux_hidden_states = torch.cat(self.pop_and_gather_aux_hiddens(), dim=-1)
-            eagle_input_hidden_states = self.eagle_module.fc(aux_hidden_states)
+            eagle_input_hidden_states = aux_hidden_states
         else:
             eagle_input_hidden_states = base_model_hidden_states
+
+        if self.training:
+            with torch.no_grad():
+                # Add some noise to the input hidden states
+                noise = (
+                    (torch.rand_like(eagle_input_hidden_states) - 0.5)
+                    * 0.2 # Magic number: noise scale used in EAGLE paper
+                    * 512
+                    / eagle_input_hidden_states.shape[-1]
+                )
+                eagle_input_hidden_states = eagle_input_hidden_states + noise
+        
+        if self.eagle_config.use_aux_hidden_state:
+            eagle_input_hidden_states = self.eagle_module.fc(eagle_input_hidden_states)
 
         # Get eagle inputs for the first eagle forward pass
         eagle_input_ids, attention_mask_0, position_ids = self._get_eagle_module_inputs(
@@ -836,7 +1137,7 @@ class HFEagleModel(EagleModel):
                 if ttt_step == 0
                 else self._get_ttt_attention_mask(seq_length, ttt_step)
             )
-            _, eagle_input_hidden_states, eagle_logits, eagle_cache = self._eagle_forward(
+            _, eagle_input_hidden_states, eagle_logits, eagle_cache, aux_loss = self._eagle_forward(
                 eagle_input_hidden_states,
                 inputs_embeds,
                 attention_mask,
@@ -869,12 +1170,14 @@ class HFEagleModel(EagleModel):
                     dim=1,
                 ),
             )
-            eagle_loss = (
-                classification_loss if eagle_loss is None else eagle_loss + classification_loss
-            )
+            # is_in_last_2_steps = ttt_step >= (self.num_ttt_steps - 2)
+            # if is_in_last_2_steps:
+            eagle_losses.append(classification_loss)
             train_accs.append(acc)
-            if not self.training:
-                break
+            if aux_loss is not None:
+                aux_losses.append(aux_loss)
+        eagle_loss = torch.stack(eagle_losses).mean()
+        aux_loss = torch.mean(torch.stack(aux_losses)) if len(aux_losses) > 0 else None
         # Finally, we merge base model loss and eagle loss, raise error if both are None
         if base_model_loss is not None and eagle_loss is not None:
             loss = base_model_loss + eagle_loss
@@ -887,6 +1190,8 @@ class HFEagleModel(EagleModel):
             assert not self.training, ValueError(
                 "Both base_model_loss and eagle_loss are skipped. At least one loss must be computed."
             )
+        if aux_loss is not None:
+            loss = loss + aux_loss
 
         return ModelOutput(
             loss=loss,
@@ -979,7 +1284,7 @@ class HFEagleModel(EagleModel):
             with temporary_set_config_value(
                 self.eagle_module.config, "_attn_implementation", "sdpa"
             ):
-                _, eagle_prenorm_h, eagle_logits, _ = self._eagle_forward(
+                _, eagle_prenorm_h, eagle_logits, _, _ = self._eagle_forward(
                     eagle_input_hidden_states,
                     self._base_model_embeddings(eagle_ids),
                     eagle_attention_mask,

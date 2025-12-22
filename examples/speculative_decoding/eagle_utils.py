@@ -27,6 +27,12 @@ from scripts.ar_validate import validate_ar
 from torch.utils.data import Dataset
 from transformers import AutoProcessor, Trainer, TrainerCallback
 from transformers.trainer_pt_utils import LabelSmoother
+from torch.utils.tensorboard import SummaryWriter
+
+import matplotlib.pyplot as plt
+import io
+from PIL import Image
+from torchvision.transforms import ToTensor
 
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import is_master
@@ -78,6 +84,7 @@ def preprocess(examples, tokenizer, **kwargs):
             return_tensors="pt",
             add_special_tokens=False,
             truncation=True,
+            max_length=4096
         )
         input_ids = output.input_ids[0]
         attention_mask = output.attention_mask[0]
@@ -272,23 +279,64 @@ class OfflineSupervisedDataset(Dataset):
         max_length = self.tokenizer.model_max_length
         offline_data = torch.load(offline_file_path)
         offline_data["input_ids"] = offline_data["input_ids"][:max_length]
-        offline_data["hidden_states"] = offline_data["hidden_states"][:max_length, :]
-        offline_data["aux_hidden_states"] = offline_data["aux_hidden_states"][:max_length, :]
+        if "aux_hidden_states" in offline_data:
+            offline_data["aux_hidden_states"] = offline_data["aux_hidden_states"][:max_length, :].to(torch.bfloat16)
+            hidden_dim = offline_data["aux_hidden_states"].shape[-1]
+            assert hidden_dim % 3 == 0, \
+                f"Aux hidden states dimension {hidden_dim} is not divisible by 3."
+            hidden_dim = hidden_dim // 3
+            # take last third of aux hidden states as the main hidden states
+            offline_data["hidden_states"] = offline_data["aux_hidden_states"][:, -hidden_dim:].clone()
+        else:
+            offline_data["hidden_states"] = offline_data["hidden_states"][:max_length, :].to(torch.bfloat16)
 
         # Make sure the input_ids have the same shape
         if preprocessed_base["input_ids"].shape != offline_data["input_ids"].shape:
-            msg = f"""Input IDs from offline data do not match the preprocessed input IDs
-                                for offline data sample at {offline_file_path}."""
-            raise ValueError(msg)
+            min_len = min(
+                preprocessed_base["input_ids"].shape[0],
+                offline_data["input_ids"].shape[0],
+            )
+            offline_data["input_ids"] = offline_data["input_ids"][:min_len]
+            offline_data["hidden_states"] = offline_data["hidden_states"][:min_len]
+            if "aux_hidden_states" in offline_data:
+                offline_data["aux_hidden_states"] = offline_data["aux_hidden_states"][:min_len]
+            # Use input ids from offline data for consistency
+            preprocessed_base["input_ids"] = offline_data["input_ids"][:min_len]
+            preprocessed_base["attention_mask"] = preprocessed_base["attention_mask"][:min_len]
+            preprocessed_base["loss_mask"] = preprocessed_base["loss_mask"][:min_len]
+            # Use labels from offline data for consistency
+            preprocessed_base["labels"] = torch.cat([
+                preprocessed_base["input_ids"][1:],
+                torch.tensor([IGNORE_TOKEN_ID], dtype=preprocessed_base["input_ids"].dtype),
+            ])
+
+            # Check for exact off-by-one where the preprocessed data is 1 longer
+            # if preprocessed_base["input_ids"].shape[0] == offline_data["input_ids"].shape[0] + 1:
+            #     for k in preprocessed_base:
+            #         if isinstance(preprocessed_base[k], torch.Tensor) and \
+            #             preprocessed_base[k].shape[0] == offline_data["input_ids"].shape[0] + 1:
+            #             preprocessed_base[k] = preprocessed_base[k][:-1]
+            # elif preprocessed_base["input_ids"].shape[0] + 1 == offline_data["input_ids"].shape[0]:
+            #     # Check for exact off-by-one where the offline data is 1 longer
+            #     for k in offline_data:
+            #         if isinstance(offline_data[k], torch.Tensor) and \
+            #             offline_data[k].shape[0] == preprocessed_base["input_ids"].shape[0] + 1:
+            #             offline_data[k] = offline_data[k][:-1]
+            # else:
+            #     msg = f"""Input IDs from offline data do not match the preprocessed input IDs
+            #                         for offline data sample at {offline_file_path}."""
+            #     raise ValueError(msg)
 
         ret = {**preprocessed_base}  # Shallow copy so we don't accidentally modify the cache
         ret["input_ids"] = offline_data["input_ids"]
         ret["kwargs"] = {
             "base_model_outputs": {
                 "base_model_hidden_states": offline_data["hidden_states"],
-                "aux_hidden_states": offline_data["aux_hidden_states"],
             }
         }
+        if "aux_hidden_states" in offline_data:
+            ret["kwargs"]["base_model_outputs"]["aux_hidden_states"] = \
+                offline_data["aux_hidden_states"]
         return ret
 
 
@@ -473,48 +521,54 @@ class DataCollatorForOffline(DataCollatorWithPadding):
                 for item in features
             ]
         )
-        batch_aux_hidden_states = torch.stack(
-            [self.paddingtensor2d(item["aux_hidden_states"], self.max_length) for item in features]
-        )
 
         batch = {
             **base_batch,
             "base_model_outputs": {
                 "base_model_hidden_states": batch_hidden_states,
-                "aux_hidden_states": batch_aux_hidden_states,
             },
         }
+        if features and "aux_hidden_states" in features[0]:
+            batch_aux_hidden_states = torch.stack(
+                [self.paddingtensor2d(item["aux_hidden_states"], self.max_length) for item in features]
+            )
+            batch["base_model_outputs"]["aux_hidden_states"] = batch_aux_hidden_states
 
         return batch
 
 
 class EagleTrainerWithAccLog(Trainer):
     """Wrapper around Trainer that logs training accuracy."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model_accepts_loss_kwargs = False
 
     def compute_loss(self, *args, **kwargs):
         """Override compute_loss to save train accs in trainer state."""
         if not hasattr(self.state, "training_accs"):
             self.state.training_accs = []
         kwargs.pop("num_items_in_batch", None)
-        loss, outputs = super().compute_loss(return_outputs=True, *args, **kwargs)
+        return_outputs = kwargs.pop("return_outputs", False)
+        loss, outputs = super().compute_loss(*args, return_outputs=True, **kwargs)
         if hasattr(outputs, "train_acc"):
             self.state.training_accs.append(outputs.train_acc)
-        return loss
+        return (loss, outputs) if return_outputs else loss
 
 
 class EagleTrainingPlot(TrainerCallback):
     """Callback that plot training acc and AR during training."""
 
-    def __init__(self, ar_validate_steps: int = 1000, estimate_ar: bool = False):
+    def __init__(self, ar_validate_steps: int = 1000, estimate_ar: bool = False, tb_writer: SummaryWriter | None = None):
         self.ar_validate_steps = ar_validate_steps
         if wandb and is_master():
             wandb.init()
         self.estimate_ar = estimate_ar
+        self.tb_writer = tb_writer
+        self.last_seen_step = -1
 
-    def on_log(self, args, state, control, **kwargs):
-        """Log training acc and estimate AR during log step."""
+    def _report_stats(self, state, eval_mode: bool):
         if not hasattr(state, "training_accs") or len(state.training_accs) == 0:
-            return control
+            return
         average_acc = np.mean(state.training_accs, axis=0)
         if self.estimate_ar:
             # Calculate mean training AR since last log
@@ -524,15 +578,42 @@ class EagleTrainingPlot(TrainerCallback):
             for step_acc in average_acc:
                 est_ar += acc_cumprod * step_acc
                 acc_cumprod *= step_acc
-            print_rank_0(f"Step {state.global_step} Estimated Training AR: {est_ar:.4f}")
+            print_rank_0(f"Step {state.global_step} Estimated {"Eval" if eval_mode else "Training"} AR: {est_ar:.4f}")
 
         # log to wandb
         if wandb and is_master():
             for i, step_acc in enumerate(average_acc):
-                wandb.log({f"step_{i}_train_acc": step_acc}, step=state.global_step)
+                wandb.log({f"step_{i}_{"eval" if eval_mode else "train"}_acc": step_acc}, step=state.global_step)
             if self.estimate_ar:
-                wandb.log({"estimated_training_ar": est_ar}, step=state.global_step)
+                wandb.log({f"estimated_{"eval" if eval_mode else "train"}_ar": est_ar}, step=state.global_step)
+        
+        if self.tb_writer:
+            for i, step_acc in enumerate(average_acc):
+                self.tb_writer.add_scalar(f"custom/step_{i}_{'eval' if eval_mode else 'train'}_acc", step_acc, state.global_step)
+            if self.estimate_ar:
+                self.tb_writer.add_scalar(f"custom/estimated_{'eval' if eval_mode else 'train'}_ar", est_ar, state.global_step)
 
+    def on_log(self, args, state, control, **kwargs):
+        """Log training acc and estimate AR during log step."""
+        if not hasattr(state, "training_accs") or len(state.training_accs) == 0:
+            self.last_seen_step = state.global_step
+            return control
+        
+        if state.global_step != self.last_seen_step:
+            # Eval mode doesn't increment the global step, so we can use that to detect eval vs training
+            self._report_stats(state, eval_mode=False)
+            # reset training_accs
+            state.training_accs = []
+        
+        self.last_seen_step = state.global_step
+        return control
+
+    def on_evaluate(self, args, state, control, **kwargs):
+        """Log eval acc and estimate AR during eval step."""
+        if not hasattr(state, "training_accs") or len(state.training_accs) == 0:
+            return control
+        
+        self._report_stats(state, eval_mode=True)
         # reset training_accs
         state.training_accs = []
         return control
@@ -553,6 +634,147 @@ class EagleTrainingPlot(TrainerCallback):
                 print_rank_0(f"Step {state.global_step} AR: {sum(ars) / len(ars):.4f}")
                 if wandb and is_master():
                     wandb.log({"validate_ar": sum(ars) / len(ars)}, step=state.global_step)
+                if self.tb_writer:
+                    self.tb_writer.add_scalar("custom/validate_ar", sum(ars) / len(ars), state.global_step)
             except Exception:
                 print_rank_0("AR validation not available.")
+        return control
+
+def _render_bar_chart_to_tensor(data_tensor, title, ylabel, ylim, color_fn=None):
+    """
+    Internal helper: Converts a 1D tensor into a matplotlib bar chart image tensor.
+    """
+    # 1. Pre-process data to CPU Numpy
+    data_np = data_tensor.detach().float().cpu().numpy()
+    experts = range(len(data_np))
+
+    # 2. Determine colors based on optional function
+    if color_fn is None:
+        colors = 'tab:blue' # Default
+    else:
+        colors = [color_fn(x) for x in data_np]
+
+    # 3. Create a distinct figure (smaller height since it's single)
+    fig, ax = plt.subplots(figsize=(10, 4))
+
+    # 4. Plotting details
+    ax.bar(experts, data_np, color=colors, alpha=0.7, width=0.8)
+    # Important: Set fixed Y-limits to stop axes jumping around between steps
+    ax.set_ylim(ylim)
+    ax.set_ylabel(ylabel)
+    ax.set_xlabel("Expert Index")
+    ax.set_title(title)
+    ax.grid(True, axis='y', linestyle='--', alpha=0.5)
+    # Add a strong baseline at 0
+    ax.axhline(0, color='black', linewidth=0.8)
+
+    # 5. Render to memory buffer
+    plt.tight_layout()
+    buf = io.BytesIO()
+    # dpi=100 keeps image size reasonable
+    plt.savefig(buf, format='png', dpi=100)
+    buf.seek(0)
+
+    # 6. Convert buffer to Torch Tensor
+    image = Image.open(buf)
+    image_tensor = ToTensor()(image)
+
+    # 7. Cleanup memory
+    plt.close(fig)
+    buf.close()
+
+    return image_tensor
+
+def log_expert_snapshots(writer, step, violations, biases, batch_expert_usage):
+    # --- Image 1: Bias Scores ---
+    # Simple bars
+    bias_image_tensor = _render_bar_chart_to_tensor(
+        biases,
+        title=f"Expert Bias Scores (Step {step})",
+        ylabel="Bias",
+        ylim=(-1.1, 1.1),
+        color_fn=None # Use default blue
+    )
+    writer.add_image("moe/snapshot_bias", bias_image_tensor, global_step=step)
+
+    # --- Image 2: Violation Scores ---
+    violation_color_logic = lambda x: 'tab:red' if x > 10.0 else (
+        'tab:green' if (-0.5 < x < 1.5) else 'tab:orange'
+    )
+
+    violation_image_tensor = _render_bar_chart_to_tensor(
+        violations,
+        title=f"Batch Expert Violation Scores (Step {step})",
+        ylabel="Violation Score",
+        ylim=(-2, 25),
+        color_fn=violation_color_logic
+    )
+    writer.add_image("moe/snapshot_violations", violation_image_tensor, global_step=step)
+
+    # --- Image 3: Batch Expert Usage ---
+    total_usage = batch_expert_usage.sum().item()
+    batch_usage_image_tensor = _render_bar_chart_to_tensor(
+        batch_expert_usage / total_usage,
+        title=f"Batch Expert Usage (Step {step})",
+        ylabel="Fraction of Load",
+        ylim=(0, 1.1),
+        color_fn=None # Use default blue
+    )
+    writer.add_image("moe/snapshot_batch_usage", batch_usage_image_tensor, global_step=step)
+
+class EagleMoEBalancer(TrainerCallback):
+    """Callback that balances MoE expert usage during training."""
+
+    def __init__(self, update_interval: int, tb_writer: SummaryWriter | None = None):
+        self.tb_writer = tb_writer
+        self.seen_last_step = -1
+        self.last_was_train = False
+        self.update_interval = update_interval
+
+    def on_step_end(self, args, state, control, **kwargs):
+        """Balance MoE expert usage at the end of each training step."""
+        # Exit if not training
+        model = kwargs["model"]
+        gate = model.eagle_module.layers[0].mlp.gate
+        is_train = self.seen_last_step != state.global_step
+        if not is_train:
+            gate.clear_temp_correction_accumulator()
+            self.seen_last_step = state.global_step
+            self.last_was_train = False
+            return control
+        elif not self.last_was_train:
+            # First training step after eval, don't use the expert usage stats from eval
+            gate.clear_temp_correction_accumulator()
+            self.seen_last_step = state.global_step
+            self.last_was_train = True
+            return control
+        
+        # In training with usable data
+        self.last_was_train = True
+        self.seen_last_step = state.global_step
+
+        if state.global_step % self.update_interval != 0:
+            return control
+        
+        violations = gate.apply_bias_update()
+
+        # Logging
+        if self.tb_writer:
+            if state.global_step % 10 == 0:
+                log_expert_snapshots(
+                    self.tb_writer, 
+                    state.global_step, 
+                    violations, 
+                    gate.get_e_score_correction_bias(),
+                    gate.e_score_correction_bias_temp_acc.data
+                )
+
+            # 3. SCALARS: Track the worst case
+            self.tb_writer.add_scalar(
+                "moe/max_violation",
+                violations.max().item(),
+                state.global_step,
+            )
+
+        gate.clear_temp_correction_accumulator()
         return control

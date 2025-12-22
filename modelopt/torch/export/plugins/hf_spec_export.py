@@ -18,26 +18,63 @@
 import torch
 import torch.nn as nn
 
-EAGLE_MODELOPT_TO_OFFICIAL = {
-    "required": {
-        "layers.0.self_attn.q_proj.weight": "midlayer.self_attn.q_proj.weight",
-        "layers.0.self_attn.k_proj.weight": "midlayer.self_attn.k_proj.weight",
-        "layers.0.self_attn.v_proj.weight": "midlayer.self_attn.v_proj.weight",
-        "layers.0.self_attn.o_proj.weight": "midlayer.self_attn.o_proj.weight",
-        "layers.0.mlp.gate_proj.weight": "midlayer.mlp.gate_proj.weight",
-        "layers.0.mlp.up_proj.weight": "midlayer.mlp.up_proj.weight",
-        "layers.0.mlp.down_proj.weight": "midlayer.mlp.down_proj.weight",
-        "hidden_norm.weight": "midlayer.hidden_norm.weight",
-        "input_embeds_norm.weight": "midlayer.input_layernorm.weight",
-        "layers.0.post_attention_layernorm.weight": "midlayer.post_attention_layernorm.weight",
-        "norm.weight": "norm.weight",
-        "fc.weight": "fc.weight",
-    },
-    "optional": {
-        "d2t": "d2t",
-        "eagle_lm_head.weight": "lm_head.weight",
-    },
-}
+# EAGLE_MODELOPT_TO_OFFICIAL = {
+#     "required": {
+#         "layers.0.self_attn.q_proj.weight": "midlayer.self_attn.q_proj.weight",
+#         "layers.0.self_attn.k_proj.weight": "midlayer.self_attn.k_proj.weight",
+#         "layers.0.self_attn.v_proj.weight": "midlayer.self_attn.v_proj.weight",
+#         "layers.0.self_attn.o_proj.weight": "midlayer.self_attn.o_proj.weight",
+#         "layers.0.mlp.gate_proj.weight": "midlayer.mlp.gate_proj.weight",
+#         "layers.0.mlp.up_proj.weight": "midlayer.mlp.up_proj.weight",
+#         "layers.0.mlp.down_proj.weight": "midlayer.mlp.down_proj.weight",
+#         "hidden_norm.weight": "midlayer.hidden_norm.weight",
+#         "input_embeds_norm.weight": "midlayer.input_layernorm.weight",
+#         "layers.0.post_attention_layernorm.weight": "midlayer.post_attention_layernorm.weight",
+#         "norm.weight": "norm.weight",
+#         "fc.weight": "fc.weight",
+#     },
+#     "optional": {
+#         "d2t": "d2t",
+#         "eagle_lm_head.weight": "lm_head.weight",
+#     },
+# }
+
+def get_eagle_mapping(num_layers: int, use_aux_hidden_state: bool):
+    EAGLE_MODELOPT_TO_OFFICIAL = {
+        "required": {
+            "norm.weight": "norm.weight",
+        },
+        "optional": {
+            "embed_tokens.weight": "embed_tokens.weight",
+            "eagle_lm_head.weight": "lm_head.weight",
+            "d2t": "d2t",
+        }
+    }
+    if use_aux_hidden_state:
+        EAGLE_MODELOPT_TO_OFFICIAL["required"]["fc.weight"] = "fc.weight"
+
+    for i in range(num_layers):
+        if i == 0:
+            EAGLE_MODELOPT_TO_OFFICIAL["required"].update({
+                "hidden_norm.weight": f"layers.{0}.hidden_norm.weight",
+                "input_embeds_norm.weight": f"layers.{0}.input_layernorm.weight",
+            })
+        else:
+            EAGLE_MODELOPT_TO_OFFICIAL["required"].update({
+                f"layers.{i}.input_layernorm.weight": f"layers.{i}.input_layernorm.weight",
+            })
+        
+        EAGLE_MODELOPT_TO_OFFICIAL["required"].update({
+            f"layers.{i}.self_attn.q_proj.weight": f"layers.{i}.self_attn.q_proj.weight",
+            f"layers.{i}.self_attn.k_proj.weight": f"layers.{i}.self_attn.k_proj.weight",
+            f"layers.{i}.self_attn.v_proj.weight": f"layers.{i}.self_attn.v_proj.weight",
+            f"layers.{i}.self_attn.o_proj.weight": f"layers.{i}.self_attn.o_proj.weight",
+            f"layers.{i}.mlp.gate_proj.weight": f"layers.{i}.mlp.gate_proj.weight",
+            f"layers.{i}.mlp.up_proj.weight": f"layers.{i}.mlp.up_proj.weight",
+            f"layers.{i}.mlp.down_proj.weight": f"layers.{i}.mlp.down_proj.weight",
+            f"layers.{i}.post_attention_layernorm.weight": f"layers.{i}.post_attention_layernorm.weight",
+        })
+    return EAGLE_MODELOPT_TO_OFFICIAL
 
 
 def _check_state_dict_keys_match(draft_model: nn.Module, required_items: dict):
@@ -61,21 +98,26 @@ def export_spec_ckpt_state_dict(model: nn.Module):
     # check the model has only speculative decoding
     assert spec_opt_only(model), "Not purely eagle model."
 
+    expected_state_dict = get_eagle_mapping(
+        num_layers=1,
+        use_aux_hidden_state=True,)
+
     # Check if the state dict keys match
-    _check_state_dict_keys_match(model.eagle_module, EAGLE_MODELOPT_TO_OFFICIAL["required"])
+    _check_state_dict_keys_match(model.eagle_module, expected_state_dict["required"])
 
     # Convert key names and save the state dict
     eagle_state = model.eagle_module.state_dict()
     export_state_dict = {}
     for ours_key, export_key in {
-        **EAGLE_MODELOPT_TO_OFFICIAL["required"],
-        **EAGLE_MODELOPT_TO_OFFICIAL["optional"],
+        **expected_state_dict["required"],
+        **expected_state_dict["optional"],
     }.items():
         if ours_key in eagle_state:
             export_state_dict[export_key] = eagle_state[ours_key]
 
     # TODO: (hg) this is a temp fix. Find cleaner way to do this.
     if "eagle_lm_head.weight" not in eagle_state:
+        raise ValueError("Requires eagle lm head for now.")
         export_state_dict["lm_head.weight"] = model.state_dict()["lm_head.weight"]
 
     return export_state_dict

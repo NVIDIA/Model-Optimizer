@@ -36,9 +36,11 @@ from typing import Literal
 
 import torch
 import transformers
-from eagle_utils import EagleTrainerWithAccLog, EagleTrainingPlot, make_eagle_supervised_data_module
+from eagle_utils import EagleTrainerWithAccLog, EagleMoEBalancer, EagleTrainingPlot, make_eagle_supervised_data_module
 from medusa_utils import make_medusa_supervised_data_module
 from transformers.trainer_utils import get_last_checkpoint
+from torch.utils.tensorboard import SummaryWriter
+from transformers.integrations import TensorBoardCallback
 
 import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
@@ -140,8 +142,8 @@ def train():
     use_offline_training = data_args.offline_data_path is not None
 
     if checkpoint:
-        model = transformers.AutoModelForCausalLM.from_pretrained(checkpoint, torch_dtype="auto")
-        tokenizer = transformers.AutoTokenizer.from_pretrained(checkpoint)
+        model = transformers.AutoModelForCausalLM.from_pretrained(checkpoint, torch_dtype="auto", trust_remote_code=True)
+        tokenizer = transformers.AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
     else:
         # To avoid OOM for large models, we load and convert model on CPU first.
         # Model will be moved to GPU during HF trainer.init().
@@ -154,11 +156,12 @@ def train():
         if use_offline_training:
             # When doing offline training, we need to set num_hidden_layers
             # since we override it when loading the model for space savings
-            model_config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path)
+            model_config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
             model.config.num_orig_hidden_layers = model_config.num_hidden_layers
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_args.model_name_or_path,
             model_max_length=training_args.training_seq_len,
+            trust_remote_code=True,
         )
         if tokenizer.chat_template is None:
             tokenizer.chat_template = (
@@ -234,11 +237,30 @@ def train():
             tokenizer, data_args, max_length=training_args.training_seq_len
         )
 
+    callbacks = []
+    tb_writer = None
+    if "tensorboard" in training_args.report_to:
+        log_dir=training_args.output_dir
+        tb_writer = SummaryWriter(log_dir=log_dir)
+        if isinstance(training_args.report_to, list):
+            training_args.report_to.remove("tensorboard")
+        else:
+            training_args.report_to = "none"
+        callbacks.append(
+            TensorBoardCallback(tb_writer=tb_writer)
+        )
+    callbacks.append(
+        EagleMoEBalancer(update_interval=1, tb_writer=tb_writer)
+    )
+    callbacks.append(
+        EagleTrainingPlot(training_args.ar_validate_steps, tb_writer=tb_writer, estimate_ar=True)
+    )
+
     trainer = EagleTrainerWithAccLog(
         model=model,
         processing_class=tokenizer,
         args=training_args,
-        callbacks=[EagleTrainingPlot(training_args.ar_validate_steps)],
+        callbacks=callbacks,
         **data_module,
     )
 

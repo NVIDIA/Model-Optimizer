@@ -40,6 +40,12 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Name of the served model.",
     )
+    parser.add_argument(
+        "--meta-channel-id",
+        type=str,
+        required=True,
+        help="Unique identifier for the meta file name used to communicate with the local serving engine. This should match the value used by the server.",
+    )
 
     ## Client Parameters ##
     parser.add_argument(
@@ -95,6 +101,11 @@ async def main(args: argparse.Namespace) -> None:
     with args.input_file.open("r", encoding="utf-8") as f:
         all_conversations.extend([json.loads(line) for line in f if line.strip()])
 
+    if args.debug_max_num_conversations is not None:
+        import random
+        random.seed(42)
+        random.shuffle(all_conversations)
+
     print("Loaded", len(all_conversations), "conversations from", args.input_file)
 
     client: AsyncOpenAI = AsyncOpenAI(
@@ -107,9 +118,10 @@ async def main(args: argparse.Namespace) -> None:
         tokenizer.pad_token = tokenizer.eos_token
     bos_token_id = tokenizer.bos_token_id
     if bos_token_id is None:
-        raise ValueError("The tokenizer does not have a BOS token.")
+        print("Warning: The tokenizer does not have a BOS token. This may lead to issues with some models.")
+    #     raise ValueError("The tokenizer does not have a BOS token.") # diff here
 
-    temp_meta_file = Path("/tmp/meta.json")
+    temp_meta_file = Path(f"/tmp/meta_{args.meta_channel_id}.json") # diff here
     if temp_meta_file.exists():
         print(f"Temporary meta file {temp_meta_file} found, removing it.")
         temp_meta_file.unlink()
@@ -149,18 +161,31 @@ async def main(args: argparse.Namespace) -> None:
                 f,
             )
 
+        kwargs = {}
+        if args.max_seq_len is not None:
+            kwargs["max_length"] = args.max_seq_len
+            kwargs["truncation"] = True
         input_ids = tokenizer.apply_chat_template(
-            conversations, return_tensors=None, add_generation_template=False, tokenize=True
+            conversations, return_tensors=None, add_generation_template=False, tokenize=True,
+            **kwargs
         )
         num_input_tokens = len(input_ids)
-        if num_input_tokens <= 10 or num_input_tokens > args.max_seq_len:
+        if num_input_tokens <= 10:
             num_too_long += 1
             continue
-        if input_ids[0] == bos_token_id:
+        if bos_token_id is not None and input_ids[0] == bos_token_id:
             # Remove the leading BOS token. vLLM's completion generation
             # endpoint will prepend the BOS token automatically.
             input_ids = input_ids[1:]
+        # if num_input_tokens > args.max_seq_len:
+        #     input_ids = input_ids[: args.max_seq_len - 2]
         input_string = tokenizer.decode(input_ids, skip_special_tokens=False)
+        if "<|im_start|>assistant" not in input_string:
+            num_too_long += 1
+            continue
+        if not input_string.strip():
+            num_invalid += 1
+            continue 
 
         try:
             # Send the message to the OpenAI-compatible endpoint
