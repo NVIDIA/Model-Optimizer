@@ -1035,3 +1035,47 @@ def cast_initializer_to_dtype(
     input_onnx = onnx.numpy_helper.from_array(input, input_name)
     input_onnx.data_type = onnx_dtype_map[dtype]
     initializer_map[input_name].CopyFrom(input_onnx)
+
+
+def get_quantized_tensors(onnx_model: onnx.ModelProto) -> set[str]:
+    """Get the names of all quantized tensors from an ONNX model.
+
+    This function identifies all QuantizeLinear nodes in the ONNX model
+    and extracts the names of tensors being quantized (the first input of
+    each QuantizeLinear node, excluding scale and zero-point inputs).
+
+    Args:
+        onnx_model: ONNX model protobuf to analyze
+
+    Returns:
+        Set of tensor names that are inputs to QuantizeLinear nodes
+        (i.e., the tensors being quantized)
+
+    Example:
+        >>> import onnx
+        >>> from modelopt.onnx.quantization.qdq_utils import get_quantized_tensors
+        >>>
+        >>> # Load a quantized model
+        >>> model = onnx.load("quantized_model.onnx")
+        >>>
+        >>> # Get all quantized tensor names
+        >>> quantized_tensors = get_quantized_tensors(model)
+        >>> print(f"Found {len(quantized_tensors)} quantized tensors")
+        >>>
+        >>> # Use with autotuner to import insertion points
+        >>> from modelopt.onnx.quantization.autotune import QDQAutotuner
+        >>> autotuner = QDQAutotuner(new_model)
+        >>> autotuner.initialize()
+        >>> autotuner.import_insertion_points(quantized_tensors)
+    """
+    quantized_tensors = set()
+
+    for node in onnx_model.graph.node:
+        if node.op_type == "QuantizeLinear":
+            # First input is the tensor being quantized
+            # (inputs[1] is scale, inputs[2] is zero-point)
+            if node.input and len(node.input) > 0:
+                quantized_tensors.add(node.input[0])
+
+    logger.debug(f"Found {len(quantized_tensors)} quantized tensors in ONNX model")
+    return quantized_tensors
