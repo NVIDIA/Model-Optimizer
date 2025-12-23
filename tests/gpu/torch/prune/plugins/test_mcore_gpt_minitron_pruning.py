@@ -29,20 +29,13 @@ from _test_utils.torch.megatron.utils import (
 )
 from _test_utils.torch.misc import compare_outputs, set_seed
 from _test_utils.torch.nas_prune.minitron_common import prune_minitron
-from megatron.core.parallel_state import destroy_model_parallel
 from megatron.core.transformer.identity_op import IdentityOp
 
 import modelopt.torch.nas as mtn
 from modelopt.torch.nas.conversion import export_searchspace
-from modelopt.torch.nas.plugins.megatron import (
-    NumAttentionHeadsHp,
-    _DynamicProjRowParallelLinear,
-    _DynamicQKVColumnParallelLinear,
-    _DynamicSelfAttention,
-    expand_head_indices,
-)
 from modelopt.torch.prune.plugins.mcore_minitron import (
     ImportanceEstimatorRegistry,
+    MCoreMinitronSearcher,
     _convert_model_to_dynamic_space,
     get_mcore_minitron_config,
 )
@@ -122,74 +115,6 @@ def test_mcore_gpt_parameter_sorting(activation_func):
         job=partial(_test_mcore_gpt_parameter_sorting, activation_func),
         backend="nccl",
     )
-
-
-def test_mcore_gpt_self_attention_head_sorting(distributed_setup_size_1):
-    model = get_mcore_gpt_model(
-        tensor_model_parallel_size=1,
-        pipeline_model_parallel_size=1,
-        initialize_megatron=True,
-        num_layers=1,
-        hidden_size=16,
-        num_attention_heads=8,
-        num_query_groups=2,
-        ffn_hidden_size=16,
-        activation_func="squared_relu",
-    ).cuda()
-
-    model = mtn.convert(model, "mcore_minitron")
-
-    self_attn = model.decoder.layers[0].self_attention
-    assert isinstance(self_attn, _DynamicSelfAttention)
-    assert isinstance(self_attn.linear_qkv, _DynamicQKVColumnParallelLinear)
-    assert isinstance(self_attn.linear_proj, _DynamicProjRowParallelLinear)
-
-    hp_num_attention_heads = self_attn.get_hparam("num_attention_heads")
-    assert isinstance(hp_num_attention_heads, NumAttentionHeadsHp)
-
-    # Choices are multiples of num_query_groups (2): [2, 4, 6, 8]
-    assert hp_num_attention_heads.choices == [2, 4, 6, 8]
-    assert hp_num_attention_heads._num_query_groups == 2
-
-    # Set importance and slice order
-    # Importance per head (group-aware): [2.2, 0.1, 1.1, 2.1, 3.0, 2.0, 0.0, 1.0]
-    # Group 0 (heads 0-3): [2.2, 0.1, 1.1, 2.1] → sorted: [0, 3, 2, 1]
-    # Group 1 (heads 4-7): [3.0, 2.0, 0.0, 1.0] → sorted: [4, 5, 7, 6]
-    # Global ranking (group-aware, flattened): [0, 3, 2, 1, 4, 5, 7, 6]
-    hp_num_attention_heads._get_importance = lambda: torch.tensor(
-        [2.2, 0.1, 1.1, 2.1, 3.0, 2.0, 0.0, 1.0]
-    )
-    # _estimate_head_ranking returns ranking as 1D tensor
-    expected_ranking = torch.tensor([0, 3, 2, 1, 4, 5, 7, 6])
-    hp_num_attention_heads.enforce_order(expected_ranking)
-
-    assert hp_num_attention_heads.active_slice.tolist() == [0, 3, 2, 1, 4, 5, 7, 6]
-
-    # check if we get correct selection of sorted + pruned heads after setting active values
-    hp_num_attention_heads.active = 4  # top 2 heads per group (2 groups * 2 heads = 4 total)
-
-    # Expected: Top 2 heads from each group: [0, 3] from group 0, [4, 5] from group 1
-    expected_q_heads = [0, 3, 4, 5]
-    # In QKV layout (4 heads/group → 6 QKV heads/group):
-    # Group 0: Q=[0, 3], K=4, V=5 → QKV indices [0, 3, 4, 5]
-    # Group 1: Q=[4, 5], K=10, V=11 → QKV indices [6, 7, 10, 11]
-    expected_qkv_heads = [0, 3, 4, 5, 6, 7, 10, 11]
-
-    assert (
-        self_attn.linear_qkv._get_output_size_indices().tolist()
-        == expand_head_indices(
-            torch.LongTensor(expected_qkv_heads), model.config.kv_channels
-        ).tolist()
-    )
-    assert (
-        self_attn.linear_proj._get_input_size_indices().tolist()
-        == expand_head_indices(
-            torch.LongTensor(expected_q_heads), model.config.kv_channels
-        ).tolist()
-    )
-
-    # Clean up since this is not a spawned process
-    destroy_model_parallel()
 
 
 def _test_mcore_gpt_pruning(
@@ -430,7 +355,7 @@ def _test_mcore_gpt_moe_parameter_sorting(rank, size):
 
     model.eval()
     dynamic_space = _convert_model_to_dynamic_space(
-        model, get_mcore_minitron_config(channel_divisor)
+        model, get_mcore_minitron_config(channel_divisor=channel_divisor, num_moe_experts_divisor=1)
     )
     registry = ImportanceEstimatorRegistry(model)  # register imp estimators and forward hooks
 
@@ -570,3 +495,29 @@ def test_mcore_gpt_pruning_moe(tmp_path):
         job=partial(_test_mcore_gpt_pruning_moe, tmp_path / "minitron_scores.pth"),
         backend="nccl",
     )
+
+
+def test_generate_search_space_combos():
+    ss = {
+        "hidden_size": [32, 64, 96, 128, 160],
+        "num_attention_heads": [8, 16, 24, 32],
+        "num_layers": [1, 2, 3, 4, 5, 6, 7, 8],
+    }
+    ss_combos = MCoreMinitronSearcher._generate_search_space_combos(
+        ss, max_width_pruning=0.5, max_depth_pruning=0.25
+    )
+    assert len(ss_combos) == 3 * 2 * 2
+    assert ss_combos == [
+        {"hidden_size": 96, "num_attention_heads": 24, "num_layers": 7},
+        {"hidden_size": 96, "num_attention_heads": 24, "num_layers": 8},
+        {"hidden_size": 96, "num_attention_heads": 32, "num_layers": 7},
+        {"hidden_size": 96, "num_attention_heads": 32, "num_layers": 8},
+        {"hidden_size": 128, "num_attention_heads": 24, "num_layers": 7},
+        {"hidden_size": 128, "num_attention_heads": 24, "num_layers": 8},
+        {"hidden_size": 128, "num_attention_heads": 32, "num_layers": 7},
+        {"hidden_size": 128, "num_attention_heads": 32, "num_layers": 8},
+        {"hidden_size": 160, "num_attention_heads": 24, "num_layers": 7},
+        {"hidden_size": 160, "num_attention_heads": 24, "num_layers": 8},
+        {"hidden_size": 160, "num_attention_heads": 32, "num_layers": 7},
+        {"hidden_size": 160, "num_attention_heads": 32, "num_layers": 8},
+    ]
