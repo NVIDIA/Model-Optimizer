@@ -751,14 +751,18 @@ def awq_lite(
             delattr(module.weight_quantizer, "_pre_quant_scale")
         if hasattr(module.input_quantizer, "_pre_quant_scale"):
             delattr(module.input_quantizer, "_pre_quant_scale")
-        if module.awq_lite.is_input_quantized and module.input_quantizer.amax is not None:
-            act_amax = module.input_quantizer.amax
-            # TODO: make this a buffer after we support only heterogeneous checkpointing for MCore
-            module.input_quantizer._amax_for_smoothing = act_amax.cpu()
-            module.input_quantizer.reset_amax()
-            module.input_quantizer.axis = None
-            module.input_quantizer.amax = act_amax.amax()
-            module.input_quantizer.enable()
+        if module.awq_lite.is_input_quantized:
+            if module.input_quantizer.amax is not None:
+                act_amax = module.input_quantizer.amax
+                # TODO: make this a buffer after we support only heterogeneous checkpointing for MCore
+                module.input_quantizer._amax_for_smoothing = act_amax.cpu()
+                module.input_quantizer.reset_amax()
+                module.input_quantizer.axis = None
+                module.input_quantizer.amax = act_amax.amax()
+                module.input_quantizer.enable()
+            # for dynamic quantization, there is no amax, so we just enable the quantizer
+            else:
+                module.input_quantizer.enable()
 
         if module.awq_lite.is_enabled:
             apply_pre_quant_scale_and_smooth(module, 1.0 / module.awq_lite.best_scale)
