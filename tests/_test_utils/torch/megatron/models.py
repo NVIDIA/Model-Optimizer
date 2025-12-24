@@ -311,6 +311,7 @@ def get_mcore_mamba_hybrid_model(
     max_sequence_length: int = 4,
     vocab_size: int = 64,
     bf16: bool = True,
+    sequence_parallel: bool = False,
     # Mamba-specific parameters
     mamba_state_dim: int = 32,
     mamba_head_dim: int = 16,
@@ -337,7 +338,7 @@ def get_mcore_mamba_hybrid_model(
     config = TransformerConfig(
         tensor_model_parallel_size=tensor_model_parallel_size,
         pipeline_model_parallel_size=pipeline_model_parallel_size,
-        sequence_parallel=False,
+        sequence_parallel=sequence_parallel,
         num_layers=num_layers,
         num_layers_in_first_pipeline_stage=num_layers_in_first_pipeline_stage,
         num_layers_in_last_pipeline_stage=num_layers_in_last_pipeline_stage,
