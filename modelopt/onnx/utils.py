@@ -867,14 +867,9 @@ def infer_types(model: onnx.ModelProto) -> onnx.ModelProto:
                 if not inp_name:
                     continue
                 inp_type = get_tensor_type(inp_name)
-                if inp_type is not None:
-                    input_types.append(inp_type)
-                else:
-                    # In topologically sorted order, this shouldn't happen unless
-                    # the input is from an initializer/input we missed or there's a cycle
-                    logger.debug(f"Warning: Input {inp_name} of node {node.name} has unknown type")
-                    # Use FLOAT as fallback
-                    input_types.append(onnx.TensorProto.FLOAT)
+                if inp_type is None:
+                    raise ValueError(f"Input {inp_name} of node {node.name} has unknown type")
+                input_types.append(inp_type)
 
             # Infer output types for this node
             output_types = []
@@ -886,15 +881,9 @@ def infer_types(model: onnx.ModelProto) -> onnx.ModelProto:
                     if attr.name == "to":
                         cast_to_type = attr.i
                         break
-                if cast_to_type is not None:
-                    output_types = [cast_to_type] * len(node.output)
-                else:
-                    # Fallback: use input type if cast target unknown
-                    output_types = (
-                        input_types[: len(node.output)]
-                        if input_types
-                        else [onnx.TensorProto.FLOAT] * len(node.output)
-                    )
+                if cast_to_type is None:
+                    raise ValueError(f"Cast node {node.name} has unknown target type")
+                output_types = [cast_to_type]
             elif node.op_type == "DequantizeLinear":
                 # DequantizeLinear: output type is determined by output_dtype attribute if present,
                 # otherwise use the scale type (input[1])
@@ -906,20 +895,17 @@ def infer_types(model: onnx.ModelProto) -> onnx.ModelProto:
                         break
 
                 if output_dtype is not None:
-                    output_types = [output_dtype] * len(node.output)
+                    output_types = [output_dtype]
                 elif len(node.input) >= 2 and node.input[1]:
                     scale_type = get_tensor_type(node.input[1])
                     if scale_type is not None:
-                        output_types = [scale_type] * len(node.output)
+                        output_types = [scale_type]
                     else:
                         # Fallback: use first input type or FLOAT
-                        output_types = [
-                            input_types[0] if input_types else onnx.TensorProto.FLOAT
-                        ] * len(node.output)
+                        output_types = [input_types[0] if input_types else onnx.TensorProto.FLOAT]
                 else:
-                    output_types = [
-                        input_types[0] if input_types else onnx.TensorProto.FLOAT
-                    ] * len(node.output)
+                    # Fallback: use first input type or FLOAT
+                    output_types = [input_types[0] if input_types else onnx.TensorProto.FLOAT]
             elif node.op_type == "QuantizeLinear":
                 # QuantizeLinear: output type is determined by output_dtype attribute if present,
                 # otherwise use the zero_point type (input[2])
@@ -935,13 +921,13 @@ def infer_types(model: onnx.ModelProto) -> onnx.ModelProto:
                 elif len(node.input) >= 3 and node.input[2]:
                     zero_point_type = get_tensor_type(node.input[2])
                     if zero_point_type is not None:
-                        output_types = [zero_point_type] * len(node.output)
+                        output_types = [zero_point_type]
                     else:
-                        # Fallback: typically UINT8 or INT8 for quantized types
-                        output_types = [onnx.TensorProto.UINT8] * len(node.output)
+                        # Fallback: use INT8 as fallback, since TRT doesn't support UINT8
+                        output_types = [onnx.TensorProto.INT8]
                 else:
-                    # Fallback: typically UINT8 or INT8 for quantized types
-                    output_types = [onnx.TensorProto.UINT8] * len(node.output)
+                    # Fallback: use INT8 as fallback, since TRT doesn't support UINT8
+                    output_types = [onnx.TensorProto.INT8]
             elif node.op_type == "Constant":
                 # Constant: output type is from the value attribute's tensor data_type
                 const_type = None
@@ -950,22 +936,20 @@ def infer_types(model: onnx.ModelProto) -> onnx.ModelProto:
                         if attr.t.HasField("data_type"):
                             const_type = attr.t.data_type
                             break
-                if const_type is not None:
-                    output_types = [const_type] * len(node.output)
-                else:
-                    # Fallback: use FLOAT if type cannot be determined
-                    output_types = [onnx.TensorProto.FLOAT] * len(node.output)
+                assert const_type is not None
+                output_types = [const_type]
             elif node.op_type == "ConstantOfShape":
                 # ConstantOfShape: output type is from the value attribute's tensor data_type
                 # If no value attribute, defaults to FLOAT
                 # Note: Schema allows multiple types, so we need to check the value attribute
-                const_type = onnx.TensorProto.FLOAT  # default
+                const_type = None
                 for attr in node.attribute:
                     if attr.name == "value" and attr.type == onnx.AttributeProto.TENSOR:
                         if attr.t.HasField("data_type"):
                             const_type = attr.t.data_type
                             break
-                output_types = [const_type] * len(node.output)
+                assert const_type is not None
+                output_types = [const_type]
             elif node.op_type == "Split":
                 # Split schema allows multiple outputs, but the schema only specifies one output type
                 output_types = [input_types[0]] * len(node.output)
