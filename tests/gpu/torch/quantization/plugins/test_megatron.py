@@ -308,7 +308,7 @@ def _gpt_model_provider(
 
 
 def _test_sharded_state_dict(
-    tmp_path, config, hidden_size, modelopt_version, compress, meta_device, moe_config, rank, size
+    tmp_path, config, hidden_size, modelopt_version, compress, meta_device, model_config, rank, size
 ):
     # Must disable output_layer quantization since output_layer amax cannot be restore via
     # sharded_state_dict. All output_layer quantizers state are removed.
@@ -318,13 +318,13 @@ def _test_sharded_state_dict(
         mto.conversion.__version__ = modelopt_version
         mtq.plugins.megatron.__version__ = modelopt_version
 
-    tp_size = moe_config.get("tp_size", size)
-    ep_size = moe_config.get("ep_size", 1)
-    etp_size = moe_config.get("etp_size", None)
-    num_moe_experts = moe_config.get("num_moe_experts", None)
-    moe_grouped_gemm = moe_config.get("moe_grouped_gemm", False)
-    use_te = moe_config.get("use_te", False)
-    transformer_impl = moe_config.get("transformer_impl", "local")
+    tp_size = model_config.get("tp_size", size)
+    ep_size = model_config.get("ep_size", 1)
+    etp_size = model_config.get("etp_size", None)
+    num_moe_experts = model_config.get("num_moe_experts", None)
+    moe_grouped_gemm = model_config.get("moe_grouped_gemm", False)
+    use_te = model_config.get("use_te", False)
+    transformer_impl = model_config.get("transformer_impl", "local")
 
     initialize_for_megatron(
         tensor_model_parallel_size=tp_size,
@@ -424,8 +424,8 @@ mixed_block_size_config["quant_cfg"].update(
         mtq.W4A8_AWQ_BETA_CFG,
         mtq.NVFP4_DEFAULT_CFG,
         mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
-        # Note: KV cache configs (FP8_KV_CFG, NVFP4_KV_CFG) are tested separately in test_kv_cache_quant
-        # They require TEDotProductAttention which needs transformer_impl="modelopt", not "local"
+        mtq.FP8_KV_CFG,
+        mtq.NVFP4_KV_CFG,
     ],
 )
 @pytest.mark.parametrize("compress", [False, True])
@@ -827,100 +827,6 @@ def _test_kv_cache_quant_helper(config, rank, size):
     assert output is not None, "Forward pass failed"
 
 
-def _test_kv_cache_sharded_state_dict_helper(tmp_path, config, rank, size):
-    """Helper for testing KV cache quantization with sharded state dict save/load."""
-    # Disable output_layer quantization (same as other sharded state dict tests)
-    config["quant_cfg"]["*output_layer*"] = {"enable": False}
-
-    initialize_for_megatron(
-        tensor_model_parallel_size=size, pipeline_model_parallel_size=1, seed=SEED
-    )
-
-    # Create GPT models with TEDotProductAttention (transformer_impl="modelopt")
-    model_ref = get_mcore_gpt_model(
-        tensor_model_parallel_size=size,
-        num_layers=2,  # At least 2 layers to test multiple attention modules
-        hidden_size=64,
-        num_attention_heads=4,
-        vocab_size=64,
-        transformer_impl="modelopt",  # CRITICAL: Use TEDotProductAttention
-    ).cuda()
-
-    model_test = get_mcore_gpt_model(
-        tensor_model_parallel_size=size,
-        num_layers=2,
-        hidden_size=64,
-        num_attention_heads=4,
-        vocab_size=64,
-        transformer_impl="modelopt",
-    ).cuda()
-
-    prompt_tokens = torch.randint(
-        0, model_ref.vocab_size, (2, model_ref.max_sequence_length)
-    ).cuda()
-
-    def forward_fn(model):
-        return megatron_prefill(model, prompt_tokens)
-
-    # Quantize the reference model
-    model_ref = mtq.quantize(model_ref, config, forward_fn)
-
-    # CRITICAL: model_test must also be quantized with the same config
-    # Otherwise it won't have the KV cache quantizer keys when loading state dict
-    model_test = mtq.quantize(model_test, config, forward_fn)
-
-    # Verify KV cache quantizers were created
-    kv_quantizers_found = False
-    for name, module in model_ref.named_modules():
-        if hasattr(module, "k_bmm_quantizer") and hasattr(module, "v_bmm_quantizer"):
-            kv_quantizers_found = True
-            assert module.k_bmm_quantizer.is_enabled, f"K quantizer not enabled in {name}"
-            assert module.v_bmm_quantizer.is_enabled, f"V quantizer not enabled in {name}"
-
-    assert kv_quantizers_found, "No KV cache quantizers found in quantized model"
-
-    # Test sharded state dict save/load
-    sharded_state_dict_test_helper(
-        tmp_path,
-        model_ref,
-        model_test,
-        forward_fn,
-        meta_device=False,
-        version=None,
-    )
-
-    # Verify KV cache quantizers are restored correctly in model_test
-    for (name_ref, module_ref), (name_test, module_test) in zip(
-        model_ref.named_modules(), model_test.named_modules()
-    ):
-        if hasattr(module_ref, "k_bmm_quantizer"):
-            assert hasattr(module_test, "k_bmm_quantizer"), (
-                f"K quantizer missing after restore in {name_test}"
-            )
-            assert hasattr(module_test, "v_bmm_quantizer"), (
-                f"V quantizer missing after restore in {name_test}"
-            )
-
-            # Check that quantizer states match
-            if hasattr(module_ref.k_bmm_quantizer, "_amax"):
-                assert hasattr(module_test.k_bmm_quantizer, "_amax"), (
-                    f"K quantizer _amax missing in {name_test}"
-                )
-                if module_ref.k_bmm_quantizer._amax is not None:
-                    assert torch.allclose(
-                        module_ref.k_bmm_quantizer._amax, module_test.k_bmm_quantizer._amax
-                    ), f"K quantizer _amax mismatch in {name_test}"
-
-            if hasattr(module_ref.v_bmm_quantizer, "_amax"):
-                assert hasattr(module_test.v_bmm_quantizer, "_amax"), (
-                    f"V quantizer _amax missing in {name_test}"
-                )
-                if module_ref.v_bmm_quantizer._amax is not None:
-                    assert torch.allclose(
-                        module_ref.v_bmm_quantizer._amax, module_test.v_bmm_quantizer._amax
-                    ), f"V quantizer _amax mismatch in {name_test}"
-
-
 @pytest.mark.parametrize(
     "config",
     [
@@ -955,9 +861,15 @@ def test_kv_cache_sharded_state_dict(tmp_path, config):
     preserved across the save/load cycle.
     """
     size = min(2, torch.cuda.device_count())  # Use 2 GPUs if available, else 1
+    model_config = {
+        "transformer_impl": "modelopt",
+        "use_te": True,
+    }
     spawn_multiprocess_job(
         size=size,
-        job=partial(_test_kv_cache_sharded_state_dict_helper, tmp_path, config),
+        job=partial(
+            _test_sharded_state_dict, tmp_path, config, 256, None, False, False, model_config
+        ),
         backend="nccl",
     )
 
