@@ -52,7 +52,6 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins.megatron import _QuantTEMCoreRowParallelLinear
-from modelopt.torch.utils.plugins import megatron_prefill
 
 try:
     from megatron.core.extensions.transformer_engine import TERowParallelLinear
@@ -79,6 +78,22 @@ def get_batch(model, batch_size=2):
     loss_mask = torch.ones((batch_size, seq_length), dtype=torch.float32).cuda()
 
     return input_ids, labels, position_ids, attention_mask, loss_mask
+
+
+def get_forward(model, batch_size=2):
+    """Return a forward function with cached batch inputs."""
+    input_ids, labels, position_ids, attention_mask, loss_mask = get_batch(model, batch_size)
+
+    def forward(model):
+        return model.forward(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            loss_mask=loss_mask,
+        )
+
+    return forward
 
 
 def test_convert_megatron_parallel_linear(distributed_setup_size_1):
@@ -357,14 +372,8 @@ def _test_sharded_state_dict(
         transformer_impl=transformer_impl,
     )
 
-    prompt_tokens = torch.randint(
-        0, model_ref.vocab_size, (2, model_ref.max_sequence_length)
-    ).cuda()
-
-    def forward_fn(model):
-        return megatron_prefill(model, prompt_tokens)
-
-    model_ref = mtq.quantize(model_ref, config, forward_fn)
+    forward = get_forward(model_ref)
+    model_ref = mtq.quantize(model_ref, config, forward)
     if compress:
         mtq.compress(model_ref)
 
@@ -376,7 +385,7 @@ def _test_sharded_state_dict(
         tmp_path,
         model_ref,
         model_test,
-        forward_fn,
+        forward,
         meta_device=meta_device,
         version=modelopt_version,
     )
@@ -430,16 +439,27 @@ mixed_block_size_config["quant_cfg"].update(
 )
 @pytest.mark.parametrize("compress", [False, True])
 @pytest.mark.parametrize("meta_device", [False, True])
-def test_homogeneous_sharded_state_dict(tmp_path, config, compress, meta_device):
+@pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
+def test_homogeneous_sharded_state_dict(tmp_path, config, compress, meta_device, transformer_impl):
     if compress and config is mtq.W4A8_AWQ_BETA_CFG:
         pytest.skip("W4A8_AWQ_BETA_CFG is not supported for compress")
 
     size = torch.cuda.device_count()
 
+    model_config = {"transformer_impl": transformer_impl}
+    if transformer_impl == "modelopt":
+        model_config["use_te"] = True
     spawn_multiprocess_job(
         size=size,
         job=partial(
-            _test_sharded_state_dict, tmp_path, config, 256, None, compress, meta_device, {}
+            _test_sharded_state_dict,
+            tmp_path,
+            config,
+            256,
+            None,
+            compress,
+            meta_device,
+            model_config,
         ),
         backend="nccl",
     )
@@ -534,16 +554,13 @@ def _test_fp8_real_quantize_helper(rank, size):
     config = mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG
 
     model = _gpt_model_provider(tp_size=1, hidden_size=hidden_size)
-    prompt_tokens = torch.randint(0, model.vocab_size, (2, model.max_sequence_length)).cuda()
 
-    def forward_fn(model):
-        return megatron_prefill(model, prompt_tokens)
-
-    forward_fn(model)
+    forward = get_forward(model)
+    forward(model)
 
     # real quant the model
     cur_mem = get_model_size(model)
-    real_quant_model = mtq.quantize(model, config, forward_fn)
+    real_quant_model = mtq.quantize(model, config, forward)
     mtq.compress(real_quant_model)
     real_quant_mem = get_model_size(real_quant_model)
 
@@ -551,7 +568,7 @@ def _test_fp8_real_quantize_helper(rank, size):
     assert real_quant_mem < (cur_mem / 2) * 1.1, "Memory after real quantization is not reduced."
 
     # check forward works after real quantization
-    forward_fn(real_quant_model)
+    forward(real_quant_model)
 
     assert real_quant_mem < cur_mem
 
@@ -606,12 +623,6 @@ def _test_te_grouped_vs_sequential_quantize_helper(tp_size, ep_size, etp_size, r
         seed=SEED,
     )
 
-    # Create input
-    prompt_tokens = torch.randint(0, 64, (2, 16)).cuda()
-
-    def forward_fn(model):
-        return megatron_prefill(model, prompt_tokens)
-
     # Create TEGrouped MoE model
     te_grouped_moe_model = _gpt_model_provider(
         tp_size=tp_size,
@@ -622,6 +633,10 @@ def _test_te_grouped_vs_sequential_quantize_helper(tp_size, ep_size, etp_size, r
         use_te=True,
         num_moe_experts=4,
     )
+
+    # Create forward function with cached inputs
+    forward = get_forward(te_grouped_moe_model)
+
     num_te_grouped_mlp = sum(
         isinstance(module, TEGroupedMLP) for module in te_grouped_moe_model.modules()
     )
@@ -649,19 +664,19 @@ def _test_te_grouped_vs_sequential_quantize_helper(tp_size, ep_size, etp_size, r
     copy_weights_from_grouped_to_non_grouped(te_grouped_moe_model, sequential_moe_model)
 
     # Compare model outputs before quantization
-    te_grouped_moe_output = forward_fn(te_grouped_moe_model)
-    sequential_moe_output = forward_fn(sequential_moe_model)
+    te_grouped_moe_output = forward(te_grouped_moe_model)
+    sequential_moe_output = forward(sequential_moe_model)
     assert torch.allclose(te_grouped_moe_output, sequential_moe_output, atol=1e-6, rtol=1e-6)
 
     # Quantize grouped model
-    mtq.quantize(te_grouped_moe_model, mtq.FP8_DEFAULT_CFG, forward_fn)
+    mtq.quantize(te_grouped_moe_model, mtq.FP8_DEFAULT_CFG, forward)
 
     # Quantize non-grouped model
-    mtq.quantize(sequential_moe_model, mtq.FP8_DEFAULT_CFG, forward_fn)
+    mtq.quantize(sequential_moe_model, mtq.FP8_DEFAULT_CFG, forward)
 
     # Compare model outputs after quantization
-    te_grouped_moe_quant_output = forward_fn(te_grouped_moe_model)
-    sequential_moe_quant_output = forward_fn(sequential_moe_model)
+    te_grouped_moe_quant_output = forward(te_grouped_moe_model)
+    sequential_moe_quant_output = forward(sequential_moe_model)
     assert torch.allclose(
         te_grouped_moe_quant_output, sequential_moe_quant_output, atol=1e-6, rtol=1e-6
     )
@@ -716,18 +731,15 @@ def _test_expert_model_parallel_amax_sync(
             param.data.fill_(const_val)
             weight_idx += 1
 
-    prompt_tokens = (torch.ones((2, model.max_sequence_length)) * 0.05 + rank * 0.5).cuda().long()
-
     # force all expert routing
     for module in model.modules():
         if isinstance(module, TopKRouter):
             module.topk = module.num_experts
 
-    def forward_fn(model):
-        return megatron_prefill(model, prompt_tokens)
+    forward = get_forward(model)
 
     # quantize the model
-    model = mtq.quantize(model, config, forward_fn)
+    model = mtq.quantize(model, config, forward)
     # Check initial sync status
     initial_sync, quantizer_type, rank_values = compare_amax_sync_across_expert_parallel(model)
     assert initial_sync, (
@@ -735,7 +747,7 @@ def _test_expert_model_parallel_amax_sync(
     )
 
     # Test if the amax values are inconsistent when distributed sync is disabled
-    mtq.model_calib.max_calibrate(model, forward_fn, distributed_sync=False)
+    mtq.model_calib.max_calibrate(model, forward, distributed_sync=False)
     inconsistent_amax, _, _ = compare_amax_sync_across_expert_parallel(
         model, compare_across_experts=False
     )
@@ -745,7 +757,7 @@ def _test_expert_model_parallel_amax_sync(
         "Amax should not be synchronized across expert parallel ranks since expert parallel is disabled"
     )
     # calibrate the model with distributed sync and test synchronization
-    mtq.model_calib.max_calibrate(model, forward_fn, distributed_sync=True)
+    mtq.model_calib.max_calibrate(model, forward, distributed_sync=True)
     for module in model.modules():
         if hasattr(module, "sync_moe_local_experts_amax"):
             module.sync_moe_local_experts_amax()
@@ -798,14 +810,11 @@ def _test_kv_cache_quant_helper(config, rank, size):
         transformer_impl="modelopt",  # This uses TEDotProductAttention via get_gpt_modelopt_spec
     ).cuda()
 
-    # Create dummy input for calibration
-    prompt_tokens = torch.randint(0, model.vocab_size, (2, model.max_sequence_length)).cuda()
-
-    def forward_fn(model):
-        return megatron_prefill(model, prompt_tokens)
+    # Create forward function with cached inputs
+    forward = get_forward(model)
 
     # Test KV cache quantization with the given config
-    quantized_model = mtq.quantize(model, config, forward_fn)
+    quantized_model = mtq.quantize(model, config, forward)
 
     # Find TEDotProductAttention modules and verify they have KV cache quantizers
     te_attention_found = False
@@ -823,7 +832,7 @@ def _test_kv_cache_quant_helper(config, rank, size):
     assert te_attention_found, "No TEDotProductAttention with KV cache quantizers found in model"
 
     # Quick smoke test that forward still works
-    output = forward_fn(quantized_model)
+    output = forward(quantized_model)
     assert output is not None, "Forward pass failed"
 
 
@@ -880,16 +889,7 @@ def test_convert_mcore_te_gpt_model(distributed_setup_size_1):
     initialize_for_megatron(tensor_model_parallel_size=1, seed=SEED)
     model = get_mcore_gpt_model(tensor_model_parallel_size=1, transformer_impl="transformer_engine")
 
-    input_ids, labels, position_ids, attention_mask, loss_mask = get_batch(model)
-
-    def forward(model):
-        return model.forward(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-            loss_mask=loss_mask,
-        )
+    forward = get_forward(model)
 
     for name, param in model.named_parameters():
         param.requires_grad = True
