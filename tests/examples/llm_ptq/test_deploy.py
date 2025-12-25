@@ -386,6 +386,13 @@ def test_kimi(command):
             tensor_parallel_size=8,
             mini_sm=89,
         ),
+        *ModelDeployerList(
+            model_id="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=1,
+            mini_sm=89,
+            attn_backend="FLASHINFER",
+        ),
     ],
     ids=idfn,
 )
@@ -464,15 +471,30 @@ def test_medusa(command):
         ),
         *ModelDeployerList(
             base_model="openai/gpt-oss-120b",
-            model_id="nvidia/gpt-oss-120b-Eagle3",
+            model_id="nvidia/gpt-oss-120b-Eagle3-long-context",
             backend=("trtllm", "sglang"),
             tensor_parallel_size=8,
             mini_sm=89,
         ),
         *ModelDeployerList(
             base_model="openai/gpt-oss-120b",
-            model_id="nvidia/gpt-oss-120b-Eagle3-v2",
+            model_id="nvidia/gpt-oss-120b-Eagle3-short-context",
             backend=("trtllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=89,
+        ),
+        *ModelDeployerList(
+            base_model="openai/gpt-oss-120b",
+            model_id="nvidia/gpt-oss-120b-Eagle3-throughput",
+            backend=("trtllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=89,
+        ),
+        *ModelDeployerList(
+            base_model="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+            model_id="nvidia/EAGLE3-NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+            backend=("trtllm", "vllm", "sglang"),
+            eagle3_one_model=False,
             tensor_parallel_size=8,
             mini_sm=89,
         ),
@@ -487,4 +509,16 @@ def test_medusa(command):
     ids=idfn,
 )
 def test_eagle(command):
-    command.run()
+    """Skip test if MODELOPT_LOCAL_MODEL_ROOT is set but model doesn't exist locally.
+    speculative models shoule be loaded by local path"""
+    local_root = os.getenv("MODELOPT_LOCAL_MODEL_ROOT")
+    if not local_root:
+        return
+
+    local_path = os.path.join(local_root, command.model_id)
+    if os.path.isdir(local_path):
+        # Update model_id to use local path
+        command.model_id = local_path
+        command.run()
+    else:
+        pytest.skip(f"Local model not found: {local_path}")
