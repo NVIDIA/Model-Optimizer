@@ -272,7 +272,7 @@ To perform QAD with logits loss, run:
    --backend fsdp2
 ```
 
-> **_NOTE:_** QAD doesn't support original FSDP - only FSDP2. It also requires quantization to be applied before the FSDP wrapper.
+> **_NOTE:_** QAD doesn't support FSDP1 (<https://docs.pytorch.org/docs/stable/fsdp.html>)  - only FSDP2. It also requires quantization to be applied before the FSDP wrapper.
 
 ## Testing QAT model with LLM benchmarks for accuracy evaluation
 
