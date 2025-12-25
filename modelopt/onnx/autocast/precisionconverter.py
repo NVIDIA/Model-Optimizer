@@ -97,6 +97,7 @@ class PrecisionConverter:
         max_ir_version: int | None = None,
         trt_plugins: list[str] | None = [],
         tensor_block_dict: dict[str, dict[str, list[int]]] = {},
+        use_local_type_inference: bool = False,
     ) -> None:
         """Initialize PrecisionConverter.
 
@@ -114,6 +115,7 @@ class PrecisionConverter:
             max_ir_version: Max IR version for conversion.
             trt_plugins: List of custom TensorRT plugin library paths in .so format (compiled shared library).
             tensor_block_dict: Dictionary of tensors (operation type and I/O indices) that should remain in FP32.
+            use_local_type_inference: Use local type inference instead of ONNX's infer_shapes.
         """
         self.model = deepcopy(model)
         self.value_info_map = value_info_map
@@ -140,6 +142,7 @@ class PrecisionConverter:
         self.min_opset = min_opset
         self.max_ir_version = max_ir_version
         self.trt_plugins = trt_plugins
+        self.use_local_type_inference = use_local_type_inference
 
         # Detect additional ops not supported in low precision according to the model's opset version
         self.op_types_not_supported_in_low_precision = OP_TYPES_NOT_SUPPORTED_IN_LOW_PRECISION + (
@@ -156,6 +159,20 @@ class PrecisionConverter:
         # Flags to log initializer value range warnings only once
         self._warned_values_clamp_max = False
         self._warned_values_clamp_min = False
+
+    def infer_types(self, **kwargs):
+        """Infers types (and optionally shapes) based on the use_local_type_inference flag.
+
+        Args:
+            **kwargs: Additional arguments passed to infer_shapes when not using local type inference.
+
+        Returns:
+            onnx.ModelProto: Model with inferred types (and shapes if not using local type inference).
+        """
+        if self.use_local_type_inference:
+            return onnx_utils.infer_types(self.model)
+        else:
+            return onnx_utils.infer_shapes(self.model, **kwargs)
 
     def convert(
         self,
@@ -254,10 +271,10 @@ class PrecisionConverter:
             # Clear type/shape information for intermediates and outputs (including subgraphs)
             self._clear_types_and_shapes_recursive(self.model.graph)
             # Populate type information with inferred types
-            self.model = onnx_utils.infer_shapes(self.model, strict_mode=True, check_type=False)
+            self.model = self.infer_types(strict_mode=True, check_type=False)
             self._ensure_types_are_defined()
             # Sanity check: Verify type correctness
-            self.model = onnx_utils.infer_shapes(self.model, strict_mode=True, check_type=True)
+            self.model = self.infer_types(strict_mode=True, check_type=True)
 
         # Update value_info_map and initializer_map with casts we added
         self.value_info_map, self.initializer_map, self.node_to_init_map = utils.setup_mappings(
@@ -282,7 +299,9 @@ class PrecisionConverter:
     ) -> None:
         """Recursively clear type/shape information for a graph and all its subgraphs.
 
-        This is necessary for control flow operators (Scan, If, Loop) which have subgraphs.
+        If use_local_type_inference is True, we clear only types, not shapes.
+        For subgraphs, input types/shapes are cleared, so that the input types/shapes are propagated
+        from the main graph.
 
         Args:
             graph: The ONNX graph to clear types and shapes for.
@@ -299,22 +318,25 @@ class PrecisionConverter:
                 for inp in g.input:
                     if inp.type.HasField("tensor_type"):
                         inp.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
-                        for idx, d in enumerate(inp.type.tensor_type.shape.dim):
-                            if d.dim_value:
-                                inp.type.tensor_type.shape.dim[idx].dim_param = "unk"
+                        if not self.use_local_type_inference:
+                            for idx, d in enumerate(inp.type.tensor_type.shape.dim):
+                                if d.dim_value:
+                                    inp.type.tensor_type.shape.dim[idx].dim_param = "unk"
 
             # Clear type/shape information for intermediates and outputs
             for vi in g.value_info:
                 vi.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
-                for idx, d in enumerate(vi.type.tensor_type.shape.dim):
-                    if d.dim_value:
-                        vi.type.tensor_type.shape.dim[idx].dim_param = "unk"
+                if not self.use_local_type_inference:
+                    for idx, d in enumerate(vi.type.tensor_type.shape.dim):
+                        if d.dim_value:
+                            vi.type.tensor_type.shape.dim[idx].dim_param = "unk"
 
             for out in g.output:
                 out.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
-                for idx, d in enumerate(out.type.tensor_type.shape.dim):
-                    if d.dim_value:
-                        out.type.tensor_type.shape.dim[idx].dim_param = "unk"
+                if not self.use_local_type_inference:
+                    for idx, d in enumerate(out.type.tensor_type.shape.dim):
+                        if d.dim_value:
+                            out.type.tensor_type.shape.dim[idx].dim_param = "unk"
 
         utils.walk_subgraphs_recursive(graph, _clear_callback, is_subgraph=is_subgraph)
 
@@ -1159,8 +1181,9 @@ class PrecisionConverter:
         if self.custom_ops:
             self.model = self._propagate_types_shapes_custom_ops(self.model)
         else:
-            self.model = onnx_utils.infer_shapes(self.model, strict_mode=True)
-            self.model = onnx_utils.infer_shapes(self.model, strict_mode=True, check_type=True)
+            self.model = self.infer_types(strict_mode=True)
+            if not self.use_local_type_inference:
+                self.model = self.infer_types(strict_mode=True, check_type=True)
 
         nodes_to_remove = []
         for node in self.model.graph.node:
@@ -1245,7 +1268,7 @@ class PrecisionConverter:
             if self.custom_ops:
                 self.model = self._propagate_types_shapes_custom_ops(self.model)
             else:
-                self.model = onnx_utils.infer_shapes(self.model, strict_mode=True, check_type=True)
+                self.model = self.infer_types(strict_mode=True, check_type=True)
             self.value_info_map, self.initializer_map, self.node_to_init_map = utils.setup_mappings(
                 self.model
             )
