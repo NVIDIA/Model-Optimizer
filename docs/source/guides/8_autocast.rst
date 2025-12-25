@@ -42,7 +42,7 @@ AutoCast can also be used programmatically through its Python API:
       trt_plugins=[],                       # list of TensorRT plugin library paths in .so format
       max_depth_of_reduction=None,          # maximum depth of reduction allowed in low precision
       opset=None,                           # optional target ONNX opset version (default: 13 for fp16, 22 for bf16)
-      use_local_type_inference=False,       # use local type inference instead of ONNX's infer_shapes (WAR)
+      use_standalone_type_inference=False,  # use standalone type inference instead of ONNX's infer_shapes (WAR)
    )
 
    # Save the converted model
@@ -85,7 +85,7 @@ AutoCast follows these steps to convert a model:
    - Automatically replaces initializers with lower precision values
    - Performs type inference to propagate types through the graph
      - By default, uses ONNX's ``infer_shapes`` which performs both shape and type inference using the ONNX infer_shapes API.
-     - Use ``use_local_type_inference=True`` to use a local type-only inference implementation (experimental).
+     - Use ``use_standalone_type_inference=True`` to use a standalone type-only inference implementation (experimental).
 
 #. **Validation and Export**:
 
@@ -152,10 +152,10 @@ Best Practices
 #. **Type Inference Control**
 
    - By default, AutoCast uses ONNX's ``infer_shapes`` which performs both shape and type inference.
-   - Use ``--use_local_type_inference`` to enable a local type-only inference implementation.
+   - Use ``--use_standalone_type_inference`` to enable a standalone type-only inference implementation.
    - This is a workaround for cases where shape inference fails for any reason, which allows us to bypass the dependency in ONNX's shape inference logic.
-   - The local implementation uses graphsurgeon for topological sorting and handles special operators like Cast, QuantizeLinear, DequantizeLinear, Constant and ConstantOfShape.
-   - Note: The local type inference may be less robust than ONNX's implementation for edge cases, but avoids unnecessary shape inference overhead and possible failures.
+   - The standalone implementation uses graphsurgeon for topological sorting and handles special operators like Cast, QuantizeLinear, DequantizeLinear, Constant and ConstantOfShape.
+   - Note: The standalone type inference may be less robust than ONNX's implementation for edge cases, but avoids unnecessary shape inference overhead and possible failures.
 
 Limitations and Restrictions
 ----------------------------
@@ -211,8 +211,8 @@ Convert to BF16 with a specific opset:
 
    python -m modelopt.onnx.autocast --onnx_path model.onnx --low_precision_type bf16 --opset 22
 
-Use local type inference instead of ONNX's infer_shapes:
+Use standalone type inference instead of ONNX's infer_shapes:
 
 .. code-block:: bash
 
-   python -m modelopt.onnx.autocast --onnx_path model.onnx --use_local_type_inference
+   python -m modelopt.onnx.autocast --onnx_path model.onnx --use_standalone_type_inference
