@@ -299,9 +299,9 @@ class PrecisionConverter:
     ) -> None:
         """Recursively clear type/shape information for a graph and all its subgraphs.
 
-        This is necessary for control flow operators (Scan, If, Loop) which have subgraphs.
-        For subgraphs, preserve value_info for outer scope variables (not produced by nodes in subgraph).
-        For main graph, clear all value_info.
+        If use_local_type_inference is True, we clear only types, not shapes.
+        For subgraphs, input types/shapes are cleared, so that the input types/shapes are propagated
+        from the main graph.
 
         Args:
             graph: The ONNX graph to clear types and shapes for.
@@ -318,15 +318,23 @@ class PrecisionConverter:
                 for inp in g.input:
                     if inp.type.HasField("tensor_type"):
                         inp.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
-                        for idx, d in enumerate(inp.type.tensor_type.shape.dim):
-                            if d.dim_value:
-                                inp.type.tensor_type.shape.dim[idx].dim_param = "unk"
+                        if not self.use_local_type_inference:
+                            for idx, d in enumerate(inp.type.tensor_type.shape.dim):
+                                if d.dim_value:
+                                    inp.type.tensor_type.shape.dim[idx].dim_param = "unk"
 
             if is_sub:
                 # Identify which tensors are produced by nodes in this subgraph
                 subgraph_outputs = set()
                 for node in g.node:
                     subgraph_outputs.update(node.output)
+            # Clear type/shape information for intermediates and outputs
+            for vi in g.value_info:
+                vi.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
+                if not self.use_local_type_inference:
+                    for idx, d in enumerate(vi.type.tensor_type.shape.dim):
+                        if d.dim_value:
+                            vi.type.tensor_type.shape.dim[idx].dim_param = "unk"
 
                 # Clear value_info only for intermediates produced by nodes in this subgraph
                 for vi in g.value_info:
@@ -345,9 +353,10 @@ class PrecisionConverter:
             # Clear outputs for both main graph and subgraphs
             for out in g.output:
                 out.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
-                for idx, d in enumerate(out.type.tensor_type.shape.dim):
-                    if d.dim_value:
-                        out.type.tensor_type.shape.dim[idx].dim_param = "unk"
+                if not self.use_local_type_inference:
+                    for idx, d in enumerate(out.type.tensor_type.shape.dim):
+                        if d.dim_value:
+                            out.type.tensor_type.shape.dim[idx].dim_param = "unk"
 
         utils.walk_subgraphs_recursive(graph, _clear_callback, is_subgraph=is_subgraph)
 
