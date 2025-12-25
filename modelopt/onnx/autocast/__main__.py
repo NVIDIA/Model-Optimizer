@@ -186,7 +186,7 @@ def get_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--use_local_type_inference",
+        "--use_standalone_type_inference",
         action="store_true",
         default=False,
         help=(
@@ -228,7 +228,7 @@ def main(argv=None):
         trt_plugins_precision=args.trt_plugins_precision,
         max_depth_of_reduction=args.max_depth_of_reduction,
         opset=args.opset,
-        use_local_type_inference=args.use_local_type_inference,
+        use_standalone_type_inference=args.use_standalone_type_inference,
     )
 
     output_path = args.output_path
