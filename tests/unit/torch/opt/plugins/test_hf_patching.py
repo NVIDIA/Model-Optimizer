@@ -45,7 +45,6 @@ def test_nested_model_save_restore(tmp_path, model_cls, teacher_model_type):
     kd_config = {
         "teacher_model": teacher_model,
         "criterion": mtd.LogitsDistillationLoss(),
-        "expose_minimal_state_dict": False,
     }
     model = mtd.convert(model_ref, mode=[("kd_loss", kd_config)])
     model.save_pretrained(tiny_llama_dir / "modelopt_model")

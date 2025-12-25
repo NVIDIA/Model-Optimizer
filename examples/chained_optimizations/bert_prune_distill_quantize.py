@@ -861,11 +861,6 @@ def evaluate_model(
     return eval_metric
 
 
-# Model Optimizer: Define a teacher factory for initializing the distillation model
-def teacher_factory(model_name_or_path):
-    return AutoModelForQuestionAnswering.from_pretrained(model_name_or_path)
-
-
 # Model Optimizer: Define a custom distillation loss function that uses start and end logits
 class StartEndLogitsDistillationLoss(mtd.LogitsDistillationLoss):
     def forward(self, outputs_s, outputs_t):
@@ -1199,7 +1194,9 @@ def main(input_args: list[str] | None = None) -> None:
             logger.info(f"Using distillation with teacher {args.model_name_or_path}")
 
             kd_config = {
-                "teacher_model": (teacher_factory, (args.model_name_or_path,), {}),
+                "teacher_model": AutoModelForQuestionAnswering.from_pretrained(
+                    args.model_name_or_path,
+                ),
                 "criterion": StartEndLogitsDistillationLoss(args.temperature),
             }
             model = mtd.convert(model, mode=[("kd_loss", kd_config)])
