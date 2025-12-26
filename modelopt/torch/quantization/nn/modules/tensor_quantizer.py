@@ -1169,6 +1169,54 @@ class TensorQuantizer(nn.Module):
                     "if happening during modelopt restore."
                 )
 
+    def sync_bias_across_distributed_group(self, parallel_group: DistributedProcessGroup):
+        """Synchronize the bias across all ranks in the given group."""
+        if not parallel_group.is_initialized():
+            return
+        if self.bias_calibrator is None or self.bias_type != "static":
+            return
+
+        bias = self.bias_calibrator.compute_bias()
+        if bias is None:
+            return
+
+        try:
+            if self.bias_method == "mean":
+                cnt = float(getattr(self.bias_calibrator, "_cnt", 0))
+                bias_sum = bias.float() * cnt
+                cnt_tensor = torch.tensor(cnt, device=bias_sum.device, dtype=bias_sum.dtype)
+                dist.all_reduce(bias_sum, op=dist.ReduceOp.SUM, group=parallel_group.group)
+                dist.all_reduce(cnt_tensor, op=dist.ReduceOp.SUM, group=parallel_group.group)
+                if cnt_tensor.item() > 0:
+                    bias_avg = (bias_sum / cnt_tensor).to(bias.dtype)
+                else:
+                    bias_avg = bias
+                self.bias_value = bias_avg
+                self.bias_calibrator._calib_bias = bias_avg.detach().clone()
+                self.bias_calibrator._cnt = int(cnt_tensor.item())
+            elif self.bias_method == "max_min":
+                calib_max = getattr(self.bias_calibrator, "_calib_max", None)
+                calib_min = getattr(self.bias_calibrator, "_calib_min", None)
+                if calib_max is None:
+                    calib_max = torch.full_like(bias, -float("inf"))
+                if calib_min is None:
+                    calib_min = torch.full_like(bias, float("inf"))
+                dist.all_reduce(calib_max, op=dist.ReduceOp.MAX, group=parallel_group.group)
+                dist.all_reduce(calib_min, op=dist.ReduceOp.MIN, group=parallel_group.group)
+                bias_val = ((calib_max + calib_min) / 2).to(bias.dtype)
+                self.bias_value = bias_val
+                self.bias_calibrator._calib_max = calib_max.detach().clone()
+                self.bias_calibrator._calib_min = calib_min.detach().clone()
+                self.bias_calibrator._calib_bias = bias_val.detach().clone()
+            else:
+                warnings.warn(f"Unsupported bias method: {self.bias_method}; skipping bias sync.")
+        except RuntimeError as e:
+            warnings.warn(
+                f"Failed to synchronize bias: {e}, probably because the tensor is on a device which is not"
+                "supported by the current distributed backend. This warning can be ignored"
+                "if happening during modelopt restore."
+            )
+
     @contextlib.contextmanager
     def disable_pre_quant_scale(self):
         """Context manager to turn off pre_quant_scale inside this quantizer."""
