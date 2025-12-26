@@ -266,7 +266,97 @@ def mse_calibrate(
     # Step 4: Compute optimal amax and load it
     finish_stats_collection(model, method="mse")
 
-    # TODO: Sync amax across distributed processes
+    if not distributed_sync:
+        return
+
+    def sync_quantizer_amax_across_dp_ep(quantizer, parallel_state):
+        """Synchronize the amax across all ranks in the data parallel and expert parallel groups."""
+        if isinstance(quantizer, SequentialQuantizer):
+            for _q in quantizer:
+                sync_quantizer_amax_across_dp_ep(_q, parallel_state)
+            return
+        if getattr(quantizer, "_amax", None) is not None:
+            quantizer.sync_amax_across_distributed_group(parallel_state.data_parallel_group)
+            quantizer.sync_amax_across_distributed_group(parallel_state.expert_model_parallel_group)
+        # TODO: create sync_bias_across_distributed_group
+
+    for name, module in model.named_modules():
+        if isinstance(module, QuantModule):
+            for child in module.children():
+                if isinstance(child, (TensorQuantizer, SequentialQuantizer)):
+                    sync_quantizer_amax_across_dp_ep(child, module.parallel_state)
+
+    def sync_quantizer_amax_across_tp(
+        quantizer: TensorQuantizer | SequentialQuantizer,
+        linear_name: str,
+        quantizer_type: str,
+        axes_for_sync: list,
+        parallel_state: ParallelState,
+    ):
+        # Syncing amax across TP for sequential quantizer
+        if isinstance(quantizer, SequentialQuantizer):
+            for _q in quantizer:
+                # Syncing amax across TP for sequential quantizer
+                sync_quantizer_amax_across_tp(
+                    _q, linear_name, quantizer_type, axes_for_sync, parallel_state
+                )
+            return
+        # sync is not needed for block quantization
+        if quantizer.block_sizes is not None:
+            if hasattr(quantizer, "_padding"):
+                warnings.warn(
+                    f"Found block-quantized padded {quantizer_type} for {linear_name}, amax will"
+                    " not be synced correctly."
+                )
+            # Skip amax sync for INT4 / W4A8 block quantization
+            # Sync amax for NVFP4 (dynamic per-block, static per-tensor quantized scale)
+            if getattr(quantizer.block_sizes, "type", None) == "dynamic":
+                return
+
+        if quantizer.axis in axes_for_sync and quantizer.amax is not None:
+            quantizer.sync_amax_across_distributed_group(parallel_state.tensor_parallel_group)
+
+    for name, module in model.named_modules():
+        if getattr(module, "_parallel_state", None) is None:
+            continue
+
+        if is_quantized_column_parallel_linear(module):
+            sync_quantizer_amax_across_tp(
+                module.input_quantizer,
+                name,
+                "input_quantizer",
+                axes_for_sync=[None, -1],
+                parallel_state=module.parallel_state,
+            )
+
+            sync_quantizer_amax_across_tp(
+                module.weight_quantizer,
+                name,
+                "weight_quantizer",
+                axes_for_sync=[None, -1],
+                parallel_state=module.parallel_state,
+            )
+
+        if is_quantized_row_parallel_linear(module):
+            sync_quantizer_amax_across_tp(
+                module.input_quantizer,
+                name,
+                "input_quantizer",
+                axes_for_sync=[None],
+                parallel_state=module.parallel_state,
+            )
+
+            sync_quantizer_amax_across_tp(
+                module.weight_quantizer,
+                name,
+                "weight_quantizer",
+                axes_for_sync=[None, 0],
+                parallel_state=module.parallel_state,
+            )
+
+    for name, module in model.named_modules():
+        if hasattr(module, "sync_moe_local_experts_amax"):
+            module.sync_moe_local_experts_amax()
 
 
 def enable_stats_collection(model: nn.Module):
