@@ -179,7 +179,7 @@ class ModelDeployer:
             pytest.skip("vllm package not available")
 
         quantization_method = "modelopt"
-        if "FP4" in self.model_id.lower():
+        if "fp4" in self.model_id.lower():
             quantization_method = "modelopt_fp4"
         llm = LLM(
             model=self.model_id,
@@ -215,7 +215,7 @@ class ModelDeployer:
         except ImportError:
             pytest.skip("sglang package not available")
         quantization_method = "modelopt"
-        if "FP4" in self.model_id.lower():
+        if "fp4" in self.model_id.lower():
             quantization_method = "modelopt_fp4"
         if "eagle" in self.model_id.lower():
             llm = sgl.Engine(
