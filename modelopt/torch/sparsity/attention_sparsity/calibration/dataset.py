@@ -20,9 +20,6 @@ import string
 from dataclasses import dataclass
 from typing import Any
 
-from tqdm import tqdm
-from transformers import AutoTokenizer
-
 from . import ruler_utils
 
 
@@ -232,6 +229,8 @@ class RulerDatasetBuilder:
 
         # Initialize tokenizer
         if isinstance(tokenizer_name_or_path, str):
+            from transformers import AutoTokenizer
+
             self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
         else:
             self.tokenizer = tokenizer_name_or_path
@@ -243,6 +242,8 @@ class RulerDatasetBuilder:
         Returns:
             List of calibration samples with 'input' and 'length' fields
         """
+        from tqdm import tqdm
+
         all_samples = []
 
         # Generate calibration samples

@@ -68,14 +68,6 @@ def create_from_arg_obj(cls: type[T], arg_dict: dict, additional_config: dict | 
     additional_config = {} if additional_config is None else additional_config
     additional_config = {k: v for k, v in additional_config.items() if v is not None}
 
-    # Force eager attention if sparse attention is requested
-    if sparse_cfg:
-        additional_config["attn_implementation"] = "eager"
-        warnings.warn(
-            "Sparse attention requires attn_implementation='eager'. "
-            "Forcing eager attention implementation."
-        )
-
     # Enable automatic save/load of modelopt state huggingface checkpointing
     mto.enable_huggingface_checkpointing()
 
