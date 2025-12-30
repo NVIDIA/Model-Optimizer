@@ -29,6 +29,7 @@ MODEL_NAME_TO_TYPE = {
     "MPT": "mpt",
     "Bloom": "bloom",
     "ChatGLM": "chatglm",
+    "Qwen3Moe": "qwen3moe",
     "Qwen3Next": "qwen3next",
     "QWen": "qwen",
     "RecurrentGemma": "recurrentgemma",
