@@ -1040,6 +1040,7 @@ class _DynamicMCoreLanguageModel(DynamicModule):
         ffn_hidden_size_divisor: int = 1,
         mamba_head_dim_divisor: int = 1,
         num_moe_experts_divisor: int = 1,
+        num_layers_divisor: int = 1,
     ):
         """Modify the dynamic choices of the module according to provided keyword arguments.
 
@@ -1048,10 +1049,15 @@ class _DynamicMCoreLanguageModel(DynamicModule):
             ffn_hidden_size_divisor: The divisor of the mlp ffn_hidden_size.
             mamba_head_dim_divisor: The divisor of the mamba head_dim.
             num_moe_experts_divisor: The divisor of the number of MoE experts.
+            num_layers_divisor: The divisor of the number of layers.
         """
-        hp = self.get_hparam("hidden_size")
-        choices = {int(make_divisible(c, hidden_size_divisor)) for c in hp.choices}  # type: ignore[arg-type]
-        hp.choices = list(set(hp.choices) & choices | {hp.original})
+        for hp_name, divisor in [
+            ("hidden_size", hidden_size_divisor),
+            ("num_layers", num_layers_divisor),
+        ]:
+            hp = self.get_hparam(hp_name)
+            choices = {int(make_divisible(c, divisor)) for c in hp.choices}  # type: ignore[arg-type]
+            hp.choices = list(set(hp.choices) & choices | {hp.original})
 
         for layer in self.decoder.layers:
             layer.modify(

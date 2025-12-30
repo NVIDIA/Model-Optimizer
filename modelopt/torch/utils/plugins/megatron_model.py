@@ -46,9 +46,14 @@ def param_num_megatron(
     Returns:
         The number of parameters in the model (reduced across TP and PP ranks).
     """
+    from modelopt.torch.opt.dynamic import DynamicModule
+
     if from_forward:
         assert args is not None, "args must be provided if from_forward is True"
         params = int(param_num_from_forward(model, args, unit=1.0))
+    elif isinstance(model, DynamicModule):
+        # NOTE: model.parameters() doesnt consider active_slice so we dont get sorted or trimmed parameters!
+        raise NotImplementedError("DynamicModule input is not supported without from_forward.")
     else:
         params = sum(p.numel() for p in model.parameters())
     reduced_params = torch.Tensor([params]).to(device=next(model.parameters()).device)

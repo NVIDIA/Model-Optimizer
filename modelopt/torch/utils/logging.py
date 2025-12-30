@@ -46,7 +46,7 @@ __all__ = [
 def num2hrb(num: float, suffix="") -> str:
     """Convert big floating number to human readable string."""
     step = 1000  # step between units is 1000
-    units = ["", "K", "M", "G", "T", "P", "E"]
+    units = ["", "K", "M", "B", "T", "P", "E"]
     while abs(num) >= step and len(units) > 1:
         num /= step
         units.pop(0)
