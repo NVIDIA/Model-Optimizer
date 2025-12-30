@@ -17,7 +17,7 @@
 
 import pytest
 import torch
-from _test_utils.torch_sparsity.sparse_attention_common import SimpleTransformerEncoderLayer
+from _test_utils.torch.sparsity.sparse_attention_common import SimpleTransformerEncoderLayer
 
 import modelopt.torch.opt as mto
 from modelopt.torch.sparsity.attention_sparsity import sparsify

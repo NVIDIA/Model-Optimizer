@@ -167,7 +167,11 @@ class CalibrationConfig(ModeloptBaseConfig):
     samples: int = ModeloptField(
         default=24,
         title="Calibration samples",
-        description="Total number of RULER samples for calibration (distributed across length bins).",
+        description=(
+            "Total number of RULER samples for calibration (distributed across length bins). "
+            "Default (24) provides 1 sample per task per length bin (4 bins * 6 RULER tasks). "
+            "Increase for more robust calibration."
+        ),
     )
 
     max_seqlen: int = ModeloptField(
@@ -318,7 +322,6 @@ class SparseAttentionConfig(ModeloptBaseConfig):
 class FlashSkipSoftmaxConfig(SparseAttentionConfig):
     """Configuration for Flash Attention-aware softmax skip sparse attention."""
 
-    # Override sparse_cfg with flash_skip_softmax specific defaults
     # Override sparse_cfg with flash_skip_softmax specific defaults
     sparse_cfg: SparseAttentionCfgType = ModeloptField(
         default={

@@ -269,14 +269,6 @@ def main(
             max_batch_size=1,
         )
     else:
-        # Force eager attention if sparse attention is requested
-        if sparse_cfg:
-            kwargs["attn_implementation"] = "eager"
-            warnings.warn(
-                "Sparse attention requires attn_implementation='eager'. "
-                "Forcing eager attention implementation."
-            )
-
         model = select_model(
             max_input_length=MAX_SEQ_LEN, max_output_length=2, dtype=dtype, **kwargs
         )

@@ -15,12 +15,15 @@
 
 """Dynamic sparse attention registration for HuggingFace models."""
 
+import warnings
+
 import torch.nn as nn
 import transformers
 
 from modelopt.torch.opt.dynamic import DynamicModule
 
 from ..sparse_attention import SparseAttentionModule, SparseAttentionRegistry
+from . import CUSTOM_MODEL_PLUGINS
 
 
 class _GenericSparseAttention(SparseAttentionModule):
@@ -118,3 +121,33 @@ def _is_supported_model(model: nn.Module) -> bool:
 
     # Support any PyTorch model with attention modules
     return isinstance(model, nn.Module)
+
+
+def validate_eager_attention(model: nn.Module) -> None:
+    """Validate and enforce eager attention for HuggingFace models.
+
+    Sparse attention requires attn_implementation='eager' because it
+    patches torch.nn.functional.softmax, which is only called in eager mode.
+
+    Args:
+        model: Model to validate
+    """
+    if not isinstance(model, transformers.PreTrainedModel):
+        return
+
+    attn_impl = getattr(model.config, "_attn_implementation", None)
+    if attn_impl and attn_impl != "eager":
+        warnings.warn(
+            f"Sparse attention requires attn_implementation='eager', but model uses '{attn_impl}'. "
+            "Forcing eager attention implementation."
+        )
+        model.config._attn_implementation = "eager"
+
+
+# Register plugins
+CUSTOM_MODEL_PLUGINS.update(
+    [
+        validate_eager_attention,
+        register_sparse_attention_on_the_fly,
+    ]
+)

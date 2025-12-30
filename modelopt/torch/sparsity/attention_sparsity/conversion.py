@@ -23,10 +23,10 @@ import torch.nn as nn
 
 from modelopt.torch.opt.conversion import ModelLikeModule, ModeloptStateManager
 from modelopt.torch.opt.mode import ConvertReturnType, MetadataDict
-from modelopt.torch.utils import get_unwrapped_name
+from modelopt.torch.utils import atomic_print, get_unwrapped_name
 
 from .config import SparseAttentionConfig
-from .plugins.huggingface import register_sparse_attention_on_the_fly
+from .plugins import register_custom_model_plugins_on_the_fly
 from .sparse_attention import SparseAttentionModule, SparseAttentionRegistry
 
 
@@ -59,8 +59,8 @@ def convert_to_sparse_attention_model(
     # Initialize the true module if necessary
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
 
-    # Register sparse attention modules dynamically
-    register_sparse_attention_on_the_fly(model)
+    # Apply custom model plugins
+    register_custom_model_plugins_on_the_fly(model)
 
     # Replace attention modules with sparse versions
     replace_sparse_attention_modules(model, version=ModeloptStateManager(model).state_version)
@@ -340,6 +340,7 @@ def _format_threshold(info: dict) -> str:
     return "threshold=N/A"
 
 
+@atomic_print
 def print_sparse_attention_summary(model: nn.Module):
     """Print summary of sparse attention modules in the model.
 

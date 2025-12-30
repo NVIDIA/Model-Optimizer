@@ -20,7 +20,7 @@ import pytest
 pytest.importorskip("transformers")
 
 import numpy as np
-from _test_utils.torch_sparsity.sparse_attention_common import (
+from _test_utils.torch.sparsity.sparse_attention_common import (
     SimpleAttentionModel,
     SimpleTransformerEncoder,
 )
