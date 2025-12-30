@@ -62,6 +62,9 @@ optional_deps = {
         "huggingface_hub>=0.24.0",
         "peft>=0.17.0",
         "transformers>=4.53,<5.0",  # Should match modelopt/torch/__init__.py and tox.ini
+        "deepspeed>=0.9.6 ; platform_system != 'Darwin' and platform_system != 'Windows'",
+        "nltk",
+        "wonderwords",
     ],
     # linter tools
     "dev-lint": [

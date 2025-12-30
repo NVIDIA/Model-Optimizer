@@ -50,10 +50,12 @@ model = mtsa.sparsify(model, config=SKIP_SOFTMAX_CALIB)
 
 ## Prerequisites
 
-### Install Requirements
+### Local Installation
+
+For Hugging Face models, install Model Optimizer with `hf` dependencies using `pip` from [PyPI](https://pypi.org/project/nvidia-modelopt/) and install the requirements for the example:
 
 ```bash
-pip install -r requirements.txt
+pip install nvidia-modelopt[hf]
 ```
 
 ### Download RULER Calibration Data (Required for Calibration)

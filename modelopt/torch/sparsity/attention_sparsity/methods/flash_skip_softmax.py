@@ -166,7 +166,7 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             # Used by Flash Attention to adjust running sum when max increases
             block_max_larger = torch.ones_like(block_max)
             block_max_larger[..., 1:] = block_max[..., 1:] > block_max_cummax[..., :-1]
-            correction_factor = float(torch.sum(block_max_larger) / torch.numel(block_max_larger))
+            correction_factor = (block_max_larger.sum() / block_max_larger.numel()).item()
 
             # Step 4: Normalize attention scores by cumulative max
             # p represents log-space difference: log(score) - log(cummax)
@@ -193,12 +193,13 @@ class FlashSkipSoftmax(SparseAttentionMethod):
                 # For causal attention, only count lower triangle blocks (including diagonal)
                 num_causal_blocks = num_block_rows * (2 * num_block_cols - num_block_rows + 1) // 2
                 total_valid_blocks = batch_size * num_heads * num_causal_blocks
-                density = float(block_mask.sum()) / total_valid_blocks
+                dense_blocks = block_mask.sum()
                 total_blocks = num_causal_blocks
             else:
-                density = float(block_mask.sum() / block_mask.numel())
+                dense_blocks = block_mask.sum()  # Keep as tensor
+                total_valid_blocks = block_mask.numel()
                 total_blocks = num_block_rows * num_block_cols
-            sparsity = 1 - density
+            sparsity = 1.0 - dense_blocks.item() / total_valid_blocks
         else:  # decode
             blocked_attn, _, num_block_cols, _, padded_seq_k = self._reshape_to_blocks(
                 attn_weights, 1, self.bc
@@ -219,7 +220,7 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             # Tracks how often the maximum increases (needed for Flash Attention rescaling)
             block_max_larger = torch.ones_like(block_max)
             block_max_larger[..., 1:] = block_max[..., 1:] > block_max_cummax[..., :-1]
-            correction_factor = float(torch.sum(block_max_larger) / torch.numel(block_max_larger))
+            correction_factor = (block_max_larger.sum() / block_max_larger.numel()).item()
 
             # Step 4: Normalize scores by cumulative max
             # p = log(score) - log(cummax) in log-space
@@ -236,8 +237,9 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             element_mask = element_mask[:, :, :seq_q, :seq_k]
 
             # Step 7: Calculate sparsity statistics
-            density = float(block_mask.sum() / block_mask.numel())
-            sparsity = 1 - density
+            dense_blocks = block_mask.sum()
+            total_valid_blocks = block_mask.numel()
+            sparsity = 1.0 - dense_blocks.item() / total_valid_blocks
             total_blocks = num_block_cols
 
         # Create stats dictionary

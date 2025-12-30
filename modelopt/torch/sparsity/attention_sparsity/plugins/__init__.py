@@ -15,8 +15,20 @@
 
 """Plugins for sparse attention integration with various frameworks."""
 
-from .huggingface import register_sparse_attention_on_the_fly
+# List of model plugins that are called during conversion
+# Each plugin is a callable that takes (model) and performs validation/setup
+CUSTOM_MODEL_PLUGINS: set = set()
+
+
+def register_custom_model_plugins_on_the_fly(model):
+    """Applies all registered custom model plugins."""
+    for callback in CUSTOM_MODEL_PLUGINS:
+        callback(model)
+
+
+from . import huggingface  # noqa: E402
 
 __all__ = [
-    "register_sparse_attention_on_the_fly",
+    "CUSTOM_MODEL_PLUGINS",
+    "register_custom_model_plugins_on_the_fly",
 ]
