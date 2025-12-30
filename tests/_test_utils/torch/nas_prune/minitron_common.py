@@ -26,6 +26,7 @@ def prune_minitron(model, export_config, config, channel_divisor=64):
                     channel_divisor=channel_divisor,
                     mamba_head_dim_divisor=4,
                     num_moe_experts_divisor=1,
+                    num_layers_divisor=1,
                 ),
             )
         ],

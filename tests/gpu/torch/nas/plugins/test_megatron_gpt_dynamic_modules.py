@@ -83,7 +83,15 @@ def _test_gpt_search_space(
         normalization=normalization,
     ).cuda()
 
-    mtn.convert(model, [("mcore_minitron", get_mcore_minitron_config(channel_divisor))])
+    mtn.convert(
+        model,
+        [
+            (
+                "mcore_minitron",
+                get_mcore_minitron_config(channel_divisor=channel_divisor, num_layers_divisor=1),
+            )
+        ],
+    )
 
     assert isinstance(model, _DynamicMCoreLanguageModel)
     for m in model.modules():
@@ -255,7 +263,14 @@ def _test_gpt_moe_search_space(rank, size):
 
     mtn.convert(
         model,
-        [("mcore_minitron", get_mcore_minitron_config(channel_divisor, num_moe_experts_divisor=1))],
+        [
+            (
+                "mcore_minitron",
+                get_mcore_minitron_config(
+                    channel_divisor=channel_divisor, num_moe_experts_divisor=1, num_layers_divisor=1
+                ),
+            )
+        ],
     )
 
     moe = model.decoder.layers[0].mlp

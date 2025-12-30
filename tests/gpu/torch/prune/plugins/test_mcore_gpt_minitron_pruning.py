@@ -78,7 +78,7 @@ def _test_mcore_gpt_parameter_sorting(activation_func, rank, size):
 
     model.eval()
     dynamic_space = _convert_model_to_dynamic_space(
-        model, get_mcore_minitron_config(channel_divisor)
+        model, get_mcore_minitron_config(channel_divisor=channel_divisor)
     )
     registry = ImportanceEstimatorRegistry(model)  # register imp estimators and forward hooks
 
