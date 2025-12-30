@@ -201,7 +201,6 @@ def forward(input):
 +     "teacher_model": teacher_model,
 +     "criterion": distill_config["criterion"],
 +     "loss_balancer": distill_config["loss_balancer"],
-+     "expose_minimal_state_dict": False,
 + }
 + transformer = mtd.convert(transformer, mode=[("kd_loss", kd_config)])
 

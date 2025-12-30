@@ -115,7 +115,7 @@ case "${BACKEND,,}" in
     FSDP_ARGS="--fsdp_transformer_layer_cls_to_wrap $FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP"
     ;;
   "fsdp2")
-    echo "Using FSDP2 instead of FSDP1. FSDP2 is not mature yet! Please use it with latest torch and transformers."
+    echo "Using FSDP2 instead of FSDP1."
     CONFIG_FILE="fsdp2.yaml"
     FSDP_ARGS="--fsdp_transformer_layer_cls_to_wrap $FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP"
     ;;
@@ -139,8 +139,11 @@ esac
 DISTILLATION_ARGS=""
 if [[ "${DISTILL,,}" == "true" ]]; then
   DISTILLATION_ARGS="--distill $DISTILL --teacher_model $TEACHER_MODEL"
-  # Distillation does not work with memory efficient loading for FSDP
-  if [[ "${BACKEND,,}" == "fsdp1" || "${BACKEND,,}" == "fsdp2" ]]; then
+  if [[ "${BACKEND,,}" == "fsdp1" ]]; then
+    echo "Error: Distillation does not support FSDP1. Use FSDP2 instead."
+    exit 1
+  elif [[ "${BACKEND,,}" == "fsdp2" ]]; then
+    # Distillation does not work with memory efficient loading for FSDP
     FSDP_ARGS="$FSDP_ARGS --fsdp_cpu_ram_efficient_loading False"
   fi
 fi
