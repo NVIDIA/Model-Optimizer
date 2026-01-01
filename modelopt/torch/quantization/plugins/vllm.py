@@ -267,17 +267,13 @@ class _QuantVLLMAttention(QuantModule):
     def _setup(self):
         self.q_bmm_quantizer = TensorQuantizer()
         self.k_bmm_quantizer = TensorQuantizer()
-        # required for vllm < 0.11.1
-        if not self.use_mla:
-            self.v_bmm_quantizer = TensorQuantizer()
+        self.v_bmm_quantizer = TensorQuantizer()
         self.parallel_state = create_parallel_state()
 
     def forward(self, query, key, value, *args, **kwargs):
         query = self.q_bmm_quantizer(query)
         key = self.k_bmm_quantizer(key)
-        # required for vllm < 0.11.1
-        if not self.use_mla:
-            value = self.v_bmm_quantizer(value)
+        value = self.v_bmm_quantizer(value)
 
         return super().forward(query, key, value, *args, **kwargs)
 
@@ -299,9 +295,11 @@ if VllmMLAAttention is not None:
         def _setup(self):
             self.q_bmm_quantizer = TensorQuantizer()
             self.kv_c_bmm_quantizer = TensorQuantizer()
+            self.k_pe_bmm_quantizer = TensorQuantizer()
             self.parallel_state = create_parallel_state()
 
-        def forward(self, query, kv_c, *args, **kwargs):
+        def forward(self, query, kv_c, k_pe, *args, **kwargs):
             query = self.q_bmm_quantizer(query)
             kv_c = self.kv_c_bmm_quantizer(kv_c)
-            return super().forward(query, kv_c, *args, **kwargs)
+            k_pe = self.k_pe_bmm_quantizer(k_pe)
+            return super().forward(query, kv_c, k_pe, *args, **kwargs)
