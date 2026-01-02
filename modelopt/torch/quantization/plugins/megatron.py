@@ -16,6 +16,7 @@
 """Support quantization for megatron linear layers."""
 
 import logging
+import types
 import warnings
 from typing import Any
 
@@ -28,6 +29,7 @@ import torch
 from megatron.core.parallel_state import get_data_parallel_group
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 from megatron.core.transformer import MegatronModule
+from megatron.core.transformer.attention import Attention
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import get_tensor_model_parallel_group_if_none
 
@@ -202,6 +204,19 @@ def quant_module_set_extra_state(self, state: Any):
     self.allow_post_restore = False
 
 
+def _create_incompatible_method(method_name: str):
+    """Create a method that raises an error for incompatible flash decode methods."""
+
+    def _incompatible_method(self, *args, **kwargs):
+        raise NotImplementedError(
+            f"{method_name} is not compatible with ModelOpt KV cache quantization. "
+            f"KV cache quantization requires core_attention to be called. "
+            f"Please raise an issue at https://github.com/NVIDIA/Model-Optimizer if you need this feature."
+        )
+
+    return _incompatible_method
+
+
 def megatron_replace_quant_module_hook(model: torch.nn.Module):
     """Configure Megatron-Core model quantization support.
 
@@ -212,7 +227,31 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
     1. We change TransformerConfig to enable heterogenous distributed checkpointing.
     2. We enable all sub- QuantModule to store quantizer_state as extra_state by
        typing-matching the QuantModuleRegistry.
+    3. For Attention modules, we configure them to use core_attention path for KV cache quantization.
     """
+
+    def _configure_attention_for_kv_cache_quant(module: Attention):
+        """Configure Attention module for KV cache quantization compatibility."""
+        # Disable flash_decode if enabled (it bypasses core_attention)
+        if getattr(module.config, "flash_decode", False):
+            warnings.warn(
+                "flash_decode=True is incompatible with ModelOpt KV cache quantization. "
+                "Setting flash_decode=False. Flash decode bypasses core_attention during decode phase."
+            )
+            module.config.flash_decode = False
+
+        # Set dtype and device for core_attention (needed for modelopt_post_restore)
+        assert hasattr(module, "core_attention"), "Attention module must have core_attention"
+        param = next(iter(module.parameters()), None)
+        if param is not None:
+            module.core_attention.dtype = param.dtype
+            module.core_attention.device = param.device
+
+        # Patch flash_decode and flash_decode_and_prefill to raise errors
+        module.flash_decode = types.MethodType(_create_incompatible_method("flash_decode"), module)
+        module.flash_decode_and_prefill = types.MethodType(
+            _create_incompatible_method("flash_decode_and_prefill"), module
+        )
 
     def _register_extra_state_callbacks(model: torch.nn.Module):
         for name, module in model.named_modules():
@@ -223,10 +262,10 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
                     quant_module_get_extra_state,
                     quant_module_set_extra_state,
                 )
-                if HAS_TE and isinstance(module, TEDotProductAttention):
-                    # A hack to set the dtype and device for DotProductAttention
-                    # to be used in _QuantTEDotProductAttention.modelopt_post_restore()
-                    _QuantTEDotProductAttention.set_dtype(module, name, model)
+
+            # Configure Attention modules for KV cache quantization
+            if isinstance(module, Attention):
+                _configure_attention_for_kv_cache_quant(module)
 
     for name, module in model.named_modules():
         if isinstance(module, MegatronModule):
@@ -650,23 +689,12 @@ if HAS_TE:
             for tq in [self.q_bmm_quantizer, self.k_bmm_quantizer, self.v_bmm_quantizer]:
                 # TODO: Add support for non-scalar states such as
                 # Affine KVCache  bias vector which is per head per channel
-                assert all(v.numel() == 1 for v in tq.state_dict().values()), (
-                    "Only scalar states are KV Cache/BMM Quantizers"
-                )
-            # Should have been set in the `megatron_replace_quant_module_hook`
+                if not all(v.numel() == 1 for v in tq.state_dict().values()):
+                    raise NotImplementedError("Only scalar states are supported for KV Cache/BMM Quantizers")
+            # dtype and device should have been set in `megatron_replace_quant_module_hook`
+            # via `_configure_attention_for_kv_cache_quant`
             assert hasattr(self, "device") and hasattr(self, "dtype")
             self.to(device=self.device, dtype=self.dtype)
-
-        @staticmethod
-        def set_dtype(module: "TEDotProductAttention", name, model: torch.nn.Module):
-            """Set the dtype for the module from any parameter in the model.
-
-            DotProductAttention does not have any parameters, so lets get the parameter from the parent module.
-            """
-            parent = model.get_submodule(name.rsplit(".", 1)[0]) if "." in name else model
-            param = next(iter(parent.parameters()))
-            module.dtype = param.dtype
-            module.device = param.device
 
 
 @QuantModuleRegistry.register({megatron_moe_layer.MoELayer: "megatron_moe_MoELayer"})

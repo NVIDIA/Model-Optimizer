@@ -20,7 +20,12 @@ import pytest
 import torch
 from _test_utils.import_helper import skip_if_no_megatron
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
-from _test_utils.torch.megatron.models import MegatronModel, get_mcore_gpt_model
+from _test_utils.torch.megatron.models import (
+    MambaModel,
+    MegatronModel,
+    get_mcore_gpt_model,
+    get_mcore_mamba_hybrid_model,
+)
 from _test_utils.torch.megatron.utils import (
     compare_amax_sync_across_expert_parallel,
     copy_weights_from_grouped_to_non_grouped,
@@ -85,6 +90,14 @@ def get_forward(model, batch_size=2):
     input_ids, labels, position_ids, attention_mask, loss_mask = get_batch(model, batch_size)
 
     def forward(model):
+        # MambaModel doesn't accept loss_mask argument
+        if isinstance(model, MambaModel):
+            return model.forward(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+            )
         return model.forward(
             input_ids=input_ids,
             position_ids=position_ids,
@@ -282,12 +295,37 @@ def _gpt_model_provider(
     etp_size=None,
     use_te=False,
     transformer_impl="local",
+    # Hybrid mamba MOE parameters
+    is_hybrid=False,
+    hybrid_override_pattern=None,
+    mamba_head_dim=16,
 ):
-    """Build the model."""
+    from contextlib import nullcontext
 
-    if meta_device:
-        with torch.device("meta"):
-            gpt_model = get_mcore_gpt_model(
+    device_ctx = torch.device("meta") if meta_device else nullcontext()
+
+    with device_ctx:
+        if is_hybrid:
+            # Derive num_layers from pattern length, default to 4
+            num_layers = len(hybrid_override_pattern) if hybrid_override_pattern else 4
+            model = get_mcore_mamba_hybrid_model(
+                tensor_model_parallel_size=tp_size,
+                num_layers=num_layers,
+                hidden_size=hidden_size,
+                vocab_size=vocab_size,
+                num_attention_heads=8,
+                ffn_hidden_size=None,
+                hybrid_override_pattern=hybrid_override_pattern,
+                mamba_head_dim=mamba_head_dim,
+                mamba_num_groups=tp_size,  # Must be divisible by tp_size
+                num_moe_experts=num_moe_experts,
+                sequence_parallel=True,  # Required for MoE + TP
+                # EP/ETP passed via config_kwargs
+                expert_model_parallel_size=ep_size,
+                expert_tensor_parallel_size=etp_size,
+            )
+        else:
+            model = get_mcore_gpt_model(
                 tensor_model_parallel_size=tp_size,
                 expert_model_parallel_size=ep_size,
                 expert_tensor_parallel_size=etp_size,
@@ -303,23 +341,10 @@ def _gpt_model_provider(
                 moe_grouped_gemm=moe_grouped_gemm,
                 use_te=use_te,
             )
-    else:
-        gpt_model = get_mcore_gpt_model(
-            tensor_model_parallel_size=tp_size,
-            expert_model_parallel_size=ep_size,
-            expert_tensor_parallel_size=etp_size,
-            num_layers=4,
-            ffn_hidden_size=None,
-            num_attention_heads=8,
-            activation_func="squared_relu",
-            transformer_impl=transformer_impl,
-            hidden_size=hidden_size,
-            vocab_size=vocab_size,
-            num_moe_experts=num_moe_experts,
-            moe_grouped_gemm=moe_grouped_gemm,
-            use_te=use_te,
-        ).cuda()
-    return gpt_model.eval()
+
+    if not meta_device:
+        model = model.cuda()
+    return model.eval()
 
 
 def _test_sharded_state_dict(
@@ -340,6 +365,9 @@ def _test_sharded_state_dict(
     moe_grouped_gemm = model_config.get("moe_grouped_gemm", False)
     use_te = model_config.get("use_te", False)
     transformer_impl = model_config.get("transformer_impl", "local")
+    # Hybrid mamba MOE parameters
+    is_hybrid = model_config.get("is_hybrid", False)
+    hybrid_override_pattern = model_config.get("hybrid_override_pattern", None)
 
     initialize_for_megatron(
         tensor_model_parallel_size=tp_size,
@@ -358,6 +386,8 @@ def _test_sharded_state_dict(
         ep_size=ep_size,
         etp_size=etp_size,
         transformer_impl=transformer_impl,
+        is_hybrid=is_hybrid,
+        hybrid_override_pattern=hybrid_override_pattern,
     )
     model_test = _gpt_model_provider(
         tp_size,
@@ -370,6 +400,8 @@ def _test_sharded_state_dict(
         ep_size=ep_size,
         etp_size=etp_size,
         transformer_impl=transformer_impl,
+        is_hybrid=is_hybrid,
+        hybrid_override_pattern=hybrid_override_pattern,
     )
 
     forward = get_forward(model_ref)
@@ -422,19 +454,24 @@ mixed_block_size_config["quant_cfg"].update(
     }
 )
 
+# Combined NVFP4 GEMM + KV cache quantization config
+NVFP4_GEMM_KV_CFG = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
+NVFP4_GEMM_KV_CFG["quant_cfg"].update(mtq.NVFP4_KV_CFG["quant_cfg"])
+
+FP8_GEMM_KV_CFG = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
+FP8_GEMM_KV_CFG["quant_cfg"].update(mtq.FP8_KV_CFG["quant_cfg"])
+
 
 @pytest.mark.parametrize(
     "config",
     [
-        mtq.FP8_DEFAULT_CFG,
+        FP8_GEMM_KV_CFG,
         mtq.INT8_SMOOTHQUANT_CFG,
         mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
         mtq.INT4_AWQ_CFG,
         mtq.W4A8_AWQ_BETA_CFG,
-        mtq.NVFP4_DEFAULT_CFG,
+        NVFP4_GEMM_KV_CFG,
         mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
-        mtq.FP8_KV_CFG,
-        mtq.NVFP4_KV_CFG,
     ],
 )
 @pytest.mark.parametrize("compress", [False, True])
@@ -459,6 +496,42 @@ def test_homogeneous_sharded_state_dict(tmp_path, config, compress, meta_device,
             None,
             compress,
             meta_device,
+            model_config,
+        ),
+        backend="nccl",
+    )
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        NVFP4_GEMM_KV_CFG,
+        FP8_GEMM_KV_CFG,
+    ],
+)
+def test_homogeneous_sharded_state_dict_hybrid(tmp_path, config):
+    """Test sharded state dict for hybrid Mamba MOE models."""
+    if torch.cuda.device_count() < 4:
+        pytest.skip("Hybrid MOE test requires at least 4 GPUs")
+
+    model_config = {
+        "is_hybrid": True,
+        "hybrid_override_pattern": "MEM*E",  # 5 layers: Mamba → MoE → Mamba → Attention → MoE
+        "num_moe_experts": 8,
+        "tp_size": 2,
+        "ep_size": 2,
+        "etp_size": 2,
+    }
+    spawn_multiprocess_job(
+        size=4,
+        job=partial(
+            _test_sharded_state_dict,
+            tmp_path,
+            config,
+            256,
+            None,
+            False,  # compress
+            False,  # meta_device
             model_config,
         ),
         backend="nccl",
@@ -853,34 +926,6 @@ def test_kv_cache_quant(config):
     is only available with transformer_impl="modelopt" or "transformer_engine" (not "local").
     """
     spawn_multiprocess_job(size=1, job=partial(_test_kv_cache_quant_helper, config), backend="nccl")
-
-
-@pytest.mark.parametrize(
-    "config",
-    [
-        mtq.FP8_KV_CFG,
-        mtq.NVFP4_KV_CFG,
-    ],
-)
-def test_kv_cache_sharded_state_dict(tmp_path, config):
-    """Test KV cache quantization with sharded state dict save/load.
-
-    This test verifies the complete workflow of saving and loading KV cache quantized
-    models with distributed checkpointing, ensuring quantizer states are properly
-    preserved across the save/load cycle.
-    """
-    size = min(2, torch.cuda.device_count())  # Use 2 GPUs if available, else 1
-    model_config = {
-        "transformer_impl": "modelopt",
-        "use_te": True,
-    }
-    spawn_multiprocess_job(
-        size=size,
-        job=partial(
-            _test_sharded_state_dict, tmp_path, config, 256, None, False, False, model_config
-        ),
-        backend="nccl",
-    )
 
 
 def test_convert_mcore_te_gpt_model(distributed_setup_size_1):
