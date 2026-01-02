@@ -204,12 +204,22 @@ def sharded_state_dict_test_helper(
             f"{k} v:{v}, s[k]: {state_dict_test[k]}"
         )
 
+    model_test.train()
     logits_test = forward_fn(model_test)
 
     logits_diff = (logits_test - logits_ref) / logits_ref
     assert torch.allclose(logits_ref, logits_test), (
         f"diff: {logits_diff.max()} ref: {logits_ref}, test: {logits_test}"
     )
+
+    # Test backward pass on model_test
+    loss = logits_test.sum()
+    loss.backward()
+
+    # Assert that trainable parameters have gradients computed
+    for name, param in model_test.named_parameters():
+        if param.requires_grad:
+            assert param.grad is not None, f"Parameter {name} has no gradient computed"
 
 
 def copy_weights_from_grouped_to_non_grouped(te_grouped_moe_model, sequential_moe_model):

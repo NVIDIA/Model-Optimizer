@@ -95,7 +95,7 @@ def scaled_e4m3_impl(
     # and tensor parallelism. The fake_e4m3fy() kernel produces corrupted output for
     # tensors with shape [seq_len, 1, head_dim] when TP > 1.
     # Using eager fallback until kernel is fixed.
-    if cuda_ext_fp8 is None or True:  # Force eager fallback
+    if cuda_ext_fp8 is None: 
         return fp8_eager(inputs, amax)
 
     with torch.cuda.device(
