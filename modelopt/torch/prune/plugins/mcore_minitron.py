@@ -25,6 +25,7 @@ Actual dynamic module implementations are at :mod:`modelopt.torch.nas.plugins.me
 """
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import partial
 from itertools import product
 from typing import Any
@@ -54,6 +55,7 @@ from modelopt.torch.nas.plugins.megatron import (
     _DynamicMambaMixer,
     _DynamicMCoreLanguageModel,
     _DynamicMLP,
+    _DynamicMoELayer,
     _DynamicSelfAttention,
     _DynamicSequentialMLP,
     _DynamicTransformerLayer,
@@ -169,6 +171,13 @@ def drop_mcore_language_model_layers(model: nn.Module, *, layers_to_drop: list[i
     model.config.num_layers = new_num_layers
 
 
+@dataclass
+class CandidateSubnet:
+    ss_config: dict
+    params: float
+    score: float | None
+
+
 class MCoreMinitronSearcher(BaseSearcher):
     """Searcher for Minitron pruning algorithm.
 
@@ -182,7 +191,8 @@ class MCoreMinitronSearcher(BaseSearcher):
 
     activations_per_rank: list[dict[str, torch.Tensor]]
     layer_scores: dict[int, torch.Tensor]
-    top_k_candidates_per_constraint: dict[float, list[tuple[dict, float]]]
+    # Dict from params constraint to list of tuples (ss_config, params, score)
+    top_k_candidates_per_constraint: dict[float, list[CandidateSubnet]]
 
     @property
     def default_search_config(self) -> SearchConfig:
@@ -359,6 +369,12 @@ class MCoreMinitronSearcher(BaseSearcher):
             for hp_name, hp_value in export_config.items():
                 setattr(self.model.config, hp_name, hp_value)
 
+        # Reinitialize the MoE token dispatcher after pruning
+        for m in self.model.modules():
+            if isinstance(m, _DynamicMoELayer):
+                m._export_reinit_token_dispatcher()
+                break
+
     def search_best_arch_by_params(self, sorted_layers: list[int]) -> dict:
         """Search for the best architecture based on the given parameters constraints.
 
@@ -400,7 +416,7 @@ class MCoreMinitronSearcher(BaseSearcher):
                 max_depth_pruning,
             )
             sample(self.model, sample_func=max)  # reset to max subnet (for sanity)
-            selected: list[tuple[dict, float]] = []
+            selected = []
             for ss_config in tqdm(
                 search_space_configs,
                 desc=f"Finding top {top_k} candidates fitting the constraints...",
@@ -415,23 +431,44 @@ class MCoreMinitronSearcher(BaseSearcher):
                     layer_ids = sorted_layers[: ss_config["num_layers"]]
                 candidate_params = _param_num_dynamic(self.model, layer_numbers_to_count=layer_ids)
                 if candidate_params <= max_params:
-                    selected.append((ss_config, candidate_params))
+                    selected.append(CandidateSubnet(ss_config, candidate_params, None))
                 sample(self.model, sample_func=max)  # reset to max subnet
             assert len(selected) > 0, "No subnets found fitting the constraints!"
             print_rank_0(f"Found {len(selected)} candidates fitting the constraints!")
             self.top_k_candidates_per_constraint[max_params] = sorted(
-                selected, key=lambda x: x[1], reverse=True
+                selected, key=lambda x: x.params, reverse=True
             )[:top_k]
             self.save_search_checkpoint(verbose=True)
         else:
             print_rank_0(f"Using top {top_k} candidates from checkpoint")
         top_k_candidates = self.top_k_candidates_per_constraint[max_params]
 
-        # 3. Validate top-k candidates using the score_func and return the best subnet
-        # TODO: update this
-        best = top_k_candidates[0][0]
+        print_rank_0(f"\n====================\nTop {top_k} candidates:")
+        for candidate in top_k_candidates:
+            print_rank_0(f"\t{candidate.ss_config} -> {num2hrb(candidate.params)} params")
+        print_rank_0("====================\n")
 
-        return best
+        # 3. Validate top-k candidates using the score_func and return the best subnet
+        for candidate in tqdm(
+            top_k_candidates,
+            desc=f"Validating top {top_k} candidates on given score_func...",
+            disable=not dist.is_master(),
+        ):
+            if candidate.score is None:  # not restored from checkpoint
+                self._prune(candidate.ss_config, prune_depth=False, update_config=False)
+                candidate.score = self.eval_score(silent=True)
+                sample(self.model, sample_func=max)  # reset to max subnet
+                self.save_search_checkpoint(verbose=False)
+            print_rank_0(
+                f"\t{candidate.ss_config} -> {num2hrb(candidate.params)} params, {candidate.score:.4f} score"
+            )
+
+        dist.barrier()
+        best = max(top_k_candidates, key=lambda x: x.score)  # type: ignore[arg-type, return-value]
+        print_rank_0(
+            f"\n[BEST SUBNET] {best.ss_config} -> {num2hrb(best.params)} params, {best.score:.4f} score\n"
+        )
+        return best.ss_config
 
     @staticmethod
     def _generate_search_space_combos(
