@@ -83,6 +83,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "w4a8_nvfp4_fp8": mtq.W4A8_NVFP4_FP8_CFG,
     "w4a8_mxfp4_fp8": mtq.W4A8_MXFP4_FP8_CFG,
     "nvfp4_mlp_only": mtq.NVFP4_MLP_ONLY_CFG,
+    "nvfp4_experts_only": mtq.NVFP4_EXPERTS_ONLY_CFG,
 }
 
 KV_QUANT_CFG_CHOICES = {
@@ -184,6 +185,7 @@ def auto_quantize(
             "fp8_pb_wo",
             "w4a8_mxfp4_fp8",
             "nvfp4_mlp_only",
+            "nvfp4_experts_only",
         ]
         for args.qformat in qformat_list
     ), "One or more quantization formats provided are not supported for unified checkpoint export"
