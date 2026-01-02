@@ -52,7 +52,7 @@ from modelopt.torch.opt.hparam import HPType
 from modelopt.torch.opt.searcher import ConstraintsDict
 from modelopt.torch.trace import Symbol
 from modelopt.torch.utils import distributed as dist
-from modelopt.torch.utils import make_divisible, print_rank_0, random
+from modelopt.torch.utils import make_divisible, random
 from modelopt.torch.utils.plugins import param_num_megatron
 
 from ..algorithms import (
@@ -627,7 +627,6 @@ class _DynamicMoELayer(DynamicModule):
 
     def _export_reinit_token_dispatcher(self) -> None:
         """Reinitialize the token dispatcher after pruning."""
-        print_rank_0("Reinitializing token dispatcher after pruning")
         if hasattr(moe_utils, "get_default_model_comm_pgs"):
             model_comm_pgs = moe_utils.get_default_model_comm_pgs()
         else:
