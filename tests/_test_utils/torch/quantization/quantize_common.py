@@ -127,6 +127,23 @@ def _distributed_attr_check(quantizer, attr: str, op=dist.ReduceOp.MAX, groups=[
     assert torch.allclose(quantizer_attr, getattr(quantizer, attr))
 
 
+def verify_kv_cache_amax_sync(model, group=None):
+    kv_quantizers_found = False
+    for name, module in model.named_modules():
+        if hasattr(module, "k_bmm_quantizer") and hasattr(module, "v_bmm_quantizer"):
+            kv_quantizers_found = True
+
+            for quantizer in [module.k_bmm_quantizer, module.v_bmm_quantizer]:
+                if quantizer.amax is not None:
+                    quantizer_amax = quantizer.amax.clone()
+                    dist.all_reduce(quantizer_amax, op=dist.ReduceOp.MAX, group=group)
+                    assert torch.allclose(quantizer_amax, quantizer.amax), (
+                        f"KV cache quantizer amax not synced across distributed group for {name}"
+                    )
+
+    return kv_quantizers_found
+
+
 original_awq_lite = model_calib_module.awq_lite
 
 
