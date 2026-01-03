@@ -112,6 +112,13 @@ def param_num(network: nn.Module, trainable_only: bool = False, unit=1e6) -> flo
     Returns:
         The number of parameters in the model in the given unit.
     """
+    from modelopt.torch.opt.dynamic import DynamicModule
+
+    if isinstance(network, DynamicModule):
+        # NOTE: model.parameters() doesnt consider active_slice so we dont get sorted or trimmed parameters!
+        raise NotImplementedError(
+            "param_num doesn't support DynamicModule. Please use param_num_from_forward instead."
+        )
     return (
         sum(
             p.numel() if not trainable_only or p.requires_grad else 0
@@ -142,7 +149,7 @@ def param_num_from_forward(
     Returns:
         The number of parameters from the model's forward pass in the given unit.
 
-    This can helpful for dynamic modules, where the state dict might contain extra parameters that
+    This can helpful for MoE or dynamic modules, where the state dict might contain extra parameters that
     is not actively used in the model, e.g., because of a DynamicModule that is deactivated for the
     forward pass. We circumvent this issue by just counting parameters of modules that appear in a
     forward pass.
