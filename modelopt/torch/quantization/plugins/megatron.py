@@ -676,6 +676,16 @@ if HAS_TE:
             self.k_bmm_quantizer = TensorQuantizer()
             self.v_bmm_quantizer = TensorQuantizer()
 
+            # Set parallel_state for distributed sync of BMM quantizers
+            try:
+                data_parallel_group = get_data_parallel_group(with_context_parallel=True)
+            except AssertionError:
+                data_parallel_group = get_data_parallel_group()
+            self.parallel_state = ParallelState(
+                data_parallel_group,
+                mcore_parallel.get_tensor_model_parallel_group(),
+            )
+
         def forward(self, query, key, value, *args, **kwargs):
             """Apply post-RoPE quantization to KV cache."""
             # Quantize Q, K, V
@@ -690,7 +700,9 @@ if HAS_TE:
                 # TODO: Add support for non-scalar states such as
                 # Affine KVCache  bias vector which is per head per channel
                 if not all(v.numel() == 1 for v in tq.state_dict().values()):
-                    raise NotImplementedError("Only scalar states are supported for KV Cache/BMM Quantizers")
+                    raise NotImplementedError(
+                        "Only scalar states are supported for KV Cache/BMM Quantizers"
+                    )
             # dtype and device should have been set in `megatron_replace_quant_module_hook`
             # via `_configure_attention_for_kv_cache_quant`
             assert hasattr(self, "device") and hasattr(self, "dtype")

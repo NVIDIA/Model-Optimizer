@@ -39,6 +39,7 @@ from _test_utils.torch.quantization.quant_utils import get_model_size
 from _test_utils.torch.quantization.quantize_common import (
     auto_quantize_helper,
     data_tensor_context_parallel_test_helper,
+    verify_kv_cache_amax_sync,
 )
 
 skip_if_no_megatron()
@@ -458,6 +459,7 @@ mixed_block_size_config["quant_cfg"].update(
 NVFP4_GEMM_KV_CFG = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
 NVFP4_GEMM_KV_CFG["quant_cfg"].update(mtq.NVFP4_KV_CFG["quant_cfg"])
 
+# Combined FP8 GEMM + KV cache quantization config
 FP8_GEMM_KV_CFG = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
 FP8_GEMM_KV_CFG["quant_cfg"].update(mtq.FP8_KV_CFG["quant_cfg"])
 
@@ -465,13 +467,15 @@ FP8_GEMM_KV_CFG["quant_cfg"].update(mtq.FP8_KV_CFG["quant_cfg"])
 @pytest.mark.parametrize(
     "config",
     [
-        FP8_GEMM_KV_CFG,
+        mtq.FP8_DEFAULT_CFG,
         mtq.INT8_SMOOTHQUANT_CFG,
         mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
         mtq.INT4_AWQ_CFG,
         mtq.W4A8_AWQ_BETA_CFG,
-        NVFP4_GEMM_KV_CFG,
+        mtq.NVFP4_DEFAULT_CFG,
         mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
+        mtq.FP8_KV_CFG,
+        mtq.NVFP4_KV_CFG,
     ],
 )
 @pytest.mark.parametrize("compress", [False, True])
@@ -480,6 +484,12 @@ FP8_GEMM_KV_CFG["quant_cfg"].update(mtq.FP8_KV_CFG["quant_cfg"])
 def test_homogeneous_sharded_state_dict(tmp_path, config, compress, meta_device, transformer_impl):
     if compress and config is mtq.W4A8_AWQ_BETA_CFG:
         pytest.skip("W4A8_AWQ_BETA_CFG is not supported for compress")
+
+    if config in (mtq.FP8_KV_CFG, mtq.NVFP4_KV_CFG):
+        if transformer_impl != "modelopt" or compress or meta_device:
+            pytest.skip(
+                "KV cache configs require transformer_impl='modelopt' and no compress/meta_device"
+            )
 
     size = torch.cuda.device_count()
 
@@ -926,6 +936,46 @@ def test_kv_cache_quant(config):
     is only available with transformer_impl="modelopt" or "transformer_engine" (not "local").
     """
     spawn_multiprocess_job(size=1, job=partial(_test_kv_cache_quant_helper, config), backend="nccl")
+
+
+def _test_kv_cache_amax_sync_helper(config, rank, size, tensor_model_parallel_size=1):
+    """Helper function for testing KV cache quantizer amax sync across distributed world."""
+    # Use rank in seed to produce different amax values across ranks
+    seed = SEED + rank
+    initialize_for_megatron(
+        tensor_model_parallel_size=tensor_model_parallel_size,
+        pipeline_model_parallel_size=1,
+        seed=seed,
+    )
+
+    model = get_mcore_gpt_model(
+        tensor_model_parallel_size=tensor_model_parallel_size,
+        num_layers=1,
+        hidden_size=64,
+        num_attention_heads=4,
+        vocab_size=32,
+        transformer_impl="modelopt",
+    ).cuda()
+
+    forward = get_forward(model)
+
+    # Quantize with KV cache config
+    quantized_model = mtq.quantize(model, config, forward)
+
+    # Verify KV cache quantizer amax is synced across the whole world
+    kv_quantizers_found = verify_kv_cache_amax_sync(quantized_model)
+    assert kv_quantizers_found, "No KV cache quantizers found in model"
+
+
+def test_kv_cache_amax_sync(need_2_gpus):
+    """Test KV cache quantizer amax is synced across the distributed world."""
+    spawn_multiprocess_job(
+        size=2,
+        job=partial(
+            _test_kv_cache_amax_sync_helper, NVFP4_GEMM_KV_CFG, tensor_model_parallel_size=2
+        ),
+        backend="nccl",
+    )
 
 
 def test_convert_mcore_te_gpt_model(distributed_setup_size_1):
