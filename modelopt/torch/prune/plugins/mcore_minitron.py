@@ -34,6 +34,8 @@ from warnings import warn
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from megatron.core.models.gpt.gpt_model import GPTModel
+from megatron.core.models.mamba.mamba_model import MambaModel
 from megatron.core.parallel_state import (
     get_pipeline_model_parallel_group,
     get_pipeline_model_parallel_rank,
@@ -103,6 +105,7 @@ __all__ = [
     "MCoreMinitronSearcher",
     "drop_mcore_language_model_layers",
     "get_mcore_minitron_config",
+    "get_mcore_param_count",
 ]
 
 
@@ -300,6 +303,7 @@ class MCoreMinitronSearcher(BaseSearcher):
             print_rank_0("Skipping sorting parameters...")
         else:
             sort_parameters(self.model, self.hps_to_sort, verbose=True)
+        registry.cleanup()
 
         if self.layer_scores:
             # sort layers by scores and drop the lowest ones
@@ -324,8 +328,6 @@ class MCoreMinitronSearcher(BaseSearcher):
         self._prune(
             export_config, prune_depth=True, update_config=True, sorted_layers=sorted_layers
         )
-
-        registry.cleanup()
 
     def _prune(
         self,
@@ -419,7 +421,7 @@ class MCoreMinitronSearcher(BaseSearcher):
             selected = []
             for ss_config in tqdm(
                 search_space_configs,
-                desc=f"Finding top {top_k} candidates fitting the constraints...",
+                desc=f"Finding top {top_k} (`config['top_k']`) candidates fitting the constraints...",
                 disable=not dist.is_master(),
             ):
                 self._prune(ss_config, prune_depth=False, update_config=False)
@@ -451,12 +453,12 @@ class MCoreMinitronSearcher(BaseSearcher):
         # 3. Validate top-k candidates using the score_func and return the best subnet
         for candidate in tqdm(
             top_k_candidates,
-            desc=f"Validating top {top_k} candidates on given score_func...",
+            desc=f"Validating top {top_k} candidates on given score_func (this will take some time)...",
             disable=not dist.is_master(),
         ):
             if candidate.score is None:  # not restored from checkpoint
                 self._prune(candidate.ss_config, prune_depth=False, update_config=False)
-                candidate.score = self.eval_score(silent=True)
+                candidate.score = self.eval_score(silent=False)
                 sample(self.model, sample_func=max)  # reset to max subnet
                 self.save_search_checkpoint(verbose=False)
             print_rank_0(
@@ -525,6 +527,30 @@ class MCoreMinitronSearcher(BaseSearcher):
         return search_space_combos
 
 
+def get_mcore_param_count(model: GPTModel | MambaModel) -> float:
+    """Get the number of parameters in the MCore GPTModel or MambaModel (reduced across TP and PP ranks)."""
+    assert isinstance(model, (GPTModel, MambaModel)), "Model must be a GPTModel or MambaModel"
+    if isinstance(model, DynamicModule):
+        return _param_num_dynamic(model)
+    else:
+        return _param_num(model)
+
+
+def _param_num(model: GPTModel | MambaModel) -> float:
+    """Get the number of parameters in the model (reduced across TP and PP ranks)."""
+    # Dont double count output_layer parameters if model.share_embeddings_and_output_weights is True
+    params = sum(
+        p.numel()
+        for name, p in model.named_parameters()
+        if not model.share_embeddings_and_output_weights or "output_layer.weight" not in name
+    )
+
+    reduced_params = torch.Tensor([params]).to(device=next(model.parameters()).device)
+    torch.distributed.all_reduce(reduced_params, group=get_pipeline_model_parallel_group())
+    torch.distributed.all_reduce(reduced_params, group=get_tensor_model_parallel_group())
+    return reduced_params.item()
+
+
 def _param_num_dynamic(
     model: _DynamicMCoreLanguageModel, *, layer_numbers_to_count: list[int] | None = None
 ) -> float:
@@ -544,10 +570,12 @@ def _param_num_dynamic(
         return getattr(submodule, param_name).numel()
 
     # Account for depth pruning with uneven PP and hybrid models!
+    # Dont double count output_layer parameters if model.share_embeddings_and_output_weights is True
     params = sum(
         get_param_count(model, name)
         for name, _ in model.named_parameters()
         if ("decoder.layers." not in name or layer_numbers_to_count is None)
+        and not (model.share_embeddings_and_output_weights and "output_layer.weight" in name)
     )
     if layer_numbers_to_count is not None:
         for layer in model.decoder.layers:
