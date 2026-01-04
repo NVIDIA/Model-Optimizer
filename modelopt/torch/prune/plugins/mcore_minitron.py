@@ -325,15 +325,12 @@ class MCoreMinitronSearcher(BaseSearcher):
             export_config = self.constraints["export_config"]
 
         # Prune homogeneously
-        self._prune(
-            export_config, prune_depth=True, update_config=True, sorted_layers=sorted_layers
-        )
+        self._prune(export_config, prune_depth=True, sorted_layers=sorted_layers)
 
     def _prune(
         self,
         export_config: dict,
         prune_depth: bool = True,
-        update_config: bool = True,
         *,
         sorted_layers: list[int] | None = None,
     ) -> None:
@@ -342,7 +339,6 @@ class MCoreMinitronSearcher(BaseSearcher):
         Args:
             export_config: Dictionary mapping hyperparameter names to their pruned values.
             prune_depth: Whether to drop layers based on sorted_layers (default: True).
-            update_config: Whether to update the model config with the pruned architecture (default: True).
             sorted_layers: Sorted list of layers (1-indexed) for depth pruning.
         """
         # Prune homogeneously
@@ -361,15 +357,14 @@ class MCoreMinitronSearcher(BaseSearcher):
 
         # Update model config with pruned architecture
         # kv_channels can be None so we need to save original from original hidden_size and num_attention_heads
-        if update_config:
-            orig_kv_channels = self.model.config.kv_channels
-            if orig_kv_channels is None:
-                orig_kv_channels = (
-                    self.model.config.hidden_size // self.model.config.num_attention_heads
-                )
-            self.model.config.kv_channels = orig_kv_channels
-            for hp_name, hp_value in export_config.items():
-                setattr(self.model.config, hp_name, hp_value)
+        orig_kv_channels = self.model.config.kv_channels
+        if orig_kv_channels is None:
+            orig_kv_channels = (
+                self.model.config.hidden_size // self.model.config.num_attention_heads
+            )
+        self.model.config.kv_channels = orig_kv_channels
+        for hp_name, hp_value in export_config.items():
+            setattr(self.model.config, hp_name, hp_value)
 
         # Reinitialize the MoE token dispatcher after pruning
         for m in self.model.modules():
@@ -424,7 +419,7 @@ class MCoreMinitronSearcher(BaseSearcher):
                 desc=f"Finding top {top_k} (`config['top_k']`) candidates fitting the constraints...",
                 disable=not dist.is_master(),
             ):
-                self._prune(ss_config, prune_depth=False, update_config=False)
+                self._prune(ss_config, prune_depth=False)
                 layer_ids = None
                 if (
                     "num_layers" in ss_config
@@ -457,7 +452,7 @@ class MCoreMinitronSearcher(BaseSearcher):
             disable=not dist.is_master(),
         ):
             if candidate.score is None:  # not restored from checkpoint
-                self._prune(candidate.ss_config, prune_depth=False, update_config=False)
+                self._prune(candidate.ss_config, prune_depth=False)
                 candidate.score = self.eval_score(silent=False)
                 sample(self.model, sample_func=max)  # reset to max subnet
                 self.save_search_checkpoint(verbose=False)
