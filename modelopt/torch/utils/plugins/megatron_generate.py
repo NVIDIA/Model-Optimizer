@@ -24,6 +24,8 @@ from megatron.core.timers import Timer
 from megatron.core.transformer import MegatronModule
 from tqdm import tqdm
 
+__all__ = ["megatron_generate", "megatron_prefill"]
+
 
 def get_current_memory_info():
     """Get current memory usage."""

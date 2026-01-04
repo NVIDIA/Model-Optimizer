@@ -18,24 +18,18 @@
 import types
 from abc import ABC
 from collections.abc import Callable, Sequence
-from typing import Any
 
 import torch
 import torch.nn as nn
 from megatron.core.fusions.fused_layer_norm import FusedLayerNorm
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.models.gpt import GPTModel
-from megatron.core.parallel_state import (
-    get_data_parallel_group,
-    is_pipeline_first_stage,
-    is_pipeline_last_stage,
-)
+from megatron.core.parallel_state import is_pipeline_first_stage, is_pipeline_last_stage
 from megatron.core.tensor_parallel.layers import (
     ColumnParallelLinear,
     RowParallelLinear,
     VocabParallelEmbedding,
 )
-from megatron.core.transformer import MegatronModule
 from megatron.core.transformer.attention import SelfAttention
 from megatron.core.transformer.dot_product_attention import DotProductAttention
 from megatron.core.transformer.mlp import MLP
@@ -49,24 +43,14 @@ from megatron.core.transformer.transformer_layer import TransformerLayer
 from modelopt.torch.nas.modules import DynamicModuleList
 from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.opt.hparam import HPType
-from modelopt.torch.opt.searcher import ConstraintsDict
 from modelopt.torch.trace import Symbol
 from modelopt.torch.utils import distributed as dist
-from modelopt.torch.utils import make_divisible, random
-from modelopt.torch.utils.plugins import param_num_megatron
+from modelopt.torch.utils import make_divisible
 
-from ..algorithms import (
-    MODULE_TYPE_TO_CONSTRAINTS_FUNC,
-    ConstraintEvalFunc,
-    ConstraintInterpolator,
-    ConstraintsFunc,
-    ConstraintsRes,
-)
 from ..hparams.concat import build_concat_hp
 from ..modules import _DynamicLayerNorm
 from ..modules.utils import get_sliced_tensor, get_sliced_tensor_by_slices
 from ..registry import DMRegistry
-from ..search_space import SampleFunc
 from ..traced_hp import TracedHp
 
 SUPPORTED_MODELS = {GPTModel: "megatron.core.models.gpt.GPTModel"}
@@ -1079,82 +1063,3 @@ class _DynamicMCoreLanguageModel(DynamicModule):
             ).export()
             self.output_layer.export()
         return super().export()
-
-
-class MegatronConstraintsFunc(ConstraintsFunc):
-    """A Functor class to check if sub-net satisfied all provided constraints.
-
-    We intentionally expose some attributes like `limits` s.t. we can modify it manually.
-    """
-
-    _sample_points_dict: dict[tuple[str, ...], dict[str, SampleFunc]] = {
-        ("params",): {"min": min, "centroid": random.centroid, "max": max},
-    }
-
-    def __init__(
-        self,
-        model: MegatronModule,
-        constraints: ConstraintsDict,
-        dummy_input: Any | tuple[Any, ...],
-        deployment: dict | None = None,
-        fast_eval: bool = True,
-    ):
-        """Initialize with additional data parallel group info from megatron."""
-        for key in constraints:
-            if key != "params":
-                raise ValueError("Only params constraints is supported for MegatronModule!")
-
-        self.model = model
-        self.dummy_input = dummy_input
-        self.deployment = deployment
-        self._fast_eval = fast_eval
-
-        # Getting data parallel group for
-        self.dp_group = get_data_parallel_group()
-
-        # initialize latency interpolator
-        keys_for_interpolation = ("params",)
-        if ConstraintsFunc.is_configurable(self.model, "depth"):
-            keys_for_interpolation += ("flops_min_depth",)
-        self._latency_interpolator = ConstraintInterpolator(
-            self.model,
-            points_funcs={k: self.constraint_eval_funcs[k] for k in keys_for_interpolation},
-            value_func=self._get_true_latency,
-        )
-        # set fast/regular mode for latency interpolator
-        self._latency_interpolator.collect_mode = not self.fast_eval
-
-        # set limit at the end with setter to use sanity checks on constraints
-        self._limits = {}
-        self.limits = constraints
-
-    @property
-    def constraint_eval_funcs(self) -> dict[str, ConstraintEvalFunc]:
-        """Get constraint eval fns."""
-        return {
-            "params": self._get_params,
-        }
-
-    def _get_params(self, _: ConstraintsRes | None = None) -> float:
-        """Get number of model parameters from forward pass."""
-        return param_num_megatron(self.model, from_forward=True, args=self.dummy_input)
-
-    def _get_flops(self, _: ConstraintsRes | None = None) -> float:
-        """Get inference FLOPs."""
-        raise NotImplementedError
-
-    def _get_flops_min_depth(self, _: ConstraintsRes | None = None) -> float:
-        """Get inference FLOPs with depth set to minimum."""
-        raise NotImplementedError
-
-    def _get_true_latency(self, _: ConstraintsRes | None = None) -> float:
-        """Get true inference latency."""
-        raise NotImplementedError
-
-    def _get_latency(self, precomputed: ConstraintsRes | None = None) -> float:
-        """Get inference latency from interpolator."""
-        raise NotImplementedError
-
-
-# Clear the mapping and reinsert.
-MODULE_TYPE_TO_CONSTRAINTS_FUNC[MegatronModule] = MegatronConstraintsFunc
