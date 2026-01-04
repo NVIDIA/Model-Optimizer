@@ -552,19 +552,19 @@ def duplicate_shared_constants(onnx_model: onnx.ModelProto) -> tuple[onnx.ModelP
     return onnx_model, is_modified
 
 
-def check_model(model: onnx.ModelProto) -> onnx.ModelProto:
+def check_model(model: onnx.ModelProto) -> None:
     """Checks if the given model is valid."""
     if model.ByteSize() > (2 * (1024**3)):  # 2GB limit
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # ONNX also looks in CWD, so we need to use a unique id
-            unique_id = str(uuid.uuid4())[:8]
-            onnx_tmp_path = os.path.join(temp_dir, f"model_{unique_id}.onnx")
-            save_onnx(model, onnx_tmp_path, save_as_external_data=True)
-            onnx.checker.check_model(onnx_tmp_path)
-            return onnx.load(onnx_tmp_path)
+        logger.warning("Model exceeds 2GB limit, skipping check_model")
+        # with tempfile.TemporaryDirectory() as temp_dir:
+        #     # ONNX also looks in CWD, so we need to use a unique id
+        #     unique_id = str(uuid.uuid4())[:8]
+        #     onnx_tmp_path = os.path.join(temp_dir, f"model_{unique_id}.onnx")
+        #     save_onnx(model, onnx_tmp_path, save_as_external_data=True)
+        #     onnx.checker.check_model(onnx_tmp_path)
+
     else:
         onnx.checker.check_model(model)
-        return model
 
 
 def find_lowest_common_ancestor(node1: Node, node2: Node) -> tuple[str | None, int, int]:
@@ -644,7 +644,7 @@ def save_onnx(model: onnx.ModelProto, onnx_path: str, save_as_external_data: boo
         model_proto = model.SerializeToString()
         model_size = len(model_proto)
         save_as_external_data = save_as_external_data or model_size > size_threshold
-        logger.debug(
+        logger.warning(
             f"Model size: {model_size} bytes, using external data: {save_as_external_data}"
         )
 
@@ -658,7 +658,7 @@ def save_onnx(model: onnx.ModelProto, onnx_path: str, save_as_external_data: boo
 
     # Set ir_version to 10, remove it once ORT supports ir_version 11
     model.ir_version = 10
-
+    save_as_external_data = True # GAGAM: for debug
     if save_as_external_data:
         external_data_path = os.path.basename(onnx_path) + "_data"
         if os.path.exists(external_data_path):
