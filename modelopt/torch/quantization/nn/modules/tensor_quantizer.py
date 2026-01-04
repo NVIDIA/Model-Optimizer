@@ -487,6 +487,27 @@ class TensorQuantizer(nn.Module):
         )
 
     @property
+    def is_mxfp4(self):
+        """Check if is MXFP4."""
+        return (
+            self.is_mx_format and self.num_bits == (2, 1) and self.block_sizes.get(-1, None) == 32
+        )
+
+    @property
+    def is_mxfp6(self):
+        """Check if is MXFP6."""
+        return (
+            self.is_mx_format and self.num_bits == (3, 2) and self.block_sizes.get(-1, None) == 32
+        )
+
+    @property
+    def is_mxfp8(self):
+        """Check if is MXFP8."""
+        return (
+            self.is_mx_format and self.num_bits == (4, 3) and self.block_sizes.get(-1, None) == 32
+        )
+
+    @property
     def is_static_block_quant(self):
         """Check if is static block quantization."""
         return (
