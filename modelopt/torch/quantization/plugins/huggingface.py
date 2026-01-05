@@ -72,7 +72,7 @@ class _QuantAttention(QuantModule):
             self.kitchen_attn_fn = "disabled"
             return
         self.use_kitchen = True
-        if self.softmax_quantizer.is_mxfp8:
+        if self.softmax_quantizer.is_mxfp(8):
             qfa_params = triton_fa_params.QTritonFAParams(
                 backend="triton",
                 qk_dot_precisions="bf16@bf16",
