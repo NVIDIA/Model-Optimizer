@@ -61,11 +61,6 @@ class KnowledgeDistillationModeDescriptor(ModeDescriptor):
         return KDLossConfig
 
     @property
-    def next_modes(self) -> set[str] | None:
-        """Modes that must immediately follow this mode."""
-        return {"export_student"}
-
-    @property
     def export_mode(self) -> str | None:
         """The mode that corresponds to the export mode of this mode."""
         return "export_student"
