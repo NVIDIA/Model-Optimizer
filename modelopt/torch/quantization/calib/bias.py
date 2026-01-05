@@ -134,7 +134,13 @@ class BiasCalibrator(_Calibrator):
             if self._calib_bias is None:
                 self._calib_bias = bias_
             else:
-                self._calib_bias = (self._calib_bias * self._cnt + bias_) / (self._cnt + 1)
+                dtype = bias_.dtype
+                # Convert bias to float for numerical stability
+                self._calib_bias = (self._calib_bias.float() * self._cnt + bias_.float()) / (
+                    self._cnt + 1
+                )
+                self._calib_bias = self._calib_bias.to(dtype)
+
             self._cnt += 1
         elif self._method == "max_min":
             max_, min_ = compute_maxmin(x, self._axis)
