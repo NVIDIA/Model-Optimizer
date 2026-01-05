@@ -1,0 +1,78 @@
+# LTXV Full Model Fine-tuning Configuration
+
+# Model configuration
+model:
+  model_source: "/home/scavallari/ltx-qad/model/ltx-av-step-1933500-split-new-vae.safetensors"
+  training_mode: "full"  # Options: "lora" or "full"
+  load_checkpoint: null  # Path to checkpoint file or directory to resume from. If directory, latest checkpoint will be used.
+  # load_checkpoint: "outputs/ltxv_full_finetune/checkpoints"
+  text_encoder_path: "/home/dhutchins/models/gemma"
+
+# Conditioning configuration
+conditioning:
+  mode: "none" # Options: "none", "reference_video"
+  first_frame_conditioning_p: 0.1
+
+# Optimization configuration
+optimization:
+  learning_rate: 1e-5 # Lower learning rate for full fine-tuning
+  steps: 1000
+  batch_size: 1
+  gradient_accumulation_steps: 4
+  max_grad_norm: 1.0
+  optimizer_type: "adamw" # Use 8-bit optimizer to save memory
+  scheduler_type: "linear" # Options: "constant", "linear", "cosine", "cosine_with_restarts", "polynomial"
+  scheduler_params: {}
+  enable_gradient_checkpointing: false # Enable to save memory
+
+# Acceleration optimization
+acceleration:
+  mixed_precision_mode: "bf16" # Options: "no", "fp16", "bf16"
+  quantization: null # Disable quantization for full fine-tuning
+  load_text_encoder_in_8bit: true # Load text encoder in 8-bit precision to save memory
+
+# Data configuration
+data:
+  preprocessed_data_root: "/home/dhutchins/data/video_dataset"
+  num_dataloader_workers: 2
+
+# Validation configuration
+validation:
+  prompts:
+    - "a professional portrait video of a person with blurry bokeh background"
+    - "a video of a person wearing a nice suit"
+  negative_prompt: "worst quality, inconsistent motion, blurry, jittery, distorted"
+  images: null # Set to a list of image paths to use first-frame conditioning, or null to disable
+  video_dims: [768, 448, 89] # [width, height, frames]
+  seed: 42
+  inference_steps: 50
+  interval: null # Set to null to disable validation
+  videos_per_prompt: 1
+  guidance_scale: 3.5
+
+# Checkpoint configuration
+checkpoints:
+  interval: 500  # Save a checkpoint every N steps, set to null to disable
+  keep_last_n: -1 # Keep only the N most recent checkpoints, set to -1 to keep all
+
+# Flow matching configuration
+flow_matching:
+  timestep_sampling_mode: "shifted_logit_normal" # Options: "uniform", "shifted_logit_normal"
+  timestep_sampling_params: {}
+
+# HuggingFace Hub configuration
+hub:
+  push_to_hub: false # Whether to push the model weights to the Hugging Face Hub
+  hub_model_id: null # Hugging Face Hub repository ID (e.g., 'username/repo-name'). Must be provided if `push_to_hub` is set to True
+
+# W&B configuration
+wandb:
+  enabled: true  # Set to true to enable W&B logging
+  project: "ltxv-trainer"
+  entity: null  # Leave as null.  (Your W&B username or team?)
+  tags: []
+  log_validation_videos: true
+
+# General configuration
+seed: 42
+output_dir: "outputs/ltxv_full_finetune"

@@ -1,0 +1,15 @@
+2025-12-22 15:25:58,697 INFO    MainThread:1488168 [wandb_setup.py:_flush():80] Current SDK version is 0.23.1
+2025-12-22 15:25:58,698 INFO    MainThread:1488168 [wandb_setup.py:_flush():80] Configure stats pid to 1488168
+2025-12-22 15:25:58,698 INFO    MainThread:1488168 [wandb_setup.py:_flush():80] Loading settings from /root/.config/wandb/settings
+2025-12-22 15:25:58,698 INFO    MainThread:1488168 [wandb_setup.py:_flush():80] Loading settings from /home/dhutchins/ltx-2/training/wandb/settings
+2025-12-22 15:25:58,698 INFO    MainThread:1488168 [wandb_setup.py:_flush():80] Loading settings from environment variables
+2025-12-22 15:25:58,698 INFO    MainThread:1488168 [wandb_init.py:setup_run_log_directory():714] Logging user logs to /home/dhutchins/ltx-2/training/wandb/run-20251222_152558-5d0fryzm/logs/debug.log
+2025-12-22 15:25:58,698 INFO    MainThread:1488168 [wandb_init.py:setup_run_log_directory():715] Logging internal logs to /home/dhutchins/ltx-2/training/wandb/run-20251222_152558-5d0fryzm/logs/debug-internal.log
+2025-12-22 15:25:58,698 INFO    MainThread:1488168 [wandb_init.py:init():841] calling init triggers
+2025-12-22 15:25:58,698 INFO    MainThread:1488168 [wandb_init.py:init():846] wandb.init called with sweep_config: {}
+config: {'epochs': 10, 'lr': 0.01, '_wandb': {}}
+2025-12-22 15:25:58,698 INFO    MainThread:1488168 [wandb_init.py:init():889] starting backend
+2025-12-22 15:25:59,060 INFO    MainThread:1488168 [wandb_init.py:init():892] sending inform_init request
+2025-12-22 15:25:59,067 INFO    MainThread:1488168 [wandb_init.py:init():900] backend started and connected
+2025-12-22 15:25:59,101 INFO    MainThread:1488168 [wandb_init.py:init():970] updated telemetry
+2025-12-22 15:25:59,115 INFO    MainThread:1488168 [wandb_init.py:init():994] communicating run to backend with 90.0 second timeout

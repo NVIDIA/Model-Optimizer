@@ -16,6 +16,7 @@
 """ModelOpt plugin for transformers Trainer."""
 
 import gc
+import inspect
 import json
 import os
 import types
@@ -122,6 +123,8 @@ class QATTrainer(ModelOptHFTrainer):
     This class takes an additional optional argument `quant_args` of type
     :class:`QuantizationArgumentsWithConfig <QuantizationArgumentsWithConfig>`
     to specify the quantization arguments.
+    
+    Supports both HuggingFace transformers and diffusion models (e.g., LTX-2).
     """
 
     def __init__(
@@ -142,6 +145,9 @@ class QATTrainer(ModelOptHFTrainer):
                 else quant_args.quant_cfg
             )
         self.quant_cfg = quant_cfg
+
+        # Detect if this is a diffusion/LTX-2 model or a HuggingFace transformer
+        self._is_diffusion_model = self._detect_diffusion_model()
 
         # Add lora adapter before quantizing the model
         if getattr(self.args, "lora_config", None) is not None and not hasattr(
@@ -174,6 +180,33 @@ class QATTrainer(ModelOptHFTrainer):
             getattr(self.model, "config", None), "dtype", None
         ) or getattr(getattr(self.model, "config", None), "torch_dtype", None)
 
+    def _detect_diffusion_model(self):
+        """Detect if model is a diffusion model (LTX-2, LTXV, etc.) vs HuggingFace transformer."""
+        model_class_name = self.model.__class__.__name__
+        
+        # Check for LTX model types
+        if "LTX" in model_class_name or "AVTransformer" in model_class_name:
+            print_rank_0(f"Detected diffusion model: {model_class_name}")
+            return True
+        
+        # Check if model has forward signature typical of diffusion models
+        # Diffusion models typically have forward(x, timestep, context, attention_mask, ...)
+        import inspect
+        sig = inspect.signature(self.model.forward)
+        params = list(sig.parameters.keys())
+        
+        # Check for diffusion-specific parameters
+        has_timestep = "timestep" in params or "timesteps" in params
+        has_context = "context" in params or "encoder_hidden_states" in params
+        has_x = "x" in params or "sample" in params
+        
+        if has_timestep and has_context and has_x:
+            print_rank_0(f"Detected diffusion model based on forward signature: {model_class_name}")
+            return True
+        
+        print_rank_0(f"Detected HuggingFace transformer model: {model_class_name}")
+        return False
+
     def _save_modelopt_state_with_weights(self):
         """Save the modelopt weights for fsdp2 models."""
         if torch.distributed.is_initialized():
@@ -203,12 +236,46 @@ class QATTrainer(ModelOptHFTrainer):
         dataset = torch.utils.data.Subset(dataset, list(range(num_samples)))
         data_loader = self.get_eval_dataloader(dataset)
 
-        def forward_loop(model):
-            for batch in tqdm(data_loader, desc="Calibrating", disable=not self.args.should_save):
-                batch = self._prepare_inputs(batch)
-                # Important: We should forward pass using the unwrapped model
-                # mtq.quantize will unwrap the model & pass to the forward_loop
-                self.model(**batch)
+        if self._is_diffusion_model:
+            # Diffusion model (LTX-2) forward loop
+            def forward_loop(model):
+                model.eval()
+                with torch.no_grad():
+                    for batch in tqdm(data_loader, desc="Calibrating", disable=not self.args.should_save):
+                        batch = self._prepare_inputs(batch)
+                        try:
+                            # Extract inputs for diffusion model
+                            video_latents = batch.get("video_latents", batch.get("x"))
+                            prompt_embeds = batch.get("prompt_embeds", batch.get("context"))
+                            timesteps = batch.get("timesteps", batch.get("timestep"))
+                            
+                            if video_latents is None or prompt_embeds is None or timesteps is None:
+                                print_rank_0(f"Warning: Missing required inputs in batch. Keys: {batch.keys()}")
+                                continue
+                            
+                            # Prepare attention mask
+                            B = video_latents.shape[0]
+                            seq_len = prompt_embeds.shape[1] if prompt_embeds.dim() > 2 else prompt_embeds.shape[0]
+                            attention_mask = torch.ones(B, seq_len, device=video_latents.device, dtype=torch.bool)
+                            
+                            # Forward pass with diffusion model signature
+                            _ = model(
+                                x=video_latents,
+                                timestep=timesteps,
+                                context=prompt_embeds,
+                                attention_mask=attention_mask,
+                            )
+                        except Exception as e:
+                            print_rank_0(f"Warning: Calibration batch failed: {e}")
+                            continue
+        else:
+            # HuggingFace transformer forward loop
+            def forward_loop(model):
+                for batch in tqdm(data_loader, desc="Calibrating", disable=not self.args.should_save):
+                    batch = self._prepare_inputs(batch)
+                    # Important: We should forward pass using the unwrapped model
+                    # mtq.quantize will unwrap the model & pass to the forward_loop
+                    self.model(**batch)
 
         # TODO: Remove calibrate_with_adapters - this should not be needed
         with calibrate_with_adapters(self.model, self.args):
@@ -230,6 +297,56 @@ class QATTrainer(ModelOptHFTrainer):
         if self.accelerator.is_main_process:
             mtq.print_quant_summary(self.model)
 
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        """
+        Compute loss for both HuggingFace transformers and diffusion models.
+        
+        For diffusion models, computes MSE loss between model prediction and target noise.
+        For HuggingFace models, uses the default compute_loss implementation.
+        
+        Args:
+            model: The model to compute loss for.
+            inputs: Dictionary of inputs.
+            return_outputs: Whether to return model outputs along with the loss.
+            num_items_in_batch: Number of items in the batch (passed by newer HF Trainer versions).
+        """
+        if self._is_diffusion_model:
+            # Diffusion model loss computation
+            video_latents = inputs.get("video_latents", inputs.get("x"))
+            prompt_embeds = inputs.get("prompt_embeds", inputs.get("context"))
+            timesteps = inputs.get("timesteps", inputs.get("timestep"))
+            targets = inputs.get("targets")
+            latent_shape = inputs.get("latent_shape")  # Required for packed latents
+            
+            if targets is None:
+                raise ValueError("Diffusion model training requires 'targets' in the batch")
+            
+            # Prepare attention mask
+            B = video_latents.shape[0]
+            seq_len = prompt_embeds.shape[1] if prompt_embeds.dim() > 2 else prompt_embeds.shape[0]
+            attention_mask = torch.ones(B, seq_len, device=video_latents.device, dtype=torch.bool)
+            
+            # Forward pass
+            model_output = model(
+                x=video_latents,
+                timestep=timesteps,
+                context=prompt_embeds,
+                attention_mask=attention_mask,
+                latent_shape=latent_shape,  # Pass latent_shape for packed inputs
+            )
+            
+            # Compute MSE loss
+            loss = torch.nn.functional.mse_loss(
+                model_output.float(),
+                targets.float(),
+                reduction="mean"
+            )
+            
+            return (loss, model_output) if return_outputs else loss
+        else:
+            # HuggingFace transformer - use default implementation
+            return super().compute_loss(model, inputs, return_outputs, num_items_in_batch=num_items_in_batch)
+
     def training_step(self, *args, **kwargs):
         """Training step."""
         if self.quant_cfg is not None and not is_quantized(self.model):
@@ -237,10 +354,66 @@ class QATTrainer(ModelOptHFTrainer):
         return super().training_step(*args, **kwargs)
 
     def prediction_step(self, *args, **kwargs):
-        """Prediction step."""
+        """
+        Prediction step for both HuggingFace transformers and diffusion models.
+        
+        For diffusion models, we need to remap input keys to match the model's forward signature.
+        For HuggingFace models, we delegate to the parent class without modification.
+        """
         if self.quant_cfg is not None and not is_quantized(self.model):
             self._quantize_model()
-        return super().prediction_step(*args, **kwargs)
+        
+        if self._is_diffusion_model:
+            # Parse arguments - they could be positional or keyword
+            # Standard signature: prediction_step(model, inputs, prediction_loss_only, ignore_keys=None)
+            model = args[0] if len(args) > 0 else kwargs.get('model')
+            inputs = args[1] if len(args) > 1 else kwargs.get('inputs')
+            prediction_loss_only = args[2] if len(args) > 2 else kwargs.get('prediction_loss_only', False)
+            
+            # Diffusion model prediction - remap inputs and call model
+            has_labels = "targets" in inputs
+            
+            # Extract and remap inputs
+            video_latents = inputs.get("video_latents", inputs.get("x"))
+            prompt_embeds = inputs.get("prompt_embeds", inputs.get("context"))
+            timesteps = inputs.get("timesteps", inputs.get("timestep"))
+            latent_shape = inputs.get("latent_shape")  # Required for packed latents
+            
+            # Prepare attention mask
+            B = video_latents.shape[0]
+            seq_len = prompt_embeds.shape[1] if prompt_embeds.dim() > 2 else prompt_embeds.shape[0]
+            attention_mask = torch.ones(B, seq_len, device=video_latents.device, dtype=torch.bool)
+            
+            with torch.no_grad():
+                # Forward pass
+                outputs = model(
+                    x=video_latents,
+                    timestep=timesteps,
+                    context=prompt_embeds,
+                    attention_mask=attention_mask,
+                    latent_shape=latent_shape,  # Pass latent_shape for packed inputs
+                )
+                
+                # Compute loss if targets are available
+                loss = None
+                if has_labels:
+                    targets = inputs.get("targets")
+                    loss = torch.nn.functional.mse_loss(
+                        outputs.float(),
+                        targets.float(),
+                        reduction="mean"
+                    )
+            
+            # Return in the format expected by Trainer
+            # (loss, logits, labels) where logits can be None if prediction_loss_only=True
+            if prediction_loss_only:
+                return (loss, None, None)
+            else:
+                labels = inputs.get("targets") if has_labels else None
+                return (loss, outputs, labels)
+        else:
+            # HuggingFace model - pass through all arguments unchanged
+            return super().prediction_step(*args, **kwargs)
 
     def evaluate(self, *args, **kwargs):
         """Evaluate the model."""
@@ -285,7 +458,12 @@ class QATTrainer(ModelOptHFTrainer):
             out_dir = args[0]
             # FSDP may upcast parameter dtype to float32 during mixed-precision training,
             # we convert it back to original dtype by updating `torch-dtype` in `config.json`
-            self._update_config_json_dtype(out_dir, str(self._original_dtype).split(".")[1])
+            # Only update if dtype is available (HuggingFace models have config.dtype, diffusion models may not)
+            if self._original_dtype is not None:
+                dtype_str = str(self._original_dtype)
+                if "." in dtype_str:
+                    dtype_name = dtype_str.split(".")[1]
+                    self._update_config_json_dtype(out_dir, dtype_name)
         return outputs
 
     def _load_best_model(self, *args, **kwargs):
@@ -374,6 +552,8 @@ class QADTrainer(QATTrainer, KDTrainer):
     arguments in addition to the `quant_args` argument.
     For details on `quant_args` see
     :class:`QATTrainer <QATTrainer>`.
+    
+    Supports both HuggingFace transformers and diffusion models (e.g., LTX-2).
     """
 
     def __init__(
@@ -405,9 +585,94 @@ class QADTrainer(QATTrainer, KDTrainer):
         _convert_for_kd(self.model, KDLossConfig(**self.distill_config))
         print_rank_0("Distillation model created.")
 
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        """
+        Compute distillation loss for both HuggingFace transformers and diffusion models.
+        
+        For diffusion models, computes combined loss:
+        - Hard loss: MSE between student prediction and ground truth
+        - Soft loss: MSE between student and teacher predictions (distillation)
+        
+        For HuggingFace models, uses the default KDTrainer compute_loss.
+        
+        Args:
+            model: The model to compute loss for (DistillationModel wrapper).
+            inputs: Dictionary of inputs.
+            return_outputs: Whether to return model outputs along with the loss.
+            num_items_in_batch: Number of items in the batch (passed by newer HF Trainer versions).
+        """
+        if self._is_diffusion_model:
+            # Diffusion model distillation
+            video_latents = inputs.get("video_latents", inputs.get("x"))
+            prompt_embeds = inputs.get("prompt_embeds", inputs.get("context"))
+            timesteps = inputs.get("timesteps", inputs.get("timestep"))
+            targets = inputs.get("targets")
+            latent_shape = inputs.get("latent_shape")  # Required for packed latents
+            
+            if targets is None:
+                raise ValueError("Diffusion model training requires 'targets' in the batch")
+            
+            # Prepare attention mask
+            B = video_latents.shape[0]
+            seq_len = prompt_embeds.shape[1] if prompt_embeds.dim() > 2 else prompt_embeds.shape[0]
+            attention_mask = torch.ones(B, seq_len, device=video_latents.device, dtype=torch.bool)
+            
+            # Get teacher and student models from DistillationModel wrapper
+            # The model is wrapped by _convert_for_kd, which creates a DistillationModel
+            # that contains both teacher and student
+            if model.training:
+                # During training, compute distillation loss
+                # The DistillationModel.forward() will call both teacher and student
+                # and store their outputs for compute_kd_loss()
+                
+                # Forward pass (calls both teacher and student internally)
+                student_output = model(
+                    x=video_latents,
+                    timestep=timesteps,
+                    context=prompt_embeds,
+                    attention_mask=attention_mask,
+                    latent_shape=latent_shape,  # Pass latent_shape for packed inputs
+                )
+                
+                # Compute hard loss (student vs ground truth)
+                hard_loss = torch.nn.functional.mse_loss(
+                    student_output.float(),
+                    targets.float(),
+                    reduction="mean"
+                )
+                
+                # Compute distillation loss (combines hard loss with teacher-student loss)
+                # The DistillationModel has captured teacher outputs during forward pass
+                total_loss = model.compute_kd_loss(student_loss=hard_loss)
+                
+                return (total_loss, student_output) if return_outputs else total_loss
+            else:
+                # During evaluation, only use student and compute hard loss
+                student_output = model(
+                    x=video_latents,
+                    timestep=timesteps,
+                    context=prompt_embeds,
+                    attention_mask=attention_mask,
+                    latent_shape=latent_shape,  # Pass latent_shape for packed inputs
+                )
+                
+                loss = torch.nn.functional.mse_loss(
+                    student_output.float(),
+                    targets.float(),
+                    reduction="mean"
+                )
+                
+                return (loss, student_output) if return_outputs else loss
+        else:
+            # HuggingFace transformer - use KDTrainer's implementation
+            return KDTrainer.compute_loss(self, model, inputs, return_outputs, num_items_in_batch=num_items_in_batch)
+
     def train(self, *args, **kwargs):
         """Train the model with QAD."""
-        self.compute_loss_func = lambda *args, **kwargs: self.model.compute_kd_loss()
+        if not self._is_diffusion_model:
+            # For HuggingFace models, use the KD loss computation
+            self.compute_loss_func = lambda *args, **kwargs: self.model.compute_kd_loss()
+        # For diffusion models, compute_loss handles everything (no compute_loss_func needed)
         return super().train(*args, **kwargs)
 
     def save_model(

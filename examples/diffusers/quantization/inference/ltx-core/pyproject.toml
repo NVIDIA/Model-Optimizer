@@ -1,0 +1,26 @@
+[project]
+name = "ltx-core"
+version = "0.1.0"
+description = "Core implementation of Lightricks' LTX-2 model"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "torch~=2.7",
+    "einops",
+    "numpy",
+    "transformers",
+    "safetensors",
+    "accelerate"
+]
+
+[project.optional-dependencies]
+flashpack = ["flashpack==0.1.2"]
+
+[build-system]
+requires = ["uv_build>=0.9.8,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "scikit-image>=0.25.2",
+]

@@ -1,0 +1,17 @@
+{
+  "os":  "Linux-6.11.0-1015-gcp-x86_64-with-glibc2.39",
+  "python":  "CPython 3.12.3",
+  "startedAt":  "2025-12-22T23:19:46.423869Z",
+  "program":  "/home/dhutchins/ltx-2/training/scripts/test_wandb.py",
+  "codePath":  "training/scripts/test_wandb.py",
+  "codePathLocal":  "scripts/test_wandb.py",
+  "git":  {
+    "remote":  "ssh://gitlab-master.nvidia.com:12051/forrestl/ltx-2.git",
+    "commit":  "e746344f7599fe78588409ffe217961fc7d5c35b"
+  },
+  "email":  "dhutchins@nvidia.com",
+  "root":  "/home/dhutchins/ltx-2/training",
+  "host":  "pool0-0303",
+  "executable":  "/home/dhutchins/ltx-2/training/.venv/bin/python3",
+  "writerId":  "qs7h3x7ck0hy3blaz8bfz5syguhjep3l"
+}

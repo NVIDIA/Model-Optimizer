@@ -1,0 +1,94 @@
+# LTX-2 LoRA Training Configuration
+# Efficient fine-tuning for LTX-2 audio-video generation model
+
+# Model configuration
+model:
+  model_source: "LTX2"  # Options: "LTX2" for default, or path to custom LTX-2 checkpoint (.safetensors)
+  training_mode: "lora"  # LoRA training (only updates adapter weights)
+  load_checkpoint: null  # Path to checkpoint file or directory to resume from
+  text_encoder_path: "/path/to/gemma/model"  # REQUIRED for LTX-2: Path to Gemma model directory
+
+# LoRA configuration
+lora:
+  rank: 32  # LoRA rank (higher = more capacity but more memory). Try 16, 32, 64, 128
+  alpha: 32  # LoRA alpha (typically set equal to rank)
+  dropout: 0.0  # LoRA dropout (0.0 = no dropout)
+  target_modules:  # Which modules to apply LoRA to
+    - "to_k"      # Key projection in attention
+    - "to_q"      # Query projection in attention
+    - "to_v"      # Value projection in attention
+    - "to_out.0"  # Output projection in attention
+    # Uncomment below for more capacity (increases memory usage):
+    # - "ff.net.0.proj"  # Feed-forward gate projection
+    # - "ff.net.2"       # Feed-forward output projection
+
+# Conditioning configuration
+conditioning:
+  mode: "none"  # Options: "none", "reference_video", "audio_video"
+  first_frame_conditioning_p: 0.1  # Probability of using first frame conditioning
+
+# Optimization configuration
+optimization:
+  learning_rate: 2e-4  # Higher learning rate for LoRA (2e-4 is typical)
+  steps: 1500  # Total training steps
+  batch_size: 1  # Batch size per GPU
+  gradient_accumulation_steps: 1  # Gradient accumulation (1 = no accumulation)
+  max_grad_norm: 1.0  # Gradient clipping threshold
+  optimizer_type: "adamw"  # Options: "adamw" or "adamw8bit"
+  scheduler_type: "linear"  # Options: "constant", "linear", "cosine", "cosine_with_restarts", "polynomial"
+  scheduler_params: {}
+  enable_gradient_checkpointing: false  # Usually not needed for LoRA
+
+# Acceleration optimization
+acceleration:
+  mixed_precision_mode: "bf16"  # Options: "no", "fp16", "bf16"
+  quantization: null  # Options: null, "int8-quanto", "int4-quanto", "fp8-quanto" (saves memory)
+  load_text_encoder_in_8bit: true  # Load Gemma in 8-bit to save memory
+
+# Data configuration
+data:
+  preprocessed_data_root: "/path/to/preprocessed/data"  # Path to preprocessed dataset
+  num_dataloader_workers: 2
+
+# Validation configuration
+validation:
+  prompts:
+    - "a professional portrait video of a person with blurry bokeh background"
+    - "a video of a person wearing a nice suit"
+    - "a cinematic video of city lights at night"
+  negative_prompt: "worst quality, inconsistent motion, blurry, jittery, distorted"
+  images: null  # First-frame conditioning images (null = disabled)
+  video_dims: [768, 448, 89]  # [width, height, frames]
+  seed: 42
+  inference_steps: 50
+  interval: 100  # Validate every 100 steps
+  videos_per_prompt: 1
+  guidance_scale: 3.5
+
+# Checkpoint configuration
+checkpoints:
+  interval: 250  # Save checkpoint every 250 steps
+  keep_last_n: -1  # Keep all checkpoints (-1) or specify number to keep
+
+# Flow matching configuration
+flow_matching:
+  timestep_sampling_mode: "shifted_logit_normal"  # Options: "uniform", "shifted_logit_normal"
+  timestep_sampling_params: {}
+
+# HuggingFace Hub configuration
+hub:
+  push_to_hub: false  # Set to true to upload to HuggingFace Hub
+  hub_model_id: null  # e.g., 'username/ltx2-lora-effect'
+
+# Weights & Biases configuration
+wandb:
+  enabled: false  # Enable W&B logging
+  project: "ltx2-trainer"
+  entity: null
+  tags: ["ltx2", "lora"]
+  log_validation_videos: true
+
+# General configuration
+seed: 42
+output_dir: "outputs/ltx2_lora"
+

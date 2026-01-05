@@ -1,0 +1,12 @@
+{"time":"2025-12-22T15:19:46.735753693-08:00","level":"INFO","msg":"stream: starting","core version":"0.23.1"}
+{"time":"2025-12-22T15:19:47.493070865-08:00","level":"INFO","msg":"stream: created new stream","id":"eoefxtxl"}
+{"time":"2025-12-22T15:19:47.493141217-08:00","level":"INFO","msg":"handler: started","stream_id":"eoefxtxl"}
+{"time":"2025-12-22T15:19:47.495152425-08:00","level":"INFO","msg":"stream: started","id":"eoefxtxl"}
+{"time":"2025-12-22T15:19:47.495165137-08:00","level":"INFO","msg":"writer: started","stream_id":"eoefxtxl"}
+{"time":"2025-12-22T15:19:47.495178763-08:00","level":"INFO","msg":"sender: started","stream_id":"eoefxtxl"}
+{"time":"2025-12-22T15:19:49.534365665-08:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-12-22T15:19:50.296540731-08:00","level":"INFO","msg":"handler: operation stats","stats":{}}
+{"time":"2025-12-22T15:19:50.299634711-08:00","level":"INFO","msg":"stream: closing","id":"eoefxtxl"}
+{"time":"2025-12-22T15:19:50.299651309-08:00","level":"INFO","msg":"handler: closed","stream_id":"eoefxtxl"}
+{"time":"2025-12-22T15:19:50.300802115-08:00","level":"INFO","msg":"sender: closed","stream_id":"eoefxtxl"}
+{"time":"2025-12-22T15:19:50.300811283-08:00","level":"INFO","msg":"stream: closed","id":"eoefxtxl"}

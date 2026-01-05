@@ -1,0 +1,87 @@
+# LTXV LoRA Training Configuration
+
+# Model configuration
+model:
+  model_source: "LTXV_13B_097_DEV" # Options: "LTX2", "LTXV_13B_097_DEV", "LTXV_2B_0.9.6_DEV", "LTXV_2B_0.9.5", "LTXV_2B_0.9.1", "LTXV_2B_0.9.0", or a HF repo/local path
+  training_mode: "lora" # Options: "lora" or "full"
+  load_checkpoint: null # Path to checkpoint file or directory to resume from. If directory, latest checkpoint will be used.
+
+# LoRA configuration
+lora:
+  rank: [RANK]
+  alpha: [RANK]
+  dropout: 0.0
+  target_modules:
+    - "to_k"
+    - "to_q"
+    - "to_v"
+    - "to_out.0"
+
+# Conditioning configuration
+conditioning:
+  mode: "none" # Options: "none", "reference_video"
+  first_frame_conditioning_p: 0.5
+
+# Optimization configuration
+optimization:
+  learning_rate: 2e-4
+  steps: 2000
+  batch_size: 1
+  gradient_accumulation_steps: 1
+  max_grad_norm: 1.0
+  optimizer_type: "adamw" # Options: "adamw" or "adamw8bit"
+  scheduler_type: "linear" # Options: "constant", "linear", "cosine", "cosine_with_restarts", "polynomial"
+  scheduler_params: {}
+  enable_gradient_checkpointing: true
+
+# Acceleration optimization
+acceleration:
+  mixed_precision_mode: "bf16" # Options: "no", "fp16", "bf16"
+  quantization: null # Options: null, "int8-quanto", "int4-quanto", "int2-quanto", "fp8-quanto", "fp8uz-quanto"
+  load_text_encoder_in_8bit: false # Load text encoder in 8-bit precision to save memory
+
+# Data configuration
+data:
+  preprocessed_data_root: "[BASENAME]_scenes"
+  num_dataloader_workers: 2
+
+# Validation configuration
+validation:
+  prompts:
+    - "CAKEIFY a person using a knife to cut a cake shaped like bottle of mouthwash"
+    - "CAKEIFY a person using a knife to cut a cake shaped like potted plant"
+    - "CAKEIFY a person using a knife to cut a cake shaped like a jar of Nutella"
+  negative_prompt: "worst quality, inconsistent motion, blurry, jittery, distorted"
+  video_dims: [576, 576, 121] # [width, height, frames]
+  seed: 42
+  inference_steps: 50
+  interval: 250 # Set to null to disable validation
+  videos_per_prompt: 1
+  guidance_scale: 3.5
+
+# Checkpoint configuration
+checkpoints:
+  interval: 250 # Save a checkpoint every N steps, set to null to disable
+  keep_last_n: -1 # Keep only the N most recent checkpoints, set to -1 to keep all
+
+# Flow matching configuration
+flow_matching:
+  timestep_sampling_mode: "shifted_logit_normal" # Options: "uniform", "shifted_logit_normal"
+  timestep_sampling_params: {}
+
+# HuggingFace Hub configuration
+hub:
+  push_to_hub: false # Whether to push the model weights to the Hugging Face Hub
+  hub_model_id: null # Hugging Face Hub repository ID (e.g., 'username/repo-name'). Must be provided if `push_to_hub` is set to True
+
+# W&B configuration
+wandb:
+  enabled: false  # Set to true to enable W&B logging
+  project: "ltxv-trainer"
+  entity: null  # Your W&B username or team
+  tags: []
+  log_validation_videos: true
+
+# General configuration
+seed: 42
+output_dir: "outputs/[BASENAME]_lora_r[RANK]"

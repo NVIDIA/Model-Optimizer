@@ -1,0 +1,120 @@
+{
+  "os":  "Linux-6.11.0-1015-gcp-x86_64-with-glibc2.39",
+  "python":  "CPython 3.12.3",
+  "startedAt":  "2025-12-22T23:31:27.364786Z",
+  "args":  [
+    "configs/ltxv_custom.yaml"
+  ],
+  "program":  "/home/dhutchins/ltx-2/training/scripts/train.py",
+  "codePath":  "training/scripts/train.py",
+  "codePathLocal":  "scripts/train.py",
+  "git":  {
+    "remote":  "ssh://gitlab-master.nvidia.com:12051/forrestl/ltx-2.git",
+    "commit":  "e746344f7599fe78588409ffe217961fc7d5c35b"
+  },
+  "email":  "dhutchins@nvidia.com",
+  "root":  "/home/dhutchins/ltx-2/training",
+  "host":  "pool0-0303",
+  "executable":  "/home/dhutchins/ltx-2/training/.venv/bin/python3",
+  "cpu_count":  112,
+  "cpu_count_logical":  224,
+  "gpu":  "NVIDIA B200",
+  "gpu_count":  4,
+  "disk":  {
+    "/":  {
+      "total":  "12777782681600",
+      "used":  "20411092992"
+    }
+  },
+  "memory":  {
+    "total":  "4189258678272"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA B200",
+      "memoryTotal":  "192265846784",
+      "cudaCores":  18944,
+      "architecture":  "Blackwell",
+      "uuid":  "GPU-4ac40db0-42b1-3e05-e0e6-7bad7ed71d0f"
+    },
+    {
+      "name":  "NVIDIA B200",
+      "memoryTotal":  "192265846784",
+      "cudaCores":  18944,
+      "architecture":  "Blackwell",
+      "uuid":  "GPU-42290983-d4d7-a942-b778-8a18f257bc51"
+    },
+    {
+      "name":  "NVIDIA B200",
+      "memoryTotal":  "192265846784",
+      "cudaCores":  18944,
+      "architecture":  "Blackwell",
+      "uuid":  "GPU-2bcda9d0-b40a-cc1b-f1c9-463370c3ec26"
+    },
+    {
+      "name":  "NVIDIA B200",
+      "memoryTotal":  "192265846784",
+      "cudaCores":  18944,
+      "architecture":  "Blackwell",
+      "uuid":  "GPU-7d34c353-6e66-0d13-dbb2-2acf99537718"
+    }
+  ],
+  "cudaVersion":  "13.0",
+  "slurm":  {
+    "cluster_name":  "gcp-nrt-cs-001",
+    "conf":  "/cm/shared/apps/slurm/etc/gcp-nrt-cs-001/slurm.conf",
+    "cpus_on_node":  "112",
+    "gpus":  "4",
+    "gpus_on_node":  "4",
+    "gtids":  "0",
+    "job_account":  "adlr_psx_numerics",
+    "job_cpus_per_node":  "112",
+    "job_end_time":  "1766455859",
+    "job_gid":  "30",
+    "job_group":  "dip",
+    "job_id":  "113235",
+    "job_name":  "bash",
+    "job_nodelist":  "pool0-0303",
+    "job_num_nodes":  "1",
+    "job_partition":  "batch",
+    "job_qos":  "interactive",
+    "job_start_time":  "1766441459",
+    "job_uid":  "149930",
+    "job_user":  "dhutchins",
+    "jobid":  "113235",
+    "launch_node_ipaddr":  "10.69.196.29",
+    "localid":  "0",
+    "mpi_type":  "pmix",
+    "nnodes":  "1",
+    "nodeid":  "0",
+    "nodelist":  "pool0-0303",
+    "nprocs":  "1",
+    "ntasks":  "1",
+    "oom_kill_step":  "0",
+    "pmix_mapping_serv":  "(vector,(0,1,1))",
+    "pmixp_abort_agent_port":  "15309",
+    "prio_process":  "0",
+    "procid":  "0",
+    "pty_port":  "20403",
+    "pty_win_col":  "158",
+    "pty_win_row":  "42",
+    "srun_comm_host":  "10.69.196.29",
+    "srun_comm_port":  "36089",
+    "step_gpus":  "0,1,2,3",
+    "step_id":  "0",
+    "step_launcher_port":  "36089",
+    "step_nodelist":  "pool0-0303",
+    "step_num_nodes":  "1",
+    "step_num_tasks":  "1",
+    "step_tasks_per_node":  "1",
+    "stepid":  "0",
+    "submit_dir":  "/home/dhutchins",
+    "submit_host":  "gcp-nrt-cs-001-login-002",
+    "task_pid":  "1432494",
+    "tasks_per_node":  "1",
+    "topology_addr":  "asia-northeast1-cluster-pedb.8e19905a0e8b3e6ab522a116f66b62e6.32f239a2a5656619a39b2265082f8fe3.pool0-0303",
+    "topology_addr_pattern":  "switch.switch.switch.node",
+    "umask":  "0022"
+  },
+  "writerId":  "991lc78ngnovynszs3lxvc7s8octu8qs"
+}

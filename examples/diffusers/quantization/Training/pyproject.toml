@@ -1,0 +1,93 @@
+[project]
+name = "ltxv-trainer"
+version = "0.1.0"
+description = "LTXV training democratized."
+readme = "README.md"
+authors = [
+    { name = "Matan Ben-Yosef", email = "mbyosef@lightricks.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "accelerate>=1.2.1",
+    "av>=14.2.1",
+    "bitsandbytes >=0.45.2; sys_platform == 'linux'",
+    "decord >=0.6.0; sys_platform == 'linux'",
+    "diffusers>=0.32.1",
+    "einops>=0.8.1",
+    "huggingface-hub[hf-xet]>=0.31.4",
+    "imageio>=2.37.0",
+    "imageio-ffmpeg>=0.6.0",
+    "opencv-python>=4.11.0.86",
+    "optimum-quanto>=0.2.6",
+    "pandas>=2.2.3",
+    "peft>=0.14.0",
+    "pillow-heif>=0.21.0",
+    "protobuf>=5.29.3",
+    "pydantic>=2.10.4",
+    "rich>=13.9.4",
+    "safetensors>=0.5.0",
+    "scenedetect>=0.6.5.2",
+    "sentencepiece>=0.2.0",
+    "setuptools>=75.6.0",
+    "torch>=2.6.0",
+    "torchaudio>=2.9.0",
+    "torchcodec>=0.8.1",
+    "torchvision>=0.21.0",
+    "transformers>=4.57.3",
+    "typer>=0.15.1",
+    "wandb>=0.19.11",
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.0.1",
+    "ruff>=0.8.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+exclude = ["src/ltx_core/models"]
+
+[tool.ruff.lint]
+select = [
+    "E", # pycodestyle
+    "F", # pyflakes
+    "W", # pycodestyle (warnings)
+    "I", # isort
+    "N", # pep8-naming
+    "ANN", # flake8-annotations
+    "B", # flake8-bugbear
+    "A", # flake8-builtins
+    "COM", # flake8-commas
+    "C4", # flake8-comprehensions
+    "DTZ", # flake8-datetimez
+    "EXE", # flake8-executable
+    "PIE", # flake8-pie
+    "T20", # flake8-print
+    "PT", # flake8-pytest
+    "SIM", # flake8-simplify
+    "ARG", # flake8-unused-arguments
+    "PTH", # flake8--use-pathlib
+    "ERA", # flake8-eradicate
+    "RUF", # ruff specific rules
+    "PL", # pylint
+]
+ignore = [
+    "ANN002", # Missing type annotation for *args
+    "ANN003", # Missing type annotation for **kwargs
+    "ANN204", # Missing type annotation for special method
+    "COM812", # Missing trailing comma
+    "PTH123", # `open()` should be replaced by `Path.open()`
+    "PLR2004", # Magic value used in comparison, consider replacing with a constant variable
+]
+
+[tool.ruff.lint.pylint]
+max-args = 10
+
+[tool.ruff.lint.isort]
+known-first-party = ["ltxv_trainer"]

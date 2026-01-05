@@ -1,0 +1,80 @@
+# LTX-2 Full Model Fine-tuning Configuration
+# LTX-2 is an audio-video generation model that uses Gemma text encoder
+
+# Model configuration
+model:
+  model_source: "LTX2"  # Options: "LTX2" for default, or path to custom LTX-2 checkpoint (.safetensors)
+  training_mode: "full"  # Full fine-tuning (updates all model weights)
+  load_checkpoint: null  # Path to checkpoint file or directory to resume from. If directory, latest checkpoint will be used.
+  text_encoder_path: "/lustre/fsw/portfolios/adlr/projects/adlr_psx_numerics/users/ynankani/ltx-2/training/scripts/gemma/model"  # REQUIRED for LTX-2: Path to Gemma model directory
+
+# Conditioning configuration
+conditioning:
+  mode: "none"  # Options: "none", "reference_video", "audio_video"
+  first_frame_conditioning_p: 0.1  # Probability of using first frame conditioning
+
+# Optimization configuration
+optimization:
+  learning_rate: 1e-5  # Lower learning rate for full fine-tuning (more stable)
+  steps: 1000  # Total training steps
+  batch_size: 1  # Batch size per GPU
+  gradient_accumulation_steps: 4  # Effective batch size = batch_size × gradient_accumulation_steps
+  max_grad_norm: 1.0  # Gradient clipping threshold
+  optimizer_type: "adamw"  # Options: "adamw" or "adamw8bit" (8-bit saves memory)
+  scheduler_type: "linear"  # Options: "constant", "linear", "cosine", "cosine_with_restarts", "polynomial"
+  scheduler_params: {}  # Additional scheduler parameters
+  enable_gradient_checkpointing: true  # Enable to save GPU memory (recommended for full training)
+
+# Acceleration optimization
+acceleration:
+  mixed_precision_mode: "bf16"  # Options: "no", "fp16", "bf16" (bf16 recommended for stability)
+  quantization: null  # Disable quantization for full fine-tuning (use null)
+  load_text_encoder_in_8bit: true  # Load Gemma text encoder in 8-bit to save memory
+
+# Data configuration
+data:
+  preprocessed_data_root: "/lustre/fsw/portfolios/adlr/projects/adlr_psx_numerics/users/ynankani/TensorRT-Model-Optimizer/examples/diffusers/quantization/video_dataset/.precomputed"  # Path to preprocessed dataset (with latents)
+  num_dataloader_workers: 2  # Number of workers for data loading
+
+# Validation configuration
+validation:
+  prompts:
+    - "a professional portrait video of a person with blurry bokeh background"
+    - "a video of a person wearing a nice suit"
+    - "a cinematic video of city lights at night"
+  negative_prompt: "worst quality, inconsistent motion, blurry, jittery, distorted"
+  images: null  # Set to list of image paths for first-frame conditioning, or null to disable
+  video_dims: [768, 448, 89]  # [width, height, frames] - adjust based on your needs
+  seed: 42
+  inference_steps: 50  # Number of denoising steps during validation
+  interval: 200  # Run validation every N steps, set to null to disable
+  videos_per_prompt: 1  # Number of videos to generate per prompt
+  guidance_scale: 3.5  # Classifier-free guidance scale
+
+# Checkpoint configuration
+checkpoints:
+  interval: 500  # Save checkpoint every N steps, set to null to disable intermediate checkpoints
+  keep_last_n: -1  # Keep N most recent checkpoints (-1 keeps all, 3 keeps last 3, etc.)
+
+# Flow matching configuration
+flow_matching:
+  timestep_sampling_mode: "shifted_logit_normal"  # Options: "uniform", "shifted_logit_normal"
+  timestep_sampling_params: {}  # Additional parameters for timestep sampling
+
+# HuggingFace Hub configuration
+hub:
+  push_to_hub: false  # Set to true to upload trained model to HuggingFace Hub
+  hub_model_id: null  # HuggingFace repo ID (e.g., 'username/ltx2-finetuned')
+
+# Weights & Biases configuration
+wandb:
+  enabled: false  # Set to true to enable W&B logging
+  project: "ltx2-trainer"  # W&B project name
+  entity: null  # Your W&B username or team name
+  tags: ["ltx2", "full-finetune"]  # Tags for organizing runs
+  log_validation_videos: true  # Log validation videos to W&B
+
+# General configuration
+seed: 42  # Random seed for reproducibility
+output_dir: "outputs/ltx2_full_finetune"  # Directory for checkpoints and outputs
+
