@@ -382,17 +382,18 @@ class QADTrainer(QATTrainer, KDTrainer):
         """Initialize the trainer with modelopt states."""
         assert distill_config is not None, "`distill_config` is required for QAD."
         self.distill_config = distill_config
-
         super().__init__(*args, **kwargs)
 
         # Note: FSDP memory efficient loading doesn't work.
         self.model.cuda()
-        if self.quant_cfg is not None and not is_quantized(self.model):
-            self._quantize_model()
-        if getattr(self.args, "lora_config", None) is not None:
-            self.model.add_adapter(self.args.lora_config)
-            print_rank_0("Lora adapter added.")
         self._convert_to_distillation_model()
+        model = self.accelerator.unwrap_model(self.model)
+        with model.hide_teacher_model(), model.only_student_forward():
+            if self.quant_cfg is not None and not is_quantized(self.model):
+                self._quantize_model()
+            if getattr(self.args, "lora_config", None) is not None:
+                self.model.add_adapter(self.args.lora_config)
+                print_rank_0("Lora adapter added.")
 
     def _convert_to_distillation_model(self):
         """Convert the model to a distillation model."""

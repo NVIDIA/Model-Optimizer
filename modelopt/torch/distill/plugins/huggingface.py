@@ -86,7 +86,7 @@ class KDTrainer(ModelOptHFTrainer):
             self.processing_class.save_pretrained(output_dir)
 
     def train(self, *args, **kwargs):
-        """Enable or disable training/evaluation mode."""
+        """Train the model."""
         self.compute_loss_func = lambda *args, **kwargs: self.model.compute_kd_loss()
         return super().train(*args, **kwargs)
 
