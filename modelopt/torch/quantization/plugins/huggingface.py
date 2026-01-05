@@ -518,6 +518,14 @@ class _QuantCompressedLinear(QuantModule):
 
         return linear(self.input_quantizer(input), self.weight_quantizer(weight_data), self.bias)
 
+    def unpack_weight(self):
+        from compressed_tensors.quantization import QuantizationStatus
+
+        if self.quantization_status == QuantizationStatus.COMPRESSED:
+            self.weight = nn.Parameter(self.compressor.decompress_module(self), requires_grad=False)
+        del self.weight_packed
+        del self.weight_scale
+
 
 try:
     from transformers.models.llama4.modeling_llama4 import Llama4TextExperts, Llama4TextMoe

@@ -390,6 +390,8 @@ def _export_quantized_weight(
     if weight_scale is not None:
         sub_module.register_buffer(quantizer_attrs.weight_scale, weight_scale)
 
+    torch.cuda.empty_cache()
+
 
 def _export_hf_checkpoint(
     model: nn.Module, dtype: torch.dtype | None = None, is_modelopt_qlora: bool = False, **kwargs
@@ -516,6 +518,8 @@ def _export_hf_checkpoint(
         if is_modelopt_qlora and (hasattr(sub_module, "base_layer")):
             continue
 
+        if hasattr(sub_module, "weight_packed"):
+            sub_module.unpack_weight()
         if get_quantization_format(sub_module) != QUANTIZATION_NONE:
             if is_quantlinear(sub_module):
                 with fsdp2_aware_weight_update(model, sub_module, reshard=False):
