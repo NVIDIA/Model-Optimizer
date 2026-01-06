@@ -127,7 +127,7 @@ def drop_mcore_language_model_layers(model: nn.Module, *, layers_to_drop: list[i
     assert isinstance(model, supported_model_types), (
         f"Model should have one of {supported_model_types} submodule, got {model}"
     )
-    print_rank_0(f"Dropping layers {layers_to_drop} from {n} ({type(model)}).")
+    print_rank_0(f"Dropping decoder layers {layers_to_drop} from model.")
 
     # get the number of layers remaining in each pp rank
     layers_remaining_per_pp = torch.zeros(
@@ -151,25 +151,14 @@ def drop_mcore_language_model_layers(model: nn.Module, *, layers_to_drop: list[i
     new_num_layers = sum(layers_remaining_per_pp)
 
     # reindex kept layers, exclude sharded state dict for dropped layers
-    layer_offset = sum(layers_remaining_per_pp[: get_pipeline_model_parallel_rank()])
-    layer_number = layer_offset + 1
-    dropped_layers = []
+    layer_number = sum(layers_remaining_per_pp[: get_pipeline_model_parallel_rank()]) + 1
+    kept_layers = []
     for layer in model.decoder.layers:
-        if layer.layer_number in layers_to_drop:
-            layer.layer_number = -1  # should not be used
-            # layer.sharded_state_dict = lambda prefix, sharded_offsets, metadata: {}
-            dropped_layers.append(layer)
-        else:
+        if layer.layer_number not in layers_to_drop:
             layer.layer_number = layer_number
-            layer.get_transformer_layer_offset = lambda: layer_offset
             layer_number += 1
-
-    # remove dropped layers from the modulelist
-    model.decoder.layers = nn.ModuleList(
-        [layer for layer in model.decoder.layers if layer.layer_number != -1]
-    )
-    for layer in dropped_layers:
-        del layer
+            kept_layers.append(layer)
+    model.decoder.layers = nn.ModuleList(kept_layers)
 
     model.config.num_layers = new_num_layers
 
@@ -187,7 +176,7 @@ class MCoreMinitronSearcher(BaseSearcher):
     Available additional config options:
     - `max_width_pruning`: Maximum fraction per width hyperparameter to prune (default: 0.5).
         Only top (1 - max_width_pruning) choices will be considered.
-    - `max_depth_pruning`: Maximum fraction per depth hyperparameter to prune (default: 0.25).
+    - `max_depth_pruning`: Maximum fraction per depth hyperparameter to prune (default: 0.2).
         Only top (1 - max_depth_pruning) choices will be considered.
     - `top_k`: Number of candidates to consider for score_func validation (default: 10).
     """
@@ -407,6 +396,7 @@ class MCoreMinitronSearcher(BaseSearcher):
 
         # 2. Perform grid-search over the search space to find subnets fitting the constraints
         if max_params not in self.top_k_candidates_per_constraint:
+            max_num_layers = self.unwrapped_model.get_hparam("num_layers").max
             search_space_configs = MCoreMinitronSearcher._generate_search_space_combos(
                 hp_choices,  # type: ignore[arg-type]
                 max_width_pruning,
@@ -421,10 +411,7 @@ class MCoreMinitronSearcher(BaseSearcher):
             ):
                 self._prune(ss_config, prune_depth=False)
                 layer_ids = None
-                if (
-                    "num_layers" in ss_config
-                    and ss_config["num_layers"] < self.model.config.num_layers
-                ):
+                if "num_layers" in ss_config and ss_config["num_layers"] < max_num_layers:
                     layer_ids = sorted_layers[: ss_config["num_layers"]]
                 candidate_params = _param_num_dynamic(self.model, layer_numbers_to_count=layer_ids)
                 if candidate_params <= max_params:
@@ -437,7 +424,7 @@ class MCoreMinitronSearcher(BaseSearcher):
             )[:top_k]
             self.save_search_checkpoint(verbose=True)
         else:
-            print_rank_0(f"Using top {top_k} candidates from checkpoint")
+            print_rank_0(f"\nUsing top {top_k} candidates from checkpoint")
         top_k_candidates = self.top_k_candidates_per_constraint[max_params]
 
         print_rank_0(f"\n====================\nTop {top_k} candidates:")
@@ -452,10 +439,19 @@ class MCoreMinitronSearcher(BaseSearcher):
             disable=not dist.is_master(),
         ):
             if candidate.score is None:  # not restored from checkpoint
-                self._prune(candidate.ss_config, prune_depth=False)
+                all_layers = self.unwrapped_model.decoder.layers
+                start_layer_number = all_layers[0].layer_number
+
+                self._prune(candidate.ss_config, prune_depth=True, sorted_layers=sorted_layers)
                 candidate.score = self.eval_score(silent=False)
-                sample(self.model, sample_func=max)  # reset to max subnet
                 self.save_search_checkpoint(verbose=False)
+
+                # reset to max subnet and revert dropped layers
+                sample(self.model, sample_func=max)
+                for layer in all_layers:
+                    layer.layer_number = start_layer_number
+                    start_layer_number += 1
+                self.unwrapped_model.decoder.layers = all_layers
             print_rank_0(
                 f"\t{candidate.ss_config} -> {num2hrb(candidate.params)} params, {candidate.score:.4f} score"
             )
@@ -471,7 +467,7 @@ class MCoreMinitronSearcher(BaseSearcher):
     def _generate_search_space_combos(
         search_space: dict[str, list],
         max_width_pruning: float = 0.5,
-        max_depth_pruning: float = 0.25,
+        max_depth_pruning: float = 0.2,
     ) -> list[dict[str, Any]]:
         """Generate all possible combinations of hyperparameters from the search space.
 
@@ -480,7 +476,7 @@ class MCoreMinitronSearcher(BaseSearcher):
                         Example: {"hidden_size": [1024, 2048, 3072, 4096], "num_layers": [1, 2, ..., 31, 32]}
             max_width_pruning: Maximum fraction of width hyperparameters to prune (default: 0.5).
                             Only top (1 - max_width_pruning) choices will be considered.
-            max_depth_pruning: Maximum fraction of depth hyperparameters to prune (default: 0.25).
+            max_depth_pruning: Maximum fraction of depth hyperparameters to prune (default: 0.2).
                             Only top (1 - max_depth_pruning) choices will be considered.
 
         Returns:
