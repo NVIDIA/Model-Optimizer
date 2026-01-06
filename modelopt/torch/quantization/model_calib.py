@@ -95,6 +95,7 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
             quantizer.sync_amax_across_distributed_group(parallel_state.expert_model_parallel_group)
         # TODO: create sync_bias_across_distributed_group
 
+    # Step 1:Sync amax across data parallelism
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
             for child in module.children():
@@ -142,6 +143,7 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
         if quantizer.axis in axes_for_sync and quantizer.amax is not None:
             quantizer.sync_amax_across_distributed_group(parallel_state.tensor_parallel_group)
 
+    # Step 2: Sync amax across relevant parallelism (such as TP / EP)
     for name, module in model.named_modules():
         if getattr(module, "_parallel_state", None) is None:
             continue
@@ -180,20 +182,19 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
                 parallel_state=module.parallel_state,
             )
 
-    for name, module in model.named_modules():
+        # MOE Quantization
         if hasattr(module, "sync_moe_local_experts_amax"):
             module.sync_moe_local_experts_amax()
 
-    # We only support KVCache quantization with scalar per-tensor states for now (NVFP4 & FP8 KV cache)
-    # So we should sync amax across DP and TP for these quantizers (DP is already synced from above)
-    for name, module in model.named_modules():
-        if not (hasattr(module, "k_bmm_quantizer") and hasattr(module, "parallel_state")):
-            continue
-        for quantizer in [module.k_bmm_quantizer, module.v_bmm_quantizer]:
-            if isinstance(quantizer, TensorQuantizer) and quantizer.amax is not None:
-                quantizer.sync_amax_across_distributed_group(
-                    module.parallel_state.tensor_parallel_group
-                )
+        # KV Cache Quantization
+        if hasattr(module, "k_bmm_quantizer") and hasattr(module, "v_bmm_quantizer"):
+            # We only support KVCache quantization with scalar per-tensor states for now (NVFP4 & FP8 KV cache)
+            # So we should sync amax across DP and TP for these quantizers (DP is already synced from above)
+            for quantizer in [module.k_bmm_quantizer, module.v_bmm_quantizer]:
+                if isinstance(quantizer, TensorQuantizer) and quantizer.amax is not None:
+                    quantizer.sync_amax_across_distributed_group(
+                        module.parallel_state.tensor_parallel_group
+                    )
 
 
 @torch.no_grad()
