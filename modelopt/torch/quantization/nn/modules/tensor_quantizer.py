@@ -49,6 +49,7 @@ from ...qtensor import (
     INT4QTensor,
     INT8QTensor,
     MXFP4QTensor,
+    MXFP8QTensor,
     NF4QTensor,
     NVFP4QTensor,
     QTensorWrapper,
@@ -649,8 +650,32 @@ class TensorQuantizer(nn.Module):
         assert self._is_real_quantize_support(), "Real quantization not supported for this format."
 
         buffer_to_register = {}
-        if self._num_bits == (4, 3):
-            # FP8 quantization
+        # Check MX formats first (before FP8) since MXFP8 also has num_bits=(4,3)
+        if (
+            self._block_sizes
+            and self._block_sizes.get("scale_bits") == (8, 0)
+            and self._block_sizes.get("type") == "dynamic"
+        ):
+            # MX quantization (MXFP4/MXFP8)
+            if self._num_bits == (2, 1):
+                # MXFP4
+                outputs, scales = MXFP4QTensor.quantize(inputs, self._block_sizes[-1])
+                buffer_to_register["_scale"] = scales
+            elif self._num_bits == (4, 3):
+                # MXFP8
+                assert self._block_sizes[-1] == MXFP8QTensor.BLOCK_SIZE, (
+                    f"MXFP8 requires block size {MXFP8QTensor.BLOCK_SIZE}, "
+                    f"got {self._block_sizes[-1]}"
+                )
+                outputs, scales = MXFP8QTensor.quantize(inputs)
+                buffer_to_register["_scale"] = scales
+            else:
+                raise ValueError(
+                    f"Unsupported MX format: num_bits={self._num_bits}. "
+                    f"Expected (2, 1) for MXFP4 or (4, 3) for MXFP8."
+                )
+        elif self._num_bits == (4, 3):
+            # FP8 quantization (non-MX)
             # For per-tensor/per-channel quantization, we might need amax which is synced across all ranks
             # For blockwise quantization, amax will be recomputed in the kernel
             use_amax = self.amax is not None and not (self._block_sizes and self.amax.numel() == 1)
@@ -683,18 +708,6 @@ class TensorQuantizer(nn.Module):
             buffer_to_register["_scale"] = _scale
             buffer_to_register["_double_scale"] = _double_scale
             buffer_to_register["_scale_zeros"] = _scale_zeros
-        elif (
-            self._block_sizes.get("scale_bits") == (8, 0)
-            and self._block_sizes.get("type") == "dynamic"
-        ):
-            # MX quantization
-            if self._num_bits == (2, 1):
-                outputs, scales = MXFP4QTensor.quantize(inputs, self._block_sizes[-1])
-                buffer_to_register["_scale"] = scales
-            else:
-                raise ValueError(
-                    f"Real quantization for MX {self._num_bits} format is not supported."
-                )
         elif self._block_sizes.get("scale_bits") == (4, 3):
             # NVFP4 default quantization
             # Return real quantized tensor and store scales inside TensorQuantizer
