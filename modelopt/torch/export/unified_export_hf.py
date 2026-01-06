@@ -32,7 +32,7 @@ from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
-from modelopt.torch.quantization.qtensor import NVFP4QTensor
+from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
 
 from .convert_hf_config import convert_hf_quant_config_format
@@ -298,39 +298,13 @@ def _export_quantized_weight(
             del weight_quantizer._scale
         elif quantization_format == QUANTIZATION_MXFP8:
             # MXFP8 uses dynamic block quantization with E8M0 scales (uint8)
+            weight = getattr(sub_module, weight_name)
+            e8m0_scale = MXFP8QTensor.get_weights_scaling_factor_from_quantizer(
+                weight, weight_quantizer
+            )
+            sub_module.register_buffer(quantizer_attrs.weight_scale, e8m0_scale)
             if hasattr(weight_quantizer, "_scale") and weight_quantizer._scale is not None:
-                # If _scale is already uint8 (from MXFP8QTensor.quantize), keep it as is
-                if weight_quantizer._scale.dtype == torch.uint8:
-                    sub_module.register_buffer(
-                        quantizer_attrs.weight_scale,
-                        weight_quantizer._scale,
-                    )
-                else:
-                    # Legacy path: convert float32 scale to E8M0 uint8
-                    # scale = amax / E4M3_max, so exponent = ceil(log2(scale))
-                    scale = weight_quantizer._scale.to(torch.float32)
-                    e8m0_exponent = torch.ceil(torch.log2(scale.clamp(min=2**-127)))
-                    e8m0_exponent = torch.clamp(e8m0_exponent, min=-127, max=127)
-                    e8m0_scale = (e8m0_exponent + 127).to(torch.uint8)
-                    sub_module.register_buffer(
-                        quantizer_attrs.weight_scale,
-                        e8m0_scale,
-                    )
                 del weight_quantizer._scale
-            else:
-                # Compute E8M0 scaling factor from weight tensor
-                weight = getattr(sub_module, weight_name)
-                block_size = weight_quantizer.block_sizes[-1]
-                out_dim, in_dim = weight.shape[-2], weight.shape[-1]
-                num_blocks = in_dim // block_size
-                weight_reshaped = weight.view(out_dim, num_blocks, block_size)
-                amax = weight_reshaped.float().abs().max(dim=-1)[0]
-                maxbound = torch.finfo(torch.float8_e4m3fn).max
-                descale = amax / maxbound
-                e8m0_exponent = torch.ceil(torch.log2(descale.clamp(min=2**-127)))
-                e8m0_exponent = torch.clamp(e8m0_exponent, min=-127, max=127)
-                e8m0_scale = (e8m0_exponent + 127).to(torch.uint8)
-                sub_module.register_buffer(quantizer_attrs.weight_scale, e8m0_scale)
         else:
             sub_module.register_buffer(
                 quantizer_attrs.weight_scale, get_weight_scaling_factor(sub_module, weight_name)

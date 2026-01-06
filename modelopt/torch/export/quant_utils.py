@@ -16,7 +16,6 @@
 """Utils for quantization including scaling factors adjustments."""
 
 import logging
-import math
 from collections.abc import Generator
 from types import SimpleNamespace
 from typing import Any
@@ -757,56 +756,6 @@ def pack_int4_in_uint8(weight, weights_scaling_factor):
         return packed_byte.T.contiguous().view(torch.uint8)
 
 
-def _quantize_weight_mxfp8(
-    weight: torch.Tensor,
-    weights_scaling_factor: torch.Tensor,
-) -> torch.Tensor:
-    """Quantize weight tensor using MXFP8 format.
-
-    MXFP8 uses dynamic block quantization with FP8 (E4M3) along dimension -1 only (1D blocking).
-    Scales are E8M0 format (power-of-2 only), stored as biased uint8 exponents.
-    """
-    assert weights_scaling_factor is not None, (
-        "weights_scaling_factor must be provided for MXFP8 quantization."
-    )
-
-    # MXFP8 block size is 32
-    block_size = 32
-    maxbound = torch.finfo(torch.float8_e4m3fn).max  # 448.0
-
-    out_dim, in_dim = weight.shape[-2], weight.shape[-1]
-    expected_shape = (out_dim, in_dim // block_size)
-
-    # Reshape scaling factor if needed (same number of elements but wrong shape)
-    if weights_scaling_factor.shape != expected_shape:
-        if weights_scaling_factor.numel() == math.prod(expected_shape):
-            weights_scaling_factor = weights_scaling_factor.reshape(expected_shape)
-
-    # Handle E8M0 uint8 scale format (biased exponent)
-    if weights_scaling_factor.dtype == torch.uint8:
-        # E8M0 format: descale = 2^(exponent - 127), scale = 2^(127 - exponent)
-        scale_factor = torch.exp2(127 - weights_scaling_factor.float())
-    else:
-        # Legacy float32 scale format: scale = amax / maxbound
-        # Convert to E8M0: exponent = ceil(log2(scale))
-        e8m0_exponent = torch.ceil(torch.log2(weights_scaling_factor.clamp(min=2**-127)))
-        e8m0_exponent = torch.clamp(e8m0_exponent, min=-127, max=127)
-        scale_factor = torch.exp2(-e8m0_exponent)
-
-    # Reshape weight to [out_dim, num_blocks, block_size]
-    num_blocks = in_dim // block_size
-    weight_reshaped = weight.view(out_dim, num_blocks, block_size)
-
-    # Apply scale and quantize to FP8 E4M3
-    scale_factor_expanded = scale_factor.unsqueeze(-1)
-    scaled_weight = weight_reshaped * scale_factor_expanded
-    scaled_weight = torch.clamp(scaled_weight, min=-maxbound, max=maxbound)
-    quantized_weight = scaled_weight.to(torch.float8_e4m3fn)
-
-    # Reshape back to original 2D shape
-    return quantized_weight.view(out_dim, in_dim)
-
-
 def to_quantized_weight(
     weight: torch.Tensor,
     weights_scaling_factor: torch.Tensor,
@@ -843,7 +792,7 @@ def to_quantized_weight(
         return (weight / weights_scaling_factor[:, None]).round().clamp(-128, 127).to(torch.int8)
 
     if quantization == QUANTIZATION_MXFP8:
-        return _quantize_weight_mxfp8(weight, weights_scaling_factor)
+        return MXFP8QTensor.quantize_with_e8m0_scale(weight, weights_scaling_factor)
 
     if quantization == QUANTIZATION_FP8_PB_WO:
         return FP8QTensor.quantize(

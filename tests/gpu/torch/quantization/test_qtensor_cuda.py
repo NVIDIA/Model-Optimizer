@@ -15,6 +15,8 @@
 
 """Unit tests for quantized tensors."""
 
+import math
+
 import pytest
 import torch
 from _test_utils.torch.misc import set_seed
@@ -613,41 +615,61 @@ class TestQTensor:
 
     @pytest.mark.parametrize("device", ["cuda", "cpu"])
     @pytest.mark.parametrize("input_dtype", [torch.float32, torch.float16, torch.bfloat16])
-    @pytest.mark.parametrize("block_size", [32])
     @pytest.mark.parametrize(
         "input_shape",
-        [(128, 128), (256, 64), (512, 512)],
+        [
+            (128, 128),
+            (256, 64),
+            (512, 512),
+            # 3D shapes (MoE): (num_experts, out_dim, in_dim)
+            (4, 64, 128),
+            (1, 64, 128),  # single expert edge case
+            (32, 256, 512),  # large-scale MoE
+            # Shapes requiring padding (last dim not divisible by block size 32)
+            (8, 128, 65),  # odd in_dim
+            (128, 65),
+            (256, 100),
+            (64, 33),
+        ],
     )
-    def test_mxfp8_quantize_dequantize(self, device, input_dtype, block_size, input_shape):
+    def test_mxfp8_quantize_dequantize(self, device, input_dtype, input_shape):
         """Test MXFP8 quantization and dequantization produces correct E8M0 scales."""
         # Create test tensor
         test_tensor = torch.randn(input_shape, dtype=input_dtype, device=device)
 
         # Quantize using MXFP8QTensor
-        qtensor, e8m0_scale = MXFP8QTensor.quantize(test_tensor, block_size)
+        qtensor, e8m0_scale = MXFP8QTensor.quantize(test_tensor)
 
         # Verify scale is uint8 (E8M0 format)
         assert e8m0_scale.dtype == torch.uint8, f"Expected uint8 scale, got {e8m0_scale.dtype}"
 
-        # Verify scale shape is [out_dim, in_dim // block_size]
-        expected_scale_shape = (input_shape[0], input_shape[1] // block_size)
+        # Verify scale shape: last dim is ceil(in_dim / 32), other dims preserved
+        expected_scale_shape = (
+            *input_shape[:-1],
+            math.ceil(input_shape[-1] / MXFP8QTensor.BLOCK_SIZE),
+        )
         assert e8m0_scale.shape == expected_scale_shape, (
             f"Expected scale shape {expected_scale_shape}, got {e8m0_scale.shape}"
         )
 
-        # Verify quantized data is FP8 E4M3
+        # Verify quantized data is FP8 E4M3 and preserves original shape
         assert qtensor._quantized_data.dtype == torch.float8_e4m3fn, (
             f"Expected float8_e4m3fn, got {qtensor._quantized_data.dtype}"
+        )
+        assert qtensor._quantized_data.shape == input_shape, (
+            f"Expected quantized data shape {input_shape}, got {qtensor._quantized_data.shape}"
         )
 
         # Dequantize
         dequant_tensor = qtensor.dequantize(
             dtype=input_dtype,
             scale=e8m0_scale,
-            block_sizes={-1: block_size},
         )
 
-        # Verify dequantized tensor is close to original
+        # Verify dequantized tensor shape and values match original
+        assert dequant_tensor.shape == input_shape, (
+            f"Expected dequantized shape {input_shape}, got {dequant_tensor.shape}"
+        )
         assert torch.allclose(dequant_tensor, test_tensor, rtol=5e-2, atol=5e-2), (
             f"Dequantized tensor differs from original: "
             f"max diff = {(dequant_tensor - test_tensor).abs().max()}"
@@ -657,8 +679,7 @@ class TestQTensor:
     def test_mxfp8_e8m0_scale_values(self, device):
         """Test that MXFP8 produces correct E8M0 scale values (power-of-2 only)."""
         # Create a tensor with known amax values per block
-        # Block size is 32, so create a 2x64 tensor (2 rows, 2 blocks per row)
-        block_size = 32
+        # MXFP8 block size is 32, so create a 2x64 tensor (2 rows, 2 blocks per row)
         test_tensor = torch.zeros((2, 64), dtype=torch.float32, device=device)
 
         # First block (row 0, elements 0-31): max abs = 1.0, should give exponent ~127-8 = 119
@@ -676,7 +697,7 @@ class TestQTensor:
         test_tensor[1, 32:64] = 0.5
 
         # Quantize
-        qtensor, e8m0_scale = MXFP8QTensor.quantize(test_tensor, block_size)
+        qtensor, e8m0_scale = MXFP8QTensor.quantize(test_tensor)
 
         # Verify all scales are valid uint8 values
         assert e8m0_scale.dtype == torch.uint8
@@ -686,7 +707,6 @@ class TestQTensor:
         dequant = qtensor.dequantize(
             dtype=torch.float32,
             scale=e8m0_scale,
-            block_sizes={-1: block_size},
         )
 
         # Check that the dequantized max values per block are close to original
@@ -696,7 +716,6 @@ class TestQTensor:
         assert torch.allclose(dequant[1, 32:64].max(), torch.tensor(0.5, device=device), rtol=0.1)
 
     @pytest.mark.parametrize("device", ["cuda"])
-    @pytest.mark.parametrize("block_size", [32])
     @pytest.mark.parametrize("input_dtype", [torch.float32, torch.float16, torch.bfloat16])
     @pytest.mark.parametrize(
         "test_input",
@@ -781,10 +800,10 @@ class TestQTensor:
             ),
         ],
     )
-    def test_mxfp8_quantize_boundary_values(self, test_input, device, block_size, input_dtype):
+    def test_mxfp8_quantize_boundary_values(self, test_input, device, input_dtype):
         """Test MXFP8 quantization with E4M3 boundary values."""
         x = test_input.to(input_dtype).to(device)
-        qtensor, e8m0_scale = MXFP8QTensor.quantize(x, block_size)
+        qtensor, e8m0_scale = MXFP8QTensor.quantize(x)
 
         # Verify scale is uint8 (E8M0 format)
         assert e8m0_scale.dtype == torch.uint8, f"Expected uint8 scale, got {e8m0_scale.dtype}"
@@ -792,7 +811,6 @@ class TestQTensor:
         dequant = qtensor.dequantize(
             dtype=input_dtype,
             scale=e8m0_scale,
-            block_sizes={-1: block_size},
         )
 
         # FP8 E4M3 has limited precision, allow reasonable tolerance
@@ -812,18 +830,16 @@ class TestQTensor:
             free, total = torch.cuda.mem_get_info(device)
             return total - free
 
-        block_size = 32
-
         # Warmup
         test_input = torch.rand((32, 32), dtype=torch.float32, device="cuda")
-        MXFP8QTensor.quantize(test_input, block_size)
+        MXFP8QTensor.quantize(test_input)
 
         test_input = torch.rand(input_shape, dtype=torch.float32, device="cuda")
         torch.cuda.empty_cache()
 
         input_size = test_input.element_size() * test_input.numel()
         before_quantize = _get_gpu_mem_used()
-        MXFP8QTensor.quantize(test_input, block_size)
+        MXFP8QTensor.quantize(test_input)
         after_quantize = _get_gpu_mem_used()
 
         # Memory increase should be reasonable (less than 3x input size)
@@ -834,65 +850,20 @@ class TestQTensor:
         )
 
     @pytest.mark.parametrize("device", ["cuda"])
-    @pytest.mark.parametrize("block_size", [32])
-    @pytest.mark.parametrize("input_dtype", [torch.float32, torch.float16, torch.bfloat16])
-    @pytest.mark.parametrize(
-        "input_shape",
-        [
-            (128, 65),  # last dim not divisible by block_size
-            (256, 100),  # last dim not divisible by block_size
-            (64, 33),  # odd number, not divisible by block_size
-        ],
-    )
-    def test_mxfp8_quantize_with_padding(self, device, block_size, input_dtype, input_shape):
-        """Test MXFP8 quantization with inputs requiring padding."""
-        test_tensor = torch.randn(input_shape, dtype=input_dtype, device=device)
-
-        # Quantize using MXFP8QTensor
-        qtensor, e8m0_scale = MXFP8QTensor.quantize(test_tensor, block_size)
-
-        # Verify scale is uint8 (E8M0 format)
-        assert e8m0_scale.dtype == torch.uint8, f"Expected uint8 scale, got {e8m0_scale.dtype}"
-
-        # Verify quantized data preserves original shape (not padded shape)
-        assert qtensor._quantized_data.shape == input_shape, (
-            f"Expected quantized data shape {input_shape}, got {qtensor._quantized_data.shape}"
-        )
-
-        # Dequantize
-        dequant_tensor = qtensor.dequantize(
-            dtype=input_dtype,
-            scale=e8m0_scale,
-            block_sizes={-1: block_size},
-        )
-
-        # Verify dequantized tensor shape matches original
-        assert dequant_tensor.shape == input_shape, (
-            f"Expected dequantized shape {input_shape}, got {dequant_tensor.shape}"
-        )
-
-        # Verify dequantized tensor is close to original
-        assert torch.allclose(dequant_tensor, test_tensor, rtol=5e-2, atol=5e-2), (
-            f"Dequantized tensor differs from original: "
-            f"max diff = {(dequant_tensor - test_tensor).abs().max()}"
-        )
-
-    @pytest.mark.parametrize("device", ["cuda"])
-    @pytest.mark.parametrize("block_size", [32])
     @pytest.mark.parametrize(
         "input_shape",
         [(128, 64), (256, 128), (512, 256)],
     )
-    def test_mxfp8_get_weights_scaling_factor(self, device, block_size, input_shape):
+    def test_mxfp8_get_weights_scaling_factor(self, device, input_shape):
         """Test MXFP8 get_weights_scaling_factor returns correct E8M0 scales."""
         weight = torch.randn(input_shape, dtype=torch.float32, device=device)
 
         # Get scaling factor
-        e8m0_scale = MXFP8QTensor.get_weights_scaling_factor(weight, block_size)
+        e8m0_scale = MXFP8QTensor.get_weights_scaling_factor(weight)
 
         # Verify dtype and shape
         assert e8m0_scale.dtype == torch.uint8, f"Expected uint8 scale, got {e8m0_scale.dtype}"
-        expected_shape = (input_shape[0], input_shape[1] // block_size)
+        expected_shape = (input_shape[0], input_shape[1] // MXFP8QTensor.BLOCK_SIZE)
         assert e8m0_scale.shape == expected_shape, (
             f"Expected scale shape {expected_shape}, got {e8m0_scale.shape}"
         )
@@ -901,39 +872,3 @@ class TestQTensor:
         # The code clamps unbiased exponent to [-127, 127], giving biased range [0, 254]
         # Note: 255 (0xFF) represents NaN in E8M0 and should never appear from valid weights
         assert torch.all(e8m0_scale <= 254), "E8M0 scale contains NaN value (255)"
-
-    @pytest.mark.parametrize("device", ["cuda"])
-    @pytest.mark.parametrize("input_dtype", [torch.float32, torch.float16, torch.bfloat16])
-    def test_mxfp8_quantize_3d_tensor(self, device, input_dtype):
-        """Test MXFP8 quantization with 3D tensors (e.g., MoE experts)."""
-        block_size = 32
-        # Shape: (num_experts, out_dim, in_dim)
-        input_shape = (4, 64, 128)
-        test_tensor = torch.randn(input_shape, dtype=input_dtype, device=device)
-
-        # Quantize using MXFP8QTensor
-        qtensor, e8m0_scale = MXFP8QTensor.quantize(test_tensor, block_size)
-
-        # Verify scale shape: should be (num_experts, out_dim, in_dim // block_size)
-        expected_scale_shape = (4, 64, 128 // block_size)
-        assert e8m0_scale.shape == expected_scale_shape, (
-            f"Expected scale shape {expected_scale_shape}, got {e8m0_scale.shape}"
-        )
-
-        # Verify quantized data preserves original shape
-        assert qtensor._quantized_data.shape == input_shape, (
-            f"Expected quantized data shape {input_shape}, got {qtensor._quantized_data.shape}"
-        )
-
-        # Dequantize
-        dequant_tensor = qtensor.dequantize(
-            dtype=input_dtype,
-            scale=e8m0_scale,
-            block_sizes={-1: block_size},
-        )
-
-        # Verify dequantized tensor is close to original
-        assert torch.allclose(dequant_tensor, test_tensor, rtol=5e-2, atol=5e-2), (
-            f"Dequantized tensor differs from original: "
-            f"max diff = {(dequant_tensor - test_tensor).abs().max()}"
-        )
