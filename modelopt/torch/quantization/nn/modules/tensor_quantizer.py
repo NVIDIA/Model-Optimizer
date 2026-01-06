@@ -18,7 +18,7 @@
 import contextlib
 import math
 import warnings
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from typing import Any, Protocol
 
 import torch
@@ -1155,23 +1155,11 @@ class TensorQuantizer(nn.Module):
                 modelopt_state.get("_pytorch_state_metadata", {})
             )
 
-    def sync_amax_across_distributed_group(
-        self,
-        parallel_group: DistributedProcessGroup | Iterable[DistributedProcessGroup],
-    ):
-        """Synchronize the amax across all ranks in the given group(s)."""
-        if getattr(self, "_amax", None) is None:
-            return
-
-        for pg in (
-            [parallel_group]
-            if isinstance(parallel_group, DistributedProcessGroup)
-            else list(parallel_group)
-        ):
-            if not pg.is_initialized():
-                continue
+    def sync_amax_across_distributed_group(self, parallel_group: DistributedProcessGroup):
+        """Synchronize the amax across all ranks in the given group."""
+        if parallel_group.is_initialized() and getattr(self, "_amax", None) is not None:
             try:
-                dist.all_reduce(self._amax, op=dist.ReduceOp.MAX, group=pg.group)
+                dist.all_reduce(self._amax, op=dist.ReduceOp.MAX, group=parallel_group.group)
             except RuntimeError as e:
                 # This error happens if the distributed backend is using GPU and
                 # the tensor is not on GPU (or vice versa).

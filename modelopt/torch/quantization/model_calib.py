@@ -185,17 +185,14 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
             module.sync_moe_local_experts_amax()
 
     # We only support KVCache quantization with scalar per-tensor states for now (NVFP4 & FP8 KV cache)
-    # So we should sync amax across DP and TP for these quantizers
+    # So we should sync amax across DP and TP for these quantizers (DP is already synced from above)
     for name, module in model.named_modules():
         if not (hasattr(module, "k_bmm_quantizer") and hasattr(module, "parallel_state")):
             continue
         for quantizer in [module.k_bmm_quantizer, module.v_bmm_quantizer]:
             if isinstance(quantizer, TensorQuantizer) and quantizer.amax is not None:
                 quantizer.sync_amax_across_distributed_group(
-                    [
-                        module.parallel_state.data_parallel_group,
-                        module.parallel_state.tensor_parallel_group,
-                    ]
+                    module.parallel_state.tensor_parallel_group
                 )
 
 

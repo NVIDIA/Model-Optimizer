@@ -225,7 +225,7 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
 
     def _configure_attention_for_kv_cache_quant(module: Attention):
         """Configure Attention module for KV cache quantization compatibility."""
-        # Disable flash_decode if enabled (it bypasses core_attention)
+        # Disable flash_decode if enabled - it bypasses core_attention (only called during inference)
         if getattr(module.config, "flash_decode", False):
             warnings.warn(
                 "flash_decode=True is incompatible with ModelOpt KV cache quantization. "
