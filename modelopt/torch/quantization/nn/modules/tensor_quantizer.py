@@ -999,7 +999,7 @@ class TensorQuantizer(nn.Module):
             # Check if the input tensor is contiguous
             # Non-contiguous tensors will generate incorrect FP4 quantization results
             if hasattr(inputs, "is_contiguous") and not inputs.is_contiguous():
-                inputs.data = inputs.data.contiguous()
+                inputs = inputs.contiguous()
             if self.fake_quant:
                 with same_device_as(inputs):
                     outputs = self._fake_quantize(inputs)

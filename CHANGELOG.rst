@@ -4,6 +4,10 @@ NVIDIA Model Optimizer Changelog (Linux)
 0.41 (2026-01-19)
 ^^^^^^^^^^^^^^^^^
 
+**Bug Fixes**
+
+- Fix Megatron KV Cache quantization checkpoint restore for QAT/QAD (device placement, amax sync across DP/TP, flash_decode compatibility).
+
 **New Features**
 
 - Add support for Transformer Engine quantization for Megatron Core models.
