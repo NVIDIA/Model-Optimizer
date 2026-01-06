@@ -297,6 +297,63 @@ class LogitsKLLoss(BaseLoss):
         self._temperature = temperature
         self._reverse = reverse
 
+    def _calculate_kld(self, output_teacher: Tensor, output_student: Tensor) -> Tensor:
+        """Calculate KLD loss between two tensors."""
+        # Compute local softmax, and the reweight to compute global softmax.
+        if self._config.tensor_model_parallel_size > 1:
+            tp_group = parallel_state.get_tensor_model_parallel_group()
+
+            # Maximum value along vocab dimension across all GPUs.
+            teacher_logits_max, _ = torch.max(output_teacher, dim=-1)
+            torch.distributed.all_reduce(
+                teacher_logits_max,
+                op=torch.distributed.ReduceOp.MAX,
+                group=tp_group,
+            )
+            output_teacher -= teacher_logits_max.unsqueeze(dim=-1)
+
+            denom_teacher = torch.sum(torch.exp(output_teacher), dim=-1)
+            # We can't use standard reduction function here since the computation
+            # that follows it isn't identical across TP ranks.
+            denom_teacher = all_reduce_autograd(denom_teacher, group=tp_group)
+
+            # Maximum value along vocab dimension across all GPUs.
+            student_logits_max, _ = torch.max(output_student, dim=-1)
+            torch.distributed.all_reduce(
+                student_logits_max,
+                op=torch.distributed.ReduceOp.MAX,
+                group=tp_group,
+            )
+            output_student -= student_logits_max.unsqueeze(dim=-1).detach()
+
+            denom_student = torch.sum(torch.exp(output_student), dim=-1)
+            denom_student = all_reduce_autograd(denom_student, group=tp_group)
+
+            slen, bsz, sharded_vocab_size = output_student.shape
+            student_log_prob = output_student - torch.log(denom_student).view(slen, bsz, 1).expand(
+                slen, bsz, sharded_vocab_size
+            )
+            teacher_log_prob = output_teacher - torch.log(denom_teacher).view(slen, bsz, 1).expand(
+                slen, bsz, sharded_vocab_size
+            )
+
+            if self._reverse:
+                p, q = teacher_log_prob, student_log_prob
+            else:
+                p, q = student_log_prob, teacher_log_prob
+
+            loss = torch.sum(F.kl_div(p, q, reduction="none", log_target=True), dim=-1)
+
+        else:
+            if self._reverse:
+                p, q = F.log_softmax(output_teacher, dim=-1), F.softmax(output_student, dim=-1)
+            else:
+                p, q = F.log_softmax(output_student, dim=-1), F.softmax(output_teacher, dim=-1)
+
+            loss = torch.sum(F.kl_div(p, q, reduction="none", log_target=True), dim=-1)
+
+        return loss
+
     def forward(self, predictions: Tensor, targets: Tensor) -> Tensor:
         """Forward function.
 
@@ -310,79 +367,113 @@ class LogitsKLLoss(BaseLoss):
         predictions, targets = self.pre_forward(predictions, targets)
 
         # Division by temp should happen prior to finding max for both student and teacher.
-        # Currently we don't use temperature in any of ours runs (temp=1.0)
         output_teacher = targets.float() / self._temperature
         output_student = predictions.float() / self._temperature
 
-        # Compute local softmax, and the reweight to compute global softmax.
-        if self._config.tensor_model_parallel_size > 1:
-            # Maximum value along vocab dimension across all GPUs.
-            teacher_logits_max, _ = torch.max(output_teacher, dim=-1)
-            torch.distributed.all_reduce(
-                teacher_logits_max,
-                op=torch.distributed.ReduceOp.MAX,
-                group=parallel_state.get_tensor_model_parallel_group(),
-            )
-            output_teacher = output_teacher - teacher_logits_max.unsqueeze(dim=-1)
+        loss = self._calculate_kld(output_teacher, output_student)
 
-            denom_teacher = torch.sum(torch.exp(output_teacher), dim=-1)
-            # We can't use standard reduction function here since the computation
-            # that follows it isn't identical across TP ranks.
-            denom_teacher = all_reduce_autograd(
-                denom_teacher, group=parallel_state.get_tensor_model_parallel_group()
-            )
+        return self.post_forward(loss, tp_reduce=True)
 
-            # Maximum value along vocab dimension across all GPUs.
-            student_logits_max, _ = torch.max(output_student, dim=-1)
-            torch.distributed.all_reduce(
-                student_logits_max,
-                op=torch.distributed.ReduceOp.MAX,
-                group=parallel_state.get_tensor_model_parallel_group(),
-            )
-            output_student = output_student - student_logits_max.unsqueeze(dim=-1).detach()
 
-            denom_student = torch.sum(torch.exp(output_student), dim=-1)
-            denom_student = all_reduce_autograd(
-                denom_student, group=parallel_state.get_tensor_model_parallel_group()
-            )
+class TopKLogitsKLLoss(LogitsKLLoss):
+    """Calculates KL-Divergence loss restricted to the Teacher's Top-K vocabulary entries.
 
-            slen, bsz, sharded_vocab_size = output_student.shape
-            student_log_prob = output_student - torch.log(denom_student).view(slen, bsz, 1).expand(
-                slen, bsz, sharded_vocab_size
-            )
-            teacher_log_prob = output_teacher - torch.log(denom_teacher).view(slen, bsz, 1).expand(
-                slen, bsz, sharded_vocab_size
-            )
+    Respects Tensor Parallelism by finding the global Top-K threshold without
+    gathering full logits.
+    """
 
-            if self._reverse:
-                loss = torch.sum(
-                    F.kl_div(teacher_log_prob, student_log_prob, reduction="none", log_target=True),
-                    dim=-1,
-                )
-            else:
-                loss = torch.sum(
-                    F.kl_div(student_log_prob, teacher_log_prob, reduction="none", log_target=True),
-                    dim=-1,
-                )
+    def __init__(
+        self,
+        model_config: "TransformerConfig",
+        temperature: float = 1.0,
+        reverse: bool = False,
+        top_k: int = 100,
+    ):
+        """Constructor.
 
-        elif self._reverse:
-            loss = torch.sum(
-                F.kl_div(
-                    F.log_softmax(output_teacher, dim=-1),
-                    F.softmax(output_student, dim=-1),
-                    reduction="none",
-                ),
-                dim=-1,
-            )
-        else:
-            loss = torch.sum(
-                F.kl_div(
-                    F.log_softmax(output_student, dim=-1),
-                    F.softmax(output_teacher, dim=-1),
-                    reduction="none",
-                ),
-                dim=-1,
-            )
+        Args:
+            model_config: MCore transformer config.
+            temperature: Divide tensors by this value prior to calculating loss.
+            reverse: Whether to reverse the loss as KLD(teacher, student) instead of KLD(student, teacher)
+            top_k: The number of top vocabulary entries to keep from the teacher's distribution.
+        """
+        super().__init__(model_config, temperature, reverse)
+        self.top_k = top_k
+
+    def _get_global_min_threshold(self, local_teacher_logits: Tensor) -> Tensor:
+        """Determines the cutoff value (threshold) for the global Top-K elements.
+
+        Args:
+            local_teacher_logits: Tensor of shape [s, b, h]
+
+        Returns:
+            threshold: Tensor of shape [s, b, 1] containing the K-th largest value globally.
+        """
+        # 1. Get Local Top-K values (we don't need indices, just values)
+        # We clamp k to the local vocab size to avoid errors if vocab < k
+        local_k = min(self.top_k, local_teacher_logits.size(-1))
+        local_top_vals, _ = torch.topk(local_teacher_logits, local_k, dim=-1)  # [s, b, k]
+
+        # If TP is 1, local is global
+        if self._config.tensor_model_parallel_size == 1:
+            return local_top_vals[..., -1:]
+
+        # 2. Gather these candidates from all TP ranks
+        # Resulting shape will be effectively [s, b, k * tp_size]
+        gathered_list = [
+            torch.zeros_like(local_top_vals) for _ in range(self._config.tensor_model_parallel_size)
+        ]
+        torch.distributed.all_gather(
+            gathered_list,
+            local_top_vals.contiguous(),
+            group=parallel_state.get_tensor_model_parallel_group(),
+        )
+
+        # Concatenate along the top-k dimension
+        global_candidates = torch.cat(gathered_list, dim=-1)
+
+        # 3. Find the global Top-K from the candidates
+        # The K-th value here is the global threshold.
+        # Note: We must ensure we don't ask for more than available if k*tp is small (unlikely)
+        global_k = min(self.top_k, global_candidates.size(-1))
+        global_top_vals, _ = torch.topk(global_candidates, global_k, dim=-1)
+
+        # The last element is the smallest of the top K, i.e., the threshold.
+        threshold = global_top_vals[..., -1:]  # [s, b, 1]
+
+        return threshold
+
+    def forward(self, predictions: Tensor, targets: Tensor) -> Tensor:
+        """Forward function.
+
+        Args:
+            predictions: Student model tensors (size [s, b, h])
+            targets: Teacher model tensors (size [s, b, h])
+
+        Returns:
+            KLD loss of tensors (size [b, s])
+        """
+        predictions, targets = self.pre_forward(predictions, targets)
+
+        # Apply Temperature
+        output_teacher = targets.float() / self._temperature
+        output_student = predictions.float() / self._temperature
+
+        # We determine the mask based on teacher's confidence.
+        with torch.no_grad():
+            threshold = self._get_global_min_threshold(output_teacher)
+
+            # Create mask: True if value is NOT in top-k
+            # We use strict inequality (<) for the threshold cut.
+            # (Ties might include slightly more than K, which is acceptable and numerically safer)
+            mask = output_teacher < threshold
+
+        # Apply mask to both Teacher and Student
+        # Setting to -inf ensures they contribute 0 to the sum(exp(x)) later
+        output_teacher = output_teacher.masked_fill(mask, float("-inf"))
+        output_student = output_student.masked_fill(mask, float("-inf"))
+
+        loss = self._calculate_kld(output_teacher, output_student)
 
         return self.post_forward(loss, tp_reduce=True)
 
