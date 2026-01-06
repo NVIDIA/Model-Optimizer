@@ -20,5 +20,6 @@ from .fp8_tensor import *
 from .int4_tensor import *
 from .int8_tensor import *
 from .mxfp4_tensor import *
+from .mxfp8_tensor import *
 from .nf4_tensor import *
 from .nvfp4_tensor import *
