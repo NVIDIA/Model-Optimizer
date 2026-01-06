@@ -177,7 +177,7 @@ def train():
     tokenizer.pad_token_id = tokenizer.eos_token_id
 
     # We set model.config.use_cache to False for training when gradient_checkpointing=False.
-    # Currently useful for FSDP2 to allow for setting activation_checkpointing=True in the config file.åå
+    # Currently useful for FSDP2 to allow for setting activation_checkpointing=True in the config file.
     model.config.use_cache = False
 
     print_rank_0("Loading dataset...")
