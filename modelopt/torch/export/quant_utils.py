@@ -792,7 +792,7 @@ def to_quantized_weight(
         return (weight / weights_scaling_factor[:, None]).round().clamp(-128, 127).to(torch.int8)
 
     if quantization == QUANTIZATION_MXFP8:
-        return MXFP8QTensor.quantize_with_e8m0_scale(weight, weights_scaling_factor)
+        return MXFP8QTensor.quantize_with_scale(weight, weights_scaling_factor)
 
     if quantization == QUANTIZATION_FP8_PB_WO:
         return FP8QTensor.quantize(
