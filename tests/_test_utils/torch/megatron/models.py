@@ -87,7 +87,7 @@ class MegatronModel(MegatronModule):
             init_method=torch.nn.init.xavier_uniform_,
             bias=True,
             gather_output=False,
-            skip_bias_add=True,
+            skip_bias_add=False,
             is_expert=False,
             tp_group=tp_group,
         )
@@ -101,7 +101,7 @@ class MegatronModel(MegatronModule):
             config=config,
             init_method=torch.nn.init.xavier_uniform_,
             bias=True,
-            skip_bias_add=True,
+            skip_bias_add=False,
             input_is_parallel=True,
             is_expert=False,
             tp_group=tp_group,

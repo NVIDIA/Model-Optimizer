@@ -248,9 +248,8 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
 
     def _register_extra_state_callbacks(model: torch.nn.Module):
         for name, module in model.named_modules():
-            
             if name.endswith("output_layer"):
-                # output_layer is not quantized, 
+                # output_layer is not quantized,
                 # hence we don't need to register extra state callbacks for it
                 continue
 
