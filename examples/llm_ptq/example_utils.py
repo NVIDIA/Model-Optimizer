@@ -174,6 +174,11 @@ def build_quant_cfg(
             quant_cfg["quant_cfg"]["*image*"] = {"enable": False}
             quant_cfg["quant_cfg"]["*vision*"] = {"enable": False}
 
+        if model_type == "deepseek":
+            # Disable MLA quantization for accuracy.
+            quant_cfg["quant_cfg"]["*self_attn.q*"] = {"enable": False}
+            quant_cfg["quant_cfg"]["*self_attn.kv*"] = {"enable": False}
+
     return quant_cfg
 
 
@@ -328,10 +333,12 @@ def get_model(
                 **model_kwargs,
             )
         elif hf_config.quantization_config.get("format", None) == "pack-quantized":
+            torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)
             model = AutoModelForCausalLM.from_pretrained(
                 ckpt_path,
                 device_map="auto",
                 trust_remote_code=trust_remote_code,
+                torch_dtype=torch_dtype,
             )
         else:
             architecture = hf_config.architectures[0]
