@@ -24,7 +24,7 @@ import torch
 import triton
 import triton.language as tl
 
-__all__ = ["fp4_fake_quant_block"]
+__all__ = ["fp4_fake_quant_block", "static_blockwise_fp4_fake_quant"]
 
 
 _TORCH_TO_TL_DTYPE = {
@@ -399,23 +399,27 @@ def static_blockwise_fp4_fake_quant_kernel(
     )
 
     x_rescaled = q_val * scale_safe
-    x_dequant = tl.where(x >= 0, x_rescaled, -x_rescaled)
+    x_quant = tl.where(x >= 0, x_rescaled, -x_rescaled)
 
-    tl.store(y_ptr + idx, x_dequant.to(OUT_DTYPE))
+    tl.store(y_ptr + idx, x_quant.to(OUT_DTYPE))
 
 
-def launch_static_blockwise_fp4_fake_quant(
+def static_blockwise_fp4_fake_quant(
     x: torch.Tensor,
     scale: torch.Tensor,
-    out_dtype: torch.dtype = torch.float16,
+    out_dtype: torch.dtype | None = None,
 ):
-    """Launch Triton kernel for blockwise FP4 fake quantization.
+    """Static blockwise FP4 fake quantization using Triton kernel.
 
     x: [NUM_FP4_BLOCKS, BLOCK_SIZE] on CUDA.
     scale: [NUM_FP4_BLOCKS] or [NUM_FP4_BLOCKS, 1] on CUDA.
+    out_dtype: Output dtype. Defaults to x.dtype if None.
     """
     assert x.ndim == 2
     NUM_FP4_BLOCKS, BLOCK_SIZE = x.shape
+
+    if out_dtype is None:
+        out_dtype = x.dtype
 
     x_flat = x.contiguous().view(-1)
     y_flat = torch.empty_like(x_flat, dtype=out_dtype)
@@ -437,65 +441,3 @@ def launch_static_blockwise_fp4_fake_quant(
         )
 
     return y_flat.view_as(x)
-
-
-def blockwise_fp4_fake_quant_reference(
-    x: torch.Tensor,
-    scale: torch.Tensor,
-    out_dtype: torch.dtype = torch.bfloat16,
-) -> torch.Tensor:
-    """Reference implementation of blockwise FP4 fake quantization.
-
-    x: [NUM_FP4_BLOCKS, BLOCK_SIZE].
-    scale: [NUM_FP4_BLOCKS] or [NUM_FP4_BLOCKS, 1].
-
-    Uses FP4 quantization levels: 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0.
-    """
-    assert x.ndim == 2
-    num_blocks, block_size = x.shape
-
-    if scale.ndim == 1:
-        scale = scale.view(num_blocks, 1)
-    assert scale.shape == (num_blocks, 1)
-
-    x_f = x.to(torch.float32)
-    s_f = scale.to(torch.float32)
-
-    s_f = torch.where(s_f >= 1e-5, s_f, torch.ones_like(s_f))
-
-    x_abs = torch.abs(x_f)
-    abs_scaled = x_abs / s_f
-
-    q_val = torch.where(
-        abs_scaled <= 0.25,
-        torch.zeros_like(abs_scaled),
-        torch.where(
-            abs_scaled < 0.75,
-            torch.full_like(abs_scaled, 0.5),
-            torch.where(
-                abs_scaled <= 1.25,
-                torch.ones_like(abs_scaled),
-                torch.where(
-                    abs_scaled < 1.75,
-                    torch.full_like(abs_scaled, 1.5),
-                    torch.where(
-                        abs_scaled <= 2.5,
-                        torch.full_like(abs_scaled, 2.0),
-                        torch.where(
-                            abs_scaled < 3.5,
-                            torch.full_like(abs_scaled, 3.0),
-                            torch.where(
-                                abs_scaled <= 5.0,
-                                torch.full_like(abs_scaled, 4.0),
-                                torch.full_like(abs_scaled, 6.0),
-                            ),
-                        ),
-                    ),
-                ),
-            ),
-        ),
-    )
-
-    x_rescaled = q_val * s_f
-    x_dequant = torch.where(x_f >= 0, x_rescaled, -x_rescaled)
-    return x_dequant.to(out_dtype)

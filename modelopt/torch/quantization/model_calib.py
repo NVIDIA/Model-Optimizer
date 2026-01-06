@@ -224,12 +224,6 @@ def mse_calibrate(
 
     for name, module in model.named_modules():
         if isinstance(module, TensorQuantizer) and not module._disabled:
-            # Static block quantization is not supported by MseCalibrator
-            # if module.is_static_block_quant:
-            #     raise ValueError(
-            #         f"MSE calibration does not support static block quantization. "
-            #         f"Found static block quantization at {name}."
-            #     )
             if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
                 # Get the initial amax from max calibration
                 initial_amax = module._amax.clone().detach()

@@ -656,12 +656,10 @@ class TensorQuantizer(nn.Module):
             )
         elif self._num_bits == (2, 1) and self.is_static_block_quant:
             from modelopt.torch.quantization.triton.fp4_kernel import (
-                launch_static_blockwise_fp4_fake_quant,
+                static_blockwise_fp4_fake_quant,
             )
 
-            outputs = launch_static_blockwise_fp4_fake_quant(
-                inputs, amax / 6.0, out_dtype=inputs.dtype
-            )
+            outputs = static_blockwise_fp4_fake_quant(inputs, amax / 6.0, out_dtype=inputs.dtype)
         elif isinstance(self._num_bits, tuple):
             # Float-point quantization, e.g., FP8
             E, M = self._num_bits  # noqa: N806
@@ -792,11 +790,6 @@ class TensorQuantizer(nn.Module):
         if hasattr(self, "_padding"):
             inputs = F.pad(inputs, self._padding, "constant", 0)
 
-        # if inputs.shape != self._original_shape:
-        #     print(
-        #         f"Input shape has changed from {self._original_shape} to {inputs.shape}."
-        #         " Block-quantization requires a fixed input shape."
-        #     )
         inputs = inputs.reshape(self._block_reshape_size)
         return inputs
 

@@ -221,3 +221,45 @@ class Testfp4:
         test_in *= sign
         test_out = torch.tensor([[0.5, 1, 1.5, 2, 3, 4, 6, 6]]).cuda() * sign
         _test_fp4_kernel(test_in, test_out)
+
+    @pytest.mark.skipif(not triton_kernel.IS_AVAILABLE, reason="triton kernel is not available")
+    @pytest.mark.parametrize(
+        "set_torch_dtype", [torch.float, torch.float16, torch.bfloat16], indirect=True
+    )
+    @pytest.mark.parametrize("block_size", [8, 16, 32])
+    def test_static_blockwise_fp4(self, set_torch_dtype, block_size):
+        # Test with e2m1 table values
+        sign = torch.randint(0, 2, (1, 8)).cuda() * 2 - 1
+
+        def _get_test_inputs_outputs(test_in, test_out, num_blocks=4):
+            return torch.concat((test_in,) * (block_size // 8), dim=-1).repeat(
+                num_blocks, 1
+            ), torch.concat((test_out,) * (block_size // 8), dim=-1).repeat(num_blocks, 1)
+
+        def _test_static_fp4_kernel(test_in, test_out, scale_value=1.0):
+            inputs, expected_outputs = _get_test_inputs_outputs(test_in, test_out)
+            num_blocks = inputs.shape[0]
+            scales = torch.full((num_blocks,), scale_value, device=inputs.device)
+
+            quantized_outputs_triton = triton_kernel.static_blockwise_fp4_fake_quant(inputs, scales)
+            assert torch.allclose(quantized_outputs_triton, expected_outputs)
+
+        test_in = torch.tensor([[0, 0.5, 1, 1.5, 2, 3, 4, 6]]).cuda() * sign
+        test_out = torch.tensor([[0, 0.5, 1, 1.5, 2, 3, 4, 6]]).cuda() * sign
+        _test_static_fp4_kernel(test_in, test_out)
+
+        # Test slightly below the e2m1 boundary values.
+        # Numbers should be quantized down to the corresponding e2m1 value.
+        test_in = torch.tensor([[0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5, 6]]).cuda()
+        test_in[:, :-1] -= 0.1
+        test_in *= sign
+        test_out = torch.tensor([[0.0, 0.5, 1, 1.5, 2, 3, 4, 6]]).cuda() * sign
+        _test_static_fp4_kernel(test_in, test_out)
+
+        # Test slightly above the e2m1 boundary values.
+        # Numbers should be quantized up to the corresponding e2m1 value.
+        test_in = torch.tensor([[0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5, 6]]).cuda()
+        test_in[:, :-1] += 0.1
+        test_in *= sign
+        test_out = torch.tensor([[0.5, 1, 1.5, 2, 3, 4, 6, 6]]).cuda() * sign
+        _test_static_fp4_kernel(test_in, test_out)
