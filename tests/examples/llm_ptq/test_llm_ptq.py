@@ -114,6 +114,7 @@ class TestWhisper(WithRequirements):
         # sm89
         PTQCommand(quant="fp8", min_sm=89),
         PTQCommand(quant="fp8", kv_cache_quant="none", min_sm=89),  # sm100
+        PTQCommand(quant="mxfp8", min_sm=100),
         PTQCommand(quant="nvfp4", min_sm=100),
         #
         # multi_gpu
