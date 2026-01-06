@@ -1075,6 +1075,18 @@ def _get_awq_quantizer_block_size(tensor: torch.Tensor, quantizer: TensorQuantiz
     return blocksize
 
 
+def svd(weight, rank):
+    original_device = weight.device
+    original_dtype = weight.dtype
+    weight_f64 = weight.to(dtype=torch.float64, device=original_device)
+    u, s, vt = torch.linalg.svd(weight_f64, full_matrices=False)
+    us = u[:, :rank] * s[:rank]
+    vt = vt[:rank]
+    return us.to(device=original_device, dtype=original_dtype), vt.to(
+        device=original_device, dtype=original_dtype
+    )
+
+
 @torch.no_grad()
 def svdquant(
     model: nn.Module,
@@ -1096,25 +1108,16 @@ def svdquant(
     def postprocess(module, name):
         print_rank_0(f"SVD {name}")
         weight = module.weight.data
-        original_device = weight.device
-        original_dtype = weight.dtype
-        weight_f64 = weight.to(dtype=torch.float64, device=original_device)
-        u, s, vt = torch.linalg.svd(weight_f64, full_matrices=False)
-        if u.shape[1] < lowrank or vt.shape[0] < lowrank:
+        us, vt = svd(weight, lowrank)
+        if us.shape[1] < lowrank or vt.shape[0] < lowrank:
             warnings.warn(
                 "The low-rank dimensions do not match the layer dimensions. "
                 "Please verify your configuration and model settings. "
                 f"SVD will be skipped for this layer {name}."
             )
             return
-        us = u[:, :lowrank] * s[:lowrank]
-        vt = vt[:lowrank]
-        module.weight_quantizer.svdquant_lora_a = vt.to(
-            dtype=original_dtype, device=original_device
-        )
-        module.weight_quantizer.svdquant_lora_b = us.to(
-            dtype=original_dtype, device=original_device
-        )
+        module.weight_quantizer.svdquant_lora_a = vt
+        module.weight_quantizer.svdquant_lora_b = us
         module.weight.data.sub_(
             module.weight_quantizer.svdquant_lora_b @ module.weight_quantizer.svdquant_lora_a
         )

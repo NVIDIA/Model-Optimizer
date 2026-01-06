@@ -25,7 +25,11 @@ import torch
 import torch.nn as nn
 
 from modelopt import __version__
-from modelopt.torch.quantization.model_calib import enable_stats_collection, finish_stats_collection
+from modelopt.torch.quantization.model_calib import (
+    enable_stats_collection,
+    finish_stats_collection,
+    svd,
+)
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.qtensor import (
     FP8QTensor,
@@ -491,11 +495,7 @@ def get_quantization_format(module) -> str | None:
             block_sizes = getattr(weight_quantizer, "block_sizes")
             scale_bits = block_sizes.get("scale_bits")
 
-            if (
-                input_quantizer is not None
-                and hasattr(input_quantizer, "_pre_quant_scale")
-                and hasattr(weight_quantizer, "svdquant_lora_a")
-            ):
+            if input_quantizer is not None and hasattr(weight_quantizer, "svdquant_lora_a"):
                 return QUANTIZATION_NVFP4_SVDQUANT
             if input_quantizer is not None and hasattr(input_quantizer, "_pre_quant_scale"):
                 return QUANTIZATION_NVFP4_AWQ
@@ -1032,6 +1032,40 @@ def _update_pre_quant_scale(module, new_pre_quant_scale):
     finish_stats_collection(module.weight_quantizer)
 
 
+def _update_svdquant(modules, new_pre_quant_scale):
+    """Updates the pre_quant_scale, svdquant_lora_a and svdquant_lora_b matrices when pre_quant_scale is changed."""
+    new_pre_quant_scale = new_pre_quant_scale.to(torch.float32)
+    lora_a = [m.weight_quantizer.svdquant_lora_a.to(torch.float32) for m in modules]
+    lora_b = [m.weight_quantizer.svdquant_lora_b.to(torch.float32) for m in modules]
+    weight = [m.weight.to(torch.float32) for m in modules]
+    old_pre_quant_scale = [m.input_quantizer._pre_quant_scale.to(torch.float32) for m in modules]
+    weight = [
+        (w + (lb @ la)) * (s / new_pre_quant_scale)
+        for w, la, lb, s in zip(weight, lora_a, lora_b, old_pre_quant_scale)
+    ]
+    weight_concatenated = torch.cat(weight, dim=0)
+    lb, la = svd(weight_concatenated, rank=lora_a[0].shape[0])
+    weight_concatenated -= lb @ la
+    weight_concatenated = weight_concatenated.to(modules[0].weight.dtype)
+    la = la.to(modules[0].weight_quantizer.svdquant_lora_a.dtype)
+    lb = lb.to(modules[0].weight_quantizer.svdquant_lora_b.dtype)
+    new_pre_quant_scale = new_pre_quant_scale.to(modules[0].input_quantizer.pre_quant_scale.dtype)
+
+    index = 0
+    for i, module in enumerate(modules):
+        module.input_quantizer.pre_quant_scale = new_pre_quant_scale
+        module.weight_quantizer.svdquant_lora_a = la
+        assert lora_b[i].shape[0] == module.weight.shape[0]
+        module.weight_quantizer.svdquant_lora_b = lb[index : index + lora_b[i].shape[0], :]
+        module.weight = nn.Parameter(weight_concatenated[index : index + lora_b[i].shape[0], :])
+        index += lora_b[i].shape[0]
+        # Redo weights collection
+        module.weight_quantizer.reset_amax()
+        enable_stats_collection(module.weight_quantizer)
+        module.weight_quantizer(module.weight)
+        finish_stats_collection(module.weight_quantizer)
+
+
 # Format: (list of target modules, tuple of (linear_to_fuse_into, linear_from_with_scale))
 PQS_FUSE_MODULE_MAPPING = [
     # Attention: Fuse o_proj's pre_quant_scale into v_proj's output dimension
@@ -1184,9 +1218,12 @@ def preprocess_linear_fusion(modules: list[torch.nn.Module], resmooth_only=False
                 dim=0,
             )
 
-            for module in modules:
-                if not torch.equal(module.input_quantizer.pre_quant_scale, avg_prequant_scale):
-                    _update_pre_quant_scale(module, avg_prequant_scale)
+            if hasattr(modules[0].weight_quantizer, "svdquant_lora_a"):
+                _update_svdquant(modules, avg_prequant_scale)
+            else:
+                for module in modules:
+                    if not torch.equal(module.input_quantizer.pre_quant_scale, avg_prequant_scale):
+                        _update_pre_quant_scale(module, avg_prequant_scale)
 
         if resmooth_only:
             return
