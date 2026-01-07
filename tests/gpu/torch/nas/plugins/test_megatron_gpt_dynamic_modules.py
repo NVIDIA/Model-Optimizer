@@ -88,7 +88,11 @@ def _test_gpt_search_space(
         [
             (
                 "mcore_minitron",
-                get_mcore_minitron_config(channel_divisor=channel_divisor, num_layers_divisor=1),
+                get_mcore_minitron_config(
+                    hidden_size_divisor=channel_divisor,
+                    ffn_hidden_size_divisor=channel_divisor,
+                    num_layers_divisor=1,
+                ),
             )
         ],
     )
@@ -267,7 +271,10 @@ def _test_gpt_moe_search_space(rank, size):
             (
                 "mcore_minitron",
                 get_mcore_minitron_config(
-                    channel_divisor=channel_divisor, num_moe_experts_divisor=1, num_layers_divisor=1
+                    hidden_size_divisor=channel_divisor,
+                    ffn_hidden_size_divisor=channel_divisor,
+                    num_moe_experts_divisor=1,
+                    num_layers_divisor=1,
                 ),
             )
         ],

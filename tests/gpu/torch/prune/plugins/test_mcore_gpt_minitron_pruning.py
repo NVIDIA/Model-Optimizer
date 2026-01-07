@@ -78,7 +78,10 @@ def _test_mcore_gpt_parameter_sorting(activation_func, rank, size):
 
     model.eval()
     dynamic_space = _convert_model_to_dynamic_space(
-        model, get_mcore_minitron_config(channel_divisor=channel_divisor)
+        model,
+        get_mcore_minitron_config(
+            hidden_size_divisor=channel_divisor, ffn_hidden_size_divisor=channel_divisor
+        ),
     )
     registry = ImportanceEstimatorRegistry(model)  # register imp estimators and forward hooks
 
@@ -355,7 +358,12 @@ def _test_mcore_gpt_moe_parameter_sorting(rank, size):
 
     model.eval()
     dynamic_space = _convert_model_to_dynamic_space(
-        model, get_mcore_minitron_config(channel_divisor=channel_divisor, num_moe_experts_divisor=1)
+        model,
+        get_mcore_minitron_config(
+            hidden_size_divisor=channel_divisor,
+            ffn_hidden_size_divisor=channel_divisor,
+            num_moe_experts_divisor=1,
+        ),
     )
     registry = ImportanceEstimatorRegistry(model)  # register imp estimators and forward hooks
 
@@ -500,11 +508,12 @@ def test_mcore_gpt_pruning_moe(tmp_path):
 def test_generate_search_space_combos():
     ss = {
         "hidden_size": [32, 64, 96, 128, 160],
+        "ffn_hidden_size": [128, 256, 384, 512, 640],
         "num_attention_heads": [8, 16, 24, 32],
         "num_layers": [1, 2, 3, 4, 5, 6, 7, 8],
     }
     ss_combos = MCoreMinitronSearcher._generate_search_space_combos(
-        ss, max_width_pruning=0.5, max_depth_pruning=0.25
+        ss, max_width_pruning=0.5, max_depth_pruning=0.25, hparams_to_skip=["ffn_hidden_size"]
     )
     assert len(ss_combos) == 3 * 2 * 2
     assert ss_combos == [

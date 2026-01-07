@@ -81,7 +81,8 @@ def _test_mamba_search_space(rank, size):
             (
                 "mcore_minitron",
                 get_mcore_minitron_config(
-                    channel_divisor=channel_divisor,
+                    hidden_size_divisor=channel_divisor,
+                    ffn_hidden_size_divisor=channel_divisor,
                     mamba_head_dim_divisor=mamba_head_dim_divisor,
                     num_layers_divisor=1,
                 ),
