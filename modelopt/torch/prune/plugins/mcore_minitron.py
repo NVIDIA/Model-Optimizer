@@ -173,11 +173,12 @@ class CandidateSubnet:
 class MCoreMinitronSearcher(BaseSearcher):
     """Searcher for Minitron pruning algorithm.
 
-    Available additional config options:
-    - `max_width_pruning`: Maximum fraction per width hyperparameter to prune (default: 0.5).
+    Available additional config options (used when `params` constraint is provided):
+    - `max_width_pruning`: Maximum fraction per width hyperparameter to prune (default: 0.40).
         Only top (1 - max_width_pruning) choices will be considered.
-    - `max_depth_pruning`: Maximum fraction per depth hyperparameter to prune (default: 0.2).
+    - `max_depth_pruning`: Maximum fraction per depth hyperparameter to prune (default: 0.20).
         Only top (1 - max_depth_pruning) choices will be considered.
+    - `hparams_to_skip`: List of hparams to skip during the search (default: None).
     - `top_k`: Number of candidates to consider for score_func validation (default: 10).
     """
 
@@ -195,8 +196,9 @@ class MCoreMinitronSearcher(BaseSearcher):
             "skip_sorting": False,
             "scores_path": None,
             # Additional search config for parameter-based pruning
-            "max_width_pruning": 0.5,
-            "max_depth_pruning": 0.25,
+            "max_width_pruning": 0.40,
+            "max_depth_pruning": 0.20,
+            "hparams_to_skip": None,
             "top_k": 10,
         }
 
@@ -378,6 +380,7 @@ class MCoreMinitronSearcher(BaseSearcher):
         max_params = float(self.constraints["params"])  # type: ignore[arg-type]
         max_width_pruning = self.config["max_width_pruning"]
         max_depth_pruning = self.config["max_depth_pruning"]
+        hparams_to_skip = self.config["hparams_to_skip"]
         top_k = self.config["top_k"]
         print_rank_0(
             f"\nSearching for the best pruned architecture under {num2hrb(max_params)} params constraints..."
@@ -401,6 +404,7 @@ class MCoreMinitronSearcher(BaseSearcher):
                 hp_choices,  # type: ignore[arg-type]
                 max_width_pruning,
                 max_depth_pruning,
+                hparams_to_skip,
             )
             sample(self.model, sample_func=max)  # reset to max subnet (for sanity)
             selected = []
@@ -466,18 +470,20 @@ class MCoreMinitronSearcher(BaseSearcher):
     @staticmethod
     def _generate_search_space_combos(
         search_space: dict[str, list],
-        max_width_pruning: float = 0.5,
-        max_depth_pruning: float = 0.2,
+        max_width_pruning: float = 0.40,
+        max_depth_pruning: float = 0.20,
+        hparams_to_skip: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Generate all possible combinations of hyperparameters from the search space.
 
         Args:
             search_space: Dictionary mapping hyperparameter names to their possible sorted choices.
                         Example: {"hidden_size": [1024, 2048, 3072, 4096], "num_layers": [1, 2, ..., 31, 32]}
-            max_width_pruning: Maximum fraction of width hyperparameters to prune (default: 0.5).
+            max_width_pruning: Maximum fraction of width hyperparameters to prune (default: 0.40).
                             Only top (1 - max_width_pruning) choices will be considered.
-            max_depth_pruning: Maximum fraction of depth hyperparameters to prune (default: 0.2).
+            max_depth_pruning: Maximum fraction of depth hyperparameters to prune (default: 0.20).
                             Only top (1 - max_depth_pruning) choices will be considered.
+            hparams_to_skip: List of hparams to skip during the search (default: None).
 
         Returns:
             List of configuration dictionaries, where each dictionary maps hyperparameter
@@ -494,11 +500,22 @@ class MCoreMinitronSearcher(BaseSearcher):
             f"{max_depth_pruning * 100:.0f}% for depth pruning hparams"
         )
 
+        if hparams_to_skip:
+            print_rank_0(f"Skipping {hparams_to_skip=} during search space generation...")
+            for hparam in hparams_to_skip:
+                if hparam in search_space:
+                    search_space.pop(hparam)
+                else:
+                    warn(f"Hparam {hparam} not found in search space! Skipping...")
+
         filtered_ss = {
-            k: sorted(v)[int((1 - max_depth_pruning) * len(v)) :]
-            if k == "num_layers"
-            else sorted(v)[int((1 - max_width_pruning) * len(v)) :]
+            k: (
+                sorted(v)[int((1 - max_depth_pruning) * len(v)) :]
+                if k == "num_layers"
+                else sorted(v)[int((1 - max_width_pruning) * len(v)) :]
+            )
             for k, v in search_space.items()
+            if len(v) > 1
         }
 
         ss_size = 1
@@ -586,7 +603,7 @@ MCoreMinitronConfig: type[ModeloptBaseConfig] = create_model(
         default_rules={
             "megatron.core.models.gpt.GPTModel": {
                 "hidden_size_divisor": 256,
-                "ffn_hidden_size_divisor": 256,
+                "ffn_hidden_size_divisor": 512,
                 "num_moe_experts_divisor": 8,
                 "num_layers_divisor": 2,
             },
@@ -594,7 +611,7 @@ MCoreMinitronConfig: type[ModeloptBaseConfig] = create_model(
                 {
                     "megatron.core.models.mamba.MambaModel": {
                         "hidden_size_divisor": 256,
-                        "ffn_hidden_size_divisor": 256,
+                        "ffn_hidden_size_divisor": 512,
                         "mamba_head_dim_divisor": 8,
                         "num_moe_experts_divisor": 8,
                         "num_layers_divisor": 2,
@@ -611,20 +628,23 @@ MCoreMinitronConfig: type[ModeloptBaseConfig] = create_model(
 
 def get_mcore_minitron_config(
     *,
-    channel_divisor: int = 256,
+    hidden_size_divisor: int = 256,
+    ffn_hidden_size_divisor: int = 512,
     mamba_head_dim_divisor: int = 8,
     num_moe_experts_divisor: int = 8,
     num_layers_divisor: int = 2,
 ) -> ModeloptBaseConfig:
-    """Get a MCoreMinitronConfig with the given channel divisor instead of default."""
+    """Get a MCoreMinitronConfig with the given divisors instead of default."""
     config = MCoreMinitronConfig()
 
     def _set_divisors(c):
         for k, v in c.items():
             if isinstance(v, dict):
                 _set_divisors(v)
-            elif k in ["hidden_size_divisor", "ffn_hidden_size_divisor"]:
-                c[k] = channel_divisor
+            elif k == "hidden_size_divisor":
+                c[k] = hidden_size_divisor
+            elif k == "ffn_hidden_size_divisor":
+                c[k] = ffn_hidden_size_divisor
             elif k == "mamba_head_dim_divisor":
                 c[k] = mamba_head_dim_divisor
             elif k == "num_moe_experts_divisor":

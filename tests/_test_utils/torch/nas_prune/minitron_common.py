@@ -23,7 +23,8 @@ def prune_minitron(model, export_config, config, channel_divisor=64):
             (
                 "mcore_minitron",
                 mtp.mcore_minitron.get_mcore_minitron_config(
-                    channel_divisor=channel_divisor,
+                    hidden_size_divisor=channel_divisor,
+                    ffn_hidden_size_divisor=channel_divisor,
                     mamba_head_dim_divisor=4,
                     num_moe_experts_divisor=1,
                     num_layers_divisor=1,
