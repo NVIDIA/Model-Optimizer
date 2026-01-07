@@ -337,19 +337,15 @@ class LogitsKLLoss(BaseLoss):
                 slen, bsz, sharded_vocab_size
             )
 
+            p, q = student_log_prob, teacher_log_prob
             if self._reverse:
                 p, q = teacher_log_prob, student_log_prob
-            else:
-                p, q = student_log_prob, teacher_log_prob
-
             loss = torch.sum(F.kl_div(p, q, reduction="none", log_target=True), dim=-1)
 
         else:
+            p, q = F.log_softmax(output_student, dim=-1), F.softmax(output_teacher, dim=-1)
             if self._reverse:
                 p, q = F.log_softmax(output_teacher, dim=-1), F.softmax(output_student, dim=-1)
-            else:
-                p, q = F.log_softmax(output_student, dim=-1), F.softmax(output_teacher, dim=-1)
-
             loss = torch.sum(F.kl_div(p, q, reduction="none", log_target=True), dim=-1)
 
         return loss
@@ -435,39 +431,70 @@ class TopKLogitsKLLoss(LogitsKLLoss):
 
         return threshold
 
-    def forward(self, predictions: Tensor, targets: Tensor) -> Tensor:
-        """Forward function.
-
-        Args:
-            predictions: Student model tensors (size [s, b, h])
-            targets: Teacher model tensors (size [s, b, h])
-
-        Returns:
-            KLD loss of tensors (size [b, s])
-        """
-        predictions, targets = self.pre_forward(predictions, targets)
-
-        # Apply Temperature
-        output_teacher = targets.float() / self._temperature
-        output_student = predictions.float() / self._temperature
-
-        # We determine the mask based on teacher's confidence.
+    def _calculate_kld(self, output_teacher: Tensor, output_student: Tensor) -> Tensor:
+        """Calculate KLD loss between two tensors."""
+        # 1. Determine cutoff threshold based on teacher's confidence
         with torch.no_grad():
             threshold = self._get_global_min_threshold(output_teacher)
+            mask = output_teacher >= threshold  # elements to keep
 
-            # Create mask: True if value is NOT in top-k
-            # We use strict inequality (<) for the threshold cut.
-            # (Ties might include slightly more than K, which is acceptable and numerically safer)
-            mask = output_teacher < threshold
+        # Flatten tensors for simplicity
+        s, b = output_student.size(0), output_student.size(1)
+        output_teacher = output_teacher.view(s * b, -1)
+        output_student = output_student.view(s * b, -1)
+        mask = mask.view(s * b, -1)
 
-        # Apply mask to both Teacher and Student
-        # Setting to -inf ensures they contribute 0 to the sum(exp(x)) later
-        output_teacher = output_teacher.masked_fill(mask, float("-inf"))
-        output_student = output_student.masked_fill(mask, float("-inf"))
+        # 2. Extract values above threshold (Sparse Selection)
+        sel_teacher = torch.masked_select(output_teacher, mask)
+        sel_student = torch.masked_select(output_student, mask)
 
-        loss = self._calculate_kld(output_teacher, output_student)
+        # 3. Handle Indices
+        indices = torch.nonzero(mask)
+        # indices[:, 0] is exactly the row_index (0 to s*b-1)
+        # indices[:, 1] is the vocab_index (which we don't need for summation)
+        row_ids = indices[:, 0]
 
-        return self.post_forward(loss, tp_reduce=True)
+        # 4. Softmax Normalization
+        exp_teacher = torch.exp(sel_teacher)
+        exp_student = torch.exp(sel_student)
+
+        # Prepare containers for the sums of shape [s * b]
+        denom_teacher = output_student.new_zeros(s * b)
+        denom_student = output_student.new_zeros(s * b)
+
+        # We must use scatter_add because 'exp_teacher' is a 1D list of variable length
+        # segments. We need to sum "all values belonging to row 0", then "all for row 1", etc.
+        denom_teacher.scatter_add_(0, row_ids, exp_teacher)
+        denom_student.scatter_add_(0, row_ids, exp_student)
+
+        # Global Reduction (Tensor Parallelism)
+        if self._config.tensor_model_parallel_size > 1:
+            tp_group = parallel_state.get_tensor_model_parallel_group()
+            all_reduce_autograd(denom_teacher, group=tp_group)
+            all_reduce_autograd(denom_student, group=tp_group)
+
+        # 5. KL Divergence
+        # Gather the calculated denominators back to the sparse elements
+        # If sel_teacher[i] belongs to row J, we divide by denom_teacher[J]
+        sel_denom_teacher = denom_teacher[row_ids]
+        sel_denom_student = denom_student[row_ids]
+
+        log_prob_teacher = sel_teacher - torch.log(sel_denom_teacher)
+        log_prob_student = sel_student - torch.log(sel_denom_student)
+
+        p, q = log_prob_student, log_prob_teacher
+        if self._reverse:
+            p, q = log_prob_teacher, log_prob_student
+        kl_elements = F.kl_div(p, q, reduction="none", log_target=True)
+
+        # 6. Accumulate Loss
+        loss_flat = output_student.new_zeros(s * b)
+        loss_flat.scatter_add_(0, row_ids, kl_elements)
+
+        # Reshape back to [s, b] for the post_forward step
+        loss = loss_flat.view(s, b)
+
+        return loss
 
 
 class LogitsAndIntermediatesLossBalancer(mtd.DistillationLossBalancer):
