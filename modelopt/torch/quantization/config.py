@@ -719,6 +719,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         if not all(x > 0 for x in num_bits):
             raise ValueError("num_bits must be a positive integer or a tuple of positive integers.")
 
+        block_sizes = self.block_sizes
         if num_bits not in [
             (4, 3),
             (5, 2),
@@ -731,6 +732,13 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         ]:
             raise ValueError(
                 "Supported FPx quantization formats: FP8 (E4M3, E5M2), FP6(E3M2, E2M3), FP4(E2M1)."
+            )
+        elif num_bits not in [(4, 3), (2, 1)] and (
+            block_sizes is None or block_sizes.get("type", None) != "dynamic"
+        ):
+            raise ValueError(
+                "Only blockwise dynamic quantization is supported with quantization "
+                "formats E{num_bis[0]}M{num_bits[1]}."
             )
         return self
 
