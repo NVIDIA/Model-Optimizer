@@ -155,6 +155,9 @@ class _MegatronMLP(DynamicModule):
         pass
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        if metadata is None:
+            metadata = {}
+        metadata["singleton_local_shards"] = True
         sharded_state_dict = super().sharded_state_dict(prefix, sharded_offsets, metadata)
         if not self.config.gated_linear_unit:
             return sharded_state_dict
@@ -163,6 +166,6 @@ class _MegatronMLP(DynamicModule):
                 re.compile(pattern).match(k) for pattern in self._modelopt_state_keys
             ):
                 sharded_state_dict[k] = megatron_mlp.apply_swiglu_sharded_factory(
-                    v, sharded_offsets
+                    v, sharded_offsets, metadata["singleton_local_shards"],
                 )
         return sharded_state_dict
