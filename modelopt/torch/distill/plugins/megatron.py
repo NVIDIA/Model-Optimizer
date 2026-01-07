@@ -297,59 +297,6 @@ class LogitsKLLoss(BaseLoss):
         self._temperature = temperature
         self._reverse = reverse
 
-    def _calculate_kld(self, output_teacher: Tensor, output_student: Tensor) -> Tensor:
-        """Calculate KLD loss between two tensors."""
-        # Compute local softmax, and the reweight to compute global softmax.
-        if self._config.tensor_model_parallel_size > 1:
-            tp_group = parallel_state.get_tensor_model_parallel_group()
-
-            # Subtract maximum value along vocab dimension across all GPUs (for stability)
-            teacher_logits_max, _ = torch.max(output_teacher, dim=-1)
-            torch.distributed.all_reduce(
-                teacher_logits_max,
-                op=torch.distributed.ReduceOp.MAX,
-                group=tp_group,
-            )
-            output_teacher -= teacher_logits_max.unsqueeze(dim=-1)
-
-            denom_teacher = torch.sum(torch.exp(output_teacher), dim=-1)
-            # We can't use standard reduction function here since the computation
-            # that follows it isn't identical across TP ranks.
-            denom_teacher = all_reduce_autograd(denom_teacher, group=tp_group)
-
-            # Subtract maximum value along vocab dimension across all GPUs (for stability)
-            student_logits_max, _ = torch.max(output_student, dim=-1)
-            torch.distributed.all_reduce(
-                student_logits_max,
-                op=torch.distributed.ReduceOp.MAX,
-                group=tp_group,
-            )
-            output_student -= student_logits_max.unsqueeze(dim=-1).detach()
-
-            denom_student = torch.sum(torch.exp(output_student), dim=-1)
-            denom_student = all_reduce_autograd(denom_student, group=tp_group)
-
-            slen, bsz, sharded_vocab_size = output_student.shape
-            student_log_prob = output_student - torch.log(denom_student).view(slen, bsz, 1).expand(
-                slen, bsz, sharded_vocab_size
-            )
-            teacher_log_prob = output_teacher - torch.log(denom_teacher).view(slen, bsz, 1).expand(
-                slen, bsz, sharded_vocab_size
-            )
-
-            p, q = student_log_prob, teacher_log_prob
-            if self._reverse:
-                p, q = teacher_log_prob, student_log_prob
-            loss = torch.sum(F.kl_div(p, q, reduction="none", log_target=True), dim=-1)
-
-        else:
-            p, q = F.log_softmax(output_student, dim=-1), F.softmax(output_teacher, dim=-1)
-            if self._reverse:
-                p, q = F.log_softmax(output_teacher, dim=-1), F.softmax(output_student, dim=-1)
-            loss = torch.sum(F.kl_div(p, q, reduction="none", log_target=True), dim=-1)
-
-        return loss
-
     def forward(self, predictions: Tensor, targets: Tensor) -> Tensor:
         """Forward function.
 
@@ -366,7 +313,50 @@ class LogitsKLLoss(BaseLoss):
         output_teacher = targets.float() / self._temperature
         output_student = predictions.float() / self._temperature
 
-        loss = self._calculate_kld(output_teacher, output_student)
+        # Compute local softmax, and the reweight to compute global softmax.
+        if self._config.tensor_model_parallel_size > 1:
+            tp_group = parallel_state.get_tensor_model_parallel_group()
+
+            # Subtract maximum value along vocab dimension across all GPUs (for stability)
+            teacher_logits_max, _ = torch.max(output_teacher, dim=-1, keepdim=True)
+            torch.distributed.all_reduce(
+                teacher_logits_max,
+                op=torch.distributed.ReduceOp.MAX,
+                group=tp_group,
+            )
+            output_teacher -= teacher_logits_max
+
+            student_logits_max, _ = torch.max(output_student, dim=-1, keepdim=True)
+            torch.distributed.all_reduce(
+                student_logits_max,
+                op=torch.distributed.ReduceOp.MAX,
+                group=tp_group,
+            )
+            output_student -= student_logits_max.detach()
+
+            # Compute global softmax denominators
+            # We can't use standard reduction function here since the computation
+            # that follows it isn't identical across TP ranks.
+            denom_teacher = torch.sum(torch.exp(output_teacher), dim=-1, keepdim=True)
+            denom_teacher = all_reduce_autograd(denom_teacher, group=tp_group)
+
+            denom_student = torch.sum(torch.exp(output_student), dim=-1, keepdim=True)
+            denom_student = all_reduce_autograd(denom_student, group=tp_group)
+
+            # Compute log probabilities (log softmax)
+            teacher_log_prob = output_teacher - torch.log(denom_teacher)
+            student_log_prob = output_student - torch.log(denom_student)
+
+            # KL divergence
+            p, q = student_log_prob, teacher_log_prob
+        else:
+            # Compute log probabilities
+            p, q = F.log_softmax(output_student, dim=-1), F.log_softmax(output_teacher, dim=-1)
+
+        # KL divergence
+        if self._reverse:
+            p, q = q, p
+        loss = torch.sum(F.kl_div(p, q, reduction="none", log_target=True), dim=-1)
 
         return self.post_forward(loss, tp_reduce=True)
 
