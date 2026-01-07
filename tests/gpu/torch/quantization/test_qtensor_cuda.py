@@ -715,92 +715,24 @@ class TestQTensor:
         assert torch.allclose(dequant[1, :32].max(), torch.tensor(2.0, device=device), rtol=0.1)
         assert torch.allclose(dequant[1, 32:64].max(), torch.tensor(0.5, device=device), rtol=0.1)
 
+    # fmt: off
     @pytest.mark.parametrize("device", ["cuda"])
     @pytest.mark.parametrize("input_dtype", [torch.float32, torch.float16, torch.bfloat16])
     @pytest.mark.parametrize(
         "test_input",
         [
             # FP8 E4M3 boundary test values (max is 448, various powers of 2)
-            torch.tensor(
-                [
-                    [
-                        1.0,
-                        2.0,
-                        4.0,
-                        8.0,
-                        16.0,
-                        32.0,
-                        64.0,
-                        128.0,
-                        256.0,
-                        448.0,
-                        0.5,
-                        0.25,
-                        0.125,
-                        0.0625,
-                        0.03125,
-                        0.015625,
-                        -1.0,
-                        -2.0,
-                        -4.0,
-                        -8.0,
-                        -16.0,
-                        -32.0,
-                        -64.0,
-                        -128.0,
-                        -256.0,
-                        -448.0,
-                        -0.5,
-                        -0.25,
-                        -0.125,
-                        -0.0625,
-                        -0.03125,
-                        -0.015625,
-                    ]
-                ]
-            ),
+            torch.tensor([[1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 448.0, 0.5, 0.25,
+                           0.125, 0.0625, 0.03125, 0.015625, -1.0, -2.0, -4.0, -8.0, -16.0, -32.0,
+                           -64.0, -128.0, -256.0, -448.0, -0.5, -0.25, -0.125, -0.0625, -0.03125, -0.015625]]),
             # Mix of positive and negative values near E4M3 boundaries
-            torch.tensor(
-                [
-                    [
-                        448.0,
-                        416.0,
-                        384.0,
-                        352.0,
-                        320.0,
-                        288.0,
-                        256.0,
-                        224.0,
-                        192.0,
-                        160.0,
-                        128.0,
-                        96.0,
-                        64.0,
-                        48.0,
-                        32.0,
-                        24.0,
-                        -448.0,
-                        -416.0,
-                        -384.0,
-                        -352.0,
-                        -320.0,
-                        -288.0,
-                        -256.0,
-                        -224.0,
-                        -192.0,
-                        -160.0,
-                        -128.0,
-                        -96.0,
-                        -64.0,
-                        -48.0,
-                        -32.0,
-                        -24.0,
-                    ]
-                ]
-            ),
+            torch.tensor([[448.0, 416.0, 384.0, 352.0, 320.0, 288.0, 256.0, 224.0, 192.0, 160.0,
+                           128.0, 96.0, 64.0, 48.0, 32.0, 24.0, -448.0, -416.0, -384.0, -352.0, -320.0,
+                           -288.0, -256.0, -224.0, -192.0, -160.0, -128.0, -96.0, -64.0, -48.0, -32.0, -24.0]]),
         ],
     )
     def test_mxfp8_quantize_boundary_values(self, test_input, device, input_dtype):
+        # fmt: on
         """Test MXFP8 quantization with E4M3 boundary values."""
         x = test_input.to(input_dtype).to(device)
         qtensor, e8m0_scale = MXFP8QTensor.quantize(x)
