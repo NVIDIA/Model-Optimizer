@@ -303,7 +303,7 @@ class LogitsKLLoss(BaseLoss):
         if self._config.tensor_model_parallel_size > 1:
             tp_group = parallel_state.get_tensor_model_parallel_group()
 
-            # Maximum value along vocab dimension across all GPUs.
+            # Subtract maximum value along vocab dimension across all GPUs (for stability)
             teacher_logits_max, _ = torch.max(output_teacher, dim=-1)
             torch.distributed.all_reduce(
                 teacher_logits_max,
@@ -317,7 +317,7 @@ class LogitsKLLoss(BaseLoss):
             # that follows it isn't identical across TP ranks.
             denom_teacher = all_reduce_autograd(denom_teacher, group=tp_group)
 
-            # Maximum value along vocab dimension across all GPUs.
+            # Subtract maximum value along vocab dimension across all GPUs (for stability)
             student_logits_max, _ = torch.max(output_student, dim=-1)
             torch.distributed.all_reduce(
                 student_logits_max,
@@ -400,7 +400,7 @@ class TopKLogitsKLLoss(LogitsKLLoss):
         super().__init__(model_config, temperature, reverse)
         self.top_k = top_k
 
-    def _get_global_min_threshold(self, local_teacher_logits: Tensor) -> Tensor:
+    def _get_global_min_threshold(self, output_teacher: Tensor) -> Tensor:
         """Determines the cutoff value (threshold) for the global Top-K elements.
 
         Args:
@@ -409,37 +409,29 @@ class TopKLogitsKLLoss(LogitsKLLoss):
         Returns:
             threshold: Tensor of shape [s, b, 1] containing the K-th largest value globally.
         """
-        # 1. Get Local Top-K values (we don't need indices, just values)
-        # We clamp k to the local vocab size to avoid errors if vocab < k
-        local_k = min(self.top_k, local_teacher_logits.size(-1))
-        local_top_vals, _ = torch.topk(local_teacher_logits, local_k, dim=-1)  # [s, b, k]
+        # Get Local Top-K values
+        assert self.top_k <= output_teacher.size(-1), f"{self.top_k=}, {output_teacher.size(-1)=}"
+        local_top_vals, _ = torch.topk(output_teacher, self.top_k, dim=-1)  # [s, b, k]
 
         # If TP is 1, local is global
         if self._config.tensor_model_parallel_size == 1:
             return local_top_vals[..., -1:]
 
-        # 2. Gather these candidates from all TP ranks
-        # Resulting shape will be effectively [s, b, k * tp_size]
-        gathered_list = [
+        # Gather these candidates from all TP ranks
+        global_candidates = [
             torch.zeros_like(local_top_vals) for _ in range(self._config.tensor_model_parallel_size)
         ]
         torch.distributed.all_gather(
-            gathered_list,
+            global_candidates,
             local_top_vals.contiguous(),
             group=parallel_state.get_tensor_model_parallel_group(),
         )
+        global_candidates = torch.cat(global_candidates, dim=-1)  # [s, b, k * tp_size]
 
-        # Concatenate along the top-k dimension
-        global_candidates = torch.cat(gathered_list, dim=-1)
-
-        # 3. Find the global Top-K from the candidates
-        # The K-th value here is the global threshold.
-        # Note: We must ensure we don't ask for more than available if k*tp is small (unlikely)
-        global_k = min(self.top_k, global_candidates.size(-1))
-        global_top_vals, _ = torch.topk(global_candidates, global_k, dim=-1)
-
-        # The last element is the smallest of the top K, i.e., the threshold.
-        threshold = global_top_vals[..., -1:]  # [s, b, 1]
+        # Find the global Top-K from the candidates
+        # The smallest of the top K (last element) is the global threshold.
+        global_top_vals, _ = torch.topk(global_candidates, self.top_k, dim=-1)
+        threshold = global_top_vals[..., -1:]
 
         return threshold
 
