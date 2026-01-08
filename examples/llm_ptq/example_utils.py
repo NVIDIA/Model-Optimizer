@@ -180,12 +180,12 @@ def build_quant_cfg(
         quant_cfg["quant_cfg"]["*image*"] = {"enable": False}
         quant_cfg["quant_cfg"]["*vision*"] = {"enable": False}
 
-        if model_type in ["qwen3moe", "qwen3next"] and qformat == "nvfp4":
-            # Disable the attention projection layers to retain accuracy
-            quant_cfg["quant_cfg"]["model*.*attn*in_proj*"] = {"enable": False}
-            quant_cfg["quant_cfg"]["model*.*attn*q_proj*"] = {"enable": False}
-            quant_cfg["quant_cfg"]["model*.*attn*k_proj*"] = {"enable": False}
-            quant_cfg["quant_cfg"]["model*.*attn*v_proj*"] = {"enable": False}
+    if model_type in ["qwen3moe", "qwen3next"] and qformat == "nvfp4":
+        # Disable the attention projection layers to retain accuracy
+        quant_cfg["quant_cfg"]["model*.*attn*in_proj*"] = {"enable": False}
+        quant_cfg["quant_cfg"]["model*.*attn*q_proj*"] = {"enable": False}
+        quant_cfg["quant_cfg"]["model*.*attn*k_proj*"] = {"enable": False}
+        quant_cfg["quant_cfg"]["model*.*attn*v_proj*"] = {"enable": False}
 
     return quant_cfg
 
