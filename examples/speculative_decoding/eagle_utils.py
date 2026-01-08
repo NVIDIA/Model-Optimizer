@@ -681,7 +681,7 @@ def get_patched_templated_ring_attn(orig_templated_attn: Callable):
 
 
 def patch_ring_attention_for_ttt():
-    """Patch to enable context parallelism for TTT."""
+    """Patch torch ring attention to support context parallelism for TTT."""
     # Torch Ring Attention only supports no mask or causal mask. We apply the following patches to enable TTT mask.
 
     # 1. Disable load balance, which is designed for causal mask.
