@@ -202,6 +202,7 @@ def _test_mcore_gpt_pruning(
         export_config["hidden_size"] = pruned_hidden_size
     if pruned_num_layers_div != 1:
         export_config["num_layers"] = pruned_num_layers
+    constraints = {"export_config": export_config}
 
     config = {
         "scores_path": ckpt_path,
@@ -211,7 +212,7 @@ def _test_mcore_gpt_pruning(
         assert ckpt_path is None
     else:
         config["forward_loop"] = forward_loop
-    model, pruning_scores = prune_minitron(model, export_config, config, channel_divisor)
+    model, pruning_scores = prune_minitron(model, constraints, config, channel_divisor)
     if not skip_sorting:
         assert pruning_scores["layer_scores"]
         assert pruning_scores["activations_per_rank"]
@@ -248,7 +249,7 @@ def _test_mcore_gpt_pruning(
         model_rerun = _get_model(initialize_megatron=False)
         model_rerun.load_state_dict(sd)
         model_rerun, pruning_scores = prune_minitron(
-            model_rerun, export_config, {"scores_path": ckpt_path}, channel_divisor
+            model_rerun, constraints, {"scores_path": ckpt_path}, channel_divisor
         )
 
         output_rerun = run_mcore_inference(model_rerun, prompt_tokens, pruned_hidden_size)
@@ -450,10 +451,11 @@ def _test_mcore_gpt_pruning_moe(ckpt_path, rank, size):
         "moe_shared_expert_intermediate_size": pruned_moe_shared_ffn,
         "num_moe_experts": pruned_num_moe_experts,
     }
+    constraints = {"export_config": export_config}
 
     prune_minitron(
         model,
-        export_config,
+        constraints,
         {"scores_path": ckpt_path, "forward_loop": forward_loop},
         channel_divisor,
     )
@@ -491,7 +493,7 @@ def _test_mcore_gpt_pruning_moe(ckpt_path, rank, size):
     # Assert re-pruning from scores_path works without running the forward loop again
     model_rerun = _get_model(initialize_megatron=False)
     model_rerun.load_state_dict(sd)
-    prune_minitron(model_rerun, export_config, {"scores_path": ckpt_path}, channel_divisor)
+    prune_minitron(model_rerun, constraints, {"scores_path": ckpt_path}, channel_divisor)
 
     output_rerun = run_mcore_inference(model_rerun, prompt_tokens, pruned_hidden_size)
     assert torch.allclose(output, output_rerun, atol=1e-5)

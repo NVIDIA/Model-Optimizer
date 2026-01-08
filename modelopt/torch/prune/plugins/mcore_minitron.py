@@ -214,7 +214,8 @@ class MCoreMinitronSearcher(BaseSearcher):
     def sanitize_search_config(self, config: SearchConfig | None) -> SearchConfig:
         """Sanitize the search config dict."""
         config = super().sanitize_search_config(config)
-        config["checkpoint"] = config["scores_path"]
+        if config["scores_path"]:
+            config["checkpoint"] = config["scores_path"]
         config["verbose"] = True  # Print for all ranks
         return config
 
@@ -457,7 +458,7 @@ class MCoreMinitronSearcher(BaseSearcher):
                     start_layer_number += 1
                 self.unwrapped_model.decoder.layers = all_layers
             print_rank_0(
-                f"\t{candidate.ss_config} -> {num2hrb(candidate.params)} params, {candidate.score:.4f} score"
+                f"\t{candidate.ss_config} -> {num2hrb(candidate.params)} params, {candidate.score:.4f} score\n"
             )
 
         dist.barrier()
