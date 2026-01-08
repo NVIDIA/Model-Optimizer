@@ -22,7 +22,6 @@ from collections.abc import Callable
 from typing import Any, Protocol
 
 import torch
-import torch.distributed as dist
 
 try:
     from torch.distributed.tensor import DTensor
@@ -1178,11 +1177,36 @@ class TensorQuantizer(nn.Module):
                 modelopt_state.get("_pytorch_state_metadata", {})
             )
 
-    def sync_amax_across_distributed_group(self, parallel_group: DistributedProcessGroup):
+    def sync_amax_across_distributed_group(
+        self, parallel_group: DistributedProcessGroup, device: torch.device = None
+    ):
         """Synchronize the amax across all ranks in the given group."""
-        if parallel_group.is_initialized() and getattr(self, "_amax", None) is not None:
+        if parallel_group.is_initialized():
+            # A amax sync process that is safe if some process have amax = None  and some have amax as a tensor
+            # This scenario typically happens with expert parallelism where some experts have seen
+            # tokens and some have not
+
+            device = self.amax.device if self.amax is not None else None
+
             try:
-                dist.all_reduce(self._amax, op=dist.ReduceOp.MAX, group=parallel_group.group)
+
+                def reduce_amaxs(amax_list):
+                    tensor_amaxs = [amax for amax in amax_list if amax is not None]
+                    amax_synced = None
+                    for amax in tensor_amaxs:
+                        amax_synced = (
+                            amax if amax_synced is None else torch.maximum(amax_synced, amax)
+                        )
+                    return amax_synced
+
+                amax = DistributedProcessGroup.get_dist_syncd_obj(
+                    self.amax if self.amax is None else self.amax.cpu(),
+                    parallel_group,
+                    reduce_amaxs,
+                )
+                if amax is not None:
+                    self.amax = amax.to(device) if device is not None else amax
+
             except RuntimeError as e:
                 # This error happens if the distributed backend is using GPU and
                 # the tensor is not on GPU (or vice versa).
