@@ -349,11 +349,12 @@ def get_model(
         else:
             architecture = hf_config.architectures[0]
 
-            if not hasattr(transformers, architecture):
-                warnings.warn(
-                    f"Architecture {architecture} not found in transformers: {transformers.__version__}. "
-                    "Falling back to AutoModelForCausalLM."
-                )
+            if not hasattr(transformers, architecture) or "Deepseek" in architecture:
+                if not hasattr(transformers, architecture):
+                    warnings.warn(
+                        f"Architecture {architecture} not found in transformers: {transformers.__version__}. "
+                        "Falling back to AutoModelForCausalLM."
+                    )
                 assert trust_remote_code, (
                     "Please set trust_remote_code to True if you want to use this architecture"
                 )
