@@ -155,6 +155,12 @@ class _MegatronMLP(DynamicModule):
         pass
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        """Overriding the default to support scalar sharding.
+
+        Note:
+            singleton_local_shards needs to be added to the metadata as well as
+            apply_swiglu_sharded_factory to handle the swiglu case.
+        """
         if metadata is None:
             metadata = {}
         metadata["singleton_local_shards"] = True

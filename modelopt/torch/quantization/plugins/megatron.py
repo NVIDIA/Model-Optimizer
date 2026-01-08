@@ -594,6 +594,14 @@ class _MegatronSequentialMLP(DynamicModule):
                     module.amax = amax_dict[name].detach().clone().to(module.amax.device)
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        """Override the default to enable singleton_local_shards.
+
+        Note:
+            singleton_local_shards must be added to the metadata; otherwise, all experts
+            amax are packed to gather and currently the TP replica_id for linear_fc1
+            is incorrect. This limits TP=ETP=1 when EP>1. Otherwise, there will be
+            sharded_state_dict access error.
+        """
         if metadata is None:
             metadata = {}
         metadata["singleton_local_shards"] = True
