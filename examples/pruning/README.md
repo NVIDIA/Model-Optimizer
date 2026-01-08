@@ -17,27 +17,36 @@ This section focuses on applying Model Optimizer's state-of-the-art complementar
 | Pre-Requisites | Required & optional packages to use this technique | \[[Link](#pre-requisites)\] | |
 | Getting Started | Learn how to use the pruning API | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/3_pruning.html)\] |
 | Support Matrix | View the support matrix to see available pruning algorithms and their compatibility with different models and frameworks | \[[Link](#support-matrix)\] | |
-| Pruning Guidelines | Guidelines for choosing how and how much to prune for best results | \[[Link](#pruning-guidelines)\] | |
 | Examples | Examples of different pruning methods | \[[Link](#examples)\] | |
+| Pruning Guidelines | Guidelines for choosing how and how much to prune for best results | \[[Link](#pruning-guidelines)\] | |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] | |
 
 </div>
 
 ## Pre-Requisites
 
-For Minitron pruning for Megatron-LM / NeMo models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:25.09`) which has all the dependencies installed.
+For Minitron pruning for Megatron-LM / NeMo models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:25.11`) which has all the dependencies installed. Make sure to upgrade Model Optimizer to the latest version using `pip`.
 
 For FastNAS pruning for PyTorch Computer Vision models, no additional dependencies are required.
 
-For GradNAS pruning for Hugging Face BERT / GPT-J, no additional dependencies are requisred.
+For GradNAS pruning for Hugging Face BERT / GPT-J, no additional dependencies are required.
 
 ## Getting Started
 
-As part of the pruning process, you will need to set up the training and/or validation data loaders, and optionally define a validation score function (FastNAS) or loss function (GradNAS) and specify the desired pruning constraints (See [Support Matrix](#support-matrix) for available pruning constraints).
+As part of the pruning process, you will need to set up the training and/or validation data loaders, and optionally define a validation score function (Minitron, FastNAS) or loss function (GradNAS) and specify the desired pruning constraints (See [Support Matrix](#support-matrix) for available pruning constraints).
 
-To prune your model, you can simply call the `mtp.prune` API and save the pruned model. If the model is pruned using FastNAS or GradNAS, you need to use `mto.save` and `mto.restore` to save and restore the pruned model; while for Minitron pruning, you can use your standard saving and loading functions since it is a homogeneous pruning.
+To prune your model, you can simply call the `mtp.prune` API and save the pruned model. If the model is pruned using Minitron, you can use your standard saving and loading functions since it is a homogeneous pruning; while for FastNAS or GradNAS, you need to use `mto.save` and `mto.restore` to save and restore the heterogeneous pruned model.
 
-Please see an example snippet of Minitron pruning for Megatron-Core GPT model below (for other algorithms, please refer to the examples below).
+### Minitron
+
+Minitron pruning supports two modes:
+
+1. **Manual Pruning**: Manually specify the target dimensions for each pruning axis (e.g., `constraints = {"export_config": {"hidden_size": 3072, "ffn_hidden_size": 9216}}`)
+2. **NAS-based Auto Pruning (New)**: Specify a target parameter count (e.g., `constraints = {"params": 6e9}`) and let the algorithm automatically search for the best architecture that maximizes a user-defined score function (e.g. MMLU, negative validation loss, etc.)
+
+Please see example snippets of both modes for Minitron pruning on Megatron-Core GPT model below. For end-to-end examples script (M-LM / NeMo framework), please refer to the examples below.
+
+#### Common Setup
 
 ```python
 import modelopt.torch.prune as mtp
@@ -45,11 +54,11 @@ from megatron.core.models.gpt import GPTModel
 from megatron.core.post_training.modelopt.gpt.model_specs import get_gpt_modelopt_spec
 from megatron.core.transformer.transformer_config import TransformerConfig
 
-# Load the Megatron-Core GPTModel with ModelOpt transformer layer spec
-config = TransformerConfig(...)
+# Load the Megatron-Core GPTModel MambaModel with ModelOpt transformer layer spec
+model_config = TransformerConfig(...)
 model = GPTModel(
-    config=config,
-    transformer_layer_spec=get_gpt_modelopt_spec(config, remap_te_layernorm=True),
+    config=model_config,
+    transformer_layer_spec=get_gpt_modelopt_spec(model_config, remap_te_layernorm=True),
     ...
 )
 
@@ -60,40 +69,140 @@ from megatron.training.training import evaluate_and_print_results
 def forward_loop(_):
     evaluate_and_print_results(prefix, forward_step, train_iterator, model, ...)
 
-
-# Specify the pruning constraints (Check Support Matrix for available pruning dimensions)
-export_config = {
-    "hidden_size": 3072,
-    "ffn_hidden_size": 9216,
-}
-
-
 # Run the pruning process (if model is a list then pass model[0] to the prune API)
-# Save minitron scores at scores_path so we can re-run pruning with different export configs without running the forward loop again
-# NOTE: Skip scores_path on re-running if you want to change the dataset and re-calibrate
+# Save minitron scores at checkpoint so we can re-run pruning with different constraints without running the forward loop again
+# NOTE: Skip checkpoint on re-running if you want to change the dataset and re-calibrate
 model, pruning_scores = mtp.prune(
     model,
     mode="mcore_minitron",
-    constraints={"export_config": export_config},
+    constraints=constraints,
     dummy_input=None,  # Not used
-    config={"forward_loop": forward_loop, "scores_path": "modelopt_minitron_scores.pth"},
+    config=config,
 )
 ```
 
-If your model parameters are already sorted, you can skip the sorting step by setting `"skip_sorting": True` in `config` instead of passing `forward_loop`.
-
 > [!Note]
 > Fine-tuning / distillation is required after pruning to recover the accuracy. Please refer to [end-to-end pruning and distillation tutorial](https://github.com/NVIDIA-NeMo/NeMo/tree/main/tutorials/llm/qwen/pruning-distillation) for more details.
+
+#### 1. Manual Pruning
+
+This mode can be useful when you know the exact dimensions you want to prune to (e.g. fitting a specific latency / memory budget).
+
+```python
+# Specify the pruning constraints (Check Support Matrix for available pruning dimensions)
+constraints = {"export_config": {"hidden_size": 3072, "ffn_hidden_size": 9216}}
+config = {"forward_loop": forward_loop, "checkpoint": "/path/to/cache/pruning/scores.pth"}
+
+mtp.prune(...)
+```
+
+**Under the Hood:**
+
+1. **Importance Scoring**: Runs forward passes on calibration data (512-1024 samples) to compute activation magnitudes for each neuron/head/layer (takes ~5 minutes for an 8B model)
+2. **Ranking**: Ranks all parameters within each pruning dimension (e.g., all hidden dimensions, all attention heads) by their importance scores
+3. **Pruning**: Removes the least important parameters to meet the specified target dimensions in `export_config`
+4. **Weight Slicing**: Slices the model weights according to the pruned architecture (homogeneous pruning - all layers pruned uniformly)
+
+> [!TIP]
+> Checkout the [Pruning Guidelines](#pruning-guidelines) section for more details on how to choose the best pruning strategy and distillation hyperparameters.
+
+#### 2. NAS-based Auto Pruning
+
+This mode can be useful when you don't know the exact dimensions you want to prune to and want the algorithm to search for the best architecture that maximizes a user-defined score function at the cost of longer runtime.
+
+```python
+# Define the score function to maximize (e.g., MMLU, negative validation loss, etc.)
+# The algorithm will search for the best architecture that maximizes this score
+from modelopt.torch.utils.plugins.megatron_mmlu import megatron_mmlu
+
+def score_func(m):
+    return megatron_mmlu(m, tokenizer, percentage=0.05)  # 5% sampled data for faster eval
+
+# Specify target parameter count and configure the auto pruning algorithm
+constraints = {"params": 6e9}  # Prune to 6B parameters
+config = {
+    "forward_loop": forward_loop,
+    "checkpoint": "/path/to/cache/pruning/scores.pth",
+    "score_func": score_func,
+    # Optional: Configure search space constraints (showing defaults)
+    "max_width_pruning": 0.4,  # Maximum 40% per width pruning hparam
+    "max_depth_pruning": 0.2,  # Maximum 20% per depth pruning hparam (num_layers)
+    "hparams_to_skip": [],  # Disable pruning specific hparams, e.g., ["num_attention_heads"]
+    "top_k": 10,  # Number of top architectures to evaluate (use 20 for better results at the cost of 2x time)
+}
+
+mtp.prune(...)
+```
+
+**Under the Hood:**
+
+1. **Importance Scoring**: Same as manual pruning - computes activation magnitudes for all parameters (takes ~5 minutes for an 8B model)
+2. **Search Space Construction**: Generates a search space of possible architectures based search space config and other configs (`max_width_pruning`, `max_depth_pruning`, `hparams_to_skip`)
+3. **Architecture Search**: Find candidate architectures that meet the parameter constraint and evaluate `top_k` (based on number of parameters) of them using `score_func` e.g. MMLU, negative validation loss, etc. (takes ~10 mins per candidate for an 8B model pruning)
+4. **Best Architecture Selection**: Returns the architecture (best `export_config`) with the highest actual score from the top-K evaluated architectures
+5. **Weight Slicing**: Slices the model weights according to the best pruned architecture found
+
+> [!Note]
+> As per the [original paper](https://arxiv.org/pdf/2407.14679), ideally we need to perform a short Knowledge Distillation on ~2B tokens for all top-K candidate architectures before evaluating the score function, which will take a lot longer to prune, require splitting the pruning process into multiple stages and a lot more compute for pruning but can lead to better pruned model. If you are interested to do this, you can take the top-K candidate's `export_config` from the pruning logs and then export all models separately and perform Knowledge Distillation on each of them before evaluating the score function.
+
+#### Advanced Configuration
+
+For finer control over the search space (e.g., granularity of pruning choices), you can configure the divisors:
+
+```python
+# Configure search space granularity (showing defaults)
+ss_config = mtp.mcore_minitron.get_mcore_minitron_config(
+    hidden_size_divisor=256,
+    ffn_hidden_size_divisor=512,
+    mamba_head_dim_divisor=8,
+    num_moe_experts_divisor=8,
+    num_layers_divisor=2,
+)
+
+# Use the custom search space config
+mtp.prune(model, mode=[("mcore_minitron", ss_config)], ...)
+```
+
+If your model parameters are already sorted and you just want to prune the weights, you can skip the sorting step by setting `"skip_sorting": True` in `config` instead of passing `forward_loop`.
 
 ## Support Matrix
 
 | **Algorithm** | **Model** | **Pruning Constraints** |
 | :---: | :---: | :---: |
-| Minitron | Megatron-core / NeMo based GPT / Mamba / MoE / Hybrid LLM Models<sup>1</sup> | Export config with width (`hidden_size`, `ffn_hidden_size`, `num_attention_heads`, `mamba_num_heads`, `mamba_head_dim`, `num_moe_experts`, `moe_ffn_hidden_size`, `moe_shared_expert_intermediate_size`) and/or depth (`num_layers`) values |
-| FastNAS | Computer Vision models | flops, parameters |
-| GradNAS | HuggingFace BERT, GPT-J | flops, parameters |
+| Minitron | Megatron-core / NeMo based GPT / Mamba / MoE / Hybrid LLM Models<sup>1</sup> | **Manual:** `export_config` with width (`hidden_size`, `ffn_hidden_size`, `num_attention_heads`, `mamba_num_heads`, `mamba_head_dim`, `num_moe_experts`, `moe_ffn_hidden_size`, `moe_shared_expert_intermediate_size`) and/or depth (`num_layers`) pruned values<br>**Auto:** `params` (requires `score_func` in config) |
+| FastNAS | Computer Vision models | `flops`, `params` |
+| GradNAS | HuggingFace BERT, GPT-J | `flops`, `params` |
 
 > *<sup>1.</sup>Only Pipeline Parallel models are supported. Hugging Face models can be converted to Megatron-LM/NeMo format and used subsequently.*
+
+## Examples
+
+### Minitron Pruning for Megatron-LM / NeMo Framework LLMs (e.g. Qwen 3, Nemotron Nano)
+
+Checkout the Minitron pruning example for the [Megatron-LM Framework](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt#-pruning) or [NeMo Framework](https://docs.nvidia.com/nemo-framework/user-guide/latest/model-optimization/pruning/pruning.html) which showcases the usage of the powerful Minitron pruning algorithm developed by NVIDIA Research for pruning LLMs like Llama-3.1-8B, Qwen3-8B, Nemotron-Nano-9B-v2, Nemotron-3-Nano-30B-A3B, etc.
+Both frameworks support importing from a Hugging Face pretrained checkpoint.
+
+You can also look at the NeMo tutorial notebooks [here](https://github.com/NVIDIA-NeMo/NeMo/tree/main/tutorials/llm/qwen/pruning-distillation) which showcase the usage of Minitron pruning followed by distillation for Qwen3-8B step-by-step in NeMo framework. Hugging Face models can also be converted to NeMo format and used subsequently as shown in the tutorial.
+
+Some of the models pruned using Minitron method followed by distillation and post-training are:
+
+- [Minitron Collection on Hugging Face](https://huggingface.co/collections/nvidia/minitron)
+- [NVIDIA-Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2)
+
+### FastNAS Pruning for PyTorch Computer Vision Models
+
+Check out the FastNAS pruning example usage in the [documentation](https://nvidia.github.io/Model-Optimizer/guides/3_pruning.html#pruning-and-subnet-search).
+
+You can also take a look at FastNAS pruning interactive notebook [cifar_resnet](./cifar_resnet.ipynb) in this directory
+which showcases the usage of FastNAS for pruning a ResNet 20 model for the CIFAR-10 dataset. The notebook
+also shows how to profile the model to understand the search space of possible pruning options and demonstrates
+how to save and restore pruned models.
+
+### GradNAS Pruning for HuggingFace Language Models (e.g. BERT)
+
+Checkout the BERT pruning example in [chained_optimizations](../chained_optimizations/README.md) directory
+which showcases the usage of GradNAS for pruning BERT model for Question Answering followed by fine-tuning
+with distillation and quantization. The example also demonstrates how to save and restore pruned models.
 
 ## Pruning Guidelines
 
@@ -172,35 +281,6 @@ After pruning, distillation is required to recover model accuracy. Below are rec
 
 > [!TIP]
 > If you know the maximum learning rate used during the original training, a good rule of thumb for knowledge distillation is to use **1/5th of that maximum LR** when compressing by ~50%.
-
-## Examples
-
-### Minitron Pruning for Megatron-LM / NeMo Framework LLMs (e.g. Qwen 3, Nemotron Nano)
-
-Checkout the Minitron pruning example for the [Megatron-LM Framework](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt#-pruning) or [NeMo Framework](https://docs.nvidia.com/nemo-framework/user-guide/latest/model-optimization/pruning/pruning.html) which showcases the usage of the powerful Minitron pruning algorithm developed by NVIDIA Research for pruning LLMs like Llama 3.1 8B, Qwen 3 8B, Nemotron Nano 12B v2, etc.
-Both frameworks support importing from a Hugging Face pretrained checkpoint.
-
-You can also look at the NeMo tutorial notebooks [here](https://github.com/NVIDIA-NeMo/NeMo/tree/main/tutorials/llm/qwen/pruning-distillation) which showcase the usage of Minitron pruning followed by distillation for Qwen 3 8B step-by-step in NeMo framework. Hugging Face models can also be converted to NeMo format and used subsequently as shown in the tutorial.
-
-Some of the models pruned using Minitron method followed by distillation and post-training are:
-
-- [Minitron Collection on Hugging Face](https://huggingface.co/collections/nvidia/minitron)
-- [NVIDIA-Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2)
-
-### FastNAS Pruning for PyTorch Computer Vision Models
-
-Check out the FastNAS pruning example usage in the [documentation](https://nvidia.github.io/Model-Optimizer/guides/3_pruning.html#pruning-and-subnet-search).
-
-You can also take a look at FastNAS pruning interactive notebook [cifar_resnet](./cifar_resnet.ipynb) in this directory
-which showcases the usage of FastNAS for pruning a ResNet 20 model for the CIFAR-10 dataset. The notebook
-also shows how to profile the model to understand the search space of possible pruning options and demonstrates
-how to save and restore pruned models.
-
-### GradNAS Pruning for HuggingFace Language Models (e.g. BERT)
-
-Checkout the BERT pruning example in [chained_optimizations](../chained_optimizations/README.md) directory
-which showcases the usage of GradNAS for pruning BERT model for Question Answering followed by fine-tuning
-with distillation and quantization. The example also demonstrates how to save and restore pruned models.
 
 ## Resources
 
