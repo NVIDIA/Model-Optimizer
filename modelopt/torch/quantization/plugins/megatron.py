@@ -554,6 +554,14 @@ class _RealQuantMegatronRowParallelLinear(
 @QuantModuleRegistry.register({megatron_moe.SequentialMLP: "megatron_moe_SequentialMLP"})
 class _MegatronSequentialMLP(DynamicModule):
     def _setup(self):
+        if (
+            self.config.expert_model_parallel_size > 1
+            and self.config.tensor_model_parallel_size > 1
+        ):
+            raise ValueError(
+                "TP+EP is not supported by QuantSequentialMLP. Set either TP or EP to 1!"
+            )
+
         if not hasattr(self, "parallel_state") or self.parallel_state is None:
             self.parallel_state = ParallelState(
                 mcore_parallel.get_expert_data_parallel_group(),
