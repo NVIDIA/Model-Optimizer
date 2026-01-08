@@ -16,7 +16,7 @@
 import modelopt.torch.prune as mtp
 
 
-def prune_minitron(model, export_config, config, channel_divisor=64):
+def prune_minitron(model, constraints, config, channel_divisor=64):
     return mtp.prune(
         model,
         mode=[
@@ -31,7 +31,7 @@ def prune_minitron(model, export_config, config, channel_divisor=64):
                 ),
             )
         ],
-        constraints={"export_config": export_config},
+        constraints=constraints,
         dummy_input=None,  # Not used
         config=config,
     )
