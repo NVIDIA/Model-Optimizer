@@ -172,6 +172,8 @@ class _MegatronMLP(DynamicModule):
                 re.compile(pattern).match(k) for pattern in self._modelopt_state_keys
             ):
                 sharded_state_dict[k] = megatron_mlp.apply_swiglu_sharded_factory(
-                    v, sharded_offsets, metadata["singleton_local_shards"],
+                    v,
+                    sharded_offsets,
+                    metadata["singleton_local_shards"],
                 )
         return sharded_state_dict
