@@ -19,7 +19,7 @@ import inspect
 import warnings
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Any, Optional, Type, Union, get_args, get_origin
+from typing import Any, List, Optional, Type, Union, get_args, get_origin
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -306,3 +306,25 @@ class BlockConfig(BaseDataclass):
                 BlockConfig(**block_config) for block_config in self.parallel_blocks
             ]
             self._force_setattr("parallel_blocks", initialized_block_configs)
+
+    def to_dict(self) -> dict:
+        """Convert BlockConfig to a dictionary."""
+        return dataclasses.asdict(self)
+
+
+def maybe_cast_block_configs(
+    block_configs: List[BlockConfig | dict] | None,
+) -> List[BlockConfig] | None:
+    """Cast a list of dicts to BlockConfig objects if needed.
+
+    Args:
+        block_configs: List of BlockConfig or dict objects, or None.
+
+    Returns:
+        List of BlockConfig objects, or None if input is None/empty.
+    """
+    if not block_configs:
+        return block_configs
+    if isinstance(block_configs[0], dict):
+        return [BlockConfig(**conf) for conf in block_configs]
+    return block_configs
