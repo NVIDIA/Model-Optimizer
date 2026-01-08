@@ -56,10 +56,13 @@ from ..utils import (
     AcceptanceRateValidation,
     ResBlock,
     _setup_kimi_k2_decoder,
+    enable_cp_ttt_patch,
+    get_ttt_msk_func,
     temporary_set_config_value,
 )
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
+ENABLE_CP_TTT_PATCH = False
 
 
 @MedusaDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
@@ -370,7 +373,7 @@ class EagleModule(nn.Module):
                 hidden_states,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
-                past_key_value=past_key_values,
+                past_key_values=past_key_values,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 position_embeddings=position_embeddings,
@@ -678,16 +681,7 @@ class HFEagleModel(EagleModel):
         self, batch_size, seq_length, ttt_step
     ) -> BlockMask | torch.Tensor:
         """Return TTT attention_mask tensor of type BlockMask or Tensor depends on eagle attn impl."""
-
-        def msk_func(b, h, q_idx, kv_idx):
-            mask = kv_idx <= (q_idx - ttt_step)
-            for i in range(1, ttt_step + 1):
-                mask_block_i = (kv_idx == q_idx + i * seq_length - (ttt_step - i)) & (
-                    kv_idx >= seq_length * i
-                )
-                mask = mask | mask_block_i
-            return mask
-
+        msk_func = get_ttt_msk_func(seq_length, ttt_step)
         dtypemin = torch.finfo(self._base_llm_config.dtype).min
         q_len = seq_length
         kv_len = seq_length * (1 + ttt_step)
@@ -874,9 +868,9 @@ class HFEagleModel(EagleModel):
             )
 
         if not isinstance(past_key_values, Cache):
-            past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+            past_key_values = DynamicCache(config=self._base_llm_config)
         if not isinstance(eagle_cache, Cache):
-            eagle_cache = DynamicCache.from_legacy_cache(eagle_cache)
+            eagle_cache = DynamicCache(config=self.eagle_module.config)
 
         # ====Run eagle forward====
         eagle_loss = None
@@ -912,13 +906,14 @@ class HFEagleModel(EagleModel):
                 if ttt_step == 0
                 else self._get_ttt_attention_mask(b, seq_length, ttt_step)
             )
-            _, eagle_input_hidden_states, eagle_logits, eagle_cache = self._eagle_forward(
-                eagle_input_hidden_states,
-                inputs_embeds,
-                attention_mask,
-                position_ids,
-                eagle_cache,
-            )
+            with enable_cp_ttt_patch():
+                _, eagle_input_hidden_states, eagle_logits, eagle_cache = self._eagle_forward(
+                    eagle_input_hidden_states,
+                    inputs_embeds,
+                    attention_mask,
+                    position_ids,
+                    eagle_cache,
+                )
             eagle_input_hidden_states = torch.cat(
                 (
                     torch.zeros(
@@ -989,6 +984,7 @@ class HFEagleModel(EagleModel):
             assert hasattr(self.eagle_module, "d2t"), "d2t buffer not initialized"
             base_model_logits = self._map_logits_to_draft_vocab(base_model_logits)
         loss_mask = loss_mask[:, :, None]
+        loss_mask = loss_mask[:, : eagle_logits.shape[1]]
         classification_loss = nn.Softmax(dim=2)(base_model_logits) * nn.LogSoftmax(dim=2)(
             eagle_logits
         )
