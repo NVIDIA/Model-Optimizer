@@ -520,9 +520,11 @@ def awq(
             awq_clip(model, forward_loop, **kwargs)
 
     # Special handling for SequentialQuantizer
+    # Pre-compute name_to_module dict to avoid O(n^2) complexity in enable_weight_access_and_writeback
+    name_to_module = dict(model.named_modules())
     for name, module in model.named_modules():
         if is_quantized_linear(module) and isinstance(module.weight_quantizer, SequentialQuantizer):
-            with enable_weight_access_and_writeback(module, model):
+            with enable_weight_access_and_writeback(module, model, name_to_module):
                 max_calibrate(module, lambda linear: linear.weight_quantizer(module.weight))
 
 
@@ -594,8 +596,9 @@ def awq_lite(
                 weight = F.pad(weight, (0, block_size - org_shape[-1] % block_size), "constant", 0)
                 org_shape = weight.shape
             weight = weight.contiguous().view(-1, block_size)
-        weight_abs_amax = weight.abs().amax(dim=1, keepdim=True)
-        scale = weight.abs() / (weight_abs_amax + torch.finfo(weight.dtype).tiny)
+        weight_abs = weight.abs()  # Cache to avoid redundant computation
+        weight_abs_amax = weight_abs.amax(dim=1, keepdim=True)
+        scale = weight_abs / (weight_abs_amax + torch.finfo(weight.dtype).tiny)
         scale = scale.view(org_shape)
         if slice_after_padding is not None:
             scale = scale[..., slice_after_padding]
@@ -689,15 +692,16 @@ def awq_lite(
         # Now forward the actual output without any quantization
         return out_actual
 
-    for name, module in model.named_modules():
+    # Pre-compute name_to_module dict ONCE to avoid O(n^2) complexity in enable_weight_access_and_writeback
+    name_to_module = dict(model.named_modules())
+    for name, module in name_to_module.items():
         if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
-            with enable_weight_access_and_writeback(module, model):
+            with enable_weight_access_and_writeback(module, model, name_to_module):
                 module.awq_lite = AWQLiteHelper(module, name)
             module.awq_lite.setup()
 
     # Collect activation scale values
     AWQLiteHelper.cache_mode = True
-    print_rank_0("awq_lite: Caching activation statistics...")
 
     # Lets enable stats collection
     # This will collect amax for input_quantizers and KV quantizers during the caching mode forward pass
@@ -741,7 +745,6 @@ def awq_lite(
                 )
 
     AWQLiteHelper.cache_mode = False
-    print_rank_0("awq_lite: Searching parameters...")
     with torch.no_grad():
         forward_loop(model)
 
@@ -781,7 +784,7 @@ def awq_lite(
                     f" {name}. Please provide a valid `forward_loop` function that can be used to"
                     " forward data through the model many times."
                 )
-            with enable_weight_access_and_writeback(module, model):
+            with enable_weight_access_and_writeback(module, model, name_to_module):
                 postprocess(module, name)
 
             module.awq_lite.cleanup()
@@ -961,6 +964,8 @@ def awq_clip(
         self.weight_quantizer.disable()
         return self._forward_no_awq(input, *args, **kwargs)
 
+    # Pre-compute name_to_module dict to avoid O(n^2) complexity in enable_weight_access_and_writeback
+    name_to_module = dict(model.named_modules())
     for name, module in model.named_modules():
         if (
             is_quantized_linear(module)
@@ -968,7 +973,7 @@ def awq_clip(
             and module.weight_quantizer.block_sizes is not None
         ):
             bind_forward_method(module, partial(forward, name), "_forward_no_awq")
-            with enable_weight_access_and_writeback(module, model):
+            with enable_weight_access_and_writeback(module, model, name_to_module):
                 module.awq_clip = AWQClipHelper(module)
 
     print_rank_0("awq_clip: Estimating parameters...")
@@ -992,7 +997,7 @@ def awq_clip(
     for name, module in model.named_modules():
         if is_quantized_linear(module) and hasattr(module, "awq_clip"):
             if module.awq_clip.num_tokens > 0:
-                with enable_weight_access_and_writeback(module, model):
+                with enable_weight_access_and_writeback(module, model, name_to_module):
                     postprocess(module)
 
             if not debug:
