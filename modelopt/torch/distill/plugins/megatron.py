@@ -364,8 +364,8 @@ class LogitsKLLoss(BaseLoss):
 class TopKLogitsKLLoss(LogitsKLLoss):
     """Calculates KL-Divergence loss restricted to the Teacher's Top-K vocabulary entries.
 
-    Respects Tensor Parallelism by finding the global Top-K threshold without
-    gathering full logits.
+    Calculates using the global Top-K entries without gathering full logits.
+    NOTE: Will gather Top-K logits per rank, so mind the value of K for memory and communication.
     """
 
     def __init__(
@@ -373,7 +373,7 @@ class TopKLogitsKLLoss(LogitsKLLoss):
         model_config: "TransformerConfig",
         temperature: float = 1.0,
         reverse: bool = False,
-        top_k: int = 100,
+        top_k: int = 1000,
     ):
         """Constructor.
 
@@ -386,105 +386,64 @@ class TopKLogitsKLLoss(LogitsKLLoss):
         super().__init__(model_config, temperature, reverse)
         self.top_k = top_k
 
-    def _get_global_min_threshold(self, output_teacher: Tensor) -> Tensor:
-        """Determines the cutoff value (threshold) for the global Top-K elements.
+    def forward(self, predictions: Tensor, targets: Tensor) -> Tensor:
+        """Forward function.
 
         Args:
-            local_teacher_logits: Tensor of shape [s, b, h]
+            predictions: Student model tensors (size [s, b, h])
+            targets: Teacher model tensors (size [s, b, h])
 
         Returns:
-            threshold: Tensor of shape [s, b, 1] containing the K-th largest value globally.
+            Top-K KLD loss of tensors (size [b, s])
         """
-        # Get Local Top-K values
-        assert self.top_k <= output_teacher.size(-1), f"{self.top_k=}, {output_teacher.size(-1)=}"
-        local_top_vals, _ = torch.topk(output_teacher, self.top_k, dim=-1)  # [s, b, k]
+        predictions, targets = self.pre_forward(predictions, targets)
 
-        # If TP is 1, local is global
-        if self._config.tensor_model_parallel_size == 1:
-            return local_top_vals[..., -1:]
+        assert self.top_k <= targets.size(-1), f"{self.top_k=}, {targets.size(-1)=}"
 
-        # Gather these candidates from all TP ranks
-        global_candidates = [
-            torch.zeros_like(local_top_vals) for _ in range(self._config.tensor_model_parallel_size)
-        ]
-        torch.distributed.all_gather(
-            global_candidates,
-            local_top_vals.contiguous(),
-            group=parallel_state.get_tensor_model_parallel_group(),
-        )
-        global_candidates = torch.cat(global_candidates, dim=-1)  # [s, b, k * tp_size]
+        # Divide by temperature first
+        output_teacher = targets.float() / self._temperature
+        output_student = predictions.float() / self._temperature
 
-        # Find the global Top-K from the candidates
-        # The smallest of the top K (last element) is the global threshold.
-        global_top_vals, _ = torch.topk(global_candidates, self.top_k, dim=-1)
-        threshold = global_top_vals[..., -1:]
+        # Extract local Top-K
+        # We take K from each rank and then find the global Top-K of all those.
+        top_teacher_vals, top_idx = torch.topk(output_teacher, self.top_k, dim=-1)
+        top_student_vals = torch.gather(output_student, dim=-1, index=top_idx)
 
-        return threshold
-
-    def _calculate_kld(self, output_teacher: Tensor, output_student: Tensor) -> Tensor:
-        """Calculate KLD loss between two tensors."""
-        # 1. Determine cutoff threshold based on teacher's confidence
-        with torch.no_grad():
-            threshold = self._get_global_min_threshold(output_teacher)
-            mask = output_teacher >= threshold  # elements to keep
-
-        # Flatten tensors for simplicity
-        s, b = output_student.size(0), output_student.size(1)
-        output_teacher = output_teacher.view(s * b, -1)
-        output_student = output_student.view(s * b, -1)
-        mask = mask.view(s * b, -1)
-
-        # 2. Extract values above threshold (Sparse Selection)
-        sel_teacher = torch.masked_select(output_teacher, mask)
-        sel_student = torch.masked_select(output_student, mask)
-
-        # 3. Handle Indices
-        indices = torch.nonzero(mask)
-        # indices[:, 0] is exactly the row_index (0 to s*b-1)
-        # indices[:, 1] is the vocab_index (which we don't need for summation)
-        row_ids = indices[:, 0]
-
-        # 4. Softmax Normalization
-        exp_teacher = torch.exp(sel_teacher)
-        exp_student = torch.exp(sel_student)
-
-        # Prepare containers for the sums of shape [s * b]
-        denom_teacher = output_student.new_zeros(s * b)
-        denom_student = output_student.new_zeros(s * b)
-
-        # We must use scatter_add because 'exp_teacher' is a 1D list of variable length
-        # segments. We need to sum "all values belonging to row 0", then "all for row 1", etc.
-        denom_teacher.scatter_add_(0, row_ids, exp_teacher)
-        denom_student.scatter_add_(0, row_ids, exp_student)
-
-        # Global Reduction (Tensor Parallelism)
-        if self._config.tensor_model_parallel_size > 1:
+        if (tp_size := self._config.tensor_model_parallel_size) > 1:
             tp_group = parallel_state.get_tensor_model_parallel_group()
-            all_reduce_autograd(denom_teacher, group=tp_group)
-            all_reduce_autograd(denom_student, group=tp_group)
 
-        # 5. KL Divergence
-        # Gather the calculated denominators back to the sparse elements
-        # If sel_teacher[i] belongs to row J, we divide by denom_teacher[J]
-        sel_denom_teacher = denom_teacher[row_ids]
-        sel_denom_student = denom_student[row_ids]
+            # Gather all candidates into shape [N_rows, local_k * tp_size]
+            all_teacher_vals = [torch.zeros_like(top_teacher_vals) for _ in range(tp_size)]
+            all_student_vals = [torch.zeros_like(top_student_vals) for _ in range(tp_size)]
+            torch.distributed.all_gather(
+                all_teacher_vals, top_teacher_vals.contiguous(), group=tp_group
+            )
+            torch.distributed.all_gather(
+                all_student_vals, top_student_vals.contiguous(), group=tp_group
+            )
+            all_teacher_vals = torch.cat(all_teacher_vals, dim=-1)
+            all_student_vals = torch.cat(all_student_vals, dim=-1)
 
-        log_prob_teacher = sel_teacher - torch.log(sel_denom_teacher)
-        log_prob_student = sel_student - torch.log(sel_denom_student)
+            # Pick the true Top-K based on Teacher values
+            global_top_vals, global_top_idx = torch.topk(all_teacher_vals, self.top_k, dim=-1)
 
-        p, q = log_prob_student, log_prob_teacher
+            final_teacher_logits = global_top_vals
+            final_student_logits = torch.gather(all_student_vals, dim=-1, index=global_top_idx)
+        else:
+            final_teacher_logits = top_teacher_vals
+            final_student_logits = top_student_vals
+
+        # Standard (dense) Softmax + KL
+        p = F.log_softmax(final_student_logits, dim=-1)
+        q = F.log_softmax(final_teacher_logits, dim=-1)
+
+        # KL divergence
         if self._reverse:
-            p, q = log_prob_teacher, log_prob_student
-        kl_elements = F.kl_div(p, q, reduction="none", log_target=True)
+            p, q = q, p
+        loss = torch.sum(F.kl_div(p, q, reduction="none", log_target=True), dim=-1)
 
-        # 6. Accumulate Loss
-        loss_flat = output_student.new_zeros(s * b)
-        loss_flat.scatter_add_(0, row_ids, kl_elements)
-
-        # Reshape back to [s, b] for the post_forward step
-        loss = loss_flat.view(s, b)
-
-        return loss
+        # No need to reduce since all ranks compute same global Top-K
+        return self.post_forward(loss, tp_reduce=False)
 
 
 class LogitsAndIntermediatesLossBalancer(mtd.DistillationLossBalancer):
