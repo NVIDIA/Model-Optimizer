@@ -68,7 +68,7 @@ ONNX_TYPES = [t.onnx_type for t in PRECISION_MAP.values()]
 OP_TYPES_NOT_SUPPORTED_IN_LOW_PRECISION = ["Upsample", "NonMaxSuppression", "Celu"]
 
 # Mapping of op types to indices of inputs that should not be converted to low precision.
-SKIP_LOW_PRECISION_MAPPING_FP16 = {"Resize": {2}}
+SKIP_LOW_PRECISION_MAPPING_FP16 = {"Resize": {1, 2}}  # {X, roi (opt), scales (opt)}
 SKIP_LOW_PRECISION_MAPPING_BF16 = {"Resize": {1, 2}}
 
 
