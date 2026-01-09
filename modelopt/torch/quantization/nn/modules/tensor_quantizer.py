@@ -1155,43 +1155,61 @@ class TensorQuantizer(nn.Module):
             )
 
     def sync_amax_across_distributed_group(
-        self, parallel_group: DistributedProcessGroup, device: torch.device = None
+        self, parallel_group: DistributedProcessGroup, fallback_device: torch.device | None = None
     ):
-        """Synchronize the amax across all ranks in the given group."""
-        if parallel_group.is_initialized():
-            # A amax sync process that is safe if some process have amax = None  and some have amax as a tensor
-            # This scenario typically happens with expert parallelism where some experts have seen
-            # tokens and some have not
+        """Synchronize the amax across all ranks in the given group.
 
-            device = self.amax.device if self.amax is not None else None
+        This handles the case where some ranks have amax=None (e.g., MoE experts that
+        haven't seen any tokens) while others have valid amax tensors.
 
-            try:
+        Args:
+            parallel_group: The distributed process group to sync across.
+            fallback_device: Device to place the synced amax if local amax is None.
+                If None, defaults to the current CUDA device if available.
+        """
+        if not parallel_group.is_initialized():
+            return
 
-                def reduce_amaxs(amax_list):
-                    tensor_amaxs = [amax for amax in amax_list if amax is not None]
-                    amax_synced = None
-                    for amax in tensor_amaxs:
-                        amax_synced = (
-                            amax if amax_synced is None else torch.maximum(amax_synced, amax)
-                        )
-                    return amax_synced
+        # Determine target device: prefer local amax device, then fallback, then current CUDA device
+        local_device = self.amax.device if self.amax is not None else None
+        if fallback_device is None and torch.cuda.is_available():
+            fallback_device = torch.device("cuda", torch.cuda.current_device())
+        target_device = local_device or fallback_device
 
-                amax = DistributedProcessGroup.get_dist_syncd_obj(
-                    self.amax if self.amax is None else self.amax.cpu(),
-                    parallel_group,
-                    reduce_amaxs,
-                )
-                if amax is not None:
-                    self.amax = amax.to(device) if device is not None else amax
+        def reduce_amaxs(amax_list: list) -> torch.Tensor | None:
+            """Reduce amax values across ranks by taking element-wise maximum."""
+            valid_amaxs = [a for a in amax_list if a is not None]
+            if not valid_amaxs:
+                return None
 
-            except RuntimeError as e:
-                # This error happens if the distributed backend is using GPU and
-                # the tensor is not on GPU (or vice versa).
-                warnings.warn(
-                    f"Failed to synchronize amax: {e}, probably because the tensor is on a device which is not"
-                    "supported by the current distributed backend. This warning can be ignored"
-                    "if happening during modelopt restore."
-                )
+            # Iterative max handles both scalar and tensor amax values
+            result = valid_amaxs[0]
+            for amax in valid_amaxs[1:]:
+                result = torch.maximum(result, amax)
+            return result
+
+        try:
+            # Move to CPU for gathering to avoid NCCL device placement issues
+            local_amax_cpu = self.amax.cpu() if self.amax is not None else None
+
+            synced_amax = DistributedProcessGroup.get_dist_syncd_obj(
+                local_amax_cpu,
+                parallel_group,
+                reduce_amaxs,
+            )
+
+            if synced_amax is not None:
+                # Move to target device
+                if target_device is not None:
+                    synced_amax = synced_amax.to(target_device)
+                self.amax = synced_amax
+
+        except RuntimeError as e:
+            warnings.warn(
+                f"Failed to synchronize amax: {e}. This may occur if the tensor is on a "
+                "device not supported by the current distributed backend. This warning "
+                "can be ignored if happening during modelopt restore."
+            )
 
     @contextlib.contextmanager
     def disable_pre_quant_scale(self):
