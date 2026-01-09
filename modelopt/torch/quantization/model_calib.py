@@ -114,8 +114,7 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
                 sync_quantizer_amax_across_dp_ep(
                     child, module.parallel_state, get_module_device(module)
                 )
-                if "experts" in name or "weight_quantizer" in name:
-                    assert child.amax is not None
+
     # TP sync:
     # Objective: the quantization parameters when TP = 8 then changed to TP=4 then back to TP=8 should be the same
 

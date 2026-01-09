@@ -1189,7 +1189,7 @@ class TensorQuantizer(nn.Module):
             return result
 
         try:
-            # Move to CPU for gathering to avoid NCCL device placement issues
+            # All gathering of objects happens on CPU, so lets move the local amax to CPU
             local_amax_cpu = self.amax.cpu() if self.amax is not None else None
 
             synced_amax = DistributedProcessGroup.get_dist_syncd_obj(
