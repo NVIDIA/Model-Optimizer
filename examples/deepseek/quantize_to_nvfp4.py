@@ -83,36 +83,17 @@ def _remap_key(key_dict: dict[str, Any]):
 
 
 def remove_quantization_config_from_original_config(export_dir: str) -> None:
-    """Remove `quantization_config` from exported HF `config.json` if present.
+    """Remove `quantization_config` from exported HF `config.json`.
 
-    DeepSeek original checkpoints may include a `quantization_config` field in `config.json`
-    (describing the source checkpoint's quantization). When we export ModelOpt quantization
-    configs to `hf_quant_config.json`, leaving the original `quantization_config` in place can
-    be confusing. This function performs an in-place, best-effort cleanup in the exported
-    checkpoint directory.
+    Assumes the exported checkpoint directory has a `config.json` containing `quantization_config`.
     """
     config_path = os.path.join(export_dir, "config.json")
-    if not os.path.exists(config_path):
-        return
-
-    try:
-        with open(config_path) as f:
-            cfg = json.load(f)
-    except Exception as e:
-        print(f"Warning: Failed to read {config_path}: {e}")
-        return
-
-    if not isinstance(cfg, dict) or "quantization_config" not in cfg:
-        return
-
-    cfg.pop("quantization_config", None)
-    try:
-        with open(config_path, "w") as f:
-            json.dump(cfg, f, indent=2, sort_keys=True)
-            f.write("\n")
-    except Exception as e:
-        print(f"Warning: Failed to write {config_path}: {e}")
-        return
+    with open(config_path) as f:
+        cfg = json.load(f)
+    del cfg["quantization_config"]
+    with open(config_path, "w") as f:
+        json.dump(cfg, f, indent=2, sort_keys=True)
+        f.write("\n")
 
 
 def load_and_preprocess_state_dict(modelopt_state_root, world_size=8):
