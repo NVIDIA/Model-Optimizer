@@ -387,6 +387,29 @@ NVFP4_DEFAULT_CFG = {
     "algorithm": "max",
 }
 
+NVFP4_WEIGHT_MSE_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "enable": False,
+        },
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": {
+        "method": "mse",
+        # "step_size": 0.05,
+        "fp8_scale_sweep": True,
+        # "num_steps": 5,
+        # "start_multiplier": 0.25,
+        # "stop_multiplier": 2.0,
+    },
+}
+
 NVFP4_AWQ_LITE_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
@@ -987,29 +1010,58 @@ class MseCalibConfig(QuantizeAlgorithmConfig):
     reconstruction error of a tensor after uniform Q→DQ:
 
         s* = argmin_s  E[(X - DQ(Q(X; s)))^2],   X ∈ {weights | activations}
+
+    Note: You can specify either num_steps or step_size (but not both) to control
+    the amax search range. If both are provided, num_steps takes precedence.
+    When fp8_scale_sweep is enabled, num_steps and step_size are ignored.
     """
 
     method: Literal["mse"] = ModeloptField("mse")
 
     num_steps: int | None = ModeloptField(
-        default=10,
+        default=None,
         ge=1,
         title="Number of amax candidates to try.",
-        description="Number of amax candidates to search over for MSE minimization.",
+        description="Number of amax candidates to search over for MSE minimization. "
+        "Mutually exclusive with step_size. If both are provided, num_steps takes precedence. "
+        "If neither num_steps nor step_size is provided, defaults to 10. "
+        "Ignored if fp8_scale_sweep is True.",
+    )
+
+    step_size: float | None = ModeloptField(
+        default=None,
+        gt=0.0,
+        title="Step size for amax search.",
+        description="Step size for the multiplier range [start_multiplier, stop_multiplier]. "
+        "Mutually exclusive with num_steps. If specified, num_steps will be computed as "
+        "ceil((stop_multiplier - start_multiplier) / step_size) + 1. "
+        "Ignored if fp8_scale_sweep is True.",
     )
 
     start_multiplier: float | None = ModeloptField(
         default=0.25,
         gt=0.0,
         title="Starting multiplier for amax search.",
-        description="Starting multiplier for amax search range (multiplies initial amax).",
+        description="Starting multiplier for amax search range (multiplies initial amax). "
+        "Ignored if fp8_scale_sweep is True.",
     )
 
     stop_multiplier: float | None = ModeloptField(
         default=4.0,
         gt=0.0,
         title="Ending multiplier for amax search.",
-        description="Ending multiplier for amax search range (multiplies initial amax).",
+        description="Ending multiplier for amax search range (multiplies initial amax). "
+        "Ignored if fp8_scale_sweep is True.",
+    )
+
+    fp8_scale_sweep: bool | None = ModeloptField(
+        default=False,
+        title="Enable FP8 scale sweep for NVFP4 per-block quantization.",
+        description="If True, sweep over all 128 possible FP8 E4M3 scale values "
+        "for NVFP4 per-block quantization instead of using multipliers. "
+        "This is specifically designed for optimizing the FP8-quantized per-block scales "
+        "in NVFP4 format. When enabled, num_steps, step_size, start_multiplier, and "
+        "stop_multiplier are ignored for NVFP4 per-block quantizers.",
     )
 
     distributed_sync: bool | None = ModeloptField(

@@ -192,9 +192,11 @@ def mse_calibrate(
     model: nn.Module,
     forward_loop: ForwardLoop | None = None,
     distributed_sync=True,
-    num_steps: int = 10,
+    num_steps: int | None = None,
+    step_size: float | None = None,
     start_multiplier: float = 0.25,
     stop_multiplier: float = 4.0,
+    fp8_scale_sweep: bool = False,
 ):
     """Calibrate the model using MSE-based amax search.
 
@@ -207,13 +209,28 @@ def mse_calibrate(
         forward_loop: A callable which takes the model as argument and
             forwards calibration data through the model.
         distributed_sync: Whether to sync amax across distributed processes.
-        num_steps: Number of amax candidates to try (default: 10).
+        num_steps: Number of amax candidates to try. Mutually exclusive with step_size.
+                  If both are provided, num_steps takes precedence. If neither is provided,
+                  defaults to 10. Ignored if fp8_scale_sweep is True.
+        step_size: Step size for the multiplier range [start_multiplier, stop_multiplier].
+                  Mutually exclusive with num_steps. If specified, num_steps will be
+                  computed as ceil((stop_multiplier - start_multiplier) / step_size) + 1.
+                  Ignored if fp8_scale_sweep is True.
         start_multiplier: Starting multiplier for amax search (default: 0.25).
+                         Ignored if fp8_scale_sweep is True.
         stop_multiplier: Ending multiplier for amax search (default: 4.0).
+                        Ignored if fp8_scale_sweep is True.
+        fp8_scale_sweep: If True, sweep over all 128 possible FP8 E4M3 scale values
+                        for NVFP4 per-block quantization instead of using multipliers.
+                        This is specifically designed for optimizing the FP8-quantized
+                        per-block scales in NVFP4 format (default: False).
 
     See :class:`MseCalibConfig <modelopt.torch.quantization.config.MseCalibConfig>` for
     details on the remaining arguments.
     """
+    # Set default for num_steps if neither num_steps nor step_size is provided
+    if num_steps is None and step_size is None:
+        num_steps = 10
     # Step 1: First get initial amax using max calibration
     max_calibrate(model, forward_loop, distributed_sync)
 
@@ -228,9 +245,20 @@ def mse_calibrate(
                 # Get the initial amax from max calibration
                 initial_amax = module._amax.clone().detach()
 
-                def quant_func(x, amax, quantizer=module):
+                def quant_func(x, amax, quantizer=module, use_fp8_sweep=fp8_scale_sweep):
                     original_amax = quantizer._amax.clone() if hasattr(quantizer, "_amax") else None
-                    quantizer._amax = amax
+
+                    # FP8 quantization of NVFP4 static per-block scales
+                    if (
+                        quantizer.is_static_block_quant
+                        and quantizer._num_bits == (2, 1)
+                        and quantizer._block_sizes.get("scale_bits") == (4, 3)
+                    ):
+                        weight_amax = reduce_amax(x, axis=None, keepdims=False, squeeze_scalar=True)
+                        quantizer._amax = scaled_e4m3_impl(amax, weight_amax)
+                    else:
+                        # For non-NVFP4 quantizers, use amax directly
+                        quantizer._amax = amax
 
                     with (
                         enable_quant(quantizer),
@@ -241,17 +269,6 @@ def mse_calibrate(
                         xq = quantizer(x)
                         quantizer._keep_shape = False
 
-                        # FP8 quantization of NVFP4 static per-block scales
-                        if (
-                            quantizer.is_static_block_quant
-                            and quantizer._num_bits == (2, 1)
-                            and quantizer._block_sizes.get("scale_bits") == (4, 3)
-                        ):
-                            weight_amax = reduce_amax(
-                                x, axis=None, keepdims=False, squeeze_scalar=True
-                            )
-                            quantizer._amax = scaled_e4m3_impl(amax / 6.0, weight_amax / 6.0) * 6.0
-
                     if original_amax is not None:
                         quantizer._amax = original_amax
                     else:
@@ -259,14 +276,24 @@ def mse_calibrate(
 
                     return xq
 
+                # Determine if this is an NVFP4 per-block quantizer that should use FP8 scale sweep
+                is_nvfp4_per_block = (
+                    fp8_scale_sweep
+                    and module.is_static_block_quant
+                    and module._num_bits == (2, 1)
+                    and module._block_sizes.get("scale_bits") == (4, 3)
+                )
+
                 # Create MSE calibrator with quant_func
                 module._calibrator = MseCalibrator(
                     amax=initial_amax,
                     axis=module._calibrator._axis,
                     num_steps=num_steps,
+                    step_size=step_size,
                     start_multiplier=start_multiplier,
                     stop_multiplier=stop_multiplier,
                     quant_func=quant_func,
+                    fp8_scale_sweep=is_nvfp4_per_block,
                 )
 
     # Identify weight quantizers by checking if they have corresponding weight parameters
@@ -291,6 +318,8 @@ def mse_calibrate(
         with enable_weight_access_and_writeback(parent_module, model):
             weight = getattr(parent_module, weight_name)
             weight_quantizer(weight)
+
+    torch.cuda.empty_cache()
 
     # Step 4: Disable weight quantizers during forward loop
     for _, _, weight_quantizer in weight_quantizers:
@@ -319,6 +348,8 @@ def mse_calibrate(
             if hasattr(module, "_calibrator") and module._calibrator is not None:
                 if hasattr(module._calibrator, "clear"):
                     module._calibrator.clear()
+
+    torch.cuda.empty_cache()
 
     # TODO: Sync amax across distributed processes
 
