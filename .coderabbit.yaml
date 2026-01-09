@@ -1,0 +1,10 @@
+# Reference: https://docs.coderabbit.ai/getting-started/yaml-configuration
+language: "en-US"
+reviews:
+  profile: chill
+  collapse_walkthrough: true
+  poem: false
+  auto_review:
+    auto_incremental_review: false
+    drafts: false
+    base_branches: ["main", "release/.*", "feature/.*"]
