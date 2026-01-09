@@ -33,6 +33,7 @@ from megatron.core.transformer.attention import Attention
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import get_tensor_model_parallel_group_if_none
 
+from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.opt.plugins.megatron import (
     _MegatronMLP,
     ensure_metadata_has_dp_cp_group,
@@ -551,8 +552,16 @@ class _RealQuantMegatronRowParallelLinear(
 
 
 @QuantModuleRegistry.register({megatron_moe.SequentialMLP: "megatron_moe_SequentialMLP"})
-class _MegatronSequentialMLP(_MegatronMLP):
+class _MegatronSequentialMLP(DynamicModule):
     def _setup(self):
+        if (
+            self.config.expert_model_parallel_size > 1
+            and self.config.tensor_model_parallel_size > 1
+        ):
+            raise ValueError(
+                "TP+EP is not supported by QuantSequentialMLP. Set either TP or EP to 1!"
+            )
+
         if not hasattr(self, "parallel_state") or self.parallel_state is None:
             self.parallel_state = ParallelState(
                 mcore_parallel.get_expert_data_parallel_group(),
@@ -591,6 +600,21 @@ class _MegatronSequentialMLP(_MegatronMLP):
             for name, module in expert.named_modules():
                 if isinstance(module, TensorQuantizer) and module.amax is not None:
                     module.amax = amax_dict[name].detach().clone().to(module.amax.device)
+
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        """Override the default to enable singleton_local_shards.
+
+        Note:
+            singleton_local_shards must be added to the metadata; otherwise, all experts
+            amax are packed to gather and currently the TP replica_id for linear_fc1
+            is incorrect. This limits TP=ETP=1 when EP>1. Otherwise, there will be
+            sharded_state_dict access error.
+        """
+        if metadata is None:
+            metadata = {}
+        metadata["singleton_local_shards"] = True
+        sharded_state_dict = super().sharded_state_dict(prefix, sharded_offsets, metadata)
+        return sharded_state_dict
 
 
 if HAS_TE:
