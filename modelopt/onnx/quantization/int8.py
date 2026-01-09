@@ -132,6 +132,7 @@ def quantize(
     calibrate_per_node: bool = False,
     custom_ops_to_quantize: list[str] = [],
     direct_io_types: bool = False,
+    kv_quant_mode: str = "NONE",
     **kwargs,
 ) -> onnx.ModelProto:
     """Applies INT8 quantization to an ONNX file using the compiler friendly heuristics.
@@ -262,6 +263,9 @@ def quantize(
                 # With ActivationSymmetric as True, MinMax calibration is equivalent to max calibration
                 else CalibrationMethod.MinMax
             ),
+            intermediate_generated_files=intermediate_generated_files,
+            kv_quant_mode=kv_quant_mode,
+            **kwargs,
         )
 
         intermediate_generated_files.append(tmp_onnx_path)
