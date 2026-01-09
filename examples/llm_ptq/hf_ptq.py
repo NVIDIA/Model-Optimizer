@@ -65,7 +65,10 @@ from modelopt.torch.utils.dataset_utils import (
 from modelopt.torch.utils.image_processor import BaseImageProcessor, MllamaImageProcessor
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
-from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
+from modelopt.torch.utils.vlm_dataset_utils import (
+    get_supported_vlm_datasets,
+    get_vlm_dataset_dataloader,
+)
 
 RAND_SEED = 1234
 
@@ -108,7 +111,25 @@ def make_calib_dataloader(
 ) -> tuple[DataLoader, str | None]:
     calib_dataloader = None
     first_text_speech_dataset = None
-    if model_type == "mllama":
+    if getattr(args, "calib_with_images", False):
+        # Generic multimodal calibration path (used for Nemotron VL and other HF VLMs).
+        assert processor is not None, (
+            "Please provide a processor (e.g., AutoProcessor) for image calibration."
+        )
+        assert len(args.calib_size) == 1, (
+            "Image calibration currently supports a single dataset. "
+            "Please pass --calib_size with one value (e.g., --calib_size 256)."
+        )
+        calib_dataloader = get_vlm_dataset_dataloader(
+            dataset_name=getattr(args, "vlm_dataset", "scienceqa"),
+            processor=processor,
+            batch_size=args.batch_size,
+            num_samples=args.calib_size[0],
+            device=device,
+            max_length=args.calib_seq,
+            require_image=True,
+        )
+    elif model_type == "mllama":
         assert processor is not None and isinstance(processor, MllamaImageProcessor), (
             "The MllamaImageProcessor must be set."
         )
@@ -164,6 +185,12 @@ def auto_quantize(
     auto_quantize_checkpoint=None,
 ):
     """Auto search quantization of multiple formats."""
+
+    if getattr(args, "calib_with_images", False):
+        raise NotImplementedError(
+            "AutoQuantize with image-text calibration is not supported yet. "
+            "Please run plain PTQ (e.g., --qformat nvfp4) with --calib_with_images."
+        )
 
     assert not (args.auto_quantize_bits and args.inference_pipeline_parallel > 1), (
         "Auto Quantization is not supported for pipeline parallel size > 1"
@@ -293,6 +320,7 @@ def load_model(args: argparse.Namespace):
     language_model = full_model
     default_padding_side = None
 
+    is_nemotron_vl_model = is_nemotron_vl(full_model)
     if model_type == "mllama":
         processor = get_processor(
             args.pyt_ckpt_path,
@@ -308,6 +336,41 @@ def load_model(args: argparse.Namespace):
             device,
             trust_remote_code=args.trust_remote_code,
         )
+    elif is_nemotron_vl_model and getattr(args, "calib_with_images", False):
+        # For Nemotron VL image calibration, we need an AutoProcessor to build multimodal inputs.
+        try:
+            processor = AutoProcessor.from_pretrained(
+                args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code, padding_side="left"
+            )
+        except Exception as e:
+            raise RuntimeError(
+                "Failed to load AutoProcessor for Nemotron VL image calibration. "
+                "Please ensure the checkpoint provides a compatible processor."
+            ) from e
+
+        if hasattr(processor, "tokenizer") and processor.tokenizer is not None:
+            tokenizer = processor.tokenizer
+        else:
+            tokenizer = get_tokenizer(args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code)
+
+        default_padding_side = tokenizer.padding_side
+        tokenizer.padding_side = "left"
+
+        # Quantize only the language model, but keep the full_model for calibration forward.
+        language_model_lineage = get_language_model_from_vl(full_model)
+        if language_model_lineage is not None:
+            language_model = language_model_lineage.pop(-1)
+            ancestors = language_model_lineage
+            disabled_quant_cfg = {"quant_cfg": {"default": {"enable": False}}, "algorithm": "max"}
+
+            memo = set(ancestors) | {language_model}
+            for ancestor in ancestors:
+                for _, module in ancestor.named_children():
+                    if module not in memo:
+                        mtq.quantize(module, disabled_quant_cfg, forward_loop=None)
+                        memo.add(module)
+
+            model_type = get_model_type(language_model)
     else:
         if args.dataset is None:
             args.dataset = ["cnn_dailymail", "nemotron-post-training-dataset-v2"]
@@ -433,9 +496,19 @@ def mono_quantize(
 
         if not use_calibration:
             warnings.warn("Dynamic quantization. Calibration skipped.")
-        calibrate_loop = (
-            create_forward_loop(dataloader=calib_dataloader) if use_calibration else None
-        )
+        calibrate_loop = None
+        if use_calibration:
+            base_forward_loop = create_forward_loop(dataloader=calib_dataloader)
+            # For Nemotron VL image calibration, the dataloader yields multimodal kwargs (e.g., pixel_values).
+            # Those kwargs must be consumed by the *full* VLM model, not the extracted language_model.
+            if getattr(args, "calib_with_images", False) and is_nemotron_vl_model:
+
+                def calibrate_full_model(_model):
+                    return base_forward_loop(full_model)
+
+                calibrate_loop = calibrate_full_model
+            else:
+                calibrate_loop = base_forward_loop
 
         if calibration_only:
             language_model = mtq.calibrate(
@@ -865,6 +938,20 @@ def parse_args() -> argparse.Namespace:
         ),
         type=str,
         default=None,
+    )
+    parser.add_argument(
+        "--calib_with_images",
+        action="store_true",
+        help=(
+            "Calibrate with image-text pairs (for VLMs). "
+            "For Nemotron VL this enables multimodal calibration using --vlm_dataset."
+        ),
+    )
+    parser.add_argument(
+        "--vlm_dataset",
+        type=str,
+        default="scienceqa",
+        help=f"VLM calibration dataset name (choices: {get_supported_vlm_datasets()}).",
     )
     parser.add_argument("--inference_tensor_parallel", type=int, default=1)
     parser.add_argument("--inference_pipeline_parallel", type=int, default=1)
