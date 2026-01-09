@@ -20,7 +20,7 @@ import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
 import pytest
-from _test_utils.onnx.lib_test_models import build_conv_isinf_model
+from _test_utils.onnx.lib_test_models import build_conv_isinf_model, build_conv_resize_model
 
 import modelopt.onnx.autocast.utils as utils
 import modelopt.onnx.utils as onnx_utils
@@ -188,6 +188,26 @@ def test_conv_isinf_conversion(tmp_path, opset_version):
     opset_version = onnx_utils.get_opset_version(converted_model)
     supported_dtype = "float32" if opset_version < 20 else "float16"
     assert assert_input_precision(isinf_nodes, dtype=supported_dtype)
+
+
+def test_conv_resize_conversion(tmp_path):
+    onnx_model = build_conv_resize_model()
+    onnx_path = os.path.join(tmp_path, "conv_resize_model.onnx")
+    onnx.save(onnx_model, onnx_path)
+
+    # Convert the model
+    converted_model = convert_to_mixed_precision(onnx_path=onnx_path)
+
+    # Output model should be produced in the same tmp_path
+    output_onnx_path = onnx_path.replace(".onnx", ".fp16.onnx")
+    onnx.save(converted_model, output_onnx_path)
+
+    # Load the output model and check QDQ node placements
+    graph = gs.import_onnx(converted_model)
+
+    # Check that Conv is converted
+    conv_nodes = [n for n in graph.nodes if "Conv" in n.op]
+    assert assert_input_precision(conv_nodes)
 
 
 @pytest.mark.parametrize("target_opset", [13, 17, 19, 21])
