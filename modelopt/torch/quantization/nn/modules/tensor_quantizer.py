@@ -1202,7 +1202,7 @@ class TensorQuantizer(nn.Module):
                 # Move to target device
                 if target_device is not None:
                     synced_amax = synced_amax.to(target_device)
-                self.amax = synced_amax
+                self.amax = synced_amax.clone().detach()
 
         except RuntimeError as e:
             warnings.warn(
