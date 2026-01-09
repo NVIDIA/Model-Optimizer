@@ -178,106 +178,51 @@ class Llama4AttentionConfig(BaseDataclass):
 
 @dataclass(frozen=True, kw_only=True)
 class AttentionConfig(SubblockConfig):
-    n_heads_in_group: Optional[int] = None
-    window_length: Optional[int] = None
-    num_sink_tokens: Optional[int] = None
-    use_prefill_window_in_sink_attention: bool = False
-    unshifted_sink: bool = False
-    mamba: Optional[MambaConfig] = None
+    num_key_value_heads: Optional[int] = None
     llama4: Optional[Llama4AttentionConfig] = None
+    mamba: Optional[MambaConfig] = None
 
     def __post_init__(self):
         super().__post_init__()
 
         if self.no_op:
-            assert not self.replace_with_linear
             assert not self.is_mamba
             assert not self.is_llama4
 
-        if self.no_op or self.replace_with_linear or self.is_mamba:
+        if self.no_op or self.is_mamba:
             for irrelevant_att in [
-                "n_heads_in_group",
-                "window_length",
-                "num_sink_tokens",
-                "use_prefill_window_in_sink_attention",
-                "unshifted_sink",
-                "attention_chunk_size",
-                "attn_scale",
-                "floor_scale",
-                "attn_temperature_tuning",
-                "attention_dropout",
-                "use_qk_norm",
+                "num_key_value_heads",
             ]:
                 self._force_setattr(irrelevant_att, None)
         else:
-            assert self.n_heads_in_group is not None
-
-        if self.is_sink:
-            assert not (self.unshifted_sink and self.use_prefill_window_in_sink_attention), (
-                "Unshifted sink uses its own kind of explicit masking, not standard window. "
-                "Set use_prefill_window_in_sink_attention to False."
-            )
-            assert not (self.num_sink_tokens == 0 and not self.unshifted_sink), (
-                "Fake sink attention with 0 sink tokens is only supported with unshifted_sink=True"
-            )
-
-        if self.is_llama4:
-            assert not self.is_sink, "Sink not support with Llama4 currently"
-            assert not self.is_sliding, "Sliding window not support with Llama4 currently"
-            assert not self.unshifted_sink, "Unshifted sink not support with Llama4 currently"
+            assert self.num_key_value_heads is not None
 
     def to_blockconfig(self) -> "BlockConfig":
         return BlockConfig(attention=self, ffn=FFNConfig(no_op=True))
 
     @property
-    def prefill_sliding_window(self) -> Optional[int]:
-        if self.window_length is not None:
-            if not self.is_sink or self.use_prefill_window_in_sink_attention:
-                return self.window_length
-        return None
-
-    @property
-    def is_sliding(self) -> bool:
-        return self.prefill_sliding_window is not None
-
-    @property
-    def is_sink(self) -> bool:
-        return (self.window_length is not None) and (self.num_sink_tokens is not None)
+    def is_llama4(self) -> bool:
+        return self.llama4 is not None
 
     @property
     def is_mamba(self) -> bool:
         return self.mamba is not None
 
-    @property
-    def is_llama4(self) -> bool:
-        return self.llama4 is not None
-
 
 @dataclass(frozen=True, kw_only=True)
 class FFNConfig(SubblockConfig):
-    gated: Optional[bool] = (
-        True  # Gated Linear Unit e.g. SwiGLU or vanilla MLP (up -> activation -> down)
-    )
-    hidden_act: Optional[str] = "silu"
     moe: Optional[MoEConfig] = None
     intermediate_size: Optional[int] = None
 
     def __post_init__(self):
         super().__post_init__()
-        if self.no_op or self.replace_with_linear:
-            self._force_setattr("gated", None)
-            self._force_setattr("hidden_act", None)
+        if self.no_op:
             self._force_setattr("moe", None)
             self._force_setattr("intermediate_size", None)
         elif self.is_moe:
-            self._force_setattr("gated", None)
-            self._force_setattr("hidden_act", None)
             self._force_setattr("intermediate_size", None)
         else:
-            assert self.intermediate_size is not None, (
-                "Intermediate size must be provided for an FFN block"
-            )
-            assert self.intermediate_size % 256 == 0, "Intermediate size must be divisible by 256"
+            assert self.intermediate_size is not None, "Intermediate size must be provided for an FFN block"
 
     def to_blockconfig(self) -> "BlockConfig":
         return BlockConfig(attention=AttentionConfig(no_op=True), ffn=self)
