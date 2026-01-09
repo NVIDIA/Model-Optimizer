@@ -387,6 +387,30 @@ NVFP4_DEFAULT_CFG = {
     "algorithm": "max",
 }
 
+NVFP4_WEIGHT_ACT_MSE_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": {
+        "method": "mse",
+        "step_size": 0.25,
+        "start_multiplier": 0.25,
+        "stop_multiplier": 2.0,
+    },
+}
+
 NVFP4_AWQ_LITE_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
@@ -991,11 +1015,12 @@ class MseCalibConfig(QuantizeAlgorithmConfig):
 
     method: Literal["mse"] = ModeloptField("mse")
 
-    num_steps: int | None = ModeloptField(
-        default=10,
-        ge=1,
-        title="Number of amax candidates to try.",
-        description="Number of amax candidates to search over for MSE minimization.",
+    step_size: float | None = ModeloptField(
+        default=0.1,
+        gt=0.0,
+        title="Step size for amax search.",
+        description="Step size between amax candidates. The number of candidates is computed as "
+        "ceil((stop_multiplier - start_multiplier) / step_size) + 1.",
     )
 
     start_multiplier: float | None = ModeloptField(

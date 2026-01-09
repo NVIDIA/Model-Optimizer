@@ -407,19 +407,33 @@ def static_blockwise_fp4_fake_quant_kernel(
 def static_blockwise_fp4_fake_quant(
     x: torch.Tensor,
     scale: torch.Tensor,
+    scale_quant_amax: torch.Tensor | None = None,
+    skip_scale_quant: bool = False,
     out_dtype: torch.dtype | None = None,
 ):
     """Static blockwise FP4 fake quantization using Triton kernel.
 
-    x: [NUM_FP4_BLOCKS, BLOCK_SIZE] on CUDA.
-    scale: [NUM_FP4_BLOCKS] or [NUM_FP4_BLOCKS, 1] on CUDA.
-    out_dtype: Output dtype. Defaults to x.dtype if None.
+    Args:
+        x: [NUM_FP4_BLOCKS, BLOCK_SIZE] on CUDA.
+        scale: [NUM_FP4_BLOCKS] or [NUM_FP4_BLOCKS, 1] on CUDA.
+        scale_quant_amax: Absolute max range for FP8 quantization of scale. If None, computed from scale.
+        skip_scale_quant: If True, skip FP8 quantization of scale.
+        out_dtype: Output dtype. Defaults to x.dtype if None.
     """
     assert x.ndim == 2
     NUM_FP4_BLOCKS, BLOCK_SIZE = x.shape
 
     if out_dtype is None:
         out_dtype = x.dtype
+
+    if not skip_scale_quant:
+        from modelopt.torch.quantization.tensor_quant import scaled_e4m3_impl
+        from modelopt.torch.quantization.utils import reduce_amax
+
+        if scale_quant_amax is None:
+            scale_quant_amax = reduce_amax(x, axis=None, keepdims=False, squeeze_scalar=True)
+
+        scale = scaled_e4m3_impl(scale, scale_quant_amax)
 
     x_flat = x.contiguous().view(-1)
     y_flat = torch.empty_like(x_flat, dtype=out_dtype)

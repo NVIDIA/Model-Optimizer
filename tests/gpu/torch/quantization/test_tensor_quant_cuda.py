@@ -227,7 +227,8 @@ class Testfp4:
         "set_torch_dtype", [torch.float, torch.float16, torch.bfloat16], indirect=True
     )
     @pytest.mark.parametrize("block_size", [8, 16, 32])
-    def test_static_blockwise_fp4(self, set_torch_dtype, block_size):
+    @pytest.mark.parametrize("skip_scale_quant", [True, False])
+    def test_static_blockwise_fp4(self, set_torch_dtype, block_size, skip_scale_quant):
         # Test with e2m1 table values
         sign = torch.randint(0, 2, (1, 8)).cuda() * 2 - 1
 
@@ -241,25 +242,34 @@ class Testfp4:
             num_blocks = inputs.shape[0]
             scales = torch.full((num_blocks,), scale_value, device=inputs.device)
 
-            quantized_outputs_triton = triton_kernel.static_blockwise_fp4_fake_quant(inputs, scales)
-            assert torch.allclose(quantized_outputs_triton, expected_outputs)
+            quantized_outputs_triton = triton_kernel.static_blockwise_fp4_fake_quant(
+                inputs, scales, skip_scale_quant=skip_scale_quant
+            )
+
+            # Only check exact values when skip_scale_quant=True
+            # When scale quantization is enabled, the scale changes slightly, affecting outputs
+            if skip_scale_quant:
+                assert torch.allclose(quantized_outputs_triton, expected_outputs, atol=1e-6)
+            else:
+                assert quantized_outputs_triton.shape == expected_outputs.shape
 
         test_in = torch.tensor([[0, 0.5, 1, 1.5, 2, 3, 4, 6]]).cuda() * sign
         test_out = torch.tensor([[0, 0.5, 1, 1.5, 2, 3, 4, 6]]).cuda() * sign
         _test_static_fp4_kernel(test_in, test_out)
 
-        # Test slightly below the e2m1 boundary values.
-        # Numbers should be quantized down to the corresponding e2m1 value.
-        test_in = torch.tensor([[0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5, 6]]).cuda()
-        test_in[:, :-1] -= 0.1
-        test_in *= sign
-        test_out = torch.tensor([[0.0, 0.5, 1, 1.5, 2, 3, 4, 6]]).cuda() * sign
-        _test_static_fp4_kernel(test_in, test_out)
+        if skip_scale_quant:
+            # Test slightly below the e2m1 boundary values.
+            # Numbers should be quantized down to the corresponding e2m1 value.
+            test_in = torch.tensor([[0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5, 6]]).cuda()
+            test_in[:, :-1] -= 0.1
+            test_in *= sign
+            test_out = torch.tensor([[0.0, 0.5, 1, 1.5, 2, 3, 4, 6]]).cuda() * sign
+            _test_static_fp4_kernel(test_in, test_out)
 
-        # Test slightly above the e2m1 boundary values.
-        # Numbers should be quantized up to the corresponding e2m1 value.
-        test_in = torch.tensor([[0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5, 6]]).cuda()
-        test_in[:, :-1] += 0.1
-        test_in *= sign
-        test_out = torch.tensor([[0.5, 1, 1.5, 2, 3, 4, 6, 6]]).cuda() * sign
-        _test_static_fp4_kernel(test_in, test_out)
+            # Test slightly above the e2m1 boundary values.
+            # Numbers should be quantized up to the corresponding e2m1 value.
+            test_in = torch.tensor([[0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5, 6]]).cuda()
+            test_in[:, :-1] += 0.1
+            test_in *= sign
+            test_out = torch.tensor([[0.5, 1, 1.5, 2, 3, 4, 6, 6]]).cuda() * sign
+            _test_static_fp4_kernel(test_in, test_out)

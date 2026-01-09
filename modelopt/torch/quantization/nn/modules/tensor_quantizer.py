@@ -659,7 +659,13 @@ class TensorQuantizer(nn.Module):
                 static_blockwise_fp4_fake_quant,
             )
 
-            outputs = static_blockwise_fp4_fake_quant(inputs, amax / 6.0, out_dtype=inputs.dtype)
+            outputs = static_blockwise_fp4_fake_quant(
+                inputs,
+                amax / 6.0,
+                scale_quant_amax=None,
+                skip_scale_quant=False,
+                out_dtype=inputs.dtype,
+            )
         elif isinstance(self._num_bits, tuple):
             # Float-point quantization, e.g., FP8
             E, M = self._num_bits  # noqa: N806

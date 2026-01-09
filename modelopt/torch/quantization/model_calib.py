@@ -32,7 +32,6 @@ from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_me
 from .calib import MseCalibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
 from .nn import QuantModule, SequentialQuantizer, TensorQuantizer
-from .tensor_quant import scaled_e4m3_impl
 from .utils import (
     disable_calib,
     enable_fake_quant,
@@ -42,7 +41,6 @@ from .utils import (
     is_quantized_linear,
     is_quantized_row_parallel_linear,
     quantizer_attr_names,
-    reduce_amax,
     weight_attr_names,
 )
 
@@ -192,7 +190,7 @@ def mse_calibrate(
     model: nn.Module,
     forward_loop: ForwardLoop | None = None,
     distributed_sync=True,
-    num_steps: int = 10,
+    step_size: float = 0.1,
     start_multiplier: float = 0.25,
     stop_multiplier: float = 4.0,
 ):
@@ -207,7 +205,7 @@ def mse_calibrate(
         forward_loop: A callable which takes the model as argument and
             forwards calibration data through the model.
         distributed_sync: Whether to sync amax across distributed processes.
-        num_steps: Number of amax candidates to try (default: 10).
+        step_size: Step size for amax search (default: 0.1).
         start_multiplier: Starting multiplier for amax search (default: 0.25).
         stop_multiplier: Ending multiplier for amax search (default: 4.0).
 
@@ -241,17 +239,6 @@ def mse_calibrate(
                         xq = quantizer(x)
                         quantizer._keep_shape = False
 
-                        # FP8 quantization of NVFP4 static per-block scales
-                        if (
-                            quantizer.is_static_block_quant
-                            and quantizer._num_bits == (2, 1)
-                            and quantizer._block_sizes.get("scale_bits") == (4, 3)
-                        ):
-                            weight_amax = reduce_amax(
-                                x, axis=None, keepdims=False, squeeze_scalar=True
-                            )
-                            quantizer._amax = scaled_e4m3_impl(amax / 6.0, weight_amax / 6.0) * 6.0
-
                     if original_amax is not None:
                         quantizer._amax = original_amax
                     else:
@@ -263,7 +250,7 @@ def mse_calibrate(
                 module._calibrator = MseCalibrator(
                     amax=initial_amax,
                     axis=module._calibrator._axis,
-                    num_steps=num_steps,
+                    step_size=step_size,
                     start_multiplier=start_multiplier,
                     stop_multiplier=stop_multiplier,
                     quant_func=quant_func,
