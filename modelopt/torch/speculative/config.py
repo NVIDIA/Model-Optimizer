@@ -19,10 +19,14 @@ from copy import deepcopy
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
-from .eagle.default_config import default_eagle_config, default_kimik2_eagle_config
+from .eagle.default_config import (
+    default_deepseek_v3_eagle_config,
+    default_eagle_config,
+    default_kimik2_eagle_config,
+)
 
 kimik2_eagle_default_config = deepcopy(default_kimik2_eagle_config)
-
+deepseek_v3_eagle_default_config = deepcopy(default_deepseek_v3_eagle_config)
 eagle3_default_config = deepcopy(default_eagle_config)
 eagle_mtp_default_config = deepcopy(default_eagle_config)
 
