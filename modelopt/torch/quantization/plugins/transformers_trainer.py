@@ -404,24 +404,3 @@ class QADTrainer(QATTrainer, KDTrainer):
         """Train the model with QAD."""
         self.compute_loss_func = lambda *args, **kwargs: self.model.compute_kd_loss()
         return super().train(*args, **kwargs)
-
-    def save_model(
-        self,
-        output_dir: str | None = None,
-        _internal_call: bool = False,
-        *args,
-        **kwargs,
-    ):
-        """Dumps model to disk without teacher model and loss modules.
-
-        Args:
-            output_dir: The directory to save the model and ModelOpt states.
-        """
-        if self.accelerator.is_fsdp2 and "SHARDED_STATE_DICT" in str(
-            self.accelerator.state.fsdp_plugin.state_dict_type
-        ):
-            model = self.accelerator.unwrap_model(self.model)
-            with model.hide_teacher_model(), model.hide_loss_modules(enable=not _internal_call):
-                return QATTrainer.save_model(self, output_dir, _internal_call, *args, **kwargs)
-        else:
-            return KDTrainer.save_model(self, output_dir, _internal_call, *args, **kwargs)
