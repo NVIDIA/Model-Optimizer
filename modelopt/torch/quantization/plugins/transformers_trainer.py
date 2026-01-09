@@ -24,7 +24,6 @@ from dataclasses import dataclass, field
 import torch
 from tqdm import tqdm
 
-import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.distill.plugins.huggingface import KDTrainer
@@ -367,40 +366,15 @@ class QATTrainer(ModelOptHFTrainer):
 class QADTrainer(QATTrainer, KDTrainer):
     """A drop-in replacement of HuggingFace's Trainer for quantization aware distillation with ModelOpt.
 
-    This class takes additional optional argument `distill_config` to specify the distillation
-    arguments in addition to the `quant_args` argument.
-    For details on `quant_args` see
-    :class:`QATTrainer <QATTrainer>`.
+    This class takes additional arguments for both distillation and quantization configuration.
+    For details, see
+    :class:`QATTrainer <QATTrainer>`
+    and
+    :class:`KDTrainer <modelopt.torch.distill.plugins.huggingface.KDTrainer>`.
     """
 
-    def __init__(
-        self,
-        *args,
-        distill_config=None,
-        **kwargs,
-    ):
-        """Initialize the trainer with modelopt states."""
-        assert distill_config is not None, "`distill_config` is required for QAD."
-        self.distill_config = distill_config
-        super().__init__(*args, **kwargs)
-
-        # Note: FSDP memory efficient loading doesn't work.
-        self.model.cuda()
-        self._convert_to_distillation_model()
+    def _quantize_model(self):
+        """Quantize the model."""
         model = self.accelerator.unwrap_model(self.model)
         with model.hide_teacher_model(), model.only_student_forward():
-            if self.quant_cfg is not None and not is_quantized(self.model):
-                self._quantize_model()
-            if getattr(self.args, "lora_config", None) is not None:
-                self.model.add_adapter(self.args.lora_config)
-                print_rank_0("Lora adapter added.")
-
-    def _convert_to_distillation_model(self):
-        """Convert the model to a distillation model."""
-        mtd.convert(self.model, mode=[("kd_loss", self.distill_config)])
-        print_rank_0("Distillation model created.")
-
-    def train(self, *args, **kwargs):
-        """Train the model with QAD."""
-        self.compute_loss_func = lambda *args, **kwargs: self.model.compute_kd_loss()
-        return super().train(*args, **kwargs)
+            return super()._quantize_model()

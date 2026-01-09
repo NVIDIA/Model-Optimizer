@@ -19,16 +19,26 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 import modelopt.torch.distill as mtd
 from modelopt.torch.opt.plugins import ModelOptHFTrainer
+from modelopt.torch.utils import print_rank_0
 
 
 class KDTrainer(ModelOptHFTrainer):
     """Distillation trainer for HuggingFace models."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, distill_config=None, **kwargs):
         """Initialize the trainer."""
         super().__init__(*args, **kwargs)
         if self.is_fsdp_enabled and not self.accelerator.is_fsdp2:
             raise ValueError("FSDP1 is not supported for distillation. Use FSDP2 instead.")
+
+        assert distill_config is not None, "`distill_config` is required for distillation."
+        self.distill_config = distill_config
+        self._convert_to_distillation_model()
+
+    def _convert_to_distillation_model(self):
+        """Convert the model to a distillation model."""
+        mtd.convert(self.model, mode=[("kd_loss", self.distill_config)])
+        print_rank_0("Distillation model created.")
 
     def compute_loss(self, model, inputs, *args, **kwargs):
         """Compute loss for distillation.
@@ -44,6 +54,7 @@ class KDTrainer(ModelOptHFTrainer):
             self.compute_loss_func = None
 
         loss = super().compute_loss(model, inputs, *args, **kwargs)
+
         if not model.training:
             self.compute_loss_func = _compute_loss_func
 
