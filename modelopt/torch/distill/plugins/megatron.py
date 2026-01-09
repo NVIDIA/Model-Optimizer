@@ -407,7 +407,10 @@ class TopKLogitsKLLoss(LogitsKLLoss):
         """
         predictions, targets = self.pre_forward(predictions, targets)
 
-        assert self.top_k <= targets.size(-1), f"{self.top_k=}, {targets.size(-1)=}"
+        tp_size = self._config.tensor_model_parallel_size
+        assert self.top_k <= targets.size(-1) * tp_size, (
+            f"top_k ({self.top_k}) is larger than total vocab size ({targets.size(-1) * tp_size})"
+        )
 
         # Divide by temperature first
         output_teacher = targets.float() / self._temperature
@@ -415,10 +418,11 @@ class TopKLogitsKLLoss(LogitsKLLoss):
 
         # Extract local Top-K
         # We take K from each rank and then find the global Top-K of all those.
-        top_teacher_vals, top_idx = torch.topk(output_teacher, self.top_k, dim=-1)
+        local_top_k = min(self.top_k, targets.size(-1))
+        top_teacher_vals, top_idx = torch.topk(output_teacher, local_top_k, dim=-1)
         top_student_vals = torch.gather(output_student, dim=-1, index=top_idx)
 
-        if self._config.tensor_model_parallel_size > 1:
+        if tp_size > 1:
             tp_group = parallel_state.get_tensor_model_parallel_group()
 
             # Gather all candidates into shape [N_rows, local_k * tp_size]
