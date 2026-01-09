@@ -26,6 +26,7 @@ from types import MethodType
 from typing import TYPE_CHECKING
 
 import torch
+import torch.distributed.nn as dist_nn
 import torch.nn as nn
 import torch.nn.functional as F
 import yaml
@@ -57,6 +58,7 @@ class DistillationConfig:
         skip_lm_loss: Whether to skip computing the standard language model loss (default: ``True``).
         kd_loss_scale: Relative scaling factor for the distillation loss if ``skip_lm_loss`` is ``False``.
         logit_kl_temperature: Temperature for the logit KL-divergence loss.
+        logits_kl_topk: If not None, use TopKLogitsKLLoss instead of LogitsKLLoss with this top-k value.
     """
 
     intermediate_layer_pairs: list[tuple[str, ...]] = field(default_factory=list)
@@ -64,6 +66,7 @@ class DistillationConfig:
     skip_lm_loss: bool = True
     kd_loss_scale: float = 1.0
     logit_kl_temperature: float = 1.0
+    logits_kl_topk: int | None = None
     criterion: Criterion | None = None
     loss_balancer: mtd.DistillationLossBalancer | None = None
 
@@ -123,9 +126,15 @@ def setup_distillation_config(
     if cfg.criterion is None:
         criterion = {}
         if parallel_state.is_pipeline_last_stage():
-            criterion[tuple(cfg.logit_layers)] = LogitsKLLoss(
-                student_cfg, temperature=cfg.logit_kl_temperature
-            )
+            # Use TopKLogitsKLLoss if logits_kl_topk is specified, otherwise use LogitsKLLoss
+            if cfg.logits_kl_topk is not None:
+                criterion[tuple(cfg.logit_layers)] = TopKLogitsKLLoss(
+                    student_cfg, temperature=cfg.logit_kl_temperature, top_k=cfg.logits_kl_topk
+                )
+            else:
+                criterion[tuple(cfg.logit_layers)] = LogitsKLLoss(
+                    student_cfg, temperature=cfg.logit_kl_temperature
+                )
             # NOTE: Projection layer shared among intermediate layer pairs.
             projection_layer = ProjectionLayer(student_cfg, teacher_cfg)
 
@@ -335,13 +344,13 @@ class LogitsKLLoss(BaseLoss):
             output_student -= student_logits_max.detach()
 
             # Compute global softmax denominators
-            # We can't use standard reduction function here since the computation
+            # We can't use standard all_reduce function here since the computation
             # that follows it isn't identical across TP ranks.
             denom_teacher = torch.sum(torch.exp(output_teacher), dim=-1, keepdim=True)
-            denom_teacher = all_reduce_autograd(denom_teacher, group=tp_group)
+            denom_teacher = dist_nn.functional.all_reduce(denom_teacher, group=tp_group)
 
             denom_student = torch.sum(torch.exp(output_student), dim=-1, keepdim=True)
-            denom_student = all_reduce_autograd(denom_student, group=tp_group)
+            denom_student = dist_nn.functional.all_reduce(denom_student, group=tp_group)
 
             # Compute log probabilities (log softmax)
             teacher_log_prob = output_teacher - torch.log(denom_teacher)
@@ -409,17 +418,16 @@ class TopKLogitsKLLoss(LogitsKLLoss):
         top_teacher_vals, top_idx = torch.topk(output_teacher, self.top_k, dim=-1)
         top_student_vals = torch.gather(output_student, dim=-1, index=top_idx)
 
-        if (tp_size := self._config.tensor_model_parallel_size) > 1:
+        if self._config.tensor_model_parallel_size > 1:
             tp_group = parallel_state.get_tensor_model_parallel_group()
 
             # Gather all candidates into shape [N_rows, local_k * tp_size]
-            all_teacher_vals = [torch.zeros_like(top_teacher_vals) for _ in range(tp_size)]
-            all_student_vals = [torch.zeros_like(top_student_vals) for _ in range(tp_size)]
-            torch.distributed.all_gather(
-                all_teacher_vals, top_teacher_vals.contiguous(), group=tp_group
+            # Use all_gather from torch.distributed.nn.functional to preserve gradients
+            all_teacher_vals = dist_nn.functional.all_gather(
+                top_teacher_vals.contiguous(), group=tp_group
             )
-            torch.distributed.all_gather(
-                all_student_vals, top_student_vals.contiguous(), group=tp_group
+            all_student_vals = dist_nn.functional.all_gather(
+                top_student_vals.contiguous(), group=tp_group
             )
             all_teacher_vals = torch.cat(all_teacher_vals, dim=-1)
             all_student_vals = torch.cat(all_student_vals, dim=-1)
@@ -476,7 +484,7 @@ class LogitsAndIntermediatesLossBalancer(mtd.DistillationLossBalancer):
         """
         original_loss = loss_dict.pop(mtd.loss_balancers.STUDENT_LOSS_KEY)
         for _key in loss_dict:
-            if _key.startswith(LogitsKLLoss.__name__):
+            if "Logits" in _key:  # class name
                 logits_key = _key  # should only be one
         logits_loss = loss_dict.pop(logits_key)
         intermediate_loss = sum(loss_dict.values()) / max(len(loss_dict), 1)
@@ -538,32 +546,6 @@ class ProjectionLayer(MegatronModule):
             self.config.init_method(module.weight.data)
             if module.bias is not None:
                 module.bias.data.zero_()
-
-
-class _AllReduce(torch.autograd.Function):
-    """Implementation from old PyTorch `torch.distributed.nn.parallel`."""
-
-    @staticmethod
-    def forward(ctx, op, group, tensor):
-        ctx.group, ctx.op = group, op
-        tensor = tensor.clone()
-        torch.distributed.all_reduce(tensor, op=op, group=group)
-        return tensor
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return (None, None, _AllReduce.apply(ctx.op, ctx.group, grad_output))
-
-
-def all_reduce_autograd(
-    tensor, op=torch.distributed.ReduceOp.SUM, group=torch.distributed.group.WORLD
-):
-    """Custom all-reduce function.
-
-    Needed instead of other all-reduce functions available when the computation following
-    the all-reduce call differs per rank. In KL loss, this corresponds to the different numerators.
-    """
-    return _AllReduce.apply(op, group, tensor)
 
 
 ########################################################
