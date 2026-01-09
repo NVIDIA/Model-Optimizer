@@ -248,8 +248,8 @@ class TestFlashSkipSoftmaxMethod:
         assert stats_causal["total_blocks"] == 3
         assert stats_noncausal["total_blocks"] == 4
 
-    def test_apply_sparsity_assertions(self):
-        """Test apply_sparsity input validation."""
+    def test_calculate_sparsity_assertions(self):
+        """Test calculate_sparsity input validation."""
         method = FlashSkipSoftmax(
             {
                 "threshold": 1e-3,
@@ -260,13 +260,56 @@ class TestFlashSkipSoftmaxMethod:
             }
         )
 
-        # Test: attention_scores required
-        with pytest.raises(AssertionError, match="attention_scores must be provided"):
-            method.apply_sparsity()
-
         # Test: 4D shape required
         with pytest.raises(AssertionError, match="Expected 4D"):
-            method.apply_sparsity(attention_scores=torch.randn(2, 64, 64))  # 3D
+            method.calculate_sparsity(attention_scores=torch.randn(2, 64, 64))  # 3D
+
+    def test_apply_sparsity_with_mask(self):
+        """Test apply_sparsity with pre-computed mask."""
+        method = FlashSkipSoftmax(
+            {
+                "threshold": 1e-3,
+                "br": 128,
+                "bc": 128,
+                "backend": "pytorch",
+                "is_causal": True,
+            }
+        )
+
+        attn = torch.randn(2, 4, 128, 256)
+
+        # Calculate sparsity first
+        sparse_mask, stats = method.calculate_sparsity(attn)
+
+        # Apply sparsity with pre-computed mask
+        sparse_attn = method.apply_sparsity(attn, sparse_mask)
+
+        # Verify output shape matches input
+        assert sparse_attn.shape == attn.shape
+
+        # Verify masked positions have min value
+        mask_value = torch.finfo(attn.dtype).min
+        assert (sparse_attn[~sparse_mask] == mask_value).all()
+
+    def test_apply_sparsity_without_mask(self):
+        """Test apply_sparsity calculates mask internally when None."""
+        method = FlashSkipSoftmax(
+            {
+                "threshold": 1e-3,
+                "br": 128,
+                "bc": 128,
+                "backend": "pytorch",
+                "is_causal": True,
+            }
+        )
+
+        attn = torch.randn(2, 4, 128, 256)
+
+        # Apply sparsity without pre-computed mask
+        sparse_attn = method.apply_sparsity(attn)
+
+        # Verify output shape matches input
+        assert sparse_attn.shape == attn.shape
 
     def test_name_property(self):
         """Test method name property."""
