@@ -22,15 +22,17 @@ from .base import Metric
 class AcceptanceRate(Metric):
     def __init__(self):
         super().__init__()
-        self.prompt_ar = []
+        self.prompt_ar = {}
         self.name = "acceptance_rate"
 
-    def process_step(self, step_outputs, new_turn=True):
-        if new_turn:
-            self.prompt_ar.append([])
+    def process_step(self, step_outputs, request_id, turn_id):
+        if request_id not in self.prompt_ar:
+            self.prompt_ar[request_id] = {}
+        if turn_id not in self.prompt_ar[request_id]:
+            self.prompt_ar[request_id][turn_id] = []
         for i, beam_output in enumerate(step_outputs["output_ids"]):
             for output_id_iter in beam_output:
-                self.prompt_ar[-1].append(len(output_id_iter))
+                self.prompt_ar[request_id][turn_id].append(len(output_id_iter))
 
     def _get_lengths(self, turn, lengths):
         for j in turn:
@@ -55,16 +57,19 @@ class AcceptanceRate(Metric):
             running_len -= v
 
     def process_final(self, text_outputs):
-        i = 0
+        all_ar = []
         lengths = {}
         self.out["Request_AR"] = {}
-        while i < len(self.prompt_ar):
-            turn_1 = self.prompt_ar[i]
-            self.out["Request_AR"][i] = sum(turn_1) / len(turn_1)
-            self._get_lengths(turn_1, lengths)
-            print(i, self.out["Request_AR"][i])
-            i += 1
-        average_ar = sum(self.out["Request_AR"].values()) / len(self.out["Request_AR"])
+        self.prompt_ar = dict(sorted(self.prompt_ar.items(), key=lambda x: x[0]))
+        for request_id, turns in self.prompt_ar.items():
+            self.out["Request_AR"][request_id] = {}
+            for turn_id, turn in turns.items():
+                ar = sum(turn) / len(turn)
+                self.out["Request_AR"][request_id][turn_id] = ar
+                all_ar.append(ar)
+                self._get_lengths(turn, lengths)
+                print(request_id, turn_id, self.out["Request_AR"][request_id][turn_id])
+        average_ar = sum(all_ar) / len(all_ar)
         print("Average AR:", average_ar)
         self.out["Average_AR"] = average_ar
         self._process_lengths(lengths)

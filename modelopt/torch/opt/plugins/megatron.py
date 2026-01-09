@@ -22,8 +22,34 @@ from typing import Any
 import megatron.core.transformer.mlp as megatron_mlp
 import regex as re
 import torch
+from megatron.core.parallel_state import get_data_parallel_group
 
 from ..dynamic import DynamicModule
+
+
+def ensure_metadata_has_dp_cp_group(metadata):
+    """Ensure `metadata` is a dict containing `dp_cp_group` entry.
+
+    This function is adapted from megatron-lm's megatron.core.transformer.utils to avoid
+    dependency on megatron-lm's specific version.
+
+    Note:
+        This is a temporary method and will be removed once this function is merged to
+        megatron.core.transformer.utils in the main branch of megatron-lm.
+    """
+    # Create a copy to avoid modifying the original metadata dict
+    # This prevents ProcessGroup from leaking into state dict
+    if metadata is None:
+        new_metadata = {}
+    else:
+        new_metadata = dict(metadata)
+    if "dp_cp_group" not in new_metadata:
+        try:
+            new_metadata["dp_cp_group"] = get_data_parallel_group(with_context_parallel=True)
+        except (AssertionError, RuntimeError):
+            # Fallback if context parallel is not initialized
+            new_metadata["dp_cp_group"] = get_data_parallel_group()
+    return new_metadata
 
 
 def _modelopt_get_extra_state(self):
@@ -129,6 +155,15 @@ class _MegatronMLP(DynamicModule):
         pass
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        """Overriding the default to support scalar sharding.
+
+        Note:
+            singleton_local_shards needs to be added to the metadata as well as
+            apply_swiglu_sharded_factory to handle the swiglu case.
+        """
+        if metadata is None:
+            metadata = {}
+        metadata["singleton_local_shards"] = True
         sharded_state_dict = super().sharded_state_dict(prefix, sharded_offsets, metadata)
         if not self.config.gated_linear_unit:
             return sharded_state_dict
@@ -137,6 +172,8 @@ class _MegatronMLP(DynamicModule):
                 re.compile(pattern).match(k) for pattern in self._modelopt_state_keys
             ):
                 sharded_state_dict[k] = megatron_mlp.apply_swiglu_sharded_factory(
-                    v, sharded_offsets
+                    v,
+                    sharded_offsets,
+                    metadata["singleton_local_shards"],
                 )
         return sharded_state_dict

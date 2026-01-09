@@ -242,6 +242,17 @@ class ModeDescriptor(ABC):
         """
         return False
 
+    @property
+    def save_mode_in_state(self) -> bool:
+        """Whether the mode should be saved into the modelopt state.
+
+        This is useful if the mode is intended to be manually re-applied every time it's used.
+
+        Returns:
+            True
+        """
+        return True
+
     def assert_compatibility_as_next_mode_of(self, other_mode: "ModeDescriptor | str") -> None:
         """Assert that this mode is compatible as a next mode of the other mode."""
         if isinstance(other_mode, str):
@@ -249,8 +260,7 @@ class ModeDescriptor(ABC):
 
         if other_mode.next_modes is not None:
             assert str(self) in other_mode.next_modes, (
-                f"Cannot add {self} after {other_mode}! Next modes of {other_mode} are"
-                f" {other_mode.next_modes}."
+                f"Cannot add {self} after {other_mode}! Next modes of {other_mode} are {other_mode.next_modes}."
             )
 
         if other_mode.next_prohibited_modes is not None:

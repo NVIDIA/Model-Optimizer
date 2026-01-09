@@ -57,14 +57,14 @@ def test_onnx_simplification(tmp_path):
         assert os.path.isfile(output_onnx_path), "Quantized ONNX was not found!"
 
         # Load the simplified model and check that the model doesn't contain Identity nodes,
-        #   only 3 layers (Conv->BN->Relu).
+        #   only 2 layers (Conv->Relu).
         graph = gs.import_onnx(onnx.load(simplified_onnx_path))
         identity_nodes = [n for n in graph.nodes if n.op == "Identity"]
         assert not identity_nodes, "Simplified ONNX model contains Identity nodes but it shouldn't."
-        assert len(graph.nodes) == 3, (
-            f"Number of nodes doesn't match the expected: {len(graph.nodes)} vs 3."
+        assert len(graph.nodes) == 2, (
+            f"Number of nodes doesn't match the expected: {len(graph.nodes)} vs 2."
         )
-        assert all(n.op in ["Conv", "BatchNormalization", "Relu"] for n in graph.nodes), (
+        assert all(n.op in ["Conv", "Relu"] for n in graph.nodes), (
             "Graph contains more ops than expected."
         )
 

@@ -20,10 +20,21 @@ from functools import partial
 from types import ModuleType
 from typing import TYPE_CHECKING
 
+import diffusers
 import onnx
 import torch
 from diffusers.models.attention_processor import Attention
 from diffusers.models.lora import LoRACompatibleConv, LoRACompatibleLinear
+from packaging.version import parse as parse_version
+
+if parse_version(diffusers.__version__) >= parse_version("0.35.0"):
+    from diffusers.models.attention import AttentionModuleMixin
+    from diffusers.models.attention_dispatch import AttentionBackendName, attention_backend
+    from diffusers.models.transformers.transformer_flux import FluxAttention
+    from diffusers.models.transformers.transformer_ltx import LTXAttention
+    from diffusers.models.transformers.transformer_wan import WanAttention
+else:
+    AttentionModuleMixin = type("_dummy_type_no_instance", (), {})  # pylint: disable=invalid-name
 from torch.autograd import Function
 from torch.nn import functional as F
 from torch.onnx import symbolic_helper
@@ -140,7 +151,7 @@ def _quantized_sdpa(self, *args, **kwargs):
 
 
 class _QuantAttention(_QuantFunctionalMixin):
-    """FP8 processor for performing attention-related computations."""
+    """Quantized processor for performing attention-related computations."""
 
     _functionals_to_replace = [
         (torch, "bmm", _quantized_bmm),
@@ -165,6 +176,20 @@ class _QuantAttention(_QuantFunctionalMixin):
 
 
 QuantModuleRegistry.register({Attention: "Attention"})(_QuantAttention)
+
+
+if AttentionModuleMixin.__module__.startswith(diffusers.__name__):
+
+    class _QuantAttentionModuleMixin(_QuantAttention):
+        """Quantized AttentionModuleMixin for performing attention-related computations."""
+
+        def forward(self, *args, **kwargs):
+            with attention_backend(AttentionBackendName.NATIVE):
+                return super().forward(*args, **kwargs)
+
+    QuantModuleRegistry.register({FluxAttention: "FluxAttention"})(_QuantAttentionModuleMixin)
+    QuantModuleRegistry.register({WanAttention: "WanAttention"})(_QuantAttentionModuleMixin)
+    QuantModuleRegistry.register({LTXAttention: "LTXAttention"})(_QuantAttentionModuleMixin)
 
 
 original_scaled_dot_product_attention = F.scaled_dot_product_attention

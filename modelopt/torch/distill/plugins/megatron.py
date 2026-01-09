@@ -423,7 +423,7 @@ class LogitsAndIntermediatesLossBalancer(mtd.DistillationLossBalancer):
         intermediate_loss = sum(loss_dict.values()) / max(len(loss_dict), 1)
 
         if intermediate_loss > 0:
-            dynamic_scale = logits_loss.item() / intermediate_loss.item()
+            dynamic_scale = logits_loss.detach() / intermediate_loss.detach()
             intermediate_loss_scaled = intermediate_loss * dynamic_scale
         else:
             intermediate_loss = logits_loss.new_tensor(intermediate_loss)
@@ -433,7 +433,8 @@ class LogitsAndIntermediatesLossBalancer(mtd.DistillationLossBalancer):
             total_loss = logits_loss + intermediate_loss_scaled
         else:
             kd_loss = logits_loss + intermediate_loss_scaled
-            kd_loss *= original_loss.item() / kd_loss.item()
+            if kd_loss > 0 and original_loss > 0:  # zero when one CP rank has only context tokens
+                kd_loss *= original_loss.detach() / kd_loss.detach()
             total_loss = original_loss + kd_loss * self._kd_loss_scale
 
         out_dict = {

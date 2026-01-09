@@ -476,11 +476,16 @@ def modelopt_state(model: nn.Module) -> dict[str, Any]:
     # update metadata of current mode as needed
     manager.update_last_state_before_save(model)
 
+    # filter out modes that should not be saved in the state
+    skip_idx = []
+    for i, (m, _, _) in enumerate(manager.modes_with_states()):
+        if not m.save_mode_in_state:
+            skip_idx.append(i)
+    state_dict = [state for i, state in enumerate(manager.state_dict()) if i not in skip_idx]
+
     # construct state dict and return it
     objs = {
-        "modelopt_state_dict": (
-            manager.state_dict()
-        ),  # empty state_dict is okay (saving regular models)
+        "modelopt_state_dict": state_dict,  # empty state_dict is okay (saving regular models)
         "modelopt_version": __version__,
     }
     return objs

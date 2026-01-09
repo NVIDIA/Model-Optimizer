@@ -588,11 +588,12 @@ class DynamicModule(nn.Module):
 
     @classmethod
     @torch.no_grad()
-    def convert(cls, module: nn.Module) -> "DynamicModule":
+    def convert(cls, module: nn.Module, **setup_kwargs: Any) -> "DynamicModule":
         """Converts a module in-place into its dynamic counterpart by patching its class.
 
         Args:
             module: The module to be converted into a dynamic module.
+            **setup_kwargs: Keyword arguments to be passed to the ``DynamicModule._setup`` method.
 
         Returns:
             The converted dynamic module.
@@ -641,7 +642,7 @@ class DynamicModule(nn.Module):
         bind_forward_method_if_needed(module)
 
         # setup new hparams and dynamic attributes
-        module._setup()
+        module._setup(**setup_kwargs)
 
         # setup parallel state now that the module is converted
         if module.parallel_state is None:
@@ -649,10 +650,13 @@ class DynamicModule(nn.Module):
 
         return module
 
-    def _setup(self):
+    def _setup(self, **setup_kwargs: Any):
         """Setup dynamic attributes and hparams after the convert call.
 
         This method should be overridden by the child class!
+
+        Args:
+            **setup_kwargs: Keyword arguments to be passed to the setup method.
         """
         raise NotImplementedError("_setup() must be implemented by child class!")
 
@@ -1092,9 +1096,9 @@ class _DMRegistryCls:
         self._registry.pop(nn_cls)
         self._key_registry.pop(nn_cls)
 
-    def convert(self, nn_mod: nn.Module) -> DynamicModule:
+    def convert(self, nn_mod: nn.Module, **setup_kwargs: Any) -> DynamicModule:
         """Converts the module into a dynamic module if registered or raise KeyError."""
-        return self[type(nn_mod)].convert(nn_mod)
+        return self[type(nn_mod)].convert(nn_mod, **setup_kwargs)
 
     @property
     def prefix(self) -> str:

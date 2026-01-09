@@ -6,7 +6,7 @@ labels: bug
 assignees: ''
 ---
 
-**Before submitting an issue, please make sure it hasn't been already addressed by searching through the [existing and past issues](https://github.com/NVIDIA/TensorRT-Model-Optimizer/issues?q=is%3Aissue).**
+**Before submitting an issue, please make sure it hasn't been already addressed by searching through the [existing and past issues](https://github.com/NVIDIA/Model-Optimizer/issues?q=is%3Aissue).**
 
 ## Describe the bug
 <!-- Description of what the bug is, its impact (blocker, should have, nice to have) and any stack traces or error messages. -->
@@ -30,7 +30,7 @@ If you are unsure about whom to tag, you can leave it blank, and we will make su
 
 ## System information
 
-<!-- Run this script to automatically collect system information: https://github.com/NVIDIA/TensorRT-Model-Optimizer/blob/main/.github/ISSUE_TEMPLATE/get_system_info.py -->
+<!-- Run this script to automatically collect system information: https://github.com/NVIDIA/Model-Optimizer/blob/main/.github/ISSUE_TEMPLATE/get_system_info.py -->
 
 - Container used (if applicable): ?
 - OS (e.g., Ubuntu 22.04, CentOS 7, Windows 10): ? <!-- If Windows, please add the `windows` label to the issue. -->

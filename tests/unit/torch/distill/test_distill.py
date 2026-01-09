@@ -147,15 +147,20 @@ def test_distillation_save_restore(distillation_model, tmp_path):
     new_student = tiny_mobilenet()
     distillation_model_new = mto.restore(new_student, tmp_path / "ckpt.pt")
 
-    # Ensure state config was reset
+    # Ensure state is not actually restored
     manager = mto.ModeloptStateManager(distillation_model_new)
-    cfg = manager._state[-1][1]["config"]
-    assert cfg["teacher_model"] == nn.Module
-    assert isinstance(next(iter(cfg["criterion"].values())), Loss)
-    assert cfg["loss_balancer"] is None
-
-    # Should not have restored anything
+    assert not manager.has_state
     assert isinstance(distillation_model_new, type(new_student))
+
+    # Subsequent convert should behave normally
+    config = {
+        "teacher_model": distillation_model.teacher_model,
+        "criterion": mtd.LogitsDistillationLoss(),
+    }
+    distillation_model_newer = mtd.convert(new_student, mode=[("kd_loss", config)])
+    manager = mto.ModeloptStateManager(distillation_model_newer)
+    assert manager.has_state
+    assert isinstance(distillation_model_newer, mtd.DistillationModel)
 
 
 def test_distillation_export(distillation_model, tmp_path):

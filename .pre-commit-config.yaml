@@ -92,7 +92,7 @@ repos:
               examples/llm_eval/mmlu.py|
               examples/llm_eval/modeling.py|
               examples/llm_qat/main.py|
-              examples/llm_sparsity/finetune.py|
+              examples/llm_sparsity/weight_sparsity/finetune.py|
               examples/speculative_decoding/main.py|
               examples/speculative_decoding/medusa_utils.py|
               examples/speculative_decoding/server_generate.py|

@@ -15,6 +15,5 @@
 
 from .base import Model
 from .sglang import SGLANGModel
-from .trtllm import TRTLLMModel
 from .trtllm_torch_api import TRTLLMPYTModel
 from .vllm import VLLMModel

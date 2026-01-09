@@ -5,7 +5,7 @@ DirectML
 ===================
 
 
-Once an ONNX FP16 model is quantized using TensorRT Model Optimizer on Windows, the resulting quantized ONNX model can be deployed on the DirectML (DML) backend via the `ONNX Runtime GenAI <https://onnxruntime.ai/docs/genai/>`_ or `ONNX Runtime <https://onnxruntime.ai/>`_.
+Once an ONNX FP16 model is quantized using Model Optimizer on Windows, the resulting quantized ONNX model can be deployed on the DirectML (DML) backend via the `ONNX Runtime GenAI <https://onnxruntime.ai/docs/genai/>`_ or `ONNX Runtime <https://onnxruntime.ai/>`_.
 
 .. note:: Currently, DirectML backend doesn't support 8-bit precision. So, 8-bit quantized models should be deployed on other backends like ORT-CUDA etc. However, DML path does support INT4 quantized models.
 

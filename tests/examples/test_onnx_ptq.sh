@@ -19,9 +19,8 @@
 # It prepares calibration data, quantizes the models at different precisions,
 # and evaluates all models in a specified folder on the ImageNet validation dataset.
 # It is recommended to execute this script inside the Model Optimization Toolkit TensorRT Docker container.
-# Please ensure that the ImageNet dataset is available in the container at the specified path.
 
-# Usage: ./test_onnx_ptq.sh [--no-clean] [--eval] [/path/to/imagenet] [/path/to/models] [/path/to/timing_cache]
+# Usage: ./test_onnx_ptq.sh [--no-clean] [--eval] [/path/to/models] [/path/to/timing_cache]
 
 set -exo pipefail
 
@@ -38,7 +37,6 @@ pushd $public_example_dir
 # Parse arguments
 clean_mode=true
 eval_mode=false
-imagenet_path=""
 models_folder=""
 timing_cache_path=""
 
@@ -53,9 +51,7 @@ for arg in "$@"; do
             shift
             ;;
         *)
-            if [ -z "$imagenet_path" ]; then
-                imagenet_path="$arg"
-            elif [ -z "$models_folder" ]; then
+            if [ -z "$models_folder" ]; then
                 models_folder="$arg"
             elif [ -z "$timing_cache_path" ]; then
                 timing_cache_path="$arg"
@@ -68,8 +64,7 @@ done
 export TQDM_DISABLE=1
 
 
-# Setting image and model paths (contains 8 models)
-imagenet_path=${imagenet_path:-/data/imagenet/}
+# Setting model paths (contains 8 models)
 models_folder=${models_folder:-/models/onnx}
 timing_cache_path=${timing_cache_path:-/models/onnx/build/timing.cache}
 calib_size=1
@@ -201,7 +196,6 @@ if [ "$eval_mode" = true ]; then
                 python evaluate.py \
                     --onnx_path=$eval_model_path \
                     --engine_path=$engine_path \
-                    --imagenet_path=$imagenet_path \
                     --eval_data_size=$eval_size \
                     --batch_size $batch_size \
                     --model_name="${timm_model_name[$model_name]}" \

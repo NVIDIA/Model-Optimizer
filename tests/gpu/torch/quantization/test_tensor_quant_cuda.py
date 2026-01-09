@@ -30,14 +30,6 @@ from modelopt.torch.quantization.tensor_quant import mx_format_map
 class TestFakeTensorQuantCuda(FakeTensorQuantTester):
     device = "cuda"
 
-    def test_non_current_gpu(self, need_2_gpus):
-        device = torch.cuda.device_count() - 1
-        assert torch.cuda.current_device() != device
-        x = torch.randn(3, 4).cuda(device)
-        quant_x = tensor_quant.fake_tensor_quant(x, torch.max(torch.abs(x)), None)
-        quant_x_ref = quant(x, torch.max(torch.abs(x)), fake=True)
-        assert torch.allclose(quant_x, quant_x_ref)
-
 
 class TestCudaExt:
     @pytest.mark.parametrize("num_bits", [3, 4, 5, 7, 8, 11])
@@ -144,15 +136,6 @@ class TestScaledE4M3:
         loss = criterion(quant_x, labels)
         loss.backward()
         assert torch.allclose(quant_x.grad, x.grad)
-
-    def test_non_current_gpu(self, need_2_gpus):
-        torch.cuda.set_device(0)
-        device = torch.cuda.device_count() - 1
-        x = torch.randn(3, 4).cuda()
-        quant_x_ref = tensor_quant.fp8_eager(x, torch.tensor(448.0, device=x.device))
-        x = x.cuda(device)
-        quant_x = tensor_quant.scaled_e4m3(x, None, None, 4, 3)
-        assert torch.allclose(quant_x.cuda(), quant_x_ref)
 
     @pytest.mark.parametrize("axis", [0, 1, 2])
     def test_e4m3_per_channel(self, axis):

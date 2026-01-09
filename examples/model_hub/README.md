@@ -27,4 +27,4 @@ To deploy and run on SGLang:
 python run_llama_fp8_sglang.py
 ```
 
-If you want to run post-training quantization with TensorRT Model Optimizer for your selected models, check [here](../llm_ptq/README.md).
+If you want to run post-training quantization with Model Optimizer for your selected models, check [here](../llm_ptq/README.md).

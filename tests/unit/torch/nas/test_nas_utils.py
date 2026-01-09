@@ -16,6 +16,8 @@
 import pytest
 import torch.nn as nn
 
+pytest.importorskip("torchprofile")
+
 from modelopt.torch.nas.utils import inference_flops
 
 

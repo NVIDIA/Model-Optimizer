@@ -21,7 +21,7 @@ import torch
 from _test_utils.torch.quantization.models import SimpleLinear
 
 import modelopt.torch.quantization as mtq
-from modelopt.onnx.quantization.qdq_utils import fp4qdq_to_2dq
+from modelopt.onnx.export import NVFP4QuantExporter
 from modelopt.torch.quantization.utils import is_quantized_linear
 
 dtype_to_onnx_type_name = {
@@ -100,5 +100,5 @@ def test_simple_linear(tmp_path, dtype: str):
         opset_version=17,
     )
 
-    onnx_model = fp4qdq_to_2dq(onnx.load(onnx_path))
+    onnx_model = NVFP4QuantExporter.process_model(onnx.load(onnx_path))
     _check_gemm_quantized(onnx_model, dtype)

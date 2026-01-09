@@ -50,6 +50,7 @@ from .model_config import (
     KV_CACHE_NVFP4_AFFINE,
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_REAL,
+    QUANTIZATION_FP8_PC_PT,
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
     QUANTIZATION_NVFP4_AWQ,
@@ -60,6 +61,7 @@ from .model_utils import get_language_model_from_vl, is_multimodal_model
 from .plugins import export_spec_ckpt_config, export_spec_ckpt_state_dict, spec_opt_only
 from .quant_utils import (
     fuse_prequant_layernorm,
+    fuse_prequant_to_linear,
     get_activation_scaling_factor,
     get_quant_config,
     get_quantization_format,
@@ -106,6 +108,10 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
 
     fused_linears = {}
     module_names = set()
+
+    # Fuse pre_quant_scale to the linear weights if possible
+    if quantization_format is not None and "nvfp4_awq" in quantization_format.lower():
+        fuse_prequant_to_linear(model)
 
     for name, module in model.named_modules():
         module_names.add(name)
@@ -322,13 +328,15 @@ def _export_quantized_weight(
     weight_scale_2: torch.Tensor | None = getattr(sub_module, quantizer_attrs.weight_scale_2, None)
 
     # Transpose weight for bmm-style expert quantization (llama4, gpt-oss)
+    # Check if this is a BMM-style expert weight that needs transposition
+    is_bmm_expert_weight = weight.dim() == 3 and any(
+        expert_type in type(sub_module).__name__
+        for expert_type in ["Llama4TextExperts", "GptOssExperts"]
+    )
+
     if quantization_format in [QUANTIZATION_NVFP4, QUANTIZATION_NVFP4_AWQ]:
         # Transpose weight from (num_experts, input_dim, output_dim) to (num_experts, output_dim, input_dim)
         # for NVFP4 quantization functions that expect input_dim as the last dimension for block quantization
-        is_bmm_expert_weight = weight.dim() == 3 and any(
-            expert_type in type(sub_module).__name__
-            for expert_type in ["Llama4TextExperts", "GptOssExperts"]
-        )
         weight, _ = maybe_transpose_expert_weight_dimensions(
             weight, is_bmm_expert_weight=is_bmm_expert_weight
         )
@@ -348,6 +356,24 @@ def _export_quantized_weight(
 
         quantized_weight, weight_scale = maybe_transpose_expert_weight_dimensions(
             quantized_weight, weight_scale, is_bmm_expert_weight=is_bmm_expert_weight
+        )
+    elif quantization_format == QUANTIZATION_FP8_PC_PT and is_bmm_expert_weight:
+        # For FP8_PC_PT with BMM-style experts, transpose only the weight (not weight_scale)
+        weight, _ = maybe_transpose_expert_weight_dimensions(
+            weight, is_bmm_expert_weight=is_bmm_expert_weight
+        )
+
+        quantized_weight = to_quantized_weight(
+            weight.to(dtype),
+            weight_scale,
+            quantization_format,
+            weight_scale_2,
+            block_size,
+        )
+
+        # Transpose back to original BMM format
+        quantized_weight, _ = maybe_transpose_expert_weight_dimensions(
+            quantized_weight, is_bmm_expert_weight=is_bmm_expert_weight
         )
     else:
         quantized_weight = to_quantized_weight(
@@ -510,8 +536,8 @@ def _export_hf_checkpoint(
                     quantizer_attrs=["gate_up_proj_input_quantizer", "down_proj_input_quantizer"],
                 )
                 # Export the quantized weights
-                for weight_name in ["gate_up_proj", "down_proj"]:
-                    with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                    for weight_name in ["gate_up_proj", "down_proj"]:
                         _export_quantized_weight(sub_module, dtype, weight_name)
 
     if accelerator is not None:
@@ -555,11 +581,12 @@ def export_hf_checkpoint(
     try:
         post_state_dict, hf_quant_config = _export_hf_checkpoint(model, dtype)
 
-        # Save hf_quant_config.json for backward compatibility
-        with open(f"{export_dir}/hf_quant_config.json", "w") as file:
-            json.dump(hf_quant_config, file, indent=4)
+        if hf_quant_config is not None:
+            # Save hf_quant_config.json for\ backward compatibility
+            with open(f"{export_dir}/hf_quant_config.json", "w") as file:
+                json.dump(hf_quant_config, file, indent=4)
 
-        hf_quant_config = convert_hf_quant_config_format(hf_quant_config)
+            hf_quant_config = convert_hf_quant_config_format(hf_quant_config)
 
         # Save model
         model.save_pretrained(
@@ -572,7 +599,8 @@ def export_hf_checkpoint(
         with open(original_config) as file:
             config_data = json.load(file)
 
-        config_data["quantization_config"] = hf_quant_config
+        if hf_quant_config is not None:
+            config_data["quantization_config"] = hf_quant_config
 
         with open(original_config, "w") as file:
             json.dump(config_data, file, indent=4)

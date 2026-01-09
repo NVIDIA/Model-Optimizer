@@ -15,44 +15,87 @@
 
 """Support quantization for Transformer Engine layers."""
 
+import warnings
+
 import torch
 import transformer_engine as te
 import transformer_engine.pytorch.module.grouped_linear as te_grouped_linear
+import transformer_engine.pytorch.module.layernorm_linear as te_layernorm_linear
 import transformer_engine.pytorch.module.linear as te_linear
+from packaging.version import Version
+
+from modelopt.torch.quantization.utils import replace_function
 
 from ..nn import QuantModuleRegistry
 from .custom import _ParallelLinear
 
+_TE_VERSION = Version(te.__version__)
+
+
+def _assert_te_fp8_enabled():
+    """Check if Transformer Engine FP8 autocast is enabled and raise error if so."""
+    try:
+        from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+
+        if FP8GlobalStateManager.is_fp8_enabled():
+            raise RuntimeError(
+                "Transformer Engine FP8 training (fp8_autocast) is enabled, which conflicts with "
+                "ModelOpt quantization. Please disable TE FP8 autocast when using ModelOpt "
+                "quantization, or use ModelOpt's FP8 quantization instead."
+            )
+    except ImportError:
+        pass  # Older TE versions may not have this API
+
 
 @QuantModuleRegistry.register({te.pytorch.Linear: "te_Linear"})
 class _QuantTELinear(_ParallelLinear):
-    _functionals_to_replace = [
-        (
-            te_linear._Linear,
-            "apply" if torch.is_grad_enabled() else "forward",
-        ),
-    ]
+    @property
+    def _functionals_to_replace(self):
+        return (
+            [(te_linear._Linear, "apply")]
+            if torch.is_grad_enabled()
+            else [(te_linear._Linear, "forward")]
+        )
+
+    @_functionals_to_replace.setter
+    def _functionals_to_replace(self, value):
+        self._functionals_to_replace = value
+
+    def _setup(self):
+        super()._setup()
+        if getattr(self, "fuse_wgrad_accumulation", False):
+            warnings.warn(
+                "fuse_wgrad_accumulation is not supported with ModelOpt quantization. "
+                "Setting fuse_wgrad_accumulation to False."
+            )
+            self.fuse_wgrad_accumulation = False
 
     @staticmethod
     def te_quantized_linear_fn(package, func_name, self, *args, **kwargs):
         """Quantized version specifically for TE with weight first, then input."""
-        if te.__version__ >= "2.0":
-            weight, inputs = args[0], args[1]
-            remaining_args = args[2:]
+        _assert_te_fp8_enabled()
+        if Version("2.0") <= _TE_VERSION:
+            idx = 1 if func_name == "_forward" else 0
+            weight, inputs = args[idx], args[idx + 1]
+            remaining_args = args[idx + 2 :]
+            weight = self.weight_quantizer(weight)
+            inputs = self.input_quantizer(inputs)
+            new_args = (weight, inputs, *remaining_args)
+            new_args = (args[0], *new_args) if func_name == "_forward" else new_args
             output = getattr(package, func_name)(
-                self.weight_quantizer(weight),
-                self.input_quantizer(inputs),
-                *remaining_args,
+                *new_args,
                 **kwargs,
             )
         else:
-            weight, weight_fp8, inputs = args[0], args[1], args[2]
-            remaining_args = args[3:]
+            idx = 1 if func_name == "_forward" else 0
+            weight, weight_fp8, inputs = args[idx], args[idx + 1], args[idx + 2]
+            remaining_args = args[idx + 3 :]
+            weight = self.weight_quantizer(weight)
+            inputs = self.input_quantizer(inputs)
+            new_args = (weight, weight_fp8, inputs, *remaining_args)
+            new_args = (args[0], *new_args) if func_name == "_forward" else new_args
             output = getattr(package, func_name)(
-                self.weight_quantizer(weight),
-                weight_fp8,
-                self.input_quantizer(inputs),
-                *remaining_args,
+                *new_args,
                 **kwargs,
             )
         return self.output_quantizer(output)
@@ -64,10 +107,17 @@ class _QuantTELinear(_ParallelLinear):
 # Register the public te.pytorch.GroupedLinear class
 @QuantModuleRegistry.register({te_grouped_linear.GroupedLinear: "te_GroupedLinear"})
 class _QuantTEGroupedLinear(_ParallelLinear):
-    _functionals_to_replace = [
-        (te_grouped_linear._GroupedLinear, "forward"),
-        (te_grouped_linear._GroupedLinear, "apply"),
-    ]
+    @property
+    def _functionals_to_replace(self):
+        return (
+            [(te_grouped_linear._GroupedLinear, "apply")]
+            if torch.is_grad_enabled()
+            else [(te_grouped_linear._GroupedLinear, "forward")]
+        )
+
+    @_functionals_to_replace.setter
+    def _functionals_to_replace(self, value):
+        self._functionals_to_replace = value
 
     def _setup(self):
         # GroupedMLP stores the weights as weight0, weight1, etc. To run setup in order to
@@ -93,6 +143,7 @@ class _QuantTEGroupedLinear(_ParallelLinear):
 
     @staticmethod
     def te_grouped_quantized_linear_fn(package, func_name, self, *args):
+        _assert_te_fp8_enabled()
         idx = 1 if func_name == "_forward" else 0
         inp = args[idx]
         num_gemms = len(args[idx + 1])
@@ -116,3 +167,120 @@ class _QuantTEGroupedLinear(_ParallelLinear):
 
     # Override the quantized linear function
     _quantized_linear_fn = te_grouped_quantized_linear_fn
+
+
+class _QuantLayerNormLinearFunc(torch.autograd.Function):
+    """Patched version of _LayerNormLinear to quantize the input to the GEMM operation."""
+
+    @staticmethod
+    def _get_original_gemm():
+        if Version("2.0") <= _TE_VERSION:
+            return te_layernorm_linear.general_gemm
+        else:
+            return te_layernorm_linear.tex.gemm
+
+    @staticmethod
+    def _gemm_replace_args():
+        if Version("2.0") <= _TE_VERSION:
+            return (te_layernorm_linear, "general_gemm")
+        else:
+            return (te_layernorm_linear.tex, "gemm")
+
+    @staticmethod
+    def forward(ctx, inp, ln_weight, ln_bias, weight, *args, **kwargs):
+        input_quantizer, weight_quantizer = _QuantLayerNormLinearFunc.modelopt_quantizers
+
+        qweight = weight_quantizer(weight)
+        qweight.requires_grad = weight.requires_grad
+        if ctx is not None:
+            # We need to recompute the quantized input for the backward pass, so we save the input_quantizer
+            ctx.modelopt_input_quantizer = input_quantizer
+
+        original_gemm = _QuantLayerNormLinearFunc._get_original_gemm()
+
+        def _patched_general_gemm(weight, input, *gemm_args, **gemm_kwargs):
+            qinput = input_quantizer(input)
+            return original_gemm(weight, qinput, *gemm_args, **gemm_kwargs)
+
+        with replace_function(
+            *_QuantLayerNormLinearFunc._gemm_replace_args(),
+            _patched_general_gemm,  # type: ignore[call-arg]
+        ):
+            outputs = te_layernorm_linear._og_LayerNormLinear.forward(
+                ctx, inp, ln_weight, ln_bias, qweight, *args, **kwargs
+            )
+        return outputs
+
+    # TODO: Support non-pass-through backward behavior for activation quantization
+    @staticmethod
+    def backward(ctx, *grad_outputs):
+        """Backward pass for _QuantLayerNormLinearFunc functional.
+
+        The backward pass input and weight gradient estimation uses straight through estimator (STE).
+        We should add support for advanced gradient estimation techniques like STE with clipping.
+        However this is a low priority item.
+        """
+        gemm_call_counter = {"count": 0}
+
+        original_gemm = _QuantLayerNormLinearFunc._get_original_gemm()
+
+        def _patched_general_gemm(a, b, *gemm_args, **gemm_kwargs):
+            # The first time, gemm is used for dgrad calculation
+            # dgrad GEMM; dx = dy * qw; Called as gemm(qw, dy, ...)
+            if gemm_call_counter["count"] == 0:
+                gemm_call_counter["count"] += 1
+                return original_gemm(a, b, *gemm_args, **gemm_kwargs)
+
+            # The second time, gemm is used for wgrad calculation
+            # wgrad GEMM; dqw = dy^T * x; Called as gemm(x, dy, ..);
+
+            # x should be quantized input (qinput) for the backward pass as per chain rule,
+            # but gemm is called with the unquantized input (a)
+            # So lets first get the quantized input (qinput) and then call the gemm
+            qinput = ctx.modelopt_input_quantizer(a)
+            return original_gemm(qinput, b, *gemm_args, **gemm_kwargs)
+
+        with replace_function(
+            *_QuantLayerNormLinearFunc._gemm_replace_args(),
+            _patched_general_gemm,  # type: ignore[call-arg]
+        ):
+            # During backward, the patch does not exist; autograd will automatically use
+            # _QuantLayerNormLinearFunc.backward
+            outputs = te_layernorm_linear._LayerNormLinear.backward(ctx, *grad_outputs)
+
+        delattr(ctx, "modelopt_input_quantizer")
+        return outputs
+
+
+@QuantModuleRegistry.register({te.pytorch.LayerNormLinear: "te_LayerNormLinear"})
+class _QuantTELayerNormLinear(_ParallelLinear):
+    _functionals_to_replace = []
+
+    def _setup(self):
+        super()._setup()
+        if getattr(self, "fuse_wgrad_accumulation", False):
+            warnings.warn(
+                "fuse_wgrad_accumulation is not supported with ModelOpt quantization. "
+                "Setting fuse_wgrad_accumulation to False."
+            )
+            self.fuse_wgrad_accumulation = False
+
+    def forward(self, *args, **kwargs):
+        """Call ModelOpt patch for _LayerNormLinear functional."""
+        _assert_te_fp8_enabled()
+        # This is multi-process safe (such as in torch distributed jobs), not multi-thread safe
+        _QuantLayerNormLinearFunc.modelopt_quantizers = (
+            self.input_quantizer,
+            self.weight_quantizer,
+        )
+        with replace_function(
+            te_layernorm_linear,
+            "_LayerNormLinear",
+            _QuantLayerNormLinearFunc,
+            "_og_LayerNormLinear",
+        ):
+            outputs = super().forward(*args, **kwargs)
+        delattr(_QuantLayerNormLinearFunc, "modelopt_quantizers")
+        if isinstance(outputs, tuple):
+            return (self.output_quantizer(outputs[0]), *outputs[1:])
+        return self.output_quantizer(outputs)

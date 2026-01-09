@@ -92,7 +92,7 @@ Model Support Matrix
 
 .. tab:: Linux
 
-    Please checkout the model support matrix `here <https://github.com/NVIDIA/TensorRT-Model-Optimizer?tab=readme-ov-file#model-support-matrix>`_.
+    Please checkout the model support matrix `here <https://github.com/NVIDIA/Model-Optimizer?tab=readme-ov-file#model-support-matrix>`_.
 
 .. tab:: Windows
 
@@ -179,4 +179,4 @@ Model Support Matrix
   .. note::
     - ``ONNX INT8 Max`` means INT8 (W8A8) quantization of ONNX model using Max calibration. Similar holds true for the term ``ONNX FP8 Max``.
     - The LLMs in above table are `GenAI <https://github.com/microsoft/onnxruntime-genai/>`_ built LLMs unless specified otherwise.
-    - Check `examples <https://github.com/NVIDIA/TensorRT-Model-Optimizer/tree/main/examples/windows/onnx_ptq/>`_ for specific instructions and scripts.
+    - Check `examples <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/onnx_ptq/>`_ for specific instructions and scripts.

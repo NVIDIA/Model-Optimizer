@@ -262,32 +262,30 @@ class QATTrainer(ModelOptHFTrainer):
 
     def save_model(self, *args, **kwargs):
         """Save the quantized model."""
-        if not self.is_in_train:
-            if (
-                self.is_fsdp_enabled
-                and self.accelerator.state.fsdp_plugin.state_dict_type != "FULL_STATE_DICT"
-            ):
+        if (
+            (not self.is_in_train)
+            and self.is_fsdp_enabled
+            and self.accelerator.state.fsdp_plugin.state_dict_type != "FULL_STATE_DICT"
+        ):
+            print_rank_0("Setting state_dict_type to FULL_STATE_DICT for final checkpoint save.")
+            original_type = self.accelerator.state.fsdp_plugin.state_dict_type
+            self.accelerator.state.fsdp_plugin.set_state_dict_type("FULL_STATE_DICT")
+            outputs = super().save_model(*args, **kwargs)
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
+            if mto.ModeloptStateManager.is_converted(self.accelerator.unwrap_model(self.model)):
                 print_rank_0(
-                    "Setting state_dict_type to FULL_STATE_DICT for final checkpoint save."
+                    "Model saved. To restore, call mto.enable_huggingface_checkpointing() first before loading the "
+                    "model. See https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.opt.plugins.huggingface.html#modelopt.torch.opt.plugins.huggingface.enable_huggingface_checkpointing"
                 )
-                original_type = self.accelerator.state.fsdp_plugin.state_dict_type
-                self.accelerator.state.fsdp_plugin.set_state_dict_type("FULL_STATE_DICT")
-                outputs = super().save_model(*args, **kwargs)
-                if torch.distributed.is_initialized():
-                    torch.distributed.barrier()
-                if mto.ModeloptStateManager.is_converted(self.accelerator.unwrap_model(self.model)):
-                    print_rank_0(
-                        "Model saved. To restore, call mto.enable_huggingface_checkpointing() first before loading the "
-                        "model. See https://nvidia.github.io/TensorRT-Model-Optimizer/reference/generated/modelopt.torch.opt.plugins.huggingface.html#modelopt.torch.opt.plugins.huggingface.enable_huggingface_checkpointing"
-                    )
-                self.accelerator.state.fsdp_plugin.set_state_dict_type(original_type)
-            if self.args.should_save:
-                out_dir = args[0]
-                # FSDP may upcast parameter dtype to float32 during mixed-precision training,
-                # we convert it back to original dtype by updating `torch-dtype` in `config.json`
-                self._update_config_json_dtype(out_dir, str(self._original_dtype).split(".")[1])
+            self.accelerator.state.fsdp_plugin.set_state_dict_type(original_type)
         else:
             outputs = super().save_model(*args, **kwargs)
+        if (not self.is_in_train) and self.args.should_save:
+            out_dir = args[0]
+            # FSDP may upcast parameter dtype to float32 during mixed-precision training,
+            # we convert it back to original dtype by updating `torch-dtype` in `config.json`
+            self._update_config_json_dtype(out_dir, str(self._original_dtype).split(".")[1])
         return outputs
 
     def _load_best_model(self, *args, **kwargs):

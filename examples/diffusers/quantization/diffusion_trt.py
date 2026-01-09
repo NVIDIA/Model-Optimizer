@@ -14,11 +14,25 @@
 # limitations under the License.
 
 import argparse
+from contextlib import nullcontext
 
 import numpy as np
 import torch
+
+# This is a workaround for making the onnx export of models that use the torch RMSNorm work. We will
+# need to move on to use dynamo based onnx export to properly fix the problem. The issue has been hit
+# by both external users https://github.com/NVIDIA/Model-Optimizer/issues/262, and our
+# internal users from MLPerf Inference.
+#
+if __name__ == "__main__":
+    from diffusers.models.normalization import RMSNorm as DiffuserRMSNorm
+
+    torch.nn.RMSNorm = DiffuserRMSNorm
+    torch.nn.modules.normalization.RMSNorm = DiffuserRMSNorm
+
 from onnx_utils.export import (
-    generate_dummy_inputs_and_dynamic_axes_and_shapes,
+    _create_trt_dynamic_shapes,
+    generate_dummy_kwargs_and_dynamic_axes_and_shapes,
     get_io_shapes,
     remove_nesting,
     update_dynamic_axes,
@@ -51,14 +65,16 @@ DTYPE_MAP = {
 
 
 @torch.inference_mode()
-def generate_image(pipe, prompt, image_name):
+def generate_image(pipe, prompt, image_name, torch_autocast=False):
+    context = torch.autocast("cuda") if torch_autocast else nullcontext()
     seed = 42
-    image = pipe(
-        prompt,
-        output_type="pil",
-        num_inference_steps=30,
-        generator=torch.Generator("cuda").manual_seed(seed),
-    ).images[0]
+    with context:
+        image = pipe(
+            prompt,
+            output_type="pil",
+            num_inference_steps=30,
+            generator=torch.Generator("cuda").manual_seed(seed),
+        ).images[0]
     image.save(image_name)
     print(f"Image generated saved as {image_name}")
 
@@ -69,22 +85,25 @@ def benchmark_backbone_standalone(
     num_warmup=10,
     num_benchmark=100,
     model_name="flux-dev",
+    torch_autocast=False,
 ):
     """Benchmark the backbone model directly without running the full pipeline."""
+    context = torch.autocast("cuda") if torch_autocast else nullcontext()
     backbone = pipe.transformer if hasattr(pipe, "transformer") else pipe.unet
 
     # Generate dummy inputs for the backbone
-    dummy_inputs, _, _ = generate_dummy_inputs_and_dynamic_axes_and_shapes(model_name, backbone)
+    dummy_kwargs, _, _ = generate_dummy_kwargs_and_dynamic_axes_and_shapes(model_name, backbone)
 
     # Extract the dict from the tuple and move to cuda
-    dummy_inputs_dict = {
-        k: v.cuda() if isinstance(v, torch.Tensor) else v for k, v in dummy_inputs[0].items()
+    dummy_kwargs_cuda = {
+        k: v.cuda() if isinstance(v, torch.Tensor) else v for k, v in dummy_kwargs.items()
     }
 
     # Warmup
     print(f"Warming up: {num_warmup} iterations")
     for _ in tqdm(range(num_warmup), desc="Warmup"):
-        _ = backbone(**dummy_inputs_dict)
+        with context:
+            _ = backbone(**dummy_kwargs_cuda)
 
     # Benchmark
     torch.cuda.synchronize()
@@ -94,13 +113,14 @@ def benchmark_backbone_standalone(
     print(f"Benchmarking: {num_benchmark} iterations")
     times = []
     for _ in tqdm(range(num_benchmark), desc="Benchmark"):
-        torch.cuda.profiler.cudart().cudaProfilerStart()
-        start_event.record()
-        _ = backbone(**dummy_inputs_dict)
-        end_event.record()
-        torch.cuda.synchronize()
-        torch.cuda.profiler.cudart().cudaProfilerStop()
-        times.append(start_event.elapsed_time(end_event))
+        with context:
+            torch.cuda.profiler.cudart().cudaProfilerStart()
+            start_event.record()
+            _ = backbone(**dummy_kwargs_cuda)
+            end_event.record()
+            torch.cuda.synchronize()
+            torch.cuda.profiler.cudart().cudaProfilerStop()
+            times.append(start_event.elapsed_time(end_event))
 
     avg_latency = sum(times) / len(times)
     p50 = np.percentile(times, 50)
@@ -160,6 +180,11 @@ def main():
     parser.add_argument(
         "--torch-compile", action="store_true", help="Use torch.compile() on the backbone model"
     )
+    parser.add_argument(
+        "--torch-autocast",
+        action="store_true",
+        help="Use torch.autocast() during inference or benchmarking",
+    )
     parser.add_argument("--skip-image", action="store_true", help="Skip image generation")
     args = parser.parse_args()
 
@@ -174,11 +199,13 @@ def main():
 
     if args.torch_compile:
         assert args.torch, "Torch mode must be enabled when torch_compile is used"
-    # Save the backbone of the pipeline and move it to the GPU
+    # Save the backbone (and other attributes) of the pipeline and move it to the GPU
     add_embedding = None
-    backbone = None
+    cache_context = None
     if hasattr(pipe, "transformer"):
         backbone = pipe.transformer
+        if hasattr(backbone, "cache_context"):
+            cache_context = backbone.cache_context
     elif hasattr(pipe, "unet"):
         backbone = pipe.unet
         add_embedding = backbone.add_embedding
@@ -204,16 +231,17 @@ def main():
                 num_warmup=10,
                 num_benchmark=100,
                 model_name=args.model,
+                torch_autocast=args.torch_autocast,
             )
 
         if not args.skip_image:
-            generate_image(pipe, args.prompt, image_name)
+            generate_image(pipe, args.prompt, image_name, args.torch_autocast)
         return
 
     backbone.to("cuda")
 
     # Generate dummy inputs for the backbone
-    dummy_inputs, dynamic_axes, dynamic_shapes = generate_dummy_inputs_and_dynamic_axes_and_shapes(
+    dummy_inputs, dynamic_axes, dynamic_shapes = generate_dummy_kwargs_and_dynamic_axes_and_shapes(
         args.model, backbone
     )
 
@@ -221,13 +249,13 @@ def main():
     if args.onnx_load_path == "":
         update_dynamic_axes(args.model, dynamic_axes)
 
-    compilation_args = dynamic_shapes
+    trt_dynamic_shapes = _create_trt_dynamic_shapes(dynamic_shapes)
 
     # We only need to remove the nesting for SDXL models as they contain the nested input added_cond_kwargs
     # which are renamed by the DeviceModel
     ignore_nesting = False
     if args.onnx_load_path != "" and args.model in ["sdxl-1.0", "sdxl-turbo"]:
-        remove_nesting(compilation_args)
+        remove_nesting(trt_dynamic_shapes)
         ignore_nesting = True
 
     # Define deployment configuration
@@ -255,6 +283,7 @@ def main():
     del backbone
     torch.cuda.empty_cache()
 
+    compilation_args = {"dynamic_shapes": trt_dynamic_shapes}
     if not args.trt_engine_load_path:
         # Compile the TRT engine from the exported ONNX model
         compiled_model = client.ir_to_compiled(onnx_bytes, compilation_args)
@@ -276,24 +305,24 @@ def main():
         compiled_model,
         metadata,
         compilation_args,
-        get_io_shapes(args.model, args.onnx_load_path, dynamic_shapes),
+        get_io_shapes(args.model, args.onnx_load_path, trt_dynamic_shapes),
         ignore_nesting,
     )
 
-    if hasattr(pipe, "unet") and add_embedding:
-        setattr(device_model, "add_embedding", add_embedding)
-
-    # Set the backbone to the device model
-    if hasattr(pipe, "unet"):
-        pipe.unet = device_model
-    elif hasattr(pipe, "transformer"):
+    # Set the backbone and other attributes to the device model
+    if hasattr(pipe, "transformer"):
         pipe.transformer = device_model
+        if cache_context:
+            device_model.cache_context = cache_context
+    elif hasattr(pipe, "unet"):
+        pipe.unet = device_model
+        device_model.add_embedding = add_embedding
     else:
         raise ValueError("Pipeline does not have a transformer or unet backbone")
     pipe.to("cuda")
 
     if not args.skip_image:
-        generate_image(pipe, args.prompt, image_name)
+        generate_image(pipe, args.prompt, image_name, args.torch_autocast)
         print(f"Image generated using {args.model} model saved as {image_name}")
 
     if args.benchmark:

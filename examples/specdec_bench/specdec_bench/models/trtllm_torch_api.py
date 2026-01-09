@@ -43,7 +43,7 @@ class TRTLLMPYTModel(Model):
         self.model = create_executor(model_path, max_concurrent_requests, kwargs)
         self.sampling_kwargs = sampling_kwargs
 
-    async def run(self, prompt_ids, max_length, end_id, request_id):
+    async def run(self, prompt_ids, max_length, end_id, request_id, turn_id):
         output_dict = {}
         sampling_config = check_sampling_config(self.sampling_kwargs, max_length, end_id)
         outputs = []

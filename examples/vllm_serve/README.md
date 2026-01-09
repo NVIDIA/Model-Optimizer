@@ -24,6 +24,7 @@ You can either edit the `quant_config` dictionary in `vllm_serve_fakequant.py`, 
 | QUANT_DATASET   | Dataset name for calibration                     | cnn_dailymail       |
 | QUANT_CALIB_SIZE| Number of samples used for calibration           | 512                 |
 | QUANT_CFG       | Quantization format                              | NVFP4_DEFAULT_CFG   |
+| KV_QUANT_CFG    | Quantization format for KV Cache                 | None                |
 | AMAX_FILE_PATH  | Optional path to amax file (for loading amax)    | None                |
 
 Set these variables in your shell or Docker environment as needed to customize calibration.
@@ -55,33 +56,21 @@ lm_eval --model local-completions --tasks gsm8k --model_args model=<model_name>,
 
 ## Load QAT/PTQ model and serve in vLLM (WIP)
 
-Overwrite the calibrated amax value with prepared values from either PTQ/QAT. This is only tested for Llama3.1
+Overwrite the calibrated amax value with prepared values from either QAT/PTQ.
 
-Step 1: convert amax to merged amax, using llama3.1 as an example:
+Step 1: export the model with bf16 weights and amax values. To export the model:
+
+- For HF model use `modelopt.torch.export.export_hf_vllm_fq_checkpoint` function.
+- For MCore model use `modelopt.torch.export.export_mcore_gpt_to_hf_vllm_fq` function.
+
+Step 2: configure <quant_amax.pth> from exported model using AMAX_FILE_PATH environment variable in step 1. For example:
 
 ```bash
-python convert_amax_hf2vllm.py -i <amax.pth> -o <vllm_amax.pth>
-```
-
-Step 2: add `<vllm_amax.pth>` to `quant_config` in `vllm_serve_fakequant.py`
-
-## Important Notes
-
-**Amax Synchronization across Tensor Parallel (TP):**
-
-- **For non-per-tensor quantization**: It is **recommended** to use an amax file (via `AMAX_FILE_PATH`) because amax synchronization across TP/EP is not automatically handled. Without an amax file, the amax values can be different across different TP ranks, leading to inconsistent results compared to real-quantization.
-
-- **For per-tensor quantization**: If you are not using an amax file, you need to enable amax synchronization across TP ranks. An example implementation is provided in `fakequant_worker.py` (lines 190-198):
-
-```python
-for name, buffer in model.named_buffers():
-    if name.endswith("_amax"):
-        torch.distributed.all_reduce(
-            buffer, op=torch.distributed.ReduceOp.MAX, group=get_tp_group().device_group
-        )
-torch.distributed.barrier()
+AMAX_FILE_PATH=<vllm_amax.pth> QUANT_CFG=<quant_config> python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
 ```
 
 ## Known Problems
 
 1. AWQ is not yet supported in vLLM.
+2. QAT checkpoint export doesn't have KV Cache quantization enabled. KV Cache fake quantization works for PTQ.
+3. Mixed precision checkpoint doesn't work currently.

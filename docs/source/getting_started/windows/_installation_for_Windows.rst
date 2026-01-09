@@ -6,7 +6,7 @@ Installation for Windows
 
 **System Requirements**
 
-The following system requirements are necessary to install and use TensorRT Model Optimizer - Windows:
+The following system requirements are necessary to install and use Model Optimizer - Windows:
 
 +-------------------------+-----------------------------+
 | OS                      |  Windows                    |
@@ -28,7 +28,7 @@ The following system requirements are necessary to install and use TensorRT Mode
    - Make sure to use GPU-compatible driver and other dependencies (e.g. torch etc.). For instance, support for Blackwell GPU might be present in Nvidia 570+ driver, and CUDA-12.8.
    - We currently support *Single-GPU* configuration.
 
-The TensorRT Model Optimizer - Windows can be used in following ways:
+The Model Optimizer - Windows can be used in following ways:
 
 .. toctree::
    :glob:

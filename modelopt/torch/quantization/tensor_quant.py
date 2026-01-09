@@ -79,14 +79,11 @@ def scaled_e4m3_impl(
     if cuda_ext_fp8 is None:
         return fp8_eager(inputs, amax)
 
-    with torch.cuda.device(
-        None if inputs.device.index == torch.cuda.current_device() else inputs.device.index
-    ):
-        if amax.numel() == 1:
-            outputs = cuda_ext_fp8.fake_e4m3fy(inputs, amax)
-        elif amax.squeeze().ndim == 1:
-            axis = amax.shape.index(amax.numel())
-            outputs = cuda_ext_fp8.fake_e4m3fy_with_axis(inputs, amax.squeeze(), axis)
+    if amax.numel() == 1:
+        outputs = cuda_ext_fp8.fake_e4m3fy(inputs, amax)
+    elif amax.squeeze().ndim == 1:
+        axis = amax.shape.index(amax.numel())
+        outputs = cuda_ext_fp8.fake_e4m3fy_with_axis(inputs, amax.squeeze(), axis)
     return outputs
 
 
@@ -100,17 +97,14 @@ def fake_quant_impl(
     """Implementation of fake quantizing input according to number of bits."""
     cuda_ext = get_cuda_ext()
 
-    with torch.cuda.device(
-        None if inputs.device.index == torch.cuda.current_device() else inputs.device.index
-    ):
-        if amax.numel() == 1:
-            outputs = cuda_ext.fake_tensor_quant(inputs, amax, num_bits, unsigned, narrow_range)
-        else:
-            axis = amax.shape.index(amax.numel())
-            outputs = cuda_ext.fake_tensor_quant_with_axis(
-                inputs, amax.squeeze(), axis, num_bits, unsigned, narrow_range
-            )
-        return outputs
+    if amax.numel() == 1:
+        outputs = cuda_ext.fake_tensor_quant(inputs, amax, num_bits, unsigned, narrow_range)
+    else:
+        axis = amax.shape.index(amax.numel())
+        outputs = cuda_ext.fake_tensor_quant_with_axis(
+            inputs, amax.squeeze(), axis, num_bits, unsigned, narrow_range
+        )
+    return outputs
 
 
 def _quantize_impl(
@@ -173,25 +167,22 @@ def _dynamic_block_quantize_impl(
             assert amax.is_cuda, "amax must be a CUDA tensor for dynamic block quantization."
             if amax.numel() != 1:
                 amax = amax.amax()
-        with torch.cuda.device(
-            None if inputs.device.index == torch.cuda.current_device() else inputs.device.index
+        if (
+            num_bits == (2, 1)  # type: ignore[comparison-overlap]
+            and scale_bits == (4, 3)
+            and triton_kernel.IS_AVAILABLE
+            and not DISABLE_TRITON_KERNEL
+            and amax is not None
         ):
-            if (
-                num_bits == (2, 1)  # type: ignore[comparison-overlap]
-                and scale_bits == (4, 3)
-                and triton_kernel.IS_AVAILABLE
-                and not DISABLE_TRITON_KERNEL
-                and amax is not None
-            ):
-                return triton_kernel.fp4_fake_quant_block(inputs, amax)
-            cuda_ext_mx = get_cuda_ext_mx(raise_if_failed=True)
-            return cuda_ext_mx.fused_amax_convert(
-                inputs,
-                block_size,
-                getattr(cuda_ext_mx.Types, mx_format_map[num_bits]),
-                getattr(cuda_ext_mx.Types, mx_format_map[scale_bits]),
-                amax,
-            )
+            return triton_kernel.fp4_fake_quant_block(inputs, amax)
+        cuda_ext_mx = get_cuda_ext_mx(raise_if_failed=True)
+        return cuda_ext_mx.fused_amax_convert(
+            inputs,
+            block_size,
+            getattr(cuda_ext_mx.Types, mx_format_map[num_bits]),
+            getattr(cuda_ext_mx.Types, mx_format_map[scale_bits]),
+            amax,
+        )
     else:
         raise NotImplementedError(
             f"Unsupported num_bits: {num_bits}, scale_bits: {scale_bits} for dynamic block quantization."

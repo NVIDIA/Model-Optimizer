@@ -21,14 +21,14 @@ class BaseRunner:
         self.metrics = metrics
         self.prompt_ar = []
 
-    async def run(self, prompt_ids, max_length, end_id, sampling_kwargs):
+    async def run(self, prompt_ids, max_length, end_id, request_id, turn_id):
         raise NotImplementedError()
 
     def process_metrics_final(self, text_outputs):
         [metric.process_final(text_outputs) for metric in self.metrics]
 
-    def process_metrics_step(self, step_outputs, new_turn=True):
-        [metric.process_step(step_outputs, new_turn) for metric in self.metrics]
+    def process_metrics_step(self, step_outputs, request_id, turn_id):
+        [metric.process_step(step_outputs, request_id, turn_id) for metric in self.metrics]
 
     def clear_metrics(self):
         [metric.clear() for metric in self.metrics]

@@ -30,12 +30,9 @@ __all__ = ["_DynamicTENorm"]
 class _DynamicTENorm(_DynamicLayerNorm):
     """A ``te.pytorch.{Layer/RMS}Norm`` layer with dynamic hyperparams."""
 
-    def _setup(self):
-        hidden_size = self.weight.shape[-1]
-
-        # register the hyperparameter with a new name
-        self._register_hparam("num_features", TracedHp(list(range(1, hidden_size + 1))))
-
+    def _setup(self, *, num_features: TracedHp):
+        """Setup the TENorm dynamic module with pre-defined num_features hparam."""
+        self._register_hparam("num_features", num_features)
         # register dynamic attributes
         self._register_dynamic_attribute("weight", self._cut_to_active_features)
         if hasattr(self, "bias"):  # Bias is not present in RMSNorm

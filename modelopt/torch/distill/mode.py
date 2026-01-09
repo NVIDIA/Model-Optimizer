@@ -78,7 +78,7 @@ class KnowledgeDistillationModeDescriptor(ModeDescriptor):
     @property
     def restore(self) -> RestoreEntrypoint:
         """The mode's entrypoint for restoring a model."""
-        return _restore_kd_model
+        raise NotImplementedError(f"{self.name} mode does not support restore.")
 
     @property
     def update_for_new_mode(self) -> UpdateEntrypoint:
@@ -86,9 +86,9 @@ class KnowledgeDistillationModeDescriptor(ModeDescriptor):
         return _reset_kd_state_config
 
     @property
-    def update_for_save(self) -> UpdateEntrypoint:
-        """The mode's entrypoint for updating the models state before saving."""
-        return _reset_kd_state_config
+    def save_mode_in_state(self) -> bool:
+        """Whether the mode should be saved into the modelopt state."""
+        return False
 
 
 @DistillModeRegistry.register_mode
@@ -121,7 +121,12 @@ class ExportStudentModeDescriptor(ModeDescriptor):
     @property
     def restore(self) -> RestoreEntrypoint:
         """The mode's entrypoint for restoring a model."""
-        return _restore_exported_student
+        raise NotImplementedError(f"{self.name} mode does not support restore.")
+
+    @property
+    def save_mode_in_state(self) -> bool:
+        """Whether the mode should be saved into the modelopt state."""
+        return False
 
 
 def _convert_for_kd(model: nn.Module, config: KDLossConfig) -> ConvertReturnType:
@@ -174,12 +179,6 @@ def _convert_for_kd(model: nn.Module, config: KDLossConfig) -> ConvertReturnType
     return distillation_model, metadata
 
 
-def _restore_kd_model(model: nn.Module, config: KDLossConfig, metadata: MetadataDict) -> nn.Module:
-    """Function for restoring a previously convert model to a distillation meta-model."""
-    # NOTE: DistillationModel will purposely remain unrestored
-    return model
-
-
 def _reset_kd_state_config(model: nn.Module, config: KDLossConfig, metadata: MetadataDict):
     """Function for resetting the state's config."""
     config.teacher_model = nn.Module
@@ -206,16 +205,8 @@ def _export_student(model: nn.Module, config: ExportStudentConfig) -> ConvertRet
         student_model,
         warn=True,
         msg=(
-            f"The student model is wrapped into {type(student_model).__name__}. Unwrapping and"
-            " exporting it ..."
+            f"The student model is wrapped into {type(student_model).__name__}. Unwrapping and exporting it ..."
         ),
     )
 
     return student_model, {}
-
-
-def _restore_exported_student(
-    model: nn.Module, config: ExportStudentConfig, metadata: MetadataDict
-) -> nn.Module:
-    # NOTE: DistillationModel was unrestored so this does nothing
-    return model

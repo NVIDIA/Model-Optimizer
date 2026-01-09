@@ -16,11 +16,13 @@
 import pytest
 import torch
 import torch.nn as nn
+from _test_utils.torch.misc import set_seed
 from _test_utils.torch.quantization.quantize_common import quantize_model_and_forward
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.extensions import get_cuda_ext_mx
+from modelopt.torch.quantization.nn import QuantModule
 
 te = pytest.importorskip("transformer_engine")
 
@@ -29,7 +31,7 @@ class TELinear(nn.Module):
     def __init__(self):
         super().__init__()
         self.net = torch.nn.Sequential(
-            te.pytorch.Linear(16, 32), te.pytorch.Linear(32, 64), te.pytorch.Linear(64, 16)
+            te.pytorch.Linear(16, 32), te.pytorch.LayerNormLinear(32, 16, normalization="RMSNorm")
         )
 
     def forward(self, x):
@@ -75,6 +77,35 @@ def test_quantize(model_cls, config):
     model = model_cls().cuda()
     calib_data = [model.get_input().cuda() for _ in range(1)]
     quantize_model_and_forward(model, config, calib_data)
+
+
+def test_quantize_forward_backward():
+    set_seed()
+    model = TELinear().cuda()
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            param.data.copy_(param.data.abs() + 0.1)  # hack to get non-zero gradient
+
+    # hack to get non-zero gradient
+    calib_data = [model.get_input().cuda().abs() + 0.1 for _ in range(1)]
+
+    quantize_model_and_forward(model, mtq.INT8_DEFAULT_CFG, calib_data)
+
+    model.train()
+    for name, param in model.named_parameters():
+        param.grad = None
+
+    loss = model(calib_data[0]).sum()
+    loss.backward()
+
+    for i, linear in enumerate(model.net):
+        assert isinstance(linear, QuantModule)
+        # In-directly tests that data was passed to the quantizers
+        assert linear.input_quantizer.amax is not None
+        assert linear.weight_quantizer.amax is not None
+
+        # In-directly tests that gradients were computed correctly
+        assert linear.weight.grad is not None and linear.weight.grad.abs().sum() > 0.0
 
 
 @pytest.mark.parametrize(

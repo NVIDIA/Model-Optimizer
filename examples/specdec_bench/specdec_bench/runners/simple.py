@@ -23,9 +23,9 @@ class SimpleRunner(BaseRunner):
         self.metrics = metrics
         self.prompt_ar = []
 
-    async def run(self, prompt_ids, max_length, end_id, request_id):
-        model_output = await self.model.run(prompt_ids, max_length, end_id, request_id)
-        self.process_metrics_step(model_output)
+    async def run(self, prompt_ids, max_length, end_id, request_id, turn_id):
+        model_output = await self.model.run(prompt_ids, max_length, end_id, request_id, turn_id)
+        self.process_metrics_step(model_output, request_id, turn_id)
         output_ids = model_output["output_ids"]
         flattened_output_ids = [[] for _ in range(len(output_ids))]
         for i, beam_output in enumerate(output_ids):

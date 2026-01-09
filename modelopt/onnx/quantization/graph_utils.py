@@ -236,6 +236,7 @@ def get_tensor_from_name(graph: onnx.GraphProto, tensor_name: str) -> onnx.Value
 
 def get_tensor_producer_nodes(
     graph: onnx.GraphProto,
+    get_initializer_producers: bool = False,
 ) -> dict[str, onnx.NodeProto]:
     """Returns a dictionary of tensor name and their producer node object mapping.
 
@@ -271,6 +272,10 @@ def get_tensor_producer_nodes(
     for node in graph.node:
         for output_name in node.output:
             tensor_producers[output_name] = node
+
+    if get_initializer_producers:
+        for initializer in graph.initializer:
+            tensor_producers[initializer.name] = initializer
 
     return tensor_producers
 

@@ -32,12 +32,15 @@ from onnxconverter_common import convert_float_to_float16
 from torch.nn.parallel import DataParallel, DistributedDataParallel
 
 from modelopt.onnx.autocast.convert import convert_to_f16
-from modelopt.onnx.quantization.qdq_utils import (
-    fp4qdq_to_2dq,
-    qdq_to_dq,
-    quantize_weights_to_int4,
-    quantize_weights_to_mxfp8,
+from modelopt.onnx.export import (
+    FP8QuantExporter,
+    INT4QuantExporter,
+    INT8QuantExporter,
+    MXFP8QuantExporter,
+    NVFP4QuantExporter,
+    ONNXQuantExporter,
 )
+from modelopt.onnx.quantization.qdq_utils import qdq_to_dq, replace_zero_scale_with_smallest_nonzero
 from modelopt.onnx.utils import (
     get_input_names,
     get_input_shapes,
@@ -336,6 +339,87 @@ def is_mxfp8_quantized(model: nn.Module) -> bool:
     return False
 
 
+def is_int8_quantized(model: nn.Module) -> bool:
+    """Check if the model is quantized in INT8 mode."""
+    for _, module in model.named_modules():
+        if (
+            hasattr(module, "weight_quantizer")
+            and hasattr(module, "input_quantizer")
+            and module.weight_quantizer.is_enabled
+            and module.input_quantizer.is_enabled
+            and module.weight_quantizer._num_bits == 8
+            and module.input_quantizer._num_bits == 8
+        ):
+            return True
+    return False
+
+
+def is_fp8_quantized(model: nn.Module) -> bool:
+    """Check if the model is quantized in FP8 mode."""
+    for _, module in model.named_modules():
+        if (
+            hasattr(module, "weight_quantizer")
+            and hasattr(module, "input_quantizer")
+            and module.weight_quantizer.is_enabled
+            and module.input_quantizer.is_enabled
+            and module.weight_quantizer._num_bits == (4, 3)
+            and module.input_quantizer._num_bits == (4, 3)
+            # Exclude MXFP8 which also uses (4,3) but has block_sizes with scale_bits
+            and not (
+                module.input_quantizer.block_sizes
+                and module.input_quantizer.block_sizes.get("scale_bits", None) == (8, 0)
+            )
+        ):
+            return True
+    return False
+
+
+def quantize_weights(model: nn.Module, onnx_model: onnx.ModelProto) -> onnx.ModelProto:
+    """Real quantizes the weights in the onnx model.
+
+    Applies weight quantization to an ONNX model based on the quantization scheme detected
+    in the PyTorch model. Supports INT4, FP4, and MXFP8 quantization formats.
+
+    The function performs a four-stage process for each detected quantization type:
+    1. Pre-process - Restructure the graph for quantization
+    2. Compute scales - Calculate quantization scaling factors
+    3. Compress weights - Convert weights to the target quantized format
+    4. Post-process - Apply any final transformations or cleanup
+
+    Args:
+        model (nn.Module): The original PyTorch model used to detect quantization schemes.
+            This model should have been quantized using modelopt's quantization APIs.
+        onnx_model (onnx.ModelProto): The ONNX model whose weights will be quantized.
+
+    Returns:
+        onnx.ModelProto: The ONNX model with quantized weights applied. The returned model
+            contains compressed weight tensors in the appropriate quantization format.
+
+    Notes:
+        - Multiple quantization formats can be applied sequentially if the model contains
+          different quantization schemes for different layers
+        - The function checks for INT4, FP4, and MXFP8 quantization in the PyTorch model
+        - Each quantization exporter modifies the ONNX graph in-place before returning
+    """
+
+    onnx_exporters: list[type[ONNXQuantExporter]] = []
+    if is_int4_quantized(model):
+        onnx_exporters.append(INT4QuantExporter)
+    if is_fp4_quantized(model):
+        onnx_exporters.append(NVFP4QuantExporter)
+    if is_mxfp8_quantized(model):
+        onnx_exporters.append(MXFP8QuantExporter)
+    if is_fp8_quantized(model):
+        onnx_exporters.append(FP8QuantExporter)
+    if is_int8_quantized(model):
+        onnx_exporters.append(INT8QuantExporter)
+
+    for onnx_exporter in onnx_exporters:
+        onnx_model = onnx_exporter.process_model(onnx_model)
+
+    return onnx_model
+
+
 def get_onnx_bytes_and_metadata(
     model: nn.Module,
     dummy_input: Any | tuple,
@@ -481,12 +565,8 @@ def get_onnx_bytes_and_metadata(
 
     # Convert dummy TRT_FP4QDQ nodes to 2DQ format if the model is quantized in FP4 mode
     # Or convert weights to MXFP8 format if the model is quantized in MXFP8 mode
-    if is_int4_quantized(model):
-        onnx_opt_graph = quantize_weights_to_int4(onnx_opt_graph)
-    elif is_fp4_quantized(model):
-        onnx_opt_graph = fp4qdq_to_2dq(onnx_opt_graph)
-    elif is_mxfp8_quantized(model):
-        onnx_opt_graph = quantize_weights_to_mxfp8(onnx_opt_graph)
+    if is_int4_quantized(model) or is_fp4_quantized(model) or is_mxfp8_quantized(model):
+        onnx_opt_graph = quantize_weights(model, onnx_opt_graph)
 
     if dq_only:
         onnx_opt_graph = qdq_to_dq(onnx_opt_graph)
@@ -497,7 +577,7 @@ def get_onnx_bytes_and_metadata(
     except StopIteration:
         param_dtype = torch.float32
     if weights_dtype in ["fp16", "bf16"] and param_dtype == torch.float32:
-        if is_mxfp8_quantized(model) or is_int4_quantized(model):
+        if is_int4_quantized(model) or is_mxfp8_quantized(model):
             assert weights_dtype == "fp16", "BF16 + MXFP8/INT4 mixed precision is not supported yet"
             onnx_opt_graph = convert_float_to_float16(
                 onnx_opt_graph,
@@ -509,6 +589,9 @@ def get_onnx_bytes_and_metadata(
             onnx_opt_graph = convert_to_f16(
                 onnx_opt_graph, low_precision_type=weights_dtype, keep_io_types=False
             )
+
+        # TensorRT expects all scales to be postive
+        onnx_opt_graph = replace_zero_scale_with_smallest_nonzero(onnx_opt_graph)
 
     # If the onnx model contains external data store the external tensors in one file and save the onnx model
     if has_external_data(onnx_save_path):

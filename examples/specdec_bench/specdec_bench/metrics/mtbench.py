@@ -35,16 +35,16 @@ class MTBench(AcceptanceRate):
         i = 0
         lengths = {}
         self.out["Request_AR"] = {}
-        while i < len(self.prompt_ar):
-            turn_1 = self.prompt_ar[i]
-            turn_2 = self.prompt_ar[i + 1]
-            q_id = i // 2
+        self.prompt_ar = dict(sorted(self.prompt_ar.items(), key=lambda x: x[0]))
+        for request_id, turns in self.prompt_ar.items():
+            turn_1 = turns[0]
+            turn_2 = turns[1]
+            q_id = request_id
             mtbench_topic = MTBENCH_TOPICS[q_id // 10]
-            self.out["Request_AR"][q_id] = sum(turn_1 + turn_2) / len(turn_1 + turn_2)
+            self.out["Request_AR"][request_id] = sum(turn_1 + turn_2) / len(turn_1 + turn_2)
             self._get_lengths(turn_1, lengths)
             self._get_lengths(turn_2, lengths)
             print(mtbench_topic, sum(turn_1 + turn_2) / len(turn_1 + turn_2))
-            i += 2
         per_category = [[] for _ in range(len(MTBENCH_TOPICS))]
         for q_id, ar in self.out["Request_AR"].items():
             per_category[q_id // 10].append(ar)

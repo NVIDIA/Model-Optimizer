@@ -1,6 +1,6 @@
-# TensorRT Model Optimizer - Windows: Benchmark Reference
+# Model Optimizer - Windows: Benchmark Reference
 
-This document provides a summary of the performance and accuracy measurements of [TensorRT Model Optimizer - Windows](./README.md) for several popular models. The benchmark results in the following tables serve as reference points and **should not be viewed as the maximum performance** achievable by Model Optimizer - Windows.
+This document provides a summary of the performance and accuracy measurements of [Model Optimizer - Windows](./README.md) for several popular models. The benchmark results in the following tables serve as reference points and **should not be viewed as the maximum performance** achievable by Model Optimizer - Windows.
 
 ## 1 Performance And Accuracy Comparison: ONNX INT4 vs ONNX FP16 Models
 

@@ -1,9 +1,0 @@
-cuda-python<13
-diffusers<=0.34.0
-nvtx
-onnx_graphsurgeon
-opencv-python>=4.8.1.78,<4.12.0.88
-sentencepiece
-# TODO: Fix for torch 2.9
-torch<2.9
-torchvision<0.24.0

@@ -62,22 +62,6 @@ def run_command_in_background(
     return process
 
 
-def run_onnx_llm_export_command(
-    *, torch_dir: str, dtype: str, lm_head: str, output_dir: str, calib_size: str, **kwargs
-):
-    kwargs.update(
-        {
-            "torch_dir": torch_dir,
-            "dtype": dtype,
-            "lm_head": lm_head,
-            "output_dir": output_dir,
-            "calib_size": calib_size,
-        }
-    )
-    cmd_parts = extend_cmd_parts(["python", "llm_export.py"], **kwargs)
-    run_example_command(cmd_parts, "onnx_ptq")
-
-
 def run_llm_ptq_command(*, model: str, quant: str, **kwargs):
     kwargs.update({"model": model, "quant": quant})
     kwargs.setdefault("tasks", "quant")

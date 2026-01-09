@@ -93,6 +93,28 @@ fi
 if [ -n "$AUTO_QUANTIZE_BITS" ]; then
     PTQ_ARGS+=" --auto_quantize_bits=$AUTO_QUANTIZE_BITS "
 fi
+
+if [ -n "$AUTO_QUANTIZE_METHOD" ]; then
+    PTQ_ARGS+=" --auto_quantize_method=$AUTO_QUANTIZE_METHOD "
+fi
+
+if [ -n "$AUTO_QUANTIZE_SCORE_SIZE" ]; then
+    PTQ_ARGS+=" --auto_quantize_score_size=$AUTO_QUANTIZE_SCORE_SIZE "
+fi
+
+# Automatically generate auto_quantize checkpoint path if not provided
+if [ -n "$AUTO_QUANTIZE_BITS" ] && [ -z "$AUTO_QUANTIZE_CHECKPOINT" ]; then
+    # Create a descriptive checkpoint name based on model and quantization settings
+    AQ_METHOD=${AUTO_QUANTIZE_METHOD:-gradient}
+    AUTO_QUANTIZE_CHECKPOINT="${ROOT_SAVE_PATH}/auto_quantize_checkpoints/${MODEL_NAME}_${AQ_METHOD}.pth"
+    mkdir -p $(dirname $AUTO_QUANTIZE_CHECKPOINT)
+    echo "Auto-generated auto_quantize checkpoint path: $AUTO_QUANTIZE_CHECKPOINT"
+fi
+
+if [ -n "$AUTO_QUANTIZE_BITS" ]; then
+    PTQ_ARGS+=" --auto_quantize_checkpoint=$AUTO_QUANTIZE_CHECKPOINT "
+fi
+
 if [ -n "$CALIB_DATASET" ]; then
     PTQ_ARGS+=" --dataset=$CALIB_DATASET "
 fi

@@ -24,7 +24,7 @@ class Metric:
         self.out = {}
         self.name = "metric"
 
-    def process_step(self, step_outputs, new_turn=True):
+    def process_step(self, step_outputs, request_id, turn_id):
         raise NotImplementedError
 
     def process_final(self, text_outputs):

@@ -50,6 +50,7 @@ class SGLANGModel(Model):
                 speculative_num_steps=kwargs.get("speculative_num_steps", 3),
                 speculative_eagle_topk=kwargs.get("speculative_eagle_topk", 1),
                 speculative_num_draft_tokens=kwargs.get("speculative_num_draft_tokens", 4),
+                speculative_draft_model_path=kwargs.get("draft_model_dir"),
                 torch_compile_max_bs=max_concurrent_requests,
                 attention_backend=kwargs.get("attention_backend"),
                 enable_torch_compile=kwargs.get("enable_torch_compile", False),
@@ -70,7 +71,7 @@ class SGLANGModel(Model):
 
         self.sampling_config = sampling_kwargs
 
-    async def run(self, prompt_ids, max_length, end_id, request_id):
+    async def run(self, prompt_ids, max_length, end_id, request_id, turn_id):
         timing = []
         output_dict = {}
         self.sampling_config["max_new_tokens"] = max_length

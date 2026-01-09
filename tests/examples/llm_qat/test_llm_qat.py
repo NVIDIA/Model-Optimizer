@@ -15,6 +15,7 @@
 
 
 import pytest
+import torch
 from _test_utils.examples.run_command import run_example_command
 
 
@@ -37,7 +38,7 @@ def _run_command(extra_cmd_args: list[str]):
     )
 
 @pytest.mark.parametrize("backend", [
-    "fsdp1",
+    pytest.param("fsdp1", marks=pytest.mark.skipif(torch.cuda.device_count() < 2, reason="need 2 GPUs!")),
     "fsdp2",
     "deepspeed",
     "ddp",
@@ -68,7 +69,7 @@ def test_llama_qat_int4w_int8a(tiny_llama_path, tmp_path, backend):
     )
 
 @pytest.mark.parametrize("backend", [
-    "fsdp1",
+    pytest.param("fsdp1", marks=pytest.mark.skipif(torch.cuda.device_count() < 2, reason="need 2 GPUs!")),
     "fsdp2",
     "deepspeed",
     "ddp",
@@ -93,6 +94,7 @@ def test_llama_lora_qat_nvfp4(tiny_llama_path, tmp_path):
             "--quant_cfg", "NVFP4_DEFAULT_CFG",
             "--lora", "True",
             "--output_dir", tmp_path / "lora_qat",
+            "--backend", "fsdp2",
         ]
     )
 

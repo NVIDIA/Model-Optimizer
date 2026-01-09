@@ -1,6 +1,6 @@
 # Post-training quantization (PTQ) for Vision Language Models
 
-To learn more about the quantization feature, please refer to the [documentation](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/1_quantization.html).
+To learn more about the quantization feature, please refer to the [documentation](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html).
 
 Quantization is an effective model optimization technique that compresses your models. Quantization with Model Optimizer can compress model size by 2x-4x, speeding up inference while preserving model quality. \
 Model Optimizer enables highly performant quantization formats including NVFP4, FP8, INT8, INT4 and supports advanced algorithms such as SmoothQuant, AWQ, SVDQuant, and Double Quantization with easy-to-use Python APIs.
@@ -12,7 +12,7 @@ This section focuses on Post-training quantization for VLM (Vision Language Mode
 | **Section** | **Description** | **Link** | **Docs** |
 | :------------: | :------------: | :------------: | :------------: |
 | Pre-Requisites | Required & optional packages to use this technique | \[[Link](#pre-requisites)\] | |
-| Getting Started | Learn how to optimize your models using PTQ to reduce precision and improve inference efficiency | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/1_quantization.html)\] |
+| Getting Started | Learn how to optimize your models using PTQ to reduce precision and improve inference efficiency | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | Support Matrix | View the support matrix to see quantization compatibility and feature availability across different models | \[[Link](#support-matrix)\] | |
 | Framework Scripts | Example scripts demonstrating quantization techniques for optimizing Hugging Face / NeMo / Megatron-LM models | \[[Link](#framework-scripts)\] | |
 | Pre-Quantized Checkpoints | Ready to deploy Hugging Face pre-quantized checkpoints | \[[Link](#pre-quantized-checkpoints)\] | |
@@ -62,15 +62,15 @@ scripts/huggingface_example.sh --model <Hugging Face model card or checkpoint> -
 
 ## Pre-Quantized Checkpoints
 
-- Ready-to-deploy checkpoints \[[🤗 Hugging Face - Nvidia TensorRT Model Optimizer Collection](https://huggingface.co/collections/nvidia/inference-optimized-checkpoints-with-model-optimizer)\]
+- Ready-to-deploy checkpoints \[[🤗 Hugging Face - Nvidia Model Optimizer Collection](https://huggingface.co/collections/nvidia/inference-optimized-checkpoints-with-model-optimizer)\]
 - Deployable on [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang)
 - More models coming soon!
 
 ## Resources
 
-- 📅 [Roadmap](https://github.com/NVIDIA/TensorRT-Model-Optimizer/issues/146)
-- 📖 [Documentation](https://nvidia.github.io/TensorRT-Model-Optimizer)
+- 📅 [Roadmap](https://github.com/NVIDIA/Model-Optimizer/issues/146)
+- 📖 [Documentation](https://nvidia.github.io/Model-Optimizer)
 - 🎯 [Benchmarks](../benchmark.md)
-- 💡 [Release Notes](https://nvidia.github.io/TensorRT-Model-Optimizer/reference/0_changelog.html)
-- 🐛 [File a bug](https://github.com/NVIDIA/TensorRT-Model-Optimizer/issues/new?template=1_bug_report.md)
-- ✨ [File a Feature Request](https://github.com/NVIDIA/TensorRT-Model-Optimizer/issues/new?template=2_feature_request.md)
+- 💡 [Release Notes](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)
+- 🐛 [File a bug](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=1_bug_report.md)
+- ✨ [File a Feature Request](https://github.com/NVIDIA/Model-Optimizer/issues/new?template=2_feature_request.md)

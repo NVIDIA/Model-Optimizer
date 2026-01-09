@@ -20,7 +20,7 @@ This transformation reduces model size and allows deployment on systems with lim
 ModelOpt-Windows Quantization
 -----------------------------
 
-The TensorRT Model Optimizer - Windows is designed to create optimized ONNX models for DirectML and TensorRT* backends.
+The Model Optimizer - Windows is designed to create optimized ONNX models for DirectML and TensorRT* backends.
 
 **Supported Techniques**:
 
@@ -69,7 +69,7 @@ As an example, preparing calibration data for INT4 AWQ quantization of LLMs may 
 1. **Generate Token Encodings**: Use a dataset like *cnn-dailymail* or *pile* with the model's tokenizer to generate token encodings and related data from the representative dataset
 2. **Format for Model Input**: Convert encodings into model-compatible formats.
 
-Please refer the `example scripts <https://github.com/NVIDIA/TensorRT-Model-Optimizer/tree/main/examples/windows/onnx_ptq/>`_ for details about preparing calibration-data of various supported ONNX models.
+Please refer the `example scripts <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/onnx_ptq/>`_ for details about preparing calibration-data of various supported ONNX models.
 
 **Call Quantization API**
 
@@ -155,4 +155,4 @@ To save a quantized ONNX model with external data, use the following code:
 Deploy Quantized ONNX Model
 ---------------------------
 
-Inference of the quantized models can be done using tools like `GenAI <https://github.com/microsoft/onnxruntime-genai/>`_, `OnnxRunTime (ORT) <https://onnxruntime.ai//>`_. These APIs can do inference on backends like DML. For details about DirectML deployment of quantized models, see :ref:`DirectML_Deployment`. Also, refer `example scripts <https://github.com/NVIDIA/TensorRT-Model-Optimizer/tree/main/examples/windows/onnx_ptq/>`_ for any possible model-specific inference guidance or script (if any).
+Inference of the quantized models can be done using tools like `GenAI <https://github.com/microsoft/onnxruntime-genai/>`_, `OnnxRunTime (ORT) <https://onnxruntime.ai//>`_. These APIs can do inference on backends like DML. For details about DirectML deployment of quantized models, see :ref:`DirectML_Deployment`. Also, refer `example scripts <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/onnx_ptq/>`_ for any possible model-specific inference guidance or script (if any).

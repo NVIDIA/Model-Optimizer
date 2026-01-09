@@ -257,7 +257,18 @@ def load_deepseek_model(model_config: str, model_path: str, batch_size: int):
     # load model
     checkpoint_path = os.path.join(model_path, f"model{rank}-mp{world_size}.safetensors")
     print(f"Loading {checkpoint_path}")
+
+    # Temporary fix for fp32 params
+    fp32_params = {}
+    for name, param in model.named_parameters():
+        if param.dtype == torch.float32 and (
+            "head.weight" in name or "attn.indexer.weights_proj.weight" in name
+        ):
+            param.data = param.data.to(torch.get_default_dtype())
+            fp32_params[name] = param
     load_model(model, checkpoint_path)
+    for param in fp32_params.values():
+        param.data = param.data.to(torch.float32)
     print(f"Loaded {checkpoint_path}")
     return model
 
@@ -368,7 +379,7 @@ def save_amax_and_quant_config(model, output_path: str, enable_fp8_kvcache: bool
     #                 counts = module.activated_expert_counts()
     #                 f.writelines(f"{name}: {count}\n" for count in counts)
 
-    quant_config = get_quant_config(model.named_modules())
+    quant_config = get_quant_config(model)
 
     if enable_fp8_kvcache:
         quant_config["quantization"]["kv_cache_quant_algo"] = KV_CACHE_FP8

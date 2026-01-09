@@ -38,6 +38,10 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       MODE="${1#*=}"
       ;;
+    --eagle_decoder_type*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      EAGLE_DECODER_TYPE="${1#*=}"
+      ;;
     --output_dir*)
       if [[ "$1" != *=* ]]; then shift; fi
       OUTPUT_DIR="${1#*=}"
@@ -90,6 +94,10 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       VLM_IMG_DIR="${1#*=}"
       ;;
+    --estimate_ar*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      ESTIMATE_AR="${1#*=}"
+      ;;
     --ar_validate_steps*)
       if [[ "$1" != *=* ]]; then shift; fi
       AR_VALIDATE_STEPS="${1#*=}"
@@ -111,6 +119,7 @@ DEFAULT_SAVE_STEPS=$((8192 / GPU_COUNT))
 
 MODEL=${MODEL:-"TinyLlama/TinyLlama-1.1B-Chat-v1.0"}
 MODE=${MODE:-"eagle3"}
+EAGLE_DECODER_TYPE=${EAGLE_DECODER_TYPE:-"llama"}
 # Set default OUTPUT_DIR to ckpts/{modelname}, where {modelname} is the last part of the model path
 MODEL_BASENAME=$(basename "$MODEL")
 OUTPUT_DIR=${OUTPUT_DIR:-"ckpts/${MODEL_BASENAME}-$(date +%Y%m%d_%H%M)"}
@@ -120,8 +129,6 @@ LR=${LR:-"1e-4"}
 TRAIN_BS=${TRAIN_BS:-4}
 MEDUSA_NUM_HEADS=${MEDUSA_NUM_HEADS:-1}
 MEDUSA_NUM_LAYERS=${MEDUSA_NUM_LAYERS:-1}
-REDRAFTER_TOKENS=${REDRAFTER_TOKENS:-1}
-REDRAFTER_NUM_LAYERS=${REDRAFTER_NUM_LAYERS:-1}
 FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP=${FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP:-"LlamaDecoderLayer"}
 NUM_GPU=${NUM_GPU:-1}
 TRAINING_SEQ_LEN=${TRAINING_SEQ_LEN:-2048}
@@ -130,6 +137,7 @@ DISABLE_TQDM=${DISABLE_TQDM:-False}
 VLM_PROCESSOR=${VLM_PROCESSOR:-}
 VLM_IMG_DIR=${VLM_IMG_DIR:-}
 AR_VALIDATE_STEPS=${AR_VALIDATE_STEPS:-1000}
+ESTIMATE_AR=${ESTIMATE_AR:-False}
 
 if [[ "$MODE" == "medusa" ]]; then
   SPECULATIVE_ARGS="--medusa_num_heads $MEDUSA_NUM_HEADS --medusa_num_layers $MEDUSA_NUM_LAYERS"
@@ -171,6 +179,7 @@ fi
 export TOKENIZERS_PARALLELISM=False
 CMD="accelerate launch $MULTI_GPU --mixed_precision bf16 main.py \
     --mode $MODE \
+    --eagle_decoder_type $EAGLE_DECODER_TYPE \
     --model_name_or_path $MODEL \
     --training_seq_len $TRAINING_SEQ_LEN \
     --dataloader_drop_last True \
@@ -192,6 +201,7 @@ CMD="accelerate launch $MULTI_GPU --mixed_precision bf16 main.py \
     --tf32 True \
     --data_path $DATA \
     --disable_tqdm $DISABLE_TQDM \
+    --estimate_ar $ESTIMATE_AR \
     --ar_validate_steps $AR_VALIDATE_STEPS \
     $VLM_ARGS \
     $OFFLINE_TRAINING_ARGS \

@@ -98,6 +98,10 @@ eagle_llama_causal_lm_export: dict[str, CustomModuleMapping] = {
     "final_layernorm": NameRemapping("norm."),
     "d2t": NameRemapping("d2t"),
     "output_layer": NameRemapping("lm_head."),
+    "parallel_draft_heads.medusa_layers": NameRemapping(
+        "parallel_draft_heads.{}.medusa_layers.{}.linear."
+    ),
+    "parallel_draft_heads.lm_head": NameRemapping("parallel_draft_heads.lm_head."),
 }
 
 eagle3_llama_causal_lm_export: dict[str, CustomModuleMapping] = {
@@ -113,22 +117,30 @@ eagle3_llama_causal_lm_export: dict[str, CustomModuleMapping] = {
     "final_layernorm": NameRemapping("norm."),
     "d2t": NameRemapping("d2t"),
     "output_layer": NameRemapping("lm_head."),
+    "parallel_draft_heads.medusa_layers": NameRemapping(
+        "parallel_draft_heads.{}.medusa_layers.{}.linear."
+    ),
+    "parallel_draft_heads.lm_head": NameRemapping("parallel_draft_heads.lm_head."),
 }
 
 eagle3_deep_llama_causal_lm_export: dict[str, CustomModuleMapping] = {
     "word_embeddings": NameRemapping("embed_tokens."),
-    "enorm": NameRemapping("layers.0.input_layernorm."),
+    "enorm": NameRemapping("midlayer.0.input_layernorm."),
     "fc": NameRemapping("fc."),
-    "first_input_layernorm": NameRemapping("layers.0.hidden_norm."),
-    "input_layernorm": NameRemapping("layers.{}.input_layernorm."),
-    "linear_qkv": QKVSlicing("layers.{}.self_attn."),
-    "linear_proj": NameRemapping("layers.{}.self_attn.o_proj."),
-    "pre_mlp_layernorm": NameRemapping("layers.{}.post_attention_layernorm."),
-    "linear_fc1": GatedMLPSlicing("layers.{}.mlp."),
-    "linear_fc2": NameRemapping("layers.{}.mlp.down_proj."),
+    "first_input_layernorm": NameRemapping("midlayer.0.hidden_norm."),
+    "input_layernorm": NameRemapping("midlayer.{}.hidden_norm."),
+    "linear_qkv": QKVSlicing("midlayer.{}.self_attn."),
+    "linear_proj": NameRemapping("midlayer.{}.self_attn.o_proj."),
+    "pre_mlp_layernorm": NameRemapping("midlayer.{}.post_attention_layernorm."),
+    "linear_fc1": GatedMLPSlicing("midlayer.{}.mlp."),
+    "linear_fc2": NameRemapping("midlayer.{}.mlp.down_proj."),
     "final_layernorm": NameRemapping("norm."),
     "d2t": NameRemapping("d2t"),
     "output_layer": NameRemapping("lm_head."),
+    "parallel_draft_heads.medusa_layers": NameRemapping(
+        "parallel_draft_heads.{}.medusa_layers.{}.linear."
+    ),
+    "parallel_draft_heads.lm_head": NameRemapping("parallel_draft_heads.lm_head."),
 }
 
 

@@ -53,5 +53,5 @@ def test_nested_model_save_restore(tmp_path, model_cls, teacher_model_type):
     model_test = model_cls.from_pretrained(tiny_llama_dir / "modelopt_model")
 
     tf_output_tester(model, model_test)
-    # since distill model contains loss function, we compare state of model manually
-    assert mto.modelopt_state(model.model) == mto.modelopt_state(model_test.model)
+    # KD state is not saved and it should be empty
+    assert not mto.ModeloptStateManager(model_test).has_state

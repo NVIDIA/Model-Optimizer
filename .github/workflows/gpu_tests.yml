@@ -21,7 +21,7 @@ jobs:
     outputs:
       any_changed: ${{ steps.changed-tests.outputs.any_changed }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - id: get-pr-info
@@ -54,12 +54,11 @@ jobs:
       checks: read
     secrets: inherit
     with:
-      match_pattern: '^DCO$|^linux$' # Wait for DCO and Unit tests / linux to pass
+      match_pattern: "^DCO$|^linux$" # Wait for DCO and Unit tests / linux to pass
       delay: 300s
   gpu-tests-pr:
     needs: [check-file-changes, wait-checks]
     if: needs.check-file-changes.outputs.any_changed == 'true'
-    # Runner list at https://github.com/nv-gha-runners/enterprise-runner-configuration/blob/main/docs/runner-groups.md
     runs-on: linux-amd64-gpu-l4-latest-1
     timeout-minutes: 120
     container: &gpu_container
@@ -69,7 +68,7 @@ jobs:
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps: &gpu_steps
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: nv-gha-runners/setup-proxy-cache@main
       - name: Setup environment variables
         run: |
@@ -78,8 +77,7 @@ jobs:
         run: pip install tox-current-env && tox -e py312-cuda12-gpu --current-env
   gpu-tests-non-pr:
     if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
-    # Runner list at https://github.com/nv-gha-runners/enterprise-runner-configuration/blob/main/docs/runner-groups.md
-    runs-on: linux-amd64-gpu-h100-latest-1
+    runs-on: linux-amd64-gpu-h100-latest-2
     timeout-minutes: 120
     container: *gpu_container
     steps: *gpu_steps

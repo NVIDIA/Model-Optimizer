@@ -6,7 +6,7 @@ We support exporting modelopt-optimized Huggingface models and Megatron Core mod
 
 The workflow is as follows:
 
-#. Load the Huggingface models or Megatron Core models, `quantize with modelopt <https://github.com/NVIDIA/TensorRT-Model-Optimizer/tree/main/examples/llm_ptq#ptq-post-training-quantization>`_ , and export to the unified checkpoint format, where the layer structures and tensor names are aligned with the original checkpoint.
+#. Load the Huggingface models or Megatron Core models, `quantize with modelopt <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_ptq#ptq-post-training-quantization>`_ , and export to the unified checkpoint format, where the layer structures and tensor names are aligned with the original checkpoint.
 #. Load the unified checkpoint in the supported inference framework for accelerated inference.
 
 

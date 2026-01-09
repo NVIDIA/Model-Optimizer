@@ -227,6 +227,9 @@ def main(
     batch_size: int = 0,
     calib_size: int = 512,
     dtype: str = "bfloat16",
+    auto_quantize_method: str = "gradient",
+    auto_quantize_score_size: int = 128,
+    auto_quantize_checkpoint: str | None = None,
     **kwargs,
 ):
     random.seed(RAND_SEED)
@@ -281,6 +284,9 @@ def main(
                     batch_size=batch_size,
                     calib_size=calib_size,
                     auto_quantize_bits=auto_quantize_bits,
+                    auto_quantize_method=auto_quantize_method,
+                    auto_quantize_score_size=auto_quantize_score_size,
+                    auto_quantize_checkpoint=auto_quantize_checkpoint,
                 )
 
     for subject in tqdm(subjects):

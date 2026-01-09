@@ -88,7 +88,9 @@ def test_chained_save_restore(mode):
     # compare serialized version since some configs may be objected...
     manager = mto.ModeloptStateManager(model)
     manager2 = mto.ModeloptStateManager(model2)
-    assert torch.equal(_serialize(manager.state_dict()), _serialize(manager2.state_dict()))
+    # NOTE: KD modes are skipped during restore and thus won't exist
+    state_minus_kd = [s for s in manager.state_dict() if s[0] not in ("kd_loss", "export_student")]
+    assert torch.equal(_serialize(state_minus_kd), _serialize(manager2.state_dict()))
 
     # run comparison in eval mode since there might be model randomization in train mode
     model.eval()

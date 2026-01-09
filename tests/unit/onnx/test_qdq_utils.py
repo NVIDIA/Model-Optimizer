@@ -17,13 +17,8 @@ import numpy as np
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
-from modelopt.onnx.quantization.qdq_utils import (
-    _cast_fp4,
-    _cast_fp8,
-    fp4qdq_to_2dq,
-    quantize_weights_to_int4,
-    quantize_weights_to_mxfp8,
-)
+from modelopt.onnx.export import INT4QuantExporter, MXFP8QuantExporter, NVFP4QuantExporter
+from modelopt.onnx.export.nvfp4_exporter import _cast_fp4, _cast_fp8
 
 
 def create_test_model_with_int4_dq_reshape_transpose_matmul(constant_scale: bool = False):
@@ -337,7 +332,7 @@ class TestQuantizeWeightsToInt4:
         model = create_test_model_with_int4_dq_reshape_transpose_matmul()
 
         # Run quantization
-        quantized_model = quantize_weights_to_int4(model)
+        quantized_model = INT4QuantExporter.process_model(model)
 
         # Verify weight is converted to INT4
         weight_tensor = next(
@@ -362,7 +357,7 @@ class TestQuantizeWeightsToInt4:
         model = create_test_model_with_int4_dq_reshape_transpose_matmul(constant_scale=True)
 
         # Run quantization
-        quantized_model = quantize_weights_to_int4(model)
+        quantized_model = INT4QuantExporter.process_model(model)
 
         # Verify Constant node is removed
         constant_nodes = [node for node in quantized_model.graph.node if node.op_type == "Constant"]
@@ -385,7 +380,7 @@ class TestQuantizeWeightsToInt4:
         model = create_test_model_with_proj_nodes()
 
         # Run quantization
-        quantized_model = quantize_weights_to_int4(model)
+        quantized_model = INT4QuantExporter.process_model(model)
 
         # Verify bias tensor is cast to float16
         bias_tensor = next(
@@ -474,15 +469,15 @@ class TestCastFunctions:
         assert np.all(result == expected_array)
 
 
-class TestQuantizeWeightsToMXFP8:
-    """Test suite for quantize_weights_to_mxfp8 function."""
+class TestMXFP8QuantExporter:
+    """Test suite for MXFP8QuantExporter."""
 
     def test_basic_mxfp8_quantization(self):
         """Test basic MXFP8 quantization with TRT_MXFP8DequantizeLinear nodes."""
         model = create_test_model_with_mxfp8_dq()
 
         # Run MXFP8 quantization
-        quantized_model = quantize_weights_to_mxfp8(model)
+        quantized_model = MXFP8QuantExporter.process_model(model)
 
         # Verify weight is converted to FP8
         weight_tensor = next(
@@ -513,7 +508,7 @@ class TestQuantizeWeightsToMXFP8:
         model = create_test_model_with_mxfp8_dq()
 
         # Run MXFP8 quantization
-        quantized_model = quantize_weights_to_mxfp8(model)
+        quantized_model = MXFP8QuantExporter.process_model(model)
 
         # Verify output_dtype is set to FP16
         dq_node = next(
@@ -529,7 +524,7 @@ class TestQuantizeWeightsToMXFP8:
         model = create_test_model_with_mxfp8_dq()
 
         # Run MXFP8 quantization
-        quantized_model = quantize_weights_to_mxfp8(model)
+        quantized_model = MXFP8QuantExporter.process_model(model)
 
         # Verify Gelu approximation is set to tanh
         gelu_node = next(node for node in quantized_model.graph.node if node.op_type == "Gelu")
@@ -577,7 +572,7 @@ class TestQuantizeWeightsToMXFP8:
         model = helper.make_model(graph)
 
         # Run MXFP8 quantization (should use default values)
-        quantized_model = quantize_weights_to_mxfp8(model)
+        quantized_model = MXFP8QuantExporter.process_model(model)
 
         # Verify the model is still processed correctly
         weight_tensor = next(
@@ -587,7 +582,7 @@ class TestQuantizeWeightsToMXFP8:
 
 
 class TestFP4QDQTo2DQ:
-    """Test suite for fp4qdq_to_2dq function."""
+    """Test suite for NVFP4QuantExporter."""
 
     @pytest.mark.parametrize("with_transpose", [False, True])
     def test_fp4qdq_conversion(self, with_transpose):
@@ -595,7 +590,7 @@ class TestFP4QDQTo2DQ:
         model = create_test_model_with_nvfp4_qdq(with_transpose=with_transpose)
 
         # Run FP4QDQ to 2DQ conversion
-        converted_model = fp4qdq_to_2dq(model)
+        converted_model = NVFP4QuantExporter.process_model(model)
 
         # Verify TRT_FP4QDQ node is removed
         fp4qdq_nodes = [node for node in converted_model.graph.node if node.op_type == "TRT_FP4QDQ"]

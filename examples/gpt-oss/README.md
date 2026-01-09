@@ -27,7 +27,7 @@ pip install -r requirements.txt
 
 In Quantization Aware Training, the forward computations are performed with 'fake quantized' values and the backward computations are performed with high precision datatype. In 'fake quantization' the numerical equivalent of the quantized value is represented using a high precision datatype such as BF16. Hence, QAT can be integrated to standard training pipeline such as regular BF16 mixed precision training.
 
-During QAT, the model learns to recover the accuracy after quantization. To perform QAT, quantize your model first using ModelOpt's [`mtq.quantize`](https://nvidia.github.io/TensorRT-Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.quantize) API. Then you can train this quantized model with your existing training pipeline.
+During QAT, the model learns to recover the accuracy after quantization. To perform QAT, quantize your model first using ModelOpt's [`mtq.quantize`](https://nvidia.github.io/Model-Optimizer/reference/generated/modelopt.torch.quantization.model_quant.html#modelopt.torch.quantization.model_quant.quantize) API. Then you can train this quantized model with your existing training pipeline.
 
 Here is a code example:
 
@@ -94,7 +94,7 @@ accelerate launch --config_file configs/zero3.yaml sft.py \
 
 The final QAT checkpoint is in fake-quantized form. Low memory footprint and speedup comes after [deployment](#deployment) to accelerated runtimes.
 
-Note: For restoring the model checkpoint for Pytorch native evaluation, see [ModelOpt Restore using Huggingface APIs](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/2_save_load.html#modelopt-save-restore-using-huggingface-checkpointing-apis).
+Note: For restoring the model checkpoint for Pytorch native evaluation, see [ModelOpt Restore using Huggingface APIs](https://nvidia.github.io/Model-Optimizer/guides/2_save_load.html#modelopt-save-restore-using-huggingface-checkpointing-apis).
 
 ## Deployment
 
@@ -179,8 +179,8 @@ You can deploy this real quantized MXFP4 checkpoint just like the original GPT-O
 
 ### Easy QAT from ModelOpt using LLaMA-Factory
 
-ModelOpt provides easy end to end QAT via [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory), an open-source repository for LLM/VLM finetuning. Please refer to [LLaMa-Factory QAT example](https://github.com/NVIDIA/TensorRT-Model-Optimizer/tree/main/examples/llm_qat/llama_factory) for performing QAT on your favorite models.
+ModelOpt provides easy end to end QAT via [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory), an open-source repository for LLM/VLM finetuning. Please refer to [LLaMa-Factory QAT example](../llm_qat/llama_factory) for performing QAT on your favorite models.
 
 ### Deployment of ModelOpt QAT/PTQ models beyond GPT-OSS
 
-ModelOpt supports exporting a wide variety of models after QAT/PTQ to TensorRT-LLM, vLLM, SGLang etc. Please refer to [llm_ptq](https://github.com/NVIDIA/TensorRT-Model-Optimizer/tree/main/examples/llm_ptq).
+ModelOpt supports exporting a wide variety of models after QAT/PTQ to TensorRT-LLM, vLLM, SGLang etc. Please refer to [llm_ptq](../llm_ptq).

@@ -201,8 +201,11 @@ def get_model_answers(
                 tokenizer,
                 args.calib_batch_size,
                 args.calib_size,
-                args.auto_quantize_bits,
                 test_generated=False,
+                auto_quantize_bits=args.auto_quantize_bits,
+                auto_quantize_method=args.auto_quantize_method,
+                auto_quantize_score_size=args.auto_quantize_score_size,
+                auto_quantize_checkpoint=args.auto_quantize_checkpoint,
             )
 
     for question in tqdm(questions):
@@ -448,6 +451,36 @@ if __name__ == "__main__":
         help=(
             "Effective bits constraint for auto_quantize. If not set, "
             "regular quantization without auto_quantize search will be applied."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_method",
+        type=str,
+        default="gradient",
+        choices=["gradient", "kl_div"],
+        help=(
+            "Method for auto_quantize sensitivity analysis. 'gradient' uses gradient-based method "
+            "(requires labels in dataset). 'kl_div' uses KL divergence between original and "
+            "quantized model outputs (no labels required). Default: 'gradient'"
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_score_size",
+        type=int,
+        default=128,
+        help=(
+            "Number of samples to use for auto_quantize scoring. Most of auto_quantize time is spent on "
+            "sensitivity score estimation, so reducing this speeds it up while only minimally affecting "
+            "final model accuracy compared to lowering --calib_size (the number of samples used for calibration)."
+        ),
+    )
+    parser.add_argument(
+        "--auto_quantize_checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Path to checkpoint file for saving/restoring auto_quantize search state "
+            "(sensitivity scores, costs, etc.). Only used when auto_quantize_bits is specified."
         ),
     )
     parser.add_argument(

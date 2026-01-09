@@ -2,7 +2,7 @@
 
 Quantization-Aware Training (QAT) with NVIDIA ModelOpt injects simulated quantization noise during training to recover accuracy lost by Post-Training Quantization (PTQ). A CNN model quantized via `mtq.quantize()` can be fine-tuned using your existing training loop. During QAT, the quantizer scales are frozen while the model weights adapt.
 
-Learn more in the [ModelOpt QAT guide](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/_pytorch_quantization.html#quantization-aware-training-qat).
+Learn more in the [ModelOpt QAT guide](https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#quantization-aware-training-qat).
 
 > **_NOTE:_** This example uses a TorchVision ResNet-50 on an ImageNet-style dataset, but you can extend the same steps to any CNN and computer-vision dataset.
 
@@ -66,7 +66,7 @@ model.to(device)
 
 See the full script [torchvision_qat.py](./torchvision_qat.py) for all boilerplate (argument parsing, DDP setup, logging, etc.).
 
-> **_NOTE:_** The example above uses [mto.save](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/2_save_load.html#saving-modelopt-models) and [mto.restore](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/2_save_load.html#restoring-modelopt-models) for saving and restoring ModelOpt modified models. These functions handle the model weights as well as the quantizer states. Please see [saving & restoring](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/2_save_load.html) to learn more.
+> **_NOTE:_** The example above uses [mto.save](https://nvidia.github.io/Model-Optimizer/guides/2_save_load.html#saving-modelopt-models) and [mto.restore](https://nvidia.github.io/Model-Optimizer/guides/2_save_load.html#restoring-modelopt-models) for saving and restoring ModelOpt modified models. These functions handle the model weights as well as the quantizer states. Please see [saving & restoring](https://nvidia.github.io/Model-Optimizer/guides/2_save_load.html) to learn more.
 
 ### End-to-end QAT Example
 

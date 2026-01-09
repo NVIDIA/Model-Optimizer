@@ -13,8 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
 import torch
 import torch.nn as nn
+
+pytest.importorskip("torchprofile")
 
 import modelopt.torch.prune as mtp
 from modelopt.torch.nas.utils import inference_flops

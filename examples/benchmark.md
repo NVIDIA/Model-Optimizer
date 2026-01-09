@@ -1,6 +1,6 @@
-# TensorRT Model Optimizer Benchmark Reference
+# Model Optimizer Benchmark Reference
 
-This document summarizes performance and accuracy measurements of [TensorRT Model Optimizer](https://github.com/NVIDIA/TensorRT-Model-Optimizer) for a few popular models.
+This document summarizes performance and accuracy measurements of [Model Optimizer](https://github.com/NVIDIA/Model-Optimizer) for a few popular models.
 The benchmark in the following tables is provided as reference points and **should not be considered as the peak
 performance** that can be delivered by Model Optimizer. All performance numbers are tested with [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM) or [TensorRT](https://developer.nvidia.com/tensorrt-getting-started).
 

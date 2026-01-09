@@ -84,12 +84,12 @@ class VLLMModel(Model):
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
 
-    async def run(self, prompt_ids, max_length, end_id, request_id):
+    async def run(self, prompt_ids, max_length, end_id, request_id, turn_id):
         output_dict = {}
         self.sampling_config.max_tokens = max_length
         self.sampling_config.stop_token_ids = [end_id]
 
-        outputs, timing, full_tokens = await self.generate(prompt_ids, request_id)
+        outputs, timing, full_tokens = await self.generate(prompt_ids, request_id, turn_id)
 
         reformatted_output_ids = [[] for _ in range(self.sampling_kwargs.get("beam_width", 1))]
         start = 0
@@ -114,13 +114,13 @@ class VLLMModel(Model):
         ]
         return output_dict
 
-    async def generate(self, prompt_ids, request_id):
+    async def generate(self, prompt_ids, request_id, turn_id):
         timing = []
         timing.append(time.perf_counter())
         outputs = []
         full_tokens = []
         async for output in self.model.generate(
-            request_id=str(request_id),
+            request_id=f"{request_id}.{turn_id}",
             prompt=TokensPrompt(prompt_token_ids=prompt_ids),
             sampling_params=self.sampling_config,
         ):

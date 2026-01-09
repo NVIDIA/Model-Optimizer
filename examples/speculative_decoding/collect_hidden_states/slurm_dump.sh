@@ -20,8 +20,8 @@
 # THE BIWEEKLY CAPACITY MEETING. IF YOU DON'T KNOW WHO IS THE PIC OF YOUR CSRG PPP
 # MANAGEMET, GO WITH `-p backfill -t 00:25:00`.
 
-#SBATCH -A coreai_dlalgo_modelopt
-#SBATCH --job-name=coreai_dlalgo_modelopt-generate_eagle_hidden_states
+#SBATCH -A <account_name>
+#SBATCH --job-name=<job_name>
 #SBATCH --nodes=1 --ntasks-per-node=4 --gpus-per-node=4
 #SBATCH -p batch
 #SBATCH -t 04:00:00
@@ -29,7 +29,7 @@
 echo "SLURM_ARRAY_TASK_ID: $SLURM_ARRAY_TASK_ID"
 echo "SLURM_ARRAY_TASK_COUNT: $SLURM_ARRAY_TASK_COUNT"
 
-CONTAINER="nvcr.io#nvidia/tensorrt-llm/release:1.2.0rc0"
+CONTAINER="nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc4"
 
 INPUT_DIR="<Can be directory containing the .jsonl files, or path to single .jsonl file>"
 DUMP_DIR="<Directory for output hidden states>"

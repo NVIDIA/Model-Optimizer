@@ -169,7 +169,7 @@ def export_int8(
     scale.masked_fill_(scale == 0, 1.0)
     scale = g.op("Constant", value_t=scale)
 
-    assert trt_high_precision_dtype in (input_type, "Float"), (
+    assert trt_high_precision_dtype in (input_type, "Float", "BFloat16"), (
         "TRT StronglyType requires both weights and amax to be in the BF16/FP16, or the QDQ in Float."
     )
 
@@ -410,7 +410,7 @@ def export_fp8_mha(
     if hasattr(torch.onnx, "_type_utils"):
         from torch.onnx._type_utils import JitScalarType
     else:  # torch >= 2.9
-        from torch.onnx._internal.torchscript_exporter import JitScalarType
+        from torch.onnx._internal.torchscript_exporter._type_utils import JitScalarType
 
     if hasattr(torch.onnx, "symbolic_opset14"):
         from torch.onnx.symbolic_opset14 import _attention_scale, _causal_attention_mask
@@ -557,7 +557,7 @@ def _fp4_dequantize(
             "Constant",
             value_t=torch.tensor(scale, dtype=torch_dtype_map["Float"]),
         )
-    return g.op("trt::DequantizeLinear", inputs, scale)
+    return g.op("DequantizeLinear", inputs, scale)
 
 
 def _fp4_dequantize_2(
@@ -568,7 +568,7 @@ def _fp4_dequantize_2(
     axis: int = -1,
 ):
     """Helper Function for Dequantization."""
-    return g.op("trt::DequantizeLinear", inputs, dyn_scale, axis_i=axis, block_size_i=block_size)
+    return g.op("DequantizeLinear", inputs, dyn_scale, axis_i=axis, block_size_i=block_size)
 
 
 def _mxfp8_dynamic_quantize(

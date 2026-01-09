@@ -59,7 +59,7 @@ class _QuantFunctionalMixin(QuantModule):
     def functionals_to_replace(self) -> Iterator[tuple[ModuleType, str, Callable]]:
         return (
             (package, func_name, quantized_func)
-            for package, func_name, quantized_func in self._functionals_to_replace
+            for package, func_name, quantized_func in getattr(self, "_functionals_to_replace", [])
             if hasattr(package, func_name)
         )
 

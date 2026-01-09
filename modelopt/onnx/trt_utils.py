@@ -18,6 +18,7 @@
 import ctypes
 import platform
 
+import lief
 import onnx
 import onnx_graphsurgeon as gs
 
@@ -39,6 +40,50 @@ except ImportError:
 MAX_IR_VERSION = 10
 
 
+def _is_static_plugin(plugin_path: str) -> bool:
+    """Check if a plugin is statically linked against 'libnvinfer'.
+
+    Args:
+        plugin_path: Path to the plugin .so file.
+
+    Returns:
+        True if plugin is statically linked, False otherwise.
+    """
+    try:
+        return any(dep.startswith("libnvinfer.so") for dep in lief.parse(plugin_path).libraries)
+    except Exception as e:
+        logger.debug(
+            f"Could not find 'libnvinfer.so' link in {plugin_path}: {e}. Assuming it's dynamically linked."
+        )
+        return False
+
+
+def _load_trt_plugin(plugin_path: str, registry) -> None:
+    """Load a TensorRT plugin using the appropriate method.
+
+    Static plugins (linked against 'libnvinfer') are loaded with ctypes.CDLL to avoid double-loading TensorRT and
+    thus avoid SegFault error. Dynamic plugins use registry.load_library for proper TensorRT registration.
+
+    Args:
+        plugin_path: Path to the plugin .so file.
+        registry: TensorRT plugin registry.
+    """
+    is_static = _is_static_plugin(plugin_path)
+    logger.debug(f"Loading {'static' if is_static else 'dynamic'} plugin: {plugin_path}")
+
+    if is_static:
+        # Static plugins: use ctypes.CDLL to avoid double-loading 'libnvinfer'.
+        ctypes.CDLL(plugin_path)
+    else:
+        # Dynamic plugins: use registry.load_library for proper TensorRT registration, falling back to ctypes.CDLL
+        # as needed.
+        try:
+            registry.load_library(plugin_path)
+        except Exception as e:
+            logger.warning(f"registry.load_library() failed: {e}, falling back to ctypes.CDLL()")
+            ctypes.CDLL(plugin_path)
+
+
 def get_custom_layers(
     onnx_path: str | onnx.ModelProto,
     trt_plugins: list[str] | None,
@@ -57,15 +102,19 @@ def get_custom_layers(
     """
     logger.debug("Checking for custom TensorRT ops")
 
-    # Initialize TensorRT plugins
-    if trt_plugins:
-        logger.debug(f"Loading TensorRT plugins: {trt_plugins}")
-        for plugin in trt_plugins:
-            ctypes.CDLL(plugin)
-
-    # Create builder and network
+    # Initialize TensorRT logger and plugins
     trt_logger = trt.Logger(trt.Logger.WARNING)
     trt.init_libnvinfer_plugins(trt_logger, "")
+
+    # Load custom TensorRT plugins
+    if trt_plugins:
+        logger.debug(f"Loading {len(trt_plugins)} TensorRT plugin(s)")
+        registry = trt.get_plugin_registry()
+
+        for plugin in trt_plugins:
+            _load_trt_plugin(plugin, registry)
+
+        logger.debug(f"Total registered plugin creators: {len(registry.plugin_creator_list)}")
     builder = trt.Builder(trt_logger)
     network = (
         builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))

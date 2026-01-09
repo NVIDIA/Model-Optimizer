@@ -34,7 +34,7 @@ class AATiming(Metric):
         self.base_tokenizer = base_tokenizer
         self.total_tokens = []
 
-    def process_step(self, step_outputs, new_turn=True):
+    def process_step(self, step_outputs, request_id, turn_id):
         self.timing.append(step_outputs["token_times"])
         target_tokens = [
             t for tok_list in step_outputs["output_ids"] for tok in tok_list for t in tok

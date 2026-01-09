@@ -110,6 +110,7 @@ Best Practices
 #. **Validate with Real Data**:
 
    - Provide representative input data using the ``calibration_data`` option for more accurate node classification.
+   - The input names and shapes in ``calibration_data`` should match the ones in the given ONNX model.
 
 #. **Control Reduction Depth**:
    - Use ``max_depth_of_reduction`` to limit the depth of reduction operations that can be converted to low precision.

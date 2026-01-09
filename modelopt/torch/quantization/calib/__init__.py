@@ -23,3 +23,4 @@ from .bias import *
 from .calibrator import *
 from .histogram import *
 from .max import *
+from .mse import *

@@ -67,6 +67,7 @@ def test_llama_medusa_fp8_qat(tiny_llama_path, num_gpus, tiny_daring_anteater_pa
             "--output_dir", tmp_path / "medusa-tinyllama-qat-finetune",
             "--quant_cfg", "FP8_DEFAULT_CFG",
             "--calib_size", "64",
+            "--backend", "fsdp2",
         ],
         "llm_qat",
     )

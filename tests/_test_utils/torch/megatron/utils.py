@@ -81,7 +81,10 @@ def run_mcore_inference(
         if HAS_MAMBA and isinstance(model.decoder.layers[0], MambaLayer):
             active_hidden_size = model.decoder.layers[0].mixer.d_model
         elif isinstance(model.decoder.layers[0].self_attention, SelfAttention):
-            active_hidden_size = model.decoder.layers[0].self_attention.linear_qkv.input_size
+            if hasattr(model.decoder.layers[0].self_attention.linear_qkv, "in_features"):
+                active_hidden_size = model.decoder.layers[0].self_attention.linear_qkv.in_features
+            else:
+                active_hidden_size = model.decoder.layers[0].self_attention.linear_qkv.input_size
         elif isinstance(model.decoder.layers[0].mlp, MLP):
             active_hidden_size = model.decoder.layers[0].mlp.linear_fc1.input_size
         else:
@@ -210,6 +213,16 @@ def sharded_state_dict_test_helper(
     assert torch.allclose(logits_ref, logits_test), (
         f"diff: {logits_diff.max()} ref: {logits_ref}, test: {logits_test}"
     )
+
+    # Test backward pass on model_test
+    model_test.train()
+    loss = forward_fn(model_test).sum()
+    loss.backward()
+
+    # Assert that trainable parameters have gradients computed
+    for name, param in model_test.named_parameters():
+        if param.requires_grad:
+            assert param.grad is not None, f"Parameter {name} has no gradient computed"
 
 
 def copy_weights_from_grouped_to_non_grouped(te_grouped_moe_model, sequential_moe_model):

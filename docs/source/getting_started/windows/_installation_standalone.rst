@@ -4,7 +4,7 @@
 Install ModelOpt-Windows as a Standalone Toolkit
 ================================================
 
-The TensorRT Model Optimizer - Windows (ModelOpt-Windows) can be installed as a standalone toolkit for quantizing ONNX models. Below are the setup steps:
+The Model Optimizer - Windows (ModelOpt-Windows) can be installed as a standalone toolkit for quantizing ONNX models. Below are the setup steps:
 
 **1. Setup Prerequisites**
 

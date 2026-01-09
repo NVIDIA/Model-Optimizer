@@ -49,12 +49,14 @@ async def run_loop(runner, dataset, tokenizer, output_length, postprocess, concu
             if request.system_prompt is not None:
                 messages.append({"role": "system", "content": request.system_prompt})
 
-            for question in request.turns:
+            for turn_id, question in enumerate(request.turns):
                 messages.append({"role": "user", "content": question})
                 entry_encoded = encode_chat(tokenizer, messages)
 
                 # Run the async runner.run directly
-                output_tokens = await runner.run(entry_encoded, max_length, end_id, i)
+                output_tokens = await runner.run(
+                    entry_encoded, max_length, end_id, request_id=i, turn_id=turn_id
+                )
                 output_text = decode_chat(tokenizer, output_tokens["output_ids"][0])
                 output_text = postprocess(output_text)
                 messages.append({"role": "assistant", "content": output_text})

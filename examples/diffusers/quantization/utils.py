@@ -15,6 +15,7 @@
 
 import os
 import re
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -24,6 +25,7 @@ from diffusers.models.lora import LoRACompatibleConv, LoRACompatibleLinear
 from diffusers.utils import load_image
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.plugins.diffusers import AttentionModuleMixin
 
 USE_PEFT = True
 try:
@@ -43,21 +45,24 @@ def filter_func_default(name: str) -> bool:
 
 
 def check_conv_and_mha(backbone, if_fp4, quantize_mha):
-    for _, module in backbone.named_modules():
+    for name, module in backbone.named_modules():
         if isinstance(module, (torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d)) and if_fp4:
             module.weight_quantizer.disable()
             module.input_quantizer.disable()
-        elif isinstance(module, Attention):
-            if not quantize_mha:
-                continue
+
+            print(f"Disabled NVFP4 Conv layer quantization for layer {name}")
+
+        elif isinstance(module, (Attention, AttentionModuleMixin)):
             head_size = int(module.inner_dim / module.heads)
-            module.q_bmm_quantizer.disable()
-            module.k_bmm_quantizer.disable()
-            module.v_bmm_quantizer.disable()
-            module.softmax_quantizer.disable()
-            module.bmm2_output_quantizer.disable()
-            if head_size % 16 != 0:
+            if not quantize_mha or head_size % 16 != 0:
+                module.q_bmm_quantizer.disable()
+                module.k_bmm_quantizer.disable()
+                module.v_bmm_quantizer.disable()
+                module.softmax_quantizer.disable()
+                module.bmm2_output_quantizer.disable()
                 setattr(module, "_disable_fp8_mha", True)
+
+                print(f"Disabled Attention layer quantization for layer {name}")
             else:
                 setattr(module, "_disable_fp8_mha", False)
 
@@ -68,10 +73,26 @@ def filter_func_ltx_video(name: str) -> bool:
     return pattern.match(name) is not None
 
 
-def load_calib_prompts(batch_size, calib_data_path="Gustavosta/Stable-Diffusion-Prompts"):
-    dataset = load_dataset(calib_data_path)
-    _to_list = list(dataset["train"]["Prompt"])
-    return [_to_list[i : i + batch_size] for i in range(0, len(_to_list), batch_size)]
+def filter_func_wan_video(name: str) -> bool:
+    """Filter function specifically for LTX-Video models."""
+    pattern = re.compile(r".*(patch_embedding|condition_embedder).*")
+    return pattern.match(name) is not None
+
+
+def load_calib_prompts(
+    batch_size,
+    calib_data_path: str | Path = "Gustavosta/Stable-Diffusion-Prompts",
+    split="train",
+    column="Prompt",
+) -> list[list[str]]:
+    prompt_list: list[str] = []
+    if isinstance(calib_data_path, Path):
+        with open(calib_data_path) as f:
+            prompt_list = f.readlines()
+    else:
+        dataset = load_dataset(calib_data_path)
+        prompt_list = list(dataset[split][column])
+    return [prompt_list[i : i + batch_size] for i in range(0, len(prompt_list), batch_size)]
 
 
 def load_calib_images(folder_path):

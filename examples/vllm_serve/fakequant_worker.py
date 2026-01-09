@@ -15,7 +15,9 @@
 
 import dataclasses
 import os
+import re
 import warnings
+from collections import defaultdict
 from contextlib import contextmanager
 from typing import Any
 
@@ -28,6 +30,99 @@ from vllm.v1.worker.gpu_worker import Worker as BaseWorker
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
+
+
+def convert_amax_hf2vllm(
+    hf_state_dict: dict[str, torch.Tensor], fuse_experts: bool = False
+) -> dict[str, torch.Tensor]:
+    """
+    Convert amax values from HuggingFace format to vLLM format.
+
+    This function merges:
+    - q_proj, k_proj, v_proj amax values into qkv_proj (taking max)
+    - gate_proj, up_proj amax values into gate_up_proj (taking max)
+
+    Args:
+        hf_state_dict: HuggingFace state dict containing amax values
+
+    Returns:
+        vLLM format state dict with merged amax values
+    """
+    vllm_state_dict = {}
+
+    # Group keys by their base pattern (without the specific projection name)
+    merge_groups = defaultdict(list)
+
+    for key, value in hf_state_dict.items():
+        if "_amax" not in key:
+            # Copy non-amax keys as-is
+            vllm_state_dict[key] = value
+            continue
+
+        # Check if this is a q/k/v projection that needs merging
+        qkv_match = re.search(r"(.*\.)([qkv])_proj(\..+_amax)$", key)
+        if qkv_match:
+            base_pattern = qkv_match.group(1) + "qkv_proj" + qkv_match.group(3)
+            merge_groups[base_pattern].append((key, value))
+            continue
+
+        # Check if this is an expert gate/up projection
+        # Pattern: model.layers.0.mlp.experts.*.gate_proj.input_quantizer._amax and
+        # model.layers.0.mlp.experts.*.up_proj.input_quantizer._amax
+        # Maps to: model.layers.0.mlp.experts.w13_input_quantizer._amax
+        expert_gate_up_match = (
+            "mixer" not in key
+            and fuse_experts
+            and re.search(r"(.*\.experts)\.\d+\.(gate|up)_proj\.([^.]+_quantizer\._amax)$", key)
+        )
+        if expert_gate_up_match:
+            base_pattern = expert_gate_up_match.group(1) + ".w13_" + expert_gate_up_match.group(3)
+            merge_groups[base_pattern].append((key, value))
+            continue
+
+        # Check if this is a non-expert gate/up projection that needs merging
+        gate_up_match = (
+            "mixer" not in key
+            and "experts" not in key
+            and re.search(r"(.*\.)(gate|up)_proj(\..+_amax)$", key)
+        )
+        if gate_up_match:
+            base_pattern = gate_up_match.group(1) + "gate_up_proj" + gate_up_match.group(3)
+            merge_groups[base_pattern].append((key, value))
+            continue
+
+        # Check if this is an expert down_proj
+        # Pattern: model.layers.0.mlp.experts.*.down_proj.input_quantizer._amax
+        # Maps to: model.layers.0.mlp.experts.w2_input_quantizer._amax
+        expert_down_match = (
+            "mixer" not in key
+            and fuse_experts
+            and re.search(r"(.*\.experts)\.\d+\.down_proj\.([^.]+_quantizer\._amax)$", key)
+        )
+        if expert_down_match:
+            base_pattern = expert_down_match.group(1) + ".w2_" + expert_down_match.group(2)
+            merge_groups[base_pattern].append((key, value))
+            continue
+
+        # Copy other amax keys as-is (like o_proj, down_proj)
+        vllm_state_dict[key] = value
+
+    # Merge grouped amax values by taking the maximum
+    for merged_key, key_value_pairs in merge_groups.items():
+        if len(key_value_pairs) > 1:
+            # Take the maximum across all values for this merged key
+            values = [value for _, value in key_value_pairs]
+            merged_value = torch.stack(values).max(dim=0)[0]
+            vllm_state_dict[merged_key] = merged_value
+            print(f"Merged {len(key_value_pairs)} keys into {merged_key}")
+            for orig_key, _ in key_value_pairs:
+                print(f"  - {orig_key}")
+        else:
+            # Single key, just rename it
+            _, value = key_value_pairs[0]
+            vllm_state_dict[merged_key] = value
+
+    return vllm_state_dict
 
 
 @contextmanager
@@ -54,9 +149,33 @@ def disable_compilation(model):
 quant_config: dict[str, Any] = {
     "dataset": os.environ.get("QUANT_DATASET", "cnn_dailymail"),
     "calib_size": int(os.environ.get("QUANT_CALIB_SIZE", 512)),
-    "quant_cfg": os.environ.get("QUANT_CFG", "NVFP4_DEFAULT_CFG"),
+    "quant_cfg": os.environ.get("QUANT_CFG", None),
+    "kv_quant_cfg": os.environ.get("KV_QUANT_CFG", None),
     "amax_file_path": os.environ.get("AMAX_FILE_PATH", None),
 }
+
+
+def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: dict[str, Any]) -> dict[str, Any]:
+    """Update KV cache quantization config for MLA models.
+
+    MLA uses `kv_c_bmm_quantizer` (compressed KV) instead of separate
+    `k_bmm_quantizer` and `v_bmm_quantizer`. This function copies the
+    config from `*[kv]_bmm_quantizer` to also cover `*kv_c_bmm_quantizer`.
+    """
+    try:
+        from vllm.attention.layer import MLAAttention
+    except ImportError:
+        return kv_quant_cfg
+
+    if not any(isinstance(m, MLAAttention) for m in model.modules()):
+        return kv_quant_cfg
+
+    if kv_config := kv_quant_cfg.get("*[kv]_bmm_quantizer"):
+        kv_quant_cfg["*kv_c_bmm_quantizer"] = kv_config
+        kv_quant_cfg["*k_pe_bmm_quantizer"] = kv_config
+        print("MLA detected: added *kv_c_bmm_quantizer and k_pe_bmm_quantizer config")
+
+    return kv_quant_cfg
 
 
 def _create_new_data_cls(data_cls, **kwargs):
@@ -140,11 +259,23 @@ def _fakequant_run_prolog_worker(self) -> None:
                 if output is None:  # TODO: make this default when vllm <= 0.11 is outdated
                     self.sample_tokens(None)
 
-    quant_cfg = getattr(mtq, quant_config["quant_cfg"])
+    quant_cfg = {} if quant_config["quant_cfg"] is None else getattr(mtq, quant_config["quant_cfg"])
+    quant_kv_cfg = (
+        {} if quant_config["kv_quant_cfg"] is None else getattr(mtq, quant_config["kv_quant_cfg"])
+    )
 
     model = self.model_runner.model
     if hasattr(model, "unwrap"):
         model = model.unwrap()
+
+    # Check if model has MLA and update KV config accordingly
+    if quant_kv_cfg:
+        quant_kv_cfg["quant_cfg"] = update_kv_cfg_for_mla(model, quant_kv_cfg["quant_cfg"])
+
+    if quant_kv_cfg:
+        quant_cfg = mtq.utils.update_quant_cfg_with_kv_cache_quant(
+            quant_cfg, quant_kv_cfg["quant_cfg"]
+        )
 
     with disable_compilation(model):
         print("quantizing model...")
@@ -154,8 +285,17 @@ def _fakequant_run_prolog_worker(self) -> None:
     if amax_file_path:
         print(f"Loading amax values from {amax_file_path}")
         saved_amax_dict = torch.load(amax_file_path)
-        current_state_dict = model.state_dict()
+        # convert amax keys to vLLM format
+        if hasattr(self.model_runner.model, "hf_to_vllm_mapper"):
+            saved_amax_dict = self.model_runner.model.hf_to_vllm_mapper.apply_dict(saved_amax_dict)
+            saved_amax_dict = {
+                key.replace("quantizer_amax", "quantizer._amax"): value
+                for key, value in saved_amax_dict.items()
+                if key.endswith("quantizer_amax")
+            }
+        saved_amax_dict = convert_amax_hf2vllm(saved_amax_dict, fuse_experts=True)
 
+        current_state_dict = model.state_dict()
         # Count amax keys in checkpoint and model
         checkpoint_amax_keys = [key for key in saved_amax_dict if key.endswith("_amax")]
         model_amax_keys = [key for key in current_state_dict if key.endswith("_amax")]
@@ -186,17 +326,6 @@ def _fakequant_run_prolog_worker(self) -> None:
         model.load_state_dict(current_state_dict)
         torch.distributed.barrier()
 
-    if amax_file_path is None:
-        # Sync amax across TP can be done here if needed
-        pass
-        # for name, buffer in model.named_buffers():
-        #     if name.endswith("_amax"):
-        #         print("syncing amax across TP for", name)
-        #         torch.distributed.all_reduce(
-        #             buffer, op=torch.distributed.ReduceOp.MAX, group=get_tp_group().device_group
-        #         )
-        # torch.distributed.barrier()
-
     if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
         mtq.print_quant_summary(model)
 
@@ -216,6 +345,6 @@ class FakeQuantWorker(BaseWorker):
             return super().determine_available_memory()
 
     def compile_or_warm_up_model(self) -> None:
-        if quant_config["quant_cfg"]:
+        if quant_config["quant_cfg"] or quant_config["kv_quant_cfg"]:
             _fakequant_run_prolog_worker(self)
         super().compile_or_warm_up_model()
