@@ -15,6 +15,7 @@
 
 """Utility functions for getting samples and dataloader for different VLM calibration datasets."""
 
+import contextlib
 from typing import Any
 
 import torch
@@ -62,11 +63,8 @@ def _get_vlm_dataset(dataset_name: str, num_samples: int, require_image: bool = 
 
     if require_image:
         # Keep only samples with a non-null image field (ScienceQA has both).
-        try:
+        with contextlib.suppress(Exception):
             ds = ds.filter(lambda ex: ex.get("image", None) is not None)
-        except Exception:
-            # Some dataset backends may not support filter; fall back to best-effort selection below.
-            pass
 
     # Select the first `num_samples` entries (or fewer if dataset is smaller).
     try:
@@ -167,7 +165,12 @@ def get_vlm_dataset_dataloader(
         images = [ex.get("image", None) for ex in examples]
         prompts = [_build_prompt(processor, q) for q in questions]
 
-        kwargs: dict[str, Any] = {"text": prompts, "images": images, "return_tensors": "pt", "padding": True}
+        kwargs: dict[str, Any] = {
+            "text": prompts,
+            "images": images,
+            "return_tensors": "pt",
+            "padding": True,
+        }
         if max_length is not None:
             kwargs.update({"truncation": True, "max_length": max_length})
 
