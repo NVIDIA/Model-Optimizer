@@ -303,3 +303,22 @@ def is_data_dependent_shape_op(op_type: str):
         "NonZero",
         "RoiAlign",
     ]
+
+
+def get_symmetric_ops():
+    """Returns set of commutative/symmetric operations where operand order doesn't matter."""
+    return {
+        "Add",
+        "Mul",
+        "And",
+        "Or",
+        "Xor",
+        "Equal",
+        "Max",
+        "Min",
+        "Sum",
+        "Mean",
+        "BitwiseAnd",
+        "BitwiseOr",
+        "BitwiseXor",
+    }
