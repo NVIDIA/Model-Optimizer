@@ -264,7 +264,7 @@ def mse_calibrate(
             weight_quantizer_name = quantizer_attr_names(weight_name).weight_quantizer
             weight_quantizer = getattr(parent_module, weight_quantizer_name, None)
             if isinstance(weight_quantizer, TensorQuantizer) and not weight_quantizer._disabled:
-                if weight_quantizer._calibrator is not None:
+                if getattr(weight_quantizer, "_calibrator", None) is not None:
                     weight_quantizers.append((parent_module, weight_name, weight_quantizer))
         seen_modules.add(parent_module)
 
