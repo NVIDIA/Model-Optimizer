@@ -303,3 +303,76 @@ def is_data_dependent_shape_op(op_type: str):
         "NonZero",
         "RoiAlign",
     ]
+
+
+def get_bool_operations():
+    """Returns set of boolean/comparison operations that are not quantizable."""
+    return {
+        "Not",
+        "And",
+        "Or",
+        "Xor",
+        "BitwiseAnd",
+        "BitwiseOr",
+        "BitwiseXor",
+        "BitShift",
+        "IsNaN",
+        "IsInf",
+        "Sign",
+        "Abs",
+        "Equal",
+        "Greater",
+        "GreaterOrEqual",
+        "Less",
+        "LessOrEqual",
+        "Where",
+        "Max",
+        "Min",
+        "Mean",
+        "Median",
+        "ArgMax",
+        "ArgMin",
+        "ReduceMax",
+        "ReduceMin",
+        "ReduceSum",
+        "ReduceMean",
+        "All",
+        "Any",
+        "Unique",
+        "NonZero",
+        "TopK",
+    }
+
+
+def get_autotuner_skip_ops():
+    """Returns set of shape/structural operations that are not quantizable.
+
+    These operations manipulate tensor structure or perform indexing rather than
+    computing on tensor values, making them unsuitable for quantization.
+    """
+    indexing_ops = {"Compress", "Gather", "GatherElements", "GatherND", "Slice"}
+    scatter_ops = {"Scatter", "ScatterND"}
+    reshape_ops = {"ExpandDims", "Flatten", "Squeeze", "Unsqueeze", "View"}
+    rearrangement_ops = {"Concat", "Pad", "Split", "Tile", "Transpose"}
+    utility_ops = {"Cast", "Ceil", "Clip", "Identity", "Range", "Shape"}
+
+    return indexing_ops | scatter_ops | reshape_ops | rearrangement_ops | utility_ops
+
+
+def get_autotuner_quantizable_operations():
+    """Returns set of key operations that benefit from quantization."""
+    return {
+        "Conv",
+        "ConvTranspose",
+        "Gemm",
+        "MatMul",
+        "AveragePool",
+        "MaxPool",
+        "GlobalAveragePool",
+        "GlobalMaxPool",
+        "Resize",
+        "Add",
+        "Sum",
+        "Mul",
+        "Relu",
+    }
