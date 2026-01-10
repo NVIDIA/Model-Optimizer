@@ -58,7 +58,7 @@ class DistillationConfig:
         skip_lm_loss: Whether to skip computing the standard language model loss (default: ``True``).
         kd_loss_scale: Relative scaling factor for the distillation loss if ``skip_lm_loss`` is ``False``.
         logit_kl_temperature: Temperature for the logit KL-divergence loss.
-        logits_kl_topk: If not None, use TopKLogitsKLLoss instead of LogitsKLLoss with this top-k value.
+        logit_kl_topk: If not None, use TopKLogitsKLLoss instead of LogitsKLLoss with this top-k value.
     """
 
     intermediate_layer_pairs: list[tuple[str, ...]] = field(default_factory=list)
@@ -66,7 +66,7 @@ class DistillationConfig:
     skip_lm_loss: bool = True
     kd_loss_scale: float = 1.0
     logit_kl_temperature: float = 1.0
-    logits_kl_topk: int | None = None
+    logit_kl_topk: int | None = None
     criterion: Criterion | None = None
     loss_balancer: mtd.DistillationLossBalancer | None = None
 
@@ -126,10 +126,10 @@ def setup_distillation_config(
     if cfg.criterion is None:
         criterion = {}
         if parallel_state.is_pipeline_last_stage():
-            # Use TopKLogitsKLLoss if logits_kl_topk is specified, otherwise use LogitsKLLoss
-            if cfg.logits_kl_topk is not None:
+            # Use TopKLogitsKLLoss if logit_kl_topk is specified, otherwise use LogitsKLLoss
+            if cfg.logit_kl_topk is not None:
                 criterion[tuple(cfg.logit_layers)] = TopKLogitsKLLoss(
-                    student_cfg, temperature=cfg.logit_kl_temperature, top_k=cfg.logits_kl_topk
+                    student_cfg, temperature=cfg.logit_kl_temperature, top_k=cfg.logit_kl_topk
                 )
             else:
                 criterion[tuple(cfg.logit_layers)] = LogitsKLLoss(
