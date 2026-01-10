@@ -63,7 +63,7 @@ def _format_smoltalk_chat_template(sample, tokenizer):
     return tokenizer.apply_chat_template(messages, tokenize=False)
 
 
-class KDSFTTrainer(SFTTrainer, KDTrainer):
+class KDSFTTrainer(KDTrainer, SFTTrainer):
     pass
 
 
