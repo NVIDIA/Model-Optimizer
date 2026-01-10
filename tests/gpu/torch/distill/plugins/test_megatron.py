@@ -169,9 +169,9 @@ def _test_topk_logits_kl_loss(top_k, rank, size):
         activation_func="squared_relu",
     ).cuda()
 
-    # Setup distillation config with TopKLogitsKLLoss via logits_kl_topk argument
+    # Setup distillation config with TopKLogitsKLLoss via logit_kl_topk argument
     distill_cfg = setup_distillation_config(
-        config_or_path=DistillationConfig(logits_kl_topk=top_k),
+        config_or_path=DistillationConfig(logit_kl_topk=top_k),
         student_cfg=student_model.config,
         teacher_cfg=teacher_model.config,
     )
