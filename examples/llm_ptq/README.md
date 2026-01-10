@@ -327,6 +327,24 @@ with torch.inference_mode():
 python hf_ptq.py --pyt_ckpt_path <huggingface_model_card> --qformat fp8 --export_path <quantized_ckpt_path> --trust_remote_code
 ```
 
+#### VLM calibration with image-text pairs (e.g., Nemotron VL)
+
+For vision-language models, calibration quality can improve by using image-text pairs instead of text-only data:
+
+```bash
+python hf_ptq.py \
+  --pyt_ckpt_path <huggingface_model_card> \
+  --qformat nvfp4 \
+  --export_path <quantized_ckpt_path> \
+  --trust_remote_code \
+  --calib_with_images \
+  --vlm_dataset nemotron_vlm_dataset_v2 \
+  --vlm_subsets docvqa_cot,chartqa_cot \
+  --calib_size 256
+```
+
+> Note: when `--calib_with_images` is set, `--calib_size` must be a single value.
+
 ### Hugging Face framework [Script](./scripts/huggingface_example.sh)
 
 Alternatively, the framework script `huggingface_example.sh` also supports quantize and export:
