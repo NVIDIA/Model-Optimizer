@@ -13,9 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Utility functions for getting samples and dataloader for different VLM calibration datasets."""
+"""Utility functions for getting samples and dataloader for different VLM calibration datasets.
+
+This module supports both:
+- Small non-streaming VLM datasets (e.g., ScienceQA)
+- Large streaming VLM datasets (e.g., Nemotron-VLM-Dataset-v2) where we want to avoid downloading everything.
+"""
 
 import contextlib
+import itertools
 from typing import Any
 
 import torch
@@ -27,18 +33,75 @@ from .image_processor import MllamaImageProcessor
 # If we want to export more options to user like target languages, we need more standardized approach like dataclass.
 SUPPORTED_VLM_DATASET_CONFIG: dict[str, dict[str, Any]] = {
     "scienceqa": {"config": {"path": "derek-thomas/ScienceQA", "split": "train"}},
+    # Large multi-subset dataset (use streaming to avoid downloading the entire dataset)
+    "nemotron_vlm_dataset_v2": {
+        "config": {"path": "nvidia/Nemotron-VLM-Dataset-v2", "split": "train", "streaming": True},
+        # Provide a sane default that is easy to extend from the CLI.
+        "default_subsets": ["docvqa_cot", "chartqa_cot"],
+    },
 }
 
 __all__ = ["get_supported_vlm_datasets", "get_vlm_dataset_dataloader"]
 
 
-def _get_vlm_dataset(dataset_name: str, num_samples: int, require_image: bool = True):
+class _HFDatasetsIterableWrapper(torch.utils.data.IterableDataset):
+    """Wrap a HF streaming IterableDataset to be compatible with torch DataLoader."""
+
+    def __init__(self, hf_iterable, num_samples: int):
+        super().__init__()
+        self._hf_iterable = hf_iterable
+        self._num_samples = num_samples
+
+    def __iter__(self):
+        return itertools.islice(iter(self._hf_iterable), self._num_samples)
+
+    def __len__(self):
+        return self._num_samples
+
+
+def _extract_text_from_messages(messages: Any) -> str | None:
+    """Best-effort extraction of a user text prompt from a chat-style `messages` field."""
+    if not isinstance(messages, list):
+        return None
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            # Common multimodal format: [{"type":"image"}, {"type":"text","text":"..."}]
+            texts = [
+                part["text"]
+                for part in content
+                if isinstance(part, dict)
+                and part.get("type") == "text"
+                and isinstance(part.get("text"), str)
+            ]
+            if texts:
+                return "\n".join(texts)
+    return None
+
+
+def _get_vlm_dataset(
+    dataset_name: str,
+    num_samples: int,
+    require_image: bool = True,
+    subsets: list[str] | None = None,
+    shuffle_buffer_size: int = 10_000,
+    seed: int = 42,
+):
     """Load a portion of train dataset with the dataset name and a given size.
 
     Args:
         dataset_name: Name of the dataset to load.
         num_samples: Number of samples to load from the dataset.
         require_image: If True, keep only samples that have an image field.
+        subsets: Optional subset/config names for multi-subset datasets (e.g., Nemotron-VLM-Dataset-v2).
+        shuffle_buffer_size: Shuffle buffer size for streaming datasets (higher is "more random").
+        seed: RNG seed for streaming dataset shuffle.
 
     Returns:
         A hugging face Dataset.
@@ -47,37 +110,61 @@ def _get_vlm_dataset(dataset_name: str, num_samples: int, require_image: bool = 
     if dataset_name in SUPPORTED_VLM_DATASET_CONFIG:
         from datasets import load_dataset
 
-        # Use streaming can reduce the downloading time for large datasets
-        dataset = load_dataset(
-            **SUPPORTED_VLM_DATASET_CONFIG[dataset_name]["config"],
-        )
+        cfg = SUPPORTED_VLM_DATASET_CONFIG[dataset_name]["config"].copy()
+        streaming = bool(cfg.pop("streaming", False))
+
+        if dataset_name == "nemotron_vlm_dataset_v2":
+            # This dataset contains many subsets; load only the requested ones via `name=...`.
+            if not subsets:
+                subsets = SUPPORTED_VLM_DATASET_CONFIG[dataset_name].get("default_subsets", [])
+            if not subsets:
+                raise ValueError("No VLM subsets provided for nemotron_vlm_dataset_v2.")
+
+            # Load each subset as a separate (streaming) dataset, then interleave.
+            streams = [
+                load_dataset(
+                    cfg["path"],
+                    name=subset,
+                    split=cfg.get("split", "train"),
+                    streaming=streaming,
+                )
+                for subset in subsets
+            ]
+            try:
+                from datasets import interleave_datasets
+
+                ds = interleave_datasets(streams)
+            except Exception:
+                # Fallback: round-robin by chaining (less balanced than interleave).
+                ds = itertools.chain.from_iterable(streams)
+        else:
+            dataset = load_dataset(**cfg, streaming=streaming)
+            split = cfg.get("split", "train")
+            ds = dataset[split] if hasattr(dataset, "__getitem__") and split in dataset else dataset
     else:
         raise NotImplementedError(
             f"dataset {dataset_name} is not supported. Please use one of the following:"
             f" {get_supported_vlm_datasets()}."
         )
 
-    # `load_dataset` returns a DatasetDict. Use the configured split.
-    split = SUPPORTED_VLM_DATASET_CONFIG[dataset_name]["config"].get("split", "train")
-    ds = dataset[split] if hasattr(dataset, "__getitem__") and split in dataset else dataset
+    # Streaming datasets: shuffle with bounded buffer and wrap into a torch IterableDataset.
+    if dataset_name == "nemotron_vlm_dataset_v2":
+        with contextlib.suppress(Exception):
+            ds = ds.shuffle(seed=seed, buffer_size=shuffle_buffer_size)
 
     if require_image:
         # Keep only samples with a non-null image field (ScienceQA has both).
         with contextlib.suppress(Exception):
-            ds = ds.filter(lambda ex: ex.get("image", None) is not None)
+            ds = ds.filter(
+                lambda ex: ex.get("image", None) is not None or ex.get("images", None) is not None
+            )
 
     # Select the first `num_samples` entries (or fewer if dataset is smaller).
     try:
         return ds.select(range(min(num_samples, len(ds))))
     except Exception:
-        # For iterable datasets without __len__/select, take first N items.
-        collected = []
-        for i, ex in enumerate(ds):
-            if i >= num_samples:
-                break
-            if not require_image or ex.get("image", None) is not None:
-                collected.append(ex)
-        return collected
+        # For streaming/iterable datasets without __len__/select, wrap for DataLoader iteration.
+        return _HFDatasetsIterableWrapper(ds, num_samples=num_samples)
 
 
 def get_supported_vlm_datasets() -> list[str]:
@@ -105,6 +192,9 @@ def get_vlm_dataset_dataloader(
     device: str | torch.device | None = None,
     max_length: int | None = None,
     require_image: bool = True,
+    subsets: list[str] | None = None,
+    shuffle_buffer_size: int = 10_000,
+    seed: int = 42,
 ) -> DataLoader:
     """Get a dataloader with the dataset name and processor of the target model.
 
@@ -125,7 +215,14 @@ def get_vlm_dataset_dataloader(
     if device is not None:
         device = torch.device(device)
 
-    dataset = _get_vlm_dataset(dataset_name, num_samples=num_samples, require_image=require_image)
+    dataset = _get_vlm_dataset(
+        dataset_name,
+        num_samples=num_samples,
+        require_image=require_image,
+        subsets=subsets,
+        shuffle_buffer_size=shuffle_buffer_size,
+        seed=seed,
+    )
 
     # Legacy path: our internal image processor wrapper (e.g., Mllama).
     if isinstance(processor, MllamaImageProcessor):
@@ -161,8 +258,22 @@ def get_vlm_dataset_dataloader(
         return question
 
     def _collate_fn(examples: list[dict[str, Any]]) -> dict[str, torch.Tensor] | dict[str, Any]:
-        questions = [ex.get("question", "Describe this image.") for ex in examples]
-        images = [ex.get("image", None) for ex in examples]
+        questions = []
+        images = []
+        for ex in examples:
+            q = ex.get("question")
+            if q is None and "messages" in ex:
+                q = _extract_text_from_messages(ex.get("messages"))
+            if q is None:
+                q = "Describe this image."
+            questions.append(q)
+
+            img = ex.get("image", None)
+            if img is None:
+                img = ex.get("images", None)
+                if isinstance(img, list) and img:
+                    img = img[0]
+            images.append(img)
         prompts = [_build_prompt(processor, q) for q in questions]
 
         kwargs: dict[str, Any] = {

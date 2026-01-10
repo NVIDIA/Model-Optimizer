@@ -128,6 +128,9 @@ def make_calib_dataloader(
             device=device,
             max_length=args.calib_seq,
             require_image=True,
+            subsets=getattr(args, "vlm_subsets", None),
+            shuffle_buffer_size=getattr(args, "vlm_shuffle_buffer", 10_000),
+            seed=getattr(args, "vlm_shuffle_seed", 42),
         )
     elif model_type == "mllama":
         assert processor is not None and isinstance(processor, MllamaImageProcessor), (
@@ -953,6 +956,27 @@ def parse_args() -> argparse.Namespace:
         default="scienceqa",
         help=f"VLM calibration dataset name (choices: {get_supported_vlm_datasets()}).",
     )
+    parser.add_argument(
+        "--vlm_subsets",
+        type=str,
+        default="docvqa_cot,chartqa_cot",
+        help=(
+            "Comma-separated subset/config names for multi-subset VLM datasets "
+            "(e.g., nemotron_vlm_dataset_v2)."
+        ),
+    )
+    parser.add_argument(
+        "--vlm_shuffle_buffer",
+        type=int,
+        default=10_000,
+        help="Shuffle buffer size for streaming VLM datasets (higher is more random but downloads more).",
+    )
+    parser.add_argument(
+        "--vlm_shuffle_seed",
+        type=int,
+        default=42,
+        help="Random seed for streaming VLM dataset shuffle.",
+    )
     parser.add_argument("--inference_tensor_parallel", type=int, default=1)
     parser.add_argument("--inference_pipeline_parallel", type=int, default=1)
     parser.add_argument("--awq_block_size", default=0, type=int)
@@ -1119,4 +1143,7 @@ if __name__ == "__main__":
 
     args.dataset = args.dataset.split(",") if args.dataset else None
     args.calib_size = [int(num_sample) for num_sample in args.calib_size.split(",")]
+    args.vlm_subsets = (
+        [s.strip() for s in args.vlm_subsets.split(",") if s.strip()] if args.vlm_subsets else None
+    )
     main(args)
