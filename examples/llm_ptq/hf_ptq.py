@@ -30,6 +30,7 @@ from example_utils import (
     get_tokenizer,
     is_enc_dec,
     is_nemotron_vl,
+    maybe_patch_deepseek_v3_config,
     run_nemotron_vl_preview,
 )
 from torch.utils.data import DataLoader
@@ -270,12 +271,20 @@ def load_model(args: argparse.Namespace):
             )
 
         # Do not use real quant GEMM so the calibration can be more accurate.
+        # Load and patch config for DeepSeek V3 before initializing the model
+        from transformers import AutoConfig
+
+        config_kwargs = {"trust_remote_code": args.trust_remote_code}
+        hf_config = AutoConfig.from_pretrained(args.pyt_ckpt_path, **config_kwargs)
+        hf_config = maybe_patch_deepseek_v3_config(hf_config)
+
         with init_quantized_weights(
             quant_cfg, gpu_mem_percentage=args.gpu_max_mem_percentage, quant_gemm=False
         ):
             model_kwargs = {"trust_remote_code": args.trust_remote_code}
             if args.attn_implementation is not None:
                 model_kwargs["attn_implementation"] = args.attn_implementation
+            model_kwargs["config"] = hf_config
             full_model = AutoModelForCausalLM.from_pretrained(
                 args.pyt_ckpt_path,
                 **model_kwargs,

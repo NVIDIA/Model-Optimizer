@@ -274,6 +274,25 @@ def get_dtype(dtype):
     return dtype
 
 
+def maybe_patch_deepseek_v3_config(hf_config):
+    """Patch DeepSeek V3 config to add missing qk_head_dim attribute if needed.
+
+    Args:
+        hf_config: HuggingFace model config object
+
+    Returns:
+        The patched config object
+    """
+    if hf_config.model_type == "deepseek_v3" and not hasattr(hf_config, "qk_head_dim"):
+        if hasattr(hf_config, "qk_nope_head_dim") and hasattr(hf_config, "qk_rope_head_dim"):
+            hf_config.qk_head_dim = hf_config.qk_nope_head_dim + hf_config.qk_rope_head_dim
+            print(
+                f"Patched DeepSeek V3 config: qk_head_dim = {hf_config.qk_head_dim} "
+                f"(qk_nope_head_dim={hf_config.qk_nope_head_dim} + qk_rope_head_dim={hf_config.qk_rope_head_dim})"
+            )
+    return hf_config
+
+
 def get_model(
     ckpt_path,
     device="cuda",
@@ -301,6 +320,8 @@ def get_model(
     # Load config once and handle VL model detection
     try:
         hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
+        hf_config = maybe_patch_deepseek_v3_config(hf_config)
+
         if is_nemotron_vl(hf_config):
             print(
                 "Detected Nemotron VL model from config. "
