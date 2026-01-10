@@ -26,8 +26,6 @@ from tqdm import tqdm
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
-from modelopt.torch.distill import KDLossConfig
-from modelopt.torch.distill.mode import _convert_for_kd
 from modelopt.torch.distill.plugins.huggingface import KDTrainer
 from modelopt.torch.opt.conversion import restore_from_modelopt_state
 from modelopt.torch.opt.plugins import ModelOptHFTrainer
@@ -255,8 +253,7 @@ class QATTrainer(ModelOptHFTrainer):
         """Train the model."""
         outputs = super().train(*args, **kwargs)
         print_rank_0(
-            "Training completed. Please save the final model using `Trainer.save_model()` "
-            "to preserve ModelOpt states."
+            "Training completed. Please save the final model using `Trainer.save_model()` to preserve ModelOpt states."
         )
         return outputs
 
@@ -271,8 +268,7 @@ class QATTrainer(ModelOptHFTrainer):
             original_type = self.accelerator.state.fsdp_plugin.state_dict_type
             self.accelerator.state.fsdp_plugin.set_state_dict_type("FULL_STATE_DICT")
             outputs = super().save_model(*args, **kwargs)
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
+            self.accelerator.wait_for_everyone()
             if mto.ModeloptStateManager.is_converted(self.accelerator.unwrap_model(self.model)):
                 print_rank_0(
                     "Model saved. To restore, call mto.enable_huggingface_checkpointing() first before loading the "
@@ -370,67 +366,15 @@ class QATTrainer(ModelOptHFTrainer):
 class QADTrainer(QATTrainer, KDTrainer):
     """A drop-in replacement of HuggingFace's Trainer for quantization aware distillation with ModelOpt.
 
-    This class takes additional optional argument `distill_config` to specify the distillation
-    arguments in addition to the `quant_args` argument.
-    For details on `quant_args` see
-    :class:`QATTrainer <QATTrainer>`.
+    This class takes additional arguments for both distillation and quantization configuration.
+    For details, see
+    :class:`QATTrainer <QATTrainer>`
+    and
+    :class:`KDTrainer <modelopt.torch.distill.plugins.huggingface.KDTrainer>`.
     """
 
-    def __init__(
-        self,
-        *args,
-        distill_config=None,
-        **kwargs,
-    ):
-        """Initialize the trainer with modelopt states."""
-        assert distill_config is not None, "`distill_config` is required for QAD."
-        self.distill_config = distill_config
-
-        super().__init__(*args, **kwargs)
-
-        # Note: QAD doesn't work with FSDP wrapped model. We quantize model before the wrapper.
-        # The drawback is that we can't train a model that is bigger than a single GPU memory.
-        # And memory efficient loading doesn't work.
-        self.model.cuda()
-        if self.quant_cfg is not None and not is_quantized(self.model):
-            self._quantize_model()
-        if getattr(self.args, "lora_config", None) is not None:
-            self.model.add_adapter(self.args.lora_config)
-            print_rank_0("Lora adapter added.")
-        self._convert_to_distillation_model()
-
-    def _convert_to_distillation_model(self):
-        """Convert the model to a distillation model."""
-        # We don't need any save/restore feature of the distallation mode, so we skip it here.
-        _convert_for_kd(self.model, KDLossConfig(**self.distill_config))
-        print_rank_0("Distillation model created.")
-
-    def train(self, *args, **kwargs):
-        """Train the model with QAD."""
-        self.compute_loss_func = lambda *args, **kwargs: self.model.compute_kd_loss()
-        return super().train(*args, **kwargs)
-
-    def save_model(
-        self,
-        output_dir: str | None = None,
-        _internal_call: bool = False,
-        export_student: bool = False,
-        *args,
-        **kwargs,
-    ):
-        """Dumps model to disk without teacher model and loss modules.
-
-        Args:
-            output_dir: The directory to save the model and ModelOpt states.
-            export_student: Whether to export the student model.
-        """
-        if self.accelerator.is_fsdp2 and "SHARDED_STATE_DICT" in str(
-            self.accelerator.state.fsdp_plugin.state_dict_type
-        ):
-            if export_student:
-                model = self.accelerator.unwrap_model(self.model)
-                model = model.export()
-            return QATTrainer.save_model(self, output_dir, _internal_call, *args, **kwargs)
-        return KDTrainer.save_model(
-            self, output_dir, _internal_call, export_student, *args, **kwargs
-        )
+    def _quantize_model(self):
+        """Quantize the model."""
+        model = self.accelerator.unwrap_model(self.model)
+        with model.hide_teacher_model(), model.only_student_forward():
+            return super()._quantize_model()

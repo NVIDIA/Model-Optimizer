@@ -73,13 +73,6 @@ def _get_init_kwargs(model_args: ModelArguments) -> dict[str, Any]:
 mto.enable_huggingface_checkpointing()
 
 
-def _teacher_factory(model_name_or_path):
-    """Function to create a teacher model."""
-    return transformers.AutoModelForCausalLM.from_pretrained(
-        model_name_or_path,
-    )
-
-
 def parse_args():
     """Parse configuration file and extract ModelOpt quantization/distillation arguments.
 
@@ -221,14 +214,12 @@ def create_patch_module(quant_args=None, distill_args=None):
                 # Initialize parent classes
                 modelopt_trainer_args = {"quant_args": quant_args}
                 if distill_args and distill_args.distill:
+                    teacher_model = transformers.AutoModelForCausalLM.from_pretrained(
+                        distill_args.teacher_model,
+                    )
                     distill_config = {
-                        "teacher_model": (
-                            _teacher_factory,
-                            (distill_args.teacher_model,),
-                            {},
-                        ),
+                        "teacher_model": teacher_model,
                         "criterion": LMLogitsLoss(),
-                        "expose_minimal_state_dict": False,  # FSDP requires this to be False
                     }
                     modelopt_trainer_args["distill_config"] = distill_config
                 super().__init__(*args, **modelopt_trainer_args, **kwargs)
@@ -249,11 +240,9 @@ def create_patch_modelcard_and_push(module):
     ) -> None:
         original_fn(trainer, *args, **kwargs)
 
-        # export the student model for quantization aware distillation
-        kwargs = {"export_student": True} if hasattr(trainer, "distill_config") else {}
         # save the model in the output directory
         trainer.save_state()
-        trainer.save_model(output_dir=trainer.args.output_dir, **kwargs)
+        trainer.save_model(output_dir=trainer.args.output_dir)
 
     module.create_modelcard_and_push = create_modelcard_and_push
 
