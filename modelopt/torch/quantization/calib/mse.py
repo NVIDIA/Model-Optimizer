@@ -116,6 +116,9 @@ class MseCalibrator(_Calibrator):
         device = x.device
 
         if self._fp8_scale_sweep:
+            global_amax = quant_utils.reduce_amax(x, axis=None, keepdims=False, squeeze_scalar=True)
+            global_amax_expanded = global_amax * torch.ones_like(self._initial_amax)
+
             # Generate all 128 possible FP8 E4M3 values (0-127 as uint8, viewed as float8_e4m3fn)
             # Create uint8 tensor with values 0-127, view as float8_e4m3fn, then convert to float32
             uint8_values = torch.arange(0, 128, dtype=torch.uint8, device=device)
@@ -125,7 +128,6 @@ class MseCalibrator(_Calibrator):
             valid_mask = torch.isfinite(fp8_values) & (fp8_values > 0)
             fp8_values_valid = fp8_values[valid_mask]
 
-            # Scale down by 448 to ensure the range is appropriate for FP8 quantization
             candidates = fp8_values_valid / 448.0
 
             print(
@@ -146,10 +148,8 @@ class MseCalibrator(_Calibrator):
 
         for step, candidate in enumerate(candidates):
             if self._fp8_scale_sweep:
-                # For FP8 scale sweep, use FP8 values as multipliers of initial_amax
-                # This ensures we search in a reasonable range relative to max calibration
                 multiplier = candidate
-                candidate_amax = self._initial_amax * multiplier
+                candidate_amax = global_amax_expanded * multiplier
             else:
                 # For normal MSE calibration, multiply initial amax by the multiplier
                 candidate_amax = self._initial_amax * candidate
