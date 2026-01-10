@@ -49,6 +49,7 @@ from ...qtensor import (
     INT4QTensor,
     INT8QTensor,
     MXFP4QTensor,
+    MXFP8QTensor,
     NF4QTensor,
     NVFP4QTensor,
     QTensorWrapper,
@@ -684,7 +685,16 @@ class TensorQuantizer(nn.Module):
         ):
             # MX quantization
             if self._num_bits == (2, 1):
+                # MXFP4
                 outputs, scales = MXFP4QTensor.quantize(inputs, self._block_sizes[-1])
+                buffer_to_register["_scale"] = scales
+            elif self._num_bits == (4, 3):
+                # MXFP8
+                assert self._block_sizes[-1] == MXFP8QTensor.BLOCK_SIZE, (
+                    f"MXFP8 requires block size {MXFP8QTensor.BLOCK_SIZE}, "
+                    f"got {self._block_sizes[-1]}"
+                )
+                outputs, scales = MXFP8QTensor.quantize(inputs)
                 buffer_to_register["_scale"] = scales
             else:
                 raise ValueError(
