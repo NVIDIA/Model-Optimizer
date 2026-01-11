@@ -328,21 +328,15 @@ class PrecisionConverter:
                 subgraph_outputs = set()
                 for node in g.node:
                     subgraph_outputs.update(node.output)
-            # Clear type/shape information for intermediates and outputs
-            for vi in g.value_info:
-                vi.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
-                if not self.use_standalone_type_inference:
-                    for idx, d in enumerate(vi.type.tensor_type.shape.dim):
-                        if d.dim_value:
-                            vi.type.tensor_type.shape.dim[idx].dim_param = "unk"
 
                 # Clear value_info only for intermediates produced by nodes in this subgraph
                 for vi in g.value_info:
                     if vi.name in subgraph_outputs:
                         vi.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
-                        for idx, d in enumerate(vi.type.tensor_type.shape.dim):
-                            if d.dim_value:
-                                vi.type.tensor_type.shape.dim[idx].dim_param = "unk"
+                        if not self.use_standalone_type_inference:
+                            for idx, d in enumerate(vi.type.tensor_type.shape.dim):
+                                if d.dim_value:
+                                    vi.type.tensor_type.shape.dim[idx].dim_param = "unk"
             else:
                 for vi in g.value_info:
                     vi.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
