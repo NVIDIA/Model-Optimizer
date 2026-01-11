@@ -797,13 +797,12 @@ def _infer_types_only(model: onnx.ModelProto) -> onnx.ModelProto:
             tensor_types[init_name] = init.data_type
 
         # Helper function to get tensor type
-        def get_tensor_type(tensor_name: str) -> int | None:
+        def get_tensor_type_from_name(tensor_name: str) -> int | None:
             if tensor_name in tensor_types:
                 return tensor_types[tensor_name]
             if tensor_name in value_info_map:
                 vi = value_info_map[tensor_name]
-                if vi.type.HasField("tensor_type"):
-                    return vi.type.tensor_type.elem_type
+                return _get_tensor_type(vi)
             return None
 
         # Process nodes in topological order (single pass)
@@ -811,9 +810,10 @@ def _infer_types_only(model: onnx.ModelProto) -> onnx.ModelProto:
             # Get input types for this node
             input_types = []
             for inp_name in node.input:
+                # an empty tensor name is typically a sign of an optional input, skip it
                 if not inp_name:
                     continue
-                inp_type = get_tensor_type(inp_name)
+                inp_type = get_tensor_type_from_name(inp_name)
                 if inp_type is None:
                     raise ValueError(f"Input {inp_name} of node {node.name} has unknown type")
                 input_types.append(inp_type)
@@ -844,7 +844,7 @@ def _infer_types_only(model: onnx.ModelProto) -> onnx.ModelProto:
                 if output_dtype is not None:
                     output_types = [output_dtype]
                 elif len(node.input) >= 2 and node.input[1]:
-                    scale_type = get_tensor_type(node.input[1])
+                    scale_type = get_tensor_type_from_name(node.input[1])
                     if scale_type is not None:
                         output_types = [scale_type]
                     else:
@@ -866,7 +866,7 @@ def _infer_types_only(model: onnx.ModelProto) -> onnx.ModelProto:
                 if output_dtype is not None:
                     output_types = [output_dtype] * len(node.output)
                 elif len(node.input) >= 3 and node.input[2]:
-                    zero_point_type = get_tensor_type(node.input[2])
+                    zero_point_type = get_tensor_type_from_name(node.input[2])
                     if zero_point_type is not None:
                         output_types = [zero_point_type]
                     else:

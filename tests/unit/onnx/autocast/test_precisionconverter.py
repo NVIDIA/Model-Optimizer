@@ -622,7 +622,7 @@ def test_dynamic_model_conversion(model_with_dynamic_shapes, use_standalone_type
         use_standalone_type_inference=use_standalone_type_inference,
     )
     high_precision_nodes = ["matmul"]
-    low_precision_nodes = ["transpose", "concat", "size", "div", "concat_dims", "reshape"]
+    low_precision_nodes = ["transpose", "concat1", "size", "div", "concat2", "reshape"]
 
     converted_model = converter2.convert(high_precision_nodes, low_precision_nodes)
     # Verify model is valid
