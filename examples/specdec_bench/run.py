@@ -18,7 +18,13 @@ import asyncio
 
 import yaml
 from specdec_bench import datasets, metrics, models, runners
-from specdec_bench.utils import decode_chat, encode_chat, get_tokenizer, postprocess_base
+from specdec_bench.utils import (
+    decode_chat,
+    encode_chat,
+    get_tokenizer,
+    postprocess_base,
+    postprocess_gptoss,
+)
 
 engines_available = {
     "TRTLLM": models.TRTLLMPYTModel,
@@ -109,7 +115,12 @@ def run_simple(args):
         metrics_list.insert(0, metrics.AcceptanceRate())
     runner = runners.SimpleRunner(model, metrics=metrics_list)
 
-    postprocess = postprocess_base
+    if args.postprocess == "base":
+        postprocess = postprocess_base
+    elif args.postprocess == "gptoss":
+        postprocess = postprocess_gptoss
+    else:
+        raise ValueError(f"Invalid postprocess: {args.postprocess}")
 
     asyncio.run(
         run_loop(runner, dataset, tokenizer, args.output_length, postprocess, args.concurrency)
@@ -183,6 +194,15 @@ if __name__ == "__main__":
         help="Maximum number of concurrent requests",
     )
     parser.add_argument("--aa_timing", action="store_true", help="Enable AA timing metric")
+    parser.add_argument(
+        "--postprocess",
+        type=str,
+        required=False,
+        default="base",
+        choices=["base", "gptoss"],
+        help="Postprocess to use",
+    )
+
     args = parser.parse_args()
 
     if args.runtime_params is not None:
