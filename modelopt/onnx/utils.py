@@ -769,13 +769,16 @@ def _infer_types_only(model: onnx.ModelProto) -> onnx.ModelProto:
         try:
             gs_graph = gs.import_onnx(temp_model)
             gs_graph.toposort()
+            # Convert back to ONNX to get topologically sorted nodes
+            sorted_model = gs.export_onnx(gs_graph)
+            sorted_graph = sorted_model.graph
         except Exception as e:
             logger.debug(
                 f"Graphsurgeon toposort failed for {'subgraph' if is_subgraph else 'main graph'},"
                 f"using original order: {e!s}"
             )
             # Fallback: process nodes in original order
-            gs_graph = None
+            sorted_graph = graph
 
         # Create mappings for quick lookup for this graph
         initializer_map = {init.name: init for init in graph.initializer}
@@ -803,66 +806,8 @@ def _infer_types_only(model: onnx.ModelProto) -> onnx.ModelProto:
                     return vi.type.tensor_type.elem_type
             return None
 
-        def str_to_tensor_dtype(dtype_str: str) -> onnx.TensorProto.DataType:
-            """Converts a string representation of a tensor dtype to an onnx.TensorProto.DataType."""
-            _str_to_tensor_dtype = {
-                "float": onnx.TensorProto.FLOAT,
-                "uint8": onnx.TensorProto.UINT8,
-                "int8": onnx.TensorProto.INT8,
-                "uint16": onnx.TensorProto.UINT16,
-                "int16": onnx.TensorProto.INT16,
-                "int32": onnx.TensorProto.INT32,
-                "int64": onnx.TensorProto.INT64,
-                "string": onnx.TensorProto.STRING,
-                "bool": onnx.TensorProto.BOOL,
-                "float16": onnx.TensorProto.FLOAT16,
-                "double": onnx.TensorProto.DOUBLE,
-                "uint32": onnx.TensorProto.UINT32,
-                "uint64": onnx.TensorProto.UINT64,
-                "complex64": onnx.TensorProto.COMPLEX64,
-                "complex128": onnx.TensorProto.COMPLEX128,
-                "bfloat16": onnx.TensorProto.BFLOAT16,
-                "float8e4m3fn": onnx.TensorProto.FLOAT8E4M3FN,
-                "float8e4m3fnuz": onnx.TensorProto.FLOAT8E4M3FNUZ,
-                "float8e5m2": onnx.TensorProto.FLOAT8E5M2,
-                "float8e5m2fnuz": onnx.TensorProto.FLOAT8E5M2FNUZ,
-                "uint4": onnx.TensorProto.UINT4,
-                "int4": onnx.TensorProto.INT4,
-                "float4e2m1": onnx.TensorProto.FLOAT4E2M1,
-                "float8e8m0": onnx.TensorProto.FLOAT8E8M0,
-            }
-            try:
-                str_sanitized = dtype_str.replace("tensor(", "").replace(")", "")
-                return _str_to_tensor_dtype[str_sanitized]
-            except KeyError:
-                raise ValueError(f"Invalid tensor dtype string: {str_sanitized}")
-
-        # Create mapping from node name to ONNX node for efficient lookup
-        node_name_to_onnx = {node.name: node for node in graph.node}
-
-        # Get nodes to process (from graphsurgeon if available, otherwise from graph directly)
-        if gs_graph is not None:
-            nodes_to_process = gs_graph.nodes
-        else:
-            nodes_to_process = graph.node
-
         # Process nodes in topological order (single pass)
-        for gs_node_or_onnx_node in nodes_to_process:
-            # Get corresponding ONNX node
-            if gs_graph is not None:
-                # From graphsurgeon
-                node = node_name_to_onnx.get(gs_node_or_onnx_node.name)
-            else:
-                # Direct from graph
-                node = gs_node_or_onnx_node
-
-            if node is None:
-                if gs_graph is not None:
-                    logger.debug(
-                        f"Could not find ONNX node for graphsurgeon node: {gs_node_or_onnx_node.name}"
-                    )
-                continue
-
+        for node in sorted_graph.node:
             # Get input types for this node
             input_types = []
             for inp_name in node.input:
@@ -1029,7 +974,7 @@ def _infer_types_only(model: onnx.ModelProto) -> onnx.ModelProto:
                         for output_idx in range(len(node.output)):
                             # explicit type is set in schema, use it
                             if "tensor" in output_schemas[output_idx]:
-                                found_type = str_to_tensor_dtype(output_schemas[output_idx])
+                                found_type = onnx_type_str_to_enum(output_schemas[output_idx])
                                 output_types[output_idx] = found_type
                                 continue
                             # sometimes output type is set with a placeholder name despite supporting a single type
@@ -1038,7 +983,7 @@ def _infer_types_only(model: onnx.ModelProto) -> onnx.ModelProto:
                                 # If output type constraint has only one allowed type, use it directly
                                 if constraint.type_param_str == output_schemas[output_idx]:
                                     if len(constraint.allowed_type_strs) == 1:
-                                        found_type = str_to_tensor_dtype(
+                                        found_type = onnx_type_str_to_enum(
                                             constraint.allowed_type_strs[0]
                                         )
                                         output_types[output_idx] = found_type
