@@ -36,10 +36,7 @@ def setup_mappings(
     model: onnx.ModelProto, use_standalone_type_inference: bool = False
 ) -> tuple[onnx.ModelProto, dict, dict, dict]:
     # Setup internal mappings
-    if use_standalone_type_inference:
-        model = onnx_utils.infer_types(model)
-    else:
-        model = onnx_utils.infer_shapes(model)
+    model = onnx_utils.infer_types(model, use_standalone_type_inference)
     value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
     return model, value_info_map, initializer_map, node_to_init_map
 

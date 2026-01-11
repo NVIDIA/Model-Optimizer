@@ -136,10 +136,7 @@ def convert_to_mixed_precision(
     model = graph_sanitizer.model
 
     # Setup internal mappings
-    if use_standalone_type_inference:
-        model = onnx_utils.infer_types(model)
-    else:
-        model = onnx_utils.infer_shapes(model)
+    model = onnx_utils.infer_types(model, use_standalone_type_inference)
     value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
 
     # Automatically add 'trt' to list of providers if custom ops are detected
@@ -237,10 +234,7 @@ def convert_to_f16(
     model = sanitizer.model
 
     # Setup internal mappings
-    if use_standalone_type_inference:
-        model = onnx_utils.infer_types(model)
-    else:
-        model = onnx_utils.infer_shapes(model)
+    model = onnx_utils.infer_types(model, use_standalone_type_inference)
     value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
 
     precision_converter = PrecisionConverter(

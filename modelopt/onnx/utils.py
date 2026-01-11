@@ -728,8 +728,10 @@ def get_attribute(node: onnx.NodeProto, attr_name: str) -> Any:
     raise ValueError(f"Attribute {attr_name} not found in node {node.name}")
 
 
-def infer_types(model: onnx.ModelProto) -> onnx.ModelProto:
+def _infer_types_only(model: onnx.ModelProto) -> onnx.ModelProto:
     """Infers types (but not shapes) of the onnx graph using local implementation.
+
+    This is an internal function. Use infer_types() as the public API.
 
     This is a workaround for cases when ONNX's shape inference fails.
     ONNX's infer_shapes performs both shape and type inference together, but for AutoCast, we only
@@ -1155,6 +1157,29 @@ def infer_shapes(model: onnx.ModelProto, **kwargs):
         return model
     else:
         return onnx.shape_inference.infer_shapes(model, **kwargs)
+
+
+def infer_types(
+    model: onnx.ModelProto, use_standalone_type_inference: bool = False, **kwargs
+) -> onnx.ModelProto:
+    """Infers types (and optionally shapes) based on the use_standalone_type_inference flag.
+
+    When use_standalone_type_inference is True, uses a standalone type inference implementation
+    that only infers types. Otherwise, uses ONNX's infer_shapes which infers both types and shapes.
+
+    Args:
+        model: ONNX model to infer types/shapes for.
+        use_standalone_type_inference: If True, use standalone type inference (_infer_types_only).
+                                       If False, use ONNX's shape inference (infer_shapes).
+        **kwargs: Additional arguments passed to infer_shapes when not using standalone type inference.
+
+    Returns:
+        onnx.ModelProto: Model with inferred types (and shapes if not using standalone type inference).
+    """
+    if use_standalone_type_inference:
+        return _infer_types_only(model)
+    else:
+        return infer_shapes(model, **kwargs)
 
 
 def onnx_type_str_to_enum(dtype: str) -> int:

@@ -160,20 +160,6 @@ class PrecisionConverter:
         self._warned_values_clamp_max = False
         self._warned_values_clamp_min = False
 
-    def infer_types(self, **kwargs):
-        """Infers types (and optionally shapes) based on the use_standalone_type_inference flag.
-
-        Args:
-            **kwargs: Additional arguments passed to infer_shapes when not using local type inference.
-
-        Returns:
-            onnx.ModelProto: Model with inferred types (and shapes if not using local type inference).
-        """
-        if self.use_standalone_type_inference:
-            return onnx_utils.infer_types(self.model)
-        else:
-            return onnx_utils.infer_shapes(self.model, **kwargs)
-
     def convert(
         self,
         high_precision_nodes: list[str],
@@ -271,10 +257,14 @@ class PrecisionConverter:
             # Clear type/shape information for intermediates and outputs (including subgraphs)
             self._clear_types_and_shapes_recursive(self.model.graph)
             # Populate type information with inferred types
-            self.model = self.infer_types(strict_mode=True, check_type=False)
+            self.model = onnx_utils.infer_types(
+                self.model, self.use_standalone_type_inference, strict_mode=True, check_type=False
+            )
             self._ensure_types_are_defined()
             # Sanity check: Verify type correctness
-            self.model = self.infer_types(strict_mode=True, check_type=True)
+            self.model = onnx_utils.infer_types(
+                self.model, self.use_standalone_type_inference, strict_mode=True, check_type=True
+            )
 
         # Update value_info_map and initializer_map with casts we added
         self.value_info_map, self.initializer_map, self.node_to_init_map = utils.setup_mappings(
@@ -1195,9 +1185,16 @@ class PrecisionConverter:
         if self.custom_ops:
             self.model = self._propagate_types_shapes_custom_ops(self.model)
         else:
-            self.model = self.infer_types(strict_mode=True)
+            self.model = onnx_utils.infer_types(
+                self.model, self.use_standalone_type_inference, strict_mode=True
+            )
             if not self.use_standalone_type_inference:
-                self.model = self.infer_types(strict_mode=True, check_type=True)
+                self.model = onnx_utils.infer_types(
+                    self.model,
+                    self.use_standalone_type_inference,
+                    strict_mode=True,
+                    check_type=True,
+                )
 
         nodes_to_remove = []
         for node in self.model.graph.node:
@@ -1282,7 +1279,12 @@ class PrecisionConverter:
             if self.custom_ops:
                 self.model = self._propagate_types_shapes_custom_ops(self.model)
             else:
-                self.model = self.infer_types(strict_mode=True, check_type=True)
+                self.model = onnx_utils.infer_types(
+                    self.model,
+                    self.use_standalone_type_inference,
+                    strict_mode=True,
+                    check_type=True,
+                )
             self.value_info_map, self.initializer_map, self.node_to_init_map = utils.setup_mappings(
                 self.model
             )
