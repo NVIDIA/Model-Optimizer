@@ -1,6 +1,13 @@
 defaults:
   - pruning_defaults
 
+pruning_mixin:
+  _target_: modelopt.torch._compress.pruning.ffn_intermediate_pruning_mixin.FFNIntermediatePruningMixIn
+  layer_descriptor:
+    _target_: modelopt.torch._compress.anymodel.models.llama.llama_model_descriptor.LlamaFFNIntermediateLayerDescriptor
+
+hook_class: ${get_object:modelopt.torch.nas.plugins.megatron_hooks.base_hooks.IterativeChannelContributionHook}
+
 activations_log_dir: ${puzzle_dir}/pruning/pruning_scores/ffn_${pruning.activation_hooks_kwargs.method}/${pruning.experiment_id}
 
 activation_hooks_kwargs:

@@ -23,6 +23,8 @@ import torch.nn as nn
 from modelopt.torch._compress.decilm.deci_lm_hf_code.block_config import BlockConfig
 from modelopt.torch._compress.utils.dummy_modules import DummyBlock
 
+__all__ = ["ModelDescriptor"]
+
 
 class ModelDescriptor(ABC):
     @staticmethod

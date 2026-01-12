@@ -7,6 +7,7 @@ defaults:
   - _self_
 
 puzzle_dir: ???
+descriptor: llama
 teacher_dir: ${puzzle_dir}/ckpts/teacher/
 replacement_library_path: ${puzzle_dir}/replacement_library.json
 dataset_path: ??? # ppath to Nemotron-Post-Training-Dataset-v2
@@ -32,6 +33,7 @@ calc_subblock_stats:
     backend: trt_torch
 
 scoring:
+  descriptor: ${descriptor}
   solutions_to_validate:
   skip_existing_solutions: true
 
@@ -84,6 +86,7 @@ mip:
   max_seconds_per_solution: 60
 
 realize_model:
+  descriptor: ${descriptor}
   teacher_dir: ${to_path:${teacher_dir}}
   tokenizer_name: ${to_path:${teacher_dir}}
   replacement_library_path: ${replacement_library_path}

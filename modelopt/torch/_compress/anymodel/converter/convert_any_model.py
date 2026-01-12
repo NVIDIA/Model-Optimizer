@@ -22,6 +22,8 @@ from modelopt.torch._compress.anymodel.converter.converter import Converter
 from modelopt.torch._compress.anymodel.converter.converter_factory import ConverterFactory
 from modelopt.torch._compress.anymodel.model_descriptor import ModelDescriptorFactory
 
+__all__ = ["convert_model"]
+
 
 def convert_model(
     input_dir: str,

@@ -1,6 +1,7 @@
 defaults:
   - /validate_model_defaults
 
+descriptor: ${descriptor}
 model_name_or_path: ${teacher_dir}
 experiment_id: ${pruning.eval_samples}samples_diverse_mini
 activations_log_dir: ???

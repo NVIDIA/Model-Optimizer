@@ -16,13 +16,14 @@
 """
 Compress NAS plugin for the Modelopt framework (based on Puzzle algorithm: https://arxiv.org/abs/2411.19146).
 
-It is used by mtn.convert() to convert a model from HF format to DeciLM format + do pruning scoring
+It is used by mtn.convert() to convert a model from HF format to Puzzletron heterogeneous format + do pruning scoring
 and save pruned checkpoints, and by mtn.search() to perform the MIP-based NAS search.
 """
 
 import datetime
 from pathlib import Path
 
+import hydra
 import torch
 from torch import nn
 
@@ -32,9 +33,8 @@ import modelopt.torch._compress.scoring.scoring as scoring
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress import build_library_and_stats
 from modelopt.torch._compress.activation_scoring import score_pruning_activations
-from modelopt.torch._compress.decilm.converters.convert_llama3_to_decilm import (
-    convert_llama3_to_decilm,
-)
+from modelopt.torch._compress.anymodel.converter import ConverterFactory
+from modelopt.torch._compress.anymodel.model_descriptor import ModelDescriptorFactory
 from modelopt.torch._compress.tools.hydra_utils import initialize_hydra_config_for_dir
 from modelopt.torch._compress.tools.logger import mprint
 from modelopt.torch.nas.conversion import NASModeRegistry
@@ -93,7 +93,7 @@ class CompressConfig(ModeloptBaseConfig):
 
 
 def convert_compress_model(model: nn.Module, config: CompressConfig) -> ConvertReturnType:
-    """1. Convert the model from HF format to DeciLM format.
+    """1. Convert the model from HF format to AnyModel format.
     2. Score the pruning activations.
     3. Prune the model and save pruned checkpoints
 
@@ -114,14 +114,22 @@ def convert_compress_model(model: nn.Module, config: CompressConfig) -> ConvertR
             f"dataset_path={config.dataset_path}",
         ],
     )
+    # Instantiate nested Hydra configs (e.g., pruning_mixin, hook_class)
+    hydra_cfg = hydra.utils.instantiate(hydra_cfg)
 
-    # Convert Llama3 model to DeciLM model
-    # TODO: Make it generic, do not call convert_llama3_to_decilm directly.
+    # Convert HuggingFace model to Puzzletron heterogeneous format (generic, uses descriptor from config)
     if dist.is_master():
-        mprint("Compress Progress 2/8: converting model from HF to DeciLM (single-gpu)")
+        mprint("Compress Progress 2/8: converting model to Puzzletron hete format (single-gpu)")
         hf_ckpt_teacher_dir = "ckpts/teacher"  # TODO: make it configurable
-        convert_llama3_to_decilm(
-            input_dir=config.input_model_path,
+
+        # Get descriptor and converter from the hydra config
+        descriptor_name = hydra_cfg.descriptor
+        descriptor = ModelDescriptorFactory.get(descriptor_name)
+        converter = ConverterFactory.get(descriptor_name)
+
+        converter.convert(
+            descriptor=descriptor,
+            input_dir=Path(config.input_model_path),
             output_dir=Path(config.puzzle_dir) / hf_ckpt_teacher_dir,
         )
     dist.barrier()
@@ -205,6 +213,8 @@ class CompressSearcher(BaseSearcher):
                 f"dataset_path={self.model.dataset_path}",
             ],
         )
+        # Instantiate nested Hydra configs (e.g., pruning_mixin, hook_class)
+        hydra_cfg = hydra.utils.instantiate(hydra_cfg)
 
         # Build_library_and_stats (single process)
         if dist.is_master():

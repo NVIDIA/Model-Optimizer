@@ -31,6 +31,8 @@ from transformers import AutoConfig, PretrainedConfig
 from modelopt.torch._compress.anymodel.model_descriptor import ModelDescriptor
 from modelopt.torch._compress.decilm.deci_lm_hf_code.block_config import BlockConfig
 
+__all__ = ["Converter"]
+
 
 def load_model_config(checkpoint_path: Path) -> PretrainedConfig:
     """Load model config from a checkpoint directory."""

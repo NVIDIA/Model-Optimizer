@@ -12,7 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Converters for transforming HuggingFace models to AnyModel format."""
 
-from modelopt.torch._compress.anymodel.converter.convert_any_model import convert_model
-from modelopt.torch._compress.anymodel.converter.converter import Converter
-from modelopt.torch._compress.anymodel.converter.converter_factory import ConverterFactory
+from .convert_any_model import *
+from .converter import *
+from .converter_factory import *

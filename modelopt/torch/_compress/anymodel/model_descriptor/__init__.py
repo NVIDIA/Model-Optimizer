@@ -12,8 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Model descriptors for defining model-specific properties and layer naming conventions."""
 
-from modelopt.torch._compress.anymodel.model_descriptor.model_descriptor import ModelDescriptor
-from modelopt.torch._compress.anymodel.model_descriptor.model_descriptor_factory import (
-    ModelDescriptorFactory,
-)
+from .model_descriptor import *
+from .model_descriptor_factory import *

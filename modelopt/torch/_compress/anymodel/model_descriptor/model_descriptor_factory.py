@@ -19,6 +19,8 @@ from typing import Callable, Type
 
 from modelopt.torch._compress.anymodel.model_descriptor.model_descriptor import ModelDescriptor
 
+__all__ = ["ModelDescriptorFactory"]
+
 
 class ModelDescriptorFactory:
     """Factory for registering and retrieving ModelDescriptor classes."""
