@@ -82,6 +82,7 @@ mip:
   max_seconds_per_solution: 60
 
 realize_model:
+  descriptor: ${descriptor}
   teacher_dir: ${to_path:${teacher_dir}}
   tokenizer_name: ${to_path:${teacher_dir}}
   replacement_library_path: ${replacement_library_path}
