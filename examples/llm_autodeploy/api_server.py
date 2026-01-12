@@ -60,7 +60,7 @@ def build_runner_from_config(args) -> LLM:
         model_kwargs=model_kwargs,
         attn_backend="triton",
     )
-    llm = LLM(**ad_config.to_dict())
+    llm = LLM(**ad_config.to_llm_kwargs())
 
     return llm
 
