@@ -24,6 +24,8 @@ Memory savings and inference speedup are compared to the ONNX FP16 baseline.
 
 ### 1.2 Accuracy Comparison
 
+#### 1.2.1 MMLU Scores
+
 For accuracy evaluation, the [Massive Multitask Language Understanding (MMLU)](https://arxiv.org/abs/2009.03300) benchmark has been utilized. Please refer to the [detailed instructions](./accuracy_benchmark/README.md) for running the MMLU accuracy benchmark.
 
 The table below shows the MMLU 5-shot score for some models.
@@ -39,3 +41,52 @@ The table below shows the MMLU 5-shot score for some models.
 | [Mistral-7B-Instruct-v0.3](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3) | 61.76 | 60.73 |
 | [Llama3.2-3B-Instruct](https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct) | 60.8 | 57.71 |
 | [Gemma-2b-it](https://huggingface.co/google/gemma-2b-it) | 37.01 | 37.2 |
+
+#### 1.2.2 Perplexity (PPL)
+
+Perplexity measures how well a probability model predicts a sample. Lower perplexity values indicate better model quality. The following table shows perplexity values at input sequence length 1024 with chunk size of 512.
+
+**Learn more about Perplexity:** [Perplexity - Wikipedia](https://en.wikipedia.org/wiki/Perplexity) | [Hugging Face - Perplexity of Fixed-Length Models](https://huggingface.co/docs/transformers/en/perplexity)
+
+- **FP16-MB**: Baseline FP16 genai model (Model Builder)
+- **Mixed AWQ-MO**: Mixed precision AWQ quantization using ModelOpt
+- **Mixed RTN-MO**: Mixed precision RTN quantization using ModelOpt
+- **Pure INT4 AWQ-MO**: Pure INT4 AWQ quantization using ModelOpt
+- **Pure INT4 RTN-MO**: Pure INT4 RTN quantization using ModelOpt
+- **Pure INT8 RTN-MO**: Pure INT8 RTN quantization using ModelOpt
+- **Pure INT8 AWQ-MO**: Pure INT8 AWQ quantization using ModelOpt
+- **Configuration**: Windows OS, GPU RTX 5090, nvidia-modelopt v0.39.0, onnxruntime-genai-cuda 0.9.2, onnxruntime-gpu 1.23.0, torch 2.8.0+cu128, transformers 4.49.0
+
+| Model | FP16-MB | Mixed AWQ-MO | Mixed RTN-MO | Pure INT4 AWQ-MO | Pure INT4 RTN-MO | Pure INT8 RTN-MO | Pure INT8 AWQ-MO |
+|:------|:--------|:-------------|:-------------|:-----------------|:-----------------|:-----------------|:-----------------|
+| DeepSeek R1 Distill Qwen 1.5B | 39.447 | 41.699 | 44.332 | 44.213 | 46.304 | 39.802 | 39.713 |
+| Llama 3.2 1B Instruct | 12.631 | 13.852 | 14.176 | 14.549 | 16.900 | 12.664 | 12.637 |
+| Phi-3.5 Mini Instruct | 6.046 | 6.500 | 6.599 | 6.711 | 7.070 | - | - |
+| Phi-4 Mini Instruct | 9.039 | 9.673 | 9.712 | 10.015 | 10.911 | - | - |
+| Qwen 2.5 1.5B Instruct | 9.216 | 10.084 | 10.338 | 10.495 | 10.933 | 9.227 | 9.232 |
+
+For detailed instructions on evaluating perplexity, please refer to the [Perplexity Evaluation Guide](./accuracy_benchmark/perplexity_metrics/README.md).
+
+#### 1.2.3 KL-divergence
+
+KL-divergence (Kullback-Leibler divergence) quantifies the distributional difference between the quantized model and the baseline model. Lower KL-divergence values indicate that the quantized model's output distribution is closer to the original model.
+
+**Learn more about KL-divergence:** [KL Divergence - Wikipedia](https://en.wikipedia.org/wiki/Kullback%E2%80%93Leibler_divergence) | [Understanding KL Divergence](https://www.countbayesie.com/blog/2017/5/9/kullback-leibler-divergence-explained)
+
+- **Baseline model**: Hugging Face FP16 model
+- **Quantized models**: Generated using ModelOpt fake quantization
+- **Configuration**: Windows OS, GPU RTX 5090, nvidia-modelopt v0.39.0, onnxruntime-genai-cuda 0.9.2, onnxruntime-gpu 1.23.0, torch 2.8.0+cu128, transformers 4.49.0
+
+| Model | Quantization Method | Block-size | KL-divergence | Notes |
+|:------|:--------------------|:-----------|:--------------|:------|
+| Qwen2.5-1.5B-Instruct | Base FP16 (Baseline) | - | 0.000 | Reference baseline |
+| Qwen2.5-1.5B-Instruct | fake int4+int8 Blockwise-max-mixed | 128 (blockwise) | 0.336 | Blockwise quantization |
+| Qwen2.5-1.5B-Instruct | fake int4+int8 max-mixed | 128, -1 (per-channel) | 0.337 | Per-channel quantization |
+| Llama-3.2-3B-Instruct | Base FP16 (Baseline) | - | 0.000 | Reference baseline |
+| Llama-3.2-3B-Instruct | fake int4+int8 Blockwise-awq-lite-mixed | 128 (blockwise) | 0.228 | Best: Lowest divergence |
+| Llama-3.2-3B-Instruct | fake int4+int8 per-channel-awq-lite-mixed | 128, -1 (per-channel) | 0.230 | AWQ-lite per-channel |
+| Llama-3.2-3B-Instruct | fake int4+int8 Blockwise-max-mixed | 128 (blockwise) | 0.238 | Max-mixed blockwise |
+| Llama-3.2-3B-Instruct | fake int4+int8 per-channel-max-mixed | 128, -1 (per-channel) | 0.238 | Max-mixed per-channel |
+| Llama-3.2-3B-Instruct | fake int4-Blockwise-max | 128 (blockwise) | 0.334 | INT4 only (no INT8 activation) |
+
+For detailed instructions on computing KL-divergence, please refer to the [KL-divergence Evaluation Guide](./accuracy_benchmark/kl_divergence_metrics/README.md).
