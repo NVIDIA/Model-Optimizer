@@ -60,7 +60,10 @@ def build_runner_from_config(args) -> LLM:
         model_kwargs=model_kwargs,
         attn_backend="triton",
     )
-    llm = LLM(**ad_config.to_dict())
+    llm_kwargs = ad_config.to_dict()
+    # Remove 'yaml_default' to avoid conflict with 'mode' in LLM constructor
+    llm_kwargs.pop("yaml_default", None)
+    llm = LLM(**llm_kwargs)
 
     return llm
 
