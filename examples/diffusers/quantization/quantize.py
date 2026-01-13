@@ -704,7 +704,7 @@ class PipelineManager:
             # Load text encoders
             if self.config.text_encoder_path:
                 self.logger.info(f"Loading CLIP text encoder from: {self.config.text_encoder_path}")
-                from transformers import CLIPTextModelWithProjection, CLIPTextConfig
+                from transformers import CLIPTextConfig
                 
                 # Load config and create model
                 try:
@@ -717,7 +717,8 @@ class PipelineManager:
                     clip_config = CLIPTextConfig.from_pretrained("openai/clip-vit-large-patch14")
                 
                 # Create model and load weights from safetensors
-                text_encoder = CLIPTextModelWithProjection(clip_config)
+                # Use CLIPTextModel to keep pooler_output available for Flux pipelines.
+                text_encoder = CLIPTextModel(clip_config)
                 clip_state_dict = load_file(str(self.config.text_encoder_path))
                 text_encoder.load_state_dict(clip_state_dict, strict=False)
                 del clip_state_dict
