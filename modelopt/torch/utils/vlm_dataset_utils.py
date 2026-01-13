@@ -104,22 +104,6 @@ def _messages_up_to_last_user(messages: Any) -> list[dict[str, Any]] | None:
     return [m for m in trimmed if isinstance(m, dict)]
 
 
-def _messages_has_image(messages: Any) -> bool:
-    """Return True if `messages` contains an image content item."""
-    if not isinstance(messages, list):
-        return False
-    for msg in messages:
-        if not isinstance(msg, dict):
-            continue
-        content = msg.get("content")
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            if isinstance(part, dict) and part.get("type") == "image":
-                return True
-    return False
-
-
 def _extract_first_image_from_messages(messages: Any) -> Any:
     """Best-effort extraction of an image object from a chat-style `messages` field."""
     if not isinstance(messages, list):
@@ -307,7 +291,7 @@ def _get_vlm_dataset(
             ds = ds.filter(
                 lambda ex: ex.get("image", None) is not None
                 or ex.get("images", None) is not None
-                or _messages_has_image(ex.get("messages"))
+                or _extract_first_image_from_messages(ex.get("messages")) is not None
             )
 
     # Select the first `num_samples` entries (or fewer if dataset is smaller).
@@ -476,15 +460,6 @@ def get_vlm_dataset_dataloader(
         if hasattr(enc, "data"):
             enc = enc.data
         out: dict[str, Any] = dict(enc)
-
-        # Nemotron Nano VL v2 expects `image_flags` in forward(), but the processor does not emit it.
-        # `pixel_values` is flattened across batch*images, so `image_flags` should align with pixel_values.shape[0].
-        if out.get("pixel_values") is not None and out.get("image_flags") is None:
-            pv = out["pixel_values"]
-            if torch.is_tensor(pv):
-                out["image_flags"] = torch.ones(
-                    (pv.shape[0], 1), device=pv.device, dtype=torch.long
-                )
 
         # Move tensors to device if requested.
         if device is not None:

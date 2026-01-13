@@ -41,7 +41,16 @@ def safe_nemotron_vl_forward(full_model: torch.nn.Module, batch: dict[str, Any])
     position_ids = batch.get("position_ids")
     image_flags = batch.get("image_flags")
 
-    if pixel_values is None or input_ids is None or image_flags is None:
+    if pixel_values is None or input_ids is None:
+        return
+
+    # Nemotron Nano VL v2 expects `image_flags` in forward(), but the processor doesn't always emit it.
+    # `pixel_values` is flattened across batch*images, so `image_flags` should align with pixel_values.shape[0].
+    if image_flags is None and torch.is_tensor(pixel_values):
+        image_flags = torch.ones(
+            (pixel_values.shape[0], 1), device=pixel_values.device, dtype=torch.long
+        )
+    if image_flags is None:
         return
 
     # Match the model's preferred vision dtype (usually bf16).
