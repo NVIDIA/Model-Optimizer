@@ -223,7 +223,7 @@ def quantize(
     high_precision_dtype: str = "fp16",
     mha_accumulation_dtype: str = "fp16",
     disable_mha_qdq: bool = False,
-    dq_only: bool = True,
+    dq_only: bool = False,
     block_size: int | None = None,
     use_zero_point: bool = False,
     passes: list[str] = ["concat_elimination"],
@@ -302,7 +302,7 @@ def quantize(
         disable_mha_qdq:
             Don't add Q/DQ layers to MatMuls in MHA pattern.
         dq_only:
-            If True (default), only add DQ nodes to the model. If False, add Q/DQ nodes to the model.
+            If True, only add DQ nodes to the model. If False (default), add Q/DQ nodes to the model.
         block_size:
             Block size parameter for int4 quantization.
         use_zero_point:
