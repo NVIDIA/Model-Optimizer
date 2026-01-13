@@ -49,7 +49,7 @@ from transformers.utils.quantization_config import QuantizationMethod
 
 from ..eagle.conversion import EagleDMRegistry
 from ..eagle.eagle_model import EagleModel
-from ..eagle.utils import RMSNorm, expand_mask, make_causal_mask
+from ..eagle.utils import expand_mask, make_causal_mask
 from ..medusa.conversion import MedusaDMRegistry
 from ..medusa.medusa_model import MedusaModel
 from ..utils import (
@@ -219,7 +219,7 @@ class EagleModule(nn.Module):
             [decoder_layer_cls(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         if config.use_last_layernorm:
-            self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+            self.norm = LlamaRMSNorm(config.hidden_size, config.rms_norm_eps)
 
         # Optionally, we use a smaller vocab table for eagle module
         if config.draft_vocab_size != config.vocab_size or config.has_lm_head:
