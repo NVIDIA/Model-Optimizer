@@ -342,7 +342,11 @@ class _NemotronTarPlusJsonlIterable(torch.utils.data.IterableDataset):
                         if f is None:
                             continue
                         try:
-                            img = Image.open(BytesIO(f.read())).convert("RGB")
+                            raw = f.read()
+                            # Some tarfile stubs type `read()` as returning `str`; normalize to bytes for mypy.
+                            if isinstance(raw, str):
+                                raw = raw.encode()
+                            img = Image.open(BytesIO(raw)).convert("RGB")
                         except Exception:
                             continue
                         meta = meta_by_image.get(name)

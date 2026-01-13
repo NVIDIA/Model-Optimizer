@@ -566,9 +566,9 @@ def mono_quantize(
                             )
                             image_flags_s = image_flags.squeeze(-1)
 
-                            B, N, C = inputs_embeds.shape
-                            flat_embeds = inputs_embeds.reshape(B * N, C)
-                            flat_ids = input_ids.reshape(B * N)
+                            b, n, c = inputs_embeds.shape
+                            flat_embeds = inputs_embeds.reshape(b * n, c)
+                            flat_ids = input_ids.reshape(b * n)
                             selected = flat_ids == full_model.img_context_token_id
 
                             vit_embeds = full_model.extract_feature(pixel_values)
@@ -576,15 +576,15 @@ def mono_quantize(
                             try:
                                 flat_embeds[selected] = flat_embeds[
                                     selected
-                                ] * 0.0 + vit_embeds.reshape(-1, C)
+                                ] * 0.0 + vit_embeds.reshape(-1, c)
                             except Exception:
-                                vit_embeds = vit_embeds.reshape(-1, C)
+                                vit_embeds = vit_embeds.reshape(-1, c)
                                 n_token = selected.sum()
                                 flat_embeds[selected] = (
                                     flat_embeds[selected] * 0.0 + vit_embeds[:n_token]
                                 )
 
-                            inputs_embeds = flat_embeds.reshape(B, N, C)
+                            inputs_embeds = flat_embeds.reshape(b, n, c)
 
                             full_model.language_model(
                                 inputs_embeds=inputs_embeds,
