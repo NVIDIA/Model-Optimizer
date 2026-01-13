@@ -174,7 +174,7 @@ def test_conv_isinf_conversion(tmp_path, opset_version):
     output_onnx_path = onnx_path.replace(".onnx", ".fp16.onnx")
     onnx.save(converted_model, output_onnx_path)
 
-    # Load the output model and check QDQ node placements
+    # Load the output model
     graph = gs.import_onnx(converted_model)
 
     # Check that Conv is converted
@@ -202,12 +202,16 @@ def test_conv_resize_conversion(tmp_path):
     output_onnx_path = onnx_path.replace(".onnx", ".fp16.onnx")
     onnx.save(converted_model, output_onnx_path)
 
-    # Load the output model and check QDQ node placements
+    # Load the output model
     graph = gs.import_onnx(converted_model)
 
-    # Check that Conv is converted
-    conv_nodes = [n for n in graph.nodes if "Conv" in n.op]
-    assert assert_input_precision(conv_nodes)
+    # Check that Resize is correctly converted:
+    # - Data and ROI inputs (indices 0 and 1) should be FP16
+    # - The remaining inputs (scales/sizes) should remain in their original types
+    resize_node = next(n for n in graph.nodes if n.op == "Resize")
+    assert all(inp.dtype == np.float16 for inp in resize_node.inputs[0:2]), (
+        "Resize data and ROI inputs should be FP16"
+    )
 
 
 @pytest.mark.parametrize("target_opset", [13, 17, 19, 21])

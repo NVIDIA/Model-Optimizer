@@ -955,6 +955,8 @@ def build_conv_resize_model():
             pads=[0, 0, 0, 0],
             strides=[1, 1],
         ),
+        # Note: resize_roi_scales is intentionally used for both roi and scales inputs
+        # to test the shared constant duplication fix (PR #757)
         helper.make_node(
             op_type="Resize",
             inputs=[
