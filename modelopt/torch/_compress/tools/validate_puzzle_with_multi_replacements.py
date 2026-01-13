@@ -160,6 +160,13 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
             val_dataloader=val_dataloader,
         )
 
+        # Properly release CUDA memory after teacher validation
+        teacher_model.cpu()
+        stitched_model.cpu()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        dist.barrier()
+
     for i_solution, puzzle_solution in tqdm(
         list(zip(args.solutions_to_validate, puzzle_solutions)), desc="Validating solutions"
     ):
@@ -205,6 +212,12 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
                 extra_payload={"i_solution": i_solution, "puzzle_solution": puzzle_solution},
                 val_dataloader=val_dataloader,
             )
+
+            # Properly release CUDA memory after solution validation
+            model.cpu()
+            stitched_model.cpu()
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
         dist.barrier()
 

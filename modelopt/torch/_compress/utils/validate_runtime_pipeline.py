@@ -23,6 +23,7 @@ Used by validate_model.py during activation scoring for sharded models.
 """
 # mypy: ignore-errors
 
+import traceback
 from typing import Type
 
 import numpy as np
@@ -42,10 +43,31 @@ from modelopt.torch._compress.sewing_kit import (
     StitchedModule,
 )
 from modelopt.torch._compress.sewing_kit.core import InputReducer
-from modelopt.torch._compress.sewing_kit.utils import distributed_recv_obj, distributed_send_obj
+from modelopt.torch._compress.sewing_kit.utils import (
+    distributed_recv_obj,
+    distributed_send_obj,
+    fake_tensor,
+)
 from modelopt.torch._compress.tools.checkpoint_utils import init_module_with_state_dict
 from modelopt.torch._compress.tools.sharded_checkpoint_utils import DummyBlock
 from modelopt.torch._compress.utils.validation import _organize_outputs, calculate_batch_outputs
+
+
+def _log_forward_error(e: Exception, rank: int, batch_idx: int, num_batches: int) -> None:
+    """Log detailed error info for distributed forward pass failures.
+
+    When one rank crashes during distributed forward, others may hang waiting for communication.
+    This logging helps diagnose which rank failed and why.
+    """
+    error_msg = (
+        f"\n{'=' * 60}\n"
+        f"[Rank {rank}] ERROR in stitched_model forward (batch {batch_idx}/{num_batches})\n"
+        f"Error: {type(e).__name__}: {e}\n"
+        f"{'=' * 60}\n"
+        f"{traceback.format_exc()}"
+        f"{'=' * 60}\n"
+    )
+    print(error_msg, flush=True)
 
 
 class HiddenStatesAndLMHead(list):
@@ -145,15 +167,18 @@ def calculate_losses_pipeline(
     stitched_model.eval()
 
     with torch.autocast(device_type="cuda", dtype=autocast_dtype):
+        fake_input_ids = fake_tensor(1, seq_len, dtype=torch.long, device=model_device)
         for i_batch in progress_bar:
             if dist.is_master():
                 input_ids = all_input_ids[i_batch].to(model_device)
             else:
-                # Use real tensors on the model device instead of fake_tensor (meta tensors)
-                # to avoid issues with HuggingFace models that use torch.autocast in rotary embeddings
-                input_ids = torch.randint(0, 1000, size=(1, seq_len), device=model_device)
+                input_ids = fake_input_ids
 
-            output = stitched_model({}, {}, input_ids)
+            try:
+                output = stitched_model({}, {}, input_ids)
+            except Exception as e:
+                _log_forward_error(e, dist.rank(), i_batch, num_batches)
+                raise
 
             if dist.is_last_process():
                 logits = output.captured_outputs.get("model_output")
@@ -183,6 +208,16 @@ def calculate_losses_pipeline(
                     )
 
                 outputs.append(batch_outputs)
+
+                # Free GPU memory after processing each batch
+                del logits, hidden_states, targets
+                if target_hidden_states is not None:
+                    del target_hidden_states
+                if target_logits is not None:
+                    del target_logits
+
+            # Free output tensor memory on all ranks
+            del output
 
             # Update checkpoint progress periodically
             if checkpoint_manager:
