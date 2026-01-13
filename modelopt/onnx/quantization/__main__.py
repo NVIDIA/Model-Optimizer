@@ -294,12 +294,13 @@ def main():
     args = get_parser().parse_args()
 
     # Security: Validate onnx model size is under 2GB by default
-    try:
-        validate_file_size(args.onnx_path, 2 * (1024**3))
-    except ValueError as e:
-        raise ValueError(
-            "Onnx model size larger than 2GB. Please set --use_external_data_format flag to bypass this validation."
-        ) from e
+    if not args.use_external_data_format:
+        try:
+            validate_file_size(args.onnx_path, 2 * (1024**3))
+        except ValueError as e:
+            raise ValueError(
+                "Onnx model size larger than 2GB. Please set --use_external_data_format flag to bypass this validation."
+            ) from e
 
     calibration_data = None
     if args.calibration_data_path:
