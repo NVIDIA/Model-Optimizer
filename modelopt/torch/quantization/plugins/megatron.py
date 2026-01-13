@@ -763,8 +763,9 @@ class _QuantMoELayer(QuantModule):
         if any(getattr(m, "_if_calib", False) for m in self.experts.modules()):
             original_top_k = self.router.topk
             self.router.topk = self.router.num_experts
-            super().forward(hidden_states)
+            output = super().forward(hidden_states)
             self.router.topk = original_top_k
+            return output
         return super().forward(hidden_states)
 
 # TODO double check if MOE forward will be implemented in MoELayer or TransformerLayer
@@ -776,12 +777,11 @@ class _QuantTransformerLayer(QuantModule):
         pass
 
     def _forward_mlp_moe_preprocess(self, hidden_states):
-        #print(f"FORWARD in TransformerLayer rank {dist.get_rank()}", flush=True)
         if any(getattr(m, "_if_calib", False) for m in self.mlp.experts.modules()):
-            print(f"Forcing top_k to num_experts in TransformerLayer rank {dist.get_rank()}", flush=True)
             original_top_k = self.mlp.router.topk
             self.mlp.router.topk = self.mlp.router.num_experts
-            super()._forward_mlp_moe_preprocess(hidden_states)
+            output = super()._forward_mlp_moe_preprocess(hidden_states)
             self.mlp.router.topk = original_top_k
+            return output
 
         return super()._forward_mlp_moe_preprocess(hidden_states)
