@@ -537,9 +537,13 @@ def mono_quantize(
                             # layers with quant modules (even if disabled), which can be stricter about dtype.
                             vision_dtype = None
                             with contextlib.suppress(Exception):
-                                vision_dtype = getattr(full_model.vision_model.config, "torch_dtype", None)
+                                vision_dtype = getattr(
+                                    full_model.vision_model.config, "torch_dtype", None
+                                )
                             if vision_dtype is None:
-                                vision_dtype = getattr(full_model.language_model.config, "torch_dtype", None)
+                                vision_dtype = getattr(
+                                    full_model.language_model.config, "torch_dtype", None
+                                )
                             if vision_dtype is not None and "pixel_values" in call_kwargs:
                                 pv = call_kwargs["pixel_values"]
                                 if torch.is_tensor(pv) and pv.dtype != vision_dtype:
@@ -548,16 +552,18 @@ def mono_quantize(
                             # - Some versions call `torch.distributed.get_rank()` unconditionally.
                             # - Some versions construct an output object that assumes `past_key_values` exists.
                             # Instead, reproduce the minimal forward needed to exercise both vision + language paths.
-                            pixel_values = call_kwargs.get("pixel_values", None)
-                            input_ids = call_kwargs.get("input_ids", None)
-                            attention_mask = call_kwargs.get("attention_mask", None)
-                            position_ids = call_kwargs.get("position_ids", None)
-                            image_flags = call_kwargs.get("image_flags", None)
+                            pixel_values = call_kwargs.get("pixel_values")
+                            input_ids = call_kwargs.get("input_ids")
+                            attention_mask = call_kwargs.get("attention_mask")
+                            position_ids = call_kwargs.get("position_ids")
+                            image_flags = call_kwargs.get("image_flags")
 
                             if pixel_values is None or input_ids is None or image_flags is None:
                                 continue
 
-                            inputs_embeds = full_model.language_model.get_input_embeddings()(input_ids)
+                            inputs_embeds = full_model.language_model.get_input_embeddings()(
+                                input_ids
+                            )
                             image_flags_s = image_flags.squeeze(-1)
 
                             B, N, C = inputs_embeds.shape
@@ -568,11 +574,15 @@ def mono_quantize(
                             vit_embeds = full_model.extract_feature(pixel_values)
                             vit_embeds = vit_embeds[image_flags_s == 1]
                             try:
-                                flat_embeds[selected] = flat_embeds[selected] * 0.0 + vit_embeds.reshape(-1, C)
+                                flat_embeds[selected] = flat_embeds[
+                                    selected
+                                ] * 0.0 + vit_embeds.reshape(-1, C)
                             except Exception:
                                 vit_embeds = vit_embeds.reshape(-1, C)
                                 n_token = selected.sum()
-                                flat_embeds[selected] = flat_embeds[selected] * 0.0 + vit_embeds[:n_token]
+                                flat_embeds[selected] = (
+                                    flat_embeds[selected] * 0.0 + vit_embeds[:n_token]
+                                )
 
                             inputs_embeds = flat_embeds.reshape(B, N, C)
 
