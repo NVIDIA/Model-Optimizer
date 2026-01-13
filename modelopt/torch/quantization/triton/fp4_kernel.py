@@ -407,7 +407,7 @@ def static_blockwise_fp4_fake_quant_kernel(
 def static_blockwise_fp4_fake_quant(
     x: torch.Tensor,
     scale: torch.Tensor,
-    scale_quant_amax: torch.Tensor | None = None,
+    scale_fp8_quant_amax: torch.Tensor | None = None,
     skip_scale_quant: bool = False,
     out_dtype: torch.dtype | None = None,
 ):
@@ -416,7 +416,7 @@ def static_blockwise_fp4_fake_quant(
     Args:
         x: [NUM_FP4_BLOCKS, BLOCK_SIZE] on CUDA.
         scale: [NUM_FP4_BLOCKS] or [NUM_FP4_BLOCKS, 1] on CUDA.
-        scale_quant_amax: Absolute max range for FP8 quantization of scale. If None, computed from scale.
+        scale_fp8_quant_amax: Absolute max range for FP8 quantization of scale. If None, computed from scale.
         skip_scale_quant: If True, skip FP8 quantization of scale.
         out_dtype: Output dtype. Defaults to x.dtype if None.
     """
@@ -430,10 +430,10 @@ def static_blockwise_fp4_fake_quant(
         from modelopt.torch.quantization.tensor_quant import scaled_e4m3_impl
         from modelopt.torch.quantization.utils import reduce_amax
 
-        if scale_quant_amax is None:
-            scale_quant_amax = reduce_amax(x, axis=None, keepdims=False, squeeze_scalar=True)
+        if scale_fp8_quant_amax is None:
+            scale_fp8_quant_amax = reduce_amax(x, axis=None, keepdims=False, squeeze_scalar=True)
 
-        scale = scaled_e4m3_impl(scale, scale_quant_amax)
+        scale = scaled_e4m3_impl(scale, scale_fp8_quant_amax)
 
     x_flat = x.contiguous().view(-1)
     y_flat = torch.empty_like(x_flat, dtype=out_dtype)

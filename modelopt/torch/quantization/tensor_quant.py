@@ -571,6 +571,35 @@ class DynamicBlockQuantizationFunction(Function):
         return _fake_quant_backward_function(ctx, grad_outputs, num_args=9)
 
 
+class StaticBlockwiseFP4FakeQuantFunction(Function):
+    """Static blockwise FP4 fake quantization functional."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        x,
+        scale,
+        scale_fp8_quant_amax,
+        skip_scale_quant,
+        out_dtype,
+        pass_through_bwd=False,
+    ):
+        """Forward method."""
+        _save_for_backward_if_needed(ctx, pass_through_bwd, x, scale)
+        return triton_kernel.static_blockwise_fp4_fake_quant(
+            x,
+            scale,
+            scale_fp8_quant_amax,
+            skip_scale_quant,
+            out_dtype,
+        )
+
+    @staticmethod
+    def backward(ctx, grad_outputs):
+        """Implements straight through estimation with clipping."""
+        return _fake_quant_backward_function(ctx, grad_outputs, num_args=6)
+
+
 def _tensor_quant(inputs, amax, num_bits=8, unsigned=False, narrow_range=True):
     """Shared function body between TensorQuantFunction and FakeTensorQuantFunction."""
     # Fine scale, per channel scale will be handled by broadcasting, which could be tricky. Pop a warning.
@@ -615,3 +644,4 @@ def _tensor_quant(inputs, amax, num_bits=8, unsigned=False, narrow_range=True):
 fake_tensor_quant = FakeTensorQuantFunction.apply
 scaled_e4m3 = ScaledE4M3Function.apply
 dynamic_block_quant = DynamicBlockQuantizationFunction.apply
+static_blockwise_fp4_fake_quant = StaticBlockwiseFP4FakeQuantFunction.apply

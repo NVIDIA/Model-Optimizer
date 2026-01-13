@@ -235,9 +235,11 @@ def mse_calibrate(
                         disable_calib(quantizer),
                         enable_fake_quant(quantizer),
                     ):
-                        quantizer._keep_shape = True
+                        if hasattr(quantizer, "_original_shape"):
+                            x = quantizer._reset_to_original_shape(x)
                         xq = quantizer(x)
-                        quantizer._keep_shape = False
+                        if hasattr(quantizer, "_block_reshape_size"):
+                            xq = xq.reshape(quantizer._block_reshape_size)
 
                     if original_amax is not None:
                         quantizer._amax = original_amax
@@ -263,7 +265,7 @@ def mse_calibrate(
         for weight_name in weight_attr_names(parent_module):
             weight_quantizer_name = quantizer_attr_names(weight_name).weight_quantizer
             weight_quantizer = getattr(parent_module, weight_quantizer_name, None)
-            if isinstance(weight_quantizer, TensorQuantizer) and not weight_quantizer._disabled:
+            if isinstance(weight_quantizer, TensorQuantizer) and weight_quantizer.is_enabled:
                 if getattr(weight_quantizer, "_calibrator", None) is not None:
                     weight_quantizers.append((parent_module, weight_name, weight_quantizer))
         seen_modules.add(parent_module)
@@ -303,7 +305,7 @@ def mse_calibrate(
     # Step 8: Free GPU memory by clearing calibrator data
     for name, module in model.named_modules():
         if isinstance(module, TensorQuantizer) and not module._disabled:
-            if hasattr(module, "_calibrator") and module._calibrator is not None:
+            if hasattr(module, "_calibrator") and getattr(module, "_calibrator", None) is not None:
                 if hasattr(module._calibrator, "clear"):
                     module._calibrator.clear()
 

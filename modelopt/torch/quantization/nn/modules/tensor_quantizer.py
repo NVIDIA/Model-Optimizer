@@ -52,7 +52,12 @@ from ...qtensor import (
     NVFP4QTensor,
     QTensorWrapper,
 )
-from ...tensor_quant import dynamic_block_quant, fake_tensor_quant, scaled_e4m3
+from ...tensor_quant import (
+    dynamic_block_quant,
+    fake_tensor_quant,
+    scaled_e4m3,
+    static_blockwise_fp4_fake_quant,
+)
 from ...utils import is_torch_export_mode
 from ..functional import normalized_hadamard_transform
 
@@ -128,7 +133,6 @@ class TensorQuantizer(nn.Module):
         self._enable_pre_quant_scale = True
         self._dequantize = False
         self._input_dtype = None
-        self._keep_shape = False
 
         # Lazy initialize the bias calibrator for KV cache quantization
         self._bias_calibrator = None
@@ -655,16 +659,13 @@ class TensorQuantizer(nn.Module):
                 self._pass_through_bwd,
             )
         elif self._num_bits == (2, 1) and self.is_static_block_quant:
-            from modelopt.torch.quantization.triton.fp4_kernel import (
-                static_blockwise_fp4_fake_quant,
-            )
-
             outputs = static_blockwise_fp4_fake_quant(
                 inputs,
                 amax / 6.0,
-                scale_quant_amax=None,
-                skip_scale_quant=False,
-                out_dtype=inputs.dtype,
+                None,  # scale_fp8_quant_amax
+                False,  # skip_scale_quant
+                inputs.dtype,  # out_dtype
+                self._pass_through_bwd,  # pass_through_bwd
             )
         elif isinstance(self._num_bits, tuple):
             # Float-point quantization, e.g., FP8
@@ -796,6 +797,11 @@ class TensorQuantizer(nn.Module):
         if hasattr(self, "_padding"):
             inputs = F.pad(inputs, self._padding, "constant", 0)
 
+        if inputs.shape != self._original_shape:
+            raise ValueError(
+                f"Input shape has changed from {self._original_shape} to {inputs.shape}."
+                " Block-quantization requires a fixed input shape."
+            )
         inputs = inputs.reshape(self._block_reshape_size)
         return inputs
 
@@ -949,7 +955,7 @@ class TensorQuantizer(nn.Module):
                     "This case should have been handled."
                 )
 
-        if self.is_static_block_quant and not self._keep_shape:
+        if self.is_static_block_quant:
             outputs = self._reset_to_original_shape(outputs)
 
         return outputs
