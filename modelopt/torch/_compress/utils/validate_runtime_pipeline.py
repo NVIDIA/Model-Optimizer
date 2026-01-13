@@ -42,11 +42,7 @@ from modelopt.torch._compress.sewing_kit import (
     StitchedModule,
 )
 from modelopt.torch._compress.sewing_kit.core import InputReducer
-from modelopt.torch._compress.sewing_kit.utils import (
-    distributed_recv_obj,
-    distributed_send_obj,
-    fake_tensor,
-)
+from modelopt.torch._compress.sewing_kit.utils import distributed_recv_obj, distributed_send_obj
 from modelopt.torch._compress.tools.checkpoint_utils import init_module_with_state_dict
 from modelopt.torch._compress.tools.sharded_checkpoint_utils import DummyBlock
 from modelopt.torch._compress.utils.validation import _organize_outputs, calculate_batch_outputs
@@ -153,7 +149,9 @@ def calculate_losses_pipeline(
             if dist.is_master():
                 input_ids = all_input_ids[i_batch].to(model_device)
             else:
-                input_ids = fake_tensor(1, seq_len, dtype=torch.long)
+                # Use real tensors on the model device instead of fake_tensor (meta tensors)
+                # to avoid issues with HuggingFace models that use torch.autocast in rotary embeddings
+                input_ids = torch.randint(0, 1000, size=(1, seq_len), device=model_device)
 
             output = stitched_model({}, {}, input_ids)
 
