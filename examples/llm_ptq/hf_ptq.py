@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import argparse
+import contextlib
+import inspect
 import random
 import time
 import warnings
@@ -131,6 +133,9 @@ def make_calib_dataloader(
             subsets=getattr(args, "vlm_subsets", None),
             shuffle_buffer_size=getattr(args, "vlm_shuffle_buffer", 10_000),
             seed=getattr(args, "vlm_shuffle_seed", 42),
+            image_root=getattr(args, "vlm_image_root", None),
+            use_media_shards=not getattr(args, "vlm_disable_media_shards", False),
+            max_shards=getattr(args, "vlm_max_shards", None),
         )
     elif model_type == "mllama":
         assert processor is not None and isinstance(processor, MllamaImageProcessor), (
@@ -356,6 +361,11 @@ def load_model(args: argparse.Namespace):
         else:
             tokenizer = get_tokenizer(args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code)
 
+        # Some Nemotron tokenizers may not define pad_token by default; but we use padding=True during calibration.
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        assert tokenizer.pad_token is not None, f"Pad token for {args.pyt_ckpt_path} cannot be set!"
+
         default_padding_side = tokenizer.padding_side
         tokenizer.padding_side = "left"
 
@@ -507,7 +517,72 @@ def mono_quantize(
             if getattr(args, "calib_with_images", False) and is_nemotron_vl_model:
 
                 def calibrate_full_model(_model):
-                    return base_forward_loop(full_model)
+                    forward_params = inspect.signature(full_model.forward).parameters
+                    accepts_kwargs = any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD for p in forward_params.values()
+                    )
+                    allowed_keys = set(forward_params.keys())
+
+                    full_model.eval()
+                    with torch.no_grad():
+                        for batch in calib_dataloader:
+                            if accepts_kwargs:
+                                call_kwargs = batch
+                            else:
+                                call_kwargs = {k: v for k, v in batch.items() if k in allowed_keys}
+                            call_kwargs = {k: v for k, v in call_kwargs.items() if v is not None}
+
+                            # Nemotron VL v2 vision encoder expects pixel_values in its torch_dtype (typically bf16).
+                            # The processor often returns float32 pixel_values; also, ModelOpt may wrap some vision
+                            # layers with quant modules (even if disabled), which can be stricter about dtype.
+                            vision_dtype = None
+                            with contextlib.suppress(Exception):
+                                vision_dtype = getattr(full_model.vision_model.config, "torch_dtype", None)
+                            if vision_dtype is None:
+                                vision_dtype = getattr(full_model.language_model.config, "torch_dtype", None)
+                            if vision_dtype is not None and "pixel_values" in call_kwargs:
+                                pv = call_kwargs["pixel_values"]
+                                if torch.is_tensor(pv) and pv.dtype != vision_dtype:
+                                    call_kwargs["pixel_values"] = pv.to(dtype=vision_dtype)
+                            # Avoid calling Nemotron VL `full_model.forward()` directly during calibration:
+                            # - Some versions call `torch.distributed.get_rank()` unconditionally.
+                            # - Some versions construct an output object that assumes `past_key_values` exists.
+                            # Instead, reproduce the minimal forward needed to exercise both vision + language paths.
+                            pixel_values = call_kwargs.get("pixel_values", None)
+                            input_ids = call_kwargs.get("input_ids", None)
+                            attention_mask = call_kwargs.get("attention_mask", None)
+                            position_ids = call_kwargs.get("position_ids", None)
+                            image_flags = call_kwargs.get("image_flags", None)
+
+                            if pixel_values is None or input_ids is None or image_flags is None:
+                                continue
+
+                            inputs_embeds = full_model.language_model.get_input_embeddings()(input_ids)
+                            image_flags_s = image_flags.squeeze(-1)
+
+                            B, N, C = inputs_embeds.shape
+                            flat_embeds = inputs_embeds.reshape(B * N, C)
+                            flat_ids = input_ids.reshape(B * N)
+                            selected = flat_ids == full_model.img_context_token_id
+
+                            vit_embeds = full_model.extract_feature(pixel_values)
+                            vit_embeds = vit_embeds[image_flags_s == 1]
+                            try:
+                                flat_embeds[selected] = flat_embeds[selected] * 0.0 + vit_embeds.reshape(-1, C)
+                            except Exception:
+                                vit_embeds = vit_embeds.reshape(-1, C)
+                                n_token = selected.sum()
+                                flat_embeds[selected] = flat_embeds[selected] * 0.0 + vit_embeds[:n_token]
+
+                            inputs_embeds = flat_embeds.reshape(B, N, C)
+
+                            full_model.language_model(
+                                inputs_embeds=inputs_embeds,
+                                attention_mask=attention_mask,
+                                position_ids=position_ids,
+                                use_cache=False,
+                                return_dict=False,
+                            )
 
                 calibrate_loop = calibrate_full_model
             else:
@@ -959,7 +1034,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--vlm_subsets",
         type=str,
-        default="docvqa_cot,chartqa_cot",
+        default="sparsetables,plotqa_cot,wiki_en",
         help=(
             "Comma-separated subset/config names for multi-subset VLM datasets "
             "(e.g., nemotron_vlm_dataset_v2)."
@@ -976,6 +1051,32 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=42,
         help="Random seed for streaming VLM dataset shuffle.",
+    )
+    parser.add_argument(
+        "--vlm_image_root",
+        type=str,
+        default=None,
+        help=(
+            "Local directory containing image files referenced by the VLM dataset annotations. "
+            "Required for nemotron_vlm_dataset_v2 subsets that only ship JSONL (e.g., docvqa_cot, chartqa_cot)."
+        ),
+    )
+    parser.add_argument(
+        "--vlm_max_shards",
+        type=int,
+        default=1,
+        help=(
+            "For VLM subsets that include in-repo tar shards under `<subset>/media/*.tar`, "
+            "limit how many shards to download/use for calibration. Increase if you don't get enough samples."
+        ),
+    )
+    parser.add_argument(
+        "--vlm_disable_media_shards",
+        action="store_true",
+        help=(
+            "Disable reading in-repo `media/shard_*.tar` files for nemotron_vlm_dataset_v2. "
+            "Useful if you want to use JSONL-only subsets together with --vlm_image_root."
+        ),
     )
     parser.add_argument("--inference_tensor_parallel", type=int, default=1)
     parser.add_argument("--inference_pipeline_parallel", type=int, default=1)

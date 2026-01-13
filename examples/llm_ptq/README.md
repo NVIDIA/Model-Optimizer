@@ -339,7 +339,7 @@ python hf_ptq.py \
   --trust_remote_code \
   --calib_with_images \
   --vlm_dataset nemotron_vlm_dataset_v2 \
-  --vlm_subsets docvqa_cot,chartqa_cot \
+  --vlm_subsets sparsetables,plotqa_cot,wiki_en \
   --calib_size 256
 ```
 

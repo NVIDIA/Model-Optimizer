@@ -21,7 +21,15 @@ This module supports both:
 """
 
 import contextlib
+import copy
+import functools
 import itertools
+import json
+import os
+import random
+import tarfile
+from io import BytesIO
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -36,12 +44,41 @@ SUPPORTED_VLM_DATASET_CONFIG: dict[str, dict[str, Any]] = {
     # Large multi-subset dataset (use streaming to avoid downloading the entire dataset)
     "nemotron_vlm_dataset_v2": {
         "config": {"path": "nvidia/Nemotron-VLM-Dataset-v2", "split": "train", "streaming": True},
-        # Provide a sane default that is easy to extend from the CLI.
-        "default_subsets": ["docvqa_cot", "chartqa_cot"],
+        # Provide a sane default that (a) includes in-repo media shards and (b) is document-centric.
+        # Subsets like docvqa_cot/chartqa_cot are JSONL-only in the dataset repo and require --vlm_image_root.
+        "default_subsets": ["sparsetables", "plotqa_cot", "wiki_en"],
     },
 }
 
 __all__ = ["get_supported_vlm_datasets", "get_vlm_dataset_dataloader"]
+
+_IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
+
+@functools.lru_cache(maxsize=8)
+def _list_repo_files(repo_id: str, repo_type: str = "dataset") -> list[str]:
+    from huggingface_hub import list_repo_files
+
+    return list_repo_files(repo_id=repo_id, repo_type=repo_type)
+
+
+def _iter_shuffle_buffer(items_iter, buffer_size: int, seed: int):
+    """Shuffle an iterator with a bounded buffer (approximate shuffle for streaming sources)."""
+    if buffer_size <= 1:
+        yield from items_iter
+        return
+
+    rng = random.Random(seed)
+    buf = []
+    for item in items_iter:
+        buf.append(item)
+        if len(buf) >= buffer_size:
+            rng.shuffle(buf)
+            yield from buf
+            buf = []
+    if buf:
+        rng.shuffle(buf)
+        yield from buf
 
 
 class _HFDatasetsIterableWrapper(torch.utils.data.IterableDataset):
@@ -57,6 +94,267 @@ class _HFDatasetsIterableWrapper(torch.utils.data.IterableDataset):
 
     def __len__(self):
         return self._num_samples
+
+
+class _TarShardIterable(torch.utils.data.IterableDataset):
+    """Iterate a list of tar shards and yield decoded samples with PIL images + metadata.
+
+    This is a lightweight alternative to webdataset/energon for calibration use-cases.
+    """
+
+    def __init__(
+        self,
+        repo_id: str,
+        shard_paths: list[str],
+        num_samples: int,
+        seed: int = 42,
+        shuffle_buffer_size: int = 0,
+    ):
+        super().__init__()
+        self.repo_id = repo_id
+        self.shard_paths = shard_paths
+        self.num_samples = num_samples
+        self.seed = seed
+        self.shuffle_buffer_size = shuffle_buffer_size
+
+    def __iter__(self):
+        from huggingface_hub import hf_hub_download
+        from PIL import Image
+
+        rng = random.Random(self.seed)
+        shard_paths = list(self.shard_paths)
+        rng.shuffle(shard_paths)
+
+        def _raw_samples():
+            yielded = 0
+            for shard in shard_paths:
+                local_tar = hf_hub_download(
+                    repo_id=self.repo_id, filename=shard, repo_type="dataset"
+                )
+                with tarfile.open(local_tar, "r:*") as tf:
+                    current_key = None
+                    bucket: dict[str, bytes] = {}
+
+                    def _emit(key: str, data_bucket: dict[str, bytes]):
+                        nonlocal yielded
+                        if yielded >= self.num_samples:
+                            return None
+                        img_bytes = data_bucket.get("img")
+                        meta_bytes = data_bucket.get("json")
+                        if img_bytes is None or meta_bytes is None:
+                            return None
+                        try:
+                            meta = json.loads(meta_bytes.decode("utf-8", errors="ignore"))
+                        except Exception:
+                            return None
+                        try:
+                            img = Image.open(BytesIO(img_bytes)).convert("RGB")
+                        except Exception:
+                            return None
+
+                        sample: dict[str, Any] = {"id": meta.get("id", key), "image": img}
+                        if "messages" in meta:
+                            sample["messages"] = meta["messages"]
+                        else:
+                            text = meta.get("text") or meta.get("question") or "Describe the image."
+                            sample["messages"] = [
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "image", "image": ""},
+                                        {"type": "text", "text": text},
+                                    ],
+                                }
+                            ]
+
+                        yielded += 1
+                        return sample
+
+                    for member in tf:
+                        if not member.isfile():
+                            continue
+                        name = member.name
+                        base, ext = os.path.splitext(name)
+                        ext = ext.lower()
+                        if ext not in _IMG_EXTS and ext != ".json":
+                            continue
+                        f = tf.extractfile(member)
+                        if f is None:
+                            continue
+                        data = f.read()
+
+                        if current_key is None:
+                            current_key = base
+                        if base != current_key:
+                            out = _emit(current_key, bucket)
+                            if out is not None:
+                                yield out
+                                if yielded >= self.num_samples:
+                                    return
+                            bucket = {}
+                            current_key = base
+
+                        if ext == ".json":
+                            bucket["json"] = data
+                        else:
+                            bucket["img"] = data
+
+                    if current_key is not None:
+                        out = _emit(current_key, bucket)
+                        if out is not None:
+                            yield out
+                            if yielded >= self.num_samples:
+                                return
+
+        it = _raw_samples()
+        if self.shuffle_buffer_size and self.shuffle_buffer_size > 1:
+            it = _iter_shuffle_buffer(it, buffer_size=self.shuffle_buffer_size, seed=self.seed)
+        yield from itertools.islice(it, self.num_samples)
+
+
+class _NemotronTarPlusJsonlIterable(torch.utils.data.IterableDataset):
+    """Join Nemotron VLM `media/shard_*.tar` (images-only) with `<subset>/<subset>.jsonl` (messages).
+
+    Many Nemotron-VLM-Dataset-v2 subsets store PNGs in tar shards and store messages in a separate JSONL where the
+    image content item references the PNG filename (e.g., `{"type":"image","image":"292180.png"}`).
+    """
+
+    def __init__(
+        self,
+        repo_id: str,
+        subsets: list[str],
+        shard_paths: list[str],
+        num_samples: int,
+        seed: int,
+        shuffle_buffer_size: int,
+        max_shards: int | None,
+    ):
+        super().__init__()
+        self.repo_id = repo_id
+        self.subsets = subsets
+        self.shard_paths = shard_paths
+        self.num_samples = num_samples
+        self.seed = seed
+        self.shuffle_buffer_size = shuffle_buffer_size
+        self.max_shards = max_shards
+
+    def __iter__(self):
+        from huggingface_hub import hf_hub_download
+        from PIL import Image
+
+        rng = random.Random(self.seed)
+
+        # Partition shards by subset.
+        shards_by_subset: dict[str, list[str]] = {s: [] for s in self.subsets}
+        for p in self.shard_paths:
+            subset = p.split("/", 1)[0]
+            if subset in shards_by_subset:
+                shards_by_subset[subset].append(p)
+
+        for subset in list(shards_by_subset.keys()):
+            shard_list = sorted(shards_by_subset[subset])
+            if self.max_shards is not None:
+                shard_list = shard_list[: max(0, self.max_shards)]
+            shards_by_subset[subset] = shard_list
+
+        # Roughly split sample budget across subsets.
+        per_subset_target = max(1, self.num_samples // max(1, len(self.subsets)))
+        yielded_total = 0
+
+        for subset in self.subsets:
+            if yielded_total >= self.num_samples:
+                break
+
+            shard_list = list(shards_by_subset.get(subset, []))
+            if not shard_list:
+                continue
+            rng.shuffle(shard_list)
+
+            # 1) Collect candidate image filenames from tar headers (no payload reads).
+            candidate_names: list[str] = []
+            header_limit = per_subset_target * 50
+            for shard in shard_list:
+                local_tar = hf_hub_download(
+                    repo_id=self.repo_id, filename=shard, repo_type="dataset"
+                )
+                with tarfile.open(local_tar, "r:*") as tf:
+                    for member in tf:
+                        if not member.isfile():
+                            continue
+                        name = member.name
+                        _, ext = os.path.splitext(name)
+                        if ext.lower() not in _IMG_EXTS:
+                            continue
+                        candidate_names.append(name)
+                        if len(candidate_names) >= header_limit:
+                            break
+                if len(candidate_names) >= header_limit:
+                    break
+
+            if not candidate_names:
+                continue
+
+            rng.shuffle(candidate_names)
+            lookup_limit = per_subset_target * 10
+            candidate_set = set(candidate_names[:lookup_limit])
+
+            # 2) Scan JSONL to map image filename -> messages.
+            jsonl_path = hf_hub_download(
+                repo_id=self.repo_id, filename=f"{subset}/{subset}.jsonl", repo_type="dataset"
+            )
+            meta_by_image: dict[str, dict[str, Any]] = {}
+            with open(jsonl_path, encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    msgs = obj.get("messages")
+                    img_name = (
+                        _extract_first_image_from_messages(msgs) if msgs is not None else None
+                    )
+                    if isinstance(img_name, str) and img_name in candidate_set:
+                        meta_by_image[img_name] = {"id": obj.get("id"), "messages": msgs}
+                        if len(meta_by_image) >= per_subset_target:
+                            break
+
+            if not meta_by_image:
+                continue
+
+            # 3) Extract matched images and yield samples.
+            needed = set(meta_by_image.keys())
+            for shard in shard_list:
+                if yielded_total >= self.num_samples or not needed:
+                    break
+                local_tar = hf_hub_download(
+                    repo_id=self.repo_id, filename=shard, repo_type="dataset"
+                )
+                with tarfile.open(local_tar, "r:*") as tf:
+                    for member in tf:
+                        if yielded_total >= self.num_samples or not needed:
+                            break
+                        if not member.isfile():
+                            continue
+                        name = member.name
+                        if name not in needed:
+                            continue
+                        f = tf.extractfile(member)
+                        if f is None:
+                            continue
+                        try:
+                            img = Image.open(BytesIO(f.read())).convert("RGB")
+                        except Exception:
+                            continue
+                        meta = meta_by_image.get(name)
+                        if not meta:
+                            continue
+                        yield {
+                            "id": meta.get("id", name),
+                            "messages": meta.get("messages"),
+                            "image": img,
+                        }
+                        needed.discard(name)
+                        yielded_total += 1
 
 
 def _extract_text_from_messages(messages: Any) -> str | None:
@@ -85,6 +383,118 @@ def _extract_text_from_messages(messages: Any) -> str | None:
     return None
 
 
+def _messages_up_to_last_user(messages: Any) -> list[dict[str, Any]] | None:
+    """Return messages truncated to the last user turn (inclusive)."""
+    if not isinstance(messages, list):
+        return None
+    last_user_idx = None
+    for i, msg in enumerate(messages):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            last_user_idx = i
+    if last_user_idx is None:
+        return None
+    trimmed = messages[: last_user_idx + 1]
+    return [m for m in trimmed if isinstance(m, dict)]
+
+
+def _messages_has_image(messages: Any) -> bool:
+    """Return True if `messages` contains an image content item."""
+    if not isinstance(messages, list):
+        return False
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "image":
+                return True
+    return False
+
+
+def _extract_first_image_from_messages(messages: Any) -> Any:
+    """Best-effort extraction of an image object from a chat-style `messages` field."""
+    if not isinstance(messages, list):
+        return None
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not (isinstance(part, dict) and part.get("type") == "image"):
+                continue
+            # Common keys used by HF datasets / chat templates
+            for key in ("image", "images", "value", "data", "path", "image_url", "url"):
+                if key in part:
+                    val = part[key]
+                    if isinstance(val, list) and val:
+                        return val[0]
+                    return val
+            # Fallback: return the dict itself (some processors may accept it)
+            return part
+    return None
+
+
+def _maybe_load_image(image_obj: Any, repo_id: str | None, image_root: str | Path | None) -> Any:
+    """Convert common image references (path/bytes) into a PIL image if possible.
+
+    For some streaming datasets, images are stored as file paths inside the dataset repo.
+    In that case, we lazily download just the referenced files via `hf_hub_download`.
+    """
+    if image_obj is None:
+        return None
+
+    # If it's a list, take the first (some formats store a list for multi-image samples).
+    if isinstance(image_obj, list) and image_obj:
+        image_obj = image_obj[0]
+
+    # Path-like reference
+    if isinstance(image_obj, str):
+        # First, try resolving against a local image root (best option for datasets that only ship JSONL refs).
+        if image_root is not None:
+            try:
+                from PIL import Image
+
+                local_path = Path(image_root) / image_obj
+                if local_path.exists():
+                    return Image.open(local_path).convert("RGB")
+            except Exception:
+                pass
+
+        if repo_id is None:
+            return image_obj
+        try:
+            from huggingface_hub import hf_hub_download
+            from PIL import Image
+
+            local_path = hf_hub_download(repo_id=repo_id, filename=image_obj, repo_type="dataset")
+            return Image.open(local_path).convert("RGB")
+        except Exception:
+            return None
+
+    # Dict-like reference (common in chat content items)
+    if isinstance(image_obj, dict):
+        # bytes payload
+        if "bytes" in image_obj and isinstance(image_obj["bytes"], (bytes, bytearray)):
+            try:
+                from PIL import Image
+
+                return Image.open(BytesIO(image_obj["bytes"])).convert("RGB")
+            except Exception:
+                return None
+
+        # path/url-ish payloads
+        for key in ("path", "image", "image_path", "file", "url", "image_url"):
+            if key in image_obj and isinstance(image_obj[key], str):
+                return _maybe_load_image(image_obj[key], repo_id=repo_id, image_root=image_root)
+
+    # If it's already a PIL/numpy/torch image-like object, just return it and let the processor validate.
+    return image_obj
+
+
 def _get_vlm_dataset(
     dataset_name: str,
     num_samples: int,
@@ -92,6 +502,8 @@ def _get_vlm_dataset(
     subsets: list[str] | None = None,
     shuffle_buffer_size: int = 10_000,
     seed: int = 42,
+    use_media_shards: bool = True,
+    max_shards: int | None = None,
 ):
     """Load a portion of train dataset with the dataset name and a given size.
 
@@ -102,6 +514,8 @@ def _get_vlm_dataset(
         subsets: Optional subset/config names for multi-subset datasets (e.g., Nemotron-VLM-Dataset-v2).
         shuffle_buffer_size: Shuffle buffer size for streaming datasets (higher is "more random").
         seed: RNG seed for streaming dataset shuffle.
+        use_media_shards: If True, prefer reading in-repo `media/shard_*.tar` files when available.
+        max_shards: Optional cap on the number of tar shards to download/use.
 
     Returns:
         A hugging face Dataset.
@@ -119,6 +533,34 @@ def _get_vlm_dataset(
                 subsets = SUPPORTED_VLM_DATASET_CONFIG[dataset_name].get("default_subsets", [])
             if not subsets:
                 raise ValueError("No VLM subsets provided for nemotron_vlm_dataset_v2.")
+
+            repo_id = cfg["path"]
+
+            # Prefer in-repo media tar shards when present. HF `datasets` streaming alone does not join media.
+            if use_media_shards:
+                all_files = _list_repo_files(repo_id, repo_type="dataset")
+                shard_paths: list[str] = []
+                for subset in subsets:
+                    prefix = f"{subset}/media/"
+                    shard_paths.extend(
+                        [
+                            p
+                            for p in all_files
+                            if p.startswith(prefix) and p.lower().endswith(".tar")
+                        ]
+                    )
+
+                shard_paths = sorted(set(shard_paths))
+                if shard_paths:
+                    return _NemotronTarPlusJsonlIterable(
+                        repo_id=repo_id,
+                        subsets=subsets,
+                        shard_paths=shard_paths,
+                        num_samples=num_samples,
+                        seed=seed,
+                        shuffle_buffer_size=shuffle_buffer_size,
+                        max_shards=max_shards,
+                    )
 
             # Load each subset as a separate (streaming) dataset, then interleave.
             streams = [
@@ -156,7 +598,9 @@ def _get_vlm_dataset(
         # Keep only samples with a non-null image field (ScienceQA has both).
         with contextlib.suppress(Exception):
             ds = ds.filter(
-                lambda ex: ex.get("image", None) is not None or ex.get("images", None) is not None
+                lambda ex: ex.get("image", None) is not None
+                or ex.get("images", None) is not None
+                or _messages_has_image(ex.get("messages"))
             )
 
     # Select the first `num_samples` entries (or fewer if dataset is smaller).
@@ -195,6 +639,9 @@ def get_vlm_dataset_dataloader(
     subsets: list[str] | None = None,
     shuffle_buffer_size: int = 10_000,
     seed: int = 42,
+    image_root: str | Path | None = None,
+    use_media_shards: bool = True,
+    max_shards: int | None = None,
 ) -> DataLoader:
     """Get a dataloader with the dataset name and processor of the target model.
 
@@ -212,6 +659,11 @@ def get_vlm_dataset_dataloader(
     """
     assert processor is not None, "Please provide a valid processor."
 
+    # Optional: allow callers to set a local image root for datasets that only ship JSON references.
+    # We store it on the processor instance to avoid threading it through a bunch of nested closures.
+    if image_root is not None:
+        setattr(processor, "_modelopt_vlm_image_root", image_root)
+
     if device is not None:
         device = torch.device(device)
 
@@ -222,6 +674,8 @@ def get_vlm_dataset_dataloader(
         subsets=subsets,
         shuffle_buffer_size=shuffle_buffer_size,
         seed=seed,
+        use_media_shards=use_media_shards,
+        max_shards=max_shards,
     )
 
     # Legacy path: our internal image processor wrapper (e.g., Mllama).
@@ -237,48 +691,72 @@ def get_vlm_dataset_dataloader(
         )
 
     # Generic HF ProcessorMixin / AutoProcessor path: tokenize & process images at collate-time.
-    # This works well for models that need extra multimodal kwargs (e.g., image_flags) in addition to pixel_values.
-    def _build_prompt(proc: Any, question: str) -> str:
-        tok = getattr(proc, "tokenizer", None)
-        # Prefer a chat template if present; it typically inserts the correct image placeholder tokens.
-        if tok is not None and getattr(tok, "chat_template", None) is not None:
-            try:
-                return tok.apply_chat_template(
-                    [
-                        {
-                            "role": "user",
-                            "content": [{"type": "image"}, {"type": "text", "text": question}],
-                        }
-                    ],
-                    add_generation_prompt=True,
-                )
-            except Exception:
-                pass
-        # Fallback: plain question. Many processors still correctly handle `images=...`.
-        return question
+    # For Nemotron VLM datasets, we prefer to follow the model-card flow:
+    #   prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    #   inputs = processor(text=[prompt], images=[pil_image], ...)
 
     def _collate_fn(examples: list[dict[str, Any]]) -> dict[str, torch.Tensor] | dict[str, Any]:
-        questions = []
-        images = []
-        for ex in examples:
-            q = ex.get("question")
-            if q is None and "messages" in ex:
-                q = _extract_text_from_messages(ex.get("messages"))
-            if q is None:
-                q = "Describe this image."
-            questions.append(q)
+        repo_id = None
+        if dataset_name == "nemotron_vlm_dataset_v2":
+            repo_id = SUPPORTED_VLM_DATASET_CONFIG[dataset_name]["config"]["path"]
+        image_root = getattr(processor, "_modelopt_vlm_image_root", None)
 
+        pairs: list[tuple[str, Any]] = []
+        for ex in examples:
+            messages = ex.get("messages")
+
+            # Image extraction
             img = ex.get("image", None)
             if img is None:
                 img = ex.get("images", None)
-                if isinstance(img, list) and img:
-                    img = img[0]
-            images.append(img)
-        prompts = [_build_prompt(processor, q) for q in questions]
+            if img is None and messages is not None:
+                img = _extract_first_image_from_messages(messages)
+            img = _maybe_load_image(img, repo_id=repo_id, image_root=image_root)
+            if require_image and img is None:
+                continue
+
+            # Prompt extraction
+            prompt = None
+            tok = getattr(processor, "tokenizer", None)
+            if tok is not None and messages is not None:
+                trimmed = _messages_up_to_last_user(messages) or []
+                # For some Nemotron-style templates, the image content expects an empty string.
+                # Keep the actual image path separate for loading; blank it in the prompt message.
+                prompt_msgs = copy.deepcopy(trimmed)
+                for msg in prompt_msgs:
+                    content = msg.get("content")
+                    if isinstance(content, list):
+                        for part in content:
+                            if isinstance(part, dict) and part.get("type") == "image":
+                                part["image"] = ""
+                with contextlib.suppress(Exception):
+                    prompt = tok.apply_chat_template(
+                        prompt_msgs, tokenize=False, add_generation_prompt=True
+                    )
+
+            if prompt is None:
+                # Fallback: best-effort question-only prompt.
+                q = ex.get("question")
+                if q is None and messages is not None:
+                    q = _extract_text_from_messages(messages)
+                prompt = q or "Describe the image."
+
+            pairs.append((prompt, img))
+
+        if not pairs:
+            raise ValueError(
+                "No usable images found in the current batch. "
+                "If you're using JSONL-only subsets (e.g., docvqa_cot/chartqa_cot), provide "
+                "`--vlm_image_root <dir>` so referenced paths can be resolved. "
+                "If you're using asset-included subsets, keep media shard loading enabled "
+                "(default) and consider increasing `--vlm_max_shards`."
+            )
+
+        prompts, images = zip(*pairs)
 
         kwargs: dict[str, Any] = {
-            "text": prompts,
-            "images": images,
+            "text": list(prompts),
+            "images": list(images),
             "return_tensors": "pt",
             "padding": True,
         }
@@ -291,6 +769,15 @@ def get_vlm_dataset_dataloader(
         if hasattr(enc, "data"):
             enc = enc.data
         out: dict[str, Any] = dict(enc)
+
+        # Nemotron Nano VL v2 expects `image_flags` in forward(), but the processor does not emit it.
+        # `pixel_values` is flattened across batch*images, so `image_flags` should align with pixel_values.shape[0].
+        if out.get("pixel_values") is not None and out.get("image_flags") is None:
+            pv = out["pixel_values"]
+            if torch.is_tensor(pv):
+                out["image_flags"] = torch.ones(
+                    (pv.shape[0], 1), device=pv.device, dtype=torch.long
+                )
 
         # Move tensors to device if requested.
         if device is not None:
