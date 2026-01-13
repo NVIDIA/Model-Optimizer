@@ -51,6 +51,7 @@ def get_model(
 
     # Restore modelopt state for LoRA models. For QAT/QAD models from_pretrained call handles this
     if hasattr(model, "peft_config"):
+        # Security NOTE: weights_only=False is used here on ModelOpt-generated state_dict, not on untrusted user input
         modelopt_state = torch.load(f"{ckpt_path}/modelopt_state_train.pth", weights_only=False)
         restore_from_modelopt_state(model, modelopt_state)
         print_rank_0("Restored modelopt state")

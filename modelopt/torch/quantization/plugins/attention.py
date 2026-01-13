@@ -207,14 +207,17 @@ def register_attention_for_kv_quant(attention_cls: type) -> bool:
     head = ast.fix_missing_locations(head)
     org_class = model_module.__dict__[org_class_name]
 
-    quant_class = _create_quantized_class_from_ast(head, org_class, new_class_name, model_module)
+    quant_class = _create_quantized_class_from_ast(head, org_class, new_class_name)
     register(original_cls=org_class, quantized_cls=quant_class)
     print(f"Successfully registered {org_class_name} for quantization")
     return True
 
 
 def _create_quantized_class_from_ast(
-    head, org_class, new_class_name, model_module, temp_file_name=None
+    head: ast.Module,
+    org_class: type,
+    new_class_name: str,
+    temp_file_name: str | None = None,
 ):
     """Create a quantized class from an AST representation.
 
@@ -222,7 +225,6 @@ def _create_quantized_class_from_ast(
         head: The AST head containing the modified class definition
         org_class: The original class to be quantized
         new_class_name: Name for the new quantized class
-        model_module: The module containing the original class
         temp_file_name: Optional file name to save the generated code
 
     Returns:
@@ -232,6 +234,19 @@ def _create_quantized_class_from_ast(
 
     # Save the generated code to a temporary file if requested
     module_code_str = ast.unparse(head)
+
+    # Security: Validate generated code doesn't contain suspicious patterns
+    suspicious_patterns = ["__import__", "eval", "exec", "compile", "open(", "os.system"]
+    for pattern in suspicious_patterns:
+        if pattern in module_code_str:
+            # Allow compile for specific trusted ModelOpt internal use
+            if pattern == "compile" and "torch.compile" in module_code_str:
+                continue
+            raise ValueError(
+                f"Generated code contains suspicious pattern '{pattern}'. "
+                f"This may indicate a security issue in AST transformation."
+            )
+
     if temp_file_name is None:
         with tempfile.NamedTemporaryFile(
             prefix="modelopt_", suffix=".py", delete=False
@@ -252,6 +267,11 @@ def _create_quantized_class_from_ast(
     #     locals=model_module.__dict__
     # )  # bandit throws error here
     # quant_class = model_module.__dict__[new_class_name]
+
+    # Security NOTE: compile() is used here on internally-generated AST,
+    # not on untrusted user input. The AST is created by ModelOpt's quantization
+    # logic and has been validated above. This is safer than exec() but still
+    # requires the AST transformation logic to be secure.
 
     # Extract the bytecode and create a new class on the fly
     # This is more tricky but doesn't require runtime execution
