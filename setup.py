@@ -108,7 +108,6 @@ optional_deps = {
         "hydra-core==1.3.2",
         "immutabledict",
         "lru-dict",
-        "mip",
         "omegaconf==2.3.0",
         "pandas",
         "typeguard",
