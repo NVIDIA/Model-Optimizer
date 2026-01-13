@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import argparse
-import contextlib
 import inspect
 import random
 import time
@@ -34,6 +33,7 @@ from example_utils import (
     is_nemotron_vl,
     run_nemotron_vl_preview,
 )
+from nemotron_vl_calib import safe_nemotron_vl_forward
 from torch.utils.data import DataLoader
 from transformers import (
     AutoConfig,
@@ -531,68 +531,7 @@ def mono_quantize(
                             else:
                                 call_kwargs = {k: v for k, v in batch.items() if k in allowed_keys}
                             call_kwargs = {k: v for k, v in call_kwargs.items() if v is not None}
-
-                            # Nemotron VL v2 vision encoder expects pixel_values in its torch_dtype (typically bf16).
-                            # The processor often returns float32 pixel_values; also, ModelOpt may wrap some vision
-                            # layers with quant modules (even if disabled), which can be stricter about dtype.
-                            vision_dtype = None
-                            with contextlib.suppress(Exception):
-                                vision_dtype = getattr(
-                                    full_model.vision_model.config, "torch_dtype", None
-                                )
-                            if vision_dtype is None:
-                                vision_dtype = getattr(
-                                    full_model.language_model.config, "torch_dtype", None
-                                )
-                            if vision_dtype is not None and "pixel_values" in call_kwargs:
-                                pv = call_kwargs["pixel_values"]
-                                if torch.is_tensor(pv) and pv.dtype != vision_dtype:
-                                    call_kwargs["pixel_values"] = pv.to(dtype=vision_dtype)
-                            # Avoid calling Nemotron VL `full_model.forward()` directly during calibration:
-                            # - Some versions call `torch.distributed.get_rank()` unconditionally.
-                            # - Some versions construct an output object that assumes `past_key_values` exists.
-                            # Instead, reproduce the minimal forward needed to exercise both vision + language paths.
-                            pixel_values = call_kwargs.get("pixel_values")
-                            input_ids = call_kwargs.get("input_ids")
-                            attention_mask = call_kwargs.get("attention_mask")
-                            position_ids = call_kwargs.get("position_ids")
-                            image_flags = call_kwargs.get("image_flags")
-
-                            if pixel_values is None or input_ids is None or image_flags is None:
-                                continue
-
-                            inputs_embeds = full_model.language_model.get_input_embeddings()(
-                                input_ids
-                            )
-                            image_flags_s = image_flags.squeeze(-1)
-
-                            b, n, c = inputs_embeds.shape
-                            flat_embeds = inputs_embeds.reshape(b * n, c)
-                            flat_ids = input_ids.reshape(b * n)
-                            selected = flat_ids == full_model.img_context_token_id
-
-                            vit_embeds = full_model.extract_feature(pixel_values)
-                            vit_embeds = vit_embeds[image_flags_s == 1]
-                            try:
-                                flat_embeds[selected] = flat_embeds[
-                                    selected
-                                ] * 0.0 + vit_embeds.reshape(-1, c)
-                            except Exception:
-                                vit_embeds = vit_embeds.reshape(-1, c)
-                                n_token = selected.sum()
-                                flat_embeds[selected] = (
-                                    flat_embeds[selected] * 0.0 + vit_embeds[:n_token]
-                                )
-
-                            inputs_embeds = flat_embeds.reshape(b, n, c)
-
-                            full_model.language_model(
-                                inputs_embeds=inputs_embeds,
-                                attention_mask=attention_mask,
-                                position_ids=position_ids,
-                                use_cache=False,
-                                return_dict=False,
-                            )
+                            safe_nemotron_vl_forward(full_model, call_kwargs)
 
                 calibrate_loop = calibrate_full_model
             else:
