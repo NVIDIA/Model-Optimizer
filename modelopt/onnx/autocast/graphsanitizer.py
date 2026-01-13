@@ -161,8 +161,8 @@ class GraphSanitizer:
             )
             self.min_opset = 19
 
-        # Convert if any default domain opset is below minimum
-        if any(op.version < self.min_opset for op in default_opsets):
+        # Convert if the default domain opset is below minimum
+        if onnx_utils.get_opset_version(self.model) < self.min_opset:
             invalid_opsets = [op.version for op in default_opsets if op.version < self.min_opset]
             try:
                 logger.info(
