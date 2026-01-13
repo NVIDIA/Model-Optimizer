@@ -581,7 +581,6 @@ class _MegatronSequentialMLP(DynamicModule):
         This function is called to synchronize the amax values across local experts s.t. all localexperts will
         share the same amax.
         """
-        torch.distributed.barrier()
         # Collect amax from all local experts
         amax_dict = {}
         for expert in self.local_experts:
