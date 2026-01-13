@@ -207,7 +207,7 @@ def test_conv_resize_conversion(tmp_path):
 
     # Check that Resize is correctly converted:
     # - Data and ROI inputs (indices 0 and 1) should be FP16
-    # - The remaining inputs (scales/sizes) should remain in their original types
+    # - The remaining inputs (scales/sizes) should be kept in their original precisions
     resize_node = next(n for n in graph.nodes if n.op == "Resize")
     assert all(inp.dtype == np.float16 for inp in resize_node.inputs[0:2]), (
         "Resize data and ROI inputs should be FP16"
