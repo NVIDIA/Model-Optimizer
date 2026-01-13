@@ -24,17 +24,17 @@ repos:
     hooks:
       - id: ruff-check
         args: [--fix, --exit-non-zero-on-fix]
-        # See: commit hooks modifies block_config.py leading to test_compress.py failing (#25) · Issues · omniml / modelopt · GitLab
+        # See: commit hooks modifies block_config.py leading to test_puzzletron.py failing (#25) · Issues · omniml / modelopt · GitLab
         exclude: >
           (?x)^(
-              modelopt/torch/_compress/decilm/deci_lm_hf_code/block_config\.py|
-              modelopt/torch/_compress/decilm/deci_lm_hf_code/transformers_.*\.py
+              modelopt/torch/puzzletron/decilm/deci_lm_hf_code/block_config\.py|
+              modelopt/torch/puzzletron/decilm/deci_lm_hf_code/transformers_.*\.py
           )$
       - id: ruff-format
         exclude: >
           (?x)^(
-              modelopt/torch/_compress/decilm/deci_lm_hf_code/block_config\.py|
-              modelopt/torch/_compress/decilm/deci_lm_hf_code/transformers_.*\.py
+              modelopt/torch/puzzletron/decilm/deci_lm_hf_code/block_config\.py|
+              modelopt/torch/puzzletron/decilm/deci_lm_hf_code/transformers_.*\.py
           )$
 
   - repo: https://github.com/pre-commit/mirrors-mypy
@@ -107,7 +107,7 @@ repos:
               examples/speculative_decoding/main.py|
               examples/speculative_decoding/medusa_utils.py|
               examples/speculative_decoding/server_generate.py|
-              modelopt/torch/_compress/decilm/deci_lm_hf_code/transformers_.*\.py|
+              modelopt/torch/puzzletron/decilm/deci_lm_hf_code/transformers_.*\.py|
           )$
 
       # Default hook for Apache 2.0 in c/c++/cuda files

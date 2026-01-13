@@ -102,8 +102,8 @@ optional_deps = {
         "setuptools>=80",
         "setuptools-scm>=8",
     ],
-    # Dependedencies for modelopt.torch._compress subpackage
-    "compress": [
+    # Dependedencies for modelopt.torch.puzzletron subpackage
+    "puzzletron": [
         "fire",
         "hydra-core==1.3.2",
         "immutabledict",

@@ -17,7 +17,6 @@ modelopt/deploy @NVIDIA/modelopt-deploy-codeowners
 modelopt/onnx @NVIDIA/modelopt-onnx-codeowners
 modelopt/onnx/autocast @NVIDIA/modelopt-onnx-autocast-codeowners
 modelopt/torch @NVIDIA/modelopt-torch-codeowners
-modelopt/torch/_compress @NVIDIA/modelopt-torch-compress-codeowners
 modelopt/torch/_deploy @NVIDIA/modelopt-torch-deploy-codeowners
 modelopt/torch/distill @NVIDIA/modelopt-torch-distill-codeowners
 modelopt/torch/export @NVIDIA/modelopt-torch-export-codeowners
@@ -25,6 +24,7 @@ modelopt/torch/nas @NVIDIA/modelopt-torch-nas-prune-codeowners
 modelopt/torch/opt @NVIDIA/modelopt-torch-opt-codeowners
 modelopt/torch/peft @NVIDIA/modelopt-torch-peft-codeowners
 modelopt/torch/prune @NVIDIA/modelopt-torch-nas-prune-codeowners
+modelopt/torch/puzzletron @NVIDIA/modelopt-torch-puzzletron-codeowners
 modelopt/torch/quantization @NVIDIA/modelopt-torch-quantization-codeowners
 modelopt/torch/sparsity @NVIDIA/modelopt-torch-sparsity-codeowners
 modelopt/torch/speculative @NVIDIA/modelopt-torch-speculative-codeowners

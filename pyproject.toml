@@ -80,7 +80,7 @@ extend-ignore = [
     "D",
     "E501",
 ] # Ignore missing docstrings or line length for Jupyter notebooks
-"modelopt/torch/_compress/*" = [
+"modelopt/torch/puzzletron/*" = [
     "C4",
     "D",
     "E",

@@ -7,6 +7,7 @@ Pruning can involve removal (prune) of Linear and Conv layers; and Transformer a
 This section focuses on applying Model Optimizer's state-of-the-art complementary pruning modes to enable you to search for the best subnet architecture from your provided base model:
 
 1. [Minitron](https://arxiv.org/pdf/2408.11796): A pruning method developed by NVIDIA Research for pruning GPT (and later extended to Mamba, MoE, and Hybrid Transformer Mamba) models in NVIDIA Megatron-LM or NeMo framework. It uses the activation magnitudes to prune the embedding hidden size; mlp ffn hidden size; transformer attention heads; mamba heads and head dimension; MoE number of experts, ffn hidden size, and shared expert intermediate size; and number of layers of the model.
+1. [Puzzletron](../puzzletron/README.md): An advanced pruning method by NVIDIA Research using Mixed Integer Programming (MIP) based NAS search algorithm.
 1. FastNAS: A pruning method recommended for Computer Vision models. Given a pretrained model, FastNAS finds the subnet which maximizes the score function while meeting the given constraints.
 1. GradNAS: A light-weight pruning method recommended for language models like Hugging Face BERT, GPT-J. It uses the gradient information to prune the model's linear layers and attention heads to meet the given constraints.
 
@@ -22,8 +23,6 @@ This section focuses on applying Model Optimizer's state-of-the-art complementar
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] | |
 
 </div>
-
-For more advanced pruning strategies, such as the [Puzzle methodology](https://arxiv.org/pdf/2411.19146), please see [Puzzle pruning example](../compress/README.md).
 
 ## Pre-Requisites
 
