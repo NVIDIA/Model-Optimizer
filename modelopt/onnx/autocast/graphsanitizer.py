@@ -259,7 +259,7 @@ class GraphSanitizer:
         """Duplicate constant tensors if they are shared."""
         self.model, is_duplicated_constant = onnx_utils.duplicate_shared_constants(self.model)
         if is_duplicated_constant:
-            logger.info("Shared constants were detected and duplicated accordingly.")
+            logger.warning("Shared constants were detected and duplicated accordingly.")
 
     def _match_layernorm_pattern(self, mean_node: onnx.NodeProto) -> dict | None:
         """Match the sequence of operations that constitute a LayerNorm.
