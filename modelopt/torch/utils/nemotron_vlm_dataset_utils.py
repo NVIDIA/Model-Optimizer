@@ -40,6 +40,12 @@ _IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
 @functools.lru_cache(maxsize=8)
 def list_repo_files_cached(repo_id: str, repo_type: str = "dataset") -> list[str]:
+    """List files in a HuggingFace repo (cached).
+
+    Args:
+        repo_id: HF repo id (e.g., a dataset repo).
+        repo_type: HF repo type, usually "dataset" here.
+    """
     from huggingface_hub import list_repo_files
 
     return list_repo_files(repo_id=repo_id, repo_type=repo_type)
@@ -80,6 +86,17 @@ class NemotronTarPlusJsonlIterable(torch.utils.data.IterableDataset):
         shuffle_buffer_size: int,
         max_shards: int | None,
     ):
+        """Create an iterable dataset for Nemotron-VLM-Dataset-v2.
+
+        Args:
+            repo_id: Dataset repo id, e.g. "nvidia/Nemotron-VLM-Dataset-v2".
+            subsets: Subset names to draw from (e.g., "sparsetables").
+            shard_paths: Tar shard paths under `<subset>/media/`.
+            num_samples: Total number of samples to yield.
+            seed: RNG seed for sampling.
+            shuffle_buffer_size: Unused for now (kept for API compatibility).
+            max_shards: Max number of shards to use per subset (limits downloads).
+        """
         super().__init__()
         self.repo_id = repo_id
         self.subsets = subsets
@@ -125,7 +142,9 @@ class NemotronTarPlusJsonlIterable(torch.utils.data.IterableDataset):
             candidate_names: list[str] = []
             header_limit = per_subset_target * 50
             for shard in shard_list:
-                local_tar = hf_hub_download(repo_id=self.repo_id, filename=shard, repo_type="dataset")
+                local_tar = hf_hub_download(
+                    repo_id=self.repo_id, filename=shard, repo_type="dataset"
+                )
                 with tarfile.open(local_tar, "r:*") as tf:
                     for member in tf:
                         if not member.isfile():
@@ -173,7 +192,9 @@ class NemotronTarPlusJsonlIterable(torch.utils.data.IterableDataset):
             for shard in shard_list:
                 if yielded_total >= self.num_samples or not needed:
                     break
-                local_tar = hf_hub_download(repo_id=self.repo_id, filename=shard, repo_type="dataset")
+                local_tar = hf_hub_download(
+                    repo_id=self.repo_id, filename=shard, repo_type="dataset"
+                )
                 with tarfile.open(local_tar, "r:*") as tf:
                     for member in tf:
                         if yielded_total >= self.num_samples or not needed:
@@ -197,7 +218,10 @@ class NemotronTarPlusJsonlIterable(torch.utils.data.IterableDataset):
                         meta = meta_by_image.get(name)
                         if not meta:
                             continue
-                        yield {"id": meta.get("id", name), "messages": meta.get("messages"), "image": img}
+                        yield {
+                            "id": meta.get("id", name),
+                            "messages": meta.get("messages"),
+                            "image": img,
+                        }
                         needed.discard(name)
                         yielded_total += 1
-

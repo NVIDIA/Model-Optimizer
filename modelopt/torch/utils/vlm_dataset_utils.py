@@ -31,6 +31,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from .image_processor import MllamaImageProcessor
+from .nemotron_vlm_dataset_utils import NemotronTarPlusJsonlIterable, list_repo_files_cached
 
 # Use dict to store the config for each dataset.
 # If we want to export more options to user like target languages, we need more standardized approach like dataclass.
@@ -46,8 +47,6 @@ SUPPORTED_VLM_DATASET_CONFIG: dict[str, dict[str, Any]] = {
 }
 
 __all__ = ["get_supported_vlm_datasets", "get_vlm_dataset_dataloader"]
-
-from .nemotron_vlm_dataset_utils import NemotronTarPlusJsonlIterable, list_repo_files_cached
 
 
 class _HFDatasetsIterableWrapper(torch.utils.data.IterableDataset):
