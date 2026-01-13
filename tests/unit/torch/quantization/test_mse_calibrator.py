@@ -68,7 +68,7 @@ class TestMseCalibrator:
 
         cal = calib.MseCalibrator(
             amax=initial_amax,
-            num_steps=20,
+            step_size=0.075,
             start_multiplier=0.1,
             stop_multiplier=1.5,
             quant_func=quant_func,
@@ -115,7 +115,7 @@ class TestMseCalibrator:
 
         cal = calib.MseCalibrator(
             amax=initial_amax,
-            num_steps=25,
+            step_size=0.045,
             start_multiplier=0.1,
             stop_multiplier=1.2,
             quant_func=quant_func,
@@ -162,7 +162,7 @@ class TestMseCalibrator:
 
         cal = calib.MseCalibrator(
             amax=initial_amax,
-            num_steps=50,
+            step_size=0.008,
             start_multiplier=0.8,
             stop_multiplier=1.2,
             quant_func=quant_func,
@@ -214,7 +214,7 @@ class TestMseCalibrator:
 
         cal = calib.MseCalibrator(
             amax=initial_amax,
-            num_steps=20,
+            step_size=0.075,
             start_multiplier=0.1,
             stop_multiplier=1.5,
             quant_func=quant_func,
@@ -265,7 +265,7 @@ class TestMseCalibrator:
 
         cal = calib.MseCalibrator(
             amax=initial_amax,
-            num_steps=15,
+            step_size=0.07,
             start_multiplier=0.5,
             stop_multiplier=1.5,
             quant_func=quant_func,
@@ -307,7 +307,7 @@ class TestMseCalibrator:
             tq._if_calib = was_calib_enabled
             return xq
 
-        cal = calib.MseCalibrator(amax=initial_amax, num_steps=10, quant_func=quant_func)
+        cal = calib.MseCalibrator(amax=initial_amax, step_size=0.4, quant_func=quant_func)
 
         cal.collect(x)
 
@@ -352,7 +352,7 @@ class TestMseCalibrator:
         cal = calib.MseCalibrator(
             amax=initial_amax,
             axis=0,
-            num_steps=10,
+            step_size=0.15,
             start_multiplier=0.5,
             stop_multiplier=2.0,
             quant_func=quant_func,
@@ -398,7 +398,7 @@ class TestMseCalibrator:
         cal = calib.MseCalibrator(
             amax=initial_amax,
             axis=0,
-            num_steps=15,
+            step_size=0.1,
             start_multiplier=0.5,
             stop_multiplier=2.0,
             quant_func=quant_func,
@@ -458,7 +458,7 @@ class TestMseCalibrator:
         cal = calib.MseCalibrator(
             amax=initial_amax,
             axis=0,
-            num_steps=20,
+            step_size=0.05,
             start_multiplier=0.5,
             stop_multiplier=1.5,
             quant_func=quant_func,
@@ -511,7 +511,7 @@ class TestMseCalibrator:
         cal = calib.MseCalibrator(
             amax=initial_amax,
             axis=0,
-            num_steps=10,
+            step_size=0.15,
             start_multiplier=0.5,
             stop_multiplier=2.0,
             quant_func=quant_func,

@@ -45,6 +45,7 @@ WINT4INT8_CFG = {
     "algorithm": "awq_lite",
 }
 
+# Test configs for per channel MSE calibration
 INT8_MSE_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {"num_bits": 8, "axis": 0},
