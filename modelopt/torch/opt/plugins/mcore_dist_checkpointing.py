@@ -242,6 +242,7 @@ def restore_sharded_modelopt_state(
         return
 
     # Loading the common modelopt_state (replicated on all ranks)
+    # Security NOTE: weights_only=False is used here on NVIDIA-generated file, not on untrusted user input
     common_modelopt_state = torch.load(
         modelopt_checkpoint_name + "/" + COMMON_STATE_FNAME, weights_only=False
     )

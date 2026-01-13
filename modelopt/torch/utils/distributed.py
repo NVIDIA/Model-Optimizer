@@ -101,6 +101,7 @@ def _deserialize(tensor: torch.Tensor, size: int | None = None) -> Any:
     buffer = tensor.numpy().tobytes()
     if size is not None:
         buffer = buffer[:size]
+    # Security NOTE: weights_only=False is used here on internally-generated buffer, not on untrusted user input
     obj = torch.load(io.BytesIO(buffer), weights_only=False)
     return obj
 
