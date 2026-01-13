@@ -87,6 +87,8 @@ nemotron_h_causal_lm_import: dict[str, CustomModuleMapping] = {
 
 }
 
+# TODO later support MTP import/export 
+
 nemotron_h_causal_lm_export: dict[str, CustomModuleMapping] = {
     "word_embeddings": NameRemapping("backbone.embeddings."),
     "final_norm": NameRemapping("backbone.norm_f."),

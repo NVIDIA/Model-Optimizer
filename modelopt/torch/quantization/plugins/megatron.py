@@ -23,6 +23,7 @@ from typing import Any
 import megatron.core.parallel_state as mcore_parallel
 import megatron.core.tensor_parallel.layers as megatron_parallel
 import megatron.core.transformer.mlp as megatron_mlp
+import megatron.core.transformer.transformer_layer as megatron_transformer_layer
 import megatron.core.transformer.moe.experts as megatron_moe
 import megatron.core.transformer.moe.moe_layer as megatron_moe_layer
 import torch
@@ -40,6 +41,7 @@ from modelopt.torch.opt.plugins.megatron import (
     register_modelopt_extra_state_callbacks,
 )
 from modelopt.torch.utils.distributed import ParallelState
+import torch.distributed as dist
 
 from ..nn import QuantModule, QuantModuleRegistry, TensorQuantizer
 from ..nn.modules.quant_linear import RealQuantLinear
@@ -593,12 +595,18 @@ class _MegatronSequentialMLP(DynamicModule):
                         if stored_amax is None
                         else torch.maximum(stored_amax, amax_tensor)
                     )
+                #if isinstance(module, TensorQuantizer) and module.amax is None:
+                #    print(f"MISSING AMAX BEFORE SYNC in expert rank {dist.get_rank()}: {name}", flush=True)
+
+
 
         # Apply synchronized amax values back to all local experts
         for expert in self.local_experts:
             for name, module in expert.named_modules():
                 if isinstance(module, TensorQuantizer) and module.amax is not None:
                     module.amax = amax_dict[name].detach().clone().to(module.amax.device)
+                #if isinstance(module, TensorQuantizer) and module.amax is None:
+                #    print(f"MISSING AMAX AFTER SYNC in expert rank {dist.get_rank()}: {name}", flush=True)
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         """Override the default to enable singleton_local_shards.
