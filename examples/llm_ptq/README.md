@@ -181,7 +181,6 @@ python hf_ptq.py \
 > Note: when `--calib_with_images` is set, `--calib_size` must be a single value.
 This functionality is currently in beta and has been tested on `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16`.
 
-
 ### NeMo Example Script
 
 NeMo 2.0 framework PTQ and TensorRT-LLM deployment examples are maintained in the NeMo GitHub repo. Please refer to the [NeMo PTQ documentation](https://docs.nvidia.com/nemo-framework/user-guide/latest/model-optimization/quantization/quantization.html) for more details.
