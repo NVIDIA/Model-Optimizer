@@ -162,6 +162,26 @@ scripts/huggingface_example.sh --model $HF_PATH --quant [fp8|nvfp4|int8_sq|int4_
 
 [PTQ for DeepSeek](../deepseek/README.md) shows how to quantize the DeepSeek model with FP4 and export to TensorRT-LLM.
 
+#### VLM calibration with image-text pairs (e.g., Nemotron VL)
+
+For vision-language models, calibration quality can likely improve by using image-text pairs instead of text-only data, especially on visual understanding tasks:
+
+```bash
+python hf_ptq.py \
+  --pyt_ckpt_path <huggingface_model_card> \
+  --qformat nvfp4 \
+  --export_path <quantized_ckpt_path> \
+  --trust_remote_code \
+  --calib_with_images \
+  --vlm_dataset nemotron_vlm_dataset_v2 \
+  --vlm_subsets sparsetables,plotqa_cot,wiki_en \
+  --calib_size 512
+```
+
+> Note: when `--calib_with_images` is set, `--calib_size` must be a single value.
+This functionality is currently in beta and has been tested on `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16`.
+
+
 ### NeMo Example Script
 
 NeMo 2.0 framework PTQ and TensorRT-LLM deployment examples are maintained in the NeMo GitHub repo. Please refer to the [NeMo PTQ documentation](https://docs.nvidia.com/nemo-framework/user-guide/latest/model-optimization/quantization/quantization.html) for more details.
@@ -326,25 +346,6 @@ with torch.inference_mode():
 ```bash
 python hf_ptq.py --pyt_ckpt_path <huggingface_model_card> --qformat fp8 --export_path <quantized_ckpt_path> --trust_remote_code
 ```
-
-#### VLM calibration with image-text pairs (e.g., Nemotron VL)
-
-For vision-language models, calibration quality can likely improve by using image-text pairs instead of text-only data, especially on visual understanding tasks:
-
-```bash
-python hf_ptq.py \
-  --pyt_ckpt_path <huggingface_model_card> \
-  --qformat nvfp4 \
-  --export_path <quantized_ckpt_path> \
-  --trust_remote_code \
-  --calib_with_images \
-  --vlm_dataset nemotron_vlm_dataset_v2 \
-  --vlm_subsets sparsetables,plotqa_cot,wiki_en \
-  --calib_size 512
-```
-
-> Note: when `--calib_with_images` is set, `--calib_size` must be a single value.
-This functionality is currently in beta and has been tested on `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16`.
 
 ### Hugging Face framework [Script](./scripts/huggingface_example.sh)
 
