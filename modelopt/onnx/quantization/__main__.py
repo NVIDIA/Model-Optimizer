@@ -16,12 +16,38 @@
 """Command-line entrypoint for ONNX PTQ."""
 
 import argparse
+import os
 
 import numpy as np
 
 from modelopt.onnx.quantization.quantize import quantize
 
 __all__ = ["main"]
+
+
+def validate_file_size(file_path: str, max_size_bytes: int) -> None:
+    """Validate that a file exists and does not exceed the maximum allowed size.
+
+    Args:
+        file_path: Path to the file to validate
+        max_size_bytes: Maximum allowed file size in bytes
+
+    Raises:
+        FileNotFoundError: If the file does not exist
+        ValueError: If the file exceeds the maximum allowed size
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    file_size = os.path.getsize(file_path)
+    if file_size > max_size_bytes:
+        max_size_gb = max_size_bytes / (1024 * 1024 * 1024)
+        actual_size_gb = file_size / (1024 * 1024 * 1024)
+        raise ValueError(
+            f"File size validation failed: {file_path} ({actual_size_gb:.2f}GB) exceeds "
+            f"maximum allowed size of {max_size_gb:.2f}GB. This limit helps prevent potential "
+            f"denial-of-service attacks."
+        )
 
 
 def get_parser() -> argparse.ArgumentParser:
@@ -266,6 +292,15 @@ def get_parser() -> argparse.ArgumentParser:
 def main():
     """Command-line entrypoint for ONNX PTQ."""
     args = get_parser().parse_args()
+
+    # Security: Validate onnx model size is under 2GB by default
+    try:
+        validate_file_size(args.onnx_path, 2 * (1024**3))
+    except ValueError as e:
+        raise ValueError(
+            "Onnx model size larger than 2GB. Please set --use_external_data_format flag to bypass this validation."
+        ) from e
+
     calibration_data = None
     if args.calibration_data_path:
         # Security: Disable pickle deserialization for untrusted sources to prevent RCE attacks
