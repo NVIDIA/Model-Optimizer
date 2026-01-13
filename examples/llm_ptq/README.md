@@ -329,7 +329,7 @@ python hf_ptq.py --pyt_ckpt_path <huggingface_model_card> --qformat fp8 --export
 
 #### VLM calibration with image-text pairs (e.g., Nemotron VL)
 
-For vision-language models, calibration quality can improve by using image-text pairs instead of text-only data:
+For vision-language models, calibration quality can likely improve by using image-text pairs instead of text-only data, especially on visual understanding tasks:
 
 ```bash
 python hf_ptq.py \
@@ -340,10 +340,11 @@ python hf_ptq.py \
   --calib_with_images \
   --vlm_dataset nemotron_vlm_dataset_v2 \
   --vlm_subsets sparsetables,plotqa_cot,wiki_en \
-  --calib_size 256
+  --calib_size 512
 ```
 
 > Note: when `--calib_with_images` is set, `--calib_size` must be a single value.
+This functionality is currently in beta and has been tested on `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16`.
 
 ### Hugging Face framework [Script](./scripts/huggingface_example.sh)
 
