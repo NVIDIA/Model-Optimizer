@@ -35,7 +35,7 @@ from modelopt.torch._compress.decilm.converters.convert_llama3_to_decilm import 
 
 def test_compress(project_root_path: Path, tmp_path: Path):
     spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
+        size=min(torch.cuda.device_count(), 2),  # assertions configured for atmost 2 GPUs
         job=partial(_test_compress_multiprocess_job, project_root_path, tmp_path),
         backend="nccl",
     )
@@ -64,10 +64,9 @@ def _test_compress_multiprocess_job(project_root_path: Path, tmp_path: Path, ran
     #
     # Check assertions
     #
+    # assertions for the score_pruning_activations step 1
+    _assert_score_pruning_activations(puzzle_dir)
     if rank == 0:
-        # assertions for the score_pruning_activations step 1
-        _assert_score_pruning_activations(puzzle_dir)
-
         # assertions for the pruning_ckpts step 2
         assert (puzzle_dir / "ckpts/ffn_256_attn_no_op").exists()
 
@@ -103,20 +102,23 @@ def _test_compress_multiprocess_job(project_root_path: Path, tmp_path: Path, ran
 def _assert_score_pruning_activations(puzzle_dir: Path):
     """Assertions for the score_pruning_activations step 1."""
     rank = dist.rank()
+    size = dist.size()
     rank_filepath = f"pruning/pruning_scores/ffn_iterative/100samples_diverse_mini/rank_{rank}.pth"
     assert (puzzle_dir / rank_filepath).is_file()
 
     pruning_scores = torch.load(puzzle_dir / rank_filepath)
 
     layer_names = list(pruning_scores.keys())
-    assert len(layer_names) == 2
+    assert len(layer_names) == 2 // size
 
-    # Check specific values for layer 0
-    layer_0 = pruning_scores[layer_names[0]]
-    assert layer_0["score"][0].item() == 371
-    assert layer_0["channels_importance_ascending"][0].item() == 140
+    if size == 1 or rank == 0:
+        # Check specific values for layer 0
+        layer_0 = pruning_scores[layer_names[0]]
+        assert layer_0["score"][0].item() == 371
+        assert layer_0["channels_importance_ascending"][0].item() == 140
 
-    # Check specific values for layer 1
-    layer_1 = pruning_scores[layer_names[1]]
-    assert layer_1["score"][0].item() == 269
-    assert layer_1["channels_importance_ascending"][0].item() == 366
+    if size == 1 or rank == 1:
+        # Check specific values for layer 1
+        layer_1 = pruning_scores[layer_names[1 if size == 1 else 0]]
+        assert layer_1["score"][0].item() == 269
+        assert layer_1["channels_importance_ascending"][0].item() == 366
