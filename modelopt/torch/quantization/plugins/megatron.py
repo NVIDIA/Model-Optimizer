@@ -23,6 +23,7 @@ from typing import Any
 import megatron.core.parallel_state as mcore_parallel
 import megatron.core.tensor_parallel.layers as megatron_parallel
 import megatron.core.transformer.mlp as megatron_mlp
+import megatron.core.transformer.transformer_layer as megatron_transformer_layer
 import megatron.core.transformer.moe.experts as megatron_moe
 import megatron.core.transformer.moe.moe_layer as megatron_moe_layer
 import torch
@@ -40,6 +41,7 @@ from modelopt.torch.opt.plugins.megatron import (
     register_modelopt_extra_state_callbacks,
 )
 from modelopt.torch.utils.distributed import ParallelState
+import torch.distributed as dist
 
 from ..nn import QuantModule, QuantModuleRegistry, TensorQuantizer
 from ..nn.modules.quant_linear import RealQuantLinear
@@ -593,12 +595,18 @@ class _MegatronSequentialMLP(DynamicModule):
                         if stored_amax is None
                         else torch.maximum(stored_amax, amax_tensor)
                     )
+                #if isinstance(module, TensorQuantizer) and module.amax is None:
+                #    print(f"MISSING AMAX BEFORE SYNC in expert rank {dist.get_rank()}: {name}", flush=True)
+
+
 
         # Apply synchronized amax values back to all local experts
         for expert in self.local_experts:
             for name, module in expert.named_modules():
                 if isinstance(module, TensorQuantizer) and module.amax is not None:
                     module.amax = amax_dict[name].detach().clone().to(module.amax.device)
+                #if isinstance(module, TensorQuantizer) and module.amax is None:
+                #    print(f"MISSING AMAX AFTER SYNC in expert rank {dist.get_rank()}: {name}", flush=True)
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         """Override the default to enable singleton_local_shards.
@@ -758,3 +766,22 @@ class _QuantMoELayer(QuantModule):
             super().forward(hidden_states)
             self.router.topk = original_top_k
         return super().forward(hidden_states)
+
+# TODO double check if MOE forward will be implemented in MoELayer or TransformerLayer
+# We do not need both layers to be patched
+
+@QuantModuleRegistry.register({megatron_transformer_layer.TransformerLayer: "megatron_transformer_layer_TransformerLayer"})
+class _QuantTransformerLayer(QuantModule):
+    def _setup(self):
+        pass
+
+    def _forward_mlp_moe_preprocess(self, hidden_states):
+        #print(f"FORWARD in TransformerLayer rank {dist.get_rank()}", flush=True)
+        if any(getattr(m, "_if_calib", False) for m in self.mlp.experts.modules()):
+            print(f"Forcing top_k to num_experts in TransformerLayer rank {dist.get_rank()}", flush=True)
+            original_top_k = self.mlp.router.topk
+            self.mlp.router.topk = self.mlp.router.num_experts
+            super()._forward_mlp_moe_preprocess(hidden_states)
+            self.mlp.router.topk = original_top_k
+
+        return super()._forward_mlp_moe_preprocess(hidden_states)
