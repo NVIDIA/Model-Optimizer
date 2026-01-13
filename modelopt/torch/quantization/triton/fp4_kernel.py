@@ -431,7 +431,9 @@ def static_blockwise_fp4_fake_quant(
         from modelopt.torch.quantization.utils import reduce_amax
 
         if scale_fp8_quant_amax is None:
-            scale_fp8_quant_amax = reduce_amax(x, axis=None, keepdims=False, squeeze_scalar=True)
+            scale_fp8_quant_amax = reduce_amax(
+                scale, axis=None, keepdims=False, squeeze_scalar=True
+            )
 
         scale = scaled_e4m3_impl(scale, scale_fp8_quant_amax)
 
