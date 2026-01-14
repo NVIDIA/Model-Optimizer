@@ -226,7 +226,7 @@ export HF_PATH=<the downloaded LLaMA checkpoint from the Hugging Face hub, or si
 # --auto_quantize_bits specifies the constraint for `AutoQuantize`
 # --quant specifies the formats to be searched for `AutoQuantize`
 # NOTE: auto_quantize_bits cannot be lower than the number of bits for the smallest quantization format in --quant
-scripts/huggingface_example.sh --type llama --model $HF_PATH --quant w4a8_awq,fp8 --auto_quantize_bits 4.8 --tp [1|2|4|8]  --calib_batch_size 4
+scripts/huggingface_example.sh --model $HF_PATH --quant w4a8_awq,fp8 --auto_quantize_bits 4.8 --calib_batch_size 4
 ```
 
 The above example perform `AutoQuantize` where the less quantization accuracy sensitive layers are quantized with `w4a8_awq` (specified by `--quant w4a8_awq`) and the more sensitive layers
