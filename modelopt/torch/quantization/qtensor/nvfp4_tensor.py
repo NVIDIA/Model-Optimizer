@@ -53,11 +53,26 @@ class NVFP4QTensor(BaseQuantizedTensor):
         return cls.e2m1_bounds_on_device[device]
 
     @classmethod
-    def get_weights_scaling_factor_2_from_quantizer(cls, weight_quantizer):
-        """Returns per tensor weight scaling factor from the weight_quantizer amax."""
-        # Assert that weight_quantizer has attribute amax
-        assert hasattr(weight_quantizer, "_amax"), "Weight quantizer does not have attribute amax"
-        return weight_quantizer._amax.float() / (6.0 * 448.0)
+    def get_weights_scaling_factor_2_from_quantizer(cls, weight_quantizer, weight=None):
+        """Returns per tensor weight scaling factor from the weight_quantizer amax.
+
+        Args:
+            weight_quantizer: The weight quantizer module
+            weight: Optional weight tensor to compute amax from if not set on quantizer
+        """
+        # Check if weight_quantizer has amax attribute and it's not None
+        if hasattr(weight_quantizer, "_amax") and weight_quantizer._amax is not None:
+            return weight_quantizer._amax.float() / (6.0 * 448.0)
+
+        # Fallback: compute amax from weight if provided
+        if weight is not None:
+            return cls.get_weights_scaling_factor_2(weight)
+
+        # If neither amax nor weight is available, raise an error
+        raise ValueError(
+            "Weight quantizer does not have attribute amax and no weight tensor provided. "
+            "Cannot compute scaling factor."
+        )
 
     @classmethod
     def get_weights_scaling_factor(
