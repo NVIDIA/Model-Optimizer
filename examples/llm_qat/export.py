@@ -23,7 +23,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import modelopt.torch.opt as mto
 from modelopt.torch.export.convert_hf_config import convert_hf_quant_config_format
-from modelopt.torch.export.unified_export_hf import _export_hf_checkpoint
+from modelopt.torch.export.unified_export_hf import _export_transformers_checkpoint
 from modelopt.torch.opt.conversion import restore_from_modelopt_state
 from modelopt.torch.quantization.utils import set_quantizer_state_dict
 from modelopt.torch.utils import print_rank_0
@@ -81,7 +81,9 @@ def main(args):
         base_model_dir = export_dir
 
     try:
-        post_state_dict, hf_quant_config = _export_hf_checkpoint(model, is_modelopt_qlora=is_qlora)
+        post_state_dict, hf_quant_config = _export_transformers_checkpoint(
+            model, is_modelopt_qlora=is_qlora
+        )
 
         with open(f"{base_model_dir}/hf_quant_config.json", "w") as file:
             json.dump(hf_quant_config, file, indent=4)
