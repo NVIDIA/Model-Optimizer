@@ -28,6 +28,7 @@ import torch.nn as nn
 from config import (
     FP8_DEFAULT_CONFIG,
     INT8_DEFAULT_CONFIG,
+    FLUX_DEV_NVFP4_MIXED_CONFIG,
     NVFP4_DEFAULT_CONFIG,
     NVFP4_FP8_MHA_CONFIG,
     reset_set_int8_config,
@@ -116,6 +117,7 @@ class QuantFormat(str, Enum):
     INT8 = "int8"
     FP8 = "fp8"
     FP4 = "fp4"
+    FP4_MIXED_DEV = "fp4_mixed_dev"
 
 
 class QuantAlgo(str, Enum):
@@ -1113,6 +1115,14 @@ class Quantizer:
                 quant_config = NVFP4_FP8_MHA_CONFIG
             else:
                 quant_config = NVFP4_DEFAULT_CONFIG
+        elif self.config.format == QuantFormat.FP4_MIXED_DEV:
+            if self.model_config.model_type.value.startswith("flux"):
+                quant_config = FLUX_DEV_NVFP4_MIXED_CONFIG
+            else:
+                self.logger.warning(
+                    "FP4 mixed-dev format is only supported for FLUX models; using NVFP4 default config."
+                )
+                quant_config = NVFP4_DEFAULT_CONFIG
         else:
             raise NotImplementedError(f"Unknown format {self.config.format}")
         set_quant_config_attr(
@@ -1231,7 +1241,10 @@ class ExportManager:
                 self.logger.info(f"📦 Saving SafeTensors format for ComfyUI compatibility...")
 
                 # Map quant format
-                quant_format_str = "nvfp4" if self.quant_format == "fp4" else "float8_e4m3fn"
+                if self.quant_format in ("fp4", "fp4_mixed_dev"):
+                    quant_format_str = "nvfp4"
+                else:
+                    quant_format_str = "float8_e4m3fn"
 
                 try:
                     save_quantized_safetensors(
@@ -1275,6 +1288,7 @@ class ExportManager:
                 "Detected quantizing conv layers in backbone. Generating FP8 scales..."
             )
             generate_fp8_scales(backbone)
+        onnx_format = QuantFormat.FP4 if quant_format == QuantFormat.FP4_MIXED_DEV else quant_format
         self.logger.info("Preparing models for export...")
         pipe.to("cpu")
         torch.cuda.empty_cache()
@@ -1284,7 +1298,7 @@ class ExportManager:
         with torch.no_grad():
             self.logger.info("Exporting to ONNX...")
             modelopt_export_sd(
-                backbone, str(self.config.onnx_dir), model_type.value, quant_format.value
+                backbone, str(self.config.onnx_dir), model_type.value, onnx_format.value
             )
 
         self.logger.info("ONNX export completed successfully")
@@ -1587,9 +1601,8 @@ def main() -> None:
 
             export_manager.save_checkpoint(backbone)
 
-        check_conv_and_mha(
-            backbone, quant_config.format == QuantFormat.FP4, quant_config.quantize_mha
-        )
+        is_fp4 = quant_config.format in (QuantFormat.FP4, QuantFormat.FP4_MIXED_DEV)
+        check_conv_and_mha(backbone, is_fp4, quant_config.quantize_mha)
         mtq.print_quant_summary(backbone)
 
         export_manager.export_onnx(

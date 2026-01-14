@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import torch.nn as nn
 from calib.plugin_calib import PercentileCalibrator
 
@@ -97,6 +98,33 @@ NVFP4_FP8_MHA_CONFIG = {
     },
     "algorithm": {"method": "svdquant", "lowrank": 32},
 }
+
+# FLUX Dev mixed-format layers derived from official NVFP4 metadata.
+FLUX_DEV_FP8_LAYER_PATTERNS = [
+    "double_blocks.*.img_attn.qkv",
+    "double_blocks.*.img_mod.lin",
+    "double_blocks.*.txt_attn.qkv",
+    "double_blocks.*.txt_mod.lin",
+    "single_blocks.*.modulation.lin",
+]
+
+
+def _build_flux_dev_nvfp4_mixed_config():
+    cfg = copy.deepcopy(NVFP4_FP8_MHA_CONFIG)
+    quant_cfg = cfg["quant_cfg"]
+    fp8_override = {
+        "num_bits": (4, 3),
+        "axis": None,
+        "block_sizes": None,
+        "enable": True,
+    }
+    for layer_pattern in FLUX_DEV_FP8_LAYER_PATTERNS:
+        quant_cfg[f"*{layer_pattern}*weight_quantizer*"] = fp8_override
+        quant_cfg[f"*{layer_pattern}*input_quantizer*"] = fp8_override
+    return cfg
+
+
+FLUX_DEV_NVFP4_MIXED_CONFIG = _build_flux_dev_nvfp4_mixed_config()
 
 
 def set_quant_config_attr(quant_config, trt_high_precision_dtype, quant_algo, **kwargs):
