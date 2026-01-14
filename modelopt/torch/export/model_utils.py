@@ -85,6 +85,7 @@ def is_multimodal_model(model):
     - Vision LoRA configurations
     - Audio processing capabilities
     - Image embedding layers
+    - Nemotron-Parse conditional generation models
 
     Args:
         model: The HuggingFace model instance to check
@@ -103,6 +104,10 @@ def is_multimodal_model(model):
     """
     config = model.config
 
+    # Check for Nemotron-Parse encoder-decoder architecture
+    architectures = getattr(config, "architectures", [])
+    is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
+
     return (
         hasattr(config, "vision_config")  # Standard vision config (e.g., Qwen2.5-VL)
         or hasattr(model, "language_model")  # Language model attribute (e.g., LLaVA)
@@ -112,6 +117,7 @@ def is_multimodal_model(model):
         or (
             hasattr(config, "embd_layer") and hasattr(config.embd_layer, "image_embd_layer")
         )  # Image embedding layers
+        or is_nemotron_parse  # Nemotron-Parse conditional generation model
     )
 
 
@@ -141,5 +147,9 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
     if hasattr(model, "language_model"):
         return [model, model.language_model]
 
-    # Pattern 3: No language_model found
+    # Pattern 3: For encoder-decoder VL models (e.g., Nemotron-Parse), the decoder is the language model
+    if hasattr(model, "decoder"):
+        return [model, model.decoder]
+
+    # Pattern 4: No language_model found
     return None

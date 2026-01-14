@@ -18,7 +18,7 @@
 import os
 
 from PIL import Image
-from transformers import AutoImageProcessor, AutoProcessor
+from transformers import AutoImageProcessor, AutoProcessor, GenerationConfig
 
 
 def run_vl_preview_generation(model, tokenizer, model_path, stage_name):
@@ -73,13 +73,34 @@ def run_vl_preview_generation(model, tokenizer, model_path, stage_name):
             print("   Skipping VL preview generation.")
             return None
 
+        # Check if this is Nemotron-Parse early to set up proper generation config
+        config = model.config
+        architectures = getattr(config, "architectures", [])
+        is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
+
         # Generate response
         question = "Describe this image briefly."  # Updated for single image
-        generation_config = {
-            "max_new_tokens": 50,
-            "do_sample": False,
-            "eos_token_id": tokenizer.eos_token_id,
-        }
+
+        # Use model's GenerationConfig for Nemotron-Parse, dict for others
+        if is_nemotron_parse:
+            try:
+                generation_config = GenerationConfig.from_pretrained(
+                    model_path, trust_remote_code=True
+                )
+                print("Using Nemotron-Parse GenerationConfig from model")
+            except Exception as e:
+                print(f"Warning: Could not load GenerationConfig: {e}, using defaults")
+                generation_config = {
+                    "max_new_tokens": 50,
+                    "do_sample": False,
+                    "eos_token_id": tokenizer.eos_token_id,
+                }
+        else:
+            generation_config = {
+                "max_new_tokens": 50,
+                "do_sample": False,
+                "eos_token_id": tokenizer.eos_token_id,
+            }
 
         print(f"Generating VL response ({stage_name})...")
 
@@ -105,27 +126,39 @@ def run_vl_preview_generation(model, tokenizer, model_path, stage_name):
         else:
             processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
 
-            messages = [
-                {"role": "system", "content": "/no_think"},
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "image": "",
-                        },
-                        {
-                            "type": "text",
-                            "text": question,
-                        },
-                    ],
-                },
-            ]
+            # Check if this is Nemotron-Parse (uses task prompts instead of chat templates)
+            config = model.config
+            architectures = getattr(config, "architectures", [])
+            is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
 
-            # Apply chat template
-            prompt = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
+            if is_nemotron_parse:
+                # Nemotron-Parse uses a specific task prompt format
+                # See: https://huggingface.co/nvidia/NVIDIA-Nemotron-Parse-v1.1#usage-example
+                prompt = "</s><s><predict_bbox><predict_classes><output_markdown>"
+                print(f"Using Nemotron-Parse task prompt: {prompt}")
+            else:
+                # Other VL models use chat templates
+                messages = [
+                    {"role": "system", "content": "/no_think"},
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "image": "",
+                            },
+                            {
+                                "type": "text",
+                                "text": question,
+                            },
+                        ],
+                    },
+                ]
+
+                # Apply chat template
+                prompt = tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
 
             # Process inputs using the processor with single image
             inputs = processor(
@@ -139,21 +172,49 @@ def run_vl_preview_generation(model, tokenizer, model_path, stage_name):
             inputs = inputs.to(model_device)
             print(f"    Moved inputs to {model_device}")
 
+            # Verify we have pixel_values for the vision encoder
+            if not hasattr(inputs, 'pixel_values') or inputs.pixel_values is None:
+                raise ValueError("Processor did not generate pixel_values. Check processor configuration.")
+
             # Generate response using model.generate
-            generated_ids = model.generate(
-                pixel_values=inputs.pixel_values,
-                input_ids=inputs.input_ids,
-                attention_mask=inputs.attention_mask,
-                **generation_config,
-            )
+            if isinstance(generation_config, GenerationConfig):
+                # For Nemotron-Parse with GenerationConfig object
+                generated_ids = model.generate(
+                    pixel_values=inputs.pixel_values,
+                    input_ids=inputs.input_ids,
+                    attention_mask=inputs.attention_mask,
+                    generation_config=generation_config,
+                )
+            else:
+                # For other models with dict generation config
+                generated_ids = model.generate(
+                    pixel_values=inputs.pixel_values,
+                    input_ids=inputs.input_ids,
+                    attention_mask=inputs.attention_mask,
+                    **generation_config,
+                )
 
             # Decode the response (trim input tokens like in the working example)
+            if generated_ids is None:
+                raise ValueError("Model generate returned None")
+
             generated_ids_trimmed = [
                 out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
             ]
-            output_text = processor.batch_decode(
-                generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
-            )
+
+            # For Nemotron-Parse, use tokenizer.batch_decode instead of processor.batch_decode
+            if is_nemotron_parse and hasattr(tokenizer, 'batch_decode'):
+                output_text = tokenizer.batch_decode(
+                    generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+                )
+            else:
+                output_text = processor.batch_decode(
+                    generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+                )
+
+            if output_text is None or len(output_text) == 0:
+                raise ValueError("Decoding returned empty output")
+
             response = output_text[0]
 
         print(f"✅ VL generation {stage_name} successful!")
