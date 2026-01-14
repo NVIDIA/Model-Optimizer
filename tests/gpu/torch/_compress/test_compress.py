@@ -18,6 +18,7 @@ from datetime import timedelta
 from functools import partial
 from pathlib import Path
 
+import pytest
 import torch
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from gpu.torch._compress.compress_test_utils import setup_test_model_and_data
@@ -32,34 +33,77 @@ from modelopt.torch._compress.anymodel import convert_model
 # Note: Bypass is disabled now in the test.
 
 
-def test_compress(project_root_path: Path, tmp_path: Path):
+@pytest.mark.parametrize(
+    (
+        "hf_config_name",
+        "converter",
+        "hydra_config_subdir",
+        "hybrid_override_pattern",
+        "has_moe_layers",
+    ),
+    [
+        ("llama_3_1_8b_instruct", "llama", "llama_3_1_8b_instruct", None, False),
+    ],
+)
+def test_compress(
+    project_root_path: Path,
+    tmp_path: Path,
+    hf_config_name: str,
+    converter: str,
+    hydra_config_subdir: str,
+    hybrid_override_pattern: str,
+    has_moe_layers: bool,
+):
     spawn_multiprocess_job(
         size=torch.cuda.device_count(),
-        job=partial(_test_compress_multiprocess_job, project_root_path, tmp_path),
+        job=partial(
+            _test_compress_multiprocess_job,
+            project_root_path,
+            tmp_path,
+            hf_config_name,
+            converter,
+            hydra_config_subdir,
+            hybrid_override_pattern,
+            has_moe_layers,
+        ),
         backend="nccl",
     )
 
 
-def _test_compress_multiprocess_job(project_root_path: Path, tmp_path: Path, rank: int, size: int):
+def _test_compress_multiprocess_job(
+    project_root_path: Path,
+    tmp_path: Path,
+    hf_config_name: str,
+    converter: str,
+    hydra_config_subdir: str,
+    hybrid_override_pattern: str,
+    has_moe_layers: bool,
+    rank: int,
+    size: int,
+):
     dist.setup(timeout=timedelta(10))
-    # Setup the test model and data.
-    puzzle_dir, llama_checkpoint_path, dataset_path = setup_test_model_and_data(
-        project_root_path, tmp_path, rank
-    )
-    hydra_config_dir = project_root_path / "tests/gpu/torch/_compress/resources/configs"
-    hydra_config_name = "Llama-3_1-8B-ffn-pruning"
 
-    # Convert the Llama model using AnyModel converter.
+    # Setup the test model and data.
+    puzzle_dir, hf_checkpoint_path, dataset_path = setup_test_model_and_data(
+        project_root_path, tmp_path, rank, hf_config_name, hybrid_override_pattern
+    )
+    hydra_config_dir = (
+        project_root_path / f"tests/gpu/torch/_compress/resources/configs/{hydra_config_subdir}"
+    )
+
+    # Convert the model using AnyModel converter.
     if rank == 0:
         convert_model(
-            input_dir=str(llama_checkpoint_path),
+            input_dir=str(hf_checkpoint_path),
             output_dir=str(puzzle_dir / "ckpts/teacher"),
-            converter="llama",
+            converter=converter,
         )
     dist.barrier()
 
     # Compress the model using a one-click approach
-    compress.compress(str(hydra_config_dir), hydra_config_name, str(puzzle_dir), str(dataset_path))
+    compress.compress(
+        str(hydra_config_dir), hydra_config_subdir, str(puzzle_dir), str(dataset_path)
+    )
 
     #
     # Check assertions
@@ -89,8 +133,8 @@ def _test_compress_multiprocess_job(project_root_path: Path, tmp_path: Path, ran
     dist.cleanup()
 
     print(
-        "PYTEST SUMMARY: test_compress_model() test has finished successfully. Puzzle directory: ",
-        puzzle_dir,
+        f"PYTEST SUMMARY: test_compress({hf_config_name}) test has finished successfully. "
+        f"Puzzle directory: {puzzle_dir}"
     )
 
 

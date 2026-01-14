@@ -19,14 +19,21 @@ from pathlib import Path
 
 import torch
 from datasets import Dataset, DatasetDict
-from transformers import AutoTokenizer, LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerBase
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress.tools.hydra_utils import register_hydra_resolvers
 
+# Path to HF configs relative to this file
+HF_CONFIGS_DIR = Path(__file__).parent / "resources/hf_configs"
+
 
 def setup_test_model_and_data(
-    project_root_path: Path, tmp_path: Path, rank: int
+    project_root_path: Path,
+    tmp_path: Path,
+    rank: int,
+    hf_config_name: str,
+    hybrid_override_pattern: str | None = None,
 ) -> tuple[Path, Path, Path]:
     """
     Setup the test model and data for the compress NAS search.
@@ -35,10 +42,12 @@ def setup_test_model_and_data(
         project_root_path (Path): the root path of the project
         tmp_path (Path): the temporary path to use for the test
         rank (int): the rank of the process
+        hf_config_name (str): Name of the HF config directory (e.g., "llama_3_1_8b_instruct")
+        hybrid_override_pattern (str): For NemotronH models, the layer type pattern
 
     Returns:
         tuple[Path, Path, Path]:
-        the puzzle_dir, llama_checkpoint_path, dataset_path
+        the puzzle_dir, hf_checkpoint_path, dataset_path
     """
 
     # Register Hydra custom resolvers (needed for config resolution)
@@ -46,8 +55,8 @@ def setup_test_model_and_data(
 
     # The inputs for the nas.convert() step.
     #
-    puzzle_dir = tmp_path
-    llama_checkpoint_path = puzzle_dir / "input_model/llama"
+    puzzle_dir = tmp_path / hf_config_name
+    hf_checkpoint_path = puzzle_dir / f"hf_models/{hf_config_name}"
     dataset_path = puzzle_dir / "dummy_dataset"
 
     if rank == 0:
@@ -55,74 +64,122 @@ def setup_test_model_and_data(
         setup_puzzle_dir(puzzle_dir)
         save_dummy_dataset(dataset_path)
 
-        # Create a small Llama model
+        # Create a small HF model
         tokenizer = create_tokenizer(project_root_path)
-        create_and_save_small_llama_model(
-            llama_checkpoint_path, vocab_size=tokenizer.vocab_size, tokenizer=tokenizer
+        create_and_save_small_hf_model(
+            output_path=str(hf_checkpoint_path),
+            vocab_size=tokenizer.vocab_size,
+            tokenizer=tokenizer,
+            hf_config_name=hf_config_name,
+            hybrid_override_pattern=hybrid_override_pattern,
         )
     dist.barrier()
 
     return (
         puzzle_dir,
-        llama_checkpoint_path,
+        hf_checkpoint_path,
         dataset_path,
     )
 
 
-def create_and_save_small_llama_model(
-    output_path: str, vocab_size: int, tokenizer: PreTrainedTokenizerBase
+def create_and_save_small_hf_model(
+    output_path: str,
+    vocab_size: int,
+    tokenizer: PreTrainedTokenizerBase,
+    hf_config_name: str,
+    hybrid_override_pattern: str | None = None,
 ):
     """
-    Create and save a small Llama model for testing the conversion pipeline.
-    This mimics having a real Llama checkpoint that needs to be converted.
+    Create and save a small HuggingFace model for testing the conversion pipeline.
+    Uses real HuggingFace config to preserve model-specific settings (like tie_word_embeddings),
+    but shrinks size parameters for fast testing.
+
+    Args:
+        output_path: Where to save the model
+        vocab_size: Vocabulary size (should match tokenizer)
+        tokenizer: Tokenizer to save alongside the model
+        hf_config_name: Name of the config directory under resources/hf_configs/
+                        e.g., "llama_3_1_8b_instruct", "llama_3_2_3b_instruct", or "qwen2_5_7b_instruct"
+        hybrid_override_pattern: For NemotronH models, the layer type pattern (e.g., "*-" for Attention+MLP,
+                                 "M-" for Mamba+MLP). Must match num_hidden_layers. None for non-NemotronH models.
     """
     os.makedirs(output_path, exist_ok=True)
 
-    # Create a minimal Llama config (small for testing)
+    # Load real HuggingFace config (preserves tie_word_embeddings, rope_scaling, etc.)
+    config_path = HF_CONFIGS_DIR / hf_config_name
+    config = AutoConfig.from_pretrained(config_path, local_files_only=True, trust_remote_code=True)
+
+    # Override size-related params to make it small for testing
     # Note: intermediate_size must be divisible by 256 per DeciLM config requirements
     # Note: hidden_size must give head_dim >= 8 for Flash Attention 2 compatibility
-    llama_config = LlamaConfig(
-        vocab_size=vocab_size,
-        hidden_size=256,  # 32 heads times 8 head_dim = 256 (matches bypass config expectations)
-        intermediate_size=512,  # Must be divisible by 256
-        num_hidden_layers=2,
-        num_attention_heads=32,  # Matches original test
-        num_key_value_heads=8,  # GQA: 32÷4=8 (matches original n_heads_in_group=4)
-        max_position_embeddings=512,
-        rms_norm_eps=1e-5,
-        rope_theta=10000.0,
-        attention_bias=False,
-        hidden_act="silu",
-        tie_word_embeddings=False,
-    )
 
-    # Create and save the Llama model
-    model = LlamaForCausalLM(llama_config)
+    # VL models have nested configs (text_config, vision_config)
+    if hf_config_name == "qwen3-vl-30b-a3b-instruct":
+        config.text_config.vocab_size = vocab_size
+        config.text_config.hidden_size = 256
+        config.text_config.intermediate_size = 512
+        config.text_config.num_hidden_layers = 2
+        config.text_config.num_attention_heads = 32
+        config.text_config.num_key_value_heads = 8
+        config.text_config.num_experts = 16  # Reduce from 128
+        config.text_config.moe_intermediate_size = 256
+        config.text_config.max_position_embeddings = 512
+        config.vision_config.depth = 2  # Reduce from 27
+        config.vision_config.hidden_size = 256
+        config.vision_config.intermediate_size = 512
+        config.vision_config.out_hidden_size = 256
+        # TODO: this is hack, redesign converter to not read config.num_hidden_layers directly.
+        # set top-level num_hidden_layers for converter compatibility
+        config.num_hidden_layers = config.text_config.num_hidden_layers
+    else:
+        # Regular models have flat config
+        config.vocab_size = vocab_size
+        config.hidden_size = 256
+        config.intermediate_size = 512
+        config.num_hidden_layers = 2
+        config.num_attention_heads = 32
+        config.num_key_value_heads = 8
+        config.max_position_embeddings = 512
+
+        # NemotronH requires hybrid_override_pattern to match num_hidden_layers
+        if hasattr(config, "hybrid_override_pattern") and hybrid_override_pattern is not None:
+            config.hybrid_override_pattern = hybrid_override_pattern
+
+    # Create and save the model
+    # TODO: Consider using AutoModel.from_config instead.
+    if hf_config_name == "qwen3-vl-30b-a3b-instruct":
+        from transformers import Qwen3VLMoeForConditionalGeneration
+
+        model = Qwen3VLMoeForConditionalGeneration._from_config(config)
+    else:
+        model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+
     model.to(dtype=torch.bfloat16).save_pretrained(output_path)
 
     # Save tokenizer
     tokenizer.save_pretrained(output_path)
 
     # Save config
-    llama_config.save_pretrained(output_path)
+    config.save_pretrained(output_path)
 
 
 def create_tokenizer(project_root_path: Path) -> PreTrainedTokenizerBase:
     """
-    Create a tokenizer for the Llama model.
+    Create a tokenizer for the model.
     """
     tokenizer_path = project_root_path / "tests/gpu/torch/_compress/resources/tokenizer"
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     return tokenizer
 
 
-def setup_puzzle_dir(puzzle_dir: str):
+def setup_puzzle_dir(puzzle_dir: str | Path):
     """
     Setup puzzle directory by removing existing directory and creating a new one.
     """
-    if Path(puzzle_dir).exists():
+    puzzle_dir = Path(puzzle_dir)
+    if puzzle_dir.exists():
         shutil.rmtree(puzzle_dir)
-        Path(puzzle_dir).mkdir(parents=True, exist_ok=True)
+    puzzle_dir.mkdir(parents=True, exist_ok=True)
 
 
 def save_dummy_dataset(dataset_path: Path | str):
