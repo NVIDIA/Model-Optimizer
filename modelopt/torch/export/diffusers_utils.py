@@ -390,3 +390,17 @@ def hide_quantizers_from_state_dict(model: nn.Module):
             module = model.get_submodule(name)
             for attr, quantizer in backup.items():
                 setattr(module, attr, quantizer)
+
+
+def infer_dtype_from_model(model: nn.Module) -> torch.dtype:
+    """Infer the dtype from a model's parameters.
+
+    Args:
+        model: The model to infer dtype from.
+
+    Returns:
+        The dtype of the model's parameters, defaulting to float16 if no parameters found.
+    """
+    for param in model.parameters():
+        return param.dtype
+    return torch.float16

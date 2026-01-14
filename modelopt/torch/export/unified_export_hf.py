@@ -44,6 +44,7 @@ from .diffusers_utils import (
     get_diffusers_components,
     get_qkv_group_key,
     hide_quantizers_from_state_dict,
+    infer_dtype_from_model,
     is_qkv_projection,
 )
 from .layer_utils import (
@@ -769,20 +770,6 @@ def _has_quantized_modules(model: nn.Module) -> bool:
     )
 
 
-def _infer_dtype_from_model(model: nn.Module) -> torch.dtype:
-    """Infer the dtype from a model's parameters.
-
-    Args:
-        model: The model to infer dtype from.
-
-    Returns:
-        The dtype of the model's parameters, defaulting to float16 if no parameters found.
-    """
-    for param in model.parameters():
-        return param.dtype
-    return torch.float16
-
-
 def _export_diffusers_checkpoint(
     pipe: DiffusionPipeline | ModelMixin,
     dtype: torch.dtype | None,
@@ -836,7 +823,7 @@ def _export_diffusers_checkpoint(
         component_export_dir.mkdir(parents=True, exist_ok=True)
 
         # Infer dtype if not provided
-        component_dtype = dtype if dtype is not None else _infer_dtype_from_model(component)
+        component_dtype = dtype if dtype is not None else infer_dtype_from_model(component)
 
         if is_quantized:
             # Step 3.5: Fuse QKV linears that share the same input (unify amax values)
