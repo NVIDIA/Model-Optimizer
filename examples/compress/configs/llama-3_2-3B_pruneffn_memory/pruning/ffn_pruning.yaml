@@ -1,0 +1,21 @@
+defaults:
+  - pruning_defaults
+
+pruning_mixin:
+  _target_: modelopt.torch._compress.pruning.ffn_intermediate_pruning_mixin.FFNIntermediatePruningMixIn
+  layer_descriptor:
+    _target_: modelopt.torch._compress.anymodel.models.llama.llama_model_descriptor.LlamaFFNIntermediateLayerDescriptor
+
+hook_class: ${get_object:modelopt.torch.nas.plugins.megatron_hooks.base_hooks.IterativeChannelContributionHook}
+
+activations_log_dir: ${puzzle_dir}/pruning/pruning_scores/ffn_${pruning.activation_hooks_kwargs.method}/${pruning.experiment_id}
+
+activation_hooks_kwargs:
+  method: iterative
+  target_layer: "mlp.down_proj"
+  layer_input_descriptors_path:
+
+# Llama-3.2-3B has intermediate_size=8192, so we use proportionally smaller pruning sizes
+intermediate_size_list: [2048, 4096, 6144]
+mlp_init_mode: "PruneByActivationsLog"
+
