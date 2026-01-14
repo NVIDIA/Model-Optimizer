@@ -13,10 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""This module provides the main compression function for a model
-using MIP-based NAS search algorithm.
-
-"""
+"""This module provides the main compression function for a model using MIP-based NAS search algorithm."""
 
 from omegaconf import DictConfig
 
