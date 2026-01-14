@@ -20,7 +20,7 @@ import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
 import pytest
-from _test_utils.onnx.lib_test_models import build_conv_isinf_model
+from _test_utils.onnx.lib_test_models import build_conv_isinf_model, build_conv_resize_model
 
 import modelopt.onnx.autocast.utils as utils
 import modelopt.onnx.utils as onnx_utils
@@ -174,7 +174,7 @@ def test_conv_isinf_conversion(tmp_path, opset_version):
     output_onnx_path = onnx_path.replace(".onnx", ".fp16.onnx")
     onnx.save(converted_model, output_onnx_path)
 
-    # Load the output model and check QDQ node placements
+    # Load the output model
     graph = gs.import_onnx(converted_model)
 
     # Check that Conv is converted
@@ -188,6 +188,30 @@ def test_conv_isinf_conversion(tmp_path, opset_version):
     opset_version = onnx_utils.get_opset_version(converted_model)
     supported_dtype = "float32" if opset_version < 20 else "float16"
     assert assert_input_precision(isinf_nodes, dtype=supported_dtype)
+
+
+def test_conv_resize_conversion(tmp_path):
+    onnx_model = build_conv_resize_model()
+    onnx_path = os.path.join(tmp_path, "conv_resize_model.onnx")
+    onnx.save(onnx_model, onnx_path)
+
+    # Convert the model
+    converted_model = convert_to_mixed_precision(onnx_path=onnx_path)
+
+    # Output model should be produced in the same tmp_path
+    output_onnx_path = onnx_path.replace(".onnx", ".fp16.onnx")
+    onnx.save(converted_model, output_onnx_path)
+
+    # Load the output model
+    graph = gs.import_onnx(converted_model)
+
+    # Check that Resize is correctly converted:
+    # - Data and ROI inputs (indices 0 and 1) should be FP16
+    # - The remaining inputs (scales/sizes) should be kept in their original precisions
+    resize_node = next(n for n in graph.nodes if n.op == "Resize")
+    assert all(inp.dtype == np.float16 for inp in resize_node.inputs[0:2]), (
+        "Resize data and ROI inputs should be FP16"
+    )
 
 
 @pytest.mark.parametrize("target_opset", [13, 17, 19, 21])
