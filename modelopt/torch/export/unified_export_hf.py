@@ -28,7 +28,15 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from diffusers import DiffusionPipeline, ModelMixin
+
+try:
+    from diffusers import DiffusionPipeline, ModelMixin
+
+    HAS_DIFFUSERS = True
+except ImportError:
+    DiffusionPipeline = None
+    ModelMixin = None
+    HAS_DIFFUSERS = False
 from safetensors.torch import save_file
 from torch.distributed.fsdp import FSDPModule
 
@@ -719,7 +727,7 @@ def export_hf_checkpoint(
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
 
-    if isinstance(model, (DiffusionPipeline, ModelMixin)):
+    if HAS_DIFFUSERS and isinstance(model, (DiffusionPipeline, ModelMixin)):
         _export_diffusers_checkpoint(model, dtype, export_dir, components)
         return
 
