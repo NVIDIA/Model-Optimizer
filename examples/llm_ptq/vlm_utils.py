@@ -173,8 +173,10 @@ def run_vl_preview_generation(model, tokenizer, model_path, stage_name):
             print(f"    Moved inputs to {model_device}")
 
             # Verify we have pixel_values for the vision encoder
-            if not hasattr(inputs, 'pixel_values') or inputs.pixel_values is None:
-                raise ValueError("Processor did not generate pixel_values. Check processor configuration.")
+            if not hasattr(inputs, "pixel_values") or inputs.pixel_values is None:
+                raise ValueError(
+                    "Processor did not generate pixel_values. Check processor configuration."
+                )
 
             # Generate response using model.generate
             if isinstance(generation_config, GenerationConfig):
@@ -203,13 +205,17 @@ def run_vl_preview_generation(model, tokenizer, model_path, stage_name):
             ]
 
             # For Nemotron-Parse, use tokenizer.batch_decode instead of processor.batch_decode
-            if is_nemotron_parse and hasattr(tokenizer, 'batch_decode'):
+            if is_nemotron_parse and hasattr(tokenizer, "batch_decode"):
                 output_text = tokenizer.batch_decode(
-                    generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+                    generated_ids_trimmed,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=False,
                 )
             else:
                 output_text = processor.batch_decode(
-                    generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+                    generated_ids_trimmed,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=False,
                 )
 
             if output_text is None or len(output_text) == 0:

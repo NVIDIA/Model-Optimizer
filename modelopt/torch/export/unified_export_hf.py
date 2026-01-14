@@ -413,32 +413,41 @@ def _export_quantized_weight(
     if quantization_format == QUANTIZATION_FP8:
         # Convert amax to float32
         # Note: Use the public 'amax' property, not the private '_amax' attribute
-        if hasattr(weight_quantizer, '_amax') and weight_quantizer._amax is not None:
-        weight_quantizer._amax = weight_quantizer._amax.to(torch.float32)
+        if hasattr(weight_quantizer, "_amax") and weight_quantizer._amax is not None:
+            weight_quantizer._amax = weight_quantizer._amax.to(torch.float32)
             amax_tensor = weight_quantizer._amax
         else:
             # Fallback to public amax property
             amax_tensor = weight_quantizer.amax
-            if amax_tensor is not None and hasattr(amax_tensor, 'to'):
+            if amax_tensor is not None and hasattr(amax_tensor, "to"):
                 amax_tensor = amax_tensor.to(torch.float32)
 
         # Only compute scaling factor if amax_tensor is valid
-        if amax_tensor is not None and hasattr(amax_tensor, 'dim'):
+        if amax_tensor is not None and hasattr(amax_tensor, "dim"):
             if amax_tensor.dim() == 1:
-            # Per-tensor amax
-            weight_scaling_factor = torch.tensor(
-                weight_quantizer.amax.item() / weight_quantizer.maxbound
+                # Per-tensor amax
+                weight_scaling_factor = torch.tensor(
+                    weight_quantizer.amax.item() / weight_quantizer.maxbound
+                )
+            else:
+                # Per-channel amax
+                weight_scaling_factor = torch.tensor(
+                    weight_quantizer.amax / weight_quantizer.maxbound
+                )
+
+            sub_module.register_buffer(
+                quantizer_attrs.weight_scale,
+                weight_scaling_factor,
             )
-        else:
-            # Per-channel amax
-            weight_scaling_factor = torch.tensor(weight_quantizer.amax / weight_quantizer.maxbound)
 
         sub_module.register_buffer(
             quantizer_attrs.weight_scale,
             weight_scaling_factor,
         )
 
-        if hasattr(input_quantizer, "_amax") or (hasattr(input_quantizer, "amax") and input_quantizer.amax is not None):
+        if hasattr(input_quantizer, "_amax") or (
+            hasattr(input_quantizer, "amax") and input_quantizer.amax is not None
+        ):
             assert input_quantizer is not None
             if hasattr(input_quantizer, "_amax") and input_quantizer._amax is not None:
             input_quantizer._amax = input_quantizer._amax.to(torch.float32)
@@ -450,7 +459,9 @@ def _export_quantized_weight(
                 ).squeeze(),
             )
 
-        if hasattr(output_quantizer, "_amax") or (hasattr(output_quantizer, "amax") and output_quantizer.amax is not None):
+        if hasattr(output_quantizer, "_amax") or (
+            hasattr(output_quantizer, "amax") and output_quantizer.amax is not None
+        ):
             assert output_quantizer is not None
             if hasattr(output_quantizer, "_amax") and output_quantizer._amax is not None:
             output_quantizer._amax = output_quantizer._amax.to(torch.float32)
@@ -506,9 +517,14 @@ def _export_quantized_weight(
 
     # If weight_scale is None (e.g., quantizer wasn't calibrated), skip quantization for this module
     # This can happen for modules that were disabled from quantization or have invalid calibration data
-    if weight_scale is None and quantization_format not in [QUANTIZATION_NVFP4, QUANTIZATION_NVFP4_AWQ]:
+    if weight_scale is None and quantization_format not in [
+        QUANTIZATION_NVFP4,
+        QUANTIZATION_NVFP4_AWQ,
+    ]:
         # For NVFP4, weight_scale is computed later, so we can't check here
-        print(f"Warning: Skipping quantization for {type(sub_module).__name__} - no weight_scale found")
+        print(
+            f"Warning: Skipping quantization for {type(sub_module).__name__} - no weight_scale found"
+        )
         return
 
     # Transpose weight for bmm-style expert quantization (llama4, gpt-oss)
