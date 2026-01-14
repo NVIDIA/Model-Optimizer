@@ -75,7 +75,7 @@ class GPTModelImporter:
         workspace_dir: str | None = None,
         dtype=torch.bfloat16,
         dequantize: bool = True,
-        trust_remote_code: bool = False,
+        trust_remote_code: bool = True,
         verbose: bool = False,
         moe_router_dtype: torch.dtype | None = None,
     ):
