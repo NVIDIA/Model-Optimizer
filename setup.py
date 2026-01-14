@@ -112,6 +112,7 @@ optional_deps = {
         "omegaconf==2.3.0",
         "pandas",
         "typeguard",
+        "lm-eval==0.4.9",
     ],
 }
 

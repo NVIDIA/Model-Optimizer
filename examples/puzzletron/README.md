@@ -231,6 +231,24 @@ vllm bench latency --model path/to/model --load-format safetensors --trust-remot
 vllm bench throughput --model path/to/model --input-len 2000 --output-len 100 --load-format safetensors --trust-remote-code
 ```
 
+## Knowledge Distillation 
+
+To recovery degradation in quality of the compressed model, we can use knowledge distillation. This would allow transfering the capabilities of the original model to the pruned one. For this, we will use [NeMo framework](https://github.com/NVIDIA-NeMo/NeMo) with the [nemo:25.07](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo?version=25.07) contianer.
+
+First, convert the HF model to NeMo format:
+
+```bash
+python3 nemo_export/convert_hf_to_nemo.py --input-ckpt-path path/to/HF-model --output-ckpt-path path/to/save/model-nemo
+```
+
+Now you can utilize all the training features available in NeMo, including distillation. Please refer to the [NeMo distillaiton documentation](https://docs.nvidia.com/nemo-framework/user-guide/latest/model-optimization/distillation/distillation.html).
+
+[Optional] Once the distillation is complete, you can convert the distilled model back to HF:
+
+```bash
+python3 nemo_export/convert_nemo_to_hf.py --input-ckpt-path path/to/nemo-model --output-ckpt-path path/to/save/model-HF
+```
+
 ## Advanced Usage
 
 Modify `llama-3_1-8B_pruneffn_memory.yaml` file for advanced compression scenarios.
