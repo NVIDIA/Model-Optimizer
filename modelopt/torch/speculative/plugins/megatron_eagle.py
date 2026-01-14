@@ -647,6 +647,8 @@ class _DynamicEagleGPTModel(EagleModel):
         eagle_report_acc,
         eagle_reuse_base_decoder,
         eagle_loss_decay_factor,
+        eagle_draft_mode,
+        eagle_num_spec_tokens,
         eagle_architecture_config,
     ):
         if self.config.pipeline_model_parallel_size > 1:
@@ -668,12 +670,19 @@ class _DynamicEagleGPTModel(EagleModel):
             eagle_report_acc=eagle_report_acc,
             eagle_reuse_base_decoder=eagle_reuse_base_decoder,
             eagle_loss_decay_factor=eagle_loss_decay_factor,
+            eagle_draft_mode=eagle_draft_mode,
+            eagle_num_spec_tokens=eagle_num_spec_tokens,
             eagle_architecture_config=eagle_architecture_config,
         )
 
         # sequence_parallel is not used in offline eagle
         if self.eagle_offline:
             self.config.sequence_parallel = False
+
+        if eagle_draft_mode != "eagle":
+            raise ValueError("Only eagle draft mode is supported in Megatron-Core!")
+        if eagle_num_spec_tokens != 3:
+            raise ValueError("Only 3 speculative tokens are supported in Megatron-Core!")
 
         self.eagle_config = dict_to_config(
             eagle_architecture_config,

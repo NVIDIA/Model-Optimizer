@@ -950,6 +950,8 @@ class HFEagleModel(EagleModel):
         eagle_report_acc,
         eagle_reuse_base_decoder,
         eagle_loss_decay_factor,
+        eagle_draft_mode,
+        eagle_num_spec_tokens,
         eagle_architecture_config,
     ):
         """Constructor.
@@ -965,6 +967,8 @@ class HFEagleModel(EagleModel):
             eagle_report_acc=eagle_report_acc,
             eagle_reuse_base_decoder=eagle_reuse_base_decoder,
             eagle_loss_decay_factor=eagle_loss_decay_factor,
+            eagle_draft_mode=eagle_draft_mode,
+            eagle_num_spec_tokens=eagle_num_spec_tokens,
             eagle_architecture_config=eagle_architecture_config,
         )
         self.eagle_config = PretrainedConfig.from_dict(eagle_architecture_config)
@@ -991,9 +995,13 @@ class HFEagleModel(EagleModel):
                 f"{self._base_llm_config.hidden_size}!"
             )
 
-        self.num_spec_tokens = 5  # NOTE: (hg) hardcoded for now. Should add to cfg.
+        self.num_spec_tokens = eagle_num_spec_tokens
         self.eval_num_spec_tokens = 7
-        self.draft_mode: Literal["ar", "pard", "dflash"] = "dflash"
+        self.draft_mode: Literal["eagle", "pard", "dflash"] = eagle_draft_mode
+        if self.draft_mode not in ["eagle", "pard", "dflash"]:
+            raise ValueError(
+                f"Invalid draft mode {self.draft_mode}. Supported modes are 'eagle', 'pard', and 'dflash'."
+            )
 
         self.eagle_module = EagleModule(
             self.eagle_config,
@@ -1568,7 +1576,7 @@ class HFEagleModel(EagleModel):
                 train_accs.append(acc)
             if aux_loss is not None:
                 aux_losses.append(aux_loss)
-        elif self.draft_mode == "ar":
+        elif self.draft_mode == "eagle3":
             # ====Perform training-time-testing eagle forward passes====
             position_embeddings = self.eagle_rotary_emb(eagle_input_hidden_states, position_ids)
             num_spec_tokens = self.num_spec_tokens if self.training else self.eval_num_spec_tokens

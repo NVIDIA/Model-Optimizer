@@ -110,6 +110,14 @@ class MedusaArguments:
 @dataclass
 class EagleArguments:
     eagle_config: str = field(default=None, metadata={"help": "Path to eagle_config.json"})
+    draft_mode: str = field(
+        default="eagle",
+        metadata={"help": "The draft mode for eagle module."},
+        choices=["eagle", "pard", "dflash"],
+    )
+    num_spec_tokens: int = field(
+        default=3, metadata={"help": "The number of speculative tokens for eagle module."}
+    )
 
 
 def train():
@@ -199,6 +207,11 @@ def train():
                 with open(eagle_args.eagle_config) as f:
                     custom_config = json.load(f)
                 config["eagle_architecture_config"].update(custom_config)
+
+            config.update({
+                "eagle_draft_mode": eagle_args.draft_mode,
+                "eagle_num_spec_tokens": eagle_args.num_spec_tokens,
+            })
 
             # Hidden size and vocab size must match base model
             llm_config = (

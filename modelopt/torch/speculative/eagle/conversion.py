@@ -47,6 +47,8 @@ def convert_to_eagle_model(model: nn.Module, config: EagleConfig) -> ConvertRetu
         eagle_report_acc=config.eagle_report_acc,
         eagle_reuse_base_decoder=config.eagle_reuse_base_decoder,
         eagle_loss_decay_factor=config.eagle_loss_decay_factor,
+        eagle_draft_mode=config.eagle_draft_mode,
+        eagle_num_spec_tokens=config.eagle_num_spec_tokens,
         eagle_architecture_config=config.eagle_architecture_config,
     )
 

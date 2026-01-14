@@ -95,6 +95,16 @@ class EagleConfig(ModeloptBaseConfig):
         default=0.9, description=("The decay factor for multiple eagle_loss.")
     )
 
+    eagle_draft_mode: str = ModeloptField(
+        default="eagle",
+        description=("The draft mode for eagle module. Options are 'eagle', 'pard', and 'dflash'."),
+        choices=["eagle", "pard", "dflash"],
+    )
+
+    eagle_num_spec_tokens: int = ModeloptField(
+        default=3, description=("The number of speculative tokens for eagle module.")
+    )
+
     eagle_architecture_config: dict = ModeloptField(
         default={}, description=("The config for eagle module architecture.")
     )

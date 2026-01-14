@@ -35,6 +35,8 @@ class EagleModel(DynamicModule):
         eagle_report_acc,
         eagle_reuse_base_decoder,
         eagle_loss_decay_factor,
+        eagle_draft_mode,
+        eagle_num_spec_tokens,
         eagle_architecture_config,
     ):
         """Base Eagle Model modify function. Child class should implement the details."""
@@ -45,6 +47,8 @@ class EagleModel(DynamicModule):
         self.eagle_report_acc = eagle_report_acc
         self.eagle_reuse_base_decoder = eagle_reuse_base_decoder
         self.eagle_loss_decay_factor = eagle_loss_decay_factor
+        self.eagle_draft_mode = eagle_draft_mode
+        self.eagle_num_spec_tokens = eagle_num_spec_tokens
 
         if eagle_architecture_config.get("parallel_draft_step", 1) > 1:
             for i in range(eagle_architecture_config.get("parallel_draft_step") - 1):
