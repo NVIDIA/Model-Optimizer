@@ -24,6 +24,8 @@ from modelopt.torch.puzzletron.export.MCore.llama_nemotron import (
 )
 from nemo.collections import llm
 
+from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import copy_deci_lm_hf_code
+
 
 def convert_model(nemo_model_path_local: str, output_path_hf_local: str, overwrite: bool = False) -> Any:
     """Convert a NeMo model to HuggingFace format.
@@ -46,6 +48,8 @@ def convert_model(nemo_model_path_local: str, output_path_hf_local: str, overwri
         target_model_name="PuzzletronLlamaNemotronModel",
         overwrite=overwrite,
     )
+
+    copy_deci_lm_hf_code(hf_path)
 
     print(f"Model saved to {hf_path}")
     return hf_path
