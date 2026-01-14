@@ -446,7 +446,9 @@ def _export_quantized_weight(
         )
 
         if hasattr(input_quantizer, "_amax") or (
-            hasattr(input_quantizer, "amax") and input_quantizer.amax is not None
+            input_quantizer is not None
+            and hasattr(input_quantizer, "amax")
+            and input_quantizer.amax is not None
         ):
             assert input_quantizer is not None
             if hasattr(input_quantizer, "_amax") and input_quantizer._amax is not None:
@@ -460,7 +462,9 @@ def _export_quantized_weight(
             )
 
         if hasattr(output_quantizer, "_amax") or (
-            hasattr(output_quantizer, "amax") and output_quantizer.amax is not None
+            output_quantizer is not None
+            and hasattr(output_quantizer, "amax")
+            and output_quantizer.amax is not None
         ):
             assert output_quantizer is not None
             if hasattr(output_quantizer, "_amax") and output_quantizer._amax is not None:
