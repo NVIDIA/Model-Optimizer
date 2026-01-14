@@ -24,20 +24,21 @@ from builtins import ValueError
 from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
+from safetensors.torch import save_file
 
 try:
     from diffusers import DiffusionPipeline, ModelMixin
 
     HAS_DIFFUSERS = True
 except ImportError:
-    DiffusionPipeline = None
-    ModelMixin = None
     HAS_DIFFUSERS = False
-from safetensors.torch import save_file
+
+if TYPE_CHECKING:
+    from diffusers import DiffusionPipeline, ModelMixin
 from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
@@ -676,7 +677,7 @@ def _export_transformers_checkpoint(
 
 
 def _export_diffusers_checkpoint(
-    pipe: DiffusionPipeline | ModelMixin,
+    pipe: "DiffusionPipeline | ModelMixin",
     dtype: torch.dtype | None,
     export_dir: Path,
     components: list[str] | None,
@@ -702,7 +703,7 @@ def _export_diffusers_checkpoint(
 
 
 def export_hf_checkpoint(
-    model: nn.Module | DiffusionPipeline,
+    model: "nn.Module | DiffusionPipeline",
     dtype: torch.dtype | None = None,
     export_dir: Path | str = tempfile.gettempdir(),
     save_modelopt_state: bool = False,
@@ -727,9 +728,13 @@ def export_hf_checkpoint(
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
 
-    if HAS_DIFFUSERS and isinstance(model, (DiffusionPipeline, ModelMixin)):
-        _export_diffusers_checkpoint(model, dtype, export_dir, components)
-        return
+    # Check for diffusers models (only when diffusers is installed)
+    if HAS_DIFFUSERS:
+        from diffusers import DiffusionPipeline, ModelMixin
+
+        if isinstance(model, (DiffusionPipeline, ModelMixin)):
+            _export_diffusers_checkpoint(model, dtype, export_dir, components)
+            return
 
     # Transformers model export
     # NOTE: (hg) Early exit for speculative decoding models
