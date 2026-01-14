@@ -228,7 +228,7 @@ class _QuantFusedMoEBase(QuantModule):
             )
 
     @torch.no_grad()
-    def fold_weight(self):
+    def fold_weight(self, keep_attrs: bool = False):
         # the MoE weights can be super large, it consumes too much memory, so we need to fold the weight one by one
         for i in range(self.w13_weight.shape[0]):
             self.w13_weight[i].copy_(

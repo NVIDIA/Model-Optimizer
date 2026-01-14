@@ -162,9 +162,9 @@ class SVDQuantLinear(QuantLinearConvBase):
             output = super().forward(input, *args, **kwargs)
         return output
 
-    def fold_weight(self):
+    def fold_weight(self, keep_attrs: bool = False):
         """Fold the weight for faster eval."""
-        super().fold_weight()
+        super().fold_weight(keep_attrs)
         if (
             hasattr(self, "weight_quantizer")
             and hasattr(self, "weight")
@@ -179,13 +179,14 @@ class SVDQuantLinear(QuantLinearConvBase):
                     self.weight
                     + self.weight_quantizer.svdquant_lora_b @ self.weight_quantizer.svdquant_lora_a
                 )
-            _attrs = [
-                "_svdquant_lora_a",
-                "_svdquant_lora_b",
-            ]
-            for attr in _attrs:
-                if hasattr(self.weight_quantizer, attr):
-                    delattr(self.weight_quantizer, attr)
+            if not keep_attrs:
+                _attrs = [
+                    "_svdquant_lora_a",
+                    "_svdquant_lora_b",
+                ]
+                for attr in _attrs:
+                    if hasattr(self.weight_quantizer, attr):
+                        delattr(self.weight_quantizer, attr)
 
 
 class RealQuantLinear(QuantModule):
