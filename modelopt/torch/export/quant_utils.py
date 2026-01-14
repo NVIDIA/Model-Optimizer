@@ -287,6 +287,7 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
             else:
                 # Compute from weight if amax not set
                 from ..utils import reduce_amax
+
                 weight_scaling_factor_2 = reduce_amax(weight).float() / 448.0
         else:
             weight_scaling_factor_2 = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(
@@ -327,6 +328,7 @@ def get_weight_scaling_factor_2(module: nn.Module, weight_name: str = "weight") 
         else:
             # Compute from weight if amax not set
             from ..quantization.utils import reduce_amax
+
             weight = getattr(module, weight_name)
             return reduce_amax(weight).float() / 448.0
 
