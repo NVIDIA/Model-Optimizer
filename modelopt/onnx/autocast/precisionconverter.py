@@ -1419,6 +1419,11 @@ class PrecisionConverter:
         graph_sanitizer.sanitize()
         self.model = graph_sanitizer.model
 
+        # Update value_info_map and initializer_map after sanitizing model
+        self.value_info_map, self.initializer_map, self.node_to_init_map = utils.setup_mappings(
+            self.model
+        )
+
     def _create_skip_inputs_mapping(self, tensor_block_dict: dict[str, dict[str, list[int]]] = {}):
         """Create mapping of op types to indices of inputs that should not be converted to low precision."""
         skip_inputs_map = {}

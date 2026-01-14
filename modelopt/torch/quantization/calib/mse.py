@@ -15,6 +15,7 @@
 
 """Calibrator that returns the MSE amax of all collected tensors."""
 
+import math
 from collections.abc import Callable
 
 import torch
@@ -33,7 +34,7 @@ class MseCalibrator(_Calibrator):
         self,
         amax: torch.Tensor,
         axis: int | tuple | list | None = None,
-        num_steps: int = 10,
+        step_size: float = 0.1,
         start_multiplier: float = 0.25,
         stop_multiplier: float = 4.0,
         quant_func: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
@@ -44,7 +45,8 @@ class MseCalibrator(_Calibrator):
         Args:
             amax: Initial amax value (required).
             axis: Quantization axis. None means per-tensor quantization.
-            num_steps: Number of amax candidates to try.
+            step_size: Step size for amax search. The number of steps is computed as
+                      ceil((stop_multiplier - start_multiplier) / step_size) + 1.
             start_multiplier: Starting multiplier for amax search.
             stop_multiplier: Ending multiplier for amax search.
             quant_func: Function that quantizes input tensor given an amax value.
@@ -54,13 +56,15 @@ class MseCalibrator(_Calibrator):
         """
         super().__init__(num_bits=None, axis=axis, unsigned=None)
         self._initial_amax = amax
-        self._num_steps = num_steps
+        self._step_size = step_size
         self._start_multiplier = start_multiplier
         self._stop_multiplier = stop_multiplier
+        self._num_steps = math.ceil((stop_multiplier - start_multiplier) / step_size) + 1
+
         self._quant_func = quant_func
         self._error_func = error_func
-        self._losses_sum = [None] * num_steps
-        self._candidate_amaxs = [None] * num_steps
+        self._losses_sum = [None] * self._num_steps
+        self._candidate_amaxs = [None] * self._num_steps
 
         self._amax = None
 
@@ -82,7 +86,6 @@ class MseCalibrator(_Calibrator):
         multipliers = torch.linspace(
             self._start_multiplier, self._stop_multiplier, steps=self._num_steps, device=device
         )
-
         # Get reduce axis for per-channel quantization
         reduce_axis = quant_utils.convert_quantization_axis_to_reduce_axis(x, self._axis)
 
@@ -110,6 +113,18 @@ class MseCalibrator(_Calibrator):
         self._losses_sum = [None] * self._num_steps
         self._candidate_amaxs = [None] * self._num_steps
         self._amax = None
+
+    def clear(self):
+        """Clear all cached data to free GPU memory.
+
+        Call this after compute_amax() and load_calib_amax() are done.
+        """
+        self._losses_sum = []
+        self._candidate_amaxs = []
+
+        if self._initial_amax is not None:
+            del self._initial_amax
+            self._initial_amax = None
 
     @torch.no_grad()
     def compute_amax(self, verbose: bool = False):
