@@ -286,7 +286,7 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
                 weight_scaling_factor_2 = weight_quantizer._amax.float() / 448.0
             else:
                 # Compute from weight if amax not set
-                from ..utils import reduce_amax
+                from ..quantization.utils import reduce_amax
 
                 weight_scaling_factor_2 = reduce_amax(weight).float() / 448.0
         else:
