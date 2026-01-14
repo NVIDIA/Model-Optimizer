@@ -1,6 +1,14 @@
 NVIDIA Model Optimizer Changelog (Linux)
 ========================================
 
+0.42 (TBD)
+^^^^^^^^^^^^^^^^^
+
+**Bug Fixes**
+
+**New Features**
+- Add standalone type inference option (``--use_standalone_type_inference``) in ONNX AutoCast as an alternative to ONNX's ``infer_shapes``. This experimental feature performs type-only inference without shape inference, useful as a workaround when shape inference fails or to avoid unnecessary shape inference overhead.
+
 0.41 (2026-01-19)
 ^^^^^^^^^^^^^^^^^
 
@@ -18,7 +26,6 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add support for parallel draft heads in Eagle speculative decoding.
 - Add support to enable custom emulated quantization backend. See :meth:`register_quant_backend <modelopt.torch.quantization.nn.modules.tensor_quantizer.register_quant_backend>`` for more details. See an example in ``tests/unit/torch/quantization/test_custom_backend.py``.
 - Add ``examples/llm_qad`` for QAD training with Megatron-LM.
-- Add standalone type inference option (``--use_standalone_type_inference``) in ONNX AutoCast as an alternative to ONNX's ``infer_shapes``. This experimental feature performs type-only inference without shape inference, useful as a workaround when shape inference fails or to avoid unnecessary shape inference overhead.
 
 **Deprecations**
 
