@@ -102,7 +102,7 @@ def int8_to_fp8(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
             )
             zero_point = initializers[zero_point_idx]
             dtype = onnx.helper.tensor_dtype_to_np_dtype(zero_point.data_type)
-            vals = np.array(zero_point.int32_data, dtype=dtype).tobytes()
+            vals = np.array(zero_point.int32_data, dtype=dtype).tobytes() or zero_point.raw_data
 
             np_zero_point = onnx.helper.make_tensor(
                 zero_point_name, onnx.TensorProto.FLOAT8E4M3FN, zero_point.dims, vals, raw=True

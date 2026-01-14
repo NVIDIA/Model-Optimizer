@@ -924,3 +924,88 @@ def build_conv_isinf_model(opset_version=13):
     onnx.checker.check_model(model_inferred)
 
     return model_inferred
+
+
+def build_conv_resize_model():
+    # Define your model inputs and outputs
+    input_names = ["input_0"]
+    output_names = ["output_0"]
+    input_shapes = [(1, 288, 32, 32)]
+    output_shapes = [(1, 16, 64, 64)]
+
+    inputs = [
+        helper.make_tensor_value_info(input_name, onnx.TensorProto.FLOAT, input_shape)
+        for input_name, input_shape in zip(input_names, input_shapes)
+    ]
+    outputs = [
+        helper.make_tensor_value_info(output_name, onnx.TensorProto.FLOAT, output_shape)
+        for output_name, output_shape in zip(output_names, output_shapes)
+    ]
+
+    # Create the ONNX graph with the nodes
+    nodes = [
+        helper.make_node(
+            op_type="Conv",
+            inputs=["input_0", "weights_1"],
+            outputs=["conv1_conv/Conv2D:0"],
+            name="conv1_conv/Conv2D",
+            dilations=[1, 1],
+            group=1,
+            kernel_shape=[1, 1],
+            pads=[0, 0, 0, 0],
+            strides=[1, 1],
+        ),
+        # Note: resize_roi_scales is intentionally used for both roi and scales inputs
+        # to test the shared constant duplication fix (PR #757)
+        helper.make_node(
+            op_type="Resize",
+            inputs=[
+                "conv1_conv/Conv2D:0",
+                "resize_roi_scales",
+                "resize_roi_scales",
+                "resize_sizes",
+            ],
+            outputs=["output_0"],
+            name="resize1_resize/Resize",
+            coordinate_transformation_mode="asymmetric",
+            cubic_coeff_a=-0.75,
+            mode="nearest",
+            nearest_mode="floor",
+        ),
+    ]
+
+    # Create the ONNX initializers
+    initializers = [
+        helper.make_tensor(
+            name="weights_1",
+            data_type=onnx.TensorProto.FLOAT,
+            dims=(16, 288, 1, 1),
+            vals=np.random.uniform(low=0.5, high=1.0, size=16 * 288 * 1 * 1),
+        ),
+        helper.make_tensor(
+            name="resize_roi_scales",
+            data_type=onnx.TensorProto.FLOAT,
+            dims=(0,),
+            vals=[],
+        ),
+        helper.make_tensor(
+            name="resize_sizes",
+            data_type=onnx.TensorProto.INT64,
+            dims=(4,),
+            vals=[1, 16, 64, 64],
+        ),
+    ]
+
+    # Create the ONNX graph with the nodes and initializers
+    graph = helper.make_graph(nodes, "conv_resize", inputs, outputs, initializer=initializers)
+
+    # Create the ONNX model
+    model = helper.make_model(graph)
+    model.opset_import[0].version = 13
+    model.ir_version = 10
+
+    # Check the ONNX model
+    model_inferred = onnx.shape_inference.infer_shapes(model)
+    onnx.checker.check_model(model_inferred)
+
+    return model_inferred
