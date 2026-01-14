@@ -592,6 +592,10 @@ def export_hf_checkpoint(
 
             hf_quant_config = convert_hf_quant_config_format(hf_quant_config)
 
+        # Remove hf_quantizer from model so post_state_dict can be exported.
+        if getattr(model, "hf_quantizer", None) is not None:
+            model.hf_quantizer = None
+
         # Save model
         model.save_pretrained(
             export_dir, state_dict=post_state_dict, save_modelopt_state=save_modelopt_state
