@@ -17,12 +17,21 @@
 
 import contextlib
 import copy
+import importlib.util
+import os
+import sys
 import warnings
 from collections import Counter, defaultdict, deque
 
 import torch
 import torch.distributed
+from huggingface_hub import snapshot_download
 from torch import nn
+from transformers.cache_utils import DynamicCache
+
+KIMI_K2_REPO_ID = "moonshotai/Kimi-K2-Thinking"
+KIMI_K2_PACKAGE_NAME = "kimi_k2_temp"
+
 
 REMOVE_THINK_CHAT_TEMPLATE = (
     "{% if '</think>' in content %}{% set content = content.split('</think>')[-1] %}{% endif %}"
@@ -374,3 +383,59 @@ def temporary_set_config_value(config, field, value):
         yield
     finally:
         setattr(config, field, original_value)
+
+
+def _patch_dynamic_cache_compatibility() -> None:
+    """Monkey-patch DynamicCache for Kimi-K2 compatibility."""
+    if not hasattr(DynamicCache, "get_usable_length"):
+        DynamicCache.get_usable_length = (
+            lambda self, seq_len, layer_idx=0: DynamicCache.get_seq_length(self, layer_idx)
+        )
+
+
+def _import_module_from_path(module_path: str, module_name: str, package_name: str):
+    """Dynamically import a module from file path."""
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Failed to load module {module_name} from {module_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    module.__package__ = package_name
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _setup_kimi_k2_decoder():
+    """Setup Kimi-K2 decoder with proper imports and patches."""
+    # Download repository files
+    kimi_k2_path = snapshot_download(repo_id=KIMI_K2_REPO_ID, allow_patterns="*.py")
+
+    # Patch deprecated usage in Kimi implementation
+    _patch_dynamic_cache_compatibility()
+
+    # Import required modules
+    config_module_path = os.path.join(kimi_k2_path, "configuration_deepseek.py")
+    model_module_path = os.path.join(kimi_k2_path, "modeling_deepseek.py")
+
+    _import_module_from_path(
+        config_module_path, f"{KIMI_K2_PACKAGE_NAME}.configuration_deepseek", KIMI_K2_PACKAGE_NAME
+    )
+
+    kimi_k2_module = _import_module_from_path(
+        model_module_path, f"{KIMI_K2_PACKAGE_NAME}.modeling_deepseek", KIMI_K2_PACKAGE_NAME
+    )
+
+    # Patch Kimi Attention to init rope lazily to avoid save/load meta tensor error
+    original_init_rope = kimi_k2_module.DeepseekV3Attention._init_rope
+    original_forward = kimi_k2_module.DeepseekV3Attention.forward
+
+    def patched_fwd_with_lazy_rope_init(self, *args, **kwargs):
+        if not hasattr(self, "rotary_emb"):
+            original_init_rope(self)
+        return original_forward(self, *args, **kwargs)
+
+    kimi_k2_module.DeepseekV3Attention._init_rope = lambda self: None
+    kimi_k2_module.DeepseekV3Attention.forward = patched_fwd_with_lazy_rope_init
+
+    return getattr(kimi_k2_module, "DeepseekV3DecoderLayer")

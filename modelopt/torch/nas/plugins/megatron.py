@@ -22,22 +22,15 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from megatron.core.fusions.fused_layer_norm import FusedLayerNorm
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.models.gpt import GPTModel
 from megatron.core.parallel_state import (
     get_data_parallel_group,
     get_pipeline_model_parallel_group,
-    get_pipeline_model_parallel_rank,
-    get_pipeline_model_parallel_world_size,
     get_tensor_model_parallel_group,
     is_pipeline_first_stage,
     is_pipeline_last_stage,
-)
-from megatron.core.tensor_parallel import (
-    gather_from_tensor_model_parallel_region,
-    reduce_from_tensor_model_parallel_region,
 )
 from megatron.core.tensor_parallel.layers import (
     ColumnParallelLinear,
@@ -104,10 +97,9 @@ try:
 except ImportError:
     HAS_MAMBA = False
 
-__all__ = ["drop_mcore_language_model_layers"]
+__all__ = []
 
 
-# TODO: Allow passing setup_kwargs to DM.convert so we can reuse hparams directly during setup
 class _DynamicParallelLinear(DynamicModule):
     """A parallel linear layer with dynamic hyperparams."""
 
@@ -124,8 +116,6 @@ class _DynamicParallelLinear(DynamicModule):
         # register dynamic attributes of the class
         self._register_dynamic_attribute("weight", self._get_weight)
         self._register_dynamic_attribute("bias", self._get_bias)
-
-        # NOTE: No importance estimators are registered
 
     @staticmethod
     def _get_weight(mod: "_DynamicParallelLinear", weight: torch.Tensor) -> torch.Tensor:
@@ -264,45 +254,6 @@ class _DynamicMLP(DynamicModule):
 
         self._register_dynamic_attribute("input_size", lambda mod, val: mod.linear_fc1.input_size)
 
-        # register importance estimator for ffn_hidden_size
-        # TODO: Ideally we want to set the forward hook right before search begins so previously collected activations
-        # can be discarded.
-        # This limitation might be fixed in OMNIML-180 (Flexible Importance Estimator)
-        # where we separate the importance estimation from the dynamic module.
-        self._register_temp_attribute("_activations", None)
-        self.hook_handle = self.linear_fc2.register_forward_hook(self._linear_fc2_forward_hook)
-        ffn_hidden_size.register_importance(self._estimate_importance)
-
-    def _linear_fc2_forward_hook(self, module, input, output):
-        """Hook to collect activations for importance estimation.
-
-        Activations are computed as mean over seq_len and then squared and summed over batch_size.
-        Later we take the square root of the sum to get the L2 norm.
-        """
-        # Gather input [seq_len, batch_size, ffn_hidden_size] over all TP regions
-        # NOTE: This is not used at the moment since we restrict to TP=1
-        input = gather_from_tensor_model_parallel_region(input[0]).detach()
-        if input.dim() == 2:
-            # For sparse experts, there is no batch dimension.
-            input = input[:, None, :]
-        # Dont aggregate activations from non-max subnets (e.g. from profiling)
-        if input.shape[-1] != self.get_hparam(self.hparam_name).max:
-            return
-
-        input = input.to(torch.float32)  # use full precision to avoid overflow
-        activations = input.abs().mean(dim=0)  # [batch_size, ffn_hidden_size]
-        activations = activations.pow(2).sum(dim=0)  # [ffn_hidden_size]
-        if self._activations is None:
-            self._activations = activations
-        else:
-            self._activations += activations
-
-    def _estimate_importance(self) -> TracedHp.Importance:
-        """Return the activation magnitude-based importance of the ffn_hidden_size."""
-        assert self._activations is not None, "No activations collected for importance estimation."
-        # Convert squared sum to L2 norm
-        return self._activations.pow(0.5)
-
     def modify(self, ffn_hidden_size_divisor: int, **kwargs) -> None:
         """Modify the ffn_hidden_size hparam choices based on search space config."""
         hp_mlp = self.get_hparam(self.hparam_name)
@@ -311,7 +262,6 @@ class _DynamicMLP(DynamicModule):
 
     def export(self) -> torch.nn.Module:
         """Export the dynamic module to a torch.nn.Module."""
-        self.hook_handle.remove()
         self.linear_fc1.export()
         self.linear_fc2.export()
         return super().export()
@@ -326,19 +276,59 @@ def expand_head_indices(heads: torch.LongTensor, hidden_size_per_head: int) -> t
     ).flatten()
 
 
+class NumAttentionHeadsHp(TracedHp):
+    """Configurable hparam for total number of attention heads.
+
+    Choices are constrained to be multiples of num_query_groups to maintain valid GQA configurations.
+    Provides group-aware sorting and slicing through active_slice property.
+    """
+
+    def __init__(self, num_attention_heads: int, num_query_groups: int) -> None:
+        """Initialize with choices that are multiples of num_query_groups."""
+        choices = [
+            h * num_query_groups for h in range(1, num_attention_heads // num_query_groups + 1)
+        ]
+        super().__init__(choices)
+        self._num_query_groups = num_query_groups
+
+    @property
+    def num_heads_per_group(self) -> int:
+        """Return the active number of heads per group."""
+        active = self.active
+        assert isinstance(active, int)
+        return active // self._num_query_groups
+
+    @property
+    def active_slice(self) -> torch.LongTensor:
+        """Return sorted indices for attention heads with group-aware sorting.
+
+        Heads are sorted within each query group to maintain GQA structure.
+        """
+        max_heads_per_group = self.max // self._num_query_groups
+
+        if self._slice_order is None:
+            all_head_ranking = torch.arange(self.max).view(self._num_query_groups, -1)
+        else:
+            # Reshape to 2D if needed: [num_query_groups, max_heads_per_group]
+            all_head_ranking = self._slice_order.view(self._num_query_groups, max_heads_per_group)
+
+        # Select active heads per group (keep all query groups, trim heads within each group)
+        selected_attn_heads = all_head_ranking[:, : self.num_heads_per_group].flatten()
+
+        return selected_attn_heads
+
+
 # NOTE: We provide a parent class since we do not register to DMRegistry.
 class _DynamicQKVColumnParallelLinear(DynamicModule, ColumnParallelLinear):
     """An mcore ColumnParallelLinear layer for linear_qkv with dynamic attributes."""
 
-    def _setup(
-        self, *, num_heads_per_group: TracedHp, num_query_groups: TracedHp, hidden_size: TracedHp
-    ):
+    def _setup(self, *, num_attention_heads: NumAttentionHeadsHp, hidden_size: TracedHp):
         """Setup the _DynamicQKVColumnParallelLinear dynamic module with global hidden_size hparam."""
         self._register_hparam("input_size", hidden_size)
+        self._register_hparam("num_attention_heads", num_attention_heads)
         self._register_dynamic_attribute(
             "output_size",
-            lambda mod, val: (num_heads_per_group.active + 2)
-            * num_query_groups.active
+            lambda mod, val: (num_attention_heads.active + 2 * mod.config.num_query_groups)
             * mod.config.kv_channels,
         )
         self._register_dynamic_attribute(
@@ -347,64 +337,66 @@ class _DynamicQKVColumnParallelLinear(DynamicModule, ColumnParallelLinear):
         self._register_dynamic_attribute("weight", self._get_weight)
         self._register_dynamic_attribute("bias", self._get_bias)
 
-        self._register_temp_attribute(
-            "_parent_hparams_refs",
-            {"num_heads_per_group": num_heads_per_group, "num_query_groups": num_query_groups},
+    def _get_output_size_indices(self) -> torch.LongTensor:
+        """Get the indices of the output size based on sorted + pruned attention heads.
+
+        QKV layout: For each query group: [Q_head_0, ..., Q_head_n, K_head, V_head]
+
+        Example: 32 attention heads (8 groups x 4 heads/group) → 48 QKV heads (8 groups x 6)
+
+        Attention layout (8 groups x 4 heads/group):
+            Group 0: [0, 1, 2, 3],  Group 1: [4, 5, 6, 7],  ...,  Group 7: [28, 29, 30, 31]
+
+        QKV layout (8 groups x 6 heads/group):
+            Group 0: [0, 1, 2, 3, 4, 5]    (Q0, Q1, Q2, Q3, K, V)
+            Group 1: [6, 7, 8, 9, 10, 11]  (Q0, Q1, Q2, Q3, K, V)
+            ...
+            Group 7: [42, 43, 44, 45, 46, 47]
+
+        If active_slice returns top-2 ranked Q heads per group (by importance):
+            E.g., [3, 1, 7, 4, 9, 11, ...] (ranked by importance within each group)
+            Reshaped per-group: [[3, 1], [7, 4], [9, 11], ...]
+            Group IDs: [[0, 0], [1, 1], [2, 2], ...]
+            Local positions: [[3, 1], [3, 0], [1, 3], ...]
+            After mapping to QKV: [[3, 1], [9, 6], [13, 15], ...]
+            With K,V added: [[3, 1, 4, 5], [9, 6, 10, 11], [13, 15, 16, 17], ...]
+        """
+        nheads_hp: NumAttentionHeadsHp = self.get_hparam("num_attention_heads")
+        nquery_groups = self.config.num_query_groups
+        max_nheads_per_group = nheads_hp.max // nquery_groups
+        nheads_per_group = nheads_hp.num_heads_per_group
+        qkv_heads_per_group = max_nheads_per_group + 2  # Q heads + K head + V head
+
+        if nheads_hp._slice_order is None and nheads_hp.active == nheads_hp.max:
+            return slice((max_nheads_per_group + 2) * nquery_groups * self.config.kv_channels)
+
+        # Get sorted and pruned Q head indices: [nquery_groups * active_num_heads_per_group]
+        q_head_indices = nheads_hp.active_slice
+        assert isinstance(q_head_indices, torch.LongTensor)
+
+        q_head_indices_per_group = q_head_indices.view(nquery_groups, nheads_per_group).cpu()
+
+        # Map from attention layout to QKV layout
+        # Determine which group each Q head belongs to
+        group_ids = q_head_indices_per_group // max_nheads_per_group
+
+        # Subtract old offset to get local position within attention group
+        local_pos_in_attn = q_head_indices_per_group - group_ids * max_nheads_per_group
+
+        # Add new offset to map to QKV layout (same local position, different group stride)
+        q_head_indices = group_ids * qkv_heads_per_group + local_pos_in_attn
+
+        # Add K,V head indices for each group (always at fixed positions within each group)
+        # K head is at position max_nheads_per_group, V head at max_nheads_per_group + 1
+        kv_head_indices = (
+            torch.arange(nquery_groups)[:, None] * qkv_heads_per_group
+            + torch.arange(max_nheads_per_group, qkv_heads_per_group)[None, :]
         )
 
-    def _get_output_size_indices(self) -> torch.LongTensor:
-        """Get the indices of the output size based on sorted + pruned heads and query groups."""
-        num_heads_per_group_hp: TracedHp = self._parent_hparams_refs["num_heads_per_group"]
-        num_query_groups_hp: TracedHp = self._parent_hparams_refs["num_query_groups"]
-        num_heads_per_group: int = num_heads_per_group_hp.active
-        num_query_groups: int = num_query_groups_hp.active
-        max_num_heads_per_group: int = num_heads_per_group_hp.max
-        max_num_query_groups: int = num_query_groups_hp.max
+        # Concatenate Q and K,V heads: [nquery_groups, active_num_heads_per_group + 2]
+        selected_qkv_heads = torch.cat([q_head_indices, kv_head_indices], dim=1).flatten()
 
-        if num_heads_per_group_hp._slice_order is not None:
-            # Sort heads per group
-            # NOTE: We use the importance instead of slice order which is sorted without the notion of groups
-            attn_head_scores_per_group = num_heads_per_group_hp.importance.view(
-                max_num_query_groups, max_num_heads_per_group
-            )
-            attn_head_ranking_per_group = attn_head_scores_per_group.argsort(descending=True)
-            qkv_head_ranking_per_group = torch.hstack(
-                (
-                    attn_head_ranking_per_group,
-                    torch.arange(
-                        max_num_heads_per_group,
-                        max_num_heads_per_group + 2,
-                        device=attn_head_ranking_per_group.device,
-                    ).repeat(max_num_query_groups, 1),
-                )
-            )
-            qkv_head_ranking_global = (
-                qkv_head_ranking_per_group
-                + torch.arange(
-                    0,
-                    (max_num_heads_per_group + 2) * max_num_query_groups,
-                    max_num_heads_per_group + 2,
-                    device=attn_head_ranking_per_group.device,
-                )[:, None]
-            )
-        else:
-            qkv_head_ranking_global = torch.arange(
-                max_num_query_groups * (max_num_heads_per_group + 2)
-            ).view(max_num_query_groups, max_num_heads_per_group + 2)
-
-        if num_query_groups_hp._slice_order is not None:
-            # Sort query groups
-            qkv_head_ranking_global = qkv_head_ranking_global[num_query_groups_hp._slice_order]
-
-        selected_qkv_heads = qkv_head_ranking_global[
-            :num_query_groups,  # Q groups
-            torch.cat(
-                (
-                    torch.arange(num_heads_per_group),  # Q heads
-                    torch.arange(max_num_heads_per_group, max_num_heads_per_group + 2),  # KV heads
-                )
-            ),
-        ].flatten()
+        # Expand to dimension indices
         selected_indices = expand_head_indices(selected_qkv_heads, self.config.kv_channels)
 
         return selected_indices.cpu()
@@ -430,16 +422,12 @@ class _DynamicQKVColumnParallelLinear(DynamicModule, ColumnParallelLinear):
 class _DynamicProjRowParallelLinear(DynamicModule, RowParallelLinear):
     """An mcore RowParallelLinear layer for linear_qkv with dynamic attributes."""
 
-    def _setup(
-        self, *, num_heads_per_group: TracedHp, num_query_groups: TracedHp, hidden_size: TracedHp
-    ):
+    def _setup(self, *, num_attention_heads: NumAttentionHeadsHp, hidden_size: TracedHp):
         """Setup the _DynamicProjRowParallelLinear dynamic module with global hidden_size hparam."""
         self._register_hparam("output_size", hidden_size)
+        self._register_hparam("num_attention_heads", num_attention_heads)
         self._register_dynamic_attribute(
-            "input_size",
-            lambda mod, val: (num_heads_per_group.active)
-            * num_query_groups.active
-            * mod.config.kv_channels,
+            "input_size", lambda mod, val: num_attention_heads.active * mod.config.kv_channels
         )
         self._register_dynamic_attribute(
             "input_size_per_partition", lambda mod, val: mod.input_size
@@ -447,51 +435,14 @@ class _DynamicProjRowParallelLinear(DynamicModule, RowParallelLinear):
         self._register_dynamic_attribute("weight", self._get_weight)
         self._register_dynamic_attribute("bias", self._get_bias)
 
-        self._register_temp_attribute(
-            "_parent_hparams_refs",
-            {"num_heads_per_group": num_heads_per_group, "num_query_groups": num_query_groups},
-        )
-
     def _get_input_size_indices(self) -> torch.LongTensor:
         """Get the indices of the input size based on sorted + pruned heads and query groups."""
-        num_heads_per_group_hp: TracedHp = self._parent_hparams_refs["num_heads_per_group"]
-        num_query_groups_hp: TracedHp = self._parent_hparams_refs["num_query_groups"]
-        num_heads_per_group: int = num_heads_per_group_hp.active
-        num_query_groups: int = num_query_groups_hp.active
-        max_num_heads_per_group: int = num_heads_per_group_hp.max
-        max_num_query_groups: int = num_query_groups_hp.max
+        nheads_hp = self.get_hparam("num_attention_heads")
+        if nheads_hp._slice_order is None and nheads_hp.active == nheads_hp.max:
+            return slice(nheads_hp.max * self.config.kv_channels)
 
-        if num_heads_per_group_hp._slice_order is not None:
-            # Sort heads per group
-            # NOTE: We use the importance instead of slice order which is sorted without the notion of groups
-            attn_head_scores_per_group = num_heads_per_group_hp.importance.view(
-                max_num_query_groups, max_num_heads_per_group
-            )
-            attn_head_ranking_per_group = attn_head_scores_per_group.argsort(
-                dim=-1, descending=True
-            )
-            attn_head_ranking_global = (
-                attn_head_ranking_per_group
-                + torch.arange(
-                    0,
-                    max_num_heads_per_group * max_num_query_groups,
-                    max_num_heads_per_group,
-                    device=attn_head_ranking_per_group.device,
-                )[:, None]
-            )
-        else:
-            attn_head_ranking_global = torch.arange(
-                max_num_query_groups * max_num_heads_per_group
-            ).view(max_num_query_groups, max_num_heads_per_group)
-
-        if num_query_groups_hp._slice_order is not None:
-            # Sort query groups
-            attn_head_ranking_global = attn_head_ranking_global[num_query_groups_hp._slice_order]
-
-        selected_attn_heads = attn_head_ranking_global[
-            :num_query_groups,  # Q groups
-            :num_heads_per_group,  # Q heads
-        ].flatten()
+        selected_attn_heads = nheads_hp.active_slice
+        assert isinstance(selected_attn_heads, torch.LongTensor)
         selected_indices = expand_head_indices(selected_attn_heads, self.config.kv_channels)
 
         return selected_indices.cpu()
@@ -521,27 +472,14 @@ class _DynamicSelfAttention(DynamicModule):
     def _setup(self, *, hidden_size: TracedHp):
         """Setup the SelfAttention dynamic module with global hidden_size hparam."""
         # Register hparams
-        num_heads_per_group = TracedHp(
-            list(
-                range(
-                    1,
-                    self.num_attention_heads_per_partition // self.num_query_groups_per_partition
-                    + 1,
-                )
-            )
+        num_attention_heads = NumAttentionHeadsHp(
+            self.num_attention_heads_per_partition, self.num_query_groups_per_partition
         )
-        num_heads_per_group._strict_len = False  # allow for different length for imp and order
-        num_query_groups = TracedHp(list(range(1, self.num_query_groups_per_partition + 1)))
-        self._register_hparam("num_heads_per_group", num_heads_per_group)
-        self._register_hparam("num_query_groups", num_query_groups)
+        self._register_hparam("num_attention_heads", num_attention_heads)
 
         # Register dynamic attributes
         self._register_dynamic_attribute(
-            "num_attention_heads_per_partition",
-            lambda mod, val: self.num_heads_per_group * self.num_query_groups,
-        )
-        self._register_dynamic_attribute(
-            "num_query_groups_per_partition", lambda mod, val: self.num_query_groups
+            "num_attention_heads_per_partition", lambda mod, val: self.num_attention_heads
         )
 
         # Convert the Dot Product Attention to dynamic module
@@ -561,10 +499,6 @@ class _DynamicSelfAttention(DynamicModule):
                 "num_attention_heads_per_partition",
                 lambda mod, val: self.num_attention_heads_per_partition,
             )
-            self.core_attention._register_dynamic_attribute(
-                "num_query_groups_per_partition",
-                lambda mod, val: self.num_query_groups_per_partition,
-            )
         else:
             assert HAS_TE and isinstance(self.core_attention, TEDotProductAttention)
 
@@ -578,98 +512,17 @@ class _DynamicSelfAttention(DynamicModule):
             self.core_attention._register_dynamic_attribute(
                 "num_attention_heads", lambda mod, val: self.num_attention_heads_per_partition
             )
-            self.core_attention._register_dynamic_attribute(
-                "num_gqa_groups", lambda mod, val: self.num_query_groups_per_partition
-            )
-            self.core_attention._register_dynamic_attribute(
-                "num_gqa_groups_per_partition", lambda mod, val: self.num_query_groups_per_partition
-            )
 
         # Convert the fused qkv and output projection linear layer to dynamic module
         _DynamicQKVColumnParallelLinear.convert(
-            self.linear_qkv,
-            num_heads_per_group=num_heads_per_group,
-            num_query_groups=num_query_groups,
-            hidden_size=hidden_size,
+            self.linear_qkv, num_attention_heads=num_attention_heads, hidden_size=hidden_size
         )
         _DynamicProjRowParallelLinear.convert(
-            self.linear_proj,
-            num_heads_per_group=num_heads_per_group,
-            num_query_groups=num_query_groups,
-            hidden_size=hidden_size,
+            self.linear_proj, num_attention_heads=num_attention_heads, hidden_size=hidden_size
         )
-
-        # register importance estimator for linear_qkv.output_size and linear_proj.input_size
-        self._register_temp_attribute("_activations", None)
-        self.hook_handle = self.linear_proj.register_forward_hook(self._linear_proj_forward_hook)
-        # NOTE: num_heads_per_group's slice_order will be of length num_attention_heads to be able to sort heads,
-        # otherwise we would only have aggregated importance of heads per group.
-        # While enforcing order during `sort_parameters`, we dont check the shape of the slice_order
-        num_heads_per_group.register_importance(self._estimate_all_head_importance)
-        num_query_groups.register_importance(self._estimate_query_group_importance)
-
-    def _linear_proj_forward_hook(self, module, input, output):
-        """Hook to collect activations for importance estimation.
-
-        Activations are computed as mean over seq_len and then squared and summed over batch_size.
-        Later we take the square root of the sum to get the L2 norm.
-        """
-        # Gather input [seq_len, batch_size, query_projection_size] over all TP regions
-        # NOTE: This is not used at the moment since we restrict to TP=1
-        input = gather_from_tensor_model_parallel_region(input[0]).detach()
-
-        # Dont aggregate activations from non-max subnets (e.g. from profiling)
-        if (
-            input.shape[-1]
-            != self.get_hparam("num_heads_per_group").max
-            * self.get_hparam("num_query_groups").max
-            * self.config.kv_channels
-        ):
-            return
-
-        input = input.to(torch.float32)  # use full precision to avoid overflow
-        activations = input.abs().mean(dim=0)
-        activations = activations.pow(2).sum(dim=0)  # [query_projection_size]
-        if self._activations is None:
-            self._activations = activations
-        else:
-            self._activations += activations
-
-    def _estimate_all_head_importance(self) -> TracedHp.Importance:
-        """Return the importance for num_attention_heads (num_heads_per_group * num_query_groups)."""
-        assert self._activations is not None, "No activations collected for importance estimation."
-        # Convert squared sum to L2 norm
-        scores = self._activations.pow(0.5)
-        attn_head_importance = torch.linalg.vector_norm(
-            scores.view(
-                self.get_hparam("num_heads_per_group").max
-                * self.get_hparam("num_query_groups").max,
-                self.config.kv_channels,
-            ),
-            ord=2,
-            dim=1,
-        )
-        return attn_head_importance
-
-    def _estimate_query_group_importance(self) -> TracedHp.Importance:
-        """Return the importance of the ``num_query_groups`` hparam."""
-        assert self._activations is not None, "No activations collected for importance estimation."
-        # Convert squared sum to L2 norm
-        scores = self._activations.pow(0.5)
-        group_importance = torch.linalg.vector_norm(
-            scores.view(
-                self.get_hparam("num_heads_per_group").max,
-                self.get_hparam("num_query_groups").max,
-                self.config.kv_channels,
-            ),
-            ord=2,
-            dim=(0, 2),
-        )
-        return group_importance
 
     def export(self) -> torch.nn.Module:
         """Export the dynamic module to a torch.nn.Module."""
-        self.hook_handle.remove()
         self.core_attention.export()
         self.linear_qkv.export()
         self.linear_proj.export()
@@ -724,60 +577,8 @@ class _DynamicSequentialMLP(DynamicModule):
         for expert in self.local_experts:
             DMRegistry.convert(expert, hidden_size=hidden_size)
 
-        # Track forward activations for importance estimation.
-        # _activations name is needed for get_activations_and_layer_scores to save scores for re-running pruning.
-        self._register_temp_attribute(
-            "_activations",
-            {
-                "expert_l2_scores": torch.zeros(self.num_local_experts),
-                "expert_sample_counts": torch.zeros(self.num_local_experts),
-            },
-        )
-        self.hook_handle = self.register_forward_hook(self._expert_l2_imp_forward_hook)
-        num_moe_experts.register_importance(self._estimate_expert_importance)
-
-    def _expert_l2_imp_forward_hook(self, module, input, output):
-        """Track expert importance based on L2 norms of expert outputs."""
-        # Dont aggregate activations from non-max subnets (e.g. from profiling)
-        num_moe_experts = self.get_hparam("num_local_experts")
-        if num_moe_experts.active != num_moe_experts.max:
-            return
-
-        # Split output back to per-expert outputs using torch.split
-        tokens_per_expert_list = input[1].tolist()
-        # use full precision to avoid overflow
-        output_local = output[0].to(torch.float32).detach()
-
-        output_local_list = torch.split(output_local, tokens_per_expert_list)
-
-        # Compute L2 norm for each expert's output
-        for expert_idx, expert_output in enumerate(output_local_list):
-            # Guard: if expert_output is empty tensor, add zero score
-            if expert_output.numel() == 0:
-                l2_norm = 0.0
-            else:
-                # Compute L2 norm of expert output (router_prob * expert_output)
-                l2_norm = torch.linalg.vector_norm(expert_output, ord=2, dim=-1).sum().item()
-
-            # Accumulate L2 scores and sample counts
-            self._activations["expert_l2_scores"][expert_idx] += l2_norm
-            self._activations["expert_sample_counts"][expert_idx] += tokens_per_expert_list[
-                expert_idx
-            ]
-
-    def _estimate_expert_importance(self) -> TracedHp.Importance:
-        """Estimate expert importance based on accumulated L2 norms."""
-        assert self._activations["expert_sample_counts"].sum() > 0, (
-            "No activations collected for importance estimation."
-        )
-        # Average L2 scores across samples (avoid division by zero if some experts have no samples)
-        return self._activations["expert_l2_scores"] / (
-            self._activations["expert_sample_counts"] + 1e-8
-        )
-
     def export(self) -> torch.nn.Module:
         """Export the dynamic module to a standard SequentialMLP."""
-        self.hook_handle.remove()
         for expert in self.local_experts:
             expert.export()
         self.local_experts.export()
@@ -858,48 +659,10 @@ class _DynamicMoELayer(DynamicModule):
 
 
 # TransformerLayer DynamicModule ###################################################################
-class MambaTransformerLayerMixin(nn.Module):
-    """A mixin for MambaLayer and TransformerLayer to share the same logic."""
-
-    def _setup_mixin(self):
-        """Setup the mixin."""
-        self._register_temp_attribute("_scores", 0.0)
-        self.hook_handle = self.register_forward_hook(
-            self._layer_imp_forward_hook, with_kwargs=True
-        )
-
-    def _export_mixin(self):
-        """Export the mixin."""
-        self.hook_handle.remove()
-
-    def _layer_imp_forward_hook(self, module, args, kwargs, output) -> None:
-        """Hook to collect cosine similarity between input and output to rank layers for depth pruning."""
-        hidden_states = kwargs["hidden_states"] if "hidden_states" in kwargs else args[0]
-
-        if isinstance(self, TransformerLayer):
-            output, _ = output  # [seq_len, batch_size, hidden_size]
-
-        # Dont aggregate activations from non-max subnets (e.g. from profiling)
-        # NOTE: max_hidden_size is set in both DyamicModule classes below!
-        if hidden_states.shape[-1] != self.max_hidden_size:
-            return
-
-        # use full precision to avoid overflow
-        hidden_states = hidden_states.to(torch.float32)
-        output = output.to(torch.float32)
-
-        with torch.no_grad():
-            # Lower cosine_similarity means higher importance hence use 1 - cosine_similarity
-            score = 1 - F.cosine_similarity(hidden_states, output, dim=2).mean()
-            # TODO: Check if we need to reduce over TP regions (seems like all TP have same scores anyway)
-            global_score = reduce_from_tensor_model_parallel_region(score).item()
-            self._scores += global_score  # aggregate sum instead of mean of scores for simplicity
-
-
 @DMRegistry.register(
     {TransformerLayer: "megatron.core.transformer.transformer_layer.TransformerLayer"}
 )
-class _DynamicTransformerLayer(DynamicModule, MambaTransformerLayerMixin):
+class _DynamicTransformerLayer(DynamicModule):
     """A TransformerLayer layer with dynamic hyperparams."""
 
     def _setup(self, *, hidden_size: TracedHp):
@@ -914,31 +677,14 @@ class _DynamicTransformerLayer(DynamicModule, MambaTransformerLayerMixin):
             DMRegistry.convert(self.pre_mlp_layernorm, num_features=hidden_size)
             DMRegistry.convert(self.mlp, hidden_size=hidden_size)
 
-        self._register_temp_attribute("max_hidden_size", hidden_size.max)
-
-        # Register forward hook to collect activations for importance estimation
-        self._setup_mixin()
-
     def modify(
         self,
         *,
-        num_heads_per_group_divisor: int = 1,
-        num_query_groups_divisor: int = 1,
         ffn_hidden_size_divisor: int = 1,
         num_moe_experts_divisor: int = 1,
         **kwargs,  # Unused hparams
     ) -> None:
         """Modify TransformerLayer hparam choices based on search space config."""
-        # Modify SelfAttention hparam
-        if isinstance(self.self_attention, SelfAttention):
-            for hp_name, divisor in [
-                ("num_heads_per_group", num_heads_per_group_divisor),
-                ("num_query_groups", num_query_groups_divisor),
-            ]:
-                hp = self.self_attention.get_hparam(hp_name)
-                choices = {int(make_divisible(c, divisor)) for c in hp.choices}
-                hp.choices = list(set(hp.choices) & choices | {hp.original})
-
         # Modify MLP hparam (regular or MoE)
         if isinstance(self.mlp, (MLP, MoELayer)):
             self.mlp.modify(
@@ -948,7 +694,6 @@ class _DynamicTransformerLayer(DynamicModule, MambaTransformerLayerMixin):
 
     def export(self):
         """Export the dynamic module to a torch.nn.Module."""
-        self._export_mixin()
         if isinstance(self.self_attention, SelfAttention):
             self.input_layernorm.export()
             self.self_attention.export()
@@ -965,23 +710,23 @@ class MambaNumHeadsHp(TracedHp):
     Need special handling for active_slice property to trim heads within each group.
     """
 
-    def __init__(
-        self, choices: Sequence[HPType], original: HPType | None = None, ngroups: int = 1
-    ) -> None:
-        super().__init__(choices, original)
-        self.ngroups = ngroups
+    def __init__(self, nheads: int, ngroups: int = 1) -> None:
+        """Initialize choices as multiples of ngroups."""
+        choices = [h * ngroups for h in range(1, nheads // ngroups + 1)]
+        super().__init__(choices)
+        self._ngroups = ngroups
 
     @property
     def active_slice(self) -> TracedHp.ActiveSlice:
         """Return the currently active sorted indices by trimming heads within each group."""
         if self._slice_order is None:
             if self.active == self.max:
-                return slice(self.active)
+                return slice(self.max)
             slice_order = torch.arange(self.max)
         else:
             slice_order = self._slice_order
-        target_nheads_per_group = self.active // self.ngroups
-        return slice_order.view(self.ngroups, -1)[:, :target_nheads_per_group].flatten()  # type: ignore[misc]
+        target_nheads_per_group = self.active // self._ngroups
+        return slice_order.view(self._ngroups, -1)[:, :target_nheads_per_group].flatten()  # type: ignore[misc]
 
 
 class MambaDInnerHp(TracedHp):
@@ -1147,7 +892,7 @@ class _DynamicMambaMixer(DynamicModule):
         assert self.d_inner == self.nheads * self.headdim, "d_inner must be nheads * headdim"
 
         # Register hyperparameters for Mamba heads and head dimensions
-        mamba_num_heads = MambaNumHeadsHp(list(range(1, self.nheads + 1)), ngroups=self.ngroups)
+        mamba_num_heads = MambaNumHeadsHp(self.nheads, self.ngroups)
         mamba_head_dim = TracedHp(list(range(1, self.headdim + 1)))
         d_inner = MambaDInnerHp(mamba_num_heads, mamba_head_dim)
         bc = TracedHp([2 * self.ngroups * self.d_state])  # not configurable
@@ -1191,105 +936,13 @@ class _DynamicMambaMixer(DynamicModule):
 
         self.cp = _MambaContextParallelProxy(self, self.cp)
 
-        # Register importance estimator for mamba heads
-        self._register_temp_attribute("_activations", None)
-        self.hook_handle = self.in_proj.register_forward_hook(self._mamba_in_proj_forward_hook)
-        mamba_num_heads._importance_is_order = True
-        mamba_num_heads.register_importance(self._estimate_head_importance)
-        mamba_head_dim._importance_is_order = True
-        mamba_head_dim.register_importance(self._estimate_head_dim_importance)
-
     @staticmethod
     def _get_dt_bias_A_log_D(mod: "_DynamicMambaMixer", data: torch.Tensor) -> torch.Tensor:  # noqa: N802
         """Return the sliced data based on mamba_num_heads's active_slice."""
         return get_sliced_tensor(mod, data, "mamba_num_heads")
 
-    def _mamba_in_proj_forward_hook(self, module, input, output) -> None:
-        """Hook to collect activations for importance estimation.
-
-        Activations are computed as mean over seq_len and then squared and summed over batch_size.
-        Later we take the square root of the sum to get the L2 norm.
-        """
-        # Gather output [seq_len, batch_size, output_size] over all TP regions
-        # NOTE: This is not used at the moment since we restrict to TP=1
-        output = gather_from_tensor_model_parallel_region(output[0]).detach()
-
-        # Dont aggregate activations from non-max subnets (e.g. from profiling)
-        if output.shape[-1] != self.in_proj.get_hparam("output_size").max:
-            return
-
-        output = output.to(torch.float32)  # use full precision to avoid overflow
-        activations = output.abs().mean(dim=0)  # [batch_size, output_size]
-        activations = activations.pow(2).sum(dim=0)  # [output_size]
-        if self._activations is None:
-            self._activations = activations
-        else:
-            self._activations += activations
-
-    def _estimate_head_and_head_dim_rankings(self):
-        """Get the rankings of Mamba heads and head dimensions.
-
-        Returns:
-            head_ranking: Ranking of Mamba heads of shape [mamba_num_heads.max]
-            head_dim_ranking: Ranking of Mamba head dimensions of shape [mamba_head_dim.max]
-        """
-        # Convert squared sum to L2 norm
-        scores = self._activations.pow(0.5)
-        assert scores is not None, "No activations collected for importance estimation."
-
-        max_nheads: int = self.get_hparam("mamba_num_heads").max
-        max_headdim: int = self.get_hparam("mamba_head_dim").max
-        max_d_inner: int = self.get_hparam("d_inner").max
-        target_headdim: int = self.headdim
-        nheads_per_group: int = max_nheads // self.ngroups
-
-        # While there can be many ways of computing the ranking out of z, x, and dt,
-        # based on ablations in the paper, using `x` is the best way to compute the ranking.
-        x_indices = torch.arange(max_d_inner, 2 * max_d_inner)
-        scores_x = scores[x_indices]  # shape = [max_d_inner] i.e. [max_nheads * max_headdim]
-
-        # Get ranking of all head and target head dimensions (same for each head)
-        all_head_dim_importance = torch.linalg.vector_norm(  # shape = [max_headdim]
-            scores_x.view(max_nheads, max_headdim), ord=2, dim=0
-        )
-        all_head_dim_ranking = all_head_dim_importance.argsort(descending=True).cpu()
-        target_head_dim_ranking = all_head_dim_ranking[:target_headdim]
-
-        # Get ranking of all heads with target head dimensions
-        target_head_dim_indices_per_head = torch.cat(  # shape = [max_nheads * target_headdim]
-            [i * max_headdim + target_head_dim_ranking for i in range(max_nheads)]
-        )
-
-        # Get ranking of heads (sorted within their group)
-        groupwise_head_importance = torch.linalg.vector_norm(  # shape = [ngroups, nheads_per_group]
-            scores_x[target_head_dim_indices_per_head].view(
-                self.ngroups, nheads_per_group, target_headdim
-            ),
-            ord=2,
-            dim=2,
-        )
-        groupwise_head_ranking = groupwise_head_importance.argsort(dim=1, descending=True).cpu()
-        group_offsets = torch.arange(self.ngroups).unsqueeze(1) * nheads_per_group
-        all_head_ranking = (groupwise_head_ranking + group_offsets).flatten()
-
-        return all_head_ranking, all_head_dim_ranking
-
-    def _estimate_head_importance(self):
-        """Get the importance of Mamba heads for sort_parameters()."""
-        head_ranking, _ = self._estimate_head_and_head_dim_rankings()
-        # [HACK] Return ranking instead of importance for sort_parameters()
-        # NOTE: Trimming should also happen within each group. This is handled in MambaNumHeadsHp.
-        return head_ranking
-
-    def _estimate_head_dim_importance(self):
-        """Get the importance of Mamba head dimensions for sort_parameters()."""
-        _, head_dim_ranking = self._estimate_head_and_head_dim_rankings()
-        # [HACK] Return ranking instead of importance for sort_parameters()
-        return head_dim_ranking
-
     def export(self) -> torch.nn.Module:
         """Export the dynamic module to a torch.nn.Module."""
-        self.hook_handle.remove()
         self.in_proj.export()
         self.out_proj.export()
         self.conv1d.export()
@@ -1298,7 +951,7 @@ class _DynamicMambaMixer(DynamicModule):
         return super().export()
 
 
-class _DynamicMambaLayer(DynamicModule, MambaTransformerLayerMixin):
+class _DynamicMambaLayer(DynamicModule):
     """A MambaLayer layer with dynamic hyperparams.
 
     Will be registered to DMRegistry if Mamba is available.
@@ -1311,30 +964,20 @@ class _DynamicMambaLayer(DynamicModule, MambaTransformerLayerMixin):
 
         DMRegistry.convert(self.norm, num_features=hidden_size)
 
-        self._register_temp_attribute("max_hidden_size", hidden_size.max)
-
-        self._setup_mixin()
-
     def modify(
         self,
         *,
-        mamba_num_heads_divisor: int = 1,
         mamba_head_dim_divisor: int = 1,
         **kwargs,  # Unused hparams
     ) -> None:
         """Modify Mamba hyperparameters."""
         # Modify MambaMixer hparams
-        for hp_name, divisor in [
-            ("mamba_num_heads", mamba_num_heads_divisor),
-            ("mamba_head_dim", mamba_head_dim_divisor),
-        ]:
-            hp = self.mixer.get_hparam(hp_name)
-            choices = {int(make_divisible(c, divisor)) for c in hp.choices}
-            hp.choices = list(set(hp.choices) & choices | {hp.original})
+        hp = self.mixer.get_hparam("mamba_head_dim")
+        choices = {int(make_divisible(c, mamba_head_dim_divisor)) for c in hp.choices}
+        hp.choices = list(set(hp.choices) & choices | {hp.original})
 
     def export(self):
         """Export the dynamic module to a torch.nn.Module."""
-        self._export_mixin()
         self.mixer.export()
         self.norm.export()
         return super().export()
@@ -1397,72 +1040,10 @@ class _DynamicMCoreLanguageModel(DynamicModule):
             DMRegistry.convert(self.output_layer, input_size=hidden_size)
             self.output_layer.get_hparam("output_size").choices = [self.output_layer.output_size]
 
-        # register importance estimator for hidden_size per hook
-        self._register_temp_attribute("_activations", {})
-        self.hook_handles = []
-        for layer in self.decoder.layers:
-            if isinstance(layer, TransformerLayer):
-                if isinstance(layer.self_attention, SelfAttention):
-                    self.hook_handles.append(
-                        layer.input_layernorm.register_forward_hook(
-                            self._emb_layernorm_forward_hook
-                        )
-                    )
-
-                # Handle both regular MLP and MoE layers
-                if isinstance(layer.mlp, (MLP, MoELayer)):
-                    # MoE layer - register hook on pre_mlp_layernorm
-                    self.hook_handles.append(
-                        layer.pre_mlp_layernorm.register_forward_hook(
-                            self._emb_layernorm_forward_hook
-                        )
-                    )
-            elif HAS_MAMBA and isinstance(layer, MambaLayer):
-                self.hook_handles.append(
-                    layer.norm.register_forward_hook(self._emb_layernorm_forward_hook)
-                )
-        hidden_size.register_importance(self._estimate_hidden_size_importance)
-
-    def _emb_layernorm_forward_hook(self, module, input, output) -> None:
-        """Hook to collect activations for importance estimation.
-
-        Activations are computed as mean over seq_len and then squared and summed over batch_size.
-        Later we take the square root of the sum to get the L2 norm.
-        """
-        # Gather output [seq_len, batch_size, hidden_size] over all TP regions
-        # NOTE: This is not used at the moment since we restrict to TP=1
-        output = gather_from_tensor_model_parallel_region(output).detach()
-
-        # Dont aggregate activations from non-max subnets (e.g. from profiling)
-        if output.shape[-1] != self.get_hparam("hidden_size").max:
-            return
-
-        output = output.to(torch.float32)  # use full precision to avoid overflow
-        activations = output.abs().mean(dim=0)  # [batch_size, hidden_size]
-        activations = activations.pow(2).sum(dim=0)  # [hidden_size]
-        if id(module) not in self._activations:
-            self._activations[id(module)] = activations
-        else:
-            self._activations[id(module)] += activations
-
-    def _estimate_hidden_size_importance(self) -> TracedHp.Importance:
-        """Return the activation magnitude-based importance of the hidden_size."""
-        assert self._activations, "No activations collected for importance estimation."
-        # Convert squared sum to L2 norm over global batch size per hook
-        aggregated_activations = [act.pow(0.5) for act in self._activations.values()]
-        activations = torch.stack(aggregated_activations).sum(dim=0)  # [hidden_size]
-
-        # Reduce over all PP ranks
-        activations = activations.clone()
-        torch.distributed.all_reduce(activations, op=torch.distributed.ReduceOp.SUM)  # average
-        return activations
-
     def modify(
         self,
         *,
         hidden_size_divisor: int = 1,
-        num_heads_per_group_divisor: int = 1,
-        num_query_groups_divisor: int = 1,
         ffn_hidden_size_divisor: int = 1,
         mamba_num_heads_divisor: int = 1,
         mamba_head_dim_divisor: int = 1,
@@ -1472,8 +1053,6 @@ class _DynamicMCoreLanguageModel(DynamicModule):
 
         Args:
             hidden_size_divisor: The divisor of the hidden_size.
-            num_heads_per_group_divisor: The divisor of the self-attention num_heads_per_group.
-            num_query_groups_divisor: The divisor of the self-attention num_query_groups.
             ffn_hidden_size_divisor: The divisor of the mlp ffn_hidden_size.
             mamba_num_heads_divisor: The divisor of the mamba num_heads.
             mamba_head_dim_divisor: The divisor of the mamba head_dim.
@@ -1485,52 +1064,15 @@ class _DynamicMCoreLanguageModel(DynamicModule):
 
         for layer in self.decoder.layers:
             layer.modify(
-                num_heads_per_group_divisor=num_heads_per_group_divisor,
-                num_query_groups_divisor=num_query_groups_divisor,
                 ffn_hidden_size_divisor=ffn_hidden_size_divisor,
                 mamba_num_heads_divisor=mamba_num_heads_divisor,
                 mamba_head_dim_divisor=mamba_head_dim_divisor,
                 num_moe_experts_divisor=num_moe_experts_divisor,
             )
 
-    def _get_layer_scores(self) -> dict[int, torch.Tensor]:
-        """Get the layer scores (1-indexed) from the module."""
-        num_layers_hp = self.get_hparam("num_layers")
-
-        for layer in self.decoder.layers:
-            assert layer._scores > 0, "No scores collected for importance estimation."
-
-        # gather layer scores from all PP ranks
-        layer_scores = {}
-        for layer in self.decoder.layers:
-            layer_scores[layer.layer_number] = layer._scores
-        all_pp_layer_scores = [None] * get_pipeline_model_parallel_world_size()
-        torch.distributed.all_gather_object(
-            all_pp_layer_scores, layer_scores, group=get_pipeline_model_parallel_group()
-        )
-        layer_scores = {k: v for d in all_pp_layer_scores for k, v in d.items()}  # type: ignore[attr-defined]
-        print_rank_0(f"Layerwise scores (1-indexed, higher is better): {layer_scores}")
-        assert sorted(layer_scores.keys()) == list(range(1, num_layers_hp.max + 1))  # type: ignore[arg-type]
-
-        return layer_scores
-
-    def _export_drop_layers(self) -> None:
-        """Drop layers during export if num_layers hparam is set to a smaller value during pruning."""
-        num_layers_hp = self.get_hparam("num_layers")
-        if num_layers_hp.active == num_layers_hp.max:  # no depth pruning
-            return
-
-        # sort layers by scores and drop the lowest ones
-        layer_scores = self._get_layer_scores()
-        sorted_layers = sorted(layer_scores.items(), key=lambda x: x[1], reverse=True)
-        layers_to_drop = [layer for layer, _ in sorted_layers[num_layers_hp.active :]]  # type: ignore[misc]
-        drop_mcore_language_model_layers(self, layers_to_drop=layers_to_drop)
-
     def export(self) -> torch.nn.Module:
         """Export the dynamic module to a torch.nn.Module."""
-        for handle in self.hook_handles:
-            handle.remove()
-        self._export_drop_layers()
+        # Drop layers if depth pruning is enabled - handled by mcore_minitron.py
         if is_pipeline_first_stage():
             self.embedding.export()
         for layer in self.decoder.layers:
@@ -1542,112 +1084,6 @@ class _DynamicMCoreLanguageModel(DynamicModule):
             ).export()
             self.output_layer.export()
         return super().export()
-
-    def get_activations_and_layer_scores(
-        self,
-    ) -> tuple[list[dict[str, torch.Tensor]], dict[int, torch.Tensor]]:
-        """Get the per-rank activations and layer scores from the module."""
-        local_activations = {}
-        for n, m in self.named_modules():
-            if hasattr(m, "_activations"):
-                local_activations[n] = m._activations
-        activations_per_rank = dist.allgather(
-            local_activations, group=get_pipeline_model_parallel_group()
-        )
-        assert len(activations_per_rank) == get_pipeline_model_parallel_world_size()
-
-        layer_scores = self._get_layer_scores()
-
-        return activations_per_rank, layer_scores
-
-    def set_activations_and_layer_scores(
-        self,
-        activations_per_rank: list[dict[str, torch.Tensor]],
-        layer_scores: dict[int, torch.Tensor],
-    ) -> None:
-        """Set the pre-computed layer_scores and per-rank activations instead of running forward.
-
-        Args:
-            layer_scores: Dict from layer_number (1-indexed) to score.
-            activations_per_rank: List of dicts from module name to activations. Should match PP size.
-        """
-        rank = get_pipeline_model_parallel_rank()
-        pp_size = get_pipeline_model_parallel_world_size()
-        assert len(activations_per_rank) == pp_size, (
-            f"Expected same PP size for stored pruning scores ({len(activations_per_rank)}) as current ({pp_size})!"
-        )
-        for layer in self.decoder.layers:
-            layer._scores = layer_scores[layer.layer_number]
-        for n, m in self.named_modules():
-            if hasattr(m, "_activations"):
-                m._activations = activations_per_rank[rank][n]
-
-
-def drop_mcore_language_model_layers(model: nn.Module, *, layers_to_drop: list[int]) -> None:
-    """Remove given layers (1-indexed) of the model (works with TP and/or PP).
-
-    If model is a wrapper around GPTModel or MambaModel, it will be unwrapped.
-    """
-    # NOTE: If this function is invoked from _DynamicMCoreLanguageModel during export,
-    # model.config.num_layers is already updated
-    layers_to_drop = sorted(layers_to_drop)
-    assert layers_to_drop[0] >= 1, (
-        f"Layers to drop should be in range 1 to {model.config.num_layers}, got {layers_to_drop}."
-    )
-
-    supported_model_types = tuple(SUPPORTED_MODELS.keys())
-    for n, m in model.named_modules():
-        if isinstance(m, supported_model_types):
-            model = m
-            break
-    assert isinstance(model, supported_model_types), (
-        f"Model should have one of {supported_model_types} submodule, got {model}"
-    )
-    print_rank_0(f"Dropping layers {layers_to_drop} from {n} ({type(model)}).")
-
-    # get the number of layers remaining in each pp rank
-    layers_remaining_per_pp = torch.zeros(
-        get_pipeline_model_parallel_world_size(),
-        dtype=torch.int,
-        device=get_module_device(model),
-    )
-    layers_remaining = torch.tensor(
-        sum(1 for layer in model.decoder.layers if layer.layer_number not in layers_to_drop),
-        dtype=torch.int,
-        device=get_module_device(model),
-    )
-
-    # Below distributed gather requires tensors to be on cuda
-    layers_remaining_per_pp = layers_remaining_per_pp.cuda()
-    layers_remaining = layers_remaining.cuda()
-    torch.distributed.all_gather_into_tensor(
-        layers_remaining_per_pp, layers_remaining, group=get_pipeline_model_parallel_group()
-    )
-    layers_remaining_per_pp = [i.item() for i in layers_remaining_per_pp]
-    new_num_layers = sum(layers_remaining_per_pp)
-
-    # reindex kept layers, exclude sharded state dict for dropped layers
-    layer_offset = sum(layers_remaining_per_pp[: get_pipeline_model_parallel_rank()])
-    layer_number = layer_offset + 1
-    dropped_layers = []
-    for layer in model.decoder.layers:
-        if layer.layer_number in layers_to_drop:
-            layer.layer_number = -1  # should not be used
-            # layer.sharded_state_dict = lambda prefix, sharded_offsets, metadata: {}
-            dropped_layers.append(layer)
-        else:
-            layer.layer_number = layer_number
-            layer.get_transformer_layer_offset = lambda: layer_offset
-            layer_number += 1
-
-    # remove dropped layers from the modulelist
-    model.decoder.layers = nn.ModuleList(
-        [layer for layer in model.decoder.layers if layer.layer_number != -1]
-    )
-    for layer in dropped_layers:
-        del layer
-
-    model.config.num_layers = new_num_layers
 
 
 class MegatronConstraintsFunc(ConstraintsFunc):

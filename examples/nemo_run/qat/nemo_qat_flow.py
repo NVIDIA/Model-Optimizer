@@ -86,7 +86,7 @@ def get_args():
         type=str,
         default="nvfp4",
         choices=quant_cfg_choices_list,
-        help="TensorRT-Model-Optimizer quantization algorithm",
+        help="Model-Optimizer quantization algorithm",
     )
     parser.add_argument(
         "--use-slurm",

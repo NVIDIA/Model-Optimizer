@@ -98,8 +98,10 @@ eagle_llama_causal_lm_export: dict[str, CustomModuleMapping] = {
     "final_layernorm": NameRemapping("norm."),
     "d2t": NameRemapping("d2t"),
     "output_layer": NameRemapping("lm_head."),
-    "parallel_draft_heads.medusa_layers": NameRemapping("parallel_draft_heads.{}.{}.linear."),
-    "parallel_draft_heads.lm_head": NameRemapping("parallel_draft_heads.{}.lm_head."),
+    "parallel_draft_heads.medusa_layers": NameRemapping(
+        "parallel_draft_heads.{}.medusa_layers.{}.linear."
+    ),
+    "parallel_draft_heads.lm_head": NameRemapping("parallel_draft_heads.lm_head."),
 }
 
 eagle3_llama_causal_lm_export: dict[str, CustomModuleMapping] = {
@@ -115,8 +117,10 @@ eagle3_llama_causal_lm_export: dict[str, CustomModuleMapping] = {
     "final_layernorm": NameRemapping("norm."),
     "d2t": NameRemapping("d2t"),
     "output_layer": NameRemapping("lm_head."),
-    "parallel_draft_heads.medusa_layers": NameRemapping("parallel_draft_heads.{}.{}.linear."),
-    "parallel_draft_heads.lm_head": NameRemapping("parallel_draft_heads.{}.lm_head."),
+    "parallel_draft_heads.medusa_layers": NameRemapping(
+        "parallel_draft_heads.{}.medusa_layers.{}.linear."
+    ),
+    "parallel_draft_heads.lm_head": NameRemapping("parallel_draft_heads.lm_head."),
 }
 
 eagle3_deep_llama_causal_lm_export: dict[str, CustomModuleMapping] = {
@@ -133,8 +137,10 @@ eagle3_deep_llama_causal_lm_export: dict[str, CustomModuleMapping] = {
     "final_layernorm": NameRemapping("norm."),
     "d2t": NameRemapping("d2t"),
     "output_layer": NameRemapping("lm_head."),
-    "parallel_draft_heads.medusa_layers": NameRemapping("parallel_draft_heads.{}.{}.linear."),
-    "parallel_draft_heads.lm_head": NameRemapping("parallel_draft_heads.{}.lm_head."),
+    "parallel_draft_heads.medusa_layers": NameRemapping(
+        "parallel_draft_heads.{}.medusa_layers.{}.linear."
+    ),
+    "parallel_draft_heads.lm_head": NameRemapping("parallel_draft_heads.lm_head."),
 }
 
 

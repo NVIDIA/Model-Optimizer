@@ -117,7 +117,9 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
         module_names.add(name)
 
         # For MoE models update pre_quant_scale to average pre_quant_scale amongst experts
-        if is_moe(module) and ("awq" in quantization_format):
+        if is_moe(module) and (
+            quantization_format is not QUANTIZATION_NONE and "awq" in quantization_format
+        ):
             # update_experts_avg_prequant_scale(module)
             grouped_experts = get_experts_list(module, model_type)
             for modules in grouped_experts:
@@ -540,8 +542,8 @@ def _export_hf_checkpoint(
                     quantizer_attrs=["gate_up_proj_input_quantizer", "down_proj_input_quantizer"],
                 )
                 # Export the quantized weights
-                for weight_name in ["gate_up_proj", "down_proj"]:
-                    with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                    for weight_name in ["gate_up_proj", "down_proj"]:
                         _export_quantized_weight(sub_module, dtype, weight_name)
 
     if accelerator is not None:

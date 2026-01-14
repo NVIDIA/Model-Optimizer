@@ -45,6 +45,7 @@ WINT4INT8_CFG = {
     "algorithm": "awq_lite",
 }
 
+# Test configs for per channel MSE calibration
 INT8_MSE_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {"num_bits": 8, "axis": 0},
@@ -108,6 +109,10 @@ def test_quantize(model_cls, config):
     model = model_cls()
     calib_data = [model.get_input() for _ in range(2)]
     quantize_model_and_forward(model, config, calib_data)
+
+    # For fast testing, lets just test one config
+    if config == mtq.INT8_DEFAULT_CFG:
+        mtq.print_quant_summary(model)
 
 
 @pytest.mark.parametrize(

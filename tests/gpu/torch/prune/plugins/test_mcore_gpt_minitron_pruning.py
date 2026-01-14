@@ -27,8 +27,169 @@ from _test_utils.torch.megatron.utils import (
     run_mcore_inference,
     run_mcore_inference_with_dummy_input,
 )
+from _test_utils.torch.misc import compare_outputs, set_seed
+from _test_utils.torch.nas_prune.minitron_common import prune_minitron
+from megatron.core.parallel_state import destroy_model_parallel
+from megatron.core.transformer.identity_op import IdentityOp
 
-import modelopt.torch.prune as mtp
+import modelopt.torch.nas as mtn
+from modelopt.torch.nas.conversion import export_searchspace
+from modelopt.torch.nas.plugins.megatron import (
+    NumAttentionHeadsHp,
+    _DynamicProjRowParallelLinear,
+    _DynamicQKVColumnParallelLinear,
+    _DynamicSelfAttention,
+    expand_head_indices,
+)
+from modelopt.torch.prune.plugins.mcore_minitron import (
+    ImportanceEstimatorRegistry,
+    _convert_model_to_dynamic_space,
+    get_mcore_minitron_config,
+)
+
+SEED = 1234
+
+
+def _test_mcore_gpt_parameter_sorting(activation_func, rank, size):
+    # Use relatively bigger model here for more accurate test for sorting
+    channel_divisor = 64
+
+    num_layers = size
+    hidden_size = channel_divisor * 2
+    num_attention_heads = 8
+    num_query_groups = 4
+    ffn_hidden_size = channel_divisor * 2
+    max_sequence_length = 32
+    vocab_size = channel_divisor * 2
+    batch_size = 2
+
+    model = get_mcore_gpt_model(
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=size,
+        initialize_megatron=True,
+        num_layers=num_layers,
+        hidden_size=hidden_size,
+        num_attention_heads=num_attention_heads,
+        num_query_groups=num_query_groups,
+        ffn_hidden_size=ffn_hidden_size,
+        max_sequence_length=max_sequence_length,
+        vocab_size=vocab_size,
+        activation_func=activation_func,
+        bf16=False,
+    ).cuda()
+
+    # Randomize layernorm weights instead of all zeros or ones
+    for n, m in model.named_modules():
+        if "layernorm" in n and not isinstance(m, IdentityOp):
+            m.weight.data = torch.randn_like(m.weight)
+
+    model.eval()
+    dynamic_space = _convert_model_to_dynamic_space(
+        model, get_mcore_minitron_config(channel_divisor)
+    )
+    registry = ImportanceEstimatorRegistry(model)  # register imp estimators and forward hooks
+
+    # Compute activations for sorting
+    for _ in range(5):
+        run_mcore_inference_with_dummy_input(model, batch_size)
+
+    # Get the output of the original model
+    prompt_tokens = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
+    y1 = run_mcore_inference(model, prompt_tokens)
+
+    mtn.utils.sort_parameters(model)
+    registry.cleanup()
+
+    # check if all ffn_hidden_size, num_attention_heads, hidden_size have been sorted
+    sortable_per_pp = [
+        n for n, hp in dynamic_space.named_hparams(configurable=True) if hp.importance is not None
+    ]
+    # 2 hps per layer (num_attention_heads, ffn_hidden_size) + 1 for hidden_size (num_layers is not sorted!)
+    assert len(sortable_per_pp) == 2 * num_layers // size + 1
+
+    # sanity check if the model functionality is preserved after sorting
+    y2 = run_mcore_inference(model, prompt_tokens)
+
+    # check if the inference results after sorting is the same
+    compare_outputs(y1, y2, rtol=1e-5, atol=1e-3)
+
+
+@pytest.mark.parametrize("activation_func", ["swiglu"])
+def test_mcore_gpt_parameter_sorting(activation_func):
+    set_seed(SEED)
+    spawn_multiprocess_job(
+        size=torch.cuda.device_count(),
+        job=partial(_test_mcore_gpt_parameter_sorting, activation_func),
+        backend="nccl",
+    )
+
+
+def test_mcore_gpt_self_attention_head_sorting(distributed_setup_size_1):
+    model = get_mcore_gpt_model(
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        initialize_megatron=True,
+        num_layers=1,
+        hidden_size=16,
+        num_attention_heads=8,
+        num_query_groups=2,
+        ffn_hidden_size=16,
+        activation_func="squared_relu",
+    ).cuda()
+
+    model = mtn.convert(model, "mcore_minitron")
+
+    self_attn = model.decoder.layers[0].self_attention
+    assert isinstance(self_attn, _DynamicSelfAttention)
+    assert isinstance(self_attn.linear_qkv, _DynamicQKVColumnParallelLinear)
+    assert isinstance(self_attn.linear_proj, _DynamicProjRowParallelLinear)
+
+    hp_num_attention_heads = self_attn.get_hparam("num_attention_heads")
+    assert isinstance(hp_num_attention_heads, NumAttentionHeadsHp)
+
+    # Choices are multiples of num_query_groups (2): [2, 4, 6, 8]
+    assert hp_num_attention_heads.choices == [2, 4, 6, 8]
+    assert hp_num_attention_heads._num_query_groups == 2
+
+    # Set importance and slice order
+    # Importance per head (group-aware): [2.2, 0.1, 1.1, 2.1, 3.0, 2.0, 0.0, 1.0]
+    # Group 0 (heads 0-3): [2.2, 0.1, 1.1, 2.1] → sorted: [0, 3, 2, 1]
+    # Group 1 (heads 4-7): [3.0, 2.0, 0.0, 1.0] → sorted: [4, 5, 7, 6]
+    # Global ranking (group-aware, flattened): [0, 3, 2, 1, 4, 5, 7, 6]
+    hp_num_attention_heads._get_importance = lambda: torch.tensor(
+        [2.2, 0.1, 1.1, 2.1, 3.0, 2.0, 0.0, 1.0]
+    )
+    # _estimate_head_ranking returns ranking as 1D tensor
+    expected_ranking = torch.tensor([0, 3, 2, 1, 4, 5, 7, 6])
+    hp_num_attention_heads.enforce_order(expected_ranking)
+
+    assert hp_num_attention_heads.active_slice.tolist() == [0, 3, 2, 1, 4, 5, 7, 6]
+
+    # check if we get correct selection of sorted + pruned heads after setting active values
+    hp_num_attention_heads.active = 4  # top 2 heads per group (2 groups * 2 heads = 4 total)
+
+    # Expected: Top 2 heads from each group: [0, 3] from group 0, [4, 5] from group 1
+    expected_q_heads = [0, 3, 4, 5]
+    # In QKV layout (4 heads/group → 6 QKV heads/group):
+    # Group 0: Q=[0, 3], K=4, V=5 → QKV indices [0, 3, 4, 5]
+    # Group 1: Q=[4, 5], K=10, V=11 → QKV indices [6, 7, 10, 11]
+    expected_qkv_heads = [0, 3, 4, 5, 6, 7, 10, 11]
+
+    assert (
+        self_attn.linear_qkv._get_output_size_indices().tolist()
+        == expand_head_indices(
+            torch.LongTensor(expected_qkv_heads), model.config.kv_channels
+        ).tolist()
+    )
+    assert (
+        self_attn.linear_proj._get_input_size_indices().tolist()
+        == expand_head_indices(
+            torch.LongTensor(expected_q_heads), model.config.kv_channels
+        ).tolist()
+    )
+
+    # Clean up since this is not a spawned process
+    destroy_model_parallel()
 
 
 def _test_mcore_gpt_pruning(
@@ -38,7 +199,6 @@ def _test_mcore_gpt_pruning(
     normalization,
     pruned_ffn_div,
     pruned_num_attention_heads_div,
-    pruned_num_query_groups_div,
     pruned_hidden_size_div,
     pruned_num_layers_div,
     uneven_pp,
@@ -48,10 +208,12 @@ def _test_mcore_gpt_pruning(
     rank,
     size,
 ):
-    hidden_size = 256
-    ffn_hidden_size = 256
-    max_sequence_length = 16
-    vocab_size = 64
+    channel_divisor = 4
+
+    hidden_size = channel_divisor * 4
+    ffn_hidden_size = channel_divisor * 4
+    max_sequence_length = 8
+    vocab_size = 16
     batch_size = 2
 
     num_layers = min(size * 2, 8)
@@ -99,17 +261,15 @@ def _test_mcore_gpt_pruning(
 
     pruned_ffn = ffn_hidden_size // pruned_ffn_div
     pruned_num_attention_heads = num_attention_heads // pruned_num_attention_heads_div
-    pruned_num_query_groups = num_query_groups // pruned_num_query_groups_div
-    pruned_num_heads_per_group = pruned_num_attention_heads // pruned_num_query_groups
+    pruned_num_heads_per_group = pruned_num_attention_heads // num_query_groups
     pruned_hidden_size = hidden_size // pruned_hidden_size_div
     pruned_num_layers = num_layers // pruned_num_layers_div
 
     export_config = {}
     if pruned_ffn_div != 1:
         export_config["ffn_hidden_size"] = pruned_ffn
-    if pruned_num_attention_heads_div != 1 or pruned_num_query_groups_div != 1:
+    if pruned_num_attention_heads_div != 1:
         export_config["num_attention_heads"] = pruned_num_attention_heads
-        export_config["num_query_groups"] = pruned_num_query_groups
     if pruned_hidden_size_div != 1:
         export_config["hidden_size"] = pruned_hidden_size
     if pruned_num_layers_div != 1:
@@ -123,13 +283,7 @@ def _test_mcore_gpt_pruning(
         assert ckpt_path is None
     else:
         config["forward_loop"] = forward_loop
-    model, pruning_scores = mtp.prune(
-        model,
-        mode="mcore_minitron",
-        constraints={"export_config": export_config},
-        dummy_input=None,  # Not used
-        config=config,
-    )
+    model, pruning_scores = prune_minitron(model, export_config, config, channel_divisor)
     if not skip_sorting:
         assert pruning_scores["layer_scores"]
         assert pruning_scores["activations_per_rank"]
@@ -142,18 +296,18 @@ def _test_mcore_gpt_pruning(
         )
         assert layer.mlp.linear_fc2.weight.shape == (pruned_hidden_size, pruned_ffn)
         assert layer.self_attention.linear_qkv.weight.shape == (
-            (pruned_num_heads_per_group + 2) * pruned_num_query_groups * model.config.kv_channels,
+            (pruned_num_heads_per_group + 2) * num_query_groups * model.config.kv_channels,
             pruned_hidden_size,
         )
         assert layer.self_attention.linear_proj.weight.shape == (
             pruned_hidden_size,
-            pruned_num_heads_per_group * pruned_num_query_groups * model.config.kv_channels,
+            pruned_num_heads_per_group * num_query_groups * model.config.kv_channels,
         )
 
     # Assert model.config is updated for correct save/restoring
     assert model.config.ffn_hidden_size == pruned_ffn
     assert model.config.num_attention_heads == pruned_num_attention_heads
-    assert model.config.num_query_groups == pruned_num_query_groups
+    assert model.config.num_query_groups == num_query_groups
     assert model.config.hidden_size == pruned_hidden_size
     assert model.config.num_layers == pruned_num_layers
 
@@ -165,12 +319,8 @@ def _test_mcore_gpt_pruning(
     if ckpt_path:
         model_rerun = _get_model(initialize_megatron=False)
         model_rerun.load_state_dict(sd)
-        mtp.prune(
-            model_rerun,
-            mode="mcore_minitron",
-            constraints={"export_config": export_config},
-            dummy_input=None,  # Not used
-            config={"scores_path": ckpt_path},
+        model_rerun, pruning_scores = prune_minitron(
+            model_rerun, export_config, {"scores_path": ckpt_path}, channel_divisor
         )
 
         output_rerun = run_mcore_inference(model_rerun, prompt_tokens, pruned_hidden_size)
@@ -185,7 +335,6 @@ def _test_mcore_gpt_pruning(
         "normalization",
         "ffn_div",
         "num_attention_heads_div",
-        "num_query_groups_div",
         "hidden_size_div",
         "num_layers_div",
         "uneven_pp",
@@ -195,15 +344,15 @@ def _test_mcore_gpt_pruning(
     ),
     [
         # MHA - pruned ffn/4
-        (8, 8, "squared_relu", "LayerNorm", 4, 1, 1, 1, 1, False, "rope", False, False),
+        (8, 8, "squared_relu", "LayerNorm", 4, 1, 1, 1, False, "rope", False, False),
         # GQA - pruned attention/2
-        (8, 4, "squared_relu", "RMSNorm", 1, 2, 2, 1, 1, False, "rope", False, False),
+        (8, 4, "squared_relu", "RMSNorm", 1, 2, 1, 1, False, "rope", False, False),
         # GQA - pruned hidden_size/4
-        (8, 4, "swiglu", "RMSNorm", 1, 1, 1, 4, 1, False, "rope", True, False),
+        (8, 4, "swiglu", "RMSNorm", 1, 1, 4, 1, False, "rope", True, False),
         # MHA - pruned num_layers/2
-        (8, 8, "swiglu", "LayerNorm", 1, 1, 1, 1, 2, False, "rope", False, False),
+        (8, 8, "swiglu", "LayerNorm", 1, 1, 1, 2, False, "rope", False, False),
         # GQA - pruned all/2, uneven pp
-        (8, 4, "swiglu", "RMSNorm", 2, 2, 2, 2, 2, True, "yarn", False, True),
+        (8, 4, "swiglu", "RMSNorm", 2, 2, 2, 2, True, "yarn", False, True),
     ],
 )
 def test_mcore_gpt_pruning(
@@ -214,7 +363,6 @@ def test_mcore_gpt_pruning(
     normalization,
     ffn_div,
     num_attention_heads_div,
-    num_query_groups_div,
     hidden_size_div,
     num_layers_div,
     uneven_pp,
@@ -232,7 +380,6 @@ def test_mcore_gpt_pruning(
             normalization,
             ffn_div,
             num_attention_heads_div,
-            num_query_groups_div,
             hidden_size_div,
             num_layers_div,
             uneven_pp,
@@ -244,14 +391,96 @@ def test_mcore_gpt_pruning(
     )
 
 
-def _test_mcore_gpt_pruning_moe(ckpt_path, rank, size):
-    num_layers = size
-    hidden_size = 128
-    moe_ffn_hidden_size = 128
+def _test_mcore_gpt_moe_parameter_sorting(rank, size):
+    # Use relatively bigger model here for more accurate test for sorting
+    channel_divisor = 64
+
+    num_layers = min(size * 2, 8)
+    hidden_size = channel_divisor * 4
+    num_attention_heads = 8
+    num_query_groups = 4
+    moe_ffn_hidden_size = channel_divisor * 2
     num_moe_experts = 4
-    moe_shared_expert_intermediate_size = 256
+    moe_shared_expert_intermediate_size = channel_divisor * 4
     max_sequence_length = 16
     vocab_size = 64
+    batch_size = 2
+
+    model = get_mcore_gpt_model(
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=size,
+        initialize_megatron=True,
+        num_layers=num_layers,
+        hidden_size=hidden_size,
+        num_attention_heads=num_attention_heads,
+        num_query_groups=num_query_groups,
+        max_sequence_length=max_sequence_length,
+        vocab_size=vocab_size,
+        activation_func="squared_relu",
+        num_moe_experts=num_moe_experts,
+        moe_ffn_hidden_size=moe_ffn_hidden_size,
+        moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
+        bf16=False,
+    ).cuda()
+
+    # Randomize layernorm weights instead of all zeros or ones
+    for n, m in model.named_modules():
+        if "layernorm" in n and not isinstance(m, IdentityOp):
+            m.weight.data = torch.randn_like(m.weight)
+
+    model.eval()
+    dynamic_space = _convert_model_to_dynamic_space(
+        model, get_mcore_minitron_config(channel_divisor)
+    )
+    registry = ImportanceEstimatorRegistry(model)  # register imp estimators and forward hooks
+
+    # Compute activations for sorting
+    for _ in range(10):
+        run_mcore_inference_with_dummy_input(model, batch_size)
+
+    # Get the output of the original model
+    prompt_tokens = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
+    y1 = run_mcore_inference(model, prompt_tokens)
+
+    mtn.utils.sort_parameters(model)
+    registry.cleanup()
+
+    # check if all num_moe_experts, moe_ffn, moe_shared_ffn, num_attention_heads, hidden_size
+    # have been sorted
+    sortable_per_pp = [
+        n for n, hp in dynamic_space.named_hparams(configurable=True) if hp.importance is not None
+    ]
+    # (num_moe_experts + 3) hps per layer + 1 for hidden_size (num_layers is not sorted!)
+    # Per layer: num_attention_heads, num_moe_experts, moe_ffn (per expert), moe_shared_ffn
+    assert len(sortable_per_pp) == (num_moe_experts + 3) * num_layers // size + 1
+
+    # sanity check if the model functionality is preserved after sorting
+    export_searchspace(model, mtn.get_subnet_config(model))
+    y2 = run_mcore_inference(model, prompt_tokens)
+
+    # check if the inference results after sorting is the same
+    compare_outputs(y1, y2, rtol=1e-5, atol=1e-3)
+
+
+def test_mcore_gpt_moe_parameter_sorting():
+    set_seed(SEED)
+    spawn_multiprocess_job(
+        size=torch.cuda.device_count(),
+        job=_test_mcore_gpt_moe_parameter_sorting,
+        backend="nccl",
+    )
+
+
+def _test_mcore_gpt_pruning_moe(ckpt_path, rank, size):
+    channel_divisor = 4
+
+    num_layers = size
+    hidden_size = channel_divisor * 4
+    moe_ffn_hidden_size = channel_divisor * 2
+    num_moe_experts = 4
+    moe_shared_expert_intermediate_size = channel_divisor * 4
+    max_sequence_length = 8
+    vocab_size = 16
     batch_size = 2
 
     def _get_model(initialize_megatron=True):
@@ -289,12 +518,11 @@ def _test_mcore_gpt_pruning_moe(ckpt_path, rank, size):
         "num_moe_experts": pruned_num_moe_experts,
     }
 
-    mtp.prune(
+    prune_minitron(
         model,
-        mode="mcore_minitron",
-        constraints={"export_config": export_config},
-        dummy_input=None,  # Not used
-        config={"scores_path": ckpt_path, "forward_loop": forward_loop},
+        export_config,
+        {"scores_path": ckpt_path, "forward_loop": forward_loop},
+        channel_divisor,
     )
 
     # Assert weights are pruned correctly
@@ -330,13 +558,7 @@ def _test_mcore_gpt_pruning_moe(ckpt_path, rank, size):
     # Assert re-pruning from scores_path works without running the forward loop again
     model_rerun = _get_model(initialize_megatron=False)
     model_rerun.load_state_dict(sd)
-    mtp.prune(
-        model_rerun,
-        mode="mcore_minitron",
-        constraints={"export_config": export_config},
-        dummy_input=None,  # Not used
-        config={"scores_path": ckpt_path},
-    )
+    prune_minitron(model_rerun, export_config, {"scores_path": ckpt_path}, channel_divisor)
 
     output_rerun = run_mcore_inference(model_rerun, prompt_tokens, pruned_hidden_size)
     assert torch.allclose(output, output_rerun, atol=1e-5)

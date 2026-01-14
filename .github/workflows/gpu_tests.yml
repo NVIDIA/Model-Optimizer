@@ -21,7 +21,7 @@ jobs:
     outputs:
       any_changed: ${{ steps.changed-tests.outputs.any_changed }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - id: get-pr-info
@@ -68,7 +68,7 @@ jobs:
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps: &gpu_steps
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: nv-gha-runners/setup-proxy-cache@main
       - name: Setup environment variables
         run: |

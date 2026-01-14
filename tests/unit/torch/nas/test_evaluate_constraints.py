@@ -15,6 +15,8 @@
 
 import pytest
 from _test_utils.torch.vision_models import get_tiny_mobilenet_and_input, get_tiny_resnet_and_input
+
+pytest.importorskip("torchprofile")
 from torchprofile import profile_macs
 
 from modelopt.torch.nas.algorithms import ConstraintsFunc

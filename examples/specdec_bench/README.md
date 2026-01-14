@@ -28,7 +28,7 @@ MTBench is available [here](https://huggingface.co/datasets/HuggingFaceH4/mt_ben
 Download `nvidia/gpt-oss-120b-Eagle3` to a local directory `/path/to/eagle`.
 
 ```bash
-python3 run.py --model_dir openai/gpt-oss-120b --tokenizer openai/gpt-oss-120b --draft_model_dir /path/to/eagle --mtbench question.jsonl --tp_size 1 --ep_size 1 --draft_length 3 --output_length 4096 --num_requests 80 --engine TRTLLM --concurrency 1
+python3 run.py --model_dir openai/gpt-oss-120b --tokenizer openai/gpt-oss-120b --draft_model_dir /path/to/eagle --mtbench question.jsonl --tp_size 1 --ep_size 1 --draft_length 3 --output_length 4096 --num_requests 80 --engine TRTLLM --concurrency 1 --postprocess gptoss
 
 ```
 

@@ -36,4 +36,4 @@ def test_llm_export_onnx(tmp_path, hf_model_path, dtype, lm_head):
         output_dir=str(tmp_path),
         calib_size=1,
     )
-    run_example_command(cmd_parts, "onnx_ptq")
+    run_example_command(cmd_parts, "torch_onnx")

@@ -41,6 +41,37 @@ pip install -r requirements.txt
 
 ```
 
+### Optional: Installing latest PyTorch and TorchAudio versions (2.8+)
+
+For users who need the latest versions of PyTorch and TorchAudio (version >=2.8), follow these additional steps:
+
+1. **Install PyTorch and TorchAudio with CUDA support:**
+
+```bash
+
+pip install --upgrade torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+
+```
+
+1. **Install torchcodec:**
+
+```bash
+
+pip install torchcodec
+
+```
+
+1. **Set up FFMPEG dependencies:**
+   - Download FFMPEG from: <https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-7.1.1-full_build-shared.7z>
+   - Extract the archive
+   - Copy all DLL files from the `bin` folder of the extracted FFMPEG directory and paste them into the torchcodec package folder (typically located at `<Python_Root_Folder>/Lib/site-packages/torchcodec`)
+
+1. **Copy PyTorch DLL files:**
+   - Navigate to the `lib` folder in the torch package directory
+   - Copy all DLL files from this folder and paste them into the torchcodec package folder
+
+After completing these steps, torchaudio will be ready for use.
+
 ## Inference script
 
 The script `whisper_optimum_ort_inference.py` is for Optimum-ORT based inference of an ONNX Whisper model. It takes an audio file (.wav) as input and transcribes its content in english. This script also supports Word Error Rate (WER) accuracy measurement.

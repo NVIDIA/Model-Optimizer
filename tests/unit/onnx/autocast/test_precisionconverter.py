@@ -1324,3 +1324,275 @@ def test_resize_op_tensor_scales_conversion(
         high_precision_nodes=[], low_precision_nodes=[node.name for node in model.graph.node]
     )
     onnx.checker.check_model(converted_model)
+
+
+####################################################################################################
+# Testing subgraph support, using If - Then Else subgraphs with initializers
+####################################################################################################
+@pytest.fixture
+def model_with_if_subgraph():
+    """Create a model with an If operation containing subgraphs with initializers.
+
+    The model has a preprocessing Add on X, then If branches use initializers.
+    This tests both external inputs (X flows through Add) and subgraph initializers.
+    """
+    # Main graph inputs/outputs
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 3])
+    condition = helper.make_tensor_value_info("condition", TensorProto.BOOL, [])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 4])
+
+    # Add a preprocessing node in main graph to use external input X
+    preprocess_weight = numpy_helper.from_array(
+        np.ones((2, 3), dtype=np.float32), name="preprocess_weight"
+    )
+    preprocess_node = helper.make_node(
+        "Add", ["X", "preprocess_weight"], ["X_processed"], name="preprocess"
+    )
+
+    # Create "then" branch subgraph with initializers
+    then_y = helper.make_tensor_value_info("then_y", TensorProto.FLOAT, [2, 4])
+
+    w_true = np.random.randn(2, 4).astype(np.float32)
+    b_true = np.random.randn(2, 4).astype(np.float32)
+    w_true_init = numpy_helper.from_array(w_true, name="W_true")
+    b_true_init = numpy_helper.from_array(b_true, name="b_true")
+
+    then_add = helper.make_node("Add", ["W_true", "b_true"], ["then_y"], name="then_add")
+
+    then_graph = helper.make_graph(
+        [then_add],
+        "then_branch",
+        [],
+        [then_y],
+        [w_true_init, b_true_init],
+    )
+
+    # Create "else" branch subgraph with different initializers
+    else_y = helper.make_tensor_value_info("else_y", TensorProto.FLOAT, [2, 4])
+
+    w_false = np.random.randn(2, 4).astype(np.float32) * 2  # Different values
+    b_false = np.random.randn(2, 4).astype(np.float32) * 2
+    w_false_init = numpy_helper.from_array(w_false, name="W_false")
+    b_false_init = numpy_helper.from_array(b_false, name="b_false")
+
+    else_add = helper.make_node("Add", ["W_false", "b_false"], ["else_y"], name="else_add")
+
+    else_graph = helper.make_graph(
+        [else_add],
+        "else_branch",
+        [],
+        [else_y],
+        [w_false_init, b_false_init],
+    )
+
+    # Create If node
+    if_node = helper.make_node(
+        "If",
+        inputs=["condition"],
+        outputs=["Y"],
+        name="if_node",
+        then_branch=then_graph,
+        else_branch=else_graph,
+    )
+
+    # Create main graph with preprocessing using external input
+    main_graph = helper.make_graph(
+        [preprocess_node, if_node],
+        "model_with_if",
+        [x, condition],
+        [y],
+        [preprocess_weight],
+    )
+
+    model = helper.make_model(main_graph, producer_name="model_with_if")
+    model.opset_import[0].version = 20
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+
+    model = onnx_utils.infer_shapes(model)
+    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+    return model, value_info_map, initializer_map, node_to_init_map
+
+
+@pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+@pytest.mark.parametrize("if_precision", ["low", "high"])
+def test_if_subgraph_initializer_conversion(
+    model_with_if_subgraph, low_precision_type, if_precision
+):
+    """Test that initializers in If subgraphs are converted based on parent node precision."""
+    model, value_info_map, initializer_map, node_to_init_map = model_with_if_subgraph
+
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=True,
+        low_precision_type=low_precision_type,
+    )
+
+    # Classify the If node based on test parameter
+    if if_precision == "low":
+        high_precision_nodes = []
+        low_precision_nodes = ["if_node"]
+        expected_init_type = low_precision_onnx_type(low_precision_type)
+    else:
+        high_precision_nodes = ["if_node"]
+        low_precision_nodes = []
+        expected_init_type = TensorProto.FLOAT
+
+    converted_model = converter.convert(high_precision_nodes, low_precision_nodes)
+
+    # Verify the model is valid
+    onnx.checker.check_model(converted_model)
+
+    # Find the If node and check its subgraph initializers
+    if_node = next(n for n in converted_model.graph.node if n.op_type == "If")
+
+    then_branch = None
+    else_branch = None
+    for attr in if_node.attribute:
+        if attr.name == "then_branch":
+            then_branch = attr.g
+        elif attr.name == "else_branch":
+            else_branch = attr.g
+
+    assert then_branch is not None, "If node should have a then_branch attribute"
+    assert else_branch is not None, "If node should have an else_branch attribute"
+
+    # Check that subgraph initializers in both branches were converted
+    assert len(then_branch.initializer) == 2, (
+        "Then branch should have 2 initializers (W_true, b_true)"
+    )
+    assert len(else_branch.initializer) == 2, (
+        "Else branch should have 2 initializers (W_false, b_false)"
+    )
+
+    for init in then_branch.initializer:
+        assert init.data_type == expected_init_type, (
+            f"Then branch initializer '{init.name}' should be {expected_init_type}, "
+            f"but is {init.data_type}"
+        )
+
+    for init in else_branch.initializer:
+        assert init.data_type == expected_init_type, (
+            f"Else branch initializer '{init.name}' should be {expected_init_type}, "
+            f"but is {init.data_type}"
+        )
+
+
+@pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+def test_if_subgraph_mixed_precision_boundary(model_with_if_subgraph, low_precision_type):
+    """Test that types are correctly handled at If subgraph boundaries in mixed precision."""
+    model, value_info_map, initializer_map, node_to_init_map = model_with_if_subgraph
+
+    # Add another node after the If to create a mixed precision scenario
+    add_weight = numpy_helper.from_array(np.ones((2, 4), dtype=np.float32), name="add_weight")
+    model.graph.initializer.append(add_weight)
+
+    add_node = helper.make_node("Add", ["Y", "add_weight"], ["output"], name="add_after_if")
+    model.graph.node.append(add_node)
+
+    # Update output
+    output_tensor = helper.make_tensor_value_info("output", TensorProto.FLOAT, [2, 4])
+    model.graph.output.append(output_tensor)
+
+    # Refresh mappings
+    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=True,
+        low_precision_type=low_precision_type,
+    )
+
+    # If in low precision, Add in high precision
+    converted_model = converter.convert(
+        high_precision_nodes=["add_after_if"], low_precision_nodes=["if_node"]
+    )
+
+    # Verify the model is valid (this tests type inference through subgraph boundaries)
+    onnx.checker.check_model(converted_model)
+
+    # Verify a cast was inserted between If output and Add input
+    cast_nodes = [n for n in converted_model.graph.node if n.op_type == "Cast"]
+    assert len(cast_nodes) > 0, "Should have cast nodes for mixed precision"
+
+
+@pytest.fixture
+def model_with_if_outer_scope_reference():
+    """Create a minimal model where If subgraphs reference outer scope variables.
+
+    This tests that subgraph value_info for outer scope variables is preserved during type clearing.
+    """
+    # Main graph inputs/outputs
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 4])
+    condition = helper.make_tensor_value_info("condition", TensorProto.BOOL, [])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 4])
+
+    # Create "then" branch: Identity on X from outer scope
+    then_y = helper.make_tensor_value_info("then_y", TensorProto.FLOAT, [2, 4])
+    then_identity = helper.make_node("Identity", ["X"], ["then_y"], name="then_identity")
+    then_graph = helper.make_graph([then_identity], "then_branch", [], [then_y])
+    # Add X to value_info - this is what needs to be preserved
+    then_graph.value_info.extend([helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 4])])
+
+    # Create "else" branch: Identity on X from outer scope
+    else_y = helper.make_tensor_value_info("else_y", TensorProto.FLOAT, [2, 4])
+    else_identity = helper.make_node("Identity", ["X"], ["else_y"], name="else_identity")
+    else_graph = helper.make_graph([else_identity], "else_branch", [], [else_y])
+    else_graph.value_info.extend([helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 4])])
+
+    # Create If node and main graph
+    if_node = helper.make_node(
+        "If", ["condition"], ["Y"], name="if_node", then_branch=then_graph, else_branch=else_graph
+    )
+    main_graph = helper.make_graph([if_node], "model_with_outer_scope", [x, condition], [y])
+
+    model = helper.make_model(main_graph, producer_name="model_with_outer_scope")
+    model.opset_import[0].version = 20
+    onnx.checker.check_model(model)
+
+    model = onnx_utils.infer_shapes(model)
+    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+    return model, value_info_map, initializer_map, node_to_init_map
+
+
+@pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+def test_if_subgraph_outer_scope_type_preservation(
+    model_with_if_outer_scope_reference, low_precision_type
+):
+    """Test that outer scope variable types are preserved in If subgraphs during conversion.
+
+    Without preserving X's value_info in subgraphs, shape inference fails with
+    "Element type of input 0 unknown".
+    """
+    model, value_info_map, initializer_map, node_to_init_map = model_with_if_outer_scope_reference
+
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=True,
+        low_precision_type=low_precision_type,
+    )
+
+    converted_model = converter.convert(high_precision_nodes=["if_node"], low_precision_nodes=[])
+    onnx.checker.check_model(converted_model)
+
+    # Verify X's value_info is preserved in both subgraphs
+    if_node = next(n for n in converted_model.graph.node if n.op_type == "If")
+    then_branch = next(attr.g for attr in if_node.attribute if attr.name == "then_branch")
+    else_branch = next(attr.g for attr in if_node.attribute if attr.name == "else_branch")
+
+    then_x_info = [vi for vi in then_branch.value_info if vi.name == "X"]
+    else_x_info = [vi for vi in else_branch.value_info if vi.name == "X"]
+
+    assert len(then_x_info) > 0, "X value_info should be preserved in then branch"
+    assert len(else_x_info) > 0, "X value_info should be preserved in else branch"
+    assert then_x_info[0].type.tensor_type.elem_type != onnx.TensorProto.UNDEFINED
+    assert else_x_info[0].type.tensor_type.elem_type != onnx.TensorProto.UNDEFINED

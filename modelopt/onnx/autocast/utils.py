@@ -23,6 +23,7 @@ support the core functionality of model precision conversion.
 
 import logging
 from collections import defaultdict
+from collections.abc import Callable
 
 import onnx
 
@@ -120,6 +121,41 @@ def get_cast_to_type(cast_node: onnx.NodeProto) -> int:
         if attr.name == "to":
             return attr.i
     raise ValueError("Cast node does not have 'to' attribute")
+
+
+def walk_subgraphs_recursive(
+    graph: onnx.GraphProto,
+    callback: Callable,
+    parent_node: onnx.NodeProto = None,
+    is_subgraph: bool = False,
+) -> None:
+    """Recursively walk through a graph and all its subgraphs, applying a callback.
+
+    This utility function traverses an ONNX graph and all nested subgraphs by examining
+    graph attributes in nodes. It works with standard control flow operators (Scan, If, Loop)
+    as well as custom operators that define subgraphs using ONNX graph attributes.
+
+    Args:
+        graph: The graph to walk.
+        callback: Function to call for each graph. Signature: callback(graph, parent_node, is_subgraph).
+        parent_node: The parent node containing this subgraph (None for main graph).
+        is_subgraph: Whether this is a subgraph (True) or the main graph (False).
+
+    Note:
+        Works with any node that has attributes of type AttributeProto.GRAPH or
+        AttributeProto.GRAPHS, including custom operators.
+    """
+    # Apply callback to current graph
+    callback(graph, parent_node, is_subgraph)
+
+    # Recursively process subgraphs in control flow nodes
+    for node in graph.node:
+        for attr in node.attribute:
+            if attr.type == onnx.AttributeProto.GRAPH:
+                walk_subgraphs_recursive(attr.g, callback, parent_node=node, is_subgraph=True)
+            elif attr.type == onnx.AttributeProto.GRAPHS:
+                for subgraph in attr.graphs:
+                    walk_subgraphs_recursive(subgraph, callback, parent_node=node, is_subgraph=True)
 
 
 def get_op_types_not_supported_in_low_precision(

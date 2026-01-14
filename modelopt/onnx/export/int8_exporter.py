@@ -27,15 +27,19 @@ class INT8QuantExporter(ONNXQuantExporter):
     @staticmethod
     def pre_process(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         """Pre-processes the ONNX model for INT8 quantization."""
+        return onnx_model
 
     @staticmethod
     def compute_scales(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         """Computes the scales for the weights in the ONNX model for INT8 quantization."""
+        return onnx_model
 
     @staticmethod
     def compress_weights(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         """Compresses the weights in the ONNX model for INT8 quantization."""
+        return onnx_model
 
     @staticmethod
     def post_process(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         """Post-processes the ONNX model for INT8 quantization."""
+        return onnx_model

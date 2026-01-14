@@ -92,6 +92,9 @@ class TrainingArguments(transformers.TrainingArguments):
     dataloader_drop_last: bool = field(default=True)
     bf16: bool = field(default=True)
     mode: Literal["eagle1", "eagle3", "medusa"] = "eagle3"
+    estimate_ar: bool = field(
+        default=False, metadata={"help": "Whether to estimate AR during training for logging."}
+    )
     ar_validate_steps: int = field(default=1000, metadata={"help": "Steps between AR validation."})
     disable_tqdm: bool = field(default=False, metadata={"help": "Disable tqdm progress bar."})
     remove_unused_columns: bool = field(
@@ -108,6 +111,10 @@ class MedusaArguments:
 @dataclass
 class EagleArguments:
     eagle_config: str = field(default=None, metadata={"help": "Path to eagle_config.json"})
+    eagle_decoder_type: str = field(
+        default="llama",
+        metadata={"help": "The class of eagle decoder to use. Available options: llama, kimik2"},
+    )
 
 
 def train():
@@ -141,24 +148,29 @@ def train():
 
     if checkpoint:
         model = transformers.AutoModelForCausalLM.from_pretrained(checkpoint, torch_dtype="auto")
-        tokenizer = transformers.AutoTokenizer.from_pretrained(checkpoint)
+        tokenizer = transformers.AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
     else:
         # To avoid OOM for large models, we load and convert model on CPU first.
         # Model will be moved to GPU during HF trainer.init().
+        offline_kwargs = {"num_hidden_layers": 0} if use_offline_training else {}
         model = transformers.AutoModelForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             torch_dtype="auto",
             device_map="cpu",
             trust_remote_code=True,
+            **offline_kwargs,
         )
         if use_offline_training:
             # When doing offline training, we need to set num_hidden_layers
             # since we override it when loading the model for space savings
-            model_config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path)
+            model_config = transformers.AutoConfig.from_pretrained(
+                model_args.model_name_or_path, trust_remote_code=True
+            )
             model.config.num_orig_hidden_layers = model_config.num_hidden_layers
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_args.model_name_or_path,
             model_max_length=training_args.training_seq_len,
+            trust_remote_code=True,
         )
         if tokenizer.chat_template is None:
             tokenizer.chat_template = (
@@ -176,38 +188,30 @@ def train():
             }
             mtsp.convert(model, [("medusa", config)])
         elif training_args.mode in ["eagle1", "eagle3"]:
-            from modelopt.torch.speculative.config import EAGLE1_DEFAULT_CFG, EAGLE3_DEFAULT_CFG
+            from modelopt.torch.speculative.config import (
+                default_eagle_config,
+                eagle3_default_config,
+                kimik2_eagle_default_config,
+            )
 
-            # Load default config
-            config = {
-                "eagle1": EAGLE1_DEFAULT_CFG,
-                "eagle3": EAGLE3_DEFAULT_CFG,
-            }[training_args.mode]["config"]
-
-            # overwrite config with custom config
-            if use_offline_training:
-                config["eagle_offline"] = True
+            if eagle_args.eagle_decoder_type == "kimik2":
+                eagle_architecture_config = kimik2_eagle_default_config
+            else:
+                eagle_architecture_config = {
+                    "eagle1": default_eagle_config,
+                    "eagle3": eagle3_default_config,
+                }[training_args.mode]
 
             if eagle_args.eagle_config:
                 with open(eagle_args.eagle_config) as f:
                     custom_config = json.load(f)
-                config["eagle_architecture_config"].update(custom_config)
+                eagle_architecture_config.update(custom_config)
 
-            # Hidden size and vocab size must match base model
-            llm_config = (
-                model.config.llm_config if hasattr(model.config, "llm_config") else model.config
-            )
-            config["eagle_architecture_config"].update(
-                {
-                    "hidden_size": llm_config.hidden_size,
-                    "vocab_size": llm_config.vocab_size,
-                    # we also overwrite max_pos_embedding for deployment compatibility
-                    "max_position_embeddings": llm_config.max_position_embeddings,
-                    "draft_vocab_size": custom_config["draft_vocab_size"]
-                    if eagle_args.eagle_config and "draft_vocab_size" in custom_config
-                    else llm_config.vocab_size,
-                }
-            )
+            config = {
+                "eagle_decoder_type": eagle_args.eagle_decoder_type,
+                "eagle_offline": use_offline_training,
+                "eagle_architecture_config": eagle_architecture_config,
+            }
 
             mtsp.convert(model, [("eagle", config)])
 
@@ -238,7 +242,7 @@ def train():
         model=model,
         processing_class=tokenizer,
         args=training_args,
-        callbacks=[EagleTrainingPlot(training_args.ar_validate_steps)],
+        callbacks=[EagleTrainingPlot(training_args.ar_validate_steps, training_args.estimate_ar)],
         **data_module,
     )
 

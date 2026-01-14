@@ -15,21 +15,24 @@
 
 """Handles suppressing import errors for third-party modules that may or may not be available."""
 
-import warnings
 from contextlib import contextmanager
+
+from .logging import warn_rank_0
 
 
 @contextmanager
-def import_plugin(plugin_name, msg_if_missing=None, verbose=True):
+def import_plugin(plugin_name, msg_if_missing=None, verbose=True, success_msg=None):
     """Context manager to import a plugin and suppress ModuleNotFoundError."""
     try:
         yield
+        if verbose and success_msg is not None:
+            warn_rank_0(success_msg)
     except ModuleNotFoundError:
-        if msg_if_missing is not None:
-            warnings.warn(msg_if_missing)
+        if verbose and msg_if_missing is not None:
+            warn_rank_0(msg_if_missing)
     except Exception as e:
         if verbose:
-            warnings.warn(
+            warn_rank_0(
                 f"Failed to import {plugin_name} plugin due to: {e!r}. "
                 "You may ignore this warning if you do not need this plugin."
             )

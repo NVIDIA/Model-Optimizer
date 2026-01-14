@@ -30,6 +30,7 @@ from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.opt.utils import forward_with_reshard
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
+from modelopt.torch.utils import atomic_print
 
 from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher, QuantRecipe
 from .config import QuantizeAlgoCfgType
@@ -228,7 +229,7 @@ def quantize(
     Returns: A pytorch model which has been quantized and calibrated.
     """
     model = apply_mode(model, mode=[("quantize", config)], registry=QuantizeModeRegistry)
-    return calibrate(model, config["algorithm"], forward_loop=forward_loop)
+    return calibrate(model, config.get("algorithm"), forward_loop=forward_loop)
 
 
 # TODO: create a config interface for auto_quantize and expose setting
@@ -506,6 +507,7 @@ def enable_quantizer(model: nn.Module, wildcard_or_filter_func: str | Callable):
     set_quantizer_attribute(model, wildcard_or_filter_func, {"enable": True})
 
 
+@atomic_print
 def print_quant_summary(model: nn.Module):
     """Print summary of all quantizer modules in the model."""
     count = 0

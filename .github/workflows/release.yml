@@ -1,0 +1,27 @@
+name: Wheel Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write # Required to upload assets to the release
+
+jobs:
+  build-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/ubuntu-setup
+      - name: Install dependencies
+        run: pip install tox
+      - name: Run basic unit tests
+        run: tox -e py312-torch29-tf_latest-unit
+      - name: Build Wheel
+        run: |
+          tox -e build-wheel
+          echo "WHEEL_PATH=$(find dist -name "*.whl" | head -n 1)" >> $GITHUB_ENV
+      - name: Upload GitHub Release Artifact
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload ${{ github.event.release.tag_name }} ${{ env.WHEEL_PATH }}

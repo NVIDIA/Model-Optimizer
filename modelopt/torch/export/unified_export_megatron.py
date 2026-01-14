@@ -137,7 +137,7 @@ class GPTModelExporter:
         pretrained_model_name_or_path: str | os.PathLike | None = None,
         export_extra_modules: bool = False,
         dtype=torch.bfloat16,
-        trust_remote_code: bool = True,
+        trust_remote_code: bool = False,
         moe_router_dtype: torch.dtype | None = None,
     ):
         """Create a GPTModel exporter instance."""
@@ -212,26 +212,14 @@ class GPTModelExporter:
                     )
 
                     eagle_config = {
-                        "use_input_layernorm_in_first_layer": mode_cfg["config"][
-                            "eagle_architecture_config"
-                        ]["use_input_layernorm_in_first_layer"],
-                        "use_last_layernorm": mode_cfg["config"]["eagle_architecture_config"][
-                            "use_last_layernorm"
-                        ],
-                        "use_mtp_layernorm": mode_cfg["config"]["eagle_architecture_config"][
-                            "use_mtp_layernorm"
-                        ],
-                        "use_aux_hidden_state": mode_cfg["config"]["eagle_architecture_config"][
-                            "use_aux_hidden_state"
-                        ],
+                        "use_input_layernorm_in_first_layer": model.eagle_config.use_input_layernorm_in_first_layer,
+                        "use_last_layernorm": model.eagle_config.use_last_layernorm,
+                        "use_mtp_layernorm": model.eagle_config.use_mtp_layernorm,
+                        "use_aux_hidden_state": model.eagle_config.use_aux_hidden_state,
                         "eagle_aux_hidden_state_layer_ids": model.eagle_config.eagle_aux_hidden_state_layer_ids,
                         "next_layer_regular": True,
-                        "parallel_draft_step": mode_cfg["config"]["eagle_architecture_config"][
-                            "parallel_draft_step"
-                        ],
-                        "parallel_draft_heads_num_layers": mode_cfg["config"][
-                            "eagle_architecture_config"
-                        ]["parallel_draft_heads_num_layers"],
+                        "parallel_draft_step": model.eagle_config.parallel_draft_step,
+                        "parallel_draft_heads_num_layers": model.eagle_config.parallel_draft_heads_num_layers,
                     }
 
                     eagle_config_update = {
@@ -243,9 +231,7 @@ class GPTModelExporter:
                         "max_position_embeddings": self._hf_text_config.max_position_embeddings,
                         "num_attention_heads": model.eagle_module.config.num_attention_heads,
                         "num_key_value_heads": model.eagle_module.config.num_query_groups,
-                        "num_hidden_layers": mode_cfg["config"]["eagle_architecture_config"][
-                            "num_hidden_layers"
-                        ],
+                        "num_hidden_layers": model.eagle_config.num_layers,
                         "vocab_size": self._hf_text_config.vocab_size,
                         # Unset any special token ids given that the tokenizer can change here.
                         "bos_token_id": None,
@@ -254,9 +240,7 @@ class GPTModelExporter:
                         "sep_token_id": None,
                         # The following attributes are EAGLE specific
                         "eagle_config": eagle_config,
-                        "draft_vocab_size": mode_cfg["config"]["eagle_architecture_config"][
-                            "draft_vocab_size"
-                        ],
+                        "draft_vocab_size": model.eagle_config.draft_vocab_size,
                     }
 
                     self._hf_extra_config.update(eagle_config_update)
@@ -1085,12 +1069,12 @@ class GPTModelExporter:
 
         parallel_draft_heads = getattr(eagle_module, "parallel_draft_heads", None)
         if parallel_draft_heads is not None:
-            for head_id, head in enumerate(parallel_draft_heads):
-                self.rules["parallel_draft_heads.lm_head"](head.lm_head, head_id)
-                for layer_id, layer in enumerate(head.medusa_layers):
+            for head_id, head in enumerate(parallel_draft_heads.medusa_heads):
+                for layer_id, layer in enumerate(head):
                     self.rules["parallel_draft_heads.medusa_layers"](
                         layer.linear, head_id, layer_id
                     )
+            self.rules["parallel_draft_heads.lm_head"](parallel_draft_heads.lm_head)
 
     def _get_state_dict(self):
         model = self.model
@@ -1221,6 +1205,7 @@ def export_mcore_gpt_to_hf(
     export_extra_modules: bool = False,
     dtype: torch.dtype = torch.bfloat16,
     export_dir: Path | str = tempfile.gettempdir(),
+    trust_remote_code: bool = False,
     moe_router_dtype: torch.dtype | None = None,
 ):
     """Export Megatron Core GPTModel to unified checkpoint and save to export_dir.
@@ -1241,6 +1226,7 @@ def export_mcore_gpt_to_hf(
         pretrained_model_name_or_path,
         export_extra_modules=export_extra_modules,
         dtype=dtype,
+        trust_remote_code=trust_remote_code,
         moe_router_dtype=moe_router_dtype,
     )
     exporter.save_pretrained(export_dir, pretrained_model_name_or_path)
@@ -1251,6 +1237,7 @@ def import_mcore_gpt_from_hf(
     pretrained_model_path: str,
     workspace_dir: str | None = None,
     dtype: torch.dtype = torch.bfloat16,
+    trust_remote_code: bool = False,
     moe_router_dtype: torch.dtype | None = None,
 ):
     """Import GPTModel state_dict from supported HuggingFace pretrained model path.
@@ -1259,13 +1246,17 @@ def import_mcore_gpt_from_hf(
         model: The Megatron Core GPTModel instance.
         pretrained_model_path: A path to a *directory* containing model weights saved using
             [`~PreTrainedModel.save_pretrained`], e.g., `./my_model_directory/`.
+        workspace_dir: The directory to save the workspace.
         dtype: The weights data type to import.
+        trust_remote_code: If True, this allows importing from a wider range of sources.
+        moe_router_dtype: The data type to import the moe router weights.
     """
     importer = GPTModelImporter(
         model,
         pretrained_model_path,
         workspace_dir=workspace_dir,
         dtype=dtype,
+        trust_remote_code=trust_remote_code,
         moe_router_dtype=moe_router_dtype,
     )
     importer._import_state_dict()

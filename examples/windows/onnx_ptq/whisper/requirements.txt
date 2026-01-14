@@ -4,10 +4,10 @@ datasets==2.19.0
 evaluate
 jiwer
 librosa
-onnx==1.17.0
-onnxruntime-gpu==1.20.1
+onnx==1.19.0
+onnxruntime-gpu==1.23.2
 optimum==1.23.3
 soundfile
 torch==2.7.0+cu128
 torchaudio==2.7.0+cu128
-transformers==4.48.0
+transformers==4.57.3

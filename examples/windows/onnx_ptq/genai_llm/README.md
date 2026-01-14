@@ -97,7 +97,7 @@ Refer to the following example scripts and tutorials for deployment:
 
 ### Model Support Matrix
 
-Please refer to [support matrix](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/0_support_matrix.html) for a full list of supported features and models.
+Please refer to [support matrix](https://nvidia.github.io/Model-Optimizer/guides/0_support_matrix.html) for a full list of supported features and models.
 
 ### Troubleshoot
 

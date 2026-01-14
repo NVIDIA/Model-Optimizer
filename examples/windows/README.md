@@ -1,10 +1,10 @@
 <div align="center">
 
-# NVIDIA TensorRT Model Optimizer - Windows
+# NVIDIA Model Optimizer - Windows
 
 A Library to Quantize and Compress Deep Learning Models for Optimized Inference on Native Windows RTX GPUs
 
-[![Documentation](https://img.shields.io/badge/Documentation-latest-brightgreen.svg?style=flat)](https://nvidia.github.io/TensorRT-Model-Optimizer/)
+[![Documentation](https://img.shields.io/badge/Documentation-latest-brightgreen.svg?style=flat)](https://nvidia.github.io/Model-Optimizer/)
 [![version](https://img.shields.io/badge/v0.33.0-orange?label=Release)](https://pypi.org/project/nvidia-modelopt/)
 [![license](https://img.shields.io/badge/License-Apache%202.0-blue)](../../LICENSE)
 
@@ -32,7 +32,7 @@ A Library to Quantize and Compress Deep Learning Models for Optimized Inference 
 
 ## Overview
 
-The **TensorRT Model Optimizer - Windows** (**ModelOpt-Windows**) is engineered to deliver advanced model compression techniques, including quantization, to Windows RTX PC systems. Specifically tailored to meet the needs of Windows users, ModelOpt-Windows is optimized for rapid and efficient quantization, featuring local GPU calibration, reduced system and video memory consumption, and swift processing times.
+The **Model Optimizer - Windows** (**ModelOpt-Windows**) is engineered to deliver advanced model compression techniques, including quantization, to Windows RTX PC systems. Specifically tailored to meet the needs of Windows users, ModelOpt-Windows is optimized for rapid and efficient quantization, featuring local GPU calibration, reduced system and video memory consumption, and swift processing times.
 The primary objective of the ModelOpt-Windows is to generate optimized, standards-compliant ONNX-format models. This makes it an ideal solution for seamless integration with ONNX Runtime (ORT) and DirectML (DML) frameworks, ensuring broad compatibility with any inference framework supporting the ONNX standard. Furthermore, ModelOpt-Windows integrates smoothly within the Windows ecosystem, with full support for tools and SDKs such as Olive and ONNX Runtime, enabling deployment of quantized models across various independent hardware vendors (IHVs) through the DML path and TensorRT path.
 
 Model Optimizer is available for free for all developers on [NVIDIA PyPI](https://pypi.org/project/nvidia-modelopt/). This repository is for sharing examples and GPU-optimized recipes as well as collecting feedback from the community.
@@ -59,7 +59,7 @@ pip install onnxruntime-genai-directml>=0.4.0
 pip install onnxruntime-directml==1.20.0
 ```
 
-For more details, please refer to the [detailed installation instructions](https://nvidia.github.io/TensorRT-Model-Optimizer/getting_started/windows/_installation_for_Windows.html).
+For more details, please refer to the [detailed installation instructions](https://nvidia.github.io/Model-Optimizer/getting_started/windows/_installation_for_Windows.html).
 
 ## Techniques
 
@@ -67,7 +67,7 @@ For more details, please refer to the [detailed installation instructions](https
 
 Quantization is an effective model optimization technique for large models. Quantization with ModelOpt-Windows can compress model size by 2x-4x, speeding up inference while preserving model quality. ModelOpt-Window enables highly performant quantization formats including INT4, FP8, INT8, etc. and supports advanced algorithms such as AWQ and SmoothQuant\* focusing on post-training quantization (PTQ) for ONNX and PyTorch\* models with DirectML, CUDA and TensorRT\* inference backends.
 
-For more details, please refer to the [detailed quantization guide](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/windows_guides/_ONNX_PTQ_guide.html).
+For more details, please refer to the [detailed quantization guide](https://nvidia.github.io/Model-Optimizer/guides/windows_guides/_ONNX_PTQ_guide.html).
 
 ## Getting Started
 
@@ -94,13 +94,13 @@ onnx.save_model(
 
 Check `modelopt.onnx.quantization.quantize_int4` for details about INT4 quantization API.
 
-Refer to our [Support Matrix](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/0_support_matrix.html#support-matrix) for details about supported features and models.
+Refer to our [Support Matrix](https://nvidia.github.io/Model-Optimizer/guides/0_support_matrix.html#support-matrix) for details about supported features and models.
 
-To learn more about ONNX PTQ, refer to our [docs](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/windows_guides/_ONNX_PTQ_guide.html#onnx-ptq-guide-windows).
+To learn more about ONNX PTQ, refer to our [docs](https://nvidia.github.io/Model-Optimizer/guides/windows_guides/_ONNX_PTQ_guide.html#onnx-ptq-guide-windows).
 
 ### Deployment
 
-The quantized onnx model can be deployed using frameworks like onnxruntime. Ensure that model’s opset is 19+ for FP8 quantization, and it is 21+ for INT4 quantization. This is needed due to different opset requirements of ONNX’s [Q](https://onnx.ai/onnx/operators/onnx__QuantizeLinear.html)/[DQ](https://onnx.ai/onnx/operators/onnx__DequantizeLinear.html) nodes for INT4, FP8 data-types support. Refer to [Apply Post Training Quantization (PTQ)](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/windows_guides/_ONNX_PTQ_guide.html#apply-onnx-ptq) for details.
+The quantized onnx model can be deployed using frameworks like onnxruntime. Ensure that model’s opset is 19+ for FP8 quantization, and it is 21+ for INT4 quantization. This is needed due to different opset requirements of ONNX’s [Q](https://onnx.ai/onnx/operators/onnx__QuantizeLinear.html)/[DQ](https://onnx.ai/onnx/operators/onnx__DequantizeLinear.html) nodes for INT4, FP8 data-types support. Refer to [Apply Post Training Quantization (PTQ)](https://nvidia.github.io/Model-Optimizer/guides/windows_guides/_ONNX_PTQ_guide.html#apply-onnx-ptq) for details.
 
 ```python
 # write steps (say, upgrade_opset() method) to upgrade or patch opset of the model, if needed
@@ -117,22 +117,24 @@ onnx.save_model(
 )
 ```
 
-For detailed instructions about deployment of quantized models with DirectML backend (ORT-DML), see the [DirectML](https://nvidia.github.io/TensorRT-Model-Optimizer/deployment/2_directml.html#directml-deployment).
+For detailed instructions about deployment of quantized models with DirectML backend (ORT-DML), see the [DirectML](https://nvidia.github.io/Model-Optimizer/deployment/2_directml.html#directml-deployment).
 
 > [!Note]
 > The ready-to-deploy optimized ONNX models from ModelOpt-Windows are available at HuggingFace [NVIDIA collections](https://huggingface.co/collections/nvidia/optimized-onnx-models-for-nvidia-rtx-gpus).
 
 ## Examples
 
-- We have ONNX PTQ examples for various ONNX model variants:
-  - [PTQ for GenAI LLMs](./onnx_ptq/genai_llm/README.md) covers how to use ONNX Post-Training Quantization (PTQ) with [ONNX Runtime GenAI](https://onnxruntime.ai/docs/genai) built LLM ONNX models, and their deployment with DirectML.
-  - [PTQ for Whisper](./onnx_ptq/whisper/README.md) illustrates using ONNX Post-Training Quantization (PTQ) with a Whisper ONNX model (i.e. an ASR model). It also provides example script for Optimum-ORT based inference of Whisper using CUDA EP.
-  - [PTQ for SAM2](./onnx_ptq/sam2/README.md) illustrates using ONNX Post-Training Quantization (PTQ) with a SAM2 ONNX model (i.e. a segmentation model).
+- Examples for Post-Training Quantization (PTQ) of ONNX models:
+  - [PTQ for GenAI LLMs](./onnx_ptq/genai_llm/README.md) covers how to use ONNX PTQ with [ONNX Runtime GenAI](https://onnxruntime.ai/docs/genai) built LLM ONNX models, and their deployment with DirectML.
+  - [PTQ for Whisper](./onnx_ptq/whisper/README.md) illustrates using ONNX PTQ with a Whisper ONNX model (i.e. an ASR model). It also provides example script for Optimum-ORT based inference of Whisper using CUDA EP.
+  - [PTQ for SAM2](./onnx_ptq/sam2/README.md) illustrates using ONNX PTQ with a SAM2 ONNX model (i.e. a segmentation model).
+- Examples that demonstrate PTQ of a PyTorch model followed by ONNX export:
+  - [Diffusers](./torch_onnx/diffusers/README.md) example demonstrates how to apply PTQ to diffusion models in PyTorch format and then export the quantized models to ONNX.
 - [MMLU Benchmark](./accuracy_benchmark/README.md) provides an example script for MMLU benchmarking of LLM models, and demonstrates how to run it with various popular backends like DirectML, TensorRT-LLM\* and model formats like ONNX and PyTorch\*.
 
 ## Support Matrix
 
-Please refer to [support matrix](https://nvidia.github.io/TensorRT-Model-Optimizer/guides/0_support_matrix.html) for a full list of supported features and models.
+Please refer to [support matrix](https://nvidia.github.io/Model-Optimizer/guides/0_support_matrix.html) for a full list of supported features and models.
 
 ## Benchmark Results
 
@@ -144,6 +146,6 @@ The ready-to-deploy optimized ONNX models from ModelOpt-Windows are available at
 
 ## Release Notes
 
-Please refer to [changelog](https://nvidia.github.io/TensorRT-Model-Optimizer/reference/0_changelog.html)
+Please refer to [changelog](https://nvidia.github.io/Model-Optimizer/reference/0_changelog.html)
 
 \* *Experimental support*

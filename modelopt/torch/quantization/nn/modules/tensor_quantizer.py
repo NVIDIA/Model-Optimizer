@@ -18,7 +18,8 @@
 import contextlib
 import math
 import warnings
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
+from typing import Any, Protocol
 
 import torch
 import torch.distributed as dist
@@ -36,7 +37,7 @@ else:  # torch >= 2.9
 import torch.nn.functional as F
 from torch import nn
 
-from modelopt.torch.utils import standardize_constructor_args
+from modelopt.torch.utils import same_device_as, standardize_constructor_args
 from modelopt.torch.utils.distributed import DistributedProcessGroup
 
 from ... import calib
@@ -52,14 +53,72 @@ from ...qtensor import (
     NVFP4QTensor,
     QTensorWrapper,
 )
-from ...tensor_quant import dynamic_block_quant, fake_tensor_quant, scaled_e4m3
+from ...tensor_quant import (
+    dynamic_block_quant,
+    fake_tensor_quant,
+    scaled_e4m3,
+    static_blockwise_fp4_fake_quant,
+)
 from ...utils import is_torch_export_mode
 from ..functional import normalized_hadamard_transform
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
+__all__ = [
+    "SequentialQuantizer",
+    "TensorQuantizer",
+    "TensorQuantizerCache",
+    "is_registered_quant_backend",
+    "register_quant_backend",
+    "unregister_quant_backend",
+]
 
-__all__ = ["SequentialQuantizer", "TensorQuantizer"]
+
+QuantBackendEntrypoint = Callable[[torch.Tensor, "TensorQuantizer"], torch.Tensor]
+
+_QUANT_FUNCTIONAL_BACKENDS: dict[str, QuantBackendEntrypoint] = {}
+
+
+def register_quant_backend(name: str, entrypoint: QuantBackendEntrypoint) -> None:
+    """Register a custom quantization backend.
+
+    Args:
+        name: The name of the backend.
+        entrypoint: The entrypoint of the backend. The entrypoint should be a callable that takes in
+            the inputs and the tensor quantizer as arguments and returns the quantized tensor.
+            See :class:`modelopt.torch.quantization.config.QuantizerAttributeConfig`
+            for details on choosing from the registered backends via the ``backend`` and
+            ``backend_extra_args`` fields.
+    """
+    if not isinstance(name, str) or not name:
+        raise ValueError("Backend name must be a non-empty string.")
+    if not callable(entrypoint):
+        raise TypeError("Entrypoint must be callable.")
+    if name in _QUANT_FUNCTIONAL_BACKENDS:
+        warnings.warn(f"Overwriting existing backend: {name}")
+    _QUANT_FUNCTIONAL_BACKENDS[name] = entrypoint
+
+
+def unregister_quant_backend(name: str) -> None:
+    """Unregister a custom quantization backend.
+
+    Args:
+        name: The name of the backend to unregister.
+    """
+    if not isinstance(name, str) or not name:
+        raise ValueError("Backend name must be a non-empty string.")
+    _QUANT_FUNCTIONAL_BACKENDS.pop(name, None)
+
+
+def is_registered_quant_backend(name: str) -> bool:
+    """Check if a custom quantization backend is registered.
+
+    Args:
+        name: The name of the backend to check.
+    """
+    return name in _QUANT_FUNCTIONAL_BACKENDS
+
+
+class TensorQuantizerCache(Protocol):
+    """A protocol for a cache interface for TensorQuantizer."""
 
 
 class TensorQuantizer(nn.Module):
@@ -104,6 +163,8 @@ class TensorQuantizer(nn.Module):
         "ds_grads_remaining",
         "ds_id",
         "pre_bwd_fn",
+        # quantizer cache for custom backends, like luts
+        "_quantizer_cache",
     }
 
     def __init__(
@@ -132,6 +193,9 @@ class TensorQuantizer(nn.Module):
         # Lazy initialize the bias calibrator for KV cache quantization
         self._bias_calibrator = None
 
+        # Optional quantizer cache for caching quantizer related encoding or tensors.
+        self._quantizer_cache = None
+
     def set_from_attribute_config(self, attribute_cfg: QuantizerAttributeConfig | dict):
         """Set quantizer attributes from attribute_dict.
 
@@ -153,6 +217,8 @@ class TensorQuantizer(nn.Module):
             "enable": ("_disabled", lambda val: val is False),
             "type": ("_dynamic", lambda val: val == "dynamic"),
             "calibrator": ("_calibrator", _calibrator_setter),
+            "backend": ("backend", lambda val: val),
+            "backend_extra_args": ("backend_extra_args", lambda val: val or {}),
         }
 
         for attribute, val in attribute_cfg.items():
@@ -425,6 +491,29 @@ class TensorQuantizer(nn.Module):
             and self.block_sizes.get("scale_bits", None) == (8, 0)
         )
 
+    def is_mxfp(self, bits):
+        """Check if is MXFP4/MXFP6/MXFP8."""
+        if bits == 4:
+            return (
+                self.is_mx_format
+                and self.num_bits == (2, 1)
+                and self.block_sizes.get(-1, None) == 32
+            )
+        elif bits == 6:
+            return (
+                self.is_mx_format
+                and self.num_bits == (3, 2)
+                and self.block_sizes.get(-1, None) == 32
+            )
+        elif bits == 8:
+            return (
+                self.is_mx_format
+                and self.num_bits == (4, 3)
+                and self.block_sizes.get(-1, None) == 32
+            )
+        else:
+            raise NotImplementedError()
+
     @property
     def is_static_block_quant(self):
         """Check if is static block quantization."""
@@ -632,6 +721,12 @@ class TensorQuantizer(nn.Module):
 
     def _fake_quantize(self, inputs):
         """Fake quantization."""
+        if self.backend is not None:
+            if self.backend not in _QUANT_FUNCTIONAL_BACKENDS:
+                raise KeyError(f"Quant backend '{self.backend}' is not registered.")
+            entrypoint = _QUANT_FUNCTIONAL_BACKENDS[self.backend]
+            return entrypoint(inputs, self)
+
         amax = None
         if not self.is_mx_format:
             amax = self._get_amax(inputs)
@@ -654,6 +749,15 @@ class TensorQuantizer(nn.Module):
                 getattr(self, "_trt_high_precision_dtype", None),
                 getattr(self, "_onnx_quantizer_type", None),
                 self._pass_through_bwd,
+            )
+        elif self._num_bits == (2, 1) and self.is_static_block_quant:
+            outputs = static_blockwise_fp4_fake_quant(
+                inputs,
+                amax / 6.0,
+                None,  # scale_fp8_quant_amax
+                False,  # skip_scale_quant
+                inputs.dtype,  # out_dtype
+                self._pass_through_bwd,  # pass_through_bwd
             )
         elif isinstance(self._num_bits, tuple):
             # Float-point quantization, e.g., FP8
@@ -932,9 +1036,10 @@ class TensorQuantizer(nn.Module):
             # Check if the input tensor is contiguous
             # Non-contiguous tensors will generate incorrect FP4 quantization results
             if hasattr(inputs, "is_contiguous") and not inputs.is_contiguous():
-                inputs.data = inputs.data.contiguous()
+                inputs = inputs.contiguous()
             if self.fake_quant:
-                outputs = self._fake_quantize(inputs)
+                with same_device_as(inputs):
+                    outputs = self._fake_quantize(inputs)
             elif not self._dequantize:
                 outputs = self._real_quantize(inputs)
             else:
@@ -964,16 +1069,23 @@ class TensorQuantizer(nn.Module):
             return "None"
         if self._amax.is_meta:
             return "meta"
-        if self._amax.numel() == 1:
-            return f"{self._amax.item():{fmt}}"
-        return (
-            f"[{self._amax.min().item():{fmt}},"
-            f" {self._amax.max().item():{fmt}}]({self._amax.numel()})"
-        )
+        return self._short_tensor(self._amax, fmt)
+
+    def _short_tensor(self, tensor: torch.Tensor, fmt=".4f"):
+        """Short description of tensor."""
+        if tensor.numel() == 1:
+            return f"{tensor.item():{fmt}}"
+        return f"[{tensor.min().item():{fmt}}, {tensor.max().item():{fmt}}]({tensor.numel()})"
 
     def extra_repr(self):
         """Set the extra information about this module."""
         if self._disabled:
+            s = "disabled"
+            s += (
+                f" pre_quant_scale={self._short_tensor(self.pre_quant_scale)}"
+                if self.pre_quant_scale is not None
+                else ""
+            )
             return "disabled"
         s = f"{'unsigned ' if self._unsigned else ''}{self._num_bits} bit"
         s += " narrow" if (self._narrow_range) else ""
@@ -983,7 +1095,11 @@ class TensorQuantizer(nn.Module):
         else:
             s += f" axis={self._axis}" if self._axis is not None else " per-tensor"
         s += f" amax={self._short_amax()}"
-        s += " pre_quant_scale" if self.pre_quant_scale is not None else ""
+        s += (
+            f" pre_quant_scale={self._short_tensor(self.pre_quant_scale)}"
+            if self.pre_quant_scale is not None
+            else ""
+        )
         s += " rotated" if self._rotate else ""
         s += (
             f" calibrator={self._calibrator.__class__.__name__}"
@@ -995,6 +1111,11 @@ class TensorQuantizer(nn.Module):
 
         s += " quant" if (self._if_quant) else ""
         s += " calib" if (self._if_calib) else ""
+        s += (
+            f" backend={self.backend}, extra_args={self.backend_extra_args}"
+            if self.backend is not None
+            else ""
+        )
         return s
 
     def _get_properties_for_modelopt_state(self):

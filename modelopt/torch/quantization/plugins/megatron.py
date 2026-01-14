@@ -16,6 +16,7 @@
 """Support quantization for megatron linear layers."""
 
 import logging
+import types
 import warnings
 from typing import Any
 
@@ -28,9 +29,11 @@ import torch
 from megatron.core.parallel_state import get_data_parallel_group
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 from megatron.core.transformer import MegatronModule
+from megatron.core.transformer.attention import Attention
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import get_tensor_model_parallel_group_if_none
 
+from modelopt.torch.opt.dynamic import DynamicModule
 from modelopt.torch.opt.plugins.megatron import (
     _MegatronMLP,
     ensure_metadata_has_dp_cp_group,
@@ -38,7 +41,6 @@ from modelopt.torch.opt.plugins.megatron import (
 )
 from modelopt.torch.utils.distributed import ParallelState
 
-from ..model_calib import max_calibrate
 from ..nn import QuantModule, QuantModuleRegistry, TensorQuantizer
 from ..nn.modules.quant_linear import RealQuantLinear
 from ..qtensor import QTensorWrapper
@@ -47,11 +49,14 @@ from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear
 try:
     from megatron.core.extensions.transformer_engine import (
         TEColumnParallelGroupedLinear,
+        TEColumnParallelLinear,
         TEDotProductAttention,
+        TELayerNormColumnParallelLinear,
         TERowParallelGroupedLinear,
+        TERowParallelLinear,
     )
 
-    from .transformer_engine import _QuantTEGroupedLinear
+    from .transformer_engine import _QuantTEGroupedLinear, _QuantTELayerNormLinear, _QuantTELinear
 
     HAS_TE = True
 except ImportError:
@@ -94,11 +99,6 @@ def quant_module_get_extra_state(self) -> dict:
     which avoids the need to store the full module name.
     """
     extra_state = {}
-
-    is_enabled = self.weight_quantizer.is_enabled if hasattr(self, "weight_quantizer") else False
-
-    if not is_enabled:
-        return extra_state
 
     quantizer_state = {}
     for name, module in self.named_modules():
@@ -198,6 +198,19 @@ def quant_module_set_extra_state(self, state: Any):
     self.allow_post_restore = False
 
 
+def _create_incompatible_method(method_name: str):
+    """Create a method that raises an error for incompatible flash decode methods."""
+
+    def _incompatible_method(self, *args, **kwargs):
+        raise NotImplementedError(
+            f"{method_name} is not compatible with ModelOpt KV cache quantization. "
+            f"KV cache quantization requires core_attention to be called. "
+            f"Please raise an issue at https://github.com/NVIDIA/Model-Optimizer if you need this feature."
+        )
+
+    return _incompatible_method
+
+
 def megatron_replace_quant_module_hook(model: torch.nn.Module):
     """Configure Megatron-Core model quantization support.
 
@@ -208,10 +221,39 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
     1. We change TransformerConfig to enable heterogenous distributed checkpointing.
     2. We enable all sub- QuantModule to store quantizer_state as extra_state by
        typing-matching the QuantModuleRegistry.
+    3. For Attention modules, we configure them to use core_attention path for KV cache quantization.
     """
+
+    def _configure_attention_for_kv_cache_quant(module: Attention):
+        """Configure Attention module for KV cache quantization compatibility."""
+        # Disable flash_decode if enabled - it bypasses core_attention (only called during inference)
+        if getattr(module.config, "flash_decode", False):
+            warnings.warn(
+                "flash_decode=True is incompatible with ModelOpt KV cache quantization. "
+                "Setting flash_decode=False. Flash decode bypasses core_attention during decode phase."
+            )
+            module.config.flash_decode = False
+
+        # Set dtype and device for core_attention (needed for modelopt_post_restore)
+        assert hasattr(module, "core_attention"), "Attention module must have core_attention"
+        param = next(iter(module.parameters()), None)
+        if param is not None:
+            module.core_attention.dtype = param.dtype
+            module.core_attention.device = param.device
+
+        # Patch flash_decode and flash_decode_and_prefill to raise errors
+        module.flash_decode = types.MethodType(_create_incompatible_method("flash_decode"), module)
+        module.flash_decode_and_prefill = types.MethodType(
+            _create_incompatible_method("flash_decode_and_prefill"), module
+        )
 
     def _register_extra_state_callbacks(model: torch.nn.Module):
         for name, module in model.named_modules():
+            if name.endswith("output_layer"):
+                # output_layer is not quantized,
+                # hence we don't need to register extra state callbacks for it
+                continue
+
             if type(module) in QuantModuleRegistry:
                 # This module will be replaced as a QuantModule
                 register_modelopt_extra_state_callbacks(
@@ -219,6 +261,10 @@ def megatron_replace_quant_module_hook(model: torch.nn.Module):
                     quant_module_get_extra_state,
                     quant_module_set_extra_state,
                 )
+
+            # Configure Attention modules for KV cache quantization
+            if isinstance(module, Attention):
+                _configure_attention_for_kv_cache_quant(module)
 
     for name, module in model.named_modules():
         if isinstance(module, MegatronModule):
@@ -506,8 +552,16 @@ class _RealQuantMegatronRowParallelLinear(
 
 
 @QuantModuleRegistry.register({megatron_moe.SequentialMLP: "megatron_moe_SequentialMLP"})
-class _MegatronSequentialMLP(_MegatronMLP):
+class _MegatronSequentialMLP(DynamicModule):
     def _setup(self):
+        if (
+            self.config.expert_model_parallel_size > 1
+            and self.config.tensor_model_parallel_size > 1
+        ):
+            raise ValueError(
+                "TP+EP is not supported by QuantSequentialMLP. Set either TP or EP to 1!"
+            )
+
         if not hasattr(self, "parallel_state") or self.parallel_state is None:
             self.parallel_state = ParallelState(
                 mcore_parallel.get_expert_data_parallel_group(),
@@ -547,8 +601,40 @@ class _MegatronSequentialMLP(_MegatronMLP):
                 if isinstance(module, TensorQuantizer) and module.amax is not None:
                     module.amax = amax_dict[name].detach().clone().to(module.amax.device)
 
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        """Override the default to enable singleton_local_shards.
+
+        Note:
+            singleton_local_shards must be added to the metadata; otherwise, all experts
+            amax are packed to gather and currently the TP replica_id for linear_fc1
+            is incorrect. This limits TP=ETP=1 when EP>1. Otherwise, there will be
+            sharded_state_dict access error.
+        """
+        if metadata is None:
+            metadata = {}
+        metadata["singleton_local_shards"] = True
+        sharded_state_dict = super().sharded_state_dict(prefix, sharded_offsets, metadata)
+        return sharded_state_dict
+
 
 if HAS_TE:
+
+    @QuantModuleRegistry.register({TERowParallelLinear: "te_mcore_RowParallelLinear"})
+    class _QuantTEMCoreRowParallelLinear(_QuantTELinear, _MegatronRowParallelLinear):
+        pass
+
+    @QuantModuleRegistry.register({TEColumnParallelLinear: "te_mcore_ColumnParallelLinear"})
+    class _QuantTEMCoreColumnParallelLinear(_QuantTELinear, _MegatronColumnParallelLinear):
+        pass
+
+    @QuantModuleRegistry.register(
+        {TELayerNormColumnParallelLinear: "te_mcore_LayerNormColumnParallelLinear"}
+    )
+    class _QuantTELayerNormColumnParallelLinear(
+        _QuantTELayerNormLinear, _MegatronColumnParallelLinear
+    ):
+        pass
+
     # Quantized subclasses to support TEGroupedMLP quantization
     class _QuantMegatronTEGroupedLinear(_QuantTEGroupedLinear, _MegatronParallelLinear):
         def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
@@ -612,152 +698,44 @@ if HAS_TE:
             self.k_bmm_quantizer = TensorQuantizer()
             self.v_bmm_quantizer = TensorQuantizer()
 
-        def _calibrate_quantizers(self):
-            """Calibrate quantizers with minimal dummy tensors."""
-            # Get device and dtype from the parent module's parameters
-            param = next(iter(self.parameters()), None)
-            device = param.device if param is not None else torch.device("cuda")
-            dtype = param.dtype if param is not None else torch.float16
-
-            # TEDotProductAttention expects format 'sbhd' or 'bshd' depending on rope_fusion
-            batch_size = 1
-            seq_len = 1
-
-            # Get dimensions from config
-            num_heads = self.config.num_attention_heads
-            head_dim = (
-                self.config.kv_channels
-                if hasattr(self.config, "kv_channels")
-                else self.config.hidden_size // num_heads
+            # Set parallel_state for distributed sync of BMM quantizers
+            try:
+                data_parallel_group = get_data_parallel_group(with_context_parallel=True)
+            except AssertionError:
+                data_parallel_group = get_data_parallel_group()
+            self.parallel_state = ParallelState(
+                data_parallel_group,
+                mcore_parallel.get_tensor_model_parallel_group(),
             )
 
-            # Determine tensor format (default to sbhd if not specified)
-            apply_rope_fusion = getattr(self.config, "apply_rope_fusion", False)
-            qkv_format = "bshd" if apply_rope_fusion else "sbhd"
-
-            if qkv_format == "sbhd":
-                dummy_tensor = torch.randn(
-                    seq_len, batch_size, num_heads, head_dim, device=device, dtype=dtype
-                )
-            else:
-                dummy_tensor = torch.randn(
-                    batch_size, seq_len, num_heads, head_dim, device=device, dtype=dtype
-                )
-
-            # Calibrate each quantizer
-            quantizers = [
-                ("q_bmm_quantizer", self.q_bmm_quantizer),
-                ("k_bmm_quantizer", self.k_bmm_quantizer),
-                ("v_bmm_quantizer", self.v_bmm_quantizer),
-            ]
-
-            for _, quantizer in quantizers:
-                if quantizer is not None and quantizer.is_enabled():
-                    if not hasattr(quantizer, "_amax") or quantizer._amax is None:
-                        quantizer.reset_amax()
-                        max_calibrate(quantizer, lambda q: q(dummy_tensor), distributed_sync=False)
-
         def forward(self, query, key, value, *args, **kwargs):
-            """Apply post-RoPE quantization to KV cache.
-
-            TEDotProductAttention receives Q, K, V after RoPE is applied,
-            so we quantize them directly for KV cache quantization.
-            """
+            """Apply post-RoPE quantization to KV cache."""
             # Quantize Q, K, V
             query = self.q_bmm_quantizer(query)
             key = self.k_bmm_quantizer(key)
             value = self.v_bmm_quantizer(value)
-
             return super().forward(query, key, value, *args, **kwargs)
-
-        def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
-            """Create a sharded state dictionary for distributed checkpointing."""
-            sharded_state_dict = {}
-
-            # First add non-quantizer parameters
-            for k, v in self.state_dict(prefix="", keep_vars=True).items():
-                if isinstance(v, torch.Tensor) and v is not None and "_quantizer" not in k:
-                    sharded_state_dict[prefix + k] = v
-
-            # Process _amax in bmm_quantizers
-            for name, quantizer in [
-                ("q_bmm_quantizer", self.q_bmm_quantizer),
-                ("k_bmm_quantizer", self.k_bmm_quantizer),
-                ("v_bmm_quantizer", self.v_bmm_quantizer),
-            ]:
-                if hasattr(quantizer, "_amax") and quantizer._amax is not None:
-                    amax_key = f"{prefix}{name}._amax"
-                    sharded_state_dict[amax_key] = quantizer._amax
-
-            # Process other quantizer parameters in bmm_quantizers
-            quantizer_state_dict = {
-                k: v
-                for k, v in self.state_dict(prefix="", keep_vars=True).items()
-                if isinstance(v, torch.Tensor) and "_quantizer" in k and "_amax" not in k
-            }
-
-            if quantizer_state_dict:
-                sharded_state_dict.update(
-                    **make_sharded_tensors_for_checkpoint(
-                        quantizer_state_dict, prefix, {}, sharded_offsets
-                    )
-                )
-
-            return sharded_state_dict
-
-        def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
-            """Handle loading state dict for quantizers."""
-            for quantizer_name in ["q_bmm_quantizer", "k_bmm_quantizer", "v_bmm_quantizer"]:
-                full_prefix = f"{prefix}{quantizer_name}."
-                amax_key = f"{prefix}{quantizer_name}._amax"
-
-                # If amax is in state_dict, rename it to the format expected by TensorQuantizer
-                if amax_key in state_dict:
-                    expected_amax_key = f"{full_prefix}_amax"
-                    state_dict[expected_amax_key] = state_dict.pop(amax_key)
-
-            # Handle other quantizer states
-            for k in list(state_dict.keys()):
-                if "_quantizer" in k and "_amax" not in k:
-                    name = k.split(prefix)[-1] if prefix else k
-                    if name in self.state_dict():
-                        state_dict[k] = state_dict[k].view_as(self.state_dict()[name])
-
-            super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
         def modelopt_post_restore(self, name=""):
             """Restore quantizer states after model loading."""
-            super().modelopt_post_restore(name)
+            for tq in [self.q_bmm_quantizer, self.k_bmm_quantizer, self.v_bmm_quantizer]:
+                # TODO: Add support for non-scalar states such as
+                # Affine KVCache  bias vector which is per head per channel
+                if not all(v.numel() == 1 for v in tq.state_dict().values()):
+                    raise NotImplementedError(
+                        "Only scalar states are supported for KV Cache/BMM Quantizers"
+                    )
+            # dtype and device should have been set in `megatron_replace_quant_module_hook`
+            # via `_configure_attention_for_kv_cache_quant`
+            assert hasattr(self, "device") and hasattr(self, "dtype")
+            self.to(device=self.device, dtype=self.dtype)
 
-            def _check_unsupported_states(quantizer):
-                """Check for unsupported quantizer states and warn if found."""
-                if not hasattr(quantizer, "state_dict"):
-                    return
-
-                for k in quantizer.state_dict():
-                    if k not in ["_amax", "_pre_quant_scale"]:
-                        warnings.warn(
-                            f"Restore of {k} for {name} is not supported. The restore of this layer might be "
-                            f"incorrect. Please implement a custom restore for {k}."
-                        )
-
-            calibration_needed = False
-
-            for quantizer_name, quantizer in [
-                ("q_bmm_quantizer", self.q_bmm_quantizer),
-                ("k_bmm_quantizer", self.k_bmm_quantizer),
-                ("v_bmm_quantizer", self.v_bmm_quantizer),
-            ]:
-                if not hasattr(self, quantizer_name) or not quantizer.is_enabled():
-                    continue
-
-                _check_unsupported_states(quantizer)
-
-                if not hasattr(quantizer, "_amax") or quantizer._amax is None:
-                    calibration_needed = True
-
-            if calibration_needed:
-                self._calibrate_quantizers()
+        def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+            # Currently we do not need sharded_state_dict for TEDotProductAttention since the amax are scalar values.
+            # However we would need this in future to support non-scalar states such as
+            # Affine KVCache Quant bias vector.
+            state_dict = self.state_dict(prefix="", keep_vars=True)
+            return make_sharded_tensors_for_checkpoint(state_dict, prefix, {}, sharded_offsets)
 
 
 @QuantModuleRegistry.register({megatron_moe_layer.MoELayer: "megatron_moe_MoELayer"})
