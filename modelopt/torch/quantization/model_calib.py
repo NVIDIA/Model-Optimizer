@@ -1441,7 +1441,6 @@ def gptq_lite(
         print_rank_0("Computing Hessian matrices...")
         forward_loop(model)
 
-    # After Phase 3 (around line 1385), concatenate original activations:
     # Remove hooks
     for handle in handles:
         handle.remove()
@@ -1459,28 +1458,11 @@ def gptq_lite(
         if is_quantized_linear(module) and module.weight_quantizer.is_enabled
     ]
 
-    # NEW: Save original weights before quantization
-    original_weights = {}
-    for name, module in quantized_modules:
-        original_weights[name] = module.weight.data.clone().cpu()
-
     # Perform blockwise weight updates
     for name, module in tqdm(quantized_modules, desc="Quantizing layers"):
         state = hessian_state[module.name]
         hessian = state["hessian"].to(module.weight.device)
         blockwise_weight_update(module, hessian, block_size, percdamp)
         torch.cuda.empty_cache()
-
-    # Remove hooks
-    for handle in handles:
-        handle.remove()
-
-    # Phase 5: Reset and recalibrate quantizer statistics
-    for name, module in model.named_modules():
-        if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
-            module.input_quantizer.reset_amax()
-            module.output_quantizer.reset_amax()
-
-    max_calibrate(model, forward_loop)
 
     print_rank_0("GPTQ-lite quantization completed successfully")
