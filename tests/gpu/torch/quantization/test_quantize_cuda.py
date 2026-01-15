@@ -70,7 +70,8 @@ NVFP4_WEIGHT_ACT_MSE_CFG = {
         mtq.MXINT8_DEFAULT_CFG,
         mtq.NVFP4_KV_ROTATE_CFG,
         mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
-        NVFP4_WEIGHT_ACT_MSE_CFG,
+        mtq.NVFP4_WEIGHT_ACT_MSE_CFG,
+        mtq.NVFP4_WEIGHT_MSE_CFG,
     ],
 )
 def test_quantize(model_cls, config):
@@ -87,7 +88,8 @@ def test_quantize(model_cls, config):
         mtq.MXINT8_DEFAULT_CFG,
         mtq.NVFP4_KV_ROTATE_CFG,
         mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
-        NVFP4_WEIGHT_ACT_MSE_CFG,
+        mtq.NVFP4_WEIGHT_ACT_MSE_CFG,
+        mtq.NVFP4_WEIGHT_MSE_CFG,
     ]:
         if get_cuda_ext_mx() is None:
             pytest.skip("cuda_ext_mx is not available")

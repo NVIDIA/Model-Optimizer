@@ -39,6 +39,7 @@ class MseCalibrator(_Calibrator):
         stop_multiplier: float = 4.0,
         quant_func: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
         error_func: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
+        fp8_scale_sweep: bool = False,
     ):
         """Initialize MSE calibrator.
 
@@ -46,13 +47,16 @@ class MseCalibrator(_Calibrator):
             amax: Initial amax value (required).
             axis: Quantization axis. None means per-tensor quantization.
             step_size: Step size for amax search. The number of steps is computed as
-                      ceil((stop_multiplier - start_multiplier) / step_size) + 1.
+                        ceil((stop_multiplier - start_multiplier) / step_size) + 1.
             start_multiplier: Starting multiplier for amax search.
             stop_multiplier: Ending multiplier for amax search.
             quant_func: Function that quantizes input tensor given an amax value.
-                       Should have signature: quant_func(x, amax) -> quantized_x.
+                        Should have signature: quant_func(x, amax) -> quantized_x.
             error_func: Function to compute error between x and xq.
-                       Default is F.mse_loss(x, xq, reduction='none').
+                        Default is F.mse_loss(x, xq, reduction='none').
+            fp8_scale_sweep: If True, sweep over all 128 possible FP8 E4M3 scale values
+                        instead of using multipliers. This is specifically for NVFP4
+                        per-block quantization where scales are stored in FP8 format.
         """
         super().__init__(num_bits=None, axis=axis, unsigned=None)
         self._initial_amax = amax
@@ -65,6 +69,13 @@ class MseCalibrator(_Calibrator):
         self._error_func = error_func
         self._losses_sum = [None] * self._num_steps
         self._candidate_amaxs = [None] * self._num_steps
+        self._fp8_scale_sweep = fp8_scale_sweep
+        if fp8_scale_sweep:
+            # For FP8 scale sweep, we always have exactly 126 valid FP8 E4M3 values
+            # (128 total - 2 invalid: byte 0 = zero, byte 127 = NaN)
+            self._num_steps = 126
+            self._losses_sum = [None] * self._num_steps
+            self._candidate_amaxs = [None] * self._num_steps
 
         self._amax = None
 
@@ -83,14 +94,40 @@ class MseCalibrator(_Calibrator):
         x = x.detach().to(dtype=torch.float32)
 
         device = x.device
-        multipliers = torch.linspace(
-            self._start_multiplier, self._stop_multiplier, steps=self._num_steps, device=device
-        )
+
+        if self._fp8_scale_sweep:
+            global_amax = quant_utils.reduce_amax(x, axis=None, keepdims=False, squeeze_scalar=True)
+            global_amax_expanded = global_amax * torch.ones_like(self._initial_amax)
+
+            # Generate all 128 possible FP8 E4M3 values (0-127 as uint8, viewed as float8_e4m3fn)
+            # Create uint8 tensor with values 0-127, view as float8_e4m3fn, then convert to float32
+            uint8_values = torch.arange(0, 128, dtype=torch.uint8, device=device)
+            fp8_values = uint8_values.view(torch.float8_e4m3fn).float()
+
+            # Filter out invalid values (NaN, inf, and zero) which aren't useful as multipliers
+            valid_mask = torch.isfinite(fp8_values) & (fp8_values > 0)
+            fp8_values_valid = fp8_values[valid_mask]
+
+            candidates = fp8_values_valid / 448.0
+
+            print(
+                f"FP8 scale sweep: trying {len(candidates)} valid FP8 E4M3 multipliers (out of 128 total)"
+            )
+            print(
+                f"Multiplier range: {candidates.min().item():.6e} to {candidates.max().item():.6e}"
+            )
+        else:
+            candidates = torch.linspace(
+                self._start_multiplier, self._stop_multiplier, steps=self._num_steps, device=device
+            )
         # Get reduce axis for per-channel quantization
         reduce_axis = quant_utils.convert_quantization_axis_to_reduce_axis(x, self._axis)
 
-        for step, multiplier in enumerate(multipliers):
-            candidate_amax = self._initial_amax * multiplier
+        for step, candidate in enumerate(candidates):
+            if self._fp8_scale_sweep:
+                candidate_amax = global_amax_expanded * candidate
+            else:
+                candidate_amax = self._initial_amax * candidate
             xq = self._quant_func(x, candidate_amax)
 
             if self._error_func is not None:
