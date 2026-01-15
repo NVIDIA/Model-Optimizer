@@ -19,14 +19,10 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Dict, Optional, Union
-from modelopt.torch.puzzletron.tools.logger import mprint
+
 import torch
 import torch.nn.functional as F
-from nemo.collections.llm.gpt.model.base import (
-    GPTConfig,
-    GPTModel,
-    torch_dtype_from_mcore_config,
-)
+from nemo.collections.llm.gpt.model.base import GPTConfig, GPTModel, torch_dtype_from_mcore_config
 from nemo.collections.llm.gpt.model.llama import (
     Llama3Config,
     Llama31Config,
@@ -44,6 +40,8 @@ from nemo.utils import logging
 from nemo.utils.import_utils import safe_import
 from torch import nn
 
+from modelopt.torch.puzzletron.tools.logger import mprint
+
 # from nemo.collections.llm.gpt.model.llama_nemotron import Llama33NemotronSuper49BConfig
 
 
@@ -57,13 +55,13 @@ from megatron.core.transformer.heterogeneous.heterogeneous_config import (
 from megatron.core.transformer.spec_utils import ModuleSpec
 
 if TYPE_CHECKING:
-    from peft import AutoPeftModelForCausalLM, PeftConfig
-    from transformers import LlamaConfig as HFLlamaConfig
-    from transformers import LlamaForCausalLM, GenerationConfig
     from megatron.core.models.gpt.gpt_model import GPTModel as MCoreGPTModel
-
     from nemo.collections.common.tokenizers.huggingface.auto_tokenizer import AutoTokenizer
     from nemo.collections.common.tokenizers.tokenizer_spec import TokenizerSpec
+    from peft import AutoPeftModelForCausalLM, PeftConfig
+    from transformers import GenerationConfig, LlamaForCausalLM
+    from transformers import LlamaConfig as HFLlamaConfig
+
     from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 
 from modelopt.torch.puzzletron.export.MCore.llama_nemotron_utils import (
@@ -82,7 +80,9 @@ from modelopt.torch.puzzletron.export.MCore.puzzletron_layer_specs import (
 )
 
 
-def heterogeneous_layer_spec_puzzletron(config: PuzzletronHeterogeneousTransformerConfig) -> ModuleSpec:
+def heterogeneous_layer_spec_puzzletron(
+    config: PuzzletronHeterogeneousTransformerConfig,
+) -> ModuleSpec:
     return get_gpt_heterogeneous_layer_spec_puzzletron(config, use_transformer_engine=HAVE_TE)
 
 
@@ -162,7 +162,9 @@ class PuzzletronNemotronModelConfig(GPTConfig, PuzzletronHeterogeneousTransforme
     # Actual new PuzzleNemotronModelConfig attributes
     heterogeneous_layers_config_path: Optional[str] = None
     heterogeneous_layers_config_encoded_json: Optional[str] = None
-    transformer_layer_spec: Union[ModuleSpec, Callable[["GPTConfig"], ModuleSpec]] = heterogeneous_layer_spec_puzzletron
+    transformer_layer_spec: Union[ModuleSpec, Callable[["GPTConfig"], ModuleSpec]] = (
+        heterogeneous_layer_spec_puzzletron
+    )
 
     # HF-specific metadata for lossless round-trip conversion (HF → NeMo → HF)
     # Stores HF config fields that don't have direct NeMo equivalents
@@ -190,7 +192,9 @@ class PuzzletronNemotronModelConfig(GPTConfig, PuzzletronHeterogeneousTransforme
     # validation logic to support per-block validation (e.g., in get_config_for_layer() or MLP.__init__)
 
     # ===== Llama31Config method =====
-    def configure_model(self, tokenizer, pre_process=None, post_process=None, vp_stage=None) -> "MCoreGPTModel":
+    def configure_model(
+        self, tokenizer, pre_process=None, post_process=None, vp_stage=None
+    ) -> "MCoreGPTModel":
         """Configure and instantiate a Megatron Core Llama 3.1 model.
 
         NOTE: This method is originally from Llama31Config and is explicitly included here
@@ -267,7 +271,9 @@ class PuzzletronNemotronModelConfig(GPTConfig, PuzzletronHeterogeneousTransforme
             raise NotImplementedError("o_proj_bias is not fully supported")
         if orig_cfg_dict["position_embedding_type"] not in ["rope", "yarn"]:
             # this one is not supported by MCore
-            raise ValueError(f"only rope and yarn are supported, got {orig_cfg_dict['position_embedding_type']}")
+            raise ValueError(
+                f"only rope and yarn are supported, got {orig_cfg_dict['position_embedding_type']}"
+            )
 
         # Handle dtype (new format uses 'dtype', old format uses 'torch_dtype')
         # Check 'dtype' first, then fall back to 'torch_dtype'
@@ -278,25 +284,33 @@ class PuzzletronNemotronModelConfig(GPTConfig, PuzzletronHeterogeneousTransforme
             mprint(f"DEBUG: torch_dtype found in config: {orig_cfg_dict['torch_dtype']}")
             adapted_cfg_dict["torch_dtype"] = orig_cfg_dict["torch_dtype"]
         else:
-            mprint(f"WARNING: neither dtype nor torch_dtype found in config (or both are None), setting to bfloat16")
+            mprint(
+                f"WARNING: neither dtype nor torch_dtype found in config (or both are None), setting to bfloat16"
+            )
             adapted_cfg_dict["torch_dtype"] = "bfloat16"
 
         # TODO: check how config keys such as position_embedding_type are handled (since they're not passed to the constructor)
         adapted_cfg_dict["heterogeneous_layers_config_path"] = None
         adapted_cfg_dict["block_configs"] = block_conf["block_configs"]
-        adapted_cfg_dict["heterogeneous_layers_config_encoded_json"] = json.dumps(block_conf, ensure_ascii=False)
+        adapted_cfg_dict["heterogeneous_layers_config_encoded_json"] = json.dumps(
+            block_conf, ensure_ascii=False
+        )
         adapted_cfg_dict["transformer_layer_spec"] = heterogeneous_layer_spec_puzzletron
         adapted_cfg_dict["vocab_size"] = orig_cfg_dict["vocab_size"]
         adapted_cfg_dict["num_layers"] = len(orig_cfg_dict["block_configs"])
         adapted_cfg_dict["hidden_size"] = orig_cfg_dict["hidden_size"]
         # adapted_cfg_dict['num_attention_heads'] = cfg["num_attention_heads"]
         adapted_cfg_dict["kv_channels"] = adapted_cfg_dict["head_dim"]
-        adapted_cfg_dict["scale_factor"] = float(adapted_cfg_dict["rope_scaling"].get("factor", 8.0))
+        adapted_cfg_dict["scale_factor"] = float(
+            adapted_cfg_dict["rope_scaling"].get("factor", 8.0)
+        )
         adapted_cfg_dict["rotary_base"] = int(orig_cfg_dict.get("rope_theta", 500_000))
         adapted_cfg_dict["seq_length"] = int(orig_cfg_dict.get("max_position_embeddings", 131072))
         adapted_cfg_dict["init_method_std"] = float(orig_cfg_dict.get("initializer_range", 0.02))
         adapted_cfg_dict["layernorm_epsilon"] = float(orig_cfg_dict.get("rms_norm_eps", 1e-5))
-        adapted_cfg_dict["share_embeddings_and_output_weights"] = bool(orig_cfg_dict.get("tie_word_embeddings", False))
+        adapted_cfg_dict["share_embeddings_and_output_weights"] = bool(
+            orig_cfg_dict.get("tie_word_embeddings", False)
+        )
         # adapted_cfg_dict["make_vocab_size_divisible_by"] = 128
 
         # Preserve HF-specific config fields that don't have NeMo equivalents
@@ -318,7 +332,9 @@ class PuzzletronNemotronModelConfig(GPTConfig, PuzzletronHeterogeneousTransforme
             source_hf_config_metadata["dtype"] = orig_cfg_dict["dtype"]
 
         # Store as direct config attribute (will be serialized by NeMo automatically)
-        adapted_cfg_dict["source_hf_config_metadata"] = source_hf_config_metadata if source_hf_config_metadata else None
+        adapted_cfg_dict["source_hf_config_metadata"] = (
+            source_hf_config_metadata if source_hf_config_metadata else None
+        )
 
         return adapted_cfg_dict
 
@@ -332,13 +348,18 @@ class PuzzletronLlamaNemotronModel(GPTModel):
 
     def __init__(
         self,
-        config: Annotated[Optional[PuzzletronNemotronModelConfig], Config[PuzzletronNemotronModelConfig]] = None,
+        config: Annotated[
+            Optional[PuzzletronNemotronModelConfig], Config[PuzzletronNemotronModelConfig]
+        ] = None,
         optim: Optional[OptimizerModule] = None,
         tokenizer: Optional["TokenizerSpec"] = None,
         model_transform: Optional[Callable[[nn.Module], nn.Module]] = None,
     ):
         super().__init__(
-            config or PuzzletronNemotronModelConfig(), optim=optim, tokenizer=tokenizer, model_transform=model_transform
+            config or PuzzletronNemotronModelConfig(),
+            optim=optim,
+            tokenizer=tokenizer,
+            model_transform=model_transform,
         )
 
 
@@ -449,7 +470,9 @@ def instantiate_nemo_config_from_adapted_dict(
         # No activation functions found (all blocks are no-op or have None)
         # Default to F.silu to pass MCore validation
         global_activation_func = F.silu
-        mprint("WARNING: No not-None activation functions found in blocks, defaulting global activation_func to F.silu")
+        mprint(
+            "WARNING: No not-None activation functions found in blocks, defaulting global activation_func to F.silu"
+        )
     elif len(unique_not_none) == 1:
         # All not-None blocks use the same activation function (safe)
         global_activation_func = not_none_activations[0]
@@ -476,7 +499,9 @@ def instantiate_nemo_config_from_adapted_dict(
         )
 
     return PuzzletronNemotronModelConfig(
-        heterogeneous_layers_config_encoded_json=adapted_cfg_dict["heterogeneous_layers_config_encoded_json"],
+        heterogeneous_layers_config_encoded_json=adapted_cfg_dict[
+            "heterogeneous_layers_config_encoded_json"
+        ],
         heterogeneous_layers_config_path=None,  # We directly load the block config as json
         transformer_layer_spec=adapted_cfg_dict["transformer_layer_spec"],
         activation_func=global_activation_func,  # Set to match all blocks
@@ -502,7 +527,9 @@ def instantiate_nemo_config_from_adapted_dict(
 
 
 @io.model_importer(PuzzletronLlamaNemotronModel, "hf")
-class PuzzletronHFLlamaNemotronImporter(io.ModelConnector["LlamaForCausalLM", PuzzletronLlamaNemotronModel]):
+class PuzzletronHFLlamaNemotronImporter(
+    io.ModelConnector["LlamaForCausalLM", PuzzletronLlamaNemotronModel]
+):
     """Importer for converting Hugging Face Llama-Nemotron models to NeMo format.
 
     This class handles the conversion of Hugging Face's LlamaForCausalLM models
@@ -548,14 +575,18 @@ class PuzzletronHFLlamaNemotronImporter(io.ModelConnector["LlamaForCausalLM", Pu
         from transformers import AutoModelForCausalLM
 
         logging.info(f"Load Puzzletron HF model {str(self)}")
-        source = AutoModelForCausalLM.from_pretrained(str(self), trust_remote_code=True, torch_dtype="auto")
+        source = AutoModelForCausalLM.from_pretrained(
+            str(self), trust_remote_code=True, torch_dtype="auto"
+        )
         logging.info("Initialize NeMo Puzzletron Llama Nemotron model")
         target = self.init()
         trainer = self.nemo_setup(target)
         self.convert_state(source, target)
         self.nemo_save(output_path, trainer)
 
-        mprint(f"Converted Llama-Nemotron model to Nemo, model saved to {output_path} in {source.dtype}.")
+        mprint(
+            f"Converted Llama-Nemotron model to Nemo, model saved to {output_path} in {source.dtype}."
+        )
 
         teardown(trainer, target)
         del trainer, target
@@ -592,7 +623,10 @@ class PuzzletronHFLlamaNemotronImporter(io.ModelConnector["LlamaForCausalLM", Pu
 
         # Remove layernorm wildcards from default_mapping - these will be replaced with
         # specific per-layer mappings based on each layer's architecture.
-        for pattern in ["model.layers.*.input_layernorm.weight", "model.layers.*.post_attention_layernorm.weight"]:
+        for pattern in [
+            "model.layers.*.input_layernorm.weight",
+            "model.layers.*.post_attention_layernorm.weight",
+        ]:
             if pattern in mapping:
                 del mapping[pattern]
 
@@ -635,7 +669,10 @@ class PuzzletronHFLlamaNemotronImporter(io.ModelConnector["LlamaForCausalLM", Pu
         # Add standard FC1 merge transform
         transforms.append(
             io.state_transform(
-                source_key=("model.layers.*.mlp.gate_proj.weight", "model.layers.*.mlp.up_proj.weight"),
+                source_key=(
+                    "model.layers.*.mlp.gate_proj.weight",
+                    "model.layers.*.mlp.up_proj.weight",
+                ),
                 target_key="decoder.layers.*.mlp.linear_fc1.weight",
                 fn=TransformFns.merge_fc1,
             )
@@ -649,9 +686,7 @@ class PuzzletronHFLlamaNemotronImporter(io.ModelConnector["LlamaForCausalLM", Pu
         Returns:
             AutoTokenizer: Tokenizer instance initialized from the HF model's tokenizer
         """
-        from nemo.collections.common.tokenizers.huggingface.auto_tokenizer import (
-            AutoTokenizer,
-        )
+        from nemo.collections.common.tokenizers.huggingface.auto_tokenizer import AutoTokenizer
 
         return AutoTokenizer(self.save_hf_tokenizer_assets(str(self)), trust_remote_code=True)
 
@@ -670,13 +705,15 @@ class PuzzletronHFLlamaNemotronImporter(io.ModelConnector["LlamaForCausalLM", Pu
         source = AutoConfig.from_pretrained(str(self), trust_remote_code=True)
 
         # Validate that this is a proper Puzzletron-Nemotron checkpoint
-        assert getattr(source, "rope_scaling", None), "Llama-Nemotron model should have rope scaling"
-        assert (
-            getattr(source, "block_configs", None) is not None
-        ), "Puzzletron-Nemotron model should be heterogeneous and have block configs"
+        assert getattr(source, "rope_scaling", None), (
+            "Llama-Nemotron model should have rope scaling"
+        )
+        assert getattr(source, "block_configs", None) is not None, (
+            "Puzzletron-Nemotron model should be heterogeneous and have block configs"
+        )
 
-        adapted_cfg_dict = PuzzletronNemotronModelConfig.create_adapted_config_dict_from_puzzletron_config(
-            source
+        adapted_cfg_dict = (
+            PuzzletronNemotronModelConfig.create_adapted_config_dict_from_puzzletron_config(source)
         )  # type: ignore
 
         try:
@@ -684,12 +721,16 @@ class PuzzletronHFLlamaNemotronImporter(io.ModelConnector["LlamaForCausalLM", Pu
         except Exception:
             generation_config = None
 
-        output = instantiate_nemo_config_from_adapted_dict(adapted_cfg_dict, generation_config=generation_config)
+        output = instantiate_nemo_config_from_adapted_dict(
+            adapted_cfg_dict, generation_config=generation_config
+        )
         return output
 
 
 @io.model_exporter(PuzzletronLlamaNemotronModel, "hf")
-class PuzzletronHFLlamaNemotronExporter(io.ModelConnector[PuzzletronLlamaNemotronModel, "LlamaForCausalLM"]):
+class PuzzletronHFLlamaNemotronExporter(
+    io.ModelConnector[PuzzletronLlamaNemotronModel, "LlamaForCausalLM"]
+):
     """Exporter for converting NeMo Puzzletron Llama-Nemotron models to Hugging Face format.
 
     This class handles the conversion of NeMo's PuzzletronLlamaNemotronModel to Hugging Face's
@@ -774,8 +815,11 @@ class PuzzletronHFLlamaNemotronExporter(io.ModelConnector[PuzzletronLlamaNemotro
         Raises:
             ValueError: If model_name is provided (not supported for Puzzletron models)
         """
-        from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.modeling_decilm import DeciLMForCausalLM
         from transformers.modeling_utils import no_init_weights
+
+        from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.modeling_decilm import (
+            DeciLMForCausalLM,
+        )
 
         with no_init_weights():
             if from_config:
@@ -929,7 +973,10 @@ class PuzzletronHFLlamaNemotronExporter(io.ModelConnector[PuzzletronLlamaNemotro
             [
                 io.state_transform(
                     source_key="decoder.layers.*.mlp.linear_fc1.weight",
-                    target_key=("model.layers.*.mlp.gate_proj.weight", "model.layers.*.mlp.up_proj.weight"),
+                    target_key=(
+                        "model.layers.*.mlp.gate_proj.weight",
+                        "model.layers.*.mlp.up_proj.weight",
+                    ),
                     fn=TransformFns.split_fc1,
                 ),
                 io.state_transform(

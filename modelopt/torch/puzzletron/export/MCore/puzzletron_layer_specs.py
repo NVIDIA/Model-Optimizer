@@ -81,7 +81,9 @@ except ImportError:
 
 # NOTE based on https://github.com/NVIDIA/Megatron-LM/blob/aacc3b8aa5f0d3071431a94503d6233802fbaedd/megatron/core/models/gpt/heterogeneous/heterogeneous_layer_specs.py#L144
 # TODO: what is the difference between this and the referenced one?
-def _get_sharded_state_dict_keys_map(block_config: "PuzzletronTransformerBlockConfig", use_transformer_engine: bool):
+def _get_sharded_state_dict_keys_map(
+    block_config: "PuzzletronTransformerBlockConfig", use_transformer_engine: bool
+):
     """Generate a mapping of sharded state dictionary keys for Puzzletron transformer blocks.
 
     This function is a specialized version of the original Megatron-LM
@@ -146,7 +148,9 @@ class PuzzletronSubblockConfig:
 
     @classmethod
     def build_config_from_dict(
-        cls, subblock_config_dict: dict[str, Any], main_config: "PuzzletronHeterogeneousTransformerConfig"
+        cls,
+        subblock_config_dict: dict[str, Any],
+        main_config: "PuzzletronHeterogeneousTransformerConfig",
     ):
         field_names = {f.name for f in fields(cls)}
         subblock_config_dict = {k: v for k, v in subblock_config_dict.items() if k in field_names}
@@ -158,7 +162,9 @@ class PuzzletronSubblockConfig:
         return cls(**subblock_config_dict)
 
     def __post_init__(self) -> None:
-        assert not (self.no_op and self.replace_with_linear), "at most one of no_op, replace_with_linear can be True"
+        assert not (self.no_op and self.replace_with_linear), (
+            "at most one of no_op, replace_with_linear can be True"
+        )
 
 
 @dataclass
@@ -232,7 +238,9 @@ class PuzzletronAttentionConfig(PuzzletronSubblockConfig):
         if self.is_mamba:
             if self.num_attention_heads is None or self.num_attention_heads == 0:
                 self.num_attention_heads = 8  # to avoid division by zero
-        assert not (self.is_mamba and self.multi_latent_attention), "Mamba and MLA cannot be used together"
+        assert not (self.is_mamba and self.multi_latent_attention), (
+            "Mamba and MLA cannot be used together"
+        )
 
 
 @dataclass
@@ -300,7 +308,9 @@ class PuzzletronTransformerBlockConfig:
     mlp: PuzzletronMLPConfig
 
     @classmethod
-    def build_from_dict(cls, block: dict[str, Any], main_config: "PuzzletronHeterogeneousTransformerConfig"):
+    def build_from_dict(
+        cls, block: dict[str, Any], main_config: "PuzzletronHeterogeneousTransformerConfig"
+    ):
         if "mlp" in block:
             mlp = block["mlp"]
         elif "ffn" in block:
@@ -312,7 +322,9 @@ class PuzzletronTransformerBlockConfig:
             attention=PuzzletronAttentionConfig.build_config_from_dict(
                 subblock_config_dict=block["attention"], main_config=main_config
             ),
-            mlp=PuzzletronMLPConfig.build_config_from_dict(subblock_config_dict=mlp, main_config=main_config),
+            mlp=PuzzletronMLPConfig.build_config_from_dict(
+                subblock_config_dict=mlp, main_config=main_config
+            ),
         )
 
 
@@ -399,8 +411,12 @@ class PuzzletronHeterogeneousTransformerConfig(TransformerConfig):
             assert self.heterogeneous_layers_config_path not in (
                 None,
                 "",
-            ), "heterogeneous_layers_config_path is required, if heterogeneous_layers_config_encoded_json is not provided"
-            self.heterogeneous_layers_config_encoded_json = Path(self.heterogeneous_layers_config_path).read_text()
+            ), (
+                "heterogeneous_layers_config_path is required, if heterogeneous_layers_config_encoded_json is not provided"
+            )
+            self.heterogeneous_layers_config_encoded_json = Path(
+                self.heterogeneous_layers_config_path
+            ).read_text()
         hf_config_dict: dict[str, Any] = json.loads(self.heterogeneous_layers_config_encoded_json)
         block_list = hf_config_dict["block_configs"]
         # TODO: should we change the definition of num_layers? it can be sum(mlp/attention) rather than uneven blocks
@@ -408,12 +424,15 @@ class PuzzletronHeterogeneousTransformerConfig(TransformerConfig):
             self.num_layers = len(block_list)
         # Type assertion to help mypy understand the type after the check
         assert isinstance(self.num_layers, int), "num_layers must be an integer"
-        assert self.num_layers == len(block_list), "num_layers must match the number of blocks in the json file"
+        assert self.num_layers == len(block_list), (
+            "num_layers must match the number of blocks in the json file"
+        )
         super().__post_init__()
         self.heterogeneous_block_specs = True
         self.heterogeneous_dist_checkpoint = True  # TODO: check if this is correct/needed
         self.per_block_parameters = [
-            PuzzletronTransformerBlockConfig.build_from_dict(block=block, main_config=self) for block in block_list
+            PuzzletronTransformerBlockConfig.build_from_dict(block=block, main_config=self)
+            for block in block_list
         ]
 
     # TODO add parallel blocks support
@@ -433,7 +452,8 @@ class PuzzletronHeterogeneousTransformerConfig(TransformerConfig):
         layer_idx = layer_number - 1  # layer number starts from 1
         if layer_idx < 0 or layer_idx >= len(self.per_block_parameters):
             raise ValueError(
-                f"Invalid layer number: {layer_number}. Should be in " f"range [1, {len(self.per_block_parameters)}]."
+                f"Invalid layer number: {layer_number}. Should be in "
+                f"range [1, {len(self.per_block_parameters)}]."
             )
         block_config = self.per_block_parameters[layer_idx]
 
@@ -456,7 +476,9 @@ class PuzzletronHeterogeneousTransformerConfig(TransformerConfig):
         transformer_config_dict = asdict(self)
 
         # Remove keys that are not in the target config class
-        transformer_config_dict = {k: v for k, v in transformer_config_dict.items() if k in target_config_fields}
+        transformer_config_dict = {
+            k: v for k, v in transformer_config_dict.items() if k in target_config_fields
+        }
 
         # Update with all available attention config values (if they exist in target config)
         for field_name in attention_fields:
@@ -512,7 +534,8 @@ class WrappedTENormLinear(TELayerNormColumnParallelLinear):
         # unfortunately, TELayerNormColumnParallelLinear sets tp_group and forcing it to be None requires to copy/paste __init__
         if not HAVE_TE:
             raise ImportError(
-                "Transformer Engine is not installed. " "Please install it with `pip install transformer-engine`."
+                "Transformer Engine is not installed. "
+                "Please install it with `pip install transformer-engine`."
             )
 
         self.config = config
@@ -546,7 +569,9 @@ class WrappedTENormLinear(TELayerNormColumnParallelLinear):
             extra_kwargs["normalization"] = self.config.normalization
         elif self.config.normalization != "LayerNorm":
             te_version = get_te_version()
-            raise ValueError(f"Transformer Engine v{te_version} does not support {self.config.normalization}.")
+            raise ValueError(
+                f"Transformer Engine v{te_version} does not support {self.config.normalization}."
+            )
 
         if self.config.symmetric_ar_type is not None:
             assert is_torch_min_version("2.7.0a0"), "Must have at least torch version 2.7 or higher"
@@ -566,7 +591,9 @@ class WrappedTENormLinear(TELayerNormColumnParallelLinear):
             fuse_wgrad_accumulation=self.config.gradient_accumulation_fusion,
             tp_group=None,
             tp_size=1,
-            get_rng_state_tracker=(get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None),
+            get_rng_state_tracker=(
+                get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None
+            ),
             init_method=lambda w: None,
             bias=bias,
             return_bias=self.te_return_bias,
@@ -592,7 +619,9 @@ class WrappedTENormLinear(TELayerNormColumnParallelLinear):
                 skip_set_tensor_parallel_attributes=True,
             )
             if bias:
-                self.bias = Parameter(torch.empty(output_size_per_partition, dtype=config.params_dtype))
+                self.bias = Parameter(
+                    torch.empty(output_size_per_partition, dtype=config.params_dtype)
+                )
                 with torch.no_grad():
                     self.bias.zero_()
 
@@ -742,7 +771,11 @@ def get_layer_spec_for_layer(
             module=WrappedMambaMixer,
             params=mamba_mixer_params,
             submodules=MambaMixerSubmodules(
-                in_proj=(TELayerNormColumnParallelLinear if use_transformer_engine else ColumnParallelLinear),
+                in_proj=(
+                    TELayerNormColumnParallelLinear
+                    if use_transformer_engine
+                    else ColumnParallelLinear
+                ),
                 out_proj=TERowParallelLinear if use_transformer_engine else RowParallelLinear,
             ),
         )
@@ -797,7 +830,9 @@ def get_gpt_heterogeneous_layer_spec_puzzletron(
     """
     # Create the layer specs for the model.
     layer_specs = [
-        get_layer_spec_for_layer(block_params, config, use_transformer_engine, normalization, qk_l2_norm)
+        get_layer_spec_for_layer(
+            block_params, config, use_transformer_engine, normalization, qk_l2_norm
+        )
         for block_params in config.per_block_parameters
     ]
 
@@ -822,7 +857,9 @@ def get_gpt_heterogeneous_layer_spec_puzzletron(
         layer_norm_impl = LNImpl
 
     # Block spec.
-    block_spec = TransformerBlockSubmodules(layer_specs=local_layer_specs, layer_norm=layer_norm_impl)
+    block_spec = TransformerBlockSubmodules(
+        layer_specs=local_layer_specs, layer_norm=layer_norm_impl
+    )
 
     return block_spec
 

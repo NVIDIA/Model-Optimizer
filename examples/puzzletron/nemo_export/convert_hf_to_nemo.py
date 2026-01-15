@@ -14,20 +14,21 @@
 # limitations under the License.
 
 import argparse
-from pathlib import Path
 import os
+from pathlib import Path
 from typing import Any
+
+from nemo.collections import llm
 
 from modelopt.torch.puzzletron.export.MCore.llama_nemotron import (
     PuzzletronLlamaNemotronModel,
     PuzzletronNemotronModelConfig,
 )
-from nemo.collections import llm
-from nemo.collections.llm.gpt.model.llama_nemotron import LlamaNemotronModel
 
-from modelopt.torch.puzzletron.tools.logger import mprint
 
-def convert_model(hf_model_path_local: str, output_path_nemo_local: str, overwrite: bool = False) -> Any:
+def convert_model(
+    hf_model_path_local: str, output_path_nemo_local: str, overwrite: bool = False
+) -> Any:
     """Convert a Puzzletron HuggingFace model to NeMo format.
 
     Args:
@@ -53,7 +54,9 @@ def convert_model(hf_model_path_local: str, output_path_nemo_local: str, overwri
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Convert Puzzletron HuggingFace model to NeMo format")
+    parser = argparse.ArgumentParser(
+        description="Convert Puzzletron HuggingFace model to NeMo format"
+    )
     parser.add_argument(
         "--input-ckpt-path",
         "-i",

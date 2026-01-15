@@ -16,12 +16,6 @@
 from dataclasses import asdict
 
 import torch
-from modelopt.torch.puzzletron.export.MCore.puzzletron_layer_specs import (
-    PuzzletronAttentionConfig,
-    PuzzletronHeterogeneousTransformerConfig,
-    PuzzletronMLPConfig,
-    get_gpt_heterogeneous_layer_spec_puzzletron,
-)
 from megatron.core.transformer.spec_utils import ModuleSpec
 from nemo.collections.common.tokenizers.huggingface.auto_tokenizer import (
     AutoTokenizer as NemoAutoTokenizer,
@@ -33,6 +27,13 @@ from nemo.lightning.io.state import TransformFns
 from nemo.utils.import_utils import safe_import
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from modelopt.torch.puzzletron.export.MCore.puzzletron_layer_specs import (
+    PuzzletronAttentionConfig,
+    PuzzletronHeterogeneousTransformerConfig,
+    PuzzletronMLPConfig,
+    get_gpt_heterogeneous_layer_spec_puzzletron,
+)
+
 
 def convert_attention_config_from_cfg_object(attention_config, num_attention_heads, head_dim):
     for unsupported_key in [
@@ -42,7 +43,9 @@ def convert_attention_config_from_cfg_object(attention_config, num_attention_hea
         "unshifted_sink",
         "use_prefill_window_in_sink_attention",
     ]:
-        if hasattr(attention_config, unsupported_key) and getattr(attention_config, unsupported_key) not in [
+        if hasattr(attention_config, unsupported_key) and getattr(
+            attention_config, unsupported_key
+        ) not in [
             None,
             False,
         ]:
@@ -53,14 +56,18 @@ def convert_attention_config_from_cfg_object(attention_config, num_attention_hea
     if window_size is not None:
         window_size = (window_size, 0)
     is_mamba = attention_config.mamba if hasattr(attention_config, "mamba") else None
-    n_heads_in_group = attention_config.n_heads_in_group if hasattr(attention_config, "n_heads_in_group") else 1
+    n_heads_in_group = (
+        attention_config.n_heads_in_group if hasattr(attention_config, "n_heads_in_group") else 1
+    )
     if n_heads_in_group is None:
         n_heads_in_group = 1
     return asdict(
         PuzzletronAttentionConfig(
             no_op=attention_config.no_op if hasattr(attention_config, "no_op") else False,
             replace_with_linear=(
-                attention_config.replace_with_linear if hasattr(attention_config, "replace_with_linear") else False
+                attention_config.replace_with_linear
+                if hasattr(attention_config, "replace_with_linear")
+                else False
             ),
             num_attention_heads=num_attention_heads,
             num_query_groups=num_attention_heads // n_heads_in_group,
@@ -69,16 +76,24 @@ def convert_attention_config_from_cfg_object(attention_config, num_attention_hea
             multi_latent_attention=False,
             is_mamba=is_mamba,
             mamba_state_dim=(
-                attention_config.mamba.state_dim if is_mamba and hasattr(attention_config.mamba, "state_dim") else 128
+                attention_config.mamba.state_dim
+                if is_mamba and hasattr(attention_config.mamba, "state_dim")
+                else 128
             ),
             mamba_head_dim=(
-                attention_config.mamba.head_dim if is_mamba and hasattr(attention_config.mamba, "head_dim") else 64
+                attention_config.mamba.head_dim
+                if is_mamba and hasattr(attention_config.mamba, "head_dim")
+                else 64
             ),
             mamba_num_groups=(
-                attention_config.mamba.num_groups if is_mamba and hasattr(attention_config.mamba, "num_groups") else 8
+                attention_config.mamba.num_groups
+                if is_mamba and hasattr(attention_config.mamba, "num_groups")
+                else 8
             ),
             mamba_num_heads=(
-                attention_config.mamba.num_heads if is_mamba and hasattr(attention_config.mamba, "num_heads") else None
+                attention_config.mamba.num_heads
+                if is_mamba and hasattr(attention_config.mamba, "num_heads")
+                else None
             ),
         )
     )
@@ -97,10 +112,16 @@ def convert_mlp_config_from_cfg_object(mlp_config, parallel_blocks, default_hidd
     return asdict(
         PuzzletronMLPConfig(
             no_op=mlp_config.no_op if hasattr(mlp_config, "no_op") else False,
-            replace_with_linear=mlp_config.replace_with_linear if hasattr(mlp_config, "replace_with_linear") else False,
-            ffn_hidden_size=mlp_config.intermediate_size if hasattr(mlp_config, "intermediate_size") else None,
+            replace_with_linear=mlp_config.replace_with_linear
+            if hasattr(mlp_config, "replace_with_linear")
+            else False,
+            ffn_hidden_size=mlp_config.intermediate_size
+            if hasattr(mlp_config, "intermediate_size")
+            else None,
             num_moe_experts=(
-                mlp_config.moe.num_local_experts if is_moe and hasattr(mlp_config.moe, "num_local_experts") else None
+                mlp_config.moe.num_local_experts
+                if is_moe and hasattr(mlp_config.moe, "num_local_experts")
+                else None
             ),
             moe_shared_expert_intermediate_size=(
                 mlp_config.moe.shared_expert_intermediate_dim
@@ -113,7 +134,9 @@ def convert_mlp_config_from_cfg_object(mlp_config, parallel_blocks, default_hidd
                 else None
             ),
             moe_router_topk=(
-                mlp_config.moe.num_experts_per_tok if is_moe and hasattr(mlp_config.moe, "num_experts_per_tok") else 2
+                mlp_config.moe.num_experts_per_tok
+                if is_moe and hasattr(mlp_config.moe, "num_experts_per_tok")
+                else 2
             ),
         )
     )

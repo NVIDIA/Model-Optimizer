@@ -18,13 +18,14 @@ import os
 from pathlib import Path
 from typing import Any
 
-from modelopt.torch.puzzletron.export.MCore.llama_nemotron import PuzzletronLlamaNemotronModel
 from nemo.collections import llm
 
 from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import copy_deci_lm_hf_code
 
 
-def convert_model(nemo_model_path_local: str, output_path_hf_local: str, overwrite: bool = False) -> Any:
+def convert_model(
+    nemo_model_path_local: str, output_path_hf_local: str, overwrite: bool = False
+) -> Any:
     """Convert a NeMo model to HuggingFace format.
 
     Args:
@@ -55,7 +56,11 @@ def convert_model(nemo_model_path_local: str, output_path_hf_local: str, overwri
 def main() -> None:
     parser = argparse.ArgumentParser(description="Convert NeMo model to HuggingFace format")
     parser.add_argument(
-        "--input-ckpt-path", "-i", type=str, required=True, help="Path to the input NeMo model checkpoint"
+        "--input-ckpt-path",
+        "-i",
+        type=str,
+        required=True,
+        help="Path to the input NeMo model checkpoint",
     )
     parser.add_argument(
         "--output-ckpt-path",

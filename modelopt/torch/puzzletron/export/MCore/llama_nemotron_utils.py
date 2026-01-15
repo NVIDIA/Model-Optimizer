@@ -18,12 +18,6 @@ from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
-from modelopt.torch.puzzletron.export.MCore.puzzletron_layer_specs import (
-    PuzzletronAttentionConfig,
-    PuzzletronHeterogeneousTransformerConfig,
-    PuzzletronMLPConfig,
-    get_gpt_heterogeneous_layer_spec_puzzletron,
-)
 from megatron.core.transformer.spec_utils import ModuleSpec
 from nemo.collections.common.tokenizers.huggingface.auto_tokenizer import (
     AutoTokenizer as NemoAutoTokenizer,
@@ -36,6 +30,13 @@ from nemo.lightning.pytorch.utils import dtype_from_str
 from nemo.utils.import_utils import safe_import
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from modelopt.torch.puzzletron.export.MCore.puzzletron_layer_specs import (
+    PuzzletronAttentionConfig,
+    PuzzletronHeterogeneousTransformerConfig,
+    PuzzletronMLPConfig,
+    get_gpt_heterogeneous_layer_spec_puzzletron,
+)
+
 
 def convert_attention_config_from_cfg_object(attention_config, num_attention_heads, head_dim):
     for unsupported_key in [
@@ -45,7 +46,9 @@ def convert_attention_config_from_cfg_object(attention_config, num_attention_hea
         "unshifted_sink",
         "use_prefill_window_in_sink_attention",
     ]:
-        if hasattr(attention_config, unsupported_key) and getattr(attention_config, unsupported_key) not in [
+        if hasattr(attention_config, unsupported_key) and getattr(
+            attention_config, unsupported_key
+        ) not in [
             None,
             False,
         ]:
@@ -56,14 +59,18 @@ def convert_attention_config_from_cfg_object(attention_config, num_attention_hea
     if window_size is not None:
         window_size = (window_size, 0)
     is_mamba = attention_config.mamba if hasattr(attention_config, "mamba") else None
-    n_heads_in_group = attention_config.n_heads_in_group if hasattr(attention_config, "n_heads_in_group") else 1
+    n_heads_in_group = (
+        attention_config.n_heads_in_group if hasattr(attention_config, "n_heads_in_group") else 1
+    )
     if n_heads_in_group is None:
         n_heads_in_group = 1
     return asdict(
         PuzzletronAttentionConfig(
             no_op=attention_config.no_op if hasattr(attention_config, "no_op") else False,
             replace_with_linear=(
-                attention_config.replace_with_linear if hasattr(attention_config, "replace_with_linear") else False
+                attention_config.replace_with_linear
+                if hasattr(attention_config, "replace_with_linear")
+                else False
             ),
             num_attention_heads=num_attention_heads,
             num_query_groups=num_attention_heads // n_heads_in_group,
@@ -72,16 +79,24 @@ def convert_attention_config_from_cfg_object(attention_config, num_attention_hea
             multi_latent_attention=False,
             is_mamba=is_mamba,
             mamba_state_dim=(
-                attention_config.mamba.state_dim if is_mamba and hasattr(attention_config.mamba, "state_dim") else 128
+                attention_config.mamba.state_dim
+                if is_mamba and hasattr(attention_config.mamba, "state_dim")
+                else 128
             ),
             mamba_head_dim=(
-                attention_config.mamba.head_dim if is_mamba and hasattr(attention_config.mamba, "head_dim") else 64
+                attention_config.mamba.head_dim
+                if is_mamba and hasattr(attention_config.mamba, "head_dim")
+                else 64
             ),
             mamba_num_groups=(
-                attention_config.mamba.num_groups if is_mamba and hasattr(attention_config.mamba, "num_groups") else 8
+                attention_config.mamba.num_groups
+                if is_mamba and hasattr(attention_config.mamba, "num_groups")
+                else 8
             ),
             mamba_num_heads=(
-                attention_config.mamba.num_heads if is_mamba and hasattr(attention_config.mamba, "num_heads") else None
+                attention_config.mamba.num_heads
+                if is_mamba and hasattr(attention_config.mamba, "num_heads")
+                else None
             ),
         )
     )
@@ -113,10 +128,16 @@ def convert_mlp_config_from_cfg_object(mlp_config, parallel_blocks):
     return asdict(
         PuzzletronMLPConfig(
             no_op=mlp_config.no_op if hasattr(mlp_config, "no_op") else False,
-            replace_with_linear=mlp_config.replace_with_linear if hasattr(mlp_config, "replace_with_linear") else False,
-            ffn_hidden_size=mlp_config.intermediate_size if hasattr(mlp_config, "intermediate_size") else None,
+            replace_with_linear=mlp_config.replace_with_linear
+            if hasattr(mlp_config, "replace_with_linear")
+            else False,
+            ffn_hidden_size=mlp_config.intermediate_size
+            if hasattr(mlp_config, "intermediate_size")
+            else None,
             num_moe_experts=(
-                mlp_config.moe.num_local_experts if is_moe and hasattr(mlp_config.moe, "num_local_experts") else None
+                mlp_config.moe.num_local_experts
+                if is_moe and hasattr(mlp_config.moe, "num_local_experts")
+                else None
             ),
             moe_shared_expert_intermediate_size=(
                 mlp_config.moe.shared_expert_intermediate_dim
@@ -129,7 +150,9 @@ def convert_mlp_config_from_cfg_object(mlp_config, parallel_blocks):
                 else None
             ),
             moe_router_topk=(
-                mlp_config.moe.num_experts_per_tok if is_moe and hasattr(mlp_config.moe, "num_experts_per_tok") else 2
+                mlp_config.moe.num_experts_per_tok
+                if is_moe and hasattr(mlp_config.moe, "num_experts_per_tok")
+                else 2
             ),
         )
     )
@@ -183,7 +206,9 @@ def convert_nemo_config_to_hf_decilm_config(
                     "no_op": attn_block.get("no_op", False),
                     "replace_with_linear": attn_block.get("replace_with_linear", False),
                     "sparsify": attn_block.get("sparsify", None),
-                    "n_heads_in_group": attn_block.get("num_attention_heads", nemo_config.num_attention_heads)
+                    "n_heads_in_group": attn_block.get(
+                        "num_attention_heads", nemo_config.num_attention_heads
+                    )
                     // attn_block.get("num_query_groups", nemo_config.num_query_groups),
                     "window_length": attn_block.get("window_size", None),
                     "num_sink_tokens": attn_block.get("num_sink_tokens", None),
@@ -197,7 +222,9 @@ def convert_nemo_config_to_hf_decilm_config(
                 if attn_block.get("is_mamba", False):
                     attention_config["mamba"] = {
                         "state_dim": attn_block.get("mamba_state_dim", 128),
-                        "num_heads": attn_block.get("mamba_num_heads", nemo_config.num_attention_heads),
+                        "num_heads": attn_block.get(
+                            "mamba_num_heads", nemo_config.num_attention_heads
+                        ),
                         "head_dim": attn_block.get("mamba_head_dim", 64),
                         "num_groups": attn_block.get("mamba_num_groups", 8),
                     }
@@ -212,7 +239,9 @@ def convert_nemo_config_to_hf_decilm_config(
                     "no_op": mlp_block.get("no_op", False),
                     "replace_with_linear": mlp_block.get("replace_with_linear", False),
                     "sparsify": mlp_block.get("sparsify", None),
-                    "intermediate_size": mlp_block.get("ffn_hidden_size", nemo_config.ffn_hidden_size),
+                    "intermediate_size": mlp_block.get(
+                        "ffn_hidden_size", nemo_config.ffn_hidden_size
+                    ),
                     "gated": True,  # Puzzletron uses gated activations
                     # Use the activation function name extracted from this block's config
                     "hidden_act": mlp_block.get("hidden_act", None),
@@ -225,7 +254,9 @@ def convert_nemo_config_to_hf_decilm_config(
                         "num_local_experts": num_moe_experts,
                         "num_experts_per_tok": mlp_block.get("moe_router_topk", 1),
                         "expert_intermediate_dim": mlp_block.get("moe_ffn_hidden_size", 8192),
-                        "shared_expert_intermediate_dim": mlp_block.get("moe_shared_expert_intermediate_size", 8192),
+                        "shared_expert_intermediate_dim": mlp_block.get(
+                            "moe_shared_expert_intermediate_size", 8192
+                        ),
                     }
                 else:
                     ffn_config["moe"] = None
@@ -260,7 +291,9 @@ def convert_nemo_config_to_hf_decilm_config(
         vocab_size=vocab_size,
         rms_norm_eps=nemo_config.layernorm_epsilon,
         attention_bias=getattr(nemo_config, "attention_bias", False),
-        o_proj_bias=getattr(nemo_config, "o_proj_bias", getattr(nemo_config, "attention_bias", False)),
+        o_proj_bias=getattr(
+            nemo_config, "o_proj_bias", getattr(nemo_config, "attention_bias", False)
+        ),
         rope_theta=nemo_config.rotary_base,
         rope_scaling=rope_scaling,
         position_embedding_type="rope",
@@ -335,7 +368,9 @@ def _build_puzzletron_mappings_and_transforms(
     elif is_nemo_config:
         # NeMo config case (exporter) - parse JSON
         try:
-            heterogeneous_config = json.loads(source_config.heterogeneous_layers_config_encoded_json)
+            heterogeneous_config = json.loads(
+                source_config.heterogeneous_layers_config_encoded_json
+            )
             block_configs = heterogeneous_config.get("block_configs", [])
         except (json.JSONDecodeError, KeyError):
             block_configs = []
@@ -411,7 +446,9 @@ def _build_puzzletron_mappings_and_transforms(
         shared_expert_size = None
         if moe_config:
             # Convert moe_config to dict if it's an object (HF case)
-            moe_dict = _config_to_dict(moe_config) if not isinstance(moe_config, (int, type(None))) else {}
+            moe_dict = (
+                _config_to_dict(moe_config) if not isinstance(moe_config, (int, type(None))) else {}
+            )
             shared_expert_size = moe_dict.get("shared_expert_intermediate_dim") or ffn_dict.get(
                 "moe_shared_expert_intermediate_size"
             )
@@ -422,7 +459,9 @@ def _build_puzzletron_mappings_and_transforms(
             value = f"decoder.layers.{idx}.mlp.layer_norm_weight"
         elif moe_config is not None:
             value = f"decoder.layers.{idx}.pre_mlp_layernorm.weight"
-            moe_mapping[f"model.layers.{idx}.mlp.router.weight"] = f"decoder.layers.{idx}.mlp.router.weight"
+            moe_mapping[f"model.layers.{idx}.mlp.router.weight"] = (
+                f"decoder.layers.{idx}.mlp.router.weight"
+            )
             # Store transform spec for MoE expert FC1 merging
             transform_specs.append(
                 {
@@ -465,7 +504,11 @@ def _build_puzzletron_mappings_and_transforms(
 
 
 def merge_qkv_for_puzzletron(
-    ctx: io.state.TransformCTX, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, idx: Optional[int] = None
+    ctx: io.state.TransformCTX,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    idx: Optional[int] = None,
 ):
     """
     Merge q, k, v to interleave-concatenated qkv.
@@ -481,7 +524,9 @@ def merge_qkv_for_puzzletron(
     else:
         megatron_config = ctx.target.config
     head_num = megatron_config.num_attention_heads
-    heads_per_group = q.shape[0] // k.shape[0]  # NOTE: This is important to support heterogeneous attention
+    heads_per_group = (
+        q.shape[0] // k.shape[0]
+    )  # NOTE: This is important to support heterogeneous attention
     num_query_groups = head_num // heads_per_group
     hidden_size = megatron_config.hidden_size
     head_size = megatron_config.kv_channels
@@ -639,7 +684,9 @@ def embed_chat_template_in_tokenizer_config(nemo_checkpoint_path: str, output_pa
 
     # Path to NeMo checkpoint tokenizer files
     nemo_checkpoint = Path(nemo_checkpoint_path)
-    nemo_chat_template_jinja = nemo_checkpoint / "context" / "nemo_tokenizer" / "chat_template.jinja"
+    nemo_chat_template_jinja = (
+        nemo_checkpoint / "context" / "nemo_tokenizer" / "chat_template.jinja"
+    )
 
     # Path to exported tokenizer config
     output_dir = Path(output_path)
@@ -647,7 +694,9 @@ def embed_chat_template_in_tokenizer_config(nemo_checkpoint_path: str, output_pa
 
     # Check if both files exist
     if not nemo_chat_template_jinja.exists():
-        logging.debug(f"No chat_template.jinja found in NeMo checkpoint at {nemo_chat_template_jinja}")
+        logging.debug(
+            f"No chat_template.jinja found in NeMo checkpoint at {nemo_chat_template_jinja}"
+        )
         return
 
     if not output_tokenizer_config.exists():
