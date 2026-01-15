@@ -351,7 +351,10 @@ def get_model(
                 device_map=device_map,
                 **model_kwargs,
             )
-        elif hf_config.quantization_config.get("format", None) == "pack-quantized":
+        elif (
+            hasattr(hf_config, "quantization_config")
+            and hf_config.quantization_config.get("format", None) == "pack-quantized"
+        ):
             torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)
             model = AutoModelForCausalLM.from_pretrained(
                 ckpt_path,
