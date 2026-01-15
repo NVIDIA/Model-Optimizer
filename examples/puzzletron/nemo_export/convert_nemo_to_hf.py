@@ -18,10 +18,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from modelopt.torch.puzzletron.export.MCore.llama_nemotron import (
-    PuzzletronLlamaNemotronModel,
-    PuzzletronNemotronModelConfig,
-)
+from modelopt.torch.puzzletron.export.MCore.llama_nemotron import PuzzletronLlamaNemotronModel
 from nemo.collections import llm
 
 from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import copy_deci_lm_hf_code
