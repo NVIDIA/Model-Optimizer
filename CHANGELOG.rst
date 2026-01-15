@@ -1,6 +1,13 @@
 NVIDIA Model Optimizer Changelog (Linux)
 ========================================
 
+0.42 (XXXX-XX-XX)
+^^^^^^^^^^^^^^^^^
+
+**New Features**
+
+- Add support for Kimi K2 Thinking model quantization from the original int4 checkpoint.
+
 0.41 (2026-01-19)
 ^^^^^^^^^^^^^^^^^
 
