@@ -88,7 +88,7 @@ def convert_mlp_config_from_cfg_object(mlp_config, parallel_blocks, default_hidd
     if parallel_blocks is not None:
         raise NotImplementedError("parallel_blocks is not supported")
     if not hasattr(mlp_config, "gated") or mlp_config.gated is False:
-        raise NotImplementedError("notgated MLP is not supported")
+        raise NotImplementedError("non-gated MLP is not supported")
     if not hasattr(mlp_config, "hidden_act") or mlp_config.hidden_act not in [default_hidden_act]:
         raise NotImplementedError(f"all mlps must have the same activation ({default_hidden_act})")
     if hasattr(mlp_config, "sparsify") and mlp_config.sparsify is not None:
