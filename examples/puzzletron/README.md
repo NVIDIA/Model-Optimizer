@@ -17,6 +17,7 @@ In this example, we compress the [Llama-3.1-8B-Instruct](https://huggingface.co/
 
 ```bash
 pip install -e .[hf,puzzletron]
+pip install -r requirements.txt
 ```
 
 - For this example we are using 2x NVIDIA H100 80GB HBM3 to show multi-GPU steps. You can use also use s single GPU.
