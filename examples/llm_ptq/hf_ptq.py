@@ -623,7 +623,7 @@ def post_quantize(
     generated_ids_after_ptq = None
     if generated_ids_before_ptq is None:
         pass
-    if model_type != "llama4" and not is_nemotron_vl_model:
+    elif model_type != "llama4" and not is_nemotron_vl_model:
         # Our fake quantizer may not be fully compatible with torch.compile.
         generated_ids_after_ptq = full_model.generate(preview_input_ids, max_new_tokens=100)
     elif is_nemotron_vl_model and tokenizer is not None:
