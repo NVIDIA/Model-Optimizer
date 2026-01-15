@@ -269,6 +269,7 @@ def mse_calibrate(
                     fp8_scale_sweep
                     and module.is_static_block_quant
                     and module._num_bits == (2, 1)
+                    and module._block_sizes is not None
                     and module._block_sizes.get("scale_bits") == (4, 3)
                 )
 
