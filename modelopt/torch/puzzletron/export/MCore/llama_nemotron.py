@@ -349,7 +349,8 @@ class PuzzletronLlamaNemotronModel(GPTModel):
     def __init__(
         self,
         config: Annotated[
-            Optional[PuzzletronNemotronModelConfig], Config[PuzzletronNemotronModelConfig]
+            Optional[PuzzletronNemotronModelConfig] | type[PuzzletronNemotronModelConfig],
+            Config[PuzzletronNemotronModelConfig],
         ] = None,
         optim: Optional[OptimizerModule] = None,
         tokenizer: Optional["TokenizerSpec"] = None,
