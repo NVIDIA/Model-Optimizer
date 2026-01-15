@@ -157,12 +157,14 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
 
         # Run forward pass so that all modules sharing the same input are collected using forward hook.
 
+        # Check if this is Nemotron-Parse (encoder-decoder VL model)
+        architectures = getattr(model.config, "architectures", [])
+        is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
+
         with set_quantizer_by_cfg_context(model, {"*": {"enable": False}}):
-            if getattr(model.config, "is_encoder_decoder", False):
-                # For encoder-decoder models, we need to pass both the encoder and decoder input ids
-                model(fake_input, decoder_input_ids=decoder_fake_input)
-            elif is_vl_model and "nemotron" in model_type:
-                # For Nemotron VL models, try to run optimization on just the language model part
+            if is_vl_model and ("nemotron" in model_type or is_nemotron_parse):
+                # For Nemotron VL models (including Nemotron-Parse), run optimization on just the language model/decoder
+                # This avoids needing to create proper pixel_values for the vision encoder
                 language_model_lineage = get_language_model_from_vl(model)
 
                 if language_model_lineage is not None:
@@ -179,6 +181,9 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                         "This is required for requantization/resmoothing optimization. "
                         "Please ensure the model architecture is supported or file an issue."
                     )
+            elif getattr(model.config, "is_encoder_decoder", False):
+                # For other encoder-decoder models (non-VL), we need to pass both encoder and decoder input ids
+                model(fake_input, decoder_input_ids=decoder_fake_input)
             else:
                 model(fake_input)
 
@@ -259,25 +264,42 @@ def _export_quantized_weight(
 
     if quantization_format == QUANTIZATION_FP8:
         # Convert amax to float32
-        weight_quantizer._amax = weight_quantizer._amax.to(torch.float32)
-
-        if weight_quantizer._amax.dim() == 1:
-            # Per-tensor amax
-            weight_scaling_factor = torch.tensor(
-                weight_quantizer.amax.item() / weight_quantizer.maxbound
-            )
+        # Note: Use the public 'amax' property, not the private '_amax' attribute
+        if hasattr(weight_quantizer, "_amax") and weight_quantizer._amax is not None:
+            weight_quantizer._amax = weight_quantizer._amax.to(torch.float32)
+            amax_tensor = weight_quantizer._amax
         else:
-            # Per-channel amax
-            weight_scaling_factor = torch.tensor(weight_quantizer.amax / weight_quantizer.maxbound)
+            # Fallback to public amax property
+            amax_tensor = weight_quantizer.amax
+            if amax_tensor is not None and hasattr(amax_tensor, "to"):
+                amax_tensor = amax_tensor.to(torch.float32)
 
-        sub_module.register_buffer(
-            quantizer_attrs.weight_scale,
-            weight_scaling_factor,
-        )
+        # Only compute scaling factor if amax_tensor is valid
+        if amax_tensor is not None and hasattr(amax_tensor, "dim"):
+            if amax_tensor.dim() == 1:
+                # Per-tensor amax
+                weight_scaling_factor = torch.tensor(
+                    weight_quantizer.amax.item() / weight_quantizer.maxbound
+                )
+            else:
+                # Per-channel amax
+                weight_scaling_factor = torch.tensor(
+                    weight_quantizer.amax / weight_quantizer.maxbound
+                )
 
-        if hasattr(input_quantizer, "_amax"):
+            sub_module.register_buffer(
+                quantizer_attrs.weight_scale,
+                weight_scaling_factor,
+            )
+
+        if hasattr(input_quantizer, "_amax") or (
+            input_quantizer is not None
+            and hasattr(input_quantizer, "amax")
+            and input_quantizer.amax is not None
+        ):
             assert input_quantizer is not None
-            input_quantizer._amax = input_quantizer._amax.to(torch.float32)
+            if hasattr(input_quantizer, "_amax") and input_quantizer._amax is not None:
+                input_quantizer._amax = input_quantizer._amax.to(torch.float32)
 
             sub_module.register_buffer(
                 quantizer_attrs.input_scale,
@@ -286,9 +308,14 @@ def _export_quantized_weight(
                 ).squeeze(),
             )
 
-        if hasattr(output_quantizer, "_amax"):
+        if hasattr(output_quantizer, "_amax") or (
+            output_quantizer is not None
+            and hasattr(output_quantizer, "amax")
+            and output_quantizer.amax is not None
+        ):
             assert output_quantizer is not None
-            output_quantizer._amax = output_quantizer._amax.to(torch.float32)
+            if hasattr(output_quantizer, "_amax") and output_quantizer._amax is not None:
+                output_quantizer._amax = output_quantizer._amax.to(torch.float32)
     else:
         # Register weight_scale and input_scale
         if quantization_format == QUANTIZATION_FP8_PB_REAL:
@@ -328,6 +355,18 @@ def _export_quantized_weight(
 
     weight_scale: torch.Tensor | None = getattr(sub_module, quantizer_attrs.weight_scale, None)
     weight_scale_2: torch.Tensor | None = getattr(sub_module, quantizer_attrs.weight_scale_2, None)
+
+    # If weight_scale is None (e.g., quantizer wasn't calibrated), skip quantization for this module
+    # This can happen for modules that were disabled from quantization or have invalid calibration data
+    if weight_scale is None and quantization_format not in [
+        QUANTIZATION_NVFP4,
+        QUANTIZATION_NVFP4_AWQ,
+    ]:
+        # For NVFP4, weight_scale is computed later, so we can't check here
+        print(
+            f"Warning: Skipping quantization for {type(sub_module).__name__} - no weight_scale found"
+        )
+        return
 
     # Transpose weight for bmm-style expert quantization (llama4, gpt-oss)
     # Check if this is a BMM-style expert weight that needs transposition

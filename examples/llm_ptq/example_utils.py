@@ -28,6 +28,7 @@ from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
 from transformers import (
     AutoConfig,
+    AutoModel,
     AutoModelForCausalLM,
     AutoProcessor,
     AutoTokenizer,
@@ -64,27 +65,39 @@ def run_nemotron_vl_preview(
     """
     from vlm_utils import run_text_only_generation, run_vl_preview_generation
 
-    print(f"Running text-only preview generation for Nemotron VL model ({stage_name})...")
-    question = tokenizer.decode(input_ids[0], skip_special_tokens=True)
-    generation_config = {
-        "max_new_tokens": 100,
-        "do_sample": False,
-        "eos_token_id": tokenizer.eos_token_id,
-    }
+    # Check if this is Nemotron-Parse (encoder-decoder model that requires images)
+    config = full_model.config
+    architectures = getattr(config, "architectures", [])
+    is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
 
-    # Try text-only generation
-    text_response = run_text_only_generation(
-        full_model, tokenizer, question, generation_config, pyt_ckpt_path
-    )
+    generated_ids = None
 
-    if text_response is not None:
-        print(f"✅ Text-only generation successful: {text_response[:100]}...")
-        generated_ids = text_response
-    elif allow_fallback:
-        print("Text-only generation failed, falling back to standard generate...")
-        generated_ids = full_model.generate(input_ids, max_new_tokens=100)
+    if not is_nemotron_parse:
+        # Only try text-only generation for models that support it (not Nemotron-Parse)
+        print(f"Running text-only preview generation for Nemotron VL model ({stage_name})...")
+        question = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+        generation_config = {
+            "max_new_tokens": 100,
+            "do_sample": False,
+            "eos_token_id": tokenizer.eos_token_id,
+        }
+
+        # Try text-only generation
+        text_response = run_text_only_generation(
+            full_model, tokenizer, question, generation_config, pyt_ckpt_path
+        )
+
+        if text_response is not None:
+            print(f"✅ Text-only generation successful: {text_response[:100]}...")
+            generated_ids = text_response
+        elif allow_fallback:
+            print("Text-only generation failed, falling back to standard generate...")
+            generated_ids = full_model.generate(input_ids, max_new_tokens=100)
     else:
-        generated_ids = None
+        print(
+            f"Skipping text-only generation for Nemotron-Parse ({stage_name}) - "
+            "this encoder-decoder model requires images for all operations."
+        )
 
     # Run additional VL test with images
     print(f"Running additional VL test with images ({stage_name})...")
@@ -95,6 +108,10 @@ def run_nemotron_vl_preview(
 
 def _is_multimodal_config(config):
     """Check if a config indicates a multimodal model (config-only version of is_multimodal_model)."""
+    # Check for Nemotron-Parse encoder-decoder architecture
+    architectures = getattr(config, "architectures", [])
+    is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
+
     return (
         hasattr(config, "vision_config")  # Standard vision config (e.g., Qwen2.5-VL)
         or getattr(config, "model_type", "") == "phi4mm"  # Phi-4 multimodal
@@ -103,6 +120,7 @@ def _is_multimodal_config(config):
         or (
             hasattr(config, "embd_layer") and hasattr(config.embd_layer, "image_embd_layer")
         )  # Image embedding layers
+        or is_nemotron_parse  # Nemotron-Parse conditional generation model
     )
 
 
@@ -257,8 +275,19 @@ def get_processor(
         )
 
         return MllamaImageProcessor(processor, device)
-
-    return None
+    else:
+        # Try to load AutoProcessor for other VL models (e.g., Nemotron-Parse)
+        # This will only work if the model has a processor config
+        try:
+            processor = AutoProcessor.from_pretrained(
+                ckpt_path,
+                **model_kwargs,
+            )
+            print(f"Loaded AutoProcessor for model type: {model_type}")
+            return processor
+        except Exception as e:
+            print(f"Could not load processor for {model_type}: {e}")
+            return None
 
 
 def get_dtype(dtype):
@@ -320,8 +349,6 @@ def get_model(
         model_kwargs.setdefault("torch_dtype", "auto")
 
     if "vila" in ckpt_path.lower():
-        from transformers import AutoModel
-
         hf_vila = AutoModel.from_pretrained(
             ckpt_path,
             device_map=device_map,
@@ -353,13 +380,13 @@ def get_model(
                 if not hasattr(transformers, architecture):
                     warnings.warn(
                         f"Architecture {architecture} not found in transformers: {transformers.__version__}. "
-                        "Falling back to AutoModelForCausalLM."
+                        "Falling back to AutoModel."
                     )
                 assert trust_remote_code, (
                     "Please set trust_remote_code to True if you want to use this architecture"
                 )
 
-                auto_model_module = AutoModelForCausalLM
+                auto_model_module = AutoModel
                 from_config = auto_model_module.from_config
             else:
                 auto_model_module = getattr(transformers, architecture)
@@ -370,7 +397,7 @@ def get_model(
                 # unless specified by the hf_config.
                 torch_dtype = getattr(hf_config, "torch_dtype", torch.float16)
                 model_kwargs2 = model_kwargs.copy()
-                if auto_model_module != AutoModelForCausalLM:
+                if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
                     model_kwargs2.pop("trust_remote_code", None)
                 model_kwargs2["torch_dtype"] = torch_dtype
                 model_kwargs2.pop("max_memory", None)
