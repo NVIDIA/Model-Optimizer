@@ -1,0 +1,34 @@
+defaults:
+  - /validate_model_defaults
+
+model_name_or_path: ${teacher_dir}
+experiment_id: ${pruning.eval_samples}samples_diverse_mini
+activations_log_dir: ???
+activation_hooks_kwargs: ???
+
+descriptor: ${descriptor}
+
+# Data:
+eval_samples: 100
+micro_batch_size: 4
+dataset_path: ${dataset_path}
+val_dataset_name: train
+
+# Prune ckpts
+pruned_ckpts_outpt_dir: ${puzzle_dir}/pruning/${pruning.experiment_id}
+
+## FFN pruning
+ffn_list:
+mlp_init_mode: "Truncate"
+
+## KV-heads pruning
+n_heads_in_group_list:
+gqa_init_mode: "AverageKV"
+
+## Hidden dimension pruning
+hidden_size_list:
+hidden_size_init_mode: "PruneByChannelRanking"
+linear_init_mode: "FromTeacher"
+
+mlp_init_config_yaml:
+  activations_log_dir: ${pruning.activations_log_dir}

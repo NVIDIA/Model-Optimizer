@@ -184,7 +184,7 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
                 / f"solution_{i_solution}"
             )
 
-            model_config.dtype = args.model_dtype
+            model_config.dtype = getattr(args, "model_dtype", "torch.bfloat16")
             model_config.architectures = ["DeciLMForCausalLM"]
             if realizable_as_symlinks:
                 if dist.is_master():

@@ -45,6 +45,7 @@ from modelopt.torch._compress.anymodel import convert_model
         ("llama_3_1_8b_instruct", "llama", "llama_3_1_8b_instruct", None, False),
         ("llama_3_2_3b_instruct", "llama", "llama_3_1_8b_instruct", None, False),
         ("qwen2_5_7b_instruct", "qwen2", "qwen2_5_7b_instruct", None, False),
+        ("nemotron-nano-12b-v2", "nemotron_h_v2", "nemotron-nano-12b-v2", "*-", False),
     ],
 )
 def test_compress(
@@ -141,25 +142,24 @@ def _test_compress_multiprocess_job(
 
 
 # Expected pruning activation values per model
+# Each model has a list of (score, channels) tuples for each FFN layer
 EXPECTED_PRUNING_VALUES = {
-    "llama_3_1_8b_instruct": {
-        "layer_0_score": 73,
-        "layer_0_channels": 95,
-        "layer_1_score": 440,
-        "layer_1_channels": 174,
-    },
-    "llama_3_2_3b_instruct": {
-        "layer_0_score": 79,
-        "layer_0_channels": 95,
-        "layer_1_score": 428,
-        "layer_1_channels": 174,
-    },
-    "qwen2_5_7b_instruct": {
-        "layer_0_score": 96,
-        "layer_0_channels": 433,
-        "layer_1_score": 485,
-        "layer_1_channels": 105,
-    },
+    "llama_3_1_8b_instruct": [
+        {"score": 73, "channels": 95},
+        {"score": 440, "channels": 174},
+    ],
+    "llama_3_2_3b_instruct": [
+        {"score": 79, "channels": 95},
+        {"score": 428, "channels": 174},
+    ],
+    "qwen2_5_7b_instruct": [
+        {"score": 96, "channels": 433},
+        {"score": 485, "channels": 105},
+    ],
+    # NemotronH with pattern "*-" has only 1 FFN layer (the "-" layer)
+    "nemotron-nano-12b-v2": [
+        {"score": 70, "channels": 509},
+    ],
 }
 
 
@@ -168,6 +168,7 @@ EXPECTED_LM_LOSS = {
     "llama_3_1_8b_instruct": 4.706878662109375,
     "llama_3_2_3b_instruct": 4.816886901855469,
     "qwen2_5_7b_instruct": 4.778186798095703,
+    "nemotron-nano-12b-v2": 4.79390811920166,
 }
 
 
@@ -180,16 +181,29 @@ def _assert_score_pruning_activations(puzzle_dir: Path, hf_config_name: str):
     pruning_scores = torch.load(puzzle_dir / rank_filepath)
 
     layer_names = list(pruning_scores.keys())
-    assert len(layer_names) == 2
-
-    layer_0 = pruning_scores[layer_names[0]]
-    layer_1 = pruning_scores[layer_names[1]]
-
     expected = EXPECTED_PRUNING_VALUES[hf_config_name]
-    assert layer_0["score"][0].item() == expected["layer_0_score"]
-    assert layer_0["channels_importance_ascending"][0].item() == expected["layer_0_channels"]
-    assert layer_1["score"][0].item() == expected["layer_1_score"]
-    assert layer_1["channels_importance_ascending"][0].item() == expected["layer_1_channels"]
+
+    if expected is not None:
+        # Verify we have the expected number of FFN layers
+        assert len(layer_names) == len(expected), (
+            f"Expected {len(expected)} FFN layers, got {len(layer_names)}"
+        )
+        # Check each layer's values
+        for i, layer_name in enumerate(layer_names):
+            layer_data = pruning_scores[layer_name]
+            assert layer_data["score"][0].item() == expected[i]["score"]
+            assert layer_data["channels_importance_ascending"][0].item() == expected[i]["channels"]
+    else:
+        # Print values for new models - update EXPECTED_PRUNING_VALUES with these
+        print(f"\n=== PRUNING VALUES for {hf_config_name} (num_layers={len(layer_names)}) ===")
+        print(f'"{hf_config_name}": [')
+        for layer_name in layer_names:
+            layer_data = pruning_scores[layer_name]
+            score = layer_data["score"][0].item()
+            channels = layer_data["channels_importance_ascending"][0].item()
+            print(f'    {{"score": {score}, "channels": {channels}}},')
+        print("],")
+        print("===")
 
 
 def _assert_mip_solutions(puzzle_dir: Path, hf_config_name: str):
@@ -208,6 +222,12 @@ def _assert_mip_solutions(puzzle_dir: Path, hf_config_name: str):
 
     actual_lm_loss = validation["lm_loss"]["avg"]
     expected_lm_loss = EXPECTED_LM_LOSS[hf_config_name]
-    assert abs(actual_lm_loss - expected_lm_loss) < 0.01, (
-        f"lm_loss mismatch: expected {expected_lm_loss}, got {actual_lm_loss}"
-    )
+    if expected_lm_loss is not None:
+        assert abs(actual_lm_loss - expected_lm_loss) < 0.01, (
+            f"lm_loss mismatch: expected {expected_lm_loss}, got {actual_lm_loss}"
+        )
+    else:
+        # Print value for new models - update EXPECTED_LM_LOSS with this
+        print(f"\n=== LM_LOSS for {hf_config_name} ===")
+        print(f'"{hf_config_name}": {actual_lm_loss},')
+        print("===")

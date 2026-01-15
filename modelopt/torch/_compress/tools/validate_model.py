@@ -192,7 +192,9 @@ def validate_model(
         calc_on_cpu=args.calc_losses_on_cpu,
         just_model_forward=just_model_forward,
         checkpoint_manager=checkpoint_manager,
-        autocast_dtype=getattr(torch, args.autocast_dtype.strip("torch.")),
+        autocast_dtype=getattr(
+            torch, getattr(args, "autocast_dtype", "torch.bfloat16").strip("torch.")
+        ),
         descriptor=descriptor,
     )
 

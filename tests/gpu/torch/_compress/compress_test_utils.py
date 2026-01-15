@@ -141,6 +141,10 @@ def create_and_save_small_hf_model(
         config.num_key_value_heads = 8
         config.max_position_embeddings = 512
 
+        # Fix layer_types to match num_hidden_layers (newer transformers validates this)
+        if hasattr(config, "layer_types") and config.layer_types is not None:
+            config.layer_types = config.layer_types[:2]
+
         # Fix rope_scaling to be consistent with max_position_embeddings
         if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
             config.rope_scaling["original_max_position_embeddings"] = 256

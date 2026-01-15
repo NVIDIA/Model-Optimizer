@@ -27,6 +27,9 @@ from typing import Optional
 
 from omegaconf import DictConfig
 
+from modelopt.torch._compress.pruning.ffn_intermediate_pruning_mixin import (
+    FFNIntermediatePruningMixIn,
+)
 from modelopt.torch._compress.tools.bypassed_training.child_init import (
     GQAInitMode,
     HiddenSizeInitMode,
@@ -330,7 +333,10 @@ def launch_prune_ckpt(cfg: DictConfig):
     )
     mprint(f"  (Override with env vars: PRUNING_IO_WORKERS, PRUNING_LAYER_WORKERS)")
 
-    if target_layer == "mlp.down_proj":
+    pruning_mixin = cfg.pruning.pruning_mixin
+
+    # Dispatch based on pruning mixin type (following Puzzletron pattern)
+    if isinstance(pruning_mixin, FFNIntermediatePruningMixIn):
         launch_ffn_intermediates_prune_ckpt(cfg, max_save_workers, max_layer_workers)
     elif target_layer == "self_attn.o_proj":
         launch_attn_groups_prune_ckpt(cfg, max_save_workers, max_layer_workers)
@@ -344,5 +350,5 @@ def launch_prune_ckpt(cfg: DictConfig):
         launch_moe_ffn_intermediates_prune_ckpt(cfg, max_save_workers, max_layer_workers)
     else:
         raise NotImplementedError(
-            f"checkpoint pruning is not currently supported for target layer: {target_layer}"
+            f"checkpoint pruning is not currently supported for pruning mixin: {pruning_mixin.__class__.__name__}"
         )

@@ -26,22 +26,13 @@ from typing import Dict, List
 
 from safetensors.torch import load_file, save_file
 from tqdm import tqdm
-from transformers import AutoConfig, PretrainedConfig
+from transformers import PretrainedConfig
 
 from modelopt.torch._compress.anymodel.model_descriptor import ModelDescriptor
 from modelopt.torch._compress.decilm.deci_lm_hf_code.block_config import BlockConfig
+from modelopt.torch._compress.tools.checkpoint_utils_hf import load_model_config, save_model_config
 
 __all__ = ["Converter"]
-
-
-def load_model_config(checkpoint_path: Path) -> PretrainedConfig:
-    """Load model config from a checkpoint directory."""
-    return AutoConfig.from_pretrained(checkpoint_path, trust_remote_code=True)
-
-
-def save_model_config(config: PretrainedConfig, output_path: Path) -> None:
-    """Save model config to a checkpoint directory."""
-    config.save_pretrained(output_path)
 
 
 class Converter(ABC):
