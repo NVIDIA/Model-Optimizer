@@ -187,10 +187,10 @@ def build_quant_cfg(
         quant_cfg["quant_cfg"]["model*.*attn*k_proj*"] = {"enable": False}
         quant_cfg["quant_cfg"]["model*.*attn*v_proj*"] = {"enable": False}
 
-        if model_type == "deepseek":
-            # Disable MLA quantization for accuracy.
-            quant_cfg["quant_cfg"]["*self_attn.q*"] = {"enable": False}
-            quant_cfg["quant_cfg"]["*self_attn.kv*"] = {"enable": False}
+    if model_type == "deepseek":
+        # Disable MLA quantization for accuracy.
+        quant_cfg["quant_cfg"]["*self_attn.q*"] = {"enable": False}
+        quant_cfg["quant_cfg"]["*self_attn.kv*"] = {"enable": False}
 
     return quant_cfg
 

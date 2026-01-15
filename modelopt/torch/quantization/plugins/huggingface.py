@@ -607,8 +607,10 @@ class _QuantCompressedLinear(QuantModule):
 
         if self.quantization_status == QuantizationStatus.COMPRESSED:
             self.weight = nn.Parameter(self.compressor.decompress_module(self), requires_grad=False)
-        del self.weight_packed
-        del self.weight_scale
+        if hasattr(self, "weight_packed"):
+            del self.weight_packed
+        if hasattr(self, "weight_scale"):
+            del self.weight_scale
 
 
 try:
