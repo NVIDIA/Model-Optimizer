@@ -411,7 +411,7 @@ class PuzzletronHeterogeneousTransformerConfig(TransformerConfig):
         assert self.num_layers == len(block_list), "num_layers must match the number of blocks in the json file"
         super().__post_init__()
         self.heterogeneous_block_specs = True
-        self.hetereogenous_dist_checkpoint = True  # TODO: check if this is correct/needed
+        self.heterogeneous_dist_checkpoint = True  # TODO: check if this is correct/needed
         self.per_block_parameters = [
             PuzzletronTransformerBlockConfig.build_from_dict(block=block, main_config=self) for block in block_list
         ]

@@ -19,7 +19,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Dict, Optional, Union
-
+from modelopt.torch.puzzletron.tools.logger import mprint
 import torch
 import torch.nn.functional as F
 from nemo.collections.llm.gpt.model.base import (
@@ -272,13 +272,13 @@ class PuzzletronNemotronModelConfig(GPTConfig, PuzzletronHeterogeneousTransforme
         # Handle dtype (new format uses 'dtype', old format uses 'torch_dtype')
         # Check 'dtype' first, then fall back to 'torch_dtype'
         if "dtype" in orig_cfg_dict and orig_cfg_dict["dtype"] is not None:
-            print(f"DEBUG: dtype found in config: {orig_cfg_dict['dtype']}")
+            mprint(f"DEBUG: dtype found in config: {orig_cfg_dict['dtype']}")
             adapted_cfg_dict["torch_dtype"] = orig_cfg_dict["dtype"]
         elif "torch_dtype" in orig_cfg_dict and orig_cfg_dict["torch_dtype"] is not None:
-            print(f"DEBUG: torch_dtype found in config: {orig_cfg_dict['torch_dtype']}")
+            mprint(f"DEBUG: torch_dtype found in config: {orig_cfg_dict['torch_dtype']}")
             adapted_cfg_dict["torch_dtype"] = orig_cfg_dict["torch_dtype"]
         else:
-            print(f"WARNING: neither dtype nor torch_dtype found in config (or both are None), setting to bfloat16")
+            mprint(f"WARNING: neither dtype nor torch_dtype found in config (or both are None), setting to bfloat16")
             adapted_cfg_dict["torch_dtype"] = "bfloat16"
 
         # TODO: check how config keys such as position_embedding_type are handled (since they're not passed to the constructor)
@@ -387,16 +387,16 @@ def instantiate_nemo_config_from_adapted_dict(
     # Keys that are metadata or derived (not directly passed to constructor)
     metadata_keys = set(adapted_cfg_dict.keys()) - INSTANTIATION_KEYS
 
-    print(f"DEBUG: Keys used for instantiation: {sorted(INSTANTIATION_KEYS)}")
-    print(f"DEBUG: Metadata keys (not used for direct instantiation): {sorted(metadata_keys)}")
+    mprint(f"DEBUG: Keys used for instantiation: {sorted(INSTANTIATION_KEYS)}")
+    mprint(f"DEBUG: Metadata keys (not used for direct instantiation): {sorted(metadata_keys)}")
     for key in sorted(metadata_keys):
         value = adapted_cfg_dict[key]
         if isinstance(value, (list, dict)):
-            print(f"  - {key}: {type(value).__name__} with {len(value)} items")
+            mprint(f"  - {key}: {type(value).__name__} with {len(value)} items")
         elif callable(value):
-            print(f"  - {key}: {value.__name__ if hasattr(value, '__name__') else 'callable'}")
+            mprint(f"  - {key}: {value.__name__ if hasattr(value, '__name__') else 'callable'}")
         else:
-            print(f"  - {key}: {value}")
+            mprint(f"  - {key}: {value}")
 
     model_dtype = dtype_from_dict(adapted_cfg_dict)
 
@@ -449,7 +449,7 @@ def instantiate_nemo_config_from_adapted_dict(
         # No activation functions found (all blocks are no-op or have None)
         # Default to F.silu to pass MCore validation
         global_activation_func = F.silu
-        print("WARNING: No not-None activation functions found in blocks, defaulting global activation_func to F.silu")
+        mprint("WARNING: No not-None activation functions found in blocks, defaulting global activation_func to F.silu")
     elif len(unique_not_none) == 1:
         # All not-None blocks use the same activation function (safe)
         global_activation_func = not_none_activations[0]
@@ -460,7 +460,7 @@ def instantiate_nemo_config_from_adapted_dict(
         )
         none_count = activation_funcs.count(None)
         total_count = len(activation_funcs)
-        print(
+        mprint(
             f"INFO: All {total_count - none_count} not-None blocks use the same activation function: {func_name} ({none_count} None/no-op blocks)"
         )
     else:
@@ -530,10 +530,10 @@ class PuzzletronHFLlamaNemotronImporter(io.ModelConnector["LlamaForCausalLM", Pu
                         and tokenizer.
         """
         config = self.config
-        print(f"DEBUG: NeMo config dtype settings:")
-        print(f"  - config.bf16: {config.bf16}")
-        print(f"  - config.fp16: {config.fp16}")
-        print(f"  - config.params_dtype: {config.params_dtype}")
+        mprint(f"DEBUG: NeMo config dtype settings:")
+        mprint(f"  - config.bf16: {config.bf16}")
+        mprint(f"  - config.fp16: {config.fp16}")
+        mprint(f"  - config.params_dtype: {config.params_dtype}")
         return PuzzletronLlamaNemotronModel(config, tokenizer=self.tokenizer)
 
     def apply(self, output_path: Path) -> Path:
@@ -555,7 +555,7 @@ class PuzzletronHFLlamaNemotronImporter(io.ModelConnector["LlamaForCausalLM", Pu
         self.convert_state(source, target)
         self.nemo_save(output_path, trainer)
 
-        print(f"Converted Llama-Nemotron model to Nemo, model saved to {output_path} in {source.dtype}.")
+        mprint(f"Converted Llama-Nemotron model to Nemo, model saved to {output_path} in {source.dtype}.")
 
         teardown(trainer, target)
         del trainer, target
