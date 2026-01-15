@@ -55,7 +55,7 @@ def convert_attention_config_from_cfg_object(attention_config, num_attention_hea
     window_size = attention_config.window_size if hasattr(attention_config, "window_size") else None
     if window_size is not None:
         window_size = (window_size, 0)
-    is_mamba = attention_config.mamba if hasattr(attention_config, "mamba") else None
+    is_mamba = attention_config.mamba if hasattr(attention_config, "mamba") else False
     n_heads_in_group = (
         attention_config.n_heads_in_group if hasattr(attention_config, "n_heads_in_group") else 1
     )

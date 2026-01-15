@@ -403,7 +403,7 @@ class PuzzletronHeterogeneousTransformerConfig(TransformerConfig):
     chunk_size: int = 128
 
     def __post_init__(self) -> None:
-        if self.kv_channels is None and self.num_attention_heads == 0:  # type: ignore[has-type]
+        if self.kv_channels is None and self.num_attention_heads == 0:
             self.num_attention_heads = 8  # to avoid division by zero
         # Type assertion to help mypy understand the type after the check
         assert isinstance(self.num_attention_heads, int), "num_attention_heads must be an integer"
@@ -420,7 +420,7 @@ class PuzzletronHeterogeneousTransformerConfig(TransformerConfig):
         hf_config_dict: dict[str, Any] = json.loads(self.heterogeneous_layers_config_encoded_json)
         block_list = hf_config_dict["block_configs"]
         # TODO: should we change the definition of num_layers? it can be sum(mlp/attention) rather than uneven blocks
-        if self.num_layers is None or self.num_layers == 0:  # type: ignore[has-type]
+        if self.num_layers is None or self.num_layers == 0:
             self.num_layers = len(block_list)
         # Type assertion to help mypy understand the type after the check
         assert isinstance(self.num_layers, int), "num_layers must be an integer"

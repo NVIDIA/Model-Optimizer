@@ -36,7 +36,10 @@ def convert_model(
 
     # NOTE: API call to export_ckpt is here: https://github.com/NVIDIA-NeMo/NeMo/blob/main/nemo/collections/llm/api.py#L987
     print(
-        f"calling export_ckpt with path: {nemo_model_path_local}, target: hf, output_path: {output_path_hf_local}, target_model_name: PuzzletronLlamaNemotronModel, overwrite: {overwrite}"
+        f"calling export_ckpt with path: {nemo_model_path_local}, "
+        f"target: hf, output_path: {output_path_hf_local}, "
+        f"target_model_name: PuzzletronLlamaNemotronModel, "
+        f"overwrite: {overwrite}"
     )
 
     hf_path = llm.export_ckpt(

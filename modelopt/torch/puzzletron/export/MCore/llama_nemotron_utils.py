@@ -23,13 +23,17 @@ from nemo.collections.common.tokenizers.huggingface.auto_tokenizer import (
     AutoTokenizer as NemoAutoTokenizer,
 )
 from nemo.collections.llm.gpt.model.base import GPTModel
-from nemo.collections.llm.gpt.model.llama_nemotron import HFLlamaNemotronImporter
+from nemo.collections.llm.gpt.model.llama_nemotron import (
+    HFLlamaNemotronImporter,
+    PuzzletronNemotronModelConfig,
+)
 from nemo.lightning import io, teardown
 from nemo.lightning.io.state import TransformFns
 from nemo.lightning.pytorch.utils import dtype_from_str
 from nemo.utils.import_utils import safe_import
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 from modelopt.torch.puzzletron.export.MCore.puzzletron_layer_specs import (
     PuzzletronAttentionConfig,
     PuzzletronHeterogeneousTransformerConfig,
@@ -58,7 +62,7 @@ def convert_attention_config_from_cfg_object(attention_config, num_attention_hea
     window_size = attention_config.window_size if hasattr(attention_config, "window_size") else None
     if window_size is not None:
         window_size = (window_size, 0)
-    is_mamba = attention_config.mamba if hasattr(attention_config, "mamba") else None
+    is_mamba = attention_config.mamba if hasattr(attention_config, "mamba") else False
     n_heads_in_group = (
         attention_config.n_heads_in_group if hasattr(attention_config, "n_heads_in_group") else 1
     )
@@ -180,7 +184,6 @@ def convert_nemo_config_to_hf_decilm_config(
     Returns:
         DeciLMConfig: The equivalent HF config
     """
-    from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 
     # Get preserved HF config metadata (stored as direct attribute)
     # This enables lossless round-trip conversion HF → NeMo → HF

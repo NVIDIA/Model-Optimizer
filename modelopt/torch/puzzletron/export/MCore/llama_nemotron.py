@@ -122,7 +122,7 @@ class PuzzletronNemotronModelConfig(GPTConfig, PuzzletronHeterogeneousTransforme
     gated_linear_unit: bool = True
     position_embedding_type: str = "rope"
     add_bias_linear: bool = False
-    seq_length: int = 4096  # (will be overridden by Llama31Config70B)
+    # seq_length: int = 4096  # (will be overridden by Llama31Config70B)
     attention_dropout: float = 0.0
     hidden_dropout: float = 0.0
     share_embeddings_and_output_weights: bool = False
@@ -136,7 +136,7 @@ class PuzzletronNemotronModelConfig(GPTConfig, PuzzletronHeterogeneousTransforme
 
     # ===== Llama3Config attributes =====
     num_query_groups: int = 8
-    init_method_std: float = 0.01  # (will be overridden by Llama31Config)
+    # init_method_std: float = 0.01  # (will be overridden by Llama31Config)
     layernorm_epsilon: float = 1.0e-05
     rotary_percent: float = 1.0
 
@@ -519,10 +519,10 @@ def instantiate_nemo_config_from_adapted_dict(
         share_embeddings_and_output_weights=adapted_cfg_dict["share_embeddings_and_output_weights"],
         # HF-specific metadata for lossless round-trip conversion
         source_hf_config_metadata=adapted_cfg_dict.get("source_hf_config_metadata"),
-        fp16=(model_dtype == torch.float16),  # type: ignore
-        bf16=(model_dtype == torch.bfloat16),  # type: ignore
-        params_dtype=model_dtype,  # type: ignore
-        generation_config=generation_config,  # type: ignore
+        fp16=(model_dtype == torch.float16),
+        bf16=(model_dtype == torch.bfloat16),
+        params_dtype=model_dtype,
+        generation_config=generation_config,
     )
 
 
@@ -714,7 +714,7 @@ class PuzzletronHFLlamaNemotronImporter(
 
         adapted_cfg_dict = (
             PuzzletronNemotronModelConfig.create_adapted_config_dict_from_puzzletron_config(source)
-        )  # type: ignore
+        )
 
         try:
             generation_config = GenerationConfig.from_pretrained(str(self))
@@ -871,12 +871,12 @@ class PuzzletronHFLlamaNemotronExporter(
             embed_chat_template_in_tokenizer_config,
         )
 
-        copy_puzzletron_python_files_to_decilm_checkpoint(output_path)
+        copy_puzzletron_python_files_to_decilm_checkpoint(str(output_path))
 
         # Fix tokenizer: embed chat_template from .jinja file into tokenizer_config.json
         # NeMo's HF → NeMo import extracts chat_template to .jinja but doesn't preserve
         # it in tokenizer_config.json. We restore it here for accuracy parity.
-        embed_chat_template_in_tokenizer_config(str(self), output_path)
+        embed_chat_template_in_tokenizer_config(str(self), str(output_path))
 
         return output_path
 

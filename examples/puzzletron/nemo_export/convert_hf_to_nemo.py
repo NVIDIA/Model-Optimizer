@@ -40,7 +40,10 @@ def convert_model(
     model = PuzzletronLlamaNemotronModel(config=PuzzletronNemotronModelConfig)
     # NOTE: API call to import_ckpt is here: https://github.com/NVIDIA-NeMo/NeMo/blob/294ddff187f68c055d87ffe9400e65975b38693d/nemo/collections/llm/api.py#L888
     print(
-        f"calling import_ckpt with model: {model}, source: {hf_model_path_local}, output_path: {output_path_nemo_local}, overwrite: {overwrite}"
+        f"calling import_ckpt with model: {model}, "
+        f"source: {hf_model_path_local}, "
+        f"output_path: {output_path_nemo_local}, "
+        f"overwrite: {overwrite}"
     )
     nemo2_path = llm.import_ckpt(
         model=model,
