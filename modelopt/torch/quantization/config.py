@@ -1206,8 +1206,9 @@ class GPTQLiteConfig(QuantizeAlgorithmConfig):
     GPTQ lite does not perform sequential quantization of layers. This means that the updated
     activations are not used to process the next layer.
 
-    GPTQ lite also uses dynamic scales computed during the weight update phase. The original GPTQ
-    implementation uses static scales computed on the weights before beginning blockwise update.
+    The default values are taken from the official GPTQ implementation:
+    https://github.com/IST-DASLab/FP-Quant/blob/d2e3092f968262c4de5fb050e1aef568a280dadd/src/quantization/gptq.py#L35
+
 
     """
 
@@ -1222,12 +1223,14 @@ class GPTQLiteConfig(QuantizeAlgorithmConfig):
     block_size: int | None = ModeloptField(
         default=128,
         title="Block size for GPTQ weight update.",
-        description="The block size for GPTQ weight update.",
+        description="""The block size for GPTQ weight update, which must be a multiple of the
+        group_size used in the quantization.""",
     )
     hessian_state_path: str | None = ModeloptField(
         default=None,
         title="Path to the Hessian state file.",
-        description="The path to the Hessian state file.",
+        description="""The path to the Hessian state file. If hessian path exists, we load from
+         hessian file insteaed of recomputing them.""",
     )
 
 

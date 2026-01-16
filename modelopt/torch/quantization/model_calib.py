@@ -15,7 +15,6 @@
 
 """Calibration utilities."""
 
-import gc
 import math
 import os
 import warnings
@@ -1331,7 +1330,6 @@ def gptq_lite(
     percdamp: float = 0.01,
     block_size: int = 128,
     hessian_state_path: str | None = None,
-    store_activations: bool = True,
 ):
     """GPTQ-lite quantization - a simplified GPTQ variant.
 
@@ -1403,17 +1401,15 @@ def gptq_lite(
         state = hessian_state[module.name]
         hessian, n_samples = update_hessian(input[0], state["hessian"], state["n_samples"])
         hessian_state[module.name] = {"hessian": hessian, "n_samples": n_samples}
-        torch.cuda.empty_cache()
-        gc.collect()
 
     # Phase 1: Collect statistics for quantizers
-    max_calibrate(model, forward_loop)
+    max_calibrate(model)
 
     # Phase 2: Build tensor mapping for all quantized layers
     tensor_mapping = {}
     for name, module in model.named_modules():
         if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
-            in_features = module.weight.shape[1]
+            in_features = module.weight.shape[-1]
             tensor_mapping[name] = ((in_features, in_features), module.weight.device)
             module.name = name  # Attach name for easy access in hooks
 
@@ -1463,6 +1459,7 @@ def gptq_lite(
         state = hessian_state[module.name]
         hessian = state["hessian"].to(module.weight.device)
         blockwise_weight_update(module, hessian, block_size, percdamp)
+        del hessian_state[module.name]
         torch.cuda.empty_cache()
 
     print_rank_0("GPTQ-lite quantization completed successfully")
