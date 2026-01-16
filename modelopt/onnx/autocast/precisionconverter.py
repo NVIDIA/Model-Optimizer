@@ -347,6 +347,8 @@ class PrecisionConverter:
                 return node.inputs[1].dtype  # scale type
             elif node.op == "QuantizeLinear":
                 return node.inputs[2].dtype  # zero_point type
+            elif node.op == "ConstantOfShape":
+                return node.attrs["value"].dtype
             elif not inp.dtype or inp.dtype == onnx.TensorProto.UNDEFINED:
                 return None
             elif node.op not in self.custom_ops:
