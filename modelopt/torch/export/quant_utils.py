@@ -1218,7 +1218,7 @@ def preprocess_linear_fusion(modules: list[torch.nn.Module], resmooth_only=False
                 dim=0,
             )
 
-            if hasattr(modules[0].weight_quantizer, "svdquant_lora_a"):
+            if getattr(modules[0].weight_quantizer, "svdquant_lora_a", None) is not None:
                 _update_svdquant(modules, avg_prequant_scale)
             else:
                 for module in modules:
