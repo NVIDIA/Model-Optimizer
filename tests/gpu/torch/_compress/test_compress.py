@@ -45,6 +45,13 @@ from modelopt.torch._compress.anymodel import convert_model
         ("llama_3_1_8b_instruct", "llama", "llama_3_1_8b_instruct", None, False),
         ("llama_3_2_3b_instruct", "llama", "llama_3_1_8b_instruct", None, False),
         ("qwen2_5_7b_instruct", "qwen2", "qwen2_5_7b_instruct", None, False),
+        (
+            "mistral-small-24b-instruct-2501",
+            "mistral_small",
+            "mistral-small-24b-instruct-2501",
+            None,
+            False,
+        ),
         ("nemotron-nano-12b-v2", "nemotron_h_v2", "nemotron-nano-12b-v2", "*-", False),
         (
             "nemotron-3-nano-30b-a3b-base-bf16",
@@ -181,6 +188,11 @@ EXPECTED_PRUNING_VALUES = {
         {"score": 96, "channels": 433},
         {"score": 485, "channels": 105},
     ],
+    # Mistral Small 24B
+    "mistral-small-24b-instruct-2501": [
+        {"score": 73, "channels": 95},
+        {"score": 431, "channels": 174},
+    ],
     # NemotronH with pattern "*-" has only 1 FFN layer (the "-" layer)
     "nemotron-nano-12b-v2": [
         {"score": 70, "channels": 509},
@@ -196,6 +208,7 @@ EXPECTED_LM_LOSS = {
     "llama_3_2_3b_instruct": 4.816886901855469,
     "qwen2_5_7b_instruct": 4.778186798095703,
     "nemotron-nano-12b-v2": 4.79390811920166,
+    "mistral-small-24b-instruct-2501": 4.709150314331055,
     # Note: nemotron-3-nano-30b-a3b-base-bf16 uses MoE expert pruning with different MIP path
 }
 

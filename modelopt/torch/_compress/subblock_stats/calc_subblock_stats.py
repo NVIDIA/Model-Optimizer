@@ -235,7 +235,7 @@ def launch_calc_subblock_stats(cfg: DictConfig) -> None:
         generation_seq_len=cfg.calc_subblock_stats.generation_seq_len,
         num_active_tokens_override=cfg.calc_subblock_stats.get("num_active_tokens_override", None),
         prefill_queue_size=cfg.calc_subblock_stats.prefill_queue_size,
-        allocate_prefill_query=cfg.calc_subblock_stats.allocate_prefill_query,
+        allocate_prefill_query=cfg.calc_subblock_stats.get("allocate_prefill_query", False),
         benchmark_iterations=cfg.calc_subblock_stats.get("benchmark_iterations", None),
         merge_with_existing_stats=cfg.calc_subblock_stats.merge_with_existing_stats,
         subblock_stats_filename=cfg.calc_subblock_stats.subblock_stats_filename,
