@@ -345,6 +345,7 @@ def load_mtp_weights_if_needed(model: torch.nn.Module, model_path: str) -> bool:
 
     # Find non-standard shard files (not matching model-XXXXX-of-XXXXX.safetensors pattern)
     import re
+
     standard_pattern = re.compile(r"model-\d{5}-of-\d{5}\.safetensors")
     non_standard_files = [f for f in all_files if not standard_pattern.match(f)]
 
