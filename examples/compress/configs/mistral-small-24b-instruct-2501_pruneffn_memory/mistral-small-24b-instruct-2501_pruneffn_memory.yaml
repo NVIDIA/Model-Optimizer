@@ -11,12 +11,11 @@ dataset_path: /workspace/datasets/Nemotron-Post-Training-Dataset-v2
 # Working directory for compression outputs
 puzzle_dir: /workspace/puzzle_dir
 
-# MIP memory constraint (in MiB) 
+# MIP memory constraint (in MiB)
 mip:
   human_constraints:
-    target_memory: 78_000 # 78 GiB
+    target_memory: 234_000 # 234 GiB
 
 # FFN intermediate sizes to search over (heterogeneous architecture)
-# teacher_intermediate_size is 32768
 pruning:
-  intermediate_size_list: [8192, 16384, 24576]
+  intermediate_size_list: [8192, 16384, 24576]  # teacher_intermediate_size is 32768

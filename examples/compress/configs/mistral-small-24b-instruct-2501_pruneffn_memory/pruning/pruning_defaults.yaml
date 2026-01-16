@@ -1,15 +1,14 @@
 defaults:
   - /validate_model_defaults
 
+descriptor: ${descriptor}
 model_name_or_path: ${teacher_dir}
 experiment_id: ${pruning.eval_samples}samples_diverse_mini
 activations_log_dir: ???
 activation_hooks_kwargs: ???
 
-descriptor: ${descriptor}
-
 # Data:
-eval_samples: 100
+eval_samples: 1000 # default is 10000
 micro_batch_size: 4
 dataset_path: ${dataset_path}
 val_dataset_name: train
@@ -19,7 +18,7 @@ pruned_ckpts_outpt_dir: ${puzzle_dir}/pruning/${pruning.experiment_id}
 
 ## FFN pruning
 ffn_list:
-mlp_init_mode: "Truncate"
+mlp_init_mode: "Truncate" # PruneByActivationsLog
 
 ## KV-heads pruning
 n_heads_in_group_list:
