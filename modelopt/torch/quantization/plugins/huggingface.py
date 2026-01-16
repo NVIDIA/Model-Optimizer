@@ -604,8 +604,8 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
             )
 
         for idx in range(self.num_experts):
-            _copy_weight(gate_proj[idx], self.gate_up_proj[idx, :, : self.expert_dim].T)
-            _copy_weight(up_proj[idx], self.gate_up_proj[idx, :, self.expert_dim :].T)
+            _copy_weight(gate_proj[idx], self.gate_up_proj[idx, :, : self.intermediate_dim].T)
+            _copy_weight(up_proj[idx], self.gate_up_proj[idx, :, self.intermediate_dim :].T)
             _copy_weight(down_proj[idx], self.down_proj[idx, :].T)
 
         delattr(self, "gate_up_proj")
@@ -627,8 +627,7 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
             expert_mask = torch.nn.functional.one_hot(router_indices, num_classes=self.num_experts)
             expert_mask = expert_mask.permute(2, 1, 0)
             expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
-        for expert_idx in expert_hit[:]:
-            assert expert_idx.numel() == 1, expert_idx
+        for expert_idx in expert_hit:
             with torch.no_grad():
                 _, token_idx = torch.where(expert_mask[expert_idx[0]])
             current_state = hidden_states[token_idx]
