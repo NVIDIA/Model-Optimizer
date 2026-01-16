@@ -387,49 +387,6 @@ NVFP4_DEFAULT_CFG = {
     "algorithm": "max",
 }
 
-NVFP4_WEIGHT_ACT_MSE_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        **_default_disabled_quantizer_cfg,
-    },
-    "algorithm": {
-        "method": "mse",
-        "step_size": 0.25,
-        "start_multiplier": 0.25,
-        "stop_multiplier": 2.0,
-    },
-}
-
-NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "enable": False,
-        },
-        **_default_disabled_quantizer_cfg,
-    },
-    "algorithm": {
-        "method": "mse",
-        "fp8_scale_sweep": True,
-    },
-}
-
 NVFP4_AWQ_LITE_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
@@ -1090,11 +1047,9 @@ class MseCalibConfig(QuantizeAlgorithmConfig):
     fp8_scale_sweep: bool | None = ModeloptField(
         default=False,
         title="Enable FP8 scale sweep for NVFP4 per-block quantization.",
-        description="If True, sweep over all 128 possible FP8 E4M3 scale values "
-        "for NVFP4 per-block quantization instead of using multipliers. "
-        "This is specifically designed for optimizing the FP8-quantized per-block scales "
-        "in NVFP4 format. When enabled, num_steps, step_size, start_multiplier, and "
-        "stop_multiplier are ignored for NVFP4 per-block quantizers.",
+        description="If True, sweep all 128 FP8 E4M3 scale values instead of using multipliers. "
+        "Only applies to NVFP4 weight quantization. When enabled, num_steps, step_size, "
+        "start_multiplier, and stop_multiplier are ignored.",
     )
 
     distributed_sync: bool | None = ModeloptField(

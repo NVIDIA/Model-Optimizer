@@ -197,6 +197,30 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
                     )
 
 
+def _mse_quant_func(x, amax, quantizer):
+    """Quantization function for MSE calibration."""
+    original_amax = quantizer._amax.clone() if hasattr(quantizer, "_amax") else None
+    quantizer._amax = amax
+
+    with (
+        enable_quant(quantizer),
+        disable_calib(quantizer),
+        enable_fake_quant(quantizer),
+    ):
+        if hasattr(quantizer, "_original_shape"):
+            x = quantizer._reset_to_original_shape(x)
+        xq = quantizer(x)
+        if hasattr(quantizer, "_block_reshape_size"):
+            xq = xq.reshape(quantizer._block_reshape_size)
+
+    if original_amax is not None:
+        quantizer._amax = original_amax
+    else:
+        delattr(quantizer, "_amax")
+
+    return xq
+
+
 @torch.no_grad()
 def mse_calibrate(
     model: nn.Module,
@@ -243,29 +267,7 @@ def mse_calibrate(
                 # Get the initial amax from max calibration
                 initial_amax = module._amax.clone().detach()
 
-                def quant_func(x, amax, quantizer=module):
-                    original_amax = quantizer._amax.clone() if hasattr(quantizer, "_amax") else None
-                    quantizer._amax = amax
-
-                    with (
-                        enable_quant(quantizer),
-                        disable_calib(quantizer),
-                        enable_fake_quant(quantizer),
-                    ):
-                        if hasattr(quantizer, "_original_shape"):
-                            x = quantizer._reset_to_original_shape(x)
-                        xq = quantizer(x)
-                        if hasattr(quantizer, "_block_reshape_size"):
-                            xq = xq.reshape(quantizer._block_reshape_size)
-
-                    if original_amax is not None:
-                        quantizer._amax = original_amax
-                    else:
-                        delattr(quantizer, "_amax")
-
-                    return xq
-
-                is_nvfp4_per_block = (
+                is_nvfp4_static = (
                     fp8_scale_sweep
                     and module.is_static_block_quant
                     and module._num_bits == (2, 1)
@@ -280,8 +282,8 @@ def mse_calibrate(
                     step_size=step_size,
                     start_multiplier=start_multiplier,
                     stop_multiplier=stop_multiplier,
-                    quant_func=quant_func,
-                    fp8_scale_sweep=is_nvfp4_per_block,
+                    quant_func=partial(_mse_quant_func, quantizer=module),
+                    fp8_scale_sweep=is_nvfp4_static,
                 )
 
     # Identify weight quantizers by checking if they have corresponding weight parameters

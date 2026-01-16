@@ -406,20 +406,31 @@ def static_blockwise_fp4_fake_quant_kernel(
 
 def static_blockwise_fp4_fake_quant(
     x: torch.Tensor,
-    scale: torch.Tensor,
+    scale: torch.Tensor | None = None,
     scale_fp8_quant_amax: torch.Tensor | None = None,
     skip_scale_quant: bool = False,
     out_dtype: torch.dtype | None = None,
+    amax: torch.Tensor | None = None,
 ):
     """Static blockwise FP4 fake quantization using Triton kernel.
 
     Args:
         x: [NUM_FP4_BLOCKS, BLOCK_SIZE] on CUDA.
-        scale: [NUM_FP4_BLOCKS] or [NUM_FP4_BLOCKS, 1] on CUDA.
+        scale: [NUM_FP4_BLOCKS] or [NUM_FP4_BLOCKS, 1] on CUDA. Mutually exclusive with amax.
         scale_fp8_quant_amax: Absolute max range for FP8 quantization of scale. If None, computed from scale.
         skip_scale_quant: If True, skip FP8 quantization of scale.
         out_dtype: Output dtype. Defaults to x.dtype if None.
+        amax: [NUM_FP4_BLOCKS] or [NUM_FP4_BLOCKS, 1] on CUDA. If provided, scale = amax / 6.0.
+            Mutually exclusive with scale.
     """
+    if scale is None and amax is None:
+        raise ValueError("Either scale or amax must be provided")
+    if scale is not None and amax is not None:
+        raise ValueError("Cannot provide both scale and amax")
+
+    if amax is not None:
+        scale = amax / 6.0  # FP4 max representable value is 6.0
+
     assert x.ndim == 2
     NUM_FP4_BLOCKS, BLOCK_SIZE = x.shape
 
