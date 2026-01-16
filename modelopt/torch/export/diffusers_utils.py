@@ -336,7 +336,7 @@ def get_qkv_group_key(module_name: str) -> str:
 
 
 def get_diffusers_components(
-    model: DiffusionPipeline,
+    model: DiffusionPipeline | nn.Module,
     components: list[str] | None = None,
 ) -> dict[str, Any]:
     """Get all exportable components from a diffusers pipeline.
@@ -367,8 +367,22 @@ def get_diffusers_components(
             return filtered
 
         return all_components
-    else:
-        raise TypeError(f"Expected DiffusionPipeline for now, got {type(model).__name__}")
+
+    if isinstance(model, nn.Module):
+        # Single component model (e.g., UNet2DConditionModel, DiTTransformer2DModel, FluxTransformer2DModel)
+        component_name = type(model).__name__
+        all_components = {component_name: model}
+
+        if components is not None:
+            filtered = {name: comp for name, comp in all_components.items() if name in components}
+            missing = set(components) - set(filtered.keys())
+            if missing:
+                warnings.warn(f"Requested components not found in pipeline: {missing}")
+            return filtered
+
+        return all_components
+
+    raise TypeError(f"Expected DiffusionPipeline or nn.Module, got {type(model).__name__}")
 
 
 @contextmanager
