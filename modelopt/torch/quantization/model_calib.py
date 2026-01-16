@@ -1423,6 +1423,7 @@ def gptq_lite(
     hessian_exists = hessian_state_path is not None and os.path.exists(hessian_state_path)
 
     if hessian_exists:
+        print_rank_0(f"Loading hessian state from {hessian_state_path}")
         load_hessian_state(hessian_state_path, tensor_mapping)
     else:
         if forward_loop is None:
@@ -1441,9 +1442,8 @@ def gptq_lite(
         print_rank_0("Computing Hessian matrices...")
         forward_loop(model)
 
-    # Remove hooks
-    for handle in handles:
-        handle.remove()
+        for handle in handles:
+            handle.remove()
 
     # Save if path provided
     if hessian_state_path is not None:
