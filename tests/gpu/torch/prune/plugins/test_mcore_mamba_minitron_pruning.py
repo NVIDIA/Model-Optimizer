@@ -200,7 +200,7 @@ def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
     prune_minitron(
         model,
         constraints,
-        {"forward_loop": forward_loop, "scores_path": ckpt_path},
+        {"forward_loop": forward_loop, "checkpoint": ckpt_path},
         channel_divisor,
     )
 
@@ -229,9 +229,9 @@ def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
     # Assert forward pass works on the pruned model
     run_mcore_inference_with_dummy_input(model, batch_size, pruned_hidden_size)
 
-    # Assert re-pruning from scores_path works without running the forward loop again
+    # Assert re-pruning from checkpoint works without running the forward loop again
     model = _get_model(initialize_megatron=False)
-    prune_minitron(model, constraints, {"scores_path": ckpt_path}, channel_divisor)
+    prune_minitron(model, constraints, {"checkpoint": ckpt_path}, channel_divisor)
 
 
 def test_mcore_mamba_hybrid_pruning(tmp_path):
@@ -309,7 +309,7 @@ def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
     constraints = {"params": int(param_count * 0.7)}
     config = {
         "forward_loop": forward_loop,
-        "scores_path": ckpt_path,
+        "checkpoint": ckpt_path,
         "score_func": score_func,
         "max_width_pruning": 0.5,
         "max_depth_pruning": 0.5,

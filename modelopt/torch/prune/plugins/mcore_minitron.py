@@ -184,6 +184,7 @@ class MCoreMinitronSearcher(BaseSearcher):
 
     activations_per_rank: list[dict[str, torch.Tensor]]
     layer_scores: dict[int, torch.Tensor]
+    sorted_layers: list[int] | None  # 1-indexed sorted list of layer numbers
     # Dict from params constraint to list of tuples (ss_config, params, score)
     top_k_candidates_per_constraint: dict[float, list[CandidateSubnet]]
 
@@ -208,6 +209,7 @@ class MCoreMinitronSearcher(BaseSearcher):
         return {
             "activations_per_rank": [],
             "layer_scores": {},
+            "sorted_layers": None,
             "top_k_candidates_per_constraint": {},
         }
 
@@ -264,17 +266,13 @@ class MCoreMinitronSearcher(BaseSearcher):
                     )
             hp.reset_choices()  # Make sure ConcatHparam choices are updated after modify()
 
-        unwrapped_model = self.model
-        for m in self.model.modules():
-            if isinstance(m, _DynamicMCoreLanguageModel):
-                unwrapped_model = m
-                break
-        assert isinstance(unwrapped_model, _DynamicMCoreLanguageModel), "Model not supported!"
-        self.unwrapped_model = unwrapped_model
+        assert isinstance(self.model, _DynamicMCoreLanguageModel), (
+            "Input should be unwrapped MCore model!"
+        )
 
     def run_search(self) -> None:
         """Run forward loop to collect activations, sort parameters, and prune the model."""
-        registry = ImportanceEstimatorRegistry(self.unwrapped_model)
+        registry = ImportanceEstimatorRegistry(self.model)
         if self.layer_scores and self.activations_per_rank:  # Available from checkpoint
             registry.set_activations_and_layer_scores(self.activations_per_rank, self.layer_scores)
         elif not self.config["skip_sorting"]:
@@ -299,39 +297,49 @@ class MCoreMinitronSearcher(BaseSearcher):
 
         if self.layer_scores:
             # sort layers by scores and drop the lowest ones
-            sorted_layers = [
+            self.sorted_layers = [
                 layer
                 for layer, _ in sorted(self.layer_scores.items(), key=lambda x: x[1], reverse=True)
             ]
+            assert sorted(self.sorted_layers) == list(range(1, self.model.config.num_layers + 1))
         else:
             assert (
                 self.constraints.keys() == {"export_config"}
                 and "num_layers" not in self.constraints["export_config"]
             ), "Cannot prune `num_layers` without collecting layer scores!"
-            sorted_layers = None
+            self.sorted_layers = None
 
         if "params" in self.constraints:
-            assert sorted_layers is not None
-            export_config = self.search_best_arch_by_params(sorted_layers=sorted_layers)
+            export_config = self.search_best_arch_by_params()
         else:
             export_config = self.constraints["export_config"]
 
         # Prune homogeneously
-        self._prune(export_config, prune_depth=True, sorted_layers=sorted_layers)
+        self._prune(export_config, prune_depth=True)
+
+        # Update hybrid_override_pattern if pruning is done on a hybrid model
+        if isinstance(self.model, MambaModel):
+            print_rank_0(f"Original hybrid_override_pattern: {self.model.hybrid_override_pattern}")
+            new_num_layers = self.model.config.num_layers
+            assert self.sorted_layers is not None
+            kept_layers_numbers = self.sorted_layers[:new_num_layers]
+            self.model.hybrid_override_pattern = "".join(
+                c
+                for i, c in enumerate(self.model.hybrid_override_pattern)
+                if i + 1 in kept_layers_numbers
+            )
+            print_rank_0(f"Pruned hybrid_override_pattern: {self.model.hybrid_override_pattern}")
 
     def _prune(
         self,
         export_config: dict,
         prune_depth: bool = True,
-        *,
-        sorted_layers: list[int] | None = None,
     ) -> None:
         """Prune the model homogeneously based on the export_config by setting active choices for configurable hparams.
 
         Args:
             export_config: Dictionary mapping hyperparameter names to their pruned values.
             prune_depth: Whether to drop layers based on sorted_layers (default: True).
-            sorted_layers: Sorted list of layers (1-indexed) for depth pruning.
         """
         # Prune homogeneously
         for n, hp in named_hparams(self.model, configurable=True):
@@ -341,20 +349,31 @@ class MCoreMinitronSearcher(BaseSearcher):
 
         # Drop layers if depth pruning is enabled
         if prune_depth:
-            num_layers_hp = self.unwrapped_model.get_hparam("num_layers")
+            num_layers_hp = self.model.get_hparam("num_layers")
             if num_layers_hp.active != num_layers_hp.max:
-                assert sorted_layers is not None
-                layers_to_drop = sorted_layers[num_layers_hp.active :]  # type: ignore[misc]
+                assert self.sorted_layers is not None
+                layers_to_drop = self.sorted_layers[num_layers_hp.active :]
                 drop_mcore_language_model_layers(self.model, layers_to_drop=layers_to_drop)
 
         # Update model config with pruned architecture
-        # kv_channels can be None so we need to save original from original hidden_size and num_attention_heads
+        # kv_channels can be None so we need to save from original hidden_size and num_attention_heads
         orig_kv_channels = self.model.config.kv_channels
         if orig_kv_channels is None:
             orig_kv_channels = (
                 self.model.config.hidden_size // self.model.config.num_attention_heads
             )
-        self.model.config.kv_channels = orig_kv_channels
+            self.model.config.kv_channels = orig_kv_channels
+        # num_query_groups can be None so we need to save from original num_attention_heads
+        orig_num_query_groups = self.model.config.num_query_groups
+        if orig_num_query_groups is None:
+            orig_num_query_groups = self.model.config.num_attention_heads
+            self.model.config.num_query_groups = orig_num_query_groups
+        # moe_ffn_hidden_size can be None so we need to save from original ffn_hidden_size
+        orig_moe_ffn_hidden_size = self.model.config.moe_ffn_hidden_size
+        if orig_moe_ffn_hidden_size is None:
+            orig_moe_ffn_hidden_size = self.model.config.ffn_hidden_size
+            self.model.config.moe_ffn_hidden_size = orig_moe_ffn_hidden_size
+        # Now set hparam active choices
         for hp_name, hp_value in export_config.items():
             setattr(self.model.config, hp_name, hp_value)
 
@@ -364,20 +383,17 @@ class MCoreMinitronSearcher(BaseSearcher):
                 m._export_reinit_token_dispatcher()
                 break
 
-    def search_best_arch_by_params(self, sorted_layers: list[int]) -> dict:
+    def search_best_arch_by_params(self) -> dict:
         """Search for the best architecture based on the given parameters constraints.
 
         We perform a grid-search over the search space to find subnets (homogeneous) fitting the constraints.
         Top-k candidates (sorted by param count) are then validated using the score_func (e.g. MMLU)
             and the best subnet is returned.
 
-        Args:
-            sorted_layers: Sorted list of layer numbers (1-indexed) for depth pruning.
-
         Returns:
             export_config: Dictionary mapping hyperparameter names to their pruned values.
         """
-        assert sorted(sorted_layers) == list(range(1, self.model.config.num_layers + 1))
+        assert self.sorted_layers is not None
         max_params = float(self.constraints["params"])  # type: ignore[arg-type]
         max_width_pruning = self.config["max_width_pruning"]
         max_depth_pruning = self.config["max_depth_pruning"]
@@ -392,17 +408,20 @@ class MCoreMinitronSearcher(BaseSearcher):
         for n, hp in named_hparams(self.model, configurable=True):
             hp_name = n.split(".")[-1]
             hp_choices[hp_name] = hp.choices
-        all_pp_search_spaces = [None] * get_pipeline_model_parallel_world_size()
-        torch.distributed.all_gather_object(
-            all_pp_search_spaces, hp_choices, group=get_pipeline_model_parallel_group()
+        pp_group = dist.DistributedProcessGroup(get_pipeline_model_parallel_group())
+        hp_choices = dist.DistributedProcessGroup.get_dist_syncd_obj(
+            hp_choices,
+            pp_group,
+            op=lambda all_pp_search_spaces: {
+                k: v for d in all_pp_search_spaces for k, v in d.items()
+            },
         )
-        hp_choices = {k: v for d in all_pp_search_spaces for k, v in d.items()}  # type: ignore[attr-defined]
 
         # 2. Perform grid-search over the search space to find subnets fitting the constraints
         if max_params not in self.top_k_candidates_per_constraint:
-            max_num_layers = self.unwrapped_model.get_hparam("num_layers").max
+            max_num_layers = self.model.get_hparam("num_layers").max
             search_space_configs = MCoreMinitronSearcher._generate_search_space_combos(
-                hp_choices,  # type: ignore[arg-type]
+                hp_choices,
                 max_width_pruning,
                 max_depth_pruning,
                 hparams_to_skip,
@@ -417,7 +436,7 @@ class MCoreMinitronSearcher(BaseSearcher):
                 self._prune(ss_config, prune_depth=False)
                 layer_ids = None
                 if "num_layers" in ss_config and ss_config["num_layers"] < max_num_layers:
-                    layer_ids = sorted_layers[: ss_config["num_layers"]]
+                    layer_ids = self.sorted_layers[: ss_config["num_layers"]]
                 candidate_params = _param_num_dynamic(self.model, layer_numbers_to_count=layer_ids)
                 if candidate_params <= max_params:
                     selected.append(CandidateSubnet(ss_config, candidate_params, None))
@@ -437,17 +456,30 @@ class MCoreMinitronSearcher(BaseSearcher):
             print_rank_0(f"\t{candidate.ss_config} -> {num2hrb(candidate.params)} params")
         print_rank_0("====================\n")
 
-        # 3. Validate top-k candidates using the score_func and return the best subnet
+        # 3. Optional Knowledge Distillation (KD) step for all top-k candidates
+        print_rank_0(
+            "\nSkipping optional Knowledge Distillation (KD) step for candidates as it is a manual step. "
+            "As per the original paper (https://arxiv.org/pdf/2407.14679), ideally we need to perform a short "
+            f"Knowledge Distillation on ~2B tokens for all top {top_k} candidates before evaluating the "
+            "`score_func`, which will take a lot longer to prune, require splitting the pruning process into multiple "
+            "stages and a lot more compute for pruning but can lead to better pruned model selection. If you are "
+            f"interested to do this, you can take the top {top_k} candidates' `export_config` from the logs above and "
+            "then export all models separately and perform Knowledge Distillation on each of them before evaluating "
+            "the `score_func`.\n"
+        )
+
+        # 4. Validate top-k candidates using the score_func and return the best subnet
         for candidate in tqdm(
             top_k_candidates,
             desc=f"Validating top {top_k} candidates on given score_func (this will take some time)...",
             disable=not dist.is_master(),
+            smoothing=0.7,
         ):
             if candidate.score is None:  # not restored from checkpoint
-                all_layers = self.unwrapped_model.decoder.layers
+                all_layers = self.model.decoder.layers
                 start_layer_number = all_layers[0].layer_number
 
-                self._prune(candidate.ss_config, prune_depth=True, sorted_layers=sorted_layers)
+                self._prune(candidate.ss_config, prune_depth=True)
                 candidate.score = self.eval_score(silent=False)
                 self.save_search_checkpoint(verbose=False)
 
@@ -456,10 +488,17 @@ class MCoreMinitronSearcher(BaseSearcher):
                 for layer in all_layers:
                     layer.layer_number = start_layer_number
                     start_layer_number += 1
-                self.unwrapped_model.decoder.layers = all_layers
+                self.model.decoder.layers = all_layers
             print_rank_0(
                 f"\t{candidate.ss_config} -> {num2hrb(candidate.params)} params, {candidate.score:.4f} score\n"
             )
+
+        print_rank_0(f"\n====================\nTop {top_k} candidates with scores:")
+        for candidate in top_k_candidates:
+            print_rank_0(
+                f"\t{candidate.ss_config} -> {num2hrb(candidate.params)} params, {candidate.score:.4f} score"
+            )
+        print_rank_0("====================\n")
 
         dist.barrier()
         best = max(top_k_candidates, key=lambda x: x.score)  # type: ignore[arg-type, return-value]
@@ -834,11 +873,14 @@ class ImportanceEstimatorRegistry:
         layer_scores = {}
         for layer in self.model.decoder.layers:
             layer_scores[layer.layer_number] = layer._scores
-        all_pp_layer_scores = [None] * get_pipeline_model_parallel_world_size()
-        torch.distributed.all_gather_object(
-            all_pp_layer_scores, layer_scores, group=get_pipeline_model_parallel_group()
+        pp_group = dist.DistributedProcessGroup(get_pipeline_model_parallel_group())
+        layer_scores = dist.DistributedProcessGroup.get_dist_syncd_obj(
+            layer_scores,
+            pp_group,
+            op=lambda all_pp_layer_scores: {
+                k: v for d in all_pp_layer_scores for k, v in d.items()
+            },
         )
-        layer_scores = {k: v for d in all_pp_layer_scores for k, v in d.items()}  # type: ignore[attr-defined]
         print_rank_0(f"Layerwise scores (1-indexed, higher is better): {layer_scores}")
         assert sorted(layer_scores.keys()) == list(range(1, num_layers_hp.max + 1))  # type: ignore[arg-type]
 
