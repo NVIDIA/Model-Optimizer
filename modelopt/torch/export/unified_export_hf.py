@@ -34,6 +34,15 @@ try:
     import diffusers
     from diffusers import DiffusionPipeline, ModelMixin
 
+    from .diffusers_utils import (
+        generate_diffusion_dummy_inputs,
+        get_diffusers_components,
+        get_qkv_group_key,
+        hide_quantizers_from_state_dict,
+        infer_dtype_from_model,
+        is_qkv_projection,
+    )
+
     HAS_DIFFUSERS = True
 except ImportError:
     HAS_DIFFUSERS = False
@@ -46,14 +55,6 @@ from modelopt.torch.quantization.qtensor import NVFP4QTensor
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
 
 from .convert_hf_config import convert_hf_quant_config_format
-from .diffusers_utils import (
-    generate_diffusion_dummy_inputs,
-    get_diffusers_components,
-    get_qkv_group_key,
-    hide_quantizers_from_state_dict,
-    infer_dtype_from_model,
-    is_qkv_projection,
-)
 from .layer_utils import (
     get_expert_linear_names,
     get_experts_list,
