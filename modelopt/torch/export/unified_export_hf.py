@@ -655,6 +655,7 @@ def _export_transformers_checkpoint(
 
     # We define kv cache scale as amax / 448 for both FP8 and NVFP4 KV cache quantization.
     kv_cache_max_bound = 448
+    kv_cache_format = quant_config["quantization"]["kv_cache_quant_algo"]
     quantized_state_dict = postprocess_state_dict(
         quantized_state_dict, kv_cache_max_bound, kv_cache_format, is_modelopt_qlora
     )
