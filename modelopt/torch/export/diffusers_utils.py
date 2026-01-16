@@ -17,6 +17,7 @@
 
 import warnings
 from contextlib import contextmanager
+from importlib import import_module
 from typing import Any
 
 import torch
@@ -49,37 +50,37 @@ def generate_diffusion_dummy_inputs(
     batch_size = 1
 
     # Try to import specific model classes for isinstance checks
-    try:
-        from diffusers.models.transformers import FluxTransformer2DModel
+    def _is_model_type(module_path: str, class_name: str, fallback: bool) -> bool:
+        try:
+            module = import_module(module_path)
+            return isinstance(model, getattr(module, class_name))
+        except (ImportError, AttributeError):
+            return fallback
 
-        is_flux = isinstance(model, FluxTransformer2DModel)
-    except ImportError:
-        is_flux = "flux" in model_class_name.lower()
-
-    try:
-        from diffusers.models.transformers import SD3Transformer2DModel
-
-        is_sd3 = isinstance(model, SD3Transformer2DModel)
-    except ImportError:
-        is_sd3 = "sd3" in model_class_name.lower()
-
-    try:
-        from diffusers.models.transformers import DiTTransformer2DModel
-
-        is_dit = isinstance(model, DiTTransformer2DModel)
-    except ImportError:
-        is_dit = model_class_name == "DiTTransformer2DModel"
-
-    try:
-        from diffusers.models.unets import UNet2DConditionModel
-
-        is_unet = isinstance(model, UNet2DConditionModel)
-    except ImportError:
-        is_unet = "unet" in model_class_name.lower()
+    is_flux = _is_model_type(
+        "diffusers.models.transformers",
+        "FluxTransformer2DModel",
+        "flux" in model_class_name.lower(),
+    )
+    is_sd3 = _is_model_type(
+        "diffusers.models.transformers",
+        "SD3Transformer2DModel",
+        "sd3" in model_class_name.lower(),
+    )
+    is_dit = _is_model_type(
+        "diffusers.models.transformers",
+        "DiTTransformer2DModel",
+        model_class_name == "DiTTransformer2DModel",
+    )
+    is_unet = _is_model_type(
+        "diffusers.models.unets",
+        "UNet2DConditionModel",
+        "unet" in model_class_name.lower(),
+    )
 
     cfg = getattr(model, "config", None)
 
-    if is_flux:
+    def _flux_inputs() -> dict[str, torch.Tensor]:
         # FluxTransformer2DModel: 3D hidden_states (batch, seq_len, in_channels)
         # Requires: hidden_states, encoder_hidden_states, pooled_projections, timestep, img_ids, txt_ids
         in_channels = getattr(cfg, "in_channels", 64)
@@ -110,7 +111,7 @@ def generate_diffusion_dummy_inputs(
             dummy_inputs["guidance"] = torch.tensor([3.5], device=device, dtype=torch.float32)
         return dummy_inputs
 
-    elif is_sd3:
+    def _sd3_inputs() -> dict[str, torch.Tensor]:
         # SD3Transformer2DModel: 4D hidden_states (batch, channels, height, width)
         # Requires: hidden_states, encoder_hidden_states, pooled_projections, timestep
         in_channels = getattr(cfg, "in_channels", 16)
@@ -136,7 +137,7 @@ def generate_diffusion_dummy_inputs(
             "return_dict": False,
         }
 
-    elif is_dit:
+    def _dit_inputs() -> dict[str, torch.Tensor]:
         # DiTTransformer2DModel: 4D hidden_states (batch, in_channels, height, width)
         # Requires: hidden_states, timestep, class_labels
         in_channels = getattr(cfg, "in_channels", 4)
@@ -155,7 +156,7 @@ def generate_diffusion_dummy_inputs(
             "return_dict": False,
         }
 
-    elif is_unet:
+    def _unet_inputs() -> dict[str, torch.Tensor]:
         # UNet2DConditionModel: 4D sample (batch, in_channels, height, width)
         # Requires: sample, timestep, encoder_hidden_states
         in_channels = getattr(cfg, "in_channels", 4)
@@ -189,40 +190,58 @@ def generate_diffusion_dummy_inputs(
             }
         return dummy_inputs
 
-    # Try generic transformer handling for other model types
-    # Check if model has common transformer attributes
-    elif cfg is not None:
-        # Many transformers use 4D hidden_states with in_channels and sample_size
-        if hasattr(cfg, "in_channels") and hasattr(cfg, "sample_size"):
-            in_channels = cfg.in_channels
-            sample_size = cfg.sample_size
-            test_size = min(sample_size, 32)
+    def _generic_transformer_inputs() -> dict[str, torch.Tensor] | None:
+        # Try generic transformer handling for other model types
+        # Check if model has common transformer attributes
+        if cfg is None:
+            return None
+        if not (hasattr(cfg, "in_channels") and hasattr(cfg, "sample_size")):
+            return None
 
-            dummy_inputs = {
-                "hidden_states": torch.randn(
-                    batch_size, in_channels, test_size, test_size, device=device, dtype=dtype
-                ),
-                "timestep": torch.randint(0, 1000, (batch_size,), device=device),
-                "return_dict": False,
-            }
+        in_channels = cfg.in_channels
+        sample_size = cfg.sample_size
+        test_size = min(sample_size, 32)
 
-            # Add encoder_hidden_states if model has cross attention
-            if hasattr(cfg, "joint_attention_dim"):
-                text_seq_len = 8
-                dummy_inputs["encoder_hidden_states"] = torch.randn(
-                    batch_size, text_seq_len, cfg.joint_attention_dim, device=device, dtype=dtype
+        dummy_inputs = {
+            "hidden_states": torch.randn(
+                batch_size, in_channels, test_size, test_size, device=device, dtype=dtype
+            ),
+            "timestep": torch.randint(0, 1000, (batch_size,), device=device),
+            "return_dict": False,
+        }
+
+        # Add encoder_hidden_states if model has cross attention
+        if hasattr(cfg, "joint_attention_dim"):
+            text_seq_len = 8
+            dummy_inputs["encoder_hidden_states"] = torch.randn(
+                batch_size, text_seq_len, cfg.joint_attention_dim, device=device, dtype=dtype
+            )
+            if hasattr(cfg, "pooled_projection_dim"):
+                dummy_inputs["pooled_projections"] = torch.randn(
+                    batch_size, cfg.pooled_projection_dim, device=device, dtype=dtype
                 )
-                if hasattr(cfg, "pooled_projection_dim"):
-                    dummy_inputs["pooled_projections"] = torch.randn(
-                        batch_size, cfg.pooled_projection_dim, device=device, dtype=dtype
-                    )
-            elif hasattr(cfg, "cross_attention_dim"):
-                text_seq_len = 8
-                dummy_inputs["encoder_hidden_states"] = torch.randn(
-                    batch_size, text_seq_len, cfg.cross_attention_dim, device=device, dtype=dtype
-                )
+        elif hasattr(cfg, "cross_attention_dim"):
+            text_seq_len = 8
+            dummy_inputs["encoder_hidden_states"] = torch.randn(
+                batch_size, text_seq_len, cfg.cross_attention_dim, device=device, dtype=dtype
+            )
 
-            return dummy_inputs
+        return dummy_inputs
+
+    model_input_builders = [
+        ("flux", is_flux, _flux_inputs),
+        ("sd3", is_sd3, _sd3_inputs),
+        ("dit", is_dit, _dit_inputs),
+        ("unet", is_unet, _unet_inputs),
+    ]
+
+    for _, matches, build_inputs in model_input_builders:
+        if matches:
+            return build_inputs()
+
+    generic_inputs = _generic_transformer_inputs()
+    if generic_inputs is not None:
+        return generic_inputs
 
     return None
 

@@ -80,7 +80,8 @@ class ModelType(str, Enum):
     FLUX_DEV = "flux-dev"
     FLUX_SCHNELL = "flux-schnell"
     LTX_VIDEO_DEV = "ltx-video-dev"
-    WAN22_T2V = "wan2.2-t2v-14b"
+    WAN22_T2V_14b = "wan2.2-t2v-14b"
+    WAN22_T2V_5b = "wan2.2-t2v-5b"
 
 
 class DataType(str, Enum):
@@ -146,7 +147,8 @@ def get_model_filter_func(model_type: ModelType) -> Callable[[str], bool]:
         ModelType.SD3_MEDIUM: filter_func_default,
         ModelType.SD35_MEDIUM: filter_func_default,
         ModelType.LTX_VIDEO_DEV: filter_func_ltx_video,
-        ModelType.WAN22_T2V: filter_func_wan_video,
+        ModelType.WAN22_T2V_14b: filter_func_wan_video,
+        ModelType.WAN22_T2V_5b: filter_func_wan_video,
     }
 
     return filter_func_map.get(model_type, filter_func_default)
@@ -161,7 +163,8 @@ MODEL_REGISTRY: dict[ModelType, str] = {
     ModelType.FLUX_DEV: "black-forest-labs/FLUX.1-dev",
     ModelType.FLUX_SCHNELL: "black-forest-labs/FLUX.1-schnell",
     ModelType.LTX_VIDEO_DEV: "Lightricks/LTX-Video-0.9.7-dev",
-    ModelType.WAN22_T2V: "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+    ModelType.WAN22_T2V_14b: "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
+    ModelType.WAN22_T2V_5b: "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
 }
 
 MODEL_PIPELINE: dict[ModelType, type[DiffusionPipeline]] = {
@@ -172,7 +175,8 @@ MODEL_PIPELINE: dict[ModelType, type[DiffusionPipeline]] = {
     ModelType.FLUX_DEV: FluxPipeline,
     ModelType.FLUX_SCHNELL: FluxPipeline,
     ModelType.LTX_VIDEO_DEV: LTXConditionPipeline,
-    ModelType.WAN22_T2V: WanPipeline,
+    ModelType.WAN22_T2V_14b: WanPipeline,
+    ModelType.WAN22_T2V_5b: WanPipeline,
 }
 
 # Model-specific default arguments for calibration
@@ -251,7 +255,7 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
             "negative_prompt": "worst quality, inconsistent motion, blurry, jittery, distorted",
         },
     },
-    ModelType.WAN22_T2V: {
+    ModelType.WAN22_T2V_14b: {
         "backbone": "transformer",
         "dataset": {"name": "nkp37/OpenVid-1M", "split": "train", "column": "caption"},
         "from_pretrained_extra_args": {
@@ -271,6 +275,22 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
                 "poorly drawn face, deformed, disfigured, deformed limbs, fused fingers, "
                 "static image, cluttered background, three legs, many people in the background, "
                 "walking backwards"
+            ),
+        },
+    },
+    ModelType.WAN22_T2V_5b: {
+        "backbone": "transformer",
+        "dataset": {"name": "nkp37/OpenVid-1M", "split": "train", "column": "caption"},
+        "inference_extra_args": {
+            "height": 512,
+            "width": 768,
+            "num_frames": 81,
+            "fps": 16,
+            "guidance_scale": 5.0,
+            "negative_prompt": (
+                "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留"  # noqa: RUF001
+                "，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，"  # noqa: RUF001
+                "手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"  # noqa: RUF001
             ),
         },
     },
@@ -591,8 +611,8 @@ class Calibrator:
                 if self.model_type == ModelType.LTX_VIDEO_DEV:
                     # Special handling for LTX-Video
                     self._run_ltx_video_calibration(prompt_batch, extra_args)
-                elif self.model_type == ModelType.WAN22_T2V:
-                    # Special handling for LTX-Video
+                elif self.model_type in [ModelType.WAN22_T2V_14b, ModelType.WAN22_T2V_5b]:
+                    # Special handling for WAN video models
                     self._run_wan_video_calibration(prompt_batch, extra_args)
                 else:
                     common_args = {
@@ -607,23 +627,17 @@ class Calibrator:
     def _run_wan_video_calibration(
         self, prompt_batch: list[str], extra_args: dict[str, Any]
     ) -> None:
-        negative_prompt = extra_args["negative_prompt"]
-        height = extra_args["height"]
-        width = extra_args["width"]
-        num_frames = extra_args["num_frames"]
-        guidance_scale = extra_args["guidance_scale"]
-        guidance_scale_2 = extra_args["guidance_scale_2"]
+        kwargs = {}
+        kwargs["negative_prompt"] = extra_args["negative_prompt"]
+        kwargs["height"] = extra_args["height"]
+        kwargs["width"] = extra_args["width"]
+        kwargs["num_frames"] = extra_args["num_frames"]
+        kwargs["guidance_scale"] = extra_args["guidance_scale"]
+        if "guidance_scale_2" in extra_args:
+            kwargs["guidance_scale_2"] = extra_args["guidance_scale_2"]
+        kwargs["num_inference_steps"] = self.config.n_steps
 
-        self.pipe(
-            prompt=prompt_batch,
-            negative_prompt=negative_prompt,
-            height=height,
-            width=width,
-            num_frames=num_frames,
-            guidance_scale=guidance_scale,
-            guidance_scale_2=guidance_scale_2,
-            num_inference_steps=self.config.n_steps,
-        ).frames  # type: ignore[misc]
+        self.pipe(prompt=prompt_batch, **kwargs).frames  # type: ignore[misc]
 
     def _run_ltx_video_calibration(
         self, prompt_batch: list[str], extra_args: dict[str, Any]
