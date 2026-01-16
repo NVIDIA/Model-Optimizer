@@ -733,23 +733,20 @@ except ImportError:
     pass
 
 try:
-    from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextSparseMoeBlock
-
+    from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
+        Qwen3VLMoeTextSparseMoeBlock,
+        Qwen3VLMoeTextExperts,
+    )
+    
     if Qwen3VLMoeTextSparseMoeBlock not in QuantModuleRegistry:
         QuantModuleRegistry.register(
             {Qwen3VLMoeTextSparseMoeBlock: "hf.Qwen3VLMoeTextSparseMoeBlock"}
         )(_QuantSparseMoe)
-except ImportError:
-    pass
-
-
-try:
-    from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextExperts
-
+    
     if Qwen3VLMoeTextExperts not in QuantModuleRegistry:
-        QuantModuleRegistry.register({Qwen3VLMoeTextExperts: "hf.Qwen3VLMoeTextExperts"})(
-            _QuantQwen3VLMoeTextExperts
-        )
+        QuantModuleRegistry.register(
+            {Qwen3VLMoeTextExperts: "hf.Qwen3VLMoeTextExperts"}
+        )(_QuantQwen3VLMoeTextExperts)
 except ImportError:
     pass
 
