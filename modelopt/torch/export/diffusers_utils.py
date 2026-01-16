@@ -37,6 +37,7 @@ def generate_diffusion_dummy_inputs(
     - FluxTransformer2DModel: 3D hidden_states + encoder_hidden_states + img_ids + txt_ids + pooled_projections
     - SD3Transformer2DModel: 4D hidden_states + encoder_hidden_states + pooled_projections
     - UNet2DConditionModel: 4D sample + timestep + encoder_hidden_states
+    - WanTransformer3DModel: 5D hidden_states + encoder_hidden_states + timestep
 
     Args:
         model: The diffusion model component.
@@ -71,6 +72,11 @@ def generate_diffusion_dummy_inputs(
         "diffusers.models.transformers",
         "DiTTransformer2DModel",
         model_class_name == "DiTTransformer2DModel",
+    )
+    is_wan = _is_model_type(
+        "diffusers.models.transformers",
+        "WanTransformer3DModel",
+        "wan" in model_class_name.lower(),
     )
     is_unet = _is_model_type(
         "diffusers.models.unets",
@@ -190,6 +196,41 @@ def generate_diffusion_dummy_inputs(
             }
         return dummy_inputs
 
+    def _wan_inputs() -> dict[str, torch.Tensor]:
+        # WanTransformer3DModel: 5D hidden_states (batch, channels, frames, height, width)
+        # Requires: hidden_states, encoder_hidden_states, timestep
+        in_channels = getattr(cfg, "in_channels", 16)
+        text_dim = getattr(cfg, "text_dim", 4096)
+        max_seq_len = getattr(cfg, "rope_max_seq_len", 512)
+
+        patch_dtype = getattr(getattr(model, "patch_embedding", None), "weight", None)
+        patch_dtype = patch_dtype.dtype if patch_dtype is not None else dtype
+        text_embedder = getattr(getattr(model, "condition_embedder", None), "text_embedder", None)
+        text_dtype = (
+            text_embedder.linear_1.weight.dtype
+            if text_embedder is not None and hasattr(text_embedder, "linear_1")
+            else dtype
+        )
+
+        # Wan expects num_frames = 4 * n + 1; keep n small for dummy forward
+        num_frames = 5
+        text_seq_len = min(max_seq_len, 512)
+
+        # Keep spatial dims small and divisible by patch size (default 2x2)
+        height = 8
+        width = 8
+
+        return {
+            "hidden_states": torch.randn(
+                batch_size, in_channels, num_frames, height, width, device=device, dtype=patch_dtype
+            ),
+            "encoder_hidden_states": torch.randn(
+                batch_size, text_seq_len, text_dim, device=device, dtype=text_dtype
+            ),
+            "timestep": torch.randint(0, 1000, (batch_size,), device=device),
+            "return_dict": False,
+        }
+
     def _generic_transformer_inputs() -> dict[str, torch.Tensor] | None:
         # Try generic transformer handling for other model types
         # Check if model has common transformer attributes
@@ -232,6 +273,7 @@ def generate_diffusion_dummy_inputs(
         ("flux", is_flux, _flux_inputs),
         ("sd3", is_sd3, _sd3_inputs),
         ("dit", is_dit, _dit_inputs),
+        ("wan", is_wan, _wan_inputs),
         ("unet", is_unet, _unet_inputs),
     ]
 
