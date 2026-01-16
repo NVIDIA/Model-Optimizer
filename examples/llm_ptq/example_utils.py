@@ -15,7 +15,9 @@
 
 import copy
 import glob
+import json
 import os
+import re
 import shutil
 import sys
 import warnings
@@ -26,6 +28,7 @@ import torch
 import transformers
 from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
+from safetensors.torch import load_file
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
