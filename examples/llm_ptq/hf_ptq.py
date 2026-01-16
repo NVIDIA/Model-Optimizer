@@ -67,10 +67,7 @@ from modelopt.torch.utils.dataset_utils import (
 from modelopt.torch.utils.image_processor import BaseImageProcessor, MllamaImageProcessor
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
-from modelopt.torch.utils.vlm_dataset_utils import (
-    get_supported_vlm_datasets,
-    get_vlm_dataset_dataloader,
-)
+from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
 
@@ -114,7 +111,7 @@ def make_calib_dataloader(
     calib_dataloader = None
     first_text_speech_dataset = None
     if getattr(args, "calib_with_images", False):
-        # Generic multimodal calibration path (used for Nemotron VL and other HF VLMs).
+        # VLM image-text calibration path: assume Nemotron VLM dataset by default.
         assert processor is not None, (
             "Please provide a processor (e.g., AutoProcessor) for image calibration."
         )
@@ -123,19 +120,18 @@ def make_calib_dataloader(
             "Please pass --calib_size with one value (e.g., --calib_size 256)."
         )
         calib_dataloader = get_vlm_dataset_dataloader(
-            dataset_name=getattr(args, "vlm_dataset", "scienceqa"),
+            dataset_name="nemotron_vlm_dataset_v2",
             processor=processor,
             batch_size=args.batch_size,
             num_samples=args.calib_size[0],
             device=device,
             max_length=args.calib_seq,
             require_image=True,
-            subsets=getattr(args, "vlm_subsets", None),
-            shuffle_buffer_size=getattr(args, "vlm_shuffle_buffer", 10_000),
-            seed=getattr(args, "vlm_shuffle_seed", 42),
-            image_root=getattr(args, "vlm_image_root", None),
-            use_media_shards=not getattr(args, "vlm_disable_media_shards", False),
-            max_shards=getattr(args, "vlm_max_shards", None),
+            subsets=["sparsetables", "plotqa_cot", "wiki_en"],
+            shuffle_buffer_size=10_000,
+            seed=42,
+            use_media_shards=True,
+            max_shards=1,
         )
     elif model_type == "mllama":
         assert processor is not None and isinstance(processor, MllamaImageProcessor), (
@@ -327,6 +323,7 @@ def load_model(args: argparse.Namespace):
     tokenizer = None
     language_model = full_model
     default_padding_side = None
+    default_pad_token = None
 
     is_nemotron_vl_model = is_nemotron_vl(full_model)
     if model_type == "mllama":
@@ -361,6 +358,7 @@ def load_model(args: argparse.Namespace):
         else:
             tokenizer = get_tokenizer(args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code)
 
+        default_pad_token = tokenizer.pad_token
         # Some Nemotron tokenizers may not define pad_token by default; but we use padding=True during calibration.
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
@@ -397,6 +395,7 @@ def load_model(args: argparse.Namespace):
         tokenizer = get_tokenizer(args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code)
 
         default_padding_side = tokenizer.padding_side
+        default_pad_token = tokenizer.pad_token
         # Left padding usually provides better calibration result.
         tokenizer.padding_side = "left"
 
@@ -432,6 +431,7 @@ def load_model(args: argparse.Namespace):
         processor,
         tokenizer,
         default_padding_side,
+        default_pad_token,
         device,
     )
 
@@ -562,6 +562,7 @@ def export_quantized(
     model_type: str | None,
     tokenizer: PreTrainedTokenizerBase | None,
     default_padding_side,
+    default_pad_token,
 ):
     with torch.inference_mode():
         if model_type is None:
@@ -651,6 +652,8 @@ def export_quantized(
         # Restore default padding and export the tokenizer as well.
         if tokenizer is not None:
             tokenizer.padding_side = default_padding_side
+            if default_pad_token is not None:
+                tokenizer.pad_token = default_pad_token
             tokenizer.save_pretrained(export_path)
 
         end_time = time.time()
@@ -800,6 +803,7 @@ def quantize_main(
     processor: BaseImageProcessor | ProcessorMixin | None,
     tokenizer: PreTrainedTokenizerBase | None,
     default_padding_side,
+    default_pad_token,
     device: torch.device,
 ):
     if args.batch_size == 0:
@@ -915,7 +919,15 @@ def quantize_main(
         is_nemotron_vl_model,
         first_text_speech_dataset,
     )
-    export_quantized(args, full_model, language_model, model_type, tokenizer, default_padding_side)
+    export_quantized(
+        args,
+        full_model,
+        language_model,
+        model_type,
+        tokenizer,
+        default_padding_side,
+        default_pad_token,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -971,60 +983,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Calibrate with image-text pairs (for VLMs). "
-            "For Nemotron VL this enables multimodal calibration using --vlm_dataset."
-        ),
-    )
-    parser.add_argument(
-        "--vlm_dataset",
-        type=str,
-        default="scienceqa",
-        help=f"VLM calibration dataset name (choices: {get_supported_vlm_datasets()}).",
-    )
-    parser.add_argument(
-        "--vlm_subsets",
-        type=str,
-        default="sparsetables,plotqa_cot,wiki_en",
-        help=(
-            "Comma-separated subset/config names for multi-subset VLM datasets "
-            "(e.g., nemotron_vlm_dataset_v2)."
-        ),
-    )
-    parser.add_argument(
-        "--vlm_shuffle_buffer",
-        type=int,
-        default=10_000,
-        help="Shuffle buffer size for streaming VLM datasets (higher is more random but downloads more).",
-    )
-    parser.add_argument(
-        "--vlm_shuffle_seed",
-        type=int,
-        default=42,
-        help="Random seed for streaming VLM dataset shuffle.",
-    )
-    parser.add_argument(
-        "--vlm_image_root",
-        type=str,
-        default=None,
-        help=(
-            "Local directory containing image files referenced by the VLM dataset annotations. "
-            "Required for nemotron_vlm_dataset_v2 subsets that only ship JSONL (e.g., docvqa_cot, chartqa_cot)."
-        ),
-    )
-    parser.add_argument(
-        "--vlm_max_shards",
-        type=int,
-        default=1,
-        help=(
-            "For VLM subsets that include in-repo tar shards under `<subset>/media/*.tar`, "
-            "limit how many shards to download/use for calibration. Increase if you don't get enough samples."
-        ),
-    )
-    parser.add_argument(
-        "--vlm_disable_media_shards",
-        action="store_true",
-        help=(
-            "Disable reading in-repo `media/shard_*.tar` files for nemotron_vlm_dataset_v2. "
-            "Useful if you want to use JSONL-only subsets together with --vlm_image_root."
+            "This uses nemotron_vlm_dataset_v2 with default subsets (sparsetables, plotqa_cot, wiki_en)."
         ),
     )
     parser.add_argument("--inference_tensor_parallel", type=int, default=1)
@@ -1164,6 +1123,7 @@ def main(args: argparse.Namespace):
         processor,
         tokenizer,
         default_padding_side,
+        default_pad_token,
         device,
     ) = load_model(args)
 
@@ -1181,6 +1141,7 @@ def main(args: argparse.Namespace):
             processor,
             tokenizer,
             default_padding_side,
+            default_pad_token,
             device,
         )
 
@@ -1191,9 +1152,6 @@ if __name__ == "__main__":
     if args.export_fmt != "hf":
         warnings.warn("Deprecated. --export_fmt forced to hf.")
 
-    args.dataset = args.dataset.split(",") if args.dataset else None
+    args.dataset = args.dataset.split(",") if isinstance(args.dataset, str) else args.dataset
     args.calib_size = [int(num_sample) for num_sample in args.calib_size.split(",")]
-    args.vlm_subsets = (
-        [s.strip() for s in args.vlm_subsets.split(",") if s.strip()] if args.vlm_subsets else None
-    )
     main(args)

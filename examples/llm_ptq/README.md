@@ -173,8 +173,6 @@ python hf_ptq.py \
   --export_path <quantized_ckpt_path> \
   --trust_remote_code \
   --calib_with_images \
-  --vlm_dataset nemotron_vlm_dataset_v2 \
-  --vlm_subsets sparsetables,plotqa_cot,wiki_en \
   --calib_size 512
 ```
 
