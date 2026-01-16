@@ -291,7 +291,10 @@ class Testfp4:
 
         if use_amax_param:
             output_static = triton_kernel.static_blockwise_fp4_fake_quant(
-                x, amax=block_amax, scale_fp8_quant_amax=scale_fp8_quant_amax, skip_scale_quant=False
+                x,
+                amax=block_amax,
+                scale_fp8_quant_amax=scale_fp8_quant_amax,
+                skip_scale_quant=False,
             )
         else:
             output_static = triton_kernel.static_blockwise_fp4_fake_quant(

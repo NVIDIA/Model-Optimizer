@@ -69,6 +69,7 @@ NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG = {
     },
 }
 
+
 @pytest.mark.parametrize("model_cls", [SimpleLinear, SimpleConv, SimpleConvLinear])
 @pytest.mark.parametrize(
     "config",

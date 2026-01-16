@@ -431,6 +431,7 @@ def static_blockwise_fp4_fake_quant(
     if amax is not None:
         scale = amax / 6.0  # FP4 max representable value is 6.0
 
+    assert scale is not None  # Guaranteed by validation above
     assert x.ndim == 2
     NUM_FP4_BLOCKS, BLOCK_SIZE = x.shape
 
