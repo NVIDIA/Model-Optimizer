@@ -32,7 +32,6 @@
 import argparse
 import copy
 import os
-import pickle
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
@@ -232,27 +231,17 @@ class SupervisedDataset(Dataset):
     ):
         super().__init__()
 
-        pickle_name = f"dict_{split}_{tokenizer.model_max_length}.pickle"
         with training_args.main_process_first():
-            if os.path.isfile(pickle_name):
-                with open(pickle_name, "rb") as f:
-                    print_rank_0("Reuse pickled data")
-                    data_dict = pickle.load(f)
-            else:
-                print_rank_0("Loading data...")
-                list_data_dict = utils.jload(data_path)
+            print_rank_0("Loading data...")
+            list_data_dict = utils.jload(data_path)
 
-                print_rank_0("Formatting inputs...")
-                prompt_input = PROMPT_DICT["prompt_input"]
-                sources = [prompt_input.format_map(example) for example in list_data_dict]
-                targets = [
-                    f"{example['output']}{tokenizer.eos_token}" for example in list_data_dict
-                ]
+            print_rank_0("Formatting inputs...")
+            prompt_input = PROMPT_DICT["prompt_input"]
+            sources = [prompt_input.format_map(example) for example in list_data_dict]
+            targets = [f"{example['output']}{tokenizer.eos_token}" for example in list_data_dict]
 
-                print_rank_0("Tokenizing inputs... This may take some time...")
-                data_dict = preprocess(sources, targets, tokenizer)
-                with open(pickle_name, "wb") as f:
-                    pickle.dump(data_dict, f, pickle.HIGHEST_PROTOCOL)
+            print_rank_0("Tokenizing inputs... This may take some time...")
+            data_dict = preprocess(sources, targets, tokenizer)
 
         self.input_ids = data_dict["input_ids"]
         self.labels = data_dict["labels"]

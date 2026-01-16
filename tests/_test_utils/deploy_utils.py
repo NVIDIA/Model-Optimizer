@@ -100,7 +100,40 @@ class ModelDeployer:
         spec_config = None
         llm = None
         kv_cache_config = KvCacheConfig(enable_block_reuse=True, free_gpu_memory_fraction=0.8)
-        if "eagle" in self.model_id.lower():
+
+        if self.model_id == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8":
+            llm = LLM(
+                model=self.model_id,
+                tensor_parallel_size=self.tensor_parallel_size,
+                enable_attention_dp=False,
+                attn_backend=self.attn_backend,
+                trust_remote_code=True,
+                max_batch_size=8,
+                kv_cache_config=KvCacheConfig(
+                    enable_block_reuse=False,
+                    mamba_ssm_cache_dtype="float32",
+                ),
+            )
+        elif self.model_id == "nvidia/EAGLE3-NVIDIA-Nemotron-3-Nano-30B-A3B-BF16":
+            spec_config = EagleDecodingConfig(
+                max_draft_len=3,
+                speculative_model_dir=self.model_id,
+                eagle3_one_model=self.eagle3_one_model,
+            )
+            llm = LLM(
+                model=self.model_id,
+                tensor_parallel_size=self.tensor_parallel_size,
+                enable_attention_dp=False,
+                attn_backend=self.attn_backend,
+                trust_remote_code=True,
+                max_batch_size=8,
+                speculative_config=spec_config,
+                kv_cache_config=KvCacheConfig(
+                    enable_block_reuse=False,
+                    mamba_ssm_cache_dtype="float32",
+                ),
+            )
+        elif "eagle" in self.model_id.lower():
             spec_config = EagleDecodingConfig(
                 max_draft_len=3,
                 speculative_model_dir=self.model_id,
@@ -146,7 +179,7 @@ class ModelDeployer:
             pytest.skip("vllm package not available")
 
         quantization_method = "modelopt"
-        if "FP4" in self.model_id:
+        if "fp4" in self.model_id.lower():
             quantization_method = "modelopt_fp4"
         llm = LLM(
             model=self.model_id,
@@ -182,7 +215,7 @@ class ModelDeployer:
         except ImportError:
             pytest.skip("sglang package not available")
         quantization_method = "modelopt"
-        if "FP4" in self.model_id:
+        if "fp4" in self.model_id.lower():
             quantization_method = "modelopt_fp4"
         if "eagle" in self.model_id.lower():
             llm = sgl.Engine(
@@ -196,6 +229,14 @@ class ModelDeployer:
                 trust_remote_code=True,
                 mem_fraction_static=0.7,
                 context_length=1024,
+            )
+        elif self.model_id == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8":
+            llm = sgl.Engine(
+                model_path=self.model_id,
+                quantization=quantization_method,
+                tp_size=self.tensor_parallel_size,
+                trust_remote_code=True,
+                attention_backend="flashinfer",
             )
         else:
             llm = sgl.Engine(

@@ -48,6 +48,7 @@ from modelopt.torch.nas.plugins.megatron import (
     expand_head_indices,
 )
 from modelopt.torch.opt.utils import named_dynamic_modules, search_space_size
+from modelopt.torch.prune.plugins.mcore_minitron import get_mcore_minitron_config
 from modelopt.torch.utils.random import centroid
 
 SEED = 1234
@@ -56,13 +57,13 @@ SEED = 1234
 def _test_gpt_search_space(
     num_attention_heads, num_query_groups, activation_func, normalization, rank, size
 ):
-    channel_divisor = 64
+    channel_divisor = 4
 
     num_layers = min(size * 2, 8)
-    hidden_size = 256
-    ffn_hidden_size = 128
-    max_sequence_length = 16
-    vocab_size = 64
+    hidden_size = channel_divisor * 4
+    ffn_hidden_size = channel_divisor * 2
+    max_sequence_length = 8
+    vocab_size = 32
     batch_size = 2
 
     model = get_mcore_gpt_model(
@@ -80,7 +81,7 @@ def _test_gpt_search_space(
         normalization=normalization,
     ).cuda()
 
-    model = mtn.convert(model, "mcore_minitron")
+    model = mtn.convert(model, [("mcore_minitron", get_mcore_minitron_config(channel_divisor))])
 
     assert isinstance(model, _DynamicMCoreLanguageModel)
     for m in model.modules():
@@ -153,17 +154,17 @@ def test_expand_head_indices():
 
 
 def _test_gpt_moe_search_space(rank, size):
-    channel_divisor = 64
+    channel_divisor = 4
 
     num_layers = min(size * 2, 8)
-    hidden_size = 256
+    hidden_size = channel_divisor * 4
     num_attention_heads = 8
     num_query_groups = 4
-    moe_ffn_hidden_size = 128
+    moe_ffn_hidden_size = channel_divisor * 2
     num_moe_experts = 4
-    moe_shared_expert_intermediate_size = 256
-    max_sequence_length = 16
-    vocab_size = 64
+    moe_shared_expert_intermediate_size = channel_divisor * 4
+    max_sequence_length = 8
+    vocab_size = 32
     batch_size = 2
 
     model = get_mcore_gpt_model(
@@ -182,7 +183,7 @@ def _test_gpt_moe_search_space(rank, size):
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
     ).cuda()
 
-    model = mtn.convert(model, "mcore_minitron")
+    model = mtn.convert(model, [("mcore_minitron", get_mcore_minitron_config(channel_divisor))])
 
     moe = model.decoder.layers[0].mlp
     assert isinstance(moe, _DynamicMoELayer)

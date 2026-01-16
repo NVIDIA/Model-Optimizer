@@ -16,6 +16,7 @@
 import argparse
 import json
 import os
+from itertools import islice
 
 import torch
 from transformers import AutoTokenizer
@@ -47,9 +48,8 @@ def main():
     print("Calibrating vocab...")
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     with open(args.data) as f:
-        conversations = [json.loads(line)["conversations"] for line in f]
-        if args.calibrate_size:
-            conversations = conversations[: args.calibrate_size]
+        lines = islice(f, args.calibrate_size) if args.calibrate_size else f
+        conversations = [json.loads(line)["conversations"] for line in lines]
         conversations = [item for sublist in conversations for item in sublist]
 
     d2t = calibrate_frequent_vocab(tokenizer, conversations, args.draft_vocab_size)

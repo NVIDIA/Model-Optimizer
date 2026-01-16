@@ -95,6 +95,7 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
             quantizer.sync_amax_across_distributed_group(parallel_state.expert_model_parallel_group)
         # TODO: create sync_bias_across_distributed_group
 
+    # Step 1:Sync amax across data parallelism
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
             for child in module.children():
@@ -142,6 +143,7 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
         if quantizer.axis in axes_for_sync and quantizer.amax is not None:
             quantizer.sync_amax_across_distributed_group(parallel_state.tensor_parallel_group)
 
+    # Step 2: Sync amax across relevant parallelism (such as TP / EP)
     for name, module in model.named_modules():
         if getattr(module, "_parallel_state", None) is None:
             continue
@@ -180,9 +182,19 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
                 parallel_state=module.parallel_state,
             )
 
-    for name, module in model.named_modules():
+        # MOE Quantization
         if hasattr(module, "sync_moe_local_experts_amax"):
             module.sync_moe_local_experts_amax()
+
+        # KV Cache Quantization
+        if hasattr(module, "k_bmm_quantizer") and hasattr(module, "v_bmm_quantizer"):
+            # We only support KVCache quantization with scalar per-tensor states for now (NVFP4 & FP8 KV cache)
+            # So we should sync amax across DP and TP for these quantizers (DP is already synced from above)
+            for quantizer in [module.k_bmm_quantizer, module.v_bmm_quantizer]:
+                if isinstance(quantizer, TensorQuantizer) and quantizer.amax is not None:
+                    quantizer.sync_amax_across_distributed_group(
+                        module.parallel_state.tensor_parallel_group
+                    )
 
 
 @torch.no_grad()
@@ -190,7 +202,7 @@ def mse_calibrate(
     model: nn.Module,
     forward_loop: ForwardLoop | None = None,
     distributed_sync=True,
-    num_steps: int = 10,
+    step_size: float = 0.1,
     start_multiplier: float = 0.25,
     stop_multiplier: float = 4.0,
 ):
@@ -205,7 +217,7 @@ def mse_calibrate(
         forward_loop: A callable which takes the model as argument and
             forwards calibration data through the model.
         distributed_sync: Whether to sync amax across distributed processes.
-        num_steps: Number of amax candidates to try (default: 10).
+        step_size: Step size for amax search (default: 0.1).
         start_multiplier: Starting multiplier for amax search (default: 0.25).
         stop_multiplier: Ending multiplier for amax search (default: 4.0).
 
@@ -216,14 +228,12 @@ def mse_calibrate(
     max_calibrate(model, forward_loop, distributed_sync)
 
     # Step 2: Replace calibrators with MseCalibrator for enabled quantizers
+    # and identify weight quantizers
+    weight_quantizers = []
+    seen_modules = set()
+
     for name, module in model.named_modules():
         if isinstance(module, TensorQuantizer) and not module._disabled:
-            # Static block quantization is not supported by MseCalibrator
-            if module.is_static_block_quant:
-                raise ValueError(
-                    f"MSE calibration does not support static block quantization. "
-                    f"Found static block quantization at {name}."
-                )
             if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
                 # Get the initial amax from max calibration
                 initial_amax = module._amax.clone().detach()
@@ -237,7 +247,11 @@ def mse_calibrate(
                         disable_calib(quantizer),
                         enable_fake_quant(quantizer),
                     ):
+                        if hasattr(quantizer, "_original_shape"):
+                            x = quantizer._reset_to_original_shape(x)
                         xq = quantizer(x)
+                        if hasattr(quantizer, "_block_reshape_size"):
+                            xq = xq.reshape(quantizer._block_reshape_size)
 
                     if original_amax is not None:
                         quantizer._amax = original_amax
@@ -250,21 +264,62 @@ def mse_calibrate(
                 module._calibrator = MseCalibrator(
                     amax=initial_amax,
                     axis=module._calibrator._axis,
-                    num_steps=num_steps,
+                    step_size=step_size,
                     start_multiplier=start_multiplier,
                     stop_multiplier=stop_multiplier,
                     quant_func=quant_func,
                 )
 
-    # Step 3: Collect data with MSE calibrators
+    # Identify weight quantizers by checking if they have corresponding weight parameters
+    for name, parent_module in model.named_modules():
+        if parent_module in seen_modules:
+            continue
+        for weight_name in weight_attr_names(parent_module):
+            weight_quantizer_name = quantizer_attr_names(weight_name).weight_quantizer
+            weight_quantizer = getattr(parent_module, weight_quantizer_name, None)
+            if isinstance(weight_quantizer, TensorQuantizer) and weight_quantizer.is_enabled:
+                if getattr(weight_quantizer, "_calibrator", None) is not None:
+                    weight_quantizers.append((parent_module, weight_name, weight_quantizer))
+        seen_modules.add(parent_module)
+
+    # Step 3: Calibrate weight quantizers once with MSE calibration
+    # This ensures weights are only calibrated once, not during every forward pass
+    for parent_module, weight_name, weight_quantizer in weight_quantizers:
+        # Enable calibration mode for the weight quantizer
+        weight_quantizer.disable_quant()
+        weight_quantizer.enable_calib()
+
+        with enable_weight_access_and_writeback(parent_module, model):
+            weight = getattr(parent_module, weight_name)
+            weight_quantizer(weight)
+
+    # Step 4: Disable weight quantizers during forward loop
+    for _, _, weight_quantizer in weight_quantizers:
+        weight_quantizer.disable()
+
+    # Step 5: Collect data with MSE calibrators for activation quantizers only
     enable_stats_collection(model)
     if forward_loop is None:
-        weight_only_quantize(model)
+        # If no forward loop, nothing else to do since weights are already calibrated
+        pass
     else:
+        # Run forward loop - only activation quantizers will collect data
         forward_loop(model)
 
-    # Step 4: Compute optimal amax and load it
+    # Step 6: Re-enable weight quantizers before finalizing calibration
+    # This ensures finish_stats_collection processes them correctly
+    for _, _, weight_quantizer in weight_quantizers:
+        weight_quantizer.enable()
+
+    # Step 7: Compute optimal amax and load it for all quantizers (weights + activations)
     finish_stats_collection(model, method="mse")
+
+    # Step 8: Free GPU memory by clearing calibrator data
+    for name, module in model.named_modules():
+        if isinstance(module, TensorQuantizer) and not module._disabled:
+            if hasattr(module, "_calibrator") and getattr(module, "_calibrator", None) is not None:
+                if hasattr(module._calibrator, "clear"):
+                    module._calibrator.clear()
 
     # TODO: Sync amax across distributed processes
 
@@ -520,9 +575,11 @@ def awq(
             awq_clip(model, forward_loop, **kwargs)
 
     # Special handling for SequentialQuantizer
+    # Pre-compute name_to_module dict to avoid O(n^2) complexity in enable_weight_access_and_writeback
+    name_to_module = dict(model.named_modules())
     for name, module in model.named_modules():
         if is_quantized_linear(module) and isinstance(module.weight_quantizer, SequentialQuantizer):
-            with enable_weight_access_and_writeback(module, model):
+            with enable_weight_access_and_writeback(module, model, name_to_module):
                 max_calibrate(module, lambda linear: linear.weight_quantizer(module.weight))
 
 
@@ -594,8 +651,9 @@ def awq_lite(
                 weight = F.pad(weight, (0, block_size - org_shape[-1] % block_size), "constant", 0)
                 org_shape = weight.shape
             weight = weight.contiguous().view(-1, block_size)
-        weight_abs_amax = weight.abs().amax(dim=1, keepdim=True)
-        scale = weight.abs() / (weight_abs_amax + torch.finfo(weight.dtype).tiny)
+        weight_abs = weight.abs()  # Cache to avoid redundant computation
+        weight_abs_amax = weight_abs.amax(dim=1, keepdim=True)
+        scale = weight_abs / (weight_abs_amax + torch.finfo(weight.dtype).tiny)
         scale = scale.view(org_shape)
         if slice_after_padding is not None:
             scale = scale[..., slice_after_padding]
@@ -689,9 +747,11 @@ def awq_lite(
         # Now forward the actual output without any quantization
         return out_actual
 
-    for name, module in model.named_modules():
+    # Pre-compute name_to_module dict ONCE to avoid O(n^2) complexity in enable_weight_access_and_writeback
+    name_to_module = dict(model.named_modules())
+    for name, module in name_to_module.items():
         if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
-            with enable_weight_access_and_writeback(module, model):
+            with enable_weight_access_and_writeback(module, model, name_to_module):
                 module.awq_lite = AWQLiteHelper(module, name)
             module.awq_lite.setup()
 
@@ -751,14 +811,18 @@ def awq_lite(
             delattr(module.weight_quantizer, "_pre_quant_scale")
         if hasattr(module.input_quantizer, "_pre_quant_scale"):
             delattr(module.input_quantizer, "_pre_quant_scale")
-        if module.awq_lite.is_input_quantized and module.input_quantizer.amax is not None:
-            act_amax = module.input_quantizer.amax
-            # TODO: make this a buffer after we support only heterogeneous checkpointing for MCore
-            module.input_quantizer._amax_for_smoothing = act_amax.cpu()
-            module.input_quantizer.reset_amax()
-            module.input_quantizer.axis = None
-            module.input_quantizer.amax = act_amax.amax()
-            module.input_quantizer.enable()
+        if module.awq_lite.is_input_quantized:
+            if module.input_quantizer.amax is not None:
+                act_amax = module.input_quantizer.amax
+                # TODO: make this a buffer after we support only heterogeneous checkpointing for MCore
+                module.input_quantizer._amax_for_smoothing = act_amax.cpu()
+                module.input_quantizer.reset_amax()
+                module.input_quantizer.axis = None
+                module.input_quantizer.amax = act_amax.amax()
+                module.input_quantizer.enable()
+            # for dynamic quantization, there is no amax, so we just enable the quantizer
+            else:
+                module.input_quantizer.enable()
 
         if module.awq_lite.is_enabled:
             apply_pre_quant_scale_and_smooth(module, 1.0 / module.awq_lite.best_scale)
@@ -777,7 +841,7 @@ def awq_lite(
                     f" {name}. Please provide a valid `forward_loop` function that can be used to"
                     " forward data through the model many times."
                 )
-            with enable_weight_access_and_writeback(module, model):
+            with enable_weight_access_and_writeback(module, model, name_to_module):
                 postprocess(module, name)
 
             module.awq_lite.cleanup()
@@ -957,6 +1021,8 @@ def awq_clip(
         self.weight_quantizer.disable()
         return self._forward_no_awq(input, *args, **kwargs)
 
+    # Pre-compute name_to_module dict to avoid O(n^2) complexity in enable_weight_access_and_writeback
+    name_to_module = dict(model.named_modules())
     for name, module in model.named_modules():
         if (
             is_quantized_linear(module)
@@ -964,7 +1030,7 @@ def awq_clip(
             and module.weight_quantizer.block_sizes is not None
         ):
             bind_forward_method(module, partial(forward, name), "_forward_no_awq")
-            with enable_weight_access_and_writeback(module, model):
+            with enable_weight_access_and_writeback(module, model, name_to_module):
                 module.awq_clip = AWQClipHelper(module)
 
     print_rank_0("awq_clip: Estimating parameters...")
@@ -988,7 +1054,7 @@ def awq_clip(
     for name, module in model.named_modules():
         if is_quantized_linear(module) and hasattr(module, "awq_clip"):
             if module.awq_clip.num_tokens > 0:
-                with enable_weight_access_and_writeback(module, model):
+                with enable_weight_access_and_writeback(module, model, name_to_module):
                     postprocess(module)
 
             if not debug:

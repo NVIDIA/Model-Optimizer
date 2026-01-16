@@ -173,7 +173,7 @@ def get_dataset_dataloader(
     batch_size: int = 1,
     num_samples: int | list[int] = 512,
     max_sample_length: int = 512,
-    device: str | None = None,
+    device: torch.device | None = None,
     include_labels: bool = False,
 ) -> DataLoader:
     """Get a dataloader with the dataset name and toknizer of the target model.
@@ -264,7 +264,7 @@ def get_max_batch_size(
     model: torch.nn.Module,
     max_sample_length: int = 512,
     sample_memory_usage_ratio: float = 1.0,
-    sample_input_single_batch: torch.Tensor = None,
+    sample_input_single_batch: torch.Tensor | None = None,
     enable_grad: bool = False,
 ):
     """Get the maximum batch size that can be used for the model."""

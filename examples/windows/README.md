@@ -124,10 +124,12 @@ For detailed instructions about deployment of quantized models with DirectML bac
 
 ## Examples
 
-- We have ONNX PTQ examples for various ONNX model variants:
-  - [PTQ for GenAI LLMs](./onnx_ptq/genai_llm/README.md) covers how to use ONNX Post-Training Quantization (PTQ) with [ONNX Runtime GenAI](https://onnxruntime.ai/docs/genai) built LLM ONNX models, and their deployment with DirectML.
-  - [PTQ for Whisper](./onnx_ptq/whisper/README.md) illustrates using ONNX Post-Training Quantization (PTQ) with a Whisper ONNX model (i.e. an ASR model). It also provides example script for Optimum-ORT based inference of Whisper using CUDA EP.
-  - [PTQ for SAM2](./onnx_ptq/sam2/README.md) illustrates using ONNX Post-Training Quantization (PTQ) with a SAM2 ONNX model (i.e. a segmentation model).
+- Examples for Post-Training Quantization (PTQ) of ONNX models:
+  - [PTQ for GenAI LLMs](./onnx_ptq/genai_llm/README.md) covers how to use ONNX PTQ with [ONNX Runtime GenAI](https://onnxruntime.ai/docs/genai) built LLM ONNX models, and their deployment with DirectML.
+  - [PTQ for Whisper](./onnx_ptq/whisper/README.md) illustrates using ONNX PTQ with a Whisper ONNX model (i.e. an ASR model). It also provides example script for Optimum-ORT based inference of Whisper using CUDA EP.
+  - [PTQ for SAM2](./onnx_ptq/sam2/README.md) illustrates using ONNX PTQ with a SAM2 ONNX model (i.e. a segmentation model).
+- Examples that demonstrate PTQ of a PyTorch model followed by ONNX export:
+  - [Diffusers](./torch_onnx/diffusers/README.md) example demonstrates how to apply PTQ to diffusion models in PyTorch format and then export the quantized models to ONNX.
 - [MMLU Benchmark](./accuracy_benchmark/README.md) provides an example script for MMLU benchmarking of LLM models, and demonstrates how to run it with various popular backends like DirectML, TensorRT-LLM\* and model formats like ONNX and PyTorch\*.
 
 ## Support Matrix

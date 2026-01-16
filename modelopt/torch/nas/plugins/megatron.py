@@ -710,10 +710,10 @@ class MambaNumHeadsHp(TracedHp):
     Need special handling for active_slice property to trim heads within each group.
     """
 
-    def __init__(
-        self, choices: Sequence[HPType], original: HPType | None = None, ngroups: int = 1
-    ) -> None:
-        super().__init__(choices, original)
+    def __init__(self, nheads: int, ngroups: int = 1) -> None:
+        """Initialize choices as multiples of ngroups."""
+        choices = [h * ngroups for h in range(1, nheads // ngroups + 1)]
+        super().__init__(choices)
         self._ngroups = ngroups
 
     @property
@@ -892,7 +892,7 @@ class _DynamicMambaMixer(DynamicModule):
         assert self.d_inner == self.nheads * self.headdim, "d_inner must be nheads * headdim"
 
         # Register hyperparameters for Mamba heads and head dimensions
-        mamba_num_heads = MambaNumHeadsHp(list(range(1, self.nheads + 1)), ngroups=self.ngroups)
+        mamba_num_heads = MambaNumHeadsHp(self.nheads, self.ngroups)
         mamba_head_dim = TracedHp(list(range(1, self.headdim + 1)))
         d_inner = MambaDInnerHp(mamba_num_heads, mamba_head_dim)
         bc = TracedHp([2 * self.ngroups * self.d_state])  # not configurable
@@ -967,19 +967,14 @@ class _DynamicMambaLayer(DynamicModule):
     def modify(
         self,
         *,
-        mamba_num_heads_divisor: int = 1,
         mamba_head_dim_divisor: int = 1,
         **kwargs,  # Unused hparams
     ) -> None:
         """Modify Mamba hyperparameters."""
         # Modify MambaMixer hparams
-        for hp_name, divisor in [
-            ("mamba_num_heads", mamba_num_heads_divisor),
-            ("mamba_head_dim", mamba_head_dim_divisor),
-        ]:
-            hp = self.mixer.get_hparam(hp_name)
-            choices = {int(make_divisible(c, divisor)) for c in hp.choices}
-            hp.choices = list(set(hp.choices) & choices | {hp.original})
+        hp = self.mixer.get_hparam("mamba_head_dim")
+        choices = {int(make_divisible(c, mamba_head_dim_divisor)) for c in hp.choices}
+        hp.choices = list(set(hp.choices) & choices | {hp.original})
 
     def export(self):
         """Export the dynamic module to a torch.nn.Module."""

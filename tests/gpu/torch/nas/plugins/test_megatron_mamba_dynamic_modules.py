@@ -40,23 +40,23 @@ from modelopt.torch.nas.plugins.megatron import (
 )
 from modelopt.torch.nas.traced_hp import TracedHp
 from modelopt.torch.opt.utils import named_dynamic_modules, search_space_size
+from modelopt.torch.prune.plugins.mcore_minitron import get_mcore_minitron_config
 from modelopt.torch.utils.random import centroid
 
 SEED = 1234
 
 
 def _test_mamba_search_space(rank, size):
-    channel_divisor = 64
-    mamba_num_heads_divisor = 4
+    channel_divisor = 4
     mamba_head_dim_divisor = 4
 
     num_layers = size
     hybrid_override_pattern = "M" * size
-    hidden_size = 256
-    mamba_state_dim = 64
-    mamba_head_dim = 16
+    hidden_size = channel_divisor * 4
+    mamba_state_dim = channel_divisor
+    mamba_head_dim = mamba_head_dim_divisor * 2
     mamba_num_groups = 2
-    max_sequence_length = 16
+    max_sequence_length = 8
     vocab_size = 32
     batch_size = 2
 
@@ -75,7 +75,7 @@ def _test_mamba_search_space(rank, size):
     ).cuda()
     mamba_num_heads = model.decoder.layers[0].mixer.nheads
 
-    model = mtn.convert(model, "mcore_minitron")
+    model = mtn.convert(model, [("mcore_minitron", get_mcore_minitron_config(channel_divisor))])
 
     assert isinstance(model, _DynamicMCoreLanguageModel)
     if is_pipeline_first_stage():
@@ -94,7 +94,7 @@ def _test_mamba_search_space(rank, size):
 
     # NOTE: `search_space_size` does not reduce across TP/PP groups
     ss_size_per_pp = search_space_size(model)
-    num_heads_choices = mamba_num_heads // mamba_num_heads_divisor
+    num_heads_choices = mamba_num_heads // mamba_num_groups
     head_dim_choices = mamba_head_dim // mamba_head_dim_divisor
     hidden_size_choices = hidden_size // channel_divisor
     num_layers_per_pp = num_layers // size
@@ -125,7 +125,7 @@ def test_mamba_search_space():
 
 
 def test_mamba_num_heads_hp():
-    num_heads = MambaNumHeadsHp([2, 4, 6, 8], ngroups=2)  # 4 heads per group
+    num_heads = MambaNumHeadsHp(8, ngroups=2)  # 4 heads per group
     assert num_heads.choices == [2, 4, 6, 8]
     assert num_heads.active_slice == slice(8)
 

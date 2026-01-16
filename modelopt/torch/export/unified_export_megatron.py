@@ -137,7 +137,7 @@ class GPTModelExporter:
         pretrained_model_name_or_path: str | os.PathLike | None = None,
         export_extra_modules: bool = False,
         dtype=torch.bfloat16,
-        trust_remote_code: bool = True,
+        trust_remote_code: bool = False,
         moe_router_dtype: torch.dtype | None = None,
     ):
         """Create a GPTModel exporter instance."""
@@ -1069,12 +1069,12 @@ class GPTModelExporter:
 
         parallel_draft_heads = getattr(eagle_module, "parallel_draft_heads", None)
         if parallel_draft_heads is not None:
-            for head_id, head in enumerate(parallel_draft_heads):
-                self.rules["parallel_draft_heads.lm_head"](head.lm_head, head_id)
-                for layer_id, layer in enumerate(head.medusa_layers):
+            for head_id, head in enumerate(parallel_draft_heads.medusa_heads):
+                for layer_id, layer in enumerate(head):
                     self.rules["parallel_draft_heads.medusa_layers"](
                         layer.linear, head_id, layer_id
                     )
+            self.rules["parallel_draft_heads.lm_head"](parallel_draft_heads.lm_head)
 
     def _get_state_dict(self):
         model = self.model
@@ -1205,6 +1205,7 @@ def export_mcore_gpt_to_hf(
     export_extra_modules: bool = False,
     dtype: torch.dtype = torch.bfloat16,
     export_dir: Path | str = tempfile.gettempdir(),
+    trust_remote_code: bool = False,
     moe_router_dtype: torch.dtype | None = None,
 ):
     """Export Megatron Core GPTModel to unified checkpoint and save to export_dir.
@@ -1225,6 +1226,7 @@ def export_mcore_gpt_to_hf(
         pretrained_model_name_or_path,
         export_extra_modules=export_extra_modules,
         dtype=dtype,
+        trust_remote_code=trust_remote_code,
         moe_router_dtype=moe_router_dtype,
     )
     exporter.save_pretrained(export_dir, pretrained_model_name_or_path)
@@ -1235,6 +1237,7 @@ def import_mcore_gpt_from_hf(
     pretrained_model_path: str,
     workspace_dir: str | None = None,
     dtype: torch.dtype = torch.bfloat16,
+    trust_remote_code: bool = False,
     moe_router_dtype: torch.dtype | None = None,
 ):
     """Import GPTModel state_dict from supported HuggingFace pretrained model path.
@@ -1243,13 +1246,17 @@ def import_mcore_gpt_from_hf(
         model: The Megatron Core GPTModel instance.
         pretrained_model_path: A path to a *directory* containing model weights saved using
             [`~PreTrainedModel.save_pretrained`], e.g., `./my_model_directory/`.
+        workspace_dir: The directory to save the workspace.
         dtype: The weights data type to import.
+        trust_remote_code: If True, this allows importing from a wider range of sources.
+        moe_router_dtype: The data type to import the moe router weights.
     """
     importer = GPTModelImporter(
         model,
         pretrained_model_path,
         workspace_dir=workspace_dir,
         dtype=dtype,
+        trust_remote_code=trust_remote_code,
         moe_router_dtype=moe_router_dtype,
     )
     importer._import_state_dict()

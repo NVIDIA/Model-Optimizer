@@ -28,6 +28,13 @@ try:
 except ImportError:
     Shard = None
 
+try:
+    import kitchen
+    from kitchen.fa import KitchenFlashAttentionModule
+    from kitchen.triton_module import triton_fa_params
+except ImportError:
+    kitchen = None
+
 import torch.nn as nn
 import transformers
 from transformers.models.t5.modeling_t5 import T5Attention
@@ -56,17 +63,94 @@ class _QuantAttention(QuantModule):
         self.q_bmm_quantizer = TensorQuantizer()
         self.k_bmm_quantizer = TensorQuantizer()
         self.v_bmm_quantizer = TensorQuantizer()
+        self.softmax_quantizer = TensorQuantizer()
+        self.kitchen_attn_fn = None
+        self.use_kitchen = False
+
+    def _init_kitchen_attn_fn(self):
+        if not self.softmax_quantizer.is_enabled:
+            self.kitchen_attn_fn = "disabled"
+            return
+        self.use_kitchen = True
+        if self.softmax_quantizer.is_mxfp(8):
+            qfa_params = triton_fa_params.QTritonFAParams(
+                backend="triton",
+                qk_dot_precisions="bf16@bf16",
+                pv_dot_precisions="mxfp8_e4m3_emulation@bf16",
+                dp_v_x_do_dot_precisions="bf16@bf16",
+                dp_do_x_v_dot_precisions="bf16@bf16",
+                dq_ds_x_k_dot_precisions="bf16@bf16",
+                dk_ds_x_q_dot_precisions="bf16@bf16",
+                dv_p_x_do_dot_precisions="bf16@bf16",
+                use_natural_transcendental_func=False,  # Different from default
+            )
+        else:
+            raise NotImplementedError(f"softmax_quantizer not supported: {self.softmax_quantizer}")
+
+        self.kitchen_attn_fn = KitchenFlashAttentionModule(
+            num_attention_heads=self.config.num_attention_heads,
+            kv_channels=self.config.head_dim,
+            num_gqa_groups=None,  # self.config.num_key_value_heads, kitchen does not support gqa.
+            attention_dropout=self.config.attention_dropout,
+            qkv_format="sbhd",  # this is not used at all, but in forward, this is the only supported format.
+            attn_mask_type="causal",
+            window_size=getattr(self.config, "sliding_window", None),
+            sequence_parallel=False,
+            get_rng_state_tracker=None,
+            layer_number=None,
+            attention_type="self",
+            softmax_scale=None,  # This will be convert to the same default as sdpa: 1/sqrt(dim_q)
+            qfa_params=qfa_params,
+        )
 
     @staticmethod
     def _quantized_attention(
-        original_attention_interface, self, query_states, key_states, value_states, *args, **kwargs
+        original_attention_interface,
+        self,
+        query_states,
+        key_states,
+        value_states,
+        *args,
+        **kwargs,
     ):
+        if kitchen is not None and self.kitchen_attn_fn is None:
+            self._init_kitchen_attn_fn()
+
         query_states = self.q_bmm_quantizer(query_states)
         key_states = self.k_bmm_quantizer(key_states)
         value_states = self.v_bmm_quantizer(value_states)
-        return original_attention_interface(
-            self, query_states, key_states, value_states, *args, **kwargs
-        )
+        if not self.use_kitchen:
+            return original_attention_interface(
+                self, query_states, key_states, value_states, *args, **kwargs
+            )
+
+        query_sequence_length = query_states.shape[2]
+        if query_states.shape[2] < key_states.shape[2]:  # For decoding stage.
+            shape = list(query_states.shape)
+            shape[2] = key_states.shape[2] - query_states.shape[2]
+            query_states = torch.cat(
+                [
+                    torch.empty(shape, dtype=query_states.dtype, device=query_states.device),
+                    query_states,
+                ],
+                dim=2,
+            )
+
+        n_repeat = self.config.num_attention_heads // self.config.num_key_value_heads
+        if n_repeat > 1:
+            key_states = key_states.repeat_interleave(n_repeat, dim=1)
+            value_states = value_states.repeat_interleave(n_repeat, dim=1)
+        # kitchen only supports sbhd. we have bhsd.
+        query_states = query_states.permute(2, 0, 1, 3)
+        key_states = key_states.permute(2, 0, 1, 3)
+        value_states = value_states.permute(2, 0, 1, 3)
+        attn_out = self.kitchen_attn_fn(query_states, key_states, value_states)
+        attn_out = attn_out[-query_sequence_length:, :, :]
+        # output is sb(h*d), we need bshd
+        attn_out = attn_out.reshape(
+            (attn_out.shape[0], attn_out.shape[1], query_states.shape[2], -1)
+        ).permute(1, 0, 2, 3)
+        return attn_out.contiguous(), None
 
     def forward(self, *args, **kwargs):
         """Forward method for KV cache quantization compatible with new_attention_interface in transformers >= 4.48.0.

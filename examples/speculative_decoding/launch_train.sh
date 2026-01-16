@@ -38,6 +38,10 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       MODE="${1#*=}"
       ;;
+    --eagle_decoder_type*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      EAGLE_DECODER_TYPE="${1#*=}"
+      ;;
     --output_dir*)
       if [[ "$1" != *=* ]]; then shift; fi
       OUTPUT_DIR="${1#*=}"
@@ -115,6 +119,7 @@ DEFAULT_SAVE_STEPS=$((8192 / GPU_COUNT))
 
 MODEL=${MODEL:-"TinyLlama/TinyLlama-1.1B-Chat-v1.0"}
 MODE=${MODE:-"eagle3"}
+EAGLE_DECODER_TYPE=${EAGLE_DECODER_TYPE:-"llama"}
 # Set default OUTPUT_DIR to ckpts/{modelname}, where {modelname} is the last part of the model path
 MODEL_BASENAME=$(basename "$MODEL")
 OUTPUT_DIR=${OUTPUT_DIR:-"ckpts/${MODEL_BASENAME}-$(date +%Y%m%d_%H%M)"}
@@ -174,6 +179,7 @@ fi
 export TOKENIZERS_PARALLELISM=False
 CMD="accelerate launch $MULTI_GPU --mixed_precision bf16 main.py \
     --mode $MODE \
+    --eagle_decoder_type $EAGLE_DECODER_TYPE \
     --model_name_or_path $MODEL \
     --training_seq_len $TRAINING_SEQ_LEN \
     --dataloader_drop_last True \

@@ -19,7 +19,9 @@ from copy import deepcopy
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
-from .eagle.default_config import default_eagle_config
+from .eagle.default_config import default_eagle_config, default_kimik2_eagle_config
+
+kimik2_eagle_default_config = deepcopy(default_kimik2_eagle_config)
 
 eagle3_default_config = deepcopy(default_eagle_config)
 eagle_mtp_default_config = deepcopy(default_eagle_config)
@@ -97,4 +99,9 @@ class EagleConfig(ModeloptBaseConfig):
 
     eagle_architecture_config: dict = ModeloptField(
         default={}, description=("The config for eagle module architecture.")
+    )
+
+    eagle_decoder_type: str = ModeloptField(
+        default="llama",
+        description=("The class of eagle decoder to use. Available options: llama, kimik2"),
     )

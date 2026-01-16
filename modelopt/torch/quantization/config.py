@@ -387,6 +387,29 @@ NVFP4_DEFAULT_CFG = {
     "algorithm": "max",
 }
 
+NVFP4_WEIGHT_ACT_MSE_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": {
+        "method": "mse",
+        "step_size": 0.25,
+        "start_multiplier": 0.25,
+        "stop_multiplier": 2.0,
+    },
+}
 
 NVFP4_AWQ_LITE_CFG = {
     "quant_cfg": {
@@ -667,7 +690,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         description="""If True, enables the quantizer. If False, by-pass the quantizer and returns the input tensor.""",
     )
 
-    num_bits: int | tuple[int, int] = ModeloptField(
+    num_bits: int | tuple[int, int] | str = ModeloptField(
         default=8,
         title="An integer or a tuple of two integers specifying the number of quantization bits.",
         description="""`num_bits` can be:
@@ -677,7 +700,9 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
 
         #. Constant integer tuple (E,M) for floating point quantization emulating
             Nvidia's FPx quantization. E is the number of exponent bits and M is the number
-            of mantissa bits. Supported FPx quantization formats: FP8 (E4M3, E5M2), FP6(E3M2, E2M3), FP4(E2M1).""",
+            of mantissa bits. Supported FPx quantization formats: FP8 (E4M3, E5M2), FP6(E3M2, E2M3), FP4(E2M1).
+
+        #. String specifying the quantization format. This is current used only for custom backends.""",
     )
 
     @model_validator(mode="before")
@@ -709,10 +734,16 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
     @model_validator(mode="after")
     def validate_num_bits(self):
         """Validate `num_bits`."""
+        if self.backend is not None:
+            # For custom backends, we don't need to validate num_bits
+            return self
+
         num_bits = self.num_bits
 
         if isinstance(num_bits, int) and num_bits < 1:
-            raise ValueError("num_bits must be a positive integer or a tuple of positive integers.")
+            raise ValueError(
+                f"num_bits must be a positive integer or a tuple of positive integers. {num_bits}"
+            )
 
         if not isinstance(num_bits, tuple):
             return self
@@ -734,7 +765,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
             raise ValueError(
                 "Supported FPx quantization formats: FP8 (E4M3, E5M2), FP6(E3M2, E2M3), FP4(E2M1)."
             )
-        elif num_bits != (4, 3) and (
+        elif num_bits not in [(4, 3), (2, 1)] and (
             block_sizes is None or block_sizes.get("type", None) != "dynamic"
         ):
             raise ValueError(
@@ -954,6 +985,27 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         """,
     )
 
+    backend: str | None = ModeloptField(
+        default=None,
+        title="Name of custom quantization functional backend.",
+        description="""
+            Selects a non-default quantization functional backend by name. See
+            :meth:`register_quant_backend <modelopt.torch.nn.modules.tensor_quantizer.register_quant_backend>`
+            for more details on how to register a custom quantization backend.
+        """,
+    )
+    backend_extra_args: dict | None = ModeloptField(
+        default=None,
+        title="Extra arguments for the selected backend.",
+        description="""The extra arguments will saved on to the quantizer instance - this wont be
+        passed directly to the backend entrypoint. Can be any serializable dictionary.
+
+        Please use `backend_extra_args` to pass arguments that are not already supported by
+        `QuantizerAttributeConfig`. This will ensure maximum compatibility with the other modelopt
+        features such as modelopt's calibration algorithms.
+        """,
+    )
+
 
 class QuantizeAlgorithmConfig(ModeloptBaseConfig):
     """Calibration algorithm config base."""
@@ -992,11 +1044,12 @@ class MseCalibConfig(QuantizeAlgorithmConfig):
 
     method: Literal["mse"] = ModeloptField("mse")
 
-    num_steps: int | None = ModeloptField(
-        default=10,
-        ge=1,
-        title="Number of amax candidates to try.",
-        description="Number of amax candidates to search over for MSE minimization.",
+    step_size: float | None = ModeloptField(
+        default=0.1,
+        gt=0.0,
+        title="Step size for amax search.",
+        description="Step size between amax candidates. The number of candidates is computed as "
+        "ceil((stop_multiplier - start_multiplier) / step_size) + 1.",
     )
 
     start_multiplier: float | None = ModeloptField(

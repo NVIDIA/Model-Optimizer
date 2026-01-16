@@ -102,7 +102,7 @@ def _modelopt_set_extra_state(self, state: Any):
         # Default format: byte tensor with pickled data
         #
         # TODO: possible deserialization improvement
-        # https://github.com/NVIDIA/TensorRT-LLM/commits/main/tensorrt_llm/serialization.py
+        # https://github.com/NVIDIA/TensorRT-LLM/blob/main/tensorrt_llm/serialization.py
         extra_state = pickle.loads(state.detach().cpu().numpy().tobytes())  # nosec
     else:
         raise RuntimeError("Unsupported extra_state format.")
@@ -155,6 +155,15 @@ class _MegatronMLP(DynamicModule):
         pass
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        """Overriding the default to support scalar sharding.
+
+        Note:
+            singleton_local_shards needs to be added to the metadata as well as
+            apply_swiglu_sharded_factory to handle the swiglu case.
+        """
+        if metadata is None:
+            metadata = {}
+        metadata["singleton_local_shards"] = True
         sharded_state_dict = super().sharded_state_dict(prefix, sharded_offsets, metadata)
         if not self.config.gated_linear_unit:
             return sharded_state_dict
@@ -163,6 +172,8 @@ class _MegatronMLP(DynamicModule):
                 re.compile(pattern).match(k) for pattern in self._modelopt_state_keys
             ):
                 sharded_state_dict[k] = megatron_mlp.apply_swiglu_sharded_factory(
-                    v, sharded_offsets
+                    v,
+                    sharded_offsets,
+                    metadata["singleton_local_shards"],
                 )
         return sharded_state_dict
