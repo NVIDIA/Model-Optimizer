@@ -1223,7 +1223,7 @@ def prepare_hessian_inverse(h, weight, percdamp):
     h = h.clone()
     # Handle dead neurons (zero weight columns)
     # Get columns with all zeros in weight
-    zero_cols = torch.nonzero(weight.eq(0).all(dim=0))
+    zero_cols = torch.nonzero(weight.eq(0).all(dim=0)).unsqueeze(-1)
 
     # Zero out entire rows and columns in Hessian for dead neurons
     h[zero_cols, :] = 0

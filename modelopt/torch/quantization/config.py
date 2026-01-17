@@ -1222,7 +1222,7 @@ class GPTQLiteConfig(QuantizeAlgorithmConfig):
         default=None,
         title="Path to the Hessian state file.",
         description="""The path to the Hessian state file. If hessian path exists, we load from
-         hessian file insteaed of recomputing them.""",
+         hessian file instead of recomputing them.""",
     )
 
 

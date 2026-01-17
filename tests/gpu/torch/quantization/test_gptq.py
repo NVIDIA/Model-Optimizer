@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
+
 import pytest
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -116,7 +118,7 @@ def test_update_hessian():
     ],
 )
 def test_gptq_updates(block_size, dim, model_weight, expect_weight_change):
-    model = torch.nn.Linear(dim, 1).to("cuda")
+    model = torch.nn.Linear(dim, dim).to("cuda")
     model.weight.data = model_weight
     original_weight = model_weight.clone()
     input = torch.randn(2, 16, dim).to("cuda")
@@ -175,6 +177,7 @@ def test_gptq_e2e_flow(quant_cfg):
     assert tokenizer.pad_token is not None, "Pad token cannot be set!"
     model.eval()
 
+    quant_cfg = copy.deepcopy(quant_cfg)
     quant_cfg["algorithm"] = "gptq_lite"
     # Define quantizer/dataloader
     calib_dataloader = get_dataset_dataloader(
