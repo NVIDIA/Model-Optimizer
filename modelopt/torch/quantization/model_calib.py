@@ -1162,6 +1162,27 @@ def svdquant(
     max_calibrate(model, forward_loop)
 
 
+def print_relative_mse_error(q: torch.Tensor, w: torch.Tensor, h: torch.Tensor, module_name: str):
+    """Print relative mean squared error between quantized and original weights.
+
+    Computes the Hessian-weighted relative MSE between quantized and original weights,
+    providing a measure of quantization quality. This metric is adapted from the GPTQ
+    repository.
+
+    Args:
+        q (torch.Tensor): Quantized weight tensor
+        w (torch.Tensor): Original weight tensor
+        h (torch.Tensor): Hessian matrix used for weighting the error
+        module_name (str): Name of the module for logging purposes
+    Note:
+        Implementation adapted from the GPTQ repository:
+        https://github.com/IST-DASLab/FP-Quant
+    """
+    delta = q - w
+    mse = (delta).mm(h).mul(delta).mean() / (w.mm(h).mul(w).mean() + 1e-6)
+    print(f"[{module_name}] Relative MSE error: {mse.item():.2e}")
+
+
 def update_hessian(input, hessian, n_samples):
     """Update hessian matrix with new input samples using incremental formula.
 
@@ -1169,7 +1190,6 @@ def update_hessian(input, hessian, n_samples):
         input: Input tensor (batch_size, ..., features)
         hessian: Current Hessian matrix to update in-place
         n_samples: Number of samples already processed
-
     Returns:
         Tuple of (updated_hessian, new_sample_count)
     """
@@ -1179,7 +1199,8 @@ def update_hessian(input, hessian, n_samples):
     hessian *= n_samples / (n_samples + batch_size)
     n_samples += batch_size
 
-    # Compute outer product: H += (X^T X) / n_samples
+    # Compute outer product: H += (2/n_samples) * X @ X^T
+    # where X is the flattened input reshaped to (features, batch*seq)
     input_flat = input.reshape(-1, input.shape[-1]).t().float()
     scaled_input = math.sqrt(2 / n_samples) * input_flat
     hessian.add_((scaled_input @ scaled_input.t()).to(hessian.device))
@@ -1188,10 +1209,21 @@ def update_hessian(input, hessian, n_samples):
 
 
 def prepare_hessian_inverse(h, weight, percdamp):
-    """Prepare inverse Hessian with dead neuron handling and damping."""
+    """Prepare inverse Hessian with dead neuron handling and damping.
+
+    Args:
+        h: Hessian matrix to update
+        weight: Weight tensor to prepare Hessian for
+        percdamp: Damping percentage for Hessian diagonal
+    Returns:
+        h_inv: Inverse Hessian matrix
+    Implementation adapted from the FP-Quant repository:
+    https://github.com/IST-DASLab/FP-Quant/blob/d2e3092f968262c4de5fb050e1aef568a280dadd/src/quantization/gptq.py#L200
+    """
+    h = h.clone()
     # Handle dead neurons (zero weight columns)
     # Get columns with all zeros in weight
-    zero_cols = torch.nonzero(weight.eq(0).all(dim=0)).squeeze(-1)
+    zero_cols = torch.nonzero(weight.eq(0).all(dim=0))
 
     # Zero out entire rows and columns in Hessian for dead neurons
     h[zero_cols, :] = 0
@@ -1216,12 +1248,11 @@ def quantize_block(full_weight, block_start, block_end, h_inv, quantizer):
     """Quantize a block of weights group by group (based on quantizer block sizes) with error propagation.
 
     Args:
-        full_weight: The complete weight tensor (needed for INT4 quantization)
+        full_weight: The full weight tensor (needed for INT4 quantization)
         block_start: Starting column index of the block
         block_end: Ending column index of the block
         h_inv: Hessian inverse
         quantizer: The quantizer to apply
-
     Returns:
         quantized_block: Quantized weights for this block
         losses: Quantization losses per element
@@ -1261,28 +1292,6 @@ def quantize_block(full_weight, block_start, block_end, h_inv, quantizer):
         full_weight[:, block_start:block_end] = block_weight
 
     return quantized_block, losses, errors
-
-
-def print_relative_mse_error(q: torch.Tensor, w: torch.Tensor, h: torch.Tensor, module_name: str):
-    """Print relative mean squared error between quantized and original weights.
-
-    Computes the Hessian-weighted relative MSE between quantized and original weights,
-    providing a measure of quantization quality. This metric is adapted from the GPTQ
-    repository.
-
-    Args:
-        q (torch.Tensor): Quantized weight tensor
-        w (torch.Tensor): Original weight tensor
-        h (torch.Tensor): Hessian matrix used for weighting the error
-        module_name (str): Name of the module for logging purposes
-
-    Note:
-        Implementation adapted from the GPTQ repository:
-        https://github.com/IST-DASLab/FP-Quant
-    """
-    delta = q - w
-    mse = (delta).mm(h).mul(delta).mean() / (w.mm(h).mul(w).mean() + 1e-6)
-    print(f"[{module_name}] Relative MSE error: {mse.item():.2e}")
 
 
 def blockwise_weight_update(module, h, block_size, percdamp):
@@ -1343,7 +1352,7 @@ def gptq_lite(
         percdamp: Percentage of avg Hessian diagonal for damping (default: 0.01).
         block_size: Block size for GPTQ weight update.
         hessian_state_path: Path to save/load Hessian state. If None, compute without saving.
-            If path exists, load from it. If path doesn't exist, compute and save to it.
+            If path exists, load from it. If path doesnt exist then save computed hessians to path.
 
     See :class:`GPTQLiteConfig <modelopt.torch.quantization.config.GPTQLiteConfig>` for
     details on the remaining arguments.
@@ -1413,10 +1422,9 @@ def gptq_lite(
             tensor_mapping[name] = ((in_features, in_features), module.weight.device)
             module.name = name  # Attach name for easy access in hooks
 
-    print_rank_0(f"Found {len(tensor_mapping)} quantized layers")
-
     # Phase 3: Load or compute Hessians
     hessian_exists = hessian_state_path is not None and os.path.exists(hessian_state_path)
+    save_hessians = hessian_state_path is not None and not hessian_exists
 
     if hessian_exists:
         print_rank_0(f"Loading hessian state from {hessian_state_path}")
@@ -1441,9 +1449,13 @@ def gptq_lite(
         for handle in handles:
             handle.remove()
 
-    # Save if path provided
-    if hessian_state_path is not None:
-        save_hessian_state(hessian_state_path)
+    # Save if configured
+    if save_hessians:
+        try:
+            save_hessian_state(hessian_state_path)
+        except Exception as e:
+            print_rank_0(f"Error saving hessian state: {e}")
+            print_rank_0("Continuing execution...")
 
     # Phase 4: Update weights using computed Hessians
     print_rank_0("Updating weights using GPTQ-lite algorithm...")
@@ -1459,6 +1471,7 @@ def gptq_lite(
         state = hessian_state[module.name]
         hessian = state["hessian"].to(module.weight.device)
         blockwise_weight_update(module, hessian, block_size, percdamp)
+        # Delete hessian state to free memory
         del hessian_state[module.name]
         torch.cuda.empty_cache()
 

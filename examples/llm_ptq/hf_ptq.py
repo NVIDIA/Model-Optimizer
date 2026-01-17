@@ -76,7 +76,6 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "int8_wo": mtq.INT8_WEIGHT_ONLY_CFG,
     "fp8": mtq.FP8_DEFAULT_CFG,
     "int4_awq": mtq.INT4_AWQ_CFG,
-    "int4_gptq_lite": mtq.INT4_BLOCKWISE_WEIGHT_ONLY_GPTQ_LITE_CFG,
     "w4a8_awq": mtq.W4A8_AWQ_BETA_CFG,
     "nvfp4": mtq.NVFP4_DEFAULT_CFG,
     "nvfp4_awq": mtq.NVFP4_AWQ_LITE_CFG,
@@ -243,14 +242,12 @@ def auto_quantize(
             "int8_sq",
             "int8_wo",
             "int4_awq",
-            "int4_gptq_lite",
             "nvfp4",
             "nvfp4_awq",
             "w4a8_awq",
             "fp8_pb_wo",
             "w4a8_mxfp4_fp8",
             "nvfp4_mlp_only",
-            "nvfp4_gptq_lite",
         ]
         for args.qformat in qformat_list
     ), "One or more quantization formats provided are not supported for unified checkpoint export"
@@ -625,67 +622,6 @@ def export_quantized(
                     "Unified HF export format does not specify inference tensor parallel or pipeline parallel. "
                     "They will be set at deployment time."
                 )
-
-            if True:
-                # mtq.fold_weight(full_model)
-                print("Disabling quantizers for perplexity evaluation (weights are already QDQ'ed)")
-                # Disable all quantizers without re-applying them to weights
-                mtq.disable_quantizer(full_model, "*")
-
-                import torch.nn.functional as F
-                from datasets import load_dataset
-                from tqdm import trange
-                from transformers import AutoTokenizer
-
-                def _get_wikitext2(tokenizer: AutoTokenizer, sequence_length: int):
-                    test_dataset_raw = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-                    test_dataset_tok = tokenizer(
-                        "\n\n".join(test_dataset_raw["text"]), return_tensors="pt"
-                    ).input_ids
-                    num_test_sequences = test_dataset_tok.numel() // sequence_length
-                    test_loader = [
-                        test_dataset_tok[:, i * sequence_length : (i + 1) * sequence_length]
-                        for i in range(num_test_sequences)
-                    ]
-                    return test_loader
-
-                @torch.no_grad()
-                def _compute_perplexity(model, data, batch_size: int = 1):
-                    num_samples = len(data)
-                    device = next(model.parameters()).device
-                    # Running estimate of negative log-likelihood
-                    nll_running = 0
-                    # Number of tokens processed to far
-                    tokens_processed = 0
-                    # Loop through each batch
-                    for i in trange(
-                        0, num_samples, batch_size, desc="Computing perplexity", leave=False
-                    ):
-                        j = min(i + batch_size, num_samples)
-                        inputs = torch.cat(data[i:j]).to(device)
-                        # Forward pass through the model
-                        lm_logits = model(inputs).logits
-                        # Shift logits and labels for next token prediction
-                        shift_logits = lm_logits[:, :-1, :].contiguous()
-                        shift_labels = inputs[:, 1:]
-                        # Compute loss
-                        loss = F.cross_entropy(
-                            shift_logits.reshape(-1, shift_logits.size(-1)),
-                            shift_labels.reshape(-1),
-                        )
-                        # Calculate negative log likelihood
-                        a = shift_labels.numel() / (tokens_processed + shift_labels.numel())
-                        b = tokens_processed / (tokens_processed + shift_labels.numel())
-                        nll_running = a * loss + b * nll_running
-                        # Update number of processed tokens
-                        tokens_processed += shift_labels.numel()
-                    # Compute perplexity
-                    ppl = nll_running.exp().item()
-                    return ppl
-
-                eval_data = _get_wikitext2(tokenizer, 2048)
-                ppl = _compute_perplexity(full_model, eval_data)
-                print(f"Wikitext-2 perplexity: {round(ppl, 2):.2f}")
 
             export_hf_checkpoint(
                 full_model,
