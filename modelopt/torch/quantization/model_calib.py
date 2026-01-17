@@ -1063,3 +1063,179 @@ def svdquant(
             with enable_weight_access_and_writeback(module, model):
                 postprocess(module, name)
     max_calibrate(model, forward_loop)
+
+
+def print_relative_mse_error(q: torch.Tensor, w: torch.Tensor, h: torch.Tensor, module_name: str):
+    """Print relative mean squared error between quantized and original weights.
+
+    Computes the Hessian-weighted relative MSE between quantized and original weights,
+    providing a measure of quantization quality. This metric is adapted from the GPTQ
+    repository.
+
+    Args:
+        q (torch.Tensor): Quantized weight tensor
+        w (torch.Tensor): Original weight tensor
+        h (torch.Tensor): Hessian matrix used for weighting the error
+        module_name (str): Name of the module for logging purposes
+
+    Note:
+        Implementation adapted from the GPTQ repository:
+        https://github.com/IST-DASLab/FP-Quant
+    """
+    delta = q - w
+    mse = (delta).mm(h).mul(delta).mean() / (w.mm(h).mul(w).mean() + 1e-6)
+    print(f"[{module_name}] Relative MSE error: {mse.item():.2e}")
+
+
+def update_hessian(input, hessian, n_samples):
+    """Update hessian matrix with new input samples using incremental formula.
+
+    Args:
+        input: Input tensor (batch_size, ..., features)
+        hessian: Current Hessian matrix to update in-place
+        n_samples: Number of samples already processed
+
+    Returns:
+        Tuple of (updated_hessian, new_sample_count)
+    """
+    batch_size = input.shape[0]
+
+    # Incremental averaging: scale down old hessian
+    hessian *= n_samples / (n_samples + batch_size)
+    n_samples += batch_size
+
+    # Compute outer product: H += (2/n_samples) * X @ X^T
+    # where X is the flattened input reshaped to (features, batch*seq)
+    input_flat = input.reshape(-1, input.shape[-1]).t().float()
+    scaled_input = math.sqrt(2 / n_samples) * input_flat
+    hessian.add_((scaled_input @ scaled_input.t()).to(hessian.device))
+
+    return hessian, n_samples
+
+
+def prepare_hessian_inverse(h, weight, percdamp):
+    """Prepare inverse Hessian with dead neuron handling and damping.
+
+    Args:
+        h: Hessian matrix to update
+        weight: Weight tensor to prepare Hessian for
+        percdamp: Damping percentage for Hessian diagonal
+
+    Returns:
+        h_inv: Inverse Hessian matrix
+
+    Implementation adapted from the FP-Quant repository:
+    https://github.com/IST-DASLab/FP-Quant/blob/d2e3092f968262c4de5fb050e1aef568a280dadd/src/quantization/gptq.py#L200
+    """
+    h = h.clone()
+    # Handle dead neurons (zero weight columns)
+    # Get columns with all zeros in weight
+    zero_cols = torch.nonzero(weight.eq(0).all(dim=0))
+
+    # Zero out entire rows and columns in Hessian for dead neurons
+    h[zero_cols, :] = 0
+    h[:, zero_cols] = 0
+    h[zero_cols, zero_cols] = 1
+
+    # Add damping to diagonal
+    damp = percdamp * torch.mean(torch.diag(h))
+    diag_indices = torch.arange(h.shape[0], device=h.device)
+    h[diag_indices, diag_indices] += damp
+
+    try:
+        h = torch.cholesky_inverse(torch.linalg.cholesky(h))
+        h_inv = torch.linalg.cholesky(h, upper=True)
+    except (RuntimeError, torch.linalg.LinAlgError):
+        print("Warning: Hessian is not positive definite, using identity matrix")
+        h_inv = torch.eye(h.shape[0], device=h.device, dtype=h.dtype)
+    return h_inv
+
+
+def quantize_block(full_weight, block_start, block_end, h_inv, quantizer):
+    """Quantize a block of weights group by group (based on quantizer block sizes) with error propagation.
+
+    Args:
+        full_weight: The full weight tensor (needed for INT4 quantization)
+        block_start: Starting column index of the block
+        block_end: Ending column index of the block
+        h_inv: Hessian inverse
+        quantizer: The quantizer to apply
+
+    Returns:
+        quantized_block: Quantized weights for this block
+        losses: Quantization losses per element
+        errors: Accumulated errors for propagation
+    """
+    # Extract the block we're working on
+    block_weight = full_weight[:, block_start:block_end]
+    block_hinv = h_inv[block_start:block_end, block_start:block_end]
+    block_size = block_end - block_start
+
+    quantized_block = torch.zeros_like(block_weight)
+    losses = torch.zeros_like(block_weight)
+    errors = torch.zeros_like(block_weight)
+
+    # We perform column-wise update for GPTQ within the block
+    group_size = 1
+
+    for group_start in range(0, block_size, group_size):
+        group_end = min(group_start + group_size, block_size)
+        group_cols = slice(group_start, group_end)
+        # Get current column and its Hessian inverse diagonal
+        weight_col = block_weight[:, group_cols]
+        hinv_diag = torch.diag(block_hinv[group_cols, group_cols])
+
+        # Quantize using the full weight, then extract the columns we need
+        quantized_full = quantizer(full_weight)
+        quantized_cols = quantized_full[:, block_start + group_start : block_start + group_end]
+        quantized_block[:, group_cols] = quantized_cols
+
+        # Compute quantization error and loss
+        error = (weight_col - quantized_cols) / hinv_diag
+        losses[:, group_cols] = (weight_col - quantized_cols) ** 2 / (hinv_diag**2) / 2
+        errors[:, group_cols] = error
+
+        # Propagate error to remaining columns in block
+        block_weight[:, group_start:] -= error @ block_hinv[group_start:group_end, group_start:]
+        full_weight[:, block_start:block_end] = block_weight
+
+    return quantized_block, losses, errors
+
+
+def blockwise_weight_update(module, h, block_size, percdamp):
+    """Update module weights using GPTQ-style blockwise quantization.
+
+    Args:
+        module: Neural network module with weight and weight_quantizer
+        H: Hessian matrix (d x d)
+        block_size: Size of blocks to process at once
+        percdamp: Damping percentage for Hessian diagonal
+    """
+    weight = module.weight.data.float().clone()
+    _, num_cols = weight.shape
+
+    # Preprocess Hessian: handle dead neurons and add damping
+    h_inv = prepare_hessian_inverse(h, weight, percdamp)
+
+    # Initialize output tensors
+    quantized_weight = torch.zeros_like(weight)
+    losses = torch.zeros_like(weight)
+
+    # Process weights in blocks
+    for block_start in range(0, num_cols, block_size):
+        block_end = min(block_start + block_size, num_cols)
+
+        quantized_block, block_losses, block_errors = quantize_block(
+            weight, block_start, block_end, h_inv, module.weight_quantizer
+        )
+        # Store results
+        quantized_weight[:, block_start:block_end] = quantized_block
+        losses[:, block_start:block_end] = block_losses
+
+        # Propagate errors to remaining weights
+        weight[:, block_end:] -= block_errors @ h_inv[block_start:block_end, block_end:]
+
+    # Print relative mse error
+    print_relative_mse_error(quantized_weight, module.weight.float(), h, module.name)
+    # Update module weights
+    module.weight.data = quantized_weight.reshape(module.weight.shape).to(module.weight.data.dtype)
