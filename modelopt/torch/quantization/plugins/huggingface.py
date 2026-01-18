@@ -583,29 +583,38 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
             with torch.no_grad():
                 module.weight.data = weight.detach().data.to(dtype=dtype, device=device)
 
+        # The attribute name was changed from `intermediate_size` to `intermediate_dim` in
+        # https://github.com/huggingface/transformers/commit/0642963ba13f2dae0596fe489415569e1d91fbda
+        if hasattr(self, "intermediate_size"):
+            expert_dim = self.intermediate_size
+        elif hasattr(self, "intermediate_dim"):
+            expert_dim = self.intermediate_dim
+        else:
+            raise AttributeError("Could not find intermediate dimension size in model")
+
         with init_empty_weights():
             gate_proj = nn.ModuleList(
                 [
-                    nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+                    nn.Linear(self.hidden_size, expert_dim, bias=False)
                     for _ in range(self.num_experts)
                 ]
             )
             up_proj = nn.ModuleList(
                 [
-                    nn.Linear(self.hidden_size, self.intermediate_size, bias=False)
+                    nn.Linear(self.hidden_size, expert_dim, bias=False)
                     for _ in range(self.num_experts)
                 ]
             )
             down_proj = nn.ModuleList(
                 [
-                    nn.Linear(self.intermediate_size, self.hidden_size, bias=False)
+                    nn.Linear(expert_dim, self.hidden_size, bias=False)
                     for _ in range(self.num_experts)
                 ]
             )
 
         for idx in range(self.num_experts):
-            _copy_weight(gate_proj[idx], self.gate_up_proj[idx, :, : self.intermediate_dim].T)
-            _copy_weight(up_proj[idx], self.gate_up_proj[idx, :, self.intermediate_dim :].T)
+            _copy_weight(gate_proj[idx], self.gate_up_proj[idx, :, :expert_dim].T)
+            _copy_weight(up_proj[idx], self.gate_up_proj[idx, :, expert_dim:].T)
             _copy_weight(down_proj[idx], self.down_proj[idx, :].T)
 
         delattr(self, "gate_up_proj")
