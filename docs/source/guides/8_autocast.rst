@@ -42,6 +42,7 @@ AutoCast can also be used programmatically through its Python API:
       trt_plugins=[],                       # list of TensorRT plugin library paths in .so format
       max_depth_of_reduction=None,          # maximum depth of reduction allowed in low precision
       opset=None,                           # optional target ONNX opset version (default: 13 for fp16, 22 for bf16)
+      use_standalone_type_inference=False,  # use standalone type inference instead of ONNX's infer_shapes (WAR)
    )
 
    # Save the converted model
@@ -82,6 +83,9 @@ AutoCast follows these steps to convert a model:
    - Converts eligible nodes to lower precision
    - Automatically inserts necessary cast operations
    - Automatically replaces initializers with lower precision values
+   - Performs type inference to propagate types through the graph
+     - By default, uses ONNX's ``infer_shapes`` which performs both shape and type inference using the ONNX infer_shapes API.
+     - Use ``use_standalone_type_inference=True`` to use a standalone type-only inference implementation (experimental).
 
 #. **Validation and Export**:
 
@@ -145,6 +149,14 @@ Best Practices
    - A warning will be issued if you specify an opset lower than the original model's opset, as downgrading opset versions may cause compatibility issues.
    - The opset may be automatically increased beyond your specified value if certain operations require it (e.g., quantization nodes require opset >= 19).
 
+#. **Type Inference Control**
+
+   - By default, AutoCast uses ONNX's ``infer_shapes`` which performs both shape and type inference.
+   - Use ``--use_standalone_type_inference`` to enable a standalone type-only inference implementation.
+   - This is a workaround for cases where shape inference fails for any reason, which allows us to bypass the dependency in ONNX's shape inference logic.
+   - The standalone implementation uses graphsurgeon for topological sorting and handles special operators like Cast, QuantizeLinear, DequantizeLinear, Constant and ConstantOfShape.
+   - Note: The standalone type inference may be less robust than ONNX's implementation for edge cases, but avoids unnecessary shape inference overhead and possible failures.
+
 Limitations and Restrictions
 ----------------------------
 - AutoCast does not yet support quantized models.
@@ -198,3 +210,9 @@ Convert to BF16 with a specific opset:
 .. code-block:: bash
 
    python -m modelopt.onnx.autocast --onnx_path model.onnx --low_precision_type bf16 --opset 22
+
+Use standalone type inference instead of ONNX's infer_shapes:
+
+.. code-block:: bash
+
+   python -m modelopt.onnx.autocast --onnx_path model.onnx --use_standalone_type_inference
