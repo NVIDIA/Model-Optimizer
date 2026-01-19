@@ -644,7 +644,7 @@ def save_onnx(model: onnx.ModelProto, onnx_path: str, save_as_external_data: boo
         model_proto = model.SerializeToString()
         model_size = len(model_proto)
         save_as_external_data = save_as_external_data or model_size > size_threshold
-        logger.warning(
+        logger.debug(
             f"Model size: {model_size} bytes, using external data: {save_as_external_data}"
         )
 
@@ -658,7 +658,6 @@ def save_onnx(model: onnx.ModelProto, onnx_path: str, save_as_external_data: boo
 
     # Set ir_version to 10, remove it once ORT supports ir_version 11
     model.ir_version = 10
-    save_as_external_data = True # GAGAM: for debug
     if save_as_external_data:
         external_data_path = os.path.basename(onnx_path) + "_data"
         if os.path.exists(external_data_path):

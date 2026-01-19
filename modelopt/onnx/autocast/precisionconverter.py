@@ -82,10 +82,6 @@ class PrecisionConverter:
     Public Methods:
         convert: Convert specified nodes to FP16/BF16 precision while keeping others in FP32.
     """
-    def print_byte_size(self, label: str):
-        model_proto = self.model.SerializeToString()
-        model_size = len(model_proto)
-        print(f"GAGAM {label} ByteSize: {model_size}")
 
     def __init__(
         self,
@@ -1298,9 +1294,7 @@ class PrecisionConverter:
     def _sanity_check(self):
         sanity_ok = True
         try:
-            self.print_byte_size("before check_model")
             onnx_utils.check_model(self.model)
-            self.print_byte_size("after check_model")
         except onnx.checker.ValidationError as e:
             logger.error(f"Internal error: onnx.checker failed: {e}")
             sanity_ok = False
