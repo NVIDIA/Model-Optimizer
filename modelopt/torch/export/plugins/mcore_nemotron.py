@@ -81,8 +81,13 @@ nemotron_h_causal_lm_import: dict[str, CustomModuleMapping] = {
     "shared_experts.linear_fc2": NameRemapping(
         "backbone.layers.{}.mixer.shared_experts.down_proj.", ROW_TP
     ),
+    # Latent MoE
+    "fc1_latent_proj": NameRemapping("backbone.layers.{}.mixer.fc1_latent_proj.", REPLICATE),
+    "fc2_latent_proj": NameRemapping("backbone.layers.{}.mixer.fc2_latent_proj.", REPLICATE),
+
 }
 
+# TODO later support MTP import/export 
 
 nemotron_h_causal_lm_export: dict[str, CustomModuleMapping] = {
     "word_embeddings": NameRemapping("backbone.embeddings."),
@@ -115,4 +120,7 @@ nemotron_h_causal_lm_export: dict[str, CustomModuleMapping] = {
     "shared_experts.linear_fc2": NameRemapping(
         "backbone.layers.{}.mixer.shared_experts.down_proj."
     ),
+    # Latent MoE
+    "fc1_latent_proj": NameRemapping("backbone.layers.{}.mixer.fc1_latent_proj."),
+    "fc2_latent_proj": NameRemapping("backbone.layers.{}.mixer.fc2_latent_proj."),
 }
