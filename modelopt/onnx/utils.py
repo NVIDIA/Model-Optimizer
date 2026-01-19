@@ -15,6 +15,7 @@
 
 """Utility functions related to onnx."""
 
+import copy
 import io
 import os
 import tempfile
@@ -555,14 +556,13 @@ def duplicate_shared_constants(onnx_model: onnx.ModelProto) -> tuple[onnx.ModelP
 def check_model(model: onnx.ModelProto) -> None:
     """Checks if the given model is valid."""
     if model.ByteSize() > (2 * (1024**3)):  # 2GB limit
-        logger.warning("Model exceeds 2GB limit, skipping check_model")
-        # with tempfile.TemporaryDirectory() as temp_dir:
-        #     # ONNX also looks in CWD, so we need to use a unique id
-        #     unique_id = str(uuid.uuid4())[:8]
-        #     onnx_tmp_path = os.path.join(temp_dir, f"model_{unique_id}.onnx")
-        #     save_onnx(model, onnx_tmp_path, save_as_external_data=True)
-        #     onnx.checker.check_model(onnx_tmp_path)
-
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # ONNX also looks in CWD, so we need to use a unique id
+            unique_id = str(uuid.uuid4())[:8]
+            onnx_tmp_path = os.path.join(temp_dir, f"model_{unique_id}.onnx")
+            model_copy = copy.deepcopy(model)
+            save_onnx(model_copy, onnx_tmp_path, save_as_external_data=True)
+            onnx.checker.check_model(onnx_tmp_path)
     else:
         onnx.checker.check_model(model)
 
