@@ -560,8 +560,7 @@ def check_model(model: onnx.ModelProto) -> None:
             # ONNX also looks in CWD, so we need to use a unique id
             unique_id = str(uuid.uuid4())[:8]
             onnx_tmp_path = os.path.join(temp_dir, f"model_{unique_id}.onnx")
-            model_copy = copy.deepcopy(model)
-            save_onnx(model_copy, onnx_tmp_path, save_as_external_data=True)
+            save_onnx(model, onnx_tmp_path, save_as_external_data=True)
             onnx.checker.check_model(onnx_tmp_path)
     else:
         onnx.checker.check_model(model)
@@ -664,8 +663,10 @@ def save_onnx(model: onnx.ModelProto, onnx_path: str, save_as_external_data: boo
             logger.warning(f"Removing existing external data file: {external_data_path}")
             os.remove(external_data_path)
 
+        # Copy so the onnx.ModelProto object will not be modified
+        model_copy = copy.deepcopy(model)
         onnx.save_model(
-            model,
+            model_copy,
             onnx_path,
             save_as_external_data=True,
             all_tensors_to_one_file=True,
