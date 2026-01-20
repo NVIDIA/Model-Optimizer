@@ -207,7 +207,9 @@ class CalibrationConfig(ModeloptBaseConfig):
         title="Threshold trials",
         description=(
             "List of threshold values to test during calibration. "
-            "If None, uses default: [1e-6, 5e-6, 1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2, 1e-1, 5e-1]"
+            "If None, uses default: [1e-6, 5e-6, 1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, "
+            "1e-2, 2e-2, 5e-2, 1e-1, 2e-1, 3e-1, 5e-1, 7e-1]. "
+            "Increasing the number of trials improves calibration accuracy but slows down calibration."
         ),
     )
 
