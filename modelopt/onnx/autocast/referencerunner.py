@@ -128,10 +128,7 @@ class ReferenceRunner:
         # Check if model has external data by checking:
         # 1. If any initializer has data_location set to EXTERNAL (even if data is loaded)
         # 2. If model size would exceed 2GB (indicating need for external data)
-        has_external_data = any(
-            init.HasField("data_location") and init.data_location == onnx.TensorProto.EXTERNAL
-            for init in self.model.graph.initializer
-        )
+        has_external_data = onnx_utils.check_model_uses_external_data(self.model)
 
         # Also check if model would be too large (>2GB) for SerializeToString
         # This handles cases where model was loaded with external data already loaded

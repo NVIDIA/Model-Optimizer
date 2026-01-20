@@ -696,6 +696,21 @@ def get_opset_version(model: onnx.ModelProto) -> int:
     return ai_onnx_domain[0].version
 
 
+def check_model_uses_external_data(model: onnx.ModelProto) -> bool:
+    """Checks if the model uses external data.
+
+    Args:
+        model: Loaded in-memory onnx ModelProto.
+
+    Returns:
+        True if any initializer tensor has data_location set to EXTERNAL.
+    """
+    return any(
+        init.HasField("data_location") and init.data_location == onnx.TensorProto.EXTERNAL
+        for init in model.graph.initializer
+    )
+
+
 def bfloat16_to_float32(bf16_array):
     """Converts a bfloat16 array (as raw data) to a float32 array."""
     uint32_array = bf16_array.astype(np.uint32) << 16
