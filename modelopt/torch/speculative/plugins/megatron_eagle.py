@@ -17,6 +17,7 @@
 
 import copy
 import warnings
+from contextlib import contextmanager
 
 import megatron.core
 import torch
@@ -31,6 +32,7 @@ from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEm
 from megatron.core.models.gpt import GPTModel
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.parallel_state import (
+    get_context_parallel_world_size,
     get_data_parallel_rank,
     get_expert_tensor_parallel_world_size,
     get_pipeline_model_parallel_world_size,
@@ -1111,14 +1113,17 @@ class _DynamicEagleGPTModel(EagleModel):
                 ttt_step=ttt_step,
             )
 
-            _, eagle_logits, eagle_module_input_hidden_states = self._eagle_forward(
-                eagle_inputs,
-                output_weight,
-                inference_params=inference_params,
-                packed_seq_params=packed_seq_params,
-                inference_context=eagle_inference_context,
-                **(extra_block_kwargs or {}),
-            )
+            with TEDotProductAttentionCP(
+                eagle_inputs["attention_mask"], self.eagle_config.num_attention_heads
+            ):
+                _, eagle_logits, eagle_module_input_hidden_states = self._eagle_forward(
+                    eagle_inputs,
+                    output_weight,
+                    inference_params=inference_params,
+                    packed_seq_params=packed_seq_params,
+                    inference_context=eagle_inference_context,
+                    **(extra_block_kwargs or {}),
+                )
 
             if self.config.sequence_parallel:
                 eagle_module_input_hidden_states = gather_from_sequence_parallel_region(
@@ -1266,10 +1271,13 @@ class _DynamicEagleGPTModel(EagleModel):
             # [TODO] (chenhany): let the module compute itself
             eagle_inputs["rotary_pos_emb"] = None
 
-            _, eagle_logits, eagle_next_hidden_states_input = self._eagle_forward(
-                eagle_inputs,
-                output_weight,
-            )
+            with TEDotProductAttentionCP(
+                eagle_inputs["attention_mask"], self.eagle_config.num_attention_heads
+            ):
+                _, eagle_logits, eagle_next_hidden_states_input = self._eagle_forward(
+                    eagle_inputs,
+                    output_weight,
+                )
 
             # parallel_logits are only used after the last step
             if step == steps - 1 and self.eagle_config.parallel_draft_step > 1:
@@ -1330,3 +1338,47 @@ class MegatronARValidation(AcceptanceRateValidation):
             if input_id[0, 0] == self.end_token:
                 break
         return input_ids
+
+
+@contextmanager
+def TEDotProductAttentionCP(attention_mask: torch.Tensor, num_attention_heads: int):
+    """Context manager for TEDotProductAttention with context parallelism.
+
+    Context manager that temporarily replace `attention_bias`
+    with `attention_mask` for `TEDotProductAttention.forward` calls across the process
+    if context parallel is used.
+
+    Any call to `TEDotProductAttention.forward` (including calls originating
+    from other modules) inside the context will receive `attention_bias=attention_mask`
+    if context parallelism is used.
+
+    Example:
+        with TEDotProductAttentionCP(attention_mask_tensor, num_attention_heads):
+            outputs = model(...)
+
+    Note: This monkey-patches the class method and restores it on exit.
+    """
+    from megatron.core.extensions.transformer_engine import TEDotProductAttention as cls
+
+    orig_forward = cls.forward
+
+    def _wrapped_forward(self, *args, **kwargs):
+        # Megatron mask is in shape [b, 1, s, s]
+        # TEDotProductAttention expects bias in [b, h, s, s]
+        # Replace the attention_bias argument passed to forward
+        kwargs["attention_bias"] = attention_mask.repeat(
+            [
+                attention_mask.shape[0],
+                num_attention_heads,
+                attention_mask.shape[2],
+                attention_mask.shape[3],
+            ]
+        )
+        return orig_forward(self, *args, **kwargs)
+
+    if get_context_parallel_world_size() > 1:
+        cls.forward = _wrapped_forward
+    try:
+        yield
+    finally:
+        cls.forward = orig_forward
