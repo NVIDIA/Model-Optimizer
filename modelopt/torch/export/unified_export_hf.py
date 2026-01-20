@@ -896,7 +896,7 @@ def _export_diffusers_checkpoint(
 
 
 def export_hf_checkpoint(
-    model: nn.Module | DiffusionPipeline,
+    model: "nn.Module | DiffusionPipeline",
     dtype: torch.dtype | None = None,
     export_dir: Path | str = tempfile.gettempdir(),
     save_modelopt_state: bool = False,
