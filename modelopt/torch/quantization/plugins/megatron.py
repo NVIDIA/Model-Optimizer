@@ -595,8 +595,6 @@ class _MegatronSequentialMLP(DynamicModule):
                         if stored_amax is None
                         else torch.maximum(stored_amax, amax_tensor)
                     )
-                #if isinstance(module, TensorQuantizer) and module.amax is None:
-                #    print(f"MISSING AMAX BEFORE SYNC in expert rank {dist.get_rank()}: {name}", flush=True)
 
 
 

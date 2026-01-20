@@ -387,7 +387,7 @@ def get_prequant_scaling_factor(module: nn.Module) -> torch.Tensor:
     if prequant_scaling_factor is not None:
         assert torch.all(prequant_scaling_factor > 0), (
             f"prequant scaling factor {prequant_scaling_factor} not positive."
-        )
+    )
     return prequant_scaling_factor
 
 
@@ -399,30 +399,20 @@ def get_kv_cache_bias(kv_module: nn.Module) -> list[torch.Tensor]:
         kv_bias.append(getattr(quantizer_module, "_bias_value", None))
     return kv_bias
 
-
-def get_kv_cache_scaling_factor(kv_module: nn.Module) -> list[torch.Tensor]:
-    """Returns the kv_cache scaling factor if output quantizer is set. Else returns None by default."""
-    if not hasattr(kv_module, "k_bmm_quantizer") or not hasattr(kv_module, "v_bmm_quantizer"):
+def get_kv_cache_scaling_factor(self_attention_module: nn.Module) -> torch.Tensor:
+    """
+    Returns the k and v BMM scaling factors if BMM quantizers are set in the self attention module. 
+    Else returns None by default.
+    """
+    if not hasattr(self_attention_module, "k_bmm_quantizer") or not hasattr(self_attention_module, "v_bmm_quantizer"):
         return [None, None]
 
     scaling_factors = [
-        get_scaling_factor(getattr(kv_module, quantizer))
+        get_scaling_factor(getattr(self_attention_module, quantizer))
         for quantizer in ("k_bmm_quantizer", "v_bmm_quantizer")
     ]
-
-    # For FP8, we recommend default kv cache scaling factor to be 1.
-    if get_kv_cache_dtype(kv_module) == KV_CACHE_FP8:
-        for i, factor in enumerate(scaling_factors):
-            if factor.item() > 0.5:
-                warn(
-                    f"Warning: Large KV activation detected: {factor.item()}, "
-                    "Quantized KV cache may lead to higher accuracy drop."
-                )
-            scaling_factors[i] = torch.max(
-                factor, torch.tensor([1.0], dtype=torch.float, device=factor.device)
-            )
-
     return scaling_factors
+
 
 
 def get_kv_cache_dtype(modules: list[nn.Module] | nn.Module) -> str | None:
@@ -445,8 +435,7 @@ def get_kv_cache_dtype(modules: list[nn.Module] | nn.Module) -> str | None:
 
     for module in modules:
         # Case where the module has both k_bmm_quantizer and v_bmm_quantizer
-        # Still check for output quantizer for the unified_megatron_export path
-        for quantizer in ("k_bmm_quantizer", "v_bmm_quantizer", "output_quantizer"):
+        for quantizer in ("k_bmm_quantizer", "v_bmm_quantizer"): 
             quantizer_attr = getattr(module, quantizer, None)
             if quantizer_attr and quantizer_attr.is_enabled:
                 num_bits_list.append(quantizer_attr.num_bits)
