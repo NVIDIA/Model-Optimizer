@@ -298,7 +298,7 @@ class GPTModelExporter:
         if is_last_stage_main_rank and quantization is not None:
             # TODO refactor to use mte.quant_utils.get_quant_config
             # except layer names are different in MCore and HF
-             hf_quant_config = {
+            hf_quant_config = {
                 "producer": {
                     "name": "modelopt",
                     "version": __version__,
@@ -309,7 +309,7 @@ class GPTModelExporter:
                     "exclude_modules": ["lm_head"], # TODO update this dynamically
                 },
             }
-            if quantization == "NVFP4":
+            if quantization == "NVFP4": # update block size
                 hf_quant_config["quantization"]["group_size"] = 16
             with open(save_directory + "/hf_quant_config.json", "w") as f:
                 json.dump(hf_quant_config, f, indent=4)
@@ -763,7 +763,7 @@ class GPTModelExporter:
                 self._state_dict[v_proj_key] = val.detach().clone()
 
     def _self_attention_scaling(self, module, prefix, k_scale_name="k_scale", v_scale_name="v_scale"):
-        """KV cache scaling for self attention module."""
+        """KV cache scaling for CoreAttention module."""
         k_scale_key = prefix + k_scale_name
         v_scale_key = prefix + v_scale_name
         if hasattr(module, "k_bmm_quantizer") and hasattr(module, "v_bmm_quantizer"):
