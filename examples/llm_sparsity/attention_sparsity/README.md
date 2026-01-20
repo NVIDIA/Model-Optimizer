@@ -102,7 +102,7 @@ The calibration process:
 |----------|---------|-------------|
 | `--pyt_ckpt_path` | Required | HuggingFace model path or name |
 | `--sparse_attn` | `skip_softmax` | Configuration: `skip_softmax` or `skip_softmax_calib` |
-| `--backend` | `pytorch` | Backend: `pytorch` or `triton` |
+| `--backend` | `pytorch` | Backend: `pytorch` (only supported backend) |
 | `--seq_len` | `2048` | Maximum sequence length for input prompts |
 | `--export_dir` | `None` | Directory to export the sparsified model |
 
@@ -137,9 +137,11 @@ You can create custom sparse attention configurations:
 custom_config = {
     "sparse_cfg": {
         "calibration": {  # Optional: omit for fixed threshold
-            "target_sparse_ratio": 0.5,  # Target 50% sparsity
+            "target_sparse_ratio": {"prefill": 0.5, "decode": 0.5},  # Target 50% sparsity
             "samples": 128,              # Number of calibration samples
             "max_seqlen": 8192,          # Maximum sequence length
+            # Optional: customize threshold trials for calibration
+            "threshold_trials": [1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 2e-2, 5e-2, 1e-1, 2e-1, 3e-1, 5e-1, 7e-1],
         },
         "*attn*": {  # Pattern to match attention modules
             "method": "flash_skip_softmax",

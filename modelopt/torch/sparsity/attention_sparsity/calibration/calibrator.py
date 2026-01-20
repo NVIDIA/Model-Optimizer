@@ -71,9 +71,13 @@ class DynamicThresholdCalibrator:
             1e-3,
             5e-3,
             1e-2,
+            2e-2,
             5e-2,
             1e-1,
+            2e-1,
+            3e-1,
             5e-1,
+            7e-1,
         ]
 
         # Statistics tracking
