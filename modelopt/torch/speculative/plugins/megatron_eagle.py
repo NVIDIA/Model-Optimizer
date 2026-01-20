@@ -585,11 +585,9 @@ class EagleModule(MegatronModule):
         # NOTE: Even if sequence_parallel is used, the rotary_seq_len must be in the original
         #       length. Since we get the seq_len from hidden_states.shape[0], we need to
         #       multiply the the tp back.
-        #       Similarly, if get_context_parallel_world_size() > 1, we also need to multiply the cp size.
         rotary_seq_len = hidden_states.shape[0]
         if self.config.sequence_parallel:
             rotary_seq_len *= self.config.tensor_model_parallel_size
-        rotary_seq_len *= get_context_parallel_world_size()
 
         if self.config.use_mtp_layernorm:
             embeddings = self.enorm(embeddings)
