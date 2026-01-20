@@ -1,6 +1,17 @@
 NVIDIA Model Optimizer Changelog (Linux)
 ========================================
 
+0.42 (TBD)
+^^^^^^^^^^^^^^^^^
+
+**Bug Fixes**
+
+- Fix calibration data generation with multiple samples in the ONNX workflow.
+
+**New Features**
+
+- Add standalone type inference option (``--use_standalone_type_inference``) in ONNX AutoCast as an alternative to ONNX's ``infer_shapes``. This experimental feature performs type-only inference without shape inference, useful as a workaround when shape inference fails or to avoid unnecessary shape inference overhead.
+
 0.41 (2026-01-19)
 ^^^^^^^^^^^^^^^^^
 
