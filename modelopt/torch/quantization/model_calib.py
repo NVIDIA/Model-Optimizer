@@ -100,10 +100,6 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
         if hasattr(module, "sync_moe_local_experts_amax"):
             module.sync_moe_local_experts_amax()
 
-            # TODO just for testing
-            if "experts" in name and "weight_quantizer" in name:
-                assert child.amax is not None
-
     # Step 2:Sync amax across data parallelism
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
@@ -165,7 +161,6 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
                 axes_for_sync=[None, -1],
                 parallel_state=module.parallel_state,
             )
-
             sync_quantizer_amax_across_tp(
                 module.weight_quantizer,
                 name,
@@ -283,8 +278,6 @@ def mse_calibrate(
 
     # Step 4: Compute optimal amax and load it
     finish_stats_collection(model, method="mse")
-
-    # TODO: Sync amax across distributed processes
 
 
 def enable_stats_collection(model: nn.Module):

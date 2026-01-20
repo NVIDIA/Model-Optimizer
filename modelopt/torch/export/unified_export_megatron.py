@@ -52,6 +52,8 @@ from .plugins.megatron_importer import GPTModelImporter
 from .quant_utils import (
     get_activation_scaling_factor,
     get_kv_cache_dtype,
+    get_kv_cache_scaling_factor,
+    get_quant_config,
     get_quantization_format,
     get_scaling_factor,
     get_weight_block_size,
@@ -84,33 +86,6 @@ __all__ = [
     "export_mcore_gpt_to_hf",
     "import_mcore_gpt_from_hf",
 ]
-
-
-# This path uses output_quantizer for KV cache quantization.
-# The function below is the old version of get_kv_cache_scaling_factor which is now refactored to handle bmm_quantizer.
-def get_kv_cache_scaling_factor(kv_module: nn.Module) -> torch.Tensor:
-    """Returns the kv_cache scaling factor if output quantizer is set. Else returns None by default."""
-    scaling_factor = (
-        get_scaling_factor(kv_module.output_quantizer)
-        if hasattr(kv_module, "output_quantizer")
-        else None
-    )
-
-    if not scaling_factor:
-        return None
-
-    # For FP8, we recommend default kv cache scaling factor to be 1.
-    if get_kv_cache_dtype(kv_module) == KV_CACHE_FP8:
-        if scaling_factor.item() > 0.5:
-            warn(
-                f"!!!!Large KV activations detected: {scaling_factor.item()}, "
-                "Quantized KV cache may lead to higher accuracy drop.\n!!!!"
-            )
-        scaling_factor = torch.max(
-            scaling_factor,
-            torch.tensor([1.0], dtype=torch.float, device=scaling_factor.device),
-        )
-    return scaling_factor
 
 
 class GPTModelExporter:
@@ -283,6 +258,7 @@ class GPTModelExporter:
 
         kv_cache_quantization = None
         kv_cache_dtype = get_kv_cache_dtype(self.model)
+        print("kv_cache_dtype: ", kv_cache_dtype)
         if kv_cache_dtype in (KV_CACHE_FP8, KV_CACHE_NVFP4):
             # FP8 KV Cache is supported in VLLM; NVFP4 supported in TRTLLM
             kv_cache_quantization = kv_cache_dtype
@@ -320,7 +296,9 @@ class GPTModelExporter:
                     pass
 
         if is_last_stage_main_rank and quantization is not None:
-            hf_quant_config = {
+            # TODO refactor to use mte.quant_utils.get_quant_config
+            # except layer names are different in MCore and HF
+             hf_quant_config = {
                 "producer": {
                     "name": "modelopt",
                     "version": __version__,
@@ -328,9 +306,11 @@ class GPTModelExporter:
                 "quantization": {
                     "quant_algo": quantization,
                     "kv_cache_quant_algo": kv_cache_quantization,
-                    "exclude_modules": ["lm_head"],
+                    "exclude_modules": ["lm_head"], # TODO update this dynamically
                 },
             }
+            if quantization == "NVFP4":
+                hf_quant_config["quantization"]["group_size"] = 16
             with open(save_directory + "/hf_quant_config.json", "w") as f:
                 json.dump(hf_quant_config, f, indent=4)
 
@@ -473,6 +453,7 @@ class GPTModelExporter:
             method_map = {
                 "name_remapping": self._name_remapping,
                 "qkv_slicing": self._qkv_slicing,
+                "self_attention_scaling": self._self_attention_scaling,
                 "gated_mlp_slicing": self._gated_mlp_slicing,
                 "pack_name_remapping": self._pack_name_remapping,
                 "pack_name_remapping_gpt_oss": self._pack_name_remapping_gpt_oss,
@@ -541,12 +522,8 @@ class GPTModelExporter:
             # TODO (chenhany): support AWQ with pre_quant_scale
             if hasattr(module.input_quantizer, "_pre_quant_scale"):
                 raise ValueError("Detect pre_quant_scale! SmoothQuant/AWQ are not yet supported!")
-
-        if hasattr(module, "output_quantizer"):
-            output_scale = get_kv_cache_scaling_factor(module)
-            if output_scale is not None:
-                name_to_value["output_scale"] = output_scale
-
+            
+        
         return name_to_value, qformat, block_size
 
     def _get_quantization_format(self, module: torch.nn.Module):
@@ -674,9 +651,7 @@ class GPTModelExporter:
         q_proj_name="q_proj",
         k_proj_name="k_proj",
         v_proj_name="v_proj",
-        k_scale_name="k_scale",
-        v_scale_name="v_scale",
-    ):
+            ):
         name_to_value, qformat, block_size = self._get_quantized_state(module, self.dtype)
 
         q_proj_prefix = prefix + q_proj_name + "."
@@ -774,10 +749,7 @@ class GPTModelExporter:
             q_proj_key = q_proj_prefix + key
             k_proj_key = k_proj_prefix + key
             v_proj_key = v_proj_prefix + key
-            if key == "output_scale":
-                self._state_dict[prefix + k_scale_name] = val.detach().clone()
-                self._state_dict[prefix + v_scale_name] = val.detach().clone()
-            elif key == "bias":
+            if key == "bias":
                 # Slice bias similar to weight
                 bias = val.detach().clone()
                 bias = bias.reshape([qkv_total_dim, head_size])
@@ -789,6 +761,17 @@ class GPTModelExporter:
                 self._state_dict[q_proj_key] = val.detach().clone()
                 self._state_dict[k_proj_key] = val.detach().clone()
                 self._state_dict[v_proj_key] = val.detach().clone()
+
+    def _self_attention_scaling(self, module, prefix, k_scale_name="k_scale", v_scale_name="v_scale"):
+        """KV cache scaling for self attention module."""
+        k_scale_key = prefix + k_scale_name
+        v_scale_key = prefix + v_scale_name
+        if hasattr(module, "k_bmm_quantizer") and hasattr(module, "v_bmm_quantizer"):
+            kv_scales = get_kv_cache_scaling_factor(module)
+            if all(s is not None for s in kv_scales):
+                self._state_dict[k_scale_key] = kv_scales[0]
+                self._state_dict[v_scale_key] = kv_scales[1]
+
 
     def _pack_name_remapping(self, module, prefix, layer_type=None):
         """Pack name remapping into one tensor."""
@@ -1149,6 +1132,8 @@ class GPTModelExporter:
                             self.rules["q_layernorm"](layer.self_attention.q_layernorm, layer_id)
                             self.rules["k_layernorm"](layer.self_attention.k_layernorm, layer_id)
                         self.rules["linear_qkv"](layer.self_attention.linear_qkv, layer_id)
+                        if hasattr(layer.self_attention, "core_attention"):
+                            self.rules["core_attention"](layer.self_attention.core_attention, layer_id)
                         self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
                         if (
                             getattr(layer.self_attention.core_attention, "softmax_offset", None)
@@ -1166,6 +1151,10 @@ class GPTModelExporter:
                         self.rules["router"](
                             layer.mlp.router, layer_id, dtype=self.moe_router_dtype
                         )
+                        if hasattr(layer.mlp, "fc1_latent_proj") and layer.mlp.fc1_latent_proj is not None:
+                            self.rules["fc1_latent_proj"](layer.mlp.fc1_latent_proj, layer_id)
+                        if hasattr(layer.mlp, "fc2_latent_proj") and layer.mlp.fc2_latent_proj is not None:
+                            self.rules["fc2_latent_proj"](layer.mlp.fc2_latent_proj, layer_id)
                         if (
                             hasattr(layer.mlp, "shared_experts")
                             and layer.mlp.shared_experts is not None

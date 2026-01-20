@@ -595,8 +595,6 @@ class _MegatronSequentialMLP(DynamicModule):
                         if stored_amax is None
                         else torch.maximum(stored_amax, amax_tensor)
                     )
-                #if isinstance(module, TensorQuantizer) and module.amax is None:
-                #    print(f"MISSING AMAX BEFORE SYNC in expert rank {dist.get_rank()}: {name}", flush=True)
 
 
 
@@ -765,7 +763,6 @@ class _QuantMoELayer(QuantModule):
             self.router.topk = self.router.num_experts
             output = super().forward(hidden_states)
             self.router.topk = original_top_k
-            return output
         return super().forward(hidden_states)
 
 # TODO double check if MOE forward will be implemented in MoELayer or TransformerLayer
@@ -782,6 +779,4 @@ class _QuantTransformerLayer(QuantModule):
             self.mlp.router.topk = self.mlp.router.num_experts
             output = super()._forward_mlp_moe_preprocess(hidden_states)
             self.mlp.router.topk = original_top_k
-            return output
-
         return super()._forward_mlp_moe_preprocess(hidden_states)

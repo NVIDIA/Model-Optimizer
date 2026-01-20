@@ -26,6 +26,7 @@ from .mcore_custom import (
     NameRemapping,
     QKVMerging,
     QKVSlicing,
+    SelfAttentionScaling,
 )
 
 # Example on adding a new CausalLM.
@@ -84,10 +85,18 @@ nemotron_h_causal_lm_import: dict[str, CustomModuleMapping] = {
     # Latent MoE
     "fc1_latent_proj": NameRemapping("backbone.layers.{}.mixer.fc1_latent_proj.", REPLICATE),
     "fc2_latent_proj": NameRemapping("backbone.layers.{}.mixer.fc2_latent_proj.", REPLICATE),
+    # MTP
+    #"enorm": NameRemapping("mtp.layers.{}.enorm.", REPLICATE),
+    #"hnorm": NameRemapping("mtp.layers.{}.hnorm.", REPLICATE),
+    #"eh_proj": NameRemapping("mtp.layers.{}.eh_proj.", REPLICATE),
+    #"layer_norm": NameRemapping("mtp.layers.{}.final_layernorm.", REPLICATE),
+    #"norm": NameRemapping("mtp.layers.{}.norm", REPLICATE)
+    # "transformer_layer": NameRemapping("mtp.layers.{}.mixer", REPLICATE),
+
 
 }
 
-# TODO later support MTP import/export 
+# TODO ADD MTP export 
 
 nemotron_h_causal_lm_export: dict[str, CustomModuleMapping] = {
     "word_embeddings": NameRemapping("backbone.embeddings."),
@@ -106,6 +115,7 @@ nemotron_h_causal_lm_export: dict[str, CustomModuleMapping] = {
     "input_layernorm": NameRemapping("backbone.layers.{}.norm."),
     "linear_qkv": QKVSlicing("backbone.layers.{}.mixer."),
     "linear_proj": NameRemapping("backbone.layers.{}.mixer.o_proj."),
+    "core_attention": SelfAttentionScaling("backbone.layers.{}.mixer."),
     # MLP
     "pre_mlp_layernorm": NameRemapping("backbone.layers.{}.norm."),
     "linear_fc1": NameRemapping("backbone.layers.{}.mixer.up_proj."),
