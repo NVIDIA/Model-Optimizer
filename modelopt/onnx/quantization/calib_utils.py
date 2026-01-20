@@ -89,7 +89,7 @@ class CalibrationDataProvider(CalibrationDataReader):
         # Create list of model inputs with appropriate batch size
         n_itr = int(calibration_data[input_names[0]].shape[0] / input_shapes[input_names[0]][0])
         logger.debug(f"Creating {n_itr} calibration iterations")
-        self.calibration_data_list = [{}] * n_itr
+        self.calibration_data_list = [{} for _ in range(n_itr)]
         for input_name in input_names:
             for idx, calib_data in enumerate(
                 np.array_split(calibration_data[input_name], n_itr, axis=0)
