@@ -357,22 +357,19 @@ class MCoreMinitronSearcher(BaseSearcher):
 
         # Update model config with pruned architecture
         # kv_channels can be None so we need to save from original hidden_size and num_attention_heads
-        orig_kv_channels = self.model.config.kv_channels
-        if orig_kv_channels is None:
-            orig_kv_channels = (
+        if self.model.config.kv_channels is None:
+            self.model.config.kv_channels = (
                 self.model.config.hidden_size // self.model.config.num_attention_heads
             )
-            self.model.config.kv_channels = orig_kv_channels
         # num_query_groups can be None so we need to save from original num_attention_heads
-        orig_num_query_groups = self.model.config.num_query_groups
-        if orig_num_query_groups is None:
-            orig_num_query_groups = self.model.config.num_attention_heads
-            self.model.config.num_query_groups = orig_num_query_groups
+        if self.model.config.num_query_groups is None:
+            self.model.config.num_query_groups = self.model.config.num_attention_heads
         # moe_ffn_hidden_size can be None so we need to save from original ffn_hidden_size
-        orig_moe_ffn_hidden_size = self.model.config.moe_ffn_hidden_size
-        if orig_moe_ffn_hidden_size is None:
-            orig_moe_ffn_hidden_size = self.model.config.ffn_hidden_size
-            self.model.config.moe_ffn_hidden_size = orig_moe_ffn_hidden_size
+        if (
+            self.model.config.moe_ffn_hidden_size is None
+            and self.model.config.num_moe_experts is not None
+        ):
+            self.model.config.moe_ffn_hidden_size = self.model.config.ffn_hidden_size
         # Now set hparam active choices
         for hp_name, hp_value in export_config.items():
             setattr(self.model.config, hp_name, hp_value)
@@ -541,6 +538,7 @@ class MCoreMinitronSearcher(BaseSearcher):
         )
 
         if hparams_to_skip:
+            search_space = dict(search_space)  # Avoid modifying the original search space
             print_rank_0(f"Skipping {hparams_to_skip=} during search space generation...")
             for hparam in hparams_to_skip:
                 if hparam in search_space:
