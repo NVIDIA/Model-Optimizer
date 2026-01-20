@@ -16,6 +16,7 @@
 """Distillation API subpackage for torch."""
 
 from . import mode
+from .bypass_distillation_model import *
 from .config import *
 from .distillation import *
 from .distillation_model import *

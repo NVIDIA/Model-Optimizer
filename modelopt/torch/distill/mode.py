@@ -36,7 +36,8 @@ from modelopt.torch.opt.mode import (
 )
 from modelopt.torch.utils import init_model_from_model_like, unwrap_model
 
-from .config import ExportStudentConfig, KDLossConfig
+from .bypass_distillation_model import BypassDistillationModel
+from .config import BypassKDConfig, ExportStudentConfig, KDLossConfig
 from .distillation_model import DistillationModel
 from .registry import DistillationDMRegistry
 
@@ -87,6 +88,29 @@ class KnowledgeDistillationModeDescriptor(ModeDescriptor):
 
 
 @DistillModeRegistry.register_mode
+class BypassKDModeDescriptor(KnowledgeDistillationModeDescriptor):
+    """Class to describe the Bypass Knowledge-Distillation mode.
+
+    The properties of this mode can be inspected via the source code.
+    """
+
+    @property
+    def name(self) -> str:
+        """Returns the value (str representation) of the mode."""
+        return "bypass_kd"
+
+    @property
+    def config_class(self) -> type[ModeloptBaseConfig]:
+        """Specifies the config class for the mode."""
+        return BypassKDConfig
+
+    @property
+    def convert(self) -> ConvertEntrypoint:
+        """The mode's entrypoint for converting a model."""
+        return _convert_for_bypass
+
+
+@DistillModeRegistry.register_mode
 class ExportStudentModeDescriptor(ModeDescriptor):
     """Class to describe the specific Export mode to be used with Knowledge Distillation.
 
@@ -124,7 +148,9 @@ class ExportStudentModeDescriptor(ModeDescriptor):
         return False
 
 
-def _convert_for_kd(model: nn.Module, config: KDLossConfig) -> ConvertReturnType:
+def _convert_for_kd(
+    model: nn.Module, config: KDLossConfig, model_cls: type[nn.Module] = DistillationModel
+) -> ConvertReturnType:
     """Function for converting a model to a distillation meta-model.
 
     This is the only utility needed to use the ``modelopt.torch.distill`` API directly.
@@ -159,7 +185,7 @@ def _convert_for_kd(model: nn.Module, config: KDLossConfig) -> ConvertReturnType
     # initialize distillation model
     original_cls = type(student)
     if original_cls not in DistillationDMRegistry:
-        DistillationDMRegistry.register({original_cls: "student_class"})(DistillationModel)
+        DistillationDMRegistry.register({original_cls: "student_class"})(model_cls)
     # TODO (lucasl): look into ways to avoid registering every class manually
     # (e.g. by just registering nn.Module and disable the "forward" check for the inherited class check
 
@@ -172,6 +198,11 @@ def _convert_for_kd(model: nn.Module, config: KDLossConfig) -> ConvertReturnType
     metadata = {}
 
     return distillation_model, metadata
+
+
+def _convert_for_bypass(model: nn.Module, config: BypassKDConfig) -> ConvertReturnType:
+    """Function for converting a model to a bypass distillation meta-model."""
+    return _convert_for_kd(model, config, model_cls=BypassDistillationModel)
 
 
 def _reset_kd_state_config(model: nn.Module, config: KDLossConfig, metadata: MetadataDict):

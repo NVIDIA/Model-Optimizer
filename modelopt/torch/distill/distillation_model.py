@@ -117,7 +117,7 @@ class DistillationModel(DynamicModule):
             handle_s = student_layer.register_forward_hook(student_output_capture_fwd_hook)
             setattr(teacher_layer, "_intermediate_output", None)
             handle_t = teacher_layer.register_forward_hook(teacher_output_capture_fwd_hook)
-            self._hook_handles.extend([handle_s, handle_t])
+            self._hook_handles.update([handle_s, handle_t])
 
     def export(self):
         """Export the distillation model."""
