@@ -28,6 +28,7 @@ import torch.nn as nn
 from config import (
     FP8_DEFAULT_CONFIG,
     INT8_DEFAULT_CONFIG,
+    FLUX_DEV_NVFP4_MIXED_CONFIG,
     NVFP4_DEFAULT_CONFIG,
     NVFP4_FP8_MHA_CONFIG,
     reset_set_int8_config,
@@ -46,12 +47,21 @@ if __name__ == "__main__":
     torch.nn.modules.normalization.RMSNorm = DiffuserRMSNorm
 
 from diffusers import (
+    AutoencoderKL,
     DiffusionPipeline,
     FluxPipeline,
+    FluxTransformer2DModel,
     LTXConditionPipeline,
     LTXLatentUpsamplePipeline,
     StableDiffusion3Pipeline,
     WanPipeline,
+)
+from diffusers.models import SD3Transformer2DModel as StableDiffusion3Transformer2DModel
+from transformers import (
+    CLIPTextModel,
+    CLIPTokenizer,
+    T5EncoderModel,
+    T5TokenizerFast,
 )
 from onnx_utils.export import generate_fp8_scales, modelopt_export_sd
 from tqdm import tqdm
@@ -63,6 +73,7 @@ from utils import (
     filter_func_wan_video,
     load_calib_prompts,
 )
+from save_quantized_safetensors import save_quantized_safetensors
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -107,6 +118,7 @@ class QuantFormat(str, Enum):
     INT8 = "int8"
     FP8 = "fp8"
     FP4 = "fp4"
+    FP4_MIXED_DEV = "fp4_mixed_dev"
 
 
 class QuantAlgo(str, Enum):
@@ -332,6 +344,9 @@ class ModelConfig:
     backbone: str = ""
     trt_high_precision_dtype: DataType = DataType.HALF
     override_model_path: Path | None = None
+    vae_path: Path | None = None  # Local VAE path (optional)
+    text_encoder_path: Path | None = None  # Local text encoder path (optional)
+    text_encoder_2_path: Path | None = None  # Local text encoder 2 path (optional, for FLUX/SD3)
     cpu_offloading: bool = False
     ltx_skip_upsampler: bool = False  # Skip upsampler for LTX-Video (faster calibration)
 
@@ -351,6 +366,7 @@ class ExportConfig:
     onnx_dir: Path | None = None
     hf_ckpt_dir: Path | None = None
     restore_from: Path | None = None
+    save_safetensors: bool = True  # NEW: Save SafeTensors directly
 
     def validate(self) -> None:
         """Validate export configuration."""
@@ -437,12 +453,66 @@ class PipelineManager:
             model_id = (
                 MODEL_REGISTRY[model_type] if override_model_path is None else override_model_path
             )
-            pipe = MODEL_PIPELINE[model_type].from_pretrained(
-                model_id,
-                torch_dtype=torch_dtype,
-                use_safetensors=True,
-                **MODEL_DEFAULTS[model_type].get("from_pretrained_extra_args", {}),
-            )
+            is_safetensors_file = model_id.lower().endswith('.safetensors')
+
+            # If the path is a .safetensors file, we need to handle it differently
+            if is_safetensors_file:
+                # Load base model from HuggingFace
+                base_model_id = MODEL_REGISTRY[model_type]
+                pipe = MODEL_PIPELINE[model_type].from_pretrained(
+                    base_model_id,
+                    torch_dtype=torch_dtype,
+                    **MODEL_DEFAULTS[model_type].get("from_pretrained_extra_args", {}),
+                )
+
+                # Load custom transformer from safetensors file
+                if model_type in [ModelType.FLUX_DEV, ModelType.FLUX_SCHNELL]:
+                    dtype = torch_dtype.get("transformer", torch_dtype.get("default")) if isinstance(torch_dtype, dict) else torch_dtype
+                    # Create transformer with hardcoded config to avoid downloading from HuggingFace
+                    # Use meta device to reduce RAM usage during initialization
+                    with torch.device('meta'):
+                        transformer = FluxTransformer2DModel(
+                            attention_head_dim=128,
+                            guidance_embeds=True,
+                            in_channels=64,
+                            joint_attention_dim=4096,
+                            num_attention_heads=24,
+                            num_layers=19,
+                            num_single_layers=38,
+                            patch_size=1,
+                            pooled_projection_dim=768,
+                        )
+                    
+                    # Load weights from safetensors file
+                    from safetensors.torch import load_file
+                    state_dict = load_file(model_id)
+                    transformer = transformer.to_empty(device='cpu')
+                    transformer.load_state_dict(state_dict, strict=False, assign=True)
+                    del state_dict
+                    transformer = transformer.to(dtype)
+                    
+                    pipe.transformer = transformer
+                elif model_type in [ModelType.SD3_MEDIUM, ModelType.SD35_MEDIUM]:
+                    dtype = torch_dtype.get("transformer", torch_dtype.get("default")) if isinstance(torch_dtype, dict) else torch_dtype
+                    transformer = StableDiffusion3Transformer2DModel.from_single_file(
+                        model_id,
+                        torch_dtype=dtype,
+                    )
+                    pipe.transformer = transformer
+                else:
+                    raise ValueError(
+                        f"Loading from single .safetensors file is not supported for {model_type.value}. "
+                        "Please provide a directory with the full model or use a HuggingFace model ID."
+                    )
+            else:
+                # Normal loading from directory or HuggingFace repo
+                pipe = MODEL_PIPELINE[model_type].from_pretrained(
+                    model_id,
+                    torch_dtype=torch_dtype,
+                    use_safetensors=True,
+                    **MODEL_DEFAULTS[model_type].get("from_pretrained_extra_args", {}),
+                )
+
             pipe.set_progress_bar_config(disable=True)
             return pipe
         except Exception as e:
@@ -463,12 +533,83 @@ class PipelineManager:
         self.logger.info(f"Data type: {self.config.model_dtype}")
 
         try:
-            self.pipe = MODEL_PIPELINE[self.config.model_type].from_pretrained(
-                self.config.model_path,
-                torch_dtype=self.config.model_dtype,
-                use_safetensors=True,
-                **MODEL_DEFAULTS[self.config.model_type].get("from_pretrained_extra_args", {}),
+            model_path = self.config.model_path
+            is_safetensors_file = model_path.lower().endswith('.safetensors')
+            has_local_components = (
+                self.config.vae_path or
+                self.config.text_encoder_path or
+                self.config.text_encoder_2_path
             )
+
+            # If the path is a .safetensors file, we need to handle it differently
+            if is_safetensors_file:
+                self.logger.info(f"Detected single .safetensors file: {model_path}")
+
+                # Check if user provided local VAE/text encoders
+                if has_local_components:
+                    self.logger.info("Loading pipeline components from local paths...")
+                    self.pipe = self._load_pipeline_from_components(model_path)
+                else:
+                    self.logger.info("Loading base model from HuggingFace and replacing transformer...")
+                    # Load base model from HuggingFace
+                    base_model_id = MODEL_REGISTRY[self.config.model_type]
+                    self.logger.info(f"Loading base pipeline from: {base_model_id}")
+
+                    self.pipe = MODEL_PIPELINE[self.config.model_type].from_pretrained(
+                        base_model_id,
+                        torch_dtype=self.config.model_dtype,
+                        **MODEL_DEFAULTS[self.config.model_type].get("from_pretrained_extra_args", {}),
+                    )
+
+                    # Load custom transformer from safetensors file
+                    self.logger.info(f"Loading custom transformer from: {model_path}")
+                    if self.config.model_type in [ModelType.FLUX_DEV, ModelType.FLUX_SCHNELL]:
+                        # Create transformer with hardcoded config to avoid downloading from HuggingFace
+                        # Use meta device to reduce RAM usage during initialization
+                        with torch.device('meta'):
+                            transformer = FluxTransformer2DModel(
+                                attention_head_dim=128,
+                                guidance_embeds=True,
+                                in_channels=64,
+                                joint_attention_dim=4096,
+                                num_attention_heads=24,
+                                num_layers=19,
+                                num_single_layers=38,
+                                patch_size=1,
+                                pooled_projection_dim=768,
+                            )
+                        
+                        # Load weights from safetensors file
+                        from safetensors.torch import load_file
+                        state_dict = load_file(model_path)
+                        transformer = transformer.to_empty(device='cpu')
+                        transformer.load_state_dict(state_dict, strict=False, assign=True)
+                        del state_dict
+                        transformer = transformer.to(self.config.model_dtype.get("transformer", self.config.model_dtype.get("default")))
+                        
+                        self.pipe.transformer = transformer
+                        self.logger.info("Successfully replaced FLUX transformer with custom weights")
+                    elif self.config.model_type in [ModelType.SD3_MEDIUM, ModelType.SD35_MEDIUM]:
+                        transformer = StableDiffusion3Transformer2DModel.from_single_file(
+                            model_path,
+                            torch_dtype=self.config.model_dtype.get("transformer", self.config.model_dtype.get("default")),
+                        )
+                        self.pipe.transformer = transformer
+                        self.logger.info("Successfully replaced SD3 transformer with custom weights")
+                    else:
+                        raise ValueError(
+                            f"Loading from single .safetensors file is not supported for {self.config.model_type.value}. "
+                            "Please provide a directory with the full model or use a HuggingFace model ID."
+                        )
+            else:
+                # Normal loading from directory or HuggingFace repo
+                self.pipe = MODEL_PIPELINE[self.config.model_type].from_pretrained(
+                    model_path,
+                    torch_dtype=self.config.model_dtype,
+                    use_safetensors=True,
+                    **MODEL_DEFAULTS[self.config.model_type].get("from_pretrained_extra_args", {}),
+                )
+
             if self.config.model_type == ModelType.LTX_VIDEO_DEV:
                 # Optionally load the upsampler pipeline for LTX-Video
                 if not self.config.ltx_skip_upsampler:
@@ -489,6 +630,258 @@ class PipelineManager:
         except Exception as e:
             self.logger.error(f"Failed to create pipeline: {e}")
             raise
+
+    def _load_pipeline_from_components(self, transformer_path: str) -> DiffusionPipeline:
+        """
+        Load pipeline from individual component files (transformer, VAE, text encoders).
+
+        Args:
+            transformer_path: Path to transformer .safetensors file
+
+        Returns:
+            Configured pipeline with local components
+        """
+        dtype_default = self.config.model_dtype.get("default", torch.bfloat16)
+
+        if self.config.model_type in [ModelType.FLUX_DEV, ModelType.FLUX_SCHNELL]:
+            self.logger.info("Loading FLUX pipeline from local components...")
+
+            # Load transformer
+            self.logger.info(f"Loading transformer from: {transformer_path}")
+            # Create transformer with hardcoded config to avoid downloading from HuggingFace
+            # Use meta device to reduce RAM usage during initialization
+            with torch.device('meta'):
+                transformer = FluxTransformer2DModel(
+                    attention_head_dim=128,
+                    guidance_embeds=True,
+                    in_channels=64,
+                    joint_attention_dim=4096,
+                    num_attention_heads=24,
+                    num_layers=19,
+                    num_single_layers=38,
+                    patch_size=1,
+                    pooled_projection_dim=768,
+                )
+            
+            # Load weights from safetensors file directly onto model
+            from safetensors.torch import load_file
+            state_dict = load_file(transformer_path)
+            
+            # Move from meta to CPU using to_empty()
+            transformer = transformer.to_empty(device='cpu')
+            transformer.load_state_dict(state_dict, strict=False, assign=True)
+            del state_dict  # Free memory immediately
+            
+            # Convert to desired dtype
+            transformer = transformer.to(self.config.model_dtype.get("transformer", dtype_default))
+            self.logger.info(f"Transformer loaded successfully (dtype: {transformer.dtype})")
+
+            # Load VAE
+            if self.config.vae_path:
+                self.logger.info(f"Loading FLUX VAE from: {self.config.vae_path}")
+                # FLUX VAE has 16 latent channels (official configuration)
+                with torch.device('meta'):
+                    vae = AutoencoderKL(
+                        in_channels=3,
+                        out_channels=3,
+                        down_block_types=["DownEncoderBlock2D"] * 4,
+                        up_block_types=["UpDecoderBlock2D"] * 4,
+                        block_out_channels=[128, 256, 512, 512],
+                        layers_per_block=2,
+                        act_fn="silu",
+                        latent_channels=16,  # FLUX uses 16 latent channels
+                        norm_num_groups=32,
+                        sample_size=1024,
+                        scaling_factor=0.3611,
+                        shift_factor=0.1159,
+                    )
+                
+                vae_state_dict = load_file(str(self.config.vae_path))
+                vae = vae.to_empty(device='cpu')
+                vae.load_state_dict(vae_state_dict, strict=False, assign=True)
+                del vae_state_dict
+                vae = vae.to(self.config.model_dtype.get("vae", dtype_default))
+                self.logger.info(f"FLUX VAE loaded successfully (dtype: {vae.dtype})")
+            else:
+                self.logger.info("Loading VAE from HuggingFace (black-forest-labs/FLUX.1-dev)...")
+                vae = AutoencoderKL.from_pretrained(
+                    "black-forest-labs/FLUX.1-dev",
+                    subfolder="vae",
+                    torch_dtype=self.config.model_dtype.get("vae", dtype_default),
+                )
+
+            # Load text encoders
+            if self.config.text_encoder_path:
+                self.logger.info(f"Loading CLIP text encoder from: {self.config.text_encoder_path}")
+                from transformers import CLIPTextConfig
+                
+                # Load config and create model
+                try:
+                    clip_config = CLIPTextConfig.from_pretrained(
+                        "openai/clip-vit-large-patch14",
+                        local_files_only=True,
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Could not load CLIP config from cache: {e}. Downloading...")
+                    clip_config = CLIPTextConfig.from_pretrained("openai/clip-vit-large-patch14")
+                
+                # Create model and load weights from safetensors
+                # Use CLIPTextModel to keep pooler_output available for Flux pipelines.
+                text_encoder = CLIPTextModel(clip_config)
+                clip_state_dict = load_file(str(self.config.text_encoder_path))
+                text_encoder.load_state_dict(clip_state_dict, strict=False)
+                del clip_state_dict
+                text_encoder = text_encoder.to(self.config.model_dtype.get("text_encoder", dtype_default))
+                
+                # Load tokenizer from cached HF model
+                try:
+                    tokenizer = CLIPTokenizer.from_pretrained(
+                        "openai/clip-vit-large-patch14",
+                        local_files_only=True,
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Could not load tokenizer from cache, downloading: {e}")
+                    tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
+            else:
+                self.logger.info("Loading CLIP from HuggingFace (openai/clip-vit-large-patch14)...")
+                text_encoder = CLIPTextModel.from_pretrained(
+                    "openai/clip-vit-large-patch14",
+                    torch_dtype=self.config.model_dtype.get("text_encoder", dtype_default),
+                )
+                tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
+
+            if self.config.text_encoder_2_path:
+                self.logger.info(f"Loading T5 text encoder from: {self.config.text_encoder_2_path}")
+                # Load T5 from single file
+                from safetensors.torch import load_file
+                state_dict = load_file(str(self.config.text_encoder_2_path))
+                
+                # Try to load config and create model from cached HF model
+                try:
+                    from transformers import T5Config
+                    config_t5 = T5Config.from_pretrained(
+                        "black-forest-labs/FLUX.1-dev",
+                        subfolder="text_encoder_2",
+                        local_files_only=True,
+                    )
+                    text_encoder_2 = T5EncoderModel(config_t5)
+                    text_encoder_2.load_state_dict(state_dict, strict=False)
+                    del state_dict  # Free memory
+                    text_encoder_2 = text_encoder_2.to(self.config.model_dtype.get("text_encoder_2", dtype_default))
+                except Exception as e:
+                    self.logger.warning(f"Could not load T5 config from cache: {e}. Downloading...")
+                    config_t5 = T5Config.from_pretrained(
+                        "black-forest-labs/FLUX.1-dev",
+                        subfolder="text_encoder_2",
+                    )
+                    text_encoder_2 = T5EncoderModel(config_t5)
+                    text_encoder_2.load_state_dict(state_dict, strict=False)
+                    del state_dict  # Free memory
+                    text_encoder_2 = text_encoder_2.to(self.config.model_dtype.get("text_encoder_2", dtype_default))
+                
+                
+                # Load tokenizer from cached HF model
+                try:
+                    tokenizer_2 = T5TokenizerFast.from_pretrained(
+                        "black-forest-labs/FLUX.1-dev",
+                        subfolder="tokenizer_2",
+                        local_files_only=True,
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Could not load T5 tokenizer from cache: {e}. Downloading...")
+                    tokenizer_2 = T5TokenizerFast.from_pretrained(
+                        "black-forest-labs/FLUX.1-dev",
+                        subfolder="tokenizer_2",
+                    )
+            else:
+                self.logger.info("Loading T5 from HuggingFace (black-forest-labs/FLUX.1-dev)...")
+                text_encoder_2 = T5EncoderModel.from_pretrained(
+                    "black-forest-labs/FLUX.1-dev",
+                    subfolder="text_encoder_2",
+                    torch_dtype=self.config.model_dtype.get("text_encoder_2", dtype_default),
+                )
+                tokenizer_2 = T5TokenizerFast.from_pretrained(
+                    "black-forest-labs/FLUX.1-dev",
+                    subfolder="tokenizer_2",
+                )
+
+            # Load scheduler from base model
+            from diffusers import FlowMatchEulerDiscreteScheduler
+            try:
+                scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+                    "black-forest-labs/FLUX.1-dev",
+                    subfolder="scheduler",
+                    local_files_only=True,
+                )
+            except Exception as e:
+                self.logger.warning(f"Could not load scheduler from cache: {e}. Downloading...")
+                scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+                    "black-forest-labs/FLUX.1-dev",
+                    subfolder="scheduler",
+                )
+
+            # Construct pipeline
+            pipe = FluxPipeline(
+                scheduler=scheduler,
+                text_encoder=text_encoder,
+                tokenizer=tokenizer,
+                text_encoder_2=text_encoder_2,
+                tokenizer_2=tokenizer_2,
+                vae=vae,
+                transformer=transformer,
+            )
+
+            self.logger.info("Successfully created FLUX pipeline from local components")
+            return pipe
+
+        elif self.config.model_type in [ModelType.SD3_MEDIUM, ModelType.SD35_MEDIUM]:
+            self.logger.info("Loading SD3 pipeline from local components...")
+
+            # Load transformer
+            self.logger.info(f"Loading transformer from: {transformer_path}")
+            transformer = StableDiffusion3Transformer2DModel.from_single_file(
+                transformer_path,
+                torch_dtype=self.config.model_dtype.get("transformer", dtype_default),
+            )
+
+            # Load VAE
+            if self.config.vae_path:
+                self.logger.info(f"Loading VAE from: {self.config.vae_path}")
+                vae = AutoencoderKL.from_single_file(
+                    str(self.config.vae_path),
+                    torch_dtype=self.config.model_dtype.get("vae", dtype_default),
+                )
+            else:
+                base_model = "stabilityai/stable-diffusion-3-medium" if self.config.model_type == ModelType.SD3_MEDIUM else "stabilityai/stable-diffusion-3.5-medium"
+                self.logger.info(f"Loading VAE from HuggingFace ({base_model})...")
+                vae = AutoencoderKL.from_pretrained(
+                    base_model,
+                    subfolder="vae",
+                    torch_dtype=self.config.model_dtype.get("vae", dtype_default),
+                )
+
+            # For SD3, we need 3 text encoders - for now, fall back to HF if not all provided
+            # This is more complex and users typically keep the full model together
+            if self.config.text_encoder_path and self.config.text_encoder_2_path:
+                self.logger.warning("SD3 requires 3 text encoders. Falling back to HuggingFace for text encoders...")
+
+            base_model = "stabilityai/stable-diffusion-3-medium" if self.config.model_type == ModelType.SD3_MEDIUM else "stabilityai/stable-diffusion-3.5-medium"
+
+            # Load full pipeline and replace transformer
+            pipe = StableDiffusion3Pipeline.from_pretrained(
+                base_model,
+                transformer=transformer,
+                vae=vae,
+                torch_dtype=self.config.model_dtype,
+            )
+
+            self.logger.info("Successfully created SD3 pipeline with local components")
+            return pipe
+
+        else:
+            raise ValueError(
+                f"Loading from components is not supported for {self.config.model_type.value}"
+            )
 
     def setup_device(self) -> None:
         """Configure pipeline device placement."""
@@ -727,6 +1120,14 @@ class Quantizer:
                 quant_config = NVFP4_FP8_MHA_CONFIG
             else:
                 quant_config = NVFP4_DEFAULT_CONFIG
+        elif self.config.format == QuantFormat.FP4_MIXED_DEV:
+            if self.model_config.model_type.value.startswith("flux"):
+                quant_config = FLUX_DEV_NVFP4_MIXED_CONFIG
+            else:
+                self.logger.warning(
+                    "FP4 mixed-dev format is only supported for FLUX models; using NVFP4 default config."
+                )
+                quant_config = NVFP4_DEFAULT_CONFIG
         else:
             raise NotImplementedError(f"Unknown format {self.config.format}")
         set_quant_config_attr(
@@ -771,16 +1172,20 @@ class Quantizer:
 class ExportManager:
     """Handles model export operations."""
 
-    def __init__(self, config: ExportConfig, logger: logging.Logger):
+    def __init__(self, config: ExportConfig, logger: logging.Logger, quant_format: str = "fp4", quant_algo: str = "max"):
         """
         Initialize export manager.
 
         Args:
             config: Export configuration
             logger: Logger instance
+            quant_format: Quantization format for metadata
+            quant_algo: Quantization algorithm for metadata
         """
         self.config = config
         self.logger = logger
+        self.quant_format = quant_format
+        self.quant_algo = quant_algo
 
     def _has_conv_layers(self, model: torch.nn.Module) -> bool:
         """
@@ -801,17 +1206,66 @@ class ExportManager:
 
     def save_checkpoint(self, backbone: torch.nn.Module) -> None:
         """
-        Save quantized model checkpoint.
+        Save quantized model checkpoint with ComfyUI-compatible metadata.
 
         Args:
             backbone: Model backbone to save
         """
         if not self.config.quantized_torch_ckpt_path:
+            self.logger.warning("⚠️ quantized_torch_ckpt_path is None or empty! Skipping save.")
+            self.logger.warning(f"⚠️ Config: {self.config}")
             return
 
-        self.logger.info(f"Saving quantized checkpoint to {self.config.quantized_torch_ckpt_path}")
-        mto.save(backbone, str(self.config.quantized_torch_ckpt_path))
-        self.logger.info("Checkpoint saved successfully")
+        self.logger.info(f"💾 Saving quantized checkpoint to {self.config.quantized_torch_ckpt_path}")
+        self.logger.info(f"💾 Path type: {type(self.config.quantized_torch_ckpt_path)}")
+        self.logger.info(f"💾 Path exists (parent): {self.config.quantized_torch_ckpt_path.parent.exists()}")
+
+        try:
+            # Save ModelOpt .pt checkpoint
+            mto.save(backbone, str(self.config.quantized_torch_ckpt_path))
+            self.logger.info("✅ ModelOpt checkpoint saved successfully")
+
+            # Verify the file was actually created
+            import os
+            if os.path.exists(str(self.config.quantized_torch_ckpt_path)):
+                file_size = os.path.getsize(str(self.config.quantized_torch_ckpt_path)) / (1024**3)
+                self.logger.info(f"✅ File verified: {file_size:.2f} GB")
+            else:
+                self.logger.error(f"❌ File was not created: {self.config.quantized_torch_ckpt_path}")
+                return
+
+            # Also save as SafeTensors with proper metadata for ComfyUI
+            if self.config.save_safetensors:
+                safetensors_path = self.config.quantized_torch_ckpt_path.with_suffix('.safetensors')
+                self.logger.info(f"")
+                self.logger.info("=" * 80)
+                self.logger.info("🚀 CLAUDE'S FIX: Starting SafeTensors export with metadata!")
+                self.logger.info(f"   Fix applied: 2026-01-14 @ 14:20 UTC+3")
+                self.logger.info(f"   Target file: {safetensors_path.name}")
+                self.logger.info("=" * 80)
+                self.logger.info(f"📦 Saving SafeTensors format for ComfyUI compatibility...")
+
+                # Map quant format
+                if self.quant_format in ("fp4", "fp4_mixed_dev"):
+                    quant_format_str = "nvfp4"
+                else:
+                    quant_format_str = "float8_e4m3fn"
+
+                try:
+                    save_quantized_safetensors(
+                        backbone,
+                        safetensors_path,
+                        quant_format=quant_format_str,
+                        quant_algo=self.quant_algo,
+                        logger=self.logger
+                    )
+                except Exception as e:
+                    self.logger.error(f"❌ SafeTensors save failed: {e}")
+                    self.logger.warning("⚠️ ModelOpt .pt file is still available")
+
+        except Exception as e:
+            self.logger.error(f"❌ Save failed with error: {e}")
+            raise
 
     def export_onnx(
         self,
@@ -839,6 +1293,7 @@ class ExportManager:
                 "Detected quantizing conv layers in backbone. Generating FP8 scales..."
             )
             generate_fp8_scales(backbone)
+        onnx_format = QuantFormat.FP4 if quant_format == QuantFormat.FP4_MIXED_DEV else quant_format
         self.logger.info("Preparing models for export...")
         pipe.to("cpu")
         torch.cuda.empty_cache()
@@ -848,7 +1303,7 @@ class ExportManager:
         with torch.no_grad():
             self.logger.info("Exporting to ONNX...")
             modelopt_export_sd(
-                backbone, str(self.config.onnx_dir), model_type.value, quant_format.value
+                backbone, str(self.config.onnx_dir), model_type.value, onnx_format.value
             )
 
         self.logger.info("ONNX export completed successfully")
@@ -945,6 +1400,15 @@ def create_argument_parser() -> argparse.ArgumentParser:
     )
     model_group.add_argument(
         "--override-model-path", type=str, help="Custom path to model (overrides default)"
+    )
+    model_group.add_argument(
+        "--vae-path", type=str, help="Local path to VAE model (optional, for use with .safetensors transformer files)"
+    )
+    model_group.add_argument(
+        "--text-encoder-path", type=str, help="Local path to text encoder (CLIP for FLUX, optional)"
+    )
+    model_group.add_argument(
+        "--text-encoder-2-path", type=str, help="Local path to second text encoder (T5 for FLUX, optional)"
     )
     model_group.add_argument(
         "--cpu-offloading", action="store_true", help="Enable CPU offloading for limited VRAM"
@@ -1059,6 +1523,9 @@ def main() -> None:
             override_model_path=Path(args.override_model_path)
             if args.override_model_path
             else None,
+            vae_path=Path(args.vae_path) if args.vae_path else None,
+            text_encoder_path=Path(args.text_encoder_path) if args.text_encoder_path else None,
+            text_encoder_2_path=Path(args.text_encoder_2_path) if args.text_encoder_2_path else None,
             cpu_offloading=args.cpu_offloading,
             ltx_skip_upsampler=args.ltx_skip_upsampler,
         )
@@ -1089,6 +1556,14 @@ def main() -> None:
             n_steps=args.n_steps,
         )
 
+        # DEBUG: Log the parsed arguments
+        logger.info("=" * 80)
+        logger.info("🔍 EXPORT CONFIGURATION DEBUG")
+        logger.info(f"   args.quantized_torch_ckpt_save_path = {args.quantized_torch_ckpt_save_path}")
+        logger.info(f"   Type: {type(args.quantized_torch_ckpt_save_path)}")
+        logger.info(f"   Truthy: {bool(args.quantized_torch_ckpt_save_path)}")
+        logger.info("=" * 80)
+
         export_config = ExportConfig(
             quantized_torch_ckpt_path=Path(args.quantized_torch_ckpt_save_path)
             if args.quantized_torch_ckpt_save_path
@@ -1097,6 +1572,13 @@ def main() -> None:
             hf_ckpt_dir=Path(args.hf_ckpt_dir) if args.hf_ckpt_dir else None,
             restore_from=Path(args.restore_from) if args.restore_from else None,
         )
+
+        # DEBUG: Log the created config
+        logger.info("=" * 80)
+        logger.info("🔍 CREATED EXPORT CONFIG")
+        logger.info(f"   export_config.quantized_torch_ckpt_path = {export_config.quantized_torch_ckpt_path}")
+        logger.info(f"   Type: {type(export_config.quantized_torch_ckpt_path)}")
+        logger.info("=" * 80)
 
         logger.info("Validating configurations...")
         quant_config.validate()
@@ -1109,7 +1591,12 @@ def main() -> None:
         pipeline_manager.setup_device()
 
         backbone = pipeline_manager.get_backbone()
-        export_manager = ExportManager(export_config, logger)
+        export_manager = ExportManager(
+            export_config,
+            logger,
+            quant_format=quant_config.format.value,
+            quant_algo=quant_config.algo.value
+        )
 
         if export_config.restore_from and export_config.restore_from.exists():
             export_manager.restore_checkpoint(backbone)
@@ -1139,9 +1626,8 @@ def main() -> None:
 
             export_manager.save_checkpoint(backbone)
 
-        check_conv_and_mha(
-            backbone, quant_config.format == QuantFormat.FP4, quant_config.quantize_mha
-        )
+        is_fp4 = quant_config.format in (QuantFormat.FP4, QuantFormat.FP4_MIXED_DEV)
+        check_conv_and_mha(backbone, is_fp4, quant_config.quantize_mha)
         mtq.print_quant_summary(backbone)
 
         export_manager.export_onnx(
