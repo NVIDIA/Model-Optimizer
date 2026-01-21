@@ -1401,17 +1401,8 @@ def TEDotProductAttentionCP(attention_mask: torch.Tensor, num_attention_heads: i
     orig_forward = cls.forward
 
     def _wrapped_forward(self, *args, **kwargs):
-        # Megatron mask is in shape [b, 1, s, s]
-        # TEDotProductAttention expects bias in [b, h, s, s]
-        # Replace the attention_bias argument passed to forward
-        kwargs["attention_bias"] = attention_mask.repeat(
-            [
-                attention_mask.shape[0],
-                num_attention_heads,
-                attention_mask.shape[2],
-                attention_mask.shape[3],
-            ]
-        )
+        attention_bias = torch.where(attention_mask, torch.tensor(-1e9), torch.tensor(0.0))
+        kwargs["attention_bias"] = attention_bias
         return orig_forward(self, *args, **kwargs)
 
     if get_context_parallel_world_size() > 1:
