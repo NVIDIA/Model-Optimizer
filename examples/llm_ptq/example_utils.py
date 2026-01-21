@@ -187,6 +187,11 @@ def build_quant_cfg(
         quant_cfg["quant_cfg"]["model*.*attn*k_proj*"] = {"enable": False}
         quant_cfg["quant_cfg"]["model*.*attn*v_proj*"] = {"enable": False}
 
+    if model_type == "deepseek":
+        # Disable MLA quantization for accuracy.
+        quant_cfg["quant_cfg"]["*self_attn.q*"] = {"enable": False}
+        quant_cfg["quant_cfg"]["*self_attn.kv*"] = {"enable": False}
+
     return quant_cfg
 
 
@@ -346,6 +351,17 @@ def get_model(
                 device_map=device_map,
                 **model_kwargs,
             )
+        elif (
+            hasattr(hf_config, "quantization_config")
+            and hf_config.quantization_config.get("format", None) == "pack-quantized"
+        ):
+            torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)
+            model = AutoModelForCausalLM.from_pretrained(
+                ckpt_path,
+                device_map="auto",
+                trust_remote_code=trust_remote_code,
+                torch_dtype=torch_dtype,
+            )
         else:
             architecture = hf_config.architectures[0]
 
@@ -366,9 +382,9 @@ def get_model(
                 from_config = auto_model_module._from_config
 
             with init_empty_weights():
-                # When computing the device_map, assuming half precision by default,
+                # When computing the device_map, assuming bfloat16 precision by default,
                 # unless specified by the hf_config.
-                torch_dtype = getattr(hf_config, "torch_dtype", torch.float16)
+                torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)
                 model_kwargs2 = model_kwargs.copy()
                 if auto_model_module != AutoModelForCausalLM:
                     model_kwargs2.pop("trust_remote_code", None)

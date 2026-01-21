@@ -345,7 +345,8 @@ def is_moe(module: nn.Module) -> bool:
 
 def is_quantlinear(module: nn.Module) -> bool:
     """Returns whether the module is a quantized linear layer."""
-    return "QuantLinear" in type(module).__name__ and "lora" not in type(module).__name__.lower()
+    name = type(module).__name__
+    return ("QuantLinear" in name or "QuantCompressedLinear" in name) and "lora" not in name.lower()
 
 
 def dup_kv_weight(v: torch.Tensor, head_size: int, num_head: int, tp_size: int) -> torch.Tensor:

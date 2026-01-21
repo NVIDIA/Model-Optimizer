@@ -109,6 +109,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 | QWen3 MOE, Next <sup>6</sup> | ✅ | - | - | - | ✅ |
 | QwQ | ✅ | - | - | - | ✅ |
 | DeepSeek V3, R1, V3.1, V3.2<sup>7</sup> | - | - | - | - | ✅ |
+| Kimi K2 | - | - | - | - | ✅ |
 | T5 | ✅ | ✅ | ✅ | ✅ | - |
 | Whisper | ✅ | ❌ | ❌ | ❌ | - |
 

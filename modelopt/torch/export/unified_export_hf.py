@@ -490,6 +490,8 @@ def _export_quantized_weight(
     if weight_scale is not None:
         sub_module.register_buffer(quantizer_attrs.weight_scale, weight_scale)
 
+    torch.cuda.empty_cache()
+
 
 def _process_quantized_modules(
     model: nn.Module,
@@ -525,6 +527,8 @@ def _process_quantized_modules(
         if is_modelopt_qlora and (hasattr(sub_module, "base_layer")):
             continue
 
+        if hasattr(sub_module, "weight_packed"):
+            sub_module.unpack_weight()
         if get_quantization_format(sub_module) != QUANTIZATION_NONE:
             if is_quantlinear(sub_module):
                 with fsdp2_aware_weight_update(model, sub_module, reshard=False):
@@ -741,6 +745,10 @@ def export_hf_checkpoint(
                 json.dump(hf_quant_config, file, indent=4)
 
             hf_quant_config = convert_hf_quant_config_format(hf_quant_config)
+
+        # Remove hf_quantizer from model so post_state_dict can be exported.
+        if getattr(model, "hf_quantizer", None) is not None:
+            model.hf_quantizer = None
 
         # Save model
         model.save_pretrained(

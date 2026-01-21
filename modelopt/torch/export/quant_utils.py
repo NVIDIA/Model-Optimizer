@@ -881,7 +881,13 @@ def postprocess_state_dict(
         "v_bmm_quantizer._bias_value": "v_proj.v_bias",
         "input_quantizer._pre_quant_scale": "pre_quant_scale",
     }
-    skip_keys = ["output_quantizer", "_amax", "_bias_value", "input_quantizer._pre_quant_scale"]
+    skip_keys = [
+        "output_quantizer",
+        "_amax",
+        "_bias_value",
+        "input_quantizer._pre_quant_scale",
+        "weight_shape",
+    ]
 
     # For modelopt-trained LoRA models, we need to remove the base_layer prefix from the keys for deployment
     if is_modelopt_qlora:
