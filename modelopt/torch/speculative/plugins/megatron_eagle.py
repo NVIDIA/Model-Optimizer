@@ -638,7 +638,7 @@ class EagleModule(MegatronModule):
         return hidden_states, next_hidden_states_input
 
 
-@EagleDMRegistry.register({GPTModel: "megatron.core.models.gpt.gpt_model.GPTModel"})
+@EagleDMRegistry.register({GPTModel: "megatron.core.models.gpt.GPTModel"})
 class _DynamicEagleGPTModel(EagleModel):
     """A ``megatron.core.models.gpt.GPTModel`` model with dynamic hyperparams."""
 
