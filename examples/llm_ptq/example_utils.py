@@ -522,10 +522,7 @@ def get_model(
             if is_nemotron_parse:
                 # Nemotron-Parse works fine with device_map="auto"
                 # Keep device_map="auto" to ensure proper device placement
-                print(
-                    "Detected Nemotron-Parse model from config. "
-                    "Using automatic device mapping."
-                )
+                print("Detected Nemotron-Parse model from config. Using automatic device mapping.")
             else:
                 # For other Nemotron VL models, disable device_map for compatibility
                 print(
