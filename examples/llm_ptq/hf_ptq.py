@@ -510,7 +510,7 @@ def export_quantized(
             if (
                 args.inference_tensor_parallel != 1 or args.inference_pipeline_parallel != 1
             ) and args.qformat == "nvfp4_svdquant":
-                raise NotImplementedError("Svdquant does not support mulitple GPUs yet.")
+                raise NotImplementedError("Svdquant does not support multiple GPUs yet.")
             warnings.warn(
                 "Still exporting TensorRT-LLM checkpoints for models not supported by the TensorRT-LLM torch runtime."
             )
