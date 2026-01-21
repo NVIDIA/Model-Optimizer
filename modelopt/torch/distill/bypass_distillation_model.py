@@ -26,7 +26,13 @@ __all__ = ["BypassDistillationModel"]
 
 
 class BypassDistillationModel(DistillationModel):
-    """Meta-model wrapper to support bypass-enabled knowledge-distillation learning."""
+    """Meta-model wrapper to support bypass-enabled knowledge-distillation learning.
+
+    The BypassDistillationModel is a subclass of the DistillationModel that injects teacher inputs
+    into the corresponding student layers. This accomodates the case where the student model is the
+    teacher with specific submodules replaced, which now need to be trained to mimic the original
+    submodule in the teacher.
+    """
 
     def _register_hooks(self):
         """Register hooks for intermediate tensors from teacher models and the student model."""
