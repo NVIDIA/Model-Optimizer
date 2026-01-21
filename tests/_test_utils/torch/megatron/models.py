@@ -314,6 +314,7 @@ def get_mcore_mamba_hybrid_model(
     sequence_parallel: bool = False,
     # Mamba-specific parameters
     mamba_state_dim: int = 32,
+    mamba_num_heads: int | None = None,
     mamba_head_dim: int = 16,
     mamba_num_groups: int = 2,
     # MoE-specific parameters
@@ -347,6 +348,7 @@ def get_mcore_mamba_hybrid_model(
         num_query_groups=num_query_groups,
         ffn_hidden_size=ffn_hidden_size,
         mamba_state_dim=mamba_state_dim,
+        mamba_num_heads=mamba_num_heads,
         mamba_head_dim=mamba_head_dim,
         mamba_num_groups=mamba_num_groups,
         num_moe_experts=num_moe_experts,
@@ -358,7 +360,7 @@ def get_mcore_mamba_hybrid_model(
         **config_kwargs,
     )
 
-    if not (skip_moe or "E" in Symbols.VALID):
+    if not (skip_moe or "E" in Symbols.VALID):  # Mcore 0.16+ has MoE support
         warn("MoE blocks are not supported in current MambaModel. Skipping MoE blocks.")
         skip_moe = True
 

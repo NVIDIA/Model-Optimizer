@@ -33,6 +33,6 @@ def import_plugin(plugin_name, msg_if_missing=None, verbose=True, success_msg=No
     except Exception as e:
         if verbose:
             warn_rank_0(
-                f"Failed to import {plugin_name} plugin due to: {e!r}. "
+                f"Failed to import modelopt {plugin_name} plugin due to: {e!r}. "
                 "You may ignore this warning if you do not need this plugin."
             )

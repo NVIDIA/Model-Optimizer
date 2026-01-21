@@ -14,13 +14,14 @@
 # limitations under the License.
 
 import pytest
+from _test_utils.torch.nas_prune.utils import param_num
 from _test_utils.torch.vision_models import get_tiny_mobilenet_and_input, get_tiny_resnet_and_input
 
 pytest.importorskip("torchprofile")
 from torchprofile import profile_macs
 
 from modelopt.torch.nas.algorithms import ConstraintsFunc
-from modelopt.torch.utils import param_num, remove_bn
+from modelopt.torch.utils import remove_bn
 
 try:
     from _test_utils.torch.deploy.runtime import FAKE_DEPLOYMENT, fake_latency
