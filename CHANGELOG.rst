@@ -17,6 +17,7 @@ NVIDIA Model Optimizer Changelog
 - Add support for rotating the input before quantization for RHT.
 - Add support for advanced weight scale search for NVFP4 quantization and its export path.
 - Enable PTQ workflow for Qwen3.5 MoE models.
+- Add support for vLLM fakequant reload using ModelOpt state for HF models. See `examples/vllm_serve/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/vllm_serve#load-qatptq-model-and-serve-in-vllm-wip>`_ for more details.
 
 **Misc**
 
