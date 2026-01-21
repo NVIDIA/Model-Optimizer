@@ -66,6 +66,7 @@ from modelopt.torch.utils.dataset_utils import (
 )
 from modelopt.torch.utils.image_processor import BaseImageProcessor, MllamaImageProcessor
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
+from modelopt.torch.utils.nemotron_vlm_dataset_utils import get_nemotron_vlm_dataset_dataloader
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
@@ -141,6 +142,7 @@ def make_calib_dataloader(
     tokenizer: PreTrainedTokenizerBase | None,
     device: torch.device,
     model_type: str | None,
+    full_model: torch.nn.Module | None = None,
 ) -> tuple[DataLoader, str | None]:
     calib_dataloader = None
     first_text_speech_dataset = None
@@ -402,18 +404,35 @@ def load_model(args: argparse.Namespace):
             language_model = extracted_lm
             model_type = extracted_model_type
     else:
+        # Check if this is a Nemotron VL model that needs a processor
+        # Do this BEFORE setting default datasets so we can use image-text data for Nemotron-Parse
+        is_nemotron_vl_model = is_nemotron_vl(full_model)
+
+        # Check specifically for Nemotron-Parse to set appropriate dataset defaults
+        config = full_model.config
+        architectures = getattr(config, "architectures", [])
+        is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
+
         if args.dataset is None:
-            args.dataset = ["cnn_dailymail", "nemotron-post-training-dataset-v2"]
-            warnings.warn(
-                "No dataset specified. Defaulting to cnn_dailymail and nemotron-post-training-dataset-v2."
-            )
+            if is_nemotron_parse:
+                # For Nemotron-Parse, default to Nemotron VLM Dataset v2
+                args.dataset = ["nemotron_vlm_v2"]
+                print(
+                    "No dataset specified. Defaulting to 'nemotron_vlm_v2' for Nemotron-Parse "
+                    "(NVIDIA's image-text dataset for better calibration)."
+                )
+            else:
+                # For other models, use text-only datasets
+                args.dataset = ["cnn_dailymail", "nemotron-post-training-dataset-v2"]
+                warnings.warn(
+                    "No dataset specified. Defaulting to cnn_dailymail and nemotron-post-training-dataset-v2."
+                )
+
         # Adjust calib_size to match dataset length by extending or truncating as needed
         args.calib_size = (args.calib_size + [args.calib_size[-1]] * len(args.dataset))[
             : len(args.dataset)
         ]
 
-        # Check if this is a Nemotron VL model that needs a processor
-        is_nemotron_vl_model = is_nemotron_vl(full_model)
         if is_nemotron_vl_model:
             # Load processor for Nemotron VL models (like Nemotron-Parse)
             processor = get_processor(
@@ -506,14 +525,23 @@ def mono_quantize(
             "Consider reducing calib_size to reduce calibration time.\n####\n"
         )
 
+    # Check if this is Nemotron-Parse
+    config = full_model.config
+    architectures = getattr(config, "architectures", [])
+    is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
+    original_forward = None  # Track original forward method if we wrap it
+
     # For Nemotron VL models, disable quantization of vision components
     if is_nemotron_vl_model:
         print("Disabling quantization for vision components in Nemotron VL model")
         quant_cfg["quant_cfg"]["*vision*"] = {"enable": False}
         quant_cfg["quant_cfg"]["*image*"] = {"enable": False}
-        # Also disable radio model components specifically
+        # Also disable radio model components specifically (for Nemotron-Parse)
         quant_cfg["quant_cfg"]["*radio*"] = {"enable": False}
         quant_cfg["quant_cfg"]["*visual*"] = {"enable": False}
+        quant_cfg["quant_cfg"]["*encoder*"] = {"enable": False}  # Disable encoder
+        quant_cfg["quant_cfg"]["*model_encoder*"] = {"enable": False}  # Nemotron-Parse specific
+        print("Quantization will only be applied to the decoder (text generation) component")
 
     if not model_is_already_quantized or calibration_only:
         if model_type == "gptoss" and args.qformat == "nvfp4_mlp_only":
@@ -541,8 +569,15 @@ def mono_quantize(
         else:
             language_model = mtq.quantize(language_model, quant_cfg, forward_loop=calibrate_loop)
 
-        # For VL models, update full_model to use the quantized language model
-        if is_nemotron_vl_model:
+        # Restore original forward method if we wrapped it for Nemotron-Parse
+        if is_nemotron_parse and original_forward is not None:
+            print("Restoring original forward method after calibration")
+            language_model.forward = original_forward
+            original_forward = None
+
+        # For VL models (except Nemotron-Parse), update full_model to use the quantized language model
+        # For Nemotron-Parse, language_model IS full_model, so no update needed
+        if is_nemotron_vl_model and language_model is not full_model:
             language_model_lineage = get_language_model_from_vl(full_model)
             if language_model_lineage is not None:
                 print("Updating full_model with quantized language_model...")
@@ -866,37 +901,11 @@ def quantize_main(
     print(f"Use calib batch_size {args.batch_size}")
 
     calib_dataloader, first_text_speech_dataset = make_calib_dataloader(
-        args, language_model, processor, tokenizer, device, model_type
+        args, language_model, processor, tokenizer, device, model_type, full_model
     )
 
     # Detect if this is a Nemotron VL model using architecture-based detection
     is_nemotron_vl_model = is_nemotron_vl(full_model)
-
-    # For Nemotron-Parse, wrap the text-only dataloader to add dummy images
-    # Nemotron-Parse is an encoder-decoder model that requires pixel_values
-    if is_nemotron_vl_model and processor is not None:
-        config = full_model.config
-        architectures = getattr(config, "architectures", [])
-        is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
-
-        if is_nemotron_parse:
-            # Check if we're quantizing just the decoder or the full model
-            decoder_only = language_model is not full_model
-
-            if decoder_only:
-                print(
-                    "Calibration will use text-only inputs for Nemotron-Parse decoder. "
-                    "Vision encoder is excluded from quantization."
-                )
-            else:
-                print(
-                    "Wrapping calibration dataloader for Nemotron-Parse to add dummy images. "
-                    "Nemotron-Parse requires pixel_values for full model calibration."
-                )
-
-            calib_dataloader = create_nemotron_parse_calib_wrapper(
-                calib_dataloader, processor, device, decoder_only=decoder_only
-            )
 
     preview_input_ids, generated_ids_before_ptq = pre_quantize(
         args, full_model, model_type, tokenizer, calib_dataloader, is_nemotron_vl_model

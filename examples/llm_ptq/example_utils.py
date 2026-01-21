@@ -276,9 +276,33 @@ def get_tokenizer(ckpt_path, trust_remote_code=False, **kwargs) -> PreTrainedTok
     if "vila" in ckpt_path.lower():
         ckpt_path += "/llm"
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        ckpt_path, trust_remote_code=trust_remote_code, **kwargs
-    )
+    # Suppress verbose tokenizer output (e.g., printing all special tokens)
+    import contextlib
+    import io
+    import logging
+    import os
+
+    # Save current settings
+    old_verbosity = os.environ.get("TOKENIZERS_PARALLELISM", None)
+    transformers_log_level = logging.getLogger("transformers").level
+
+    # Suppress output
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    logging.getLogger("transformers").setLevel(logging.ERROR)
+
+    # Also capture stdout to suppress verbose tokenizer printing
+    with contextlib.redirect_stdout(io.StringIO()):
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                ckpt_path, trust_remote_code=trust_remote_code, **kwargs
+            )
+        finally:
+            # Restore original settings
+            if old_verbosity is not None:
+                os.environ["TOKENIZERS_PARALLELISM"] = old_verbosity
+            else:
+                os.environ.pop("TOKENIZERS_PARALLELISM", None)
+            logging.getLogger("transformers").setLevel(transformers_log_level)
 
     # can't set attribute 'pad_token' for "<unk>"
     # We skip this step for Nemo models
@@ -334,10 +358,23 @@ def get_processor(
         # Try to load AutoProcessor for other VL models (e.g., Nemotron-Parse)
         # This will only work if the model has a processor config
         try:
-            processor = AutoProcessor.from_pretrained(
-                ckpt_path,
-                **model_kwargs,
-            )
+            import contextlib
+            import io
+            import logging
+
+            # Suppress verbose output from processor/tokenizer loading
+            transformers_log_level = logging.getLogger("transformers").level
+            logging.getLogger("transformers").setLevel(logging.ERROR)
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                processor = AutoProcessor.from_pretrained(
+                    ckpt_path,
+                    **model_kwargs,
+                )
+
+            # Restore logging
+            logging.getLogger("transformers").setLevel(transformers_log_level)
+
             print(f"Loaded AutoProcessor for model type: {model_type}")
             return processor
         except Exception as e:
@@ -476,12 +513,26 @@ def get_model(
     # Load config once and handle VL model detection
     try:
         hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
+
+        # Check specifically for Nemotron-Parse
+        architectures = getattr(hf_config, "architectures", [])
+        is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
+
         if is_nemotron_vl(hf_config):
-            print(
-                "Detected Nemotron VL model from config. "
-                "Disabling automatic device mapping for compatibility."
-            )
-            device_map = None
+            if is_nemotron_parse:
+                # Nemotron-Parse works fine with device_map="auto"
+                # Keep device_map="auto" to ensure proper device placement
+                print(
+                    "Detected Nemotron-Parse model from config. "
+                    "Using automatic device mapping."
+                )
+            else:
+                # For other Nemotron VL models, disable device_map for compatibility
+                print(
+                    "Detected Nemotron VL model from config. "
+                    "Disabling automatic device mapping for compatibility."
+                )
+                device_map = None
     except Exception as e:
         print(f"Error: Could not load config from {ckpt_path}: {e}")
         raise RuntimeError(f"Failed to load model configuration from {ckpt_path}") from e
@@ -589,6 +640,21 @@ def get_model(
     if device_map is None and device != "cpu":
         print(f"Moving model to {device} device...")
         model = model.to(device)
+
+    # For Nemotron-Parse, ensure the encoder (including RADIO) is fully on device
+    # The RADIO encoder has buffers that might not be properly moved even with device_map="auto"
+    # This is because custom RADIO modules might not fully support accelerate's device_map
+    if device != "cpu" and hasattr(model, "encoder"):
+        # Check if encoder has any buffers on CPU
+        cpu_buffers = []
+        for name, buffer in model.encoder.named_buffers():
+            if buffer.device.type == "cpu":
+                cpu_buffers.append(name)
+
+        if cpu_buffers:
+            print(f"Found {len(cpu_buffers)} encoder buffers on CPU. Moving encoder to {device}...")
+            model.encoder = model.encoder.to(device)
+            print(f"Encoder moved to {device}")
 
     if device == "cuda" and not is_model_on_gpu(model):
         print("Warning: Some parameters are not on a GPU. Calibration can be slow or hit OOM")

@@ -330,11 +330,11 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                     print(
                         f"Running optimization on language model with fake_input shape: {fake_input.shape}"
                     )
-                # For Nemotron-Parse decoder, force use_cache=False to avoid tuple index errors
-                if is_nemotron_parse:
-                    language_model(fake_input, use_cache=False)
-                else:
-                    language_model(fake_input)
+                    # For Nemotron-Parse decoder, force use_cache=False to avoid tuple index errors
+                    if is_nemotron_parse:
+                        language_model(fake_input, use_cache=False)
+                    else:
+                        language_model(fake_input)
                 else:
                     raise ValueError(
                         f"Cannot extract language_model from Nemotron VL model (type: {model_type}). "
