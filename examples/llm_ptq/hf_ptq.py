@@ -51,6 +51,7 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.sparsity as mts
 from modelopt.torch.export import (
     export_hf_checkpoint,
+    export_hf_vllm_fq_checkpoint,
     export_tensorrt_llm_checkpoint,
     get_model_type,
     save_expert_token_count_table,

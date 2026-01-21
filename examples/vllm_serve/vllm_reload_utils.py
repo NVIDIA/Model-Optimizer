@@ -149,11 +149,7 @@ def _merge_values_by_max_or_concat(merged_key: str, key_value_pairs: list[tuple[
         merged_value = {}
         for dict_key in values[0]:
             tensors = [v[dict_key] for v in values]
-            if "_amax" in dict_key:
-                merged_value[dict_key] = torch.stack(tensors).max(dim=0)[0]
-            else:
-                merged_value[dict_key] = torch.cat(tensors, dim=0)
-        return merged_value
+            merged_value[dict_key] = torch.stack(tensors).max(dim=0)[0]
     else:
         # Values are tensors directly
         if "_amax" in merged_key:

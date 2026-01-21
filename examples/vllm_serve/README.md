@@ -26,7 +26,11 @@ You can either edit the `quant_config` dictionary in `vllm_serve_fakequant.py`, 
 | QUANT_CFG       | Quantization config                              | None                |
 | KV_QUANT_CFG    | KV-cache quantization config                     | None                |
 | QUANT_FILE_PATH | Optional path to exported quantizer state dict `quantizer_state.pth` | None |
+<<<<<<< HEAD
 | MODELOPT_STATE_PATH | Optional path to exported `vllm_fq_modelopt_state.pth` (restores quantizer state and parameters) | None |
+=======
+| MODELOPT_STATE_PATH | Optional path to exported `modelopt_state.pth` (restores ModelOpt mode + weights) | None |
+>>>>>>> ccbc488c (Added support for HF modelopt state reload for vllm fakequant)
 | CALIB_BATCH_SIZE | Calibration batch size                           | 1                  |
 
 Set these variables in your shell or Docker environment as needed to customize calibration.
@@ -106,5 +110,8 @@ QUANT_CFG=<quant_cfg> QUANT_FILE_PATH=<quantizer_state.pth> python vllm_serve_fa
 ## Known Problems
 
 1. **MCore reload does not use `MODELOPT_STATE_PATH`**; use `QUANT_FILE_PATH` and make sure `QUANT_CFG` matches the quantization recipe used for the original MCore model (otherwise quantizer keys/config won’t align).
+<<<<<<< HEAD
 2. AWQ reload is not supported yet
 3. KV cache quantization export and reload is not supported in MCore yet.
+=======
+>>>>>>> ccbc488c (Added support for HF modelopt state reload for vllm fakequant)

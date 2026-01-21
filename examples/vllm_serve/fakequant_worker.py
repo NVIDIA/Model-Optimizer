@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from typing import Any
 
 import torch
+from vllm_reload_utils import convert_dict_to_vllm, convert_modelopt_state_to_vllm
 from tqdm import tqdm
 from transformers import AutoTokenizer
 from vllm.sampling_params import SamplingParams
@@ -33,6 +34,7 @@ from vllm_reload_utils import (
 )
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.opt.conversion import restore_from_modelopt_state
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 
 
