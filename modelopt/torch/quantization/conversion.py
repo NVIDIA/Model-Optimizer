@@ -137,7 +137,7 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
             name = get_unwrapped_name(name, model)
-            module.modelopt_post_restore(name)
+            module.modelopt_post_restore(name, model=model)
 
     return model
 

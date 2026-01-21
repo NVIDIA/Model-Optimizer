@@ -74,8 +74,10 @@ additional_env_vars = {
     "QUANT_DATASET",
     "QUANT_CALIB_SIZE",
     "QUANT_CFG",
-    "AMAX_FILE_PATH",
+    "QUANT_FILE_PATH",
     "KV_QUANT_CFG",
+    "MODELOPT_STATE_PATH",
+    "CALIB_BATCH_SIZE",
 }
 
 RayDistributedExecutor.ADDITIONAL_ENV_VARS.update(additional_env_vars)
