@@ -96,75 +96,57 @@ MODEL_PIPELINE: dict[ModelType, type[DiffusionPipeline]] = {
     ModelType.WAN22_T2V_5b: WanPipeline,
 }
 
+# Shared dataset configurations
+_SD_PROMPTS_DATASET = {
+    "name": "Gustavosta/Stable-Diffusion-Prompts",
+    "split": "train",
+    "column": "Prompt",
+}
+
+_OPENVID_DATASET = {
+    "name": "nkp37/OpenVid-1M",
+    "split": "train",
+    "column": "caption",
+}
+
+# Model family base configurations
+_SDXL_BASE_CONFIG: dict[str, Any] = {
+    "backbone": "unet",
+    "dataset": _SD_PROMPTS_DATASET,
+}
+
+_SD3_BASE_CONFIG: dict[str, Any] = {
+    "backbone": "transformer",
+    "dataset": _SD_PROMPTS_DATASET,
+}
+
+_FLUX_BASE_CONFIG: dict[str, Any] = {
+    "backbone": "transformer",
+    "dataset": _SD_PROMPTS_DATASET,
+    "inference_extra_args": {
+        "height": 1024,
+        "width": 1024,
+        "guidance_scale": 3.5,
+        "max_sequence_length": 512,
+    },
+}
+
+_WAN_BASE_CONFIG: dict[str, Any] = {
+    "backbone": "transformer",
+    "dataset": _OPENVID_DATASET,
+}
+
 # Model-specific default arguments for calibration
 MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
-    ModelType.SDXL_BASE: {
-        "backbone": "unet",
-        "dataset": {
-            "name": "Gustavosta/Stable-Diffusion-Prompts",
-            "split": "train",
-            "column": "Prompt",
-        },
-    },
-    ModelType.SDXL_TURBO: {
-        "backbone": "unet",
-        "dataset": {
-            "name": "Gustavosta/Stable-Diffusion-Prompts",
-            "split": "train",
-            "column": "Prompt",
-        },
-    },
-    ModelType.SD3_MEDIUM: {
-        "backbone": "transformer",
-        "dataset": {
-            "name": "Gustavosta/Stable-Diffusion-Prompts",
-            "split": "train",
-            "column": "Prompt",
-        },
-    },
-    ModelType.SD35_MEDIUM: {
-        "backbone": "transformer",
-        "dataset": {
-            "name": "Gustavosta/Stable-Diffusion-Prompts",
-            "split": "train",
-            "column": "Prompt",
-        },
-    },
-    ModelType.FLUX_DEV: {
-        "backbone": "transformer",
-        "dataset": {
-            "name": "Gustavosta/Stable-Diffusion-Prompts",
-            "split": "train",
-            "column": "Prompt",
-        },
-        "inference_extra_args": {
-            "height": 1024,
-            "width": 1024,
-            "guidance_scale": 3.5,
-            "max_sequence_length": 512,
-        },
-    },
-    ModelType.FLUX_SCHNELL: {
-        "backbone": "transformer",
-        "dataset": {
-            "name": "Gustavosta/Stable-Diffusion-Prompts",
-            "split": "train",
-            "column": "Prompt",
-        },
-        "inference_extra_args": {
-            "height": 1024,
-            "width": 1024,
-            "guidance_scale": 3.5,
-            "max_sequence_length": 512,
-        },
-    },
+    ModelType.SDXL_BASE: _SDXL_BASE_CONFIG,
+    ModelType.SDXL_TURBO: _SDXL_BASE_CONFIG,
+    ModelType.SD3_MEDIUM: _SD3_BASE_CONFIG,
+    ModelType.SD35_MEDIUM: _SD3_BASE_CONFIG,
+    ModelType.FLUX_DEV: _FLUX_BASE_CONFIG,
+    ModelType.FLUX_SCHNELL: _FLUX_BASE_CONFIG,
     ModelType.LTX_VIDEO_DEV: {
         "backbone": "transformer",
-        "dataset": {
-            "name": "Gustavosta/Stable-Diffusion-Prompts",
-            "split": "train",
-            "column": "Prompt",
-        },
+        "dataset": _SD_PROMPTS_DATASET,
         "inference_extra_args": {
             "height": 512,
             "width": 704,
@@ -173,8 +155,7 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
         },
     },
     ModelType.WAN22_T2V_14b: {
-        "backbone": "transformer",
-        "dataset": {"name": "nkp37/OpenVid-1M", "split": "train", "column": "caption"},
+        **_WAN_BASE_CONFIG,
         "from_pretrained_extra_args": {
             "boundary_ratio": 0.875,
         },
@@ -196,8 +177,7 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
         },
     },
     ModelType.WAN22_T2V_5b: {
-        "backbone": "transformer",
-        "dataset": {"name": "nkp37/OpenVid-1M", "split": "train", "column": "caption"},
+        **_WAN_BASE_CONFIG,
         "inference_extra_args": {
             "height": 512,
             "width": 768,
