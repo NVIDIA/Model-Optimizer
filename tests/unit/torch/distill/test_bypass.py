@@ -205,22 +205,30 @@ def test_bypass_gradient_flow():
     }
     bypass_model = mtd.convert(student, mode=[("bypass_kd", config)])
 
-    optimizer = torch.optim.SGD(bypass_model.parameters(), lr=0.01)
+    # Save param snapshots by module
+    param_snapshots = {
+        name: p.clone() for name, p in bypass_model.named_parameters() if p.requires_grad
+    }
 
-    # Get initial parameter values
-    initial_params = [p.clone() for p in bypass_model.parameters() if p.requires_grad]
-
-    # Training step
+    # Forward and backward
+    optimizer = torch.optim.SGD(bypass_model.parameters(), lr=0.5)
     optimizer.zero_grad()
     bypass_model(get_input_tensor())
     loss = bypass_model.compute_kd_loss()
     loss.backward()
     optimizer.step()
 
-    # Check that at least some parameters changed
-    current_params = [p for p in bypass_model.parameters() if p.requires_grad]
-    param_changed = any(
-        not torch.allclose(initial, current)
-        for initial, current in zip(initial_params, current_params)
+    # Check: parameters in only the target layer(s) are changed
+    updated_any = False
+    for name, param in bypass_model.named_parameters():
+        if not param.requires_grad:
+            continue
+        changed = not torch.allclose(param, param_snapshots[name])
+        if "features.2" in name:
+            assert changed, f"'{name}' parameters did not change!"
+            updated_any = True
+        else:
+            assert not changed, f"Parameters in unrelated layer '{name}' changed!"
+    assert updated_any, (
+        "No parameters were updated in 'features.2' or related layers during training"
     )
-    assert param_changed, "No parameters were updated during training"
