@@ -32,6 +32,7 @@ from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEm
 from megatron.core.models.gpt import GPTModel
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.parallel_state import (
+    get_context_parallel_group,
     get_context_parallel_world_size,
     get_data_parallel_rank,
     get_expert_tensor_parallel_world_size,
@@ -40,10 +41,8 @@ from megatron.core.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from megatron.core.tensor_parallel.mappings import (
-    gather_from_context_parallel_region,
     gather_from_sequence_parallel_region,
     gather_from_tensor_model_parallel_region,
-    scatter_to_context_parallel_region,
     scatter_to_sequence_parallel_region,
 )
 from megatron.core.transformer.attention import SelfAttention
@@ -847,7 +846,9 @@ class _DynamicEagleGPTModel(EagleModel):
     ):
         """Getting EAGLE module inputs."""
         # [b, 1]
-        input_ids = gather_from_context_parallel_region(input_ids)
+        input_ids = gather_from_sequence_parallel_region(
+            input_ids, group=get_context_parallel_group()
+        )
         id_padding = torch.zeros(
             (input_ids.shape[0], 1), dtype=input_ids.dtype, device=input_ids.device
         )
@@ -857,10 +858,17 @@ class _DynamicEagleGPTModel(EagleModel):
         # No need to scatter again.
         rotary_pos_emb = self.eagle_module.rotary_pos_emb(padded_input_ids.shape[-1])
 
-        padded_input_ids = scatter_to_context_parallel_region(padded_input_ids)
-        input_ids = scatter_to_context_parallel_region(input_ids)
+        padded_input_ids = scatter_to_sequence_parallel_region(
+            padded_input_ids, group=get_context_parallel_group()
+        )
+        # Not sure this is needed
+        input_ids = scatter_to_sequence_parallel_region(
+            input_ids, group=get_context_parallel_group()
+        )
 
-        attn_mask = gather_from_context_parallel_region(attention_mask.clone().detach())
+        attn_mask = gather_from_sequence_parallel_region(
+            attention_mask.clone().detach(), group=get_context_parallel_group()
+        )
         attn_mask[:, :, :-1, :-1] = attn_mask[:, :, 1:, 1:]
         attn_mask[:, :, -1, :] = True
         attn_mask[:, :, :, -1] = True
@@ -877,8 +885,8 @@ class _DynamicEagleGPTModel(EagleModel):
 
         eagle_inputs["hidden_states"] = hidden_states
 
-        eagle_inputs["attention_mask"] = scatter_to_context_parallel_region(
-            set_multi_step_attention_mask(attn_mask, ttt_step)
+        eagle_inputs["attention_mask"] = scatter_to_sequence_parallel_region(
+            set_multi_step_attention_mask(attn_mask, ttt_step), group=get_context_parallel_group()
         )
 
         eagle_inputs["rotary_pos_emb"] = torch.cat(
