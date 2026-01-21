@@ -97,12 +97,13 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
 __all__ = [
     "create_forward_loop",
     "get_dataset_dataloader",
+    "get_dataset_samples",
     "get_max_batch_size",
     "get_supported_datasets",
 ]
 
 
-def _get_dataset_samples(dataset_name: str, num_samples: int) -> list[str]:
+def get_dataset_samples(dataset_name: str, num_samples: int) -> list[str]:
     """Load a portion of train dataset with the dataset name and a given size.
 
     Args:
@@ -211,7 +212,7 @@ def get_dataset_dataloader(
 
     all_samples = []
     for ds_name, num_sample in zip(dataset_name, num_samples):
-        samples = _get_dataset_samples(ds_name, num_sample)
+        samples = get_dataset_samples(ds_name, num_sample)
         all_samples.extend(samples)
 
     batch_encoded = tokenizer.batch_encode_plus(
