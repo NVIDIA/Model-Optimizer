@@ -22,6 +22,7 @@ import torch
 
 from modelopt.torch.export.model_config import QUANTIZATION_NONE
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
+from modelopt.torch.quantization.utils import get_quantizer_state_dict
 
 __all__ = ["export_mcore_gpt_to_hf_vllm_fq"]
 
@@ -38,8 +39,8 @@ def gather_mcore_vllm_fq_quantized_state_dict(
     Returns:
         The state dictionary of the module without quantized state.
     """
-    amax_state_dict = {
-        k: v.detach().clone().cpu() for k, v in state_dict.items() if k.endswith("_amax")
+    quantizer_state_dict = {
+        k: v.detach().clone().cpu() for k, v in state_dict.items() if "quantizer" in k
     }
 
     # Gather all amax dicts to rank 0
@@ -48,20 +49,19 @@ def gather_mcore_vllm_fq_quantized_state_dict(
 
     if rank == 0:
         # Rank 0 will collect all amax values
-        all_amax_dicts = [None] * world_size
-        torch.distributed.gather_object(amax_state_dict, all_amax_dicts, dst=0)
+        all_quantizer_state_dicts = [None] * world_size
+        torch.distributed.gather_object(quantizer_state_dict, all_quantizer_state_dicts, dst=0)
 
-        # Merge all amax dicts into one
-        merged_amax_dict = {}
-        for amax_dict in all_amax_dicts:
-            if amax_dict is not None:
-                merged_amax_dict.update(amax_dict)
+        # Merge all quantizer state dicts into one
+        merged_quantizer_state_dict = {}
+        for quantizer_state_dict in all_quantizer_state_dicts:
+            if quantizer_state_dict is not None:
+                merged_quantizer_state_dict.update(quantizer_state_dict)
 
-        print(f"Total amax entries from all ranks: {len(merged_amax_dict.keys())}")
-        torch.save(merged_amax_dict, save_directory + "/quant_amax.pth")
+        torch.save(merged_quantizer_state_dict, save_directory + "/quantizer_state.pth")
     else:
         # Other ranks just send their amax values
-        torch.distributed.gather_object(amax_state_dict, None, dst=0)
+        torch.distributed.gather_object(quantizer_state_dict, None, dst=0)
 
     torch.distributed.barrier()
 
@@ -76,6 +76,13 @@ class VllmFqGPTModelExporter(GPTModelExporter):
     ):
         os.makedirs(save_directory, exist_ok=True)
         gather_mcore_vllm_fq_quantized_state_dict(self.model, self.state_dict, save_directory)
+
+        # NOTE: `self.state_dict` is an OrderedDict; mutating it while iterating
+        # over its keys raises "OrderedDict mutated during iteration".
+        keys_to_remove = [k for k in self.state_dict if "quantizer" in k]
+        for k in keys_to_remove:
+            self.state_dict.pop(k, None)
+
         assert not (self.is_multimodal and pretrained_model_name_or_path is not None), (
             "Exporting weights in bf16 and amax values is not supported for multimodal models "
             "when pretrained_model_name_or_path is not None"
@@ -87,6 +94,37 @@ class VllmFqGPTModelExporter(GPTModelExporter):
 
     def _get_quantization_format(self, module: torch.nn.Module):
         return QUANTIZATION_NONE
+
+    def _get_quantized_state(
+        self,
+        module: torch.nn.Module,
+        dtype: torch.dtype = torch.float16,
+    ) -> tuple[dict[str, torch.Tensor], str, int]:
+        """Return a state_dict, quantization format, and block_size of the module.
+
+        Args:
+            module: The target module to perform real quantization.
+            dtype: The default data type.
+
+        Returns:
+            Tuple: state_dict, quantization format, and block_size of the module.
+        """
+        name_to_value = {}
+        qformat: str = self._get_quantization_format(module)
+        block_size = 0
+
+        if hasattr(module, "weight") and module.weight is not None:
+            weight = module.weight.to(dtype).cpu()
+            name_to_value["weight"] = weight
+        else:
+            return name_to_value, qformat, block_size
+
+        if hasattr(module, "bias") and module.bias is not None:
+            name_to_value["bias"] = module.bias.to(dtype).cpu()
+        for name, param in get_quantizer_state_dict(module).items():
+            for key, value in param.items():
+                name_to_value[name + "." + key] = value.to(dtype).cpu()
+        return name_to_value, qformat, block_size
 
 
 def export_mcore_gpt_to_hf_vllm_fq(

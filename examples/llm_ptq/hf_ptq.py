@@ -51,6 +51,7 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.sparsity as mts
 from modelopt.torch.export import (
     export_hf_checkpoint,
+    export_hf_vllm_fq_checkpoint,
     export_tensorrt_llm_checkpoint,
     get_model_type,
     save_expert_token_count_table,
@@ -1125,6 +1126,12 @@ def parse_args() -> argparse.Namespace:
             "Path to checkpoint file for saving/restoring auto_quantize search state "
             "(sensitivity scores, costs, etc.). Only used when auto_quantize_bits is specified."
         ),
+    )
+    parser.add_argument(
+        "--export_vllm_fq",
+        help="Export vLLM fakequant checkpoint.",
+        default=False,
+        action="store_true",
     )
 
     return parser.parse_args()
