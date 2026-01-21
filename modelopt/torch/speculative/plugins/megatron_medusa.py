@@ -127,7 +127,7 @@ class MedusaHead(MegatronModule):
         return sharded_state_dict
 
 
-@MedusaDMRegistry.register({GPTModel: "megatron.core.models.gpt.gpt_model.GPTModel"})
+@MedusaDMRegistry.register({GPTModel: "megatron.core.models.gpt.GPTModel"})
 class _DynamicMedusaGPTModel(MedusaModel):
     """A ``megatron.core.models.gpt.GPTModel`` model with dynamic hyperparams."""
 
