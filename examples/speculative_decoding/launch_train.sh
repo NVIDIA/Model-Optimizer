@@ -74,14 +74,6 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       EAGLE_CONFIG="${1#*=}"
       ;;
-    --fsdp_transformer_layer_cls_to_wrap*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP="${1#*=}"
-      ;;
-    --num_gpu*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      NUM_GPU="${1#*=}"
-      ;;
     --disable_tqdm*)
       if [[ "$1" != *=* ]]; then shift; fi
       DISABLE_TQDM="${1#*=}"
@@ -101,6 +93,14 @@ while [ $# -gt 0 ]; do
     --ar_validate_steps*)
       if [[ "$1" != *=* ]]; then shift; fi
       AR_VALIDATE_STEPS="${1#*=}"
+      ;;
+    --cp_size*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      CP_SIZE="${1#*=}"
+      ;;
+    --dp_size*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      DP_SHARD_SIZE="${1#*=}"
       ;;
     *)
       >&2 printf "Error: Invalid argument ${1#*=}\n"
@@ -129,8 +129,6 @@ LR=${LR:-"1e-4"}
 TRAIN_BS=${TRAIN_BS:-4}
 MEDUSA_NUM_HEADS=${MEDUSA_NUM_HEADS:-1}
 MEDUSA_NUM_LAYERS=${MEDUSA_NUM_LAYERS:-1}
-FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP=${FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP:-"LlamaDecoderLayer"}
-NUM_GPU=${NUM_GPU:-1}
 TRAINING_SEQ_LEN=${TRAINING_SEQ_LEN:-2048}
 OFFLINE_DATA_PATH=${OFFLINE_DATA_PATH:-""}
 DISABLE_TQDM=${DISABLE_TQDM:-False}
@@ -138,6 +136,8 @@ VLM_PROCESSOR=${VLM_PROCESSOR:-}
 VLM_IMG_DIR=${VLM_IMG_DIR:-}
 AR_VALIDATE_STEPS=${AR_VALIDATE_STEPS:-1000}
 ESTIMATE_AR=${ESTIMATE_AR:-False}
+CP_SIZE=${CP_SIZE:-1}
+DP_SHARD_SIZE=${DP_SHARD_SIZE:-$((GPU_COUNT/CP_SIZE))}
 
 if [[ "$MODE" == "medusa" ]]; then
   SPECULATIVE_ARGS="--medusa_num_heads $MEDUSA_NUM_HEADS --medusa_num_layers $MEDUSA_NUM_LAYERS"
@@ -163,11 +163,6 @@ else
   OFFLINE_TRAINING_ARGS=""
 fi
 
-if [[ "$NUM_GPU" == 1 ]]; then
-  MULTI_GPU=""
-else
-  MULTI_GPU="--multi_gpu"
-fi
 
 if [[ "$VLM_PROCESSOR" != "" ]]; then
   VLM_ARGS="--vlm_processor $VLM_PROCESSOR --vlm_img_dir $VLM_IMG_DIR"
@@ -177,7 +172,7 @@ fi
 
 # Disable tokenizers parallelism to avoid warning
 export TOKENIZERS_PARALLELISM=False
-CMD="accelerate launch $MULTI_GPU --mixed_precision bf16 main.py \
+CMD="accelerate launch --mixed_precision bf16 main.py \
     --mode $MODE \
     --eagle_decoder_type $EAGLE_DECODER_TYPE \
     --model_name_or_path $MODEL \
@@ -206,6 +201,10 @@ CMD="accelerate launch $MULTI_GPU --mixed_precision bf16 main.py \
     $VLM_ARGS \
     $OFFLINE_TRAINING_ARGS \
     $SPECULATIVE_ARGS \
+    --fsdp 'full_shard' \
+    --fsdp_config fsdp_config.json \
+    --cp_size $CP_SIZE \
+    --dp_shard_size $DP_SHARD_SIZE \
 "
 
 start_time=$(date +%s)

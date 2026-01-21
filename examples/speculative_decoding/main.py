@@ -36,7 +36,13 @@ from typing import Literal
 
 import torch
 import transformers
-from eagle_utils import EagleTrainerWithAccLog, EagleTrainingPlot, make_eagle_supervised_data_module
+from accelerate import ParallelismConfig
+from eagle_utils import (
+    EagleTrainerWithAccLog,
+    EagleTrainingPlot,
+    make_eagle_supervised_data_module,
+    patch_ring_attention_for_ttt,
+)
 from medusa_utils import make_medusa_supervised_data_module
 from transformers.trainer_utils import get_last_checkpoint
 
@@ -100,6 +106,8 @@ class TrainingArguments(transformers.TrainingArguments):
     remove_unused_columns: bool = field(
         default=False, metadata={"help": "Set to False to keep extra args for VLM."}
     )
+    cp_size: int = field(default=1, metadata={"help": "Context parallelism size."})
+    dp_shard_size: int = field(default=1, metadata={"help": "Data parallelism shard size."})
 
 
 @dataclass
@@ -130,6 +138,13 @@ def train():
     model_args, data_args, training_args, medusa_args, eagle_args = (
         parser.parse_args_into_dataclasses()
     )
+    training_args.parallelism_config = ParallelismConfig(
+        cp_size=training_args.cp_size, dp_shard_size=training_args.dp_shard_size
+    )
+    if training_args.cp_size > 1:
+        patch_ring_attention_for_ttt()
+        # Specific patch to accelerate 1.12.0. Removable after move to 1.13.0
+        training_args.parallelism_config.sp_backend = None
     print_rank_0(f"arguments: {model_args}, {training_args}, {medusa_args}, {eagle_args}")
 
     # Detecting last checkpoint.
