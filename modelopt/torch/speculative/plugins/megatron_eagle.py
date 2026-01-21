@@ -853,11 +853,12 @@ class _DynamicEagleGPTModel(EagleModel):
         )
         padded_input_ids = torch.cat((input_ids[:, 1:], id_padding), dim=-1)
 
+        # RotaryEmbedding's output is already scattered to context parallel region
+        # No need to scatter again.
         rotary_pos_emb = self.eagle_module.rotary_pos_emb(padded_input_ids.shape[-1])
 
         padded_input_ids = scatter_to_context_parallel_region(padded_input_ids)
         input_ids = scatter_to_context_parallel_region(input_ids)
-        rotary_pos_emb = scatter_to_context_parallel_region(rotary_pos_emb)
 
         attn_mask = gather_from_context_parallel_region(attention_mask.clone().detach())
         attn_mask[:, :, :-1, :-1] = attn_mask[:, :, 1:, 1:]
