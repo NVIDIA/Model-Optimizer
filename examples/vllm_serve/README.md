@@ -23,9 +23,11 @@ You can either edit the `quant_config` dictionary in `vllm_serve_fakequant.py`, 
 |-----------------|--------------------------------------------------|---------------------|
 | QUANT_DATASET   | Dataset name for calibration                     | cnn_dailymail       |
 | QUANT_CALIB_SIZE| Number of samples used for calibration           | 512                 |
-| QUANT_CFG       | Quantization format                              | NVFP4_DEFAULT_CFG   |
-| KV_QUANT_CFG    | Quantization format for KV Cache                 | None                |
-| AMAX_FILE_PATH  | Optional path to amax file (for loading amax)    | None                |
+| QUANT_CFG       | Quantization config                              | None                |
+| KV_QUANT_CFG    | KV-cache quantization config                     | None                |
+| QUANT_FILE_PATH | Optional path to exported quantizer state dict `quantizer_state.pth` | None |
+| MODELOPT_STATE_PATH | Optional path to exported `modelopt_state.pth` (restores ModelOpt mode + weights) | None |
+| CALIB_BATCH_SIZE | Calibration batch size                           | 1                  |
 
 Set these variables in your shell or Docker environment as needed to customize calibration.
 
@@ -60,17 +62,49 @@ Overwrite the calibrated amax value with prepared values from either QAT/PTQ.
 
 Step 1: export the model with bf16 weights and amax values. To export the model:
 
-- For HF model use `modelopt.torch.export.export_hf_vllm_fq_checkpoint` function.
-- For MCore model use `modelopt.torch.export.export_mcore_gpt_to_hf_vllm_fq` function.
+- For **HF** models, you can use `modelopt.torch.export.export_hf_vllm_fq_checkpoint`:
 
-Step 2: configure <quant_amax.pth> from exported model using AMAX_FILE_PATH environment variable in step 1. For example:
+  ```python
+  import torch
+  from modelopt.torch.export import export_hf_vllm_fq_checkpoint
+
+  with torch.inference_mode():
+      export_hf_vllm_fq_checkpoint(
+          model,  # The quantized model.
+          export_dir,  # The directory where the exported files will be stored.
+      )
+  ```
+  Or run the example script `examples/llm_ptq/hf_ptq.py` with the `--export_vllm_fq` **flag** to export a vLLM-fakequant-compatible ModelOpt state (it generates `vllm_fq_modelopt_state.pth`, which you can use via `MODELOPT_STATE_PATH`).
+
+- For **MCore** models, use `modelopt.torch.export.export_mcore_gpt_to_hf_vllm_fq`:
+
+  ```python
+  from modelopt.torch.export import export_mcore_gpt_to_hf_vllm_fq
+  export_mcore_gpt_to_hf_vllm_fq(
+          unwrapped_model,  # Quantized MCore model
+          args.pretrained_model_name,  # HF model id/path (for config/tokenizer)
+          export_dir=args.export_dir,  # Directory where exported files will be stored
+      )
+
+  ```
+  This generates `quantizer_state.pth`, which contains quantizer tensors for vLLM reload via `QUANT_FILE_PATH`.
+
+Step 2: use the exported artifacts when serving:
+
+- **HF export**: pass the exported `vllm_fq_modelopt_state.pth` via `MODELOPT_STATE_PATH`
 
 ```bash
-AMAX_FILE_PATH=<vllm_amax.pth> QUANT_CFG=<quant_config> python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
+# HF
+MODELOPT_STATE_PATH=<vllm_fq_modelopt_state.pth> python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
+```
+
+- **MCore export**: pass the exported `quantizer_state.pth` via `QUANT_FILE_PATH` and set `QUANT_CFG` to match the MCore quantization recipe
+
+```bash
+# MCore
+QUANT_CFG=<quant_cfg> QUANT_FILE_PATH=<quantizer_state.pth> python vllm_serve_fakequant.py <model_path> -tp 8 --host 0.0.0.0 --port 8000
 ```
 
 ## Known Problems
 
-1. AWQ is not yet supported in vLLM.
-2. QAT checkpoint export doesn't have KV Cache quantization enabled. KV Cache fake quantization works for PTQ.
-3. Mixed precision checkpoint doesn't work currently.
+1. **MCore reload does not use `MODELOPT_STATE_PATH`**; use `QUANT_FILE_PATH` and make sure `QUANT_CFG` matches the quantization recipe used for the original MCore model (otherwise quantizer keys/config won’t align).
