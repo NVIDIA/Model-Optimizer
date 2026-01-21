@@ -42,6 +42,8 @@ from datasets import load_dataset
 from megatron.core.datasets import indexed_dataset
 from transformers import AutoTokenizer
 
+__all__ = ["megatron_preprocess_data"]
+
 
 class _Encoder:
     tokenizer: AutoTokenizer = None

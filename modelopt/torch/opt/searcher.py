@@ -35,7 +35,7 @@ import torch
 import torch.nn as nn
 
 from modelopt.torch.utils import distributed as dist
-from modelopt.torch.utils import no_stdout, run_forward_loop
+from modelopt.torch.utils import no_stdout, print_rank_0, run_forward_loop
 
 LimitsTuple = tuple[float, float]
 ConstraintsDict = dict[str, str | float | dict | None]
@@ -212,6 +212,7 @@ class BaseSearcher(ABC):
             return None
 
         def forward_loop_with_silence_check(m: nn.Module) -> None:
+            print_rank_0("Running forward loop...")
             with no_stdout() if silent else nullcontext():
                 if data_loader is not None:
                     run_forward_loop(

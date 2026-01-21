@@ -14,8 +14,11 @@
 # limitations under the License.
 
 
+import contextlib
+import io
 from functools import partial
 
+import pytest
 import torch
 from _test_utils.import_helper import skip_if_no_megatron
 
@@ -29,6 +32,7 @@ from _test_utils.torch.megatron.utils import (
 )
 from _test_utils.torch.misc import compare_outputs, set_seed
 from _test_utils.torch.nas_prune.minitron_common import prune_minitron
+from megatron.core.ssm.mamba_hybrid_layer_allocation import Symbols
 from megatron.core.ssm.mamba_layer import MambaLayer
 from megatron.core.transformer.identity_op import IdentityOp
 
@@ -37,6 +41,7 @@ from modelopt.torch.prune.plugins.mcore_minitron import (
     ImportanceEstimatorRegistry,
     _convert_model_to_dynamic_space,
     get_mcore_minitron_config,
+    get_mcore_param_count,
 )
 
 SEED = 1234
@@ -78,7 +83,12 @@ def _test_mcore_mamba_parameter_sorting(rank, size):
 
     model.eval()
     dynamic_space = _convert_model_to_dynamic_space(
-        model, get_mcore_minitron_config(channel_divisor)
+        model,
+        get_mcore_minitron_config(
+            hidden_size_divisor=channel_divisor,
+            ffn_hidden_size_divisor=channel_divisor,
+            mamba_head_dim_divisor=4,
+        ),
     )
     registry = ImportanceEstimatorRegistry(model)  # register imp estimators and forward hooks
 
@@ -162,7 +172,7 @@ def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
     mamba_num_heads = mamba_layer.mixer.nheads
 
     def forward_loop(m):
-        for _ in range(5):
+        for _ in range(2):
             run_mcore_inference_with_dummy_input(m, batch_size, hidden_size)
 
     # Traditional GPT pruning parameters
@@ -186,10 +196,11 @@ def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
         "moe_shared_expert_intermediate_size": pruned_ffn_hidden_size,
         "num_moe_experts": pruned_num_moe_experts,
     }
+    constraints = {"export_config": export_config}
     prune_minitron(
         model,
-        export_config,
-        {"forward_loop": forward_loop, "scores_path": ckpt_path},
+        constraints,
+        {"forward_loop": forward_loop, "checkpoint": ckpt_path},
         channel_divisor,
     )
 
@@ -218,14 +229,169 @@ def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
     # Assert forward pass works on the pruned model
     run_mcore_inference_with_dummy_input(model, batch_size, pruned_hidden_size)
 
-    # Assert re-pruning from scores_path works without running the forward loop again
+    # Assert re-pruning from checkpoint works without running the forward loop again
     model = _get_model(initialize_megatron=False)
-    prune_minitron(model, export_config, {"scores_path": ckpt_path}, channel_divisor)
+    prune_minitron(model, constraints, {"checkpoint": ckpt_path}, channel_divisor)
 
 
 def test_mcore_mamba_hybrid_pruning(tmp_path):
     spawn_multiprocess_job(
         size=torch.cuda.device_count(),
         job=partial(_test_mcore_mamba_hybrid_pruning, tmp_path / "modelopt_minitron_scores.pth"),
+        backend="nccl",
+    )
+
+
+def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
+    channel_divisor = 4
+
+    # TODO: MoE in MambaModel requires Mcore 0.16+
+    num_layers = 4  # Atleast one of "M, *, -, E" blocks
+    hybrid_pattern = "M*-M"  # "ME*-"
+    hidden_size = 16
+    ffn_hidden_size = 32
+    num_attention_heads = 16
+    num_query_groups = 4
+    mamba_state_dim = 4
+    mamba_num_heads = 16
+    mamba_head_dim = 16
+    mamba_num_groups = 2
+    num_moe_experts = None
+    moe_ffn_hidden_size = None
+    moe_shared_expert_intermediate_size = None
+    # num_moe_experts = 8
+    # moe_ffn_hidden_size = 16
+    # moe_shared_expert_intermediate_size = 16
+    vocab_size = 32
+    batch_size = 2
+
+    model = get_mcore_mamba_hybrid_model(
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=size,
+        initialize_megatron=True,
+        num_layers=num_layers,
+        hybrid_override_pattern=hybrid_pattern,
+        hidden_size=hidden_size,
+        num_attention_heads=num_attention_heads,
+        num_query_groups=num_query_groups,
+        ffn_hidden_size=ffn_hidden_size,
+        mamba_state_dim=mamba_state_dim,
+        mamba_num_heads=mamba_num_heads,
+        mamba_head_dim=mamba_head_dim,
+        mamba_num_groups=mamba_num_groups,
+        moe_ffn_hidden_size=moe_ffn_hidden_size,
+        moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
+        num_moe_experts=num_moe_experts,
+        vocab_size=vocab_size,
+    ).cuda()
+
+    param_count = get_mcore_param_count(model)
+    assert param_count == 31776.0, param_count
+
+    def forward_loop(m):
+        for _ in range(2):
+            run_mcore_inference_with_dummy_input(m, batch_size, hidden_size)
+
+    def score_func(m):
+        c = m.config
+        return (
+            c.num_layers
+            + c.hidden_size
+            + c.ffn_hidden_size
+            + c.mamba_num_heads
+            + c.mamba_head_dim
+            + c.num_attention_heads
+            # + c.num_moe_experts
+            # + c.moe_ffn_hidden_size
+            # + c.moe_shared_expert_intermediate_size
+        )
+
+    constraints = {"params": int(param_count * 0.7)}
+    config = {
+        "forward_loop": forward_loop,
+        "checkpoint": ckpt_path,
+        "score_func": score_func,
+        "max_width_pruning": 0.5,
+        "max_depth_pruning": 0.5,
+        "hparams_to_skip": ["num_attention_heads"],
+        "top_k": 10,
+    }
+
+    # Capture stdout to assert search space output
+    stdout_capture = io.StringIO()
+    with contextlib.redirect_stdout(stdout_capture):
+        model, searcher_state = prune_minitron(model, constraints, config, channel_divisor)
+
+    # Assert expected search space output is present
+    captured_output = stdout_capture.getvalue()
+    print(captured_output)
+    if rank == 0:
+        assert "Search space for num_layers: [3, 4]" in captured_output
+        assert "Search space for hidden_size: [12, 16]" in captured_output
+        assert "Search space for mamba_num_heads: [10, 12, 14, 16]" in captured_output
+        assert "Search space for mamba_head_dim: [12, 16]" in captured_output
+        assert "Search space for ffn_hidden_size: [20, 24, 28, 32]" in captured_output
+        assert "Total search space in consideration: 128" in captured_output
+
+    # NOTE: Slight variation in layer ordering for Attention and MLP depending on PP configuration
+    # This affects param counts when num_layers is pruned
+    sorted_layers = [
+        layer
+        for layer, _ in sorted(
+            searcher_state["layer_scores"].items(), key=lambda x: x[1], reverse=True
+        )
+    ]
+    # fmt: off
+    if sorted_layers == [1, 4, 2, 3]:
+        expected_top_k = [
+            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 14, "mamba_head_dim": 12, "ffn_hidden_size": 32}, 22196.0, 94.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 14, "mamba_head_dim": 12, "ffn_hidden_size": 28}, 22068.0, 90.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 14, "mamba_head_dim": 12, "ffn_hidden_size": 24}, 21940.0, 86.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 14, "mamba_head_dim": 16, "ffn_hidden_size": 32}, 21916.0, 94.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 14, "mamba_head_dim": 16, "ffn_hidden_size": 28}, 21820.0, 90.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 14, "mamba_head_dim": 12, "ffn_hidden_size": 20}, 21812.0, 82.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 14, "mamba_head_dim": 16, "ffn_hidden_size": 24}, 21724.0, 86.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 14, "mamba_head_dim": 16, "ffn_hidden_size": 20}, 21628.0, 82.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 10, "mamba_head_dim": 16, "ffn_hidden_size": 32}, 21180.0, 94.0],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 14, "mamba_head_dim": 12, "ffn_hidden_size": 20}, 21140.0, 81.0],  # noqa: E501
+        ]
+    elif sorted_layers == [1, 4, 3, 2]:
+        expected_top_k = [
+            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 14, "mamba_head_dim": 12, "ffn_hidden_size": 32}, 22196.0, 94.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 14, "mamba_head_dim": 12, "ffn_hidden_size": 28}, 22068.0, 90.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 14, "mamba_head_dim": 12, "ffn_hidden_size": 24}, 21940.0, 86.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 14, "mamba_head_dim": 16, "ffn_hidden_size": 32}, 21916.0, 94.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 14, "mamba_head_dim": 16, "ffn_hidden_size": 28}, 21820.0, 90.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 14, "mamba_head_dim": 12, "ffn_hidden_size": 20}, 21812.0, 82.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 14, "mamba_head_dim": 16, "ffn_hidden_size": 24}, 21724.0, 86.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 14, "mamba_head_dim": 16, "ffn_hidden_size": 20}, 21628.0, 82.0],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 14, "mamba_head_dim": 12, "ffn_hidden_size": 32}, 21524.0, 93.0],  # noqa: E501
+            [{"num_layers": 3, "hidden_size": 12, "mamba_num_heads": 14, "mamba_head_dim": 16, "ffn_hidden_size": 32}, 21412.0, 93.0],  # noqa: E501
+        ]
+    else:
+        raise RuntimeError(f"FIXME: Non deterministic test, assertions may fail: {sorted_layers}")
+    # fmt: on
+
+    assert get_mcore_param_count(model) == 22196.0
+
+    top_k = searcher_state["top_k_candidates_per_constraint"][constraints["params"]]
+    assert len(top_k) == 10
+    for actual, (ss_config, params, score) in zip(top_k, expected_top_k):
+        assert actual.ss_config == ss_config, (actual.ss_config, ss_config)
+        assert actual.params == params, (actual.params, params)
+        assert actual.score == score, (actual.score, score)
+
+
+def test_mcore_mamba_hybrid_pruning_nas(tmp_path):
+    set_seed(SEED)
+    if torch.cuda.device_count() > 4:
+        pytest.skip("Skipping test for more than 4 GPUs")
+    if "E" in Symbols.VALID:
+        pytest.skip("TODO: Update test for MoE in Mamba (Mcore 0.16+)")
+    spawn_multiprocess_job(
+        size=torch.cuda.device_count(),
+        job=partial(
+            _test_mcore_mamba_hybrid_pruning_nas, tmp_path / "modelopt_minitron_scores.pth"
+        ),
         backend="nccl",
     )

@@ -1,7 +1,7 @@
 NVIDIA Model Optimizer Changelog (Linux)
 ========================================
 
-0.42 (TBD)
+0.42 (2026-02-xx)
 ^^^^^^^^^^^^^^^^^
 
 **Bug Fixes**
@@ -12,6 +12,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 
 - Add standalone type inference option (``--use_standalone_type_inference``) in ONNX AutoCast as an alternative to ONNX's ``infer_shapes``. This experimental feature performs type-only inference without shape inference, useful as a workaround when shape inference fails or to avoid unnecessary shape inference overhead.
 - Add support for Kimi K2 Thinking model quantization from the original int4 checkpoint.
+- Add support for ``params`` constraint based automatic neural architecture search in Minitron pruning (``mcore_minitron``) as an alternative to manual pruning (using ``export_config``). See `examples/pruning/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning>`_ for more details on its usage.
 
 0.41 (2026-01-19)
 ^^^^^^^^^^^^^^^^^
@@ -96,7 +97,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 
 **Documentation**
 
-- Add general guidelines for Minitron pruning and distillation. See `examples/pruning/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning#pruning-guidelines>`_ for more details.
+- Add general guidelines for Minitron pruning and distillation. See `pruning guidelines <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning#pruning-guidelines>`_ for more details.
 - Added example for exporting QLoRA checkpoint for vLLM deployment. Refer to `examples/llm_qat/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/79ef31bc7269ba4da0cfab446da5b64509cbfcef/examples/llm_qat/README.md#qlora-deployment>`_ for more details
 
 0.37 (2025-10-08)

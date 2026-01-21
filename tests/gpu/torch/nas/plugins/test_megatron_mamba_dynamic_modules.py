@@ -51,7 +51,7 @@ def _test_mamba_search_space(rank, size):
     mamba_head_dim_divisor = 4
 
     num_layers = size
-    hybrid_override_pattern = "M" * size
+    hybrid_override_pattern = "M" * size  # all layers are Mamba layers
     hidden_size = channel_divisor * 4
     mamba_state_dim = channel_divisor
     mamba_head_dim = mamba_head_dim_divisor * 2
@@ -75,7 +75,20 @@ def _test_mamba_search_space(rank, size):
     ).cuda()
     mamba_num_heads = model.decoder.layers[0].mixer.nheads
 
-    model = mtn.convert(model, [("mcore_minitron", get_mcore_minitron_config(channel_divisor))])
+    mtn.convert(
+        model,
+        [
+            (
+                "mcore_minitron",
+                get_mcore_minitron_config(
+                    hidden_size_divisor=channel_divisor,
+                    ffn_hidden_size_divisor=channel_divisor,
+                    mamba_head_dim_divisor=mamba_head_dim_divisor,
+                    num_layers_divisor=1,
+                ),
+            )
+        ],
+    )
 
     assert isinstance(model, _DynamicMCoreLanguageModel)
     if is_pipeline_first_stage():

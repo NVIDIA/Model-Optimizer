@@ -19,6 +19,7 @@ from contextlib import nullcontext
 
 import pytest
 import torch
+from _test_utils.torch.nas_prune.utils import param_num
 from torch import nn
 from torchvision.models import MobileNetV2
 
@@ -28,7 +29,6 @@ from modelopt.torch.utils.network import (
     get_model_attributes,
     get_same_padding,
     make_divisible,
-    param_num,
     set_submodule,
     standardize_model_args,
 )
