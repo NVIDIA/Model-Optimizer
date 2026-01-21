@@ -73,9 +73,15 @@ def filter_func_ltx_video(name: str) -> bool:
     return pattern.match(name) is not None
 
 
+def filter_func_flux_dev(name: str) -> bool:
+    """Filter function specifically for Flux-dev models."""
+    pattern = re.compile(r"(proj_out.*|.*(time_text_embed|context_embedder|x_embedder|norm_out).*)")
+    return pattern.match(name) is not None
+
+
 def filter_func_wan_video(name: str) -> bool:
     """Filter function specifically for LTX-Video models."""
-    pattern = re.compile(r".*(patch_embedding|condition_embedder).*")
+    pattern = re.compile(r".*(patch_embedding|condition_embedder|proj_out).*")
     return pattern.match(name) is not None
 
 

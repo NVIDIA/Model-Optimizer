@@ -21,6 +21,12 @@ import torch
 pytest.importorskip("diffusers")
 from diffusers import UNet2DConditionModel
 
+try:
+    from diffusers.models.transformers import DiTTransformer2DModel, FluxTransformer2DModel
+except Exception:  # pragma: no cover - optional diffusers models
+    DiTTransformer2DModel = None
+    FluxTransformer2DModel = None
+
 import modelopt.torch.opt as mto
 
 
@@ -43,6 +49,48 @@ def get_tiny_unet(**config_kwargs) -> UNet2DConditionModel:
     tiny_unet = UNet2DConditionModel(**kwargs)
 
     return tiny_unet
+
+
+def get_tiny_dit(**config_kwargs):
+    """Create a tiny DiTTransformer2DModel for testing."""
+    if DiTTransformer2DModel is None:
+        pytest.skip("DiTTransformer2DModel is not available in this diffusers version.")
+
+    kwargs = {
+        "num_attention_heads": 2,
+        "attention_head_dim": 8,
+        "in_channels": 2,
+        "out_channels": 2,
+        "num_layers": 1,
+        "norm_num_groups": 1,
+        "sample_size": 8,
+        "patch_size": 2,
+        "num_embeds_ada_norm": 10,
+    }
+    kwargs.update(**config_kwargs)
+    return DiTTransformer2DModel(**kwargs)
+
+
+def get_tiny_flux(**config_kwargs):
+    """Create a tiny FluxTransformer2DModel for testing."""
+    if FluxTransformer2DModel is None:
+        pytest.skip("FluxTransformer2DModel is not available in this diffusers version.")
+
+    kwargs = {
+        "patch_size": 1,
+        "in_channels": 4,
+        "out_channels": 4,
+        "num_layers": 1,
+        "num_single_layers": 1,
+        "attention_head_dim": 8,
+        "num_attention_heads": 2,
+        "joint_attention_dim": 8,
+        "pooled_projection_dim": 8,
+        "guidance_embeds": False,
+        "axes_dims_rope": (2, 2, 4),
+    }
+    kwargs.update(**config_kwargs)
+    return FluxTransformer2DModel(**kwargs)
 
 
 def create_tiny_unet_dir(tmp_path: Path, **config_kwargs) -> Path:

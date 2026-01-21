@@ -1306,3 +1306,18 @@ def get_quant_config(
         quant_config["quantization"]["kv_cache_quant_algo"] = kv_cache_format
 
     return quant_config
+
+
+def has_quantized_modules(model: nn.Module) -> bool:
+    """Check if a model has any quantized modules.
+
+    Args:
+        model: The model to check.
+
+    Returns:
+        True if the model contains quantized modules, False otherwise.
+    """
+    return any(
+        get_quantization_format(sub_module) != QUANTIZATION_NONE
+        for _, sub_module in model.named_modules()
+    )
