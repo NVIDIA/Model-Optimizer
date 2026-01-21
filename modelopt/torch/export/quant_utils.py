@@ -1107,6 +1107,16 @@ def fuse_prequant_to_linear(model: torch.nn.Module, fuse_grouped_heads=False):
                     setattr(linear_pqs_from, "fused_with_prequant", True)
 
 
+def _layernorm_uses_weight_plus_one(module: torch.nn.Module) -> bool:
+    if any(
+        name in type(module).__name__
+        for name in ["LayerNorm1P", "GemmaRMSNorm", "Gemma2RMSNorm", "Gemma3RMSNorm"]
+    ):
+        return True
+
+    return bool(hasattr(module, "zero_centered_gamma") and module.zero_centered_gamma)
+
+
 def fuse_prequant_layernorm(
     layernorm_module: torch.nn.Module,
     modules: list[torch.Tensor],
@@ -1122,13 +1132,17 @@ def fuse_prequant_layernorm(
         fused_bias = bias * avg_pre_quant_scale
         layernorm_output_scaled = (normalization(input) * fused_weight) + fused_bias
     """
-    layernorm_module.weight = torch.nn.Parameter(
-        layernorm_module.weight * getattr(modules[0].input_quantizer, "_pre_quant_scale")
+    pre_quant_scale = getattr(modules[0].input_quantizer, "_pre_quant_scale").to(
+        layernorm_module.weight.device
     )
+    if _layernorm_uses_weight_plus_one(layernorm_module):
+        # For norms that use (1 + weight) in forward, fold pre_quant_scale into the effective weight.
+        fused_weight = (layernorm_module.weight + 1.0) * pre_quant_scale - 1.0
+    else:
+        fused_weight = layernorm_module.weight * pre_quant_scale
+    layernorm_module.weight = torch.nn.Parameter(fused_weight.to(layernorm_module.weight.dtype))
     if hasattr(layernorm_module, "bias") and layernorm_module.bias is not None:
-        layernorm_module.bias = torch.nn.Parameter(
-            layernorm_module.bias * getattr(modules[0].input_quantizer, "_pre_quant_scale")
-        )
+        layernorm_module.bias = torch.nn.Parameter(layernorm_module.bias * pre_quant_scale)
     # Pre_quant_scales of modules must not be exported, since they have been fused with layernorm
     for module in modules:
         delattr(module.input_quantizer, "_pre_quant_scale")

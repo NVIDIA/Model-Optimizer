@@ -1,11 +1,16 @@
 NVIDIA Model Optimizer Changelog (Linux)
 ========================================
 
-0.42 (XXXX-XX-XX)
+0.42 (TBD)
 ^^^^^^^^^^^^^^^^^
+
+**Bug Fixes**
+
+- Fix calibration data generation with multiple samples in the ONNX workflow.
 
 **New Features**
 
+- Add standalone type inference option (``--use_standalone_type_inference``) in ONNX AutoCast as an alternative to ONNX's ``infer_shapes``. This experimental feature performs type-only inference without shape inference, useful as a workaround when shape inference fails or to avoid unnecessary shape inference overhead.
 - Add support for Kimi K2 Thinking model quantization from the original int4 checkpoint.
 
 0.41 (2026-01-19)

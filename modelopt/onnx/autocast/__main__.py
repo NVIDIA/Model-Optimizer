@@ -185,6 +185,16 @@ def get_parser() -> argparse.ArgumentParser:
             "higher version."
         ),
     )
+    parser.add_argument(
+        "--use_standalone_type_inference",
+        action="store_true",
+        default=False,
+        help=(
+            "Use local type inference implementation instead of ONNX's infer_shapes (experimental)."
+            "This is a workaround for cases where shape inference fails for any reason."
+            "Default: False (uses ONNX's infer_shapes which does both shape and type inference)."
+        ),
+    )
 
     return parser
 
@@ -218,6 +228,7 @@ def main(argv=None):
         trt_plugins_precision=args.trt_plugins_precision,
         max_depth_of_reduction=args.max_depth_of_reduction,
         opset=args.opset,
+        use_standalone_type_inference=args.use_standalone_type_inference,
     )
 
     output_path = args.output_path

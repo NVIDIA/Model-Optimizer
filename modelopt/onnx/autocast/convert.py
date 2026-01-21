@@ -61,6 +61,7 @@ def convert_to_mixed_precision(
     trt_plugins_precision: list[str] = [],
     max_depth_of_reduction: int | None = None,
     opset: int | None = None,
+    use_standalone_type_inference: bool = False,
 ) -> onnx.ModelProto:
     """Convert model to mixed precision.
 
@@ -85,6 +86,9 @@ def convert_to_mixed_precision(
         opset: Target ONNX opset version. If None, uses default minimum opset based on low_precision_type
                (22 for bf16, 13 for fp16). The opset may be automatically increased if certain operations
                require a higher version.
+        use_standalone_type_inference: If True, use standalone type inference implementation instead of ONNX's
+                                  infer_shapes. This is a workaround (WAR) when only type inference is
+                                  needed without shape inference. Default: False.
 
     Returns:
         onnx.ModelProto: The converted mixed precision model.
@@ -132,7 +136,7 @@ def convert_to_mixed_precision(
     model = graph_sanitizer.model
 
     # Setup internal mappings
-    model = onnx_utils.infer_shapes(model)
+    model = onnx_utils.infer_types(model, use_standalone_type_inference)
     value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
 
     # Automatically add 'trt' to list of providers if custom ops are detected
@@ -164,6 +168,7 @@ def convert_to_mixed_precision(
         low_precision_type=low_precision_type,
         init_conversion_max_bytes=init_conversion_max_bytes,
         custom_ops=graph_sanitizer.custom_ops,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
 
     # Obtain reference data
@@ -196,6 +201,7 @@ def convert_to_f16(
     op_block_list: list[str] = [],
     tensor_block_dict: dict[str, dict[str, list[int]]] = {},
     trt_plugins: list[str] | None = [],
+    use_standalone_type_inference: bool = False,
 ) -> onnx.ModelProto:
     """Convert model to mixed precision, using PrecisionConverter.
 
@@ -208,6 +214,9 @@ def convert_to_f16(
         op_block_list: List of operation types that should remain in FP32.
         tensor_block_dict: Dictionary of tensors (operation type and I/O indices) that should remain in FP32.
         trt_plugins: List of TensorRT plugin library paths in .so format (compiled shared library).
+        use_standalone_type_inference: If True, use standalone type inference implementation instead of ONNX's
+                                  infer_shapes. This is a workaround (WAR) when only type inference is
+                                  needed without shape inference. Default: False.
     """
     assert low_precision_type in ["fp16", "bf16"], "low_precision_type must be either fp16 or bf16"
 
@@ -225,7 +234,7 @@ def convert_to_f16(
     model = sanitizer.model
 
     # Setup internal mappings
-    model = onnx_utils.infer_shapes(model)
+    model = onnx_utils.infer_types(model, use_standalone_type_inference)
     value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
 
     precision_converter = PrecisionConverter(
@@ -237,6 +246,7 @@ def convert_to_f16(
         low_precision_type=low_precision_type,
         custom_ops=sanitizer.custom_ops,
         tensor_block_dict=tensor_block_dict,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
     high_precision_nodes = [node.name for node in model.graph.node if node.op_type in op_block_list]
     low_precision_nodes = [
