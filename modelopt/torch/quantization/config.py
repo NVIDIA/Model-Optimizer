@@ -446,6 +446,27 @@ NVFP4_LOCAL_HESSIAN_CFG = {
     },
     "algorithm": {
         "method": "local_hessian",
+        "hessian_type": "local",
+        "fp8_scale_sweep": True,
+    },
+}
+
+NVFP4_GLOBAL_HESSIAN_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "enable": False,
+        },
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": {
+        "method": "local_hessian",
+        "hessian_type": "global",
         "fp8_scale_sweep": True,
     },
 }
@@ -1125,22 +1146,41 @@ class MseCalibConfig(QuantizeAlgorithmConfig):
 
 
 class LocalHessianCalibConfig(QuantizeAlgorithmConfig):
-    """Configuration for local Hessian-weighted MSE calibration.
+    """Configuration for Hessian-weighted MSE calibration.
 
     This algorithm uses activation information to optimize per-block scales for weight
     quantization. It minimizes the output reconstruction error by weighting the loss
-    with the local Hessian matrix computed from input activations.
+    with the Hessian matrix computed from input activations (and optionally output gradients).
 
-    The local Hessian loss for each block is: ``(dw @ H @ dw.T)`` where:
+    The Hessian loss for each block is: ``(dw @ H @ dw.T)`` where:
     - ``dw = weight - quantized_weight`` (weight reconstruction error per block)
-    - ``H = X @ X.T`` is the local Hessian computed from input activations X
+    - ``H`` is the Hessian matrix (local or global, depending on ``hessian_type``)
+
+    Two Hessian types are supported:
+
+    - **local**: ``H = X @ X.T`` - uses only input activations. Faster, no backward pass needed.
+    - **global**: ``H = (X * grad²) @ X.T`` - weights by output gradient squared.
+      More accurate as it accounts for output importance, but requires backward pass.
 
     This method is particularly effective for NVFP4 weight-only quantization where
     activation information helps select better per-block scales.
-
     """
 
     method: Literal["local_hessian"] = ModeloptField("local_hessian")
+
+    hessian_type: Literal["local", "global"] = ModeloptField(
+        default="local",
+        title="Type of Hessian to compute.",
+        description="""Type of Hessian matrix to use for weighting quantization errors:
+
+        - ``"local"``: H = X @ X.T - Only uses input activations. Fast, forward-pass only.
+        - ``"global"``: H = (X * grad²) @ X.T - Weights by output gradient squared.
+          More accurate as it captures output importance, but requires backward pass
+          during calibration.
+
+        The global Hessian is closer to the true Fisher Information and typically
+        gives better results, but at the cost of running backward passes.""",
+    )
 
     step_size: float | None = ModeloptField(
         default=0.1,
@@ -1175,8 +1215,8 @@ class LocalHessianCalibConfig(QuantizeAlgorithmConfig):
     block_size: int | None = ModeloptField(
         default=16,
         gt=0,
-        title="Block size for local Hessian computation.",
-        description="The block size used for computing the local Hessian matrix. "
+        title="Block size for Hessian computation.",
+        description="The block size used for computing the Hessian matrix. "
         "This should match the block size used in the quantization config. "
         "Default is 16 for NVFP4.",
     )
@@ -1190,7 +1230,7 @@ class LocalHessianCalibConfig(QuantizeAlgorithmConfig):
     debug: bool | None = ModeloptField(
         default=False,
         title="Debug mode.",
-        description="If True, module's local Hessian metadata will be kept as a module attribute.",
+        description="If True, module's Hessian metadata will be kept as a module attribute.",
     )
 
 

@@ -48,7 +48,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 import modelopt.torch.sparsity as mts
 from modelopt.torch.export import (
-    export_hf_checkpoint,
+    export_hf_vllm_fq_checkpoint,
     export_tensorrt_llm_checkpoint,
     get_model_type,
 )
@@ -77,6 +77,9 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "int4_awq": mtq.INT4_AWQ_CFG,
     "w4a8_awq": mtq.W4A8_AWQ_BETA_CFG,
     "nvfp4": mtq.NVFP4_DEFAULT_CFG,
+    "nvfp4_mse": mtq.NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG,
+    "nvfp4_lo_he": mtq.NVFP4_LOCAL_HESSIAN_CFG,
+    "nvfp4_gl_he": mtq.NVFP4_GLOBAL_HESSIAN_CFG,
     "nvfp4_awq": mtq.NVFP4_AWQ_LITE_CFG,
     "fp8_pb_wo": mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
     "fp8_pc_pt": mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG,
@@ -139,10 +142,10 @@ def make_calib_dataloader(
         assert tokenizer is not None and isinstance(
             tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)
         ), "The PreTrainedTokenizer must be set"
-        # Labels are only needed for gradient-based auto_quantize
+        # Labels are needed for gradient-based auto_quantize or global hessian calibration
         include_labels = (
             args.auto_quantize_bits is not None and args.auto_quantize_method == "gradient"
-        )
+        ) or args.qformat == "nvfp4_gl_he"  # Global hessian needs labels for backward pass
         calib_dataloader = get_dataset_dataloader(
             dataset_name=args.dataset,
             tokenizer=tokenizer,
@@ -432,8 +435,18 @@ def mono_quantize(
 
         if not use_calibration:
             warnings.warn("Dynamic quantization. Calibration skipped.")
+
+        # Check if we need backward pass for global hessian calibration
+        algorithm_cfg = quant_cfg.get("algorithm", {})
+        use_global_hessian = (
+            algorithm_cfg.get("method") == "local_hessian"
+            and algorithm_cfg.get("hessian_type") == "global"
+        )
+
         calibrate_loop = (
-            create_forward_loop(dataloader=calib_dataloader) if use_calibration else None
+            create_forward_loop(dataloader=calib_dataloader, enable_backward=use_global_hessian)
+            if use_calibration
+            else None
         )
 
         if calibration_only:
@@ -535,7 +548,7 @@ def export_quantized(
                     "They will be set at deployment time."
                 )
 
-            export_hf_checkpoint(
+            export_hf_vllm_fq_checkpoint(
                 full_model,
                 export_dir=export_path,
             )

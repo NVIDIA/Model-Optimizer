@@ -339,7 +339,6 @@ def mse_calibrate(
     # TODO: Sync amax across distributed processes
 
 
-@torch.no_grad()
 def local_hessian_calibrate(
     model: nn.Module,
     forward_loop: ForwardLoop | None = None,
@@ -349,13 +348,14 @@ def local_hessian_calibrate(
     stop_multiplier: float = 4.0,
     fp8_scale_sweep: bool = True,
     block_size: int = 16,
+    hessian_type: str = "local",
     debug: bool = False,
 ):
-    """Calibrate the model using local Hessian-weighted MSE search.
+    """Calibrate the model using Hessian-weighted MSE search.
 
-    This calibration method collects input activations during forward pass, computes
-    per-block local Hessian matrices (H = X @ X.T), and uses them to weight the
-    MSE loss for scale selection. This minimizes output reconstruction error rather
+    This calibration method collects input activations (and optionally output gradients)
+    during forward pass, computes per-block Hessian matrices, and uses them to weight
+    the MSE loss for scale selection. This minimizes output reconstruction error rather
     than weight reconstruction error.
 
     Args:
@@ -368,8 +368,13 @@ def local_hessian_calibrate(
         stop_multiplier: Ending multiplier for amax search (default: 4.0).
         fp8_scale_sweep: If True, sweep over all 128 possible FP8 E4M3 scale values
             for NVFP4 per-block quantization (default: True).
-        block_size: Block size for local Hessian computation (default: 16).
-        debug: If True, keep the local Hessian metadata on modules.
+        block_size: Block size for Hessian computation (default: 16).
+        hessian_type: Type of Hessian to compute:
+            - "local": H = X @ X.T (forward pass only, default)
+            - "global": H = (X * grad²) @ X.T (requires backward pass).
+              **Important**: When using "global", the forward_loop must compute a loss
+              and call loss.backward() to generate output gradients.
+        debug: If True, keep the Hessian metadata on modules.
 
     See :class:`LocalHessianCalibConfig <modelopt.torch.quantization.config.LocalHessianCalibConfig>`
     for details on the configuration options.
@@ -378,8 +383,18 @@ def local_hessian_calibrate(
         warnings.warn("forward_loop must be provided for local_hessian; skipping local_hessian")
         return
 
+    use_global_hessian = hessian_type == "global"
+
+    if use_global_hessian:
+        print_rank_0(
+            "NOTE: Global Hessian requires the forward_loop to compute a loss and call "
+            ".backward() to generate output gradients. If your forward_loop only runs "
+            "forward passes, no Hessian will be accumulated and calibration will fall back "
+            "to standard MSE behavior."
+        )
+
     class LocalHessianHelper:
-        """Helper class to collect activations and compute local Hessian per module."""
+        """Helper class to collect activations and compute Hessian per module."""
 
         cache_mode: bool = False
 
@@ -402,6 +417,10 @@ def local_hessian_calibrate(
             )
             self.num_samples = 0
 
+            # For global hessian: store input for backward hook
+            self._cached_input = None
+            self._backward_hook_handle = None
+
         def setup(self):
             """Set up the forward hook to collect activations."""
             module = self.module
@@ -411,23 +430,23 @@ def local_hessian_calibrate(
             if self.cin % self.block_size != 0:
                 warnings.warn(
                     f"Module {self.name}: input features ({self.cin}) not divisible by "
-                    f"block_size ({self.block_size}). Skipping local Hessian for this module."
+                    f"block_size ({self.block_size}). Skipping Hessian for this module."
                 )
                 self.is_enabled = False
 
         def cleanup(self):
             """Clean up the forward hook."""
             unpatch_forward_method(self.module, "_forward_no_local_hessian")
+            if self._backward_hook_handle is not None:
+                self._backward_hook_handle.remove()
+                self._backward_hook_handle = None
+            self._cached_input = None
             if not debug:
                 if hasattr(self.module, "local_hessian"):
                     delattr(self.module, "local_hessian")
 
-        def accumulate_hessian(self, input_tensor: torch.Tensor):
-            """Accumulate local Hessian from input activations.
-
-            Args:
-                input_tensor: Input tensor of shape (..., cin)
-            """
+        def accumulate_local_hessian(self, input_tensor: torch.Tensor):
+            """Accumulate local Hessian H = X @ X.T from input activations."""
             if not self.is_enabled:
                 return
 
@@ -440,34 +459,84 @@ def local_hessian_calibrate(
             self.hessian_per_block += hessian_batch
             self.num_samples += input_tensor.numel() // self.cin
 
+        def accumulate_global_hessian(self, input_tensor: torch.Tensor, grad_output: torch.Tensor):
+            """Accumulate global Hessian H = (X * grad²) @ X.T."""
+            if not self.is_enabled:
+                return
+
+            # Flatten inputs: (num_tokens, cin) -> (cin, num_tokens) -> (num_blocks, bs, n)
+            x = input_tensor.reshape(-1, self.cin).T.to(torch.float32)
+            x = x.reshape(self.num_blocks_per_cin, self.block_size, -1)
+
+            # Compute diagonal per-token Hessian weight from grad_output
+            # grad_output shape: (..., cout) -> flatten to (num_tokens, cout)
+            grad_flat = grad_output.reshape(-1, self.cout).to(torch.float32)
+            # Sum of squared gradients per token: (num_tokens,)
+            diagonal_per_token = (grad_flat**2).sum(dim=-1)
+
+            # Compute H = (X * diag) @ X.T for each block
+            # x: (num_blocks, bs, n), diagonal_per_token: (n,)
+            # x_weighted: (num_blocks, bs, n)
+            x_weighted = x * diagonal_per_token.unsqueeze(0).unsqueeze(0)
+            hessian_batch = (x_weighted @ x.transpose(-1, -2)).to(torch.float32)
+            self.hessian_per_block += hessian_batch
+            self.num_samples += input_tensor.numel() // self.cin
+
+        def move_hessian_to_cpu(self):
+            """Move Hessian to CPU to free GPU memory after accumulation."""
+            if self.hessian_per_block.device.type != "cpu":
+                self.hessian_per_block = self.hessian_per_block.cpu()
+
         def get_error_func(self) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
-            """Get the local Hessian error function for MSE calibration."""
+            """Get the Hessian error function for MSE calibration."""
             cout = self.cout
             bs = self.block_size
-            # Normalize hessian by number of samples
-            hessian = self.hessian_per_block / max(self.num_samples, 1)
+            num_blocks_per_cin = self.num_blocks_per_cin
+            # Normalize hessian by number of samples (keep on CPU for now)
+            hessian_cpu = self.hessian_per_block / max(self.num_samples, 1)
 
-            def local_hessian_error(x: torch.Tensor, xq: torch.Tensor) -> torch.Tensor:
-                """Compute local Hessian-weighted error."""
+            def hessian_error(x: torch.Tensor, xq: torch.Tensor) -> torch.Tensor:
+                """Compute Hessian-weighted error with chunked processing."""
                 original_shape = x.shape
-                dw = (x - xq).view(-1, 1, bs)  # (num_blocks, 1, block_size)
-                # Repeat hessian for each output channel
-                hessian_expanded = hessian.repeat(
-                    cout, 1, 1
-                )  # (num_blocks, block_size, block_size)
-                # Per-block loss: (num_blocks,)
-                block_loss = (dw @ hessian_expanded @ dw.transpose(-1, -2)).squeeze(-1).squeeze(-1)
-                error = block_loss.unsqueeze(-1).expand(-1, bs).reshape(original_shape)
+                device = x.device
+                # Reshape to (cout, num_blocks_per_cin, block_size)
+                dw = (x - xq).view(cout, num_blocks_per_cin, bs)
+
+                # Move hessian to device only when needed (lazy transfer)
+                hessian = hessian_cpu.to(device)
+
+                # Process in chunks over output channels for memory efficiency
+                # Use smaller chunk size for global hessian to reduce peak memory
+                chunk_size = max(1, min(128, cout))  # Reduced from 512 to 128
+                block_loss = torch.empty(cout, num_blocks_per_cin, device=device, dtype=dw.dtype)
+
+                for c_start in range(0, cout, chunk_size):
+                    c_end = min(c_start + chunk_size, cout)
+                    dw_chunk = dw[c_start:c_end]
+                    temp = torch.einsum("cbi,bij->cbj", dw_chunk, hessian)
+                    block_loss[c_start:c_end] = (temp * dw_chunk).sum(dim=-1)
+                    del temp
+
+                # Clean up hessian on GPU after use
+                del hessian
+
+                error = block_loss.unsqueeze(-1).expand(-1, -1, bs).reshape(original_shape)
                 return error
 
-            return local_hessian_error
+            return hessian_error
 
     def forward(self, input, *args, **kwargs):
         """Custom forward that collects activations in cache mode."""
         if LocalHessianHelper.cache_mode and self.local_hessian.is_enabled:
             # Get local tensor from DTensor if applicable
             input_local = input.to_local() if hasattr(input, "to_local") else input
-            self.local_hessian.accumulate_hessian(input_local)
+
+            if use_global_hessian:
+                # Cache input for backward hook
+                self.local_hessian._cached_input = input_local.detach()
+            else:
+                # Local hessian: accumulate immediately
+                self.local_hessian.accumulate_local_hessian(input_local)
 
         # Forward without quantization during caching
         if LocalHessianHelper.cache_mode:
@@ -477,6 +546,16 @@ def local_hessian_calibrate(
             return out
 
         return self._forward_no_local_hessian(input, *args, **kwargs)
+
+    def backward_hook(module, grad_input, grad_output):
+        """Backward hook to capture output gradients for global Hessian."""
+        if LocalHessianHelper.cache_mode and hasattr(module, "local_hessian"):
+            helper = module.local_hessian
+            if helper.is_enabled and helper._cached_input is not None:
+                grad_out = grad_output[0] if isinstance(grad_output, tuple) else grad_output
+                if grad_out is not None:
+                    helper.accumulate_global_hessian(helper._cached_input, grad_out.detach())
+                helper._cached_input = None
 
     # Setup helpers for all quantized linear modules
     name_to_module = dict(model.named_modules())
@@ -489,13 +568,110 @@ def local_hessian_calibrate(
             module.local_hessian.setup()
             if module.local_hessian.is_enabled:
                 weight_quantizers_info.append((name, module))
+                # Register backward hook for global hessian
+                if use_global_hessian:
+                    handle = module.register_full_backward_hook(backward_hook)
+                    module.local_hessian._backward_hook_handle = handle
 
     # Cache activations by running forward loop
     LocalHessianHelper.cache_mode = True
-    print_rank_0("local_hessian: Caching activations and computing local Hessian...")
-    forward_loop(model)
+    hessian_type_str = "global" if use_global_hessian else "local"
+    print_rank_0(f"local_hessian: Caching activations and computing {hessian_type_str} Hessian...")
+
+    if use_global_hessian:
+        # Global hessian requires backward pass - need gradients enabled
+        # The forward_loop should compute loss and call backward
+        with torch.enable_grad():
+            forward_loop(model)
+    else:
+        # Local hessian only needs forward pass
+        with torch.no_grad():
+            forward_loop(model)
+
+    # Check if Hessian was accumulated
+    total_samples_collected = sum(
+        module.local_hessian.num_samples for _, module in weight_quantizers_info
+    )
+
+    if debug:
+        print_rank_0(f"local_hessian: DEBUG - Total samples collected: {total_samples_collected}")
+        for name, module in weight_quantizers_info:
+            print_rank_0(
+                f"  {name}: num_samples={module.local_hessian.num_samples}, "
+                f"hessian_norm={module.local_hessian.hessian_per_block.norm().item():.6f}"
+            )
+
+    # For global hessian, check if backward was called
+    if use_global_hessian:
+        modules_with_no_samples = [
+            name for name, module in weight_quantizers_info if module.local_hessian.num_samples == 0
+        ]
+        if modules_with_no_samples:
+            # ALL modules have no samples - backward was never called
+            if len(modules_with_no_samples) == len(weight_quantizers_info):
+                warnings.warn(
+                    "Global Hessian: NO modules received gradient information. "
+                    "This means the forward_loop did NOT call .backward(). "
+                    "Falling back to standard MSE calibration (no Hessian weighting).\n\n"
+                    "To use global Hessian, your forward_loop must:\n"
+                    "  1. Compute a loss from model outputs (e.g., outputs.loss)\n"
+                    "  2. Call loss.backward()\n\n"
+                    "Example:\n"
+                    "  def forward_loop(model):\n"
+                    "      for batch in dataloader:\n"
+                    "          outputs = model(**batch)\n"
+                    "          loss = outputs.loss\n"
+                    "          loss.backward()\n"
+                )
+                # Fall back to standard MSE calibration
+                print_rank_0(
+                    "local_hessian: Falling back to standard MSE calibration (no Hessian weighting)..."
+                )
+                mse_calibrate(
+                    model,
+                    forward_loop=None,  # Already have max amax from calibration
+                    step_size=step_size,
+                    start_multiplier=start_multiplier,
+                    stop_multiplier=stop_multiplier,
+                    distributed_sync=distributed_sync,
+                    fp8_scale_sweep=fp8_scale_sweep,
+                )
+                # Cleanup
+                LocalHessianHelper.cache_mode = False
+                for _, module in weight_quantizers_info:
+                    if hasattr(module, "local_hessian"):
+                        module.local_hessian.cleanup()
+                        if hasattr(module.local_hessian, "_backward_hook_handle"):
+                            module.local_hessian._backward_hook_handle.remove()
+                        if not debug:
+                            delattr(module, "local_hessian")
+                    if hasattr(module, "_forward_no_local_hessian"):
+                        module.forward = module._forward_no_local_hessian
+                        delattr(module, "_forward_no_local_hessian")
+                print_rank_0("local_hessian: Calibration complete (fallback to MSE).")
+                return
+            else:
+                warnings.warn(
+                    f"Global Hessian: {len(modules_with_no_samples)} modules received no gradient "
+                    "information. Some modules may not contribute to the loss. "
+                    "Modules without gradients will use unweighted MSE."
+                )
 
     # TODO(fridah-nv): Sync Hessian across distributed processes if needed
+
+    # Move Hessian matrices to CPU to free GPU memory for MSE calibration
+    # This is especially important for global hessian which uses more GPU memory
+    LocalHessianHelper.cache_mode = False  # Disable caching first
+    print_rank_0("local_hessian: Moving Hessian matrices to CPU to free GPU memory...")
+    for _, module in weight_quantizers_info:
+        if hasattr(module, "local_hessian"):
+            module.local_hessian.move_hessian_to_cpu()
+            # Clear cached input if any
+            module.local_hessian._cached_input = None
+
+    # Clear GPU cache after moving Hessian to CPU
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     # Get initial amax using max calibration on weights
     print_rank_0("local_hessian: Computing initial amax with max calibration...")
@@ -503,8 +679,8 @@ def local_hessian_calibrate(
         with enable_weight_access_and_writeback(module, model, name_to_module):
             max_calibrate(module, lambda m: m.weight_quantizer(m.weight), distributed_sync)
 
-    # Replace calibrators with MseCalibrator using local Hessian error function
-    print_rank_0("local_hessian: Running MSE calibration with local Hessian loss...")
+    # Replace calibrators with MseCalibrator using Hessian error function
+    print_rank_0(f"local_hessian: Running MSE calibration with {hessian_type_str} Hessian loss...")
     for name, module in weight_quantizers_info:
         weight_quantizer = module.weight_quantizer
         helper = module.local_hessian

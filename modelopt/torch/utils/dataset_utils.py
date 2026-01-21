@@ -420,6 +420,51 @@ def _forward_loop(model: torch.nn.Module, dataloader: DataLoader) -> None:
             max_working_batch_size = _process_batch(data, infer_method, max_working_batch_size)
 
 
+def _forward_backward_loop(model: torch.nn.Module, dataloader: DataLoader) -> None:
+    """Runs forward and backward passes through the model for global Hessian computation.
+
+    This loop is designed for global Hessian calibration which requires gradient information.
+    It computes the loss from model outputs and calls backward() to generate gradients.
+
+    Args:
+        model: The PyTorch model to run inference on. Must return outputs with a 'loss' attribute.
+        dataloader: DataLoader containing the batched input data. Must include labels.
+    """
+    # Don't use torch.no_grad() - we need gradients for global Hessian
+    warned_no_loss = False
+    for _, data in enumerate(tqdm(dataloader)):
+        # Zero gradients before forward to prevent accumulation
+        model.zero_grad(set_to_none=True)
+
+        if isinstance(data, dict):
+            outputs = model(**data)
+        else:
+            outputs = model(data)
+
+        # Get loss from outputs
+        if hasattr(outputs, "loss") and outputs.loss is not None:
+            loss = outputs.loss
+            # Backward pass to compute gradients (this triggers the backward hooks)
+            loss.backward()
+
+            # Clear references to free memory
+            del loss
+            del outputs
+        elif not warned_no_loss:
+            import warnings
+
+            warnings.warn(
+                "Model output has no 'loss' attribute. Global Hessian requires loss computation. "
+                "Ensure your dataloader includes labels (include_labels=True) and the model "
+                "computes loss when labels are provided."
+            )
+            warned_no_loss = True
+
+        # Periodically clear CUDA cache to prevent fragmentation
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
 def create_forward_loop(
     model: torch.nn.Module | None = None,
     dataset_name: str = "cnn_dailymail",
@@ -430,6 +475,7 @@ def create_forward_loop(
     device: str | None = None,
     include_labels: bool = False,
     dataloader: DataLoader | None = None,
+    enable_backward: bool = False,
 ) -> Callable:
     """Creates and returns a forward loop function configured for a specific model, dataset, and tokenizer.
 
@@ -446,8 +492,11 @@ def create_forward_loop(
         num_samples: Number of samples from the dataset.
         max_sample_length: Maximum length of a sample.
         device: Target device for the returned dataloader.
-        include_labels: Whether to include labels in the dataloader.
+        include_labels: Whether to include labels in the dataloader. Required for `enable_backward=True`.
         dataloader: If provided, use the provided dataloader instead.
+        enable_backward: If True, the forward loop will compute loss and call backward() for each batch.
+            This is required for global Hessian calibration. When True, `include_labels` is automatically
+            set to True.
 
     Example usage for quantization:
 
@@ -467,10 +516,29 @@ def create_forward_loop(
         # Quantize the model with the calibration dataset
         mtq.quantize(model, quant_cfg, forward_loop=forward_loop)
 
+    Example usage for global Hessian calibration:
+
+    .. code-block:: python
+
+        # Create forward loop with backward pass for global Hessian
+        forward_loop = create_forward_loop(
+            model=model,
+            dataset_name="cnn_dailymail",
+            tokenizer=tokenizer,
+            enable_backward=True,  # Automatically includes labels
+        )
+
+        # Use with NVFP4_GLOBAL_HESSIAN_CFG
+        mtq.quantize(model, mtq.NVFP4_GLOBAL_HESSIAN_CFG, forward_loop=forward_loop)
+
     Returns:
         A forward loop function that can be called with no arguments. When called, this function iterates over
             the dataset specified by `dataset_name`.
     """
+    # For backward mode, labels are required
+    if enable_backward:
+        include_labels = True
+
     if dataloader is None:
         if batch_size == 0:
             # We let the system to determine the max data batch for each forward.
@@ -487,6 +555,8 @@ def create_forward_loop(
             include_labels=include_labels,
         )
 
+    if enable_backward:
+        return lambda model: _forward_backward_loop(model, dataloader)
     return lambda model: _forward_loop(model, dataloader)
 
 
