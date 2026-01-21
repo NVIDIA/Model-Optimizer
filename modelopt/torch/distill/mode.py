@@ -21,17 +21,14 @@ Check out :meth:`mtn.convert <modelopt.torch.nas.conversion.convert>` to learn m
 import warnings
 
 import torch.nn as nn
-from torch.nn.modules.loss import _Loss as Loss
 
 from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.opt.conversion import ModeloptStateManager
 from modelopt.torch.opt.mode import (
     ConvertEntrypoint,
     ConvertReturnType,
-    MetadataDict,
     ModeDescriptor,
     RestoreEntrypoint,
-    UpdateEntrypoint,
     _ModeRegistryCls,
 )
 from modelopt.torch.utils import init_model_from_model_like, unwrap_model
@@ -75,11 +72,6 @@ class KnowledgeDistillationModeDescriptor(ModeDescriptor):
     def restore(self) -> RestoreEntrypoint:
         """The mode's entrypoint for restoring a model."""
         raise NotImplementedError(f"{self.name} mode does not support restore.")
-
-    @property
-    def update_for_new_mode(self) -> UpdateEntrypoint:
-        """The mode's entrypoint for updating the models state for adding new mode."""
-        return _reset_kd_state_config
 
     @property
     def save_mode_in_state(self) -> bool:
@@ -203,13 +195,6 @@ def _convert_for_kd(
 def _convert_for_bypass(model: nn.Module, config: BypassKDConfig) -> ConvertReturnType:
     """Function for converting a model to a bypass distillation meta-model."""
     return _convert_for_kd(model, config, model_cls=BypassDistillationModel)
-
-
-def _reset_kd_state_config(model: nn.Module, config: KDLossConfig, metadata: MetadataDict):
-    """Function for resetting the state's config."""
-    config.teacher_model = nn.Module
-    config.criterion = Loss()
-    config.loss_balancer = None
 
 
 def _export_student(model: nn.Module, config: ExportStudentConfig) -> ConvertReturnType:
