@@ -35,6 +35,7 @@ from .model_config import (
     LINEAR_ROW,
     QUANTIZATION_NVFP4,
     QUANTIZATION_NVFP4_AWQ,
+    QUANTIZATION_NVFP4_SVDQUANT,
     ConvConfig,
     EmbeddingConfig,
     ExpertConfig,
@@ -398,7 +399,10 @@ def _merge_model_configs_to_first_tp(config, ranks: list[int], group=None):
                                 group_size=config.awq_block_size,
                                 quantization=config.quantization,
                             )
-                            if config.quantization == QUANTIZATION_NVFP4_AWQ:
+                            if config.quantization in [
+                                QUANTIZATION_NVFP4_AWQ,
+                                QUANTIZATION_NVFP4_SVDQUANT,
+                            ]:
                                 # We have to update weight_scaling_factor and weight_scaling_factor_2
                                 config.weights_scaling_factor, config.weights_scaling_factor_2 = (
                                     NVFP4QTensor.get_weights_scaling_factor(
@@ -430,6 +434,7 @@ def _merge_model_configs_to_first_tp(config, ranks: list[int], group=None):
                                     if config.quantization in [
                                         QUANTIZATION_NVFP4,
                                         QUANTIZATION_NVFP4_AWQ,
+                                        QUANTIZATION_NVFP4_SVDQUANT,
                                     ]:
                                         (
                                             config.weights_scaling_factor,

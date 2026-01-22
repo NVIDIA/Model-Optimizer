@@ -33,6 +33,7 @@ QUANTIZATION_INT8_WO = "int8_wo"
 QUANTIZATION_INT4_AWQ = "int4_awq"
 QUANTIZATION_W4A8_AWQ = "w4a8_awq"
 QUANTIZATION_NVFP4 = "nvfp4"
+QUANTIZATION_NVFP4_SVDQUANT = "nvfp4_svdquant"
 QUANTIZATION_W4A8_NVFP4_FP8 = "w4a8_nvfp4_fp8"
 QUANTIZATION_MXFP4 = "mxfp4"
 QUANTIZATION_W4A8_MXFP4_FP8 = "w4a8_mxfp4_fp8"
@@ -507,12 +508,20 @@ class DecoderLayerConfig:
         """Returns the hidden size of the transformer model."""
         if isinstance(self.mlp, MOEConfig):
             # fc.weight for MOE is stacked
-            if self.mlp.fc.quantization in [QUANTIZATION_NVFP4, QUANTIZATION_NVFP4_AWQ]:
+            if self.mlp.fc.quantization in [
+                QUANTIZATION_NVFP4,
+                QUANTIZATION_NVFP4_AWQ,
+                QUANTIZATION_NVFP4_SVDQUANT,
+            ]:
                 return self.mlp.fc.weight.shape[-1] * 2
             return self.mlp.fc.weight.shape[-1]
         else:
             k = self.mlp.fc.weight.shape[1]
-            if self.mlp.fc.quantization in [QUANTIZATION_NVFP4, QUANTIZATION_NVFP4_AWQ]:
+            if self.mlp.fc.quantization in [
+                QUANTIZATION_NVFP4,
+                QUANTIZATION_NVFP4_AWQ,
+                QUANTIZATION_NVFP4_SVDQUANT,
+            ]:
                 return k * 2
             return k
 

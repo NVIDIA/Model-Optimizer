@@ -29,15 +29,17 @@ from safetensors import safe_open
         "fuse_input_scale",
         "fuse_weight_scale",
         "fuse_weight_scale_2",
-        "fuse_prequant_scale",
+        "fuse_pre_quant_scale",
+        "fuse_svdquant_lora_a",
     ),
     [
-        ("fp8", "tiny_llama-fp8", True, False, True, True),
-        ("nvfp4", "tiny_llama-nvfp4", True, False, True, True),
-        ("nvfp4_awq", "tiny_llama-nvfp4-awq", True, False, True, True),
-        ("int4_awq", "tiny_llama-int4-awq", True, False, True, True),
-        ("w4a8_awq", "tiny_llama-w4a8-awq", True, False, True, True),
-        ("int8_wo", "tiny_llama-int8-wo", False, False, False, False),
+        ("fp8", "tiny_llama-fp8", True, False, True, True, False),
+        ("nvfp4", "tiny_llama-nvfp4", True, False, True, True, False),
+        ("nvfp4_awq", "tiny_llama-nvfp4-awq", True, False, True, True, False),
+        ("int4_awq", "tiny_llama-int4-awq", True, False, True, True, False),
+        ("w4a8_awq", "tiny_llama-w4a8-awq", True, False, True, True, False),
+        ("int8_wo", "tiny_llama-int8-wo", False, False, False, False, False),
+        ("nvfp4_svdquant", "tiny_llama-nvfp4-svdquant", True, False, True, True, True),
     ],
 )
 def test_unified_hf_export_and_check_safetensors(
@@ -47,7 +49,8 @@ def test_unified_hf_export_and_check_safetensors(
     fuse_input_scale,
     fuse_weight_scale,
     fuse_weight_scale_2,
-    fuse_prequant_scale,
+    fuse_pre_quant_scale,
+    fuse_svdquant_lora_a,
 ):
     """
     1) Generates a .safetensors file by running hf_ptq.py with each --qformat.
@@ -92,6 +95,18 @@ def test_unified_hf_export_and_check_safetensors(
         f"Expected .safetensors file not found for qformat={qformat}: {generated_file}"
     )
 
+    # Map scale types to their conditions
+    scale_types = [
+        ("input_scale", fuse_input_scale),
+        ("weight_scale", fuse_weight_scale),
+        ("weight_scale_2", fuse_weight_scale_2),
+        ("pre_quant_scale", fuse_pre_quant_scale),
+        ("weight_quantizer._svdquant_lora_a", fuse_svdquant_lora_a),
+    ]
+
+    # Projection pairs to check for equality
+    proj_pairs = [("gate_proj", "up_proj"), ("q_proj", "k_proj"), ("q_proj", "v_proj")]
+
     def _same_scale(name, key1, key2, f):
         if key1 in name:
             tensor1 = f.get_tensor(name)
@@ -108,23 +123,11 @@ def test_unified_hf_export_and_check_safetensors(
             assert tensor.shape is not None, f"Tensor '{name}' shape is None!"
             assert tensor.dtype is not None, f"Tensor '{name}' dtype is None!"
 
-            if "scale" in name:
-                # Map scale types to their conditions
-                scale_types = [
-                    ("input_scale", fuse_input_scale),
-                    ("weight_scale", fuse_weight_scale),
-                    ("weight_scale_2", fuse_weight_scale_2),
-                    ("prequant_scale", fuse_prequant_scale),
-                ]
-
-                # Projection pairs to check for equality
-                proj_pairs = [("gate_proj", "up_proj"), ("q_proj", "k_proj"), ("q_proj", "v_proj")]
-
-                # Check each scale type if its condition is met
-                for scale_suffix, condition in scale_types:
-                    if name.endswith(scale_suffix) and condition:
-                        # Check each projection pair
-                        for proj1, proj2 in proj_pairs:
-                            _same_scale(name, proj1, proj2, f)
+            # Check each scale type if its condition is met
+            for scale_suffix, condition in scale_types:
+                if name.endswith(scale_suffix) and condition:
+                    # Check each projection pair
+                    for proj1, proj2 in proj_pairs:
+                        _same_scale(name, proj1, proj2, f)
 
     # TODO: Load a pre-dumped log to compare textually or use pre-defined dict for sanity checks
