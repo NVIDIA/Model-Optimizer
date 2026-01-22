@@ -14,10 +14,10 @@
 # limitations under the License.
 
 import re
-import torch
-
 from collections import defaultdict
-from typing import Any, Callable
+from typing import Any
+
+import torch
 
 
 def _values_equal(v1: Any, v2: Any) -> bool:
@@ -27,14 +27,14 @@ def _values_equal(v1: Any, v2: Any) -> bool:
             return False
         return all(
             torch.equal(v1[k], v2[k]) if isinstance(v1[k], torch.Tensor) else v1[k] == v2[k]
-            for k in v1.keys()
+            for k in v1
         )
     elif isinstance(v1, torch.Tensor) and isinstance(v2, torch.Tensor):
         return torch.equal(v1, v2)
     return v1 == v2
 
 
-def _convert_key_for_vllm(key: str, value: Any) -> tuple[str | None, str | None, Any]:
+def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
     """
     Transform a single key from HuggingFace format to vLLM format.
 
@@ -47,12 +47,8 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str | None, str | None,
     if "quantizer" not in key:
         return ("copy", key, value)
 
-    # Skip softmax_quantizer (not needed in vLLM)
-    if "softmax_quantizer" in key:
-        return ("skip", None, None)
-
-    # Skip lm_head quantizers (not needed in vLLM)
-    if key.startswith("lm_head.") and "quantizer" in key:
+    # Skip softmax_quantizer and lm_head quantizers(not needed in vLLM)
+    if "softmax_quantizer" in key or (key.startswith("lm_head.") and "quantizer" in key):
         return ("skip", None, None)
 
     # Check if this is a q/k/v projection that needs merging
@@ -69,7 +65,9 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str | None, str | None,
         )
         if expert_gate_up_match:
             suffix = expert_gate_up_match.group(4) or ""
-            group_key = expert_gate_up_match.group(1) + ".w13_" + expert_gate_up_match.group(3) + suffix
+            group_key = (
+                expert_gate_up_match.group(1) + ".w13_" + expert_gate_up_match.group(3) + suffix
+            )
             return ("group", group_key, value)
 
     # Check if this is a non-expert gate/up projection that needs merging
@@ -110,8 +108,8 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str | None, str | None,
 
 
 def _group_keys_for_vllm(
-    state_dict: dict[str, Any]
-) -> tuple[dict[str, Any], dict[str, list[tuple[str, Any]]]]:
+    state_dict: dict[str, Any],
+) -> tuple[dict[str, Any], defaultdict[str, list[tuple[str, Any]]]]:
     """
     Process state dict and group keys that need merging.
 
@@ -123,7 +121,11 @@ def _group_keys_for_vllm(
 
     for key, value in state_dict.items():
         action, new_key, new_value = _convert_key_for_vllm(key, value)
-
+        if new_key is None or new_value is None:
+            assert action == "skip", (
+                f"Expected action to be 'skip' for key {key}, value {value}, got {action}"
+            )
+            continue
         if action == "copy":
             vllm_state_dict[new_key] = new_value
         elif action == "group":
@@ -133,9 +135,7 @@ def _group_keys_for_vllm(
     return vllm_state_dict, merge_groups
 
 
-def _merge_values_by_max_or_concat(
-    merged_key: str, key_value_pairs: list[tuple[str, Any]]
-) -> Any:
+def _merge_values_by_max_or_concat(merged_key: str, key_value_pairs: list[tuple[str, Any]]) -> Any:
     """
     Merge values by taking max for amax, concatenating for others.
     Used for quantizer state weights (tensor values).
@@ -145,7 +145,7 @@ def _merge_values_by_max_or_concat(
     # Check if values are dicts (OrderedDict) containing tensors
     if isinstance(values[0], dict):
         merged_value = {}
-        for dict_key in values[0].keys():
+        for dict_key in values[0]:
             tensors = [v[dict_key] for v in values]
             if "_amax" in dict_key:
                 merged_value[dict_key] = torch.stack(tensors).max(dim=0)[0]
@@ -161,9 +161,7 @@ def _merge_values_by_max_or_concat(
         return merged_value
 
 
-def _merge_values_require_identical(
-    merged_key: str, key_value_pairs: list[tuple[str, Any]]
-) -> Any:
+def _merge_values_require_identical(merged_key: str, key_value_pairs: list[tuple[str, Any]]) -> Any:
     """
     Merge values by requiring all values to be identical.
     Used for quantizer state (config/metadata).
@@ -183,8 +181,7 @@ def _merge_values_require_identical(
 
 
 def convert_dict_to_vllm(
-    state_dict: dict[str, Any],
-    merge_mode: str = "max_or_concat"
+    state_dict: dict[str, Any], merge_mode: str = "max_or_concat"
 ) -> dict[str, Any]:
     """
     Common implementation for converting quantizer state from HF to vLLM format.
@@ -196,7 +193,11 @@ def convert_dict_to_vllm(
     """
     vllm_state_dict, merge_groups = _group_keys_for_vllm(state_dict)
 
-    merge_fn = _merge_values_require_identical if merge_mode == "require_identical" else _merge_values_by_max_or_concat
+    merge_fn = (
+        _merge_values_require_identical
+        if merge_mode == "require_identical"
+        else _merge_values_by_max_or_concat
+    )
 
     # Merge grouped values
     for merged_key, key_value_pairs in merge_groups.items():
@@ -228,10 +229,12 @@ def convert_modelopt_state_to_vllm(modelopt_state: dict[str, Any]) -> dict[str, 
         current_mode_metadata = current_mode[1].pop("metadata", {})
         current_mode_quant_state = current_mode_metadata.pop("quantizer_state", {})
         if current_mode_quant_state:
-            current_mode_metadata["quantizer_state"] = convert_dict_to_vllm(current_mode_quant_state, merge_mode="require_identical")
+            current_mode_metadata["quantizer_state"] = convert_dict_to_vllm(
+                current_mode_quant_state, merge_mode="require_identical"
+            )
         else:
             current_mode_metadata.pop("quantizer_state", None)
-        current_mode[1]['metadata'] = current_mode_metadata
+        current_mode[1]["metadata"] = current_mode_metadata
         modelopt_state_dict[idx] = (current_mode[0], current_mode[1])
     modelopt_state["modelopt_state_dict"] = modelopt_state_dict
     return modelopt_state

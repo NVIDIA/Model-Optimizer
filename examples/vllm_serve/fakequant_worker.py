@@ -20,12 +20,12 @@ from contextlib import contextmanager
 from typing import Any
 
 import torch
-from vllm_reload_utils import convert_dict_to_vllm, convert_modelopt_state_to_vllm
 from tqdm import tqdm
 from transformers import AutoTokenizer
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.worker.gpu_worker import Worker as BaseWorker
+from vllm_reload_utils import convert_dict_to_vllm, convert_modelopt_state_to_vllm
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.opt.conversion import restore_from_modelopt_state
