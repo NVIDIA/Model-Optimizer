@@ -112,8 +112,20 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 | Kimi K2 | - | - | - | - | ✅ |
 | T5 | ✅ | ✅ | ✅ | ✅ | - |
 | Whisper | ✅ | ❌ | ❌ | ❌ | - |
+| Kimi-K2-Thinking-BF16 | ✅ | ❌ | ❌ | ❌ | ✅ |
 
 > *This is a subset of the models supported. For the full list please check the [TensorRT-LLM support matrix](https://nvidia.github.io/TensorRT-LLM/reference/precision.html#support-matrix)*
+
+> We recommend upcasting Kimi-K2-Thinking from INT4 to BF16 before running quantization.
+
+```python
+from transformers import AutoModelForCausalLM
+from transformers.utils.quantization_config import CompressedTensorsConfig
+
+model = AutoModelForCausalLM.from_pretrained("moonshotai/Kimi-K2-Thinking", torch_dtype="auto", device_map = "auto", local_files_only = True, trust_remote_code = True, quantization_config = CompressedTensorsConfig(run_compressed=False))
+
+# And then save it with save_pretrained
+```
 
 > *<sup>1.</sup>The w4a8_awq is an experimental quantization scheme that may result in a higher accuracy penalty.* \
 > *<sup>2.</sup>For some models, there is only support for exporting quantized checkpoints.* \

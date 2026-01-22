@@ -646,6 +646,25 @@ NVFP4_MLP_ONLY_CFG = {
     "algorithm": "max",
 }
 
+NVFP4_EXPERTS_ONLY_CFG = {
+    "quant_cfg": {
+        "*mlp.experts*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "enable": True,
+            "pass_through_bwd": True,
+        },
+        "*mlp.experts*input_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "enable": True,
+            "pass_through_bwd": True,
+        },
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": "max",
+}
+
 choices: set[str] = {
     "FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG",
     "FP8_AFFINE_KV_CFG",
@@ -675,6 +694,7 @@ choices: set[str] = {
     "NVFP4_MLP_WEIGHT_ONLY_CFG",
     "MXFP4_MLP_WEIGHT_ONLY_CFG",
     "NVFP4_MLP_ONLY_CFG",
+    "NVFP4_EXPERTS_ONLY_CFG",
 }
 
 BiasType = Literal["static", "dynamic"]
