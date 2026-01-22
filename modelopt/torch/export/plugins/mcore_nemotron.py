@@ -131,4 +131,10 @@ nemotron_h_causal_lm_export: dict[str, CustomModuleMapping] = {
     # Latent MoE
     "fc1_latent_proj": NameRemapping("backbone.layers.{}.mixer.fc1_latent_proj."),
     "fc2_latent_proj": NameRemapping("backbone.layers.{}.mixer.fc2_latent_proj."),
+    # MTP
+    "mtp.enorm": NameRemapping("mtp.layers.{}.enorm."),
+    "mtp.hnorm": NameRemapping("mtp.layers.{}.hnorm."),
+    "mtp.eh_proj": NameRemapping("mtp.layers.{}.eh_proj."),
+    "mtp.final_layernorm": NameRemapping("mtp.layers.{}.final_layernorm."),
+
 }
