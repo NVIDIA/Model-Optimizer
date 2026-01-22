@@ -83,6 +83,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "w4a8_nvfp4_fp8": mtq.W4A8_NVFP4_FP8_CFG,
     "w4a8_mxfp4_fp8": mtq.W4A8_MXFP4_FP8_CFG,
     "nvfp4_mlp_only": mtq.NVFP4_MLP_ONLY_CFG,
+    "nvfp4_svdquant": mtq.NVFP4_SVDQUANT_DEFAULT_CFG,
 }
 
 KV_QUANT_CFG_CHOICES = {
@@ -506,6 +507,10 @@ def export_quantized(
             or args.sparsity_fmt != "dense"
             or "int8_sq" in args.qformat
         ):
+            if (
+                args.inference_tensor_parallel != 1 or args.inference_pipeline_parallel != 1
+            ) and args.qformat == "nvfp4_svdquant":
+                raise NotImplementedError("Svdquant does not support multiple GPUs yet.")
             warnings.warn(
                 "Still exporting TensorRT-LLM checkpoints for models not supported by the TensorRT-LLM torch runtime."
             )

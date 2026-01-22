@@ -70,6 +70,7 @@ from .model_config import (
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
     QUANTIZATION_NVFP4_AWQ,
+    QUANTIZATION_NVFP4_SVDQUANT,
     QUANTIZATION_W4A8_AWQ,
     QUANTIZATION_W4A8_NVFP4_FP8,
 )
@@ -258,6 +259,10 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
     model_type = type(model).__name__.lower()
     module_names = set()
 
+    # NVFP4 SVDQuant does not need pre-quant scale fusion (either into previous linear or layernorm) because
+    # 1) its kernel handles pre-quant scale.
+    # 2) fusing into previous linear will need to change the lora_up in up_proj which may cause issue in
+    #    the later gate up fusion.
     # Fuse pre_quant_scale to the linear weights if possible
     if quantization_format is not None and "nvfp4_awq" in quantization_format.lower():
         fuse_prequant_to_linear(model)
@@ -268,7 +273,8 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
 
         # For MoE models update pre_quant_scale to average pre_quant_scale amongst experts
         if is_moe(module) and (
-            quantization_format is not QUANTIZATION_NONE and "awq" in quantization_format
+            quantization_format is not QUANTIZATION_NONE
+            and ("awq" in quantization_format or quantization_format == QUANTIZATION_NVFP4_SVDQUANT)
         ):
             # update_experts_avg_prequant_scale(module)
             grouped_experts = get_experts_list(module, model_type)
@@ -439,6 +445,7 @@ def _export_quantized_weight(
 
     if quantization_format in [
         QUANTIZATION_NVFP4_AWQ,
+        QUANTIZATION_NVFP4_SVDQUANT,
         QUANTIZATION_NVFP4,
         QUANTIZATION_W4A8_AWQ,
         QUANTIZATION_W4A8_NVFP4_FP8,
@@ -459,7 +466,11 @@ def _export_quantized_weight(
         for expert_type in ["Llama4TextExperts", "GptOssExperts"]
     )
 
-    if quantization_format in [QUANTIZATION_NVFP4, QUANTIZATION_NVFP4_AWQ]:
+    if quantization_format in [
+        QUANTIZATION_NVFP4,
+        QUANTIZATION_NVFP4_AWQ,
+        QUANTIZATION_NVFP4_SVDQUANT,
+    ]:
         # Transpose weight from (num_experts, input_dim, output_dim) to (num_experts, output_dim, input_dim)
         # for NVFP4 quantization functions that expect input_dim as the last dimension for block quantization
         weight, _ = maybe_transpose_expert_weight_dimensions(
