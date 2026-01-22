@@ -25,7 +25,11 @@ from transformers import AutoTokenizer
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.worker.gpu_worker import Worker as BaseWorker
-from vllm_reload_utils import convert_dict_to_vllm, convert_modelopt_state_to_vllm
+from vllm_reload_utils import (
+    convert_dict_to_vllm,
+    convert_modelopt_state_to_vllm,
+    process_state_dict_for_tp,
+)
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.opt.conversion import restore_from_modelopt_state
@@ -106,7 +110,11 @@ def _fakequant_run_prolog_worker(self) -> None:
     model = self.model_runner.model
     if quant_config["modelopt_state_path"]:
         print(f"Loading modelopt state from {quant_config['modelopt_state_path']}")
-        modelopt_state = torch.load(quant_config["modelopt_state_path"], weights_only=False)
+        # Load on CPU to avoid failures when the checkpoint was saved from a different
+        # GPU mapping
+        modelopt_state = torch.load(
+            quant_config["modelopt_state_path"], weights_only=False, map_location="cpu"
+        )
         modelopt_weights = modelopt_state.pop("modelopt_state_weights", None)
         modelopt_state = convert_modelopt_state_to_vllm(modelopt_state)
         restore_from_modelopt_state(model, modelopt_state)
@@ -203,8 +211,11 @@ def _fakequant_run_prolog_worker(self) -> None:
 
         quantizer_file_path = quant_config["quant_file_path"]
         if quantizer_file_path:
+            self.model_runner._dummy_run(1)
             print(f"Loading quantizer values from {quantizer_file_path}")
-            saved_quant_dict = torch.load(quantizer_file_path)
+            # Load on CPU to avoid failures when the checkpoint was saved from a different
+            # GPU mapping
+            saved_quant_dict = torch.load(quantizer_file_path, map_location="cpu")
             # convert quant keys to vLLM format
             if hasattr(self.model_runner.model, "hf_to_vllm_mapper"):
                 saved_quant_dict = self.model_runner.model.hf_to_vllm_mapper.apply_dict(
@@ -242,12 +253,16 @@ def _fakequant_run_prolog_worker(self) -> None:
                 )
 
             # Update quant values
+            saved_quant_dict = process_state_dict_for_tp(saved_quant_dict, current_state_dict)
             for key, value in saved_quant_dict.items():
                 if key in current_state_dict:
                     current_state_dict[key] = value.to(current_state_dict[key].device)
 
             model.load_state_dict(current_state_dict)
-            torch.distributed.barrier()
+
+            # Only barrier if distributed is actually initialized (avoids deadlocks).
+            if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+                torch.distributed.barrier()
 
     if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
         mtq.print_quant_summary(model)
