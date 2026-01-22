@@ -153,7 +153,7 @@ def _preprocess_onnx(
             else mode_min_opset
         )
 
-    if original_opset_version != target_opset and original_opset_version != 1:
+    if original_opset_version < target_opset and original_opset_version != 1:
         onnx_model = onnx.version_converter.convert_version(onnx_model, target_opset)
         onnx_path = os.path.join(output_dir, f"{model_name}_opset{target_opset}.onnx")
         save_onnx(onnx_model, onnx_path, use_external_data_format)
