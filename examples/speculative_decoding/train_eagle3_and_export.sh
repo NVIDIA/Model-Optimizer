@@ -20,7 +20,7 @@ set -eo pipefail
 # Set default values for BASE_MODEL, NUM_GPU, and DATA
 BASE_MODEL=meta-llama/Llama-3.2-1B-Instruct
 NUM_GPU=1
-DATA=input_conversations/daring-anteater.jsonl
+DATA=input_conversations/train.jsonl
 
 # Parse input arguments --base_model, --num_gpu, and --data
 while [[ $# -gt 0 ]]; do
