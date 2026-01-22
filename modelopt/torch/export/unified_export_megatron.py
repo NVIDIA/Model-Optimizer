@@ -51,8 +51,8 @@ from .plugins.mcore_custom import CustomModuleMapping, save_safetensors
 from .plugins.megatron_importer import GPTModelImporter
 from .quant_utils import (
     get_activation_scaling_factor,
-    get_kv_cache_dtype,
     get_kv_cache_scaling_factor,
+    get_kv_cache_dtype,
     get_quant_config,
     get_quantization_format,
     get_scaling_factor,
@@ -256,12 +256,6 @@ class GPTModelExporter:
         elif quantization_format == QUANTIZATION_NVFP4:
             quantization = "NVFP4"
 
-        kv_cache_quantization = None
-        kv_cache_dtype = get_kv_cache_dtype(self.model)
-        print("kv_cache_dtype: ", kv_cache_dtype)
-        if kv_cache_dtype in (KV_CACHE_FP8, KV_CACHE_NVFP4):
-            # FP8 KV Cache is supported in VLLM; NVFP4 supported in TRTLLM
-            kv_cache_quantization = kv_cache_dtype
         # We use the last PP rank and the 1st EP rank to write the config because
         # medusa_heads and eagle_module only exist in the last stage.
         if is_last_stage_main_rank:
@@ -305,12 +299,13 @@ class GPTModelExporter:
                 },
                 "quantization": {
                     "quant_algo": quantization,
-                    "kv_cache_quant_algo": kv_cache_quantization,
                     "exclude_modules": ["lm_head"], # TODO update this dynamically
                 },
             }
             if quantization == "NVFP4": # update block size
                 hf_quant_config["quantization"]["group_size"] = 16
+            if hasattr(self, "kv_cache_dtype"):
+                hf_quant_config["quantization"]["kv_cache_quant_algo"] = self.kv_cache_dtype
             with open(save_directory + "/hf_quant_config.json", "w") as f:
                 json.dump(hf_quant_config, f, indent=4)
 
@@ -731,7 +726,7 @@ class GPTModelExporter:
                 quantized_weight = to_quantized_weight(
                     weight,
                     scale,
-                    qformat,
+                   qformat,
                     weight_scale_2,
                     block_size,
                 )
@@ -772,6 +767,10 @@ class GPTModelExporter:
                 self._state_dict[k_scale_key] = kv_scales[0]
                 self._state_dict[v_scale_key] = kv_scales[1]
 
+            kv_cache_dtype = get_kv_cache_dtype(module)
+            if kv_cache_dtype in (KV_CACHE_FP8, KV_CACHE_NVFP4):
+                # FP8 KV Cache is supported in VLLM; NVFP4 supported in TRTLLM
+                self.kv_cache_dtype = kv_cache_dtype
 
     def _pack_name_remapping(self, module, prefix, layer_type=None):
         """Pack name remapping into one tensor."""
