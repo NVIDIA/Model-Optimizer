@@ -1404,7 +1404,7 @@ def TEDotProductAttentionCP(attention_mask: torch.Tensor, num_attention_heads: i
 
     def _wrapped_forward(self, *args, **kwargs):
         attention_bias = torch.where(attention_mask, torch.tensor(-1e9), torch.tensor(0.0))
-        kwargs["attention_bias"] = attention_bias
+        kwargs["attention_bias"] = attention_bias.to(args[0].dtype)
         return orig_forward(self, *args, **kwargs)
 
     if get_context_parallel_world_size() > 1:
