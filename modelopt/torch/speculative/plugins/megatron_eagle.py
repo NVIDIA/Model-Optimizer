@@ -1403,8 +1403,85 @@ def TEDotProductAttentionCP(attention_mask: torch.Tensor, num_attention_heads: i
     orig_forward = cls.forward
 
     def _wrapped_forward(self, *args, **kwargs):
-        attention_bias = torch.where(attention_mask, torch.tensor(-1e9), torch.tensor(0.0))
-        kwargs["attention_bias"] = attention_bias.to(args[0].dtype)
+        # Build attention_bias from the boolean attention_mask and ensure
+        # it's a fresh, detached tensor on the query's device/dtype to
+        # avoid shared-storage in-place modifications that break autograd.
+        query = args[0] if len(args) > 0 else None
+        if isinstance(query, torch.Tensor):
+            q_device = query.device
+            q_dtype = query.dtype
+        else:
+            q_device = None
+            q_dtype = None
+
+        mask_fill = -1e9
+        if q_dtype in (torch.float16, torch.bfloat16):
+            mask_fill = -40.0
+        mask_val = torch.tensor(mask_fill, device=attention_mask.device)
+        zero_val = torch.tensor(0.0, device=attention_mask.device)
+        attention_bias = torch.where(attention_mask, mask_val, zero_val)
+
+        # Expand head dimension if needed
+        try:
+            if attention_bias.dim() == 4 and attention_bias.shape[1] == 1:
+                attention_bias = attention_bias.expand(-1, num_attention_heads, -1, -1)
+        except Exception:
+            pass
+
+        if q_device is not None and q_dtype is not None:
+            attention_bias = attention_bias.to(device=q_device, dtype=q_dtype)
+
+        attention_bias = attention_bias.clone().detach().contiguous()
+        if q_dtype in (torch.float16, torch.bfloat16):
+            attention_bias = attention_bias.clamp(min=-40.0)
+        kwargs["attention_bias"] = attention_bias
+
+        # Defensive clone of query/key/value positional tensors to avoid
+        # passing views into the fused attention kernel that might be
+        # modified in-place during backward.
+        if len(args) >= 1:
+            original_args = args
+            new_args = list(original_args)
+            try:
+                for i in range(min(3, len(new_args))):
+                    if isinstance(new_args[i], torch.Tensor):
+                        if not new_args[i].is_contiguous():
+                            new_args[i] = new_args[i].contiguous()
+                        new_args[i] = new_args[i].clone()
+
+                if any(x is None for x in new_args):
+                    args = original_args
+                else:
+                    args = tuple(new_args)
+            except Exception:
+                args = original_args
+
+        # Ensure any provided attention_bias matches query dtype/device
+        if "attention_bias" in kwargs and isinstance(kwargs["attention_bias"], torch.Tensor):
+            if q_dtype is not None and q_device is not None:
+                try:
+                    if (
+                        kwargs["attention_bias"].dtype != q_dtype
+                        or kwargs["attention_bias"].device != q_device
+                    ):
+                        kwargs["attention_bias"] = (
+                            kwargs["attention_bias"]
+                            .to(device=q_device, dtype=q_dtype)
+                            .clone()
+                            .detach()
+                            .contiguous()
+                        )
+                    else:
+                        kwargs["attention_bias"] = (
+                            kwargs["attention_bias"].clone().detach().contiguous()
+                        )
+                except Exception:
+                    kwargs["attention_bias"] = (
+                        kwargs["attention_bias"].clone().detach().contiguous()
+                    )
+            else:
+                kwargs["attention_bias"] = kwargs["attention_bias"].clone().detach().contiguous()
+
         return orig_forward(self, *args, **kwargs)
 
     if get_context_parallel_world_size() > 1:
