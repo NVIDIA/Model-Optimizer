@@ -18,6 +18,7 @@ from collections import defaultdict
 from typing import Any
 
 import torch
+from vllm.distributed.parallel_state import get_tp_group
 
 
 def _values_equal(v1: Any, v2: Any) -> bool:
@@ -92,15 +93,6 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
     bmm_match = re.search(r"(.*\.self_attn)\.([qkv]_bmm_quantizer.*)$", key)
     if bmm_match:
         new_key = bmm_match.group(1) + ".attn." + bmm_match.group(2)
-        # Debug: show device of amax values
-        if isinstance(value, dict):
-            for k, v in value.items():
-                if isinstance(v, torch.Tensor):
-                    print(f"Renamed {key} -> {new_key}, {k} device: {v.device}")
-        elif isinstance(value, torch.Tensor):
-            print(f"Renamed {key} -> {new_key}, device: {value.device}")
-        else:
-            print(f"Renamed {key} -> {new_key}")
         return ("copy", new_key, value)
 
     # Copy other quantizer keys as-is (like o_proj, down_proj)
@@ -238,3 +230,43 @@ def convert_modelopt_state_to_vllm(modelopt_state: dict[str, Any]) -> dict[str, 
         modelopt_state_dict[idx] = (current_mode[0], current_mode[1])
     modelopt_state["modelopt_state_dict"] = modelopt_state_dict
     return modelopt_state
+
+
+def process_state_dict_for_tp(saved_qstate_dict, current_state_dict):
+    """Shard quantizer tensors for tensor parallelism by matching expected shapes."""
+    tp_group = get_tp_group()
+    tp_rank = tp_group.rank_in_group
+    tp_world_size = tp_group.world_size
+
+    result = {}
+    for key, value in saved_qstate_dict.items():
+        if key in current_state_dict:
+            expected_shape = current_state_dict[key].shape
+            if value.shape != expected_shape:
+                # Find the dimension that was tensor-parallel sharded.
+                # We expect exactly one dimension to satisfy:
+                #   checkpoint_dim == expected_dim * tp_world_size
+                shard_dims = [
+                    d
+                    for d in range(len(expected_shape))
+                    if value.shape[d] == expected_shape[d] * tp_world_size
+                ]
+                if len(shard_dims) != 1:
+                    raise ValueError(
+                        f"Cannot infer TP shard dim for {key}: "
+                        f"expected_shape={tuple(expected_shape)}, checkpoint_shape={tuple(value.shape)}, "
+                    )
+
+                shard_dim = shard_dims[0]
+                shard_size = expected_shape[shard_dim]
+                start = tp_rank * shard_size
+                end = start + shard_size
+                if end > value.shape[shard_dim]:
+                    raise ValueError(
+                        f"TP shard out of bounds for {key}: "
+                        f"expected_shape={tuple(expected_shape)}, checkpoint_shape={tuple(value.shape)})"
+                    )
+                value = value.narrow(shard_dim, start, shard_size).contiguous()
+        result[key] = value
+
+    return result
