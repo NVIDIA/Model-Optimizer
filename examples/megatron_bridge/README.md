@@ -40,7 +40,7 @@ torchrun --nproc_per_node 2 /opt/Model-Optimizer/examples/megatron_bridge/prune_
 To see the full usage for advanced configurations, run:
 
 ```bash
-torchrun /opt/Model-Optimizer/examples/megatron_bridge/prune_minitron.py --help
+python /opt/Model-Optimizer/examples/megatron_bridge/prune_minitron.py --help
 ```
 
 > [!TIP]
@@ -55,8 +55,6 @@ TODO
 ## Quantization
 
 TODO
-
-## Resources
 
 ## Resources
 

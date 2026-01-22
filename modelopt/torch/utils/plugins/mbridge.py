@@ -45,6 +45,7 @@ from megatron.bridge.training.state import GlobalState
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.core.models.gpt import GPTModel
 from megatron.core.models.mamba import MambaModel
+from megatron.core.parallel_state import get_data_parallel_group
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.utils import unwrap_model
 from transformers import AutoTokenizer
@@ -115,9 +116,17 @@ def load_mbridge_model_from_hf(
     return bridge, provider, model, unwrapped_model, tokenizer
 
 
-def _get_dataset_cfg(dataset_name: str, num_samples: int, seq_length: int) -> HFDatasetConfig:
+def _get_dataset_cfg(
+    dataset_name: str,
+    num_samples: int,
+    seq_length: int,
+    apply_chat_template: bool = True,
+    tokenizer: AutoTokenizer | None = None,
+) -> HFDatasetConfig:
     """Get a dataset config for the dataset."""
-    dataset = get_dataset_samples(dataset_name, num_samples)
+    dataset = get_dataset_samples(
+        dataset_name, num_samples, apply_chat_template=apply_chat_template, tokenizer=tokenizer
+    )
     dataset_cfg = HFDatasetConfig(
         dataset_name=f"{dataset_name}_{num_samples}",
         dataset_dict=DatasetDict({"train": dataset}),
@@ -129,7 +138,7 @@ def _get_dataset_cfg(dataset_name: str, num_samples: int, seq_length: int) -> HF
         do_test=False,
         val_proportion=None,
         split_val_from_train=False,
-        rewrite=False,
+        rewrite=True,
     )
 
     return dataset_cfg
@@ -139,6 +148,7 @@ def get_hf_mbridge_calibration_loop(
     *,
     model: list[MegatronModule],
     provider: GPTModelProvider | MambaModelProvider,
+    tokenizer: AutoTokenizer,
     hf_model_name_or_path: str,
     trust_remote_code: bool = False,
     dataset_name: str = "nemotron-post-training-dataset-v2",
@@ -150,6 +160,7 @@ def get_hf_mbridge_calibration_loop(
     Args:
         model: The model to calibrate.
         provider: The provider to use for the model.
+        tokenizer: The tokenizer to use for the model.
         hf_model_name_or_path: The name or path of the HF model.
         trust_remote_code: Whether to trust remote code.
         dataset_name: The name of the dataset to use for evaluation.
@@ -159,6 +170,7 @@ def get_hf_mbridge_calibration_loop(
     Returns:
         A function that can be used to calibrate the model with a modelopt.torch API.
     """
+    # TODO: make global_batch_size larger than micro_batch_size for PP interleaving
     global_batch_size = micro_batch_size
     num_iters = num_samples // global_batch_size
 
@@ -174,7 +186,13 @@ def get_hf_mbridge_calibration_loop(
             eval_iters=num_iters,
             skip_train=True,
         ),
-        dataset=_get_dataset_cfg(dataset_name, num_samples, provider.seq_length),
+        dataset=_get_dataset_cfg(
+            dataset_name,
+            num_samples,
+            provider.seq_length,
+            apply_chat_template=True,
+            tokenizer=tokenizer,
+        ),
         tokenizer=TokenizerConfig(
             tokenizer_type="HuggingFaceTokenizer",
             tokenizer_model=hf_model_name_or_path,
@@ -206,6 +224,7 @@ def get_hf_mbridge_calibration_loop(
         train_state=state.train_state,
         model_length=len(model),
         train_valid_test_datasets_provider=_train_valid_test_datasets_provider,
+        dp_group=get_data_parallel_group(),
     )
 
     def forward_loop(m):
