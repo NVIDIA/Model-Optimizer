@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Meta-model wrapper to support bypass-enabled knowledge-distillation learning."""
+"""Meta-model wrapper to support layerwise-enabled knowledge-distillation learning."""
 
 import warnings
 from typing import Any
@@ -22,13 +22,13 @@ import torch.nn as nn
 
 from .distillation_model import DistillationModel, student_output_capture_fwd_hook
 
-__all__ = ["BypassDistillationModel"]
+__all__ = ["LayerwiseDistillationModel"]
 
 
-class BypassDistillationModel(DistillationModel):
-    """Meta-model wrapper to support bypass-enabled knowledge-distillation learning.
+class LayerwiseDistillationModel(DistillationModel):
+    """Meta-model wrapper to support layerwise-enabled knowledge-distillation learning.
 
-    The BypassDistillationModel is a subclass of the DistillationModel that injects teacher inputs
+    The LayerwiseDistillationModel is a subclass of the DistillationModel that injects teacher inputs
     into the corresponding student layers. This accomodates the case where the student model is the
     teacher with specific submodules replaced, which now need to be trained to mimic the original
     submodule in the teacher.

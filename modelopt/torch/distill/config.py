@@ -26,7 +26,7 @@ from modelopt.torch.utils.network import ModelLike
 
 from .loss_balancers import DistillationLossBalancer
 
-__all__ = ["BypassKDConfig", "ExportStudentConfig", "KDLossConfig"]
+__all__ = ["ExportStudentConfig", "KDLossConfig", "LayerwiseKDConfig"]
 
 Criterion = Union[Loss, dict[tuple[str, str], Loss]]  # noqa: UP007
 
@@ -120,10 +120,10 @@ class KDLossConfig(ModeloptBaseConfig):
             )
 
 
-class BypassKDConfig(KDLossConfig):
-    """Configuration for the Bypass Knowledge-Distillation mode.
+class LayerwiseKDConfig(KDLossConfig):
+    """Configuration for the Layerwise Knowledge-Distillation mode.
 
-    This mode is used to distill knowledge from a teacher model to a student model using bypassing.
+    This mode is used to distill knowledge from a teacher model to a student model using layerwise distillation.
     """
 
     @pydantic.field_validator("criterion")
@@ -131,9 +131,11 @@ class BypassKDConfig(KDLossConfig):
     def format_criterion(cls, criterion: Criterion | None) -> dict[tuple[str, str], Loss]:
         """Ensure criterion is a mapping from layer names to loss (potentially entire module)."""
         if not isinstance(criterion, dict):
-            raise ValueError("Bypass Distillation mode requires explicit criterion pairs.")
+            raise ValueError("Layerwise Distillation mode requires explicit criterion pairs.")
         if any(key == ("", "") for key in criterion):
-            raise ValueError("Bypass Distillation mode does not support output-only distillation.")
+            raise ValueError(
+                "Layerwise Distillation mode does not support output-only distillation."
+            )
         return criterion
 
 

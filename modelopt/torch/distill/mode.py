@@ -33,9 +33,9 @@ from modelopt.torch.opt.mode import (
 )
 from modelopt.torch.utils import init_model_from_model_like, unwrap_model
 
-from .bypass_distillation_model import BypassDistillationModel
-from .config import BypassKDConfig, ExportStudentConfig, KDLossConfig
+from .config import ExportStudentConfig, KDLossConfig, LayerwiseKDConfig
 from .distillation_model import DistillationModel
+from .layerwise_distillation_model import LayerwiseDistillationModel
 from .registry import DistillationDMRegistry
 
 DistillModeRegistry = _ModeRegistryCls("distill")
@@ -80,8 +80,8 @@ class KnowledgeDistillationModeDescriptor(ModeDescriptor):
 
 
 @DistillModeRegistry.register_mode
-class BypassKDModeDescriptor(KnowledgeDistillationModeDescriptor):
-    """Class to describe the Bypass Knowledge-Distillation mode.
+class LayerwiseKDModeDescriptor(KnowledgeDistillationModeDescriptor):
+    """Class to describe the Layerwise Knowledge-Distillation mode.
 
     The properties of this mode can be inspected via the source code.
     """
@@ -89,17 +89,17 @@ class BypassKDModeDescriptor(KnowledgeDistillationModeDescriptor):
     @property
     def name(self) -> str:
         """Returns the value (str representation) of the mode."""
-        return "bypass_kd"
+        return "layerwise_kd"
 
     @property
     def config_class(self) -> type[ModeloptBaseConfig]:
         """Specifies the config class for the mode."""
-        return BypassKDConfig
+        return LayerwiseKDConfig
 
     @property
     def convert(self) -> ConvertEntrypoint:
         """The mode's entrypoint for converting a model."""
-        return _convert_for_bypass
+        return _convert_for_layerwise
 
 
 @DistillModeRegistry.register_mode
@@ -192,9 +192,9 @@ def _convert_for_kd(
     return distillation_model, metadata
 
 
-def _convert_for_bypass(model: nn.Module, config: BypassKDConfig) -> ConvertReturnType:
-    """Function for converting a model to a bypass distillation meta-model."""
-    return _convert_for_kd(model, config, model_cls=BypassDistillationModel)
+def _convert_for_layerwise(model: nn.Module, config: LayerwiseKDConfig) -> ConvertReturnType:
+    """Function for converting a model to a layerwise distillation meta-model."""
+    return _convert_for_kd(model, config, model_cls=LayerwiseDistillationModel)
 
 
 def _export_student(model: nn.Module, config: ExportStudentConfig) -> ConvertReturnType:
