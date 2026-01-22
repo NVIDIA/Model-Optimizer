@@ -415,7 +415,10 @@ class MCoreMinitronSearcher(BaseSearcher):
         )
 
         # 2. Perform grid-search over the search space to find subnets fitting the constraints
-        if max_params not in self.top_k_candidates_per_constraint:
+        if (
+            max_params not in self.top_k_candidates_per_constraint
+            or len(self.top_k_candidates_per_constraint[max_params]) != top_k
+        ):
             max_num_layers = self.model.get_hparam("num_layers").max
             search_space_configs = MCoreMinitronSearcher._generate_search_space_combos(
                 hp_choices,

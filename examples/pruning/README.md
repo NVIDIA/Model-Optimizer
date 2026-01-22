@@ -70,6 +70,7 @@ bridge, provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf
 forward_loop = get_hf_mbridge_calibration_loop(
     model=model,
     provider=provider,
+    tokenizer=tokenizer,
     hf_model_name_or_path="Qwen/Qwen3-8B",
     dataset_name="nemotron-post-training-dataset-v2",
     num_samples=1024,
@@ -90,7 +91,7 @@ mtp.prune(  # in-place pruning
 
 #### 1. Manual Pruning
 
-This mode can be useful when you know the exact dimensions you want to prune to (e.g. fitting a specific latency / memory budget).
+This mode can be useful when you know the exact dimensions you want to prune to (e.g. fitting a specific latency / memory budget). Alternatively, you can also use this mode to export top-K architectures (searched using NAS-based auto pruning) and perform short Knowledge Distillation on them before selecting the best architecture.
 
 ```python
 # Specify the pruning constraints (Check Support Matrix for available pruning dimensions)

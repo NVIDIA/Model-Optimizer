@@ -27,7 +27,7 @@ while skipping pruning of num_attention_heads using following defaults:
         --output_hf_path /tmp/Qwen3-8B-Pruned-6B
 
 To see the full usage for advanced configurations, run:
-    torchrun prune_minitron.py --help
+    python prune_minitron.py --help
 """
 
 import argparse
@@ -81,8 +81,11 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--calib_num_samples", type=int, default=1024, help="Number of samples for calibration"
     )
-    # TODO: Check if mbs>1 is correct or not (because of padding)
-    parser.add_argument("--calib_mbs", type=int, default=1, help="Calibration micro-batch size")
+    # TODO: Add support for pre-training dataset (pre-tokenized)
+    # TODO: only allow mbs>1 for pretraining dataset
+    parser.add_argument(
+        "--calib_mbs", type=int, default=1, choices=[1], help="Calibration micro-batch size"
+    )
     parser.add_argument("--seq_length", type=int, default=4096)
 
     # Pruning parameters
@@ -197,15 +200,16 @@ def get_args() -> argparse.Namespace:
     return args
 
 
-def main():
-    args = get_args()
+def main(args: argparse.Namespace):
     pp_size = dist.size()
     print_rank_0(f"Setting pipeline_model_parallel_size to {pp_size}")
 
-    if os.path.exists(f"{args.output_megatron_path}/latest_checkpointed_iteration.txt"):
+    if args.output_megatron_path and os.path.exists(
+        f"{args.output_megatron_path}/latest_checkpointed_iteration.txt"
+    ):
         warn_rank_0(f"\nPruned model already exists at {args.output_megatron_path}. Exiting...")
         return
-    elif os.path.exists(f"{args.output_hf_path}/config.json"):
+    elif args.output_hf_path and os.path.exists(f"{args.output_hf_path}/config.json"):
         warn_rank_0(f"\nPruned model already exists at {args.output_hf_path}. Exiting...")
         return
 
@@ -230,6 +234,7 @@ def main():
     forward_loop = get_hf_mbridge_calibration_loop(
         model=model,
         provider=provider,
+        tokenizer=tokenizer,
         hf_model_name_or_path=args.hf_model_name_or_path,
         trust_remote_code=args.trust_remote_code,
         dataset_name=args.calib_dataset_name,
@@ -365,8 +370,9 @@ def main():
 
 
 if __name__ == "__main__":
+    args = get_args()
     dist.setup()
     try:
-        main()
+        main(args)
     finally:
         dist.cleanup()
