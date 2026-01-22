@@ -329,21 +329,23 @@ def get_weight_scaling_factor_2(module: nn.Module, weight_name: str = "weight") 
     if weight_quantizer is None:
         return None
 
-    if get_quantization_format(module) in [
+    quantization_format = get_quantization_format(module)
+
+    # Calibrate weight quantizer if amax is not set for all NVFP4 variants
+    if quantization_format in [
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
         QUANTIZATION_NVFP4_SVDQUANT,
+        QUANTIZATION_W4A8_NVFP4_FP8,
     ]:
-        # Calibrate weight quantizer if amax is not set
         weight = getattr(module, weight_name)
         _ensure_weight_quantizer_calibrated(weight_quantizer, weight)
+
+    if quantization_format in [QUANTIZATION_NVFP4, QUANTIZATION_NVFP4_AWQ]:
         return NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(weight_quantizer)
-    elif get_quantization_format(module) == QUANTIZATION_W4A8_NVFP4_FP8:
+    elif quantization_format == QUANTIZATION_W4A8_NVFP4_FP8:
         # weight_scaling_factor_2 for w4a8 needs to be amax/448, so that the wsf is in range 448/6.
         # This is because the kernel dequantizes weight to fp8, which is in range 448.
-        # Calibrate weight quantizer if amax is not set
-        weight = getattr(module, weight_name)
-        _ensure_weight_quantizer_calibrated(weight_quantizer, weight)
         return weight_quantizer._amax.float() / 448.0
 
     # SequentialQuantizer is required
