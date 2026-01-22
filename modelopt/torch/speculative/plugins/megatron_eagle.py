@@ -532,11 +532,13 @@ class EagleModule(MegatronModule):
         IMPORTANT: EagleModule must use arbitrary_attention_mask since we need to
                    manipulate the mask to compute the correct loss. The default
                    causal mask will result in leaking.
+                   However, if context parallel is used, we need to switch to causal
+                   mask and inject attention_mask as attention_bias instead.
         """
         transformer_layer_spec = get_gpt_modelopt_spec(
             config,
             remap_te_layernorm=True,
-            use_arbitrary_attention_mask=True,
+            use_arbitrary_attention_mask=get_context_parallel_world_size() == 1,
         )
         # If heterogenous layers (e.g. DeepSeek), transformer_layer_spec is a
         # TransformerBlockSubmodules instead. We use the last layer_specs.
