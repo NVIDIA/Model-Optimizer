@@ -74,6 +74,7 @@ Step 1: export the model with bf16 weights and amax values. To export the model:
           export_dir,  # The directory where the exported files will be stored.
       )
   ```
+
   Or run the example script `examples/llm_ptq/hf_ptq.py` with the `--export_vllm_fq` **flag** to export a vLLM-fakequant-compatible ModelOpt state (it generates `vllm_fq_modelopt_state.pth`, which you can use via `MODELOPT_STATE_PATH`).
 
 - For **MCore** models, use `modelopt.torch.export.export_mcore_gpt_to_hf_vllm_fq`:
@@ -87,6 +88,7 @@ Step 1: export the model with bf16 weights and amax values. To export the model:
       )
 
   ```
+
   This generates `quantizer_state.pth`, which contains quantizer tensors for vLLM reload via `QUANT_FILE_PATH`.
 
 Step 2: use the exported artifacts when serving:
