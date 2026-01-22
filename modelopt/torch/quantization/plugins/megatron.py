@@ -50,6 +50,7 @@ from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear
 
 try:
     from megatron.core.extensions.transformer_engine import (
+        TELinear,
         TEColumnParallelGroupedLinear,
         TEColumnParallelLinear,
         TEDotProductAttention,
@@ -603,8 +604,6 @@ class _MegatronSequentialMLP(DynamicModule):
             for name, module in expert.named_modules():
                 if isinstance(module, TensorQuantizer) and module.amax is not None:
                     module.amax = amax_dict[name].detach().clone().to(module.amax.device)
-                #if isinstance(module, TensorQuantizer) and module.amax is None:
-                #    print(f"MISSING AMAX AFTER SYNC in expert rank {dist.get_rank()}: {name}", flush=True)
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         """Override the default to enable singleton_local_shards.
@@ -623,6 +622,10 @@ class _MegatronSequentialMLP(DynamicModule):
 
 
 if HAS_TE:
+
+    @QuantModuleRegistry.register({TELinear: "te_mcore_Linear"})
+    class _QuantTEMCoreLinear(_QuantTELinear):
+        pass
 
     @QuantModuleRegistry.register({TERowParallelLinear: "te_mcore_RowParallelLinear"})
     class _QuantTEMCoreRowParallelLinear(_QuantTELinear, _MegatronRowParallelLinear):
