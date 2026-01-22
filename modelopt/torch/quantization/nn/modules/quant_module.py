@@ -112,15 +112,18 @@ class QuantModule(DynamicModule):
 
         # If not found (e.g., container modules like vLLM's attn that only have child quantizers),
         # traverse up to parent's parent to find a module with parameters
-        if model is not None:
+        if non_tq_param_or_buffer is None and model is not None:
             parts = prefix.split(".")
             parent_prefix = ".".join(parts[: len(parts) - 1])
-            parent_module = model.get_submodule(parent_prefix)
+            parent_module = model.get_submodule(parent_prefix) if parent_prefix else model
             # Look for any parameter in parent module (not just state_dict)
-            for param in parent_module.parameters():
-                # Skip if param belongs to a TensorQuantizer
-                non_tq_param_or_buffer = param
-                break
+            for name, param in parent_module.named_parameters():
+                # Skip params that belong to TensorQuantizer submodules
+                param_parent_name = name.rsplit(".", 1)[0] if "." in name else ""
+                param_parent = parent_module.get_submodule(param_parent_name)
+                if not isinstance(param_parent, TensorQuantizer):
+                    non_tq_param_or_buffer = param
+                    break
 
         if non_tq_param_or_buffer is None:
             warnings.warn(
