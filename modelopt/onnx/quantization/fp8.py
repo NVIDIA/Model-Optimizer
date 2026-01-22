@@ -182,6 +182,7 @@ def quantize(
     calibrate_per_node: bool = False,
     custom_ops_to_quantize: list[str] = [],
     direct_io_types: bool = False,
+    opset: int | None = None,
     **kwargs,
 ) -> onnx.ModelProto:
     """Applies FP8 GEMM only quantization to an ONNX file.
@@ -328,6 +329,7 @@ def quantize(
             tensor_block_dict=custom_ops_to_cast_fp32 or {},
             low_precision_type=high_precision_dtype,
             trt_plugins=trt_extra_plugin_lib_paths,
+            opset=opset,
         )
 
         current_opsets = {opset.domain: opset.version for opset in onnx_model.opset_import}

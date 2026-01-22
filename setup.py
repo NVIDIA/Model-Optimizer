@@ -48,8 +48,8 @@ optional_deps = {
         "onnx-graphsurgeon",
         "onnx~=1.19.0",
         "onnxconverter-common~=1.16.0",
-        "onnxruntime~=1.22.0 ; platform_machine == 'aarch64' or platform_system == 'Darwin'",
-        "onnxruntime-gpu~=1.22.0 ; platform_machine != 'aarch64' and platform_system != 'Darwin'",
+        "onnxruntime~=1.23.0 ; platform_machine == 'aarch64' or platform_system == 'Darwin'",
+        "onnxruntime-gpu~=1.23.0 ; platform_machine != 'aarch64' and platform_system != 'Darwin'",
         "onnxscript",  # For autocast opset conversion and test_onnx_dynamo_export unit test
         "onnxslim>=0.1.76",
         "polygraphy>=0.49.22",

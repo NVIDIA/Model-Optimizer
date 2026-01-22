@@ -286,6 +286,15 @@ def get_parser() -> argparse.ArgumentParser:
             "The currently supported precisions are {fp16, int8, fp8}."
         ),
     )
+    argparser.add_argument(
+        "--opset",
+        type=int,
+        help=(
+            "Target ONNX opset version for the quantized model. If not specified, uses default minimum opset "
+            "(19 for fp16 scales support, 21 for int4, 23 for nvfp4). The opset may be automatically increased "
+            "if certain operations require a higher version."
+        ),
+    )
     return argparser
 
 
@@ -352,6 +361,7 @@ def main():
         simplify=args.simplify,
         calibrate_per_node=args.calibrate_per_node,
         direct_io_types=args.direct_io_types,
+        opset=args.opset,
     )
 
 
