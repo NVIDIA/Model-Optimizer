@@ -1099,7 +1099,10 @@ def svdquant(
         original_device = weight.device
         original_dtype = weight.dtype
         weight_f64 = weight.to(dtype=torch.float64, device=original_device)
-        u, s, vt = torch.linalg.svd(weight_f64, full_matrices=False)
+        if original_device.type == "cuda":
+            u, s, vt = torch.linalg.svd(weight_f64, driver="gesvd", full_matrices=False)
+        else:
+            u, s, vt = torch.linalg.svd(weight_f64, full_matrices=False)
         if u.shape[1] < lowrank or vt.shape[0] < lowrank:
             warnings.warn(
                 "The low-rank dimensions do not match the layer dimensions. "
