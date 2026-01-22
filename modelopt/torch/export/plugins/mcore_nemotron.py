@@ -86,12 +86,10 @@ nemotron_h_causal_lm_import: dict[str, CustomModuleMapping] = {
     "fc1_latent_proj": NameRemapping("backbone.layers.{}.mixer.fc1_latent_proj.", REPLICATE),
     "fc2_latent_proj": NameRemapping("backbone.layers.{}.mixer.fc2_latent_proj.", REPLICATE),
     # MTP
-    #"enorm": NameRemapping("mtp.layers.{}.enorm.", REPLICATE),
-    #"hnorm": NameRemapping("mtp.layers.{}.hnorm.", REPLICATE),
-    #"eh_proj": NameRemapping("mtp.layers.{}.eh_proj.", REPLICATE),
-    #"layer_norm": NameRemapping("mtp.layers.{}.final_layernorm.", REPLICATE),
-    #"norm": NameRemapping("mtp.layers.{}.norm", REPLICATE)
-    # "transformer_layer": NameRemapping("mtp.layers.{}.mixer", REPLICATE),
+    "mtp.enorm": NameRemapping("mtp.layers.{}.enorm.", REPLICATE),
+    "mtp.hnorm": NameRemapping("mtp.layers.{}.hnorm.", REPLICATE),
+    "mtp.eh_proj": NameRemapping("mtp.layers.{}.eh_proj.", REPLICATE),
+    "mtp.final_layernorm": NameRemapping("mtp.layers.{}.final_layernorm.", REPLICATE),
 
 
 }

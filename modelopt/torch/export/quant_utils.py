@@ -380,11 +380,28 @@ def get_kv_cache_dtype(modules: list[nn.Module] | nn.Module) -> str | None:
 
     for module in modules:
         # Case where the module has both k_bmm_quantizer and v_bmm_quantizer
-        for quantizer in ("k_bmm_quantizer", "v_bmm_quantizer"): 
+        # Still check for output quantizer for the unified_megatron_export path
+        for quantizer in ("k_bmm_quantizer", "v_bmm_quantizer", "output_quantizer"):
             quantizer_attr = getattr(module, quantizer, None)
             if quantizer_attr and quantizer_attr.is_enabled:
                 num_bits_list.append(quantizer_attr.num_bits)
                 is_affine &= hasattr(quantizer_attr, "_bias_value")
+
+    return _compute_kv_cache_dtype(num_bits_list)
+
+def _compute_kv_cache_dtype(num_bits_list: list[int]) -> str | None:
+    """Returns the kv_cache dtype.
+
+    If num_bits of output_quantizer is (4, 3) then returns FP8; if it is 8, returns int8,
+    otherwise returns None.
+
+    Args:
+        modules: The module or list of modules to inspect.
+
+    Returns:
+        The kv_cache dtype.
+    """
+    is_affine = True
 
     if (4, 3) in num_bits_list:
         return KV_CACHE_FP8
@@ -908,18 +925,6 @@ def postprocess_state_dict(
                     assert maxbound > 0, "Maxbound must be greater than zero."
 
                     value = value.float() / maxbound
-
-                    # Warn if scale exceeds threshold
-                    if quantization == KV_CACHE_FP8 and value.item() > 0.5:
-                        logger.warning(
-                            "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop. "
-                            "Setting KV cache scaling factor to at least 1."
-                        )
-
-                    # Ensure scale is at least 1 for KV_CACHE_FP8
-                    # We export real value for KV_CACHE_NVFP4
-                    if quantization == KV_CACHE_FP8:
-                        value.clamp_(min=1.0)
 
                 post_state_dict[prefix + new_suffix] = value
                 break
