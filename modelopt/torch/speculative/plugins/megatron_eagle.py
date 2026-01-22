@@ -1432,8 +1432,6 @@ def TEDotProductAttentionCP(attention_mask: torch.Tensor, num_attention_heads: i
             attention_bias = attention_bias.to(device=q_device, dtype=q_dtype)
 
         attention_bias = attention_bias.clone().detach().contiguous()
-        if q_dtype in (torch.float16, torch.bfloat16):
-            attention_bias = attention_bias.clamp(min=-40.0)
         kwargs["attention_bias"] = attention_bias
 
         # Defensive clone of query/key/value positional tensors to avoid
@@ -1455,32 +1453,6 @@ def TEDotProductAttentionCP(attention_mask: torch.Tensor, num_attention_heads: i
                     args = tuple(new_args)
             except Exception:
                 args = original_args
-
-        # Ensure any provided attention_bias matches query dtype/device
-        if "attention_bias" in kwargs and isinstance(kwargs["attention_bias"], torch.Tensor):
-            if q_dtype is not None and q_device is not None:
-                try:
-                    if (
-                        kwargs["attention_bias"].dtype != q_dtype
-                        or kwargs["attention_bias"].device != q_device
-                    ):
-                        kwargs["attention_bias"] = (
-                            kwargs["attention_bias"]
-                            .to(device=q_device, dtype=q_dtype)
-                            .clone()
-                            .detach()
-                            .contiguous()
-                        )
-                    else:
-                        kwargs["attention_bias"] = (
-                            kwargs["attention_bias"].clone().detach().contiguous()
-                        )
-                except Exception:
-                    kwargs["attention_bias"] = (
-                        kwargs["attention_bias"].clone().detach().contiguous()
-                    )
-            else:
-                kwargs["attention_bias"] = kwargs["attention_bias"].clone().detach().contiguous()
 
         return orig_forward(self, *args, **kwargs)
 
