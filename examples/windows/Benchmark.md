@@ -24,7 +24,7 @@ Memory savings and inference speedup are compared to the ONNX FP16 baseline.
 
 ### 1.2 Accuracy Comparison
 
-#### 1.2.1 MMLU 
+#### 1.2.1 MMLU
 
 For accuracy evaluation, the [Massive Multitask Language Understanding (MMLU)](https://arxiv.org/abs/2009.03300) benchmark has been utilized. Please refer to the [detailed instructions](./accuracy_benchmark/README.md) for running the MMLU accuracy benchmark.
 
@@ -90,7 +90,6 @@ KL-divergence (Kullback-Leibler divergence) quantifies the distributional differ
 | Llama-3.2-3B-Instruct  | int4+int8 Blockwise-max_algo-mixed_quant (simulated)        | INT4: per-block (block-size=128), INT8: per-channel (row-wise)      | 0.238         | PyTorch (fake quantization)   |
 | Llama-3.2-3B-Instruct  | int4+int8 per-channel-max_algo-mixed_quant (simulated)      | INT4: per-block (block-size=128), INT8: per-channel (row-wise)      | 0.238         | PyTorch (fake quantization)   |
 | Llama-3.2-3B-Instruct  | int4 Blockwise-max_algo only (simulated)              | INT4: per-block (block-size=128)                                    | 0.334         | PyTorch (fake quantization)   |
-
 
 *All KL-divergence results above are obtained via PyTorch fake quantization simulation unless otherwise noted. Inference with ONNX-runtime can also be evaluated .*
 
