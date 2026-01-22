@@ -376,18 +376,19 @@ def test_kimi(command):
         ),
         *ModelDeployerList(
             model_id="nvidia/Llama-3_1-Nemotron-Ultra-253B-v1-FP8",
-            backend=("trtllm", "vllm", "sglang"),
-            tensor_parallel_size=4,
-            mini_sm=89,
-        ),
-        *ModelDeployerList(
-            model_id="nvidia/Llama-3_1-Nemotron-Ultra-253B-v1-FP8",
             backend=("vllm",),
             tensor_parallel_size=8,
             mini_sm=89,
         ),
         *ModelDeployerList(
             model_id="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=1,
+            mini_sm=89,
+            attn_backend="FLASHINFER",
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=1,
             mini_sm=89,
