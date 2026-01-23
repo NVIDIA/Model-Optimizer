@@ -164,6 +164,7 @@ class ModelConfig:
     override_model_path: Path | None = None
     cpu_offloading: bool = False
     ltx_skip_upsampler: bool = False  # Skip upsampler for LTX-Video (faster calibration)
+    extra_params: dict[str, Any] = field(default_factory=dict)
 
     @property
     def model_path(self) -> str:
@@ -232,6 +233,51 @@ def setup_logging(verbose: bool = False) -> logging.Logger:
     return logger
 
 
+def _coerce_extra_param_value(value: str) -> Any:
+    lowered = value.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
+    except ValueError:
+        return value
+
+
+def parse_extra_params(
+    kv_args: list[str], unknown_args: list[str], logger: logging.Logger
+) -> dict[str, Any]:
+    extra_params: dict[str, Any] = {}
+    for item in kv_args:
+        if "=" not in item:
+            raise ValueError(f"Invalid --extra-param value: '{item}'. Expected KEY=VALUE.")
+        key, value = item.split("=", 1)
+        extra_params[key] = _coerce_extra_param_value(value)
+
+    i = 0
+    while i < len(unknown_args):
+        token = unknown_args[i]
+        if token.startswith("--extra_param."):
+            key = token[len("--extra_param.") :]
+            value = "true"
+            if i + 1 < len(unknown_args) and not unknown_args[i + 1].startswith("--"):
+                value = unknown_args[i + 1]
+                i += 1
+            extra_params[key] = _coerce_extra_param_value(value)
+        elif token.startswith("--extra_param"):
+            raise ValueError(
+                "Use --extra_param.KEY VALUE or --extra-param KEY=VALUE for extra parameters."
+            )
+        else:
+            logger.warning("Ignoring unknown argument: %s", token)
+        i += 1
+
+    return extra_params
+
+
 class PipelineManager:
     """Manages diffusion pipeline creation and configuration."""
 
@@ -245,8 +291,9 @@ class PipelineManager:
         """
         self.config = config
         self.logger = logger
-        self.pipe: DiffusionPipeline | None = None
+        self.pipe: Any | None = None
         self.pipe_upsample: LTXLatentUpsamplePipeline | None = None  # For LTX-Video upsampling
+        self._transformer: torch.nn.Module | None = None
 
     @staticmethod
     def create_pipeline_from(
@@ -264,10 +311,13 @@ class PipelineManager:
             ValueError: If model type is unsupported
         """
         try:
+            pipeline_cls = MODEL_PIPELINE[model_type]
+            if pipeline_cls is None:
+                raise ValueError(f"Model type {model_type.value} does not use diffusers pipelines.")
             model_id = (
                 MODEL_REGISTRY[model_type] if override_model_path is None else override_model_path
             )
-            pipe = MODEL_PIPELINE[model_type].from_pretrained(
+            pipe = pipeline_cls.from_pretrained(
                 model_id,
                 torch_dtype=torch_dtype,
                 use_safetensors=True,
@@ -278,7 +328,7 @@ class PipelineManager:
         except Exception as e:
             raise e
 
-    def create_pipeline(self) -> DiffusionPipeline:
+    def create_pipeline(self) -> Any:
         """
         Create and return an appropriate pipeline based on configuration.
 
@@ -293,6 +343,14 @@ class PipelineManager:
         self.logger.info(f"Data type: {self.config.model_dtype}")
 
         try:
+            if self.config.model_type == ModelType.LTX2:
+                from modelopt.torch.quantization.plugins.diffusion import ltx2 as ltx2_plugin
+
+                ltx2_plugin.register_ltx2_quant_linear()
+                self.pipe = self._create_ltx2_pipeline()
+                self.logger.info("LTX-2 pipeline created successfully")
+                return self.pipe
+
             self.pipe = MODEL_PIPELINE[self.config.model_type].from_pretrained(
                 self.config.model_path,
                 torch_dtype=self.config.model_dtype,
@@ -325,6 +383,10 @@ class PipelineManager:
         if not self.pipe:
             raise RuntimeError("Pipeline not created. Call create_pipeline() first.")
 
+        if self.config.model_type == ModelType.LTX2:
+            self.logger.info("Skipping device setup for LTX-2 pipeline (handled internally)")
+            return
+
         if self.config.cpu_offloading:
             self.logger.info("Enabling CPU offloading for memory efficiency")
             self.pipe.enable_model_cpu_offload()
@@ -352,7 +414,57 @@ class PipelineManager:
         if not self.pipe:
             raise RuntimeError("Pipeline not created. Call create_pipeline() first.")
 
+        if self.config.model_type == ModelType.LTX2:
+            self._ensure_ltx2_transformer_cached()
+            return self._transformer
         return getattr(self.pipe, self.config.backbone)
+
+    def _ensure_ltx2_transformer_cached(self) -> None:
+        if not self.pipe:
+            raise RuntimeError("Pipeline not created. Call create_pipeline() first.")
+        if self._transformer is None:
+            transformer = self.pipe.stage_1_model_ledger.transformer()
+            self.pipe.stage_1_model_ledger.transformer = lambda: transformer
+            self._transformer = transformer
+
+    def _create_ltx2_pipeline(self) -> Any:
+        params = dict(self.config.extra_params)
+        checkpoint_path = params.pop("checkpoint_path", None)
+        distilled_lora_path = params.pop("distilled_lora_path", None)
+        distilled_lora_strength = params.pop("distilled_lora_strength", 0.8)
+        spatial_upsampler_path = params.pop("spatial_upsampler_path", None)
+        gemma_root = params.pop("gemma_root", None)
+        fp8transformer = params.pop("fp8transformer", False)
+
+        if not checkpoint_path:
+            raise ValueError("Missing required extra_param: checkpoint_path.")
+        if not distilled_lora_path:
+            raise ValueError("Missing required extra_param: distilled_lora_path.")
+        if not spatial_upsampler_path:
+            raise ValueError("Missing required extra_param: spatial_upsampler_path.")
+        if not gemma_root:
+            raise ValueError("Missing required extra_param: gemma_root.")
+
+        from ltx_core.loader import LTXV_LORA_COMFY_RENAMING_MAP, LoraPathStrengthAndSDOps
+        from ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline
+
+        distilled_lora = [
+            LoraPathStrengthAndSDOps(
+                str(distilled_lora_path),
+                float(distilled_lora_strength),
+                LTXV_LORA_COMFY_RENAMING_MAP,
+            )
+        ]
+        pipeline_kwargs = {
+            "checkpoint_path": str(checkpoint_path),
+            "distilled_lora": distilled_lora,
+            "spatial_upsampler_path": str(spatial_upsampler_path),
+            "gemma_root": str(gemma_root),
+            "loras": [],
+            "fp8transformer": bool(fp8transformer),
+        }
+        pipeline_kwargs.update(params)
+        return TI2VidTwoStagesPipeline(**pipeline_kwargs)
 
 
 class Calibrator:
@@ -417,7 +529,9 @@ class Calibrator:
                 if i >= self.config.num_batches:
                     break
 
-                if self.model_type == ModelType.LTX_VIDEO_DEV:
+                if self.model_type == ModelType.LTX2:
+                    self._run_ltx2_calibration(prompt_batch, extra_args)
+                elif self.model_type == ModelType.LTX_VIDEO_DEV:
                     # Special handling for LTX-Video
                     self._run_ltx_video_calibration(prompt_batch, extra_args)
                 elif self.model_type in [ModelType.WAN22_T2V_14b, ModelType.WAN22_T2V_5b]:
@@ -447,6 +561,29 @@ class Calibrator:
         kwargs["num_inference_steps"] = self.config.n_steps
 
         self.pipe(prompt=prompt_batch, **kwargs).frames  # type: ignore[misc]
+
+    def _run_ltx2_calibration(self, prompt_batch: list[str], extra_args: dict[str, Any]) -> None:
+        from ltx_core.model.video_vae import TilingConfig
+
+        prompt = prompt_batch[0]
+        extra_params = self.pipeline_manager.config.extra_params
+        kwargs = {
+            "negative_prompt": extra_args.get(
+                "negative_prompt", "worst quality, inconsistent motion, blurry, jittery, distorted"
+            ),
+            "seed": extra_params.get("seed", 0),
+            "height": extra_params.get("height", extra_args.get("height", 1024)),
+            "width": extra_params.get("width", extra_args.get("width", 1536)),
+            "num_frames": extra_params.get("num_frames", extra_args.get("num_frames", 121)),
+            "frame_rate": extra_params.get("frame_rate", extra_args.get("frame_rate", 24.0)),
+            "num_inference_steps": self.config.n_steps,
+            "cfg_guidance_scale": extra_params.get(
+                "cfg_guidance_scale", extra_args.get("cfg_guidance_scale", 4.0)
+            ),
+            "images": extra_params.get("images", []),
+            "tiling_config": extra_params.get("tiling_config", TilingConfig.default()),
+        }
+        self.pipe(prompt=prompt, **kwargs)  # type: ignore[misc]
 
     def _run_ltx_video_calibration(
         self, prompt_batch: list[str], extra_args: dict[str, Any]
@@ -568,7 +705,7 @@ class Quantizer:
         backbone: torch.nn.Module,
         quant_config: Any,
         forward_loop: callable,  # type: ignore[valid-type]
-    ) -> None:
+    ) -> torch.nn.Module:
         """
         Apply quantization to the model.
 
@@ -590,6 +727,7 @@ class Quantizer:
         mtq.disable_quantizer(backbone, model_filter_func)
 
         self.logger.info("Quantization completed successfully")
+        return backbone
 
 
 class ExportManager:
@@ -754,7 +892,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
     model_group.add_argument(
         "--model-dtype",
         type=str,
-        default="Half",
+        default="BFloat16",
         choices=[d.value for d in DataType],
         help="Precision for loading the pipeline. If you want different dtypes for separate components, "
         "please specify using --component-dtype",
@@ -777,6 +915,16 @@ def create_argument_parser() -> argparse.ArgumentParser:
         "--ltx-skip-upsampler",
         action="store_true",
         help="Skip upsampler pipeline for LTX-Video (faster calibration, only quantizes main transformer)",
+    )
+    model_group.add_argument(
+        "--extra-param",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "Extra model-specific parameters in KEY=VALUE form. Can be provided multiple times. "
+            "These override model-specific CLI arguments when present."
+        ),
     )
     quant_group = parser.add_argument_group("Quantization Configuration")
     quant_group.add_argument(
@@ -859,7 +1007,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     parser = create_argument_parser()
-    args = parser.parse_args()
+    args, unknown_args = parser.parse_known_args()
 
     model_type = ModelType(args.model)
     if args.backbone is None:
@@ -875,6 +1023,7 @@ def main() -> None:
     logger.info("Starting Enhanced Diffusion Model Quantization")
 
     try:
+        extra_params = parse_extra_params(args.extra_param, unknown_args, logger)
         model_config = ModelConfig(
             model_type=model_type,
             model_dtype=model_dtype,
@@ -885,6 +1034,7 @@ def main() -> None:
             else None,
             cpu_offloading=args.cpu_offloading,
             ltx_skip_upsampler=args.ltx_skip_upsampler,
+            extra_params=extra_params,
         )
 
         quant_config = QuantizationConfig(
@@ -950,6 +1100,7 @@ def main() -> None:
             quantizer = Quantizer(quant_config, model_config, logger)
             backbone_quant_config = quantizer.get_quant_config(calib_config.n_steps, backbone)
 
+            # Pipe loads the ckpt just before the inference.
             def forward_loop(mod):
                 calibrator.run_calibration(batched_prompts)
 

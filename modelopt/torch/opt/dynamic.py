@@ -621,6 +621,10 @@ class DynamicModule(nn.Module):
                 # accelerate patched module
                 bind_forward_method(self, self.__class__.forward)
             else:
+                if not hasattr(self, "_forward_pre_dm"):
+                    # Keep the patched forward for downstream modules that want to call it.
+                    self._forward_pre_dm = self.forward
+                bind_forward_method(self, self.__class__.forward)
                 warnings.warn(
                     "Received a module with monkey patched forward method. Dynamic converted module"
                     " might not work."

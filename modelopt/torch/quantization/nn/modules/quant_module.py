@@ -110,7 +110,10 @@ class QuantInputBase(QuantModule):
     def forward(self, input, *args, **kwargs):
         """Quantize the input before calling the original forward method."""
         input = self.input_quantizer(input)
-        output = super().forward(input, *args, **kwargs)
+        if hasattr(self, "_forward_pre_dm"):
+            output = self._forward_pre_dm(input, *args, **kwargs)
+        else:
+            output = super().forward(input, *args, **kwargs)
         if isinstance(output, tuple):
             return (self.output_quantizer(output[0]), *output[1:])
         return self.output_quantizer(output)

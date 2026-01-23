@@ -42,6 +42,7 @@ class ModelType(str, Enum):
     FLUX_DEV = "flux-dev"
     FLUX_SCHNELL = "flux-schnell"
     LTX_VIDEO_DEV = "ltx-video-dev"
+    LTX2 = "ltx-2"
     WAN22_T2V_14b = "wan2.2-t2v-14b"
     WAN22_T2V_5b = "wan2.2-t2v-5b"
 
@@ -64,6 +65,7 @@ def get_model_filter_func(model_type: ModelType) -> Callable[[str], bool]:
         ModelType.SD3_MEDIUM: filter_func_default,
         ModelType.SD35_MEDIUM: filter_func_default,
         ModelType.LTX_VIDEO_DEV: filter_func_ltx_video,
+        ModelType.LTX2: filter_func_ltx_video,
         ModelType.WAN22_T2V_14b: filter_func_wan_video,
         ModelType.WAN22_T2V_5b: filter_func_wan_video,
     }
@@ -80,11 +82,12 @@ MODEL_REGISTRY: dict[ModelType, str] = {
     ModelType.FLUX_DEV: "black-forest-labs/FLUX.1-dev",
     ModelType.FLUX_SCHNELL: "black-forest-labs/FLUX.1-schnell",
     ModelType.LTX_VIDEO_DEV: "Lightricks/LTX-Video-0.9.7-dev",
+    ModelType.LTX2: "Lightricks/LTX-2",
     ModelType.WAN22_T2V_14b: "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
     ModelType.WAN22_T2V_5b: "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
 }
 
-MODEL_PIPELINE: dict[ModelType, type[DiffusionPipeline]] = {
+MODEL_PIPELINE: dict[ModelType, type[DiffusionPipeline] | None] = {
     ModelType.SDXL_BASE: DiffusionPipeline,
     ModelType.SDXL_TURBO: DiffusionPipeline,
     ModelType.SD3_MEDIUM: StableDiffusion3Pipeline,
@@ -92,6 +95,7 @@ MODEL_PIPELINE: dict[ModelType, type[DiffusionPipeline]] = {
     ModelType.FLUX_DEV: FluxPipeline,
     ModelType.FLUX_SCHNELL: FluxPipeline,
     ModelType.LTX_VIDEO_DEV: LTXConditionPipeline,
+    ModelType.LTX2: None,
     ModelType.WAN22_T2V_14b: WanPipeline,
     ModelType.WAN22_T2V_5b: WanPipeline,
 }
@@ -151,6 +155,18 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
             "height": 512,
             "width": 704,
             "num_frames": 121,
+            "negative_prompt": "worst quality, inconsistent motion, blurry, jittery, distorted",
+        },
+    },
+    ModelType.LTX2: {
+        "backbone": "transformer",
+        "dataset": _SD_PROMPTS_DATASET,
+        "inference_extra_args": {
+            "height": 1024,
+            "width": 1536,
+            "num_frames": 121,
+            "frame_rate": 24.0,
+            "cfg_guidance_scale": 4.0,
             "negative_prompt": "worst quality, inconsistent motion, blurry, jittery, distorted",
         },
     },

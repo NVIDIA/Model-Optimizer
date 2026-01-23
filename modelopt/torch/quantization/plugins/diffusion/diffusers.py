@@ -45,8 +45,8 @@ if TYPE_CHECKING:
     else:  # torch >= 2.9
         from torch.onnx._internal.torchscript_exporter.jit_utils import GraphContext
 
-from ..export_onnx import export_fp8_mha
-from ..nn import (
+from ...export_onnx import export_fp8_mha
+from ...nn import (
     QuantConv2d,
     QuantInputBase,
     QuantLinear,
@@ -54,7 +54,7 @@ from ..nn import (
     QuantModuleRegistry,
     TensorQuantizer,
 )
-from .custom import _QuantFunctionalMixin
+from ..custom import _QuantFunctionalMixin
 
 onnx_dtype_map = {
     "BFloat16": onnx.TensorProto.BFLOAT16,
