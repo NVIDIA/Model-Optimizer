@@ -49,12 +49,12 @@ Perplexity measures how well a probability model predicts a sample. Lower perple
 **Learn more about Perplexity:** [Perplexity - Wikipedia](https://en.wikipedia.org/wiki/Perplexity) | [Hugging Face - Perplexity of Fixed-Length Models](https://huggingface.co/docs/transformers/en/perplexity)
 
 - **FP16-MB**: Baseline FP16 genai model (Model Builder)
-- **Mixed AWQ-MO**: Mixed precision AWQ quantization using ModelOpt
-- **Mixed RTN-MO**: Mixed precision RTN quantization using ModelOpt
-- **Pure INT4 AWQ-MO**: Pure INT4 AWQ quantization using ModelOpt
-- **Pure INT4 RTN-MO**: Pure INT4 RTN quantization using ModelOpt
-- **Pure INT8 RTN-MO**: Pure INT8 RTN quantization using ModelOpt
-- **Pure INT8 AWQ-MO**: Pure INT8 AWQ quantization using ModelOpt
+- **Mixed AWQ-MO**: Important linear layers in INT8, rest in INT4 (AWQ), with ModelOpt.
+- **Mixed RTN-MO**: Important linear layers in INT8, rest in INT4 (RTN), with ModelOpt.
+- **Pure INT4 AWQ-MO**: All linear layers INT4 (AWQ) with ModelOpt.
+- **Pure INT4 RTN-MO**: All linear layers INT4 (RTN) with ModelOpt.
+- **Pure INT8 RTN-MO**: All linear layers INT8 (RTN) with ModelOpt.
+- **Pure INT8 AWQ-MO**: All linear layers INT8 (AWQ) with ModelOpt.
 - **Configuration**: Windows OS, GPU RTX 5090, nvidia-modelopt v0.39.0, onnxruntime-genai-cuda 0.9.2, onnxruntime-gpu 1.23.0, torch 2.8.0+cu128, transformers 4.49.0
 
 | Model | FP16-MB | Mixed AWQ-MO | Mixed RTN-MO | Pure INT4 AWQ-MO | Pure INT4 RTN-MO | Pure INT8 RTN-MO | Pure INT8 AWQ-MO |
