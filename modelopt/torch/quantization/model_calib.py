@@ -187,7 +187,6 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
                 parallel_state=module.parallel_state,
             )
 
-       
         # KV Cache Quantization
         if hasattr(module, "k_bmm_quantizer") and hasattr(module, "v_bmm_quantizer"):
             # We only support KVCache quantization with scalar per-tensor states for now (NVFP4 & FP8 KV cache)
@@ -279,6 +278,8 @@ def mse_calibrate(
 
     # Step 4: Compute optimal amax and load it
     finish_stats_collection(model, method="mse")
+
+    # TODO: Sync amax across distributed processes
 
 
 def enable_stats_collection(model: nn.Module):

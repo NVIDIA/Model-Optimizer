@@ -726,7 +726,7 @@ class GPTModelExporter:
                 quantized_weight = to_quantized_weight(
                     weight,
                     scale,
-                   qformat,
+                    qformat,
                     weight_scale_2,
                     block_size,
                 )

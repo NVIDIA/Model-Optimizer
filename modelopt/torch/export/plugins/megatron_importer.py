@@ -19,7 +19,7 @@ import tempfile
 from pathlib import Path
 
 import torch
-import torch.distributed
+import torch.distributed as dist
 from huggingface_hub import snapshot_download
 from tqdm import tqdm
 
@@ -40,6 +40,7 @@ has_mcore = False
 with import_plugin("megatron"):
     from megatron.core.parallel_state import (
         get_expert_tensor_parallel_world_size,
+        get_expert_tensor_parallel_rank,
         get_tensor_model_parallel_world_size,
     )
     from megatron.core.ssm.mamba_layer import MambaLayer
@@ -94,12 +95,12 @@ class GPTModelImporter:
             if workspace_dir is None:
                 workspace_dir = tempfile.gettempdir()
             pretrained_model_path = workspace_dir + "/" + pretrained_model_name_or_path
-            if torch.distributed.get_rank() == 0:
+            if dist.get_rank() == 0:
                 snapshot_download(
                     repo_id=pretrained_model_name_or_path,
                     local_dir=pretrained_model_path,
                 )
-            torch.distributed.barrier()
+            dist.barrier()
         self.arch = self._hf_config.architectures[0]
         self.all_rules = self._populate_rule_book()
         self.rules = self.all_rules[self.arch]
@@ -108,7 +109,7 @@ class GPTModelImporter:
         self.dtype = dtype
         self.dequantize = dequantize
         self.verbose = verbose
-        self.disable_tqdm = torch.distributed.get_rank() > 0 or verbose
+        self.disable_tqdm = dist.get_rank() > 0 or verbose
 
     def _populate_rule_book(self):
         """The rule book maps each state_dict key to a Callable."""
@@ -119,6 +120,7 @@ class GPTModelImporter:
                 "name_remapping": self._name_remapping,
                 "qkv_merging": self._qkv_merging,
                 "gated_mlp_merging": self._gated_mlp_merging,
+                "grouped_mlp_merging": self._grouped_mlp_merging,
                 "unpack_name_remapping": self._unpack_name_remapping,
                 "unpack_name_remapping_gpt_oss": self._unpack_name_remapping_gpt_oss,
             }
@@ -157,7 +159,6 @@ class GPTModelImporter:
                 prefix = prefix.replace("backbone", "mtp")
             else:
                 prefix = prefix.replace("model", "mtp")
-        print(f"name_remapping: {prefix}, mapping: {mapping}")
         if dtype is None:
             dtype = self.dtype
         if isinstance(module, torch.Tensor):
@@ -261,6 +262,37 @@ class GPTModelImporter:
 
         module.load_state_dict(state_dict)
 
+    def _grouped_mlp_merging(
+        self,
+        module,
+        prefix,
+        parallel_config: ParallelConfig | None = None,
+        is_mtp: bool = False,
+        init_expert_id: int = 0,
+        num_local_experts: int = 1,
+    ):
+        if is_mtp:
+            if "backbone" in prefix:    
+                prefix = prefix.replace("backbone", "mtp")
+            else:
+                prefix = prefix.replace("model", "mtp")
+
+                state_dict = module.state_dict()
+        weight = state_dict.get("weight", None)
+        print(f"mcore weight.shape: {weight.shape}")
+        weight_scale = state_dict.get("weight_quantizer._scale", None)
+
+        all_experts = []
+        for expert_id in range(init_expert_id, init_expert_id + num_local_experts):
+            tensor = self._get_safetensor(prefix.format(expert_id) + ".weight")
+            print(f"HF weight.shape: {tensor.shape}")
+            all_experts.append(tensor)
+        all_experts = torch.cat(all_experts, dim=0)
+        print(f"all_experts.shape: {all_experts.shape}")
+        state_dict["weight"] = all_experts
+
+        module.load_state_dict(state_dict)
+
     def _qkv_merging(
         self,
         module,
@@ -302,8 +334,9 @@ class GPTModelImporter:
 
         state_dict = {}
 
-        weight = module.state_dict().get("weight", None)
-        weight_scale = module.state_dict().get("weight_quantizer._scale", None)
+        module_state_dict = module.state_dict()
+        weight = module_state_dict.get("weight", None)
+        weight_scale = module_state_dict.get("weight_quantizer._scale", None)
 
         if weight is None:
             raise ValueError(f"{module!s} does not contain weight!")
@@ -357,7 +390,7 @@ class GPTModelImporter:
         state_dict["weight"] = tensor.reshape(-1, hidden_size)
 
         # Handle bias merging
-        bias = module.state_dict().get("bias", None)
+        bias = module_state_dict.get("bias", None)
         if bias is not None:
             q_bias = self._get_safetensor(
                 prefix + q_proj_name + ".bias", parallel_config=parallel_config
@@ -383,6 +416,11 @@ class GPTModelImporter:
             bias_tensor[v_slice] = v_bias.to(dtype=bias_tensor.dtype).to(device=bias_tensor.device)
 
             state_dict["bias"] = bias_tensor.reshape(-1)
+
+        layer_norm_weight = module_state_dict.get("layer_norm_weight", None)
+        if layer_norm_weight is not None:
+            state_dict["layer_norm_weight"] = layer_norm_weight
+            state_dict["_extra_state"] = None  # for TE modules require _extra_state key
 
         module.load_state_dict(state_dict)
 
@@ -495,47 +533,47 @@ class GPTModelImporter:
         self.rules["in_proj"](layer.mixer.in_proj, layer_id)
         self.rules["out_proj"](layer.mixer.out_proj, layer_id)
     
-    def _import_transformer_layer(self, layer, layer_id, layer_pbar, is_mtp=False):
+    def _import_transformer_layer(self, layer, layer_id, layer_pbar, is_mtp: bool = False):
         if not isinstance(layer.input_layernorm, IdentityOp):
-            self.rules["input_layernorm"](layer.input_layernorm, layer_id, is_mtp=is_mtp)
+            self.rules["input_layernorm"](layer.input_layernorm, layer_id)
 
         attention = layer.self_attention
         if not isinstance(attention, IdentityOp):
             if "MLASelfAttention" in str(type(attention)):
                 if hasattr(attention, "linear_q_proj"):
                     layer_pbar.set_description("Importing MLA (without q LoRA)")
-                    self.rules["linear_q_proj"](attention.linear_q_proj, layer_id, is_mtp=is_mtp)
+                    self.rules["linear_q_proj"](attention.linear_q_proj, layer_id)
                 else:
                     layer_pbar.set_description("Importing MLA (with q LoRA)")
-                    self.rules["linear_q_down_proj"](attention.linear_q_down_proj, layer_id, is_mtp=is_mtp)
-                    self.rules["linear_q_layernorm"](attention.q_layernorm, layer_id, is_mtp=is_mtp)
-                    self.rules["linear_q_up_proj"](attention.linear_q_up_proj, layer_id, is_mtp=is_mtp)
-                self.rules["linear_kv_down_proj"](attention.linear_kv_down_proj, layer_id, is_mtp=is_mtp)
-                self.rules["linear_kv_layernorm"](attention.kv_layernorm, layer_id, is_mtp=is_mtp)
-                self.rules["linear_kv_up_proj"](attention.linear_kv_up_proj, layer_id, is_mtp=is_mtp)
-                self.rules["linear_proj"](attention.linear_proj, layer_id, is_mtp=is_mtp)
+                    self.rules["linear_q_down_proj"](attention.linear_q_down_proj, layer_id)
+                    self.rules["linear_q_layernorm"](attention.q_layernorm, layer_id)
+                    self.rules["linear_q_up_proj"](attention.linear_q_up_proj, layer_id)
+                self.rules["linear_kv_down_proj"](attention.linear_kv_down_proj, layer_id)
+                self.rules["linear_kv_layernorm"](attention.kv_layernorm, layer_id)
+                self.rules["linear_kv_up_proj"](attention.linear_kv_up_proj, layer_id)
+                self.rules["linear_proj"](attention.linear_proj, layer_id)
             else:
                 layer_pbar.set_description("Importing GQA/MHA")
                 if attention.q_layernorm is not None and not isinstance(
                     attention.q_layernorm, (IdentityOp, L2Norm)
                 ):
-                    self.rules["q_layernorm"](attention.q_layernorm, layer_id, is_mtp=is_mtp)
-                    self.rules["k_layernorm"](attention.k_layernorm, layer_id, is_mtp=is_mtp)
+                    self.rules["q_layernorm"](attention.q_layernorm, layer_id)
+                    self.rules["k_layernorm"](attention.k_layernorm, layer_id)
                 self.rules["linear_qkv"](attention.linear_qkv, layer_id, is_mtp=is_mtp)
                 self.rules["linear_proj"](attention.linear_proj, layer_id, is_mtp=is_mtp)
                 if getattr(attention.core_attention, "softmax_offset", None) is not None:
                     self.rules["softmax_offset"](
-                        attention.core_attention.softmax_offset, layer_id, is_mtp=is_mtp
+                        attention.core_attention.softmax_offset, layer_id
                     )
 
         if not isinstance(layer.pre_mlp_layernorm, IdentityOp):
-            self.rules["pre_mlp_layernorm"](layer.pre_mlp_layernorm, layer_id, is_mtp=is_mtp)
+            self.rules["pre_mlp_layernorm"](layer.pre_mlp_layernorm, layer_id)
 
         if not isinstance(layer.mlp, IdentityOp):
             if "MoE" in str(type(layer.mlp)):
                 layer_pbar.set_description("Importing MoE")
                 self.rules["router"](
-                    layer.mlp.router, layer_id, dtype=self.moe_router_dtype, is_mtp=is_mtp
+                    layer.mlp.router, layer_id, dtype=self.moe_router_dtype
                 )
                 if (
                     hasattr(layer.mlp, "shared_experts")
@@ -544,20 +582,41 @@ class GPTModelImporter:
                     layer_pbar.set_description("Importing MoE shared experts")
                     fc1 = layer.mlp.shared_experts.linear_fc1
                     fc2 = layer.mlp.shared_experts.linear_fc2
-                    self.rules["shared_experts.linear_fc1"](fc1, layer_id, is_mtp=is_mtp)
-                    self.rules["shared_experts.linear_fc2"](fc2, layer_id, is_mtp=is_mtp)
-                if not self.rules.get("use_packed_local_experts", False):
-                    for local_expert_id, expert in tqdm(
-                        enumerate(layer.mlp.experts.local_experts),
-                        desc="Importing MoE local experts",
-                        leave=False,
-                        disable=self.disable_tqdm,
-                    ):
-                        expert_id = layer.mlp.local_expert_indices[local_expert_id]
-                        fc1 = expert.linear_fc1
-                        fc2 = expert.linear_fc2
-                        self.rules["local_experts.linear_fc1"](fc1, layer_id, expert_id, is_mtp=is_mtp)
-                        self.rules["local_experts.linear_fc2"](fc2, layer_id, expert_id, is_mtp=is_mtp)
+                    self.rules["shared_experts.linear_fc1"](fc1, layer_id)
+                    self.rules["shared_experts.linear_fc2"](fc2, layer_id)
+                if not self.rules.get("use_packed_local_experts", False): # Import local experts
+                    experts = layer.mlp.experts
+                    if hasattr(experts, "local_experts"):
+                        for local_expert_id, expert in tqdm(
+                            enumerate(layer.mlp.experts.local_experts),
+                            desc="Importing MoE local experts",
+                            leave=False,
+                            disable=self.disable_tqdm,
+                        ):
+                            expert_id = layer.mlp.local_expert_indices[local_expert_id]
+                            fc1 = expert.linear_fc1
+                            fc2 = expert.linear_fc2
+                            self.rules["local_experts.linear_fc1"](fc1, layer_id, expert_id)
+                            self.rules["local_experts.linear_fc2"](fc2, layer_id, expert_id)
+                    else: # Slice TEGroupedMLP
+                        layer_pbar.set_description("Importing MoE grouped local experts")
+                        num_local_experts = experts.num_local_experts
+                        num_global_experts = experts.config.num_moe_experts
+                        print(f"num_local_experts: {num_local_experts}")
+                        print(f"num_global_experts: {num_global_experts}")
+
+                        if parallel_config is not None:
+                            etp_size = get_expert_tensor_parallel_world_size()
+                            # etp_rank = get_expert_tensor_parallel_rank() # this gives group rank
+                            etp_rank = dist.get_rank()
+                            print(f"etp_size: {etp_size}")
+                            print(f"etp_rank: {etp_rank}")
+                            assert num_local_experts * etp_size == num_global_experts
+                            init_index = etp_rank * num_local_experts
+
+                        self.rules["experts.linear_fc1"](experts.linear_fc1, layer_id, init_expert_id=init_index, num_local_experts=num_local_experts)
+                        self.rules["experts.linear_fc2"](experts.linear_fc2, layer_id, init_expert_id=init_index, num_local_experts=num_local_experts   )
+
                 # We only support either EP or ETP for now
                 elif get_expert_tensor_parallel_world_size() > 1:
                     # ETP supports for packed MoE
@@ -565,28 +624,28 @@ class GPTModelImporter:
                     if self.arch in ["GptOssForCausalLM"]:
                         raise ValueError("ETP is not supported for gpt-oss model")
                     self.rules["local_experts.linear_fc1_etp"](
-                        layer.mlp.experts.local_experts, layer_id, is_mtp=is_mtp
+                        layer.mlp.experts.local_experts, layer_id
                     )
                     self.rules["local_experts.linear_fc2_etp"](
-                        layer.mlp.experts.local_experts, layer_id, is_mtp=is_mtp
+                        layer.mlp.experts.local_experts, layer_id
                     )
                 else:
                     # EP supports for packed MoE
                     self.rules["local_experts.linear_fc1_ep"](
-                        layer.mlp.experts.local_experts, layer_id, is_mtp=is_mtp
+                        layer.mlp.experts.local_experts, layer_id
                     )
                     self.rules["local_experts.linear_fc2_ep"](
-                        layer.mlp.experts.local_experts, layer_id, is_mtp=is_mtp
+                        layer.mlp.experts.local_experts, layer_id
                     )
             else:
                 layer_pbar.set_description("Importing MLP")
-                self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id, is_mtp=is_mtp)
-                self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id, is_mtp=is_mtp)
+                self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id)
+                self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id)
 
 
     def _import_state_dict(self):
         model = self.model
-        print(model, flush=True)
+        # print(model, flush=True)
         layer_pbar = tqdm(model.decoder.layers, disable=self.disable_tqdm)
 
         # Embedding
@@ -607,7 +666,7 @@ class GPTModelImporter:
             if self.verbose:
                 print(
                     "{:3}/{:3} completes importing layer {:3}.".format(
-                        torch.distributed.get_rank(), torch.distributed.get_world_size(), layer_id
+                        dist.get_rank(), dist.get_world_size(), layer_id
                     ),
                     flush=True,
                 )
