@@ -42,6 +42,7 @@ ModelOpt-Windows supports **mixed precision quantization**, where different laye
 #### Why Use Mixed Precision?
 
 Mixed precision quantization provides an optimal balance between:
+
 - **Model Size**: Primarily INT4 keeps the model small
 - **Inference Speed**: INT4 layers run faster and smaller
 - **Accuracy Preservation**: Critical layers in INT8 maintain model quality
@@ -71,7 +72,7 @@ This strategy preserves accuracy for the most sensitive layers while maintaining
 
 #### Using Mixed Precision Quantization
 
-**Method 1: Use the default mixed precision strategy**
+##### Method 1: Use the default mixed precision strategy
 
 ```bash
 python quantize.py --model_name=meta-llama/Meta-Llama-3.2-1B \
@@ -84,7 +85,7 @@ python quantize.py --model_name=meta-llama/Meta-Llama-3.2-1B \
 
 The `--enable_mixed_quant` flag automatically applies the default strategy.
 
-**Method 2: Specify custom layers for INT8**
+##### Method 2: Specify custom layers for INT8
 
 ```bash
 python quantize.py --model_name=meta-llama/Meta-Llama-3.2-1B \
@@ -96,10 +97,10 @@ python quantize.py --model_name=meta-llama/Meta-Llama-3.2-1B \
 ```
 
 The `--layers_8bit` option allows you to manually specify which layers to quantize to INT8. You can use:
+
 - Layer indices: `layers.0,layers.5,layers.10`
 - Layer paths: `model/layers.0/attn/qkv_proj`
 - Partial names: `qkv_proj,down_proj`
-
 
 #### Technical Details
 
