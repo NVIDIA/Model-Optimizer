@@ -443,6 +443,7 @@ def main(args):
         layers_8bit=args.layers_8bit,
         gather_block_size=args.gather_block_size,
         gather_quantize_axis=args.gather_quantize_axis,
+        use_column_major=args.use_column_major,
     )
     logging.info(f"\nQuantization process took {time.time() - t} seconds")
 
@@ -628,6 +629,15 @@ if __name__ == "__main__":
         type=str,
         default="",
         help=("Overrides default mixed quant strategy. Example: 'layers.0,lm_head'"),
+    )
+    parser.add_argument(
+        "--use_column_major",
+        default=False,
+        action="store_true",
+        help=(
+            "Apply column-major storage optimization for NvTensorRtRtx execution provider. "
+            "Only applicable for DQ-only quantization (e.g., rtn_dq, awq_lite, awq_clip)."
+        ),
     )
     args = parser.parse_args()
     main(args)
