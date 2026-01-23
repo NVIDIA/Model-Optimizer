@@ -26,6 +26,7 @@ from .mcore_custom import (
     NameRemapping,
     QKVMerging,
     QKVSlicing,
+    GroupedMLPMerging,
     SelfAttentionScaling,
 )
 
@@ -85,12 +86,14 @@ nemotron_h_causal_lm_import: dict[str, CustomModuleMapping] = {
     # Latent MoE
     "fc1_latent_proj": NameRemapping("backbone.layers.{}.mixer.fc1_latent_proj.", REPLICATE),
     "fc2_latent_proj": NameRemapping("backbone.layers.{}.mixer.fc2_latent_proj.", REPLICATE),
-    # MTP
-    "mtp.enorm": NameRemapping("mtp.layers.{}.enorm.", REPLICATE),
-    "mtp.hnorm": NameRemapping("mtp.layers.{}.hnorm.", REPLICATE),
-    "mtp.eh_proj": NameRemapping("mtp.layers.{}.eh_proj.", REPLICATE),
-    "mtp.final_layernorm": NameRemapping("mtp.layers.{}.final_layernorm.", REPLICATE),
-
+    # Repeated MTP module
+    "mtp.enorm": NameRemapping("mtp.layers.{}.enorm.",  {"is_mtp": True}),
+    "mtp.hnorm": NameRemapping("mtp.layers.{}.hnorm.",  {"is_mtp": True}),
+    "mtp.eh_proj": NameRemapping("mtp.layers.{}.eh_proj.",  {"is_mtp": True}),
+    "mtp.final_layernorm": NameRemapping("mtp.layers.{}.final_layernorm.",  {"is_mtp": True}),
+    # Grouped local experts in MTP
+    "experts.linear_fc1": GroupedMLPMerging("mtp.layers.{}.experts.{{}}.up_proj", COL_ETP | {"is_mtp": True}),
+    "experts.linear_fc2": GroupedMLPMerging("mtp.layers.{}.experts.{{}}.down_proj", ROW_ETP | {"is_mtp": True}),
 
 }
 
