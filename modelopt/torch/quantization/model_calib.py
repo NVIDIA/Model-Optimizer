@@ -268,12 +268,16 @@ def mse_calibrate(
                 initial_amax = module._amax.clone().detach()
 
                 is_nvfp4_static = (
-                    fp8_scale_sweep
-                    and module.is_static_block_quant
+                    module.is_static_block_quant
                     and module._num_bits == (2, 1)
                     and module._block_sizes is not None
                     and module._block_sizes.get("scale_bits") == (4, 3)
                 )
+                if fp8_scale_sweep and not is_nvfp4_static:
+                    warnings.warn(
+                        f"fp8_scale_sweep is enabled but quantizer '{name}' is not NVFP4 static "
+                        "block quantization. fp8_scale_sweep will be ignored for this quantizer."
+                    )
 
                 # Create MSE calibrator with quant_func
                 module._calibrator = MseCalibrator(
@@ -283,7 +287,7 @@ def mse_calibrate(
                     start_multiplier=start_multiplier,
                     stop_multiplier=stop_multiplier,
                     quant_func=partial(_mse_quant_func, quantizer=module),
-                    fp8_scale_sweep=is_nvfp4_static,
+                    fp8_scale_sweep=fp8_scale_sweep and is_nvfp4_static,
                 )
 
     # Identify weight quantizers by checking if they have corresponding weight parameters
