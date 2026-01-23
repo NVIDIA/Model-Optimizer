@@ -120,6 +120,13 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         self._functionals_to_replace = value
 
     def _setup(self):
+        if getattr(self, "fuse_wgrad_accumulation", False):
+            warnings.warn(
+                "fuse_wgrad_accumulation is not supported with ModelOpt quantization. "
+                "Setting fuse_wgrad_accumulation to False."
+            )
+            self.fuse_wgrad_accumulation = False
+
         # GroupedMLP stores the weights as weight0, weight1, etc. To run setup in order to
         # initialize the quantizer states, self.weight is used to extract shape, dtype etc. Assigning
         # self.weight0 to self.weight to run the quantizer states initialization.
@@ -130,6 +137,9 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         super()._setup()
         # Remove self.weight after setup.
         delattr(self, "weight")
+
+        # TODO: GroupedLinear supports weights split by `num_gemms`, to support quantization
+        # with static parameters beyond per-tensor, we need to support a unique quantizer for each gemm.
 
     def modelopt_post_restore(self, prefix: str = ""):
         # GroupedMLP stores the weights as weight0, weight1, etc. To run post_restore in order to
