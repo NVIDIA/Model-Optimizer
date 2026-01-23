@@ -7,6 +7,7 @@ This repository contains an example to demontrate 8-bit quantization of Whisper 
 - [ONNX export](#onnx-export)
 - [Inference script](#inference-script)
 - [Quantization script](#quantization-script)
+- [Support Matrix](#support-matrix)
 - [Validated Settings](#validated-settings)
 - [Troubleshoot](#troubleshoot)
 
@@ -148,6 +149,14 @@ python .\whisper_onnx_quantization.py --model_name=openai/whisper-large --base_m
 - The Whisper quantization script supports quantization of following Whisper ONNX files: `encoder_model.onnx`, `decoder_model.onnx`, `decoder_with_past_model.onnx`.
 
 - In case, ONNX installation unexpectedly throws error, then one can try with other ONNX versions.
+
+## Support Matrix
+
+| Model | ONNX INT8 Max (W8A8) | ONNX FP8 Max (W8A8) |
+| :---: | :---: | :---: |
+| whisper-large | ✅ | ✅ |
+
+> *`ONNX INT8 Max` means INT8 (W8A8) quantization of ONNX model using Max calibration. Similar holds true for the term `ONNX FP8 Max`.*
 
 ## Validated Settings
 

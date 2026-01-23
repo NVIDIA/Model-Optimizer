@@ -7,7 +7,7 @@ This repository provides relevant steps, script, and guidance for quantization o
 - [Installation and Pre-requisites](#installation-and-pre-requisites)
 - [Quantization of Backbone](#quantization-of-backbone)
 - [Inference using ONNX runtime](#inference-using-onnxruntime)
-- [Quantization Support Matrix](#quantization-support-matrix)
+- [Support Matrix](#support-matrix)
 - [Validated Settings](#validated-settings)
 - [Troubleshoot](#troubleshoot)
 
@@ -92,10 +92,10 @@ Place the quantized ONNX model file for the backbone inside its specific subdire
 
 Optimum-ONNX Runtime provides pipelines such as ORTStableDiffusion3Pipeline and ORTFluxPipeline that can be used to run ONNX-exported diffusion models. These pipelines offer a convenient, high-level interface for loading the exported graph and performing inference. For a practical reference, see the stable diffusion inference [example script](https://github.com/microsoft/onnxruntime-inference-examples/tree/main/python/models/stable_difusion) in the ONNX Runtime inference examples repository.
 
-## Quantization Support Matrix
+## Support Matrix
 
 | Model | fp8 | nvfp4<sup>1</sup> |
-| :---: | :---: |
+| :---: | :---: | :---: |
 | SD3-Medium-Diffusers | ❌ | ✅ |
 | SD3.5-Medium | ✅  | ✅ |
 | Flux.1.Dev<sup>2</sup> | ✅  | ✅ |
@@ -106,7 +106,7 @@ Optimum-ONNX Runtime provides pipelines such as ORTStableDiffusion3Pipeline and 
 
 > *The accuracy loss after PTQ may vary depending on the actual model and the quantization method. Different models may have different accuracy loss and usually the accuracy loss is more significant when the base model is small. If the accuracy after PTQ is not meeting the requirement, please try disabling with KV-Cache or MHA quantization, try out different calibration settings (like calibration samples data, samples size, diffusion steps etc.) or perform QAT / QAD (not yet supported / validated on Windows RTX).*
 
-Please refer to [support matrix](https://nvidia.github.io/Model-Optimizer/guides/0_support_matrix.html) for a full list of supported features and models.
+> *There are some known performance issues with NVFP4 model execution using TRTRTX EP. Stay tuned for further updates!*
 
 ## Validated Settings
 
