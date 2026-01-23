@@ -349,7 +349,11 @@ def get_weight_scaling_factor_2(module: nn.Module, weight_name: str = "weight") 
         module_name = f"{type(module).__name__}.{weight_name}"
         _ensure_weight_quantizer_calibrated(weight_quantizer, weight, module_name)
 
-    if quantization_format in [QUANTIZATION_NVFP4, QUANTIZATION_NVFP4_AWQ]:
+    if quantization_format in [
+        QUANTIZATION_NVFP4,
+        QUANTIZATION_NVFP4_AWQ,
+        QUANTIZATION_NVFP4_SVDQUANT,
+    ]:
         return NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(weight_quantizer)
     elif quantization_format == QUANTIZATION_W4A8_NVFP4_FP8:
         # weight_scaling_factor_2 for w4a8 needs to be amax/448, so that the wsf is in range 448/6.
