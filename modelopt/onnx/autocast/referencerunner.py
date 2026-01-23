@@ -73,9 +73,11 @@ class ReferenceRunner:
         """Load inputs from NPZ format."""
         calib_data = np.load(input_data_path)
 
-        # Wrap data into a CalibDataProvider to support a single NPZ file containing data from multiple batches
-        data_loader = {key: calib_data[key] for key in calib_data.files}
-        return CalibrationDataProvider(self.model, data_loader).calibration_data_list
+        if isinstance(calib_data, np.lib.npyio.NpzFile):
+            # Wrap data into a CalibDataProvider to support a single NPZ file containing data from multiple batches
+            data_loader = {key: calib_data[key] for key in calib_data.files}
+            return CalibrationDataProvider(self.model, data_loader).calibration_data_list
+        return [calib_data]
 
     def _validate_inputs(self, data_loader):
         """Validate that input names and shapes match the model."""
