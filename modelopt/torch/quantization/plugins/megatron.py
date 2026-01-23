@@ -581,7 +581,6 @@ class _MegatronSequentialMLP(DynamicModule):
         This function is called to synchronize the amax values across local experts s.t. all localexperts will
         share the same amax.
         """
-        torch.distributed.barrier()
         # Collect amax from all local experts
         amax_dict = {}
         for expert in self.local_experts:
@@ -754,8 +753,11 @@ class _QuantMoELayer(QuantModule):
 
     def forward(self, hidden_states):
         if any(getattr(m, "_if_calib", False) for m in self.experts.modules()):
-            original_top_k = self.router.topk
-            self.router.topk = self.router.num_experts
-            super().forward(hidden_states)
-            self.router.topk = original_top_k
+            if self.config.moe_router_num_groups is None:
+                original_top_k = self.router.topk
+                self.router.topk = self.router.num_experts
+                super().forward(hidden_states)
+                self.router.topk = original_top_k
+            else:
+                super().forward(hidden_states)
         return super().forward(hidden_states)
