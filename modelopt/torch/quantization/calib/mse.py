@@ -97,7 +97,6 @@ class MseCalibrator(_Calibrator):
 
         if self._fp8_scale_sweep:
             global_amax = quant_utils.reduce_amax(x, axis=None, keepdims=False, squeeze_scalar=True)
-            global_amax_expanded = global_amax * torch.ones_like(self._initial_amax)
 
             # Generate all 128 possible FP8 E4M3 values (0-127 as uint8, viewed as float8_e4m3fn)
             # Create uint8 tensor with values 0-127, view as float8_e4m3fn, then convert to float32
@@ -118,7 +117,7 @@ class MseCalibrator(_Calibrator):
 
         for step, candidate in enumerate(candidates):
             if self._fp8_scale_sweep:
-                candidate_amax = global_amax_expanded * candidate
+                candidate_amax = (global_amax * candidate) * torch.ones_like(self._initial_amax)
             else:
                 candidate_amax = self._initial_amax * candidate
             xq = self._quant_func(x, candidate_amax)
