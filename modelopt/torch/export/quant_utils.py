@@ -237,7 +237,7 @@ def get_scaling_factor(quantizer: TensorQuantizer) -> torch.Tensor:
 
 
 def _ensure_weight_quantizer_calibrated(
-    weight_quantizer: TensorQuantizer, weight: torch.Tensor
+    weight_quantizer: TensorQuantizer, weight: torch.Tensor, module_name: str = ""
 ) -> None:
     """Calibrate weight quantizer if amax is not set.
 
@@ -247,8 +247,14 @@ def _ensure_weight_quantizer_calibrated(
     Args:
         weight_quantizer: The weight quantizer to calibrate
         weight: The weight tensor to use for calibration
+        module_name: Optional module name for better warning messages
     """
     if not hasattr(weight_quantizer, "_amax") or weight_quantizer._amax is None:
+        warn(
+            f"Weight quantizer{f' for {module_name}' if module_name else ''} was not calibrated. "
+            f"Computing amax from weights. This may occur if: "
+            f"some experts were not activated during calibration (expected for MoE models), try increasing --calib_size"
+        )
         weight_quantizer.reset_amax()
         enable_stats_collection(weight_quantizer)
         weight_quantizer(weight)
@@ -299,7 +305,8 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
         QUANTIZATION_W4A8_NVFP4_FP8,
     ]:
         # Calibrate weight quantizer if amax is not set
-        _ensure_weight_quantizer_calibrated(weight_quantizer, weight)
+        module_name = f"{type(module).__name__}.{weight_name}"
+        _ensure_weight_quantizer_calibrated(weight_quantizer, weight, module_name)
 
         if quantization_format == QUANTIZATION_W4A8_NVFP4_FP8:
             # weight_scaling_factor_2 for w4a8 needs to be amax/448, so that the wsf is in range 448/6.
@@ -339,7 +346,8 @@ def get_weight_scaling_factor_2(module: nn.Module, weight_name: str = "weight") 
         QUANTIZATION_W4A8_NVFP4_FP8,
     ]:
         weight = getattr(module, weight_name)
-        _ensure_weight_quantizer_calibrated(weight_quantizer, weight)
+        module_name = f"{type(module).__name__}.{weight_name}"
+        _ensure_weight_quantizer_calibrated(weight_quantizer, weight, module_name)
 
     if quantization_format in [QUANTIZATION_NVFP4, QUANTIZATION_NVFP4_AWQ]:
         return NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(weight_quantizer)
