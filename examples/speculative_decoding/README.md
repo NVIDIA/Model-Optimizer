@@ -30,7 +30,7 @@ This example focuses on training with Hugging Face. To train with Megatron‑LM,
 
 ### Docker
 
-Please use the PyTorch docker image (e.g., `nvcr.io/nvidia/pytorch:25.06-py3`) or visit our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html) for more information.
+Please use the PyTorch docker image (e.g., `nvcr.io/nvidia/pytorch:25.08-py3`) or visit our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html) for more information.
 
 Also follow the installation steps below to upgrade to the latest version of Model Optimizer and install dataset and example-specific dependencies.
 
@@ -56,7 +56,7 @@ See [other-datasets](#other-datasets) section for other dataset options and inst
 ## Getting Started: Simplified Workflow
 
 ```bash
-bash train_eagle3_and_export.sh --base_model meta-llama/Llama-3.2-1B-Instruct --num_gpu 4
+bash train_eagle3_and_export.sh --base_model meta-llama/Llama-3.2-1B-Instruct
 ```
 
 This one-line command runs a minimal example workflow of training and exporting an EAGLE draft model in Modelopt. Specifically, it
@@ -74,12 +74,11 @@ For small base models that fit in GPU memory, we can collocate them with draft m
 ./launch_train.sh --model $BASE_MODEL \
             --output_dir $OUTPUT_DIR \
             --data input_conversations/daring-anteater.jsonl  \
-            --num_gpu $NUM_GPU \
             --num_epochs $NUM_EPOCH \
             --eagle_config eagle_config.json
 ```
 
-This command will launch `main.py` with `accelerate`. See [section: interact with modelopt.torch.speculative](#interact-with-modelopttorchspeculative) for more details.
+FSDP2 is used by default. To enable context parallelism for long-context training, specify `--cp_size n`.
 The saved modelopt checkpoint is similar in architecture to HF models. It can be further optimized through **ModelOpt**, e.g., PTQ and QAT.
 
 ## Training Draft Model with Offline Base Model
@@ -118,7 +117,6 @@ Once we finish dumping hidden states, launch offline training with an extra `--o
 ./launch_train.sh --model $BASE_MODEL \
             --output_dir $OUTPUT_DIR \
             --data $DATA \
-            --num_gpu $NUM_GPU \
             --num_epochs $NUM_EPOCH \
             --eagle_config eagle_config.json \
             --offline-data $HIDDEN_STATES_DIR
