@@ -34,6 +34,8 @@ import copy
 from typing import Any
 
 import torch
+import transformers
+from packaging.version import Version
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
@@ -61,9 +63,20 @@ from ..utils import (
     temporary_set_config_value,
 )
 
+__all__ = ["HFARValidation", "HFEagleModel", "HFMedusaModel"]
+
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
 ENABLE_CP_TTT_PATCH = False
+# module variable to cache attention mask for cp ttt
 CACHED_SHARD_TTT_MASKS = {}
+
+
+def _get_empty_cache(config):
+    """Return an empty cache. Handle different versions of transformers for unit tests."""
+    if Version(transformers.__version__) >= Version("4.54"):
+        return DynamicCache(config=config)
+    else:
+        return DynamicCache()
 
 
 @MedusaDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
@@ -852,9 +865,7 @@ class HFEagleModel(EagleModel):
                 base_model_logits = base_outputs["base_model_logits"]
             else:
                 base_model_logits = self.lm_head(base_model_hidden_states)
-            base_model_loss = None
-            past_key_values = DynamicCache()  # Dummy cache
-
+            base_model_loss, past_key_values = None, None
         else:
             base_model_hidden_states, base_model_logits, base_model_loss, past_key_values = (
                 self._base_model_forward(
@@ -869,9 +880,9 @@ class HFEagleModel(EagleModel):
             )
 
         if not isinstance(past_key_values, Cache):
-            past_key_values = DynamicCache(config=self._base_llm_config)
+            past_key_values = _get_empty_cache(self._base_llm_config)
         if not isinstance(eagle_cache, Cache):
-            eagle_cache = DynamicCache(config=self.eagle_module.config)
+            eagle_cache = _get_empty_cache(self.eagle_module.config)
 
         # ====Run eagle forward====
         eagle_loss = None
@@ -908,7 +919,7 @@ class HFEagleModel(EagleModel):
                 if ttt_step == 0
                 else self._get_ttt_attention_mask(b, seq_length, ttt_step)
             )
-            with enable_cp_ttt_patch():
+            with enable_cp_ttt_patch() if self.training else contextlib.nullcontext():
                 _, eagle_input_hidden_states, eagle_logits, eagle_cache = self._eagle_forward(
                     eagle_input_hidden_states,
                     inputs_embeds,

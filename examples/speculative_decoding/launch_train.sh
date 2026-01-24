@@ -170,6 +170,15 @@ else
   VLM_ARGS=""
 fi
 
+if [[ "$GPU_COUNT" -gt 1 ]]; then
+  #Use FSDP2 when multi GPU available
+  FSDP_ARGS="--fsdp 'full_shard' --fsdp_config fsdp_config.json"
+else
+  #Otherwise, single GPU training
+  FSDP_ARGS=""
+fi
+
+
 # Disable tokenizers parallelism to avoid warning
 export TOKENIZERS_PARALLELISM=False
 CMD="accelerate launch --mixed_precision bf16 main.py \
@@ -201,8 +210,7 @@ CMD="accelerate launch --mixed_precision bf16 main.py \
     $VLM_ARGS \
     $OFFLINE_TRAINING_ARGS \
     $SPECULATIVE_ARGS \
-    --fsdp 'full_shard' \
-    --fsdp_config fsdp_config.json \
+    $FSDP_ARGS \
     --cp_size $CP_SIZE \
     --dp_shard_size $DP_SHARD_SIZE \
 "

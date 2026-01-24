@@ -30,8 +30,6 @@ from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from transformers.cache_utils import DynamicCache
 
-import modelopt.torch.speculative.plugins.transformers
-
 KIMI_K2_REPO_ID = "moonshotai/Kimi-K2-Thinking"
 KIMI_K2_PACKAGE_NAME = "kimi_k2_temp"
 
@@ -462,6 +460,8 @@ def get_ttt_msk_func(seq_length, ttt_step):
 @contextlib.contextmanager
 def enable_cp_ttt_patch():
     """Context manager to enable CP TTT patch."""
+    import modelopt.torch.speculative.plugins.transformers
+
     modelopt.torch.speculative.plugins.transformers.ENABLE_CP_TTT_PATCH = True
     with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
         try:

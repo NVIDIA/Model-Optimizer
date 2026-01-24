@@ -28,6 +28,7 @@ import numpy as np
 import torch
 import transformers
 from datasets import load_dataset
+from packaging.version import Version
 from PIL import Image
 from scripts.ar_validate import validate_ar
 from torch.distributed.tensor.experimental._attention import _SDPAMerger
@@ -35,7 +36,7 @@ from torch.utils.data import Dataset
 from transformers import AutoProcessor, Trainer, TrainerCallback
 from transformers.trainer_pt_utils import LabelSmoother
 
-import modelopt.torch.speculative.plugins.transformers
+import modelopt
 from modelopt.torch.speculative.utils import get_ttt_msk_func
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import is_master
@@ -577,27 +578,6 @@ class EagleTrainingPlot(TrainerCallback):
         return control
 
 
-def _compute_ttt_attention_mask(batch_size, seq_length, ttt_step, dtype) -> torch.Tensor:
-    """Return TTT attention_mask tensor of type BlockMask or Tensor depends on eagle attn impl."""
-
-    msk_func = get_ttt_msk_func(seq_length, ttt_step)
-
-    dtypemin = torch.finfo(dtype).min
-    q_len = seq_length
-    kv_len = seq_length * (1 + ttt_step)
-    # Return tensor mask for non-flex attention
-    tensor_mask = msk_func(
-        None,
-        None,
-        torch.arange(q_len).view(1, 1, q_len, 1),
-        torch.arange(kv_len).view(1, 1, 1, kv_len),
-    ).to(torch.cuda.current_device())
-    tensor_mask = torch.full_like(
-        tensor_mask, 0, dtype=dtype, device=torch.cuda.current_device()
-    ).masked_fill(~tensor_mask, dtypemin)
-    return tensor_mask
-
-
 def get_patched_templated_ring_attn(orig_templated_attn: Callable):
     """
     Return patched version of
@@ -659,14 +639,14 @@ def get_patched_templated_ring_attn(orig_templated_attn: Callable):
         patch_enbabled = modelopt.torch.speculative.plugins.transformers.ENABLE_CP_TTT_PATCH
 
         if patch_enbabled and original_op != torch.ops.aten._scaled_dot_product_cudnn_attention:
-            raise ValueError(f"CP TTT only supports cuddn attention now. Got: {original_op}")
+            raise ValueError(f"CP TTT only supports cudnn attention now. Got: {original_op}")
 
         # Unset is_causal to use custom attn mask
         if patch_enbabled:
             kwargs["is_causal"] = False
 
         def patched_op(*args, **kwargs):
-            # Inpect the parent frame to get current shard info
+            # Inspect the parent frame to get current shard info
             # This is sensitive to torch _templated_ring_attention impl
             try:
                 frame: FrameType = inspect.currentframe()
@@ -678,7 +658,9 @@ def get_patched_templated_ring_attn(orig_templated_attn: Callable):
                 i = f_back.f_locals["i"]
                 ttt_step = (key.shape[2] // query.shape[2]) - 1
             except Exception as e:
-                print(f"Failed to capture loop variables in patched _templated_ring_attention: {e}")
+                raise RuntimeError(
+                    f"Failed to capture loop variables in patched _templated_ring_attention: {e}"
+                ) from e
             # Set attn mask to permuted TTT mask
             if "attn_bias" in kwargs:
                 kwargs["attn_bias"] = _get_sharded_ttt_msk(
@@ -696,8 +678,18 @@ def patch_ring_attention_for_ttt():
     """Patch torch ring attention to support context parallelism for TTT."""
     # Torch Ring Attention only supports no mask or causal mask. We apply the following patches to enable TTT mask.
 
+    if not (
+        Version(torch.__version__) > Version("2.7.1")
+        and Version(torch.__version__) < Version("2.9.0")
+    ):
+        raise RuntimeError(
+            f"Context parallel TTT only supported for PyTorch 2.8.0 now. "
+            f"Got {torch.__version__}. "
+            f"Please use nvcr.io/nvidia/pytorch:25.08-py3 or torch 2.8.0 or cp_size=1."
+        )
+
     # 1. Disable load balance, which is designed for causal mask.
-    # This affect how buffers are sharded. So need to be done permenantly before accelerate/hf trainer init.
+    # This affect how buffers are sharded. So need to be done permanently before accelerate/hf trainer init.
     torch.distributed.tensor.experimental._attention._cp_options.enable_load_balance = False
 
     # 2. Patch templated ring attention for TTT mask.
@@ -717,9 +709,7 @@ def patch_ring_attention_for_ttt():
     # 3. Patch merger to skip the blank shard to avoid difference in output.
     original_sdpa_merger_step = _SDPAMerger.step
 
-    def patched_sdpa_merger_step(
-        self, out: torch.Tensor, lse: torch.Tensor, partial: bool
-    ) -> torch.Tensor:
+    def patched_sdpa_merger_step(self, out: torch.Tensor, lse: torch.Tensor, partial: bool):
         if lse.sum() <= 0:
             return
         return original_sdpa_merger_step(self, out, lse, partial)
