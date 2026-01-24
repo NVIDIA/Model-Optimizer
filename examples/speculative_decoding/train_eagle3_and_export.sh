@@ -17,21 +17,16 @@
 
 set -eo pipefail
 
-# Set default values for BASE_MODEL, NUM_GPU, and DATA
+# Set default values for BASE_MODEL and DATA
 BASE_MODEL=meta-llama/Llama-3.2-1B-Instruct
-NUM_GPU=1
 DATA=input_conversations/daring-anteater.jsonl
 
-# Parse input arguments --base_model, --num_gpu, and --data
+# Parse input arguments --base_model and --data
 while [[ $# -gt 0 ]]; do
   key="$1"
   case $key in
     --base_model)
       BASE_MODEL="$2"
-      shift; shift
-      ;;
-    --num_gpu)
-      NUM_GPU="$2"
       shift; shift
       ;;
     --data)
@@ -49,15 +44,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-
-if [[ "$NUM_GPU" == 1 ]]; then
-  export CUDA_VISIBLE_DEVICES=0
-else
-  # Export as 0,1,...,N-1 for NUM_GPU GPUs
-  devs="$(seq -s, 0 $((NUM_GPU-1)))"
-  export CUDA_VISIBLE_DEVICES="$devs"
-fi
-
 if [[ "$OFFLINE_DATA_PATH" != "" ]]; then
   OFFLINE_DATA_ARGS="--offline-data $OFFLINE_DATA_PATH"
 else
@@ -73,7 +59,6 @@ mkdir -p "$(dirname "$OUTPUT_DIR")"
             --output_dir $OUTPUT_DIR \
             $OFFLINE_DATA_ARGS \
             --data $DATA \
-            --num_gpu $NUM_GPU \
             --num_epochs 2 \
             --eagle_config eagle_config.json
 
