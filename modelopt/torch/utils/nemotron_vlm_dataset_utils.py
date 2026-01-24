@@ -62,14 +62,10 @@ def extract_first_image_from_messages(messages: Any) -> Any:
         if not isinstance(content, list):
             continue
         for part in content:
-            if not (isinstance(part, dict) and part.get("type") == "image"):
-                continue
-            if "image" in part:
-                return part["image"]
-            # fallback
-            for key in ("images", "path", "image_url", "url", "value", "data"):
-                if key in part:
-                    return part[key]
+            if isinstance(part, dict) and part.get("type") == "image":
+                for key in ("image", "images", "path", "image_url", "url", "value", "data"):
+                    if key in part:
+                        return part[key]
     return None
 
 
@@ -137,14 +133,16 @@ class NemotronTarPlusJsonlIterable(torch.utils.data.IterableDataset):
             if not shard_list:
                 continue
             rng.shuffle(shard_list)
+            local_tar_paths = {
+                shard: hf_hub_download(repo_id=self.repo_id, filename=shard, repo_type="dataset")
+                for shard in shard_list
+            }
 
             # 1) Collect candidate image filenames from tar headers (no payload reads).
             candidate_names: list[str] = []
             header_limit = per_subset_target * 50
             for shard in shard_list:
-                local_tar = hf_hub_download(
-                    repo_id=self.repo_id, filename=shard, repo_type="dataset"
-                )
+                local_tar = local_tar_paths[shard]
                 with tarfile.open(local_tar, "r:*") as tf:
                     for member in tf:
                         if not member.isfile():
@@ -192,9 +190,7 @@ class NemotronTarPlusJsonlIterable(torch.utils.data.IterableDataset):
             for shard in shard_list:
                 if yielded_total >= self.num_samples or not needed:
                     break
-                local_tar = hf_hub_download(
-                    repo_id=self.repo_id, filename=shard, repo_type="dataset"
-                )
+                local_tar = local_tar_paths[shard]
                 with tarfile.open(local_tar, "r:*") as tf:
                     for member in tf:
                         if yielded_total >= self.num_samples or not needed:

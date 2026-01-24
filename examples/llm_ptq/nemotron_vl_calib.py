@@ -55,10 +55,10 @@ def safe_nemotron_vl_forward(full_model: torch.nn.Module, batch: dict[str, Any])
 
     # Match the model's preferred vision dtype (usually bf16).
     vision_dtype = None
-    with contextlib.suppress(Exception):
+    with contextlib.suppress(AttributeError, TypeError):
         vision_dtype = getattr(full_model.vision_model.config, "torch_dtype", None)
     if vision_dtype is None:
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(AttributeError, TypeError):
             vision_dtype = getattr(full_model.language_model.config, "torch_dtype", None)
     if (
         vision_dtype is not None

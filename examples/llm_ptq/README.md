@@ -176,7 +176,7 @@ python hf_ptq.py \
   --calib_size 512
 ```
 
-> Note: when `--calib_with_images` is set, `--calib_size` must be a single value.
+> Note: when `--calib_with_images` is set, `--calib_size` must be a single value, and the calibration dataset is nvidia/nemotron_vlm_dataset_v2.
 This functionality is currently in beta and has been tested on `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16`.
 
 ### NeMo Example Script

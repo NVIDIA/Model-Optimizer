@@ -129,6 +129,16 @@ def _extract_first_image_from_messages(messages: Any) -> Any:
     return None
 
 
+def _extract_image_ref_from_example(example: dict[str, Any]) -> Any:
+    """Best-effort extraction of an image reference from a dataset example."""
+    img = example.get("image")
+    if img is None:
+        img = example.get("images")
+    if img is None:
+        img = _extract_first_image_from_messages(example.get("messages"))
+    return img
+
+
 def _maybe_load_image(image_obj: Any, repo_id: str | None, image_root: str | Path | None) -> Any:
     """Convert common image references (path/bytes) into a PIL image if possible.
 
@@ -291,7 +301,7 @@ def _get_vlm_dataset(
             ds = ds.filter(
                 lambda ex: ex.get("image", None) is not None
                 or ex.get("images", None) is not None
-                or _extract_first_image_from_messages(ex.get("messages")) is not None
+                or _extract_image_ref_from_example(ex) is not None
             )
 
     # Select the first `num_samples` entries (or fewer if dataset is smaller).
@@ -397,12 +407,8 @@ def get_vlm_dataset_dataloader(
             messages = ex.get("messages")
 
             # Image extraction
-            img = ex.get("image", None)
-            if img is None:
-                img = ex.get("images", None)
-            if img is None and messages is not None:
-                img = _extract_first_image_from_messages(messages)
-            img = _maybe_load_image(img, repo_id=repo_id, image_root=image_root)
+            img_ref = _extract_image_ref_from_example(ex)
+            img = _maybe_load_image(img_ref, repo_id=repo_id, image_root=image_root)
             if require_image and img is None:
                 continue
 

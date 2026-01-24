@@ -512,13 +512,12 @@ def mono_quantize(
             warnings.warn("Dynamic quantization. Calibration skipped.")
         calibrate_loop = None
         if use_calibration:
-            base_forward_loop = create_forward_loop(dataloader=calib_dataloader)
             # For Nemotron VL image calibration, the dataloader yields multimodal kwargs (e.g., pixel_values).
             # Those kwargs must be consumed by the *full* VLM model, not the extracted language_model.
             if args.calib_with_images and is_nemotron_vl_model:
                 calibrate_loop = create_vlm_calibration_loop(full_model, calib_dataloader)
             else:
-                calibrate_loop = base_forward_loop
+                calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
 
         if calibration_only:
             language_model = mtq.calibrate(
