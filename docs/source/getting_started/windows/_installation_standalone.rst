@@ -48,7 +48,7 @@ The Post-Training Quantization (PTQ) process for ONNX models usually involves ru
 - *onnxruntime-gpu* provides the CUDA EP.
 - *onnxruntime* provides the CPU EP.
 
-By default, ModelOpt-Windows installs *onnxruntime-gpu*. The default CUDA version neeedd for *onnxruntime-gpu* since v1.19.0 is 12.x. The *onnxruntime-gpu* package (i.e. CUDA EP) has CUDA and cuDNN dependencies:
+By default, ModelOpt-Windows installs *onnxruntime-gpu*. The default CUDA version needed for *onnxruntime-gpu* since v1.19.0 is 12.x. The *onnxruntime-gpu* package (i.e. CUDA EP) has CUDA and cuDNN dependencies:
 
 - Install CUDA and cuDNN:
     - For the ONNX Runtime GPU package, you need to install the appropriate version of CUDA and cuDNN. Refer to the `CUDA Execution Provider requirements <https://onnxruntime.ai/docs/install/#cuda-and-cudnn/>`_ for compatible versions of CUDA and cuDNN.

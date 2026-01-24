@@ -62,4 +62,4 @@ Setup Steps for Olive with ModelOpt-Windows
 **Note**:
 
 #. Currently, the Model Optimizer - Windows only supports Onnx Runtime GenAI based LLM models in the Olive workflow.
-#. For overview about Olive workflow, refer this `overview <https://github.com/microsoft/Olive/blob/main/docs/architecture.md>`_ guide. 
+#. To get started with Olive, refer to the official `Olive documentation <https://microsoft.github.io/Olive/>`_.

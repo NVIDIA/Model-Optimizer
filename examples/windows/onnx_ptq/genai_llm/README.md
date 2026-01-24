@@ -29,7 +29,7 @@ This example takes an ONNX model as input, along with the necessary quantization
 
 ## Prepare ORT-GenAI Compatible Base Model
 
-You may generate the base model using the model builder that comes with onnxruntime-genai. The ORT-GenAI's [model-builder](https://github.com/microsoft/onnxruntime-genai/tree/main/src/python/py/models) downloads the original Pytorch model from Hugging Face, and produces an ONNX GenAI compatible base model in ONNX format. See example command-line below:
+You may generate the base model using the model builder that comes with onnxruntime-genai. The ORT-GenAI's [model-builder](https://github.com/microsoft/onnxruntime-genai/tree/main/src/python/py/models) downloads the original Pytorch model from Hugging Face, and produces an ONNX GenAI-compatible base model in ONNX format. See example command-line below:
 
 ```bash
 python -m onnxruntime_genai.models.builder -m meta-llama/Meta-Llama-3-8B -p fp16 -e dml -o E:\llama3-8b-fp16-dml-genai
@@ -67,8 +67,8 @@ The table below lists key command-line arguments of the ONNX PTQ example script.
 | `--awqclip_bsz_col` | 1024 (default) | Chunk size in columns during weight clipping, user-defined |
 | `--calibration_eps` | dml, cuda, cpu, NvTensorRtRtx (default: [dml,cpu]) | List of execution-providers to use for session run during calibration |
 | `--no_position_ids` | Default: position_ids input enabled | Use this option to disable position_ids input in calibration data|
-| `--enable_mixed_quant` | Default: disabled mixed quant | Use this option to enable mixed precsion quantization|
-| `--layers_8bit` | Default: None | Use this option to Overrides default mixed quant strategy|
+| `--enable_mixed_quant` | Default: disabled mixed quant | Use this option to enable mixed precision quantization|
+| `--layers_8bit` | Default: None | Use this option to override default mixed-quant strategy|
 | `--gather_quantize_axis` | Default: None | Use this option to enable INT4 quantization of Gather nodes - choose 0 or 1|
 | `--gather_block_size` | Default: 32 | Block-size for Gather node's INT4 quantization (when its enabled using gather_quantize_axis option)|
 
@@ -80,7 +80,7 @@ python quantize.py --help
 
 Note:
 
-1. For the `algo` argument, we have following options to choose form: awq_lite, awq_clip, rtn, rtn_dq.
+1. For the `algo` argument, we have following options to choose from: awq_lite, awq_clip, rtn, rtn_dq.
    - The 'awq_lite' option does core AWQ scale search and INT4 quantization.
    - The 'awq_clip' option primarily does weight clipping and INT4 quantization.
    - The 'rtn' option does INT4 RTN quantization with Q->DQ nodes for weights.
