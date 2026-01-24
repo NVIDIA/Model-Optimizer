@@ -751,13 +751,13 @@ class _QuantMoELayer(QuantModule):
     def _setup(self):
         pass
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states, padding_mask: torch.Tensor | None = None):
         if any(getattr(m, "_if_calib", False) for m in self.experts.modules()):
             if self.config.moe_router_num_groups is None:
                 original_top_k = self.router.topk
                 self.router.topk = self.router.num_experts
-                super().forward(hidden_states)
+                super().forward(hidden_states, padding_mask=padding_mask)
                 self.router.topk = original_top_k
             else:
-                super().forward(hidden_states)
-        return super().forward(hidden_states)
+                super().forward(hidden_states, padding_mask=padding_mask)
+        return super().forward(hidden_states, padding_mask=padding_mask)
