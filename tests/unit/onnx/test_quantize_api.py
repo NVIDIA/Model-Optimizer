@@ -18,9 +18,11 @@
 import os
 
 import onnx
+import onnxruntime
 import pytest
 import torch
 from _test_utils.onnx.lib_test_models import SimpleMLP, export_as_onnx
+from packaging import version
 
 import modelopt.onnx.quantization as moq
 from modelopt.onnx.utils import get_opset_version
@@ -31,6 +33,9 @@ MIN_OPSET = {
     "fp8": 19,
     "int4": 21,
 }
+
+# onnxruntime version that supports opset 22+
+ORT_VERSION_FOR_OPSET_22 = version.parse("1.23.0")
 
 
 @pytest.mark.parametrize("quant_mode", ["int8", "fp8", "int4"])
@@ -65,6 +70,13 @@ def test_opset_below_original_uses_original(tmp_path, quant_mode):
 
     min_opset = MIN_OPSET[quant_mode]
     higher_opset = min_opset + 1
+
+    # Skip if required opset exceeds onnxruntime support
+    ort_version = version.parse(onnxruntime.__version__)
+    if higher_opset >= 22 and ort_version < ORT_VERSION_FOR_OPSET_22:
+        pytest.skip(
+            f"Opset {higher_opset} requires onnxruntime >= {ORT_VERSION_FOR_OPSET_22}, have {ort_version}"
+        )
 
     onnx_path = os.path.join(tmp_path, "model.onnx")
     export_as_onnx(model_torch, input_tensor, onnx_filename=onnx_path, opset=higher_opset)
