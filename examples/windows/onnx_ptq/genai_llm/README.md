@@ -82,6 +82,82 @@ Note:
 
 Please refer to `quantize.py` for further details on command-line parameters.
 
+#### Mixed Precision Quantization (INT4 + INT8)
+
+ModelOpt-Windows supports **mixed precision quantization**, where different layers in the model can be quantized to different bit-widths. This approach combines INT4 quantization for most layers (for maximum compression and speed) with INT8 quantization for important or sensitive layers (to preserve accuracy).
+
+##### Why Use Mixed Precision?
+
+Mixed precision quantization provides an optimal balance between:
+
+- **Model Size**: Primarily INT4 keeps the model small
+- **Inference Speed**: INT4 layers run faster and smaller
+- **Accuracy Preservation**: Critical layers in INT8 maintain model quality
+
+Based on benchmark results, mixed precision quantization shows significant advantages:
+
+| Model | Metric | INT4 RTN | Mixed RTN (INT4+INT8) | Improvement |
+|:------|:-------|:-------------|:---------------------|:-----------|
+| DeepSeek R1 1.5B | MMLU | 32.40% | 33.90% | +1.5% |
+| | Perplexity | 46.304 | 44.332 | -2.0 (lower is better) |
+| Llama 3.2 1B | MMLU | 39.90% | 44.70% | +4.8% |
+| | Perplexity | 16.900 | 14.176 | -2.7 (lower is better) |
+| Qwen 2.5 1.5B | MMLU | 56.70% | 57.50% | +0.8% |
+| | Perplexity | 10.933 | 10.338 | -0.6 (lower is better) |
+
+As shown above, mixed precision significantly improves accuracy with minimal disk size increase (~85-109 MB).
+
+##### How Mixed Precision Works
+
+The quantization strategy selects which layers to quantize to INT8 vs INT4:
+
+1. **INT8 Layers** (Higher Precision): Important layers that significantly impact model quality. Quantized per-channel
+
+2. **INT4 Layers** (Maximum Compression): All other layers. Qunatized blockwise.
+
+This strategy preserves accuracy for the most sensitive layers while maintaining aggressive compression elsewhere.
+
+##### Using Mixed Precision Quantization
+
+###### Method 1: Use the default mixed precision strategy
+
+```bash
+python quantize.py --model_name=meta-llama/Meta-Llama-3.2-1B \
+                   --onnx_path="E:\models\llama3.2-1b-fp16\model.onnx" \
+                   --output_path="E:\models\llama3.2-1b-int4-int8-mixed\model.onnx" \
+                   --algo=awq_lite \
+                   --calib_size=32 \
+                   --enable_mixed_quant
+```
+
+The `--enable_mixed_quant` flag automatically applies the default strategy.
+
+###### Method 2: Specify custom layers for INT8
+
+```bash
+python quantize.py --model_name=meta-llama/Meta-Llama-3.2-1B \
+                   --onnx_path="E:\models\llama3.2-1b-fp16\model.onnx" \
+                   --output_path="E:\models\llama3.2-1b-int4-int8-custom\model.onnx" \
+                   --algo=awq_lite \
+                   --calib_size=32 \
+                   --layers_8bit="layers.0,layers.1,layers.15,layers.16"
+```
+
+The `--layers_8bit` option allows you to manually specify which layers to quantize to INT8. You can use:
+
+- Layer indices: `layers.0,layers.5,layers.10`
+- Layer paths: `model/layers.0/attn/qkv_proj`
+- Partial names: `qkv_proj,down_proj`
+
+##### Technical Details
+
+- **Block Size**: INT4 layers use block-wise quantization (default block-size=128), INT8 uses per-channel quantization
+- **Quantization Axis**: INT4 (per-block), INT8 (per-channel row-wise)
+- **Compatibility**: Works with both `awq_lite` and `rtn_dq` algorithms
+- **Automatic Detection**: The `--layers_8bit` option automatically enables mixed quantization
+
+For more benchmark results and detailed accuracy metrics, refer to the [Benchmark Guide](../../Benchmark.md).
+
 ### Evaluate the Quantized Model
 
 To evaluate the quantized model, please refer to the [accuracy benchmarking](../../accuracy_benchmark/README.md) and [onnxruntime-genai performance benchmarking](https://github.com/microsoft/onnxruntime-genai/tree/main/benchmark/python).
