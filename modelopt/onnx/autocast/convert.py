@@ -85,7 +85,7 @@ def convert_to_mixed_precision(
         trt_plugins_precision: List indicating the precision for each custom op.
         max_depth_of_reduction: Maximum depth of reduction for node classification.
         opset: Target ONNX opset version. If None, uses default minimum opset based on low_precision_type
-               (22 for bf16, 13 for fp16). The opset may be automatically increased if certain operations
+               (22 for bf16, 19 for fp16). The opset may be automatically increased if certain operations
                require a higher version.
         use_standalone_type_inference: If True, use standalone type inference implementation instead of ONNX's
                                   infer_shapes. This is a workaround (WAR) when only type inference is

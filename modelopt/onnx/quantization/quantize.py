@@ -80,6 +80,17 @@ from modelopt.onnx.utils import (
 __all__ = ["quantize"]
 
 
+def _normalize_quantize_mode_for_opset(quantize_mode: str) -> str:
+    """Map variants like "int4_awq", "int4_rtn", "nvfp4" to their base precision types for lookup purposes."""
+    mode_lower = quantize_mode.lower()
+    if "int4" in mode_lower:
+        return "int4"
+    if "nvfp4" in mode_lower or "float4" in mode_lower:
+        return "float4_e2m1fn"
+    # For "int8", "fp8", etc., return as-is (fp8 falls back to BASE_MIN_OPSET which is correct)
+    return quantize_mode
+
+
 def _preprocess_onnx(
     onnx_path: str,
     use_external_data_format: bool,
@@ -126,7 +137,9 @@ def _preprocess_onnx(
     original_opset_version = get_opset_version(onnx_model)
 
     # Determine minimum required opset based on quantization mode
-    mode_min_opset = QDQ_PRECISION_MIN_OPSET.get(quantize_mode, BASE_MIN_OPSET)
+    # Normalize quantize_mode to handle variants like "int4_awq", "nvfp4", etc.
+    normalized_mode = _normalize_quantize_mode_for_opset(quantize_mode)
+    mode_min_opset = QDQ_PRECISION_MIN_OPSET.get(normalized_mode, BASE_MIN_OPSET)
 
     # Determine target opset version
     if opset is not None:
