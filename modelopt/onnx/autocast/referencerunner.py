@@ -30,6 +30,7 @@ import numpy as np
 import onnx
 
 from modelopt.onnx.autocast.logging_config import configure_logging, logger
+from modelopt.onnx.quantization.calib_utils import CalibrationDataProvider
 from modelopt.onnx.quantization.ort_utils import _prepare_ep_list
 
 configure_logging()
@@ -70,7 +71,13 @@ class ReferenceRunner:
 
     def _load_inputs_from_npz(self, input_data_path):
         """Load inputs from NPZ format."""
-        return [np.load(input_data_path)]
+        calib_data = np.load(input_data_path)
+
+        if isinstance(calib_data, np.lib.npyio.NpzFile):
+            # Wrap data into a CalibDataProvider to support a single NPZ file containing data from multiple batches
+            data_loader = {key: calib_data[key] for key in calib_data.files}
+            return CalibrationDataProvider(self.model, data_loader).calibration_data_list
+        return [calib_data]
 
     def _validate_inputs(self, data_loader):
         """Validate that input names and shapes match the model."""

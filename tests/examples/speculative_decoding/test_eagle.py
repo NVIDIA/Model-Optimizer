@@ -17,7 +17,9 @@ import json
 
 import pytest
 import safetensors.torch
+import torch
 from _test_utils.examples.run_command import run_example_command
+from packaging.version import Version
 
 from modelopt.torch.export.plugins.hf_spec_export import LLAMA_EAGLE_SINGLE_LAYER
 
@@ -29,8 +31,17 @@ def eagle_output_dir(tmp_path_factory):
 
 
 # fmt: off
-def test_llama_eagle3(tiny_llama_path, num_gpus, tiny_daring_anteater_path, tmp_path, eagle_output_dir):
-    """Test Eagle3 training with a tiny llama model."""
+@pytest.mark.parametrize("cp_size", [1, 2])
+def test_llama_eagle3(tiny_llama_path, tiny_daring_anteater_path, tmp_path, eagle_output_dir, cp_size):
+    """Test Eagle3 training with a tiny llama model, using different cp_size values."""
+    available_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    if cp_size == 2 and available_gpus < 2:
+        pytest.skip("cp_size=2 requires at least 2 GPUs, but only {} found.".format(available_gpus))
+    if cp_size == 2 and not (
+        Version(torch.__version__) > Version("2.7.0")
+        and Version(torch.__version__) < Version("2.9.0")
+    ):
+        pytest.skip("cp_size=2 requires torch 2.8.0")
     # Create an ultra-tiny EAGLE config for testing to reduce memory usage
     tiny_eagle_config = {
         "max_position_embeddings": 128,
@@ -42,7 +53,7 @@ def test_llama_eagle3(tiny_llama_path, num_gpus, tiny_daring_anteater_path, tmp_
     }
 
     # Write the tiny config to a temporary file
-    config_file = tmp_path / "tiny_eagle_config.json"
+    config_file = tmp_path / f"tiny_eagle_config_cp{cp_size}.json"
     with open(config_file, "w") as f:
         json.dump(tiny_eagle_config, f)
 
@@ -53,11 +64,11 @@ def test_llama_eagle3(tiny_llama_path, num_gpus, tiny_daring_anteater_path, tmp_
             "--data", tiny_daring_anteater_path,
             "--num_epochs", "1",
             "--lr", "1e-5",
-            "--num_gpu", str(num_gpus),
             "--mode", "eagle3",
             "--eagle_config", str(config_file),
-            "--output_dir", eagle_output_dir / "eagle-tinyllama",
+            "--output_dir", eagle_output_dir / f"eagle-tinyllama-cp{cp_size}",
             "--training_seq_len", "128", # Match max_position_embeddings
+            "--cp_size", str(cp_size),
         ],
         "speculative_decoding",
     )
@@ -68,7 +79,7 @@ def test_ar_validate(eagle_output_dir):
     run_example_command(
         [
             "python", "./scripts/ar_validate.py",
-            "--model_path", eagle_output_dir / "eagle-tinyllama",
+            "--model_path", eagle_output_dir / "eagle-tinyllama-cp1",
             "--osl", "20",
             "--num_samples", "10",
             "--steps", "3"
@@ -82,7 +93,7 @@ def test_export_hf_checkpoint(eagle_output_dir):
     run_example_command(
         [
             "python", "./scripts/export_hf_checkpoint.py",
-            "--model_path", eagle_output_dir / "eagle-tinyllama",
+            "--model_path", eagle_output_dir / "eagle-tinyllama-cp1",
             "--export_path", eagle_output_dir / "eagle-tinyllama-export",
         ],
         "speculative_decoding",

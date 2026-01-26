@@ -13,6 +13,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add standalone type inference option (``--use_standalone_type_inference``) in ONNX AutoCast as an alternative to ONNX's ``infer_shapes``. This experimental feature performs type-only inference without shape inference, useful as a workaround when shape inference fails or to avoid unnecessary shape inference overhead.
 - Add support for Kimi K2 Thinking model quantization from the original int4 checkpoint.
 - Add support for ``params`` constraint based automatic neural architecture search in Minitron pruning (``mcore_minitron``) as an alternative to manual pruning (using ``export_config``). See `examples/pruning/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning>`_ for more details on its usage.
+- Add support for calibration data with multiple samples in ``npz`` format in the ONNX Autocast workflow.
 
 0.41 (2026-01-19)
 ^^^^^^^^^^^^^^^^^

@@ -27,6 +27,7 @@ import torch
 import torch.distributed
 from huggingface_hub import snapshot_download
 from torch import nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from transformers.cache_utils import DynamicCache
 
 KIMI_K2_REPO_ID = "moonshotai/Kimi-K2-Thinking"
@@ -439,3 +440,31 @@ def _setup_kimi_k2_decoder():
     kimi_k2_module.DeepseekV3Attention.forward = patched_fwd_with_lazy_rope_init
 
     return getattr(kimi_k2_module, "DeepseekV3DecoderLayer")
+
+
+def get_ttt_msk_func(seq_length, ttt_step):
+    """Return mask function for Eagle3 Training Time Test."""
+
+    def ttt_msk_func(b, h, q_idx, kv_idx):
+        mask = kv_idx <= (q_idx - ttt_step)
+        for i in range(1, ttt_step + 1):
+            mask_block_i = (kv_idx == q_idx + i * seq_length - (ttt_step - i)) & (
+                kv_idx >= seq_length * i
+            )
+            mask = mask | mask_block_i
+        return mask
+
+    return ttt_msk_func
+
+
+@contextlib.contextmanager
+def enable_cp_ttt_patch():
+    """Context manager to enable CP TTT patch."""
+    import modelopt.torch.speculative.plugins.transformers
+
+    modelopt.torch.speculative.plugins.transformers.ENABLE_CP_TTT_PATCH = True
+    with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
+        try:
+            yield
+        finally:
+            modelopt.torch.speculative.plugins.transformers.ENABLE_CP_TTT_PATCH = False
