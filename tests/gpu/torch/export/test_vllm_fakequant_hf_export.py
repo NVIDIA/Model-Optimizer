@@ -48,7 +48,7 @@ def test_hf_vllm_export(tmp_path, quant_cfg):
             model(input_ids)
 
     model = mtq.quantize(model, quant_cfg, forward_loop)
-
+    quantizer_state_dict_before = mtq.utils.get_quantizer_state_dict(model)
     model_state_dict = deepcopy(model.state_dict())
 
     # Export directory
@@ -59,8 +59,10 @@ def test_hf_vllm_export(tmp_path, quant_cfg):
     export_hf_vllm_fq_checkpoint(model, export_dir=export_dir)
 
     # check if quant_amax.pth file exists
-    quant_amax_file = export_dir / "quant_amax.pth"
-    assert quant_amax_file.exists(), f"quant_amax.pth file should be created in {export_dir}"
+    modelopt_state_file = export_dir / "vllm_fq_modelopt_state.pth"
+    assert modelopt_state_file.exists(), (
+        f"vllm_fq_modelopt_state.pth file should be created in {export_dir}"
+    )
 
     # make sure hf_quant_config.json file does not exist
     hf_quant_config_file = export_dir / "hf_quant_config.json"
@@ -73,21 +75,19 @@ def test_hf_vllm_export(tmp_path, quant_cfg):
     model_after = model_after.cuda()
     model_after.eval()
     model_after_state_dict = model_after.state_dict()
-    amax_state_dict = {}
     for key, param in model_state_dict.items():
-        if key.endswith("_amax"):
-            amax_state_dict[key] = param
-            continue
+        if "quantizer" not in key:
+            assert torch.allclose(param, model_after_state_dict[key], atol=1e-6), (
+                f"Weight mismatch for {key}: "
+                f"before shape={param.shape}, after shape={model_after_state_dict[key].shape}, "
+                f"max diff={torch.abs(param - model_after_state_dict[key]).max()}"
+            )
 
-        assert torch.allclose(param, model_after_state_dict[key], atol=1e-6), (
-            f"Weight mismatch for {key}: "
-            f"before shape={param.shape}, after shape={model_after_state_dict[key].shape}, "
-            f"max diff={torch.abs(param - model_after_state_dict[key]).max()}"
-        )
-
-    # Verify amax values are correct
-    amax_dict = torch.load(quant_amax_file)
-    assert len(amax_dict) > 0, "amax_dict should not be empty"
-    assert amax_dict.keys() == amax_state_dict.keys(), (
-        "amax keys mismatch between before and after export"
+    # Verify quantizer state dict values are correct
+    quantizer_state_dict = torch.load(modelopt_state_file)["modelopt_state_weights"]
+    assert len(quantizer_state_dict) > 0, (
+        f"modelopt_state_weights should not be empty in {modelopt_state_file}"
+    )
+    assert quantizer_state_dict.keys() == quantizer_state_dict_before.keys(), (
+        "quantizer state dict keys mismatch between before and after export"
     )
