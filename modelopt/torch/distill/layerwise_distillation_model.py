@@ -34,6 +34,25 @@ class LayerwiseDistillationModel(DistillationModel):
     submodule in the teacher.
     """
 
+    def modify(self, *args, **kwargs):
+        """Modify the distillation model."""
+        super().modify(*args, **kwargs)
+
+        # Freeze student layers except those in criterion.
+        self.requires_grad_(False)
+        for student_layer, _ in self._layers_to_loss:
+            student_layer.requires_grad_(True)
+
+        # Make lm heads (if we have them) no-ops to save compute.
+        if hasattr(self, "lm_head"):
+            self._lm_head = self.lm_head
+            self.lm_head = nn.Identity()
+        if hasattr(self._teacher_model, "lm_head"):
+            self._teacher_model._lm_head = self._teacher_model.lm_head
+            self._teacher_model.lm_head = nn.Identity()
+
+        return self
+
     def _register_hooks(self):
         """Register hooks for intermediate tensors from teacher models and the student model."""
         for student_layer, teacher_layer in self._layers_to_loss:
@@ -50,6 +69,12 @@ class LayerwiseDistillationModel(DistillationModel):
         """Export the distillation model."""
         for student_layer, _ in self._layers_to_loss:
             delattr(student_layer, "_teacher_layer")
+
+        if hasattr(self, "_lm_head"):
+            self.lm_head = self._lm_head
+        if hasattr(self._teacher_model, "_lm_head"):
+            self._teacher_model.lm_head = self._teacher_model._lm_head
+
         return super().export()
 
 
