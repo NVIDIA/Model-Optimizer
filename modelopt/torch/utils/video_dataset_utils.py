@@ -91,6 +91,7 @@ def get_video_dataset_dataloader(
     processor: "Qwen3OmniVideoProcessor" = None,
     batch_size: int = 1,
     num_samples: int = 512,
+    cache_dir: str | None = None,
 ) -> DataLoader:
     """Get a dataloader with the dataset name and processor of the target model.
 
@@ -99,17 +100,47 @@ def get_video_dataset_dataloader(
         processor: Processor used for encoding video and text data.
         batch_size: Batch size of the returned dataloader.
         num_samples: Number of samples from the dataset.
+        cache_dir: Directory to cache the processed dataset. Defaults to a temp directory.
+            If the cache exists, it will be loaded instead of reprocessing.
 
     Returns:
         An instance of dataloader.
     """
     assert processor is not None, "Please provide a valid processor."
 
-    dataset = _get_video_dataset(dataset_name, num_samples=num_samples)
-    # Apply the preprocessing function to the dataset
-    processed_dataset = dataset.map(
-        processor.preprocess_function, batched=False, remove_columns=dataset.column_names
-    )
+    # Default cache_dir to temp directory
+    if cache_dir is None:
+        cache_dir = os.path.join(tempfile.gettempdir(), "modelopt_video_dataset_cache")
+
+    processed_dataset = None
+
+    # Try to load from cache
+    if cache_dir is not None:
+        from datasets import load_from_disk
+
+        cache_path = os.path.join(cache_dir, f"{dataset_name}_n{num_samples}_processed")
+        if os.path.exists(cache_path):
+            try:
+                processed_dataset = load_from_disk(cache_path)
+                print(f"Loaded processed dataset from cache: {cache_path}")
+            except Exception as e:
+                print(f"Failed to load cache from {cache_path}: {e}. Reprocessing...")
+                processed_dataset = None
+
+    # Process dataset if not loaded from cache
+    if processed_dataset is None:
+        dataset = _get_video_dataset(dataset_name, num_samples=num_samples)
+        # Apply the preprocessing function to the dataset
+        processed_dataset = dataset.map(
+            processor.preprocess_function, batched=False, remove_columns=dataset.column_names
+        )
+
+        # Save to cache if cache_dir is provided
+        if cache_dir is not None:
+            os.makedirs(cache_dir, exist_ok=True)
+            # Use num_shards=1 to avoid off-by-one sharding bug with complex nested structures
+            processed_dataset.save_to_disk(cache_path, num_shards=1)
+            print(f"Saved processed dataset to cache: {cache_path}")
 
     # Create DataLoader with the custom collate function
     return DataLoader(
