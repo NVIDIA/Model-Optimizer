@@ -1,7 +1,9 @@
+model_dtype: torch.bfloat16 # dtype to cast the model for validate_model
+autocast_dtype: torch.bfloat16 # dtype for torch.autocast for validate_model
 block_size: 8192
 bos_rate: 0.5
-data_column: conversation
-val_dataset_name: train
+data_column: messages
+val_dataset_name: valid
 shuffle_seed: 81436
 seed: 42
 fim_rate: 0
