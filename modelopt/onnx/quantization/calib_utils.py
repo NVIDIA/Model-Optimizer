@@ -38,7 +38,7 @@ class CalibrationDataProvider(CalibrationDataReader):
 
     def __init__(
         self,
-        onnx_path: str,
+        onnx_path: str | onnx.ModelProto,
         calibration_data: CalibrationDataType,
         calibration_shapes: str | None = None,
     ):
@@ -58,7 +58,7 @@ class CalibrationDataProvider(CalibrationDataReader):
         logger.info("Setting up CalibrationDataProvider for calibration")
         # Tensor data is not required to generate the calibration data
         # So even if the model has external data, we don't need to load them here
-        onnx_model = onnx.load(onnx_path)
+        onnx_model = onnx.load(onnx_path) if isinstance(onnx_path, str) else onnx_path
         input_names = get_input_names(onnx_model)
         input_shapes = {} if calibration_shapes is None else parse_shapes_spec(calibration_shapes)
         inferred_input_shapes = get_input_shapes(onnx_model)
