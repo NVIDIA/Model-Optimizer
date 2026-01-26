@@ -128,6 +128,7 @@ def is_model_on_gpu(model) -> bool:
     """Returns if the model is fully loaded on GPUs."""
     return all("cuda" in str(param.device) for param in model.parameters())
 
+
 def get_tokenizer(ckpt_path, trust_remote_code=False):
     """Returns the tokenizer from the model ckpt_path."""
     print(f"Initializing tokenizer from {ckpt_path}")
@@ -142,6 +143,7 @@ def get_tokenizer(ckpt_path, trust_remote_code=False):
         tokenizer.pad_token = tokenizer.eos_token
 
     return tokenizer
+
 
 def quantize_and_export_model(
     args: argparse.Namespace,
@@ -188,7 +190,7 @@ def quantize_and_export_model(
     else:
         print("Model is already quantized, Skipping quantization...")
         quantized_model = model
-    
+
     mtq.print_quant_summary(quantized_model)
     if not model_is_already_quantized:
         print("--------")
@@ -199,11 +201,6 @@ def quantize_and_export_model(
         print(f"example outputs after ptq: {generated_str_after_ptq}")
 
     export_hf_vllm_fq_checkpoint(quantized_model, args.export_path)
-    # from modelopt.torch.quantization.utils import get_quantizer_state_dict
-    # quantized_model.save_pretrained(args.export_path, state_dict=quantized_model.state_dict(), save_modelopt_state=False)
-    # modelopt_state = mto.modelopt_state(quantized_model)
-    # modelopt_state["modelopt_state_weights"] = get_quantizer_state_dict(quantized_model)
-    # torch.save(modelopt_state, f"{args.export_path}/modelopt_state.pth")
     tokenizer.save_pretrained(args.export_path)
     print(f"Model exported to {args.export_path}")
 
