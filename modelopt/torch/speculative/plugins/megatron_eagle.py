@@ -1153,7 +1153,7 @@ class _DynamicEagleGPTModel(EagleModel):
                 ttt_step=ttt_step,
             )
 
-            with TEDotProductAttentionCP(
+            with te_dot_product_attention_with_cp(
                 eagle_inputs["attention_mask"], self.eagle_config.num_attention_heads
             ):
                 _, eagle_logits, eagle_module_input_hidden_states = self._eagle_forward(
@@ -1311,7 +1311,7 @@ class _DynamicEagleGPTModel(EagleModel):
             # [TODO] (chenhany): let the module compute itself
             eagle_inputs["rotary_pos_emb"] = None
 
-            with TEDotProductAttentionCP(
+            with te_dot_product_attention_with_cp(
                 eagle_inputs["attention_mask"], self.eagle_config.num_attention_heads
             ):
                 _, eagle_logits, eagle_next_hidden_states_input = self._eagle_forward(
@@ -1381,7 +1381,7 @@ class MegatronARValidation(AcceptanceRateValidation):
 
 
 @contextmanager
-def TEDotProductAttentionCP(attention_mask: torch.Tensor, num_attention_heads: int):
+def te_dot_product_attention_with_cp(attention_mask: torch.Tensor, num_attention_heads: int):
     """Context manager for TEDotProductAttention with context parallelism.
 
     Context manager that temporarily replace `attention_bias`
@@ -1393,14 +1393,14 @@ def TEDotProductAttentionCP(attention_mask: torch.Tensor, num_attention_heads: i
     if context parallelism is used.
 
     Example:
-        with TEDotProductAttentionCP(attention_mask_tensor, num_attention_heads):
+        with te_dot_product_attention_with_cp(attention_mask_tensor, num_attention_heads):
             outputs = model(...)
 
     Note: This monkey-patches the class method and restores it on exit.
     """
-    from megatron.core.extensions.transformer_engine import TEDotProductAttention as cls
+    from megatron.core.extensions.transformer_engine import TEDotProductAttention
 
-    orig_forward = cls.forward
+    orig_forward = TEDotProductAttention.forward
 
     def _wrapped_forward(self, *args, **kwargs):
         # Build attention_bias from the boolean attention_mask and ensure
@@ -1457,8 +1457,8 @@ def TEDotProductAttentionCP(attention_mask: torch.Tensor, num_attention_heads: i
         return orig_forward(self, *args, **kwargs)
 
     if get_context_parallel_world_size() > 1:
-        cls.forward = _wrapped_forward
+        TEDotProductAttention.forward = _wrapped_forward
     try:
         yield
     finally:
-        cls.forward = orig_forward
+        TEDotProductAttention.forward = orig_forward
