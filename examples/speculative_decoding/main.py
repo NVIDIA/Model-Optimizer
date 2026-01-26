@@ -162,7 +162,9 @@ def train():
     use_offline_training = data_args.offline_data_path is not None
 
     if checkpoint:
-        model = transformers.AutoModelForCausalLM.from_pretrained(checkpoint, torch_dtype="auto")
+        model = transformers.AutoModelForCausalLM.from_pretrained(
+            checkpoint, torch_dtype="auto", trust_remote_code=True
+        )
         tokenizer = transformers.AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
     else:
         # To avoid OOM for large models, we load and convert model on CPU first.
