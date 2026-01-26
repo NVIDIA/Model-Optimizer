@@ -1,0 +1,18 @@
+defaults:
+  - pruning_defaults
+
+activations_log_dir: ${puzzle_dir}/pruning/pruning_scores/ffn_${pruning.activation_hooks_kwargs.method}/${pruning.experiment_id}
+
+pruning_mixin:
+  _target_: modelopt.torch._compress.pruning.ffn_intermediate_pruning_mixin.FFNIntermediatePruningMixIn
+  layer_descriptor:
+    _target_: modelopt.torch._compress.anymodel.models.qwen3_8b.qwen3_8b_model_descriptor.Qwen3_8BFFNIntermediateLayerDescriptor
+
+hook_class: ${get_object:modelopt.torch.nas.plugins.megatron_hooks.base_hooks.IterativeChannelContributionHook}
+activation_hooks_kwargs:
+  method: iterative
+  target_layer: "mlp.down_proj"
+  layer_input_descriptors_path:
+
+intermediate_size_list: [256]  # teacher_intermediate_size is 14336
+mlp_init_mode: "PruneByActivationsLog"

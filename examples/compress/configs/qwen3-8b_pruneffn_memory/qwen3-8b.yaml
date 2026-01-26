@@ -1,0 +1,113 @@
+defaults:
+  - pruning: ffn_pruning
+  - scoring: ../validate_solutions_defaults
+  - realize_model: ../validate_solutions_defaults
+  - bypass:
+  - override hydra/hydra_logging: disabled
+  - _self_
+
+puzzle_dir: ???
+teacher_dir: ${puzzle_dir}/ckpts/teacher/
+replacement_library_path: ${puzzle_dir}/replacement_library.json
+dataset_path: ???     # path to v0.4_mini
+
+skip_realize_model: false
+
+descriptor: qwen3
+
+build_replacement_library:
+  add_ffn_no_ops: true
+  add_attention_no_ops: true
+
+calc_subblock_stats:
+  batch_sizes: [64, 96, 128]
+  prefill_seq_len: 4096
+  generation_seq_len: 4096
+  num_active_tokens_override:       # Optional override for sequence lengths
+  prefill_queue_size: 0
+  benchmark_iterations:       # Set to a number (e.g., 1000) to enable runtime benchmarking
+  merge_with_existing_stats: false
+  subblock_stats_filename: "subblock_stats.json"
+  moe_stats_filename: "moe_stats.json"
+
+scoring:
+  descriptor: ${descriptor}
+
+  solutions_to_validate:
+  skip_existing_solutions: true
+
+  replacement_library_path: ${replacement_library_path}
+  solutions_path: ${to_path:${puzzle_dir}/single_sequence_replacement_solutions.json}
+  teacher_dir: ${to_path:${teacher_dir}}
+  output_dir: ${puzzle_dir}/single_sequence_replacement_solutions--validation
+
+  eval_samples: 2
+  micro_batch_size: 1
+  dataset_path: ${dataset_path}/valid
+  seed: 42
+  shuffle_seed: 444
+
+mip:
+  single_block_replacement_validation_dir: ${to_path:${scoring.output_dir}}
+  subblock_stats_path: ${to_path:${puzzle_dir}/${calc_subblock_stats.subblock_stats_filename}}
+  output_path: ${to_path:${puzzle_dir}/mip/puzzle_solutions}
+  gathered_metrics_path:
+  puzzle_profile:
+
+  # puzzle_profile:
+  objective: metrics.cosine_embedding_loss_hidden_states
+  bigger_is_better: false
+  num_solutions: 1
+  minimal_diversity: 2
+
+  subblock_stats_args:
+    - batch_size: 96
+      weights_dtype: torch.bfloat16
+      activations_dtype: torch.bfloat16
+      kv_cache_dtype: torch.bfloat16
+
+  report_additional_costs:
+    - stats.memory_mib
+    - stats.num_params
+    - stats.num_kv_heads
+    - stats.has_attention
+    - stats.has_ffn
+    - stats.kv_cache_memory_mib
+    - stats.attention_memory_mib
+    - stats.ffn_memory_mib
+    - stats.ffn_num_params
+    - stats.attention_num_params
+
+  human_constraints:
+    target_memory: 780_000 # 78_000
+
+  mip_constraints:
+  use_greedy_search: false
+  is_multi_layer_puzzle: true
+  metric_overrides:
+  constrain_search_func:
+  max_seconds_per_solution: 60
+
+realize_model:
+  descriptor: ${descriptor}
+
+  teacher_dir: ${to_path:${teacher_dir}}
+  tokenizer_name: ${to_path:${teacher_dir}}
+  replacement_library_path: ${replacement_library_path}
+  save_models: true
+  solutions_path:     # Filled dynamically
+
+  # Validate params
+  skip_validation: false    # To enable validation of the model solution set `skip_validation` as False
+  eval_samples: 2
+  micro_batch_size: 1
+  dataset_path: ${dataset_path}/valid
+  seed: 42
+  shuffle_seed: 444
+
+nccl_timeout_minutes: ${timedelta_minutes:10}
+
+# This section redirects Hydra outputs
+hydra:
+  run:
+    dir: ${puzzle_dir}/hydra_logs/${now:%Y-%m-%d}/${now:%H-%M-%S}
