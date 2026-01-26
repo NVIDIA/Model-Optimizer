@@ -277,19 +277,14 @@ class GPTModelImporter:
             else:
                 prefix = prefix.replace("model", "mtp")
 
-                state_dict = module.state_dict()
-        weight = state_dict.get("weight", None)
-        print(f"mcore weight.shape: {weight.shape}")
-        weight_scale = state_dict.get("weight_quantizer._scale", None)
+        state_dict = module.state_dict()
+        # TODO handle weight_scale
+        #weight_scale = state_dict.get("weight_quantizer._scale", None)
 
-        all_experts = []
+        assert module.num_gemms == num_local_experts, "num_gemms must be equal to num_local_experts in TEGroupedMLP"
         for expert_id in range(init_expert_id, init_expert_id + num_local_experts):
             tensor = self._get_safetensor(prefix.format(expert_id) + ".weight")
-            print(f"HF weight.shape: {tensor.shape}")
-            all_experts.append(tensor)
-        all_experts = torch.cat(all_experts, dim=0)
-        print(f"all_experts.shape: {all_experts.shape}")
-        state_dict["weight"] = all_experts
+            state_dict[f"weight{expert_id}"] = tensor
 
         module.load_state_dict(state_dict)
 
@@ -602,9 +597,9 @@ class GPTModelImporter:
                         layer_pbar.set_description("Importing MoE grouped local experts")
                         num_local_experts = experts.num_local_experts
                         num_global_experts = experts.config.num_moe_experts
-                        print(f"num_local_experts: {num_local_experts}")
-                        print(f"num_global_experts: {num_global_experts}")
+                        assert num_local_experts == num_global_experts, "num_local_experts must be equal to num_global_experts during MoE import"
 
+                        '''
                         if parallel_config is not None:
                             etp_size = get_expert_tensor_parallel_world_size()
                             # etp_rank = get_expert_tensor_parallel_rank() # this gives group rank
@@ -613,9 +608,11 @@ class GPTModelImporter:
                             print(f"etp_rank: {etp_rank}")
                             assert num_local_experts * etp_size == num_global_experts
                             init_index = etp_rank * num_local_experts
+                        '''
+                        init_index = 0
 
                         self.rules["experts.linear_fc1"](experts.linear_fc1, layer_id, init_expert_id=init_index, num_local_experts=num_local_experts)
-                        self.rules["experts.linear_fc2"](experts.linear_fc2, layer_id, init_expert_id=init_index, num_local_experts=num_local_experts   )
+                        self.rules["experts.linear_fc2"](experts.linear_fc2, layer_id, init_expert_id=init_index, num_local_experts=num_local_experts)
 
                 # We only support either EP or ETP for now
                 elif get_expert_tensor_parallel_world_size() > 1:
@@ -670,7 +667,6 @@ class GPTModelImporter:
                     ),
                     flush=True,
                 )
-            break # TODO: remove this
 
         # Final layernorm
         if hasattr(model.decoder, "final_layernorm") and model.decoder.final_layernorm:
