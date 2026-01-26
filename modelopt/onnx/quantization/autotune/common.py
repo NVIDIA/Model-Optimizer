@@ -531,11 +531,18 @@ class PatternCache:
                         else:
                             # Existing scheme is better, skip new one
                             too_similar = True
+                            if scheme.latency_ms < existing_scheme.latency_ms:
+                                # New scheme is better, mark existing for replacement
+                                schemes_to_replace.append(existing_scheme)
                             break
 
                 if existing_to_remove is not None:
                     filtered_schemes.remove(existing_to_remove)
                 if not too_similar:
+                    filtered_schemes.append(scheme)
+                elif schemes_to_replace:
+                    for scheme_to_replace in schemes_to_replace:
+                        filtered_schemes.remove(scheme_to_replace)
                     filtered_schemes.append(scheme)
 
             sorted_schemes = filtered_schemes
