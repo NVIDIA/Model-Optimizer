@@ -220,7 +220,7 @@ def convert_to_f16(
                                   infer_shapes. This is a workaround (WAR) when only type inference is
                                   needed without shape inference. Default: False.
         opset: Target ONNX opset version. If None, uses default minimum opset based on precision type
-               (22 for bf16, 13 for fp16) and Q/DQ node requirements. The opset may be automatically
+               (22 for bf16, 19 for fp16) and Q/DQ node requirements. The opset may be automatically
                increased if Q/DQ nodes in the model require a higher version (e.g., FP8 requires 19,
                INT4 requires 21, NVFP4 requires 23).
     """
