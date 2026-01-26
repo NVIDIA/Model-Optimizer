@@ -42,6 +42,7 @@ from modelopt.onnx.export import (
 )
 from modelopt.onnx.quantization.qdq_utils import qdq_to_dq, replace_zero_scale_with_smallest_nonzero
 from modelopt.onnx.utils import (
+    check_model_uses_external_data,
     get_input_names,
     get_input_shapes,
     get_node_names,
@@ -55,7 +56,6 @@ from modelopt.torch.utils import flatten_tree, standardize_named_model_args
 from modelopt.torch.utils._pytree import TreeSpec
 
 from ..utils.onnx_optimizer import Optimizer
-from .onnx_utils import check_model_uses_external_data
 
 ModelMetadata = dict[str, Any]
 ModelType = Any

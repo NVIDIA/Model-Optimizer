@@ -15,6 +15,7 @@
 
 """Utility functions related to onnx."""
 
+import copy
 import io
 import os
 import tempfile
@@ -552,7 +553,7 @@ def duplicate_shared_constants(onnx_model: onnx.ModelProto) -> tuple[onnx.ModelP
     return onnx_model, is_modified
 
 
-def check_model(model: onnx.ModelProto) -> onnx.ModelProto:
+def check_model(model: onnx.ModelProto) -> None:
     """Checks if the given model is valid."""
     if model.ByteSize() > (2 * (1024**3)):  # 2GB limit
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -561,10 +562,8 @@ def check_model(model: onnx.ModelProto) -> onnx.ModelProto:
             onnx_tmp_path = os.path.join(temp_dir, f"model_{unique_id}.onnx")
             save_onnx(model, onnx_tmp_path, save_as_external_data=True)
             onnx.checker.check_model(onnx_tmp_path)
-            return onnx.load(onnx_tmp_path)
     else:
         onnx.checker.check_model(model)
-        return model
 
 
 def find_lowest_common_ancestor(node1: Node, node2: Node) -> tuple[str | None, int, int]:
@@ -658,15 +657,16 @@ def save_onnx(model: onnx.ModelProto, onnx_path: str, save_as_external_data: boo
 
     # Set ir_version to 10, remove it once ORT supports ir_version 11
     model.ir_version = 10
-
     if save_as_external_data:
         external_data_path = os.path.basename(onnx_path) + "_data"
         if os.path.exists(external_data_path):
             logger.warning(f"Removing existing external data file: {external_data_path}")
             os.remove(external_data_path)
 
+        # Copy so the onnx.ModelProto object will not be modified
+        model_copy = copy.deepcopy(model)
         onnx.save_model(
-            model,
+            model_copy,
             onnx_path,
             save_as_external_data=True,
             all_tensors_to_one_file=True,
@@ -694,6 +694,21 @@ def get_opset_version(model: onnx.ModelProto) -> int:
         if not opset.domain or opset.domain in ["ai.onnx", "ai.onnx.contrib", "trt.plugins"]
     ]
     return ai_onnx_domain[0].version
+
+
+def check_model_uses_external_data(model: onnx.ModelProto) -> bool:
+    """Checks if the model uses external data.
+
+    Args:
+        model: Loaded in-memory onnx ModelProto.
+
+    Returns:
+        True if any initializer tensor has data_location set to EXTERNAL.
+    """
+    return any(
+        init.HasField("data_location") and init.data_location == onnx.TensorProto.EXTERNAL
+        for init in model.graph.initializer
+    )
 
 
 def bfloat16_to_float32(bf16_array):

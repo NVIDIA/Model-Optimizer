@@ -175,7 +175,7 @@ class PrecisionConverter:
             onnx.ModelProto: The converted mixed precision model.
         """
         try:
-            self.model = onnx_utils.check_model(self.model)
+            onnx_utils.check_model(self.model)
         except onnx.checker.ValidationError as e:
             logger.error(f"Internal error: onnx.checker failed on input model {e}")
             raise Exception(
