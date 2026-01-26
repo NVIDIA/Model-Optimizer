@@ -9,7 +9,7 @@ activation_hooks_kwargs: ???
 descriptor: ${descriptor}
 
 # Data:
-eval_samples: 100
+eval_samples: 1000 # default is 10000
 micro_batch_size: 4
 dataset_path: ${dataset_path}
 val_dataset_name: train
