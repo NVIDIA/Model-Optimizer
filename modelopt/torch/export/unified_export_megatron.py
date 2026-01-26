@@ -487,16 +487,16 @@ class GPTModelExporter:
         qformat: str = self._get_quantization_format(module)
         block_size = get_weight_block_size(module)
 
-        if hasattr(module, "weight") and module.weight is not None:
+        if hasattr(module, "weight") and module.weight is not None and module.weight.numel() > 0:
             weight = module.weight.to(dtype).cpu()
             name_to_value["weight"] = weight
         else:
             return name_to_value, qformat, block_size
 
-        if hasattr(module, "bias") and module.bias is not None:
+        if hasattr(module, "bias") and module.bias is not None and module.bias.numel() > 0:
             name_to_value["bias"] = module.bias.to(dtype).cpu()
 
-        if hasattr(module, "expert_bias") and module.expert_bias is not None:
+        if hasattr(module, "expert_bias") and module.expert_bias is not None and module.expert_bias.numel() > 0:
             name_to_value["expert_bias"] = module.expert_bias.to(dtype).cpu()
 
         if qformat == QUANTIZATION_NONE:

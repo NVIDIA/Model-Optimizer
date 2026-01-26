@@ -92,8 +92,8 @@ nemotron_h_causal_lm_import: dict[str, CustomModuleMapping] = {
     "mtp.eh_proj": NameRemapping("mtp.layers.{}.eh_proj.",  {"is_mtp": True}),
     "mtp.final_layernorm": NameRemapping("mtp.layers.{}.final_layernorm.",  {"is_mtp": True}),
     # Grouped local experts in MTP
-    "experts.linear_fc1": GroupedMLPMerging("mtp.layers.{}.experts.{{}}.up_proj", COL_ETP | {"is_mtp": True}),
-    "experts.linear_fc2": GroupedMLPMerging("mtp.layers.{}.experts.{{}}.down_proj", ROW_ETP | {"is_mtp": True}),
+    "experts.linear_fc1": GroupedMLPMerging("mtp.layers.{}.mixer.experts.{{}}.up_proj", COL_ETP | {"is_mtp": True}),
+    "experts.linear_fc2": GroupedMLPMerging("mtp.layers.{}.mixer.experts.{{}}.down_proj", ROW_ETP | {"is_mtp": True}),
 
 }
 
