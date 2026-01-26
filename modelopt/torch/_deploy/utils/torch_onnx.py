@@ -31,7 +31,6 @@ from onnx import ModelProto
 from onnxconverter_common import convert_float_to_float16
 from torch.nn.parallel import DataParallel, DistributedDataParallel
 
-from modelopt.onnx.autocast.convert import convert_to_f16
 from modelopt.onnx.export import (
     FP8QuantExporter,
     INT4QuantExporter,
@@ -563,35 +562,23 @@ def get_onnx_bytes_and_metadata(
     # TODO: Remove manual ir_version change once ORT supports ir_version 11
     onnx_opt_graph.ir_version = 10
 
-    # Convert dummy TRT_FP4QDQ nodes to 2DQ format if the model is quantized in FP4 mode
-    # Or convert weights to MXFP8 format if the model is quantized in MXFP8 mode
-    if is_int4_quantized(model) or is_fp4_quantized(model) or is_mxfp8_quantized(model):
-        onnx_opt_graph = quantize_weights(model, onnx_opt_graph)
+    onnx_opt_graph = quantize_weights(model, onnx_opt_graph)
 
     if dq_only:
         onnx_opt_graph = qdq_to_dq(onnx_opt_graph)
 
-    try:
-        # TODO: Single-precision torch model assumed
-        param_dtype = next(model.parameters()).dtype
-    except StopIteration:
-        param_dtype = torch.float32
-    if weights_dtype in ["fp16", "bf16"] and param_dtype == torch.float32:
-        if is_int4_quantized(model) or is_mxfp8_quantized(model):
-            assert weights_dtype == "fp16", "BF16 + MXFP8/INT4 mixed precision is not supported yet"
-            onnx_opt_graph = convert_float_to_float16(
-                onnx_opt_graph,
-                keep_io_types=False,
-                disable_shape_infer=True,
-                check_fp16_ready=False,
-            )
-        else:
-            onnx_opt_graph = convert_to_f16(
-                onnx_opt_graph, low_precision_type=weights_dtype, keep_io_types=False
-            )
+    assert weights_dtype == "fp16", (
+        "Only FP16 weights are supported for torch quantization -> onnx export"
+    )
+    onnx_opt_graph = convert_float_to_float16(
+        onnx_opt_graph,
+        keep_io_types=False,
+        disable_shape_infer=True,
+        check_fp16_ready=False,
+    )
 
-        # TensorRT expects all scales to be postive
-        onnx_opt_graph = replace_zero_scale_with_smallest_nonzero(onnx_opt_graph)
+    # TensorRT expects all scales to be postive
+    onnx_opt_graph = replace_zero_scale_with_smallest_nonzero(onnx_opt_graph)
 
     # If the onnx model contains external data store the external tensors in one file and save the onnx model
     if has_external_data(onnx_save_path):
