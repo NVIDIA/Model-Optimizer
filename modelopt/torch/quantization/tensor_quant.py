@@ -574,21 +574,23 @@ class StaticBlockwiseFP4FakeQuantFunction(Function):
         skip_scale_quant,
         out_dtype,
         pass_through_bwd=False,
+        amax=None,
     ):
         """Forward method."""
-        _save_for_backward_if_needed(ctx, pass_through_bwd, x, scale)
+        _save_for_backward_if_needed(ctx, pass_through_bwd, x, scale if scale is not None else amax)
         return triton_kernel.static_blockwise_fp4_fake_quant(
             x,
             scale,
             scale_fp8_quant_amax,
             skip_scale_quant,
             out_dtype,
+            amax,
         )
 
     @staticmethod
     def backward(ctx, grad_outputs):
         """Implements straight through estimation with clipping."""
-        return _fake_quant_backward_function(ctx, grad_outputs, num_args=6)
+        return _fake_quant_backward_function(ctx, grad_outputs, num_args=7)
 
 
 def _tensor_quant(inputs, amax, num_bits=8, unsigned=False, narrow_range=True):

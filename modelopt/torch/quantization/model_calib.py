@@ -197,6 +197,30 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
                     )
 
 
+def _mse_quant_func(x, amax, quantizer):
+    """Quantization function for MSE calibration."""
+    original_amax = quantizer._amax.clone() if hasattr(quantizer, "_amax") else None
+    quantizer._amax = amax
+
+    with (
+        enable_quant(quantizer),
+        disable_calib(quantizer),
+        enable_fake_quant(quantizer),
+    ):
+        if hasattr(quantizer, "_original_shape"):
+            x = quantizer._reset_to_original_shape(x)
+        xq = quantizer(x)
+        if hasattr(quantizer, "_block_reshape_size"):
+            xq = xq.reshape(quantizer._block_reshape_size)
+
+    if original_amax is not None:
+        quantizer._amax = original_amax
+    else:
+        delattr(quantizer, "_amax")
+
+    return xq
+
+
 @torch.no_grad()
 def mse_calibrate(
     model: nn.Module,
@@ -205,6 +229,7 @@ def mse_calibrate(
     step_size: float = 0.1,
     start_multiplier: float = 0.25,
     stop_multiplier: float = 4.0,
+    fp8_scale_sweep: bool = False,
 ):
     """Calibrate the model using MSE-based amax search.
 
@@ -220,6 +245,10 @@ def mse_calibrate(
         step_size: Step size for amax search (default: 0.1).
         start_multiplier: Starting multiplier for amax search (default: 0.25).
         stop_multiplier: Ending multiplier for amax search (default: 4.0).
+        fp8_scale_sweep: If True, sweep over all 128 possible FP8 E4M3 scale values
+            for NVFP4 per-block quantization instead of using multipliers.
+            This is specifically designed for optimizing the FP8-quantized
+            per-block scales in NVFP4 format (default: False).
 
     See :class:`MseCalibConfig <modelopt.torch.quantization.config.MseCalibConfig>` for
     details on the remaining arguments.
@@ -238,27 +267,17 @@ def mse_calibrate(
                 # Get the initial amax from max calibration
                 initial_amax = module._amax.clone().detach()
 
-                def quant_func(x, amax, quantizer=module):
-                    original_amax = quantizer._amax.clone() if hasattr(quantizer, "_amax") else None
-                    quantizer._amax = amax
-
-                    with (
-                        enable_quant(quantizer),
-                        disable_calib(quantizer),
-                        enable_fake_quant(quantizer),
-                    ):
-                        if hasattr(quantizer, "_original_shape"):
-                            x = quantizer._reset_to_original_shape(x)
-                        xq = quantizer(x)
-                        if hasattr(quantizer, "_block_reshape_size"):
-                            xq = xq.reshape(quantizer._block_reshape_size)
-
-                    if original_amax is not None:
-                        quantizer._amax = original_amax
-                    else:
-                        delattr(quantizer, "_amax")
-
-                    return xq
+                is_nvfp4_static = (
+                    module.is_static_block_quant
+                    and module._num_bits == (2, 1)
+                    and module._block_sizes is not None
+                    and module._block_sizes.get("scale_bits") == (4, 3)
+                )
+                if fp8_scale_sweep and not is_nvfp4_static:
+                    warnings.warn(
+                        f"fp8_scale_sweep is enabled but quantizer '{name}' is not NVFP4 static "
+                        "block quantization. fp8_scale_sweep will be ignored for this quantizer."
+                    )
 
                 # Create MSE calibrator with quant_func
                 module._calibrator = MseCalibrator(
@@ -267,7 +286,8 @@ def mse_calibrate(
                     step_size=step_size,
                     start_multiplier=start_multiplier,
                     stop_multiplier=stop_multiplier,
-                    quant_func=quant_func,
+                    quant_func=partial(_mse_quant_func, quantizer=module),
+                    fp8_scale_sweep=fp8_scale_sweep and is_nvfp4_static,
                 )
 
     # Identify weight quantizers by checking if they have corresponding weight parameters
