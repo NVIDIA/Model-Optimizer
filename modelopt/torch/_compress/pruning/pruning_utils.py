@@ -191,10 +191,11 @@ def _cache_activations_log(mlp_init_config: dict[str, Any]) -> None:
         assert "activations_log_dir" in mlp_init_config
         activations_log_dir = mlp_init_config["activations_log_dir"]
         print(f"Loading activations_log from {activations_log_dir}")
+        # Only load rank_*.pth files to avoid loading hook_states_*.pth checkpoint files
         ACTIVATIONS_LOG.update(
             {
                 module_name: module_log
-                for p in Path(activations_log_dir).glob("*.pth")
+                for p in Path(activations_log_dir).glob("rank_*.pth")
                 for module_name, module_log in torch.load(p).items()
             }
         )

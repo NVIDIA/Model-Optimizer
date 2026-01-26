@@ -140,7 +140,7 @@ class ScoringCheckpointManager:
                 loaded_count = 0
                 for module_name, hook in activation_hooks.items():
                     if module_name in hook_states:
-                        hook.load_state(hook_states[module_name])
+                        hook.load_state_dict(hook_states[module_name])
                         loaded_count += 1
 
                         # Log progress info if available (only for a few hooks to avoid spam)
