@@ -58,24 +58,20 @@ lm_eval --model local-completions --tasks gsm8k --model_args model=<model_name>,
 
 ## Load QAT/PTQ model and serve in vLLM (WIP)
 
-Overwrite the calibrated amax value with prepared values from either QAT/PTQ.
+Step 1: export the model with bf16 weights and quantizer state. To export the model:
 
-Step 1: export the model with bf16 weights and amax values. To export the model:
+- For **HF** models, use `hf_ptq_export.py`:
 
-- For **HF** models, you can use `modelopt.torch.export.export_hf_vllm_fq_checkpoint`:
+```bash
+python  hf_ptq_export.py\
+  --pyt_ckpt_path <MODEL_PATH> \
+  --quant_cfg NVFP4_DEFAULT_CFG \
+  --export_path <EXPORT_DIR> \
+  --trust_remote_code
+```
 
-  ```python
-  import torch
-  from modelopt.torch.export import export_hf_vllm_fq_checkpoint
-
-  with torch.inference_mode():
-      export_hf_vllm_fq_checkpoint(
-          model,  # The quantized model.
-          export_dir,  # The directory where the exported files will be stored.
-      )
-  ```
-
-  Or run the example script `examples/llm_ptq/hf_ptq.py` with the `--export_vllm_fq` **flag** to export a vLLM-fakequant-compatible ModelOpt state (it generates `vllm_fq_modelopt_state.pth`, which you can use via `MODELOPT_STATE_PATH`).
+  This creates `<EXPORT_DIR>/vllm_fq_modelopt_state.pth` (ModelOpt quantizer state for vLLM fake-quant reload) and saves the HF-exported model under `<EXPORT_DIR>` (config/tokenizer/weights).
+  Note: `--pyt_ckpt_path` can point to either an HF checkpoint or a ModelOpt-saved checkpoint (e.g., a QAT/QAD checkpoint produced by `examples/llm_qat/main.py`). If the input checkpoint is already quantized, the script will **skip re-quantization** and only export artifacts for vLLM fakequant reload.
 
 - For **MCore** models, use `modelopt.torch.export.export_mcore_gpt_to_hf_vllm_fq`:
 
