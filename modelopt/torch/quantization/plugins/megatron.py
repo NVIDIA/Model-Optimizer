@@ -471,7 +471,7 @@ class _RealQuantMegatronParallelLinear(RealQuantLinear):
                 shard_axis_dict[k] = self._scale_tensor_shard_axis
         return shard_axis_dict
 
-    def modelopt_post_restore(self, prefix: str = ""):
+    def modelopt_post_restore(self, prefix: str = "", *args, **kwargs):
         """Post restore to correctly configure the realquant scales.
 
         ModelOpt restores the TensorQuantizer states such as `_amax` and `_pre_quant_scale` to their
@@ -732,7 +732,7 @@ if HAS_TE:
             value = self.v_bmm_quantizer(value)
             return super().forward(query, key, value, *args, **kwargs)
 
-        def modelopt_post_restore(self, name=""):
+        def modelopt_post_restore(self, name="", *args, **kwargs):
             """Restore quantizer states after model loading."""
             for tq in [self.q_bmm_quantizer, self.k_bmm_quantizer, self.v_bmm_quantizer]:
                 # TODO: Add support for non-scalar states such as
