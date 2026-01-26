@@ -1201,6 +1201,8 @@ class GPTQLiteConfig(QuantizeAlgorithmConfig):
     The default values are taken from the official GPTQ implementation:
     https://github.com/IST-DASLab/FP-Quant/blob/d2e3092f968262c4de5fb050e1aef568a280dadd/src/quantization/gptq.py#L35
 
+    Note: This feature is currently experimental and may not translate to improved accuracy as expected.
+
 
     """
 

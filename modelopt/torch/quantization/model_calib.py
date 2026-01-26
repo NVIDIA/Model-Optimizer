@@ -1356,6 +1356,8 @@ def gptq_lite(
 
     See :class:`GPTQLiteConfig <modelopt.torch.quantization.config.GPTQLiteConfig>` for
     details on the remaining arguments.
+
+    Note: This feature is currently experimental and may not translate to improved accuracy as expected.
     """
     # Dictionary to store hessian matrices: {layer_name: {"hessian": Tensor, "n_samples": int}}
     hessian_state = {}
