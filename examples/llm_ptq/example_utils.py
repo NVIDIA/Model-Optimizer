@@ -15,6 +15,7 @@
 
 import copy
 import glob
+import inspect
 import os
 import shutil
 import sys
@@ -129,6 +130,53 @@ def is_nemotron_vl(model_or_config):
 
     architectures = getattr(config, "architectures", [])
     return any("nemotron" in arch.lower() for arch in architectures)
+
+
+def create_vlm_calibration_loop(full_model, calib_dataloader):
+    """Create a calibration loop for VLM models that handles multimodal inputs.
+
+    This function inspects the model's forward signature and filters batch kwargs
+    to only include supported parameters, then calls the appropriate forward method.
+
+    Args:
+        full_model: The full VLM model
+        calib_dataloader: DataLoader yielding multimodal batches
+
+    Returns:
+        A calibration function that can be passed to mtq.quantize()
+    """
+    # Import here to avoid circular dependency
+    from nemotron_vl_calib import safe_nemotron_vl_forward
+
+    def calibrate_loop(_model):
+        # Inspect model's forward signature to determine what parameters it accepts
+        forward_params = inspect.signature(full_model.forward).parameters
+        accepts_kwargs = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in forward_params.values()
+        )
+        allowed_keys = set(forward_params.keys())
+
+        full_model.eval()
+        with torch.no_grad():
+            for batch in calib_dataloader:
+                # Filter batch to only include parameters the model accepts
+                if accepts_kwargs:
+                    call_kwargs = batch
+                else:
+                    call_kwargs = {k: v for k, v in batch.items() if k in allowed_keys}
+                # Remove None values
+                call_kwargs = {k: v for k, v in call_kwargs.items() if v is not None}
+
+                # Use safe_nemotron_vl_forward for Nemotron Nano VL (embedding-injection style)
+                # For other VLMs (like Nemotron-Parse), use standard forward
+                if hasattr(full_model, "img_context_token_id"):
+                    # Nemotron Nano VL style
+                    safe_nemotron_vl_forward(full_model, call_kwargs)
+                else:
+                    # Standard encoder-decoder or other VLM architectures
+                    full_model(**call_kwargs)
+
+    return calibrate_loop
 
 
 def build_quant_cfg(
