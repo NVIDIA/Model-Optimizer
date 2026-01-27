@@ -129,7 +129,6 @@ class GPTModelExporter:
             self.moe_router_dtype = torch.float32
         elif moe_router_dtype == "fp64":
             self.moe_router_dtype = torch.float64
-        print(f"moe_router_dtype: {self.moe_router_dtype}")
 
         # If multimodal, extra the text_config
         self._hf_text_config = getattr(self._hf_config, "text_config", self._hf_config)
