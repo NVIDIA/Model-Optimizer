@@ -129,7 +129,6 @@ class GPTModelExporter:
             self.moe_router_dtype = torch.float32
         elif moe_router_dtype == "fp64":
             self.moe_router_dtype = torch.float64
-        print(f"moe_router_dtype: {self.moe_router_dtype}")
 
         # If multimodal, extra the text_config
         self._hf_text_config = getattr(self._hf_config, "text_config", self._hf_config)
@@ -1224,7 +1223,7 @@ def export_mcore_gpt_to_hf(
     export_extra_modules: bool = False,
     dtype: torch.dtype = torch.bfloat16,
     export_dir: Path | str = tempfile.gettempdir(),
-    moe_router_dtype: torch.dtype | None = None,
+    moe_router_dtype: str | None = None,
 ):
     """Export Megatron Core GPTModel to unified checkpoint and save to export_dir.
 

@@ -191,7 +191,7 @@ class GPTModelImporter:
                 tensor = expanded_tensor
             state_dict["weight"] = tensor.view(dtype=weight.dtype).to(device=weight.device)
         else:
-            state_dict["weight"] = tensor.to(dtype=self.dtype).to(device=weight.device)
+            state_dict["weight"] = tensor.to(dtype=dtype).to(device=weight.device)
 
         # Handle the rest of the state_dict.
         for key, val in module.state_dict().items():
@@ -566,8 +566,7 @@ class GPTModelImporter:
 
         if not isinstance(layer.mlp, IdentityOp):
             if "MoE" in str(type(layer.mlp)):
-                layer_pbar.set_description("Importing MoE")
-                print(f"moe_router_dtype: {self.moe_router_dtype}")
+                layer_pbar.set_description(f"Importing MoE with moe_router_dtype: {self.moe_router_dtype}")
                 self.rules["router"](
                     layer.mlp.router, layer_id, dtype=self.moe_router_dtype
                 )
