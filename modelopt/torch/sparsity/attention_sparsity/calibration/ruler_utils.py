@@ -99,8 +99,10 @@ DEPTHS = [
     100,
 ]
 
-# Data directory for RULER calibration files (downloaded via download_ruler_data.sh)
-DATA_DIR = Path(__file__).parent / "data"
+# Data directory for RULER calibration files (in examples folder)
+# Downloaded via examples/llm_sparsity/attention_sparsity/download_ruler_data.sh
+_REPO_ROOT = Path(__file__).parent.parent.parent.parent.parent.parent
+DATA_DIR = _REPO_ROOT / "examples" / "llm_sparsity" / "attention_sparsity" / "data"
 RULER_URLS_FILE = DATA_DIR / "PaulGrahamEssays_URLs.txt"
 ESSAYS_DIR = DATA_DIR / "essays"
 
@@ -109,11 +111,10 @@ def _get_data_dir() -> Path:
     """Get data directory for RULER data.
 
     Returns:
-        Path to data directory under calibration/ (created if doesn't exist)
+        Path to data directory under examples/llm_sparsity/attention_sparsity/ (created if doesn't exist)
     """
-    data_dir = Path(__file__).parent / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    return data_dir
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    return DATA_DIR
 
 
 def _load_paul_graham_essays_from_files() -> str:
@@ -132,7 +133,7 @@ def _load_paul_graham_essays_from_files() -> str:
         raise RuntimeError(
             f"Essays directory not found at {ESSAYS_DIR}.\n"
             "Please run the download script first:\n"
-            "  bash modelopt/torch/sparsity/attention_sparsity/calibration/download_ruler_data.sh"
+            "  bash examples/llm_sparsity/attention_sparsity/download_ruler_data.sh"
         )
 
     essay_files = list(ESSAYS_DIR.glob("*.txt"))
@@ -140,7 +141,7 @@ def _load_paul_graham_essays_from_files() -> str:
         raise RuntimeError(
             f"No essay files found in {ESSAYS_DIR}.\n"
             "Please run the download script first:\n"
-            "  bash modelopt/torch/sparsity/attention_sparsity/calibration/download_ruler_data.sh"
+            "  bash examples/llm_sparsity/attention_sparsity/download_ruler_data.sh"
         )
 
     logger.info(f"Loading {len(essay_files)} Paul Graham essays from local files...")
