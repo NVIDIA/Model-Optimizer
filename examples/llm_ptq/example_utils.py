@@ -279,6 +279,94 @@ def get_dtype(dtype):
     return dtype
 
 
+def _patch_compressed_linear_init():
+    """Patch CompressedLinear to prevent transformers weight initialization errors.
+
+    When loading pack-quantized models, CompressedLinear modules don't have a 'weight'
+    attribute (they have weight_packed instead). Transformers tries to initialize
+    missing weights which fails. This patch adds a dummy weight property.
+    """
+    try:
+        from compressed_tensors.linear.compressed_linear import CompressedLinear
+    except ImportError:
+        return  # compressed_tensors not installed
+
+    if hasattr(CompressedLinear, "_modelopt_init_patched"):
+        return  # Already patched
+
+    # Patch __getattr__ to return dummy for weight access
+    original_getattr = getattr(CompressedLinear, "__getattr__", None)
+
+    def patched_getattr(self, name):
+        if name == "weight":
+            # Check if real weight exists
+            if "_parameters" in self.__dict__ and "weight" in self._parameters:
+                return self._parameters["weight"]
+            if "weight" in self.__dict__:
+                return self.__dict__["weight"]
+            # Return dummy weight for initialization purposes
+            if hasattr(self, "weight_packed"):
+                if "_dummy_weight" not in self.__dict__:
+                    object.__setattr__(
+                        self,
+                        "_dummy_weight",
+                        torch.nn.Parameter(
+                            torch.empty(0, device=self.weight_packed.device),
+                            requires_grad=False,
+                        ),
+                    )
+                return self._dummy_weight
+        if original_getattr is not None:
+            return original_getattr(self, name)
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    CompressedLinear.__getattr__ = patched_getattr
+    CompressedLinear._modelopt_init_patched = True
+    print("Patched CompressedLinear for transformers compatibility")
+
+
+def _unpack_compressed_linear_weights(model):
+    """Unpack all CompressedLinear weights from INT4 to BF16.
+
+    This decompresses the packed INT4 weights to BF16 format so they can be
+    processed by Model-Optimizer's PTQ flow. This must be called after model
+    loading but before quantization/calibration.
+    """
+    try:
+        from compressed_tensors.linear.compressed_linear import CompressedLinear
+    except ImportError:
+        return  # compressed_tensors not installed, nothing to unpack
+
+    unpacked_count = 0
+    for name, module in model.named_modules():
+        if isinstance(module, CompressedLinear) and hasattr(module, "weight_packed"):
+            # Decompress the INT4 weights to BF16
+            with torch.no_grad():
+                # Fix weight_shape if it's a tensor (should be a list of ints)
+                if hasattr(module, "weight_shape") and isinstance(module.weight_shape, torch.Tensor):
+                    module.weight_shape = module.weight_shape.tolist()
+
+                # Get the decompressed weight from the compressor
+                decompressed_weight = module.compressor.decompress_module(module)
+                # Register as a proper parameter (this replaces any dummy weight)
+                module.weight = torch.nn.Parameter(decompressed_weight, requires_grad=False)
+                # Clean up compressed attributes
+                if hasattr(module, "weight_packed"):
+                    delattr(module, "weight_packed")
+                if hasattr(module, "weight_scale"):
+                    delattr(module, "weight_scale")
+                if hasattr(module, "_dummy_weight"):
+                    delattr(module, "_dummy_weight")
+                # Update quantization status to not compressed
+                from compressed_tensors.quantization import QuantizationStatus
+
+                module.quantization_status = QuantizationStatus.FROZEN
+            unpacked_count += 1
+
+    if unpacked_count > 0:
+        print(f"Unpacked {unpacked_count} CompressedLinear modules from INT4 to BF16")
+
+
 def get_model(
     ckpt_path,
     device="cuda",
@@ -288,6 +376,8 @@ def get_model(
     attn_implementation=None,
 ):
     print(f"Initializing model from {ckpt_path}")
+
+    # Note: CompressedLinear weights will be unpacked after model loading
 
     device_map = "auto"
     if device == "cpu":
@@ -345,16 +435,29 @@ def get_model(
             # device_map "auto" and "cuda" triggers error regarding meta tensor from safetensors
             device_map = None
 
+        # Helper function to check if model has pack-quantized config
+        def has_pack_quantized_config(config):
+            # Check top-level quantization_config
+            if hasattr(config, "quantization_config"):
+                if config.quantization_config.get("format", None) == "pack-quantized":
+                    return True
+            # Check nested text_config.quantization_config (for multi-modal models like kimi k2.5)
+            if hasattr(config, "text_config") and hasattr(
+                config.text_config, "quantization_config"
+            ):
+                if config.text_config.quantization_config.get("format", None) == "pack-quantized":
+                    return True
+            return False
+
         if is_speculative(hf_config):
             model = AutoModelForCausalLM.from_pretrained(
                 ckpt_path,
                 device_map=device_map,
                 **model_kwargs,
             )
-        elif (
-            hasattr(hf_config, "quantization_config")
-            and hf_config.quantization_config.get("format", None) == "pack-quantized"
-        ):
+        elif has_pack_quantized_config(hf_config):
+            # Patch CompressedLinear before loading to handle missing weight attribute
+            _patch_compressed_linear_init()
             torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)
             model = AutoModelForCausalLM.from_pretrained(
                 ckpt_path,
@@ -416,6 +519,10 @@ def get_model(
                 **model_kwargs,
             )
     model.eval()
+
+    # Unpack CompressedLinear weights (INT4 -> BF16) if present
+    # This is needed for models with compressed-tensors quantization (e.g., kimi k2.5)
+    _unpack_compressed_linear_weights(model)
 
     # If device_map was disabled (None), manually move model to target device
     if device_map is None and device != "cpu":
