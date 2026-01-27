@@ -147,9 +147,19 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
 class CalibrationConfig(ModeloptBaseConfig):
     """Configuration for automatic threshold calibration using RULER dataset.
 
-    Calibration learns a dynamic threshold λ = scale_factor / sequence_length that
-    achieves target sparsity. Supports both prefill and decode phases with per-phase
-    target sparsity ratios.
+    Calibration fits an Inverse Power model to determine dynamic thresholds that
+    achieve target sparsity. The model learns parameters k and p per phase:
+
+        scale_factor = k / (1 - target_sparsity)^p
+
+    At inference time, the threshold is computed as:
+
+        threshold = scale_factor / sequence_length
+
+    Key benefits:
+    - Target sparsity can be changed at runtime without recalibration
+    - Threshold automatically adapts to sequence length
+    - Supports independent prefill and decode phase calibration
     """
 
     target_sparse_ratio: dict[str, float] = ModeloptField(
@@ -216,7 +226,6 @@ class CalibrationConfig(ModeloptBaseConfig):
         title="Cache directory",
         description=(
             "Directory to cache generated calibration samples. "
-            "If None, uses MODELOPT_CACHE_DIR env var or ~/.cache/modelopt/sparse_attention/. "
             "Caching avoids regenerating samples on repeated calibration runs."
         ),
     )
@@ -402,7 +411,6 @@ __all__ = [
     "SKIP_SOFTMAX_CALIB",
     "SKIP_SOFTMAX_DEFAULT",
     "CalibrationConfig",
-    "FlashSkipSoftmaxConfig",
     "FlashSkipSoftmaxConfig",
     "SparseAttentionAttributeConfig",
     "SparseAttentionCfgType",
