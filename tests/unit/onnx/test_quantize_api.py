@@ -38,85 +38,69 @@ MIN_OPSET = {
 ORT_VERSION_FOR_OPSET_22 = version.parse("1.23.0")
 
 
-@pytest.mark.parametrize("quant_mode", ["int8", "fp8", "int4"])
-def test_opset_below_minimum_upgrades_to_minimum(tmp_path, quant_mode):
-    """Test that specifying opset below minimum upgrades to minimum."""
-    model_torch = SimpleMLP()
-    input_tensor = torch.randn(2, 16, 16)
-
-    onnx_path = os.path.join(tmp_path, "model.onnx")
-    export_as_onnx(model_torch, input_tensor, onnx_filename=onnx_path)
-
-    min_opset = MIN_OPSET[quant_mode]
-
-    # Request opset below minimum
-    moq.quantize(onnx_path, quantize_mode=quant_mode, opset=min_opset - 1)
-
-    # Verify output model was upgraded to minimum opset
-    output_onnx_path = onnx_path.replace(".onnx", ".quant.onnx")
-    output_model = onnx.load(output_onnx_path)
-    output_opset = get_opset_version(output_model)
-
-    assert output_opset == min_opset, (
-        f"Expected opset {min_opset} for {quant_mode}, got {output_opset}"
-    )
+# Test scenarios: (scenario_name, export_opset_offset, request_opset_offset, expected_opset_offset)
+# Offsets are relative to MIN_OPSET[quant_mode].
+OPSET_SCENARIOS = [
+    # Requesting opset below minimum should upgrade to minimum
+    ("below_min_upgrades", -1, -1, 0),
+    # Requesting opset below original model's opset (but above minimum) should preserve original
+    ("below_original_preserves", 1, 0, 1),
+    # Requesting opset above minimum should be respected
+    ("above_min_respected", 0, 1, 1),
+]
 
 
 @pytest.mark.parametrize("quant_mode", ["int8", "fp8", "int4"])
-def test_opset_below_original_uses_original(tmp_path, quant_mode):
-    """Test that specifying opset below original model's opset uses original."""
-    model_torch = SimpleMLP()
-    input_tensor = torch.randn(2, 16, 16)
+@pytest.mark.parametrize(
+    ("scenario_name", "export_opset_offset", "request_opset_offset", "expected_opset_offset"),
+    OPSET_SCENARIOS,
+    ids=[s[0] for s in OPSET_SCENARIOS],
+)
+def test_quantize_opset_handling(
+    tmp_path,
+    quant_mode,
+    scenario_name,
+    export_opset_offset,
+    request_opset_offset,
+    expected_opset_offset,
+):
+    """Test opset handling in quantization API.
 
+    Scenarios:
+    - below_min_upgrades: Requesting opset below minimum upgrades to minimum.
+    - below_original_preserves: Requesting opset below original model's opset preserves original.
+    - above_min_respected: Requesting opset at or above minimum is respected.
+    """
     min_opset = MIN_OPSET[quant_mode]
-    higher_opset = min_opset + 1
+
+    # Calculate actual opset values from offsets
+    export_opset = min_opset + export_opset_offset
+    request_opset = min_opset + request_opset_offset
+    expected_opset = min_opset + expected_opset_offset
 
     # Skip if required opset exceeds onnxruntime support
-    ort_version = version.parse(onnxruntime.__version__)
-    if higher_opset >= 22 and ort_version < ORT_VERSION_FOR_OPSET_22:
-        pytest.skip(
-            f"Opset {higher_opset} requires onnxruntime >= {ORT_VERSION_FOR_OPSET_22}, have {ort_version}"
-        )
+    max_opset = max(export_opset, request_opset, expected_opset)
+    if max_opset >= 22:
+        ort_version = version.parse(onnxruntime.__version__)
+        if ort_version < ORT_VERSION_FOR_OPSET_22:
+            pytest.skip(
+                f"Opset {max_opset} requires onnxruntime >= {ORT_VERSION_FOR_OPSET_22}, have {ort_version}"
+            )
 
-    onnx_path = os.path.join(tmp_path, "model.onnx")
-    export_as_onnx(model_torch, input_tensor, onnx_filename=onnx_path, opset=higher_opset)
-
-    # Verify the exported model has the higher opset
-    original_model = onnx.load(onnx_path)
-    assert get_opset_version(original_model) == higher_opset
-
-    # Request opset below original (but above minimum)
-    moq.quantize(onnx_path, quantize_mode=quant_mode, opset=min_opset)
-
-    # Verify output model preserves the higher original opset
-    output_onnx_path = onnx_path.replace(".onnx", ".quant.onnx")
-    output_model = onnx.load(output_onnx_path)
-    output_opset = get_opset_version(output_model)
-
-    assert output_opset == higher_opset, (
-        f"Expected original opset {higher_opset} to be preserved, got {output_opset}"
-    )
-
-
-@pytest.mark.parametrize("quant_mode", ["int8", "fp8", "int4"])
-def test_opset_above_minimum(tmp_path, quant_mode):
-    """Test that specifying opset at or above minimum is respected."""
+    # Setup: create and export model
     model_torch = SimpleMLP()
     input_tensor = torch.randn(2, 16, 16)
-
-    min_opset = MIN_OPSET[quant_mode]
-    target_opset = min_opset + 1
-
     onnx_path = os.path.join(tmp_path, "model.onnx")
-    export_as_onnx(model_torch, input_tensor, onnx_filename=onnx_path)
+    export_as_onnx(model_torch, input_tensor, onnx_filename=onnx_path, opset=export_opset)
 
-    moq.quantize(onnx_path, quantize_mode=quant_mode, opset=target_opset)
+    # Run quantization
+    moq.quantize(onnx_path, quantize_mode=quant_mode, opset=request_opset)
 
-    # Verify output model has the requested opset
+    # Verify output opset
     output_onnx_path = onnx_path.replace(".onnx", ".quant.onnx")
     output_model = onnx.load(output_onnx_path)
     output_opset = get_opset_version(output_model)
 
-    assert output_opset == target_opset, (
-        f"Expected opset {target_opset} for {quant_mode}, got {output_opset}"
+    assert output_opset == expected_opset, (
+        f"[{scenario_name}] Expected opset {expected_opset} for {quant_mode}, got {output_opset}"
     )

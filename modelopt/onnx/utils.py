@@ -700,9 +700,7 @@ def get_opset_version(model: onnx.ModelProto) -> int:
 
 
 def check_model_uses_external_data(model: onnx.ModelProto) -> bool:
-    """Checks if the model uses external data.
-        True if any initializer tensor has data_location set to EXTERNAL.
-    """
+    """Checks if the model uses external data. True if any initializer tensor has data_location set to EXTERNAL."""
     return any(
         init.HasField("data_location") and init.data_location == onnx.TensorProto.EXTERNAL
         for init in model.graph.initializer
