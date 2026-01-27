@@ -47,7 +47,7 @@ from .model_config import (
     QUANTIZATION_NVFP4,
 )
 from .plugins.mcore_common import all_mcore_hf_export_mapping
-from .plugins.mcore_custom import CustomModuleMapping, save_safetensors
+from .plugins.mcore_custom import CustomModuleMapping, save_safetensors, get_safetensor
 from .plugins.megatron_importer import GPTModelImporter
 from .quant_utils import (
     get_activation_scaling_factor,
@@ -129,6 +129,7 @@ class GPTModelExporter:
             self.moe_router_dtype = torch.float32
         elif moe_router_dtype == "fp64":
             self.moe_router_dtype = torch.float64
+        print(f"moe_router_dtype: {self.moe_router_dtype}")
 
         # If multimodal, extra the text_config
         self._hf_text_config = getattr(self._hf_config, "text_config", self._hf_config)
@@ -308,6 +309,15 @@ class GPTModelExporter:
                 hf_quant_config["quantization"]["kv_cache_quant_algo"] = self.kv_cache_dtype
             with open(save_directory + "/hf_quant_config.json", "w") as f:
                 json.dump(hf_quant_config, f, indent=4)
+
+            # Newer versions of VLLM expect config.json with hf_quant_config
+            config_file = save_directory + "/config.json"
+            if os.path.exists(config_file):
+                with open(config_file, "r") as f:
+                    config = json.load(f)
+                config["quantization"] = hf_quant_config["quantization"]
+                with open(config_file, "w") as f:
+                    json.dump(config, f, indent=4)
 
         if (
             is_first_stage_main_rank
@@ -1185,6 +1195,27 @@ class GPTModelExporter:
                         self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id)
             else:
                 raise ValueError("Only TransformerLayer or MambaLayer are supported.")
+        
+        # MTP module
+        # Hacky version for now: copy MTP weights from pretrained model
+        if os.path.isdir(self._hf_pretrained_model_name):
+            safetensors_index_file = Path(self._hf_pretrained_model_name) / "model.safetensors.index.json"
+        else:
+            safetensors_index_file = hf_hub_download(
+            repo_id=self._hf_pretrained_model_name, 
+            filename="model.safetensors.index.json")
+
+        print(f"safetensors_index_file: {safetensors_index_file}")
+        if safetensors_index_file and os.path.exists(safetensors_index_file):
+            with open(safetensors_index_file, "r") as f:
+                safetensors_index = json.load(f)
+            model_dir = Path(safetensors_index_file).parent
+            for key in safetensors_index["weight_map"]:
+                if "mtp" in key:
+                    self._state_dict[key] = get_safetensor(model_dir, key)
+
+        # TODO implement actual MTP export
+
 
 
 def export_mcore_gpt_to_hf(
