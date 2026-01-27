@@ -61,9 +61,9 @@ class TestRegion(unittest.TestCase):
         """Test adding nodes to a region."""
         region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
 
-        region.add_node(0)
-        region.add_node(1)
-        region.add_node(2)
+        region.nodes.add(0)
+        region.nodes.add(1)
+        region.nodes.add(2)
 
         assert len(region.nodes) == 3
         assert 0 in region.get_nodes()
@@ -90,18 +90,18 @@ class TestRegion(unittest.TestCase):
         child2 = Region(region_id=3, level=0, region_type=RegionType.LEAF)
 
         # Add nodes to children
-        child1.add_node(0)
-        child1.add_node(1)
-        child2.add_node(2)
-        child2.add_node(3)
-        child2.add_node(4)
+        child1.nodes.add(0)
+        child1.nodes.add(1)
+        child2.nodes.add(2)
+        child2.nodes.add(3)
+        child2.nodes.add(4)
 
         # Add children to parent
         parent.add_child(child1)
         parent.add_child(child2)
 
         # Parent itself might have direct nodes
-        parent.add_node(5)
+        parent.nodes.add(5)
 
         # Recursive count should include all nodes
         assert len(parent.get_region_nodes_and_descendants()) == 6
@@ -143,9 +143,9 @@ class TestRegion(unittest.TestCase):
         composite2.add_child(leaf3)
 
         # Add some nodes
-        leaf1.add_node(0)
-        leaf2.add_node(1)
-        leaf3.add_node(2)
+        leaf1.nodes.add(0)
+        leaf2.nodes.add(1)
+        leaf3.nodes.add(2)
 
         # Verify structure
         assert len(root.get_children()) == 2

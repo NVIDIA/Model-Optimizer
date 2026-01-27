@@ -17,7 +17,7 @@
 Comprehensive tests for common data structures in the autotuner.
 
 Tests:
-1. InsertionPoint classes (NodeInputInsertionPoint, RegionOutputInsertionPoint, ChildRegionInputInsertionPoint)
+1. InsertionPoint classes (NodeInputInsertionPoint, ChildRegionOutputInsertionPoint, ChildRegionInputInsertionPoint)
 2. InsertionScheme serialization/deserialization
 3. InsertionScheme hashing and equality
 4. InsertionScheme properties and methods
@@ -34,10 +34,10 @@ import onnx_graphsurgeon as gs
 
 from modelopt.onnx.quantization.autotune.common import (
     ChildRegionInputInsertionPoint,
+    ChildRegionOutputInsertionPoint,
     InsertionScheme,
     NodeInputInsertionPoint,
     Region,
-    RegionOutputInsertionPoint,
     RegionType,
 )
 from modelopt.onnx.quantization.autotune.insertion_points import (
@@ -106,83 +106,83 @@ class TestNodeInputInsertionPoint(unittest.TestCase):
         assert "1" in s
 
 
-class TestRegionOutputInsertionPoint(unittest.TestCase):
-    """Test RegionOutputInsertionPoint functionality."""
+class TestChildRegionOutputInsertionPoint(unittest.TestCase):
+    """Test ChildRegionOutputInsertionPoint functionality."""
 
     def test_creation_with_region_index(self):
         """Test creating with region_index (child region output)."""
-        point = RegionOutputInsertionPoint(region_index=2, node_index=None, output_index=1)
+        point = ChildRegionOutputInsertionPoint(region_index=2, node_index=None, output_index=1)
         assert point.region_index == 2
         assert point.node_index is None
         assert point.output_index == 1
 
     def test_creation_with_node_index(self):
         """Test creating with node_index (node output)."""
-        point = RegionOutputInsertionPoint(region_index=None, node_index=5, output_index=0)
+        point = ChildRegionOutputInsertionPoint(region_index=None, node_index=5, output_index=0)
         assert point.region_index is None
         assert point.node_index == 5
         assert point.output_index == 0
 
     def test_immutability(self):
-        """Test that RegionOutputInsertionPoint is immutable (frozen)."""
-        point = RegionOutputInsertionPoint(region_index=1, node_index=None, output_index=0)
+        """Test that ChildRegionOutputInsertionPoint is immutable (frozen)."""
+        point = ChildRegionOutputInsertionPoint(region_index=1, node_index=None, output_index=0)
         passed = False
         try:
             point.region_index = 2
         except AttributeError:
             passed = True
-        assert passed, "RegionOutputInsertionPoint should be immutable"
+        assert passed, "ChildRegionOutputInsertionPoint should be immutable"
 
     def test_equality(self):
         """Test equality comparison."""
-        point1 = RegionOutputInsertionPoint(region_index=1, node_index=None, output_index=0)
-        point2 = RegionOutputInsertionPoint(region_index=1, node_index=None, output_index=0)
-        point3 = RegionOutputInsertionPoint(region_index=None, node_index=1, output_index=0)
+        point1 = ChildRegionOutputInsertionPoint(region_index=1, node_index=None, output_index=0)
+        point2 = ChildRegionOutputInsertionPoint(region_index=1, node_index=None, output_index=0)
+        point3 = ChildRegionOutputInsertionPoint(region_index=None, node_index=1, output_index=0)
 
         assert point1 == point2
         assert point1 != point3
 
     def test_hashable(self):
         """Test that points can be used in sets and dicts."""
-        point1 = RegionOutputInsertionPoint(region_index=1, node_index=None, output_index=0)
-        point2 = RegionOutputInsertionPoint(region_index=1, node_index=None, output_index=0)
-        point3 = RegionOutputInsertionPoint(region_index=None, node_index=1, output_index=0)
+        point1 = ChildRegionOutputInsertionPoint(region_index=1, node_index=None, output_index=0)
+        point2 = ChildRegionOutputInsertionPoint(region_index=1, node_index=None, output_index=0)
+        point3 = ChildRegionOutputInsertionPoint(region_index=None, node_index=1, output_index=0)
 
         point_set = {point1, point2, point3}
         assert len(point_set) == 2  # point1 and point2 are the same
 
     def test_serialization_region_index(self):
         """Test serialization with region_index."""
-        point = RegionOutputInsertionPoint(region_index=3, node_index=None, output_index=2)
+        point = ChildRegionOutputInsertionPoint(region_index=3, node_index=None, output_index=2)
 
         data = point.to_dict()
         assert data["region_index"] == 3
         assert data["node_index"] is None
         assert data["output_index"] == 2
 
-        restored = RegionOutputInsertionPoint.from_dict(data)
+        restored = ChildRegionOutputInsertionPoint.from_dict(data)
         assert point == restored
 
     def test_serialization_node_index(self):
         """Test serialization with node_index."""
-        point = RegionOutputInsertionPoint(region_index=None, node_index=7, output_index=1)
+        point = ChildRegionOutputInsertionPoint(region_index=None, node_index=7, output_index=1)
 
         data = point.to_dict()
         assert data["region_index"] is None
         assert data["node_index"] == 7
         assert data["output_index"] == 1
 
-        restored = RegionOutputInsertionPoint.from_dict(data)
+        restored = ChildRegionOutputInsertionPoint.from_dict(data)
         assert point == restored
 
     def test_string_representation(self):
         """Test __str__ method."""
-        point1 = RegionOutputInsertionPoint(region_index=2, node_index=None, output_index=1)
+        point1 = ChildRegionOutputInsertionPoint(region_index=2, node_index=None, output_index=1)
         s1 = str(point1)
         assert "region" in s1.lower()
         assert "2" in s1
 
-        point2 = RegionOutputInsertionPoint(region_index=None, node_index=5, output_index=0)
+        point2 = ChildRegionOutputInsertionPoint(region_index=None, node_index=5, output_index=0)
         s2 = str(point2)
         assert "node" in s2.lower()
         assert "5" in s2
@@ -269,8 +269,8 @@ class TestInsertionScheme(unittest.TestCase):
         """Test scheme with region output insertion points."""
         scheme = InsertionScheme()
         scheme.region_outputs = [
-            RegionOutputInsertionPoint(None, 0, 0),
-            RegionOutputInsertionPoint(1, None, 0),
+            ChildRegionOutputInsertionPoint(None, 0, 0),
+            ChildRegionOutputInsertionPoint(1, None, 0),
         ]
 
         assert not scheme.is_empty
@@ -341,7 +341,7 @@ class TestInsertionScheme(unittest.TestCase):
         scheme = InsertionScheme()
         scheme.node_inputs = [NodeInputInsertionPoint(0, 0)]
         scheme.child_region_inputs = [ChildRegionInputInsertionPoint(0, 0)]
-        scheme.region_outputs = [RegionOutputInsertionPoint(None, 0, 0)]
+        scheme.region_outputs = [ChildRegionOutputInsertionPoint(None, 0, 0)]
         scheme.latency_ms = 12.5
         scheme.error = False
 
@@ -365,11 +365,6 @@ class TestInsertionScheme(unittest.TestCase):
 
         assert restored.error
         assert restored.latency_ms == float("inf")
-
-
-# =============================================================================
-# Helper functions for creating mock graphs
-# =============================================================================
 
 
 def _create_mock_tensor(name: str, dtype=np.float32, shape=None):
@@ -542,11 +537,6 @@ def _create_residual_graph():
     return graph, tensors
 
 
-# =============================================================================
-# Utility Function Tests
-# =============================================================================
-
-
 class TestSkipInvalidInsertionPoints(unittest.TestCase):
     """Test skip_invalid_insertion_points function."""
 
@@ -639,14 +629,14 @@ class TestSkipInvalidInsertionPoints(unittest.TestCase):
 
         # Create a region containing Conv and BatchNorm nodes
         region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.add_node(0)  # Conv node
-        region.add_node(1)  # BatchNorm node
+        region.nodes.add(0)  # Conv node
+        region.nodes.add(1)  # BatchNorm node
 
         # Create a shape operation node and add to graph
         shape_tensor = _create_mock_tensor("shape_input", np.float32)
         shape_node = _create_mock_node("Shape", [shape_tensor], [])
         graph.nodes.append(shape_node)
-        region.add_node(4)  # Add the shape node to region
+        region.nodes.add(4)  # Add the shape node to region
 
         result = skip_invalid_insertion_points(graph, "shape_input", region)
         assert result is True
@@ -682,7 +672,7 @@ class TestHasQuantizableOperations(unittest.TestCase):
         graph, _ = _create_simple_graph()
 
         region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.add_node(0)  # Conv node
+        region.nodes.add(0)  # Conv node
 
         result = has_quantizable_operations(region, graph)
         assert result is True
@@ -692,7 +682,7 @@ class TestHasQuantizableOperations(unittest.TestCase):
         graph, _ = _create_simple_graph()
 
         region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.add_node(3)  # MaxPool node
+        region.nodes.add(3)  # MaxPool node
 
         result = has_quantizable_operations(region, graph)
         assert result is True
@@ -702,7 +692,7 @@ class TestHasQuantizableOperations(unittest.TestCase):
         graph, _ = _create_simple_graph()
 
         region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.add_node(2)  # Relu node only (index 2 in new graph)
+        region.nodes.add(2)  # Relu node only (index 2 in new graph)
 
         result = has_quantizable_operations(region, graph)
         assert result is True  # Relu is in MAJOR_QUANTIZABLE_OPERATIONS
@@ -712,9 +702,9 @@ class TestHasQuantizableOperations(unittest.TestCase):
         graph, _ = _create_simple_graph()
 
         region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.add_node(0)  # Conv
-        region.add_node(1)  # BatchNorm
-        region.add_node(2)  # Relu
+        region.nodes.add(0)  # Conv
+        region.nodes.add(1)  # BatchNorm
+        region.nodes.add(2)  # Relu
 
         result = has_quantizable_operations(region, graph)
         assert result is True
@@ -731,8 +721,8 @@ class TestHasQuantizableOperations(unittest.TestCase):
         graph.nodes = [shape_node, transpose_node]
 
         region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.add_node(0)
-        region.add_node(1)
+        region.nodes.add(0)
+        region.nodes.add(1)
 
         result = has_quantizable_operations(region, graph)
         assert result is False
@@ -752,7 +742,7 @@ class TestHasQuantizableOperations(unittest.TestCase):
         graph, _ = _create_residual_graph()
 
         region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.add_node(3)  # Add node
+        region.nodes.add(3)  # Add node
 
         result = has_quantizable_operations(region, graph)
         assert result is True  # Add is in MAJOR_QUANTIZABLE_OPERATIONS
@@ -769,7 +759,7 @@ class TestResolveRegionIOInsertionPoints(unittest.TestCase):
         graph.tensor_users_map = get_tensor_consumer_node_indices(graph)
 
         region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.add_node(2)  # Relu node
+        region.nodes.add(2)  # Relu node
 
         result = resolve_region_io_insertion_points(region, graph, "relu_out")
 
@@ -823,7 +813,7 @@ class TestResolveRegionIOInsertionPoints(unittest.TestCase):
         graph.tensor_users_map = {"relu1_out": [2]}
 
         region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.add_node(2)  # Conv2
+        region.nodes.add(2)  # Conv2
 
         result = resolve_region_io_insertion_points(region, graph, "relu1_out")
 
@@ -948,11 +938,6 @@ class TestMergeResolvedInsertionPoints(unittest.TestCase):
         assert ip.node_index == 0  # Still node-specific
 
 
-# =============================================================================
-# Resolve Method Tests
-# =============================================================================
-
-
 class TestNodeInputInsertionPointResolve(unittest.TestCase):
     """Test NodeInputInsertionPoint.resolve() method."""
 
@@ -961,10 +946,10 @@ class TestNodeInputInsertionPointResolve(unittest.TestCase):
         graph, tensors = _create_simple_graph()
 
         region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.add_node(0)  # Conv node
-        region.add_node(1)  # BatchNorm node
-        region.add_node(2)  # Relu node
-        region.add_node(3)  # MaxPool node
+        region.nodes.add(0)  # Conv node
+        region.nodes.add(1)  # BatchNorm node
+        region.nodes.add(2)  # Relu node
+        region.nodes.add(3)  # MaxPool node
 
         # Create insertion point for first input of first node (Conv)
         ip = NodeInputInsertionPoint(node_index=0, input_index=0)
@@ -979,7 +964,7 @@ class TestNodeInputInsertionPointResolve(unittest.TestCase):
         graph, tensors = _create_simple_graph()
 
         region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.add_node(0)  # Conv node
+        region.nodes.add(0)  # Conv node
 
         # Create insertion point for first input of Conv (should also add weight)
         ip = NodeInputInsertionPoint(node_index=0, input_index=0)
@@ -997,9 +982,9 @@ class TestNodeInputInsertionPointResolve(unittest.TestCase):
         graph, tensors = _create_simple_graph()
 
         region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.add_node(0)  # Conv
-        region.add_node(1)  # BatchNorm
-        region.add_node(2)  # Relu
+        region.nodes.add(0)  # Conv
+        region.nodes.add(1)  # BatchNorm
+        region.nodes.add(2)  # Relu
 
         # Relu is at local index 2, input 0 is bn_out
         ip = NodeInputInsertionPoint(node_index=2, input_index=0)
@@ -1015,9 +1000,9 @@ class TestNodeInputInsertionPointResolve(unittest.TestCase):
         graph, tensors = _create_residual_graph()
 
         region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.add_node(0)  # Conv1
-        region.add_node(1)  # Relu1
-        region.add_node(2)  # Conv2
+        region.nodes.add(0)  # Conv1
+        region.nodes.add(1)  # Relu1
+        region.nodes.add(2)  # Conv2
 
         # Conv2 is at local index 2, input 0 is relu1_out
         ip = NodeInputInsertionPoint(node_index=2, input_index=0)
@@ -1043,9 +1028,9 @@ class TestChildRegionInputInsertionPointResolve(unittest.TestCase):
         parent = Region(region_id=1, level=1, region_type=RegionType.COMPOSITE)
         child = Region(region_id=2, level=0, region_type=RegionType.LEAF)
         child.inputs = ["input"]
-        child.add_node(0)  # Conv
-        child.add_node(1)  # BatchNorm
-        child.add_node(2)  # Relu
+        child.nodes.add(0)  # Conv
+        child.nodes.add(1)  # BatchNorm
+        child.nodes.add(2)  # Relu
         parent.add_child(child)
 
         ip = ChildRegionInputInsertionPoint(region_index=0, input_index=0)
@@ -1060,7 +1045,7 @@ class TestChildRegionInputInsertionPointResolve(unittest.TestCase):
         graph, _ = _create_simple_graph()
 
         leaf = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        leaf.add_node(0)
+        leaf.nodes.add(0)
 
         ip = ChildRegionInputInsertionPoint(region_index=0, input_index=0)
 
@@ -1080,12 +1065,12 @@ class TestChildRegionInputInsertionPointResolve(unittest.TestCase):
         # First child: Conv1 (consumes "input")
         child1 = Region(region_id=2, level=0, region_type=RegionType.LEAF)
         child1.inputs = ["input"]
-        child1.add_node(0)  # Conv1
+        child1.nodes.add(0)  # Conv1
 
         # Second child: Relu1 (consumes "relu1_out")
         child2 = Region(region_id=3, level=0, region_type=RegionType.LEAF)
         child2.inputs = ["relu1_out"]
-        child2.add_node(2)  # Relu1
+        child2.nodes.add(2)  # Relu1
 
         parent.add_child(child1)
         parent.add_child(child2)
@@ -1105,8 +1090,8 @@ class TestChildRegionInputInsertionPointResolve(unittest.TestCase):
         assert any(rip.tensor_name == "relu1_out" for rip in result2)
 
 
-class TestRegionOutputInsertionPointResolve(unittest.TestCase):
-    """Test RegionOutputInsertionPoint.resolve() method."""
+class TestChildRegionOutputInsertionPointResolve(unittest.TestCase):
+    """Test ChildRegionOutputInsertionPoint.resolve() method."""
 
     def test_resolve_node_output(self):
         """Test resolving a node output."""
@@ -1114,14 +1099,14 @@ class TestRegionOutputInsertionPointResolve(unittest.TestCase):
         graph.tensor_users_map = get_tensor_consumer_node_indices(graph)
 
         region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.add_node(0)  # Conv
-        region.add_node(1)  # BatchNorm
-        region.add_node(2)  # Relu
-        region.add_node(3)  # MaxPool
+        region.nodes.add(0)  # Conv
+        region.nodes.add(1)  # BatchNorm
+        region.nodes.add(2)  # Relu
+        region.nodes.add(3)  # MaxPool
         region.outputs = ["pool_out"]
 
         # Output of last node (MaxPool)
-        ip = RegionOutputInsertionPoint(region_index=None, node_index=2, output_index=0)
+        ip = ChildRegionOutputInsertionPoint(region_index=None, node_index=2, output_index=0)
 
         result = ip.resolve(region, graph)
 
@@ -1136,12 +1121,12 @@ class TestRegionOutputInsertionPointResolve(unittest.TestCase):
         parent = Region(region_id=1, level=1, region_type=RegionType.COMPOSITE)
         child = Region(region_id=2, level=0, region_type=RegionType.LEAF)
         child.outputs = ["relu_out"]
-        child.add_node(0)  # Conv
-        child.add_node(1)  # BatchNorm
-        child.add_node(2)  # Relu
+        child.nodes.add(0)  # Conv
+        child.nodes.add(1)  # BatchNorm
+        child.nodes.add(2)  # Relu
         parent.add_child(child)
 
-        ip = RegionOutputInsertionPoint(region_index=0, node_index=None, output_index=0)
+        ip = ChildRegionOutputInsertionPoint(region_index=0, node_index=None, output_index=0)
 
         result = ip.resolve(parent, graph)
 
@@ -1154,25 +1139,20 @@ class TestRegionOutputInsertionPointResolve(unittest.TestCase):
         graph.tensor_users_map = {"add_out": [4]}
 
         region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.add_node(0)  # Conv1
-        region.add_node(1)  # Relu1
-        region.add_node(2)  # Conv2
-        region.add_node(3)  # Add
-        region.add_node(4)  # Relu2
+        region.nodes.add(0)  # Conv1
+        region.nodes.add(1)  # Relu1
+        region.nodes.add(2)  # Conv2
+        region.nodes.add(3)  # Add
+        region.nodes.add(4)  # Relu2
         region.outputs = ["add_out"]
 
         # Add is at local index 3, output 0
-        ip = RegionOutputInsertionPoint(region_index=None, node_index=3, output_index=0)
+        ip = ChildRegionOutputInsertionPoint(region_index=None, node_index=3, output_index=0)
 
         result = ip.resolve(region, graph)
 
         assert len(result) >= 1
         assert any(rip.tensor_name == "add_out" for rip in result)
-
-
-# =============================================================================
-# Collect From Region Tests
-# =============================================================================
 
 
 class TestNodeInputInsertionPointCollectFrom(unittest.TestCase):
@@ -1183,10 +1163,10 @@ class TestNodeInputInsertionPointCollectFrom(unittest.TestCase):
         graph, tensors = _create_simple_graph()
 
         region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.add_node(0)  # Conv
-        region.add_node(1)  # BatchNorm
-        region.add_node(2)  # Relu
-        region.add_node(3)  # MaxPool
+        region.nodes.add(0)  # Conv
+        region.nodes.add(1)  # BatchNorm
+        region.nodes.add(2)  # Relu
+        region.nodes.add(3)  # MaxPool
 
         result = NodeInputInsertionPoint.collect_from_region(region, graph)
 
@@ -1200,11 +1180,11 @@ class TestNodeInputInsertionPointCollectFrom(unittest.TestCase):
         graph, tensors = _create_residual_graph()
 
         region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.add_node(0)  # Conv1
-        region.add_node(1)  # Relu1
-        region.add_node(2)  # Conv2
-        region.add_node(3)  # Add
-        region.add_node(4)  # Relu2
+        region.nodes.add(0)  # Conv1
+        region.nodes.add(1)  # Relu1
+        region.nodes.add(2)  # Conv2
+        region.nodes.add(3)  # Add
+        region.nodes.add(4)  # Relu2
 
         result = NodeInputInsertionPoint.collect_from_region(region, graph)
 
@@ -1227,9 +1207,9 @@ class TestChildRegionInputInsertionPointCollectFrom(unittest.TestCase):
         parent = Region(region_id=1, level=1, region_type=RegionType.COMPOSITE)
         child = Region(region_id=2, level=0, region_type=RegionType.LEAF)
         child.inputs = ["input"]
-        child.add_node(0)  # Conv
-        child.add_node(1)  # BatchNorm
-        child.add_node(2)  # Relu
+        child.nodes.add(0)  # Conv
+        child.nodes.add(1)  # BatchNorm
+        child.nodes.add(2)  # Relu
         parent.add_child(child)
 
         result = ChildRegionInputInsertionPoint.collect_from_region(parent, graph)
@@ -1243,7 +1223,7 @@ class TestChildRegionInputInsertionPointCollectFrom(unittest.TestCase):
         graph, _ = _create_simple_graph()
 
         leaf = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        leaf.add_node(0)
+        leaf.nodes.add(0)
 
         result = ChildRegionInputInsertionPoint.collect_from_region(leaf, graph)
 
@@ -1257,13 +1237,13 @@ class TestChildRegionInputInsertionPointCollectFrom(unittest.TestCase):
 
         child1 = Region(region_id=2, level=0, region_type=RegionType.LEAF)
         child1.inputs = ["input"]
-        child1.add_node(0)  # Conv1
-        child1.add_node(1)  # Relu1
+        child1.nodes.add(0)  # Conv1
+        child1.nodes.add(1)  # Relu1
 
         child2 = Region(region_id=3, level=0, region_type=RegionType.LEAF)
         child2.inputs = ["relu1_out", "input"]  # Two inputs including skip connection
-        child2.add_node(2)  # Conv2
-        child2.add_node(3)  # Add
+        child2.nodes.add(2)  # Conv2
+        child2.nodes.add(3)  # Add
 
         parent.add_child(child1)
         parent.add_child(child2)
@@ -1274,25 +1254,25 @@ class TestChildRegionInputInsertionPointCollectFrom(unittest.TestCase):
         assert all(isinstance(ip, ChildRegionInputInsertionPoint) for ip in result)
 
 
-class TestRegionOutputInsertionPointCollectFrom(unittest.TestCase):
-    """Test RegionOutputInsertionPoint.collect_from_region() method."""
+class TestChildRegionOutputInsertionPointCollectFrom(unittest.TestCase):
+    """Test ChildRegionOutputInsertionPoint.collect_from_region() method."""
 
     def test_collect_node_outputs(self):
         """Test collecting node output insertion points."""
         graph, tensors = _create_simple_graph()
 
         region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.add_node(0)  # Conv
-        region.add_node(1)  # BatchNorm
-        region.add_node(2)  # Relu
-        region.add_node(3)  # MaxPool
+        region.nodes.add(0)  # Conv
+        region.nodes.add(1)  # BatchNorm
+        region.nodes.add(2)  # Relu
+        region.nodes.add(3)  # MaxPool
         region.outputs = ["pool_out"]  # Only pool_out is a region output
 
-        result = RegionOutputInsertionPoint.collect_from_region(region, graph)
+        result = ChildRegionOutputInsertionPoint.collect_from_region(region, graph)
 
         # Should find the node output that matches region output
         assert len(result) >= 0  # May be filtered
-        assert all(isinstance(ip, RegionOutputInsertionPoint) for ip in result)
+        assert all(isinstance(ip, ChildRegionOutputInsertionPoint) for ip in result)
 
     def test_collect_child_region_outputs(self):
         """Test collecting child region output insertion points."""
@@ -1301,30 +1281,30 @@ class TestRegionOutputInsertionPointCollectFrom(unittest.TestCase):
         parent = Region(region_id=1, level=1, region_type=RegionType.COMPOSITE)
         child = Region(region_id=2, level=0, region_type=RegionType.LEAF)
         child.outputs = ["relu_out"]
-        child.add_node(0)  # Conv
-        child.add_node(1)  # BatchNorm
-        child.add_node(2)  # Relu
+        child.nodes.add(0)  # Conv
+        child.nodes.add(1)  # BatchNorm
+        child.nodes.add(2)  # Relu
         parent.add_child(child)
         parent.outputs = ["relu_out"]  # Child output is also parent output
 
-        result = RegionOutputInsertionPoint.collect_from_region(parent, graph)
+        result = ChildRegionOutputInsertionPoint.collect_from_region(parent, graph)
 
         # Should find the child region output
-        assert all(isinstance(ip, RegionOutputInsertionPoint) for ip in result)
+        assert all(isinstance(ip, ChildRegionOutputInsertionPoint) for ip in result)
 
     def test_collect_residual_block_outputs(self):
         """Test collecting outputs from residual block."""
         graph, tensors = _create_residual_graph()
 
         region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.add_node(0)  # Conv1
-        region.add_node(1)  # Relu1
-        region.add_node(2)  # Conv2
-        region.add_node(3)  # Add
-        region.add_node(4)  # Relu2
+        region.nodes.add(0)  # Conv1
+        region.nodes.add(1)  # Relu1
+        region.nodes.add(2)  # Conv2
+        region.nodes.add(3)  # Add
+        region.nodes.add(4)  # Relu2
         region.outputs = ["output"]  # Final output
 
-        result = RegionOutputInsertionPoint.collect_from_region(region, graph)
+        result = ChildRegionOutputInsertionPoint.collect_from_region(region, graph)
 
         # Should find the output
-        assert all(isinstance(ip, RegionOutputInsertionPoint) for ip in result)
+        assert all(isinstance(ip, ChildRegionOutputInsertionPoint) for ip in result)

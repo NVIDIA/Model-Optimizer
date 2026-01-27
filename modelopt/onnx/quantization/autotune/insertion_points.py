@@ -13,10 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Q/DQ insertion point management for ONNX quantization autotune."""
+"""Q/DQ insertion point management for ONNX quantization autotune.
+
+This module provides data structures and utilities for managing Quantization/Dequantization (Q/DQ)
+insertion points in ONNX computational graphs during autotune optimization. It enables pattern-based
+Q/DQ insertion that can be reused across multiple matching regions in a model.
+"""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -67,7 +72,14 @@ class InsertionPoint(ABC):
 
 @dataclass(frozen=True)
 class ResolvedInsertionPoint:
-    """Resolved Q/DQ insertion point with actual tensor name and optional node context."""
+    """Resolved Q/DQ insertion point with actual tensor name and optional node context.
+
+    After resolving pattern-relative insertion points, this class represents the
+    actual location where Q/DQ pairs should be inserted in the graph. It contains the
+    tensor name and the node index (if applicable) and input index (if applicable).
+
+    This class is immutable (frozen) to allow safe use in sets and as dict keys.
+    """
 
     tensor_name: str
     node_index: int | None = None  # Absolute graph node index (or None for tensor-level insertion)
@@ -75,32 +87,31 @@ class ResolvedInsertionPoint:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
-            "tensor_name": self.tensor_name,
-            "node_index": self.node_index,
-            "input_index": self.input_index,
-        }
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ResolvedInsertionPoint":
         """Create from dictionary."""
-        return cls(
-            tensor_name=data["tensor_name"],
-            node_index=data["node_index"],
-            input_index=data.get("input_index"),
-        )
+        return cls(**data)
 
 
 @dataclass(frozen=True)
 class NodeInputInsertionPoint(InsertionPoint):
-    """Pattern-relative Q/DQ insertion point at a node's input (frozen/hashable)."""
+    """Pattern-relative Q/DQ insertion point at a node's input (frozen/hashable).
+
+    Specifies where to insert a Q/DQ pair within a region pattern using
+    pattern-relative indices rather than absolute node IDs. This enables
+    insertion scheme reuse across all regions matching the same pattern.
+
+    This class is immutable (frozen) to allow safe use in sets and as dict keys.
+    """
 
     node_index: int  # Pattern-relative node index
     input_index: int  # Input tensor index of that node
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {"node_index": self.node_index, "input_index": self.input_index}
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "NodeInputInsertionPoint":
@@ -143,9 +154,8 @@ class NodeInputInsertionPoint(InsertionPoint):
         for local_idx, node_idx in enumerate(node_indices):
             node = graph.nodes[node_idx]
             for input_idx, inp in enumerate(node.inputs):
-                if not (hasattr(inp, "name") and inp.name):
-                    continue
-                if skip_invalid_insertion_points(graph, inp.name, node):
+                name = getattr(inp, "name", None)
+                if not name or skip_invalid_insertion_points(graph, name, node):
                     continue
                 insertion_points.append(
                     NodeInputInsertionPoint(node_index=local_idx, input_index=input_idx)
@@ -157,7 +167,14 @@ class NodeInputInsertionPoint(InsertionPoint):
 class ChildRegionInputInsertionPoint(InsertionPoint):
     """Pattern-relative Q/DQ insertion point at a child region's input boundary (frozen/hashable).
 
+    Specifies where to insert Q/DQ pairs at the input boundaries of child regions
+    within COMPOSITE regions. This allows parent regions to control quantization
+    at child boundaries, potentially overriding or complementing child region
+    optimizations.
+
     Only applies to COMPOSITE regions; LEAF regions have no children.
+
+    This class is immutable (frozen) to allow safe use in sets and as dict keys.
     """
 
     # Pattern-relative child region index
@@ -167,12 +184,12 @@ class ChildRegionInputInsertionPoint(InsertionPoint):
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {"region_index": self.region_index, "input_index": self.input_index}
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ChildRegionInputInsertionPoint":
         """Create from dictionary."""
-        return cls(region_index=data["region_index"], input_index=data["input_index"])
+        return cls(**data)
 
     def resolve(self, region: "Region", graph: gs.Graph) -> set[ResolvedInsertionPoint]:
         """Resolve a child region input insertion point to actual tensor names."""
@@ -210,8 +227,15 @@ class ChildRegionInputInsertionPoint(InsertionPoint):
 
 
 @dataclass(frozen=True)
-class RegionOutputInsertionPoint(InsertionPoint):
-    """Pattern-relative Q/DQ insertion point at a child region or node output (frozen/hashable)."""
+class ChildRegionOutputInsertionPoint(InsertionPoint):
+    """Pattern-relative Q/DQ insertion point at a child region or node output (frozen/hashable).
+
+    Specifies where to insert Q/DQ pairs at output boundaries. This can be either:
+    1. Output from a child region (in COMPOSITE regions)
+    2. Output from a node within the region
+
+    This class is immutable (frozen) to allow safe use in sets and as dict keys.
+    """
 
     region_index: int | None  # Pattern-relative child region index (or None)
     node_index: int | None  # Pattern-relative node index (or None)
@@ -219,20 +243,12 @@ class RegionOutputInsertionPoint(InsertionPoint):
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
-        return {
-            "region_index": self.region_index,
-            "node_index": self.node_index,
-            "output_index": self.output_index,
-        }
+        return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "RegionOutputInsertionPoint":
+    def from_dict(cls, data: dict[str, Any]) -> "ChildRegionOutputInsertionPoint":
         """Create from dictionary."""
-        return cls(
-            region_index=data.get("region_index"),
-            node_index=data.get("node_index"),
-            output_index=data["output_index"],
-        )
+        return cls(**data)
 
     def resolve(self, region: "Region", graph: gs.Graph) -> set[ResolvedInsertionPoint]:
         """Resolve a region output insertion point to actual tensor names."""
@@ -258,7 +274,7 @@ class RegionOutputInsertionPoint(InsertionPoint):
     @staticmethod
     def collect_from_region(
         region: "Region", graph: gs.Graph
-    ) -> list["RegionOutputInsertionPoint"]:
+    ) -> list["ChildRegionOutputInsertionPoint"]:
         """Collect all valid region output insertion points from a region."""
         from modelopt.onnx.quantization.autotune.common import RegionType
 
@@ -273,7 +289,7 @@ class RegionOutputInsertionPoint(InsertionPoint):
                         graph, out, child_region
                     ):
                         insertion_points.append(
-                            RegionOutputInsertionPoint(
+                            ChildRegionOutputInsertionPoint(
                                 region_index=local_idx, node_index=None, output_index=output_idx
                             )
                         )
@@ -288,7 +304,7 @@ class RegionOutputInsertionPoint(InsertionPoint):
                     graph, out.name, node
                 ):
                     insertion_points.append(
-                        RegionOutputInsertionPoint(
+                        ChildRegionOutputInsertionPoint(
                             region_index=None, node_index=local_idx, output_index=output_idx
                         )
                     )
@@ -299,7 +315,23 @@ class RegionOutputInsertionPoint(InsertionPoint):
 def skip_invalid_insertion_points(
     graph: gs.Graph, tensor_name: str, region_or_node: "Region | gs.Node"
 ) -> bool:
-    """Determine if a tensor should be skipped for Q/DQ insertion."""
+    """Determine if a tensor should be skipped for Q/DQ insertion.
+
+    Filters out tensors that are not suitable for quantization based on various criteria:
+    - Boolean and shape operations (not quantizable)
+    - Fused operation patterns (Conv->BatchNorm->ReLU)
+    - Operation-specific non-quantizable inputs (weights, biases, BN parameters)
+    - Non-floating-point tensors (indices, masks)
+    - Small tensors (scalars, small vectors with < 8 elements)
+
+    Args:
+        graph: The ONNX graph containing the nodes
+        tensor_name: Name of the tensor to evaluate
+        region_or_node: Either a Region or a Node to check for usage of this tensor
+
+    Returns:
+        True if the insertion point should be skipped, False if it's valid for quantization
+    """
     from modelopt.onnx.quantization.autotune.common import Region
 
     if isinstance(region_or_node, Region):
@@ -370,7 +402,15 @@ def skip_invalid_insertion_points(
 
 
 def has_quantizable_operations(region: "Region", graph: gs.Graph) -> bool:
-    """Check if a region contains major quantizable operations (only checks LEAF regions)."""
+    """Check if a region contains major quantizable operations (only checks LEAF regions).
+
+    Args:
+        region: The region to check
+        graph: The ONNX graph containing the nodes
+
+    Returns:
+        True if the region contains major quantizable operations, False otherwise
+    """
     from modelopt.onnx.quantization.autotune.common import RegionType
 
     if region.type != RegionType.LEAF:
@@ -382,7 +422,21 @@ def has_quantizable_operations(region: "Region", graph: gs.Graph) -> bool:
 def resolve_region_io_insertion_points(
     region: "Region | None", graph: gs.Graph, tensor_name: str
 ) -> set[ResolvedInsertionPoint]:
-    """Resolve region input/output boundaries to actual Q/DQ insertion points."""
+    """Resolve region input/output boundaries to actual Q/DQ insertion points.
+
+    For a given tensor at a region boundary (input or output), this function
+    identifies all the actual node inputs where Q/DQ pairs should be inserted.
+    It considers both nodes within the region (if provided) and all users of
+    the tensor in the graph.
+
+    Args:
+        region: The region to search within (or None to search entire graph)
+        graph: The ONNX graph containing the nodes
+        tensor_name: Name of the tensor at the region boundary
+
+    Returns:
+        Set of ResolvedInsertionPoint objects specifying where to insert Q/DQ pairs
+    """
     tensor_users_map = getattr(graph, "tensor_users_map", None) or get_tensor_consumer_node_indices(
         graph
     )
@@ -411,8 +465,16 @@ def merge_resolved_insertion_points(
 ) -> set[ResolvedInsertionPoint]:
     """Optimize insertion points by merging node-specific insertions into tensor-level insertions.
 
-    When all consumers of a tensor have Q/DQ insertion points, insert Q/DQ once at the
-    tensor level rather than at each individual node input.
+    When all consumers (users) of a tensor have Q/DQ insertion points, it's more efficient
+    to insert Q/DQ once at the tensor level rather than at each individual node input.
+    This reduces the number of Q/DQ nodes in the graph and simplifies the quantization scheme.
+
+    Args:
+        graph: The ONNX graph containing the nodes
+        resolved_insertion_points: Set of resolved insertion points to optimize
+
+    Returns:
+        Optimized set of insertion points with merged tensor-level insertions where possible
     """
     tensor_users_map = get_tensor_consumer_node_indices(graph)
     node_ips = {ip for ip in resolved_insertion_points if ip.node_index is not None}
