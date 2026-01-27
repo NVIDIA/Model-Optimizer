@@ -24,7 +24,7 @@ from gpu.torch.puzzletron.compress_test_utils import setup_test_model_and_data
 
 import modelopt.torch.nas as mtn
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.nas.plugins.compress_nas_plugin import CompressModel
+from modelopt.torch.puzzletron.nas.plugins.puzzletron_nas_plugin import PuzzletronModel
 
 
 def test_nas_convert_ffn_pruning(project_root_path: Path, tmp_path: Path):
@@ -49,7 +49,7 @@ def _test_nas_convert_ffn_pruning_multiprocess_job(
     #
     # Run the mnt.convert() step
     #
-    input_model = CompressModel()
+    input_model = PuzzletronModel()
     mtn.convert(
         input_model,
         mode=[
@@ -107,7 +107,7 @@ def _test_nas_convert_attn_pruning_multiprocess_job(
     #
     # Run the mnt.convert() step
     #
-    input_model = CompressModel()
+    input_model = PuzzletronModel()
     mtn.convert(
         input_model,
         mode=[

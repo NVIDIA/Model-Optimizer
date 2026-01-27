@@ -49,11 +49,11 @@ from modelopt.torch.puzzletron.tools.hydra_utils import initialize_hydra_config_
 from modelopt.torch.puzzletron.tools.logger import mprint
 
 
-class CompressModel(nn.Module):
+class PuzzletronModel(nn.Module):
     pass  # No model implementation is needed for the compress mode
 
 
-class CompressConfig(ModeloptBaseConfig):
+class PuzzletronConfig(ModeloptBaseConfig):
     """Configuration for Compress NAS algorithm."""
 
     # Input model path to compress in the HF format
@@ -92,7 +92,7 @@ class CompressConfig(ModeloptBaseConfig):
     )
 
 
-def convert_compress_model(model: nn.Module, config: CompressConfig) -> ConvertReturnType:
+def convert_puzzletron_model(model: nn.Module, config: PuzzletronConfig) -> ConvertReturnType:
     """1. Convert the model from HF format to AnyModel format.
     2. Score the pruning activations.
     3. Prune the model and save pruned checkpoints
@@ -151,15 +151,15 @@ def convert_compress_model(model: nn.Module, config: CompressConfig) -> ConvertR
     return model, {}
 
 
-def restore_compress_model(
-    model: nn.Module, config: CompressConfig, metadata: MetadataDict
+def restore_puzzletron_model(
+    model: nn.Module, config: PuzzletronConfig, metadata: MetadataDict
 ) -> nn.Module:
     """Restore is not needed for the compress mode as we are not saving any model state"""
     return model
 
 
 @NASModeRegistry.register_mode
-class CompressDescriptor(ModeDescriptor):
+class PuzzletronDescriptor(ModeDescriptor):
     """Descriptor for the Compress mode."""
 
     @property
@@ -170,23 +170,23 @@ class CompressDescriptor(ModeDescriptor):
     @property
     def config_class(self) -> type[ModeloptBaseConfig]:
         """Configuration class for this mode."""
-        return CompressConfig
+        return PuzzletronConfig
 
     @property
     def search_algorithm(self) -> type[BaseSearcher]:
         """Return the associated searcher implementation."""
 
-        return CompressSearcher
+        return PuzzletronSearcher
 
     @property
     def convert(self) -> ConvertEntrypoint:
         """Entrypoint to convert a model."""
-        return convert_compress_model
+        return convert_puzzletron_model
 
     @property
     def restore(self) -> RestoreEntrypoint:
         """Entrypoint to restore a model."""
-        return restore_compress_model
+        return restore_puzzletron_model
 
     @property
     def export_mode(self) -> str | None:
@@ -197,7 +197,7 @@ class CompressDescriptor(ModeDescriptor):
         return "export_nas"
 
 
-class CompressSearcher(BaseSearcher):
+class PuzzletronSearcher(BaseSearcher):
     """Runs NAS search for the Compress mode."""
 
     @property
