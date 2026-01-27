@@ -65,8 +65,8 @@ The table below lists key command-line arguments of the ONNX PTQ example script.
 | `--awqclip_alpha_step` | 0.05 (default) | Step-size for AWQ weight clipping, user-defined |
 | `--awqclip_alpha_min` | 0.5 (default) | Minimum AWQ weight-clipping threshold, user-defined |
 | `--awqclip_bsz_col` | 1024 (default) | Chunk size in columns during weight clipping, user-defined |
-| `--calibration_eps` | dml, cuda, cpu, NvTensorRtRtx (default: [dml,cpu]) | List of execution-providers to use for session run during calibration |
-| `--no_position_ids` | Default: position_ids input enabled | Use this option to disable position_ids input in calibration data|
+| `--calibration_eps` | dml, cuda, cpu, NvTensorRtRtx (default: [cuda,cpu]) | List of execution-providers to use for session run during calibration |
+| `--add_position_ids` | Default: position_ids input disabled | Use this option to enable position_ids input in calibration data|
 | `--enable_mixed_quant` | Default: disabled mixed quant | Use this option to enable mixed precision quantization|
 | `--layers_8bit` | Default: None | Use this option to override default mixed-quant strategy|
 | `--gather_quantize_axis` | Default: None | Use this option to enable INT4 quantization of Gather nodes - choose 0 or 1|
@@ -86,7 +86,7 @@ Note:
    - The 'rtn' option does INT4 RTN quantization with Q->DQ nodes for weights.
    - The 'rtn_dq' option does INT4 RTN quantization with only DQ nodes for weights.
 1. RTN algorithm doesn't use calibration-data.
-1. If needed for the input base model, use `--no_position_ids` command-line option to disable
+1. If needed for the input base model, use `--add_position_ids` command-line option to enable
    generating position_ids calibration input. The GenAI built LLM models produced with DML EP has
    position_ids input but ones produced with CUDA EP, NvTensorRtRtx EP don't have position_ids input.
    Use `--help` or command-line options table above to inspect default values.
@@ -240,4 +240,4 @@ Refer to the following example scripts and tutorials for deployment:
 
 1. **Error - Invalid Position-IDs input to the ONNX model**
 
-   The ONNX models produced using ONNX GenerativeAI (GenAI) have different IO bindings for models produced using different execution-providers (EPs). For instance, model built with DML EP has position-ids input in the ONNX model but models builts using CUDA EP or NvTensorRtRtx EP don't have position-ids inputs. So, if base model requires, use `no_position_ids` command-line argument for disabling position_ids calibration input or set "add_position_ids" variable to `False` value (hard-code) in the quantize script if required.
+   The ONNX models produced using ONNX GenerativeAI (GenAI) have different IO bindings for models produced using different execution-providers (EPs). For instance, model built with DML EP has position-ids input in the ONNX model but models builts using CUDA EP or NvTensorRtRtx EP don't have position-ids inputs. So, if base model requires, use `--add_position_ids` command-line argument for enabling position_ids calibration input or set "add_position_ids" variable to `True` value (hard-code) in the quantize script if required.
