@@ -69,6 +69,8 @@ from modelopt.onnx.quantization.qdq_utils import (
 )
 from modelopt.onnx.trt_utils import interpret_trt_plugins_precision_flag, load_onnx_model
 from modelopt.onnx.utils import (
+    BASE_MIN_OPSET,
+    QDQ_PRECISION_MIN_OPSET,
     duplicate_shared_constants,
     get_opset_version,
     name_onnx_nodes,
@@ -76,6 +78,17 @@ from modelopt.onnx.utils import (
 )
 
 __all__ = ["quantize"]
+
+
+def _normalize_quantize_mode_for_opset(quantize_mode: str) -> str:
+    """Map variants like "int4_awq", "int4_rtn", "nvfp4" to their base precision types for lookup purposes."""
+    mode_lower = quantize_mode.lower()
+    if "int4" in mode_lower:
+        return "int4"
+    if "nvfp4" in mode_lower or "float4" in mode_lower:
+        return "float4_e2m1fn"
+    # For "int8", "fp8", etc., return as-is (fp8 falls back to BASE_MIN_OPSET which is correct)
+    return quantize_mode
 
 
 def _preprocess_onnx(
@@ -88,6 +101,7 @@ def _preprocess_onnx(
     override_shapes: str,
     simplify: bool = False,
     quantize_mode: str = "int8",
+    opset: int | None = None,
 ) -> tuple[str, onnx.ModelProto, list[str], bool, bool, bool, dict, dict]:
     logger.info(f"Preprocessing the model {onnx_path}")
     intermediate_generated_files = []
@@ -118,16 +132,45 @@ def _preprocess_onnx(
             " '--trt_plugins' flag (requires TRT 10+)."
         )
 
-    # Per-Channel support with QDQ format requires onnx opset version 13 or above
-    opset_version = get_opset_version(onnx_model)
+    # Opset 19 is the minimum required for fp16 scales in Q/DQ nodes
+    # Higher opsets required for specific quantization modes (int4: 21, nvfp4: 23)
+    original_opset_version = get_opset_version(onnx_model)
 
-    required_opset_version = 13
-    if opset_version < required_opset_version and opset_version != 1:
-        opset_version = required_opset_version
-        onnx_model = onnx.version_converter.convert_version(onnx_model, opset_version)
-        onnx_path = os.path.join(output_dir, f"{model_name}_opset{opset_version}.onnx")
+    # Determine minimum required opset based on quantization mode
+    # Normalize quantize_mode to handle variants like "int4_awq", "nvfp4", etc.
+    normalized_mode = _normalize_quantize_mode_for_opset(quantize_mode)
+    mode_min_opset = QDQ_PRECISION_MIN_OPSET.get(normalized_mode, BASE_MIN_OPSET)
+
+    # Determine target opset version
+    if opset is not None:
+        target_opset = opset
+        # Warn if user-specified opset is below mode minimum (but still respect it)
+        if opset < mode_min_opset:
+            logger.warning(
+                f"Opset {opset} is below the minimum opset {mode_min_opset} required for "
+                f"{quantize_mode} quantization. Upgrading to opset {mode_min_opset}."
+            )
+            target_opset = mode_min_opset
+        # Warn if user-specified opset is lower than original
+        if opset < original_opset_version:
+            logger.warning(
+                f"Specified opset {opset} is lower than the original model's opset {original_opset_version}. "
+                f"Using original model's opset {original_opset_version}."
+            )
+            target_opset = max(target_opset, original_opset_version)
+    else:
+        # Use model's opset if it's >= mode_min_opset, otherwise upgrade to mode_min_opset
+        target_opset = (
+            max(original_opset_version, mode_min_opset)
+            if original_opset_version != 1
+            else mode_min_opset
+        )
+
+    if original_opset_version < target_opset and original_opset_version != 1:
+        onnx_model = onnx.version_converter.convert_version(onnx_model, target_opset)
+        onnx_path = os.path.join(output_dir, f"{model_name}_opset{target_opset}.onnx")
         save_onnx(onnx_model, onnx_path, use_external_data_format)
-        logger.info(f"Model is cloned to {onnx_path} with opset_version {opset_version}")
+        logger.info(f"Model is cloned to {onnx_path} with opset_version {target_opset}")
         intermediate_generated_files.append(onnx_path)
 
     # Simplify model if requested
@@ -231,6 +274,7 @@ def quantize(
     calibrate_per_node: bool = False,
     input_shapes_profile: Sequence[dict[str, str]] | None = None,
     direct_io_types: bool = False,
+    opset: int | None = None,
     **kwargs: Any,
 ) -> None:
     """Quantizes the provided ONNX model.
@@ -350,6 +394,10 @@ def quantize(
         direct_io_types:
             If True, modify the I/O types in the quantized ONNX model to be lower precision whenever possible.
             If False, keep the I/O types in the quantized ONNX model the same as in the given ONNX model.
+        opset:
+            Target ONNX opset version for the quantized model. If None, uses required minimum opset
+            (19 for int8/fp8, 21 for int4, 23 for nvfp4). If the specified opset is lower than the required minimum,
+            a warning will be issued and the opset will be upgraded to the required minimum.
         kwargs:
             Additional keyword arguments for int4 quantization, including:
             - awqlite_alpha_step (float): Alpha step for lite, range [0, 1].
@@ -420,6 +468,7 @@ def quantize(
         override_shapes,  # type: ignore[arg-type]
         simplify,
         quantize_mode,
+        opset,
     )
     trt_plugins = update_trt_ep_support(calibration_eps, has_dds_op, has_custom_op, trt_plugins)  # type: ignore[arg-type]
 
@@ -481,6 +530,7 @@ def quantize(
             calibrate_per_node=calibrate_per_node,
             custom_ops_to_quantize=list(custom_ops_to_quantize.keys()),
             direct_io_types=direct_io_types,
+            opset=opset,
             **kwargs,
         )
     elif "int4" in quantize_mode:

@@ -132,6 +132,7 @@ def quantize(
     calibrate_per_node: bool = False,
     custom_ops_to_quantize: list[str] = [],
     direct_io_types: bool = False,
+    opset: int | None = None,
     **kwargs,
 ) -> onnx.ModelProto:
     """Applies INT8 quantization to an ONNX file using the compiler friendly heuristics.
@@ -289,6 +290,7 @@ def quantize(
             tensor_block_dict=custom_ops_to_cast_fp32 or {},
             low_precision_type=high_precision_dtype,
             trt_plugins=trt_extra_plugin_lib_paths,
+            opset=opset,
         )
 
     if nodes_to_quantize:
