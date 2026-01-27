@@ -35,7 +35,7 @@ def get_calib_dataloader(
 ):
     print("Loading calibration dataset")
     if data == "cnn_dailymail":
-        dataset = load_dataset("cnn_dailymail", name="3.0.0", split="train")
+        dataset = load_dataset("abisee/cnn_dailymail", name="3.0.0", split="train")
         dataset = dataset["article"][:calib_size]
     else:
         raise NotImplementedError
