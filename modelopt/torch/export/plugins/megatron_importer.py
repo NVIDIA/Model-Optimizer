@@ -567,9 +567,15 @@ class GPTModelImporter:
         if not isinstance(layer.mlp, IdentityOp):
             if "MoE" in str(type(layer.mlp)):
                 layer_pbar.set_description("Importing MoE")
+                print(f"moe_router_dtype: {self.moe_router_dtype}")
                 self.rules["router"](
                     layer.mlp.router, layer_id, dtype=self.moe_router_dtype
                 )
+                if hasattr(layer.mlp, "fc1_latent_proj") and layer.mlp.fc1_latent_proj is not None:
+                    self.rules["fc1_latent_proj"](layer.mlp.fc1_latent_proj, layer_id)
+                if hasattr(layer.mlp, "fc2_latent_proj") and layer.mlp.fc2_latent_proj is not None:
+                    self.rules["fc2_latent_proj"](layer.mlp.fc2_latent_proj, layer_id)
+
                 if (
                     hasattr(layer.mlp, "shared_experts")
                     and layer.mlp.shared_experts is not None
