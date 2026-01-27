@@ -129,6 +129,7 @@ class GPTModelExporter:
             self.moe_router_dtype = torch.float32
         elif moe_router_dtype == "fp64":
             self.moe_router_dtype = torch.float64
+        print(f"Exporting model with moe_router_dtype: {self.moe_router_dtype}")
 
         # If multimodal, extra the text_config
         self._hf_text_config = getattr(self._hf_config, "text_config", self._hf_config)
@@ -156,6 +157,7 @@ class GPTModelExporter:
                 del self._hf_config.quantization_config
         self.all_rules = self._populate_rule_book()
         self.rules = self.all_rules[self.arch]
+        self.exclude_modules = []
 
         if not hasattr(model, "_modelopt_state"):
             return
@@ -292,32 +294,25 @@ class GPTModelExporter:
         if is_last_stage_main_rank and quantization is not None:
             # TODO refactor to use mte.quant_utils.get_quant_config
             # except layer names are different in MCore and HF
-            hf_quant_config = {
+            self.exclude_modules.append("lm_head")
+            self._hf_quant_config = {
                 "producer": {
                     "name": "modelopt",
                     "version": __version__,
                 },
                 "quantization": {
                     "quant_algo": quantization,
-                    "exclude_modules": ["lm_head"], # TODO update this dynamically
+                    "exclude_modules": self.exclude_modules,
                 },
             }
             if quantization == "NVFP4": # update block size
-                hf_quant_config["quantization"]["group_size"] = 16
+                self._hf_quant_config["quantization"]["group_size"] = 16
             if hasattr(self, "kv_cache_dtype"):
-                hf_quant_config["quantization"]["kv_cache_quant_algo"] = self.kv_cache_dtype
+                self._hf_quant_config["quantization"]["kv_cache_quant_algo"] = self.kv_cache_dtype
             with open(save_directory + "/hf_quant_config.json", "w") as f:
-                json.dump(hf_quant_config, f, indent=4)
+                json.dump(self._hf_quant_config, f, indent=4)
 
-            # Newer versions of VLLM expect config.json with hf_quant_config
-            config_file = save_directory + "/config.json"
-            if os.path.exists(config_file):
-                with open(config_file, "r") as f:
-                    config = json.load(f)
-                config["quantization"] = hf_quant_config["quantization"]
-                with open(config_file, "w") as f:
-                    json.dump(config, f, indent=4)
-
+            
         if (
             is_first_stage_main_rank
             and self.is_multimodal
@@ -434,6 +429,15 @@ class GPTModelExporter:
             if modeling_file and os.path.exists(modeling_file):
                 shutil.copy(modeling_file, f"{save_directory}/modeling_{model_type}.py")
 
+        # Newer versions of VLLM expect config.json with hf_quant_config
+        config_json_file = save_directory + "/config.json"
+        if self._hf_quant_config and os.path.exists(config_json_file):
+            with open(config_json_file, "r") as f:
+                config_dict = json.load(f)
+            config_dict["quantization"] = self._hf_quant_config["quantization"]
+            with open(config_json_file, "w") as f:
+                json.dump(config_dict, f, indent=4)
+
         save_safetensors(state_dict, save_directory)
 
     @property
@@ -449,6 +453,268 @@ class GPTModelExporter:
             self._get_medusa_heads_state_dict()
             self._get_eagle_module_state_dict()
         return self._state_dict
+
+    def _get_state_dict(self):
+        model = self.model
+
+        # Embedding
+        if hasattr(model, "embedding"):
+            self.rules["word_embeddings"](model.embedding.word_embeddings)
+
+        # Final layernorm
+        if hasattr(model.decoder, "final_layernorm") and model.decoder.final_layernorm:
+            self.rules["final_layernorm"](model.decoder.final_layernorm)
+
+        if hasattr(model.decoder, "final_norm") and model.decoder.final_norm:
+            self.rules["final_norm"](model.decoder.final_norm)
+
+        # Output layer
+        if hasattr(model, "output_layer") and not model.share_embeddings_and_output_weights:
+            self.rules["output_layer"](model.output_layer)
+
+        # Decoder layers
+        for layer in model.decoder.layers:
+            layer_id = layer.layer_number - 1
+            if isinstance(layer, MambaLayer):
+                self._get_mamba_layer_state_dict(layer, layer_id)
+            elif isinstance(layer, TransformerLayer):
+                self._get_transformer_layer_state_dict(layer, layer_id)
+            else:
+                raise ValueError("Only TransformerLayer or MambaLayer are supported.")
+        
+        # MTP layer
+        self._get_mtp_state_dict()
+
+    def _get_transformer_layer_state_dict(self, layer, layer_id):
+        if not isinstance(layer.input_layernorm, IdentityOp):
+            self.rules["input_layernorm"](layer.input_layernorm, layer_id)
+
+        if not isinstance(layer.self_attention, IdentityOp):
+            if "MLASelfAttention" in str(type(layer.self_attention)):
+                if hasattr(layer.self_attention, "linear_q_proj"):
+                    self.rules["linear_q_proj"](
+                        layer.self_attention.linear_q_proj, layer_id
+                    )
+                else:
+                    self.rules["linear_q_down_proj"](
+                        layer.self_attention.linear_q_down_proj, layer_id
+                    )
+                    self.rules["linear_q_layernorm"](
+                        layer.self_attention.q_layernorm, layer_id
+                    )
+                    self.rules["linear_q_up_proj"](
+                        layer.self_attention.linear_q_up_proj, layer_id
+                    )
+
+                self.rules["linear_kv_down_proj"](
+                    layer.self_attention.linear_kv_down_proj, layer_id
+                )
+                self.rules["linear_kv_layernorm"](
+                    layer.self_attention.kv_layernorm, layer_id
+                )
+                self.rules["linear_kv_up_proj"](
+                    layer.self_attention.linear_kv_up_proj, layer_id
+                )
+                self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
+            else:
+                if layer.self_attention.q_layernorm is not None and not isinstance(
+                    layer.self_attention.q_layernorm, (IdentityOp, L2Norm)
+                ):
+                    self.rules["q_layernorm"](layer.self_attention.q_layernorm, layer_id)
+                    self.rules["k_layernorm"](layer.self_attention.k_layernorm, layer_id)
+                self.rules["linear_qkv"](layer.self_attention.linear_qkv, layer_id)
+                if hasattr(layer.self_attention, "core_attention"):
+                    self.rules["core_attention"](layer.self_attention.core_attention, layer_id)
+                self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
+                if (
+                    getattr(layer.self_attention.core_attention, "softmax_offset", None)
+                    is not None
+                ):
+                    self.rules["softmax_offset"](
+                        layer.self_attention.core_attention.softmax_offset, layer_id
+                    )
+
+        if not isinstance(layer.pre_mlp_layernorm, IdentityOp):
+            self.rules["pre_mlp_layernorm"](layer.pre_mlp_layernorm, layer_id)
+
+        if not isinstance(layer.mlp, IdentityOp):
+            if "MoE" in str(type(layer.mlp)):
+                self.rules["router"](
+                    layer.mlp.router, layer_id, dtype=self.moe_router_dtype
+                )
+                if hasattr(layer.mlp, "fc1_latent_proj") and layer.mlp.fc1_latent_proj is not None:
+                    self.rules["fc1_latent_proj"](layer.mlp.fc1_latent_proj, layer_id)
+                if hasattr(layer.mlp, "fc2_latent_proj") and layer.mlp.fc2_latent_proj is not None:
+                    self.rules["fc2_latent_proj"](layer.mlp.fc2_latent_proj, layer_id)
+                if (
+                    hasattr(layer.mlp, "shared_experts")
+                    and layer.mlp.shared_experts is not None
+                ):
+                    self.rules["shared_experts.linear_fc1"](
+                        layer.mlp.shared_experts.linear_fc1, layer_id
+                    )
+                    self.rules["shared_experts.linear_fc2"](
+                        layer.mlp.shared_experts.linear_fc2, layer_id
+                    )
+                if not self.rules.get("use_packed_local_experts", False):
+                    for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
+                        self.rules["local_experts.linear_fc1"](
+                            expert.linear_fc1, layer_id, expert_id
+                        )
+                        self.rules["local_experts.linear_fc2"](
+                            expert.linear_fc2, layer_id, expert_id
+                        )
+                else:
+                    # For llama 4, in hf unified checkpoint, all local experts share one scale
+                    self.rules["local_experts.linear_fc1"](
+                        layer.mlp.experts.local_experts, layer_id
+                    )
+                    self.rules["local_experts.linear_fc2"](
+                        layer.mlp.experts.local_experts, layer_id
+                    )
+            else:
+                self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id)
+                self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id)
+
+    def _get_mtp_state_dict(self):
+        # TODO implement actual MTP export
+        # Hacky version for now: copy MTP weights from pretrained model
+        if os.path.isdir(self._hf_pretrained_model_name):
+            safetensors_index_file = Path(self._hf_pretrained_model_name) / "model.safetensors.index.json"
+        else:
+            safetensors_index_file = hf_hub_download(
+            repo_id=self._hf_pretrained_model_name, 
+            filename="model.safetensors.index.json")
+
+        print(f"Exporting MTP: using safetensors_index_file: {safetensors_index_file}")
+        if safetensors_index_file and os.path.exists(safetensors_index_file):
+            with open(safetensors_index_file, "r") as f:
+                safetensors_index = json.load(f)
+            model_dir = Path(safetensors_index_file).parent
+            for key in safetensors_index["weight_map"]:
+                if key.startswith("mtp.") and key not in self._state_dict:
+                    self._state_dict[key] = get_safetensor(model_dir, key)
+
+
+    def _get_mamba_layer_state_dict(self, layer, layer_id):
+        if not isinstance(layer.norm, IdentityOp):
+            self.rules["norm"](layer.norm, layer_id)
+
+        self.rules["mixer_norm"](layer.mixer.norm, layer_id)
+        self.rules["A_log"](layer.mixer.A_log, layer_id)
+        self.rules["D"](layer.mixer.D, layer_id)
+        self.rules["dt_bias"](layer.mixer.dt_bias, layer_id)
+
+        self.rules["conv1d"](layer.mixer.conv1d, layer_id)
+        self.rules["in_proj"](layer.mixer.in_proj, layer_id)
+        self.rules["out_proj"](layer.mixer.out_proj, layer_id)
+
+    def _get_medusa_heads_state_dict(self):
+        medusa_heads = getattr(self.model, "medusa_heads", None)
+        if medusa_heads is None:
+            return
+
+        for head_id, head in enumerate(medusa_heads):
+            self.rules["medusa_heads.lm_head"](head.lm_head, head_id)
+            for layer_id, layer in enumerate(head.medusa_layers):
+                self.rules["medusa_heads.medusa_layers.linear"](layer.linear, head_id, layer_id)
+
+    def _get_eagle_module_state_dict(self):
+        eagle_module = getattr(self.model, "eagle_module", None)
+
+        if eagle_module is None:
+            return
+
+        # if hasattr(self.model, "embedding"):
+        #    self.rules["word_embeddings"](self.model.embedding.word_embeddings)
+
+        self.rules["fc"](eagle_module.fc)
+        if self.model.eagle_config.use_aux_hidden_state:
+            self.rules["enorm"](eagle_module.enorm)
+        elif self.model.eagle_config.use_mtp_layernorm:
+            self.rules["enorm"](eagle_module.enorm)
+            self.rules["hnorm"](eagle_module.hnorm)
+
+        if self.model.eagle_config.use_last_layernorm:
+            self.rules["final_layernorm"](eagle_module.decoder.final_layernorm)
+
+        if hasattr(self.model.eagle_module, "eagle_output_layer"):
+            self.rules["output_layer"](eagle_module.eagle_output_layer)
+        if hasattr(self.model.eagle_module, "dt2"):
+            self.rules["d2t"](eagle_module.d2t)
+
+        for layer in eagle_module.decoder.layers:
+            layer_id = layer.layer_number - 1
+
+            # The first layernorm needs special handling here. We have a dedicated mapping
+            # for the first layernorm since in EAGLE3 it will be mapped to hidden_norm
+            # instead of input_layernorm (due to the specialized transformer layer).
+            # The remaining EAGLE3 layers (if more than 1) are normal transformer layers
+            # where input_layernorm is mapped to input_layernorm.
+            if layer_id == 0 and self.model.eagle_config.use_input_layernorm_in_first_layer:
+                self.rules["first_input_layernorm"](layer.input_layernorm, layer_id)
+            elif layer_id > 0:
+                self.rules["input_layernorm"](layer.input_layernorm, layer_id)
+
+            if "MLASelfAttention" in str(type(layer.self_attention)):
+                if hasattr(layer.self_attention, "linear_q_proj"):
+                    self.rules["eagle_module.linear_q_proj"](
+                        layer.self_attention.linear_q_proj, layer_id
+                    )
+                else:
+                    self.rules["eagle_module.linear_q_down_proj"](
+                        layer.self_attention.linear_q_down_proj, layer_id
+                    )
+                    self.rules["eagle_module.linear_q_layernorm"](
+                        layer.self_attention.q_layernorm, layer_id
+                    )
+                    self.rules["eagle_module.linear_q_up_proj"](
+                        layer.self_attention.linear_q_up_proj, layer_id
+                    )
+
+                self.rules["eagle_module.linear_kv_down_proj"](
+                    layer.self_attention.linear_kv_down_proj, layer_id
+                )
+                self.rules["eagle_module.linear_kv_layernorm"](
+                    layer.self_attention.kv_layernorm, layer_id
+                )
+                self.rules["eagle_module.linear_kv_up_proj"](
+                    layer.self_attention.linear_kv_up_proj, layer_id
+                )
+            else:
+                self.rules["linear_qkv"](layer.self_attention.linear_qkv, layer_id)
+
+            self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
+            self.rules["pre_mlp_layernorm"](layer.pre_mlp_layernorm, layer_id)
+
+            if "MoE" in str(type(layer.mlp)):
+                self.rules["eagle_module.router"](layer.mlp.router, layer_id)
+                if hasattr(layer.mlp, "shared_experts") and layer.mlp.shared_experts is not None:
+                    self.rules["eagle_module.shared_experts.linear_fc1"](
+                        layer.mlp.shared_experts.linear_fc1, layer_id
+                    )
+                    self.rules["eagle_module.shared_experts.linear_fc2"](
+                        layer.mlp.shared_experts.linear_fc2, layer_id
+                    )
+                for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
+                    self.rules["eagle_module.local_experts.linear_fc1"](
+                        expert.linear_fc1, layer_id, expert_id
+                    )
+                    self.rules["eagle_module.local_experts.linear_fc2"](
+                        expert.linear_fc2, layer_id, expert_id
+                    )
+            else:
+                self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id)
+                self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id)
+
+        parallel_draft_heads = getattr(eagle_module, "parallel_draft_heads", None)
+        if parallel_draft_heads is not None:
+            for head_id, head in enumerate(parallel_draft_heads.medusa_heads):
+                for layer_id, layer in enumerate(head):
+                    self.rules["parallel_draft_heads.medusa_layers"](
+                        layer.linear, head_id, layer_id
+                    )
+            self.rules["parallel_draft_heads.lm_head"](parallel_draft_heads.lm_head)
 
     def _populate_rule_book(self):
         all_rules = {}
@@ -482,18 +748,22 @@ class GPTModelExporter:
         self,
         module: torch.nn.Module,
         dtype: torch.dtype = torch.float16,
+        prefix: str = "",
     ) -> tuple[dict[str, torch.Tensor], str, int]:
         """Return a state_dict, quantization format, and block_size of the module.
 
         Args:
             module: The target module to perform real quantization.
             dtype: The default data type.
+            prefix: The prefix of the layer.
 
         Returns:
             Tuple: state_dict, quantization format, and block_size of the module.
         """
         name_to_value = {}
         qformat: str = self._get_quantization_format(module)
+        if qformat is None:
+            self.exclude_modules.append(prefix)
         block_size = get_weight_block_size(module)
 
         if hasattr(module, "weight") and module.weight is not None and module.weight.numel() > 0:
@@ -561,12 +831,16 @@ class GPTModelExporter:
             self._state_dict[prefix] = module
             return
 
-        name_to_value, qformat, block_size = self._get_quantized_state(module, dtype)
+        name_to_value, qformat, block_size = self._get_quantized_state(module, dtype, prefix=prefix)
 
         weight = name_to_value.pop("weight")
+        if "mixer.gate" in prefix:
+            print(f"{prefix}: weight dtype: {weight.dtype}")
         weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
 
         if weight_scale is None:
+            if "mixer.gate" in prefix:
+                print(f"{prefix}: weight_scale is None")
             self._state_dict[prefix + "weight"] = weight
         else:
             self._state_dict[prefix + "weight"] = to_quantized_weight(
@@ -589,11 +863,14 @@ class GPTModelExporter:
             else:
                 source_key = mapping.get(key, key)
                 self._state_dict[prefix + source_key] = val
+                print(f"{prefix + source_key}: {self._state_dict[prefix + source_key].dtype}")
+        if "mixer.gate" in prefix:
+            print(f"{prefix}weight: {self._state_dict[prefix + 'weight'].dtype}")
 
     def _gated_mlp_slicing(
         self, module, prefix, gate_proj_name="gate_proj", up_proj_name="up_proj"
     ):
-        name_to_value, qformat, block_size = self._get_quantized_state(module, self.dtype)
+        name_to_value, qformat, block_size = self._get_quantized_state(module, self.dtype, prefix=prefix)
 
         weight = name_to_value.pop("weight")
         weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
@@ -656,7 +933,7 @@ class GPTModelExporter:
         k_proj_name="k_proj",
         v_proj_name="v_proj",
             ):
-        name_to_value, qformat, block_size = self._get_quantized_state(module, self.dtype)
+        name_to_value, qformat, block_size = self._get_quantized_state(module, self.dtype, prefix=prefix)
 
         q_proj_prefix = prefix + q_proj_name + "."
         k_proj_prefix = prefix + k_proj_name + "."
@@ -791,7 +1068,7 @@ class GPTModelExporter:
         for expert in module:
             assert layer_type is not None, "layer_type is required for pack_name_remapping"
             name_to_value, qformat, block_size = self._get_quantized_state(
-                getattr(expert, layer_type), self.dtype
+                getattr(expert, layer_type), self.dtype, prefix=prefix
             )
             weight = name_to_value.pop("weight")
             weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
@@ -857,7 +1134,7 @@ class GPTModelExporter:
         for expert in module:
             assert layer_type is not None, "layer_type is required for pack_name_remapping"
             name_to_value, qformat, block_size = self._get_quantized_state(
-                getattr(expert, layer_type), self.dtype
+                getattr(expert, layer_type), self.dtype, prefix=prefix
             )
             weight = name_to_value.pop("weight")
             bias = name_to_value.pop("bias", None)
@@ -960,260 +1237,7 @@ class GPTModelExporter:
             # TODO: May need to modify the key name later.
             self._state_dict[prefix + "_bias"] = merged_bias
 
-    def _get_medusa_heads_state_dict(self):
-        medusa_heads = getattr(self.model, "medusa_heads", None)
-        if medusa_heads is None:
-            return
 
-        for head_id, head in enumerate(medusa_heads):
-            self.rules["medusa_heads.lm_head"](head.lm_head, head_id)
-            for layer_id, layer in enumerate(head.medusa_layers):
-                self.rules["medusa_heads.medusa_layers.linear"](layer.linear, head_id, layer_id)
-
-    def _get_eagle_module_state_dict(self):
-        eagle_module = getattr(self.model, "eagle_module", None)
-
-        if eagle_module is None:
-            return
-
-        # if hasattr(self.model, "embedding"):
-        #    self.rules["word_embeddings"](self.model.embedding.word_embeddings)
-
-        self.rules["fc"](eagle_module.fc)
-        if self.model.eagle_config.use_aux_hidden_state:
-            self.rules["enorm"](eagle_module.enorm)
-        elif self.model.eagle_config.use_mtp_layernorm:
-            self.rules["enorm"](eagle_module.enorm)
-            self.rules["hnorm"](eagle_module.hnorm)
-
-        if self.model.eagle_config.use_last_layernorm:
-            self.rules["final_layernorm"](eagle_module.decoder.final_layernorm)
-
-        if hasattr(self.model.eagle_module, "eagle_output_layer"):
-            self.rules["output_layer"](eagle_module.eagle_output_layer)
-        if hasattr(self.model.eagle_module, "dt2"):
-            self.rules["d2t"](eagle_module.d2t)
-
-        for layer in eagle_module.decoder.layers:
-            layer_id = layer.layer_number - 1
-
-            # The first layernorm needs special handling here. We have a dedicated mapping
-            # for the first layernorm since in EAGLE3 it will be mapped to hidden_norm
-            # instead of input_layernorm (due to the specialized transformer layer).
-            # The remaining EAGLE3 layers (if more than 1) are normal transformer layers
-            # where input_layernorm is mapped to input_layernorm.
-            if layer_id == 0 and self.model.eagle_config.use_input_layernorm_in_first_layer:
-                self.rules["first_input_layernorm"](layer.input_layernorm, layer_id)
-            elif layer_id > 0:
-                self.rules["input_layernorm"](layer.input_layernorm, layer_id)
-
-            if "MLASelfAttention" in str(type(layer.self_attention)):
-                if hasattr(layer.self_attention, "linear_q_proj"):
-                    self.rules["eagle_module.linear_q_proj"](
-                        layer.self_attention.linear_q_proj, layer_id
-                    )
-                else:
-                    self.rules["eagle_module.linear_q_down_proj"](
-                        layer.self_attention.linear_q_down_proj, layer_id
-                    )
-                    self.rules["eagle_module.linear_q_layernorm"](
-                        layer.self_attention.q_layernorm, layer_id
-                    )
-                    self.rules["eagle_module.linear_q_up_proj"](
-                        layer.self_attention.linear_q_up_proj, layer_id
-                    )
-
-                self.rules["eagle_module.linear_kv_down_proj"](
-                    layer.self_attention.linear_kv_down_proj, layer_id
-                )
-                self.rules["eagle_module.linear_kv_layernorm"](
-                    layer.self_attention.kv_layernorm, layer_id
-                )
-                self.rules["eagle_module.linear_kv_up_proj"](
-                    layer.self_attention.linear_kv_up_proj, layer_id
-                )
-            else:
-                self.rules["linear_qkv"](layer.self_attention.linear_qkv, layer_id)
-
-            self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
-            self.rules["pre_mlp_layernorm"](layer.pre_mlp_layernorm, layer_id)
-
-            if "MoE" in str(type(layer.mlp)):
-                self.rules["eagle_module.router"](layer.mlp.router, layer_id)
-                if hasattr(layer.mlp, "shared_experts") and layer.mlp.shared_experts is not None:
-                    self.rules["eagle_module.shared_experts.linear_fc1"](
-                        layer.mlp.shared_experts.linear_fc1, layer_id
-                    )
-                    self.rules["eagle_module.shared_experts.linear_fc2"](
-                        layer.mlp.shared_experts.linear_fc2, layer_id
-                    )
-                for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
-                    self.rules["eagle_module.local_experts.linear_fc1"](
-                        expert.linear_fc1, layer_id, expert_id
-                    )
-                    self.rules["eagle_module.local_experts.linear_fc2"](
-                        expert.linear_fc2, layer_id, expert_id
-                    )
-            else:
-                self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id)
-                self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id)
-
-        parallel_draft_heads = getattr(eagle_module, "parallel_draft_heads", None)
-        if parallel_draft_heads is not None:
-            for head_id, head in enumerate(parallel_draft_heads.medusa_heads):
-                for layer_id, layer in enumerate(head):
-                    self.rules["parallel_draft_heads.medusa_layers"](
-                        layer.linear, head_id, layer_id
-                    )
-            self.rules["parallel_draft_heads.lm_head"](parallel_draft_heads.lm_head)
-
-    def _get_state_dict(self):
-        model = self.model
-
-        # Embedding
-        if hasattr(model, "embedding"):
-            self.rules["word_embeddings"](model.embedding.word_embeddings)
-
-        # Final layernorm
-        if hasattr(model.decoder, "final_layernorm") and model.decoder.final_layernorm:
-            self.rules["final_layernorm"](model.decoder.final_layernorm)
-
-        if hasattr(model.decoder, "final_norm") and model.decoder.final_norm:
-            self.rules["final_norm"](model.decoder.final_norm)
-
-        # Output layer
-        if hasattr(model, "output_layer") and not model.share_embeddings_and_output_weights:
-            self.rules["output_layer"](model.output_layer)
-
-        # Decoder layers
-        for layer in model.decoder.layers:
-            layer_id = layer.layer_number - 1
-
-            if isinstance(layer, MambaLayer):
-                if not isinstance(layer.norm, IdentityOp):
-                    self.rules["norm"](layer.norm, layer_id)
-
-                self.rules["mixer_norm"](layer.mixer.norm, layer_id)
-                self.rules["A_log"](layer.mixer.A_log, layer_id)
-                self.rules["D"](layer.mixer.D, layer_id)
-                self.rules["dt_bias"](layer.mixer.dt_bias, layer_id)
-
-                self.rules["conv1d"](layer.mixer.conv1d, layer_id)
-                self.rules["in_proj"](layer.mixer.in_proj, layer_id)
-                self.rules["out_proj"](layer.mixer.out_proj, layer_id)
-
-            elif isinstance(layer, TransformerLayer):
-                if not isinstance(layer.input_layernorm, IdentityOp):
-                    self.rules["input_layernorm"](layer.input_layernorm, layer_id)
-
-                if not isinstance(layer.self_attention, IdentityOp):
-                    if "MLASelfAttention" in str(type(layer.self_attention)):
-                        if hasattr(layer.self_attention, "linear_q_proj"):
-                            self.rules["linear_q_proj"](
-                                layer.self_attention.linear_q_proj, layer_id
-                            )
-                        else:
-                            self.rules["linear_q_down_proj"](
-                                layer.self_attention.linear_q_down_proj, layer_id
-                            )
-                            self.rules["linear_q_layernorm"](
-                                layer.self_attention.q_layernorm, layer_id
-                            )
-                            self.rules["linear_q_up_proj"](
-                                layer.self_attention.linear_q_up_proj, layer_id
-                            )
-
-                        self.rules["linear_kv_down_proj"](
-                            layer.self_attention.linear_kv_down_proj, layer_id
-                        )
-                        self.rules["linear_kv_layernorm"](
-                            layer.self_attention.kv_layernorm, layer_id
-                        )
-                        self.rules["linear_kv_up_proj"](
-                            layer.self_attention.linear_kv_up_proj, layer_id
-                        )
-                        self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
-                    else:
-                        if layer.self_attention.q_layernorm is not None and not isinstance(
-                            layer.self_attention.q_layernorm, (IdentityOp, L2Norm)
-                        ):
-                            self.rules["q_layernorm"](layer.self_attention.q_layernorm, layer_id)
-                            self.rules["k_layernorm"](layer.self_attention.k_layernorm, layer_id)
-                        self.rules["linear_qkv"](layer.self_attention.linear_qkv, layer_id)
-                        if hasattr(layer.self_attention, "core_attention"):
-                            self.rules["core_attention"](layer.self_attention.core_attention, layer_id)
-                        self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
-                        if (
-                            getattr(layer.self_attention.core_attention, "softmax_offset", None)
-                            is not None
-                        ):
-                            self.rules["softmax_offset"](
-                                layer.self_attention.core_attention.softmax_offset, layer_id
-                            )
-
-                if not isinstance(layer.pre_mlp_layernorm, IdentityOp):
-                    self.rules["pre_mlp_layernorm"](layer.pre_mlp_layernorm, layer_id)
-
-                if not isinstance(layer.mlp, IdentityOp):
-                    if "MoE" in str(type(layer.mlp)):
-                        self.rules["router"](
-                            layer.mlp.router, layer_id, dtype=self.moe_router_dtype
-                        )
-                        if hasattr(layer.mlp, "fc1_latent_proj") and layer.mlp.fc1_latent_proj is not None:
-                            self.rules["fc1_latent_proj"](layer.mlp.fc1_latent_proj, layer_id)
-                        if hasattr(layer.mlp, "fc2_latent_proj") and layer.mlp.fc2_latent_proj is not None:
-                            self.rules["fc2_latent_proj"](layer.mlp.fc2_latent_proj, layer_id)
-                        if (
-                            hasattr(layer.mlp, "shared_experts")
-                            and layer.mlp.shared_experts is not None
-                        ):
-                            self.rules["shared_experts.linear_fc1"](
-                                layer.mlp.shared_experts.linear_fc1, layer_id
-                            )
-                            self.rules["shared_experts.linear_fc2"](
-                                layer.mlp.shared_experts.linear_fc2, layer_id
-                            )
-                        if not self.rules.get("use_packed_local_experts", False):
-                            for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
-                                self.rules["local_experts.linear_fc1"](
-                                    expert.linear_fc1, layer_id, expert_id
-                                )
-                                self.rules["local_experts.linear_fc2"](
-                                    expert.linear_fc2, layer_id, expert_id
-                                )
-                        else:
-                            # For llama 4, in hf unified checkpoint, all local experts share one scale
-                            self.rules["local_experts.linear_fc1"](
-                                layer.mlp.experts.local_experts, layer_id
-                            )
-                            self.rules["local_experts.linear_fc2"](
-                                layer.mlp.experts.local_experts, layer_id
-                            )
-                    else:
-                        self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id)
-                        self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id)
-            else:
-                raise ValueError("Only TransformerLayer or MambaLayer are supported.")
-        
-        # MTP module
-        # Hacky version for now: copy MTP weights from pretrained model
-        if os.path.isdir(self._hf_pretrained_model_name):
-            safetensors_index_file = Path(self._hf_pretrained_model_name) / "model.safetensors.index.json"
-        else:
-            safetensors_index_file = hf_hub_download(
-            repo_id=self._hf_pretrained_model_name, 
-            filename="model.safetensors.index.json")
-
-        print(f"safetensors_index_file: {safetensors_index_file}")
-        if safetensors_index_file and os.path.exists(safetensors_index_file):
-            with open(safetensors_index_file, "r") as f:
-                safetensors_index = json.load(f)
-            model_dir = Path(safetensors_index_file).parent
-            for key in safetensors_index["weight_map"]:
-                if "mtp" in key:
-                    self._state_dict[key] = get_safetensor(model_dir, key)
-
-        # TODO implement actual MTP export
 
 
 
