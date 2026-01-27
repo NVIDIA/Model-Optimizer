@@ -507,8 +507,13 @@ def _unpack_compressed_linear_weights(model):
             # Decompress the INT4 weights to BF16
             with torch.no_grad():
                 # Fix weight_shape if it's a tensor (should be a list of ints)
-                if hasattr(module, "weight_shape") and isinstance(module.weight_shape, torch.Tensor):
-                    module.weight_shape = module.weight_shape.tolist()
+                if hasattr(module, "weight_shape") and isinstance(
+                    module.weight_shape, torch.Tensor
+                ):
+                    shape_list = module.weight_shape.tolist()
+                    # Remove the parameter and set as regular attribute
+                    del module._parameters["weight_shape"]
+                    module.weight_shape = shape_list
 
                 # Get the decompressed weight from the compressor
                 decompressed_weight = module.compressor.decompress_module(module)
