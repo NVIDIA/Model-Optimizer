@@ -67,7 +67,7 @@ def get_parser() -> argparse.ArgumentParser:
     argparser.add_argument(
         "--calibration_method",
         type=str,
-        choices=["max", "entropy", "awq_clip", "rtn_dq"],
+        choices=["max", "entropy", "awq_clip", "rtn_dq", "awq_full", "awq_lite", "rtn"],
         help=(
             "Calibration method choices for int8/fp8: {entropy (default), max}, "
             "int4: {awq_clip (default), rtn_dq}."
@@ -286,6 +286,22 @@ def get_parser() -> argparse.ArgumentParser:
             "The currently supported precisions are {fp16, int8, fp8}."
         ),
     )
+    argparser.add_argument(
+        "--kv_quant_mode",
+        type=str,
+        choices=["NONE", "PER_TENSOR", "PER_CHANNEL"],
+        default="NONE",
+        help=(
+            "Quantization mode for kv cache in GQA. NONE (default) means no quantization for kv cache, "
+        ),
+    )
+    argparser.add_argument(
+        "--kv_cache_dtype",
+        type=str,
+        choices=["fp8", "int8"],
+        default="NONE",
+        help=("Quantization type for kv cache in GQA. fp8 is default."),
+    )
     return argparser
 
 
@@ -352,6 +368,8 @@ def main():
         simplify=args.simplify,
         calibrate_per_node=args.calibrate_per_node,
         direct_io_types=args.direct_io_types,
+        kv_quant_mode=args.kv_quant_mode,
+        kv_cache_dtype=args.kv_cache_dtype,
     )
 
 

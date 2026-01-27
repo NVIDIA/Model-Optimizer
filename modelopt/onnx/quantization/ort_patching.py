@@ -1547,6 +1547,9 @@ def _quantize_static(
     use_external_data_format=False,
     calibrate_method=CalibrationMethod.MinMax,
     extra_options=None,
+    intermediate_generated_files: list[str] = [],
+    kv_quant_mode: str = "NONE",
+    **kwargs,
 ):
     """Modification: enables TRT custom ops in the calibrator via 'TrtExtraPluginLibraryPaths' in extra_options.
 
@@ -1642,6 +1645,18 @@ def _quantize_static(
             raise TypeError(
                 f"Unexpected type {type(tensors_range)} for tensors_range and calibrator={type(calibrator)}."
             )
+
+        if kv_quant_mode != "NONE":
+            from modelopt.onnx.quantization.kv_cache import save_kv_cache_calib_data
+
+            save_kv_cache_calib_data(
+                Path(model_input),
+                session=calibrator.infer_session,
+                inputs=list(calibration_data_reader),
+                intermediate_generated_files=intermediate_generated_files,
+                **kwargs,
+            )
+
         del calibrator
 
     check_static_quant_arguments(quant_format, activation_type, weight_type)

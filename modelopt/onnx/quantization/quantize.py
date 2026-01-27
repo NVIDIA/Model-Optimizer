@@ -61,6 +61,7 @@ from modelopt.onnx.quantization.graph_utils import (
 )
 from modelopt.onnx.quantization.int4 import quantize as quantize_int4
 from modelopt.onnx.quantization.int8 import quantize as quantize_int8
+from modelopt.onnx.quantization.kv_cache import kv_cache_quantize
 from modelopt.onnx.quantization.ort_utils import update_trt_ep_support
 from modelopt.onnx.quantization.qdq_utils import (
     qdq_to_dq,
@@ -231,6 +232,8 @@ def quantize(
     calibrate_per_node: bool = False,
     input_shapes_profile: Sequence[dict[str, str]] | None = None,
     direct_io_types: bool = False,
+    kv_quant_mode: str = "NONE",
+    kv_cache_dtype: str = "fp8",
     **kwargs: Any,
 ) -> None:
     """Quantizes the provided ONNX model.
@@ -350,6 +353,10 @@ def quantize(
         direct_io_types:
             If True, modify the I/O types in the quantized ONNX model to be lower precision whenever possible.
             If False, keep the I/O types in the quantized ONNX model the same as in the given ONNX model.
+        kv_quant_mode:
+            KV cache quantization mode and dtype. kv_quant_mode can be one of ["NONE", "PER_TENSOR"].
+        kv_cache_dtype:
+            kv_cache_dtype can be one of ["int8", "fp8"].
         kwargs:
             Additional keyword arguments for int4 quantization, including:
             - awqlite_alpha_step (float): Alpha step for lite, range [0, 1].
@@ -481,6 +488,7 @@ def quantize(
             calibrate_per_node=calibrate_per_node,
             custom_ops_to_quantize=list(custom_ops_to_quantize.keys()),
             direct_io_types=direct_io_types,
+            kv_quant_mode=kv_quant_mode,
             **kwargs,
         )
     elif "int4" in quantize_mode:
@@ -495,12 +503,25 @@ def quantize(
             use_zero_point=use_zero_point,
             log_level=log_level,
             input_shapes_profile=input_shapes_profile,
+            intermediate_generated_files=intermediate_generated_files,
+            kv_quant_mode=kv_quant_mode,
             **kwargs,
         )
     else:
         raise RuntimeError(f"Invalid quantization mode choice: {quantize_mode}")
 
     if onnx_model:
+        if kv_quant_mode != "NONE":
+            logger.info(
+                f"Quantization mode for KV cache: {kv_quant_mode}, kv_cache_dtype: {kv_cache_dtype}"
+            )
+            onnx_model = kv_cache_quantize(
+                onnx_model,
+                kv_quant_mode=kv_quant_mode,
+                kv_cache_dtype=kv_cache_dtype,
+                intermediate_generated_files=intermediate_generated_files,
+            )
+
         # Fuse Q nodes for INT8/FP8 mode
         if quantize_mode in ["int8", "fp8"]:
             if dq_only:
