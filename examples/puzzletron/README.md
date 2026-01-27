@@ -56,7 +56,7 @@ hf auth login
 3. Run the compression script.
 
    ```bash
-   torchrun --nproc_per_node 2 examples/compress/main.py --config examples/compress/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml 2>&1 | tee ./log.txt | grep "Compress Progress"
+   torchrun --nproc_per_node 2 examples/puzzletron/main.py --config examples/puzzletron/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml 2>&1 | tee ./log.txt | grep "Compress Progress"
    ```
 
    This will save the full output to `log.txt` and display the following progress on screen:
@@ -134,7 +134,7 @@ This assumes pruning, replacement library building, NAS scoring, and subblock st
 For example, let's set `target_memory: 96_000` in `llama-3_1-8B_pruneffn_memory.yaml`.
 
 ```bash
-torchrun --nproc_per_node 2 examples/compress/main.py --config path/to/llama-3_1-8B_pruneffn_memory.yaml --mip-only 2>&1 | tee ./log.txt | grep "Compress Progress"
+torchrun --nproc_per_node 2 examples/puzzletron/main.py --config path/to/llama-3_1-8B_pruneffn_memory.yaml --mip-only 2>&1 | tee ./log.txt | grep "Compress Progress"
 ```
 
 This will generate the following network architecture (see `log.txt`):
