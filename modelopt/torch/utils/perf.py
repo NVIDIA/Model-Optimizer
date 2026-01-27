@@ -28,7 +28,7 @@ __all__ = [
     "Timer",
     "clear_cuda_cache",
     "get_cuda_memory_stats",
-    "get_gpu_mem_fraction",
+    "get_used_gpu_mem_fraction",
     "report_memory",
 ]
 
@@ -49,7 +49,7 @@ def get_cuda_memory_stats(device=None):
     }
 
 
-def get_gpu_mem_fraction(device="cuda:0"):
+def get_used_gpu_mem_fraction(device="cuda:0"):
     """Get used GPU memory as a fraction of total memory.
 
     Args:

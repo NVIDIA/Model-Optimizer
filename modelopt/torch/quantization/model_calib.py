@@ -30,7 +30,7 @@ from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
-from modelopt.torch.utils.perf import get_gpu_mem_fraction
+from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
 
 from .calib import MseCalibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
@@ -1162,7 +1162,7 @@ def svdquant(
     max_calibrate(model, forward_loop)
 
 
-def print_relative_mse_error(q: torch.Tensor, w: torch.Tensor, h: torch.Tensor, module_name: str):
+def _print_relative_mse_error(q: torch.Tensor, w: torch.Tensor, h: torch.Tensor, module_name: str):
     """Print relative mean squared error between quantized and original weights.
 
     Computes the Hessian-weighted relative MSE between quantized and original weights,
@@ -1328,7 +1328,7 @@ def blockwise_weight_update(module, h, block_size, percdamp):
         weight[:, block_end:] -= block_errors @ h_inv[block_start:block_end, block_end:]
 
     # Print relative mse error
-    print_relative_mse_error(quantized_weight, module.weight.float(), h, module.name)
+    _print_relative_mse_error(quantized_weight, module.weight.float(), h, module.name)
     # Update module weights
     module.weight.data = quantized_weight.reshape(module.weight.shape).to(module.weight.data.dtype)
 
@@ -1366,7 +1366,7 @@ def gptq_lite(
         """Initialize hessian state with zeros."""
         for name, (shape, device) in tensor_mapping.items():
             # Use CPU if GPU memory is tight
-            target_device = "cpu" if get_gpu_mem_fraction(device) > 0.65 else device
+            target_device = "cpu" if get_used_gpu_mem_fraction(device) > 0.65 else device
             hessian_state[name] = {
                 "hessian": torch.zeros(shape, dtype=torch.float32, device=target_device),
                 "n_samples": 0,
@@ -1382,7 +1382,7 @@ def gptq_lite(
                 raise KeyError(f"Layer '{name}' not found in loaded hessian state")
 
             # Move to appropriate device based on memory
-            target_device = "cpu" if get_gpu_mem_fraction(device) > 0.65 else device
+            target_device = "cpu" if get_used_gpu_mem_fraction(device) > 0.65 else device
             hessian_state[name] = {
                 "hessian": loaded_state[name]["hessian"].to(target_device),
                 "n_samples": loaded_state[name]["n_samples"],
