@@ -69,7 +69,7 @@ class TestSparseAttentionReplacement:
             "sparse_cfg": {
                 "*self_attn*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 1e-4,
+                    "threshold": {"prefill": 1e-4, "decode": 1e-4},
                     "br": 128,
                     "bc": 128,
                     "enable": True,
@@ -100,7 +100,7 @@ class TestConversionEdgeCases:
             "sparse_cfg": {
                 filter_func: {
                     "method": "flash_skip_softmax",
-                    "threshold": 1e-3,
+                    "threshold": {"prefill": 1e-3, "decode": 1e-4},
                     "enable": True,
                 },
             },
@@ -118,7 +118,7 @@ class TestConversionEdgeCases:
             "sparse_cfg": {
                 "*nonexistent*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 1e-3,
+                    "threshold": {"prefill": 1e-3, "decode": 1e-4},
                     "enable": True,
                 },
             },
@@ -192,7 +192,7 @@ class TestSparseAttentionModuleMethods:
             "sparse_cfg": {
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 0.001,
+                    "threshold": {"prefill": 0.001, "decode": 0.0001},
                     "br": 64,
                     "bc": 64,
                     "collect_stats": True,  # Enable stats collection
@@ -228,7 +228,7 @@ class TestSparseAttentionModuleMethods:
             "sparse_cfg": {
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 0.001,
+                    "threshold": {"prefill": 0.001, "decode": 0.0001},
                     "br": 64,
                     "bc": 64,
                     "collect_stats": False,  # Disable stats collection
@@ -257,7 +257,7 @@ class TestSparseAttentionModuleMethods:
             "sparse_cfg": {
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 0.005,
+                    "threshold": {"prefill": 0.005, "decode": 0.001},
                     "br": 64,
                     "bc": 64,
                     "enable": True,

@@ -46,12 +46,12 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         description="If True, enables sparse attention. If False, bypasses sparsity.",
     )
 
-    threshold: float | dict[str, float] = ModeloptField(
-        default=1e-3,
+    threshold: dict[str, float] = ModeloptField(
+        default={"prefill": 1e-3, "decode": 1e-4},
         title="Sparsity threshold.",
         description=(
             "Threshold for determining which attention values to skip. "
-            "Can be a float or dict with phase-specific values."
+            "Must be a dict with 'prefill' and 'decode' keys."
         ),
     )
 
@@ -123,26 +123,24 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
     @field_validator("threshold")
     @classmethod
     def validate_threshold(cls, v):
-        """Validate threshold is in valid range (0, 1) or dict with valid phases."""
-        if isinstance(v, dict):
-            # Validate phase keys
-            valid_phases = {"prefill", "decode", "default"}
-            invalid_keys = set(v.keys()) - valid_phases
-            if invalid_keys:
+        """Validate threshold is a dict with valid phases and values in range (0, 1)."""
+        if not isinstance(v, dict):
+            raise ValueError(
+                f"Threshold must be a dict with 'prefill' and/or 'decode' keys, got {type(v).__name__}"
+            )
+        # Validate phase keys
+        valid_phases = {"prefill", "decode"}
+        invalid_keys = set(v.keys()) - valid_phases
+        if invalid_keys:
+            raise ValueError(
+                f"Invalid threshold phases: {invalid_keys}. Valid phases: {valid_phases}"
+            )
+        # Validate all values are in range (0, 1)
+        for phase, threshold in v.items():
+            if not isinstance(threshold, (int, float)) or threshold <= 0 or threshold >= 1:
                 raise ValueError(
-                    f"Invalid threshold phases: {invalid_keys}. Valid phases: {valid_phases}"
+                    f"Threshold for phase '{phase}' must be in range (0, 1), got {threshold}"
                 )
-            # Validate all values are in range (0, 1)
-            for phase, threshold in v.items():
-                if not isinstance(threshold, (int, float)) or threshold <= 0 or threshold >= 1:
-                    raise ValueError(
-                        f"Threshold for phase '{phase}' must be in range (0, 1), got {threshold}"
-                    )
-        elif isinstance(v, (int, float)):
-            if v <= 0 or v >= 1:
-                raise ValueError(f"Threshold must be in range (0, 1), got {v}")
-        else:
-            raise ValueError(f"Threshold must be a number in range (0, 1) or dict, got {type(v)}")
         return v
 
 
@@ -210,6 +208,16 @@ class CalibrationConfig(ModeloptBaseConfig):
             "If None, uses default: [1e-6, 5e-6, 1e-5, 5e-5, 1e-4, 5e-4, 1e-3, 5e-3, "
             "1e-2, 2e-2, 5e-2, 1e-1, 2e-1, 3e-1, 5e-1, 7e-1]. "
             "Increasing the number of trials improves calibration accuracy but slows down calibration."
+        ),
+    )
+
+    cache_dir: str | None = ModeloptField(
+        default=None,
+        title="Cache directory",
+        description=(
+            "Directory to cache generated calibration samples. "
+            "If None, uses MODELOPT_CACHE_DIR env var or ~/.cache/modelopt/sparse_attention/. "
+            "Caching avoids regenerating samples on repeated calibration runs."
         ),
     )
 
@@ -372,10 +380,10 @@ SKIP_SOFTMAX_DEFAULT = {
 SKIP_SOFTMAX_CALIB = {
     "sparse_cfg": {
         "calibration": {
-            # "target_sparse_ratio": {"prefill": 0.75, "decode": 0.75},
-            "target_sparse_ratio": {"prefill": 0.5, "decode": 0.5},
+            "target_sparse_ratio": {"prefill": 0.9, "decode": 0.9},
             "samples": 64,
-            "max_seqlen": 16384,
+            "max_seqlen": 65536,
+            "chunk_size": 4096,
         },
         "*attn*": {
             "method": "flash_skip_softmax",

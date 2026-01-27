@@ -30,7 +30,7 @@ class TestFlashSkipSoftmaxMethod:
         """Test phase detection from attention score shape."""
         method = FlashSkipSoftmax(
             {
-                "threshold": 1e-3,
+                "threshold": {"prefill": 1e-3, "decode": 1e-4},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
@@ -70,30 +70,11 @@ class TestFlashSkipSoftmaxMethod:
         method._update_threshold("prefill")
         assert method.threshold == 1e-3
 
-    def test_threshold_update_static_config(self):
-        """Test threshold with static float config."""
-        method = FlashSkipSoftmax(
-            {
-                "threshold": 5e-4,
-                "br": 128,
-                "bc": 128,
-                "backend": "pytorch",
-                "is_causal": True,
-            }
-        )
-
-        initial_threshold = method.threshold
-        assert initial_threshold == 5e-4
-
-        # Should not change for static config
-        method._update_threshold("decode")
-        assert method.threshold == 5e-4
-
     def test_block_reshaping_divisible(self):
         """Test block reshaping with divisible sequence lengths."""
         method = FlashSkipSoftmax(
             {
-                "threshold": 1e-3,
+                "threshold": {"prefill": 1e-3, "decode": 1e-4},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
@@ -116,7 +97,7 @@ class TestFlashSkipSoftmaxMethod:
         """Test block reshaping with non-divisible lengths."""
         method = FlashSkipSoftmax(
             {
-                "threshold": 1e-3,
+                "threshold": {"prefill": 1e-3, "decode": 1e-4},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
@@ -139,7 +120,7 @@ class TestFlashSkipSoftmaxMethod:
         """Test correction factor for prefill phase."""
         method = FlashSkipSoftmax(
             {
-                "threshold": 1e-3,
+                "threshold": {"prefill": 1e-3, "decode": 1e-4},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
@@ -166,7 +147,7 @@ class TestFlashSkipSoftmaxMethod:
         """Test correction factor for decode phase."""
         method = FlashSkipSoftmax(
             {
-                "threshold": 1e-5,
+                "threshold": {"prefill": 1e-3, "decode": 1e-5},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
@@ -189,7 +170,7 @@ class TestFlashSkipSoftmaxMethod:
         """Test sparsity statistics structure."""
         method = FlashSkipSoftmax(
             {
-                "threshold": 1e-3,
+                "threshold": {"prefill": 1e-3, "decode": 1e-4},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
@@ -210,7 +191,7 @@ class TestFlashSkipSoftmaxMethod:
         """Test block mask shape and type."""
         method = FlashSkipSoftmax(
             {
-                "threshold": 1e-3,
+                "threshold": {"prefill": 1e-3, "decode": 1e-4},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
@@ -229,7 +210,7 @@ class TestFlashSkipSoftmaxMethod:
     def test_causal_vs_noncausal(self):
         """Test total_blocks calculation for causal vs non-causal."""
         config_base = {
-            "threshold": 1e-3,
+            "threshold": {"prefill": 1e-3, "decode": 1e-4},
             "br": 128,
             "bc": 128,
             "backend": "pytorch",
@@ -252,7 +233,7 @@ class TestFlashSkipSoftmaxMethod:
         """Test calculate_sparsity input validation."""
         method = FlashSkipSoftmax(
             {
-                "threshold": 1e-3,
+                "threshold": {"prefill": 1e-3, "decode": 1e-4},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
@@ -268,7 +249,7 @@ class TestFlashSkipSoftmaxMethod:
         """Test apply_sparsity with pre-computed mask."""
         method = FlashSkipSoftmax(
             {
-                "threshold": 1e-3,
+                "threshold": {"prefill": 1e-3, "decode": 1e-4},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
@@ -295,7 +276,7 @@ class TestFlashSkipSoftmaxMethod:
         """Test apply_sparsity calculates mask internally when None."""
         method = FlashSkipSoftmax(
             {
-                "threshold": 1e-3,
+                "threshold": {"prefill": 1e-3, "decode": 1e-4},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
@@ -315,7 +296,7 @@ class TestFlashSkipSoftmaxMethod:
         """Test method name property."""
         method = FlashSkipSoftmax(
             {
-                "threshold": 1e-3,
+                "threshold": {"prefill": 1e-3, "decode": 1e-4},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",

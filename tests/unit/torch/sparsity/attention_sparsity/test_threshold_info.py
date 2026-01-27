@@ -29,23 +29,6 @@ from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAt
 class TestFlashSkipSoftmaxThresholdInfo:
     """Test FlashSkipSoftmax.get_threshold_info() method."""
 
-    def test_static_threshold(self):
-        """Test threshold info for static threshold."""
-        method = FlashSkipSoftmax(
-            method_config={
-                "threshold": 0.001,
-                "br": 128,
-                "bc": 128,
-                "backend": "pytorch",
-                "is_causal": True,
-            }
-        )
-
-        info = method.get_threshold_info()
-
-        assert info["type"] == "static"
-        assert info["value"] == 0.001
-
     def test_phased_threshold(self):
         """Test threshold info for phase-specific static thresholds."""
         method = FlashSkipSoftmax(
@@ -70,7 +53,7 @@ class TestFlashSkipSoftmaxThresholdInfo:
         """Test threshold info for calibrated dynamic threshold."""
         method = FlashSkipSoftmax(
             method_config={
-                "threshold": 0.001,
+                "threshold": {"prefill": 0.001, "decode": 0.0001},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
@@ -98,7 +81,7 @@ class TestFlashSkipSoftmaxThresholdInfo:
         """Test that threshold info has expected structure."""
         method = FlashSkipSoftmax(
             method_config={
-                "threshold": 0.001,
+                "threshold": {"prefill": 0.001, "decode": 0.0001},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
@@ -124,7 +107,7 @@ class TestSparseAttentionModuleThresholdInfo:
             "sparse_cfg": {
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 0.005,
+                    "threshold": {"prefill": 0.005, "decode": 0.001},
                     "br": 64,
                     "bc": 64,
                     "enable": True,
@@ -147,7 +130,8 @@ class TestSparseAttentionModuleThresholdInfo:
         info = sparse_module.get_threshold_info()
 
         assert info["type"] == "static"
-        assert info["value"] == 0.005
+        assert info["value"]["prefill"] == 0.005
+        assert info["value"]["decode"] == 0.001
 
     def test_module_with_calibrated_threshold(self):
         """Test module reports calibrated threshold correctly."""
@@ -157,7 +141,7 @@ class TestSparseAttentionModuleThresholdInfo:
             "sparse_cfg": {
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 0.001,
+                    "threshold": {"prefill": 0.001, "decode": 0.0001},
                     "br": 64,
                     "bc": 64,
                     "enable": True,
@@ -192,7 +176,7 @@ class TestSparseAttentionModuleThresholdInfo:
             "sparse_cfg": {
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 0.001,
+                    "threshold": {"prefill": 0.001, "decode": 0.0001},
                     "br": 64,
                     "bc": 64,
                     "enable": True,
@@ -230,7 +214,7 @@ class TestPrintSparseAttentionSummaryIntegration:
             "sparse_cfg": {
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 0.001,
+                    "threshold": {"prefill": 0.001, "decode": 0.0001},
                     "br": 64,
                     "bc": 64,
                     "enable": True,
@@ -242,7 +226,8 @@ class TestPrintSparseAttentionSummaryIntegration:
         print_sparse_attention_summary(sparse_model)
 
         captured = capsys.readouterr()
-        assert "threshold=1.00e-03" in captured.out
+        assert "prefill" in captured.out
+        assert "decode" in captured.out
         assert "flash_skip_softmax" in captured.out
 
     def test_summary_displays_dynamic_threshold(self, capsys):
@@ -257,7 +242,7 @@ class TestPrintSparseAttentionSummaryIntegration:
             "sparse_cfg": {
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 0.001,
+                    "threshold": {"prefill": 0.001, "decode": 0.0001},
                     "br": 64,
                     "bc": 64,
                     "enable": True,

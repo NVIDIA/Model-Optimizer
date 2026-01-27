@@ -145,7 +145,7 @@ custom_config = {
         },
         "*attn*": {  # Pattern to match attention modules
             "method": "flash_skip_softmax",
-            "threshold": 1e-4,  # Fixed threshold (ignored if calibration is used)
+            "threshold": {"prefill": 1e-3, "decode": 1e-4},  # Phase-specific thresholds (ignored if calibration is used)
             "br": 128,          # Flash Attention block rows
             "bc": 128,          # Flash Attention block columns
             "backend": "pytorch",

@@ -17,36 +17,6 @@
 
 import modelopt.torch.sparsity.attention_sparsity as mtsa
 
-# Custom sparse attention configurations
-CUSTOM_SPARSE_CONFIG = {
-    "SPARSE_CONSERVATIVE": {
-        "sparse_cfg": {
-            "*attn*": {
-                "method": "flash_skip_softmax",
-                "threshold": {"prefill": 5e-4, "decode": 1e-5},
-                "br": 128,
-                "bc": 128,
-                "backend": "pytorch",
-                "enable": True,
-            },
-            "default": {"enable": False},
-        },
-    },
-    "SPARSE_AGGRESSIVE": {
-        "sparse_cfg": {
-            "*attn*": {
-                "method": "flash_skip_softmax",
-                "threshold": {"prefill": 5e-3, "decode": 5e-4},
-                "br": 128,
-                "bc": 128,
-                "backend": "pytorch",
-                "enable": True,
-            },
-            "default": {"enable": False},
-        },
-    },
-}
-
 
 def _extract_model(model_obj):
     """Extract actual model from wrapper (HFLM or EvalModel)."""
@@ -82,13 +52,10 @@ def sparsify_model(
 
     # Resolve config
     if isinstance(sparse_cfg, str):
-        # Try custom configs first
-        mtsa_cfg = CUSTOM_SPARSE_CONFIG.get(sparse_cfg)
+        # Get config from mtsa module (e.g., SKIP_SOFTMAX_CALIB, SKIP_SOFTMAX_DEFAULT)
+        mtsa_cfg = getattr(mtsa, sparse_cfg, None)
         if mtsa_cfg is None:
-            # Try predefined configs
-            mtsa_cfg = getattr(mtsa, sparse_cfg, None)
-        if mtsa_cfg is None:
-            raise ValueError(f"Unknown sparse_cfg: {sparse_cfg}")
+            raise ValueError(f"Unknown sparse_cfg: {sparse_cfg}.")
     else:
         mtsa_cfg = sparse_cfg
 

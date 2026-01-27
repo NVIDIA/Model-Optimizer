@@ -293,7 +293,7 @@ class TestCalibrationIntegration:
             "sparse_cfg": {
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 1e-3,
+                    "threshold": {"prefill": 1e-3, "decode": 1e-4},
                     "br": 64,
                     "bc": 64,
                     "enable": True,
@@ -327,7 +327,7 @@ class TestCalibrationIntegration:
                 },
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 1e-3,
+                    "threshold": {"prefill": 1e-3, "decode": 1e-4},
                     "br": 64,
                     "bc": 64,
                     "enable": True,
@@ -344,7 +344,14 @@ class TestCalibrationIntegration:
         model = SimpleTransformerEncoder()
 
         config = {
-            "sparse_cfg": {"*attn*": {"threshold": 1e-3, "br": 64, "bc": 64, "enable": True}},
+            "sparse_cfg": {
+                "*attn*": {
+                    "threshold": {"prefill": 1e-3, "decode": 1e-4},
+                    "br": 64,
+                    "bc": 64,
+                    "enable": True,
+                }
+            },
         }
 
         sparse_model = sparsify(model, config)
@@ -433,7 +440,7 @@ class TestDynamicThresholdCalibratorMethods:
             "sparse_cfg": {
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 0.1,
+                    "threshold": {"prefill": 0.1, "decode": 0.1},
                     "br": 64,
                     "bc": 64,
                     "enable": True,
@@ -461,7 +468,7 @@ class TestDynamicThresholdCalibratorMethods:
             "sparse_cfg": {
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 0.1,
+                    "threshold": {"prefill": 0.1, "decode": 0.1},
                     "br": 64,
                     "bc": 64,
                     "enable": True,
@@ -497,7 +504,7 @@ class TestDynamicThresholdCalibratorMethods:
             "sparse_cfg": {
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 0.1,
+                    "threshold": {"prefill": 0.1, "decode": 0.1},
                     "br": 64,
                     "bc": 64,
                     "enable": True,
@@ -523,7 +530,7 @@ class TestDynamicThresholdCalibratorMethods:
             "sparse_cfg": {
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 0.1,
+                    "threshold": {"prefill": 0.1, "decode": 0.1},
                     "br": 64,
                     "bc": 64,
                     "enable": True,
@@ -559,7 +566,7 @@ class TestDynamicThresholdCalibratorMethods:
             "sparse_cfg": {
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 0.1,
+                    "threshold": {"prefill": 0.1, "decode": 0.1},
                     "br": 64,
                     "bc": 64,
                     "enable": True,
@@ -601,7 +608,7 @@ class TestDynamicThresholdCalibratorMethods:
             "sparse_cfg": {
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 0.1,
+                    "threshold": {"prefill": 0.1, "decode": 0.1},
                     "br": 64,
                     "bc": 64,
                     "enable": True,
@@ -646,7 +653,7 @@ class TestDynamicThresholdCalibratorMethods:
             "sparse_cfg": {
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 0.1,
+                    "threshold": {"prefill": 0.1, "decode": 0.1},
                     "br": 64,
                     "bc": 64,
                     "enable": True,
@@ -737,7 +744,7 @@ class TestCalibrateFunction:
             "sparse_cfg": {
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 0.1,
+                    "threshold": {"prefill": 0.1, "decode": 0.1},
                     "br": 64,
                     "bc": 64,
                     "enable": True,
@@ -780,7 +787,7 @@ class TestCalibrateFunction:
             "sparse_cfg": {
                 "*attn*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 0.1,
+                    "threshold": {"prefill": 0.1, "decode": 0.1},
                 }
             },
         }
