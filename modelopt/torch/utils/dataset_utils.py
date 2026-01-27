@@ -73,7 +73,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
         "preprocess": lambda sample: "\n".join(turn["value"] for turn in sample["conversations"]),
     },
     "cnn_dailymail": {
-        "config": {"path": "cnn_dailymail", "name": "3.0.0", "split": ["train"]},
+        "config": {"path": "abisee/cnn_dailymail", "name": "3.0.0", "split": ["train"]},
         "preprocess": lambda sample: sample["article"],
     },
     "pile": {
