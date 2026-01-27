@@ -141,7 +141,7 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         # TODO: GroupedLinear supports weights split by `num_gemms`, to support quantization
         # with static parameters beyond per-tensor, we need to support a unique quantizer for each gemm.
 
-    def modelopt_post_restore(self, prefix: str = ""):
+    def modelopt_post_restore(self, prefix: str = "", *args, **kwargs):
         # GroupedMLP stores the weights as weight0, weight1, etc. To run post_restore in order to
         # initialize the quantizer states, self.weight is used to extract shape, dtype etc. Assigning
         # self.weight0 to self.weight to run the quantizer states initialization.
