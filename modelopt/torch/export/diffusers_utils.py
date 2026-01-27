@@ -27,14 +27,45 @@ import torch.nn as nn
 from .layer_utils import is_quantlinear
 
 DiffusionPipeline: type[Any] | None
+ModelMixin: type[Any] | None
 try:  # diffusers is optional for LTX-2 export paths
     from diffusers import DiffusionPipeline as _DiffusionPipeline
+    from diffusers import ModelMixin as _ModelMixin
 
     DiffusionPipeline = _DiffusionPipeline
+    ModelMixin = _ModelMixin
     _HAS_DIFFUSERS = True
 except Exception:  # pragma: no cover
     DiffusionPipeline = None
+    ModelMixin = None
     _HAS_DIFFUSERS = False
+
+TI2VidTwoStagesPipeline: type[Any] | None
+try:  # optional for LTX-2 export paths
+    from ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline as _TI2VidTwoStagesPipeline
+
+    TI2VidTwoStagesPipeline = _TI2VidTwoStagesPipeline
+except Exception:  # pragma: no cover
+    TI2VidTwoStagesPipeline = None
+
+
+def is_diffusers_object(model: Any) -> bool:
+    """Return True if model is a diffusers pipeline/component or LTX-2 pipeline."""
+    if not _HAS_DIFFUSERS:
+        return False
+
+    diffusers_types: tuple[type, ...] = ()
+    if DiffusionPipeline is not None:
+        diffusers_types = (*diffusers_types, DiffusionPipeline)
+    if ModelMixin is not None:
+        diffusers_types = (*diffusers_types, ModelMixin)
+    if TI2VidTwoStagesPipeline is not None:
+        diffusers_types = (*diffusers_types, TI2VidTwoStagesPipeline)
+
+    if not diffusers_types:
+        return False
+
+    return isinstance(model, diffusers_types)
 
 
 def generate_diffusion_dummy_inputs(

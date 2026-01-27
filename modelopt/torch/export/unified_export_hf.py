@@ -32,7 +32,6 @@ from safetensors.torch import save_file
 
 try:
     import diffusers
-    from diffusers import DiffusionPipeline, ModelMixin
 
     from .diffusers_utils import (
         generate_diffusion_dummy_forward_fn,
@@ -40,6 +39,7 @@ try:
         get_qkv_group_key,
         hide_quantizers_from_state_dict,
         infer_dtype_from_model,
+        is_diffusers_object,
         is_qkv_projection,
     )
 
@@ -91,11 +91,6 @@ from .quant_utils import (
     preprocess_linear_fusion,
     to_quantized_weight,
 )
-
-try:  # optional for LTX-2 export paths
-    from ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline
-except ImportError:  # pragma: no cover
-    TI2VidTwoStagesPipeline = None
 
 __all__ = ["export_hf_checkpoint"]
 
@@ -973,10 +968,7 @@ def export_hf_checkpoint(
 
     is_diffusers_obj = False
     if HAS_DIFFUSERS:
-        diffusers_types: tuple[type, ...] = (DiffusionPipeline, ModelMixin)
-        if TI2VidTwoStagesPipeline is not None:
-            diffusers_types = (*diffusers_types, TI2VidTwoStagesPipeline)
-        is_diffusers_obj = isinstance(model, diffusers_types)
+        is_diffusers_obj = is_diffusers_object(model)
     if is_diffusers_obj:
         _export_diffusers_checkpoint(model, dtype, export_dir, components)
         return
