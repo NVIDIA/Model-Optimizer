@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from megatron.core import InferenceParams, tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
-from megatron.core.extensions.transformer_engine import TENorm
+from megatron.core.extensions.transformer_engine import TELinear, TENorm
 from megatron.core.inference.contexts import StaticInferenceContext
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEmbedding
@@ -62,7 +62,6 @@ from .megatron_medusa import MedusaLayer
 
 try:
     from megatron.core.post_training.modelopt.gpt.model_specs import get_gpt_modelopt_spec
-    from megatron.core.post_training.modelopt.layers import Linear
 except ImportError:
     warnings.warn("Fail to import megatron.core.post_training! EAGLE feature will be disable!")
 
@@ -391,7 +390,11 @@ class EagleTransformerBlock(TransformerBlock):
             if module is not self.layers:
                 sharded_state_dict.update(
                     sharded_state_dict_default(
-                        module, f"{prefix}{name}.", sharded_offsets, metadata
+                        module,
+                        f"{prefix}{name}.",
+                        sharded_offsets,
+                        metadata,
+                        tp_group=self.tp_group,
                     )
                 )
 
@@ -445,13 +448,14 @@ class EagleModule(MegatronModule):
             self._num_aux_hidden_states if self._num_aux_hidden_states > 0 else 2
         )
 
-        # This linear was previously a ColumnParallelLinear. We changed it to a normal linear
+        # This linear was previously a ColumnParallelLinear. We changed it to a TELinear
         # since ColumnParallelLinear will have try to gather the input sequence when sequence
         # parallel is used and does not allow gathering the outputs.
         with torch.device(device):
-            self.fc = Linear(
+            self.fc = TELinear(
                 config.hidden_size * fc_input_size_multiplier,
                 config.hidden_size,
+                parallel_mode="duplicated",
                 config=config,
                 init_method=(lambda w: None),  # not used
                 bias=bias,
