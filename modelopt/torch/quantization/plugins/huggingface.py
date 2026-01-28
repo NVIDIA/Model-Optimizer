@@ -676,21 +676,64 @@ class _QuantCompressedLinear(QuantModule):
         from compressed_tensors.quantization import QuantizationStatus
 
         if self.quantization_status == QuantizationStatus.COMPRESSED:
-            weight_data = self.compressor.decompress_module(self)
+            # Decompress once to avoid weight_shape tensor issues in decompress_module
+            if "weight" not in self._parameters:
+                self.unpack_weight()
+            weight_data = self._parameters.get("weight", self.weight)
         else:
             weight_data = self.weight
 
         return linear(self.input_quantizer(input), self.weight_quantizer(weight_data), self.bias)
 
     def unpack_weight(self):
+        import torch
         from compressed_tensors.quantization import QuantizationStatus
 
         if self.quantization_status == QuantizationStatus.COMPRESSED:
-            self.weight = nn.Parameter(self.compressor.decompress_module(self), requires_grad=False)
+            # Build compressed_data dict manually to handle weight_shape tensor issue
+            compressed_data = {}
+            compressed_data["weight_packed"] = self.weight_packed
+            if hasattr(self, "weight_scale"):
+                compressed_data["weight_scale"] = self.weight_scale
+            if hasattr(self, "weight_shape"):
+                ws = self.weight_shape
+                if isinstance(ws, torch.Tensor):
+                    compressed_data["weight_shape"] = [int(x) for x in ws.tolist()]
+                elif isinstance(ws, (list, tuple)):
+                    compressed_data["weight_shape"] = [int(x) for x in ws]
+                else:
+                    compressed_data["weight_shape"] = ws
+            if hasattr(self, "weight_zero_point"):
+                compressed_data["weight_zero_point"] = self.weight_zero_point
+
+            # Skip non-pack-quantized weights (e.g., vision modules use BF16)
+            if isinstance(compressed_data["weight_packed"], torch.Tensor):
+                if compressed_data["weight_packed"].dtype != torch.int32:
+                    return
+
+            # Get quantization args
+            quant_args = None
+            if hasattr(self, "quantization_scheme") and self.quantization_scheme:
+                if hasattr(self.quantization_scheme, "weights"):
+                    quant_args = self.quantization_scheme.weights
+
+            # Decompress
+            decompressed = self.compressor.decompress_weight(
+                compressed_data=compressed_data,
+                quantization_args=quant_args,
+            )
+            self.weight = nn.Parameter(decompressed, requires_grad=False)
         if hasattr(self, "weight_packed"):
             del self.weight_packed
         if hasattr(self, "weight_scale"):
             del self.weight_scale
+        if hasattr(self, "weight_shape"):
+            if "weight_shape" in self._parameters:
+                del self._parameters["weight_shape"]
+            else:
+                delattr(self, "weight_shape")
+        if self.quantization_status == QuantizationStatus.COMPRESSED:
+            self.quantization_status = QuantizationStatus.FROZEN
 
 
 try:
