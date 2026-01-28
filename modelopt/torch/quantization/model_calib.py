@@ -245,10 +245,10 @@ def mse_calibrate(
         step_size: Step size for amax search (default: 0.1).
         start_multiplier: Starting multiplier for amax search (default: 0.25).
         stop_multiplier: Ending multiplier for amax search (default: 4.0).
-        fp8_scale_sweep: If True, sweep over all 128 possible FP8 E4M3 scale values
+        fp8_scale_sweep: If True, sweep over all 126 valid FP8 E4M3 scale values
             for NVFP4 per-block quantization instead of using multipliers.
             This is specifically designed for optimizing the FP8-quantized
-            per-block scales in NVFP4 format (default: False).
+            per-block scales in NVFP4 format.
 
     See :class:`MseCalibConfig <modelopt.torch.quantization.config.MseCalibConfig>` for
     details on the remaining arguments.
