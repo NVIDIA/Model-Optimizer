@@ -21,24 +21,23 @@ Check out :meth:`mtn.convert <modelopt.torch.nas.conversion.convert>` to learn m
 import warnings
 
 import torch.nn as nn
-from torch.nn.modules.loss import _Loss as Loss
 
 from modelopt.torch.opt.config import ModeloptBaseConfig
 from modelopt.torch.opt.conversion import ModeloptStateManager
+from modelopt.torch.opt.dynamic import _DMRegistryCls
 from modelopt.torch.opt.mode import (
     ConvertEntrypoint,
     ConvertReturnType,
-    MetadataDict,
     ModeDescriptor,
     RestoreEntrypoint,
-    UpdateEntrypoint,
     _ModeRegistryCls,
 )
 from modelopt.torch.utils import init_model_from_model_like, unwrap_model
 
-from .config import ExportStudentConfig, KDLossConfig
+from .config import ExportStudentConfig, KDLossConfig, LayerwiseKDConfig
 from .distillation_model import DistillationModel
-from .registry import DistillationDMRegistry
+from .layerwise_distillation_model import LayerwiseDistillationModel
+from .registry import DistillationDMRegistry, LayerwiseDistillationDMRegistry
 
 DistillModeRegistry = _ModeRegistryCls("distill")
 
@@ -76,14 +75,32 @@ class KnowledgeDistillationModeDescriptor(ModeDescriptor):
         raise NotImplementedError(f"{self.name} mode does not support restore.")
 
     @property
-    def update_for_new_mode(self) -> UpdateEntrypoint:
-        """The mode's entrypoint for updating the models state for adding new mode."""
-        return _reset_kd_state_config
-
-    @property
     def save_mode_in_state(self) -> bool:
         """Whether the mode should be saved into the modelopt state."""
         return False
+
+
+@DistillModeRegistry.register_mode
+class LayerwiseKDModeDescriptor(KnowledgeDistillationModeDescriptor):
+    """Class to describe the Layerwise Knowledge-Distillation mode.
+
+    The properties of this mode can be inspected via the source code.
+    """
+
+    @property
+    def name(self) -> str:
+        """Returns the value (str representation) of the mode."""
+        return "layerwise_kd"
+
+    @property
+    def config_class(self) -> type[ModeloptBaseConfig]:
+        """Specifies the config class for the mode."""
+        return LayerwiseKDConfig
+
+    @property
+    def convert(self) -> ConvertEntrypoint:
+        """The mode's entrypoint for converting a model."""
+        return _convert_for_layerwise
 
 
 @DistillModeRegistry.register_mode
@@ -124,7 +141,12 @@ class ExportStudentModeDescriptor(ModeDescriptor):
         return False
 
 
-def _convert_for_kd(model: nn.Module, config: KDLossConfig) -> ConvertReturnType:
+def _convert_for_kd(
+    model: nn.Module,
+    config: KDLossConfig,
+    model_cls: type[nn.Module] = DistillationModel,
+    model_registry: _DMRegistryCls = DistillationDMRegistry,
+) -> ConvertReturnType:
     """Function for converting a model to a distillation meta-model.
 
     This is the only utility needed to use the ``modelopt.torch.distill`` API directly.
@@ -158,12 +180,12 @@ def _convert_for_kd(model: nn.Module, config: KDLossConfig) -> ConvertReturnType
 
     # initialize distillation model
     original_cls = type(student)
-    if original_cls not in DistillationDMRegistry:
-        DistillationDMRegistry.register({original_cls: "student_class"})(DistillationModel)
+    if original_cls not in model_registry:
+        model_registry.register({original_cls: "student_class"})(model_cls)
     # TODO (lucasl): look into ways to avoid registering every class manually
     # (e.g. by just registering nn.Module and disable the "forward" check for the inherited class check
 
-    distillation_model = DistillationDMRegistry.convert(student)
+    distillation_model = model_registry.convert(student)
     distillation_model.modify(
         **{**config, "teacher_model": teacher}  # overwrite with instantiated teacher
     )
@@ -174,11 +196,14 @@ def _convert_for_kd(model: nn.Module, config: KDLossConfig) -> ConvertReturnType
     return distillation_model, metadata
 
 
-def _reset_kd_state_config(model: nn.Module, config: KDLossConfig, metadata: MetadataDict):
-    """Function for resetting the state's config."""
-    config.teacher_model = nn.Module
-    config.criterion = Loss()
-    config.loss_balancer = None
+def _convert_for_layerwise(model: nn.Module, config: LayerwiseKDConfig) -> ConvertReturnType:
+    """Function for converting a model to a layerwise distillation meta-model."""
+    return _convert_for_kd(
+        model,
+        config,
+        model_cls=LayerwiseDistillationModel,
+        model_registry=LayerwiseDistillationDMRegistry,
+    )
 
 
 def _export_student(model: nn.Module, config: ExportStudentConfig) -> ConvertReturnType:

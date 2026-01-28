@@ -20,7 +20,6 @@ import pytest
 import torch
 import torch.nn as nn
 from _test_utils.torch.vision_models import get_tiny_mobilenet_and_input
-from torch.nn.modules.loss import _Loss as Loss
 from torchvision.models import alexnet
 
 import modelopt.torch.distill as mtd
@@ -37,7 +36,7 @@ def tiny_mobilenet():
 
 
 def tiny_alexnet():
-    return alexnet(num_classes=10)  # Same class as tiny_mobilenet
+    return alexnet(num_classes=10)  # same num classes as tiny_mobilenet
 
 
 @pytest.fixture
@@ -167,13 +166,6 @@ def test_distillation_export(distillation_model, tmp_path):
     model_exported = mtd.export(distillation_model)
     assert not hasattr(model_exported, "_teacher_model")
     assert hasattr(model_exported, mto.ModeloptStateManager._state_key)
-
-    # Test if kd_loss config has been cleaned up
-    manager = mto.ModeloptStateManager(model_exported)
-    cfg = manager._state[-2][1]["config"]
-    assert cfg["teacher_model"] == nn.Module
-    assert isinstance(next(iter(cfg["criterion"].values())), Loss)
-    assert cfg["loss_balancer"] is None
 
     mto.save(model_exported, tmp_path / "ckpt.pt")
     new_student = tiny_mobilenet()

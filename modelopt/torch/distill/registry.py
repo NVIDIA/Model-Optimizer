@@ -17,7 +17,10 @@
 
 from modelopt.torch.opt.dynamic import _DMRegistryCls
 
-__all__ = ["DistillationDMRegistry"]
+__all__ = ["DistillationDMRegistry", "LayerwiseDistillationDMRegistry"]
 
 
 DistillationDMRegistry = _DMRegistryCls(prefix="Distill")  # global instance for the registry
+
+# Need separate one due to registration override issues when using single registry for both.
+LayerwiseDistillationDMRegistry = _DMRegistryCls(prefix="LayerwiseDistill")
