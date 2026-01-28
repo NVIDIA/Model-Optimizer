@@ -518,8 +518,8 @@ def print_quant_summary(model: nn.Module):
     print(f"{count} TensorQuantizers found in model")
 
 
-def fold_weight(model: nn.Module):
+def fold_weight(model: nn.Module, keep_attrs: bool = False):
     """Fold weight quantizer for fast evaluation."""
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
-            module.fold_weight()
+            module.fold_weight(keep_attrs)
