@@ -1,12 +1,23 @@
+## Table of Contents
+
+- [Overview](#overview)
+- [Setup](#setup)
+- [Prepare ORT-GenAI Compatible Base Model](#prepare-ort-genai-compatible-base-model)
+- [Quantization](#quantization)
+- [Evaluate the Quantized Model](#evaluate-the-quantized-model)
+- [Deployment](#deployment)
+- [Support Matrix](#support-matrix)
+- [Troubleshoot](#troubleshoot)
+
 ## Overview
 
-The example script showcases how to utilize the **ModelOpt-Windows** toolkit for optimizing ONNX (Open Neural Network Exchange) models through quantization. This toolkit is designed for developers looking to enhance model performance, reduce size, and accelerate inference times, while preserving the accuracy of neural networks deployed with backends like DirectML on local RTX GPUs running Windows.
+The example script showcases how to utilize the **ModelOpt-Windows** toolkit for optimizing ONNX (Open Neural Network Exchange) models through quantization. This toolkit is designed for developers looking to enhance model performance, reduce size, and accelerate inference times, while preserving the accuracy of neural networks deployed with backends like TensorRT-RTX, DirectML, CUDA on local RTX GPUs running Windows.
 
 Quantization is a technique that converts models from floating-point to lower-precision formats, such as integers, which are more computationally efficient. This process can significantly speed up execution on supported hardware, while also reducing memory and bandwidth requirements.
 
 This example takes an ONNX model as input, along with the necessary quantization settings, and generates a quantized ONNX model as output. This script can be used for quantizing popular, [ONNX Runtime GenAI](https://onnxruntime.ai/docs/genai) built Large Language Models (LLMs) in the ONNX format.
 
-### Setup
+## Setup
 
 1. Install ModelOpt-Windows. Refer [installation instructions](../../README.md).
 
@@ -16,15 +27,15 @@ This example takes an ONNX model as input, along with the necessary quantization
    pip install -r requirements.txt
    ```
 
-### Prepare ORT-GenAI Compatible Base Model
+## Prepare ORT-GenAI Compatible Base Model
 
-You may generate the base model using the model builder that comes with onnxruntime-genai. The ORT-GenAI's [model-builder](https://github.com/microsoft/onnxruntime-genai/tree/main/src/python/py/models) downloads the original Pytorch model from Hugging Face, and produces an ONNX GenAI compatible base model in ONNX format. See example command-line below:
+You may generate the base model using the model builder that comes with onnxruntime-genai. The ORT-GenAI's [model-builder](https://github.com/microsoft/onnxruntime-genai/tree/main/src/python/py/models) downloads the original Pytorch model from Hugging Face, and produces an ONNX GenAI-compatible base model in ONNX format. See example command-line below:
 
 ```bash
 python -m onnxruntime_genai.models.builder -m meta-llama/Meta-Llama-3-8B -p fp16 -e dml -o E:\llama3-8b-fp16-dml-genai
 ```
 
-### Quantization
+## Quantization
 
 To begin quantization, run the script like below:
 
@@ -35,13 +46,13 @@ python quantize.py --model_name=meta-llama/Meta-Llama-3-8B \
                           --calib_size=32 --algo=awq_lite --dataset=cnn
 ```
 
-#### Command Line Arguments
+### Command Line Arguments
 
 The table below lists key command-line arguments of the ONNX PTQ example script.
 
 | **Argument** | **Supported Values** | **Description** |
 |---------------------------|------------------------------------------------------|-------------------------------------------------------------|
-| `--calib_size` | 32 (default), 64, 128 | Specifies the calibration size. |
+| `--calib_size` | 32 , 64, 128 (default) | Specifies the calibration size. |
 | `--dataset` | cnn (default), pilevel | Choose calibration dataset: cnn_dailymail or pile-val. |
 | `--algo` | awq_lite (default), awq_clip, rtn, rtn_dq | Select the quantization algorithm. |
 | `--onnx_path` | input .onnx file path | Path to the input ONNX model. |
@@ -54,10 +65,10 @@ The table below lists key command-line arguments of the ONNX PTQ example script.
 | `--awqclip_alpha_step` | 0.05 (default) | Step-size for AWQ weight clipping, user-defined |
 | `--awqclip_alpha_min` | 0.5 (default) | Minimum AWQ weight-clipping threshold, user-defined |
 | `--awqclip_bsz_col` | 1024 (default) | Chunk size in columns during weight clipping, user-defined |
-| `--calibration_eps` | dml, cuda, cpu, NvTensorRtRtx (default: [dml,cpu]) | List of execution-providers to use for session run during calibration |
-| `--no_position_ids` | Default: position_ids input enabled | Use this option to disable position_ids input in calibration data|
-| `--enable_mixed_quant` | Default: disabled mixed quant | Use this option to enable mixed precsion quantization|
-| `--layers_8bit` | Default: None | Use this option to Overrides default mixed quant strategy|
+| `--calibration_eps` | dml, cuda, cpu, NvTensorRtRtx (default: [cuda,cpu]) | List of execution-providers to use for session run during calibration |
+| `--add_position_ids` | Default: position_ids input is disabled | Use this option to enable position_ids input in calibration data|
+| `--enable_mixed_quant` | Default: mixed-quant is disabled | Use this option to enable mixed precision quantization|
+| `--layers_8bit` | Default: None | Use this option to override default mixed-quant strategy|
 | `--gather_quantize_axis` | Default: None | Use this option to enable INT4 quantization of Gather nodes - choose 0 or 1|
 | `--gather_block_size` | Default: 32 | Block-size for Gather node's INT4 quantization (when its enabled using gather_quantize_axis option)|
 
@@ -69,24 +80,24 @@ python quantize.py --help
 
 Note:
 
-1. For the `algo` argument, we have following options to choose form: awq_lite, awq_clip, rtn, rtn_dq.
+1. For the `algo` argument, we have following options to choose from: awq_lite, awq_clip, rtn, rtn_dq.
    - The 'awq_lite' option does core AWQ scale search and INT4 quantization.
    - The 'awq_clip' option primarily does weight clipping and INT4 quantization.
    - The 'rtn' option does INT4 RTN quantization with Q->DQ nodes for weights.
    - The 'rtn_dq' option does INT4 RTN quantization with only DQ nodes for weights.
 1. RTN algorithm doesn't use calibration-data.
-1. If needed for the input base model, use `--no_position_ids` command-line option to disable
+1. If needed for the input base model, use `--add_position_ids` command-line option to enable
    generating position_ids calibration input. The GenAI built LLM models produced with DML EP has
    position_ids input but ones produced with CUDA EP, NvTensorRtRtx EP don't have position_ids input.
    Use `--help` or command-line options table above to inspect default values.
 
 Please refer to `quantize.py` for further details on command-line parameters.
 
-#### Mixed Precision Quantization (INT4 + INT8)
+### Mixed Precision Quantization (INT4 + INT8)
 
 ModelOpt-Windows supports **mixed precision quantization**, where different layers in the model can be quantized to different bit-widths. This approach combines INT4 quantization for most layers (for maximum compression and speed) with INT8 quantization for important or sensitive layers (to preserve accuracy).
 
-##### Why Use Mixed Precision?
+#### Why Use Mixed Precision?
 
 Mixed precision quantization provides an optimal balance between:
 
@@ -107,7 +118,7 @@ Based on benchmark results, mixed precision quantization shows significant advan
 
 As shown above, mixed precision significantly improves accuracy with minimal disk size increase (~85-109 MB).
 
-##### How Mixed Precision Works
+#### How Mixed Precision Works
 
 The quantization strategy selects which layers to quantize to INT8 vs INT4:
 
@@ -117,9 +128,9 @@ The quantization strategy selects which layers to quantize to INT8 vs INT4:
 
 This strategy preserves accuracy for the most sensitive layers while maintaining aggressive compression elsewhere.
 
-##### Using Mixed Precision Quantization
+#### Using Mixed Precision Quantization
 
-###### Method 1: Use the default mixed precision strategy
+##### Method 1: Use the default mixed precision strategy
 
 ```bash
 python quantize.py --model_name=meta-llama/Meta-Llama-3.2-1B \
@@ -132,7 +143,7 @@ python quantize.py --model_name=meta-llama/Meta-Llama-3.2-1B \
 
 The `--enable_mixed_quant` flag automatically applies the default strategy.
 
-###### Method 2: Specify custom layers for INT8
+##### Method 2: Specify custom layers for INT8
 
 ```bash
 python quantize.py --model_name=meta-llama/Meta-Llama-3.2-1B \
@@ -158,24 +169,45 @@ The `--layers_8bit` option allows you to manually specify which layers to quanti
 
 For more benchmark results and detailed accuracy metrics, refer to the [Benchmark Guide](../../Benchmark.md).
 
-### Evaluate the Quantized Model
+## Evaluate the Quantized Model
 
 To evaluate the quantized model, please refer to the [accuracy benchmarking](../../accuracy_benchmark/README.md) and [onnxruntime-genai performance benchmarking](https://github.com/microsoft/onnxruntime-genai/tree/main/benchmark/python).
 
-### Deployment
+## Deployment
 
-Once an ONNX FP16 model is quantized using ModelOpt-Windows, the resulting quantized ONNX model can be deployed on the DirectML backend using [ORT-GenAI](https://onnxruntime.ai/) or [ORT](https://onnxruntime.ai/).
+Once an ONNX FP16 model is quantized using ModelOpt-Windows, the resulting quantized ONNX model can be deployed using [ORT-GenAI](https://onnxruntime.ai/) or [ORT](https://onnxruntime.ai/).
 
 Refer to the following example scripts and tutorials for deployment:
 
 1. [ORT GenAI examples](https://github.com/microsoft/onnxruntime-genai/tree/main/examples/python)
 1. [ONNX Runtime documentation](https://onnxruntime.ai/docs/api/python/)
 
-### Model Support Matrix
+## Support Matrix
 
-Please refer to [support matrix](https://nvidia.github.io/Model-Optimizer/guides/0_support_matrix.html) for a full list of supported features and models.
+| Model | ONNX INT4 AWQ (W4A16) |
+| :---: | :---: |
+| Llama3.1-8B-Instruct | ✅ |
+| Phi3.5-mini-Instruct | ✅ |
+| Mistral-7B-Instruct-v0.3 | ✅ |
+| Llama3.2-3B-Instruct | ✅ |
+| Gemma-2b-it | ✅ |
+| Gemma-2-2b | ✅ |
+| Gemma-2-9b | ✅ |
+| Nemotron Mini 4B Instruct | ✅ |
+| Qwen2.5-7B-Instruct | ✅ |
+| DeepSeek-R1-Distill-Llama-8B | ✅ |
+| DeepSeek-R1-Distil-Qwen-1.5B | ✅ |
+| DeepSeek-R1-Distil-Qwen-7B | ✅ |
+| DeepSeek-R1-Distill-Qwen-14B | ✅ |
+| Mistral-NeMo-Minitron-2B-128k-Instruct | ✅ |
+| Mistral-NeMo-Minitron-4B-128k-Instruct | ✅ |
+| Mistral-NeMo-Minitron-8B-128k-Instruct | ✅ |
 
-### Troubleshoot
+> *All LLMs in the above table are [GenAI](https://github.com/microsoft/onnxruntime-genai/) built LLMs.*
+
+ > *`ONNX INT4 AWQ (W4A16)` means INT4 weights and FP16 activations using AWQ algorithm.*
+
+## Troubleshoot
 
 1. **Configure Directories**
 
@@ -208,4 +240,4 @@ Please refer to [support matrix](https://nvidia.github.io/Model-Optimizer/guides
 
 1. **Error - Invalid Position-IDs input to the ONNX model**
 
-   The ONNX models produced using ONNX GenerativeAI (GenAI) have different IO bindings for models produced using different execution-providers (EPs). For instance, model built with DML EP has position-ids input in the ONNX model but models builts using CUDA EP or NvTensorRtRtx EP don't have position-ids inputs. So, if base model requires, use `no_position_ids` command-line argument for disabling position_ids calibration input or set "add_position_ids" variable to `False` value (hard-code) in the quantize script if required.
+   The ONNX models produced using ONNX GenerativeAI (GenAI) have different IO bindings for models produced using different execution-providers (EPs). For instance, model built with DML EP has position-ids input in the ONNX model but models builts using CUDA EP or NvTensorRtRtx EP don't have position-ids inputs. So, if base model requires, use `--add_position_ids` command-line argument for enabling position_ids calibration input or set "add_position_ids" variable to `True` value (hard-code) in the quantize script if required.

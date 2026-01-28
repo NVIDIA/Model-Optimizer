@@ -230,7 +230,7 @@ def get_calib_inputs(
     )
 
     if "cnn" in dataset_name:
-        dataset2 = load_dataset("cnn_dailymail", name="3.0.0", split="train").select(
+        dataset2 = load_dataset("abisee/cnn_dailymail", name="3.0.0", split="train").select(
             range(max_calib_rows_to_load)
         )
         column = "article"
@@ -589,10 +589,10 @@ if __name__ == "__main__":
         help="True when --use_gqa was passed during export.",
     )
     parser.add_argument(
-        "--no_position_ids",
+        "--add_position_ids",
         dest="add_position_ids",
-        action="store_false",
-        default=True,
+        action="store_true",
+        default=False,
         help="True when we want to also pass position_ids input to model",
     )
     parser.add_argument(
@@ -605,7 +605,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--calibration_eps",
         type=parse_calibration_eps,  # Use the custom parser
-        default=["dml", "cpu"],  # Default as a list
+        default=["cuda", "cpu"],  # Default as a list
         help="Comma-separated list of calibration endpoints. Choose from 'cuda', 'cpu', 'dml', 'NvTensorRtRtx'.",
     )
     parser.add_argument(
