@@ -41,7 +41,7 @@ from .attention import *
 from .custom import *
 
 with import_plugin("diffusers"):
-    from .diffusers import *
+    from .diffusion.diffusers import *
 
 with import_plugin("fairscale"):
     from .fairscale import *
@@ -77,4 +77,4 @@ with import_plugin("trl"):
     from .trl import *
 
 with import_plugin("fastvideo"):
-    from .fastvideo import *
+    from .diffusion.fastvideo import *
