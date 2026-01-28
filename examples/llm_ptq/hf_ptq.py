@@ -300,28 +300,11 @@ def main(args):
             attn_implementation=args.attn_implementation,
         )
 
+        # Uncomment this to load the model from a .pt file
+        # model = mto.restore(model, "./qwen3_omni_30b_nvfp4/model.pt")
+        # print("Qwen3Omni model restored from checkpoint")
+
         quant_cfg = QUANT_CFG_CHOICES[args.qformat]
-        # Qwen3 specific quantizer disabling patterns (thinker.model.layers only)
-        if "qkv_disabled" in args.qformat:
-            # Disable q_proj, k_proj, v_proj quantizers
-            for proj in ["q_proj", "k_proj", "v_proj"]:
-                quant_cfg["quant_cfg"][f"*thinker.model.layers.*.self_attn.{proj}*"] = {
-                    "enable": False
-                }
-        if "qkvo_disabled" in args.qformat:
-            # Disable q_proj, k_proj, v_proj, o_proj quantizers
-            for proj in ["o_proj"]:
-                quant_cfg["quant_cfg"][f"*thinker.model.layers.*.self_attn.{proj}*"] = {
-                    "enable": False
-                }
-        if "first_and_last_n_disabled" in args.qformat:
-            # Disable both first N and last N layers
-            total_layers = 48
-            n_layers_to_disable = 4
-            for i in range(n_layers_to_disable):
-                quant_cfg["quant_cfg"][f"*thinker.model.layers.{i}.*"] = {"enable": False}
-            for i in range(total_layers - n_layers_to_disable, total_layers):
-                quant_cfg["quant_cfg"][f"*thinker.model.layers.{i}.*"] = {"enable": False}
     else:
         assert args.qformat in QUANT_CFG_CHOICES, (
             f"Quantization format is not supported for low memory mode. Supported formats: {QUANT_CFG_CHOICES.keys()}"
@@ -606,6 +589,28 @@ def main(args):
             quant_cfg["quant_cfg"]["*radio*"] = {"enable": False}
             quant_cfg["quant_cfg"]["*visual*"] = {"enable": False}
 
+        # Qwen3 specific quantizer disabling patterns (thinker.model.layers only)
+        if "qkv_disabled" in args.qformat:
+            # Disable q_proj, k_proj, v_proj quantizers
+            for proj in ["q_proj", "k_proj", "v_proj"]:
+                quant_cfg["quant_cfg"][f"*thinker.model.layers.*.self_attn.{proj}*"] = {
+                    "enable": False
+                }
+        if "qkvo_disabled" in args.qformat:
+            # Disable q_proj, k_proj, v_proj, o_proj quantizers
+            for proj in ["o_proj"]:
+                quant_cfg["quant_cfg"][f"*thinker.model.layers.*.self_attn.{proj}*"] = {
+                    "enable": False
+                }
+        if "first_and_last_n_disabled" in args.qformat:
+            # Disable both first N and last N layers
+            total_layers = 48
+            n_layers_to_disable = 4
+            for i in range(n_layers_to_disable):
+                quant_cfg["quant_cfg"][f"*thinker.model.layers.{i}.*"] = {"enable": False}
+            for i in range(total_layers - n_layers_to_disable, total_layers):
+                quant_cfg["quant_cfg"][f"*thinker.model.layers.{i}.*"] = {"enable": False}
+
         if not model_is_already_quantized or calibration_only:
             # Only run single sample for preview
             calib_batch = next(iter(calib_dataloader))
@@ -745,11 +750,11 @@ def main(args):
         assert model_type != "dbrx", f"Does not support export {model_type} without quantizaton"
         print(f"qformat: {args.qformat}. No quantization applied, export {device} model")
 
-    if model_type == "qwen3omni":
-        print("Export of Qwen3Omni model is not supported yet. Saving .pt file instead.")
-        os.makedirs(os.path.dirname(args.export_path), exist_ok=True)
-        mto.save(model, args.export_path)
-        return
+    # Uncomment this to save the model as a .pt file
+    # if model_type == "qwen3omni":
+    #     print("Export of Qwen3Omni model is not supported yet. Saving .pt file instead.")
+    #     os.makedirs(os.path.dirname(args.export_path), exist_ok=True)
+    #     mto.save(model, f"{args.export_path}/model.pt")
 
     with torch.inference_mode():
         if model_type is None:
@@ -828,6 +833,7 @@ def main(args):
             export_hf_checkpoint(
                 full_model,
                 export_dir=export_path,
+                save_modelopt_state=model_type == "qwen3omni",
             )
 
         # Copy custom model files (Python files and JSON configs) if trust_remote_code is used
