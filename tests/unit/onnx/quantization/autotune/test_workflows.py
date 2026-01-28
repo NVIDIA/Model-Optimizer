@@ -53,7 +53,7 @@ def test_export_quantized_model(use_trtexec):
     output_path = output_dir + ".quant.onnx"
 
     try:
-        init_benchmark_instance(use_trtexec=False)
+        init_benchmark_instance(use_trtexec=use_trtexec)
         autotuner = region_pattern_autotuning_workflow(baseline_model_path, Path(output_dir))
 
         # Export model with Q/DQ insertion
