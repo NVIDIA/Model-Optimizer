@@ -745,19 +745,25 @@ class _QuantMoELayer(QuantModule):
     However, even in calibration mode, the actual top_k routing is used to calculate the actual outputs this instance
     returns.
 
+    When group routing is used (e.g. DSR1 or V3), with group_topk set, topk can never be all experts (otherwise,
+    the total indices will be out of bound). Since DSR1 is the only model that uses group routing and all experts
+    can be calibrated normally, we disable this WAR when group_topk is used.
+
     If calibration is not enabled, this module behaves as a normal MoELayer.
+
+    Note:
+        There are new arguments (e.g. padding_mask) passed through the forward function. Since we always pass through
+        all the arguments, we use **args and **kwargs here.
     """
 
     def _setup(self):
         pass
 
-    def forward(self, hidden_states):
+    def forward(self, *args, **kwargs):
         if any(getattr(m, "_if_calib", False) for m in self.experts.modules()):
             if self.config.moe_router_num_groups is None:
                 original_top_k = self.router.topk
                 self.router.topk = self.router.num_experts
-                super().forward(hidden_states)
+                super().forward(*args, **kwargs)
                 self.router.topk = original_top_k
-            else:
-                super().forward(hidden_states)
-        return super().forward(hidden_states)
+        return super().forward(*args, **kwargs)
