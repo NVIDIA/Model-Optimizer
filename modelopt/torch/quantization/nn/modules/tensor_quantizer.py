@@ -764,16 +764,11 @@ class TensorQuantizer(nn.Module):
                 self._pass_through_bwd,
             )
         elif self._num_bits == (2, 1) and self.is_static_block_quant:
-            skip_scale_quant = (
-                self._block_sizes.get("skip_fp8_scale_quant", False)
-                if self._block_sizes is not None
-                else False
-            )
             outputs = static_blockwise_fp4_fake_quant(
                 inputs,
                 None,  # scale
                 None,  # scale_fp8_quant_amax
-                skip_scale_quant,  # skip_scale_quant
+                True,  # skip_scale_quant
                 inputs.dtype,  # out_dtype
                 self._pass_through_bwd,  # pass_through_bwd
                 amax,  # amax
