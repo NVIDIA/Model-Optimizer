@@ -1023,7 +1023,7 @@ def replace_zero_scale_with_smallest_nonzero(onnx_model: onnx.ModelProto) -> onn
 
 
 # =============================================================================
-# Column-major weight storage transformation for NvTensorRtRtx execution provider
+# Column-major weight storage transformation for execution providers that need it
 # =============================================================================
 
 
@@ -1042,7 +1042,7 @@ def _apply_transpose_perm_to_shape(shape, perm):
     return [shape[i] for i in perm]
 
 
-def add_transpose_nodes_for_column_major(graph: gs.Graph):
+def insert_transpose_nodes_for_column_major(graph: gs.Graph):
     """Add a single Transpose node after each DequantizeLinear for column-major weights.
 
     This implements the simple transformation: A @ B = A @ ((B^T)^T)
@@ -1146,7 +1146,7 @@ def apply_column_major_transformation(
     2. Returns the updated DQ node attributes (axis=1 instead of 0)
 
     Note: After calling this function and inserting DQ nodes, you should call
-    add_transpose_nodes_for_column_major() on the graph.
+    insert_transpose_nodes_for_column_major() on the graph.
 
     Args:
         gemm_weights_quantized: Dictionary mapping weight names to quantized weight arrays

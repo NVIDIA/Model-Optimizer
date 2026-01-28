@@ -369,7 +369,7 @@ def main(args):
         f"batch_size={args.batch_size}, block_size={args.block_size}, add-position-ids={args.add_position_ids}, "
         f"past-kv={args.add_past_kv_inputs}, rcalib={args.use_random_calib}, device={args.device}, "
         f"use_zero_point={args.use_zero_point}, use_fp32={args.use_fp32} enable_mixed_quant={args.enable_mixed_quant}, "
-        f"layers_8bit={args.layers_8bit}\n"
+        f"layers_8bit={args.layers_8bit}, use_column_major={args.use_column_major}\n"
     )
 
     print(
@@ -635,7 +635,7 @@ if __name__ == "__main__":
         default=False,
         action="store_true",
         help=(
-            "Apply column-major storage optimization for NvTensorRtRtx execution provider. "
+            "Apply column-major storage optimization for execution providers that need it. "
             "Only applicable for DQ-only quantization (e.g., rtn_dq, awq_lite, awq_clip)."
         ),
     )

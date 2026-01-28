@@ -222,8 +222,8 @@ def quantize_rtn(
     dimension, and in ONNX, weights are always plugged into the RHS (i.e. y = x @ W).
 
     Args:
-        use_column_major: If True, apply column-major storage optimization for NvTensorRtRtx.
-                          Passed via kwargs.
+        use_column_major: If True, apply column-major storage optimization for execution
+                          providers that need it. Passed via kwargs.
     """
     use_column_major = kwargs.get("use_column_major", False)
 
@@ -310,6 +310,7 @@ def quantize_rtn(
                 scales[name] = np.asnumpy(scales[name])
             gemm_weights_quantized[name] = numpy.asarray(qw)
         # Apply column-major optimization if flag is set
+        # Transposes the weights and scales in-place, returns updated DQ node attributes
         if use_column_major:
             dq_node_attributes = qdq.apply_column_major_transformation(
                 gemm_weights_quantized, scales, graph, block_size
@@ -328,7 +329,7 @@ def quantize_rtn(
 
         # Add transpose nodes for column-major if needed
         if use_column_major:
-            qdq.add_transpose_nodes_for_column_major(graph)
+            qdq.insert_transpose_nodes_for_column_major(graph)
 
         if gather_w_map is not None:
             gather_dq_node_attributes = {
@@ -631,6 +632,8 @@ def _quantize_awq_clip(
 
     t = time.time()
     # Apply column-major optimization if flag is set
+    # Apply column-major optimization if flag is set
+    # Transposes the weights and scales in-place, returns updated DQ node attributes
     use_column_major = kwargs.get("use_column_major", False)
     if use_column_major:
         dq_node_attributes = qdq.apply_column_major_transformation(
@@ -648,7 +651,7 @@ def _quantize_awq_clip(
     )
     # Add transpose nodes for column-major if needed
     if use_column_major:
-        qdq.add_transpose_nodes_for_column_major(graph_gs)
+        qdq.insert_transpose_nodes_for_column_major(graph_gs)
     if gather_w_map is not None:
         assert gather_s_map is not None, "scale-map not found for quantizable gather nodes"
         gather_dq_node_attributes = {"axis": gather_quantize_axis, "block_size": gather_block_size}
@@ -1344,6 +1347,7 @@ def _quantize_awq_lite(
 
     t = time.time()
     # Apply column-major optimization if flag is set
+    # Transposes the weights and scales in-place, returns updated DQ node attributes
     use_column_major = kwargs.get("use_column_major", False)
     if use_column_major:
         dq_node_attributes = qdq.apply_column_major_transformation(
@@ -1362,7 +1366,7 @@ def _quantize_awq_lite(
     )
     # Add transpose nodes for column-major if needed
     if use_column_major:
-        qdq.add_transpose_nodes_for_column_major(graph_gs)
+        qdq.insert_transpose_nodes_for_column_major(graph_gs)
     if gather_w_map is not None:
         assert gather_s_map is not None, "scale-map not found for quantizable gather nodes"
         assert not use_zero_point or gather_zp_map, (
@@ -1466,8 +1470,8 @@ def quantize(
                 - **layers_8bit** (str): comma-separated list of layer patterns to quantize to INT8 instead of INT4.
                                               Default: [].
                 - **use_column_major** (bool): If True, apply column-major storage optimization for
-                                              NvTensorRtRtx execution provider. This transposes weights
-                                              and adds Transpose nodes around MatMul operations.
+                                              execution providers that need it. This transposes
+                                              weights and adds Transpose nodes around MatMul operations.
                                               Only applies to DQ-only quantization mode.
                                               Default: False.
     **Returns**: A quantized ONNX model in ONNX ModelProto format.
