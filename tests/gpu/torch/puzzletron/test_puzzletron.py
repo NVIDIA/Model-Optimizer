@@ -231,17 +231,25 @@ def _assert_score_pruning_activations(puzzle_dir: Path, hf_config_name: str):
 
     layer_names = list(pruning_scores.keys())
     expected = EXPECTED_PRUNING_VALUES[hf_config_name]
+    size = dist.size()
 
     if expected is not None:
-        # Verify we have the expected number of FFN layers
-        assert len(layer_names) == len(expected), (
-            f"Expected {len(expected)} FFN layers, got {len(layer_names)}"
+        # In multi-GPU: layers are distributed across ranks
+        # Each rank processes len(expected) // size layers
+        expected_layers_per_rank = len(expected) // size
+        assert len(layer_names) == expected_layers_per_rank, (
+            f"Expected {expected_layers_per_rank} FFN layers on rank {rank}/{size}, got {len(layer_names)}"
         )
         # Check each layer's values
         for i, layer_name in enumerate(layer_names):
             layer_data = pruning_scores[layer_name]
-            assert layer_data["score"][0].item() == expected[i]["score"]
-            assert layer_data["channels_importance_ascending"][0].item() == expected[i]["channels"]
+            # Calculate global layer index from rank and local index
+            global_idx = rank * expected_layers_per_rank + i
+            assert layer_data["score"][0].item() == expected[global_idx]["score"]
+            assert (
+                layer_data["channels_importance_ascending"][0].item()
+                == expected[global_idx]["channels"]
+            )
     else:
         # Print values for new models - update EXPECTED_PRUNING_VALUES with these
         print(f"\n=== PRUNING VALUES for {hf_config_name} (num_layers={len(layer_names)}) ===")
