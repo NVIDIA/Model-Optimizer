@@ -459,6 +459,8 @@ class EagleModule(MegatronModule):
                 config=config,
                 init_method=(lambda w: None),  # not used
                 bias=bias,
+                skip_bias_add=False,
+                skip_weight_param_allocation=False,
             )
 
         self.rotary_pos_emb = rotary_pos_emb
