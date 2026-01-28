@@ -331,6 +331,7 @@ class GraphSanitizer:
             # Find and extract scale and bias nodes if present
             scale = None
             bias = None
+            scale_dimension = None
             final_node = div_node
             nodes_to_remove = [
                 mean_node,
