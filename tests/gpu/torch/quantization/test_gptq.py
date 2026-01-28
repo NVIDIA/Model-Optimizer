@@ -120,6 +120,7 @@ def test_update_hessian():
 def test_gptq_updates(block_size, dim, model_weight, expect_weight_change):
     model = torch.nn.Linear(dim, dim).to("cuda")
     model.weight.data = model_weight
+    model.name = "linear"
     original_weight = model_weight.clone()
     input = torch.randn(2, 16, dim).to("cuda")
     hessian = torch.zeros(dim, dim).to("cpu")
