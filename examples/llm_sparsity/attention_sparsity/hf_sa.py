@@ -17,12 +17,12 @@
 """Example script for applying sparse attention to HuggingFace models."""
 
 import argparse
+import copy
 import random
 from pathlib import Path
 
 import numpy as np
 import torch
-from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import modelopt.torch.opt as mto
@@ -46,41 +46,13 @@ SPARSE_ATTN_CFG_CHOICES = {
 }
 
 
-def get_narrativeqa_samples(num_samples=3):
-    """Load samples from NarrativeQA dataset for testing.
-
-    Args:
-        num_samples: Number of samples to generate
-
-    Raises:
-        RuntimeError: If dataset loading fails
-        ValueError: If no valid samples could be loaded
-    """
-    # Load NarrativeQA dataset with retry logic
-    try:
-        dataset = load_dataset("narrativeqa", split="test", streaming=True)
-    except Exception as e:
-        raise RuntimeError(f"Failed to load NarrativeQA dataset: {e}")
-
-    samples = []
-    for i, item in enumerate(dataset):
-        if i >= num_samples:
-            break
-
-        # Combine document context and question
-        context = item.get("document", {}).get("text", "")
-        question = item.get("question", {}).get("text", "")
-
-        if context and question:
-            # Use the full context as-is
-            prompt = f"Context: {context}\n\nQuestion: {question}\n\nAnswer:"
-            samples.append(prompt)
-
-    if not samples:
-        raise ValueError("Could not load NarrativeQA samples")
-
-    print(f"Loaded {len(samples)} NarrativeQA samples")
-    return samples
+def get_test_prompts():
+    """Get simple test prompts for sample output generation."""
+    return [
+        "What is the capital of France? Answer:",
+        "Explain the theory of relativity in simple terms:",
+        "Write a short poem about the ocean:",
+    ]
 
 
 def truncate_text(text: str, tokenizer, max_length: int):
@@ -130,7 +102,7 @@ def generate_sample_output(model, tokenizer, args):
         Tuple of (generated_text, input_prompt, input_ids)
     """
     # Load test sample
-    prompts = get_narrativeqa_samples(num_samples=1)
+    prompts = get_test_prompts()
     prompt = prompts[0]
 
     # Prepare inputs
@@ -198,6 +170,20 @@ def main(args):
     # Apply sparse attention with optional calibration
     print(f"\nApplying sparse attention: {args.sparse_attn}")
     sparse_config = SPARSE_ATTN_CFG_CHOICES[args.sparse_attn]
+
+    # Override target_sparse_ratio if provided via CLI
+    if args.target_sparse_ratio is not None:
+        sparse_config = copy.deepcopy(sparse_config)
+        sparse_cfg = sparse_config.get("sparse_cfg", {})
+        if isinstance(sparse_cfg, dict) and "calibration" in sparse_cfg:
+            calibration_cfg = sparse_cfg["calibration"]
+            if isinstance(calibration_cfg, dict):
+                calibration_cfg["target_sparse_ratio"] = {
+                    "prefill": args.target_sparse_ratio,
+                    "decode": args.target_sparse_ratio,
+                }
+                print(f"Overriding target_sparse_ratio to {args.target_sparse_ratio}")
+
     model = mtsa.sparsify(model, config=sparse_config)
     print("Sparse attention applied successfully!")
 
@@ -285,6 +271,14 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Directory to export the model with sparse attention applied",
+    )
+
+    # Calibration arguments
+    parser.add_argument(
+        "--target_sparse_ratio",
+        type=float,
+        default=None,
+        help="Target sparsity ratio for calibration (0.0 to 1.0). Overrides config value.",
     )
 
     args = parser.parse_args()

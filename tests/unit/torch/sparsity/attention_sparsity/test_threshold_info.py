@@ -61,21 +61,26 @@ class TestFlashSkipSoftmaxThresholdInfo:
             }
         )
 
-        # Simulate calibration setting per-phase scale factors
-        method.threshold_scale_factor = {"prefill": 437.5, "decode": 500.0}
+        # Simulate calibration setting k and p parameters
+        method.calibration_params = {
+            "prefill": {"k": 150.0, "p": 1.5},
+            "decode": {"k": 200.0, "p": 1.8},
+        }
+        method.target_sparse_ratio = {"prefill": 0.9, "decode": 0.9}
 
         info = method.get_threshold_info()
 
-        assert info["type"] == "dynamic"
-        assert info["scale_factors"] == {"prefill": 437.5, "decode": 500.0}
-        assert info["formula"] == "λ[phase] / length"
+        assert info["type"] == "dynamic_calibrated"
+        assert info["formula"] == "threshold = k / (1 - target_sparsity)^p / seqlen"
+        assert "calibration_params" in info
+        assert "target_sparse_ratio" in info
         assert "phases" in info
         assert "prefill" in info["phases"]
         assert "decode" in info["phases"]
-        # Check example thresholds for prefill
-        prefill_examples = info["phases"]["prefill"]["example_thresholds"]
-        assert abs(prefill_examples[1024] - 437.5 / 1024) < 1e-6
-        assert abs(prefill_examples[2048] - 437.5 / 2048) < 1e-6
+        # Check that k and p are in phase info
+        assert info["phases"]["prefill"]["k"] == 150.0
+        assert info["phases"]["prefill"]["p"] == 1.5
+        assert info["phases"]["prefill"]["target_sparsity"] == 0.9
 
     def test_threshold_info_structure(self):
         """Test that threshold info has expected structure."""
@@ -151,13 +156,17 @@ class TestSparseAttentionModuleThresholdInfo:
 
         sparse_model = sparsify(model, config)
 
-        # Find module and set calibrated threshold (per-phase dict format)
+        # Find module and set calibrated params (Inverse Power model)
         module = None
         for module in sparse_model.modules():
             if isinstance(module, SparseAttentionModule):
-                module._sparse_method_instance.threshold_scale_factor = {
-                    "prefill": 500.0,
-                    "decode": 500.0,
+                module._sparse_method_instance.calibration_params = {
+                    "prefill": {"k": 150.0, "p": 1.5},
+                    "decode": {"k": 200.0, "p": 1.8},
+                }
+                module._sparse_method_instance.target_sparse_ratio = {
+                    "prefill": 0.9,
+                    "decode": 0.9,
                 }
                 break
 
@@ -165,8 +174,8 @@ class TestSparseAttentionModuleThresholdInfo:
         # Get threshold info
         info = module.get_threshold_info()
 
-        assert info["type"] == "dynamic"
-        assert info["scale_factors"] == {"prefill": 500.0, "decode": 500.0}
+        assert info["type"] == "dynamic_calibrated"
+        assert info["calibration_params"]["prefill"]["k"] == 150.0
 
     def test_module_without_method_instance(self):
         """Test get_threshold_info when sparse method instance doesn't exist."""
@@ -252,19 +261,22 @@ class TestPrintSparseAttentionSummaryIntegration:
 
         sparse_model = sparsify(model, config)
 
-        # Set calibrated threshold (per-phase dict format)
+        # Set calibrated params (Inverse Power model)
         for module in sparse_model.modules():
             if isinstance(module, SparseAttentionModule):
-                module._sparse_method_instance.threshold_scale_factor = {
-                    "prefill": 437.5,
-                    "decode": 500.0,
+                module._sparse_method_instance.calibration_params = {
+                    "prefill": {"k": 150.0, "p": 1.5},
+                    "decode": {"k": 200.0, "p": 1.8},
+                }
+                module._sparse_method_instance.target_sparse_ratio = {
+                    "prefill": 0.9,
+                    "decode": 0.9,
                 }
 
         print_sparse_attention_summary(sparse_model)
 
         captured = capsys.readouterr()
-        # Output format: λ={prefill=437.50, decode=500.00}
-        assert "λ=" in captured.out
-        assert "prefill=" in captured.out
-        assert "decode=" in captured.out
+        # Output should show calibrated info
         assert "flash_skip_softmax" in captured.out
+        assert "prefill" in captured.out
+        assert "decode" in captured.out
