@@ -117,7 +117,7 @@ onnx.save_model(
 )
 ```
 
-For detailed instructions about deployment of quantized models with DirectML backend (ORT-DML), see the [DirectML](https://nvidia.github.io/Model-Optimizer/deployment/2_directml.html#directml-deployment).
+For detailed instructions about deployment of quantized models with ONNX Runtime, see the [ONNX Runtime Deployment Guide](https://nvidia.github.io/Model-Optimizer/deployment/2_onnxruntime.html).
 
 > [!Note]
 > The ready-to-deploy optimized ONNX models from ModelOpt-Windows are available at HuggingFace [NVIDIA collections](https://huggingface.co/collections/nvidia/optimized-onnx-models-for-nvidia-rtx-gpus).
@@ -134,7 +134,12 @@ For detailed instructions about deployment of quantized models with DirectML bac
 
 ## Support Matrix
 
-Please refer to [support matrix](https://nvidia.github.io/Model-Optimizer/guides/0_support_matrix.html) for a full list of supported features and models.
+| Model Type | Support Matrix |
+|------------|----------------|
+| Large Language Models (LLMs) | [View Support Matrix](./onnx_ptq/genai_llm/README.md#support-matrix) |
+| Automatic Speech Recognition | [View Support Matrix](./onnx_ptq/whisper/README.md#support-matrix) |
+| Segmentation Models | [View Support Matrix](./onnx_ptq/sam2/README.md#support-matrix) |
+| Diffusion Models | [View Support Matrix](./torch_onnx/diffusers/README.md#support-matrix) |
 
 ## Benchmark Results
 
