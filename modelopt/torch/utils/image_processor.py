@@ -145,13 +145,9 @@ class Qwen3OmniTextProcessor(BaseImageProcessor):
             Dictionary with tokenized inputs.
         """
         # Build conversation in Qwen format (text-only)
-        conversation = [
-            {"role": "user", "content": [{"type": "text", "text": "/no_think " + text}]}
-        ]
-
-        # Apply chat template (tokenize=False to get formatted string)
+        conversation = [{"role": "user", "content": [{"type": "text", "text": text}]}]
         formatted_text = self.tokenizer.apply_chat_template(
-            conversation, add_generation_prompt=True, tokenize=False
+            conversation, add_generation_prompt=True, tokenize=False, enable_thinking=False
         )
 
         # Tokenize with the processor (no multimodal inputs)
@@ -212,10 +208,8 @@ class Qwen3OmniImageProcessor(BaseImageProcessor):
         content.append({"type": "text", "text": question})
 
         conversation = [{"role": "user", "content": content}]
-
-        # Apply chat template (tokenize=False to get string)
         text = self.tokenizer.apply_chat_template(
-            conversation, add_generation_prompt=True, tokenize=False
+            conversation, add_generation_prompt=True, tokenize=False, enable_thinking=False
         )
 
         # Extract multimodal info using qwen_omni_utils

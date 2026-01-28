@@ -114,14 +114,15 @@ def get_video_dataset_dataloader(
 
     processed_dataset = None
 
-    # Try to load from cache
+    # Try to load from cache (use torch.save/load to avoid Arrow 32-bit offset overflow)
     if cache_dir is not None:
-        from datasets import load_from_disk
-
-        cache_path = os.path.join(cache_dir, f"{dataset_name}_n{num_samples}_processed")
+        cache_path = os.path.join(cache_dir, f"{dataset_name}_n{num_samples}_processed.pt")
         if os.path.exists(cache_path):
             try:
-                processed_dataset = load_from_disk(cache_path)
+                from datasets import Dataset
+
+                processed_samples = torch.load(cache_path, weights_only=False)
+                processed_dataset = Dataset.from_list(processed_samples)
                 print(f"Loaded processed dataset from cache: {cache_path}")
             except Exception as e:
                 print(f"Failed to load cache from {cache_path}: {e}. Reprocessing...")
@@ -129,17 +130,25 @@ def get_video_dataset_dataloader(
 
     # Process dataset if not loaded from cache
     if processed_dataset is None:
-        dataset = _get_video_dataset(dataset_name, num_samples=num_samples)
-        # Apply the preprocessing function to the dataset
-        processed_dataset = dataset.map(
-            processor.preprocess_function, batched=False, remove_columns=dataset.column_names
-        )
+        from datasets import Dataset
 
-        # Save to cache if cache_dir is provided
+        dataset = _get_video_dataset(dataset_name, num_samples=num_samples)
+
+        # Process samples manually to avoid Arrow 32-bit offset overflow
+        # (dataset.map() uses Arrow internally which can't handle large nested lists)
+        processed_samples = []
+        for i, sample in enumerate(dataset):
+            processed = processor.preprocess_function(sample)
+            processed_samples.append(processed)
+            if (i + 1) % 10 == 0:
+                print(f"Processed {i + 1}/{len(dataset)} samples...")
+
+        processed_dataset = Dataset.from_list(processed_samples)
+
+        # Save to cache using torch.save to avoid Arrow 32-bit offset overflow
         if cache_dir is not None:
             os.makedirs(cache_dir, exist_ok=True)
-            # Use num_shards=1 to avoid off-by-one sharding bug with complex nested structures
-            processed_dataset.save_to_disk(cache_path, num_shards=1)
+            torch.save(processed_samples, cache_path)
             print(f"Saved processed dataset to cache: {cache_path}")
 
     # Create DataLoader with the custom collate function
@@ -204,9 +213,11 @@ class Qwen3OmniVideoProcessor(BaseImageProcessor):
             metadata = examples["json"]
             # Try to get a meaningful question from metadata
             category = metadata.get("content_fine_category", "")
-            question = f"/no_think Describe what is happening in this video in detail. Category hint: {category}"
+            question = (
+                f"Describe what is happening in this video in detail. Category hint: {category}"
+            )
         else:
-            question = examples.get("question", "/no_think Describe this video in detail.")
+            question = examples.get("question", "Describe this video in detail.")
 
         # Build conversation in Qwen format
         content = []
@@ -226,10 +237,8 @@ class Qwen3OmniVideoProcessor(BaseImageProcessor):
         content.append({"type": "text", "text": question})
 
         conversation = [{"role": "user", "content": content}]
-
-        # Apply chat template (tokenize=False to get string)
         text = self.tokenizer.apply_chat_template(
-            conversation, add_generation_prompt=True, tokenize=False
+            conversation, add_generation_prompt=True, tokenize=False, enable_thinking=False
         )
 
         # Extract multimodal info using qwen_omni_utils

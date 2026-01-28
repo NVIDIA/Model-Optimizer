@@ -16,7 +16,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Script to load and run a quantized Qwen3Omni model from mto checkpoint."""
+"""Script to load and run a quantized Qwen3Omni model from export_hf_checkpoint."""
 
 import argparse
 import time
@@ -27,38 +27,41 @@ from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProce
 
 import modelopt.torch.opt as mto
 
+# Enable HuggingFace checkpointing for modelopt quantized models
+mto.enable_huggingface_checkpointing()
+
 
 def main(args):
-    print(f"Loading base model from {args.model_path}...")
+    print(f"Loading quantized model from {args.checkpoint_path}...")
     model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
-        args.model_path,
+        args.checkpoint_path,
         torch_dtype="auto",
-        device_map="cuda",
+        device_map="auto",
         attn_implementation="flash_attention_2",
         trust_remote_code=True,
     )
-
-    print(f"Restoring quantized state from {args.checkpoint_path}...")
-    model = mto.restore(model, args.checkpoint_path)
 
     model.disable_talker()
 
     print("Loading processor...")
     processor = Qwen3OmniMoeProcessor.from_pretrained(
-        args.model_path,
+        "Qwen/Qwen3-Omni-30B-A3B-Thinking",
         trust_remote_code=True,
     )
 
     # Build conversation with user prompt
     prompt = args.prompt or "What is the capital of France?"
-    conversation = [{"role": "user", "content": [{"type": "text", "text": f"{prompt}"}]}]
+    conversation = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
     conversations = [conversation]
 
     # Set whether to use audio in video
     use_audio_in_video = True
 
     # Preparation for inference
-    texts = processor.apply_chat_template(conversations, add_generation_prompt=True, tokenize=False)
+    texts = processor.apply_chat_template(
+        conversations, add_generation_prompt=True, tokenize=False, enable_thinking=False
+    )
+    print(f"Texts: {texts}")
     audios, images, videos = process_mm_info(conversations, use_audio_in_video=use_audio_in_video)
 
     inputs = processor(
@@ -100,16 +103,10 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run quantized Qwen3Omni model")
     parser.add_argument(
-        "--model_path",
-        type=str,
-        default="Qwen/Qwen3-Omni-30B-A3B-Instruct",
-        help="Path to the base Qwen3Omni model (HF format)",
-    )
-    parser.add_argument(
         "--checkpoint_path",
         type=str,
-        default="/home/scratch.arasane_hw/models/qwen3omni_nvfp4_qkv_disabled_text_bs512_calib512.pt",
-        help="Path to the mto.save() quantized checkpoint",
+        required=True,
+        help="Path to the export_hf_checkpoint() quantized checkpoint directory",
     )
     parser.add_argument(
         "--prompt",
