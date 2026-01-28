@@ -16,13 +16,14 @@
 """Calibration framework for sparse attention methods."""
 
 import warnings
+from collections import defaultdict
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import torch
 import torch.nn as nn
+from scipy.optimize import curve_fit
 from tqdm import tqdm
 
 from ..sparse_attention import SparseAttentionModule
@@ -30,36 +31,38 @@ from ..stats_manager import SparseAttentionStatsManager
 
 
 class DynamicThresholdCalibrator:
-    """Dynamic threshold calibrator using length-based linear relationship.
+    """Dynamic threshold calibrator using Inverse Power model.
 
-    Implements calibration algorithm:
-    1. Find hyperparameter 'a' where threshold λ = a / context_length
-    2. Use dataset with different lengths and test multiple thresholds
-    3. For each sample, find optimal threshold closest to target sparsity
-    4. Use linear regression to fit: threshold = a * (1/length)
+    Calibration Algorithm:
+        1. For each threshold λ_j in threshold_trials:
+           - Run ALL samples through forward_loop
+           - For each sample i with length L_i, collect sparsity S_ij
+           - Compute scale_factor_ij = λ_j × L_i
+
+        2. Fit Inverse Power model to ALL individual (sf_ij, S_ij) pairs:
+           scale_factor = k / (1 - sparsity)^p
+
+        3. Return fitted k and p parameters (model-specific)
+
+    At inference time (user specifies target_sparsity S*):
+        scale_factor = k / (1 - S*)^p
+        threshold = scale_factor / seqlen
+
+    Key insight: Using all individual data points (N_thresholds × N_samples)
+    instead of per-threshold averages provides more accurate fitting without
+    additional calibration time cost.
     """
-
-    @dataclass
-    class SampleSparsity:
-        """Sparsity results for a single calibration sample."""
-
-        length: int
-        threshold_sparsities: dict[float, float]
 
     def __init__(
         self,
-        target_sparse_ratio: dict[str, float] | None = None,
         threshold_trials: list[float] | None = None,
     ):
         """Initialize dynamic threshold calibrator.
 
         Args:
-            target_sparse_ratio: Target sparsity ratio dict with 'prefill' and 'decode' keys.
-                Each value should be in range (0.0 to 1.0). Set to 0.0 to skip that phase.
-            threshold_trials: List of thresholds to try during calibration
+            threshold_trials: List of thresholds to try during calibration.
+                Should span a range that achieves sparsities from ~10% to ~95%.
         """
-        self.target_sparse_ratio = target_sparse_ratio
-
         # Default threshold trials if not provided
         self.threshold_trials = threshold_trials or [
             1e-6,
@@ -78,18 +81,28 @@ class DynamicThresholdCalibrator:
             3e-1,
             5e-1,
             7e-1,
+            8e-1,
+            9e-1,
+            9.5e-1,
+            9.9e-1,
         ]
 
-        # Statistics tracking
-        self.sparsity_results = []
-
     def calibrate(self, model: nn.Module, forward_loop: Callable, phase: str) -> dict[str, Any]:
-        """Find optimal 'a' parameter for length-based threshold.
+        """Calibrate k and p parameters for Inverse Power model.
 
         Algorithm:
-            1. Test all threshold trials by running forward_loop multiple times
-            2. For each sample, find optimal threshold closest to target sparsity
-            3. Use regression to find 'a' in: threshold = a / length
+            1. For each threshold λ_j in threshold_trials:
+               - Run ALL samples, collect sparsities S_ij for each sample i
+               - Compute scale_factor_ij = λ_j × L_i (where L_i is sample length)
+
+            2. Fit Inverse Power model to ALL (sf_ij, S_ij) pairs:
+               scale_factor = k / (1 - sparsity)^p
+
+            3. Return fitted k and p parameters
+
+        At inference time (user specifies target_sparsity S*):
+            scale_factor = k / (1 - S*)^p
+            threshold = scale_factor / seqlen
 
         Args:
             model: The model with sparse attention modules
@@ -97,48 +110,24 @@ class DynamicThresholdCalibrator:
             phase: Phase to calibrate ('prefill' or 'decode')
 
         Returns:
-            Dict with calibration results including scale_factor, or empty dict if failed
+            Dict with calibration results including k, p, r_squared, and num_data_points
         """
-        if self.target_sparse_ratio is None:
-            raise RuntimeError("target_sparse_ratio must be provided")
-        target_sparsity = self.target_sparse_ratio[phase]
-
         # Extract attention modules
         attention_modules = [m for m in model.modules() if isinstance(m, SparseAttentionModule)]
 
         if not attention_modules:
             raise ValueError("No sparse attention modules found for calibration")
 
-        print(f"Starting dynamic threshold calibration ({phase} phase)")
-        print(f"Target sparsity: {target_sparsity}")
+        print(f"Starting Inverse Power model calibration ({phase} phase)")
         print(f"Threshold trials: {len(self.threshold_trials)}")
 
-        # Stage 1: Collect sparsity for all sample-threshold pairs
-        print(f"\nStage 1: Collecting {phase} sparsity data...")
+        # Stage 1: Collect ALL (scale_factor, sparsity) pairs for all thresholds and samples
+        print(f"\nStage 1: Collecting {phase} sparsity data for all thresholds...")
 
-        # Run first threshold to discover samples and initialize results
-        self._set_threshold(attention_modules, self.threshold_trials[0])
-        self._enable_calibration_mode(attention_modules)
-        with torch.no_grad():
-            forward_loop(model)
-        per_sample_stats = self._extract_calibration_stats(attention_modules, phase=phase)
-        self._disable_calibration_mode(attention_modules)
+        # Collect ALL individual data points (not averaged)
+        all_data_points = []  # List of {"threshold", "length", "scale_factor", "sparsity"}
 
-        if not per_sample_stats:
-            warnings.warn(f"No {phase} phase statistics collected. Check forward loop.")
-            return {}
-
-        # Initialize sparsity_results with sample info
-        self.sparsity_results = [
-            self.SampleSparsity(
-                length=stat["sample_length"],
-                threshold_sparsities={self.threshold_trials[0]: stat["sparsity"]},
-            )
-            for stat in per_sample_stats
-        ]
-
-        # Collect remaining thresholds
-        for threshold in tqdm(self.threshold_trials[1:], desc=f"Testing thresholds ({phase})"):
+        for threshold in tqdm(self.threshold_trials, desc=f"Testing thresholds ({phase})"):
             self._set_threshold(attention_modules, threshold)
             self._enable_calibration_mode(attention_modules)
             with torch.no_grad():
@@ -146,90 +135,115 @@ class DynamicThresholdCalibrator:
             per_sample_stats = self._extract_calibration_stats(attention_modules, phase=phase)
             self._disable_calibration_mode(attention_modules)
 
-            for sample_idx, sample_stat in enumerate(per_sample_stats):
-                if sample_idx < len(self.sparsity_results):
-                    self.sparsity_results[sample_idx].threshold_sparsities[threshold] = sample_stat[
-                        "sparsity"
-                    ]
+            if not per_sample_stats:
+                continue
 
-        if not self.sparsity_results:
-            warnings.warn(f"No valid {phase} sparsity measurements collected during calibration")
-            return {}
+            # Collect individual (scale_factor, sparsity) pairs for each sample
+            for sample_stat in per_sample_stats:
+                length = sample_stat["sample_length"]
+                sparsity = sample_stat["sparsity"]
+                scale_factor = threshold * length
 
-        print(f"Collected statistics for {len(self.sparsity_results)} samples")
+                all_data_points.append(
+                    {
+                        "threshold": threshold,
+                        "length": length,
+                        "scale_factor": scale_factor,
+                        "sparsity": sparsity,
+                    }
+                )
 
-        # Stage 2: Find optimal threshold for each sample and compute 'a'
-        print(f"\nStage 2: Finding 'a' parameter for target sparsity {target_sparsity:.2f}")
-
-        # Find optimal threshold for each sample
-        optimal_pairs = []
-        for sample_result in self.sparsity_results:
-            # Find threshold closest to target sparsity
-            best_threshold, achieved_sparsity = min(
-                sample_result.threshold_sparsities.items(),
-                key=lambda item: abs(item[1] - target_sparsity),
-            )
-
-            optimal_pairs.append(
-                {
-                    "length": sample_result.length,
-                    "optimal_threshold": best_threshold,
-                    "achieved_sparsity": achieved_sparsity,
-                    "target_sparsity": target_sparsity,
-                }
-            )
-
-        if not optimal_pairs:
+        if len(all_data_points) < 10:
             warnings.warn(
-                f"No optimal threshold pairs found for {phase} target sparsity {target_sparsity}. "
-                f"Collected {len(self.sparsity_results)} samples but none achieved target sparsity."
+                f"Not enough data points for {phase} calibration. "
+                f"Got {len(all_data_points)}, need at least 10."
             )
             return {}
 
-        # Linear regression: threshold = a * (1/length)
-        lengths = np.array([p["length"] for p in optimal_pairs])
-        thresholds = np.array([p["optimal_threshold"] for p in optimal_pairs])
+        print(f"Collected {len(all_data_points)} individual (scale_factor, sparsity) pairs")
 
-        # X = 1/length, Y = threshold
-        x = 1.0 / lengths
-        y = thresholds
+        # Stage 2: Fit Inverse Power model: scale_factor = k / (1 - sparsity)^p
+        print("\nStage 2: Fitting Inverse Power model to all data points...")
 
-        # Least squares: scale_factor = sum(x*y) / sum(x^2)
-        scale_factor = np.sum(x * y) / np.sum(x**2)
+        # Extract data for fitting
+        scale_factors = np.array([p["scale_factor"] for p in all_data_points])
+        sparsities = np.array([p["sparsity"] for p in all_data_points])
 
-        # Calculate statistics
-        scale_factors_per_sample = y * lengths
-        scale_factor_std = np.std(scale_factors_per_sample)
+        # Filter out invalid sparsities (must be in (0, 1))
+        valid_mask = (sparsities > 0.01) & (sparsities < 0.99)
+        scale_factors = scale_factors[valid_mask]
+        sparsities = sparsities[valid_mask]
 
-        # Calculate R-squared for quality metric
-        y_pred = scale_factor * x
-        ss_res = np.sum((y - y_pred) ** 2)
-        ss_tot = np.sum((y - np.mean(y)) ** 2)
+        if len(scale_factors) < 3:
+            warnings.warn(
+                f"Not enough valid data points after filtering. Got {len(scale_factors)}."
+            )
+            return {}
+
+        # Define Inverse Power model: sf = k / (1 - S)^p
+        def inverse_power(sparsity, k, p):
+            return k / np.power(1 - sparsity, p)
+
+        # Fit the model
+        try:
+            popt, pcov = curve_fit(
+                inverse_power,
+                sparsities,
+                scale_factors,
+                p0=[100, 1.5],  # Initial guess
+                bounds=([0.1, 0.1], [1e7, 10]),  # Bounds for k and p
+                maxfev=10000,
+            )
+            k, p = popt
+        except Exception as e:
+            warnings.warn(f"Curve fitting failed: {e}")
+            return {}
+
+        # Calculate R-squared
+        pred_scale_factors = inverse_power(sparsities, k, p)
+        ss_res = np.sum((scale_factors - pred_scale_factors) ** 2)
+        ss_tot = np.sum((scale_factors - np.mean(scale_factors)) ** 2)
         r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
 
-        # Calculate average achieved sparsity
-        avg_achieved_sparsity = np.mean([p["achieved_sparsity"] for p in optimal_pairs])
+        print(f"\n{phase.capitalize()} Calibration Results (Inverse Power Model):")
+        print("  Model: scale_factor = k / (1 - sparsity)^p")
+        print(f"  Fitted k: {k:.4f}")
+        print(f"  Fitted p: {p:.4f}")
+        print(f"  R-squared: {r_squared:.6f}")
+        print(f"  Data points used: {int(np.sum(valid_mask))} / {len(all_data_points)}")
 
-        print(f"\n{phase.capitalize()} Calibration Results:")
-        print(f"  Threshold scale factor: {scale_factor:.6f} (std: {scale_factor_std:.6f})")
-        print(f"  R-squared: {r_squared:.4f}")
-        print(
-            f"  Average achieved sparsity: {avg_achieved_sparsity:.2%} (target: {target_sparsity:.2%})"
-        )
-        print(f"\nExample thresholds with λ = {scale_factor:.6f} / length:")
-        for length in [1024, 2048, 4096, 8192, 16384]:
-            print(f"  Length {length:5d}: threshold = {scale_factor / length:.2e}")
+        # Show scale_factor for various target sparsities
+        print("\nScale factors for different target sparsities:")
+        print(f"  {'Target':<10} {'Scale Factor':<15}")
+        print(f"  {'-' * 10} {'-' * 15}")
+        for target in [0.5, 0.7, 0.8, 0.9, 0.95]:
+            sf = k / (1 - target) ** p
+            print(f"  {target:<10.0%} {sf:<15.2f}")
+
+        # Print calibration data summary by threshold
+        print("\nCalibration data summary (per threshold):")
+        print(f"  {'Threshold':<12} {'Avg SF':<12} {'Avg Sparsity':<12} {'Samples':<8}")
+        print(f"  {'-' * 12} {'-' * 12} {'-' * 12} {'-' * 8}")
+
+        # Group by threshold for summary
+        by_threshold = defaultdict(list)
+        for point in all_data_points:
+            by_threshold[point["threshold"]].append(point)
+
+        for threshold in sorted(by_threshold.keys()):
+            points = by_threshold[threshold]
+            avg_sf = np.mean([p["scale_factor"] for p in points])
+            avg_s = np.mean([p["sparsity"] for p in points])
+            print(f"  {threshold:<12.4f} {avg_sf:<12.2f} {avg_s:<12.2%} {len(points):<8}")
 
         return {
             "phase": phase,
-            "scale_factor": scale_factor,
-            "scale_factor_std": scale_factor_std,
-            "r_squared": r_squared,
-            "num_samples": len(optimal_pairs),
-            "target_sparsity": target_sparsity,
-            "avg_achieved_sparsity": avg_achieved_sparsity,
-            "optimal_pairs": optimal_pairs,
-            "calibration_type": "length_based_dynamic",
+            "k": float(k),
+            "p": float(p),
+            "r_squared": float(r_squared),
+            "num_data_points": int(np.sum(valid_mask)),
+            "total_samples": len(all_data_points),
+            "calibration_type": "inverse_power",
         }
 
     def _enable_calibration_mode(self, modules: list[nn.Module]):

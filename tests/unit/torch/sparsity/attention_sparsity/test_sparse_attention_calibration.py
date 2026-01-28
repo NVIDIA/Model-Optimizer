@@ -312,7 +312,7 @@ class TestCalibrationIntegration:
         for module in sparse_model.modules():
             if isinstance(module, SparseAttentionModule):
                 method = module._sparse_method_instance
-                assert not getattr(method, "threshold_scale_factor", None)
+                assert not getattr(method, "calibration_params", None)
 
     def test_sparsify_with_calibration_requires_forward_loop(self):
         """Test that calibration requires forward_loop or proper model config."""
@@ -454,7 +454,7 @@ class TestDynamicThresholdCalibratorMethods:
         assert len(modules) > 0
 
         # Create calibrator and set threshold
-        calibrator = DynamicThresholdCalibrator(target_sparse_ratio={"prefill": 0.5, "decode": 0.5})
+        calibrator = DynamicThresholdCalibrator()
         calibrator._set_threshold(modules, 0.05)
 
         # Verify threshold was set
@@ -479,7 +479,7 @@ class TestDynamicThresholdCalibratorMethods:
 
         modules = [m for m in sparse_model.modules() if isinstance(m, SparseAttentionModule)]
 
-        calibrator = DynamicThresholdCalibrator(target_sparse_ratio={"prefill": 0.5, "decode": 0.5})
+        calibrator = DynamicThresholdCalibrator()
 
         # Enable calibration mode
         calibrator._enable_calibration_mode(modules)
@@ -515,7 +515,7 @@ class TestDynamicThresholdCalibratorMethods:
 
         modules = [m for m in sparse_model.modules() if isinstance(m, SparseAttentionModule)]
 
-        calibrator = DynamicThresholdCalibrator(target_sparse_ratio={"prefill": 0.5, "decode": 0.5})
+        calibrator = DynamicThresholdCalibrator()
 
         # Extract stats without running any forward passes
         stats = calibrator._extract_calibration_stats(modules)
@@ -546,7 +546,7 @@ class TestDynamicThresholdCalibratorMethods:
         for module in modules:
             assert module._stats_manager is not None
 
-        calibrator = DynamicThresholdCalibrator(target_sparse_ratio={"prefill": 0.5, "decode": 0.5})
+        calibrator = DynamicThresholdCalibrator()
 
         # Disable stats manager first
         for module in modules:
@@ -577,7 +577,7 @@ class TestDynamicThresholdCalibratorMethods:
 
         modules = [m for m in sparse_model.modules() if isinstance(m, SparseAttentionModule)]
 
-        calibrator = DynamicThresholdCalibrator(target_sparse_ratio={"prefill": 0.5, "decode": 0.5})
+        calibrator = DynamicThresholdCalibrator()
 
         # Enable calibration mode and manually add some stats
         calibrator._enable_calibration_mode(modules)
@@ -620,7 +620,7 @@ class TestDynamicThresholdCalibratorMethods:
 
         modules = [m for m in sparse_model.modules() if isinstance(m, SparseAttentionModule)]
 
-        calibrator = DynamicThresholdCalibrator(target_sparse_ratio={"prefill": 0.5, "decode": 0.5})
+        calibrator = DynamicThresholdCalibrator()
 
         # Stats manager should be None
         for module in modules:
@@ -636,7 +636,6 @@ class TestDynamicThresholdCalibratorMethods:
 
         # Don't apply sparse attention
         calibrator = DynamicThresholdCalibrator(
-            target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
             threshold_trials=[0.001, 0.01],
         )
 
@@ -663,7 +662,6 @@ class TestDynamicThresholdCalibratorMethods:
         sparse_model = sparsify(model, config)
 
         calibrator = DynamicThresholdCalibrator(
-            target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
             threshold_trials=[0.001],  # Only one threshold for speed
         )
 
@@ -677,12 +675,10 @@ class TestDynamicThresholdCalibratorMethods:
 
     def test_calibrator_default_threshold_trials_values(self):
         """Test that default threshold trials have expected values."""
-        calibrator = DynamicThresholdCalibrator(
-            target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
-        )
+        calibrator = DynamicThresholdCalibrator()
 
-        # Should have 12 default trials
-        assert len(calibrator.threshold_trials) == 12
+        # Should have 20 default trials (expanded range for Inverse Power model)
+        assert len(calibrator.threshold_trials) == 20
 
         # Check specific values
         expected_trials = [
@@ -695,9 +691,17 @@ class TestDynamicThresholdCalibratorMethods:
             1e-3,
             5e-3,
             1e-2,
+            2e-2,
             5e-2,
             1e-1,
+            2e-1,
+            3e-1,
             5e-1,
+            7e-1,
+            8e-1,
+            9e-1,
+            9.5e-1,
+            9.9e-1,
         ]
         assert calibrator.threshold_trials == expected_trials
 
@@ -705,31 +709,10 @@ class TestDynamicThresholdCalibratorMethods:
         """Test calibrator with custom threshold trials."""
         custom_trials = [0.001, 0.005, 0.01, 0.05, 0.1]
         calibrator = DynamicThresholdCalibrator(
-            target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
             threshold_trials=custom_trials,
         )
 
         assert calibrator.threshold_trials == custom_trials
-
-    def test_calibrator_sparsity_results_initialization(self):
-        """Test that sparsity_results is initialized as empty list."""
-        calibrator = DynamicThresholdCalibrator(
-            target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
-        )
-
-        assert calibrator.sparsity_results == []
-
-    def test_sample_sparsity_dataclass(self):
-        """Test SampleSparsity dataclass."""
-        sample = DynamicThresholdCalibrator.SampleSparsity(
-            length=1024,
-            threshold_sparsities={0.001: 0.3, 0.01: 0.5, 0.1: 0.7},
-        )
-
-        assert sample.length == 1024
-        assert sample.threshold_sparsities[0.001] == 0.3
-        assert sample.threshold_sparsities[0.01] == 0.5
-        assert sample.threshold_sparsities[0.1] == 0.7
 
 
 class TestCalibrateFunction:

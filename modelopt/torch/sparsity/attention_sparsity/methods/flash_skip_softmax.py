@@ -56,13 +56,11 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         # Optional parameters not in Pydantic config
         self.phase = config.get("phase", None)
 
-        # Initialize threshold
-        if isinstance(self.threshold_config, dict):
-            self.threshold = self.threshold_config.get(
-                "default", self.threshold_config.get("prefill", 1e-4)
-            )
-        else:
-            self.threshold = self.threshold_config
+        # Initialize threshold from dict config (prefill phase as default)
+        self.threshold = self.threshold_config.get("prefill", 1e-3)
+
+        # Calibration mode flag (prevents threshold updates during calibration)
+        self._calibration_mode = False
 
     def set_calibration_mode(self, enabled: bool):
         """Set calibration mode to prevent _update_threshold from modifying the threshold."""
@@ -70,10 +68,7 @@ class FlashSkipSoftmax(SparseAttentionMethod):
 
     def _update_threshold(self, phase: str):
         """Update threshold based on phase."""
-        if isinstance(self.threshold_config, dict):
-            self.threshold = self.threshold_config.get(
-                phase, self.threshold_config.get("default", self.threshold)
-            )
+        self.threshold = self.threshold_config.get(phase, self.threshold)
 
     def _infer_phase(self, attention_scores: torch.Tensor) -> str:
         """Infer phase from attention scores shape."""
@@ -138,10 +133,21 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         batch_size, num_heads, seq_q, seq_k = attn_weights.shape
 
         # Calculate threshold
-        threshold_scale_factor = getattr(self, "threshold_scale_factor", None)
-        if threshold_scale_factor is not None and phase in threshold_scale_factor:
-            # Per-phase calibrated threshold: λ = scale_factor[phase] / length
-            log_threshold = np.log(threshold_scale_factor[phase] / seq_k)
+        calibration_params = getattr(self, "calibration_params", None)
+        target_sparse_ratio = getattr(self, "target_sparse_ratio", None)
+
+        if (
+            calibration_params is not None
+            and phase in calibration_params
+            and target_sparse_ratio is not None
+        ):
+            # Use calibrated k, p to compute dynamic threshold
+            # scale_factor = k / (1 - target_sparsity)^p
+            k = calibration_params[phase]["k"]
+            p = calibration_params[phase]["p"]
+            target_sparsity = target_sparse_ratio.get(phase, 0.5)
+            scale_factor = k / ((1 - target_sparsity) ** p)
+            log_threshold = np.log(scale_factor / seq_k)
         else:
             # Use static threshold from config (no calibration or phase not calibrated)
             log_threshold = np.log(self.threshold)
@@ -313,23 +319,31 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         Returns:
             Dictionary with threshold configuration and calibration info.
         """
-        threshold_scale_factor = getattr(self, "threshold_scale_factor", None)
+        calibration_params = getattr(self, "calibration_params", None)
+        target_sparse_ratio = getattr(self, "target_sparse_ratio", None)
 
-        if threshold_scale_factor is not None:
-            # Per-phase calibrated dynamic threshold
-            example_lengths = [1024, 2048, 4096, 8192]
+        if calibration_params is not None and target_sparse_ratio is not None:
+            # Per-phase calibrated dynamic threshold using Inverse Power model
+            example_lengths = [1024, 4096, 16384, 65536, 131072]
             phase_info = {}
-            for phase, scale_factor in threshold_scale_factor.items():
+            for phase, params in calibration_params.items():
+                k, p = params["k"], params["p"]
+                target_sparsity = target_sparse_ratio.get(phase, 0.5)
+                scale_factor = k / ((1 - target_sparsity) ** p)
                 phase_info[phase] = {
+                    "k": k,
+                    "p": p,
+                    "target_sparsity": target_sparsity,
                     "scale_factor": scale_factor,
                     "example_thresholds": {
                         length: scale_factor / length for length in example_lengths
                     },
                 }
             return {
-                "type": "dynamic",
-                "scale_factors": threshold_scale_factor,
-                "formula": "λ[phase] / length",
+                "type": "dynamic_calibrated",
+                "formula": "threshold = k / (1 - target_sparsity)^p / seqlen",
+                "calibration_params": calibration_params,
+                "target_sparse_ratio": target_sparse_ratio,
                 "phases": phase_info,
             }
         else:

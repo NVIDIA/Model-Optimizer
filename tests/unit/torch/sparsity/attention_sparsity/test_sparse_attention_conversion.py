@@ -275,5 +275,5 @@ class TestSparseAttentionModuleMethods:
                 assert isinstance(info, dict)
                 assert "type" in info
                 assert info["type"] == "static"
-                assert info["value"] == 0.005
+                assert info["value"] == {"prefill": 0.005, "decode": 0.001}
                 break

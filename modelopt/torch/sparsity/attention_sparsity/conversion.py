@@ -244,23 +244,27 @@ def update_sparse_attention_metadata(
 def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
     """Extract sparse attention config for export to config.json.
 
-    Extracts the global threshold_scale_factor from the first sparse attention
-    module that has calibrated thresholds.
+    Extracts the calibration parameters (k, p) and target_sparse_ratio from the first
+    sparse attention module that has calibrated thresholds.
 
     Args:
         model: Model with sparse attention applied
 
     Returns:
         Dictionary with sparse attention config, or None if no calibrated config found.
-        Format: {"threshold_scale_factor": {"prefill": float, "decode": float}}
+        Contains "calibration_params" with k and p per phase, and "target_sparse_ratio".
     """
     for module in model.modules():
         if isinstance(module, SparseAttentionModule):
-            threshold_scale_factor = getattr(
-                module._sparse_method_instance, "threshold_scale_factor", None
+            calibration_params = getattr(module._sparse_method_instance, "calibration_params", None)
+            target_sparse_ratio = getattr(
+                module._sparse_method_instance, "target_sparse_ratio", None
             )
-            if threshold_scale_factor is not None:
-                return {"threshold_scale_factor": threshold_scale_factor}
+            if calibration_params is not None:
+                return {
+                    "calibration_params": calibration_params,
+                    "target_sparse_ratio": target_sparse_ratio,
+                }
     return None
 
 
@@ -327,11 +331,17 @@ def enable_sparse_attention(model: nn.Module, wildcard_or_filter_func: str | Cal
 def _format_threshold(info: dict) -> str:
     """Format threshold info for display."""
     t = info.get("type")
-    if t == "dynamic":
-        # Per-phase calibrated threshold: λ = scale_factor[phase] / length
-        scale_factors = info.get("scale_factors", {})
-        parts = [f"{phase}={sf:.2f}" for phase, sf in scale_factors.items()]
-        return f"λ={{{', '.join(parts)}}}"
+    if t == "dynamic_calibrated":
+        # Inverse Power model: threshold = k / (1 - sparsity)^p / seqlen
+        params = info.get("calibration_params", {})
+        target = info.get("target_sparse_ratio", {})
+        parts = []
+        for phase in ["prefill", "decode"]:
+            if phase in params:
+                k, p = params[phase]["k"], params[phase]["p"]
+                s = target.get(phase, 0.5)
+                parts.append(f"{phase}: k={k:.1f}, p={p:.2f}, target={s:.0%}")
+        return f"calibrated({', '.join(parts)})"
     if t == "static":
         v = info.get("value")
         if isinstance(v, dict):

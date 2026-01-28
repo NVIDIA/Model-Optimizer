@@ -20,6 +20,8 @@ import string
 from dataclasses import dataclass
 from typing import Any
 
+from tqdm import tqdm
+
 from . import ruler_utils
 
 
@@ -242,26 +244,27 @@ class RulerDatasetBuilder:
         Returns:
             List of calibration samples with 'input' and 'length' fields
         """
-        from tqdm import tqdm
-
         all_samples = []
 
-        # Generate calibration samples
-        for num_samples, target_length in tqdm(
-            zip(self.samples_per_length, self.target_lengths),
-            desc="Generating RULER calibration samples",
-            total=len(self.target_lengths),
-        ):
-            samples_per_task = max(num_samples // len(self.subtasks), 1)
+        print(
+            f"Generating {self.total_samples} calibration samples "
+            f"across {len(self.target_lengths)} length bins: {self.target_lengths}"
+        )
 
-            # Generate equal samples for each task
-            for task_name in self.subtasks:
-                for sample_idx in range(samples_per_task):
-                    sample = self._generate_sample(task_name, target_length, sample_idx)
-                    if sample and sample["length"] <= self.max_length_filter:
-                        all_samples.append(sample)
+        # Generate calibration samples with sample-level progress
+        with tqdm(total=self.total_samples, desc="Generating RULER samples") as pbar:
+            for num_samples, target_length in zip(self.samples_per_length, self.target_lengths):
+                samples_per_task = max(num_samples // len(self.subtasks), 1)
+
+                for task_name in self.subtasks:
+                    for sample_idx in range(samples_per_task):
+                        sample = self._generate_sample(task_name, target_length, sample_idx)
+                        if sample and sample["length"] <= self.max_length_filter:
+                            all_samples.append(sample)
+                        pbar.update(1)
 
         random.shuffle(all_samples)
+        print(f"Generated {len(all_samples)} valid samples")
         return all_samples
 
     def _generate_sample(

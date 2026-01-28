@@ -143,12 +143,14 @@ class TestCalibrationGPU:
         sparse_modules = [m for m in sparse_model.modules() if isinstance(m, SparseAttentionModule)]
         assert len(sparse_modules) > 0
 
-        # Verify calibration was applied
+        # Verify calibration was applied (Inverse Power model params)
         for module in sparse_modules:
             method = module._sparse_method_instance
-            # Check if calibrated threshold scale factor is set
-            if hasattr(method, "threshold_scale_factor") and method.threshold_scale_factor:
-                assert method.threshold_scale_factor > 0
+            # Check if calibration params (k, p) are set
+            if hasattr(method, "calibration_params") and method.calibration_params:
+                for params in method.calibration_params.values():
+                    assert "k" in params and params["k"] > 0
+                    assert "p" in params and params["p"] > 0
 
     def test_calibration_pytorch_backend(self, simple_model):
         """Test calibration with pytorch backend."""
