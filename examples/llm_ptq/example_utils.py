@@ -461,6 +461,22 @@ def _patch_compressed_linear_init():
     # Patch __getattr__ to return dummy for weight access
     original_getattr = getattr(CompressedLinear, "__getattr__", None)
 
+    class DummyWeightData:
+        """Dummy tensor data that accepts initialization calls like .normal_(), .zero_()."""
+
+        def __getattr__(self, name):
+            # Return self for any method call to allow chaining
+            return lambda *args, **kwargs: self
+
+    class DummyWeight:
+        """Dummy weight with .data that accepts any initialization."""
+
+        def __init__(self):
+            self.data = DummyWeightData()
+
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: self
+
     def patched_getattr(self, name):
         if name == "weight":
             # Check if real weight exists
@@ -468,18 +484,8 @@ def _patch_compressed_linear_init():
                 return self._parameters["weight"]
             if "weight" in self.__dict__:
                 return self.__dict__["weight"]
-            # Return dummy weight for initialization purposes
-            if hasattr(self, "weight_packed"):
-                if "_dummy_weight" not in self.__dict__:
-                    object.__setattr__(
-                        self,
-                        "_dummy_weight",
-                        torch.nn.Parameter(
-                            torch.empty(0, device=self.weight_packed.device),
-                            requires_grad=False,
-                        ),
-                    )
-                return self._dummy_weight
+            # Return dummy weight for initialization purposes (don't store it)
+            return DummyWeight()
         if original_getattr is not None:
             return original_getattr(self, name)
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
@@ -489,44 +495,149 @@ def _patch_compressed_linear_init():
     print("Patched CompressedLinear for transformers compatibility")
 
 
-def _unpack_compressed_linear_weights(model):
+def _unpack_compressed_linear_weights(model, ckpt_path=None):
     """Unpack all CompressedLinear weights from INT4 to BF16.
 
     This decompresses the packed INT4 weights to BF16 format so they can be
     processed by Model-Optimizer's PTQ flow. This must be called after model
     loading but before quantization/calibration.
+
+    Args:
+        model: The loaded model with CompressedLinear modules
+        ckpt_path: Path to the checkpoint to reload int32 weights from safetensors
     """
     try:
         from compressed_tensors.linear.compressed_linear import CompressedLinear
     except ImportError:
         return  # compressed_tensors not installed, nothing to unpack
 
+    # Get checkpoint path from model config if not provided
+    if ckpt_path is None:
+        if hasattr(model, "config") and hasattr(model.config, "_name_or_path"):
+            ckpt_path = model.config._name_or_path
+
+    # Load original int32 weights from safetensors
+    original_weights = {}
+    if ckpt_path:
+        import json
+        import os
+
+        from safetensors import safe_open
+
+        # Find safetensors files
+        index_path = os.path.join(ckpt_path, "model.safetensors.index.json")
+        single_path = os.path.join(ckpt_path, "model.safetensors")
+
+        safetensor_files = []
+        if os.path.exists(index_path):
+            with open(index_path) as f:
+                index = json.load(f)
+            safetensor_files = list(set(index.get("weight_map", {}).values()))
+            safetensor_files = [os.path.join(ckpt_path, f) for f in safetensor_files]
+        elif os.path.exists(single_path):
+            safetensor_files = [single_path]
+
+        # Load int32 weights (weight_packed, weight_shape)
+        for sf_path in safetensor_files:
+            with safe_open(sf_path, framework="pt") as f:
+                for key in f.keys():
+                    if "weight_packed" in key or "weight_shape" in key:
+                        original_weights[key] = f.get_tensor(key)
+
+        print(f"Loaded {len(original_weights)} packed weight tensors from safetensors")
+
+    def _lookup_original(key: str):
+        if not original_weights:
+            return None
+        if key in original_weights:
+            return original_weights[key]
+        # Fallback: match by suffix when prefixes differ
+        matches = [k for k in original_weights if k.endswith(key)]
+        if len(matches) == 1:
+            return original_weights[matches[0]]
+        return None
+
     unpacked_count = 0
     for name, module in model.named_modules():
         if isinstance(module, CompressedLinear) and hasattr(module, "weight_packed"):
-            # Decompress the INT4 weights to BF16
             with torch.no_grad():
-                # Fix weight_shape if it's a tensor (should be a list of ints)
-                if hasattr(module, "weight_shape") and isinstance(
-                    module.weight_shape, torch.Tensor
-                ):
-                    shape_list = module.weight_shape.tolist()
-                    # Remove the parameter and set as regular attribute
-                    del module._parameters["weight_shape"]
-                    module.weight_shape = shape_list
+                # Build compressed_data dict
+                compressed_data = {}
 
-                # Get the decompressed weight from the compressor
-                decompressed_weight = module.compressor.decompress_module(module)
-                # Register as a proper parameter (this replaces any dummy weight)
-                module.weight = torch.nn.Parameter(decompressed_weight, requires_grad=False)
-                # Clean up compressed attributes
+                # Use original int32 weights from safetensors if available
+                packed_key = f"{name}.weight_packed"
+                shape_key = f"{name}.weight_shape"
+
+                packed_tensor = _lookup_original(packed_key)
+                if packed_tensor is None:
+                    packed_tensor = module.weight_packed
+                elif isinstance(packed_tensor, torch.Tensor):
+                    packed_tensor = packed_tensor.to(module.weight_packed.device)
+                compressed_data["weight_packed"] = packed_tensor
+
+                if isinstance(compressed_data["weight_packed"], torch.Tensor):
+                    if compressed_data["weight_packed"].dtype != torch.int32:
+                        # Some modules (e.g., vision tower) are not pack-quantized.
+                        # Skip decompression if packed weights are not int32.
+                        continue
+
+                shape_tensor = _lookup_original(shape_key)
+                if shape_tensor is not None:
+                    if isinstance(shape_tensor, torch.Tensor):
+                        shape_tensor = shape_tensor.to(module.weight_packed.device)
+                    compressed_data["weight_shape"] = [int(x) for x in shape_tensor.tolist()]
+                elif hasattr(module, "weight_shape"):
+                    ws = module.weight_shape
+                    if isinstance(ws, torch.Tensor):
+                        compressed_data["weight_shape"] = [int(x) for x in ws.tolist()]
+                    elif isinstance(ws, (list, tuple)):
+                        compressed_data["weight_shape"] = [int(x) for x in ws]
+                    else:
+                        compressed_data["weight_shape"] = ws
+
+                # Get weight_scale (this one is float, so conversion is OK)
+                if hasattr(module, "weight_scale"):
+                    compressed_data["weight_scale"] = module.weight_scale.to(
+                        module.weight_packed.device
+                    )
+
+                if hasattr(module, "weight_zero_point"):
+                    compressed_data["weight_zero_point"] = module.weight_zero_point.to(
+                        module.weight_packed.device
+                    )
+
+                # Get quantization args
+                quant_args = None
+                if hasattr(module, "quantization_scheme") and module.quantization_scheme:
+                    if hasattr(module.quantization_scheme, "weights"):
+                        quant_args = module.quantization_scheme.weights
+
+                # Decompress
+                decompressed_weight = module.compressor.decompress_weight(
+                    compressed_data=compressed_data,
+                    quantization_args=quant_args,
+                )
+
+                # Register as parameter (avoid register_parameter to bypass __getattr__ hook)
+                module._parameters.pop("weight", None)
+                module._buffers.pop("weight", None)
+                if "weight" in module.__dict__:
+                    del module.__dict__["weight"]
+                param = torch.nn.Parameter(decompressed_weight, requires_grad=False)
+                module._parameters["weight"] = param
+                module.__dict__["weight"] = param
+
+                # Clean up
                 if hasattr(module, "weight_packed"):
                     delattr(module, "weight_packed")
                 if hasattr(module, "weight_scale"):
                     delattr(module, "weight_scale")
-                if hasattr(module, "_dummy_weight"):
-                    delattr(module, "_dummy_weight")
-                # Update quantization status to not compressed
+                if hasattr(module, "weight_shape"):
+                    if "weight_shape" in module._parameters:
+                        del module._parameters["weight_shape"]
+                    elif hasattr(module, "weight_shape"):
+                        delattr(module, "weight_shape")
+
                 from compressed_tensors.quantization import QuantizationStatus
 
                 module.quantization_status = QuantizationStatus.FROZEN
@@ -626,12 +737,13 @@ def get_model(
         elif has_pack_quantized_config(hf_config):
             # Patch CompressedLinear before loading to handle missing weight attribute
             _patch_compressed_linear_init()
-            torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)
+            # Pass torch_dtype="auto" to preserve original dtypes from safetensors
+            # This prevents int32 packed weights from being converted to float
             model = AutoModelForCausalLM.from_pretrained(
                 ckpt_path,
                 device_map="auto",
                 trust_remote_code=trust_remote_code,
-                torch_dtype=torch_dtype,
+                torch_dtype="auto",
             )
         else:
             architecture = hf_config.architectures[0]
@@ -694,7 +806,7 @@ def get_model(
 
     # Unpack CompressedLinear weights (INT4 -> BF16) if present
     # This is needed for models with compressed-tensors quantization (e.g., kimi k2.5)
-    _unpack_compressed_linear_weights(model)
+    _unpack_compressed_linear_weights(model, ckpt_path)
 
     # If device_map was disabled (None), manually move model to target device
     if device_map is None and device != "cpu":
