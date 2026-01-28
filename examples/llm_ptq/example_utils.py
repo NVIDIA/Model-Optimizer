@@ -612,11 +612,29 @@ def _unpack_compressed_linear_weights(model, ckpt_path=None):
                     if hasattr(module.quantization_scheme, "weights"):
                         quant_args = module.quantization_scheme.weights
 
-                # Decompress
+                # Decompress on CPU to avoid GPU OOM, then move to target device.
+                decompress_device = torch.device("cpu")
+                if isinstance(compressed_data["weight_packed"], torch.Tensor):
+                    compressed_data["weight_packed"] = compressed_data["weight_packed"].to(
+                        decompress_device
+                    )
+                if "weight_scale" in compressed_data and isinstance(
+                    compressed_data["weight_scale"], torch.Tensor
+                ):
+                    compressed_data["weight_scale"] = compressed_data["weight_scale"].to(
+                        decompress_device
+                    )
+                if "weight_zero_point" in compressed_data and isinstance(
+                    compressed_data["weight_zero_point"], torch.Tensor
+                ):
+                    compressed_data["weight_zero_point"] = compressed_data["weight_zero_point"].to(
+                        decompress_device
+                    )
+
                 decompressed_weight = module.compressor.decompress_weight(
                     compressed_data=compressed_data,
                     quantization_args=quant_args,
-                )
+                ).to(module.weight_packed.device, non_blocking=True)
 
                 # Register as parameter (avoid register_parameter to bypass __getattr__ hook)
                 module._parameters.pop("weight", None)
