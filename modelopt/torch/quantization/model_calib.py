@@ -248,10 +248,12 @@ def mse_calibrate(
         step_size: Step size for amax search (default: 0.1).
         start_multiplier: Starting multiplier for amax search (default: 0.25).
         stop_multiplier: Ending multiplier for amax search (default: 4.0).
-        fp8_scale_sweep: If True, sweep over all 128 possible FP8 E4M3 scale values
+        fp8_scale_sweep: If True, sweep over all 126 valid FP8 E4M3 scale values
             for NVFP4 per-block quantization instead of using multipliers.
             This is specifically designed for optimizing the FP8-quantized
-            per-block scales in NVFP4 format (default: False).
+            per-block scales in NVFP4 format. When enabled, sets
+            block_sizes["skip_fp8_scale_quant"] = True on NVFP4 quantizers
+            to skip dynamic FP8 scale quantization during inference (default: False).
 
     See :class:`MseCalibConfig <modelopt.torch.quantization.config.MseCalibConfig>` for
     details on the remaining arguments.
@@ -281,6 +283,12 @@ def mse_calibrate(
                         f"fp8_scale_sweep is enabled but quantizer '{name}' is not NVFP4 static "
                         "block quantization. fp8_scale_sweep will be ignored for this quantizer."
                     )
+
+                # Skip dynamic FP8 scale quantization as scales are pre-optimized via FP8 sweep
+                if fp8_scale_sweep and is_nvfp4_static:
+                    if module._block_sizes is None:
+                        module._block_sizes = {}
+                    module._block_sizes["skip_fp8_scale_quant"] = True
 
                 # Create MSE calibrator with quant_func
                 module._calibrator = MseCalibrator(
