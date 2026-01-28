@@ -54,6 +54,11 @@ from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
 
+try:
+    from modelopt.torch.sparsity.attention_sparsity.conversion import export_sparse_attention_config
+except ImportError:
+    export_sparse_attention_config = None
+
 from .convert_hf_config import convert_hf_quant_config_format
 from .layer_utils import (
     get_expert_linear_names,
@@ -990,6 +995,12 @@ def export_hf_checkpoint(
 
         if hf_quant_config is not None:
             config_data["quantization_config"] = hf_quant_config
+
+        # Add sparse attention config if available
+        if export_sparse_attention_config is not None:
+            sparse_attn_config = export_sparse_attention_config(model)
+            if sparse_attn_config is not None:
+                config_data["sparse_attention_config"] = sparse_attn_config
 
         with open(original_config, "w") as file:
             json.dump(config_data, file, indent=4)

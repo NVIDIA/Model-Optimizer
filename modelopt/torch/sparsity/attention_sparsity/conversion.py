@@ -23,10 +23,10 @@ import torch.nn as nn
 
 from modelopt.torch.opt.conversion import ModelLikeModule, ModeloptStateManager
 from modelopt.torch.opt.mode import ConvertReturnType, MetadataDict
-from modelopt.torch.utils import get_unwrapped_name
+from modelopt.torch.utils import atomic_print, get_unwrapped_name
 
 from .config import SparseAttentionConfig
-from .plugins.huggingface import register_sparse_attention_on_the_fly
+from .plugins import register_custom_model_plugins_on_the_fly
 from .sparse_attention import SparseAttentionModule, SparseAttentionRegistry
 
 
@@ -59,8 +59,8 @@ def convert_to_sparse_attention_model(
     # Initialize the true module if necessary
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
 
-    # Register sparse attention modules dynamically
-    register_sparse_attention_on_the_fly(model)
+    # Apply custom model plugins
+    register_custom_model_plugins_on_the_fly(model)
 
     # Replace attention modules with sparse versions
     replace_sparse_attention_modules(model, version=ModeloptStateManager(model).state_version)
@@ -241,6 +241,33 @@ def update_sparse_attention_metadata(
     )
 
 
+def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
+    """Extract sparse attention config for export to config.json.
+
+    Extracts the calibration parameters (k, p) and target_sparse_ratio from the first
+    sparse attention module that has calibrated thresholds.
+
+    Args:
+        model: Model with sparse attention applied
+
+    Returns:
+        Dictionary with sparse attention config, or None if no calibrated config found.
+        Contains "calibration_params" with k and p per phase, and "target_sparse_ratio".
+    """
+    for module in model.modules():
+        if isinstance(module, SparseAttentionModule):
+            calibration_params = getattr(module._sparse_method_instance, "calibration_params", None)
+            target_sparse_ratio = getattr(
+                module._sparse_method_instance, "target_sparse_ratio", None
+            )
+            if calibration_params is not None:
+                return {
+                    "calibration_params": calibration_params,
+                    "target_sparse_ratio": target_sparse_ratio,
+                }
+    return None
+
+
 def disable_sparse_attention(model: nn.Module, wildcard_or_filter_func: str | Callable):
     """Disable sparse attention for matching modules.
 
@@ -299,3 +326,54 @@ def enable_sparse_attention(model: nn.Module, wildcard_or_filter_func: str | Cal
 
         if matched:
             module.enable()
+
+
+def _format_threshold(info: dict) -> str:
+    """Format threshold info for display."""
+    t = info.get("type")
+    if t == "dynamic_calibrated":
+        # Inverse Power model: threshold = k / (1 - sparsity)^p / seqlen
+        params = info.get("calibration_params", {})
+        target = info.get("target_sparse_ratio", {})
+        parts = []
+        for phase in ["prefill", "decode"]:
+            if phase in params:
+                k, p = params[phase]["k"], params[phase]["p"]
+                s = target.get(phase, 0.5)
+                parts.append(f"{phase}: k={k:.1f}, p={p:.2f}, target={s:.0%}")
+        return f"calibrated({', '.join(parts)})"
+    if t == "static":
+        v = info.get("value")
+        if isinstance(v, dict):
+            return f"threshold={v}"
+        return f"threshold={v:.2e}" if isinstance(v, float) else f"threshold={v}"
+    return "threshold=N/A"
+
+
+@atomic_print
+def print_sparse_attention_summary(model: nn.Module):
+    """Print summary of sparse attention modules in the model.
+
+    Args:
+        model: Model with sparse attention applied
+    """
+    sparse_modules = [
+        (name, m) for name, m in model.named_modules() if isinstance(m, SparseAttentionModule)
+    ]
+
+    if not sparse_modules:
+        print("No sparse attention modules found")
+        return
+
+    enabled = sum(1 for _, m in sparse_modules if m.is_enabled)
+    print(f"Sparse attention: {enabled}/{len(sparse_modules)} modules enabled")
+
+    # Group by (method, threshold)
+    groups: dict[tuple[str, str], int] = {}
+    for _, module in sparse_modules:
+        method = getattr(module, "_method", "unknown")
+        threshold = _format_threshold(module.get_threshold_info())
+        groups[(method, threshold)] = groups.get((method, threshold), 0) + 1
+
+    for (method, threshold), count in sorted(groups.items()):
+        print(f"  {method}: {count} layers, {threshold}")
