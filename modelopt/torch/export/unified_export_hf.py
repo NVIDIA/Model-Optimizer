@@ -51,7 +51,7 @@ from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
-from modelopt.torch.quantization.qtensor import NVFP4QTensor
+from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
 
 from .convert_hf_config import convert_hf_quant_config_format
@@ -67,6 +67,7 @@ from .model_config import (
     QUANTIZATION_FP8,
     QUANTIZATION_FP8_PB_REAL,
     QUANTIZATION_FP8_PC_PT,
+    QUANTIZATION_MXFP8,
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
     QUANTIZATION_NVFP4_AWQ,
@@ -426,6 +427,15 @@ def _export_quantized_weight(
                 weight_quantizer._scale.to(torch.float32),
             )
             del weight_quantizer._scale
+        elif quantization_format == QUANTIZATION_MXFP8:
+            # MXFP8 uses dynamic block quantization with E8M0 scales (uint8)
+            weight = getattr(sub_module, weight_name)
+            e8m0_scale = MXFP8QTensor.get_weights_scaling_factor_from_quantizer(
+                weight, weight_quantizer
+            )
+            sub_module.register_buffer(quantizer_attrs.weight_scale, e8m0_scale)
+            if hasattr(weight_quantizer, "_scale") and weight_quantizer._scale is not None:
+                del weight_quantizer._scale
         else:
             sub_module.register_buffer(
                 quantizer_attrs.weight_scale, get_weight_scaling_factor(sub_module, weight_name)

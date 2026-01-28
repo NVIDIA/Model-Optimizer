@@ -34,6 +34,7 @@ from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.qtensor import (
     FP8QTensor,
     MXFP4QTensor,
+    MXFP8QTensor,
     NVFP4QTensor,
     QTensorWrapper,
 )
@@ -58,6 +59,7 @@ from .model_config import (
     QUANTIZATION_INT8_SQ,
     QUANTIZATION_INT8_WO,
     QUANTIZATION_MXFP4,
+    QUANTIZATION_MXFP8,
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
     QUANTIZATION_NVFP4_AWQ,
@@ -326,6 +328,9 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
         return MXFP4QTensor.quantize(weight, block_size=weight_quantizer.block_sizes[-1])[
             1
         ].reshape(*weight.shape[:-1], -1)
+
+    if quantization_format == QUANTIZATION_MXFP8:
+        return MXFP8QTensor.get_weights_scaling_factor_from_quantizer(weight, weight_quantizer)
     return get_scaling_factor(weight_quantizer)
 
 
@@ -524,6 +529,14 @@ def get_quantization_format(module) -> str | None:
         if weight_quantizer.num_bits == (4, 3):
             if weight_quantizer.block_sizes:
                 assert weight_quantizer.block_sizes[-1] > 0, "Invalid block_sizes for FP8 quantizer"
+                # Check if this is MXFP8 (dynamic block quantization with scale_bits (8, 0))
+                block_sizes = getattr(weight_quantizer, "block_sizes")
+                if (
+                    isinstance(block_sizes, dict)
+                    and block_sizes.get("type", "static") == "dynamic"
+                    and block_sizes.get("scale_bits") == (8, 0)
+                ):
+                    return QUANTIZATION_MXFP8
                 if weight_quantizer.fake_quant:
                     return QUANTIZATION_FP8_PB_WO
                 else:
@@ -724,6 +737,11 @@ def process_layer_quant_config(layer_config_dict):
                 "quant_algo": "NVFP4_SVD",
                 "group_size": block_size_value,
             }
+        elif v == "mxfp8":
+            layer_config = {
+                "quant_algo": "MXFP8",
+                "group_size": block_size_value,
+            }
         else:
             layer_config = {"quant_algo": v}
 
@@ -827,6 +845,9 @@ def to_quantized_weight(
 
     if quantization in [QUANTIZATION_INT8_SQ, QUANTIZATION_INT8_WO]:
         return (weight / weights_scaling_factor[:, None]).round().clamp(-128, 127).to(torch.int8)
+
+    if quantization == QUANTIZATION_MXFP8:
+        return MXFP8QTensor.quantize_with_scale(weight, weights_scaling_factor)
 
     if quantization == QUANTIZATION_FP8_PB_WO:
         return FP8QTensor.quantize(
