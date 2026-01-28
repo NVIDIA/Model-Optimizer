@@ -66,8 +66,8 @@ The table below lists key command-line arguments of the ONNX PTQ example script.
 | `--awqclip_alpha_min` | 0.5 (default) | Minimum AWQ weight-clipping threshold, user-defined |
 | `--awqclip_bsz_col` | 1024 (default) | Chunk size in columns during weight clipping, user-defined |
 | `--calibration_eps` | dml, cuda, cpu, NvTensorRtRtx (default: [cuda,cpu]) | List of execution-providers to use for session run during calibration |
-| `--add_position_ids` | Default: position_ids input disabled | Use this option to enable position_ids input in calibration data|
-| `--enable_mixed_quant` | Default: disabled mixed quant | Use this option to enable mixed precision quantization|
+| `--add_position_ids` | Default: position_ids input is disabled | Use this option to enable position_ids input in calibration data|
+| `--enable_mixed_quant` | Default: mixed-quant is disabled | Use this option to enable mixed precision quantization|
 | `--layers_8bit` | Default: None | Use this option to override default mixed-quant strategy|
 | `--gather_quantize_axis` | Default: None | Use this option to enable INT4 quantization of Gather nodes - choose 0 or 1|
 | `--gather_block_size` | Default: 32 | Block-size for Gather node's INT4 quantization (when its enabled using gather_quantize_axis option)|
