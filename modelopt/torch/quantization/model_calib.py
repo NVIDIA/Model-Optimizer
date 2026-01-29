@@ -62,6 +62,33 @@ def weight_only_quantize(model: nn.Module):
         seen_modules.add(module)
 
 
+def _is_moe_submodule(module: nn.Module) -> bool:
+    """Check if a module is an MoE submodule."""
+    parallel_state = getattr(module, "parallel_state", None)
+    if parallel_state is None:
+        return False
+    return parallel_state.expert_model_parallel_group.is_initialized()
+
+
+def _check_moe_calibration_complete(quantizer, parallel_state):
+    """Raise error if MoE calibration is incomplete (some ranks have amax, others don't)."""
+    if isinstance(quantizer, SequentialQuantizer):
+        for _q in quantizer:
+            _check_moe_calibration_complete(_q, parallel_state)
+        return
+    for group in [parallel_state.data_parallel_group, parallel_state.expert_model_parallel_group,
+                  parallel_state.tensor_parallel_group]:
+        if not group.is_initialized():
+            continue
+        has_amax = getattr(quantizer, "_amax", None) is not None
+        amax_states = DistributedProcessGroup.get_dist_syncd_obj(has_amax, group, lambda objs: objs)
+        if any(amax_states) and not all(amax_states):
+            raise RuntimeError(
+                "MoE calibration incomplete: some experts received no tokens during calibration. "
+                "Increase --calib-size to ensure all experts see calibration data."
+            )
+
+
 @torch.no_grad()
 def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, distributed_sync=True):
     """Calibrate the model using max.
@@ -81,8 +108,20 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
         forward_loop(model)
     finish_stats_collection(model)
 
+    # Sync amax across local experts within each rank (for SequentialMLP)
+    for name, module in model.named_modules():
+        if hasattr(module, "sync_moe_local_experts_amax"):
+            module.sync_moe_local_experts_amax()
+
     if not distributed_sync:
         return
+
+    # Check MoE calibration completeness before sync
+    for name, module in model.named_modules():
+        if isinstance(module, QuantModule) and _is_moe_submodule(module):
+            for child in module.children():
+                if isinstance(child, (TensorQuantizer, SequentialQuantizer)):
+                    _check_moe_calibration_complete(child, module.parallel_state)
 
     def sync_quantizer_amax_across_dp_ep(quantizer, parallel_state):
         """Synchronize the amax across all ranks in the data parallel and expert parallel groups."""
@@ -181,10 +220,6 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
                 axes_for_sync=[None, 0],
                 parallel_state=module.parallel_state,
             )
-
-        # MOE Quantization
-        if hasattr(module, "sync_moe_local_experts_amax"):
-            module.sync_moe_local_experts_amax()
 
         # KV Cache Quantization
         if hasattr(module, "k_bmm_quantizer") and hasattr(module, "v_bmm_quantizer"):
