@@ -400,7 +400,7 @@ def get_kv_cache_bias(kv_module: nn.Module) -> list[torch.Tensor]:
     return kv_bias
 
 
-def get_kv_cache_scaling_factor(self_attention_module: nn.Module) -> torch.Tensor:
+def get_kv_cache_scaling_factor(self_attention_module: nn.Module) -> list[torch.Tensor | None]:
     """Get the K and V BMM scaling factors for the self attention module.
 
     Args:

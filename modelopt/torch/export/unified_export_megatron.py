@@ -243,9 +243,7 @@ class GPTModelExporter:
         state_dict = self.extra_state_dict if self.export_extra_modules else self.state_dict
 
         quantization_format = self._get_quantization_format(self.model)
-
         quantization = None
-
         if quantization_format in (
             QUANTIZATION_FP8_PB_REAL,
             QUANTIZATION_FP8_PB_WO,
@@ -289,18 +287,8 @@ class GPTModelExporter:
                 except (OSError, ValueError, ImportError):
                     pass
 
-        # Gather exclude_modules from all ranks to ensure hf_quant_config is complete
-        all_exclude_modules = [None] * torch.distributed.get_world_size()
-        torch.distributed.all_gather_object(all_exclude_modules, self.exclude_modules)
-        combined_exclude_modules = set()
-        for modules in all_exclude_modules:
-            if modules:
-                combined_exclude_modules.update(modules)
-        self.exclude_modules = sorted(combined_exclude_modules)
-
         if is_last_stage_main_rank and quantization is not None:
-            # TODO refactor to use mte.quant_utils.get_quant_config
-            # except layer names are different in MCore and HF
+            self._gather_exclude_modules()  # gather exclude_modules from all ranks
             self._hf_quant_config = {
                 "producer": {
                     "name": "modelopt",
@@ -489,7 +477,8 @@ class GPTModelExporter:
                 raise ValueError("Only TransformerLayer or MambaLayer are supported.")
 
         # MTP layer
-        self._get_mtp_state_dict()
+        if self._hf_pretrained_model_name is not None:
+            self._get_mtp_state_dict()
 
     def _get_transformer_layer_state_dict(self, layer, layer_id):
         if not isinstance(layer.input_layernorm, IdentityOp):
@@ -567,7 +556,7 @@ class GPTModelExporter:
     def _get_mtp_state_dict(self):
         """Export the MTP module.
 
-        Currently, we copy the BF16 MTP weights from the pretrained model.
+        Currently, we copy the BF16 MTP weights from the pretrained model if the pretrained model has MTP layers.
         """
         # TODO Implement MTP export for quantized MTP
         # Hacky version for now: copy MTP weights from pretrained model
@@ -835,13 +824,9 @@ class GPTModelExporter:
         name_to_value, qformat, block_size = self._get_quantized_state(module, dtype, prefix=prefix)
 
         weight = name_to_value.pop("weight")
-        if "mixer.gate" in prefix:
-            print(f"{prefix}: weight dtype: {weight.dtype}")
         weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
 
         if weight_scale is None:
-            if "mixer.gate" in prefix:
-                print(f"{prefix}: weight_scale is None")
             self._state_dict[prefix + "weight"] = weight
         else:
             self._state_dict[prefix + "weight"] = to_quantized_weight(
@@ -865,8 +850,6 @@ class GPTModelExporter:
                 source_key = mapping.get(key, key)
                 self._state_dict[prefix + source_key] = val
                 print(f"{prefix + source_key}: {self._state_dict[prefix + source_key].dtype}")
-        if "mixer.gate" in prefix:
-            print(f"{prefix}weight: {self._state_dict[prefix + 'weight'].dtype}")
 
     def _gated_mlp_slicing(
         self, module, prefix, gate_proj_name="gate_proj", up_proj_name="up_proj"
@@ -1243,6 +1226,16 @@ class GPTModelExporter:
         if merged_bias is not None:
             # TODO: May need to modify the key name later.
             self._state_dict[prefix + "_bias"] = merged_bias
+
+    def _gather_exclude_modules(self):
+        """Get exclude_modules from all ranks to ensure hf_quant_config is complete."""
+        all_exclude_modules = [None] * torch.distributed.get_world_size()
+        torch.distributed.all_gather_object(all_exclude_modules, self.exclude_modules)
+        combined_exclude_modules = set()
+        for modules in all_exclude_modules:
+            if modules:
+                combined_exclude_modules.update(modules)
+        return sorted(combined_exclude_modules)
 
 
 def export_mcore_gpt_to_hf(
