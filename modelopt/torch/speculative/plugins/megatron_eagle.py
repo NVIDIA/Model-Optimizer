@@ -1427,13 +1427,6 @@ def te_dot_product_attention_with_cp(attention_mask: torch.Tensor, num_attention
         zero_val = torch.tensor(0.0, device=attention_mask.device)
         attention_bias = torch.where(attention_mask, mask_val, zero_val)
 
-        # Expand head dimension if needed
-        try:
-            if attention_bias.dim() == 4 and attention_bias.shape[1] == 1:
-                attention_bias = attention_bias.expand(-1, num_attention_heads, -1, -1)
-        except Exception:
-            pass
-
         if q_device is not None and q_dtype is not None:
             attention_bias = attention_bias.to(device=q_device, dtype=q_dtype)
 
