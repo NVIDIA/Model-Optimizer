@@ -181,7 +181,7 @@ CHECKPOINT_ARGS=" \
     ${LOAD_OPTIM_ARGS} \
     --load ${LOAD_CHECKPOINT_DIR} \
     --export-kd-teacher-load ${TEACHER_CKPT} \
-    --teacher-model-config ${TEACHER_MODEL_CONFIG}"
+    --export-kd-teacher-model-config ${TEACHER_MODEL_CONFIG}"
 
 # KD config (optional)
 if [[ -n "$KD_CFG_PATH" && -f "$KD_CFG_PATH" ]]; then
