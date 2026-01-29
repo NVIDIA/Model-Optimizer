@@ -148,12 +148,7 @@ class GptOss20bModelDescriptor(ModelDescriptor):
                     r"(post_attention_layernorm\.weight"
                     r"|mlp\.router\.weight"
                     r"|mlp\.router\.bias"
-                    r"|mlp\.experts\.gate_up_proj_bias"
-                    r"|mlp\.experts\.gate_up_proj_blocks"
-                    r"|mlp\.experts\.gate_up_proj_scales"
-                    r"|mlp\.experts\.down_proj_bias"
-                    r"|mlp\.experts\.down_proj_blocks"
-                    r"|mlp\.experts\.down_proj_scales)$"
+                    r"|mlp\.experts\.((\d+\.)?(gate_up_proj|down_proj)(\.(weight|bias|blocks|scales))?|gate_up_proj_(bias|blocks|scales)|down_proj_(bias|blocks|scales)))$"
                 )
                 for layer_idx in range(num_layers)
             }
