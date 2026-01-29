@@ -451,7 +451,7 @@ def get_kv_cache_dtype(modules: list[nn.Module] | nn.Module) -> str | None:
     return _compute_kv_cache_dtype(num_bits_list)
 
 
-def _compute_kv_cache_dtype(num_bits_list: list[int]) -> str | None:
+def _compute_kv_cache_dtype(num_bits_list: list[int | tuple[int, int]]) -> str | None:
     """Returns the kv_cache dtype.
 
     If num_bits of output_quantizer is (4, 3) then returns FP8; if it is 8, returns int8,

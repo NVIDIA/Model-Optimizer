@@ -37,6 +37,7 @@ nemotron_causal_lm_export: dict[str, CustomModuleMapping] = {
     "input_layernorm": NameRemapping("model.layers.{}.input_layernorm."),
     "linear_qkv": QKVSlicing("model.layers.{}.self_attn."),
     "linear_proj": NameRemapping("model.layers.{}.self_attn.o_proj."),
+    "core_attention": SelfAttentionScaling("backbone.layers.{}.mixer."),
     "pre_mlp_layernorm": NameRemapping("model.layers.{}.post_attention_layernorm."),
     # NemotronForCausalLM is using square-relu where no gated handle is needed.
     "linear_fc1": NameRemapping("model.layers.{}.mlp.up_proj."),
@@ -99,8 +100,6 @@ nemotron_h_causal_lm_import: dict[str, CustomModuleMapping] = {
         "mtp.layers.{}.mixer.experts.{{}}.down_proj", ROW_ETP | {"is_mtp": True}
     ),
 }
-
-# TODO ADD MTP export
 
 nemotron_h_causal_lm_export: dict[str, CustomModuleMapping] = {
     "word_embeddings": NameRemapping("backbone.embeddings."),

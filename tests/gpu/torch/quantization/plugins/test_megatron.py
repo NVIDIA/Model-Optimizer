@@ -841,9 +841,6 @@ def _test_expert_model_parallel_amax_sync(
     )
     # calibrate the model with distributed sync and test synchronization
     mtq.model_calib.max_calibrate(model, forward, distributed_sync=True)
-    for module in model.modules():
-        if hasattr(module, "sync_moe_local_experts_amax"):
-            module.sync_moe_local_experts_amax()
 
     final_sync, quantizer_type, rank_values = compare_amax_sync_across_expert_parallel(model)
     assert final_sync, f"Inconsistent amax for expert {quantizer_type} across ranks: {rank_values}"

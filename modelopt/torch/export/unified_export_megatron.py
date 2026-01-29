@@ -101,6 +101,8 @@ class GPTModelExporter:
         export_extra_modules: If True, export extra modules like medusa_heads or
             eagle_module. Otherwise, only export the base model.
         dtype: The weights data type to export the unquantized layers.
+        trust_remote_code: Whether to trust remote code in the HuggingFace pretrained model.
+        moe_router_dtype: The data type of the MoE router. Can be "fp32", "fp64", or None (default to the model dtype).
     """
 
     def __init__(
@@ -110,7 +112,7 @@ class GPTModelExporter:
         export_extra_modules: bool = False,
         dtype=torch.bfloat16,
         trust_remote_code: bool = False,
-        moe_router_dtype: torch.dtype | None = None,
+        moe_router_dtype: str | None = None,
     ):
         """Create a GPTModel exporter instance."""
         if not isinstance(model, (GPTModel, MambaModel, LLaVAModel)):
@@ -476,9 +478,8 @@ class GPTModelExporter:
             else:
                 raise ValueError("Only TransformerLayer or MambaLayer are supported.")
 
-        # MTP layer
-        if self._hf_pretrained_model_name is not None:
-            self._get_mtp_state_dict()
+        # Get MTP layer if exists
+        self._get_mtp_state_dict()
 
     def _get_transformer_layer_state_dict(self, layer, layer_id):
         if not isinstance(layer.input_layernorm, IdentityOp):
@@ -508,7 +509,10 @@ class GPTModelExporter:
                     self.rules["q_layernorm"](layer.self_attention.q_layernorm, layer_id)
                     self.rules["k_layernorm"](layer.self_attention.k_layernorm, layer_id)
                 self.rules["linear_qkv"](layer.self_attention.linear_qkv, layer_id)
-                if hasattr(layer.self_attention, "core_attention"):
+                if (
+                    hasattr(layer.self_attention, "core_attention")
+                    and "core_attention" in self.rules
+                ):  # KV cache quant export
                     self.rules["core_attention"](layer.self_attention.core_attention, layer_id)
                 self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
                 if getattr(layer.self_attention.core_attention, "softmax_offset", None) is not None:
@@ -560,28 +564,29 @@ class GPTModelExporter:
         """
         # TODO Implement MTP export for quantized MTP
         # Hacky version for now: copy MTP weights from pretrained model
-        if os.path.isdir(self._hf_pretrained_model_name):
-            safetensors_index_file = (
-                Path(self._hf_pretrained_model_name) / "model.safetensors.index.json"
-            )
-        else:
-            safetensors_index_file = hf_hub_download(
-                repo_id=self._hf_pretrained_model_name, filename="model.safetensors.index.json"
-            )
+        if self._hf_pretrained_model_name:
+            if os.path.isdir(self._hf_pretrained_model_name):
+                safetensors_index_file = (
+                    Path(self._hf_pretrained_model_name) / "model.safetensors.index.json"
+                )
+            else:
+                safetensors_index_file = hf_hub_download(
+                    repo_id=self._hf_pretrained_model_name, filename="model.safetensors.index.json"
+                )
 
-        print(f"Exporting MTP: using safetensors_index_file: {safetensors_index_file}")
-        mtp_exists = False
-        if safetensors_index_file and os.path.exists(safetensors_index_file):
-            with open(safetensors_index_file) as f:
-                safetensors_index = json.load(f)
-            model_dir = Path(safetensors_index_file).parent
-            for key in safetensors_index["weight_map"]:
-                if key.startswith("mtp.") and key not in self._state_dict:
-                    self._state_dict[key] = get_safetensor(model_dir, key)
-                    mtp_exists = True
+            print(f"Exporting MTP: using safetensors_index_file: {safetensors_index_file}")
+            mtp_exists = False
+            if safetensors_index_file and os.path.exists(safetensors_index_file):
+                with open(safetensors_index_file) as f:
+                    safetensors_index = json.load(f)
+                model_dir = Path(safetensors_index_file).parent
+                for key in safetensors_index["weight_map"]:
+                    if key.startswith("mtp.") and key not in self._state_dict:
+                        self._state_dict[key] = get_safetensor(model_dir, key)
+                        mtp_exists = True
 
-        if mtp_exists:
-            self.exclude_modules.append("mtp*")
+            if mtp_exists:
+                self.exclude_modules.append("mtp*")
 
     def _get_mamba_layer_state_dict(self, layer, layer_id):
         if not isinstance(layer.norm, IdentityOp):

@@ -84,7 +84,7 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
     # Step 1: Sync amax across local experts in a SequentialMLP
     for name, module in model.named_modules():
         if hasattr(module, "sync_moe_local_experts_amax"):
-            module.sync_moe_local_experts_amax()
+            module.layer_sync_moe_local_experts_amax()
 
     if not distributed_sync:
         return

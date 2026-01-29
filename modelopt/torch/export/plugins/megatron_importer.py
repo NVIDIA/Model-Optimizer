@@ -223,7 +223,14 @@ class GPTModelImporter:
         gate_proj_name="gate_proj",
         up_proj_name="up_proj",
         parallel_config: ParallelConfig | None = None,
+        is_mtp: bool = False,
     ):
+        if is_mtp:
+            if "backbone" in prefix:
+                prefix = prefix.replace("backbone", "mtp")
+            else:
+                prefix = prefix.replace("model", "mtp")
+
         weight = module.state_dict().get("weight", None)
         weight_scale = module.state_dict().get("weight_quantizer._scale", None)
 
@@ -425,6 +432,7 @@ class GPTModelImporter:
         prefix,
         layer_type: str,
         parallel_config: ParallelConfig | None = None,
+        is_mtp: bool = False,  # no-op: necessary for _import_transformer_layer
     ):
         tensor = self._get_safetensor(prefix, parallel_config=parallel_config)
 
@@ -455,6 +463,7 @@ class GPTModelImporter:
         prefix,
         layer_type: str,
         parallel_config: ParallelConfig | None = None,
+        is_mtp: bool = False,  # no-op: necessary for _import_transformer_layer
     ):
         tensor_blocks = self._get_safetensor(prefix + "_blocks", parallel_config=parallel_config)
         tensor_bias = self._get_safetensor(prefix + "_bias", parallel_config=parallel_config)
@@ -718,12 +727,14 @@ class GPTModelImporter:
                         )
                     else:
                         raise ValueError(
-                            f"Unsupported layer type during MTP import: {type(mtp_model_layer)}. Only TransformerLayer is supported."
+                            f"Unsupported layer type during MTP import: {type(mtp_model_layer)}.\n"
+                            "Only TransformerLayer is supported."
                         )
 
                     layer_id += 1
             else:  # non-repeated MTP
                 # MTP is the last layer in DeepSeek V3/R1
+                layer_id += 1
                 for mtp in model.mtp.layers:
                     self.rules["mtp.eh_proj"](mtp.eh_proj, layer_id)
                     self.rules["mtp.enorm"](mtp.enorm, layer_id)
