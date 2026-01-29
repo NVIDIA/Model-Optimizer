@@ -16,6 +16,7 @@
 """Utility functions for getting samples and forward loop function for different datasets."""
 
 import copy
+import json
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 from warnings import warn
@@ -102,16 +103,61 @@ __all__ = [
 ]
 
 
+def _get_jsonl_text_samples(jsonl_path: str, num_samples: int) -> list[str]:
+    """Load up to ``num_samples`` entries from a JSONL file using the ``text`` field.
+
+    Each non-empty line must be a JSON object containing a ``text`` field.
+    """
+    if num_samples <= 0:
+        return []
+
+    samples: list[str] = []
+
+    with open(jsonl_path, encoding="utf-8") as f:
+        for line_idx, line in enumerate(f, start=1):
+            if len(samples) >= num_samples:
+                break
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"Invalid JSON in JSONL file {jsonl_path} at line {line_idx}: {e}"
+                ) from e
+
+            if not isinstance(obj, dict):
+                raise ValueError(
+                    f"Expected a JSON object in JSONL file {jsonl_path} at line {line_idx}, "
+                    f"got {type(obj)}."
+                )
+
+            if "text" not in obj:
+                raise ValueError(
+                    f"Missing required field 'text' in JSONL file {jsonl_path} at line {line_idx}."
+                )
+
+            samples.append(str(obj["text"]))
+
+    return samples
+
+
 def _get_dataset_samples(dataset_name: str, num_samples: int) -> list[str]:
     """Load a portion of train dataset with the dataset name and a given size.
 
     Args:
-        dataset_name: Name of the dataset to load.
+        dataset_name: Name of the dataset to load, or a path to a ``.jsonl``/``.jsonl.gz`` file.
         num_samples: Number of samples to load from the dataset.
 
     Returns:
         Samples: The list of samples.
     """
+    # Local JSONL file path support (each line is a JSON object with a `text` field).
+    if dataset_name.endswith((".jsonl", ".jsonl.gz")):
+        return _get_jsonl_text_samples(dataset_name, num_samples)
+
     # Load the dataset
     if dataset_name not in SUPPORTED_DATASET_CONFIG:
         raise NotImplementedError(
