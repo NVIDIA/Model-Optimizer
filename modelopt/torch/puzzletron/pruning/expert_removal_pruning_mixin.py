@@ -21,6 +21,7 @@ from transformers import PretrainedConfig
 
 from modelopt.torch.nas.plugins.megatron_hooks.base_hooks import (
     ForwardHook,
+    GptOssRemoveExpertsIndependentHook,
     NemotronHRemoveExpertsIndependentHook,
     Qwen3VLRemoveExpertsIndependentHook,
     RankedChoiceVotingHook,
@@ -81,6 +82,7 @@ class ExpertRemovalPruningMixIn(PruningMixIn):
             RankedChoiceVotingHookNemotronH,
             NemotronHRemoveExpertsIndependentHook,
             Qwen3VLRemoveExpertsIndependentHook,
+            GptOssRemoveExpertsIndependentHook,
         ]
 
     def prune_single_layer(
