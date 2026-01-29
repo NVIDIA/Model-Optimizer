@@ -62,7 +62,7 @@ def launch_ffn_intermediates_prune_ckpt(
         model_config_overrides_json = {"ffn": [{"intermediate_size": intermediate_size}]}
         mlp_init_config_yaml = cfg.pruning.mlp_init_config_yaml
 
-        output_dir = os.path.join(cfg.pruning.pruned_ckpts_outpt_dir, dirname)
+        output_dir = os.path.join(cfg.pruning.pruned_ckpts_output_dir, dirname)
 
         # Profile the overall init_child_from_parent call with optimizations
         mprint("Starting init_child_from_parent...")
@@ -108,7 +108,7 @@ def launch_attn_groups_prune_ckpt(
         model_config_overrides_json = {"attention": [{"n_heads_in_group": n_heads_in_group}]}
         mlp_init_config_yaml = cfg.pruning.mlp_init_config_yaml
 
-        output_dir = os.path.join(cfg.pruning.pruned_ckpts_outpt_dir, dirname)
+        output_dir = os.path.join(cfg.pruning.pruned_ckpts_output_dir, dirname)
 
         # Profile the overall init_child_from_parent call with optimizations
         mprint("Starting init_child_from_parent...")
@@ -190,7 +190,7 @@ def launch_hidden_dim_prune_ckpt(cfg: DictConfig):
 
         mlp_init_config_yaml = cfg.pruning.mlp_init_config_yaml
         dirname = f"hidden_size_{hidden_size}"
-        output_dir = os.path.join(cfg.pruning.pruned_ckpts_outpt_dir, dirname)
+        output_dir = os.path.join(cfg.pruning.pruned_ckpts_output_dir, dirname)
 
         mprint(f"Creating checkpoint with hidden_size={hidden_size}")
         mprint(f"Model config overrides: {model_config_overrides_json}")
@@ -237,7 +237,7 @@ def launch_experts_prune_ckpt(
 
         mlp_init_config_yaml = cfg.pruning.mlp_init_config_yaml
 
-        output_dir = os.path.join(cfg.pruning.pruned_ckpts_outpt_dir, dirname)
+        output_dir = os.path.join(cfg.pruning.pruned_ckpts_output_dir, dirname)
 
         # Profile the overall init_child_from_parent call with optimizations
         mprint("Starting init_child_from_parent...")
@@ -285,7 +285,7 @@ def launch_moe_ffn_intermediates_prune_ckpt(
         }
         mlp_init_config_yaml = cfg.pruning.mlp_init_config_yaml
 
-        output_dir = os.path.join(cfg.pruning.pruned_ckpts_outpt_dir, dirname)
+        output_dir = os.path.join(cfg.pruning.pruned_ckpts_output_dir, dirname)
 
         # Profile the overall init_child_from_parent call with optimizations
         mprint("Starting init_child_from_parent...")

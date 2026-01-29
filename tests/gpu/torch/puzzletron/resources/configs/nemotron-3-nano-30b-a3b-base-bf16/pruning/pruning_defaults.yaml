@@ -15,7 +15,7 @@ dataset_path: ${dataset_path}
 val_dataset_name: train
 
 # Prune ckpts
-pruned_ckpts_outpt_dir: ${puzzle_dir}/pruning/${pruning.experiment_id}
+pruned_ckpts_output_dir: ${puzzle_dir}/pruning/${pruning.experiment_id}
 
 ## FFN pruning
 ffn_list:
