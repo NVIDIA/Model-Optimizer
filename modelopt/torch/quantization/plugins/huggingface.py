@@ -884,13 +884,38 @@ class _QuantCompressedLinear(QuantModule):
 
     def forward(self, input: Tensor) -> Tensor:
         from compressed_tensors.quantization import QuantizationStatus
+        import torch
 
         if self.quantization_status == QuantizationStatus.COMPRESSED:
-            # Decompress once to avoid weight_shape tensor issues in decompress_module
-            if "weight" not in self._parameters:
-                self.unpack_weight()
-            weight_data = self._parameters.get("weight", self.weight)
+            # Check if we should use decompress_module or manual decompress_weight
+            # Real packed weights are int32. If it's float, it's not actually compressed.
+            if self.weight_packed.dtype == torch.int32:
+                compressed_data = {"weight_packed": self.weight_packed}
+                if hasattr(self, "weight_scale"):
+                    compressed_data["weight_scale"] = self.weight_scale
+                if hasattr(self, "weight_shape"):
+                    ws = self.weight_shape
+                    if isinstance(ws, torch.Tensor):
+                        compressed_data["weight_shape"] = [int(x) for x in ws.tolist()]
+                    else:
+                        compressed_data["weight_shape"] = [int(x) for x in ws]
+                if hasattr(self, "weight_zero_point"):
+                    compressed_data["weight_zero_point"] = self.weight_zero_point
+                
+                quant_args = None
+                if hasattr(self, "quantization_scheme") and self.quantization_scheme:
+                    if hasattr(self.quantization_scheme, "weights"):
+                        quant_args = self.quantization_scheme.weights
+                
+                weight_data = self.compressor.decompress_weight(
+                    compressed_data=compressed_data,
+                    quantization_args=quant_args,
+                )
+            else:
+                # If it's not int32, just use it as-is
+                weight_data = self.weight_packed
         else:
+            # Standard path for non-compressed layers
             weight_data = self.weight
 
         return linear(self.input_quantizer(input), self.weight_quantizer(weight_data), self.bias)
@@ -932,7 +957,14 @@ class _QuantCompressedLinear(QuantModule):
                 compressed_data=compressed_data,
                 quantization_args=quant_args,
             )
-            self.weight = nn.Parameter(decompressed, requires_grad=False)
+            # Avoid register_parameter errors if a placeholder already exists
+            self._parameters.pop("weight", None)
+            self._buffers.pop("weight", None)
+            if "weight" in self.__dict__:
+                del self.__dict__["weight"]
+            param = nn.Parameter(decompressed, requires_grad=False)
+            self._parameters["weight"] = param
+            self.__dict__["weight"] = param
         if hasattr(self, "weight_packed"):
             del self.weight_packed
         if hasattr(self, "weight_scale"):
