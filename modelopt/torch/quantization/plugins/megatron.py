@@ -597,8 +597,6 @@ class _MegatronSequentialMLP(DynamicModule):
                         else torch.maximum(stored_amax, amax_tensor)
                     )
 
-
-
         # Apply synchronized amax values back to all local experts
         for expert in self.local_experts:
             for name, module in expert.named_modules():
@@ -767,19 +765,3 @@ class _QuantMoELayer(QuantModule):
             output = super().forward(hidden_states)
             self.router.topk = original_top_k
         return super().forward(hidden_states)
-
-# TODO double check if MOE forward will be implemented in MoELayer or TransformerLayer
-# We do not need both layers to be patched
-
-@QuantModuleRegistry.register({megatron_transformer_layer.TransformerLayer: "megatron_transformer_layer_TransformerLayer"})
-class _QuantTransformerLayer(QuantModule):
-    def _setup(self):
-        pass
-
-    def _forward_mlp_moe_preprocess(self, hidden_states):
-        if any(getattr(m, "_if_calib", False) for m in self.mlp.experts.modules()):
-            original_top_k = self.mlp.router.topk
-            self.mlp.router.topk = self.mlp.router.num_experts
-            output = super()._forward_mlp_moe_preprocess(hidden_states)
-            self.mlp.router.topk = original_top_k
-        return super()._forward_mlp_moe_preprocess(hidden_states)
