@@ -310,11 +310,10 @@ def quantize_rtn(
                 scales[name] = np.asnumpy(scales[name])
             gemm_weights_quantized[name] = numpy.asarray(qw)
         # Apply column-major optimization if flag is set
-        # Transposes the weights and scales in-place, returns updated DQ node attributes
+        # Transposes the weights and scales in-place
         if use_column_major:
-            dq_node_attributes = qdq.apply_column_major_transformation(
-                gemm_weights_quantized, scales, graph, block_size
-            )
+            qdq.apply_column_major_transformation(gemm_weights_quantized, scales)
+            dq_node_attributes = {"axis": 1, "block_size": block_size}
         else:
             dq_node_attributes = {"axis": 0, "block_size": block_size}
 
@@ -632,13 +631,11 @@ def _quantize_awq_clip(
 
     t = time.time()
     # Apply column-major optimization if flag is set
-    # Apply column-major optimization if flag is set
-    # Transposes the weights and scales in-place, returns updated DQ node attributes
+    # Transposes the weights and scales in-place
     use_column_major = kwargs.get("use_column_major", False)
     if use_column_major:
-        dq_node_attributes = qdq.apply_column_major_transformation(
-            gemm_weights_quantized, scales, graph_gs, block_size
-        )
+        qdq.apply_column_major_transformation(gemm_weights_quantized, scales)
+        dq_node_attributes = {"axis": 1, "block_size": block_size}
     else:
         dq_node_attributes = {"axis": 0, "block_size": block_size}
     scales = reshape_scales_for_per_channel_nodes(scales, block_size, layer_info)
@@ -1347,12 +1344,11 @@ def _quantize_awq_lite(
 
     t = time.time()
     # Apply column-major optimization if flag is set
-    # Transposes the weights and scales in-place, returns updated DQ node attributes
+    # Transposes the weights and scales in-place
     use_column_major = kwargs.get("use_column_major", False)
     if use_column_major:
-        dq_node_attributes = qdq.apply_column_major_transformation(
-            gemm_weights_quantized, scales, graph_gs, block_size
-        )
+        qdq.apply_column_major_transformation(gemm_weights_quantized, scales)
+        dq_node_attributes = {"axis": 1, "block_size": block_size}
     else:
         dq_node_attributes = {"axis": 0, "block_size": block_size}
     scales = reshape_scales_for_per_channel_nodes(scales, block_size, layer_info)

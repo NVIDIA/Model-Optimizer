@@ -1136,26 +1136,15 @@ def insert_transpose_nodes_for_column_major(graph: gs.Graph):
 def apply_column_major_transformation(
     gemm_weights_quantized: dict,
     scales: dict,
-    graph: gs.Graph,
-    block_size: int,
-) -> dict:
-    """Apply full column-major transformation to quantized weights and graph.
+) -> None:
+    """Transpose quantized weights and scales in-place for column-major storage.
 
-    This is a convenience function that:
-    1. Transposes the quantized weights and scales
-    2. Returns the updated DQ node attributes (axis=1 instead of 0)
-
-    Note: After calling this function and inserting DQ nodes, you should call
-    insert_transpose_nodes_for_column_major() on the graph.
+    Note: After calling this function and inserting DQ nodes with axis=1,
+    you should call insert_transpose_nodes_for_column_major() on the graph.
 
     Args:
         gemm_weights_quantized: Dictionary mapping weight names to quantized weight arrays
         scales: Dictionary mapping weight names to scale arrays
-        graph: ONNX GraphSurgeon graph (for reference, not modified here)
-        block_size: Block size for quantization
-
-    Returns:
-        Dictionary with DQ node attributes (axis=1 for column-major)
     """
     logger.info("Applying column-major storage optimization")
 
@@ -1165,9 +1154,6 @@ def apply_column_major_transformation(
 
     for name in list(scales.keys()):
         scales[name] = scales[name].T
-
-    # Return updated DQ node attributes with axis=1 (column-major)
-    return {"axis": 1, "block_size": block_size}
 
 
 def cast_initializer_to_dtype(
