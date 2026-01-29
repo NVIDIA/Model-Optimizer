@@ -229,4 +229,4 @@ def main(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     cli_args = parse_args()
-    asyncio.run(main(cli_args))
+    main(cli_args)
