@@ -18,7 +18,7 @@
 import argparse
 
 import torch
-from transformers import AutoModelForCausalLM
+from transformers import Qwen3VLForConditionalGeneration
 
 import modelopt.torch.opt as mto
 from modelopt.torch.export import export_hf_checkpoint
@@ -38,7 +38,7 @@ def parse_args():
 mto.enable_huggingface_checkpointing()
 
 args = parse_args()
-model = AutoModelForCausalLM.from_pretrained(args.model_path, torch_dtype="auto")
+model = Qwen3VLForConditionalGeneration.from_pretrained(args.model_path, torch_dtype="auto")
 model.eval()
 with torch.inference_mode():
     export_hf_checkpoint(

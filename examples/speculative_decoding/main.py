@@ -162,13 +162,15 @@ def train():
     use_offline_training = data_args.offline_data_path is not None
 
     if checkpoint:
-        model = transformers.AutoModelForCausalLM.from_pretrained(checkpoint, torch_dtype="auto")
+        model = transformers.Qwen3VLForConditionalGeneration.from_pretrained(
+            checkpoint, torch_dtype="auto"
+        )
         tokenizer = transformers.AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
     else:
         # To avoid OOM for large models, we load and convert model on CPU first.
         # Model will be moved to GPU during HF trainer.init().
         offline_kwargs = {"num_hidden_layers": 0} if use_offline_training else {}
-        model = transformers.AutoModelForCausalLM.from_pretrained(
+        model = transformers.Qwen3VLForConditionalGeneration.from_pretrained(
             model_args.model_name_or_path,
             torch_dtype="auto",
             device_map="cpu",
