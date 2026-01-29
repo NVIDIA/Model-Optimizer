@@ -597,8 +597,6 @@ class _MegatronSequentialMLP(DynamicModule):
                         else torch.maximum(stored_amax, amax_tensor)
                     )
 
-
-
         # Apply synchronized amax values back to all local experts
         for expert in self.local_experts:
             for name, module in expert.named_modules():

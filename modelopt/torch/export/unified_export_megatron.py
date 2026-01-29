@@ -61,6 +61,7 @@ from .quant_utils import (
     get_weight_scaling_factor_2,
     to_quantized_weight,
 )
+from .convert_hf_config import convert_hf_quant_config_format
 
 with import_plugin("transformers", verbose=False):
     import transformers
@@ -244,6 +245,8 @@ class GPTModelExporter:
 
         # Main export process
         state_dict = self.extra_state_dict if self.export_extra_modules else self.state_dict
+
+        
         quantization_format = self._get_quantization_format(self.model)
 
         quantization = None
@@ -291,10 +294,18 @@ class GPTModelExporter:
                 except (OSError, ValueError, ImportError):
                     pass
 
+        # Gather exclude_modules from all ranks to ensure hf_quant_config is complete
+        all_exclude_modules = [None] * torch.distributed.get_world_size()
+        torch.distributed.all_gather_object(all_exclude_modules, self.exclude_modules)
+        combined_exclude_modules = set()
+        for modules in all_exclude_modules:
+            if modules:
+                combined_exclude_modules.update(modules)
+        self.exclude_modules = sorted(list(combined_exclude_modules))
+
         if is_last_stage_main_rank and quantization is not None:
             # TODO refactor to use mte.quant_utils.get_quant_config
             # except layer names are different in MCore and HF
-            self.exclude_modules.append("lm_head")
             self._hf_quant_config = {
                 "producer": {
                     "name": "modelopt",
@@ -432,9 +443,10 @@ class GPTModelExporter:
         # Newer versions of VLLM expect config.json with hf_quant_config
         config_json_file = save_directory + "/config.json"
         if self._hf_quant_config and os.path.exists(config_json_file):
+            converted_quant_config = convert_hf_quant_config_format(self._hf_quant_config)
             with open(config_json_file, "r") as f:
                 config_dict = json.load(f)
-            config_dict["quantization"] = self._hf_quant_config["quantization"]
+            config_dict["quantization_config"] = converted_quant_config
             with open(config_json_file, "w") as f:
                 json.dump(config_dict, f, indent=4)
 
@@ -577,7 +589,12 @@ class GPTModelExporter:
                 self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id)
 
     def _get_mtp_state_dict(self):
-        # TODO implement actual MTP export
+        """
+        Export the MTP module. 
+        
+        Currently, we copy the BF16 MTP weights from the pretrained model.
+        """
+        # TODO Implement MTP export for quantized MTP
         # Hacky version for now: copy MTP weights from pretrained model
         if os.path.isdir(self._hf_pretrained_model_name):
             safetensors_index_file = Path(self._hf_pretrained_model_name) / "model.safetensors.index.json"
@@ -587,6 +604,7 @@ class GPTModelExporter:
             filename="model.safetensors.index.json")
 
         print(f"Exporting MTP: using safetensors_index_file: {safetensors_index_file}")
+        mtp_exists = False
         if safetensors_index_file and os.path.exists(safetensors_index_file):
             with open(safetensors_index_file, "r") as f:
                 safetensors_index = json.load(f)
@@ -594,6 +612,10 @@ class GPTModelExporter:
             for key in safetensors_index["weight_map"]:
                 if key.startswith("mtp.") and key not in self._state_dict:
                     self._state_dict[key] = get_safetensor(model_dir, key)
+                    mtp_exists = True
+        
+        if mtp_exists:
+            self.exclude_modules.append("mtp*")
 
 
     def _get_mamba_layer_state_dict(self, layer, layer_id):
@@ -762,7 +784,7 @@ class GPTModelExporter:
         """
         name_to_value = {}
         qformat: str = self._get_quantization_format(module)
-        if qformat is None:
+        if qformat is None and "norm" not in prefix:  # Add exclude layers for hf_quant_config
             self.exclude_modules.append(prefix)
         block_size = get_weight_block_size(module)
 
