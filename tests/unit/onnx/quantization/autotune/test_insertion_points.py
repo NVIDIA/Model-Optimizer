@@ -31,6 +31,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import onnx_graphsurgeon as gs
+import pytest
 
 from modelopt.onnx.quantization.autotune.common import (
     ChildRegionInputInsertionPoint,
@@ -49,322 +50,181 @@ from modelopt.onnx.quantization.autotune.insertion_points import (
 )
 from modelopt.onnx.quantization.graph_utils import get_tensor_consumer_node_indices
 
+INSERTION_POINT_CASES = [
+    pytest.param(
+        NodeInputInsertionPoint,
+        {"node_index": 5, "input_index": 2},
+        {"node_index": 5, "input_index": 2},
+        {"node_index": 5, "input_index": 3},
+        "node_index",
+        ["5", "2"],
+        id="NodeInputInsertionPoint",
+    ),
+    pytest.param(
+        ChildRegionOutputInsertionPoint,
+        {"region_index": 2, "node_index": None, "output_index": 1},
+        {"region_index": 2, "node_index": None, "output_index": 1},
+        {"region_index": None, "node_index": 2, "output_index": 1},
+        "region_index",
+        ["region", "2"],
+        id="ChildRegionOutputInsertionPoint-region",
+    ),
+    pytest.param(
+        ChildRegionOutputInsertionPoint,
+        {"region_index": None, "node_index": 5, "output_index": 0},
+        {"region_index": None, "node_index": 5, "output_index": 0},
+        {"region_index": None, "node_index": 5, "output_index": 1},
+        "node_index",
+        ["node", "5"],
+        id="ChildRegionOutputInsertionPoint-node",
+    ),
+    pytest.param(
+        ChildRegionInputInsertionPoint,
+        {"region_index": 3, "input_index": 1},
+        {"region_index": 3, "input_index": 1},
+        {"region_index": 3, "input_index": 2},
+        "region_index",
+        ["3", "1"],
+        id="ChildRegionInputInsertionPoint",
+    ),
+]
 
-class TestNodeInputInsertionPoint(unittest.TestCase):
-    """Test NodeInputInsertionPoint functionality."""
 
-    def test_creation(self):
-        """Test creating NodeInputInsertionPoint."""
-        point = NodeInputInsertionPoint(node_index=5, input_index=2)
-        assert point.node_index == 5
-        assert point.input_index == 2
+class TestInsertionPoints:
+    """Combined tests for all InsertionPoint types."""
 
-    def test_immutability(self):
-        """Test that NodeInputInsertionPoint is immutable (frozen)."""
-        point = NodeInputInsertionPoint(node_index=1, input_index=0)
-        passed = False
-        try:
-            point.node_index = 2
-        except AttributeError:
-            passed = True
-        assert passed, "NodeInputInsertionPoint should be immutable"
+    @pytest.mark.parametrize(("cls", "kwargs", "_", "__", "___", "____"), INSERTION_POINT_CASES)
+    def test_creation(self, cls, kwargs, _, __, ___, ____):
+        point = cls(**kwargs)
+        for key, val in kwargs.items():
+            assert getattr(point, key) == val
 
-    def test_equality(self):
-        """Test equality comparison."""
-        point1 = NodeInputInsertionPoint(node_index=3, input_index=1)
-        point2 = NodeInputInsertionPoint(node_index=3, input_index=1)
-        point3 = NodeInputInsertionPoint(node_index=3, input_index=2)
+    @pytest.mark.parametrize(
+        ("cls", "kwargs", "_", "__", "mutate_attr", "___"), INSERTION_POINT_CASES
+    )
+    def test_immutability(self, cls, kwargs, _, __, mutate_attr, ___):
+        point = cls(**kwargs)
+        with pytest.raises(AttributeError):
+            setattr(point, mutate_attr, 999)
 
+    @pytest.mark.parametrize(
+        ("cls", "kwargs", "equal_kwargs", "diff_kwargs", "_", "__"), INSERTION_POINT_CASES
+    )
+    def test_equality(self, cls, kwargs, equal_kwargs, diff_kwargs, _, __):
+        point1 = cls(**kwargs)
+        point2 = cls(**equal_kwargs)
+        point3 = cls(**diff_kwargs)
         assert point1 == point2
         assert point1 != point3
 
-    def test_hashable(self):
-        """Test that points can be used in sets and dicts."""
-        point1 = NodeInputInsertionPoint(node_index=1, input_index=0)
-        point2 = NodeInputInsertionPoint(node_index=1, input_index=0)
-        point3 = NodeInputInsertionPoint(node_index=2, input_index=0)
-
+    @pytest.mark.parametrize(
+        ("cls", "kwargs", "equal_kwargs", "diff_kwargs", "_", "__"), INSERTION_POINT_CASES
+    )
+    def test_hashable(self, cls, kwargs, equal_kwargs, diff_kwargs, _, __):
+        point1 = cls(**kwargs)
+        point2 = cls(**equal_kwargs)
+        point3 = cls(**diff_kwargs)
         point_set = {point1, point2, point3}
-        assert len(point_set) == 2  # point1 and point2 are the same
+        assert len(point_set) == 2
 
-    def test_serialization(self):
-        """Test to_dict and from_dict."""
-        point = NodeInputInsertionPoint(node_index=7, input_index=3)
-
+    @pytest.mark.parametrize(("cls", "kwargs", "_", "__", "___", "____"), INSERTION_POINT_CASES)
+    def test_serialization(self, cls, kwargs, _, __, ___, ____):
+        point = cls(**kwargs)
         data = point.to_dict()
-        assert data["node_index"] == 7
-        assert data["input_index"] == 3
-
-        restored = NodeInputInsertionPoint.from_dict(data)
+        for key, val in kwargs.items():
+            assert data[key] == val
+        restored = cls.from_dict(data)
         assert point == restored
 
-    def test_string_representation(self):
-        """Test __str__ method."""
-        point = NodeInputInsertionPoint(node_index=2, input_index=1)
-        s = str(point)
-        assert "2" in s
-        assert "1" in s
+    @pytest.mark.parametrize(
+        ("cls", "kwargs", "_", "__", "___", "str_checks"), INSERTION_POINT_CASES
+    )
+    def test_string_representation(self, cls, kwargs, _, __, ___, str_checks):
+        point = cls(**kwargs)
+        s = str(point).lower()
+        for check in str_checks:
+            assert check.lower() in s
 
 
-class TestChildRegionOutputInsertionPoint(unittest.TestCase):
-    """Test ChildRegionOutputInsertionPoint functionality."""
-
-    def test_creation_with_region_index(self):
-        """Test creating with region_index (child region output)."""
-        point = ChildRegionOutputInsertionPoint(region_index=2, node_index=None, output_index=1)
-        assert point.region_index == 2
-        assert point.node_index is None
-        assert point.output_index == 1
-
-    def test_creation_with_node_index(self):
-        """Test creating with node_index (node output)."""
-        point = ChildRegionOutputInsertionPoint(region_index=None, node_index=5, output_index=0)
-        assert point.region_index is None
-        assert point.node_index == 5
-        assert point.output_index == 0
-
-    def test_immutability(self):
-        """Test that ChildRegionOutputInsertionPoint is immutable (frozen)."""
-        point = ChildRegionOutputInsertionPoint(region_index=1, node_index=None, output_index=0)
-        passed = False
-        try:
-            point.region_index = 2
-        except AttributeError:
-            passed = True
-        assert passed, "ChildRegionOutputInsertionPoint should be immutable"
-
-    def test_equality(self):
-        """Test equality comparison."""
-        point1 = ChildRegionOutputInsertionPoint(region_index=1, node_index=None, output_index=0)
-        point2 = ChildRegionOutputInsertionPoint(region_index=1, node_index=None, output_index=0)
-        point3 = ChildRegionOutputInsertionPoint(region_index=None, node_index=1, output_index=0)
-
-        assert point1 == point2
-        assert point1 != point3
-
-    def test_hashable(self):
-        """Test that points can be used in sets and dicts."""
-        point1 = ChildRegionOutputInsertionPoint(region_index=1, node_index=None, output_index=0)
-        point2 = ChildRegionOutputInsertionPoint(region_index=1, node_index=None, output_index=0)
-        point3 = ChildRegionOutputInsertionPoint(region_index=None, node_index=1, output_index=0)
-
-        point_set = {point1, point2, point3}
-        assert len(point_set) == 2  # point1 and point2 are the same
-
-    def test_serialization_region_index(self):
-        """Test serialization with region_index."""
-        point = ChildRegionOutputInsertionPoint(region_index=3, node_index=None, output_index=2)
-
-        data = point.to_dict()
-        assert data["region_index"] == 3
-        assert data["node_index"] is None
-        assert data["output_index"] == 2
-
-        restored = ChildRegionOutputInsertionPoint.from_dict(data)
-        assert point == restored
-
-    def test_serialization_node_index(self):
-        """Test serialization with node_index."""
-        point = ChildRegionOutputInsertionPoint(region_index=None, node_index=7, output_index=1)
-
-        data = point.to_dict()
-        assert data["region_index"] is None
-        assert data["node_index"] == 7
-        assert data["output_index"] == 1
-
-        restored = ChildRegionOutputInsertionPoint.from_dict(data)
-        assert point == restored
-
-    def test_string_representation(self):
-        """Test __str__ method."""
-        point1 = ChildRegionOutputInsertionPoint(region_index=2, node_index=None, output_index=1)
-        s1 = str(point1)
-        assert "region" in s1.lower()
-        assert "2" in s1
-
-        point2 = ChildRegionOutputInsertionPoint(region_index=None, node_index=5, output_index=0)
-        s2 = str(point2)
-        assert "node" in s2.lower()
-        assert "5" in s2
-
-
-class TestChildRegionInputInsertionPoint(unittest.TestCase):
-    """Test ChildRegionInputInsertionPoint functionality."""
-
-    def test_creation(self):
-        """Test creating ChildRegionInputInsertionPoint."""
-        point = ChildRegionInputInsertionPoint(region_index=3, input_index=1)
-        assert point.region_index == 3
-        assert point.input_index == 1
-
-    def test_immutability(self):
-        """Test that ChildRegionInputInsertionPoint is immutable (frozen)."""
-        point = ChildRegionInputInsertionPoint(region_index=1, input_index=0)
-        passed = False
-        try:
-            point.region_index = 2
-        except AttributeError:
-            passed = True
-        assert passed, "ChildRegionInputInsertionPoint should be immutable"
-
-    def test_equality(self):
-        """Test equality comparison."""
-        point1 = ChildRegionInputInsertionPoint(region_index=2, input_index=0)
-        point2 = ChildRegionInputInsertionPoint(region_index=2, input_index=0)
-        point3 = ChildRegionInputInsertionPoint(region_index=2, input_index=1)
-
-        assert point1 == point2
-        assert point1 != point3
-
-    def test_hashable(self):
-        """Test that points can be used in sets and dicts."""
-        point1 = ChildRegionInputInsertionPoint(region_index=1, input_index=0)
-        point2 = ChildRegionInputInsertionPoint(region_index=1, input_index=0)
-        point3 = ChildRegionInputInsertionPoint(region_index=2, input_index=0)
-
-        point_set = {point1, point2, point3}
-        assert len(point_set) == 2  # point1 and point2 are the same
-
-    def test_serialization(self):
-        """Test to_dict and from_dict."""
-        point = ChildRegionInputInsertionPoint(region_index=5, input_index=2)
-
-        data = point.to_dict()
-        assert data["region_index"] == 5
-        assert data["input_index"] == 2
-
-        restored = ChildRegionInputInsertionPoint.from_dict(data)
-        assert point == restored
-
-    def test_string_representation(self):
-        """Test __str__ method."""
-        point = ChildRegionInputInsertionPoint(region_index=2, input_index=1)
-        s = str(point)
-        assert "2" in s
-        assert "1" in s
-
-
-class TestInsertionScheme(unittest.TestCase):
+class TestInsertionScheme:
     """Test InsertionScheme functionality."""
 
     def test_empty_scheme(self):
         """Test empty InsertionScheme."""
         scheme = InsertionScheme()
-
         assert scheme.is_empty
         assert len(scheme.node_inputs) == 0
         assert len(scheme.child_region_inputs) == 0
         assert len(scheme.region_outputs) == 0
         assert not scheme.error
 
-    def test_scheme_with_node_inputs(self):
-        """Test scheme with node input insertion points."""
+    @pytest.mark.parametrize(
+        ("attr", "points"),
+        [
+            ("node_inputs", [NodeInputInsertionPoint(0, 0), NodeInputInsertionPoint(1, 0)]),
+            (
+                "region_outputs",
+                [
+                    ChildRegionOutputInsertionPoint(None, 0, 0),
+                    ChildRegionOutputInsertionPoint(1, None, 0),
+                ],
+            ),
+            (
+                "child_region_inputs",
+                [ChildRegionInputInsertionPoint(0, 0), ChildRegionInputInsertionPoint(1, 0)],
+            ),
+        ],
+    )
+    def test_scheme_with_points_not_empty(self, attr, points):
+        """Test scheme with insertion points is not empty."""
         scheme = InsertionScheme()
-        scheme.node_inputs = [NodeInputInsertionPoint(0, 0), NodeInputInsertionPoint(1, 0)]
-
+        setattr(scheme, attr, points)
         assert not scheme.is_empty
-        assert len(scheme.node_inputs) == 2
-
-    def test_scheme_with_region_outputs(self):
-        """Test scheme with region output insertion points."""
-        scheme = InsertionScheme()
-        scheme.region_outputs = [
-            ChildRegionOutputInsertionPoint(None, 0, 0),
-            ChildRegionOutputInsertionPoint(1, None, 0),
-        ]
-
-        assert not scheme.is_empty
-        assert len(scheme.region_outputs) == 2
-
-    def test_scheme_with_composite_regions(self):
-        """Test scheme with composite region insertion points."""
-        scheme = InsertionScheme()
-        scheme.child_region_inputs = [
-            ChildRegionInputInsertionPoint(0, 0),
-            ChildRegionInputInsertionPoint(1, 0),
-        ]
-
-        assert not scheme.is_empty
-        assert len(scheme.child_region_inputs) == 2
+        assert len(getattr(scheme, attr)) == 2
 
     def test_scheme_hash_empty(self):
-        """Test hash of empty scheme."""
-        scheme1 = InsertionScheme()
-        scheme2 = InsertionScheme()
+        """Test hash of empty schemes are equal."""
+        assert InsertionScheme().hash == InsertionScheme().hash
 
-        assert scheme1.hash == scheme2.hash
+    def test_scheme_hash_equality(self):
+        """Test hash with same/different insertion points."""
 
-    def test_scheme_hash_with_points(self):
-        """Test hash with insertion points."""
-        scheme1 = InsertionScheme()
-        scheme1.node_inputs = [NodeInputInsertionPoint(0, 0), NodeInputInsertionPoint(1, 0)]
+        def make_scheme(*node_indices):
+            s = InsertionScheme()
+            s.node_inputs = [NodeInputInsertionPoint(i, 0) for i in node_indices]
+            return s
 
-        scheme2 = InsertionScheme()
-        scheme2.node_inputs = [NodeInputInsertionPoint(0, 0), NodeInputInsertionPoint(1, 0)]
+        assert make_scheme(0, 1).hash == make_scheme(0, 1).hash
+        assert make_scheme(0, 1).hash == make_scheme(1, 0).hash  # order independent
+        assert make_scheme(0, 1).hash != make_scheme(0, 2).hash
 
-        scheme3 = InsertionScheme()
-        scheme3.node_inputs = [
-            NodeInputInsertionPoint(0, 0),
-            NodeInputInsertionPoint(2, 0),  # Different
-        ]
-
-        assert scheme1.hash == scheme2.hash
-        assert scheme1.hash != scheme3.hash
-
-    def test_scheme_hash_order_independent(self):
-        """Test that hash is independent of insertion point order."""
-        scheme1 = InsertionScheme()
-        scheme1.node_inputs = [NodeInputInsertionPoint(0, 0), NodeInputInsertionPoint(1, 0)]
-
-        scheme2 = InsertionScheme()
-        scheme2.node_inputs = [
-            NodeInputInsertionPoint(1, 0),
-            NodeInputInsertionPoint(0, 0),  # Reversed order
-        ]
-
-        # Hash should be the same regardless of order
-        assert scheme1.hash == scheme2.hash
-
-    def test_serialization_empty(self):
-        """Test serialization of empty scheme."""
+    @pytest.mark.parametrize(
+        ("error", "latency"),
+        [
+            (False, float("inf")),  # empty
+            (False, 12.5),  # full
+            (True, float("inf")),  # with error
+        ],
+    )
+    def test_serialization_roundtrip(self, error, latency):
+        """Test serialization roundtrip."""
         scheme = InsertionScheme()
+        scheme.error = error
+        scheme.latency_ms = latency
 
-        data = scheme.to_dict()
-        restored = InsertionScheme.from_dict(data)
+        if latency != float("inf") or error:  # add points for non-empty cases
+            scheme.node_inputs = [NodeInputInsertionPoint(0, 0)]
+            scheme.child_region_inputs = [ChildRegionInputInsertionPoint(0, 0)]
+            scheme.region_outputs = [ChildRegionOutputInsertionPoint(None, 0, 0)]
 
-        assert restored.is_empty
-        assert restored.latency_ms == float("inf")
-        assert not restored.error
+        restored = InsertionScheme.from_dict(scheme.to_dict())
 
-    def test_serialization_full(self):
-        """Test serialization with all types of insertion points."""
-        scheme = InsertionScheme()
-        scheme.node_inputs = [NodeInputInsertionPoint(0, 0)]
-        scheme.child_region_inputs = [ChildRegionInputInsertionPoint(0, 0)]
-        scheme.region_outputs = [ChildRegionOutputInsertionPoint(None, 0, 0)]
-        scheme.latency_ms = 12.5
-        scheme.error = False
-
-        data = scheme.to_dict()
-        restored = InsertionScheme.from_dict(data)
-
-        assert len(restored.node_inputs) == 1
-        assert len(restored.child_region_inputs) == 1
-        assert len(restored.region_outputs) == 1
-        assert restored.latency_ms == 12.5
-        assert not restored.error
-
-    def test_serialization_with_error(self):
-        """Test serialization with error flag."""
-        scheme = InsertionScheme()
-        scheme.error = True
-        scheme.latency_ms = float("inf")
-
-        data = scheme.to_dict()
-        restored = InsertionScheme.from_dict(data)
-
-        assert restored.error
-        assert restored.latency_ms == float("inf")
+        assert restored.error == error
+        assert restored.latency_ms == latency
+        if not scheme.is_empty:
+            assert len(restored.node_inputs) == len(scheme.node_inputs)
+            assert len(restored.child_region_inputs) == len(scheme.child_region_inputs)
+            assert len(restored.region_outputs) == len(scheme.region_outputs)
 
 
 def _create_mock_tensor(name: str, dtype=np.float32, shape=None):
@@ -387,17 +247,29 @@ def _create_mock_node(op: str, inputs: list, outputs: list, name: str = ""):
     return node
 
 
+def _create_region(region_id=1, level=0, region_type=RegionType.LEAF, nodes=None):
+    """Create a region with the specified properties.
+
+    Args:
+        region_id: ID for the region
+        level: Hierarchy level (0 for LEAF, 1+ for COMPOSITE/ROOT)
+        region_type: Type of region (LEAF, COMPOSITE, or ROOT)
+        nodes: Optional list/set of node indices to add to the region
+
+    Returns:
+        Region with specified properties and nodes
+    """
+    region = Region(region_id=region_id, level=level, region_type=region_type)
+    if nodes:
+        region.nodes.update(nodes)
+    return region
+
+
 def _create_simple_graph():
     """Create a mock graph with Conv -> BatchNorm -> Relu -> MaxPool pattern.
 
     Graph structure:
         input -> Conv -> conv_out -> BatchNorm -> bn_out -> Relu -> relu_out -> MaxPool -> pool_out
-
-    Node indices:
-        0: Conv
-        1: BatchNormalization
-        2: Relu
-        3: MaxPool
     """
     # Create tensors with realistic shapes
     input_tensor = _create_mock_tensor("input", np.float32, [1, 3, 224, 224])
@@ -476,13 +348,6 @@ def _create_residual_graph():
           │
           ▼
         Relu2 -> output
-
-    Node indices:
-        0: Conv1
-        1: Relu1
-        2: Conv2
-        3: Add
-        4: Relu2
     """
     # Create tensors
     input_tensor = _create_mock_tensor("input", np.float32, [1, 64, 56, 56])
@@ -537,215 +402,113 @@ def _create_residual_graph():
     return graph, tensors
 
 
-class TestSkipInvalidInsertionPoints(unittest.TestCase):
+class TestSkipInvalidInsertionPoints:
     """Test skip_invalid_insertion_points function."""
 
-    def test_skip_bool_operations(self):
-        """Test that boolean operations are skipped."""
+    @pytest.mark.parametrize(
+        ("op", "should_skip"),
+        [
+            ("Equal", True),  # bool op
+            ("Shape", True),  # shape op
+            ("MatMul", False),  # normal op
+            ("Add", False),  # normal op
+        ],
+    )
+    def test_skip_by_op_type(self, op, should_skip):
         graph, _ = _create_simple_graph()
+        tensor = _create_mock_tensor("test_input", np.float32, [1, 64, 32, 32])
+        node = _create_mock_node(op, [tensor], [])
+        assert skip_invalid_insertion_points(graph, "test_input", node) is should_skip
 
-        # Create a node with boolean operation
-        bool_tensor = _create_mock_tensor("bool_input", np.float32)
-        bool_node = _create_mock_node("Equal", [bool_tensor], [])
-
-        result = skip_invalid_insertion_points(graph, "bool_input", bool_node)
-        assert result is True
-
-    def test_skip_shape_operations(self):
-        """Test that shape operations are skipped."""
+    @pytest.mark.parametrize(
+        ("dtype", "shape", "should_skip"),
+        [
+            (np.int32, [1, 64, 32, 32], True),  # non-float
+            (np.float32, [1], True),  # small tensor
+            (np.float32, [1, 64, 32, 32], False),  # large float - OK
+        ],
+    )
+    def test_skip_by_tensor_properties(self, dtype, shape, should_skip):
         graph, _ = _create_simple_graph()
-
-        shape_tensor = _create_mock_tensor("shape_input", np.float32)
-        shape_node = _create_mock_node("Shape", [shape_tensor], [])
-
-        result = skip_invalid_insertion_points(graph, "shape_input", shape_node)
-        assert result is True
+        tensor = _create_mock_tensor("test", dtype, shape)
+        node = _create_mock_node("Add", [tensor], [])
+        assert skip_invalid_insertion_points(graph, "test", node) is should_skip
 
     def test_skip_conv_weight_input(self):
-        """Test that Conv weight inputs (index >= 1) are skipped."""
-        graph, tensors = _create_simple_graph()
-        conv_node = graph.nodes[0]
-
-        # Weight is at input index 1
-        result = skip_invalid_insertion_points(graph, "conv_weight", conv_node)
-        assert result is True
-
-    def test_allow_conv_data_input(self):
-        """Test that Conv data input (index 0) is allowed."""
-        graph, tensors = _create_simple_graph()
-
-        # Create a MatMul node that consumes the input tensor (not Conv-related skip)
-        input_tensor = _create_mock_tensor("matmul_input", np.float32, [1, 3, 224, 224])
-        matmul_node = _create_mock_node("MatMul", [input_tensor], [])
-
-        result = skip_invalid_insertion_points(graph, "matmul_input", matmul_node)
-        assert result is False
-
-    def test_skip_non_float_tensors(self):
-        """Test that non-floating-point tensors are skipped."""
+        """Conv weight inputs (index >= 1) are skipped."""
         graph, _ = _create_simple_graph()
-
-        # Create int tensor
-        int_tensor = _create_mock_tensor("int_input", np.int32)
-        node = _create_mock_node("Add", [int_tensor], [])
-
-        result = skip_invalid_insertion_points(graph, "int_input", node)
+        result = skip_invalid_insertion_points(graph, "conv_weight", graph.nodes[0])
         assert result is True
-
-    def test_skip_small_tensors(self):
-        """Test that small tensors (< 8 elements) are skipped."""
-        graph, _ = _create_simple_graph()
-
-        # Create small tensor (scalar)
-        small_tensor = _create_mock_tensor("small", np.float32, [1])
-        node = _create_mock_node("Add", [small_tensor], [])
-
-        result = skip_invalid_insertion_points(graph, "small", node)
-        assert result is True
-
-    def test_allow_large_float_tensors(self):
-        """Test that large floating-point tensors are allowed."""
-        graph, _ = _create_simple_graph()
-
-        # Create large float tensor
-        large_tensor = _create_mock_tensor("large", np.float32, [1, 64, 32, 32])
-        node = _create_mock_node("Add", [large_tensor], [])
-
-        result = skip_invalid_insertion_points(graph, "large", node)
-        assert result is False
 
     def test_skip_bn_non_data_inputs(self):
-        """Test that BatchNormalization non-data inputs are skipped."""
-        graph, tensors = _create_simple_graph()
-        bn_node = graph.nodes[1]  # BatchNormalization node
-
-        # Scale is at input index 1, should be skipped
-        result = skip_invalid_insertion_points(graph, "bn_scale", bn_node)
-        assert result is True
-
-    def test_with_region(self):
-        """Test skip_invalid_insertion_points with a Region containing multiple nodes."""
-        graph, tensors = _create_simple_graph()
-
-        # Create a region containing Conv and BatchNorm nodes
-        region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.nodes.add(0)  # Conv node
-        region.nodes.add(1)  # BatchNorm node
-
-        # Create a shape operation node and add to graph
-        shape_tensor = _create_mock_tensor("shape_input", np.float32)
-        shape_node = _create_mock_node("Shape", [shape_tensor], [])
-        graph.nodes.append(shape_node)
-        region.nodes.add(4)  # Add the shape node to region
-
-        result = skip_invalid_insertion_points(graph, "shape_input", region)
+        """BatchNormalization non-data inputs are skipped."""
+        graph, _ = _create_simple_graph()
+        result = skip_invalid_insertion_points(graph, "bn_scale", graph.nodes[1])
         assert result is True
 
     def test_skip_conv_bn_relu_fusion(self):
-        """Test that Conv->BN->Relu fusion patterns are skipped at intermediate points."""
-        graph, tensors = _create_simple_graph()
-        relu_node = graph.nodes[2]  # Relu node
-
-        # Relu input (bn_out) should be skipped when preceded by Conv->BN
-        result = skip_invalid_insertion_points(graph, "bn_out", relu_node)
+        """Conv->BN->Relu fusion patterns are skipped at intermediate points."""
+        graph, _ = _create_simple_graph()
+        result = skip_invalid_insertion_points(graph, "bn_out", graph.nodes[2])
         assert result is True
 
-    def test_residual_block_add_inputs(self):
-        """Test insertion points in a residual block with skip connection."""
-        graph, tensors = _create_residual_graph()
-        add_node = graph.nodes[3]  # Add node
+    def test_with_region(self):
+        """Test with a Region containing multiple nodes."""
+        graph, _ = _create_simple_graph()
+        region = _create_region(nodes=[0, 1])
 
-        # Add's first input (conv2_out) should be allowed
-        result = skip_invalid_insertion_points(graph, "conv2_out", add_node)
-        assert result is False
+        shape_tensor = _create_mock_tensor("shape_input", np.float32)
+        shape_node = _create_mock_node("Shape", [shape_tensor], [])
+        graph.nodes.append(shape_node)
+        region.nodes.add(4)
 
-        # Add's second input (skip connection input) should also be allowed
-        result = skip_invalid_insertion_points(graph, "input", add_node)
-        assert result is False
+        assert skip_invalid_insertion_points(graph, "shape_input", region) is True
+
+    def test_residual_block_add_inputs_allowed(self):
+        """Add node inputs in residual blocks should be allowed."""
+        graph, _ = _create_residual_graph()
+        add_node = graph.nodes[3]
+
+        assert skip_invalid_insertion_points(graph, "conv2_out", add_node) is False
+        assert skip_invalid_insertion_points(graph, "input", add_node) is False
 
 
-class TestHasQuantizableOperations(unittest.TestCase):
+class TestHasQuantizableOperations:
     """Test has_quantizable_operations function."""
 
-    def test_leaf_with_conv(self):
-        """Test LEAF region with Conv operation."""
-        graph, _ = _create_simple_graph()
-
-        region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.nodes.add(0)  # Conv node
-
-        result = has_quantizable_operations(region, graph)
-        assert result is True
-
-    def test_leaf_with_maxpool(self):
-        """Test LEAF region with MaxPool (a major quantizable op)."""
-        graph, _ = _create_simple_graph()
-
-        region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.nodes.add(3)  # MaxPool node
-
-        result = has_quantizable_operations(region, graph)
-        assert result is True
-
-    def test_leaf_with_relu_only(self):
-        """Test LEAF region with only Relu."""
-        graph, _ = _create_simple_graph()
-
-        region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.nodes.add(2)  # Relu node only (index 2 in new graph)
-
-        result = has_quantizable_operations(region, graph)
-        assert result is True  # Relu is in MAJOR_QUANTIZABLE_OPERATIONS
-
-    def test_leaf_with_conv_bn_relu(self):
-        """Test LEAF region with Conv->BN->Relu pattern."""
-        graph, _ = _create_simple_graph()
-
-        region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.nodes.add(0)  # Conv
-        region.nodes.add(1)  # BatchNorm
-        region.nodes.add(2)  # Relu
-
-        result = has_quantizable_operations(region, graph)
-        assert result is True
+    @pytest.mark.parametrize(
+        ("nodes", "graph_fn", "expected"),
+        [
+            ({0}, _create_simple_graph, True),  # Conv
+            ({3}, _create_simple_graph, True),  # MaxPool
+            ({2}, _create_simple_graph, True),  # Relu
+            ({0, 1, 2}, _create_simple_graph, True),  # Conv->BN->Relu
+            ({3}, _create_residual_graph, True),  # Add in residual
+        ],
+    )
+    def test_leaf_with_quantizable_ops(self, nodes, graph_fn, expected):
+        """Test LEAF region with various quantizable operations."""
+        graph, _ = graph_fn()
+        region = _create_region(nodes=nodes)
+        assert has_quantizable_operations(region, graph) is expected
 
     def test_leaf_without_quantizable_ops(self):
         """Test LEAF region without major quantizable operations."""
-        # Create graph with only shape operations
         shape_tensor = _create_mock_tensor("input", np.float32)
         output_tensor = _create_mock_tensor("output", np.float32)
         shape_node = _create_mock_node("Shape", [shape_tensor], [output_tensor])
         transpose_node = _create_mock_node("Transpose", [output_tensor], [])
-
         graph = MagicMock(spec=gs.Graph)
         graph.nodes = [shape_node, transpose_node]
+        region = _create_region(nodes={0, 1})
 
-        region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.nodes.add(0)
-        region.nodes.add(1)
-
-        result = has_quantizable_operations(region, graph)
-        assert result is False
+        assert has_quantizable_operations(region, graph) is False
 
     def test_composite_region_always_true(self):
         """Test that COMPOSITE regions always return True."""
         graph, _ = _create_simple_graph()
-
-        region = Region(region_id=1, level=1, region_type=RegionType.COMPOSITE)
-        # Don't add any nodes - COMPOSITE regions assume children have quantizable ops
-
-        result = has_quantizable_operations(region, graph)
-        assert result is True
-
-    def test_residual_block_has_quantizable_ops(self):
-        """Test residual block with Add operation."""
-        graph, _ = _create_residual_graph()
-
-        region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.nodes.add(3)  # Add node
-
-        result = has_quantizable_operations(region, graph)
-        assert result is True  # Add is in MAJOR_QUANTIZABLE_OPERATIONS
+        region = _create_region(level=1, region_type=RegionType.COMPOSITE)
+        assert has_quantizable_operations(region, graph) is True
 
 
 class TestResolveRegionIOInsertionPoints(unittest.TestCase):
@@ -757,10 +520,7 @@ class TestResolveRegionIOInsertionPoints(unittest.TestCase):
 
         # Set up tensor_users_map: conv_out is consumed by BatchNorm (node 1)
         graph.tensor_users_map = get_tensor_consumer_node_indices(graph)
-
-        region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.nodes.add(2)  # Relu node
-
+        region = _create_region(nodes=[2])  # Relu node
         result = resolve_region_io_insertion_points(region, graph, "relu_out")
 
         assert len(result) >= 1
@@ -772,7 +532,6 @@ class TestResolveRegionIOInsertionPoints(unittest.TestCase):
 
         # Set up tensor_users_map: bn_out is consumed by Relu (node 2)
         graph.tensor_users_map = get_tensor_consumer_node_indices(graph)
-
         result = resolve_region_io_insertion_points(None, graph, "relu_out")
 
         assert len(result) == 1
@@ -785,7 +544,6 @@ class TestResolveRegionIOInsertionPoints(unittest.TestCase):
         """Test resolving a tensor that has no users."""
         graph, _ = _create_simple_graph()
         graph.tensor_users_map = {}
-
         result = resolve_region_io_insertion_points(None, graph, "nonexistent")
 
         assert len(result) == 0
@@ -796,7 +554,6 @@ class TestResolveRegionIOInsertionPoints(unittest.TestCase):
 
         # Input tensor is used by Conv1 (node 0) and Add (node 3)
         graph.tensor_users_map = {"input": [0, 3]}
-
         result = resolve_region_io_insertion_points(None, graph, "input")
 
         # Should find both consumers
@@ -812,8 +569,7 @@ class TestResolveRegionIOInsertionPoints(unittest.TestCase):
         # relu1_out feeds conv2 (node 2)
         graph.tensor_users_map = {"relu1_out": [2]}
 
-        region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.nodes.add(2)  # Conv2
+        region = _create_region(nodes=[2])  # Conv2
 
         result = resolve_region_io_insertion_points(region, graph, "relu1_out")
 
@@ -938,22 +694,16 @@ class TestMergeResolvedInsertionPoints(unittest.TestCase):
         assert ip.node_index == 0  # Still node-specific
 
 
-class TestNodeInputInsertionPointResolve(unittest.TestCase):
-    """Test NodeInputInsertionPoint.resolve() method."""
+class TestNodeInputInsertionPointMethods(unittest.TestCase):
+    """Test NodeInputInsertionPoint.resolve() and collect_from_region() methods."""
 
     def test_resolve_simple(self):
         """Test resolving a simple node input for Conv->BN->Relu->Pool."""
         graph, tensors = _create_simple_graph()
-
-        region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.nodes.add(0)  # Conv node
-        region.nodes.add(1)  # BatchNorm node
-        region.nodes.add(2)  # Relu node
-        region.nodes.add(3)  # MaxPool node
+        region = _create_region(nodes=[0, 1, 2, 3])  # Conv, BatchNorm, Relu, MaxPool
 
         # Create insertion point for first input of first node (Conv)
         ip = NodeInputInsertionPoint(node_index=0, input_index=0)
-
         result = ip.resolve(region, graph)
 
         assert len(result) >= 1
@@ -962,13 +712,10 @@ class TestNodeInputInsertionPointResolve(unittest.TestCase):
     def test_resolve_conv_includes_weight(self):
         """Test that resolving Conv input also includes weight."""
         graph, tensors = _create_simple_graph()
-
-        region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.nodes.add(0)  # Conv node
+        region = _create_region(nodes=[0])  # Conv node
 
         # Create insertion point for first input of Conv (should also add weight)
         ip = NodeInputInsertionPoint(node_index=0, input_index=0)
-
         result = ip.resolve(region, graph)
 
         # Should include both data input and weight
@@ -980,15 +727,10 @@ class TestNodeInputInsertionPointResolve(unittest.TestCase):
     def test_resolve_relu_input(self):
         """Test resolving Relu input in the middle of the chain."""
         graph, tensors = _create_simple_graph()
-
-        region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.nodes.add(0)  # Conv
-        region.nodes.add(1)  # BatchNorm
-        region.nodes.add(2)  # Relu
+        region = _create_region(nodes=[0, 1, 2])  # Conv, BatchNorm, Relu
 
         # Relu is at local index 2, input 0 is bn_out
         ip = NodeInputInsertionPoint(node_index=2, input_index=0)
-
         result = ip.resolve(region, graph)
 
         assert len(result) == 1
@@ -998,15 +740,10 @@ class TestNodeInputInsertionPointResolve(unittest.TestCase):
     def test_resolve_residual_conv_input(self):
         """Test resolving Conv input in residual block."""
         graph, tensors = _create_residual_graph()
-
-        region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.nodes.add(0)  # Conv1
-        region.nodes.add(1)  # Relu1
-        region.nodes.add(2)  # Conv2
+        region = _create_region(nodes=[0, 1, 2])  # Conv1, Relu1, Conv2
 
         # Conv2 is at local index 2, input 0 is relu1_out
         ip = NodeInputInsertionPoint(node_index=2, input_index=0)
-
         result = ip.resolve(region, graph)
 
         # Conv includes both data and weight
@@ -1015,9 +752,34 @@ class TestNodeInputInsertionPointResolve(unittest.TestCase):
         assert "relu1_out" in tensor_names
         assert "conv2_weight" in tensor_names
 
+    def test_collect_valid_inputs(self):
+        """Test collecting valid node input insertion points from Conv->BN->Relu->Pool."""
+        graph, tensors = _create_simple_graph()
+        region = _create_region(nodes=[0, 1, 2, 3])  # Conv, BatchNorm, Relu, MaxPool
+        result = NodeInputInsertionPoint.collect_from_region(region, graph)
 
-class TestChildRegionInputInsertionPointResolve(unittest.TestCase):
-    """Test ChildRegionInputInsertionPoint.resolve() method."""
+        # Should have collected some insertion points
+        assert len(result) >= 1
+        # All should be NodeInputInsertionPoint
+        assert all(isinstance(ip, NodeInputInsertionPoint) for ip in result)
+
+    def test_collect_from_residual_block(self):
+        """Test collecting from residual block with skip connection."""
+        graph, tensors = _create_residual_graph()
+        region = _create_region(nodes=[0, 1, 2, 3, 4])  # Conv1, Relu1, Conv2, Add, Relu2
+        result = NodeInputInsertionPoint.collect_from_region(region, graph)
+
+        # Should have collected insertion points from Conv1, Add inputs, etc.
+        assert len(result) >= 1
+        assert all(isinstance(ip, NodeInputInsertionPoint) for ip in result)
+
+        # Check that we have insertion points for different nodes
+        node_indices = {ip.node_index for ip in result}
+        assert len(node_indices) >= 1  # At least one node has valid inputs
+
+
+class TestChildRegionInputInsertionPointMethods(unittest.TestCase):
+    """Test ChildRegionInputInsertionPoint.resolve() and collect_from_region() methods."""
 
     def test_resolve_composite_region(self):
         """Test resolving child region input in COMPOSITE region."""
@@ -1025,16 +787,11 @@ class TestChildRegionInputInsertionPointResolve(unittest.TestCase):
         graph.tensor_users_map = {"input": [0]}
 
         # Create parent (COMPOSITE) with child (LEAF) containing Conv->BN->Relu
-        parent = Region(region_id=1, level=1, region_type=RegionType.COMPOSITE)
-        child = Region(region_id=2, level=0, region_type=RegionType.LEAF)
+        parent = _create_region(region_id=1, level=1, region_type=RegionType.COMPOSITE)
+        child = _create_region(region_id=2, nodes=[0, 1, 2])  # Conv, BatchNorm, Relu
         child.inputs = ["input"]
-        child.nodes.add(0)  # Conv
-        child.nodes.add(1)  # BatchNorm
-        child.nodes.add(2)  # Relu
         parent.add_child(child)
-
         ip = ChildRegionInputInsertionPoint(region_index=0, input_index=0)
-
         result = ip.resolve(parent, graph)
 
         assert len(result) >= 1
@@ -1043,14 +800,9 @@ class TestChildRegionInputInsertionPointResolve(unittest.TestCase):
     def test_resolve_leaf_returns_empty(self):
         """Test that LEAF regions return empty set."""
         graph, _ = _create_simple_graph()
-
-        leaf = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        leaf.nodes.add(0)
-
+        leaf = _create_region(nodes=[0])
         ip = ChildRegionInputInsertionPoint(region_index=0, input_index=0)
-
         result = ip.resolve(leaf, graph)
-
         assert len(result) == 0
 
     def test_resolve_multiple_children(self):
@@ -1060,18 +812,15 @@ class TestChildRegionInputInsertionPointResolve(unittest.TestCase):
         graph.tensor_users_map = get_tensor_consumer_node_indices(graph)
 
         # Create parent with two child regions
-        parent = Region(region_id=1, level=1, region_type=RegionType.COMPOSITE)
+        parent = _create_region(region_id=1, level=1, region_type=RegionType.COMPOSITE)
 
         # First child: Conv1 (consumes "input")
-        child1 = Region(region_id=2, level=0, region_type=RegionType.LEAF)
+        child1 = _create_region(region_id=2, nodes=[0])  # Conv1
         child1.inputs = ["input"]
-        child1.nodes.add(0)  # Conv1
 
         # Second child: Relu1 (consumes "relu1_out")
-        child2 = Region(region_id=3, level=0, region_type=RegionType.LEAF)
+        child2 = _create_region(region_id=3, nodes=[2])  # Relu1
         child2.inputs = ["relu1_out"]
-        child2.nodes.add(2)  # Relu1
-
         parent.add_child(child1)
         parent.add_child(child2)
 
@@ -1089,131 +838,14 @@ class TestChildRegionInputInsertionPointResolve(unittest.TestCase):
         assert len(result2) >= 1
         assert any(rip.tensor_name == "relu1_out" for rip in result2)
 
-
-class TestChildRegionOutputInsertionPointResolve(unittest.TestCase):
-    """Test ChildRegionOutputInsertionPoint.resolve() method."""
-
-    def test_resolve_node_output(self):
-        """Test resolving a node output."""
-        graph, tensors = _create_simple_graph()
-        graph.tensor_users_map = get_tensor_consumer_node_indices(graph)
-
-        region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.nodes.add(0)  # Conv
-        region.nodes.add(1)  # BatchNorm
-        region.nodes.add(2)  # Relu
-        region.nodes.add(3)  # MaxPool
-        region.outputs = ["pool_out"]
-
-        # Output of last node (MaxPool)
-        ip = ChildRegionOutputInsertionPoint(region_index=None, node_index=2, output_index=0)
-
-        result = ip.resolve(region, graph)
-
-        assert len(result) >= 1
-        assert any(rip.tensor_name == "relu_out" for rip in result)
-
-    def test_resolve_child_region_output(self):
-        """Test resolving a child region output."""
-        graph, tensors = _create_simple_graph()
-        graph.tensor_users_map = {"relu_out": [3]}
-
-        parent = Region(region_id=1, level=1, region_type=RegionType.COMPOSITE)
-        child = Region(region_id=2, level=0, region_type=RegionType.LEAF)
-        child.outputs = ["relu_out"]
-        child.nodes.add(0)  # Conv
-        child.nodes.add(1)  # BatchNorm
-        child.nodes.add(2)  # Relu
-        parent.add_child(child)
-
-        ip = ChildRegionOutputInsertionPoint(region_index=0, node_index=None, output_index=0)
-
-        result = ip.resolve(parent, graph)
-
-        assert len(result) >= 1
-        assert any(rip.tensor_name == "relu_out" for rip in result)
-
-    def test_resolve_residual_add_output(self):
-        """Test resolving Add output in residual block."""
-        graph, tensors = _create_residual_graph()
-        graph.tensor_users_map = {"add_out": [4]}
-
-        region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.nodes.add(0)  # Conv1
-        region.nodes.add(1)  # Relu1
-        region.nodes.add(2)  # Conv2
-        region.nodes.add(3)  # Add
-        region.nodes.add(4)  # Relu2
-        region.outputs = ["add_out"]
-
-        # Add is at local index 3, output 0
-        ip = ChildRegionOutputInsertionPoint(region_index=None, node_index=3, output_index=0)
-
-        result = ip.resolve(region, graph)
-
-        assert len(result) >= 1
-        assert any(rip.tensor_name == "add_out" for rip in result)
-
-
-class TestNodeInputInsertionPointCollectFrom(unittest.TestCase):
-    """Test NodeInputInsertionPoint.collect_from_region() method."""
-
-    def test_collect_valid_inputs(self):
-        """Test collecting valid node input insertion points from Conv->BN->Relu->Pool."""
-        graph, tensors = _create_simple_graph()
-
-        region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.nodes.add(0)  # Conv
-        region.nodes.add(1)  # BatchNorm
-        region.nodes.add(2)  # Relu
-        region.nodes.add(3)  # MaxPool
-
-        result = NodeInputInsertionPoint.collect_from_region(region, graph)
-
-        # Should have collected some insertion points
-        assert len(result) >= 1
-        # All should be NodeInputInsertionPoint
-        assert all(isinstance(ip, NodeInputInsertionPoint) for ip in result)
-
-    def test_collect_from_residual_block(self):
-        """Test collecting from residual block with skip connection."""
-        graph, tensors = _create_residual_graph()
-
-        region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.nodes.add(0)  # Conv1
-        region.nodes.add(1)  # Relu1
-        region.nodes.add(2)  # Conv2
-        region.nodes.add(3)  # Add
-        region.nodes.add(4)  # Relu2
-
-        result = NodeInputInsertionPoint.collect_from_region(region, graph)
-
-        # Should have collected insertion points from Conv1, Add inputs, etc.
-        assert len(result) >= 1
-        assert all(isinstance(ip, NodeInputInsertionPoint) for ip in result)
-
-        # Check that we have insertion points for different nodes
-        node_indices = {ip.node_index for ip in result}
-        assert len(node_indices) >= 1  # At least one node has valid inputs
-
-
-class TestChildRegionInputInsertionPointCollectFrom(unittest.TestCase):
-    """Test ChildRegionInputInsertionPoint.collect_from_region() method."""
-
     def test_collect_from_composite(self):
         """Test collecting from COMPOSITE region with children."""
         graph, tensors = _create_simple_graph()
-
-        parent = Region(region_id=1, level=1, region_type=RegionType.COMPOSITE)
-        child = Region(region_id=2, level=0, region_type=RegionType.LEAF)
+        parent = _create_region(region_id=1, level=1, region_type=RegionType.COMPOSITE)
+        child = _create_region(region_id=2, nodes=[0, 1, 2])  # Conv, BatchNorm, Relu
         child.inputs = ["input"]
-        child.nodes.add(0)  # Conv
-        child.nodes.add(1)  # BatchNorm
-        child.nodes.add(2)  # Relu
         parent.add_child(child)
-
         result = ChildRegionInputInsertionPoint.collect_from_region(parent, graph)
-
         # Should find the child's input
         assert len(result) >= 0  # May be filtered by skip_invalid_insertion_points
         assert all(isinstance(ip, ChildRegionInputInsertionPoint) for ip in result)
@@ -1221,53 +853,71 @@ class TestChildRegionInputInsertionPointCollectFrom(unittest.TestCase):
     def test_collect_from_leaf_returns_empty(self):
         """Test that LEAF regions return empty list."""
         graph, _ = _create_simple_graph()
-
-        leaf = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        leaf.nodes.add(0)
-
+        leaf = _create_region(nodes=[0])
         result = ChildRegionInputInsertionPoint.collect_from_region(leaf, graph)
-
         assert len(result) == 0
 
     def test_collect_from_composite_with_multiple_children(self):
         """Test collecting from COMPOSITE with multiple child regions."""
         graph, tensors = _create_residual_graph()
-
-        parent = Region(region_id=1, level=1, region_type=RegionType.COMPOSITE)
-
-        child1 = Region(region_id=2, level=0, region_type=RegionType.LEAF)
+        parent = _create_region(region_id=1, level=1, region_type=RegionType.COMPOSITE)
+        child1 = _create_region(region_id=2, nodes=[0, 1])  # Conv1, Relu1
         child1.inputs = ["input"]
-        child1.nodes.add(0)  # Conv1
-        child1.nodes.add(1)  # Relu1
-
-        child2 = Region(region_id=3, level=0, region_type=RegionType.LEAF)
+        child2 = _create_region(region_id=3, nodes=[2, 3])  # Conv2, Add
         child2.inputs = ["relu1_out", "input"]  # Two inputs including skip connection
-        child2.nodes.add(2)  # Conv2
-        child2.nodes.add(3)  # Add
-
         parent.add_child(child1)
         parent.add_child(child2)
 
         result = ChildRegionInputInsertionPoint.collect_from_region(parent, graph)
-
         # Should find inputs from both children
         assert all(isinstance(ip, ChildRegionInputInsertionPoint) for ip in result)
 
 
-class TestChildRegionOutputInsertionPointCollectFrom(unittest.TestCase):
-    """Test ChildRegionOutputInsertionPoint.collect_from_region() method."""
+class TestChildRegionOutputInsertionPointMethods(unittest.TestCase):
+    """Test ChildRegionOutputInsertionPoint.resolve() and collect_from_region() methods."""
+
+    def test_resolve_node_output(self):
+        """Test resolving a node output."""
+        graph, tensors = _create_simple_graph()
+        graph.tensor_users_map = get_tensor_consumer_node_indices(graph)
+        region = _create_region(nodes=[0, 1, 2, 3])  # Conv, BatchNorm, Relu, MaxPool
+        region.outputs = ["pool_out"]
+        # Output of last node (MaxPool)
+        ip = ChildRegionOutputInsertionPoint(region_index=None, node_index=2, output_index=0)
+        result = ip.resolve(region, graph)
+        assert len(result) >= 1
+        assert any(rip.tensor_name == "relu_out" for rip in result)
+
+    def test_resolve_child_region_output(self):
+        """Test resolving a child region output."""
+        graph, tensors = _create_simple_graph()
+        graph.tensor_users_map = {"relu_out": [3]}
+        parent = _create_region(region_id=1, level=1, region_type=RegionType.COMPOSITE)
+        child = _create_region(region_id=2, nodes=[0, 1, 2])  # Conv, BatchNorm, Relu
+        child.outputs = ["relu_out"]
+        parent.add_child(child)
+        ip = ChildRegionOutputInsertionPoint(region_index=0, node_index=None, output_index=0)
+        result = ip.resolve(parent, graph)
+        assert len(result) >= 1
+        assert any(rip.tensor_name == "relu_out" for rip in result)
+
+    def test_resolve_residual_add_output(self):
+        """Test resolving Add output in residual block."""
+        graph, tensors = _create_residual_graph()
+        graph.tensor_users_map = {"add_out": [4]}
+        region = _create_region(nodes=[0, 1, 2, 3, 4])  # Conv1, Relu1, Conv2, Add, Relu2
+        region.outputs = ["add_out"]
+        # Add is at local index 3, output 0
+        ip = ChildRegionOutputInsertionPoint(region_index=None, node_index=3, output_index=0)
+        result = ip.resolve(region, graph)
+        assert len(result) >= 1
+        assert any(rip.tensor_name == "add_out" for rip in result)
 
     def test_collect_node_outputs(self):
         """Test collecting node output insertion points."""
         graph, tensors = _create_simple_graph()
-
-        region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.nodes.add(0)  # Conv
-        region.nodes.add(1)  # BatchNorm
-        region.nodes.add(2)  # Relu
-        region.nodes.add(3)  # MaxPool
+        region = _create_region(nodes=[0, 1, 2, 3])  # Conv, BatchNorm, Relu, MaxPool
         region.outputs = ["pool_out"]  # Only pool_out is a region output
-
         result = ChildRegionOutputInsertionPoint.collect_from_region(region, graph)
 
         # Should find the node output that matches region output
@@ -1277,16 +927,11 @@ class TestChildRegionOutputInsertionPointCollectFrom(unittest.TestCase):
     def test_collect_child_region_outputs(self):
         """Test collecting child region output insertion points."""
         graph, tensors = _create_simple_graph()
-
-        parent = Region(region_id=1, level=1, region_type=RegionType.COMPOSITE)
-        child = Region(region_id=2, level=0, region_type=RegionType.LEAF)
+        parent = _create_region(region_id=1, level=1, region_type=RegionType.COMPOSITE)
+        child = _create_region(region_id=2, nodes=[0, 1, 2])  # Conv, BatchNorm, Relu
         child.outputs = ["relu_out"]
-        child.nodes.add(0)  # Conv
-        child.nodes.add(1)  # BatchNorm
-        child.nodes.add(2)  # Relu
         parent.add_child(child)
         parent.outputs = ["relu_out"]  # Child output is also parent output
-
         result = ChildRegionOutputInsertionPoint.collect_from_region(parent, graph)
 
         # Should find the child region output
@@ -1295,15 +940,8 @@ class TestChildRegionOutputInsertionPointCollectFrom(unittest.TestCase):
     def test_collect_residual_block_outputs(self):
         """Test collecting outputs from residual block."""
         graph, tensors = _create_residual_graph()
-
-        region = Region(region_id=1, level=0, region_type=RegionType.LEAF)
-        region.nodes.add(0)  # Conv1
-        region.nodes.add(1)  # Relu1
-        region.nodes.add(2)  # Conv2
-        region.nodes.add(3)  # Add
-        region.nodes.add(4)  # Relu2
+        region = _create_region(nodes=[0, 1, 2, 3, 4])  # Conv1, Relu1, Conv2, Add, Relu2
         region.outputs = ["output"]  # Final output
-
         result = ChildRegionOutputInsertionPoint.collect_from_region(region, graph)
 
         # Should find the output
