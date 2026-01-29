@@ -16,14 +16,12 @@
 
 """GPT-OSS-20B model descriptor for AnyModel compression."""
 
-import importlib
-import inspect
-import pkgutil
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Type
 
 import torch.nn as nn
+from transformers.models.gpt_oss.modeling_gpt_oss import GptOssDecoderLayer, GptOssRotaryEmbedding
 
 from modelopt.torch.puzzletron.anymodel.model_descriptor import (
     ModelDescriptor,
@@ -46,22 +44,6 @@ from modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin import (
 from modelopt.torch.puzzletron.pruning.pruning_mixin import PruningMixIn
 
 
-def get_dynamic_modules(module_cls_str: str) -> List[Type[nn.Module]]:
-    """Get dynamically loaded module classes from transformers_modules."""
-    import transformers_modules
-
-    matches = []
-    for finder, modname, ispkg in pkgutil.walk_packages(
-        transformers_modules.__path__, transformers_modules.__name__ + "."
-    ):
-        module = importlib.import_module(modname)
-        for _, obj in inspect.getmembers(module, inspect.isclass):
-            if obj.__name__ == module_cls_str:
-                matches.append(obj)
-
-    return matches
-
-
 @ModelDescriptorFactory.register_decorator("gpt_oss_20b")
 class GptOss20bModelDescriptor(ModelDescriptor):
     """Model descriptor for GPT-OSS-20B (pure MoE model)."""
@@ -70,15 +52,12 @@ class GptOss20bModelDescriptor(ModelDescriptor):
 
     @staticmethod
     def decoder_layer_cls():
-        """Get the decoder layer class for GPT-OSS models."""
-        decoder_cls_list = get_dynamic_modules("GptOssDecoderLayer")
-        if not decoder_cls_list:
-            raise AssertionError(
-                "GPT-OSS contains dynamic modules that should be cached beforehand. "
-                "Make sure to load your config using `load_model_config` or manually call "
-                "`force_cache_dynamic_modules(config, checkpoint_dir)`"
-            )
-        return decoder_cls_list
+        """Get the decoder layer class for GPT-OSS models.
+
+        GPT-OSS is a standard transformers model in recent versions.
+        Import directly from transformers.models.gpt_oss.modeling_gpt_oss.
+        """
+        return GptOssDecoderLayer
 
     @staticmethod
     def block_config_to_layer_overrides(block_config: BlockConfig):
@@ -111,14 +90,11 @@ class GptOss20bModelDescriptor(ModelDescriptor):
     def init_rotary_embedding(model, runtime):
         """Initialize rotary embeddings on the correct device."""
         # GPT-OSS uses RoPE with YARN scaling
-        # Get the dynamically loaded GptOssRotaryEmbedding class
-        rotary_emb_classes = get_dynamic_modules("GptOssRotaryEmbedding")
-        if rotary_emb_classes:
-            GptOssRotaryEmbedding = rotary_emb_classes[0]
-            model.model.rotary_emb = GptOssRotaryEmbedding(
-                config=model.config,
-                device=runtime.device,
-            )
+
+        model.model.rotary_emb = GptOssRotaryEmbedding(
+            config=model.config,
+            device=runtime.device,
+        )
 
     @staticmethod
     def input_embedding_name():
