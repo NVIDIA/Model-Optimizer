@@ -1317,13 +1317,10 @@ class _DynamicEagleGPTModel(EagleModel):
             # [TODO] (chenhany): let the module compute itself
             eagle_inputs["rotary_pos_emb"] = None
 
-            with te_dot_product_attention_with_cp(
-                eagle_inputs["attention_mask"], self.eagle_config.num_attention_heads
-            ):
-                _, eagle_logits, eagle_next_hidden_states_input = self._eagle_forward(
-                    eagle_inputs,
-                    output_weight,
-                )
+            _, eagle_logits, eagle_next_hidden_states_input = self._eagle_forward(
+                eagle_inputs,
+                output_weight,
+            )
 
             # parallel_logits are only used after the last step
             if step == steps - 1 and self.eagle_config.parallel_draft_step > 1:
