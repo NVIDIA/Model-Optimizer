@@ -425,16 +425,23 @@ class HFEagleModel(EagleModel):
     @property
     def _base_llm_config(self):
         """Return the llm config for the base model, from LLM or VLM."""
-        return self.config.llm_config if hasattr(self.config, "llm_config") else self.config
+        # return self.config.llm_config if hasattr(self.config, "llm_config") else self.config
+        return self.config.text_config
 
     def _find_base_model_parts(self):
         """Find model parts from different models and set base_{part}_path attributes."""
         base_model_parts_mapping = {
-            "base_model_path": ["model", "backbone", "language_model.backbone"],
+            "base_model_path": [
+                "model.language_model",
+                "model",
+                "backbone",
+                "language_model.backbone",
+            ],
             "base_model_embeddings_path": [
                 "model.embed_tokens",
                 "backbone.embeddings",
                 "language_model.backbone.embeddings",
+                "model.language_model.embed_tokens",
             ],
             "base_model_lm_head_path": ["lm_head", "language_model.lm_head"],
         }

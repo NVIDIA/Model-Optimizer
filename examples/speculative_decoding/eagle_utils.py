@@ -15,7 +15,6 @@
 
 import inspect
 import json
-import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -29,7 +28,6 @@ import torch
 import transformers
 from datasets import load_dataset
 from packaging.version import Version
-from PIL import Image
 from scripts.ar_validate import validate_ar
 from torch.distributed.tensor.experimental._attention import _SDPAMerger
 from torch.utils.data import Dataset
@@ -102,14 +100,14 @@ def preprocess(examples, tokenizer, **kwargs):
 
 
 def preprocess_vlm(examples, tokenizer, processor, img_dir):
+    # NOTE: This function is hard-coded to support Qwen3-VL. Consolidate before merging.
+
     tokenizer.chat_template = tokenizer.chat_template.replace(REMOVE_THINK_CHAT_TEMPLATE, "")
     new_examples = {
         "input_ids": [],
         "attention_mask": [],
         "loss_mask": [],
         "labels": [],
-        "pixel_values": [],
-        "image_flags": [],
     }
     for i in range(len(examples)):
         messages = []
@@ -134,31 +132,27 @@ def preprocess_vlm(examples, tokenizer, processor, img_dir):
 
         for sentence in source:
             role, content = get_role_content(sentence)
+            content = [{"type": "text", "text": content}]
             new_role = convert_role(role)
             messages.append({"role": new_role, "content": content})
-        conversation = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=False,
-        )
 
-        img_filename = os.path.join(img_dir, examples[i]["image"])
-        img = Image.open(img_filename)
-        output = processor(images=img, text=conversation, return_tensors="pt")
-        input_ids = output.input_ids[0]
-        attention_mask = output.attention_mask[0]
+        inputs = processor.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+            fps=4,
+        )
+        input_ids = inputs.input_ids[0]
+        attention_mask = inputs.attention_mask[0]
         loss_mask = torch.ones_like(input_ids)
         labels = torch.cat([input_ids[1:], torch.tensor([IGNORE_TOKEN_ID], dtype=input_ids.dtype)])
-        # TODO: add labels and answer-only loss masking?
 
         new_examples["input_ids"].append(input_ids)
         new_examples["attention_mask"].append(attention_mask)
         new_examples["loss_mask"].append(loss_mask)
         new_examples["labels"].append(labels)
-        new_examples["pixel_values"].append(output.pixel_values)
-        new_examples["image_flags"].append(
-            torch.ones((output.pixel_values.shape[0],), dtype=torch.int64)
-        )
     return new_examples
 
 
