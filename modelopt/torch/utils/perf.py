@@ -28,6 +28,7 @@ __all__ = [
     "Timer",
     "clear_cuda_cache",
     "get_cuda_memory_stats",
+    "get_used_gpu_mem_fraction",
     "report_memory",
 ]
 
@@ -46,6 +47,23 @@ def get_cuda_memory_stats(device=None):
         "reserved": torch.cuda.memory_reserved(device),
         "max_reserved": torch.cuda.max_memory_reserved(device),
     }
+
+
+def get_used_gpu_mem_fraction(device="cuda:0"):
+    """Get used GPU memory as a fraction of total memory.
+
+    Args:
+        device: Device identifier (default: "cuda:0")
+
+    Returns:
+        float: Fraction of GPU memory currently used (0.0 to 1.0).
+               Returns 0.0 if CUDA is not available.
+    """
+    if not torch.cuda.is_available():
+        return 0.0
+
+    free_memory, total_memory = torch.cuda.mem_get_info(device)
+    return (total_memory - free_memory) / total_memory
 
 
 def report_memory(name="", rank=0, device=None):
