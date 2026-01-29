@@ -15,6 +15,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add support for ``params`` constraint based automatic neural architecture search in Minitron pruning (``mcore_minitron``) as an alternative to manual pruning (using ``export_config``). See `examples/pruning/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning>`_ for more details on its usage.
 - Add support for calibration data with multiple samples in ``npz`` format in the ONNX Autocast workflow.
 - Add ``--opset`` option to ONNX quantization CLI to specify the target opset version for the quantized model.
+- Add support for context parallelism in Eagle speculative decoding for huggingface and megatron core models.
 
 0.41 (2026-01-19)
 ^^^^^^^^^^^^^^^^^
