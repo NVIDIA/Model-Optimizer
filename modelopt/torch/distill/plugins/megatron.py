@@ -382,7 +382,7 @@ class TopKLogitsKLLoss(LogitsKLLoss):
         model_config: "TransformerConfig",
         temperature: float = 1.0,
         reverse: bool = False,
-        top_k: int = 1000,
+        top_k: int = 1024,
     ):
         """Constructor.
 
