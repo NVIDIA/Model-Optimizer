@@ -350,7 +350,7 @@ def calibrate_sparse_attention(
         )
         prefill_result = prefill_calibrator.calibrate(model, prefill_forward_loop, phase="prefill")
 
-        if "k" in prefill_result and "p" in prefill_result:
+        if "a" in prefill_result and "b" in prefill_result:
             calibration_results["prefill"] = prefill_result
         else:
             warnings.warn("Prefill calibration did not produce valid results")
@@ -372,7 +372,7 @@ def calibrate_sparse_attention(
         )
         decode_result = decode_calibrator.calibrate(model, decode_forward_loop, phase="decode")
 
-        if "k" in decode_result and "p" in decode_result:
+        if "a" in decode_result and "b" in decode_result:
             calibration_results["decode"] = decode_result
         else:
             warnings.warn("Decode calibration did not produce valid results")
@@ -382,14 +382,14 @@ def calibrate_sparse_attention(
         warnings.warn("No calibration produced valid results")
         return {}
 
-    # Extract k and p for each phase
+    # Extract a and b for each phase
     calibration_params: dict[str, dict[str, float]] = {}
     for phase in ["prefill", "decode"]:
         if phase in calibration_results:
             result = calibration_results[phase]
             calibration_params[phase] = {
-                "k": result["k"],
-                "p": result["p"],
+                "a": result["a"],
+                "b": result["b"],
             }
 
     # Apply calibration params to all modules
@@ -400,7 +400,7 @@ def calibrate_sparse_attention(
     for phase, params in calibration_params.items():
         result = calibration_results[phase]
         print(f"  {phase}:")
-        print(f"    Model: scale_factor = {params['k']:.4f} / (1 - sparsity)^{params['p']:.4f}")
+        print(f"    Model: scale_factor = {params['a']:.6f} * exp({params['b']:.4f} * sparsity)")
         print(f"    R-squared: {result['r_squared']:.6f}")
 
     for module_name, module in sparse_modules:

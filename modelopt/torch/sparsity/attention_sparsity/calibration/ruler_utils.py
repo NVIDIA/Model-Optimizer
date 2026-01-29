@@ -461,8 +461,8 @@ def find_optimal_haystack_size(
     upper_bound = max(estimated_max, incremental * 2)
     optimal_num_haystack = None
 
-    logger.info(f"Estimated {tokens_per_haystack:.1f} tokens per haystack")
-    logger.info(f"Binary search bounds: {lower_bound} to {upper_bound}")
+    logger.debug(f"Estimated {tokens_per_haystack:.1f} tokens per haystack")
+    logger.debug(f"Binary search bounds: {lower_bound} to {upper_bound}")
 
     while lower_bound <= upper_bound:
         mid = (lower_bound + upper_bound) // 2
@@ -486,6 +486,6 @@ def find_optimal_haystack_size(
             upper_bound = mid - 1
 
     final_size = optimal_num_haystack if optimal_num_haystack is not None else incremental
-    logger.info(f"Optimal haystack size: {final_size}")
+    logger.debug(f"Optimal haystack size: {final_size}")
 
     return final_size

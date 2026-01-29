@@ -147,10 +147,10 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
 class CalibrationConfig(ModeloptBaseConfig):
     """Configuration for automatic threshold calibration using RULER dataset.
 
-    Calibration fits an Inverse Power model to determine dynamic thresholds that
-    achieve target sparsity. The model learns parameters k and p per phase:
+    Calibration fits an Exponential model to determine dynamic thresholds that
+    achieve target sparsity. The model learns parameters a and b per phase:
 
-        scale_factor = k / (1 - target_sparsity)^p
+        scale_factor = a * exp(b * target_sparsity)
 
     At inference time, the threshold is computed as:
 
@@ -160,6 +160,7 @@ class CalibrationConfig(ModeloptBaseConfig):
     - Target sparsity can be changed at runtime without recalibration
     - Threshold automatically adapts to sequence length
     - Supports independent prefill and decode phase calibration
+    - Exponential model provides better fit (lower RMSE)
     """
 
     target_sparse_ratio: dict[str, float] = ModeloptField(

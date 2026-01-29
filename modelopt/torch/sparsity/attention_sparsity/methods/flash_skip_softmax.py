@@ -141,12 +141,12 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             and phase in calibration_params
             and target_sparse_ratio is not None
         ):
-            # Use calibrated k, p to compute dynamic threshold
-            # scale_factor = k / (1 - target_sparsity)^p
-            k = calibration_params[phase]["k"]
-            p = calibration_params[phase]["p"]
+            # Use calibrated a, b to compute dynamic threshold
+            # Exponential model: scale_factor = a * exp(b * target_sparsity)
+            a = calibration_params[phase]["a"]
+            b = calibration_params[phase]["b"]
             target_sparsity = target_sparse_ratio.get(phase, 0.5)
-            scale_factor = k / ((1 - target_sparsity) ** p)
+            scale_factor = a * np.exp(b * target_sparsity)
             log_threshold = np.log(scale_factor / seq_k)
         else:
             # Use static threshold from config (no calibration or phase not calibrated)
@@ -323,16 +323,16 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         target_sparse_ratio = getattr(self, "target_sparse_ratio", None)
 
         if calibration_params is not None and target_sparse_ratio is not None:
-            # Per-phase calibrated dynamic threshold using Inverse Power model
+            # Per-phase calibrated dynamic threshold using Exponential model
             example_lengths = [1024, 4096, 16384, 65536, 131072]
             phase_info = {}
             for phase, params in calibration_params.items():
-                k, p = params["k"], params["p"]
+                a, b = params["a"], params["b"]
                 target_sparsity = target_sparse_ratio.get(phase, 0.5)
-                scale_factor = k / ((1 - target_sparsity) ** p)
+                scale_factor = a * np.exp(b * target_sparsity)
                 phase_info[phase] = {
-                    "k": k,
-                    "p": p,
+                    "a": a,
+                    "b": b,
                     "target_sparsity": target_sparsity,
                     "scale_factor": scale_factor,
                     "example_thresholds": {
@@ -341,7 +341,7 @@ class FlashSkipSoftmax(SparseAttentionMethod):
                 }
             return {
                 "type": "dynamic_calibrated",
-                "formula": "threshold = k / (1 - target_sparsity)^p / seqlen",
+                "formula": "threshold = a * exp(b * target_sparsity) / seqlen",
                 "calibration_params": calibration_params,
                 "target_sparse_ratio": target_sparse_ratio,
                 "phases": phase_info,

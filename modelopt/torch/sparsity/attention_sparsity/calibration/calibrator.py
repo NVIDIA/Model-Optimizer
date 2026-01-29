@@ -31,7 +31,7 @@ from ..stats_manager import SparseAttentionStatsManager
 
 
 class DynamicThresholdCalibrator:
-    """Dynamic threshold calibrator using Inverse Power model.
+    """Dynamic threshold calibrator using Exponential model.
 
     Calibration Algorithm:
         1. For each threshold λ_j in threshold_trials:
@@ -39,13 +39,13 @@ class DynamicThresholdCalibrator:
            - For each sample i with length L_i, collect sparsity S_ij
            - Compute scale_factor_ij = λ_j × L_i
 
-        2. Fit Inverse Power model to ALL individual (sf_ij, S_ij) pairs:
-           scale_factor = k / (1 - sparsity)^p
+        2. Fit Exponential model to ALL individual (sf_ij, S_ij) pairs:
+           scale_factor = a * exp(b * sparsity)
 
-        3. Return fitted k and p parameters (model-specific)
+        3. Return fitted a and b parameters
 
     At inference time (user specifies target_sparsity S*):
-        scale_factor = k / (1 - S*)^p
+        scale_factor = a * exp(b * S*)
         threshold = scale_factor / seqlen
 
     Key insight: Using all individual data points (N_thresholds × N_samples)
@@ -88,20 +88,20 @@ class DynamicThresholdCalibrator:
         ]
 
     def calibrate(self, model: nn.Module, forward_loop: Callable, phase: str) -> dict[str, Any]:
-        """Calibrate k and p parameters for Inverse Power model.
+        """Calibrate a and b parameters for Exponential model.
 
         Algorithm:
             1. For each threshold λ_j in threshold_trials:
                - Run ALL samples, collect sparsities S_ij for each sample i
                - Compute scale_factor_ij = λ_j × L_i (where L_i is sample length)
 
-            2. Fit Inverse Power model to ALL (sf_ij, S_ij) pairs:
-               scale_factor = k / (1 - sparsity)^p
+            2. Fit Exponential model to ALL (sf_ij, S_ij) pairs:
+               scale_factor = a * exp(b * sparsity)
 
-            3. Return fitted k and p parameters
+            3. Return fitted a and b parameters
 
         At inference time (user specifies target_sparsity S*):
-            scale_factor = k / (1 - S*)^p
+            scale_factor = a * exp(b * S*)
             threshold = scale_factor / seqlen
 
         Args:
@@ -110,7 +110,7 @@ class DynamicThresholdCalibrator:
             phase: Phase to calibrate ('prefill' or 'decode')
 
         Returns:
-            Dict with calibration results including k, p, r_squared, and num_data_points
+            Dict with calibration results including a, b, r_squared, and num_data_points
         """
         # Extract attention modules
         attention_modules = [m for m in model.modules() if isinstance(m, SparseAttentionModule)]
@@ -118,7 +118,7 @@ class DynamicThresholdCalibrator:
         if not attention_modules:
             raise ValueError("No sparse attention modules found for calibration")
 
-        print(f"Starting Inverse Power model calibration ({phase} phase)")
+        print(f"Starting Exponential model calibration ({phase} phase)")
         print(f"Threshold trials: {len(self.threshold_trials)}")
 
         # Stage 1: Collect ALL (scale_factor, sparsity) pairs for all thresholds and samples
@@ -162,15 +162,16 @@ class DynamicThresholdCalibrator:
 
         print(f"Collected {len(all_data_points)} individual (scale_factor, sparsity) pairs")
 
-        # Stage 2: Fit Inverse Power model: scale_factor = k / (1 - sparsity)^p
-        print("\nStage 2: Fitting Inverse Power model to all data points...")
+        # Stage 2: Fit Exponential model: scale_factor = a * exp(b * sparsity)
+        print("\nStage 2: Fitting Exponential model to all data points...")
 
         # Extract data for fitting
-        scale_factors = np.array([p["scale_factor"] for p in all_data_points])
-        sparsities = np.array([p["sparsity"] for p in all_data_points])
+        scale_factors = np.array([pt["scale_factor"] for pt in all_data_points])
+        sparsities = np.array([pt["sparsity"] for pt in all_data_points])
 
-        # Filter out invalid sparsities (must be in (0, 1))
-        valid_mask = (sparsities > 0.01) & (sparsities < 0.99)
+        # Filter out extreme sparsities (must be in (10%, 90%))
+        # Extreme values are unreliable for fitting
+        valid_mask = (sparsities >= 0.10) & (sparsities <= 0.90)
         scale_factors = scale_factors[valid_mask]
         sparsities = sparsities[valid_mask]
 
@@ -180,36 +181,38 @@ class DynamicThresholdCalibrator:
             )
             return {}
 
-        # Define Inverse Power model: sf = k / (1 - S)^p
-        def inverse_power(sparsity, k, p):
-            return k / np.power(1 - sparsity, p)
+        # Define Exponential model: sf = a * exp(b * S)
+        def exponential(sparsity, a, b):
+            return a * np.exp(b * sparsity)
 
         # Fit the model
         try:
             popt, pcov = curve_fit(
-                inverse_power,
+                exponential,
                 sparsities,
                 scale_factors,
-                p0=[100, 1.5],  # Initial guess
-                bounds=([0.1, 0.1], [1e7, 10]),  # Bounds for k and p
+                p0=[1.0, 5.0],  # Initial guess
+                bounds=([0.0, 0.0], [np.inf, 20.0]),  # Bounds for a and b
                 maxfev=10000,
             )
-            k, p = popt
+            a, b = popt
         except Exception as e:
             warnings.warn(f"Curve fitting failed: {e}")
             return {}
 
-        # Calculate R-squared
-        pred_scale_factors = inverse_power(sparsities, k, p)
+        # Calculate R-squared and RMSE
+        pred_scale_factors = exponential(sparsities, a, b)
         ss_res = np.sum((scale_factors - pred_scale_factors) ** 2)
         ss_tot = np.sum((scale_factors - np.mean(scale_factors)) ** 2)
         r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+        rmse = np.sqrt(np.mean((scale_factors - pred_scale_factors) ** 2))
 
-        print(f"\n{phase.capitalize()} Calibration Results (Inverse Power Model):")
-        print("  Model: scale_factor = k / (1 - sparsity)^p")
-        print(f"  Fitted k: {k:.4f}")
-        print(f"  Fitted p: {p:.4f}")
+        print(f"\n{phase.capitalize()} Calibration Results (Exponential Model):")
+        print("  Model: scale_factor = a * exp(b * sparsity)")
+        print(f"  Fitted a: {a:.6f}")
+        print(f"  Fitted b: {b:.4f}")
         print(f"  R-squared: {r_squared:.6f}")
+        print(f"  RMSE: {rmse:.2f}")
         print(f"  Data points used: {int(np.sum(valid_mask))} / {len(all_data_points)}")
 
         # Show scale_factor for various target sparsities
@@ -217,7 +220,7 @@ class DynamicThresholdCalibrator:
         print(f"  {'Target':<10} {'Scale Factor':<15}")
         print(f"  {'-' * 10} {'-' * 15}")
         for target in [0.5, 0.7, 0.8, 0.9, 0.95]:
-            sf = k / (1 - target) ** p
+            sf = a * np.exp(b * target)
             print(f"  {target:<10.0%} {sf:<15.2f}")
 
         # Print calibration data summary by threshold
@@ -238,12 +241,13 @@ class DynamicThresholdCalibrator:
 
         return {
             "phase": phase,
-            "k": float(k),
-            "p": float(p),
+            "a": float(a),
+            "b": float(b),
             "r_squared": float(r_squared),
+            "rmse": float(rmse),
             "num_data_points": int(np.sum(valid_mask)),
             "total_samples": len(all_data_points),
-            "calibration_type": "inverse_power",
+            "calibration_type": "exponential",
         }
 
     def _enable_calibration_mode(self, modules: list[nn.Module]):

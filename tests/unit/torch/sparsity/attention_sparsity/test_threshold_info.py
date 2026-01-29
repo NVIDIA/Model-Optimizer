@@ -61,25 +61,25 @@ class TestFlashSkipSoftmaxThresholdInfo:
             }
         )
 
-        # Simulate calibration setting k and p parameters
+        # Simulate calibration setting a and b parameters
         method.calibration_params = {
-            "prefill": {"k": 150.0, "p": 1.5},
-            "decode": {"k": 200.0, "p": 1.8},
+            "prefill": {"a": 150.0, "b": 1.5},
+            "decode": {"a": 200.0, "b": 1.8},
         }
         method.target_sparse_ratio = {"prefill": 0.9, "decode": 0.9}
 
         info = method.get_threshold_info()
 
         assert info["type"] == "dynamic_calibrated"
-        assert info["formula"] == "threshold = k / (1 - target_sparsity)^p / seqlen"
+        assert info["formula"] == "threshold = a * exp(b * target_sparsity) / seqlen"
         assert "calibration_params" in info
         assert "target_sparse_ratio" in info
         assert "phases" in info
         assert "prefill" in info["phases"]
         assert "decode" in info["phases"]
-        # Check that k and p are in phase info
-        assert info["phases"]["prefill"]["k"] == 150.0
-        assert info["phases"]["prefill"]["p"] == 1.5
+        # Check that a and b are in phase info
+        assert info["phases"]["prefill"]["a"] == 150.0
+        assert info["phases"]["prefill"]["b"] == 1.5
         assert info["phases"]["prefill"]["target_sparsity"] == 0.9
 
     def test_threshold_info_structure(self):
@@ -156,13 +156,13 @@ class TestSparseAttentionModuleThresholdInfo:
 
         sparse_model = sparsify(model, config)
 
-        # Find module and set calibrated params (Inverse Power model)
+        # Find module and set calibrated params (Exponential model)
         module = None
         for module in sparse_model.modules():
             if isinstance(module, SparseAttentionModule):
                 module._sparse_method_instance.calibration_params = {
-                    "prefill": {"k": 150.0, "p": 1.5},
-                    "decode": {"k": 200.0, "p": 1.8},
+                    "prefill": {"a": 150.0, "b": 1.5},
+                    "decode": {"a": 200.0, "b": 1.8},
                 }
                 module._sparse_method_instance.target_sparse_ratio = {
                     "prefill": 0.9,
@@ -175,7 +175,7 @@ class TestSparseAttentionModuleThresholdInfo:
         info = module.get_threshold_info()
 
         assert info["type"] == "dynamic_calibrated"
-        assert info["calibration_params"]["prefill"]["k"] == 150.0
+        assert info["calibration_params"]["prefill"]["a"] == 150.0
 
     def test_module_without_method_instance(self):
         """Test get_threshold_info when sparse method instance doesn't exist."""
@@ -261,12 +261,12 @@ class TestPrintSparseAttentionSummaryIntegration:
 
         sparse_model = sparsify(model, config)
 
-        # Set calibrated params (Inverse Power model)
+        # Set calibrated params (Exponential model)
         for module in sparse_model.modules():
             if isinstance(module, SparseAttentionModule):
                 module._sparse_method_instance.calibration_params = {
-                    "prefill": {"k": 150.0, "p": 1.5},
-                    "decode": {"k": 200.0, "p": 1.8},
+                    "prefill": {"a": 150.0, "b": 1.5},
+                    "decode": {"a": 200.0, "b": 1.8},
                 }
                 module._sparse_method_instance.target_sparse_ratio = {
                     "prefill": 0.9,

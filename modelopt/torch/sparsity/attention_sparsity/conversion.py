@@ -244,28 +244,85 @@ def update_sparse_attention_metadata(
 def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
     """Extract sparse attention config for export to config.json.
 
-    Extracts the calibration parameters (k, p) and target_sparse_ratio from the first
-    sparse attention module that has calibrated thresholds.
+    Extracts the calibration parameters (a, b) for the exponential threshold model
+    from the first sparse attention module that has calibrated thresholds.
+
+    The exported config allows computing threshold at runtime:
+        scale_factor = a * exp(b * target_sparsity)
+        threshold = scale_factor / seqlen
 
     Args:
         model: Model with sparse attention applied
 
     Returns:
-        Dictionary with sparse attention config, or None if no calibrated config found.
-        Contains "calibration_params" with k and p per phase, and "target_sparse_ratio".
+        Dictionary with sparse attention config for HuggingFace config.json export.
+        Returns None if no calibrated sparse attention modules found.
+
+    Example output::
+
+        {
+            "config_groups": {
+                "group_0": {"sparse_algo": "softmax_skip", "targets": ["LlamaAttention"]}
+            },
+            "threshold_scale_factor": {
+                "formula": "a * exp(b * target_sparsity)",
+                "prefill": {"a": 7.93, "b": 8.61},
+                "decode": {"a": 0.12, "b": 9.85},
+            },
+            "producer": {"name": "modelopt", "version": "0.37.0"},
+        }
     """
+    import modelopt
+
+    # Collect sparse attention module info
+    calibration_params = None
+    target_classes: set[str] = set()
+
     for module in model.modules():
         if isinstance(module, SparseAttentionModule):
-            calibration_params = getattr(module._sparse_method_instance, "calibration_params", None)
-            target_sparse_ratio = getattr(
-                module._sparse_method_instance, "target_sparse_ratio", None
-            )
-            if calibration_params is not None:
-                return {
-                    "calibration_params": calibration_params,
-                    "target_sparse_ratio": target_sparse_ratio,
-                }
-    return None
+            # Get the original wrapped module's class name
+            if hasattr(module, "get_original_cls_by_level"):
+                original_cls = module.get_original_cls_by_level(level=0)
+                if original_cls is not None:
+                    target_classes.add(original_cls.__name__)
+
+            # Get calibration params from first module that has them
+            if calibration_params is None:
+                calibration_params = getattr(
+                    module._sparse_method_instance, "calibration_params", None
+                )
+
+    # Return None if no calibration params found
+    if calibration_params is None:
+        return None
+
+    # Build threshold_scale_factor with model parameters
+    threshold_scale_factor: dict[str, Any] = {
+        "formula": "a * exp(b * target_sparsity)",
+    }
+    for phase in ["prefill", "decode"]:
+        if phase in calibration_params:
+            threshold_scale_factor[phase] = {
+                "a": calibration_params[phase]["a"],
+                "b": calibration_params[phase]["b"],
+            }
+
+    # Build the export config
+    export_config: dict[str, Any] = {
+        "config_groups": {
+            "group_0": {
+                "sparse_algo": "softmax_skip",
+                "targets": sorted(target_classes) if target_classes else ["Attention"],
+            }
+        },
+        "threshold_scale_factor": threshold_scale_factor,
+        "producer": {
+            "name": "modelopt",
+            "version": modelopt.__version__,
+        },
+    }
+
+    return export_config
 
 
 def disable_sparse_attention(model: nn.Module, wildcard_or_filter_func: str | Callable):
@@ -332,15 +389,15 @@ def _format_threshold(info: dict) -> str:
     """Format threshold info for display."""
     t = info.get("type")
     if t == "dynamic_calibrated":
-        # Inverse Power model: threshold = k / (1 - sparsity)^p / seqlen
+        # Exponential model: threshold = a * exp(b * sparsity) / seqlen
         params = info.get("calibration_params", {})
         target = info.get("target_sparse_ratio", {})
         parts = []
         for phase in ["prefill", "decode"]:
             if phase in params:
-                k, p = params[phase]["k"], params[phase]["p"]
+                a, b = params[phase]["a"], params[phase]["b"]
                 s = target.get(phase, 0.5)
-                parts.append(f"{phase}: k={k:.1f}, p={p:.2f}, target={s:.0%}")
+                parts.append(f"{phase}: a={a:.4f}, b={b:.2f}, target={s:.0%}")
         return f"calibrated({', '.join(parts)})"
     if t == "static":
         v = info.get("value")

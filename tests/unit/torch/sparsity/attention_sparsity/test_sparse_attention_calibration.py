@@ -677,7 +677,7 @@ class TestDynamicThresholdCalibratorMethods:
         """Test that default threshold trials have expected values."""
         calibrator = DynamicThresholdCalibrator()
 
-        # Should have 20 default trials (expanded range for Inverse Power model)
+        # Should have 20 default trials (expanded range for Exponential model)
         assert len(calibrator.threshold_trials) == 20
 
         # Check specific values
