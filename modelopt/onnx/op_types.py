@@ -96,7 +96,7 @@ def is_fusible_scaling_op(op_type: str):
     ]
 
 
-def get_copy_ops():
+def get_copy_ops() -> list[str]:
     """Returns list of copy operators."""
     return [
         "Flatten",
@@ -303,3 +303,67 @@ def is_data_dependent_shape_op(op_type: str):
         "NonZero",
         "RoiAlign",
     ]
+
+
+def get_bool_ops():
+    """Returns set of bool operations."""
+    return {
+        "Not",
+        "And",
+        "Or",
+        "Xor",
+    }
+
+
+def get_bitwise_ops():
+    """Returns set of bitwise operations."""
+    return {
+        "BitwiseAnd",
+        "BitwiseOr",
+        "BitwiseXor",
+        "BitShift",
+    }
+
+
+def get_value_check_ops():
+    """Returns set of value checking operations."""
+    return {
+        "IsNaN",
+        "IsInf",
+        "Sign",
+        "Abs",
+    }
+
+
+def get_comparison_ops():
+    """Returns set of comparison operations."""
+    return {
+        "Equal",
+        "Greater",
+        "GreaterOrEqual",
+        "Less",
+        "LessOrEqual",
+    }
+
+
+def get_conditional_ops():
+    """Returns set of conditional operations."""
+    return {
+        "Where",
+    }
+
+
+def get_aggregation_ops():
+    """Returns set of aggregation operations."""
+    return {
+        "All",
+        "Any",
+    }
+
+
+def get_set_ops():
+    """Returns set of set/search operations."""
+    return {
+        "Unique",
+        "NonZero",
+    }
