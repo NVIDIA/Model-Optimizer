@@ -387,7 +387,7 @@ def get_prequant_scaling_factor(module: nn.Module) -> torch.Tensor:
     if prequant_scaling_factor is not None:
         assert torch.all(prequant_scaling_factor > 0), (
             f"prequant scaling factor {prequant_scaling_factor} not positive."
-    )
+        )
     return prequant_scaling_factor
 
 
@@ -399,12 +399,19 @@ def get_kv_cache_bias(kv_module: nn.Module) -> list[torch.Tensor]:
         kv_bias.append(getattr(quantizer_module, "_bias_value", None))
     return kv_bias
 
+
 def get_kv_cache_scaling_factor(self_attention_module: nn.Module) -> torch.Tensor:
+    """Get the K and V BMM scaling factors for the self attention module.
+
+    Args:
+        self_attention_module: The self attention module to get the K and V BMM scaling factors from.
+
+    Returns:
+        The K and V BMM scaling factors.
     """
-    Returns the k and v BMM scaling factors if BMM quantizers are set in the self attention module. 
-    Else returns None by default.
-    """
-    if not hasattr(self_attention_module, "k_bmm_quantizer") or not hasattr(self_attention_module, "v_bmm_quantizer"):
+    if not hasattr(self_attention_module, "k_bmm_quantizer") or not hasattr(
+        self_attention_module, "v_bmm_quantizer"
+    ):
         return [None, None]
 
     scaling_factors = [
@@ -412,7 +419,6 @@ def get_kv_cache_scaling_factor(self_attention_module: nn.Module) -> torch.Tenso
         for quantizer in ("k_bmm_quantizer", "v_bmm_quantizer")
     ]
     return scaling_factors
-
 
 
 def get_kv_cache_dtype(modules: list[nn.Module] | nn.Module) -> str | None:
@@ -443,6 +449,7 @@ def get_kv_cache_dtype(modules: list[nn.Module] | nn.Module) -> str | None:
                 is_affine &= hasattr(quantizer_attr, "_bias_value")
 
     return _compute_kv_cache_dtype(num_bits_list)
+
 
 def _compute_kv_cache_dtype(num_bits_list: list[int]) -> str | None:
     """Returns the kv_cache dtype.

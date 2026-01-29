@@ -25,11 +25,9 @@ import tempfile
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
-from warnings import warn
 
 import torch
 import torch.distributed
-import torch.nn as nn
 from huggingface_hub import hf_hub_download, snapshot_download
 from safetensors.torch import safe_open, save_file
 from tqdm import tqdm
@@ -37,6 +35,7 @@ from tqdm import tqdm
 from modelopt import __version__
 from modelopt.torch.utils import import_plugin
 
+from .convert_hf_config import convert_hf_quant_config_format
 from .model_config import (
     KV_CACHE_FP8,
     KV_CACHE_NVFP4,
@@ -47,21 +46,18 @@ from .model_config import (
     QUANTIZATION_NVFP4,
 )
 from .plugins.mcore_common import all_mcore_hf_export_mapping
-from .plugins.mcore_custom import CustomModuleMapping, save_safetensors, get_safetensor
+from .plugins.mcore_custom import CustomModuleMapping, get_safetensor, save_safetensors
 from .plugins.megatron_importer import GPTModelImporter
 from .quant_utils import (
     get_activation_scaling_factor,
-    get_kv_cache_scaling_factor,
     get_kv_cache_dtype,
-    get_quant_config,
+    get_kv_cache_scaling_factor,
     get_quantization_format,
-    get_scaling_factor,
     get_weight_block_size,
     get_weight_scaling_factor,
     get_weight_scaling_factor_2,
     to_quantized_weight,
 )
-from .convert_hf_config import convert_hf_quant_config_format
 
 with import_plugin("transformers", verbose=False):
     import transformers
@@ -246,7 +242,6 @@ class GPTModelExporter:
         # Main export process
         state_dict = self.extra_state_dict if self.export_extra_modules else self.state_dict
 
-        
         quantization_format = self._get_quantization_format(self.model)
 
         quantization = None
@@ -301,7 +296,7 @@ class GPTModelExporter:
         for modules in all_exclude_modules:
             if modules:
                 combined_exclude_modules.update(modules)
-        self.exclude_modules = sorted(list(combined_exclude_modules))
+        self.exclude_modules = sorted(combined_exclude_modules)
 
         if is_last_stage_main_rank and quantization is not None:
             # TODO refactor to use mte.quant_utils.get_quant_config
@@ -316,14 +311,13 @@ class GPTModelExporter:
                     "exclude_modules": self.exclude_modules,
                 },
             }
-            if quantization == "NVFP4": # update block size
+            if quantization == "NVFP4":  # update block size
                 self._hf_quant_config["quantization"]["group_size"] = 16
             if hasattr(self, "kv_cache_dtype"):
                 self._hf_quant_config["quantization"]["kv_cache_quant_algo"] = self.kv_cache_dtype
             with open(save_directory + "/hf_quant_config.json", "w") as f:
                 json.dump(self._hf_quant_config, f, indent=4)
 
-            
         if (
             is_first_stage_main_rank
             and self.is_multimodal
@@ -444,7 +438,7 @@ class GPTModelExporter:
         config_json_file = save_directory + "/config.json"
         if self._hf_quant_config and os.path.exists(config_json_file):
             converted_quant_config = convert_hf_quant_config_format(self._hf_quant_config)
-            with open(config_json_file, "r") as f:
+            with open(config_json_file) as f:
                 config_dict = json.load(f)
             config_dict["quantization_config"] = converted_quant_config
             with open(config_json_file, "w") as f:
@@ -493,7 +487,7 @@ class GPTModelExporter:
                 self._get_transformer_layer_state_dict(layer, layer_id)
             else:
                 raise ValueError("Only TransformerLayer or MambaLayer are supported.")
-        
+
         # MTP layer
         self._get_mtp_state_dict()
 
@@ -504,29 +498,19 @@ class GPTModelExporter:
         if not isinstance(layer.self_attention, IdentityOp):
             if "MLASelfAttention" in str(type(layer.self_attention)):
                 if hasattr(layer.self_attention, "linear_q_proj"):
-                    self.rules["linear_q_proj"](
-                        layer.self_attention.linear_q_proj, layer_id
-                    )
+                    self.rules["linear_q_proj"](layer.self_attention.linear_q_proj, layer_id)
                 else:
                     self.rules["linear_q_down_proj"](
                         layer.self_attention.linear_q_down_proj, layer_id
                     )
-                    self.rules["linear_q_layernorm"](
-                        layer.self_attention.q_layernorm, layer_id
-                    )
-                    self.rules["linear_q_up_proj"](
-                        layer.self_attention.linear_q_up_proj, layer_id
-                    )
+                    self.rules["linear_q_layernorm"](layer.self_attention.q_layernorm, layer_id)
+                    self.rules["linear_q_up_proj"](layer.self_attention.linear_q_up_proj, layer_id)
 
                 self.rules["linear_kv_down_proj"](
                     layer.self_attention.linear_kv_down_proj, layer_id
                 )
-                self.rules["linear_kv_layernorm"](
-                    layer.self_attention.kv_layernorm, layer_id
-                )
-                self.rules["linear_kv_up_proj"](
-                    layer.self_attention.linear_kv_up_proj, layer_id
-                )
+                self.rules["linear_kv_layernorm"](layer.self_attention.kv_layernorm, layer_id)
+                self.rules["linear_kv_up_proj"](layer.self_attention.linear_kv_up_proj, layer_id)
                 self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
             else:
                 if layer.self_attention.q_layernorm is not None and not isinstance(
@@ -538,10 +522,7 @@ class GPTModelExporter:
                 if hasattr(layer.self_attention, "core_attention"):
                     self.rules["core_attention"](layer.self_attention.core_attention, layer_id)
                 self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
-                if (
-                    getattr(layer.self_attention.core_attention, "softmax_offset", None)
-                    is not None
-                ):
+                if getattr(layer.self_attention.core_attention, "softmax_offset", None) is not None:
                     self.rules["softmax_offset"](
                         layer.self_attention.core_attention.softmax_offset, layer_id
                     )
@@ -551,17 +532,12 @@ class GPTModelExporter:
 
         if not isinstance(layer.mlp, IdentityOp):
             if "MoE" in str(type(layer.mlp)):
-                self.rules["router"](
-                    layer.mlp.router, layer_id, dtype=self.moe_router_dtype
-                )
+                self.rules["router"](layer.mlp.router, layer_id, dtype=self.moe_router_dtype)
                 if hasattr(layer.mlp, "fc1_latent_proj") and layer.mlp.fc1_latent_proj is not None:
                     self.rules["fc1_latent_proj"](layer.mlp.fc1_latent_proj, layer_id)
                 if hasattr(layer.mlp, "fc2_latent_proj") and layer.mlp.fc2_latent_proj is not None:
                     self.rules["fc2_latent_proj"](layer.mlp.fc2_latent_proj, layer_id)
-                if (
-                    hasattr(layer.mlp, "shared_experts")
-                    and layer.mlp.shared_experts is not None
-                ):
+                if hasattr(layer.mlp, "shared_experts") and layer.mlp.shared_experts is not None:
                     self.rules["shared_experts.linear_fc1"](
                         layer.mlp.shared_experts.linear_fc1, layer_id
                     )
@@ -589,34 +565,34 @@ class GPTModelExporter:
                 self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id)
 
     def _get_mtp_state_dict(self):
-        """
-        Export the MTP module. 
-        
+        """Export the MTP module.
+
         Currently, we copy the BF16 MTP weights from the pretrained model.
         """
         # TODO Implement MTP export for quantized MTP
         # Hacky version for now: copy MTP weights from pretrained model
         if os.path.isdir(self._hf_pretrained_model_name):
-            safetensors_index_file = Path(self._hf_pretrained_model_name) / "model.safetensors.index.json"
+            safetensors_index_file = (
+                Path(self._hf_pretrained_model_name) / "model.safetensors.index.json"
+            )
         else:
             safetensors_index_file = hf_hub_download(
-            repo_id=self._hf_pretrained_model_name, 
-            filename="model.safetensors.index.json")
+                repo_id=self._hf_pretrained_model_name, filename="model.safetensors.index.json"
+            )
 
         print(f"Exporting MTP: using safetensors_index_file: {safetensors_index_file}")
         mtp_exists = False
         if safetensors_index_file and os.path.exists(safetensors_index_file):
-            with open(safetensors_index_file, "r") as f:
+            with open(safetensors_index_file) as f:
                 safetensors_index = json.load(f)
             model_dir = Path(safetensors_index_file).parent
             for key in safetensors_index["weight_map"]:
                 if key.startswith("mtp.") and key not in self._state_dict:
                     self._state_dict[key] = get_safetensor(model_dir, key)
                     mtp_exists = True
-        
+
         if mtp_exists:
             self.exclude_modules.append("mtp*")
-
 
     def _get_mamba_layer_state_dict(self, layer, layer_id):
         if not isinstance(layer.norm, IdentityOp):
@@ -797,7 +773,11 @@ class GPTModelExporter:
         if hasattr(module, "bias") and module.bias is not None and module.bias.numel() > 0:
             name_to_value["bias"] = module.bias.to(dtype).cpu()
 
-        if hasattr(module, "expert_bias") and module.expert_bias is not None and module.expert_bias.numel() > 0:
+        if (
+            hasattr(module, "expert_bias")
+            and module.expert_bias is not None
+            and module.expert_bias.numel() > 0
+        ):
             name_to_value["expert_bias"] = module.expert_bias.to(dtype).cpu()
 
         if qformat == QUANTIZATION_NONE:
@@ -818,8 +798,7 @@ class GPTModelExporter:
             # TODO (chenhany): support AWQ with pre_quant_scale
             if hasattr(module.input_quantizer, "_pre_quant_scale"):
                 raise ValueError("Detect pre_quant_scale! SmoothQuant/AWQ are not yet supported!")
-            
-        
+
         return name_to_value, qformat, block_size
 
     def _get_quantization_format(self, module: torch.nn.Module):
@@ -892,7 +871,9 @@ class GPTModelExporter:
     def _gated_mlp_slicing(
         self, module, prefix, gate_proj_name="gate_proj", up_proj_name="up_proj"
     ):
-        name_to_value, qformat, block_size = self._get_quantized_state(module, self.dtype, prefix=prefix)
+        name_to_value, qformat, block_size = self._get_quantized_state(
+            module, self.dtype, prefix=prefix
+        )
 
         weight = name_to_value.pop("weight")
         weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
@@ -954,8 +935,10 @@ class GPTModelExporter:
         q_proj_name="q_proj",
         k_proj_name="k_proj",
         v_proj_name="v_proj",
-            ):
-        name_to_value, qformat, block_size = self._get_quantized_state(module, self.dtype, prefix=prefix)
+    ):
+        name_to_value, qformat, block_size = self._get_quantized_state(
+            module, self.dtype, prefix=prefix
+        )
 
         q_proj_prefix = prefix + q_proj_name + "."
         k_proj_prefix = prefix + k_proj_name + "."
@@ -1065,7 +1048,9 @@ class GPTModelExporter:
                 self._state_dict[k_proj_key] = val.detach().clone()
                 self._state_dict[v_proj_key] = val.detach().clone()
 
-    def _self_attention_scaling(self, module, prefix, k_scale_name="k_scale", v_scale_name="v_scale"):
+    def _self_attention_scaling(
+        self, module, prefix, k_scale_name="k_scale", v_scale_name="v_scale"
+    ):
         """KV cache scaling for CoreAttention module."""
         k_scale_key = prefix + k_scale_name
         v_scale_key = prefix + v_scale_name
@@ -1258,9 +1243,6 @@ class GPTModelExporter:
         if merged_bias is not None:
             # TODO: May need to modify the key name later.
             self._state_dict[prefix + "_bias"] = merged_bias
-
-
-
 
 
 def export_mcore_gpt_to_hf(

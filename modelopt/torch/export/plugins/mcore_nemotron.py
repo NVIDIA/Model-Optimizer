@@ -23,10 +23,10 @@ from .mcore_custom import (
     ROW_ETP,
     ROW_TP,
     CustomModuleMapping,
+    GroupedMLPMerging,
     NameRemapping,
     QKVMerging,
     QKVSlicing,
-    GroupedMLPMerging,
     SelfAttentionScaling,
 )
 
@@ -87,17 +87,20 @@ nemotron_h_causal_lm_import: dict[str, CustomModuleMapping] = {
     "fc1_latent_proj": NameRemapping("backbone.layers.{}.mixer.fc1_latent_proj.", REPLICATE),
     "fc2_latent_proj": NameRemapping("backbone.layers.{}.mixer.fc2_latent_proj.", REPLICATE),
     # Repeated MTP module
-    "mtp.enorm": NameRemapping("mtp.layers.{}.enorm.",  {"is_mtp": True}),
-    "mtp.hnorm": NameRemapping("mtp.layers.{}.hnorm.",  {"is_mtp": True}),
-    "mtp.eh_proj": NameRemapping("mtp.layers.{}.eh_proj.",  {"is_mtp": True}),
-    "mtp.final_layernorm": NameRemapping("mtp.layers.{}.final_layernorm.",  {"is_mtp": True}),
+    "mtp.enorm": NameRemapping("mtp.layers.{}.enorm.", {"is_mtp": True}),
+    "mtp.hnorm": NameRemapping("mtp.layers.{}.hnorm.", {"is_mtp": True}),
+    "mtp.eh_proj": NameRemapping("mtp.layers.{}.eh_proj.", {"is_mtp": True}),
+    "mtp.final_layernorm": NameRemapping("mtp.layers.{}.final_layernorm.", {"is_mtp": True}),
     # Grouped local experts in MTP
-    "experts.linear_fc1": GroupedMLPMerging("mtp.layers.{}.mixer.experts.{{}}.up_proj", COL_ETP | {"is_mtp": True}),
-    "experts.linear_fc2": GroupedMLPMerging("mtp.layers.{}.mixer.experts.{{}}.down_proj", ROW_ETP | {"is_mtp": True}),
-
+    "experts.linear_fc1": GroupedMLPMerging(
+        "mtp.layers.{}.mixer.experts.{{}}.up_proj", COL_ETP | {"is_mtp": True}
+    ),
+    "experts.linear_fc2": GroupedMLPMerging(
+        "mtp.layers.{}.mixer.experts.{{}}.down_proj", ROW_ETP | {"is_mtp": True}
+    ),
 }
 
-# TODO ADD MTP export 
+# TODO ADD MTP export
 
 nemotron_h_causal_lm_export: dict[str, CustomModuleMapping] = {
     "word_embeddings": NameRemapping("backbone.embeddings."),
@@ -139,5 +142,4 @@ nemotron_h_causal_lm_export: dict[str, CustomModuleMapping] = {
     "mtp.hnorm": NameRemapping("mtp.layers.{}.hnorm."),
     "mtp.eh_proj": NameRemapping("mtp.layers.{}.eh_proj."),
     "mtp.final_layernorm": NameRemapping("mtp.layers.{}.final_layernorm."),
-
 }

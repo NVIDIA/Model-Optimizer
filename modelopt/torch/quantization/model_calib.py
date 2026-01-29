@@ -100,7 +100,6 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
             quantizer.sync_amax_across_distributed_group(parallel_state.expert_model_parallel_group)
         # TODO: create sync_bias_across_distributed_group
 
-    
     # Step 2:Sync amax across data parallelism
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):

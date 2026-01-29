@@ -102,6 +102,7 @@ class QKVMerging(CustomModuleMapping):
             func_kwargs=func_kwargs,
         )
 
+
 class GroupedMLPMerging(CustomModuleMapping):
     """A custom module mapping that merges up_proj and down_proj for Grouped MLP."""
 
@@ -112,6 +113,8 @@ class GroupedMLPMerging(CustomModuleMapping):
             target_name_or_prefix=target_name_or_prefix,
             func_kwargs=func_kwargs,
         )
+
+
 class GatedMLPMerging(CustomModuleMapping):
     """A custom module mapping that merges gate_proj and up_proj."""
 
@@ -135,8 +138,10 @@ class QKVSlicing(CustomModuleMapping):
             func_kwargs=func_kwargs,
         )
 
+
 class SelfAttentionScaling(CustomModuleMapping):
     """A custom module mapping that scales self attention."""
+
     def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
         """Create a custom module mapping that scales self attention."""
         super().__init__(
@@ -144,6 +149,7 @@ class SelfAttentionScaling(CustomModuleMapping):
             target_name_or_prefix=target_name_or_prefix,
             func_kwargs=func_kwargs,
         )
+
 
 class GatedMLPSlicing(CustomModuleMapping):
     """A custom module mapping that slices gate_proj and up_proj."""

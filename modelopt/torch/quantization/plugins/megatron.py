@@ -23,7 +23,6 @@ from typing import Any
 import megatron.core.parallel_state as mcore_parallel
 import megatron.core.tensor_parallel.layers as megatron_parallel
 import megatron.core.transformer.mlp as megatron_mlp
-import megatron.core.transformer.transformer_layer as megatron_transformer_layer
 import megatron.core.transformer.moe.experts as megatron_moe
 import megatron.core.transformer.moe.moe_layer as megatron_moe_layer
 import torch
@@ -41,7 +40,6 @@ from modelopt.torch.opt.plugins.megatron import (
     register_modelopt_extra_state_callbacks,
 )
 from modelopt.torch.utils.distributed import ParallelState
-import torch.distributed as dist
 
 from ..nn import QuantModule, QuantModuleRegistry, TensorQuantizer
 from ..nn.modules.quant_linear import RealQuantLinear
@@ -50,11 +48,11 @@ from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear
 
 try:
     from megatron.core.extensions.transformer_engine import (
-        TELinear,
         TEColumnParallelGroupedLinear,
         TEColumnParallelLinear,
         TEDotProductAttention,
         TELayerNormColumnParallelLinear,
+        TELinear,
         TERowParallelGroupedLinear,
         TERowParallelLinear,
     )
