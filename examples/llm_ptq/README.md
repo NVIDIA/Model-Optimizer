@@ -110,6 +110,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 | QwQ | ✅ | - | - | - | ✅ |
 | DeepSeek V3, R1, V3.1, V3.2<sup>7</sup> | - | - | - | - | ✅ |
 | Kimi K2 | - | - | - | - | ✅ |
+| MiniMax M2.1 | - | - | - | - | ✅ |
 | T5 | ✅ | ✅ | ✅ | ✅ | - |
 | Whisper | ✅ | ❌ | ❌ | ❌ | - |
 
