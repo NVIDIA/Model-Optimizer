@@ -131,7 +131,7 @@ def _test_unified_export_megatron(
         model,
         tmp_path if arch is not None else None,
         dtype=torch.bfloat16,
-        export_dir=tmp_export_dir,
+        export_dir=str(tmp_export_dir),
     )
 
     _verify_model_configs(tmp_export_dir, quant_config, kv_cache_quant_cfg)
