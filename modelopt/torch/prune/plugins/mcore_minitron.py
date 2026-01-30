@@ -224,19 +224,19 @@ MCoreMinitronConfig: type[ModeloptBaseConfig] = create_model(
         registry=DMRegistry,
         default_rules={
             "megatron.core.models.gpt.GPTModel": {
-                "hidden_size_divisor": 64,
+                "hidden_size_divisor": 1,
                 "num_heads_per_group_divisor": 1,
                 "num_query_groups_divisor": 1,
-                "ffn_hidden_size_divisor": 64,
+                "ffn_hidden_size_divisor": 1,
                 "num_moe_experts_divisor": 1,
             },
             **(
                 {
                     "megatron.core.models.mamba.MambaModel": {
-                        "hidden_size_divisor": 64,
+                        "hidden_size_divisor": 1,
                         "num_heads_per_group_divisor": 1,
                         "num_query_groups_divisor": 1,
-                        "ffn_hidden_size_divisor": 64,
+                        "ffn_hidden_size_divisor": 1,
                         "mamba_num_heads_divisor": 4,
                         "mamba_head_dim_divisor": 4,
                         "num_moe_experts_divisor": 1,
