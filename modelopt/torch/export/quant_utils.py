@@ -418,6 +418,18 @@ def get_kv_cache_scaling_factor(self_attention_module: nn.Module) -> list[torch.
         get_scaling_factor(getattr(self_attention_module, quantizer))
         for quantizer in ("k_bmm_quantizer", "v_bmm_quantizer")
     ]
+
+    # For FP8, we recommend default kv cache scaling factor to be 1.
+    if get_kv_cache_dtype(kv_module) == KV_CACHE_FP8:
+        for i, factor in enumerate(scaling_factors):
+            if factor.item() > 0.5:
+                warn(
+                    f"Warning: Large KV activation detected: {factor.item()}, "
+                    "Quantized KV cache may lead to higher accuracy drop."
+                )
+            scaling_factors[i] = torch.max(
+                factor, torch.tensor([1.0], dtype=torch.float, device=factor.device)
+            )
     return scaling_factors
 
 
@@ -1020,6 +1032,17 @@ def postprocess_state_dict(
 
                     value = value.float() / maxbound
 
+                    # Warn if scale exceeds threshold
+                    if quantization == KV_CACHE_FP8 and value.item() > 0.5:
+                        logger.warning(
+                            "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop. "
+                            "Setting KV cache scaling factor to at least 1."
+                        )
+
+                    # Ensure scale is at least 1 for KV_CACHE_FP8
+                    # We export real value for KV_CACHE_NVFP4
+                    if quantization == KV_CACHE_FP8:
+                        value.clamp_(min=1.0)
                 post_state_dict[prefix + new_suffix] = value
                 break
 

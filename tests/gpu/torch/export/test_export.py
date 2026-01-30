@@ -222,7 +222,7 @@ def test_get_scaling_factor_from_weight(weight, group_size, expected):
             KV_CACHE_FP8,
             128.0,
             {
-                "layer1.k_proj.k_scale": torch.tensor([0.001]),
+                "layer1.k_proj.k_scale": torch.tensor([1.0]),
                 "layer1.v_proj.v_scale": torch.tensor([2.0]),
             },
         ),

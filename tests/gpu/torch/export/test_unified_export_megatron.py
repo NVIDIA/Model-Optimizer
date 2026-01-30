@@ -129,7 +129,7 @@ def _test_unified_export_megatron(
     tmp_export_dir = tmp_path / "export"
     export_mcore_gpt_to_hf(
         model,
-        tmp_path / "pretrained" if arch is not None else None,
+        tmp_path if arch is not None else None,
         dtype=torch.bfloat16,
         export_dir=tmp_export_dir,
     )
