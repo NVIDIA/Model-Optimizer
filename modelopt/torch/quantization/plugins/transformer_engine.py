@@ -156,23 +156,61 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         _assert_te_fp8_enabled()
         idx = 1 if func_name == "_forward" else 0
         inp = args[idx]
-        num_gemms = len(args[idx + 1])
-        weights_and_biases = args[-2 * num_gemms :]
-        weights, biases = weights_and_biases[:num_gemms], weights_and_biases[num_gemms:]
-        quantized_inputs = self.input_quantizer(inp)
-        quantized_weights = [self.weight_quantizer(weight) for weight in weights]
+        non_tensor_args = args[idx + 1]
+        num_gemms = len(non_tensor_args)
 
-        output = getattr(package, func_name)(
-            *(
+        # For TE GroupedLinear, args structure is:
+        # [inp, non_tensor_args, *weight_tensors, *bias_tensors]
+        # The remaining args after non_tensor_args are weights and biases
+        remaining_args = args[idx + 2 :]
+
+        # When len(args) >= 2 * num_gemms + idx + 2, use original slicing
+        # Otherwise, we need to parse weights/biases from remaining_args
+        if len(args) >= 2 * num_gemms + idx + 2:
+            # Original logic works fine (ep=1 case)
+            weights_and_biases = args[-2 * num_gemms :]
+            weights = list(weights_and_biases[:num_gemms])
+            biases = list(weights_and_biases[num_gemms:])
+            middle_args = args[idx + 2 : -2 * num_gemms]
+        else:
+            # Short args case (ep > 1): all remaining args are weights and biases
+            # Split remaining_args in half - first half weights, second half biases
+            half = len(remaining_args) // 2
+            weights = list(remaining_args[:half])
+            biases = list(remaining_args[half:])
+            middle_args = []
+
+        # Quantize input
+        quantized_inputs = self.input_quantizer(inp)
+
+        # Quantize only actual weight tensors (non-empty, proper tensors)
+        quantized_weights = []
+        for w in weights:
+            if isinstance(w, torch.Tensor) and w.numel() > 0:
+                quantized_weights.append(self.weight_quantizer(w))
+            else:
+                quantized_weights.append(w)  # Keep empty/placeholder tensors as-is
+
+        # Build output args
+        if func_name == "_forward":
+            output_args = (
                 args[0],
                 quantized_inputs,
+                non_tensor_args,
+                *middle_args,
+                *quantized_weights,
+                *biases,
             )
-            if func_name == "_forward"
-            else (quantized_inputs,),
-            *args[idx + 1 : -2 * num_gemms],
-            *quantized_weights,
-            *biases,
-        )
+        else:
+            output_args = (
+                quantized_inputs,
+                non_tensor_args,
+                *middle_args,
+                *quantized_weights,
+                *biases,
+            )
+
+        output = getattr(package, func_name)(*output_args)
         return self.output_quantizer(output)
 
     # Override the quantized linear function
