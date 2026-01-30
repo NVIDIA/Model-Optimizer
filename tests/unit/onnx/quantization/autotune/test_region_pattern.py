@@ -149,7 +149,7 @@ class TestRegionPattern(unittest.TestCase):
         """Create a test region."""
         region = Region(region_id, level, region_type)
         if node_indices:
-            region.add_nodes(node_indices)
+            region.nodes.update(node_indices)
         return region
 
     # =========================================================================

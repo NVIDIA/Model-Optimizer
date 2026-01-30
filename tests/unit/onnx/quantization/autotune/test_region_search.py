@@ -172,7 +172,7 @@ class TestTopDownRegionBuilder(unittest.TestCase):
         # Create a root region with all nodes
         root = Region(region_id=0, level=0, region_type=RegionType.LEAF)
         for idx in range(len(graph.nodes)):
-            root.add_node(idx)
+            root.nodes.add(idx)
 
         builder = TopDownRegionBuilder(graph, root)
 
@@ -397,8 +397,7 @@ class TestPrintTree(unittest.TestCase):
 
         # Create a root region with all nodes
         root = Region(region_id=0, level=0, region_type=RegionType.LEAF)
-        for idx in range(len(graph.nodes)):
-            root.add_node(idx)
+        root.nodes.update(range(len(graph.nodes)))
 
         builder = TopDownRegionBuilder(graph, root)
         # Compute region I/O boundaries before building

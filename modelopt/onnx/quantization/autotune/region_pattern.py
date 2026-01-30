@@ -24,8 +24,8 @@ from modelopt.onnx.op_types import get_symmetric_ops
 from modelopt.onnx.quantization.autotune.common import InsertionScheme, Region
 from modelopt.onnx.quantization.autotune.insertion_points import (
     ChildRegionInputInsertionPoint,
+    ChildRegionOutputInsertionPoint,
     NodeInputInsertionPoint,
-    RegionOutputInsertionPoint,
     ResolvedInsertionPoint,
 )
 
@@ -173,7 +173,7 @@ class RegionPattern:
         scheme.child_region_inputs = ChildRegionInputInsertionPoint.collect_from_region(
             region, graph
         )
-        scheme.region_outputs = RegionOutputInsertionPoint.collect_from_region(region, graph)
+        scheme.region_outputs = ChildRegionOutputInsertionPoint.collect_from_region(region, graph)
 
         return scheme
 

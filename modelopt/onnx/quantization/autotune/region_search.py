@@ -58,12 +58,8 @@ class RegionSearchBase:
     def _build_root_region(self) -> Region:
         """Create a root region containing all nodes in the graph."""
         root = Region(region_id=0, level=0, region_type=RegionType.ROOT)
-        for node_idx in range(len(self.graph.nodes)):
-            root.add_node(node_idx)
-        for tensor_name in root.inputs:
-            root.add_input(tensor_name)
-        for tensor_name in root.outputs:
-            root.add_output(tensor_name)
+        root.nodes.update(range(len(self.graph.nodes)))
+        self.compute_region_boundaries(root)
         return root
 
     def _is_tensor_divergent(self, tensor_name: str) -> bool:
@@ -376,7 +372,7 @@ class RegionPartitioner(RegionSearchBase):
             logger.debug(f"Started region {self.current_region_id}")
             self.current_region_id += 1
 
-        self.current_region.add_node(node_idx)
+        self.current_region.nodes.add(node_idx)
         logger.debug(
             f"  Added node {node_idx} ({node.op}), region size: {len(self.current_region.nodes)}"
         )
@@ -576,7 +572,7 @@ class TopDownRegionBuilder(RegionSearchBase):
         )
         self.next_region_id += 1
         for node_idx in node_indices:
-            region.add_node(node_idx)
+            region.nodes.add(node_idx)
         self.compute_region_boundaries(region)
         return region
 
@@ -600,7 +596,7 @@ class TopDownRegionBuilder(RegionSearchBase):
             region = Region(
                 region_id=self.next_region_id, level=root.level + 1, region_type=RegionType.LEAF
             )
-            region.add_node(node_idx)
+            region.nodes.add(node_idx)
             self.compute_region_boundaries(region)
             result_regions.append(region)
             self.next_region_id += 1

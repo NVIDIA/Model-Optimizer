@@ -34,8 +34,8 @@ from .common import (
 )
 from .insertion_points import (
     ChildRegionInputInsertionPoint,
+    ChildRegionOutputInsertionPoint,
     NodeInputInsertionPoint,
-    RegionOutputInsertionPoint,
     ResolvedInsertionPoint,
 )
 from .region_pattern import RegionPattern
@@ -45,6 +45,7 @@ __all__ = [
     "AutotunerError",
     "AutotunerNotInitializedError",
     "ChildRegionInputInsertionPoint",
+    "ChildRegionOutputInsertionPoint",
     "CombinedRegionSearch",
     "Config",
     "InsertionScheme",
@@ -53,7 +54,6 @@ __all__ = [
     "PatternCache",
     "PatternSchemes",
     "Region",
-    "RegionOutputInsertionPoint",
     "RegionPattern",
     "RegionType",
     "ResolvedInsertionPoint",

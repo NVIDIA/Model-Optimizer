@@ -26,8 +26,8 @@ import yaml
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.autotune.insertion_points import (
     ChildRegionInputInsertionPoint,
+    ChildRegionOutputInsertionPoint,
     NodeInputInsertionPoint,
-    RegionOutputInsertionPoint,
     ResolvedInsertionPoint,
 )
 
@@ -88,7 +88,14 @@ class Region:
         self.metadata: dict[str, str] = {}
 
     def get_children(self, *, sort: bool = False) -> list["Region"]:
-        """Get all child regions."""
+        """Get all child regions. If sort is True, sort the children by level and size.
+
+        Args:
+            sort: Whether to sort the children by level and size
+
+        Returns:
+            List of child regions
+        """
         if sort:
             return sorted(
                 self.children, key=lambda r: (-r.level, r.get_size_of_region_and_descendants())
@@ -143,14 +150,6 @@ class Region:
             current = current.parent
         return False
 
-    def add_node(self, node_index: int) -> None:
-        """Add a node index to this region."""
-        self.nodes.add(node_index)
-
-    def add_nodes(self, node_indices: list[int]) -> None:
-        """Add multiple node indices to this region."""
-        self.nodes.update(node_indices)
-
     def get_nodes(self, *, sort: bool = False) -> list[int]:
         """Get direct node indices in this region only."""
         if sort:
@@ -178,16 +177,6 @@ class Region:
     def contains_node_within_region_and_descendants(self, node_index: int) -> bool:
         """Check if region contains a node recursively."""
         return node_index in self.get_region_nodes_and_descendants()
-
-    def add_input(self, tensor_name: str) -> None:
-        """Add an input tensor name."""
-        if tensor_name not in self.inputs:
-            self.inputs.append(tensor_name)
-
-    def add_output(self, tensor_name: str) -> None:
-        """Add an output tensor name."""
-        if tensor_name not in self.outputs:
-            self.outputs.append(tensor_name)
 
     def get_size_of_region_and_descendants(self, _visited: set[int] | None = None) -> int:
         """Get total node count recursively including all descendants."""
@@ -228,34 +217,41 @@ class Region:
         node operations, and hierarchical structure. Regions with identical
         signatures can share Q/DQ insertion schemes.
 
-        The signature captures:
-        - Node operation types and key parameters
-        - Hierarchical structure (child regions)
-        - Deterministic ordering (sorted for consistency)
-
         Args:
             graph: The ONNX graph containing the region's nodes
 
         Returns:
             Signature string (e.g., "Conv->BatchNorm->Relu" or "COMPOSITE(...)")
         """
-        raise NotImplementedError("Not implemented")
+        from modelopt.onnx.quantization.autotune.region_pattern import RegionPattern
+
+        return RegionPattern.from_region(self, graph).signature
 
 
 @dataclass
 class InsertionScheme:
-    """Q/DQ insertion specification applied to all regions matching a pattern."""
+    """Complete Q/DQ insertion specification for a region pattern.
+
+    An InsertionScheme defines a complete Q/DQ configuration for a pattern,
+    combining both node-level and region-level insertion points. The scheme
+    is applied to all regions matching the pattern.
+    """
 
     node_inputs: list[NodeInputInsertionPoint] = field(default_factory=list)
     child_region_inputs: list[ChildRegionInputInsertionPoint] = field(default_factory=list)
-    region_outputs: list[RegionOutputInsertionPoint] = field(default_factory=list)
+    region_outputs: list[ChildRegionOutputInsertionPoint] = field(default_factory=list)
     latency_ms: float = float("inf")
     error: bool = False
     profile_timestamp: str | None = None
 
     @property
     def hash(self) -> str:
-        """Compute deterministic hash for scheme identity."""
+        """Compute deterministic hash for scheme identity.
+
+        The hash uniquely identifies this scheme configuration based on its
+        insertion points. Two schemes with identical insertion points produce
+        the same hash, regardless of their measured latencies.
+        """
         sorted_nodes = sorted([(pt.node_index, pt.input_index) for pt in self.node_inputs])
         sorted_regions = sorted(
             [(pt.region_index, pt.input_index) for pt in self.child_region_inputs]
@@ -275,7 +271,11 @@ class InsertionScheme:
 
     @property
     def is_profiled(self) -> bool:
-        """Check if this scheme has been profiled (measured)."""
+        """Check if this scheme has been profiled (measured).
+
+        A scheme is considered profiled if it has been measured (has non-infinite latency)
+        or has encountered an error during measurement.
+        """
         return self.error or self.latency_ms != float("inf")
 
     def to_dict(self) -> dict[str, Any]:
@@ -306,13 +306,24 @@ class InsertionScheme:
             for pt in data.get("child_region_inputs", [])
         ]
         scheme.region_outputs = [
-            RegionOutputInsertionPoint.from_dict(pt) for pt in data.get("region_outputs", [])
+            ChildRegionOutputInsertionPoint.from_dict(pt) for pt in data.get("region_outputs", [])
         ]
 
         return scheme
 
     def distance(self, other: "InsertionScheme") -> int:
-        """Compute edit distance between this scheme and another scheme."""
+        """Compute edit distance between this scheme and another scheme.
+
+        The edit distance is the minimum number of add/remove operations needed
+        to transform this scheme into the other scheme. This is computed as the
+        symmetric difference between the insertion point sets.
+
+        Args:
+            other: InsertionScheme to compare against
+
+        Returns:
+            Total edit distance (number of add + remove operations)
+        """
         return (
             len(set(self.node_inputs).symmetric_difference(other.node_inputs))
             + len(set(self.child_region_inputs).symmetric_difference(other.child_region_inputs))
@@ -402,14 +413,6 @@ class PatternSchemes:
     def has_schemes(self) -> bool:
         """Check if any schemes have been added."""
         return len(self.schemes) > 0
-
-    def add_scheme(self, scheme: InsertionScheme) -> None:
-        """Add a scheme to the collection.
-
-        Args:
-            scheme: InsertionScheme to add
-        """
-        self.schemes.append(scheme)
 
     def get_measured_schemes(self) -> list[InsertionScheme]:
         """Get schemes that have been measured (finite latency).
