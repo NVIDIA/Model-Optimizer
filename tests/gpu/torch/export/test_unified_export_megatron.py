@@ -24,6 +24,7 @@ import transformers
 from _test_utils.import_helper import skip_if_no_megatron
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
+from _test_utils.torch.megatron.utils import get_forward
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
 
 skip_if_no_megatron(apex_or_te_required=True)
@@ -43,8 +44,14 @@ def _verify_model_quant_config(
     config_dict = json.load(open(export_dir / "config.json"))
     hf_quant_config_dict = json.load(open(export_dir / "hf_quant_config.json"))
     # Make sure config.json and hf_quant_config.json are consistent
-    assert config_dict["quantization_config"]["quant_algo"] == hf_quant_config_dict["quantization"]["quant_algo"]
-    assert config_dict["quantization_config"]["ignore"] == hf_quant_config_dict["quantization"]["exclude_modules"]
+    assert (
+        config_dict["quantization_config"]["quant_algo"]
+        == hf_quant_config_dict["quantization"]["quant_algo"]
+    )
+    assert (
+        config_dict["quantization_config"]["ignore"]
+        == hf_quant_config_dict["quantization"]["exclude_modules"]
+    )
 
     # Verify config.json
     if kv_cache_quant_cfg:
@@ -103,7 +110,8 @@ def _test_unified_export_megatron(
             quant_config_dict = mtq.utils.update_quant_cfg_with_kv_cache_quant(
                 quant_config_dict, kv_quant_cfg
             )
-        model = mtq.quantize(model, quant_config_dict)
+        forward = get_forward(model)
+        model = mtq.quantize(model, quant_config_dict, forward)
 
     if extra_module == "medusa":
         config = {
