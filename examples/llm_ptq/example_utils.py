@@ -459,7 +459,9 @@ def _patch_compressed_linear_init():
         return  # Already patched
 
     # Patch __getattr__ to return dummy for weight access
-    original_getattr = getattr(CompressedLinear, "__getattr__", None)
+    if not hasattr(CompressedLinear, "_modelopt_original_getattr"):
+        CompressedLinear._modelopt_original_getattr = getattr(CompressedLinear, "__getattr__", None)
+    original_getattr = CompressedLinear._modelopt_original_getattr
 
     class DummyWeightData:
         """Dummy tensor data that accepts initialization calls like .normal_(), .zero_()."""
@@ -493,6 +495,21 @@ def _patch_compressed_linear_init():
     CompressedLinear.__getattr__ = patched_getattr
     CompressedLinear._modelopt_init_patched = True
     print("Patched CompressedLinear for transformers compatibility")
+def _restore_compressed_linear():
+    """Restore original CompressedLinear behavior after loading."""
+    try:
+        from compressed_tensors.linear.compressed_linear import CompressedLinear
+        if hasattr(CompressedLinear, "_modelopt_original_getattr"):
+            CompressedLinear.__getattr__ = CompressedLinear._modelopt_original_getattr
+            delattr(CompressedLinear, "_modelopt_original_getattr")
+        elif hasattr(CompressedLinear, "__getattr__"):
+            # If it didn't have one before, delete the patched one
+            del CompressedLinear.__getattr__
+        CompressedLinear._modelopt_init_patched = False
+        print("Restored CompressedLinear original state")
+    except Exception:
+        pass
+
 
 
 def _unpack_compressed_linear_weights(model, ckpt_path=None):
@@ -556,10 +573,30 @@ def _unpack_compressed_linear_weights(model, ckpt_path=None):
             # CASE B: Expert (stay compressed, fix metadata)
             elif f"{name}.weight_shape" in checkpoint_weights:
                 ws = checkpoint_weights[f"{name}.weight_shape"]
-                if "weight_shape" in module._parameters:
-                    del module._parameters["weight_shape"]
-                module.weight_shape = [int(x) for x in ws.tolist()]
+                # Restore int32 packed weights if present
+                if f"{name}.weight_packed" in checkpoint_weights:
+                    module.weight_packed = checkpoint_weights[f"{name}.weight_packed"].to(torch.int32)
+                # Ensure no stale BF16 weight is registered for compressed experts
+                module._parameters.pop("weight", None)
+                module._buffers.pop("weight", None)
+                module.__dict__.pop("weight", None)
+                # Register weight_shape as int32 parameter for compressed_tensors forward
+                shape_param = torch.nn.Parameter(ws.to(torch.int32), requires_grad=False)
+                module._parameters.pop("weight_shape", None)
+                module.__dict__.pop("weight_shape", None)
+                module._parameters["weight_shape"] = shape_param
+                module.__dict__["weight_shape"] = shape_param
                 # Keep status as COMPRESSED for on-the-fly decompression
+
+    # Ensure compressed experts do not carry a stale weight attribute
+    for name, module in model.named_modules():
+        if not isinstance(module, CompressedLinear):
+            continue
+        if getattr(module, "quantization_status", None) != QuantizationStatus.COMPRESSED:
+            continue
+        module._parameters.pop("weight", None)
+        module._buffers.pop("weight", None)
+        module.__dict__.pop("weight", None)
 
 def get_model(
     ckpt_path,
@@ -659,6 +696,8 @@ def get_model(
                 trust_remote_code=trust_remote_code,
                 torch_dtype="auto",
             )
+            # Restore original CompressedLinear behavior after loading
+            _restore_compressed_linear()
         else:
             architecture = hf_config.architectures[0]
 

@@ -907,6 +907,9 @@ class _QuantCompressedLinear(QuantModule):
                     if hasattr(self.quantization_scheme, "weights"):
                         quant_args = self.quantization_scheme.weights
                 
+                if not hasattr(self, "_logged_on_the_fly"):
+                    print(f"[on-the-fly-decompress] {self.__class__.__name__}")
+                    self._logged_on_the_fly = True
                 weight_data = self.compressor.decompress_weight(
                     compressed_data=compressed_data,
                     quantization_args=quant_args,
