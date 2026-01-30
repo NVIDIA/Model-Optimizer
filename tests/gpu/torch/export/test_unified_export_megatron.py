@@ -36,7 +36,7 @@ from modelopt.torch.speculative.plugins.megatron_eagle import _DynamicEagleGPTMo
 from modelopt.torch.speculative.plugins.megatron_medusa import _DynamicMedusaGPTModel
 
 
-def _verify_model_configs(
+def _verify_model_quant_config(
     export_dir: Path, quant_config: str | None = None, kv_cache_quant_cfg: str | None = None
 ):
     """Verify config.json and hf_quant_config.json"""
@@ -89,7 +89,7 @@ def _test_unified_export_megatron(
         transformer_impl="modelopt",
     ).cuda()
 
-    if quant_config is not None:
+    if quant_config:
         quant_config_dict = getattr(mtq, quant_config)
         if kv_cache_quant_cfg:
             kv_quant_cfg = getattr(mtq, kv_cache_quant_cfg)["quant_cfg"]
@@ -134,7 +134,8 @@ def _test_unified_export_megatron(
         export_dir=str(tmp_export_dir),
     )
 
-    _verify_model_configs(tmp_export_dir, quant_config, kv_cache_quant_cfg)
+    if quant_config:
+        _verify_model_quant_config(tmp_export_dir, quant_config, kv_cache_quant_cfg)
 
 
 @pytest.mark.parametrize(

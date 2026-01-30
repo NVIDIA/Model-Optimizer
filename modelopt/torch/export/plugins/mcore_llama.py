@@ -30,6 +30,7 @@ from .mcore_custom import (
     PackNameRemapping,
     QKVMerging,
     QKVSlicing,
+    SelfAttentionScaling,
     UnpackNameRemapping,
 )
 
@@ -39,7 +40,7 @@ llama_causal_lm_export: dict[str, CustomModuleMapping] = {
     "linear_qkv": QKVSlicing("model.layers.{}.self_attn."),
     "linear_proj": NameRemapping("model.layers.{}.self_attn.o_proj."),
     # KV cache quant export
-    "core_attention": NameRemapping("model.layers.{}.self_attn."),
+    "core_attention": SelfAttentionScaling("model.layers.{}.self_attn."),
     "pre_mlp_layernorm": NameRemapping("model.layers.{}.post_attention_layernorm."),
     "linear_fc1": GatedMLPSlicing("model.layers.{}.mlp."),
     "linear_fc2": NameRemapping("model.layers.{}.mlp.down_proj."),
