@@ -155,12 +155,8 @@ def _test_puzzletron_multiprocess_job(
             solution_0_ckpt_config_path = (
                 solution_dir / "solutions--checkpoints/solution_0/config.json"
             )
-            assert solution_0_ckpt_config_path.exists(), (
-                f"Expected {solution_0_ckpt_config_path} to exist"
-            )
-            assert (solution_dir / "solutions.json").exists(), (
-                f"Expected {solution_dir / 'solutions.json'} to exist"
-            )
+            assert solution_0_ckpt_config_path.exists()
+            assert (solution_dir / "solutions.json").exists()
         else:
             # assertions for the score_pruning_activations step 1 (FFN pruning)
             _assert_score_pruning_activations(puzzle_dir, hf_config_name)
