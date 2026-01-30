@@ -52,6 +52,7 @@ try:
         TEColumnParallelLinear,
         TEDotProductAttention,
         TELayerNormColumnParallelLinear,
+        TELinear,
         TERowParallelGroupedLinear,
         TERowParallelLinear,
     )
@@ -574,12 +575,15 @@ class _MegatronSequentialMLP(DynamicModule):
             expert.linear_fc1.parallel_state = self.parallel_state
             expert.linear_fc2.parallel_state = self.parallel_state
 
-    def sync_moe_local_experts_amax(self):
+    def layer_sync_moe_local_experts_amax(self):
         """Sync amax across local experts in a SequentialMLP.
 
-        amax across EP and ETP (for RowParallel) are synchronized as part of model_calib.max_calibrate().
-        This function is called to synchronize the amax values across local experts s.t. all localexperts will
-        share the same amax.
+        Synchronize the amax values across local experts in a lyaer such that all local experts will
+        share the same amax. This function operates on a single rank and does not require distributed sync.
+
+        Distributed amax sync across EP and ETP (for RowParallel) happens in model_calib.max_calibrate().
+        This function should be called before the distributed sync to ensure the amax values
+        are synchronized across the layer first.
         """
         # Collect amax from all local experts
         amax_dict = {}
@@ -617,6 +621,10 @@ class _MegatronSequentialMLP(DynamicModule):
 
 
 if HAS_TE:
+
+    @QuantModuleRegistry.register({TELinear: "te_mcore_Linear"})
+    class _QuantTEMCoreLinear(_QuantTELinear):
+        pass
 
     @QuantModuleRegistry.register({TERowParallelLinear: "te_mcore_RowParallelLinear"})
     class _QuantTEMCoreRowParallelLinear(_QuantTELinear, _MegatronRowParallelLinear):
