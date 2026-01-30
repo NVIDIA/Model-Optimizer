@@ -60,31 +60,43 @@ def cleanup_after_test():
     "command",
     [
         *ModelDeployerList(
-            model_id="nvidia/DeepSeek-R1-FP4",
+            model_id="nvidia/DeepSeek-R1-NVFP4",
             backend=("vllm", "trtllm", "sglang"),
             tensor_parallel_size=8,
             mini_sm=100,
         ),
         *ModelDeployerList(
-            model_id="nvidia/DeepSeek-R1-FP4-v2",
+            model_id="nvidia/DeepSeek-R1-NVFP4-v2",
             backend=("vllm", "trtllm", "sglang"),
             tensor_parallel_size=8,
             mini_sm=100,
         ),
         *ModelDeployerList(
-            model_id="nvidia/DeepSeek-R1-0528-FP4",
+            model_id="nvidia/DeepSeek-R1-0528-NVFP4",
             backend=("vllm", "trtllm", "sglang"),
             tensor_parallel_size=8,
             mini_sm=100,
         ),
         *ModelDeployerList(
-            model_id="nvidia/DeepSeek-R1-0528-FP4-v2",
+            model_id="nvidia/DeepSeek-R1-0528-NVFP4-v2",
             backend=("vllm", "trtllm", "sglang"),
             tensor_parallel_size=8,
             mini_sm=100,
         ),
         *ModelDeployerList(
-            model_id="nvidia/DeepSeek-V3-0324-FP4",
+            model_id="nvidia/DeepSeek-V3-0324-NVFP4",
+            backend=("vllm", "trtllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/DeepSeek-V3.1-NVFP4",
+            backend=("vllm", "trtllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/DeepSeek-V3.2-NVFP4",
             backend=("vllm", "trtllm", "sglang"),
             tensor_parallel_size=8,
             mini_sm=100,
@@ -107,7 +119,7 @@ def test_deepseek(command):
             mini_sm=89,
         ),
         *ModelDeployerList(
-            model_id="nvidia/Llama-3.1-8B-Instruct-FP4",
+            model_id="nvidia/Llama-3.1-8B-Instruct-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=1,
             mini_sm=100,
@@ -119,7 +131,7 @@ def test_deepseek(command):
             tensor_parallel_size=4,
         ),
         *ModelDeployerList(
-            model_id="nvidia/Llama-3.3-70B-Instruct-FP4",
+            model_id="nvidia/Llama-3.3-70B-Instruct-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=4,
             mini_sm=100,
@@ -136,7 +148,7 @@ def test_deepseek(command):
             tensor_parallel_size=8,
         ),
         *ModelDeployerList(
-            model_id="nvidia/Llama-3.1-405B-Instruct-FP4",
+            model_id="nvidia/Llama-3.1-405B-Instruct-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=8,
             mini_sm=100,
@@ -148,7 +160,7 @@ def test_deepseek(command):
             tensor_parallel_size=8,
         ),
         *ModelDeployerList(
-            model_id="nvidia/Llama-4-Maverick-17B-128E-Instruct-FP4",
+            model_id="nvidia/Llama-4-Maverick-17B-128E-Instruct-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=8,
             mini_sm=100,
@@ -160,7 +172,7 @@ def test_deepseek(command):
             mini_sm=89,
         ),
         *ModelDeployerList(
-            model_id="nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
+            model_id="nvidia/Llama-4-Scout-17B-16E-Instruct-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=8,
             mini_sm=100,
@@ -176,7 +188,7 @@ def test_llama(command):
     "command",
     [
         *ModelDeployerList(
-            model_id="nvidia/Qwen3-8B-FP4",
+            model_id="nvidia/Qwen3-8B-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=1,
             mini_sm=100,
@@ -188,7 +200,7 @@ def test_llama(command):
             mini_sm=89,
         ),
         *ModelDeployerList(
-            model_id="nvidia/Qwen3-14B-FP4",
+            model_id="nvidia/Qwen3-14B-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=1,
             mini_sm=100,
@@ -200,7 +212,7 @@ def test_llama(command):
             mini_sm=89,
         ),
         *ModelDeployerList(
-            model_id="nvidia/Qwen3-235B-A22B-FP4",
+            model_id="nvidia/Qwen3-235B-A22B-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=2,
             mini_sm=100,
@@ -212,16 +224,16 @@ def test_llama(command):
             mini_sm=89,
         ),
         *ModelDeployerList(
-            model_id="nvidia/QwQ-32B-FP4", backend=("trtllm", "vllm", "sglang"), mini_sm=100
+            model_id="nvidia/QwQ-32B-NVFP4", backend=("trtllm", "vllm", "sglang"), mini_sm=100
         ),
         *ModelDeployerList(
-            model_id="nvidia/Qwen3-32B-FP4",
+            model_id="nvidia/Qwen3-32B-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=4,
             mini_sm=100,
         ),
         *ModelDeployerList(
-            model_id="nvidia/Qwen2.5-VL-7B-Instruct-FP4",
+            model_id="nvidia/Qwen2.5-VL-7B-Instruct-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=4,
             mini_sm=100,
@@ -233,9 +245,21 @@ def test_llama(command):
             mini_sm=100,
         ),
         *ModelDeployerList(
-            model_id="nvidia/Qwen3-30B-A3B-FP4",
+            model_id="nvidia/Qwen3-30B-A3B-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=4,
+            mini_sm=100,
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/Qwen3-Next-80B-A3B-Thinking-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
             mini_sm=100,
         ),
     ],
@@ -252,11 +276,10 @@ def test_qwen(command):
             model_id="nvidia/Mixtral-8x7B-Instruct-v0.1-FP8", backend=("trtllm", "vllm", "sglang")
         ),
         *ModelDeployerList(
-            model_id="nvidia/Mixtral-8x7B-Instruct-v0.1-FP4",
+            model_id="nvidia/Mixtral-8x7B-Instruct-v0.1-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             mini_sm=100,
         ),
-        #   ModelDeployer(model_id="nvidia/Mixtral-8x7B-Instruct-v0.1-FP8", backend="sglang"), unsupported
     ],
     ids=idfn,
 )
@@ -266,9 +289,9 @@ def test_mixtral(command):
 
 @pytest.mark.parametrize(
     "command",
-    [  # TRTLLM bug: https://nvbugs/5451286
+    [
         *ModelDeployerList(
-            model_id="nvidia/gemma-3-12b-it-FP4",
+            model_id="nvidia/gemma-3-12b-it-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=1,
             mini_sm=100,
@@ -282,7 +305,7 @@ def test_mixtral(command):
             attn_backend="FLASHINFER",
         ),
         *ModelDeployerList(
-            model_id="nvidia/gemma-3-27b-it-FP4",
+            model_id="nvidia/gemma-3-27b-it-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=1,
             mini_sm=100,
@@ -307,7 +330,7 @@ def test_gemma(command):
     "command",
     [
         *ModelDeployerList(
-            model_id="nvidia/Phi-4-multimodal-instruct-FP4",
+            model_id="nvidia/Phi-4-multimodal-instruct-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=1,
             mini_sm=100,
@@ -319,7 +342,7 @@ def test_gemma(command):
             mini_sm=89,
         ),
         *ModelDeployerList(
-            model_id="nvidia/Phi-4-reasoning-plus-FP4",
+            model_id="nvidia/Phi-4-reasoning-plus-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=1,
             mini_sm=100,
@@ -341,7 +364,7 @@ def test_phi(command):
     "command",
     [
         *ModelDeployerList(
-            model_id="nvidia/Kimi-K2-Instruct-FP4",
+            model_id="nvidia/Kimi-K2-Instruct-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=8,
             mini_sm=100,
@@ -376,18 +399,19 @@ def test_kimi(command):
         ),
         *ModelDeployerList(
             model_id="nvidia/Llama-3_1-Nemotron-Ultra-253B-v1-FP8",
-            backend=("trtllm", "vllm", "sglang"),
-            tensor_parallel_size=4,
-            mini_sm=89,
-        ),
-        *ModelDeployerList(
-            model_id="nvidia/Llama-3_1-Nemotron-Ultra-253B-v1-FP8",
             backend=("vllm",),
             tensor_parallel_size=8,
             mini_sm=89,
         ),
         *ModelDeployerList(
             model_id="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=1,
+            mini_sm=89,
+            attn_backend="FLASHINFER",
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
             backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=1,
             mini_sm=89,
@@ -449,6 +473,14 @@ def test_medusa(command):
         *ModelDeployerList(
             base_model="Qwen/Qwen3-235B-A22B-Thinking-2507",
             model_id="nvidia/Qwen3-235B-A22B-Thinking-2507-Eagle3",
+            backend=("trtllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=89,
+            eagle3_one_model=False,
+        ),
+        *ModelDeployerList(
+            base_model="Qwen/Qwen3-235B-A22B-Thinking-2507",
+            model_id="nvidia/Qwen3-235B-A22B-Thinking-2507-FP4-Eagle3",
             backend=("trtllm", "sglang"),
             tensor_parallel_size=8,
             mini_sm=89,
