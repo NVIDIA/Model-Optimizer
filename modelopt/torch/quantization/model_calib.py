@@ -62,12 +62,10 @@ def weight_only_quantize(model: nn.Module):
         seen_modules.add(module)
 
 
-def _is_moe_submodule(module: nn.Module) -> bool:
-    """Check if a module is an MoE submodule."""
-    parallel_state = getattr(module, "parallel_state", None)
-    if parallel_state is None:
-        return False
-    return parallel_state.expert_model_parallel_group.is_initialized()
+def _has_expert_parallelism(module: nn.Module) -> bool:
+    """Check if module has expert parallelism enabled."""
+    ps = getattr(module, "parallel_state", None)
+    return ps is not None and ps.expert_model_parallel_group.is_initialized()
 
 
 def _check_moe_calibration_complete(quantizer, parallel_state):
@@ -76,8 +74,11 @@ def _check_moe_calibration_complete(quantizer, parallel_state):
         for _q in quantizer:
             _check_moe_calibration_complete(_q, parallel_state)
         return
-    for group in [parallel_state.data_parallel_group, parallel_state.expert_model_parallel_group,
-                  parallel_state.tensor_parallel_group]:
+    for group in [
+        parallel_state.data_parallel_group,
+        parallel_state.expert_model_parallel_group,
+        parallel_state.tensor_parallel_group,
+    ]:
         if not group.is_initialized():
             continue
         has_amax = getattr(quantizer, "_amax", None) is not None
@@ -118,7 +119,7 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
 
     # Check MoE calibration completeness before sync
     for name, module in model.named_modules():
-        if isinstance(module, QuantModule) and _is_moe_submodule(module):
+        if isinstance(module, QuantModule) and _has_expert_parallelism(module):
             for child in module.children():
                 if isinstance(child, (TensorQuantizer, SequentialQuantizer)):
                     _check_moe_calibration_complete(child, module.parallel_state)
