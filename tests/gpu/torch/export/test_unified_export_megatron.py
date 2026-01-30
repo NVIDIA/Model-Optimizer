@@ -42,8 +42,15 @@ def _verify_model_quant_config(
     """Verify config.json and hf_quant_config.json"""
     config_dict = json.load(open(export_dir / "config.json"))
     hf_quant_config_dict = json.load(open(export_dir / "hf_quant_config.json"))
-    assert config_dict["quantization_config"] == hf_quant_config_dict
-    assert hf_quant_config_dict["producer"]["name"] == "modelopt"
+    # Make sure config.json and hf_quant_config.json are consistent
+    assert config_dict["quantization_config"]["quant_algo"] == hf_quant_config_dict["quantization"]["quant_algo"]
+    assert config_dict["quantization_config"]["ignore"] == hf_quant_config_dict["quantization"]["exclude_modules"]
+
+    # Verify config.json
+    if kv_cache_quant_cfg:
+        assert config_dict["quantization_config"]["kv_cache_scheme"]["num_bits"] == 8
+
+    # Verify hf_quant_config.json
     if quant_config:
         quant_config_dict = hf_quant_config_dict["quantization"]
         quant_type = quant_config_dict["quant_algo"]
