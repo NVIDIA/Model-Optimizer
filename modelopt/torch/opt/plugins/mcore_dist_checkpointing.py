@@ -39,7 +39,6 @@ SUPPORTED_WRAPPERS[Float16Module] = "module"
 DROP_SUBSTRINGS = [
     "fp4",
     "fp8",
-    "tp_",
     "parallel",
     "cuda_graph",
     "init_",
@@ -49,6 +48,10 @@ DROP_SUBSTRINGS = [
     "pipeline",
     "comm",
     "batch",
+    "pg_collection",
+]
+DROP_STARTSWITH = [
+    "tp_",  # would drop 'mtp_*' otherwise
 ]
 
 
@@ -144,6 +147,8 @@ def save_sharded_modelopt_state(
 
         for k, v in transformer_config.items():
             if any(substring in k for substring in DROP_SUBSTRINGS):
+                continue
+            if any(k.startswith(prefix) for prefix in DROP_STARTSWITH):
                 continue
             if isinstance(v, (bool, int, str)):
                 config[k] = v
