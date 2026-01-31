@@ -16,6 +16,8 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add support for calibration data with multiple samples in ``npz`` format in the ONNX Autocast workflow.
 - Add ``--opset`` option to ONNX quantization CLI to specify the target opset version for the quantized model.
 - Add support for context parallelism in Eagle speculative decoding for huggingface and megatron core models.
+- Add unified Hugging Face export support for diffusers pipelines/components.
+- Add LTX-2 and Wan2.2 (T2V) support in the diffusers quantization workflow.
 
 0.41 (2026-01-19)
 ^^^^^^^^^^^^^^^^^

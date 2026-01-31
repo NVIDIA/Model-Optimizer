@@ -229,9 +229,7 @@ def weight_attr_names(module: nn.Module) -> Generator[str, None, None]:
     # the standard weight and quantizer case
     weight = getattr(module, "weight", None)
     weight_quantizer = getattr(module, "weight_quantizer", None)
-    if isinstance(weight, nn.Parameter) and isinstance(
-        weight_quantizer, (TensorQuantizer, SequentialQuantizer)
-    ):
+    if isinstance(weight_quantizer, (TensorQuantizer, SequentialQuantizer)):
         yield "weight"
 
     # other weight and quantizer case
