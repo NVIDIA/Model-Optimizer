@@ -37,6 +37,16 @@ DEFAULT_SCALE = 1.0
 
 __all__ = []
 
+try:
+    from megatron.core.extensions.transformer_engine import (
+        TEColumnParallelLinear,
+        TERowParallelLinear,
+    )
+
+    HAS_TE = True
+except ImportError:
+    HAS_TE = False
+
 
 def megatron_replace_lora_module_hook(model: torch.nn.Module):
     """Configure Megatron-Core model PEFT/LoRA support.
@@ -240,6 +250,14 @@ class _LoRAMegatronRowParallelLinear(_MegatronParallelLoRABase):
 
         return sharded_state_dict
 
+
+if HAS_TE:
+    LoRAModuleRegistry.register({TEColumnParallelLinear: "te_mcore_ColumnParallelLinear"})(
+        _LoRAMegatronColumnParallelLinear
+    )
+    LoRAModuleRegistry.register({TERowParallelLinear: "te_mcore_RowParallelLinear"})(
+        _LoRAMegatronRowParallelLinear
+    )
 
 # Register quantized versions if available
 LoRAModuleRegistry.register({QuantColumnParallelLinear: "quant_megatron_ColumnParallelLinear"})(
