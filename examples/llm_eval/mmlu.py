@@ -48,6 +48,7 @@ import pandas as pd
 from fire import Fire
 from modeling import EvalModel, select_model
 from quantization_utils import MAX_SEQ_LEN, get_tokenizer, quantize_model
+from sparse_attention_utils import sparsify_model
 from tqdm import tqdm
 
 try:
@@ -56,6 +57,7 @@ except ImportError:
     LLM = None  # type: ignore[misc]
 import modelopt.torch.opt as mto
 from modelopt.torch.quantization.utils import is_quantized
+from modelopt.torch.sparsity.attention_sparsity.conversion import is_attn_sparsified
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -230,6 +232,7 @@ def main(
     auto_quantize_method: str = "gradient",
     auto_quantize_score_size: int = 128,
     auto_quantize_checkpoint: str | None = None,
+    sparse_cfg: str | None = None,
     **kwargs,
 ):
     random.seed(RAND_SEED)
@@ -287,6 +290,20 @@ def main(
                     auto_quantize_method=auto_quantize_method,
                     auto_quantize_score_size=auto_quantize_score_size,
                     auto_quantize_checkpoint=auto_quantize_checkpoint,
+                )
+
+        # Apply sparse attention if requested
+        if sparse_cfg:
+            model.load()
+
+            if is_attn_sparsified(model.model):
+                warnings.warn(
+                    "Skipping sparse attention: model already has sparse attention applied."
+                )
+            else:
+                sparsify_model(
+                    model=model,
+                    sparse_cfg=sparse_cfg,
                 )
 
     for subject in tqdm(subjects):
