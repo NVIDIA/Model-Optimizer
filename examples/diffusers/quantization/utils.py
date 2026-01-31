@@ -25,7 +25,7 @@ from diffusers.models.lora import LoRACompatibleConv, LoRACompatibleLinear
 from diffusers.utils import load_image
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.plugins.diffusers import AttentionModuleMixin
+from modelopt.torch.quantization.plugins.diffusion.diffusers import AttentionModuleMixin
 
 USE_PEFT = True
 try:
@@ -69,7 +69,9 @@ def check_conv_and_mha(backbone, if_fp4, quantize_mha):
 
 def filter_func_ltx_video(name: str) -> bool:
     """Filter function specifically for LTX-Video models."""
-    pattern = re.compile(r".*(proj_in|time_embed|caption_projection|proj_out).*")
+    pattern = re.compile(
+        r".*(proj_in|time_embed|caption_projection|proj_out|patchify_proj|adaln_single).*"
+    )
     return pattern.match(name) is not None
 
 
