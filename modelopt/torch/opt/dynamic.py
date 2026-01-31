@@ -630,7 +630,6 @@ class DynamicModule(nn.Module):
                 # accelerate patched module
                 bind_forward_method(self, self.__class__.forward)
             else:
-                # https://github.com/NVIDIA/Model-Optimizer/pull/824
                 if not hasattr(self, "_forward_pre_dm"):
                     # Keep the patched forward for downstream modules that want to call it.
                     self._forward_pre_dm = self.forward
