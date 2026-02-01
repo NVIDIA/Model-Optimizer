@@ -72,6 +72,13 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
         },
         "preprocess": lambda sample: "\n".join(turn["value"] for turn in sample["conversations"]),
     },
+    "ultrachat_200k": {
+        "config": {
+            "path": "HuggingFaceH4/ultrachat_200k",
+            "split": ["train_sft"],
+        },
+        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+    },
     "cnn_dailymail": {
         "config": {"path": "abisee/cnn_dailymail", "name": "3.0.0", "split": ["train"]},
         "preprocess": lambda sample: sample["article"],
