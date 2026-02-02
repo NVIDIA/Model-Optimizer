@@ -953,7 +953,7 @@ def test_convert_mcore_te_gpt_model(distributed_setup_size_1):
 
     for n, m in model.named_modules():
         if isinstance(m, TERowParallelLinear):
-            assert isinstance(m, _QuantTEMCoreRowParallelLinear)
+            assert isinstance(m, _QuantTEMCoreRowParallelLinear), f"{m=}, {type(m)}"
             assert m.input_quantizer.amax is not None
             assert m.weight_quantizer.amax is not None
 

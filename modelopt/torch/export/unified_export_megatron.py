@@ -142,7 +142,7 @@ class GPTModelExporter:
         self.is_multimodal = isinstance(model, LLaVAModel)
         if not self.is_multimodal:
             self._hf_text_config.intermediate_size = model.config.ffn_hidden_size
-        self._hf_quant_config = None
+        self._hf_quant_config: dict = None
         self._hf_extra_config = None
         self.export_extra_modules = export_extra_modules
         self.is_multimodal = isinstance(model, LLaVAModel)

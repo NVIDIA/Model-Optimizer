@@ -622,16 +622,16 @@ class _MegatronSequentialMLP(DynamicModule):
 
 if HAS_TE:
 
-    @QuantModuleRegistry.register({TELinear: "te_mcore_Linear"})
-    class _QuantTEMCoreLinear(_QuantTELinear):
-        pass
-
     @QuantModuleRegistry.register({TERowParallelLinear: "te_mcore_RowParallelLinear"})
     class _QuantTEMCoreRowParallelLinear(_QuantTELinear, _MegatronRowParallelLinear):
         pass
 
     @QuantModuleRegistry.register({TEColumnParallelLinear: "te_mcore_ColumnParallelLinear"})
     class _QuantTEMCoreColumnParallelLinear(_QuantTELinear, _MegatronColumnParallelLinear):
+        pass
+
+    @QuantModuleRegistry.register({TELinear: "te_mcore_Linear"})
+    class _QuantTEMCoreLinear(_QuantTELinear):
         pass
 
     @QuantModuleRegistry.register(

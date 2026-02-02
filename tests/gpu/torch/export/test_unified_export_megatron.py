@@ -69,7 +69,7 @@ def _verify_model_quant_config(
             assert quant_config_dict["group_size"] == 16
 
         if kv_cache_quant_cfg:
-            assert quant_config["kv_cache_quant_algo"] == KV_CACHE_FP8
+            assert quant_config_dict["kv_cache_quant_algo"] == KV_CACHE_FP8
 
 
 def _test_unified_export_megatron(
