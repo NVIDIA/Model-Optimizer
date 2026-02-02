@@ -1080,13 +1080,15 @@ def insert_transpose_nodes_for_column_major(graph: gs.Graph):
                 continue
             dq_nodes_processed.add(producer_node.name)
 
-            # For Gemm nodes, check if transB is already set
+            # For Gemm nodes with transB=1, flip to transB=0 since weights are already transposed
+            # Original: Gemm expects W and internally computes A @ W^T
+            # After column-major: weight is W^T, so set transB=0 to use W^T directly -> A @ W^T
             if node.op == "Gemm":
-                trans_b = False
-                if hasattr(node, "attrs") and "transB" in node.attrs:
-                    trans_b = node.attrs["transB"] > 0
-                if trans_b:
-                    logger.debug(f"Gemm node {node.name} already has transB=1, skipping")
+                if hasattr(node, "attrs") and "transB" in node.attrs and node.attrs["transB"] > 0:
+                    logger.debug(
+                        f"Gemm node {node.name} has transB=1, flipping to transB=0 for column-major"
+                    )
+                    node.attrs["transB"] = 0
                     continue
 
             # Get weight shape and dtype from DQ output
