@@ -142,7 +142,7 @@ class GPTModelExporter:
         self.is_multimodal = isinstance(model, LLaVAModel)
         if not self.is_multimodal:
             self._hf_text_config.intermediate_size = model.config.ffn_hidden_size
-        self._hf_quant_config: dict = None
+        self._hf_quant_config: dict = {}
         self._hf_extra_config = None
         self.export_extra_modules = export_extra_modules
         self.is_multimodal = isinstance(model, LLaVAModel)
@@ -478,8 +478,9 @@ class GPTModelExporter:
             else:
                 raise ValueError("Only TransformerLayer or MambaLayer are supported.")
 
-        # Get MTP layer if exists
-        self._get_mtp_state_dict()
+        # Get MTP layer if exists. Only on rank 0 to avoid duplicate weights.
+        if torch.distributed.get_rank() == 0:
+            self._get_mtp_state_dict()
 
     def _get_transformer_layer_state_dict(self, layer, layer_id):
         if not isinstance(layer.input_layernorm, IdentityOp):
