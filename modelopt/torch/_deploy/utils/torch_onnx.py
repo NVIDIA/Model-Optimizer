@@ -567,8 +567,8 @@ def get_onnx_bytes_and_metadata(
     if dq_only:
         onnx_opt_graph = qdq_to_dq(onnx_opt_graph)
 
-    assert weights_dtype == "fp16", (
-        "Only FP16 weights are supported for torch quantization -> onnx export"
+    assert weights_dtype in ["fp16", "fp32"], (
+        "Only FP16 and FP32 weights are supported for torch quantization -> onnx export"
     )
     onnx_opt_graph = convert_float_to_float16(
         onnx_opt_graph,
