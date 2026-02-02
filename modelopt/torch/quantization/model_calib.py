@@ -17,7 +17,6 @@
 
 import math
 import os
-import types
 import warnings
 from functools import partial
 
@@ -1345,7 +1344,7 @@ class LayerActivationGettr:
         self.model = model
 
     @staticmethod
-    def _patch_layer(layer: torch.nn.Module, stop_after_collection: bool = False):
+    def _patch_and_initialize_layer(layer: torch.nn.Module, stop_after_collection: bool = False):
         """Patch a layer to collect inputs and outputs during forward passes.
 
         Args:
@@ -1367,17 +1366,15 @@ class LayerActivationGettr:
                 raise StopIteration()
             return output
 
-        layer._original_forward = layer.forward
-        layer.forward = types.MethodType(_forward_w_data_collection, layer)
+        bind_forward_method(layer, _forward_w_data_collection, "_original_forward")
         layer.inputs = []
         layer.outputs = []
         layer._stop_after_collection = stop_after_collection
 
     @staticmethod
-    def _unpatch_layer(layer: torch.nn.Module):
+    def _unpatch_and_cleanup_layer(layer: torch.nn.Module):
         """Restore a layer's original forward method and clean up."""
-        layer.forward = layer._original_forward
-        del layer._original_forward
+        unpatch_forward_method(layer, "_original_forward")
         del layer.inputs
         del layer.outputs
         if hasattr(layer, "_stop_after_collection"):
@@ -1398,21 +1395,20 @@ class LayerActivationGettr:
         Returns:
             List of (args, kwargs) tuples representing inputs to the layer.
         """
-        # Wrap model forward to catch StopIteration per-batch
-        original_forward = self.model.forward
 
-        def _early_stop_forward(*args, **kwargs):
+        # Wrap model forward to catch StopIteration per-batch
+        def _early_stop_forward(self, *args, **kwargs):
             try:
-                return original_forward(*args, **kwargs)
+                return self._original_forward(*args, **kwargs)
             except StopIteration:
                 return None  # Stop propagation but allow next batch
 
-        self.model.forward = _early_stop_forward
-        self._patch_layer(layer, stop_after_collection=True)
+        bind_forward_method(self.model, _early_stop_forward, "_original_forward")
+        self._patch_and_initialize_layer(layer, stop_after_collection=True)
         forward_loop(self.model)
         inputs = layer.inputs.copy()
-        self._unpatch_layer(layer)
-        self.model.forward = original_forward
+        self._unpatch_and_cleanup_layer(layer)
+        unpatch_forward_method(self.model, "_original_forward")
         return inputs
 
     def get_output_activations(self, layer: torch.nn.Module, inputs: list) -> list:
@@ -1428,11 +1424,11 @@ class LayerActivationGettr:
         Returns:
             List of outputs from the layer - one per batch.
         """
-        self._patch_layer(layer, stop_after_collection=False)
+        self._patch_and_initialize_layer(layer, stop_after_collection=False)
         for args, kwargs in inputs:
             layer(*args, **kwargs)
         outputs = layer.outputs.copy()
-        self._unpatch_layer(layer)
+        self._unpatch_and_cleanup_layer(layer)
         return outputs
 
 

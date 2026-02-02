@@ -15,6 +15,7 @@
 
 """Tests for LayerActivationGettr."""
 
+import pytest
 import torch
 from torch import nn
 
@@ -35,12 +36,12 @@ class SimpleModel(nn.Module):
         return x
 
 
-def test_patch_layer():
-    """Test that _patch_layer adds expected attributes."""
+def test_patch_and_unpatch_layer():
+    """Test that _patch_layer adds expected attributes and that unpatching removes them."""
     model = SimpleModel()
     layer = model.layer1
 
-    LayerActivationGettr._patch_layer(layer)
+    LayerActivationGettr._patch_and_initialize_layer(layer)
 
     assert hasattr(layer, "_original_forward")
     assert hasattr(layer, "inputs")
@@ -49,16 +50,7 @@ def test_patch_layer():
     assert layer.inputs == []
     assert layer.outputs == []
 
-    LayerActivationGettr._unpatch_layer(layer)
-
-
-def test_unpatch_layer():
-    """Test that _unpatch_layer removes attributes."""
-    model = SimpleModel()
-    layer = model.layer1
-
-    LayerActivationGettr._patch_layer(layer)
-    LayerActivationGettr._unpatch_layer(layer)
+    LayerActivationGettr._unpatch_and_cleanup_layer(layer)
 
     assert not hasattr(layer, "_original_forward")
     assert not hasattr(layer, "inputs")
@@ -66,12 +58,15 @@ def test_unpatch_layer():
     assert not hasattr(layer, "_stop_after_collection")
 
 
-def test_patch():
+@pytest.mark.parametrize("stop_after_collection", [False])
+def test_patch(stop_after_collection):
     """Test that patched layer collects inputs and outputs."""
     model = SimpleModel()
     layer = model.layer1
 
-    LayerActivationGettr._patch_layer(layer, stop_after_collection=False)
+    LayerActivationGettr._patch_and_initialize_layer(
+        layer, stop_after_collection=stop_after_collection
+    )
 
     x = torch.ones(2, 4)
     output = layer(x)
@@ -81,7 +76,7 @@ def test_patch():
     assert torch.equal(layer.inputs[0][0][0], x)
     assert torch.equal(layer.outputs[0], output)
 
-    LayerActivationGettr._unpatch_layer(layer)
+    LayerActivationGettr._unpatch_and_cleanup_layer(layer)
 
 
 def test_get_input_activations():
