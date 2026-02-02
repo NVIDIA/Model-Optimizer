@@ -377,6 +377,10 @@ class GPTModelExporter:
             # Add multimodal components to state_dict
             state_dict.update(multimodal_state_dict)
 
+            mtp_state_dict = self._get_mtp_state_dict()
+            state_dict.update(mtp_state_dict)
+            print(f"Successfully loaded {len(mtp_state_dict)} MTP tensors")
+
         # Barrier to ensure the export_dir has been created.
         torch.distributed.barrier()
 
@@ -478,9 +482,7 @@ class GPTModelExporter:
             else:
                 raise ValueError("Only TransformerLayer or MambaLayer are supported.")
 
-        # Get MTP layer if exists. Only on rank 0 to avoid duplicate weights.
-        if torch.distributed.get_rank() == 0:
-            self._get_mtp_state_dict()
+        # TODO export MTP layer in the future
 
     def _get_transformer_layer_state_dict(self, layer, layer_id):
         if not isinstance(layer.input_layernorm, IdentityOp):
@@ -558,13 +560,14 @@ class GPTModelExporter:
                 self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id)
                 self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id)
 
-    def _get_mtp_state_dict(self):
+    def _get_mtp_state_dict(self) -> dict[str, torch.Tensor]:
         """Export the MTP module.
 
         Currently, we copy the BF16 MTP weights from the pretrained model if the pretrained model has MTP layers.
         """
         # TODO Implement MTP export for quantized MTP
         # Hacky version for now: copy MTP weights from pretrained model
+        mtp_state_dict = {}
         if self._hf_pretrained_model_name:
             if os.path.isdir(self._hf_pretrained_model_name):
                 safetensors_index_file = (
@@ -583,11 +586,12 @@ class GPTModelExporter:
                 model_dir = Path(safetensors_index_file).parent
                 for key in safetensors_index["weight_map"]:
                     if key.startswith("mtp.") and key not in self._state_dict:
-                        self._state_dict[key] = get_safetensor(model_dir, key)
+                        mtp_state_dict[key] = get_safetensor(model_dir, key)
                         mtp_exists = True
 
             if mtp_exists:
                 self.exclude_modules.append("mtp*")
+        return mtp_state_dict
 
     def _get_mamba_layer_state_dict(self, layer, layer_id):
         if not isinstance(layer.norm, IdentityOp):
@@ -855,7 +859,6 @@ class GPTModelExporter:
             else:
                 source_key = mapping.get(key, key)
                 self._state_dict[prefix + source_key] = val
-                print(f"{prefix + source_key}: {self._state_dict[prefix + source_key].dtype}")
 
     def _gated_mlp_slicing(
         self, module, prefix, gate_proj_name="gate_proj", up_proj_name="up_proj"
