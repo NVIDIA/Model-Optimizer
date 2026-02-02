@@ -1022,6 +1022,142 @@ def replace_zero_scale_with_smallest_nonzero(onnx_model: onnx.ModelProto) -> onn
     return onnx_model
 
 
+# =============================================================================
+# Column-major weight storage transformation for execution providers that need it
+# =============================================================================
+
+
+def _apply_transpose_perm_to_shape(shape, perm):
+    """Apply transpose permutation to a shape to get the output shape.
+
+    Args:
+        shape: Input shape as a list/tuple
+        perm: Permutation indices
+
+    Returns:
+        Transposed shape or None if inputs are None
+    """
+    if shape is None or perm is None:
+        return None
+    return [shape[i] for i in perm]
+
+
+def insert_transpose_nodes_for_column_major(graph: gs.Graph):
+    """Add a single Transpose node after each DequantizeLinear for column-major weights.
+
+    This implements the simple transformation: A @ B = A @ ((B^T)^T)
+    where B^T is stored in the DequantizeLinear node, and we add a Transpose
+    node after DQ to recover B before the MatMul.
+
+    Graph transformation:
+        Before: DQ(W) -> MatMul/Gemm
+        After:  DQ(W^T) -> Transpose -> W -> MatMul/Gemm
+
+    Args:
+        graph: ONNX GraphSurgeon graph to modify in-place
+    """
+    nodes_to_add = []
+    dq_nodes_processed = set()
+
+    for node in graph.nodes:
+        if node.op in ["MatMul", "Gemm"]:
+            # Check if second input (weight) is from DequantizeLinear
+            weight_input = node.inputs[1]
+            if not isinstance(weight_input, gs.Variable):
+                continue
+
+            # Find the producer of the weight input
+            producer_nodes = [n for n in graph.nodes if weight_input in n.outputs]
+            if not producer_nodes:
+                continue
+
+            producer_node = producer_nodes[0]
+            if producer_node.op != DEQUANTIZE_NODE_NAME:
+                continue
+
+            # Skip if we already processed this DQ node
+            if producer_node.name in dq_nodes_processed:
+                continue
+            dq_nodes_processed.add(producer_node.name)
+
+            # For Gemm nodes with transB=1, flip to transB=0 since weights are already transposed
+            # Original: Gemm expects W and internally computes A @ W^T
+            # After column-major: weight is W^T, so set transB=0 to use W^T directly -> A @ W^T
+            if node.op == "Gemm":
+                if hasattr(node, "attrs") and "transB" in node.attrs and node.attrs["transB"] > 0:
+                    logger.debug(
+                        f"Gemm node {node.name} has transB=1, flipping to transB=0 for column-major"
+                    )
+                    node.attrs["transB"] = 0
+                    continue
+
+            # Get weight shape and dtype from DQ output
+            # DQ outputs W^T (transposed), shape is [N, K] instead of [K, N]
+            weight_shape = weight_input.shape if hasattr(weight_input, "shape") else None
+            weight_dtype = weight_input.dtype if hasattr(weight_input, "dtype") else None
+
+            # Permutation for 2D weights: [1, 0] to transpose back
+            # The stored weight is B^T (transposed), we need to get B back
+            # For 2D [N, K] (stored as transposed): perm [1, 0] -> [K, N] (original)
+            perm = [1, 0]
+
+            # Compute the transposed shape (original weight shape)
+            transposed_weight_shape = _apply_transpose_perm_to_shape(weight_shape, perm)
+
+            # Create output variable for the transpose node
+            transpose_out = gs.Variable(
+                f"{producer_node.name}_transposed_back",
+                dtype=weight_dtype,
+                shape=transposed_weight_shape,
+            )
+
+            # Create transpose node: (B^T)^T = B
+            transpose_node = gs.Node(
+                op="Transpose",
+                name=f"{producer_node.name}_transpose_back",
+                inputs=[weight_input],
+                outputs=[transpose_out],
+                attrs={"perm": perm},
+            )
+
+            # Update MatMul/Gemm to use the transposed weight
+            node.inputs[1] = transpose_out
+
+            # Add transpose node to list
+            nodes_to_add.append(transpose_node)
+
+    # Add all new nodes to graph
+    if nodes_to_add:
+        graph.nodes.extend(nodes_to_add)
+        logger.info(f"Added {len(nodes_to_add)} transpose nodes for column-major optimization")
+
+    # Clean up and reorder graph
+    graph.cleanup().toposort()
+
+
+def apply_column_major_transformation(
+    gemm_weights_quantized: dict,
+    scales: dict,
+) -> None:
+    """Transpose quantized weights and scales in-place for column-major storage.
+
+    Note: After calling this function and inserting DQ nodes with axis=1,
+    you should call insert_transpose_nodes_for_column_major() on the graph.
+
+    Args:
+        gemm_weights_quantized: Dictionary mapping weight names to quantized weight arrays
+        scales: Dictionary mapping weight names to scale arrays
+    """
+    logger.info("Applying column-major storage optimization")
+
+    # Transpose weights and scales in-place
+    for name in list(gemm_weights_quantized.keys()):
+        gemm_weights_quantized[name] = gemm_weights_quantized[name].T
+
+    for name in list(scales.keys()):
+        scales[name] = scales[name].T
+
+
 def cast_initializer_to_dtype(
     node: onnx.NodeProto, dtype: str, initializer_map: dict[str, onnx.TensorProto]
 ):
