@@ -43,6 +43,13 @@ try:
         TERowParallelLinear,
     )
 
+    from modelopt.torch.quantization.plugins.megatron import (
+        _QuantTEMCoreColumnParallelLinear as QuantTEColumnParallelLinear,
+    )
+    from modelopt.torch.quantization.plugins.megatron import (
+        _QuantTEMCoreRowParallelLinear as QuantTERowParallelLinear,
+    )
+
     HAS_TE = True
 except ImportError:
     HAS_TE = False
@@ -252,12 +259,15 @@ class _LoRAMegatronRowParallelLinear(_MegatronParallelLoRABase):
 
 
 if HAS_TE:
-    LoRAModuleRegistry.register({TEColumnParallelLinear: "te_mcore_ColumnParallelLinear"})(
-        _LoRAMegatronColumnParallelLinear
-    )
-    LoRAModuleRegistry.register({TERowParallelLinear: "te_mcore_RowParallelLinear"})(
-        _LoRAMegatronRowParallelLinear
-    )
+
+    @LoRAModuleRegistry.register({TEColumnParallelLinear: "te_mcore_ColumnParallelLinear"})
+    class _LoRATEMCoreColumnParallelLinear(_LoRAMegatronColumnParallelLinear):
+        pass
+
+    @LoRAModuleRegistry.register({TERowParallelLinear: "te_mcore_RowParallelLinear"})
+    class _LoRATEMCoreRowParallelLinear(_LoRAMegatronRowParallelLinear):
+        pass
+
 
 # Register quantized versions if available
 LoRAModuleRegistry.register({QuantColumnParallelLinear: "quant_megatron_ColumnParallelLinear"})(
@@ -266,6 +276,13 @@ LoRAModuleRegistry.register({QuantColumnParallelLinear: "quant_megatron_ColumnPa
 LoRAModuleRegistry.register({QuantRowParallelLinear: "quant_megatron_RowParallelLinear"})(
     _LoRAMegatronRowParallelLinear
 )
+if HAS_TE:
+    LoRAModuleRegistry.register(
+        {QuantTEColumnParallelLinear: "quant_te_mcore_ColumnParallelLinear"}
+    )(_LoRATEMCoreColumnParallelLinear)
+    LoRAModuleRegistry.register({QuantTERowParallelLinear: "quant_te_mcore_RowParallelLinear"})(
+        _LoRATEMCoreRowParallelLinear
+    )
 
 
 class _QuantLoRAMegatronColumnParallelLinear(
@@ -292,9 +309,35 @@ class _QuantLoRAMegatronRowParallelLinear(_LoRAMegatronRowParallelLinear, QuantR
         QuantRowParallelLinear._setup(self)
 
 
+if HAS_TE:
+
+    class _QuantLoRATEMCoreColumnParallelLinear(
+        _LoRATEMCoreColumnParallelLinear, QuantTEColumnParallelLinear
+    ):
+        """Quantized LoRA TE ColumnParallelLinear combining LoRA and quantization."""
+
+        def _setup(self):
+            QuantTEColumnParallelLinear._setup(self)
+
+    class _QuantLoRATEMCoreRowParallelLinear(
+        _LoRATEMCoreRowParallelLinear, QuantTERowParallelLinear
+    ):
+        """Quantized LoRA TE RowParallelLinear combining LoRA and quantization."""
+
+        def _setup(self):
+            QuantTERowParallelLinear._setup(self)
+
+
 QuantModuleRegistry.register(
     {_LoRAMegatronColumnParallelLinear: "lora_megatron_ColumnParallelLinear"}
 )(_QuantLoRAMegatronColumnParallelLinear)
 QuantModuleRegistry.register({_LoRAMegatronRowParallelLinear: "lora_megatron_RowParallelLinear"})(
     _QuantLoRAMegatronRowParallelLinear
 )
+if HAS_TE:
+    QuantModuleRegistry.register(
+        {_LoRATEMCoreColumnParallelLinear: "lora_te_mcore_ColumnParallelLinear"}
+    )(_QuantLoRATEMCoreColumnParallelLinear)
+    QuantModuleRegistry.register(
+        {_LoRATEMCoreRowParallelLinear: "lora_te_mcore_RowParallelLinear"}
+    )(_QuantLoRATEMCoreRowParallelLinear)
