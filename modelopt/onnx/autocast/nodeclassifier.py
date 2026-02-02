@@ -150,20 +150,51 @@ class InitializerRangeRule(NodeRuleBase):
 
 
 class IORangeRule(NodeRuleBase):
-    """Rule for keeping nodes with out-of-range inputs/outputs in high precision."""
+    """Rule for keeping nodes with out-of-range inputs/outputs in high precision.
+
+    Supports both single-batch (raw numpy arrays) and multi-batch (TensorStats objects)
+    reference data for flexible precision conversion decisions.
+    """
 
     def __init__(self, data_max, reference_data, node_to_init_map):
         """Initialize the rule.
 
         Args:
             data_max: Maximum absolute value allowed for node I/O.
-            reference_data: Reference data for checking I/O ranges.
+            reference_data: Reference data for checking I/O ranges. Can contain either
+                raw numpy arrays (single batch) or TensorStats objects (multi-batch aggregated).
             node_to_init_map: Mapping from node names to their initializers.
         """
         self.data_max = data_max
         self.reference_data = reference_data
         self.node_to_init_map = node_to_init_map
         self.output_data = None
+        self.output_stats = None  # For TensorStats
+
+    def _get_tensor_stats(self, ref_data):
+        """Extract statistics from reference data (supports both numpy arrays and TensorStats).
+
+        Args:
+            ref_data: Either a numpy array or a TensorStats object.
+
+        Returns:
+            tuple: (absmax, min_val, max_val, size) statistics.
+        """
+        # Import here to avoid circular imports
+        from modelopt.onnx.autocast.referencerunner import TensorStats
+
+        if isinstance(ref_data, TensorStats):
+            return ref_data.absmax, ref_data.min_val, ref_data.max_val, ref_data.size
+        else:
+            # Raw numpy array
+            if ref_data.size == 0:
+                return 0, 0, 0, 0
+            return (
+                np.max(np.abs(ref_data)),
+                np.min(ref_data),
+                np.max(ref_data),
+                ref_data.size,
+            )
 
     def _check_inner(self, node):
         def is_io_out_of_range(node, tensor_name):
@@ -176,18 +207,25 @@ class IORangeRule(NodeRuleBase):
                         f"Node {node.name}: Tensor {tensor_name} not found in reference data."
                     )
                 return False
+
             ref_data = self.reference_data[tensor_name]
-            if ref_data.size == 0:
+            absmax, min_val, max_val, size = self._get_tensor_stats(ref_data)
+
+            if size == 0:
                 logger.debug(
                     f"Node {node.name}: Tensor {tensor_name} has size 0. Skipping I/O range check."
                 )
                 return False
+
             logger.debug(
-                f"Node {node.name}: reference data: min={np.min(ref_data)}, max={np.max(ref_data)}"
+                f"Node {node.name}: reference data: min={min_val}, max={max_val}, absmax={absmax}"
             )
-            if np.any(np.abs(ref_data) > self.data_max):
+
+            if absmax > self.data_max:
                 self.output_data = ref_data
+                self.output_stats = (absmax, min_val, max_val)
                 return True
+            return False
 
         if node.op_type == "Constant":
             return False
@@ -202,7 +240,13 @@ class IORangeRule(NodeRuleBase):
 
     def _log_skipped(self, node, **kwargs):
         """Log information about skipped nodes with I/O range violations."""
-        if self.output_data is not None:
+        if self.output_stats is not None:
+            absmax, min_val, max_val = self.output_stats
+            logger.info(
+                f"Skipping node {node.name}: reference IO out of range: min={min_val}, "
+                f"max={max_val}, absmax={absmax}, range=[{-self.data_max}, {self.data_max}]"
+            )
+        elif self.output_data is not None:
             logger.info(
                 f"Skipping node {node.name}: reference IO out of range: min={np.min(self.output_data)}, "
                 f"max={np.max(self.output_data)}, range=[{-self.data_max}, {self.data_max}]"
@@ -230,9 +274,18 @@ class DepthOfReductionRule(NodeRuleBase):
         self.reduction_depth = 0
 
     def _get_tensor_shape(self, tensor_name):
-        """Get tensor shape from reference data."""
+        """Get tensor shape from reference data.
+
+        Supports both raw numpy arrays and TensorStats objects.
+        """
         if tensor_name in self.reference_data:
-            return self.reference_data[tensor_name].shape
+            ref_data = self.reference_data[tensor_name]
+            # Import here to avoid circular imports
+            from modelopt.onnx.autocast.referencerunner import TensorStats
+
+            if isinstance(ref_data, TensorStats):
+                return ref_data.shape
+            return ref_data.shape
         if tensor_name in self.initializer_map:
             return self.initializer_map[tensor_name].dims
         return None
