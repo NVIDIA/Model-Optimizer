@@ -15,7 +15,6 @@
 
 """Calibration utilities."""
 
-import contextlib
 import math
 import os
 import types
@@ -1336,18 +1335,17 @@ def blockwise_weight_update(module, h, block_size, percdamp):
 
 
 class LayerActivationGettr:
-    """Utility class for collecting layer activations during forward passes.
+    """Helper class for collecting layer activations during forward passes.
 
-    This class provides building blocks for sequential layer calibration by:
-    - Patching layers to capture inputs/outputs during forward passes
-    - Supporting early stopping to avoid unnecessary computation
+    This class allows for sequential layer calibration by
+    patching layers to capture inputs/outputs during forward passes
     """
 
     def __init__(self, model: nn.Module):
         self.model = model
 
     @staticmethod
-    def _patch_layer(layer: torch.nn.Module, stop_after_collection: bool = True):
+    def _patch_layer(layer: torch.nn.Module, stop_after_collection: bool = False):
         """Patch a layer to collect inputs and outputs during forward passes.
 
         Args:
@@ -1356,7 +1354,7 @@ class LayerActivationGettr:
                 collecting to enable early exit from forward pass.
         """
 
-        def _custom_forward_w_data_collection(self, *args, **kwargs):
+        def _forward_w_data_collection(self, *args, **kwargs):
             """Custom forward that collects inputs and outputs.
 
             Note: 'self' refers to the patched layer.
@@ -1370,7 +1368,7 @@ class LayerActivationGettr:
             return output
 
         layer._original_forward = layer.forward
-        layer.forward = types.MethodType(_custom_forward_w_data_collection, layer)
+        layer.forward = types.MethodType(_forward_w_data_collection, layer)
         layer.inputs = []
         layer.outputs = []
         layer._stop_after_collection = stop_after_collection
@@ -1388,9 +1386,10 @@ class LayerActivationGettr:
     def get_input_activations(self, layer: torch.nn.Module, forward_loop: ForwardLoop) -> list:
         """Collect input activations for a layer by running the forward loop.
 
-        Patches the layer with early stopping enabled, runs the forward loop,
-        and returns the collected inputs. The forward pass stops immediately
-        after collecting inputs to avoid unnecessary computation.
+        Patches the layer with early stopping, runs the forward loop to collect
+        inputs from all batches. Propagation stops at the patched layer for each
+        batch (saves compute by not running deeper layers), but the forward_loop
+        continues to process all batches.
 
         Args:
             layer: The layer to collect inputs for.
@@ -1399,11 +1398,21 @@ class LayerActivationGettr:
         Returns:
             List of (args, kwargs) tuples representing inputs to the layer.
         """
+        # Wrap model forward to catch StopIteration per-batch
+        original_forward = self.model.forward
+
+        def _early_stop_forward(*args, **kwargs):
+            try:
+                return original_forward(*args, **kwargs)
+            except StopIteration:
+                return None  # Stop propagation but allow next batch
+
+        self.model.forward = _early_stop_forward
         self._patch_layer(layer, stop_after_collection=True)
-        with contextlib.suppress(StopIteration):
-            forward_loop(self.model)
+        forward_loop(self.model)
         inputs = layer.inputs.copy()
         self._unpatch_layer(layer)
+        self.model.forward = original_forward
         return inputs
 
     def get_output_activations(self, layer: torch.nn.Module, inputs: list) -> list:
