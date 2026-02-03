@@ -181,13 +181,22 @@ quantize(
 "
 
 # Step 2: Use the quantized baseline for autotuning
+# The autotuner will try to find better Q/DQ placements than the initial quantization
 python3 -m modelopt.onnx.quantization.autotune \
     --model resnet50.bs128.onnx \
     --output ./resnet50_autotuned \
     --qdq-baseline resnet50_quantized.onnx \
     --schemes-per-region 50
 
-# The autotuner will try to find better Q/DQ placements than the initial quantization
+# TensorRT 10.16 support remote autotuning, pass remoteAutoTuningConfig to trtexec to
+# benchmark with remote autotuning.
+python3 -m modelopt.onnx.quantization.autotune \
+    --model resnet50.bs128.onnx \
+    --output ./resnet50_autotuned \
+    --qdq-baseline resnet50_quantized.onnx \
+    --schemes-per-region 50 \
+    --use_trtexec \
+    --trtexec_benchmark_args "--remoteAutoTuningConfig=\"<remote autotuning config>\""
 ```
 
 **Note:** This example uses dummy calibration data. For production use, provide real calibration data representative of your inference workload.
