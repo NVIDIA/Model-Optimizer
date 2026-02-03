@@ -132,11 +132,8 @@ class ModelDeployer:
 
     def _deploy_trtllm(self):
         """Deploy a model using TensorRT-LLM."""
-        try:
-            from tensorrt_llm import LLM, SamplingParams
-            from tensorrt_llm.llmapi import CudaGraphConfig, EagleDecodingConfig, KvCacheConfig
-        except ImportError as e:
-            raise ImportError("tensorrt_llm package not available. ") from e
+        from tensorrt_llm import LLM, SamplingParams
+        from tensorrt_llm.llmapi import CudaGraphConfig, EagleDecodingConfig, KvCacheConfig
 
         sampling_params = SamplingParams(max_tokens=32)
         spec_config = None
@@ -218,10 +215,7 @@ class ModelDeployer:
 
     def _deploy_vllm(self):
         """Deploy a model using vLLM."""
-        try:
-            from vllm import LLM, SamplingParams
-        except ImportError as e:
-            raise ImportError("vllm package not available.") from e
+        from vllm import LLM, SamplingParams
 
         quantization_method = "modelopt"
         if "fp4" in self.model_id.lower():
@@ -255,10 +249,8 @@ class ModelDeployer:
 
     def _deploy_sglang(self):
         """Deploy a model using SGLang."""
-        try:
-            import sglang as sgl
-        except ImportError as e:
-            raise ImportError("sglang package not available.") from e
+        import sglang as sgl
+
         quantization_method = "modelopt"
         if "fp4" in self.model_id.lower():
             quantization_method = "modelopt_fp4"
