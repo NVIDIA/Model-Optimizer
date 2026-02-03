@@ -31,6 +31,7 @@ from example_utils import (
     get_tokenizer,
     is_enc_dec,
     is_nemotron_vl,
+    load_mtp_weights_if_needed,
     run_nemotron_vl_preview,
 )
 from torch.utils.data import DataLoader
@@ -349,8 +350,6 @@ def load_model(args: argparse.Namespace):
         calibration_only = True
 
         # Load any missing weights from non-standard safetensors (handled in get_model for non-low-memory mode)
-        from example_utils import load_mtp_weights_if_needed
-
         load_mtp_weights_if_needed(full_model, args.pyt_ckpt_path)
 
     model_type = get_model_type(full_model)
