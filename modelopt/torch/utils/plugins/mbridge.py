@@ -50,7 +50,7 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.utils import unwrap_model
 from transformers import AutoTokenizer
 
-from modelopt.torch.utils import get_dataset_samples, print_rank_0
+from modelopt.torch.utils import get_dataset_samples, print_rank_0, warn_rank_0
 
 __all__ = ["get_hf_mbridge_calibration_loop", "load_mbridge_model_from_hf"]
 
@@ -80,12 +80,12 @@ def load_mbridge_model_from_hf(
         A tuple of (bridge, provider, model, unwrapped_model, tokenizer).
     """
     print_rank_0(f"Loading Megatron-Bridge model from HF: {hf_model_name_or_path}")
+    trust_remote_code = is_safe_repo(
+        trust_remote_code=trust_remote_code,
+        hf_path=hf_model_name_or_path,
+    )
     bridge = AutoBridge.from_hf_pretrained(
-        hf_model_name_or_path,
-        trust_remote_code=is_safe_repo(
-            trust_remote_code=trust_remote_code,
-            hf_path=hf_model_name_or_path,
-        ),
+        hf_model_name_or_path, trust_remote_code=trust_remote_code
     )
 
     provider = bridge.to_megatron_provider()
@@ -154,6 +154,7 @@ def get_hf_mbridge_calibration_loop(
     dataset_name: str = "nemotron-post-training-dataset-v2",
     num_samples: int = 512,
     micro_batch_size: int = 1,
+    global_batch_size: int = 1,
 ) -> Callable[[nn.Module], None]:
     """Get a modelopt calibration loop for a Megatron-Bridge model.
 
@@ -166,12 +167,16 @@ def get_hf_mbridge_calibration_loop(
         dataset_name: The name of the dataset to use for evaluation.
         num_samples: The number of samples to use for evaluation.
         micro_batch_size: The micro batch size to use for evaluation.
+        global_batch_size: The global batch size to use for evaluation.
 
     Returns:
         A function that can be used to calibrate the model with a modelopt.torch API.
     """
-    # TODO: make global_batch_size larger than micro_batch_size for PP interleaving
-    global_batch_size = micro_batch_size
+    if global_batch_size < micro_batch_size:
+        warn_rank_0(
+            f"{global_batch_size=} is smaller than {micro_batch_size=}. Setting gbs to {micro_batch_size}."
+        )
+        global_batch_size = micro_batch_size
     num_iters = num_samples // global_batch_size
 
     # NOTE: Issue with NemotronH tokenizer's len() hence using use_fast=True as a WAR

@@ -86,6 +86,7 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--calib_mbs", type=int, default=1, choices=[1], help="Calibration micro-batch size"
     )
+    parser.add_argument("--calib_gbs", type=int, default=1, help="Calibration global batch size")
     parser.add_argument("--seq_length", type=int, default=4096)
 
     # Pruning parameters
@@ -167,6 +168,7 @@ def get_args() -> argparse.Namespace:
 
     args = parser.parse_args()
 
+    # Post-process arguments
     if args.prune_intermediate_checkpoint is None:
         if args.output_megatron_path:
             args.prune_intermediate_checkpoint = (
@@ -240,6 +242,7 @@ def main(args: argparse.Namespace):
         dataset_name=args.calib_dataset_name,
         num_samples=args.calib_num_samples,
         micro_batch_size=args.calib_mbs,
+        global_batch_size=args.calib_gbs,
     )
 
     pruning_config = {
@@ -358,10 +361,14 @@ def main(args: argparse.Namespace):
             hf_cfg.layer_types = [
                 lt for i, lt in enumerate(hf_cfg.layer_types) if i + 1 in kept_layer_nums
             ]
+        if hasattr(hf_cfg, "hybrid_override_pattern"):
+            hf_cfg.hybrid_override_pattern = unwrapped_model.hybrid_override_pattern
         hf_cfg.num_hidden_layers = mcore_cfg.num_layers
 
         # Save dummy pruned HF model to get the correct bridge for saving pruned weights
-        AutoModelForCausalLM.from_config(hf_cfg).save_pretrained(args.output_hf_path)
+        AutoModelForCausalLM.from_config(
+            hf_cfg, trust_remote_code=args.trust_remote_code
+        ).save_pretrained(args.output_hf_path, trust_remote_code=args.trust_remote_code)
         pruned_bridge = AutoBridge.from_hf_pretrained(args.output_hf_path)
         pruned_bridge.save_hf_weights(model, args.output_hf_path)
         print_rank_0(f"Saved pruned model to {args.output_hf_path} in HF checkpoint format")
