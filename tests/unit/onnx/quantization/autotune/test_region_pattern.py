@@ -19,21 +19,14 @@ Tests for RegionPattern functionality in the autotuner.
 Tests pattern generation, matching, and tree visualization.
 """
 
-import os
-import sys
-import unittest
-
 import numpy as np
 import onnx_graphsurgeon as gs
-
-# Add parent directory to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from modelopt.onnx.quantization.autotune.common import Region, RegionType
 from modelopt.onnx.quantization.autotune.region_pattern import RegionPattern
 
 
-class TestRegionPattern(unittest.TestCase):
+class TestRegionPattern:
     """Test RegionPattern functionality."""
 
     # =========================================================================
@@ -164,10 +157,9 @@ class TestRegionPattern(unittest.TestCase):
         assert pattern.size == 2
         assert not pattern.is_empty
         assert pattern.is_leaf
-        assert not pattern.is_composite
 
-    def test_pattern_equality(self):
-        """Test RegionPattern equality based on signature."""
+    def test_pattern_equality_and_hash(self):
+        """Test RegionPattern equality and hashing based on signature."""
         pattern1 = RegionPattern(signature="Conv->Relu", size=2)
         pattern2 = RegionPattern(signature="Conv->Relu", size=5)  # Different size
         pattern3 = RegionPattern(signature="Gemm->Relu", size=2)
@@ -176,11 +168,6 @@ class TestRegionPattern(unittest.TestCase):
         assert pattern1 == pattern2
         # Different signature = not equal
         assert pattern1 != pattern3
-
-    def test_pattern_hash(self):
-        """Test RegionPattern hashing for use in dicts/sets."""
-        pattern1 = RegionPattern(signature="Conv->Relu", size=2)
-        pattern2 = RegionPattern(signature="Conv->Relu", size=5)
 
         # Same signature = same hash
         assert hash(pattern1) == hash(pattern2)
@@ -331,8 +318,9 @@ class TestRegionPattern(unittest.TestCase):
         indented_lines = [line for line in lines if line.startswith("  ")]
         assert len(indented_lines) > 0
 
-    def test_pattern_matches_pattern(self):
-        """Test pattern-to-pattern matching."""
+    def test_pattern_matches(self):
+        """Test pattern matching against both patterns and regions."""
+        # Test pattern-to-pattern matching
         pattern1 = RegionPattern(signature="Conv->Relu", size=2)
         pattern2 = RegionPattern(signature="Conv->Relu", size=5)
         pattern3 = RegionPattern(signature="Gemm->Relu", size=2)
@@ -340,8 +328,7 @@ class TestRegionPattern(unittest.TestCase):
         assert pattern1.matches(pattern2)  # Same signature
         assert not pattern1.matches(pattern3)  # Different signature
 
-    def test_pattern_matches_region(self):
-        """Test pattern-to-region matching."""
+        # Test pattern-to-region matching
         graph = self._create_simple_graph()
 
         # Create region

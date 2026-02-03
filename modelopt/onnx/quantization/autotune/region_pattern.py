@@ -164,9 +164,18 @@ class RegionPattern:
             return None
 
     def get_full_insertion_scheme(self, region: Region, graph: gs.Graph) -> InsertionScheme:
-        """Get all possible insertion points for a region in a single InsertionScheme."""
+        """Collect all possible insertion points for quantization in a region.
+
+        This method gathers all locations where Q/DQ  nodes could be inserted within a region's
+        computational graph. These insertion points are organized into three categories:
+        - node_inputs: Inputs to individual nodes within the region
+        - child_region_inputs: Inputs to child regions within composite regions
+        - region_outputs: Outputs from the region or its child regions
+        """
         region_pattern = RegionPattern.from_region(region, graph)
-        assert self == region_pattern, "Region pattern mismatch"
+
+        if self != region_pattern:
+            raise ValueError("Region pattern mismatch")
 
         scheme = InsertionScheme()
         scheme.node_inputs = NodeInputInsertionPoint.collect_from_region(region, graph)
@@ -217,11 +226,8 @@ class RegionPattern:
 
         sorted_children = region.get_children(sort=True)
 
-        if not sorted_children and not node_ops:
-            return "EMPTY"
-
         if not sorted_children:
-            return "->".join(node_ops)
+            return "->".join(node_ops) if node_ops else "EMPTY"
 
         child_sigs = "+".join(
             [RegionPattern._compute_signature_recursive(child, graph) for child in sorted_children]
@@ -230,7 +236,7 @@ class RegionPattern:
         if node_ops:
             node_sig = "->".join(node_ops)
             return f"COMPOSITE({node_sig}|{child_sigs})"
-        return f"COMPOSITE({'+'.join(child_sigs)})"
+        return f"COMPOSITE({child_sigs})"
 
     @staticmethod
     def _get_symmetric_input_signature(
