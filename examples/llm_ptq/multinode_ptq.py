@@ -28,7 +28,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from accelerate import Accelerator
-from example_utils import build_quant_cfg, get_tokenizer
+from example_utils import build_quant_cfg, get_tokenizer, maybe_patch_deepseek_v3_config
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, PreTrainedTokenizer, PreTrainedTokenizerFast
 
@@ -146,10 +146,18 @@ def load_and_prepare_model(
     Returns:
         Tuple of (prepared_model, model_type, original_architectures, calibration_dataloader)
     """
+    # Load and patch config for DeepSeek V3 before initializing the model
+    from transformers import AutoConfig
+
+    config_kwargs = {"trust_remote_code": trust_remote_code}
+    hf_config = AutoConfig.from_pretrained(model_path, **config_kwargs)
+    hf_config = maybe_patch_deepseek_v3_config(hf_config)
+
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         torch_dtype="auto",
         trust_remote_code=trust_remote_code,
+        config=hf_config,
     )
     model.eval()
     model_type = get_model_type(model)
