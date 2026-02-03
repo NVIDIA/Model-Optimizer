@@ -694,6 +694,18 @@ def _export_transformers_checkpoint(
 
     quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
 
+    # Add MTP layer prefixes to exclude_modules if they were excluded from quantization
+    # This ensures they appear in quantization_config["ignore"] in config.json
+    mtp_layer_prefixes = getattr(model, "_mtp_layer_prefixes", None)
+    if mtp_layer_prefixes:
+        exclude_modules = quant_config["quantization"].setdefault("exclude_modules", [])
+        for prefix in mtp_layer_prefixes:
+            # Add wildcard pattern to exclude all submodules under this MTP layer
+            pattern = f"{prefix}*"
+            if pattern not in exclude_modules:
+                exclude_modules.append(pattern)
+                print(f"Adding MTP layer to quantization_config ignore: {pattern}")
+
     # Process all quantized modules and export weights
     _process_quantized_modules(model, dtype, is_modelopt_qlora)
 
