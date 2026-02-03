@@ -57,6 +57,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "split": ["stem", "chat", "math", "code"],
         },
         "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "chat_key": "messages",
     },
     "nemotron-post-training-dataset-v1": {
         "config": {
@@ -64,6 +65,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "split": ["stem", "chat", "math", "code", "tool_calling"],
         },
         "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "chat_key": "messages",
     },
     "magpie": {
         "config": {
@@ -71,6 +73,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "split": ["train"],
         },
         "preprocess": lambda sample: "\n".join(turn["value"] for turn in sample["conversations"]),
+        "chat_key": "conversations",
     },
     "cnn_dailymail": {
         "config": {"path": "abisee/cnn_dailymail", "name": "3.0.0", "split": ["train"]},
@@ -92,22 +95,36 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
         "config": {"path": "c4", "name": "en", "split": ["train"]},
         "preprocess": lambda sample: sample["text"],
     },
+    "wikitext": {
+        "config": {"path": "wikitext", "name": "wikitext-103-v1", "split": ["train"]},
+        "preprocess": lambda sample: sample["text"],
+    },
 }
 
 __all__ = [
     "create_forward_loop",
     "get_dataset_dataloader",
+    "get_dataset_samples",
     "get_max_batch_size",
     "get_supported_datasets",
 ]
 
 
-def _get_dataset_samples(dataset_name: str, num_samples: int) -> list[str]:
+def get_dataset_samples(
+    dataset_name: str,
+    num_samples: int,
+    *,
+    apply_chat_template: bool = False,
+    tokenizer: "PreTrainedTokenizerBase | None" = None,
+) -> list[str]:
     """Load a portion of train dataset with the dataset name and a given size.
 
     Args:
         dataset_name: Name of the dataset to load.
         num_samples: Number of samples to load from the dataset.
+        apply_chat_template: Whether to apply the chat template to the samples (if supported by the dataset).
+        tokenizer: Tokenizer to use for applying the chat template to the samples.
+            No tokenization is done and plain text is still returned.
 
     Returns:
         Samples: The list of samples.
@@ -122,6 +139,15 @@ def _get_dataset_samples(dataset_name: str, num_samples: int) -> list[str]:
     from datasets import load_dataset
 
     dataset_config = SUPPORTED_DATASET_CONFIG[dataset_name]
+    if apply_chat_template:
+        if "chat_key" not in dataset_config:
+            warn(
+                f"Dataset {dataset_name} does not support chat template. Chat template will not be applied."
+            )
+        elif tokenizer is None:
+            raise ValueError("Tokenizer is required when applying chat template.")
+        print(f"Applying chat template to dataset {dataset_name}")
+
     # It's unfortunate that the load_dataset function does not support split a list while streaming.
     # So we need to load the dataset for each split.
     config = dataset_config["config"].copy()
@@ -147,7 +173,14 @@ def _get_dataset_samples(dataset_name: str, num_samples: int) -> list[str]:
                 break
 
             # Apply preprocess function to the sample
-            samples.append(dataset_config["preprocess"](sample))
+            if apply_chat_template and "chat_key" in dataset_config:
+                sample = tokenizer.apply_chat_template(  # type: ignore[union-attr]
+                    sample[dataset_config["chat_key"]], tokenize=False
+                )
+            else:
+                sample = dataset_config["preprocess"](sample)
+            if sample != "":  # wikitext has some empty samples
+                samples.append(sample)
 
     return samples
 
@@ -211,7 +244,7 @@ def get_dataset_dataloader(
 
     all_samples = []
     for ds_name, num_sample in zip(dataset_name, num_samples):
-        samples = _get_dataset_samples(ds_name, num_sample)
+        samples = get_dataset_samples(ds_name, num_sample)
         all_samples.extend(samples)
 
     batch_encoded = tokenizer.batch_encode_plus(
