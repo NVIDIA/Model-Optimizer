@@ -289,8 +289,14 @@ class GPTModelExporter:
                 except (OSError, ValueError, ImportError):
                     pass
 
+            mtp_state_dict = self._get_mtp_state_dict()
+            if len(mtp_state_dict) > 0:
+                state_dict.update(mtp_state_dict)
+                print(f"Successfully loaded {len(mtp_state_dict)} MTP tensors")
+
+        combined_exclude_modules = self._gather_exclude_modules()
+
         if is_last_stage_main_rank and quantization is not None:
-            self._gather_exclude_modules()  # gather exclude_modules from all ranks
             self._hf_quant_config = {
                 "producer": {
                     "name": "modelopt",
@@ -298,7 +304,7 @@ class GPTModelExporter:
                 },
                 "quantization": {
                     "quant_algo": quantization,
-                    "exclude_modules": self.exclude_modules,
+                    "exclude_modules": combined_exclude_modules,
                 },
             }
             if quantization == "NVFP4":  # update block size
@@ -376,10 +382,6 @@ class GPTModelExporter:
             print(f"Successfully loaded {len(multimodal_state_dict)} multimodal tensors")
             # Add multimodal components to state_dict
             state_dict.update(multimodal_state_dict)
-
-            mtp_state_dict = self._get_mtp_state_dict()
-            state_dict.update(mtp_state_dict)
-            print(f"Successfully loaded {len(mtp_state_dict)} MTP tensors")
 
         # Barrier to ensure the export_dir has been created.
         torch.distributed.barrier()
@@ -1238,6 +1240,9 @@ class GPTModelExporter:
 
     def _gather_exclude_modules(self):
         """Get exclude_modules from all ranks to ensure hf_quant_config is complete."""
+        if not torch.distributed.is_initialized():
+            return sorted(self.exclude_modules)
+
         all_exclude_modules = [None] * torch.distributed.get_world_size()
         torch.distributed.all_gather_object(all_exclude_modules, self.exclude_modules)
         combined_exclude_modules = set()
