@@ -20,10 +20,10 @@ import torch.nn.functional as F
 from fastvideo.layers.linear import ReplicatedLinear
 from fastvideo.models.vaes.wanvae import WanCausalConv3d
 
-from ..nn import QuantLinearConvBase, QuantModuleRegistry
-from ..nn.modules.quant_conv import _QuantConv3d
-from ..nn.modules.quant_linear import _QuantLinear
-from ..utils import is_torch_export_mode
+from ...nn import QuantLinearConvBase, QuantModuleRegistry
+from ...nn.modules.quant_conv import _QuantConv3d
+from ...nn.modules.quant_linear import _QuantLinear
+from ...utils import is_torch_export_mode
 
 
 @QuantModuleRegistry.register({WanCausalConv3d: "WanCausalConv3d"})
