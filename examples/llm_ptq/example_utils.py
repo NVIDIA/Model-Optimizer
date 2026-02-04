@@ -397,8 +397,8 @@ def load_mtp_weights_if_needed(model: torch.nn.Module, model_path: str) -> list[
                         mtp_layer_prefixes.append(prefix)
                     break
 
-        # Load the weights
-        weights = load_file(str(filepath))
+        # Load the weights to CPU first, load_state_dict will handle device placement
+        weights = load_file(str(filepath), device="cpu")
         weights_to_load = {k: v for k, v in weights.items() if k in missing_keys}
 
         # Load into model
