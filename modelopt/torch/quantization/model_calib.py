@@ -1780,7 +1780,7 @@ def sequential_calibrate(
 ):
     """Sequential calibration - a sequential layer-by-layer calibration algorithm."""
     max_calibrate(model)
-    breakpoint()
+
     transformer_layers = get_decoder_layers(model)
     if transformer_layers is None:
         raise ValueError(
@@ -1798,10 +1798,6 @@ def sequential_calibrate(
         calib_func(layer, inputs, **calib_kwargs)
         del inputs
         torch.cuda.empty_cache()
-        # Get outputs
-        # outputs = gettr.get_output_activations(layer, inputs)
-        # Update inputs
-        # inputs = [((out, *inp[0][1:]), inp[1]) for inp, out in zip(inputs, outputs)]
 
     print_rank_0("Sequential calibration completed successfully")
 
