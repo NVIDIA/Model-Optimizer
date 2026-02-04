@@ -110,7 +110,26 @@ class QuantInputBase(QuantModule):
     def forward(self, input, *args, **kwargs):
         """Quantize the input before calling the original forward method."""
         input = self.input_quantizer(input)
-        output = super().forward(input, *args, **kwargs)
+        # Check MR: https://github.com/NVIDIA/Model-Optimizer/pull/824
+        if hasattr(self, "_forward_pre_dm"):
+            pre_fwd = getattr(self, "_forward_pre_dm")
+
+            def _is_forward_in_mro(bound_or_func) -> bool:
+                # If this is a bound method, compare its underlying function to any `forward`
+                # implementation in the current MRO. If it matches, it's not an external monkey-patch.
+                if hasattr(bound_or_func, "__func__"):
+                    fn = bound_or_func.__func__
+                    for cls in type(self).mro():
+                        if cls.__dict__.get("forward") is fn:
+                            return True
+                return False
+
+            if pre_fwd is getattr(self, "forward") or _is_forward_in_mro(pre_fwd):
+                output = super().forward(input, *args, **kwargs)
+            else:
+                output = pre_fwd(input, *args, **kwargs)
+        else:
+            output = super().forward(input, *args, **kwargs)
         if isinstance(output, tuple):
             return (self.output_quantizer(output[0]), *output[1:])
         return self.output_quantizer(output)
