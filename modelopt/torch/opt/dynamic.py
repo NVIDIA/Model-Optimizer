@@ -584,6 +584,15 @@ class DynamicModule(nn.Module):
             assert not is_dynamic, "Exported module must not be a DynamicModule anymore!"
             delattr(self, "_dm_attribute_manager")
 
+            # If this module had a monkey-patched forward before DynamicModule.convert(), we may have
+            # overridden it by binding the dynamic forward onto the instance (to follow the MRO).
+            # On final export, restore the original forward to avoid leaking a dynamic forward
+            # (e.g., DistillationModel.forward) onto the exported (non-dynamic) module instance.
+            # please see: https://github.com/NVIDIA/Model-Optimizer/pull/824
+            if hasattr(self, "_forward_pre_dm"):
+                setattr(self, "forward", getattr(self, "_forward_pre_dm"))
+                delattr(self, "_forward_pre_dm")
+
         return self
 
     @classmethod
@@ -621,6 +630,10 @@ class DynamicModule(nn.Module):
                 # accelerate patched module
                 bind_forward_method(self, self.__class__.forward)
             else:
+                if not hasattr(self, "_forward_pre_dm"):
+                    # Keep the patched forward for downstream modules that want to call it.
+                    self._forward_pre_dm = self.forward
+                bind_forward_method(self, self.__class__.forward)
                 warnings.warn(
                     "Received a module with monkey patched forward method. Dynamic converted module"
                     " might not work."
