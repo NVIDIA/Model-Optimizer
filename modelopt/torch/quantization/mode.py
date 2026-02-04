@@ -225,9 +225,6 @@ def wrapped_calib_func(
     kwargs = config.model_dump()
     method = kwargs.pop("method")
     sequential = kwargs.pop("use_sequential", False)
-    checkpoint_every_n_layers = kwargs.pop("checkpoint_every_n_layers", None)
-    checkpoint_dir = kwargs.pop("checkpoint_dir", None)
-    resume_from_layer = kwargs.pop("resume_from_layer", 0)
 
     if method is not None and "awq" in method:
         # For backward compatibility
@@ -235,19 +232,18 @@ def wrapped_calib_func(
 
     if func is not None:
         if sequential:
-            # Wrap with sequential processing - just pass func as calib_func!
+            # Wrap with sequential processing
             sequential_calibrate(
                 model,
                 forward_loop=forward_loop,
-                calib_func=func,
-                checkpoint_every_n_layers=checkpoint_every_n_layers,
-                checkpoint_dir=checkpoint_dir,
-                resume_from_layer=resume_from_layer,
+                calib_func=func, 
                 **kwargs,
             )
         else:
             # Direct calibration (existing behavior)
             func(model, forward_loop=forward_loop, **kwargs)
+    else:
+        raise ValueError(f"No calibration function provided for method: {method}")
 
     # Lets get the latest metadata for the quantizer states
     metadata = {}

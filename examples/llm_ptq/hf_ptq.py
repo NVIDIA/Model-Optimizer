@@ -91,14 +91,6 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "nvfp4_svdquant": mtq.NVFP4_SVDQUANT_DEFAULT_CFG,
     "mxfp8": mtq.MXFP8_DEFAULT_CFG,
     "int4_gptq": mtq.INT4_BLOCKWISE_WEIGHT_ONLY_GPTQ_CFG,
-    "nvfp4_static_wo_gptq": mtq.NVFP4_STATIC_WO_GPTQ_CFG,
-    "nvfp4_static_wo": mtq.NVFP4_STATIC_WO_CFG,
-    "nvfp4_wo": mtq.NVFP4_WO_CFG,
-    "nvfp4_static_wo_gptq_lite": mtq.NVFP4_STATIC_WO_GPTQ_LITE_CFG,
-    "nvfp4_dynamic_wo_gptq": mtq.NVFP4_DYNAMIC_WO_CFG,
-    "nvfp4_static_gptq": mtq.NVFP4_STATIC_GPTQ_CFG,
-    "nemotron_super_nvfp4_conservative_gptq": mtq.SUPER_NVFP4_CONSERVATIVE_GPTQ_CFG,
-    "nemotron_super_nvfp4_conservative": mtq.SUPER_NVFP4_CONSERVATIVE_CFG,
 }
 
 KV_QUANT_CFG_CHOICES = {
@@ -264,14 +256,6 @@ def auto_quantize(
             "nvfp4_mlp_only",
             "mxfp8",
             "int4_gptq",
-            "nvfp4_dynamic_wo_gptq",
-            "nvfp4_static_wo_gptq",
-            "nvfp4_static_wo",
-            "nvfp4_static_wo_gptq_lite",
-            "nvfp4_static_gptq",
-            "nvfp4_wo",
-            "nemotron_super_nvfp4_conservative_gptq",
-            "nemotron_super_nvfp4_conservative",
         ]
         for args.qformat in qformat_list
     ), "One or more quantization formats provided are not supported for unified checkpoint export"
@@ -1107,14 +1091,6 @@ def quantize_main(
                 "nvfp4_mlp_only",
                 "mxfp8",
                 "int4_gptq",
-                "nvfp4_static_wo_gptq",
-                "nvfp4_wo",
-                "nvfp4_static_wo",
-                "nvfp4_static_wo_gptq_lite",
-                "nvfp4_dynamic_wo_gptq",
-                "nvfp4_static_gptq",
-                "nemotron_super_nvfp4_conservative_gptq",
-                "nemotron_super_nvfp4_conservative",
             ]
             or args.kv_cache_qformat in KV_QUANT_CFG_CHOICES
         ), f"Plain quantization format {args.qformat} not supported for HF export path"

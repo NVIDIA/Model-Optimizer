@@ -833,15 +833,13 @@ class LayerActivationGettr:
             Note: 'self' refers to the patched layer.
             """
             assert len(args) >= 1
+            #Only collect the inputs to the layer
             self.inputs.append((args, kwargs))
-            # output = self._original_forward(*args, **kwargs)
-            # self.outputs.append(output)
             if getattr(self, "_stop_after_collection", False):
                 raise StopIteration()
 
         bind_forward_method(layer, _forward_w_data_collection, "_original_forward")
         layer.inputs = []
-        layer.outputs = []
         layer._stop_after_collection = stop_after_collection
 
     @staticmethod
@@ -849,7 +847,6 @@ class LayerActivationGettr:
         """Restore a layer's original forward method and clean up."""
         unpatch_forward_method(layer, "_original_forward")
         del layer.inputs
-        del layer.outputs
         if hasattr(layer, "_stop_after_collection"):
             del layer._stop_after_collection
 
@@ -878,14 +875,3 @@ class LayerActivationGettr:
             self._unpatch_and_cleanup_layer(layer)
             unpatch_forward_method(self.model, "_original_forward")
         return inputs
-
-    def get_output_activations(self, layer: torch.nn.Module, inputs: list) -> list:
-        """Run inputs through layer and collect outputs."""
-        self._patch_and_initialize_layer(layer, stop_after_collection=False)
-        try:
-            for args, kwargs in inputs:
-                layer(*args, **kwargs)
-            outputs = layer.outputs.copy()
-        finally:
-            self._unpatch_and_cleanup_layer(layer)
-        return outputs
