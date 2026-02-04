@@ -19,6 +19,48 @@ import subprocess
 import pytest
 import torch
 
+# Cache for available backends detection (computed once at import time)
+_AVAILABLE_BACKENDS = None
+
+
+def get_available_backends():
+    """Detect which backends are available in the current environment.
+
+    Returns:
+        set: A set of available backend names ('trtllm', 'vllm', 'sglang')
+    """
+    global _AVAILABLE_BACKENDS
+    if _AVAILABLE_BACKENDS is not None:
+        return _AVAILABLE_BACKENDS
+
+    available = set()
+
+    try:
+        import tensorrt_llm  # noqa: F401
+
+        available.add("trtllm")
+    except ImportError:
+        pass
+
+    try:
+        import vllm  # noqa: F401
+
+        available.add("vllm")
+    except ImportError:
+        pass
+
+    try:
+        import sglang  # noqa: F401
+
+        available.add("sglang")
+    except ImportError:
+        pass
+
+    _AVAILABLE_BACKENDS = available
+    print(f"[deploy_utils] Detected available backends: {available}")
+    return _AVAILABLE_BACKENDS
+
+
 # Common test prompts for all backends
 COMMON_PROMPTS = [
     "Hello, my name is",
@@ -90,18 +132,18 @@ class ModelDeployer:
 
     def _deploy_trtllm(self):
         """Deploy a model using TensorRT-LLM."""
-        try:
-            from tensorrt_llm import LLM, SamplingParams
-            from tensorrt_llm.llmapi import CudaGraphConfig, EagleDecodingConfig, KvCacheConfig
-        except ImportError:
-            pytest.skip("tensorrt_llm package not available")
+        from tensorrt_llm import LLM, SamplingParams
+        from tensorrt_llm.llmapi import CudaGraphConfig, EagleDecodingConfig, KvCacheConfig
 
         sampling_params = SamplingParams(max_tokens=32)
         spec_config = None
         llm = None
         kv_cache_config = KvCacheConfig(enable_block_reuse=True, free_gpu_memory_fraction=0.8)
 
-        if self.model_id == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8":
+        if self.model_id in (
+            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
+            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
+        ):
             llm = LLM(
                 model=self.model_id,
                 tensor_parallel_size=self.tensor_parallel_size,
@@ -173,10 +215,7 @@ class ModelDeployer:
 
     def _deploy_vllm(self):
         """Deploy a model using vLLM."""
-        try:
-            from vllm import LLM, SamplingParams
-        except ImportError:
-            pytest.skip("vllm package not available")
+        from vllm import LLM, SamplingParams
 
         quantization_method = "modelopt"
         if "fp4" in self.model_id.lower():
@@ -210,10 +249,8 @@ class ModelDeployer:
 
     def _deploy_sglang(self):
         """Deploy a model using SGLang."""
-        try:
-            import sglang as sgl
-        except ImportError:
-            pytest.skip("sglang package not available")
+        import sglang as sgl
+
         quantization_method = "modelopt"
         if "fp4" in self.model_id.lower():
             quantization_method = "modelopt_fp4"
@@ -230,7 +267,10 @@ class ModelDeployer:
                 mem_fraction_static=0.7,
                 context_length=1024,
             )
-        elif self.model_id == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8":
+        elif self.model_id in (
+            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
+            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
+        ):
             llm = sgl.Engine(
                 model_path=self.model_id,
                 quantization=quantization_method,
@@ -259,10 +299,20 @@ class ModelDeployerList:
             else:
                 self.params[key] = [value]
 
+        # Filter backends to only include available ones
+        if "backend" in self.params:
+            available = get_available_backends()
+            original_backends = self.params["backend"]
+            self.params["backend"] = [b for b in original_backends if b in available]
+
         # Pre-generate all deployers for pytest compatibility
         self._deployers = list(self._generate_deployers())
 
     def _generate_deployers(self):
+        # If no backends available after filtering, yield nothing
+        if "backend" in self.params and not self.params["backend"]:
+            return
+
         for values in itertools.product(*self.params.values()):
             deployer = ModelDeployer(**dict(zip(self.params.keys(), values)))
             # Set test case ID in format "model_id_backend"
