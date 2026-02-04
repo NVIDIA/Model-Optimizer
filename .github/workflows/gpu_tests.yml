@@ -1,4 +1,4 @@
-# NOTE: Make sure this file is consistent with .gitlab/tests.yml
+# TODO: Optimize gpu tests runtime!
 name: GPU tests
 
 on:
@@ -78,7 +78,7 @@ jobs:
   gpu-tests-non-pr:
     if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
     runs-on: linux-amd64-gpu-h100-latest-2
-    timeout-minutes: 120
+    timeout-minutes: 150
     container: *gpu_container
     steps: *gpu_steps
   gpu-pr-required-check:

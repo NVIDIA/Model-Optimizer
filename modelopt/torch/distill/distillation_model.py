@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
-
 """Meta-model wrapper to support knowledge-distillation learning."""
 
 import inspect
@@ -45,6 +43,7 @@ class DistillationModel(DynamicModule):
         self._register_temp_attribute("_loss_modules", nn.ModuleList())
         self._register_temp_attribute("_only_teacher_fwd", False)
         self._register_temp_attribute("_only_student_fwd", False)
+        self._register_temp_attribute("_hook_handles", set())
 
         # HACK: set model's forward signature to match student class' original.
         # Needed for HF `transformers.utils.find_labels` which relies on inspecting class signature.
@@ -57,13 +56,13 @@ class DistillationModel(DynamicModule):
 
     def modify(
         self,
-        teacher_model: nn.Module,  # To be frozen.
+        teacher_model: nn.Module,
         criterion: dict[
             tuple[
-                str,  # Student model layer whose output to capture.
-                str,  # Teacher model layer whose output to capture.
+                str,  # Student model layer whose output to capture
+                str,  # Teacher model layer whose output to capture
             ],
-            Loss,  # Loss fn.
+            Loss,  # Loss function
         ],
         loss_balancer: DistillationLossBalancer | None = None,
         expose_minimal_state_dict: bool = True,
@@ -71,9 +70,8 @@ class DistillationModel(DynamicModule):
         """Constructor.
 
         Args:
-            teacher_model: A teacher model which this class would encapsulate.
-            criterion: A dictionary mapping the tuple of student and teacher
-                model layer names to the loss function to apply to that layer pair.
+            teacher_model: The teacher model (will be frozen).
+            criterion: Dictionary mapping (student_layer_name, teacher_layer_name) to loss functions.
             loss_balancer: Instance of
                 :class:`DistillationLossBalancer <modelopt.torch.distill.DistillationLossBalancer>`
                 which reduces distillation and non-distillation losses into a single value using some weighing scheme.
@@ -106,22 +104,30 @@ class DistillationModel(DynamicModule):
             {m for m in self._layers_to_loss.values() if len(list(m.parameters())) > 0}
         )
 
-        # Disable grad for teacher
+        # Disable grad for teacher.
         self._teacher_model.requires_grad_(False)
 
-        # Register hooks for intermediate outputs from teacher models and the student model.
-        # HACK: For inexplicable reasons, sometimes a model will have hooks remain after
-        #   `ato.restore()` so we check if they are present accidentally first.
+        # Use hooks to caputure relevant activation tensors for loss computation.
+        self._register_hooks()
+
+    def _register_hooks(self):
+        """Register hooks for intermediate tensors from teacher models and the student model."""
         for student_layer, teacher_layer in self._layers_to_loss:
             setattr(student_layer, "_intermediate_output", None)
-            if student_output_capture_fwd_hook not in student_layer._forward_hooks.values():
-                student_layer.register_forward_hook(student_output_capture_fwd_hook)
+            handle_s = student_layer.register_forward_hook(student_output_capture_fwd_hook)
             setattr(teacher_layer, "_intermediate_output", None)
-            if teacher_output_capture_fwd_hook not in teacher_layer._forward_hooks.values():
-                teacher_layer.register_forward_hook(teacher_output_capture_fwd_hook)
+            handle_t = teacher_layer.register_forward_hook(teacher_output_capture_fwd_hook)
+            self._hook_handles.update([handle_s, handle_t])
+
+    def export(self):
+        """Export the distillation model."""
+        for handle in self._hook_handles:
+            handle.remove()
+        self._hook_handles.clear()
+        return super().export()
 
     @property
-    def teacher_model(self) -> nn.ModuleList:
+    def teacher_model(self) -> nn.Module:
         """Fetch the teacher model."""
         return self._teacher_model
 
@@ -148,7 +154,7 @@ class DistillationModel(DynamicModule):
 
     @contextmanager
     def hide_loss_modules(self, enable=True):
-        """Context manager to temporarily hide teacher model from the model."""
+        """Context manager to temporarily hide loss modules from the model."""
         loss_modules = self._loss_modules
         if enable:
             self._loss_modules = nn.ModuleList()
@@ -169,7 +175,7 @@ class DistillationModel(DynamicModule):
 
     @contextmanager
     def only_student_forward(self, enable=True):
-        """Context manager to temporarily disable forward passes on the student model."""
+        """Context manager to temporarily run forward passes only on the student model."""
         if enable:
             self._only_student_fwd = True
         try:
@@ -245,15 +251,13 @@ class DistillationModel(DynamicModule):
 
         Args:
             student_loss: Original loss computed from the student's output.
-            loss_reduction_fn: Callable to be called on each loss tensor prior to balancing. Useful for
-                loss-masking situations where the callable changes arguments each iteration.
+            loss_reduction_fn: Callable to be called on each loss tensor prior to balancing.
+                Useful for loss-masking situations where the callable changes arguments each iteration.
             skip_balancer: Whether or not to use loss balancer to reduce the loss dict into a scalar.
             **loss_fn_kwargs: Additional keyword arguments to be passed to the loss function, if needed.
-                This facilitates losses that require extras, such as labels for ``mtd.MFTLoss``.
 
         Returns:
-            If reduce is True, the scalar total loss weighted between ``student_loss`` and the distillation losses.
-            If reduce is False, a dict of student model output loss and layer-wise distillation losses.
+            A dict of losses if skip_balancer is True, else the scalar total loss.
         """
         if self._loss_balancer is None:
             assert student_loss is None, "Cannot pass in student loss without using Loss Balancer."
@@ -288,9 +292,9 @@ class DistillationModel(DynamicModule):
         return loss_total
 
 
-def student_output_capture_fwd_hook(module: nn.Module, input: Any, output: Any):  # pylint: disable=redefined-builtin
+def student_output_capture_fwd_hook(module: nn.Module, input: Any, output: Any):
     """A hook to capture layer output."""
-    # NOTE: Defined externally to allow pickling.
+    # NOTE: Defined externally to allow pickling during DDP initialization.
 
     if getattr(module, "_only_teacher_fwd", False):
         return  # Might be hooked on entire model fwd
@@ -303,9 +307,9 @@ def student_output_capture_fwd_hook(module: nn.Module, input: Any, output: Any):
     module._intermediate_output = output
 
 
-def teacher_output_capture_fwd_hook(module: nn.Module, input: Any, output: Any):  # pylint: disable=redefined-builtin
+def teacher_output_capture_fwd_hook(module: nn.Module, input: Any, output: Any):
     """A hook to capture layer output."""
-    # NOTE: Defined externally to allow pickling.
+    # NOTE: Defined externally to allow pickling during DDP initialization.
 
     if module._intermediate_output is not None:
         # NOTE: cannot tell if train or eval since teacher is always eval
