@@ -16,7 +16,9 @@
 import copy
 import glob
 import inspect
+import json
 import os
+import re
 import shutil
 import sys
 import warnings
@@ -27,6 +29,7 @@ import torch
 import transformers
 from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
+from safetensors.torch import load_file
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -314,6 +317,106 @@ def get_processor(
     return None
 
 
+def load_mtp_weights_if_needed(model: torch.nn.Module, model_path: str) -> list[str]:
+    """Load MTP weights from separate safetensors if needed (e.g., GLM-4.7).
+
+    Some models store additional layers in separate safetensors files with non-standard
+    names (e.g., mtp.safetensors). HuggingFace's from_pretrained() may not load these
+    files even though they're referenced in model.safetensors.index.json.
+
+    This function detects such cases and explicitly loads the missing weights.
+
+    Args:
+        model: The loaded model that may be missing weights
+        model_path: Path to the model directory
+
+    Returns:
+        List of layer prefixes that were loaded from non-standard safetensors files.
+        These layers should typically be excluded from quantization.
+        Empty list if no additional weights were loaded.
+    """
+    model_path = Path(model_path)
+    index_file = model_path / "model.safetensors.index.json"
+    mtp_layer_prefixes: list[str] = []
+
+    if not index_file.exists():
+        return mtp_layer_prefixes
+
+    # Load the index to find all referenced safetensors files
+    with open(index_file) as f:
+        index = json.load(f)
+
+    # Find all unique safetensors files referenced
+    all_files = set(index["weight_map"].values())
+
+    # Find non-standard shard files (not matching model-XXXXX-of-XXXXX.safetensors pattern)
+    standard_pattern = re.compile(r"model-\d{5}-of-\d{5}\.safetensors")
+    non_standard_files = [f for f in all_files if not standard_pattern.match(f)]
+
+    if not non_standard_files:
+        return mtp_layer_prefixes
+
+    # Check which non-standard files exist and have missing weights
+    model_state = model.state_dict()
+    total_loaded = 0
+
+    for filename in non_standard_files:
+        filepath = model_path / filename
+        if not filepath.exists():
+            continue
+
+        # Find keys that should be in this file
+        expected_keys = [k for k, v in index["weight_map"].items() if v == filename]
+
+        # Check which are missing from the model
+        missing_keys = [k for k in expected_keys if k not in model_state]
+
+        if not missing_keys:
+            # Even if weights are loaded, record the layer prefixes for exclusion
+            # Extract unique layer prefixes (e.g., "model.layers.92" from "model.layers.92.mlp.weight")
+            for key in expected_keys:
+                # Extract layer prefix like "model.layers.92" or "layers.92"
+                parts = key.split(".")
+                for i, part in enumerate(parts):
+                    if part == "layers" and i + 1 < len(parts) and parts[i + 1].isdigit():
+                        prefix = ".".join(parts[: i + 2])  # e.g., "model.layers.92"
+                        if prefix not in mtp_layer_prefixes:
+                            mtp_layer_prefixes.append(prefix)
+                        break
+            continue
+
+        print(f"Loading {len(missing_keys)} missing weights from {filename}...")
+
+        # Extract unique layer prefixes for exclusion from quantization
+        for key in missing_keys:
+            parts = key.split(".")
+            for i, part in enumerate(parts):
+                if part == "layers" and i + 1 < len(parts) and parts[i + 1].isdigit():
+                    prefix = ".".join(parts[: i + 2])  # e.g., "model.layers.92"
+                    if prefix not in mtp_layer_prefixes:
+                        mtp_layer_prefixes.append(prefix)
+                    break
+
+        # Load the weights to CPU first, load_state_dict will handle device placement
+        weights = load_file(str(filepath), device="cpu")
+        weights_to_load = {k: v for k, v in weights.items() if k in missing_keys}
+
+        # Load into model
+        missing, unexpected = model.load_state_dict(weights_to_load, strict=False)
+        total_loaded += len(weights_to_load)
+
+        if missing:
+            print(f"  Warning: {len(missing)} keys still missing after loading {filename}")
+
+    if total_loaded > 0:
+        print(f"✓ Successfully loaded {total_loaded} weights from non-standard safetensors files")
+
+    if mtp_layer_prefixes:
+        print(f"✓ Detected MTP layers to exclude from quantization: {mtp_layer_prefixes}")
+
+    return mtp_layer_prefixes
+
+
 def get_dtype(dtype):
     if dtype == "bf16":
         dtype = torch.bfloat16
@@ -472,6 +575,12 @@ def get_model(
 
     if device == "cuda" and not is_model_on_gpu(model):
         print("Warning: Some parameters are not on a GPU. Calibration can be slow or hit OOM")
+
+    # Load any missing weights from non-standard safetensors files (e.g., GLM-4.7's mtp.safetensors)
+    # Store the MTP layer prefixes on the model for later exclusion from quantization
+    mtp_layer_prefixes = load_mtp_weights_if_needed(model, ckpt_path)
+    if mtp_layer_prefixes:
+        model._mtp_layer_prefixes = mtp_layer_prefixes
 
     return model
 
