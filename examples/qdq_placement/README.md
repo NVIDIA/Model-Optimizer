@@ -114,7 +114,7 @@ trtexec --onnx=resnet50_results/optimized_final.onnx \
         --stronglyTyped
 ```
 
-## Pattern Cache (Transfer Learning)
+## Pattern Cache
 
 Reuse learned patterns on similar models:
 
@@ -187,19 +187,32 @@ python3 -m modelopt.onnx.quantization.autotune \
     --output ./resnet50_autotuned \
     --qdq-baseline resnet50_quantized.onnx \
     --schemes-per-region 50
+```
 
-# TensorRT 10.16 support remote autotuning, pass remoteAutoTuningConfig to trtexec to
-# benchmark with remote autotuning.
+**Note:** This example uses dummy calibration data. For production use, provide real calibration data representative of your inference workload.
+
+## Remote Autotuning with TensorRT
+
+TensorRT 10.16+ supports remote autotuning, which allows you to offload TensorRT's optimization process to remote hardware. This is useful when you want to optimize models for different target GPUs without having direct access to them.
+
+To use remote autotuning during Q/DQ placement optimization:
+
+```bash
 python3 -m modelopt.onnx.quantization.autotune \
     --model resnet50.bs128.onnx \
-    --output ./resnet50_autotuned \
-    --qdq-baseline resnet50_quantized.onnx \
+    --output ./resnet50_remote_autotuned \
     --schemes-per-region 50 \
     --use_trtexec \
     --trtexec_benchmark_args "--remoteAutoTuningConfig=\"<remote autotuning config>\""
 ```
 
-**Note:** This example uses dummy calibration data. For production use, provide real calibration data representative of your inference workload.
+**Requirements:**
+
+- TensorRT 10.16 or later
+- Valid remote autotuning configuration
+- `--use_trtexec` flag must be enabled
+
+Replace `<remote autotuning config>` with your actual remote autotuning configuration string provided by your TensorRT setup.
 
 ## Programmatic API Usage
 
