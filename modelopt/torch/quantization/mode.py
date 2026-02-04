@@ -37,6 +37,7 @@ from .config import (
     AWQFullCalibConfig,
     AWQLiteCalibConfig,
     CompressConfig,
+    GPTQConfig,
     GPTQLiteConfig,
     LocalHessianCalibConfig,
     MaxCalibConfig,
@@ -59,6 +60,7 @@ from .conversion import (
 )
 from .model_calib import (
     awq,
+    gptq,
     gptq_lite,
     local_hessian_calibrate,
     max_calibrate,
@@ -502,3 +504,15 @@ class GPTQLiteModeDescriptor(BaseCalibrateModeDescriptor):
         return GPTQLiteConfig
 
     _calib_func = gptq_lite
+
+
+@CalibrateModeRegistry.register_mode
+class GPTQModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for GPTQ calibration algorithm."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return GPTQConfig
+
+    _calib_func = gptq

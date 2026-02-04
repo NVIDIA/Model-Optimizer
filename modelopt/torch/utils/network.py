@@ -46,6 +46,7 @@ __all__ = [
     "ModelLike",
     "compare_dict",
     "create_param_grad_clear_hook",
+    "get_decoder_layers",
     "get_model_attributes",
     "get_module_device",
     "get_same_padding",
