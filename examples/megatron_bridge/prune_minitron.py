@@ -91,7 +91,7 @@ def get_args() -> argparse.Namespace:
 
     # Pruning parameters
     parser.add_argument(
-        "--prune_intermediate_checkpoint",
+        "--prune_intermediate_ckpt",
         type=str,
         default=None,
         help=(
@@ -169,18 +169,16 @@ def get_args() -> argparse.Namespace:
     args = parser.parse_args()
 
     # Post-process arguments
-    if args.prune_intermediate_checkpoint is None:
+    if args.prune_intermediate_ckpt is None:
         if args.output_megatron_path:
-            args.prune_intermediate_checkpoint = (
+            args.prune_intermediate_ckpt = (
                 f"{args.output_megatron_path}/modelopt_pruning_scores.pth"
             )
         elif args.output_hf_path:
-            args.prune_intermediate_checkpoint = (
-                f"{args.output_hf_path}/modelopt_pruning_scores.pth"
-            )
+            args.prune_intermediate_ckpt = f"{args.output_hf_path}/modelopt_pruning_scores.pth"
         print_rank_0(
             "No checkpoint provided to cache intermediate pruning scores. "
-            f"Setting to: {args.prune_intermediate_checkpoint}"
+            f"Setting to: {args.prune_intermediate_ckpt}"
         )
 
     if args.prune_export_config:
@@ -247,7 +245,7 @@ def main(args: argparse.Namespace):
 
     pruning_config = {
         "forward_loop": forward_loop,
-        "checkpoint": args.prune_intermediate_checkpoint,
+        "checkpoint": args.prune_intermediate_ckpt,
     }
     if args.prune_target_params is not None:
         # Restrict search space to a smaller set of candidates
@@ -377,8 +375,8 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    args = get_args()
     dist.setup()
+    args = get_args()
     try:
         main(args)
     finally:

@@ -31,7 +31,6 @@ from torch.fx.proxy import Proxy
 from torch.nn.parameter import Parameter
 
 from modelopt.torch.utils import get_unwrapped_name, is_channels_last, unwrap_model
-from modelopt.torch.utils.distributed import ParallelState
 from modelopt.torch.utils.network import bind_forward_method
 
 from .config import ModeloptBaseRule, RulesDict
@@ -359,14 +358,10 @@ class DynamicModule(nn.Module):
     should ensure only to expose ``hparams`` in the outermost class and handle other ``hparams``
     internally including ``hparams`` of child modules that are exposed on their own usually
     (e.g. block module implementations containing DynamicLinear).
-
-    In addition, the class also provides ``parallel_state`` attribute that can be used to access
-    the parallel state of the module.
     """
 
     # this is needed to store the special attributes for dynamic modules
     _dm_attribute_manager: _DMAttributeManager
-    _parallel_state: ParallelState
 
     def __init__(self, *args, **kwargs):
         """Initializing a dynamic module is not allowed!"""
@@ -657,10 +652,6 @@ class DynamicModule(nn.Module):
         # setup new hparams and dynamic attributes
         module._setup(**setup_kwargs)
 
-        # setup parallel state now that the module is converted
-        if module.parallel_state is None:
-            module._initialize_parallel_state()
-
         return module
 
     def _setup(self, **setup_kwargs: Any):
@@ -866,36 +857,6 @@ class DynamicModule(nn.Module):
             The original class of the dynamic module at the current level.
         """
         return self._get_dm_attribute_manager().og_cls
-
-    @property
-    def parallel_state(self) -> ParallelState | None:
-        """Return the parallel state of the dynamic module."""
-        return getattr(self, "_parallel_state", None)
-
-    @parallel_state.setter
-    def parallel_state(self, parallel_state: ParallelState):
-        """Set the parallel state of the dynamic module."""
-        assert isinstance(parallel_state, ParallelState), (
-            "parallel_state must be a ParallelState object!"
-        )
-        self._parallel_state = parallel_state
-
-    def _initialize_parallel_state(self):
-        """Initialize the parallel state of the dynamic module.
-
-        This method is called only if the `DynamicModule` does not have a `parallel_state` attribute
-        after `_setup` is called.
-        """
-        if torch.distributed.is_initialized():
-            warnings.warn(
-                f"Distributed training is initialized but no parallel_state is set for {type(self)}. "
-                "Using default parallel_state which has data_parallel_group set to the default process group and "
-                "tensor_parallel_group is unspecified. "
-                "If you are using tensor parallelism for this module, you should set the parallel_state "
-                "in its `_setup` method."
-            )
-
-        self.parallel_state = ParallelState(data_parallel_group=None)
 
     def get_original_cls_by_level(self, level: int = -1) -> type[nn.Module]:
         """Return the original class of the dynamic module.
