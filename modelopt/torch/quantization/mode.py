@@ -37,6 +37,7 @@ from .config import (
     AWQFullCalibConfig,
     AWQLiteCalibConfig,
     CompressConfig,
+    GPTQConfig,
     GPTQLiteConfig,
     MaxCalibConfig,
     MseCalibConfig,
@@ -56,7 +57,16 @@ from .conversion import (
     restore_svdquant_model,
     update_quantize_metadata,
 )
-from .model_calib import awq, gptq_lite, max_calibrate, mse_calibrate, smoothquant, svdquant
+from .model_calib import (
+    awq,
+    gptq,
+    gptq_lite,
+    max_calibrate,
+    mse_calibrate,
+    sequential_calibrate,
+    smoothquant,
+    svdquant,
+)
 
 __all__ = ["BaseCalibrateModeDescriptor"]
 
@@ -212,13 +222,24 @@ def wrapped_calib_func(
     """
     kwargs = config.model_dump()
     method = kwargs.pop("method")
+    sequential = kwargs.pop("use_sequential", False)
+
     if method is not None and "awq" in method:
         # For backward compatibility
         kwargs["algorithm"] = method
 
     if func is not None:
-        # Call the function with forward_loop as a separate argument
-        func(model, forward_loop=forward_loop, **kwargs)
+        if sequential:
+            # Wrap with sequential processing - just pass func as calib_func!
+            sequential_calibrate(
+                model,
+                forward_loop=forward_loop,
+                calib_func=func,  # <-- Pass func directly!
+                **kwargs,
+            )
+        else:
+            # Direct calibration (existing behavior)
+            func(model, forward_loop=forward_loop, **kwargs)
 
     # Lets get the latest metadata for the quantizer states
     metadata = {}
@@ -452,3 +473,15 @@ class GPTQLiteModeDescriptor(BaseCalibrateModeDescriptor):
         return GPTQLiteConfig
 
     _calib_func = gptq_lite
+
+
+@CalibrateModeRegistry.register_mode
+class GPTQModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for GPTQ calibration algorithm."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return GPTQConfig
+
+    _calib_func = gptq
