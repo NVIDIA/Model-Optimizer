@@ -340,7 +340,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
     model_group.add_argument(
         "--model-dtype",
         type=str,
-        default="BFloat16",
+        default="Half",
         choices=[d.value for d in DataType],
         help="Precision for loading the pipeline. If you want different dtypes for separate components, "
         "please specify using --component-dtype",
