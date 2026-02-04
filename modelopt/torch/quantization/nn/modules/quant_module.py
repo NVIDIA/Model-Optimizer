@@ -17,8 +17,10 @@
 
 import contextlib
 import warnings
+from typing import Any
 
 import torch
+import torch.nn as nn
 
 from modelopt.torch.opt.dynamic import DynamicModule, _DMRegistryCls
 from modelopt.torch.utils.distributed import ParallelState
@@ -44,9 +46,11 @@ class QuantModule(DynamicModule):
 
     _parallel_state: ParallelState
 
-    def convert(self, *args, **kwargs):
+    @classmethod
+    @torch.no_grad()
+    def convert(cls, module: nn.Module, **setup_kwargs: Any) -> "QuantModule":
         """Convert the module to a dynamic module."""
-        module = super().convert(*args, **kwargs)
+        module = super().convert(module, **setup_kwargs)
 
         # setup parallel state now that the module is converted
         if module.parallel_state is None:
@@ -56,7 +60,7 @@ class QuantModule(DynamicModule):
 
     @property
     def parallel_state(self) -> ParallelState | None:
-        """Return the parallel state of the dynamic module."""
+        """Return the parallel state of the quant module."""
         return getattr(self, "_parallel_state", None)
 
     @parallel_state.setter
@@ -70,7 +74,7 @@ class QuantModule(DynamicModule):
     def _initialize_parallel_state(self):
         """Initialize the parallel state of the dynamic module.
 
-        This method is called only if the `DynamicModule` does not have a `parallel_state` attribute
+        This method is called only if the `QuantModule` does not have a `parallel_state` attribute
         after `_setup` is called.
         """
         if torch.distributed.is_initialized():

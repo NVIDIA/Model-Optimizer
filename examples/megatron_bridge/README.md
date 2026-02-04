@@ -43,9 +43,8 @@ Example usage for manually pruning to a specific architecture using following de
 ```bash
 torchrun --nproc_per_node 2 /opt/Megatron-Bridge/3rdparty/Model-Optimizer/examples/megatron_bridge/prune_minitron.py \
     --hf_model_name_or_path Qwen/Qwen3-8B \
-    --prune_export_config '{"hidden_size": 3072, "ffn_hidden_size": 9216}' \
-    --hparams_to_skip num_attention_heads \
-    --output_hf_path /tmp/Qwen3-8B-Pruned-6B
+    --prune_export_config '{"hidden_size": 3584, "ffn_hidden_size": 9216}' \
+    --output_hf_path /tmp/Qwen3-8B-Pruned-6B-manual
 ```
 
 To see the full usage for advanced configurations, run:
