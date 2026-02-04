@@ -294,30 +294,27 @@ class GPTOSS:
 )
 def test_gpt_oss_complete_pipeline(model_path, tmp_path):
     """Test the complete GPT-OSS optimization pipeline by executing all 3 steps in sequence."""
-    import pathlib
 
-    # Use current directory instead of tmp_path for checkpoints
-    current_dir = pathlib.Path.cwd()
     # Create GPTOSS instance with model path
     gpt_oss = GPTOSS(model_path)
 
     if model_path == "openai/gpt-oss-20b":
         # Step 1: SFT Training
-        sft_checkpoint = gpt_oss.gpt_oss_sft_training(current_dir)
+        sft_checkpoint = gpt_oss.gpt_oss_sft_training(tmp_path)
         if not sft_checkpoint or not sft_checkpoint.exists():
             print("Step 1 failed: SFT checkpoint not found, stopping pipeline.")
             return
         print(f"Step 1 completed: SFT checkpoint at {sft_checkpoint}")
 
         # Step 2: QAT Training (depends on Step 1)
-        qat_checkpoint = gpt_oss.gpt_oss_qat_training(current_dir, sft_dir=sft_checkpoint)
+        qat_checkpoint = gpt_oss.gpt_oss_qat_training(tmp_path, sft_dir=sft_checkpoint)
         if not qat_checkpoint or not qat_checkpoint.exists():
             print("Step 2 failed: QAT checkpoint not found, stopping pipeline.")
             return
         print(f"Step 2 completed: QAT checkpoint at {qat_checkpoint}")
 
         # Step 3: MXFP4 Conversion (depends on Step 2)
-        mxfp4_checkpoint = gpt_oss.gpt_oss_mxfp4_conversion(current_dir, qat_dir=qat_checkpoint)
+        mxfp4_checkpoint = gpt_oss.gpt_oss_mxfp4_conversion(tmp_path, qat_dir=qat_checkpoint)
         if not mxfp4_checkpoint or not mxfp4_checkpoint.exists():
             print("Step 3 failed: MXFP4 checkpoint not found, stopping pipeline.")
             return
@@ -325,12 +322,12 @@ def test_gpt_oss_complete_pipeline(model_path, tmp_path):
 
         # Step 4: Deploy with TensorRT-LLM (depends on Step 3)
         print("Step 4: Running deployment with MXFP4 checkpoint...")
-        gpt_oss.deploy_gpt_oss_trtllm(current_dir, model_path_override=mxfp4_checkpoint)
+        gpt_oss.deploy_gpt_oss_trtllm(tmp_path, model_path_override=mxfp4_checkpoint)
         print("Step 4 completed: Deployment successful")
 
     elif model_path == "openai/gpt-oss-120b":
         # Step 1: QAT Training with LoRA
-        qat_lora_checkpoint = gpt_oss.gpt_oss_qat_training_lora(current_dir)
+        qat_lora_checkpoint = gpt_oss.gpt_oss_qat_training_lora(tmp_path)
         if not qat_lora_checkpoint or not qat_lora_checkpoint.exists():
             print("Step 1 failed: QAT-LoRA checkpoint not found, stopping pipeline.")
             return
@@ -338,7 +335,7 @@ def test_gpt_oss_complete_pipeline(model_path, tmp_path):
 
         # Step 2: MXFP4 Conversion for LoRA model (depends on Step 1)
         mxfp4_checkpoint = gpt_oss.gpt_oss_mxfp4_conversion_lora(
-            current_dir, qat_lora_dir=qat_lora_checkpoint
+            tmp_path, qat_lora_dir=qat_lora_checkpoint
         )
         if not mxfp4_checkpoint or not mxfp4_checkpoint.exists():
             print("Step 2 failed: MXFP4 checkpoint not found, stopping pipeline.")
@@ -347,5 +344,5 @@ def test_gpt_oss_complete_pipeline(model_path, tmp_path):
 
         # Step 3: Deploy with TensorRT-LLM (depends on Step 2)
         print("Step 3: Running deployment with MXFP4 checkpoint...")
-        gpt_oss.deploy_gpt_oss_trtllm(current_dir, model_path_override=mxfp4_checkpoint)
+        gpt_oss.deploy_gpt_oss_trtllm(tmp_path, model_path_override=mxfp4_checkpoint)
         print("Step 3 completed: Deployment successful")

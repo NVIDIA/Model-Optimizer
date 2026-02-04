@@ -302,6 +302,28 @@ def get_tensor_consumer_nodes(
     return tensor_consumers
 
 
+def get_tensor_consumer_node_indices(graph: onnx.GraphProto | gs.Graph) -> dict[str, list[int]]:
+    """Build a mapping from tensor names to the indices of nodes that use them.
+
+    Args:
+        graph: ONNX GraphSurgeon graph to analyze
+    Returns:
+        Dictionary mapping tensor names to lists of node indices that consume them
+    """
+    tensor_consumer_map: dict[str, list[int]] = defaultdict(list)
+    nodes = graph.nodes if isinstance(graph, gs.Graph) else graph.node
+    for node_idx, node in enumerate(nodes):
+        inputs = node.inputs if isinstance(node, gs.Node) else node.input
+        for tensor in inputs:
+            tensor_name = tensor
+            if isinstance(tensor, str):
+                tensor_name = tensor
+            elif hasattr(tensor, "name") and isinstance(tensor.name, str):
+                tensor_name = tensor.name
+            tensor_consumer_map[tensor_name].append(node_idx)
+    return tensor_consumer_map
+
+
 def filter_quantizable_kgen_heads(
     cask_fusible_partitions: list[list[Node]],
     kgen_partitions: list[list[Node]],

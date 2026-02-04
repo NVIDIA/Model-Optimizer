@@ -23,6 +23,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from datetime import timedelta
 from typing import Any
+from warnings import warn
 
 import torch
 import torch.distributed
@@ -76,7 +77,8 @@ def local_rank() -> int:
     """Returns the local rank of the current process."""
     if "LOCAL_RANK" in os.environ:
         return int(os.environ["LOCAL_RANK"])
-    raise RuntimeError("LOCAL_RANK environment variable not found.")
+    warn("LOCAL_RANK environment variable not found. Using global rank instead.")
+    return rank()
 
 
 def is_master(group=None) -> bool:

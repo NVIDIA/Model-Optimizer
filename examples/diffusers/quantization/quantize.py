@@ -17,13 +17,12 @@ import argparse
 import logging
 import sys
 import time as time
-from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import torch
 import torch.nn as nn
+from calibration import Calibrator
 from config import (
     FP8_DEFAULT_CONFIG,
     INT8_DEFAULT_CONFIG,
@@ -32,171 +31,25 @@ from config import (
     reset_set_int8_config,
     set_quant_config_attr,
 )
-
-# This is a workaround for making the onnx export of models that use the torch RMSNorm work. We will
-# need to move on to use dynamo based onnx export to properly fix the problem. The issue has been hit
-# by both external users https://github.com/NVIDIA/Model-Optimizer/issues/262, and our
-# internal users from MLPerf Inference.
-#
-if __name__ == "__main__":
-    from diffusers.models.normalization import RMSNorm as DiffuserRMSNorm
-
-    torch.nn.RMSNorm = DiffuserRMSNorm
-    torch.nn.modules.normalization.RMSNorm = DiffuserRMSNorm
-
-from diffusers import DiffusionPipeline, LTXLatentUpsamplePipeline
-from models_utils import (
-    MODEL_DEFAULTS,
-    MODEL_PIPELINE,
-    MODEL_REGISTRY,
-    ModelType,
-    get_model_filter_func,
-)
+from diffusers import DiffusionPipeline
+from models_utils import MODEL_DEFAULTS, ModelType, get_model_filter_func, parse_extra_params
 from onnx_utils.export import generate_fp8_scales, modelopt_export_sd
-from tqdm import tqdm
-from utils import check_conv_and_mha, check_lora, load_calib_prompts
+from pipeline_manager import PipelineManager
+from quantize_config import (
+    CalibrationConfig,
+    CollectMethod,
+    DataType,
+    ExportConfig,
+    ModelConfig,
+    QuantAlgo,
+    QuantFormat,
+    QuantizationConfig,
+)
+from utils import check_conv_and_mha, check_lora
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_hf_checkpoint
-
-
-class DataType(str, Enum):
-    """Supported data types for model loading."""
-
-    HALF = "Half"
-    BFLOAT16 = "BFloat16"
-    FLOAT = "Float"
-
-    @property
-    def torch_dtype(self) -> torch.dtype:
-        return self._dtype_map[self.value]
-
-
-DataType._dtype_map = {
-    DataType.HALF: torch.float16,
-    DataType.BFLOAT16: torch.bfloat16,
-    DataType.FLOAT: torch.float32,
-}
-
-
-class QuantFormat(str, Enum):
-    """Supported quantization formats."""
-
-    INT8 = "int8"
-    FP8 = "fp8"
-    FP4 = "fp4"
-
-
-class QuantAlgo(str, Enum):
-    """Supported quantization algorithms."""
-
-    MAX = "max"
-    SVDQUANT = "svdquant"
-    SMOOTHQUANT = "smoothquant"
-
-
-class CollectMethod(str, Enum):
-    """Calibration collection methods."""
-
-    GLOBAL_MIN = "global_min"
-    MIN_MAX = "min-max"
-    MIN_MEAN = "min-mean"
-    MEAN_MAX = "mean-max"
-    DEFAULT = "default"
-
-
-@dataclass
-class QuantizationConfig:
-    """Configuration for model quantization."""
-
-    format: QuantFormat = QuantFormat.INT8
-    algo: QuantAlgo = QuantAlgo.MAX
-    percentile: float = 1.0
-    collect_method: CollectMethod = CollectMethod.DEFAULT
-    alpha: float = 1.0  # SmoothQuant alpha
-    lowrank: int = 32  # SVDQuant lowrank
-    quantize_mha: bool = False
-    compress: bool = False
-
-    def validate(self) -> None:
-        """Validate configuration consistency."""
-        if self.format == QuantFormat.FP8 and self.collect_method != CollectMethod.DEFAULT:
-            raise NotImplementedError("Only 'default' collect method is implemented for FP8.")
-        if self.quantize_mha and self.format == QuantFormat.INT8:
-            raise ValueError("MHA quantization is only supported for FP8, not INT8.")
-        if self.compress and self.format == QuantFormat.INT8:
-            raise ValueError("Compression is only supported for FP8 and FP4, not INT8.")
-
-
-@dataclass
-class CalibrationConfig:
-    """Configuration for calibration process."""
-
-    prompts_dataset: dict | Path
-    batch_size: int = 2
-    calib_size: int = 128
-    n_steps: int = 30
-
-    def validate(self) -> None:
-        """Validate calibration configuration."""
-        if self.batch_size <= 0:
-            raise ValueError("Batch size must be positive.")
-        if self.calib_size <= 0:
-            raise ValueError("Calibration size must be positive.")
-        if self.n_steps <= 0:
-            raise ValueError("Number of steps must be positive.")
-
-    @property
-    def num_batches(self) -> int:
-        """Calculate number of calibration batches."""
-        return self.calib_size // self.batch_size
-
-
-@dataclass
-class ModelConfig:
-    """Configuration for model loading and inference."""
-
-    model_type: ModelType = ModelType.FLUX_DEV
-    model_dtype: dict[str, torch.dtype] = field(default_factory=lambda: {"default": torch.float16})
-    backbone: str = ""
-    trt_high_precision_dtype: DataType = DataType.HALF
-    override_model_path: Path | None = None
-    cpu_offloading: bool = False
-    ltx_skip_upsampler: bool = False  # Skip upsampler for LTX-Video (faster calibration)
-
-    @property
-    def model_path(self) -> str:
-        """Get the model path (override or default)."""
-        if self.override_model_path:
-            return str(self.override_model_path)
-        return MODEL_REGISTRY[self.model_type]
-
-
-@dataclass
-class ExportConfig:
-    """Configuration for model export."""
-
-    quantized_torch_ckpt_path: Path | None = None
-    onnx_dir: Path | None = None
-    hf_ckpt_dir: Path | None = None
-    restore_from: Path | None = None
-
-    def validate(self) -> None:
-        """Validate export configuration."""
-        if self.restore_from and not self.restore_from.exists():
-            raise FileNotFoundError(f"Restore checkpoint not found: {self.restore_from}")
-
-        if self.quantized_torch_ckpt_path:
-            parent_dir = self.quantized_torch_ckpt_path.parent
-            if not parent_dir.exists():
-                parent_dir.mkdir(parents=True, exist_ok=True)
-
-        if self.onnx_dir and not self.onnx_dir.exists():
-            self.onnx_dir.mkdir(parents=True, exist_ok=True)
-
-        if self.hf_ckpt_dir and not self.hf_ckpt_dir.exists():
-            self.hf_ckpt_dir.mkdir(parents=True, exist_ok=True)
 
 
 def setup_logging(verbose: bool = False) -> logging.Logger:
@@ -230,275 +83,6 @@ def setup_logging(verbose: bool = False) -> logging.Logger:
     logging.getLogger("transformers").setLevel(logging.WARNING)
 
     return logger
-
-
-class PipelineManager:
-    """Manages diffusion pipeline creation and configuration."""
-
-    def __init__(self, config: ModelConfig, logger: logging.Logger):
-        """
-        Initialize pipeline manager.
-
-        Args:
-            config: Model configuration
-            logger: Logger instance
-        """
-        self.config = config
-        self.logger = logger
-        self.pipe: DiffusionPipeline | None = None
-        self.pipe_upsample: LTXLatentUpsamplePipeline | None = None  # For LTX-Video upsampling
-
-    @staticmethod
-    def create_pipeline_from(
-        model_type: ModelType,
-        torch_dtype: torch.dtype | dict[str, str | torch.dtype] = torch.bfloat16,
-        override_model_path: str | None = None,
-    ) -> DiffusionPipeline:
-        """
-        Create and return an appropriate pipeline based on configuration.
-
-        Returns:
-            Configured diffusion pipeline
-
-        Raises:
-            ValueError: If model type is unsupported
-        """
-        try:
-            model_id = (
-                MODEL_REGISTRY[model_type] if override_model_path is None else override_model_path
-            )
-            pipe = MODEL_PIPELINE[model_type].from_pretrained(
-                model_id,
-                torch_dtype=torch_dtype,
-                use_safetensors=True,
-                **MODEL_DEFAULTS[model_type].get("from_pretrained_extra_args", {}),
-            )
-            pipe.set_progress_bar_config(disable=True)
-            return pipe
-        except Exception as e:
-            raise e
-
-    def create_pipeline(self) -> DiffusionPipeline:
-        """
-        Create and return an appropriate pipeline based on configuration.
-
-        Returns:
-            Configured diffusion pipeline
-
-        Raises:
-            ValueError: If model type is unsupported
-        """
-        self.logger.info(f"Creating pipeline for {self.config.model_type.value}")
-        self.logger.info(f"Model path: {self.config.model_path}")
-        self.logger.info(f"Data type: {self.config.model_dtype}")
-
-        try:
-            self.pipe = MODEL_PIPELINE[self.config.model_type].from_pretrained(
-                self.config.model_path,
-                torch_dtype=self.config.model_dtype,
-                use_safetensors=True,
-                **MODEL_DEFAULTS[self.config.model_type].get("from_pretrained_extra_args", {}),
-            )
-            if self.config.model_type == ModelType.LTX_VIDEO_DEV:
-                # Optionally load the upsampler pipeline for LTX-Video
-                if not self.config.ltx_skip_upsampler:
-                    self.logger.info("Loading LTX-Video upsampler pipeline...")
-                    self.pipe_upsample = LTXLatentUpsamplePipeline.from_pretrained(
-                        "Lightricks/ltxv-spatial-upscaler-0.9.7",
-                        vae=self.pipe.vae,
-                        torch_dtype=self.config.model_dtype,
-                    )
-                    self.pipe_upsample.set_progress_bar_config(disable=True)
-                else:
-                    self.logger.info("Skipping upsampler pipeline for faster calibration")
-            self.pipe.set_progress_bar_config(disable=True)
-
-            self.logger.info("Pipeline created successfully")
-            return self.pipe
-
-        except Exception as e:
-            self.logger.error(f"Failed to create pipeline: {e}")
-            raise
-
-    def setup_device(self) -> None:
-        """Configure pipeline device placement."""
-        if not self.pipe:
-            raise RuntimeError("Pipeline not created. Call create_pipeline() first.")
-
-        if self.config.cpu_offloading:
-            self.logger.info("Enabling CPU offloading for memory efficiency")
-            self.pipe.enable_model_cpu_offload()
-            if self.pipe_upsample:
-                self.pipe_upsample.enable_model_cpu_offload()
-        else:
-            self.logger.info("Moving pipeline to CUDA")
-            self.pipe.to("cuda")
-            if self.pipe_upsample:
-                self.logger.info("Moving upsampler pipeline to CUDA")
-                self.pipe_upsample.to("cuda")
-        # Enable VAE tiling for LTX-Video to save memory
-        if self.config.model_type == ModelType.LTX_VIDEO_DEV:
-            if hasattr(self.pipe, "vae") and hasattr(self.pipe.vae, "enable_tiling"):
-                self.logger.info("Enabling VAE tiling for LTX-Video")
-                self.pipe.vae.enable_tiling()
-
-    def get_backbone(self) -> torch.nn.Module:
-        """
-        Get the backbone model (transformer or UNet).
-
-        Returns:
-            Backbone model module
-        """
-        if not self.pipe:
-            raise RuntimeError("Pipeline not created. Call create_pipeline() first.")
-
-        return getattr(self.pipe, self.config.backbone)
-
-
-class Calibrator:
-    """Handles model calibration for quantization."""
-
-    def __init__(
-        self,
-        pipeline_manager: PipelineManager,
-        config: CalibrationConfig,
-        model_type: ModelType,
-        logger: logging.Logger,
-    ):
-        """
-        Initialize calibrator.
-
-        Args:
-            pipeline_manager: Pipeline manager with main and upsampler pipelines
-            config: Calibration configuration
-            model_type: Type of model being calibrated
-            logger: Logger instance
-        """
-        self.pipeline_manager = pipeline_manager
-        self.pipe = pipeline_manager.pipe
-        self.pipe_upsample = pipeline_manager.pipe_upsample
-        self.config = config
-        self.model_type = model_type
-        self.logger = logger
-
-    def load_and_batch_prompts(self) -> list[list[str]]:
-        """
-        Load calibration prompts from file.
-
-        Returns:
-            List of batched calibration prompts
-        """
-        self.logger.info(f"Loading calibration prompts from {self.config.prompts_dataset}")
-        if isinstance(self.config.prompts_dataset, Path):
-            return load_calib_prompts(
-                self.config.batch_size,
-                self.config.prompts_dataset,
-            )
-
-        return load_calib_prompts(
-            self.config.batch_size,
-            self.config.prompts_dataset["name"],
-            self.config.prompts_dataset["split"],
-            self.config.prompts_dataset["column"],
-        )
-
-    def run_calibration(self, batched_prompts: list[list[str]]) -> None:
-        """
-        Run calibration steps on the pipeline.
-
-        Args:
-            batched_prompts: List of batched calibration prompts
-        """
-        self.logger.info(f"Starting calibration with {self.config.num_batches} batches")
-        extra_args = MODEL_DEFAULTS.get(self.model_type, {}).get("inference_extra_args", {})
-
-        with tqdm(total=self.config.num_batches, desc="Calibration", unit="batch") as pbar:
-            for i, prompt_batch in enumerate(batched_prompts):
-                if i >= self.config.num_batches:
-                    break
-
-                if self.model_type == ModelType.LTX_VIDEO_DEV:
-                    # Special handling for LTX-Video
-                    self._run_ltx_video_calibration(prompt_batch, extra_args)
-                elif self.model_type in [ModelType.WAN22_T2V_14b, ModelType.WAN22_T2V_5b]:
-                    # Special handling for WAN video models
-                    self._run_wan_video_calibration(prompt_batch, extra_args)
-                else:
-                    common_args = {
-                        "prompt": prompt_batch,
-                        "num_inference_steps": self.config.n_steps,
-                    }
-                    self.pipe(**common_args, **extra_args).images  # type: ignore[misc]
-                pbar.update(1)
-                self.logger.debug(f"Completed calibration batch {i + 1}/{self.config.num_batches}")
-        self.logger.info("Calibration completed successfully")
-
-    def _run_wan_video_calibration(
-        self, prompt_batch: list[str], extra_args: dict[str, Any]
-    ) -> None:
-        kwargs = {}
-        kwargs["negative_prompt"] = extra_args["negative_prompt"]
-        kwargs["height"] = extra_args["height"]
-        kwargs["width"] = extra_args["width"]
-        kwargs["num_frames"] = extra_args["num_frames"]
-        kwargs["guidance_scale"] = extra_args["guidance_scale"]
-        if "guidance_scale_2" in extra_args:
-            kwargs["guidance_scale_2"] = extra_args["guidance_scale_2"]
-        kwargs["num_inference_steps"] = self.config.n_steps
-
-        self.pipe(prompt=prompt_batch, **kwargs).frames  # type: ignore[misc]
-
-    def _run_ltx_video_calibration(
-        self, prompt_batch: list[str], extra_args: dict[str, Any]
-    ) -> None:
-        """
-        Run calibration for LTX-Video model using the full multi-stage pipeline.
-
-        Args:
-            prompt_batch: Batch of prompts
-            extra_args: Model-specific arguments
-        """
-        # Extract specific args for LTX-Video
-        expected_height = extra_args.get("height", 512)
-        expected_width = extra_args.get("width", 704)
-        num_frames = extra_args.get("num_frames", 121)
-        negative_prompt = extra_args.get(
-            "negative_prompt", "worst quality, inconsistent motion, blurry, jittery, distorted"
-        )
-
-        def round_to_nearest_resolution_acceptable_by_vae(height, width):
-            height = height - (height % self.pipe.vae_spatial_compression_ratio)  # type: ignore[union-attr]
-            width = width - (width % self.pipe.vae_spatial_compression_ratio)  # type: ignore[union-attr]
-            return height, width
-
-        downscale_factor = 2 / 3
-        # Part 1: Generate video at smaller resolution
-        downscaled_height, downscaled_width = (
-            int(expected_height * downscale_factor),
-            int(expected_width * downscale_factor),
-        )
-        downscaled_height, downscaled_width = round_to_nearest_resolution_acceptable_by_vae(
-            downscaled_height, downscaled_width
-        )
-
-        # Generate initial latents at lower resolution
-        latents = self.pipe(  # type: ignore[misc]
-            conditions=None,
-            prompt=prompt_batch,
-            negative_prompt=negative_prompt,
-            width=downscaled_width,
-            height=downscaled_height,
-            num_frames=num_frames,
-            num_inference_steps=self.config.n_steps,
-            output_type="latent",
-        ).frames
-
-        # Part 2: Upscale generated video using latent upsampler (if available)
-        if self.pipe_upsample is not None:
-            _ = self.pipe_upsample(latents=latents, output_type="latent").frames
-
-            # Part 3: Denoise the upscaled video with few steps to improve texture
-            # However, in this example code, we will omit the upscale step since its optional.
 
 
 class Quantizer:
@@ -568,7 +152,7 @@ class Quantizer:
         backbone: torch.nn.Module,
         quant_config: Any,
         forward_loop: callable,  # type: ignore[valid-type]
-    ) -> None:
+    ) -> torch.nn.Module:
         """
         Apply quantization to the model.
 
@@ -590,6 +174,7 @@ class Quantizer:
         mtq.disable_quantizer(backbone, model_filter_func)
 
         self.logger.info("Quantization completed successfully")
+        return backbone
 
 
 class ExportManager:
@@ -691,7 +276,8 @@ class ExportManager:
         mto.restore(backbone, str(self.config.restore_from))
         self.logger.info("Model restored successfully")
 
-    def export_hf_ckpt(self, pipe: DiffusionPipeline) -> None:
+    # TODO: should not do the any data type
+    def export_hf_ckpt(self, pipe: Any) -> None:
         """
         Export quantized model to HuggingFace checkpoint format.
 
@@ -778,6 +364,16 @@ def create_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip upsampler pipeline for LTX-Video (faster calibration, only quantizes main transformer)",
     )
+    model_group.add_argument(
+        "--extra-param",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "Extra model-specific parameters in KEY=VALUE form. Can be provided multiple times. "
+            "These override model-specific CLI arguments when present."
+        ),
+    )
     quant_group = parser.add_argument_group("Quantization Configuration")
     quant_group.add_argument(
         "--format",
@@ -858,8 +454,13 @@ def create_argument_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    from diffusers.models.normalization import RMSNorm as DiffuserRMSNorm
+
+    torch.nn.RMSNorm = DiffuserRMSNorm
+    torch.nn.modules.normalization.RMSNorm = DiffuserRMSNorm
+
     parser = create_argument_parser()
-    args = parser.parse_args()
+    args, unknown_args = parser.parse_known_args()
 
     model_type = ModelType(args.model)
     if args.backbone is None:
@@ -875,6 +476,7 @@ def main() -> None:
     logger.info("Starting Enhanced Diffusion Model Quantization")
 
     try:
+        extra_params = parse_extra_params(args.extra_param, unknown_args, logger)
         model_config = ModelConfig(
             model_type=model_type,
             model_dtype=model_dtype,
@@ -885,6 +487,7 @@ def main() -> None:
             else None,
             cpu_offloading=args.cpu_offloading,
             ltx_skip_upsampler=args.ltx_skip_upsampler,
+            extra_params=extra_params,
         )
 
         quant_config = QuantizationConfig(
@@ -950,6 +553,7 @@ def main() -> None:
             quantizer = Quantizer(quant_config, model_config, logger)
             backbone_quant_config = quantizer.get_quant_config(calib_config.n_steps, backbone)
 
+            # Pipe loads the ckpt just before the inference.
             def forward_loop(mod):
                 calibrator.run_calibration(batched_prompts)
 
