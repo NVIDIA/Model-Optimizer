@@ -106,6 +106,22 @@ def _is_enabled_quantizer(quantizer):
     return False
 
 
+def _save_component_state_dict_safetensors(
+    component: nn.Module, component_export_dir: Path
+) -> None:
+    cpu_state_dict = {k: v.detach().contiguous().cpu() for k, v in component.state_dict().items()}
+    save_file(cpu_state_dict, str(component_export_dir / "model.safetensors"))
+    with open(component_export_dir / "config.json", "w") as f:
+        json.dump(
+            {
+                "_class_name": type(component).__name__,
+                "_export_format": "safetensors_state_dict",
+            },
+            f,
+            indent=4,
+        )
+
+
 def _collect_shared_input_modules(
     model: nn.Module,
     dummy_forward_fn: Callable[[], None],
@@ -853,19 +869,7 @@ def _export_diffusers_checkpoint(
                     component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)
             else:
                 with hide_quantizers_from_state_dict(component):
-                    cpu_state_dict = {
-                        k: v.detach().contiguous().cpu() for k, v in component.state_dict().items()
-                    }
-                    save_file(cpu_state_dict, str(component_export_dir / "model.safetensors"))
-                with open(component_export_dir / "config.json", "w") as f:
-                    json.dump(
-                        {
-                            "_class_name": type(component).__name__,
-                            "_export_format": "safetensors_state_dict",
-                        },
-                        f,
-                        indent=4,
-                    )
+                    _save_component_state_dict_safetensors(component, component_export_dir)
 
             # Step 7: Update config.json with quantization info
             if quant_config is not None:
@@ -882,19 +886,7 @@ def _export_diffusers_checkpoint(
         elif hasattr(component, "save_pretrained"):
             component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)
         else:
-            cpu_state_dict = {
-                k: v.detach().contiguous().cpu() for k, v in component.state_dict().items()
-            }
-            save_file(cpu_state_dict, str(component_export_dir / "model.safetensors"))
-            with open(component_export_dir / "config.json", "w") as f:
-                json.dump(
-                    {
-                        "_class_name": type(component).__name__,
-                        "_export_format": "safetensors_state_dict",
-                    },
-                    f,
-                    indent=4,
-                )
+            _save_component_state_dict_safetensors(component, component_export_dir)
 
         print(f"  Saved to: {component_export_dir}")
 
