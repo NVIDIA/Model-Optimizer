@@ -55,6 +55,7 @@ except ImportError:
     PYCUDA_AVAILABLE = False
 
 from modelopt.onnx.logging_config import logger
+from modelopt.onnx.quantization.ort_utils import _check_for_tensorrt
 
 
 class Benchmark(ABC):
@@ -190,8 +191,23 @@ class TrtExecBenchmark(Benchmark):
             self._base_cmd.append(f"--staticPlugins={plugin_path}")
             self.logger.debug(f"Added plugin library: {plugin_path}")
 
-        if self.trtexec_args:
-            self._base_cmd.extend(self.trtexec_args)
+        trtexec_args = self.trtexec_args or []
+        has_remote_config = any("--remoteAutoTuningConfig" in arg for arg in trtexec_args)
+
+        if has_remote_config:
+            try:
+                _check_for_tensorrt(min_version="10.16")
+                self.logger.debug("TensorRT Python API version >= 10.16 detected")
+                return
+            except ImportError:
+                self.logger.warning(
+                    "Remote autotuning is not supported with TensorRT version < 10.16"
+                    "Removing --remoteAutoTuningConfig from trtexec arguments"
+                )
+                trtexec_args = [
+                    arg for arg in trtexec_args if "--remoteAutoTuningConfig" not in arg
+                ]
+            self._base_cmd.extend(trtexec_args)
 
         self.logger.debug(f"Base command template: {' '.join(self._base_cmd)}")
 
