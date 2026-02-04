@@ -31,10 +31,20 @@ from modelopt.onnx.quantization.autotune.insertion_points import (
 
 
 class RegionPattern:
-    """Represents a structural pattern of a region."""
+    """Represents a structural pattern of a region.
+
+    The pattern captures the topology and operation types in a region,
+    enabling pattern matching and region comparison. Patterns are hashable
+    and can be used as dictionary keys for efficient grouping and lookup.
+    """
 
     def __init__(self, signature: str, size: int):
-        """Initialize a region pattern."""
+        """Initialize a region pattern.
+
+        Args:
+            signature: The structural signature of the region.
+            size: The number of nodes in the region.
+        """
         self.signature = signature
         self.size = size
 
@@ -77,13 +87,27 @@ class RegionPattern:
 
     def get_short_signature(self, max_length: int = 80) -> str:
         """Get a truncated version of the signature for display purposes."""
-        if len(self.signature) <= max_length:
+        if len(self.signature) <= max_length or max_length > len(self.signature):
             return self.signature
         return self.signature[: max_length - 3] + "..."
 
     @classmethod
     def from_region(cls, region: Region, graph: gs.Graph) -> "RegionPattern":
-        """Compute a structural pattern for a region."""
+        """Compute a structural pattern for a region.
+
+        The pattern captures:
+        - Direct node operations in the region
+        - Structure of sub-regions (recursively)
+        - Handles symmetric operations consistently
+        - Sorts sub-regions by size for determinism
+
+        Args:
+            region: The region to compute pattern for
+            graph: The ONNX graph containing the nodes
+
+        Returns:
+            RegionPattern object containing the signature and metadata
+        """
         signature_str = cls._compute_signature_recursive(region, graph)
         total_size = len(region.get_region_nodes_and_descendants())
         return cls(signature_str, total_size)
@@ -104,6 +128,21 @@ class RegionPattern:
         scheme: InsertionScheme | None = None,
     ) -> bool | list[int] | set[ResolvedInsertionPoint] | None:
         """Check if this pattern matches another pattern or region.
+
+        This method provides three distinct behaviors depending on the arguments:
+
+        1. **Pattern-to-pattern comparison** (other is RegionPattern, scheme is None):
+           Returns bool indicating structural equivalence.
+
+        2. **Pattern-to-region matching** (other is Region, scheme is None):
+           Returns list of node IDs in pattern order if match succeeds, None otherwise.
+
+        3. **Pattern-to-region with insertion scheme** (other is Region, scheme provided):
+           Returns set of resolved insertion points where Q/DQ should be inserted, considering:
+           - NodeInputInsertionPoints from the scheme (node-level Q/DQ)
+           - ChildRegionInputInsertionPoints from the scheme (child region input Q/DQ)
+           - RegionOutputInsertionPoints from the scheme (region output Q/DQ)
+           Returns empty set if pattern doesn't match.
 
         Args:
             other: Either a RegionPattern or Region to compare with
@@ -148,11 +187,32 @@ class RegionPattern:
             raise TypeError(f"Expected RegionPattern or Region, got {type(other).__name__}")
 
     def _matches_pattern(self, other: "RegionPattern") -> bool:
-        """Internal function: Match this pattern against another pattern."""
+        """Internal function: Match this pattern against another pattern.
+
+        Args:
+            other: Another RegionPattern to compare with
+
+        Returns:
+            True if patterns are structurally equivalent, False otherwise
+        """
         return self == other
 
     def _matches_region(self, region: Region, graph: gs.Graph | None) -> list[int] | None:
-        """Internal function: Match this pattern against a region."""
+        """Internal function: Match this pattern against a region.
+
+        Args:
+            region: The region to match against
+            graph: The ONNX graph containing the nodes
+
+        Returns:
+            List of node IDs in match order if pattern matches, None otherwise.
+            Match order follows the pattern computation order:
+            - Direct nodes of the region (sorted)
+            - Then recursively, nodes from child regions (in child sort order)
+
+        Raises:
+            ValueError: If graph is not provided
+        """
         if graph is None:
             raise ValueError("graph parameter is required when matching against a Region")
 
@@ -171,6 +231,13 @@ class RegionPattern:
         - node_inputs: Inputs to individual nodes within the region
         - child_region_inputs: Inputs to child regions within composite regions
         - region_outputs: Outputs from the region or its child regions
+
+        Args:
+            region: The region to collect insertion points for
+            graph: The ONNX graph containing the nodes
+
+        Returns:
+            InsertionScheme object containing the insertion points
         """
         region_pattern = RegionPattern.from_region(region, graph)
 
@@ -187,7 +254,18 @@ class RegionPattern:
         return scheme
 
     def format_tree(self, region: Region, graph: gs.Graph, indent: int = 0) -> str:
-        """Format this pattern and region as a human-readable tree."""
+        """Format this pattern and region as a human-readable tree.
+
+        Useful for debugging and visualization.
+
+        Args:
+            region: The region associated with this pattern
+            graph: The ONNX graph
+            indent: Indentation level
+
+        Returns:
+            Formatted string representation
+        """
         prefix = "  " * indent
         result = f"{prefix}Region {region.id}: {self.signature} (size={self.size})\n"
 
@@ -199,7 +277,21 @@ class RegionPattern:
 
     @staticmethod
     def _collect_nodes_in_match_order(region: Region) -> list[int]:
-        """Collect node IDs in the same order as signature computation."""
+        """Collect node IDs in the same order as signature computation.
+
+        This follows the traversal order used by _compute_signature_recursive:
+        1. Direct nodes of the region (sorted by node index)
+        2. Recursively, nodes from child regions (children sorted by -level, then size)
+
+        The child sorting order MUST match _compute_signature_recursive and
+        insertion_points.py for correct pattern-relative index alignment.
+
+        Args:
+            region: The region to collect nodes from
+
+        Returns:
+            List of node IDs in match order
+        """
         node_ids = []
 
         node_ids.extend(region.get_nodes(sort=True))
@@ -212,7 +304,33 @@ class RegionPattern:
 
     @staticmethod
     def _compute_signature_recursive(region: Region, graph: gs.Graph) -> str:
-        """Recursively compute structural signature for a region."""
+        """Recursively compute structural signature for a region.
+
+        The signature captures:
+        - Node operations and their key parameters (for LEAF regions)
+        - Hierarchical structure with child patterns (for COMPOSITE regions)
+        - Deterministic ordering (sorted nodes and children)
+        - Normalized handling of symmetric/commutative operations
+
+        Signature formats:
+        - Empty region: "EMPTY"
+        - Leaf region: "Op1->Op2->Op3" or "Op1[params]->Op2[params]"
+        - Composite with nodes: "COMPOSITE(nodes|child1+child2)"
+        - Composite without nodes: "COMPOSITE(child1+child2)"
+
+        Child Sorting:
+        - Children are sorted by (-level, size) for deterministic signatures
+        - This order MUST match insertion_points.py for correct pattern-relative indexing
+        - Higher-level (more abstract) children come first
+        - Within same level, smaller children come first
+
+        Args:
+            region: The region to process
+            graph: The ONNX graph containing the nodes
+
+        Returns:
+            Deterministic signature string representing the region structure
+        """
         nodes_list = list(graph.nodes)
         node_indices_set = set(region.get_nodes())
 
@@ -287,7 +405,25 @@ class RegionPattern:
     def _make_node_with_params_signature(
         node: gs.Node, graph: gs.Graph, region_node_indices: set
     ) -> str:
-        """Create signature for a single node including its parameters."""
+        """Create signature for a single node including its parameters.
+
+        Includes operation type and key attributes that affect behavior.
+        For symmetric/commutative operations (Add, Mul, etc.), normalizes
+        input order to ensure consistent signatures regardless of operand order.
+        Ensures deterministic ordering by sorting attributes by key name.
+
+        Args:
+            node: The ONNX node
+            graph: The ONNX graph containing all nodes
+            region_node_indices: Set of node indices in the current region
+
+        Returns:
+            Signature string examples:
+            - "Relu" - Simple operation without attributes
+            - "Conv[dilations=1x1,kernel_shape=3x3]" - Operation with attributes
+            - "Add<external:Conv,internal:Mul>" - Symmetric op with sorted input sources
+            - "Mul[axis=1]<external:unknown,internal:Add>" - Symmetric op with both
+        """
         op = node.op
         sym_sig = RegionPattern._get_symmetric_input_signature(node, graph, region_node_indices)
 
