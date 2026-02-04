@@ -105,8 +105,15 @@ class FP8QuantExporter(ONNXQuantExporter):
     def post_process(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         """Post-processes the ONNX model for FP8 quantization.
 
-        Converts remaining TRT_FP8 QDQ ops (activations) to native ONNX QuantizeLinear/DequantizeLinear,
-        updates GELU nodes to use tanh approximation, and inserts Cast nodes after Sqrt.
+        Converts TRT_FP8 QDQ ops to native ONNX QuantizeLinear/DequantizeLinear:
+        - TRT_FP8QuantizeLinear -> QuantizeLinear with FP8E4M3FN zero_point and saturate=1
+        - TRT_FP8DequantizeLinear -> DequantizeLinear
+
+        Args:
+            onnx_model: The ONNX model containing TRT_FP8 quantization nodes.
+
+        Returns:
+            The post-processed ONNX model with native ONNX quantization ops.
         """
         logger.info("Post-processing FP8 quantized model")
         graph = gs.import_onnx(onnx_model)
