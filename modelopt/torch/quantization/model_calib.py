@@ -28,9 +28,14 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from modelopt.torch.opt.searcher import ForwardLoop
+from modelopt.torch.quantization.utils import LayerActivationGettr
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
-from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
+from modelopt.torch.utils.network import (
+    bind_forward_method,
+    get_decoder_layers,
+    unpatch_forward_method,
+)
 from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
 
 from .calib import MseCalibrator, NVFP4MSECalibrator
@@ -1812,3 +1817,118 @@ def gptq_lite(
         torch.cuda.empty_cache()
 
     print_rank_0("GPTQ-lite quantization completed successfully")
+
+
+@torch.no_grad()
+def sequential_calibrate(
+    model: nn.Module,
+    forward_loop: ForwardLoop,
+    calib_func: Callable,
+    **calib_kwargs,
+):
+    """Sequential calibration - a sequential layer-by-layer calibration algorithm."""
+    transformer_layers = get_decoder_layers(model)
+    if transformer_layers is None:
+        raise ValueError(
+            "Could not find transformer layers in model'. "
+            "Sequential calibration requires a model with identifiable transformer layers."
+        )
+
+    print_rank_0(f"Sequential calibration: Found {len(transformer_layers)} transformer layers")
+    gettr = LayerActivationGettr(model)
+    inputs = gettr.get_input_activations(transformer_layers[0], forward_loop)
+
+    for layer in transformer_layers:
+        # Call GPTQ
+        calib_func(layer, inputs, **calib_kwargs)
+        # Get outputs
+        outputs = gettr.get_output_activations(layer, inputs)
+        # Update inputs
+        inputs = [(out, *inp[0][1:]) for inp, out in zip(inputs, outputs)]
+
+    print_rank_0("Sequential calibration completed successfully")
+
+
+@torch.no_grad()
+def gptq(
+    layer: nn.Module,
+    inputs: list[tuple[tuple, dict]],
+    percdamp: float = 0.01,
+    block_size: int = 128,
+    **kwargs,
+):
+    """GPTQ quantization - a GPTQ variant."""
+    import time
+
+    total_start = time.time()
+
+    # Dictionary to store hessian matrices for all linear layers in this decoder
+    hessian_state = {}
+
+    # Phase 1: Build tensor mapping for all quantized linear layers in this decoder layer
+    tensor_mapping = {}
+    for name, module in layer.named_modules():
+        if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
+            in_features = module.weight.shape[-1]
+            tensor_mapping[name] = ((in_features, in_features), module.weight.device)
+            module.name = name  # Attach name for easy access in hooks
+
+    if not tensor_mapping:
+        print_rank_0("No quantized linear layers found in decoder layer, skipping GPTQ")
+        return
+
+    # Initialize hessian state with zeros
+    for name, (shape, device) in tensor_mapping.items():
+        hessian_state[name] = {
+            "hessian": torch.zeros(shape, dtype=torch.float32, device=device),
+            "n_samples": 0,
+        }
+
+    # Phase 2: Register hooks to collect Hessians during forward passes
+    def hessian_hook(module, input, output):
+        """Hook to intercept activations and update hessian matrix."""
+        state = hessian_state[module.name]
+        hessian, n_samples = update_hessian(input[0], state["hessian"], state["n_samples"])
+        hessian_state[module.name] = {"hessian": hessian, "n_samples": n_samples}
+
+    handles = []
+    for name, module in layer.named_modules():
+        if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
+            handles.append(module.register_forward_hook(hessian_hook))
+
+    # Run forward passes with the provided inputs to collect Hessians
+    hessian_start = time.time()
+    print_rank_0(
+        f"Computing Hessians for {len(tensor_mapping)} linear layers using {len(inputs)} batches..."
+    )
+    for args, kwargs_input in inputs:
+        layer(*args, **kwargs_input)
+
+    # Remove hooks after collecting Hessians
+    for handle in handles:
+        handle.remove()
+
+    torch.cuda.synchronize() if torch.cuda.is_available() else None
+    hessian_time = time.time() - hessian_start
+
+    # Phase 3: Update weights using computed Hessians (same as gptq_lite)
+    weight_update_start = time.time()
+    print_rank_0("Updating weights using GPTQ algorithm...")
+    for name, module in layer.named_modules():
+        if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
+            state = hessian_state[module.name]
+            hessian = state["hessian"].to(module.weight.device)
+            blockwise_weight_update(module, hessian, block_size, percdamp)
+            # Free memory
+            del hessian_state[module.name]
+            torch.cuda.empty_cache()
+
+    torch.cuda.synchronize() if torch.cuda.is_available() else None
+    weight_update_time = time.time() - weight_update_start
+
+    total_time = time.time() - total_start
+    print_rank_0(
+        f"GPTQ timing - Hessian: {hessian_time:.2f}s, "
+        f"Weight update: {weight_update_time:.2f}s, "
+        f"Total: {total_time:.2f}s"
+    )
