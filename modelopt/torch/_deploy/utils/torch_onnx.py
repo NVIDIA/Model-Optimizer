@@ -41,6 +41,7 @@ from modelopt.onnx.export import (
 )
 from modelopt.onnx.quantization.qdq_utils import qdq_to_dq, replace_zero_scale_with_smallest_nonzero
 from modelopt.onnx.utils import (
+    change_casts_to_fp16,
     check_model_uses_external_data,
     get_input_names,
     get_input_shapes,
@@ -48,6 +49,7 @@ from modelopt.onnx.utils import (
     get_output_names,
     get_output_shapes,
     infer_shapes,
+    remove_duplicate_casts,
     remove_node_training_mode,
 )
 from modelopt.torch.quantization.export_onnx import configure_linear_module_onnx_quantizers
@@ -567,15 +569,18 @@ def get_onnx_bytes_and_metadata(
     if dq_only:
         onnx_opt_graph = qdq_to_dq(onnx_opt_graph)
 
-    assert weights_dtype in ["fp16", "fp32"], (
-        "Only FP16 and FP32 weights are supported for torch quantization -> onnx export"
-    )
-    onnx_opt_graph = convert_float_to_float16(
-        onnx_opt_graph,
-        keep_io_types=False,
-        disable_shape_infer=True,
-        check_fp16_ready=False,
-    )
+    if weights_dtype == "fp16":
+        onnx_opt_graph = convert_float_to_float16(
+            onnx_opt_graph,
+            keep_io_types=False,
+            disable_shape_infer=True,
+            check_fp16_ready=False,
+            op_block_list=["QuantizeLinear", "DequantizeLinear", "Div"],
+        )
+        # Change FP32 cast nodes feeding into Concat/Add to FP16
+        onnx_opt_graph = change_casts_to_fp16(onnx_opt_graph, ["Concat", "Add"])
+
+    onnx_opt_graph = remove_duplicate_casts(onnx_opt_graph)
 
     # TensorRT expects all scales to be postive
     onnx_opt_graph = replace_zero_scale_with_smallest_nonzero(onnx_opt_graph)

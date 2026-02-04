@@ -433,8 +433,8 @@ def randomize_weights_onnx_bytes(onnx_bytes: bytes, seed: int = 0) -> bytes:
         if len(init.dims) > 1:
             dtype = onnx.helper.tensor_dtype_to_np_dtype(init.data_type)
             if dtype in ["float16", "float32", "float64"]:
-                avg = weight_metadata.get(init.name + "_avg", None)
-                var = weight_metadata.get(init.name + "_var", None)
+                avg = weight_metadata.get(init.name + "_avg")
+                var = weight_metadata.get(init.name + "_var")
                 if avg and var:
                     numpy_array = np.random.normal(float(avg), float(var), size=init.dims).astype(
                         dtype
@@ -1215,6 +1215,52 @@ def onnx_type_str_to_enum(dtype: str) -> int:
     return getattr(onnx.TensorProto, dtype)
 
 
+def remove_duplicate_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
+    """Removes consecutive Cast nodes that cast to the same type.
+
+    Example: Cast(to=FP16) -> Cast(to=FP16) becomes just Cast(to=FP16)
+    """
+    graph = gs.import_onnx(onnx_model)
+    removed_count = 0
+
+    for node in list(graph.nodes):
+        if node.op != "Cast":
+            continue
+
+        # Check if output goes to exactly one Cast node
+        if len(node.outputs) != 1 or len(node.outputs[0].outputs) != 1:
+            continue
+
+        next_node = node.outputs[0].outputs[0]
+        if next_node.op != "Cast":
+            continue
+
+        first_to = node.attrs.get("to")
+        second_to = next_node.attrs.get("to")
+
+        # Only handle same-type casts
+        if first_to != second_to:
+            continue
+
+        # Bypass the second cast - keep first, remove second
+        input_tensor = node.outputs[0]
+        output_tensor = next_node.outputs[0]
+
+        for consumer in list(output_tensor.outputs):
+            for i, inp in enumerate(consumer.inputs):
+                if inp == output_tensor:
+                    consumer.inputs[i] = input_tensor
+        next_node.outputs.clear()
+        removed_count += 1
+        logger.debug(f"Removed duplicate cast: {next_node.name} (same type as {node.name})")
+
+    if removed_count > 0:
+        graph.cleanup().toposort()
+        logger.info(f"Removed {removed_count} duplicate Cast nodes")
+
+    return gs.export_onnx(graph)
+
+
 def remove_node_training_mode(onnx_model: onnx.ModelProto, node_op_type: str) -> onnx.ModelProto:
     """Remove `training_mode` attribute and extra training outputs from nodes of a given op type.
 
@@ -1263,3 +1309,43 @@ def remove_node_training_mode(onnx_model: onnx.ModelProto, node_op_type: str) ->
         onnx_model.graph.value_info.extend(keep)
 
     return onnx_model
+
+
+def change_casts_to_fp16(model: onnx.ModelProto, target_op_types: list[str]) -> onnx.ModelProto:
+    """Change Cast nodes that cast to FP32 and feed into specified nodes to cast to FP16 instead.
+
+    Args:
+        model: The ONNX model to modify.
+        target_op_types: List of op types to check for. Cast nodes feeding into these will be
+            changed from FP32 to FP16.
+
+    Returns:
+        The modified ONNX model with Cast nodes updated.
+    """
+    # Build a map of tensor name -> consumer nodes
+    tensor_to_consumers: dict[str, list[onnx.NodeProto]] = {}
+    for node in model.graph.node:
+        for inp in node.input:
+            if inp:
+                tensor_to_consumers.setdefault(inp, []).append(node)
+
+    # Find Cast nodes that feed into target ops and change FP32 -> FP16
+    for node in model.graph.node:
+        if node.op_type != "Cast":
+            continue
+
+        # Check if this Cast outputs to a target op type
+        cast_output = node.output[0]
+        consumers = tensor_to_consumers.get(cast_output, [])
+        feeds_target = any(c.op_type in target_op_types for c in consumers)
+
+        if not feeds_target:
+            continue
+
+        # Check if Cast is to FP32, and change to FP16
+        for attr in node.attribute:
+            if attr.name == "to" and attr.i == onnx.TensorProto.FLOAT:
+                attr.i = onnx.TensorProto.FLOAT16
+                break
+
+    return model

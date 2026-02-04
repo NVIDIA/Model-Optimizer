@@ -137,6 +137,4 @@ class FP8QuantExporter(ONNXQuantExporter):
                 )
 
         graph.cleanup().toposort()
-        onnx_model = gs.export_onnx(graph)
-
-        return onnx_model
+        return gs.export_onnx(graph)
