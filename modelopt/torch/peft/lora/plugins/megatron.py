@@ -39,10 +39,15 @@ __all__ = []
 
 try:
     from megatron.core.extensions.transformer_engine import (
+        TEColumnParallelGroupedLinear,
         TEColumnParallelLinear,
+        TERowParallelGroupedLinear,
         TERowParallelLinear,
     )
 
+    from modelopt.torch.quantization.plugins.megatron import (
+        _QuantMegatronTEGroupedLinear as QuantTEGroupedLinear,
+    )
     from modelopt.torch.quantization.plugins.megatron import (
         _QuantTEMCoreColumnParallelLinear as QuantTEColumnParallelLinear,
     )
@@ -51,8 +56,12 @@ try:
     )
 
     HAS_TE = True
+    HAS_TE_GROUPED = (
+        TEColumnParallelGroupedLinear is not None and TERowParallelGroupedLinear is not None
+    )
 except ImportError:
     HAS_TE = False
+    HAS_TE_GROUPED = False
 
 
 def megatron_replace_lora_module_hook(model: torch.nn.Module):
@@ -126,6 +135,44 @@ class _MegatronParallelLoRABase(LoRAModule):
 
         super()._register_adapter(adapter_name, lora_a, lora_b, rank, scale, enable)
 
+    def _call_lora_module(
+        self, module: nn.Module, x: torch.Tensor, *args, **kwargs
+    ) -> torch.Tensor:
+        if HAS_TE_GROUPED and isinstance(
+            module, (TEColumnParallelGroupedLinear, TERowParallelGroupedLinear)
+        ):
+            output = module(x, *args, **kwargs)
+        else:
+            output = module(x)
+        if isinstance(output, tuple):
+            return output[0]
+        return output
+
+    def forward(self, x: torch.Tensor, *args, **kwargs):
+        # Bypass LoRAModule.forward to avoid double-applying adapters.
+        output = super(LoRAModule, self).forward(x, *args, **kwargs)
+
+        if isinstance(output, tuple):
+            result = output[0]
+            other_outputs = output[1:]
+        else:
+            result = output
+            other_outputs = ()
+
+        for adapter_name in self._lora_adapters:
+            adapter = self._lora_adapters[adapter_name]
+            if adapter["enable"]:
+                lora_a = adapter["lora_a"]
+                lora_b = adapter["lora_b"]
+                lora_a_output = self._call_lora_module(lora_a, x, *args, **kwargs)
+                lora_b_output = self._call_lora_module(lora_b, lora_a_output, *args, **kwargs)
+                scale = adapter["scale"]
+                result = result + scale * lora_b_output
+
+        if other_outputs:
+            return (result, *other_outputs)
+        return result
+
 
 @LoRAModuleRegistry.register({ColumnParallelLinear: "megatron_ColumnParallelLinear"})
 class _LoRAMegatronColumnParallelLinear(_MegatronParallelLoRABase):
@@ -157,14 +204,26 @@ class _LoRAMegatronColumnParallelLinear(_MegatronParallelLoRABase):
         with torch.no_grad():
             attr_config.lora_a_init(lora_a.weight)
 
-        if HAS_TE and isinstance(self, TEColumnParallelLinear):
+        if HAS_TE_GROUPED and isinstance(self, TEColumnParallelGroupedLinear):
+            lora_b = TEColumnParallelGroupedLinear(
+                self.num_gemms,
+                attr_config.rank,
+                output_size,
+                config=self.config,
+                bias=False,
+                skip_bias_add=False,
+                is_expert=True,  # TODO (Jingyu)
+                pg_collection=getattr(self, "_pg_collection", None),
+                # tp_comm_buffer_name # TODO (Jingyu)
+            )
+        elif HAS_TE and isinstance(self, TEColumnParallelLinear):
             lora_b = TEColumnParallelLinear(
                 attr_config.rank,
                 output_size,
                 config=self.config,
                 bias=False,
                 gather_output=False,
-                is_expert=False,  # TODO (Jingyu): Hard coded to False
+                is_expert=getattr(self, "is_expert", False),  # TODO (Jingyu)
                 init_method=attr_config.lora_b_init,
             )
         else:
@@ -227,7 +286,20 @@ class _LoRAMegatronRowParallelLinear(_MegatronParallelLoRABase):
         input_size = getattr(self, "input_size", None) or self.in_features
         output_size = getattr(self, "output_size", None) or self.out_features
 
-        if HAS_TE and isinstance(self, TERowParallelLinear):
+        if HAS_TE_GROUPED and isinstance(self, TERowParallelGroupedLinear):
+            lora_a = TERowParallelGroupedLinear(
+                self.num_gemms,
+                input_size,
+                attr_config.rank,
+                config=self.config,
+                init_method=attr_config.lora_a_init,
+                bias=False,
+                skip_bias_add=True,
+                is_expert=True,  # TODO (Jingyu)
+                pg_collection=getattr(self, "_pg_collection", None),
+                # tp_comm_buffer_name? # TODO (Jingyu)
+            )
+        elif HAS_TE and isinstance(self, TERowParallelLinear):
             lora_a = TERowParallelLinear(
                 input_size,
                 attr_config.rank,
@@ -235,7 +307,7 @@ class _LoRAMegatronRowParallelLinear(_MegatronParallelLoRABase):
                 input_is_parallel=True,
                 skip_bias_add=True,
                 bias=False,
-                is_expert=False,  # TODO (Jingyu): Hard coded to False
+                is_expert=getattr(self, "is_expert", False),  # TODO (Jingyu)
                 init_method=attr_config.lora_a_init,
             )
         else:
@@ -286,6 +358,9 @@ class _LoRAMegatronRowParallelLinear(_MegatronParallelLoRABase):
 
 
 if HAS_TE:
+    # Register TEColumnParallelLinear and TERowParallelLinear with the LoRAModuleRegistry.
+    # This allows update_model to automatically replace these layers with their
+    # corresponding LoRA-enabled modules when applying LoRA.
     LoRAModuleRegistry.register({TEColumnParallelLinear: "te_mcore_ColumnParallelLinear"})(
         _LoRAMegatronColumnParallelLinear
     )
@@ -293,6 +368,16 @@ if HAS_TE:
         _LoRAMegatronRowParallelLinear
     )
 
+if HAS_TE_GROUPED:
+    # Register TEColumnParallelGroupedLinear and TERowParallelGroupedLinear with the LoRAModuleRegistry.
+    # This allows update_model to automatically replace these layers with their
+    # corresponding LoRA-enabled modules when applying LoRA.
+    LoRAModuleRegistry.register(
+        {TEColumnParallelGroupedLinear: "te_mcore_ColumnParallelGroupedLinear"}
+    )(_LoRAMegatronColumnParallelLinear)
+    LoRAModuleRegistry.register({TERowParallelGroupedLinear: "te_mcore_RowParallelGroupedLinear"})(
+        _LoRAMegatronRowParallelLinear
+    )
 
 # Register quantized versions if available
 LoRAModuleRegistry.register({QuantColumnParallelLinear: "quant_megatron_ColumnParallelLinear"})(
@@ -307,6 +392,11 @@ if HAS_TE:
     )(_LoRAMegatronColumnParallelLinear)
     LoRAModuleRegistry.register({QuantTERowParallelLinear: "quant_te_mcore_RowParallelLinear"})(
         _LoRAMegatronRowParallelLinear
+    )
+
+if HAS_TE_GROUPED:
+    LoRAModuleRegistry.register({QuantTEGroupedLinear: "quant_te_mcore_GroupedLinear"})(
+        _LoRAMegatronColumnParallelLinear
     )
 
 
