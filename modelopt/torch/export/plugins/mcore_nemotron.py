@@ -23,9 +23,11 @@ from .mcore_custom import (
     ROW_ETP,
     ROW_TP,
     CustomModuleMapping,
+    GroupedMLPMerging,
     NameRemapping,
     QKVMerging,
     QKVSlicing,
+    SelfAttentionScaling,
 )
 
 # Example on adding a new CausalLM.
@@ -35,6 +37,7 @@ nemotron_causal_lm_export: dict[str, CustomModuleMapping] = {
     "input_layernorm": NameRemapping("model.layers.{}.input_layernorm."),
     "linear_qkv": QKVSlicing("model.layers.{}.self_attn."),
     "linear_proj": NameRemapping("model.layers.{}.self_attn.o_proj."),
+    "core_attention": SelfAttentionScaling("backbone.layers.{}.mixer."),
     "pre_mlp_layernorm": NameRemapping("model.layers.{}.post_attention_layernorm."),
     # NemotronForCausalLM is using square-relu where no gated handle is needed.
     "linear_fc1": NameRemapping("model.layers.{}.mlp.up_proj."),
@@ -81,8 +84,22 @@ nemotron_h_causal_lm_import: dict[str, CustomModuleMapping] = {
     "shared_experts.linear_fc2": NameRemapping(
         "backbone.layers.{}.mixer.shared_experts.down_proj.", ROW_TP
     ),
+    # Latent MoE
+    "fc1_latent_proj": NameRemapping("backbone.layers.{}.mixer.fc1_latent_proj.", REPLICATE),
+    "fc2_latent_proj": NameRemapping("backbone.layers.{}.mixer.fc2_latent_proj.", REPLICATE),
+    # Repeated MTP module
+    "mtp.enorm": NameRemapping("mtp.layers.{}.enorm.", {"is_mtp": True}),
+    "mtp.hnorm": NameRemapping("mtp.layers.{}.hnorm.", {"is_mtp": True}),
+    "mtp.eh_proj": NameRemapping("mtp.layers.{}.eh_proj.", {"is_mtp": True}),
+    "mtp.final_layernorm": NameRemapping("mtp.layers.{}.final_layernorm.", {"is_mtp": True}),
+    # Grouped local experts in MTP
+    "experts.linear_fc1": GroupedMLPMerging(
+        "mtp.layers.{}.mixer.experts.{{}}.up_proj", COL_ETP | {"is_mtp": True}
+    ),
+    "experts.linear_fc2": GroupedMLPMerging(
+        "mtp.layers.{}.mixer.experts.{{}}.down_proj", ROW_ETP | {"is_mtp": True}
+    ),
 }
-
 
 nemotron_h_causal_lm_export: dict[str, CustomModuleMapping] = {
     "word_embeddings": NameRemapping("backbone.embeddings."),
@@ -101,6 +118,7 @@ nemotron_h_causal_lm_export: dict[str, CustomModuleMapping] = {
     "input_layernorm": NameRemapping("backbone.layers.{}.norm."),
     "linear_qkv": QKVSlicing("backbone.layers.{}.mixer."),
     "linear_proj": NameRemapping("backbone.layers.{}.mixer.o_proj."),
+    "core_attention": SelfAttentionScaling("backbone.layers.{}.mixer."),
     # MLP
     "pre_mlp_layernorm": NameRemapping("backbone.layers.{}.norm."),
     "linear_fc1": NameRemapping("backbone.layers.{}.mixer.up_proj."),
@@ -115,4 +133,12 @@ nemotron_h_causal_lm_export: dict[str, CustomModuleMapping] = {
     "shared_experts.linear_fc2": NameRemapping(
         "backbone.layers.{}.mixer.shared_experts.down_proj."
     ),
+    # Latent MoE
+    "fc1_latent_proj": NameRemapping("backbone.layers.{}.mixer.fc1_latent_proj."),
+    "fc2_latent_proj": NameRemapping("backbone.layers.{}.mixer.fc2_latent_proj."),
+    # MTP
+    "mtp.enorm": NameRemapping("mtp.layers.{}.enorm."),
+    "mtp.hnorm": NameRemapping("mtp.layers.{}.hnorm."),
+    "mtp.eh_proj": NameRemapping("mtp.layers.{}.eh_proj."),
+    "mtp.final_layernorm": NameRemapping("mtp.layers.{}.final_layernorm."),
 }
