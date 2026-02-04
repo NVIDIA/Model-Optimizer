@@ -561,9 +561,6 @@ def get_onnx_bytes_and_metadata(
         tree_spec_input, tree_spec_output, input_none_names, onnx_opt_graph, model
     )
 
-    # TODO: Remove manual ir_version change once ORT supports ir_version 11
-    onnx_opt_graph.ir_version = 10
-
     onnx_opt_graph = quantize_weights(model, onnx_opt_graph)
 
     if dq_only:
@@ -584,6 +581,10 @@ def get_onnx_bytes_and_metadata(
 
     # TensorRT expects all scales to be postive
     onnx_opt_graph = replace_zero_scale_with_smallest_nonzero(onnx_opt_graph)
+
+    # TODO: Remove manual ir_version change once ORT supports ir_version 11
+    # Must be set after all gs.export_onnx() calls as graphsurgeon resets ir_version
+    onnx_opt_graph.ir_version = 10
 
     # If the onnx model contains external data store the external tensors in one file and save the onnx model
     if has_external_data(onnx_save_path):
