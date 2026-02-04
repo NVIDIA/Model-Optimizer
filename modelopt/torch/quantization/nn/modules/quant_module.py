@@ -21,6 +21,7 @@ import warnings
 import torch
 
 from modelopt.torch.opt.dynamic import DynamicModule, _DMRegistryCls
+from modelopt.torch.utils.distributed import ParallelState
 
 from ...tensor_quant import QUANT_DESC_8BIT_PER_TENSOR
 from ...utils import is_torch_export_mode
@@ -35,7 +36,53 @@ __all__ = [
 
 
 class QuantModule(DynamicModule):
-    """A base class for quantized modules."""
+    """A base class for quantized modules.
+
+    In addition, the class also provides ``parallel_state`` attribute that can be used to access
+    the parallel state of the module.
+    """
+
+    _parallel_state: ParallelState
+
+    def convert(self, *args, **kwargs):
+        """Convert the module to a dynamic module."""
+        module = super().convert(*args, **kwargs)
+
+        # setup parallel state now that the module is converted
+        if module.parallel_state is None:
+            module._initialize_parallel_state()
+
+        return module
+
+    @property
+    def parallel_state(self) -> ParallelState | None:
+        """Return the parallel state of the dynamic module."""
+        return getattr(self, "_parallel_state", None)
+
+    @parallel_state.setter
+    def parallel_state(self, parallel_state: ParallelState):
+        """Set the parallel state of the dynamic module."""
+        assert isinstance(parallel_state, ParallelState), (
+            "parallel_state must be a ParallelState object!"
+        )
+        self._parallel_state = parallel_state
+
+    def _initialize_parallel_state(self):
+        """Initialize the parallel state of the dynamic module.
+
+        This method is called only if the `DynamicModule` does not have a `parallel_state` attribute
+        after `_setup` is called.
+        """
+        if torch.distributed.is_initialized():
+            warnings.warn(
+                f"Distributed training is initialized but no parallel_state is set for {type(self)}. "
+                "Using default parallel_state which has data_parallel_group set to the default process group and "
+                "tensor_parallel_group is unspecified. "
+                "If you are using tensor parallelism for this module, you should set the parallel_state "
+                "in its `_setup` method."
+            )
+
+        self.parallel_state = ParallelState(data_parallel_group=None)
 
     def modelopt_post_restore(self, prefix: str = ""):
         """Post-restore to correctly configure the TensorQuantizer states.
