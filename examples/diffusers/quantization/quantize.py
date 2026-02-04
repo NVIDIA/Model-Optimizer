@@ -454,6 +454,11 @@ def create_argument_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    from diffusers.models.normalization import RMSNorm as DiffuserRMSNorm
+
+    torch.nn.RMSNorm = DiffuserRMSNorm
+    torch.nn.modules.normalization.RMSNorm = DiffuserRMSNorm
+
     parser = create_argument_parser()
     args, unknown_args = parser.parse_known_args()
 
