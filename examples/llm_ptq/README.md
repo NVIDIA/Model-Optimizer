@@ -109,6 +109,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 | QWen3 MOE, Next <sup>6</sup> | ✅ | - | - | - | ✅ |
 | QwQ | ✅ | - | - | - | ✅ |
 | DeepSeek V3, R1, V3.1, V3.2<sup>7</sup> | - | - | - | - | ✅ |
+| GLM-4.7<sup>8</sup> | ✅ | - | - | - | ✅ |
 | Kimi K2 | - | - | - | - | ✅ |
 | T5 | ✅ | ✅ | ✅ | ✅ | - |
 | Whisper | ✅ | ❌ | ❌ | ❌ | - |
@@ -121,7 +122,8 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 > *<sup>4.</sup>For some models, KV cache quantization may result in a higher accuracy penalty.* \
 > *<sup>5.</sup>A selective set of the popular models are internally tested. The actual model support list may be longer. NVFP4 inference requires Blackwell GPUs and TensorRT-LLM v0.17 or later* \
 > *<sup>6.</sup>Some models currently support export to HF format only.* \
-> *<sup>7.</sup>[PTQ for DeepSeek](../deepseek/README.md)*
+> *<sup>7.</sup>[PTQ for DeepSeek](../deepseek/README.md)* \
+> *<sup>8.</sup>GLM-4.7 has MTP (Multi-Token Prediction) layers that are automatically loaded and excluded from quantization.*
 
 > *The accuracy loss after PTQ may vary depending on the actual model and the quantization method. Different models may have different accuracy loss and usually the accuracy loss is more significant when the base model is small. If the accuracy after PTQ is not meeting the requirement, please try either modifying [hf_ptq.py](./hf_ptq.py) and disabling the KV cache quantization or using the [QAT](./../llm_qat/README.md) instead.*
 
