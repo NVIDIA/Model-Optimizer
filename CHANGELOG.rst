@@ -19,6 +19,8 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add support for context parallelism in Eagle speculative decoding for huggingface and megatron core models.
 - Add unified Hugging Face export support for diffusers pipelines/components.
 - Add LTX-2 and Wan2.2 (T2V) support in the diffusers quantization workflow.
+- Add PTQ support for GLM-4.7, including loading MTP layer weights from a separate ``mtp.safetensors`` file and export as-is.
+- Add support for image-text data calibration in PTQ for Nemotron VL models.
 
 0.41 (2026-01-19)
 ^^^^^^^^^^^^^^^^^
@@ -228,7 +230,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add support for UNet ONNX quantization.
 - Enable ``concat_elimination`` pass by default to improve the performance of quantized ONNX models.
 - Enable Redundant Cast elimination pass by default in :meth:`moq.quantize <modelopt.onnx.quantization.quantize>`.
-- Add new attribute ``parallel_state`` to :class:`DynamicModule <modelopt.torch.opt.dynamic.DynamicModule>` to support distributed parallelism such as data parallel and tensor parallel.
+- Add new attribute ``parallel_state`` to :class:`QuantModule <modelopt.torch.quantization.nn.modules.quant_module.QuantModule>` to support distributed parallelism such as data parallel and tensor parallel.
 - Add MXFP8, NVFP4 quantized ONNX export support.
 - Add new example for torch quantization to ONNX for MXFP8, NVFP4 precision.
 

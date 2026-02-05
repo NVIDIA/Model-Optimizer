@@ -18,7 +18,7 @@ This directory contains examples of using Model Optimizer with [NeMo Megatron-Br
 
 Running these examples requires many additional dependencies to be installed (e.g., Megatron-Bridge, Megatron-core, etc.), hence we strongly recommend directly using the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.02`) which has all the dependencies installed.
 
-To get the latest ModelOpt features and examples, you can mount your latest ModelOpt cloned repository to the container at `/opt/Model-Optimizer` or pull the latest changes once inside the docker container (`cd /opt/Model-Optimizer && git checkout main && git pull`).
+To get the latest ModelOpt features and examples, you can mount your latest ModelOpt cloned repository to the container at `/opt/Megatron-Bridge/3rdparty/Model-Optimizer` or pull the latest changes once inside the docker container (`cd /opt/Megatron-Bridge/3rdparty/Model-Optimizer && git checkout main && git pull`).
 
 ## Pruning
 
@@ -30,17 +30,27 @@ Example usage to prune Qwen3-8B to 6B on 2-GPUs (Pipeline Parallelism = 2) while
     top-10 candidates are evaluated for MMLU score (5% sampled data) to select the best model.
 
 ```bash
-torchrun --nproc_per_node 2 /opt/Model-Optimizer/examples/megatron_bridge/prune_minitron.py \
+torchrun --nproc_per_node 2 /opt/Megatron-Bridge/3rdparty/Model-Optimizer/examples/megatron_bridge/prune_minitron.py \
     --hf_model_name_or_path Qwen/Qwen3-8B \
     --prune_target_params 6e9 \
     --hparams_to_skip num_attention_heads \
     --output_hf_path /tmp/Qwen3-8B-Pruned-6B
 ```
 
+Example usage for manually pruning to a specific architecture using following defaults:
+    1024 samples from [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) for calibration.
+
+```bash
+torchrun --nproc_per_node 2 /opt/Megatron-Bridge/3rdparty/Model-Optimizer/examples/megatron_bridge/prune_minitron.py \
+    --hf_model_name_or_path Qwen/Qwen3-8B \
+    --prune_export_config '{"hidden_size": 3584, "ffn_hidden_size": 9216}' \
+    --output_hf_path /tmp/Qwen3-8B-Pruned-6B-manual
+```
+
 To see the full usage for advanced configurations, run:
 
 ```bash
-python /opt/Model-Optimizer/examples/megatron_bridge/prune_minitron.py --help
+python /opt/Megatron-Bridge/3rdparty/Model-Optimizer/examples/megatron_bridge/prune_minitron.py --help
 ```
 
 > [!TIP]
