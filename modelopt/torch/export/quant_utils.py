@@ -45,7 +45,7 @@ from modelopt.torch.quantization.utils import (
 )
 from modelopt.torch.utils import clear_cuda_cache
 
-from ..quantization.nn import SequentialQuantizer, TensorQuantizer
+from ..quantization.nn import NVFP4StaticQuantizer, SequentialQuantizer, TensorQuantizer
 from .model_config import (
     KV_CACHE_FP8,
     KV_CACHE_INT8,
@@ -299,6 +299,31 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
         return get_scaling_factor(weight_quantizer[0])
 
     quantization_format = get_quantization_format(module)
+
+    # Handle NVFP4 static quantizer (has pre-computed per-block amax values)
+    is_nvfp4_static = isinstance(weight_quantizer, NVFP4StaticQuantizer) or getattr(
+        weight_quantizer, "_is_nvfp4_static_quantizer", False
+    )
+    if is_nvfp4_static:
+        # For static NVFP4, _amax contains per-block amax values and _global_amax is the global scale
+        assert (
+            hasattr(weight_quantizer, "_global_amax") and weight_quantizer._global_amax is not None
+        )
+        global_amax = weight_quantizer._global_amax.float()
+        per_block_amax = weight_quantizer._amax.float()
+
+        block_size = weight_quantizer.block_sizes[-1]
+        weight_scaling_factor_2 = global_amax / (6.0 * 448.0)
+        per_block_scale = per_block_amax / (6.0 * weight_scaling_factor_2.to(per_block_amax.device))
+        per_block_scale[per_block_scale == 0] = 1.0
+
+        # Reshape per_block_scale to match weight's block structure: (rows, num_blocks_per_row)
+        num_blocks_per_row = weight.shape[-1] // block_size
+        expected_shape = (*weight.shape[:-1], num_blocks_per_row)
+        per_block_scale = per_block_scale.view(expected_shape)
+
+        return per_block_scale.to(torch.float8_e4m3fn)
+
     # If NVFP4, we need to return quantized per_block scaling factors
     if quantization_format in [
         QUANTIZATION_NVFP4,
@@ -342,6 +367,16 @@ def get_weight_scaling_factor_2(module: nn.Module, weight_name: str = "weight") 
         return None
 
     quantization_format = get_quantization_format(module)
+
+    # Handle NVFP4 static quantizer (use _global_amax instead of _amax)
+    is_nvfp4_static = isinstance(weight_quantizer, NVFP4StaticQuantizer) or getattr(
+        weight_quantizer, "_is_nvfp4_static_quantizer", False
+    )
+    if is_nvfp4_static:
+        assert (
+            hasattr(weight_quantizer, "_global_amax") and weight_quantizer._global_amax is not None
+        )
+        return weight_quantizer._global_amax.float() / (6.0 * 448.0)
 
     # Calibrate weight quantizer if amax is not set for all NVFP4 variants
     if quantization_format in [
@@ -735,7 +770,7 @@ def process_layer_quant_config(layer_config_dict):
             layer_config = {"quant_algo": "W8A16"}
         elif v == "int8_sq":
             layer_config = {"quant_algo": "W8A8_SQ_PER_CHANNEL"}
-        elif v == "nvfp4":
+        elif v in ["nvfp4", "nvfp4_static"]:
             layer_config = {
                 "quant_algo": "NVFP4",
                 "group_size": block_size_value,
@@ -1422,6 +1457,24 @@ def get_quant_config(
             # Fallback to default weight quantizer if no specific weight quantizer found
             if block_size == 0:
                 block_size = get_weight_block_size(module)
+
+            # Static NVFP4 uses pre-computed per-block scales from MSE calibration
+            if quantization_format == QUANTIZATION_NVFP4:
+                weight_quantizer = getattr(module, "weight_quantizer", None)
+                if weight_quantizer is None:
+                    # Try to get from first weight attribute
+                    for wn in weight_names:
+                        weight_quantizer = getattr(
+                            module, quantizer_attr_names(wn).weight_quantizer, None
+                        )
+                        if weight_quantizer is not None:
+                            break
+                if weight_quantizer is not None:
+                    is_static = isinstance(weight_quantizer, NVFP4StaticQuantizer) or getattr(
+                        weight_quantizer, "_is_nvfp4_static_quantizer", False
+                    )
+                    if is_static:
+                        quantization_format = "nvfp4_static"
 
             # Construct per layer config dictionary
             layer_config_dict[name + ".quantization"] = quantization_format
