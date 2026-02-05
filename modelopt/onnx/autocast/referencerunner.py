@@ -95,8 +95,8 @@ class ReferenceRunner:
                 # Compare input rank
                 raise_value_error = len(inp_shape_model) != len(inp_shape_data)
                 if not raise_value_error:
-                    # Compare input shape, skipping check for unknown dimensions (shape = -1)
-                    mask = inp_shape_model != -1
+                    # Compare input shape, skipping check for unknown dimensions
+                    mask = inp_shape_model > 0
                     raise_value_error = np.any(inp_shape_model[mask] != inp_shape_data[mask])
                 if raise_value_error:
                     raise ValueError(
