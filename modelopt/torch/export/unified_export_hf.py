@@ -50,7 +50,11 @@ except ImportError:
 from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
-from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import (
+    NVFP4StaticQuantizer,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
 
@@ -507,11 +511,20 @@ def _export_quantized_weight(
         weight, _ = maybe_transpose_expert_weight_dimensions(
             weight, is_bmm_expert_weight=is_bmm_expert_weight
         )
-        weight_scale = NVFP4QTensor.get_weights_scaling_factor(
-            weight,
-            block_size=block_size,
-            weights_scaling_factor_2=weight_scale_2,
-        )[0]
+
+        # Check if this is a static NVFP4 quantizer (has pre-computed scales from MSE calibration)
+        # For static NVFP4, weight_scale is already computed from static _amax values in get_weight_scaling_factor
+        is_nvfp4_static = isinstance(weight_quantizer, NVFP4StaticQuantizer) or getattr(
+            weight_quantizer, "_is_nvfp4_static_quantizer", False
+        )
+
+        if not is_nvfp4_static:
+            # For dynamic NVFP4, compute scales from weights
+            weight_scale = NVFP4QTensor.get_weights_scaling_factor(
+                weight,
+                block_size=block_size,
+                weights_scaling_factor_2=weight_scale_2,
+            )[0]
 
         quantized_weight = to_quantized_weight(
             weight.to(dtype),
