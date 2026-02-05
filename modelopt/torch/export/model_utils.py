@@ -17,44 +17,45 @@
 import torch.nn as nn
 
 MODEL_NAME_TO_TYPE = {
-    "GPT2": "gpt",
-    "Mllama": "mllama",
-    "Llama4": "llama4",
-    "Llama": "llama",
-    "Mistral": "llama",
-    "GPTJ": "gptj",
-    "FalconForCausalLM": "falcon",
-    "RWForCausalLM": "falcon",
+    "ArcticForCausalLM": "llama",
     "baichuan": "baichuan",
-    "MPT": "mpt",
+    "Bart": "bart",
     "Bloom": "bloom",
     "ChatGLM": "chatglm",
+    "Dbrx": "dbrx",
+    "Deepseek": "deepseek",
+    "ExaoneForCausalLM": "exaone",
+    "FalconForCausalLM": "falcon",
+    "Gemma": "gemma",
+    "Gemma2": "gemma2",
+    "Gemma3": "gemma3",
+    "GLM": "glm",
+    "GPT2": "gpt",
+    "GPTJ": "gptj",
+    "gptoss": "gptoss",
+    "InternLM2ForCausalLM": "internlm",
+    "Llama": "llama",
+    "Llama4": "llama4",
+    "Mistral": "llama",
+    "MixtralForCausalLM": "llama",
+    "Mllama": "mllama",
+    "MPT": "mpt",
+    "Nemotron": "gpt",
+    "phi": "phi",
+    "phi3": "phi3",
+    "phi3small": "phi3small",
+    "Phi4MMForCausalLM": "phi4mm",
+    "PhiMoEForCausalLM": "phi3",
     "Qwen3Moe": "qwen3moe",
     "Qwen3Next": "qwen3next",
+    "Qwen3OmniMoeForConditionalGeneration": "qwen3omni",
     "QWen": "qwen",
     "RecurrentGemma": "recurrentgemma",
-    "Gemma3": "gemma3",
-    "Gemma2": "gemma2",
-    "Gemma": "gemma",
-    "phi3small": "phi3small",
-    "phi3": "phi3",
-    "PhiMoEForCausalLM": "phi3",
-    "Phi4MMForCausalLM": "phi4mm",
-    "phi": "phi",
-    "TLGv4ForCausalLM": "phi",
-    "MixtralForCausalLM": "llama",
-    "ArcticForCausalLM": "llama",
+    "RWForCausalLM": "falcon",
     "StarCoder": "gpt",
-    "Dbrx": "dbrx",
     "T5": "t5",
-    "Bart": "bart",
-    "GLM": "glm",
-    "InternLM2ForCausalLM": "internlm",
-    "ExaoneForCausalLM": "exaone",
-    "Nemotron": "gpt",
-    "Deepseek": "deepseek",
+    "TLGv4ForCausalLM": "phi",
     "Whisper": "whisper",
-    "gptoss": "gptoss",
 }
 
 __doc__ = f"""Utility functions for model type detection and classification.
@@ -140,6 +141,9 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
 
     if hasattr(model, "language_model"):
         return [model, model.language_model]
+
+    if hasattr(model, "thinker"):
+        return [model, model.thinker]
 
     # Pattern 3: No language_model found
     return None

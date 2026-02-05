@@ -14,7 +14,9 @@
 # limitations under the License.
 
 import argparse
+import io
 import random
+import sys
 import time
 import warnings
 from typing import Any
@@ -61,12 +63,26 @@ from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
     get_dataset_dataloader,
     get_max_batch_size,
+    get_qwen3omni_text_dataloader,
     get_supported_datasets,
 )
-from modelopt.torch.utils.image_processor import BaseImageProcessor, MllamaImageProcessor
+from modelopt.torch.utils.image_processor import (
+    BaseImageProcessor,
+    MllamaImageProcessor,
+    Qwen3OmniImageProcessor,
+    Qwen3OmniTextProcessor,
+)
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
-from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
+from modelopt.torch.utils.video_dataset_utils import (
+    Qwen3OmniVideoProcessor,
+    get_supported_video_datasets,
+    get_video_dataset_dataloader,
+)
+from modelopt.torch.utils.vlm_dataset_utils import (
+    get_supported_vlm_datasets,
+    get_vlm_dataset_dataloader,
+)
 
 RAND_SEED = 1234
 
@@ -179,6 +195,51 @@ def make_calib_dataloader(
             batch_size=args.batch_size,
             num_samples=args.calib_size[0],
         )
+    elif model_type == "qwen3omni":
+        assert processor is not None, "The processor must be set for qwen3omni model."
+        dataset_name = args.dataset[0] if args.dataset else "cnn_dailymail"
+        # Check if using video dataset (e.g., finevideo)
+        if dataset_name in get_supported_video_datasets():
+            video_processor = Qwen3OmniVideoProcessor(
+                processor.tokenizer if hasattr(processor, "tokenizer") else processor,
+                device=device,
+                dtype=language_model.dtype,
+                use_audio_in_video=True,
+            )
+            calib_dataloader = get_video_dataset_dataloader(
+                dataset_name=dataset_name,
+                processor=video_processor,
+                batch_size=args.batch_size,
+                num_samples=args.calib_size[0],
+            )
+        elif dataset_name in get_supported_vlm_datasets():
+            assert isinstance(processor, Qwen3OmniImageProcessor), (
+                "The Qwen3OmniImageProcessor must be set."
+            )
+            # Set the dtype for proper tensor conversion in collate_function
+            processor.dtype = language_model.dtype
+            calib_dataloader = get_vlm_dataset_dataloader(
+                dataset_name=dataset_name,
+                processor=processor,
+                batch_size=args.batch_size,
+                num_samples=args.calib_size[0],
+            )
+        else:
+            # Text-only datasets (e.g., cnn_dailymail)
+            # Use Qwen3OmniTextProcessor to apply proper conversation template
+            # See: https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Thinking
+            text_processor = Qwen3OmniTextProcessor(
+                processor=processor.tokenizer,  # Pass the underlying HF processor
+                device=device,
+                dtype=language_model.dtype,
+            )
+            calib_dataloader = get_qwen3omni_text_dataloader(
+                dataset_name=dataset_name,
+                processor=text_processor,
+                batch_size=args.batch_size,
+                num_samples=args.calib_size[0],
+            )
+        print(f"Selected dataset for calibration: {dataset_name}")
     elif model_type == "whisper":
         assert processor is not None and isinstance(processor, WhisperProcessor), (
             "The AutoProcessor must be set."
@@ -349,6 +410,9 @@ def load_model(args: argparse.Namespace):
         calibration_only = True
 
     model_type = get_model_type(full_model)
+    if model_type == "qwen3omni":
+        print("Disabling talker for Qwen3Omni model")
+        full_model.disable_talker()
 
     device = full_model.device
     if hasattr(full_model, "model"):
@@ -360,7 +424,7 @@ def load_model(args: argparse.Namespace):
     default_pad_token = None
 
     is_nemotron_vl_model = is_nemotron_vl(full_model)
-    if model_type == "mllama":
+    if model_type in ["mllama", "qwen3omni"]:
         processor = get_processor(
             args.pyt_ckpt_path,
             model_type,
@@ -500,6 +564,15 @@ def mono_quantize(
         quant_cfg["quant_cfg"]["*image*"] = {"enable": False}
         # Also disable radio model components specifically
         quant_cfg["quant_cfg"]["*radio*"] = {"enable": False}
+        quant_cfg["quant_cfg"]["*visual*"] = {"enable": False}
+
+    # For Qwen3Omni models, disable quantization of conv layers
+    if model_type == "qwen3omni":
+        print(
+            "Disabling quantization for conv layers, audio tower and visual encoder in Qwen3Omni model"
+        )
+        quant_cfg["quant_cfg"]["*conv*"] = {"enable": False}
+        quant_cfg["quant_cfg"]["*audio_tower*"] = {"enable": False}
         quant_cfg["quant_cfg"]["*visual*"] = {"enable": False}
 
     if not model_is_already_quantized or calibration_only:
@@ -662,9 +735,10 @@ def pre_quantize(
 
     """
     # Only run single sample for preview
-    preview_input_ids = next(iter(calib_dataloader))[
-        "input_features" if model_type == "whisper" else "input_ids"
-    ][0:1]
+    calib_batch = next(iter(calib_dataloader))
+    preview_input_ids = calib_batch["input_features" if model_type == "whisper" else "input_ids"][
+        0:1
+    ]
 
     # Generate preview before quantization
     if model_type == "deepseek":
@@ -679,13 +753,24 @@ def pre_quantize(
             "before quantization",
             allow_fallback=True,
         )
+    elif model_type == "qwen3omni":
+        # Qwen3Omni returns (text_ids, audio) tuple; text_ids has .sequences
+        # Pass full batch with all multimodal inputs
+        result = full_model.generate(**calib_batch, max_new_tokens=100)
+        if isinstance(result, tuple):
+            text_ids, _ = result
+            generated_ids_before_ptq = (
+                text_ids.sequences if hasattr(text_ids, "sequences") else text_ids
+            )
+        else:
+            generated_ids_before_ptq = result
     else:
         # Standard generation for non-Nemotron VL models
         generated_ids_before_ptq = full_model.generate(preview_input_ids, max_new_tokens=100)
     if model_type == "gptoss" and args.qformat == "nvfp4_mlp_only":
         print("Applying nvfp4 quantization (MoE only) for gpt-oss")
 
-    return preview_input_ids, generated_ids_before_ptq
+    return preview_input_ids, generated_ids_before_ptq, calib_batch
 
 
 def post_quantize(
@@ -698,6 +783,7 @@ def post_quantize(
     generated_ids_before_ptq,
     is_nemotron_vl_model,
     first_text_speech_dataset,
+    calib_batch: dict | None = None,
 ):
     """
     Processing after the quantization.
@@ -708,13 +794,37 @@ def post_quantize(
     """
 
     if args.verbose:
-        mtq.print_quant_summary(full_model)
+        if args.quant_summary_path:
+            # Capture the summary output to a file
+            old_stdout = sys.stdout
+            sys.stdout = buffer = io.StringIO()
+            try:
+                mtq.print_quant_summary(full_model)
+            finally:
+                sys.stdout = old_stdout
+            summary = buffer.getvalue()
+            with open(args.quant_summary_path, "w") as f:
+                f.write(summary)
+            print(f"Quantization summary saved to {args.quant_summary_path}")
+        else:
+            mtq.print_quant_summary(full_model)
 
     # Run some samples
     torch.cuda.empty_cache()
     generated_ids_after_ptq = None
     if generated_ids_before_ptq is None:
         pass
+    elif model_type == "qwen3omni":
+        # Qwen3Omni returns (text_ids, audio) tuple; text_ids has .sequences
+        # Pass full batch with all multimodal inputs
+        result = full_model.generate(**calib_batch, max_new_tokens=100)
+        if isinstance(result, tuple):
+            text_ids, _ = result
+            generated_ids_after_ptq = (
+                text_ids.sequences if hasattr(text_ids, "sequences") else text_ids
+            )
+        else:
+            generated_ids_after_ptq = result
     elif model_type != "llama4" and not is_nemotron_vl_model:
         # Our fake quantizer may not be fully compatible with torch.compile.
         generated_ids_after_ptq = full_model.generate(preview_input_ids, max_new_tokens=100)
@@ -733,12 +843,13 @@ def post_quantize(
         )
 
     def input_decode(input_ids):
-        if processor is not None and isinstance(processor, MllamaImageProcessor):
-            return processor.tokenizer.batch_decode(input_ids)
+        # BaseImageProcessor covers MllamaImageProcessor and Qwen3OmniImageProcessor
+        if processor is not None and isinstance(processor, BaseImageProcessor):
+            return processor.tokenizer.batch_decode(input_ids, skip_special_tokens=True)
         elif processor is not None and isinstance(processor, WhisperProcessor):
             return first_text_speech_dataset
         elif tokenizer is not None:
-            return tokenizer.batch_decode(input_ids)
+            return tokenizer.batch_decode(input_ids, skip_special_tokens=True)
         else:
             raise ValueError("The processor or tokenizer must be set")
 
@@ -750,6 +861,12 @@ def post_quantize(
                 return tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
         elif processor is not None and isinstance(processor, MllamaImageProcessor):
             return processor.tokenizer.batch_decode(generated_ids[:, input_shape:])
+        elif processor is not None and isinstance(processor, Qwen3OmniImageProcessor):
+            return processor.tokenizer.batch_decode(
+                generated_ids[:, input_shape:],
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )
         elif tokenizer is not None:
             return tokenizer.batch_decode(generated_ids[:, input_shape:])
         else:
@@ -831,7 +948,7 @@ def quantize_main(
     # Detect if this is a Nemotron VL model using architecture-based detection
     is_nemotron_vl_model = is_nemotron_vl(full_model)
 
-    preview_input_ids, generated_ids_before_ptq = pre_quantize(
+    preview_input_ids, generated_ids_before_ptq, calib_batch = pre_quantize(
         args, full_model, model_type, tokenizer, calib_dataloader, is_nemotron_vl_model
     )
 
@@ -903,6 +1020,7 @@ def quantize_main(
         generated_ids_before_ptq,
         is_nemotron_vl_model,
         first_text_speech_dataset,
+        calib_batch,
     )
     export_quantized(
         args,
@@ -1081,6 +1199,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Path to checkpoint file for saving/restoring auto_quantize search state "
             "(sensitivity scores, costs, etc.). Only used when auto_quantize_bits is specified."
+        ),
+    )
+    parser.add_argument(
+        "--quant_summary_path",
+        type=str,
+        default=None,
+        help=(
+            "Path to save the quantization summary. If not specified, summary is printed to stdout. "
+            "Requires --verbose to be enabled (default: True)."
         ),
     )
 

@@ -998,6 +998,16 @@ def export_hf_checkpoint(
         if getattr(model, "hf_quantizer", None) is not None:
             model.hf_quantizer = None
 
+        # Fix generation_config conflicts before saving
+        # Some models have temperature/top_p/top_k set but do_sample=False which causes validation errors
+        if hasattr(model, "generation_config") and model.generation_config is not None:
+            gen_config = model.generation_config
+            if not getattr(gen_config, "do_sample", True):
+                # Remove sampling-related params when do_sample is False
+                for attr in ["temperature", "top_p", "top_k"]:
+                    if hasattr(gen_config, attr):
+                        setattr(gen_config, attr, None)
+
         # Save model
         model.save_pretrained(
             export_dir, state_dict=post_state_dict, save_modelopt_state=save_modelopt_state

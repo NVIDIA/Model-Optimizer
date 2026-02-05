@@ -796,6 +796,23 @@ try:
 except ImportError:
     pass
 
+try:
+    from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+        Qwen3OmniMoeTalkerTextSparseMoeBlock,
+        Qwen3OmniMoeThinkerTextSparseMoeBlock,
+    )
+
+    if Qwen3OmniMoeTalkerTextSparseMoeBlock not in QuantModuleRegistry:
+        QuantModuleRegistry.register(
+            {Qwen3OmniMoeTalkerTextSparseMoeBlock: "hf.Qwen3OmniMoeTalkerTextSparseMoeBlock"}
+        )(_QuantSparseMoe)
+    if Qwen3OmniMoeThinkerTextSparseMoeBlock not in QuantModuleRegistry:
+        QuantModuleRegistry.register(
+            {Qwen3OmniMoeThinkerTextSparseMoeBlock: "hf.Qwen3OmniMoeThinkerTextSparseMoeBlock"}
+        )(_QuantSparseMoe)
+except ImportError:
+    pass
+
 
 class _QuantGptOssExperts(_QuantFunctionalMixin):
     """Quantized wrapper for `transformers.GptOssExperts`.
