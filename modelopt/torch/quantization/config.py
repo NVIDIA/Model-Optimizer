@@ -494,6 +494,32 @@ NVFP4_DEFAULT_CFG = {
     "algorithm": "max",
 }
 
+NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        # "*input_quantizer": {
+        #     "enable": False,
+        # },
+        "*input_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": {
+        "method": "mse",
+        "fp8_scale_sweep": True,
+    },
+}
+
+
 NVFP4_AWQ_LITE_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
