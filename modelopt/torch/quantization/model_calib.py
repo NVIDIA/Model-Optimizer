@@ -32,9 +32,9 @@ from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelSt
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
 
-from .calib import MseCalibrator
+from .calib import MseCalibrator, NVFP4MSECalibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
-from .nn import QuantModule, SequentialQuantizer, TensorQuantizer
+from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import (
     disable_calib,
     enable_fake_quant,
@@ -44,6 +44,7 @@ from .utils import (
     is_quantized_linear,
     is_quantized_row_parallel_linear,
     quantizer_attr_names,
+    reduce_amax,
     weight_attr_names,
 )
 
@@ -299,7 +300,7 @@ def mse_calibrate(
     weight_quantizers = []
     seen_modules = set()
 
-    for name, module in model.named_modules():
+    for name, module in list(model.named_modules()):
         if isinstance(module, TensorQuantizer) and not module._disabled:
             if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
                 # Get the initial amax from max calibration
@@ -311,6 +312,24 @@ def mse_calibrate(
                     and module._block_sizes is not None
                     and module._block_sizes.get("scale_bits") == (4, 3)
                 )
+
+                if is_nvfp4_static:
+                    # Compute and set global_amax
+                    global_amax = reduce_amax(initial_amax, axis=None)
+
+                    # Convert to NVFP4StaticQuantizer in-place
+                    NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
+
+                if fp8_scale_sweep and is_nvfp4_static:
+                    # Replace calibrator with NVFP4MSECalibrator
+                    module._calibrator = NVFP4MSECalibrator(
+                        amax=initial_amax,
+                        axis=module._calibrator._axis,
+                        global_amax=module.global_amax,
+                        quant_func=partial(_mse_quant_func, quantizer=module),
+                    )
+                    continue
+
                 if fp8_scale_sweep and not is_nvfp4_static:
                     warnings.warn(
                         f"fp8_scale_sweep is enabled but quantizer '{name}' is not NVFP4 static "
@@ -325,7 +344,6 @@ def mse_calibrate(
                     start_multiplier=start_multiplier,
                     stop_multiplier=stop_multiplier,
                     quant_func=partial(_mse_quant_func, quantizer=module),
-                    fp8_scale_sweep=fp8_scale_sweep and is_nvfp4_static,
                 )
 
     # Identify weight quantizers by checking if they have corresponding weight parameters
@@ -344,40 +362,12 @@ def mse_calibrate(
     # This ensures weights are only calibrated once, not during every forward pass
     for parent_module, weight_name, weight_quantizer in weight_quantizers:
         # Enable calibration mode for the weight quantizer
-        weight_quantizer.disable_quant()
-        weight_quantizer.enable_calib()
-
+        enable_stats_collection(parent_module)
         with enable_weight_access_and_writeback(parent_module, model):
             weight = getattr(parent_module, weight_name)
             weight_quantizer(weight)
-
-    # Step 4: Disable weight quantizers during forward loop
-    for _, _, weight_quantizer in weight_quantizers:
-        weight_quantizer.disable()
-
-    # Step 5: Collect data with MSE calibrators for activation quantizers only
-    enable_stats_collection(model)
-    if forward_loop is None:
-        # If no forward loop, nothing else to do since weights are already calibrated
-        pass
-    else:
-        # Run forward loop - only activation quantizers will collect data
-        forward_loop(model)
-
-    # Step 6: Re-enable weight quantizers before finalizing calibration
-    # This ensures finish_stats_collection processes them correctly
-    for _, _, weight_quantizer in weight_quantizers:
-        weight_quantizer.enable()
-
-    # Step 7: Compute optimal amax and load it for all quantizers (weights + activations)
-    finish_stats_collection(model, method="mse")
-
-    # Step 8: Free GPU memory by clearing calibrator data
-    for name, module in model.named_modules():
-        if isinstance(module, TensorQuantizer) and not module._disabled:
-            if hasattr(module, "_calibrator") and getattr(module, "_calibrator", None) is not None:
-                if hasattr(module._calibrator, "clear"):
-                    module._calibrator.clear()
+        finish_stats_collection(parent_module, method="mse")
+        weight_quantizer._calibrator.reset()
 
     # TODO: Sync amax across distributed processes
 
@@ -393,7 +383,7 @@ def enable_stats_collection(model: nn.Module):
                 module.disable()
 
 
-def finish_stats_collection(model: nn.Module, method: str | None = None):
+def finish_stats_collection(model: nn.Module, method: str | None = None, **kwargs):
     """Finish stats collection for all quantizers in the model."""
     for _, module in model.named_modules():
         if not isinstance(module, TensorQuantizer) or module._disabled:
@@ -401,15 +391,11 @@ def finish_stats_collection(model: nn.Module, method: str | None = None):
 
         cal = getattr(module, "_calibrator", None)
         if cal and not getattr(module, "_dynamic", False):
-            if method in {"mse", "entropy"}:
+            if method in {"entropy"}:
                 if cal.compute_amax(method) is not None:
-                    if method == "entropy":
-                        module.load_calib_amax("entropy")
-                    else:
-                        module.load_calib_amax()
-            elif cal.compute_amax() is not None:
-                # Max calibrator
-                module.load_calib_amax()
+                    module.load_calib_amax("entropy", **kwargs)
+            elif cal.compute_amax(**kwargs) is not None:
+                module.load_calib_amax(**kwargs)
 
         if module.bias_calibrator is not None and module.bias_type == "static":
             module.load_calib_bias()
