@@ -685,22 +685,20 @@ def patch_ring_attention_for_ttt():
             f"Please use torch 2.10.0 or cp_size=1."
         )
 
+    from torch.distributed.tensor.experimental._context_parallel import _attention
+
     # 1. Disable load balance, which is designed for causal mask.
     # This affect how buffers are sharded. So need to be done permanently before accelerate/hf trainer init.
-    torch.distributed.tensor.experimental._context_parallel._attention._cp_options.enable_load_balance = False
+    _attention._cp_options.enable_load_balance = False
 
     # 2. Patch templated ring attention for TTT mask.
-    original_templated_ring_attention = (
-        torch.distributed.tensor.experimental._context_parallel._attention._templated_ring_attention
+    original_templated_ring_attention = _attention._templated_ring_attention
+    original_templated_ring_attention_backward = _attention._templated_ring_attention_backward
+    _attention._templated_ring_attention = get_patched_templated_ring_attn(
+        original_templated_ring_attention
     )
-    original_templated_ring_attention_backward = (
-        torch.distributed.tensor.experimental._context_parallel._attention._templated_ring_attention_backward
-    )
-    torch.distributed.tensor.experimental._context_parallel._attention._templated_ring_attention = (
-        get_patched_templated_ring_attn(original_templated_ring_attention)
-    )
-    torch.distributed.tensor.experimental._context_parallel._attention._templated_ring_attention_backward = (
-        get_patched_templated_ring_attn(original_templated_ring_attention_backward)
+    _attention._templated_ring_attention_backward = get_patched_templated_ring_attn(
+        original_templated_ring_attention_backward
     )
 
     # 3. Patch merger to skip the blank shard to avoid difference in output.
