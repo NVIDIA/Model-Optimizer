@@ -387,11 +387,11 @@ def local_hessian_calibrate(
 ):
     """Calibrate the model using local Hessian-weighted MSE search.
 
-    Instead of minimizing weight error ||W - Wq||², this minimizes Hessian-weighted error:
-        loss = (W - Wq)ᵀ H (W - Wq)
-    where H = X @ X.T approximates output reconstruction error ||WX - WqX||².
+    Instead of minimizing weight error ``||W - Wq||²``, this minimizes Hessian-weighted error
+    ``loss = (W - Wq)ᵀ H (W - Wq)`` where ``H = X @ X.T`` approximates output reconstruction
+    error ``||WX - WqX||²``.
 
-    Per-block Hessians of shape (cin // block_size, block_size, block_size) are accumulated
+    Per-block Hessians of shape ``(cin // block_size, block_size, block_size)`` are accumulated
     during forward pass and used to weight the MSE loss during scale search.
 
     Args:
