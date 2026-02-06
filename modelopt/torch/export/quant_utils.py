@@ -1374,6 +1374,22 @@ def preprocess_linear_fusion(modules: list[torch.nn.Module], resmooth_only=False
                 for module in modules:
                     module.weight_quantizer[-1].amax = weight_amax
 
+        # Handle NVFP4StaticQuantizer: unify _global_amax for fused layers
+        elif isinstance(modules[0].weight_quantizer, NVFP4StaticQuantizer) or getattr(
+            modules[0].weight_quantizer, "_is_nvfp4_static_quantizer", False
+        ):
+            global_amax_list = [
+                m.weight_quantizer._global_amax
+                for m in modules
+                if hasattr(m.weight_quantizer, "_global_amax")
+                and m.weight_quantizer._global_amax is not None
+            ]
+            if global_amax_list:
+                unified_global_amax = torch.max(torch.stack(global_amax_list))
+                for module in modules:
+                    if hasattr(module.weight_quantizer, "_global_amax"):
+                        module.weight_quantizer._global_amax = unified_global_amax
+
         elif (
             modules[0].weight_quantizer.is_enabled
             and modules[0].weight_quantizer.amax is not None
