@@ -57,6 +57,7 @@ from ...qtensor import (
 from ...tensor_quant import (
     dynamic_block_quant,
     fake_tensor_quant,
+    fp4_cast_ste,
     scaled_e4m3,
     static_blockwise_fp4_fake_quant,
 )
@@ -1246,6 +1247,8 @@ class NVFP4StaticQuantizer(TensorQuantizer):
     Uses _global_amax and inherited _amax for per-block amax values.
     """
 
+    _scale_after_dequant: bool = False
+
     @classmethod
     def from_tensor_quantizer(
         cls, tq: TensorQuantizer, global_amax: torch.Tensor | None = None
@@ -1267,6 +1270,28 @@ class NVFP4StaticQuantizer(TensorQuantizer):
         return tq
 
     @property
+    def amax(self):
+        """Return amax, derived from per_block_scale if in scale-after-dequant mode."""
+        if self._scale_after_dequant and hasattr(self, "_per_block_scale"):
+            return self._per_block_scale * 6.0
+        if not hasattr(self, "_amax"):
+            return None
+        return self._amax
+
+    @amax.setter
+    def amax(self, value):
+        # Re-declare setter since we override the property getter.
+        assert value is not None, "amax cannot be set to None."
+        if not isinstance(value, torch.Tensor):
+            value = torch.tensor(value)
+        if not hasattr(self, "_amax"):
+            self.register_buffer("_amax", value.clone().detach())
+        else:
+            if self._amax.shape != value.shape:
+                raise RuntimeError("Changing shape when setting amax is not allowed.")
+            self._amax.data.copy_(value.clone().detach().to(self._amax.device))
+
+    @property
     def global_amax(self):
         """Return global_amax for quantization."""
         if not hasattr(self, "_global_amax"):
@@ -1286,8 +1311,44 @@ class NVFP4StaticQuantizer(TensorQuantizer):
         else:
             self._global_amax.data.copy_(value.clone().detach().to(self._global_amax.device))
 
+    def _short_amax(self, fmt=".4f"):
+        """Short description of amax, accounting for scale-after-dequant mode."""
+        if self._scale_after_dequant and hasattr(self, "_per_block_scale"):
+            amax = self._per_block_scale.data * 6.0
+            return self._short_tensor(amax, fmt)
+        return super()._short_amax(fmt)
+
+    def enable_scale_after_dequant(
+        self, per_block_scale: torch.Tensor, per_tensor_scale: torch.Tensor
+    ):
+        """Set up scale-after-dequant mode with learnable per-block scale.
+
+        Args:
+            per_block_scale: FP8-quantized per-block scale (learnable Parameter).
+            per_tensor_scale: Per-tensor scale (frozen buffer).
+        """
+        # Delete _amax buffer -- no longer needed
+        if hasattr(self, "_amax"):
+            delattr(self, "_amax")
+
+        self._per_block_scale = nn.Parameter(
+            per_block_scale.clone().detach().float(), requires_grad=True
+        )
+        self.register_buffer("_per_tensor_scale", per_tensor_scale.clone().detach().float())
+        self._scale_after_dequant = True
+
     def _fake_quantize(self, inputs):
         """Fake quantization using two-level scaling with _amax and _global_amax."""
+        if self._scale_after_dequant:
+            if self._per_block_scale.dtype != inputs.dtype:
+                self.to(dtype=inputs.dtype)
+
+            scale_raw = self._per_block_scale.clamp(min=0)
+            scale_fp8 = scaled_e4m3(scale_raw, self._per_tensor_scale, None, 4, 3)
+
+            w_cast = fp4_cast_ste(inputs)
+            return (w_cast * scale_fp8.view(-1, 1)).to(dtype=inputs.dtype)
+
         if self.amax is not None:
             return static_blockwise_fp4_fake_quant(
                 inputs,

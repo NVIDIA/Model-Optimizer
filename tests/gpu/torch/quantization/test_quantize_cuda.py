@@ -16,6 +16,8 @@
 """High-level tests for quantization."""
 
 import pytest
+import torch
+import torch.nn as nn
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
 from _test_utils.torch.quantization.quantize_common import (
     FP4_SVDQUANT_CFG,
@@ -27,6 +29,7 @@ from _test_utils.torch.quantization.quantize_common import (
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.extensions import get_cuda_ext_mx
+from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
 
 NVFP4_WEIGHT_ACT_MSE_CFG = {
     "quant_cfg": {
@@ -67,6 +70,19 @@ NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG = {
         "method": "mse",
         "fp8_scale_sweep": True,
     },
+}
+
+NVFP4_WEIGHT_SCALE_LEARN_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {"enable": False},
+    },
+    "algorithm": {"method": "scale_after_dequant"},
 }
 
 
@@ -140,3 +156,53 @@ def test_quantize(model_cls, config):
 def test_save_restore(model_cls, quant_config):
     test_cpu_restore = quant_config == mtq.INT8_SMOOTHQUANT_CFG
     save_restore_test(model_cls, "cuda", quant_config, test_cpu_restore=test_cpu_restore)
+
+
+def test_scale_after_dequant_grad():
+    """Test scale_after_dequant: outputs match FP8 sweep, and per_block_scale gets gradients."""
+    if get_cuda_ext_mx() is None:
+        pytest.skip("cuda_ext_mx is not available")
+
+    import copy
+
+    model = nn.Sequential(nn.Linear(32, 64, bias=False), nn.Linear(64, 16, bias=False)).cuda()
+    model_ref = copy.deepcopy(model)
+
+    calib_data = [torch.randn(2, 32, device="cuda") for _ in range(4)]
+
+    def forward_loop(model):
+        for x in calib_data:
+            model(x)
+
+    # Reference: MSE + FP8 sweep only
+    mtq.quantize(model_ref, NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG, forward_loop)
+
+    # scale_after_dequant (internally runs MSE + FP8 sweep, then converts)
+    mtq.quantize(model, NVFP4_WEIGHT_SCALE_LEARN_CFG, forward_loop)
+
+    # Outputs should match before any training
+    x = torch.randn(2, 32, device="cuda")
+    with torch.no_grad():
+        out_ref = model_ref(x)
+        out = model(x)
+    assert torch.allclose(out, out_ref, atol=1e-5), (
+        f"Output mismatch: max diff = {(out - out_ref).abs().max().item()}"
+    )
+
+    # Verify quantizers are in scale_after_dequant mode
+    for module in model.modules():
+        if isinstance(module, NVFP4StaticQuantizer) and module._scale_after_dequant:
+            assert isinstance(module._per_block_scale, nn.Parameter)
+            assert module._per_block_scale.requires_grad
+            assert not module._per_tensor_scale.requires_grad
+
+    # Forward + backward: verify per_block_scale gets gradients
+    out = model(x)
+    out.sum().backward()
+
+    found = False
+    for module in model.modules():
+        if isinstance(module, NVFP4StaticQuantizer) and module._scale_after_dequant:
+            assert module._per_block_scale.grad is not None
+            found = True
+    assert found

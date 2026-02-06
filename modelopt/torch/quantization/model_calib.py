@@ -27,7 +27,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from modelopt.torch.opt.searcher import ForwardLoop
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import print_rank_0, same_device_as
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
@@ -48,7 +48,7 @@ from .utils import (
     weight_attr_names,
 )
 
-__all__ = ["awq", "max_calibrate", "smoothquant", "svdquant"]
+__all__ = ["awq", "max_calibrate", "scale_after_dequant", "smoothquant", "svdquant"]
 
 
 def weight_only_quantize(model: nn.Module):
@@ -1464,3 +1464,76 @@ def gptq_lite(
         torch.cuda.empty_cache()
 
     print_rank_0("GPTQ-lite quantization completed successfully")
+
+
+@torch.no_grad()
+def scale_after_dequant(
+    model: nn.Module,
+    forward_loop: ForwardLoop | None = None,
+    scale_algorithm: dict | None = None,
+    **kwargs,
+):
+    """Run scale calibration then convert NVFP4 quantizers to scale-after-dequant mode.
+
+    Args:
+        model: Quantized model.
+        forward_loop: Calibration data forward loop.
+        scale_algorithm: Calibration algorithm config to run first. Must be MSE with
+            fp8_scale_sweep=True for static NVFP4 quantizers.
+    """
+    from .tensor_quant import scaled_e4m3
+
+    if scale_algorithm is None:
+        scale_algorithm = {"method": "mse", "fp8_scale_sweep": True}
+
+    assert scale_algorithm.get("method") == "mse" and scale_algorithm.get(
+        "fp8_scale_sweep", False
+    ), (
+        "scale_after_dequant currently requires scale_algorithm={'method': 'mse', 'fp8_scale_sweep': True}"
+    )
+
+    mse_kwargs = {k: v for k, v in scale_algorithm.items() if k != "method"}
+    mse_calibrate(model, forward_loop=forward_loop, **mse_kwargs)
+
+    # Convert each NVFP4 weight quantizer to scale-after-dequant mode
+    seen_modules = set()
+    for name, module in model.named_modules():
+        if module in seen_modules:
+            continue
+        for weight_name in weight_attr_names(module):
+            wq_name = quantizer_attr_names(weight_name).weight_quantizer
+            quantizer = getattr(module, wq_name, None)
+            if not isinstance(quantizer, NVFP4StaticQuantizer):
+                continue
+            if quantizer.amax is None or quantizer.global_amax is None:
+                continue
+
+            amax = quantizer._amax.float()
+            global_amax = quantizer._global_amax.float()
+
+            with same_device_as(amax):
+                per_block_scale = scaled_e4m3(amax / 6.0, global_amax / 6.0, None, 4, 3)
+
+            per_tensor_scale = global_amax / 6.0
+
+            # Sanitize: set to 1.0 where scale is 0, inf, or nan (matches triton kernel logic)
+            bad = (
+                (per_block_scale == 0) | torch.isinf(per_block_scale) | torch.isnan(per_block_scale)
+            )
+            per_block_scale = torch.where(bad, torch.ones_like(per_block_scale), per_block_scale)
+
+            block_size = quantizer._block_sizes.get(-1, None) or quantizer._block_sizes.get(
+                next(k for k in quantizer._block_sizes if isinstance(k, int)), None
+            )
+            assert block_size is not None, "Could not determine block size"
+
+            with enable_weight_access_and_writeback(module, model):
+                w = getattr(module, weight_name)
+                orig_shape = w.shape
+                w_flat = w.data.float().reshape(-1, block_size)
+                w_flat = w_flat / per_block_scale.view(-1, 1)
+                w.data.copy_(w_flat.reshape(orig_shape).to(w.dtype))
+
+            quantizer.enable_scale_after_dequant(per_block_scale, per_tensor_scale)
+
+        seen_modules.add(module)

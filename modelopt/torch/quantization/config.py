@@ -1190,6 +1190,22 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
     )
 
 
+class ScaleAfterDequantConfig(QuantizeAlgorithmConfig):
+    """Config for scale-after-dequant algorithm.
+
+    Runs MSE+FP8 scale sweep calibration, then converts NVFP4 quantizers to
+    learnable-amax mode for fine-tuning.
+    """
+
+    method: Literal["scale_after_dequant"] = ModeloptField("scale_after_dequant")
+
+    scale_algorithm: dict | None = ModeloptField(
+        default=None,
+        title="Scale calibration algorithm to run first.",
+        description="Must be {'method': 'mse', 'fp8_scale_sweep': True}. Defaults to that if None.",
+    )
+
+
 class GPTQLiteConfig(QuantizeAlgorithmConfig):
     """The config for GPTQ lite.
 

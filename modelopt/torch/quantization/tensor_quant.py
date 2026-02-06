@@ -638,7 +638,28 @@ def _tensor_quant(inputs, amax, num_bits=8, unsigned=False, narrow_range=True):
     return outputs
 
 
+class FP4CastSTEFunction(Function):
+    """FP4 cast with STE backward -- no scale/descale, just rounding."""
+
+    @staticmethod
+    def forward(ctx, x, out_dtype=None):
+        """Forward pass: cast to FP4 using triton kernel."""
+        if not triton_kernel.IS_AVAILABLE:
+            raise RuntimeError("FP4CastSTEFunction requires triton.")
+        ctx.save_for_backward(x)
+        return triton_kernel.static_blockwise_fp4_cast(x, out_dtype)
+
+    @staticmethod
+    def backward(ctx, grad_outputs):
+        """Backward pass: STE with clip mask at |x| <= 6.0."""
+        (x,) = ctx.saved_tensors
+        # STE with clip mask: pass gradient where |x| <= 6.0
+        grad = grad_outputs * (x.abs() <= 6.0).float()
+        return grad, None
+
+
 fake_tensor_quant = FakeTensorQuantFunction.apply
 scaled_e4m3 = ScaledE4M3Function.apply
 dynamic_block_quant = DynamicBlockQuantizationFunction.apply
 static_blockwise_fp4_fake_quant = StaticBlockwiseFP4FakeQuantFunction.apply
+fp4_cast_ste = FP4CastSTEFunction.apply

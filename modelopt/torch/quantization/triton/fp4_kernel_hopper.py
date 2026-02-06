@@ -82,7 +82,15 @@ def fp4_fake_quant_kernel(
     block_max_scaled = block_max / (6.0 * global_scale_safe)
     block_max_scaled = tl.minimum(block_max_scaled, 448.0)
     block_max_quant = block_max_scaled.to(tl.float8e4nv).to(tl.float32) * global_scale
-    block_max_quant = tl.where(block_max_quant >= 1e-5, block_max_quant, 1.0)
+    # Match CUDA masking: local_amax_invalid = (==0) || isinf || isnan
+    # Note: (x != x) checks if x is NaN per IEEE 754.
+    block_max_quant = tl.where(
+        (block_max_quant == 0)
+        | (block_max_quant != block_max_quant)  # noqa: PLR0124
+        | (tl.abs(block_max_quant) == float("inf")),
+        1.0,
+        block_max_quant,
+    )
 
     block_max_quant_broadcast = tl.broadcast_to(
         block_max_quant, (TILE_M, NUM_FP4_BLOCKS, BLOCK_SIZE)
