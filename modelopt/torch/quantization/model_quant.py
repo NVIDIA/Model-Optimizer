@@ -508,14 +508,28 @@ def enable_quantizer(model: nn.Module, wildcard_or_filter_func: str | Callable):
 
 
 @atomic_print
-def print_quant_summary(model: nn.Module):
-    """Print summary of all quantizer modules in the model."""
+def print_quant_summary(model: nn.Module, save_path: str | None = None):
+    """Print summary of all quantizer modules in the model.
+
+    Args:
+        model: The model to summarize.
+        save_path: Optional path to save the summary to a file. If None, prints to stdout.
+    """
+    lines = []
     count = 0
     for name, mod in model.named_modules():
         if isinstance(mod, TensorQuantizer):
-            print(f"{name:80} {mod}")
+            lines.append(f"{name:80} {mod}")
             count += 1
-    print(f"{count} TensorQuantizers found in model")
+    lines.append(f"{count} TensorQuantizers found in model")
+
+    summary = "\n".join(lines)
+    if save_path:
+        with open(save_path, "w") as f:
+            f.write(summary)
+        print(f"Quantization summary saved to {save_path}")
+    else:
+        print(summary)
 
 
 def fold_weight(model: nn.Module):

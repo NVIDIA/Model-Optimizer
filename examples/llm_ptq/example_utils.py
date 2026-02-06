@@ -45,7 +45,21 @@ except ImportError:
     snapshot_download = None
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.utils.image_processor import BaseImageProcessor, MllamaImageProcessor
+from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
+from modelopt.torch.utils.image_processor import (
+    BaseImageProcessor,
+    MllamaImageProcessor,
+    Qwen3OmniImageProcessor,
+)
+from modelopt.torch.utils.video_dataset_utils import (
+    Qwen3OmniVideoProcessor,
+    get_supported_video_datasets,
+    get_video_dataset_dataloader,
+)
+from modelopt.torch.utils.vlm_dataset_utils import (
+    get_supported_vlm_datasets,
+    get_vlm_dataset_dataloader,
+)
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
@@ -243,7 +257,31 @@ def build_quant_cfg(
         quant_cfg["quant_cfg"]["*self_attn.q*"] = {"enable": False}
         quant_cfg["quant_cfg"]["*self_attn.kv*"] = {"enable": False}
 
+    if model_type == "qwen3omni":
+        print(
+            "Disabling quantization for conv layers, audio tower and visual encoder in Qwen3Omni model"
+        )
+        quant_cfg["quant_cfg"]["*conv*"] = {"enable": False}
+        quant_cfg["quant_cfg"]["*audio_tower*"] = {"enable": False}
+        quant_cfg["quant_cfg"]["*visual*"] = {"enable": False}
+
     return quant_cfg
+
+
+def get_generation_kwargs(model_type: str) -> dict[str, Any]:
+    """Get model-specific generation kwargs for calibration.
+
+    Args:
+        model_type: The model type string.
+
+    Returns:
+        Dictionary of generation kwargs for the model.
+    """
+    generation_kwargs = {}
+    if model_type == "qwen3omni":
+        generation_kwargs["return_audio"] = False
+        generation_kwargs["thinker_max_new_tokens"] = 1
+    return generation_kwargs
 
 
 def is_speculative(hf_config):
@@ -287,7 +325,7 @@ def get_processor(
     if attn_implementation is not None:
         model_kwargs["attn_implementation"] = attn_implementation
 
-    if model_type == "whisper":
+    if model_type in ("whisper", "mllama", "qwen3omni"):
         processor = AutoProcessor.from_pretrained(
             ckpt_path,
             padding_side="left",
@@ -299,20 +337,11 @@ def get_processor(
             f"Pad token for {ckpt_path} cannot be set!"
         )
 
+        if model_type == "mllama":
+            return MllamaImageProcessor(processor, device)
+        elif model_type == "qwen3omni":
+            return Qwen3OmniImageProcessor(processor, device)
         return processor
-    elif model_type == "mllama":
-        processor = AutoProcessor.from_pretrained(
-            ckpt_path,
-            padding_side="left",
-            **model_kwargs,
-        )
-        if processor.tokenizer.pad_token is None:
-            processor.tokenizer.pad_token = processor.tokenizer.eos_token
-        assert processor.tokenizer.pad_token is not None, (
-            f"Pad token for {ckpt_path} cannot be set!"
-        )
-
-        return MllamaImageProcessor(processor, device)
 
     return None
 
@@ -731,3 +760,81 @@ def copy_custom_model_files(source_path: str, export_path: str, trust_remote_cod
         print(f"Successfully copied {len(copied_files)} custom model files to {export_path}")
     else:
         print("No custom model files found to copy")
+
+
+def get_qwen3omni_dataloader(
+    dataset_name: str | list[str] | None,
+    processor: Qwen3OmniImageProcessor | None,
+    tokenizer,
+    batch_size: int,
+    num_samples: int | list[int],
+    device: torch.device,
+    model_dtype: torch.dtype,
+    include_labels: bool = False,
+):
+    """Create a calibration dataloader for Qwen3Omni models.
+
+    Handles video, VLM, and text-only dataset configurations.
+
+    Args:
+        dataset_name: Name of the dataset(s) to use for calibration.
+        processor: The Qwen3OmniImageProcessor for multimodal inputs.
+        tokenizer: The tokenizer for text-only fallback.
+        batch_size: Batch size for the dataloader.
+        num_samples: Number of samples to use (int or list for multi-dataset).
+        device: Target device for tensors.
+        model_dtype: Model dtype for proper tensor conversion.
+        include_labels: Whether to include labels (for gradient-based auto_quantize).
+
+    Returns:
+        DataLoader for calibration.
+    """
+    if dataset_name is None:
+        dataset_name = ["cnn_dailymail", "nemotron-post-training-dataset-v2"]
+
+    if processor is not None:
+        if dataset_name in get_supported_video_datasets():
+            assert isinstance(dataset_name, str)
+            video_processor = Qwen3OmniVideoProcessor(
+                processor.tokenizer if hasattr(processor, "tokenizer") else processor,
+                device=device,
+                dtype=model_dtype,
+                use_audio_in_video=True,
+            )
+            calib_dataloader = get_video_dataset_dataloader(
+                dataset_name=dataset_name,
+                processor=video_processor,
+                batch_size=batch_size,
+                num_samples=num_samples if isinstance(num_samples, int) else num_samples[0],
+            )
+        elif dataset_name in get_supported_vlm_datasets():
+            assert isinstance(dataset_name, str)
+            assert isinstance(processor, Qwen3OmniImageProcessor), (
+                "The Qwen3OmniImageProcessor must be set."
+            )
+            # Set the dtype for proper tensor conversion in collate_function
+            processor.dtype = model_dtype
+            calib_dataloader = get_vlm_dataset_dataloader(
+                dataset_name=dataset_name,
+                processor=processor,
+                batch_size=batch_size,
+                num_samples=num_samples if isinstance(num_samples, int) else num_samples[0],
+            )
+        else:
+            raise ValueError(
+                f"Dataset '{dataset_name}' not supported for Qwen3Omni with processor. "
+                f"Supported video datasets: {get_supported_video_datasets()}, "
+                f"Supported VLM datasets: {get_supported_vlm_datasets()}"
+            )
+    else:
+        # Text-only fallback
+        calib_dataloader = get_dataset_dataloader(
+            dataset_name=dataset_name if isinstance(dataset_name, list) else [dataset_name],
+            tokenizer=tokenizer,
+            batch_size=batch_size,
+            num_samples=num_samples if isinstance(num_samples, list) else [num_samples],
+            device=device,
+            include_labels=include_labels,
+        )
+
+    return calib_dataloader

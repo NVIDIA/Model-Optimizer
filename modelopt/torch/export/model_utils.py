@@ -31,6 +31,7 @@ MODEL_NAME_TO_TYPE = {
     "ChatGLM": "chatglm",
     "Qwen3Moe": "qwen3moe",
     "Qwen3Next": "qwen3next",
+    "Qwen3OmniMoeForConditionalGeneration": "qwen3omni",
     "QWen": "qwen",
     "RecurrentGemma": "recurrentgemma",
     "Gemma3": "gemma3",
@@ -140,6 +141,9 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
 
     if hasattr(model, "language_model"):
         return [model, model.language_model]
+
+    if hasattr(model, "thinker"):
+        return [model, model.thinker]
 
     # Pattern 3: No language_model found
     return None

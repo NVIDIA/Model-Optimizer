@@ -106,8 +106,87 @@ __all__ = [
     "get_dataset_dataloader",
     "get_dataset_samples",
     "get_max_batch_size",
+    "get_qwen3omni_text_dataloader",
     "get_supported_datasets",
 ]
+
+
+def get_qwen3omni_text_dataloader(
+    dataset_name: str | list[str] = "cnn_dailymail",
+    processor=None,
+    batch_size: int = 1,
+    num_samples: int | list[int] = 512,
+) -> DataLoader:
+    """Get a text-only dataloader for Qwen3-Omni with proper conversation template applied.
+
+    This function applies the Qwen3-Omni chat template to text samples before tokenization,
+    which is required for proper calibration of Qwen3-Omni models with text-only datasets.
+
+    See: https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Thinking
+
+    Args:
+        dataset_name: Name of the dataset(s) to load.
+        processor: Qwen3OmniTextProcessor instance wrapping the Qwen3OmniMoeProcessor.
+        batch_size: Batch size of the returned dataloader.
+        num_samples: Number of samples from the dataset.
+
+    Returns:
+        A DataLoader with properly formatted inputs for Qwen3-Omni.
+    """
+    assert processor is not None, "Please provide a Qwen3OmniTextProcessor."
+
+    if isinstance(num_samples, int):
+        num_samples = [num_samples]
+
+    if isinstance(dataset_name, str):
+        dataset_name = [dataset_name]
+
+    assert len(dataset_name) == len(num_samples), (
+        "dataset_name and num_samples must be the same length"
+    )
+
+    # Get raw text samples
+    all_samples = []
+    for ds_name, num_sample in zip(dataset_name, num_samples):
+        samples = get_dataset_samples(ds_name, num_sample)
+        all_samples.extend(samples)
+
+    # Preprocess each sample with the conversation template
+    processed_samples = []
+    for text in all_samples:
+        # Apply conversation template and tokenize
+        values = processor.preprocess_function(text)
+
+        # Convert to lists for dataset compatibility
+        sample_dict = {}
+        for key, val in values.items():
+            if val is not None and hasattr(val, "tolist"):
+                sample_dict[key] = val.tolist()
+            elif val is not None:
+                sample_dict[key] = val
+        processed_samples.append(sample_dict)
+
+    # Create dataset
+    class _Qwen3OmniTextDataset(torch.utils.data.Dataset):
+        def __init__(self, samples):
+            self.samples = samples
+
+        def __getitem__(self, idx):
+            return self.samples[idx]
+
+        def __len__(self):
+            return len(self.samples)
+
+    dataset = _Qwen3OmniTextDataset(processed_samples)
+
+    calib_dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=processor.collate_function,
+    )
+
+    return calib_dataloader
 
 
 def get_dataset_samples(
@@ -315,8 +394,8 @@ def get_max_batch_size(
     torch.cuda.empty_cache()
 
     free_mem_before, max_allocated_before = _get_free_gpu_mem()
-    is_enc_dec = model_type_is_enc_dec(model)
-    infer_method = model.generate if is_enc_dec else model.forward
+    use_generate = model_type_is_enc_dec(model)
+    infer_method = model.generate if use_generate else model.forward
 
     if sample_input_single_batch is None:
         sample_input_single_batch = (
@@ -371,22 +450,27 @@ def get_max_batch_size(
         return 512
 
 
-def _process_batch(batch_data, infer_method, max_working_batch_size=None):
+def _process_batch(batch_data, infer_method, generation_kwargs={}, max_working_batch_size=None):
     """Process a batch of data through the model's inference method.
 
     Args:
         batch_data: Dictionary containing the batch data
         infer_method: Model's inference method (either forward or generate)
+        generation_kwargs: Keyword arguments to pass to the model.generate() method.
         max_working_batch_size: Maximum batch size known to work without OOM
 
     Returns:
         The maximum batch size that worked successfully
     """
-    assert all(torch.is_tensor(data) or data is None for data in batch_data.values()), (
-        "batch_data values must be tensors"
+    # Separate tensor values from scalar parameters (like max_new_tokens)
+    tensor_data = {k: v for k, v in batch_data.items() if torch.is_tensor(v) or v is None}
+    scalar_data = {k: v for k, v in batch_data.items() if not torch.is_tensor(v) and v is not None}
+
+    assert all(torch.is_tensor(data) or data is None for data in tensor_data.values()), (
+        "tensor_data values must be tensors"
     )
     # Get the batch size of current data
-    batch_size = batch_data[next(iter(batch_data.keys()))].shape[0]
+    batch_size = tensor_data[next(iter(batch_data.keys()))].shape[0]
 
     # If we know a smaller batch size works, preemptively split
     if max_working_batch_size is not None and batch_size > max_working_batch_size:
@@ -394,11 +478,13 @@ def _process_batch(batch_data, infer_method, max_working_batch_size=None):
         for i in range(0, batch_size, max_working_batch_size):
             end_idx = min(i + max_working_batch_size, batch_size)
             split_data = {}
-            for key in batch_data:
-                if batch_data[key] is None:
+            for key in tensor_data:
+                if tensor_data[key] is None:
                     split_data[key] = None
                 else:
-                    split_data[key] = batch_data[key][i:end_idx, ...]
+                    split_data[key] = tensor_data[key][i:end_idx, ...]
+            # Add back scalar data (non-tensor params like max_new_tokens)
+            split_data.update(scalar_data)
 
             max_working_batch_size = _process_batch(
                 split_data, infer_method, max_working_batch_size
@@ -408,7 +494,7 @@ def _process_batch(batch_data, infer_method, max_working_batch_size=None):
 
     # Try processing with current batch size
     try:
-        infer_method(**batch_data)
+        infer_method(**batch_data, **generation_kwargs)
         return (
             batch_size
             if max_working_batch_size is None
@@ -425,8 +511,11 @@ def _process_batch(batch_data, infer_method, max_working_batch_size=None):
     # Split the batch in half
     mid = (batch_size + 1) // 2
     warn(f"CUDA out of memory with batch size {batch_size}, trying with batch size {mid}")
-    split_data_1 = {key: batch_data[key][:mid, ...] for key in batch_data}
-    split_data_2 = {key: batch_data[key][mid:, ...] for key in batch_data}
+    split_data_1 = {key: tensor_data[key][:mid, ...] for key in tensor_data}
+    split_data_2 = {key: tensor_data[key][mid:, ...] for key in tensor_data}
+    # Add back scalar data (non-tensor params like max_new_tokens)
+    split_data_1.update(scalar_data)
+    split_data_2.update(scalar_data)
 
     # Recursively process each half and track max working batch size
     max_working_batch_size = _process_batch(split_data_1, infer_method)
@@ -436,21 +525,27 @@ def _process_batch(batch_data, infer_method, max_working_batch_size=None):
     return max_working_batch_size
 
 
-def _forward_loop(model: torch.nn.Module, dataloader: DataLoader) -> None:
+def _forward_loop(
+    model: torch.nn.Module, dataloader: DataLoader, generation_kwargs: dict = {}
+) -> None:
     """Runs forward passes through the model using data from the dataloader.
 
     Args:
         model: The PyTorch model to run inference on
         dataloader: DataLoader containing the batched input data
+        generation_kwargs: Keyword arguments to pass to the model.generate() method.
     """
     with torch.no_grad():
-        is_enc_dec = model_type_is_enc_dec(model)
-        infer_method = model.generate if is_enc_dec else model.forward
+        # use_generate = _should_use_generate(model)
+        use_generate = model_type_is_enc_dec(model)
+        infer_method = model.generate if use_generate else model.forward
         max_working_batch_size = None  # Initialize max working batch size as None
 
         for _, data in enumerate(tqdm(dataloader)):
             # Process batch and update max working batch size
-            max_working_batch_size = _process_batch(data, infer_method, max_working_batch_size)
+            max_working_batch_size = _process_batch(
+                data, infer_method, generation_kwargs, max_working_batch_size
+            )
 
 
 def create_forward_loop(
@@ -463,6 +558,7 @@ def create_forward_loop(
     device: str | None = None,
     include_labels: bool = False,
     dataloader: DataLoader | None = None,
+    generation_kwargs: dict = {},
 ) -> Callable:
     """Creates and returns a forward loop function configured for a specific model, dataset, and tokenizer.
 
@@ -481,7 +577,7 @@ def create_forward_loop(
         device: Target device for the returned dataloader.
         include_labels: Whether to include labels in the dataloader.
         dataloader: If provided, use the provided dataloader instead.
-
+        generation_kwargs: Keyword arguments to pass to the model.generate() method.
     Example usage for quantization:
 
     .. code-block:: python
@@ -520,9 +616,21 @@ def create_forward_loop(
             include_labels=include_labels,
         )
 
-    return lambda model: _forward_loop(model, dataloader)
+    return lambda model: _forward_loop(model, dataloader, generation_kwargs)
 
 
 def model_type_is_enc_dec(model):
     enc_dec_model_list = ["t5", "bart", "whisper"]
     return any(model_name in model.__class__.__name__.lower() for model_name in enc_dec_model_list)
+
+
+def _should_use_generate(model):
+    """Check if model should use generate() instead of forward() for calibration.
+
+    Returns True for:
+    - Encoder-decoder models (t5, bart, whisper)
+    - Conditional generation models that don't support standard forward() (qwen3omni)
+    """
+    generate_model_list = ["qwen3omni"]
+    model_name = model.__class__.__name__.lower()
+    return model_type_is_enc_dec(model) or any(name in model_name for name in generate_model_list)
