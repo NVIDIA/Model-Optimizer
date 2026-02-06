@@ -21,10 +21,11 @@ import json
 import os
 import shutil
 import tempfile
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 from typing import Any
 
 import onnx
+import onnxconverter_common.float16 as _f16_module
 import torch
 import torch.nn as nn
 from onnx import ModelProto
@@ -57,6 +58,17 @@ from modelopt.torch.utils import flatten_tree, standardize_named_model_args
 from modelopt.torch.utils._pytree import TreeSpec
 
 from ..utils.onnx_optimizer import Optimizer
+
+# Monkey-patch to fix onnxconverter_common bug where downstream_node is a list
+_original_remove_unnecessary_cast_node = _f16_module.remove_unnecessary_cast_node
+
+
+def _patched_remove_unnecessary_cast_node(graph):
+    with suppress(AttributeError):
+        _original_remove_unnecessary_cast_node(graph)
+
+
+_f16_module.remove_unnecessary_cast_node = _patched_remove_unnecessary_cast_node
 
 ModelMetadata = dict[str, Any]
 ModelType = Any
