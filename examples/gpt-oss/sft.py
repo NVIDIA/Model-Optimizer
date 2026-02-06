@@ -72,7 +72,8 @@ def main(script_args, training_args, model_args, quant_args):
         "revision": model_args.model_revision,
         "trust_remote_code": model_args.trust_remote_code,
         "attn_implementation": model_args.attn_implementation,
-        "torch_dtype": model_args.torch_dtype,
+        "torch_dtype": getattr(model_args, "torch_dtype", None)
+        or getattr(model_args, "dtype", None),
         "use_cache": not training_args.gradient_checkpointing,
     }
 
