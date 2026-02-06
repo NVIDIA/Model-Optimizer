@@ -360,9 +360,10 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
         QUANTIZATION_NVFP4_SVDQUANT,
         QUANTIZATION_W4A8_NVFP4_FP8,
     ]:
-        # Calibrate weight quantizer if amax is not set
-        module_name = f"{type(module).__name__}.{weight_name}"
-        _ensure_weight_quantizer_calibrated(weight_quantizer, weight, module_name)
+        # Calibrate weight quantizer if amax is not set (only needed for dynamic quantizers)
+        if not is_nvfp4_static:
+            module_name = f"{type(module).__name__}.{weight_name}"
+            _ensure_weight_quantizer_calibrated(weight_quantizer, weight, module_name)
 
         if quantization_format == QUANTIZATION_W4A8_NVFP4_FP8:
             # weight_scaling_factor_2 for w4a8 needs to be amax/448, so that the wsf is in range 448/6.
