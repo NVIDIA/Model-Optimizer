@@ -1171,3 +1171,30 @@ def cast_initializer_to_dtype(
     input_onnx = onnx.numpy_helper.from_array(input, input_name)
     input_onnx.data_type = onnx_dtype_map[dtype]
     initializer_map[input_name].CopyFrom(input_onnx)
+
+
+def get_quantized_tensors(onnx_model: onnx.ModelProto) -> set[str]:
+    """Get the names of all quantized tensors from an ONNX model.
+
+    This function identifies all DequantizeLinear nodes in the ONNX model
+    and extracts the names of tensors being dequantized (the first input of
+    each DequantizeLinear node, excluding scale and zero-point inputs).
+
+    Args:
+        onnx_model: ONNX model protobuf to analyze
+
+    Returns:
+        Set of tensor names that are inputs to DequantizeLinear nodes
+        (i.e., the tensors being dequantized)
+    """
+    quantized_tensors = set()
+
+    for node in onnx_model.graph.node:
+        if node.op_type == "DequantizeLinear":
+            # First input is the tensor being dequantized
+            # (inputs[1] is scale, inputs[2] is zero-point)
+            if node.input and len(node.input) > 0:
+                quantized_tensors.add(node.input[0])
+
+    logger.debug(f"Found {len(quantized_tensors)} dequantized tensors in ONNX model")
+    return quantized_tensors
