@@ -583,6 +583,12 @@ class _MegatronSequentialMLP(DynamicModule):
         Distributed amax sync across EP and ETP (for RowParallel) happens in model_calib.max_calibrate().
         This function should be called before the distributed sync to ensure the amax values
         are synchronized across the layer first.
+
+        Note:
+            Because there are logic which calls collective communication based on whether amax is not None,
+            We need to garuantee that all experts must have amax. Otherwise, there will be deadlock
+            when synchroizing over EP since some ranks may have amax None and not calling the collective
+            communication.
         """
         # Collect amax from all local experts
         amax_dict = {}
@@ -600,8 +606,8 @@ class _MegatronSequentialMLP(DynamicModule):
         # Apply synchronized amax values back to all local experts
         for expert in self.local_experts:
             for name, module in expert.named_modules():
-                if isinstance(module, TensorQuantizer) and module.amax is not None:
-                    module.amax = amax_dict[name].detach().clone().to(module.amax.device)
+                if isinstance(module, TensorQuantizer) and name in amax_dict:
+                    module.amax = amax_dict[name].detach().clone()
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         """Override the default to enable singleton_local_shards.
