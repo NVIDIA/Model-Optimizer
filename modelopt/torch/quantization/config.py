@@ -265,6 +265,19 @@ INT4_BLOCKWISE_WEIGHT_ONLY_CFG = {
     "algorithm": "max",
 }
 
+INT3_BLOCKWISE_WEIGHT_ONLY_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": 3,
+            "block_sizes": {-1: 16, "type": "static"},
+            "enable": True,
+        },
+        "*input_quantizer": {"enable": False},
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": "max",
+}
+
 
 INT4_AWQ_CFG = {
     "quant_cfg": {
@@ -1391,6 +1404,26 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
         description=(
             "Specifies the rank of the LoRA used in the SVDQuant method, "
             "which captures outliers from the original weights."
+        ),
+    )
+
+
+class ScaleAfterDequantConfig(QuantizeAlgorithmConfig):
+    """Config for scale-after-dequant algorithm.
+
+    Runs MSE calibration, then converts static block quantizers (FP4 or INT)
+    to learnable-amax mode for fine-tuning. For FP4 quantizers, FP8 scale
+    sweep is recommended. For INT quantizers, plain MSE calibration suffices.
+    """
+
+    method: Literal["scale_after_dequant"] = ModeloptField("scale_after_dequant")
+
+    scale_algorithm: dict | None = ModeloptField(
+        default=None,
+        title="Scale calibration algorithm to run first.",
+        description=(
+            "Must have method='mse'. Optional keys include 'fp8_scale_sweep' for FP4 formats. "
+            "Defaults to {'method': 'mse'} if None."
         ),
     )
 

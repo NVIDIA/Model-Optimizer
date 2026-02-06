@@ -24,7 +24,7 @@ import torch
 import triton
 import triton.language as tl
 
-__all__ = ["fp4_dequantize", "static_blockwise_fp4_fake_quant"]
+__all__ = ["fp4_dequantize", "static_blockwise_fp4_cast", "static_blockwise_fp4_fake_quant"]
 
 
 _TORCH_TO_TL_DTYPE = {
@@ -296,6 +296,90 @@ def static_blockwise_fp4_fake_quant(
             NUM_FP4_BLOCKS,
             BLOCK_SIZE,
             OUT_DTYPE=tl_out_dtype,
+        )
+
+    return y_flat.view_as(x)
+
+
+@triton.jit
+def static_blockwise_fp4_cast_kernel(
+    x_ptr,
+    y_ptr,
+    N,
+    OUT_DTYPE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """FP4 cast only -- rounds |x| to nearest FP4 value, no scale/descale."""
+    pid = tl.program_id(axis=0)
+    if pid >= N:
+        return
+
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    x = tl.load(x_ptr + offs).to(tl.float32)
+    x_abs = tl.abs(x)
+
+    # FP4 values: 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0
+    q_val = tl.where(
+        x_abs <= 0.25,
+        0.0,
+        tl.where(
+            x_abs < 0.75,
+            0.5,
+            tl.where(
+                x_abs <= 1.25,
+                1.0,
+                tl.where(
+                    x_abs < 1.75,
+                    1.5,
+                    tl.where(
+                        x_abs <= 2.5,
+                        2.0,
+                        tl.where(
+                            x_abs < 3.5,
+                            3.0,
+                            tl.where(x_abs <= 5.0, 4.0, 6.0),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    y = tl.where(x >= 0, q_val, -q_val)
+    tl.store(y_ptr + offs, y.to(OUT_DTYPE))
+
+
+def static_blockwise_fp4_cast(
+    x: torch.Tensor,
+    out_dtype: torch.dtype | None = None,
+):
+    """FP4 cast: rounds to nearest FP4 value without any scale/descale.
+
+    Input x should already be pre-scaled to [-6, 6] range.
+
+    Args:
+        x: [NUM_BLOCKS, BLOCK_SIZE] on CUDA.
+        out_dtype: Output dtype. Defaults to x.dtype.
+    """
+    assert x.ndim == 2
+    NUM_BLOCKS, BLOCK_SIZE = x.shape
+
+    if out_dtype is None:
+        out_dtype = x.dtype
+
+    x_flat = x.contiguous().view(-1)
+    y_flat = torch.empty_like(x_flat, dtype=out_dtype)
+
+    tl_out_dtype = _torch_dtype_to_tl(out_dtype)
+    grid = (NUM_BLOCKS,)
+
+    with torch.cuda.device(x.device):
+        static_blockwise_fp4_cast_kernel[grid](
+            x_flat,
+            y_flat,
+            NUM_BLOCKS,
+            OUT_DTYPE=tl_out_dtype,
+            BLOCK_SIZE=BLOCK_SIZE,
         )
 
     return y_flat.view_as(x)

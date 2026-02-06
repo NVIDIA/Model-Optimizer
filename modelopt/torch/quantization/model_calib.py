@@ -28,14 +28,14 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from modelopt.torch.opt.searcher import ForwardLoop
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import print_rank_0, same_device_as
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
 
 from .calib import MseCalibrator, NVFP4MSECalibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
-from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
+from .nn import QuantModule, SequentialQuantizer, StaticBlockScaleQuantizer, TensorQuantizer
 from .utils import (
     disable_calib,
     enable_fake_quant,
@@ -49,7 +49,7 @@ from .utils import (
     weight_attr_names,
 )
 
-__all__ = ["awq", "local_hessian_calibrate", "max_calibrate", "smoothquant", "svdquant"]
+__all__ = ["awq", "local_hessian_calibrate", "max_calibrate", "smoothquant", "svdquant", "scale_after_dequant"]
 
 
 def weight_only_quantize(model: nn.Module):
@@ -312,21 +312,29 @@ def mse_calibrate(
                 # Get the initial amax from max calibration
                 initial_amax = module._amax.clone().detach()
 
-                is_nvfp4_static = (
+                is_static_block_scale = (
                     module.is_static_block_quant
-                    and module._num_bits == (2, 1)
                     and module._block_sizes is not None
-                    and module._block_sizes.get("scale_bits") == (4, 3)
+                    and (
+                        (
+                            module._num_bits == (2, 1)
+                            and module._block_sizes.get("scale_bits") == (4, 3)
+                        )
+                        or isinstance(module._num_bits, int)
+                    )
                 )
 
-                if is_nvfp4_static:
-                    # Compute and set global_amax
-                    global_amax = reduce_amax(initial_amax, axis=None)
+                if is_static_block_scale:
+                    if _is_quantized_block_scale(module):
+                        global_amax = reduce_amax(initial_amax, axis=None)
+                    else:
+                        global_amax = None
 
-                    # Convert to NVFP4StaticQuantizer in-place
-                    NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
+                    module = StaticBlockScaleQuantizer.from_tensor_quantizer(
+                        module, global_amax=global_amax
+                    )
 
-                if fp8_scale_sweep and is_nvfp4_static:
+                if fp8_scale_sweep and is_static_block_scale:
                     # Replace calibrator with NVFP4MSECalibrator
                     module._calibrator = NVFP4MSECalibrator(
                         amax=initial_amax,
@@ -336,9 +344,9 @@ def mse_calibrate(
                     )
                     continue
 
-                if fp8_scale_sweep and not is_nvfp4_static:
+                if fp8_scale_sweep and not is_static_block_scale:
                     warnings.warn(
-                        f"fp8_scale_sweep is enabled but quantizer '{name}' is not NVFP4 static "
+                        f"fp8_scale_sweep is enabled but quantizer '{name}' is not static "
                         "block quantization. fp8_scale_sweep will be ignored for this quantizer."
                     )
 
@@ -1819,3 +1827,99 @@ def gptq_lite(
         torch.cuda.empty_cache()
 
     print_rank_0("GPTQ-lite quantization completed successfully")
+
+
+def _is_quantized_block_scale(quantizer: StaticBlockScaleQuantizer) -> bool:
+    if quantizer._block_sizes is None:
+        return False
+    scale_bits = quantizer._block_sizes.get("scale_bits", None)
+    if scale_bits is None:
+        return False
+    return scale_bits == (4, 3)
+
+
+@torch.no_grad()
+def scale_after_dequant(
+    model: nn.Module,
+    forward_loop: ForwardLoop | None = None,
+    scale_algorithm: dict | None = None,
+    **kwargs,
+):
+    """Run scale calibration then convert static block quantizers to scale-after-dequant mode.
+
+    Args:
+        model: Quantized model.
+        forward_loop: Calibration data forward loop.
+        scale_algorithm: Calibration algorithm config to run first.
+            For FP4 quantizers, defaults to MSE with fp8_scale_sweep=True.
+            For INT quantizers, defaults to MSE calibration.
+    """
+    from .tensor_quant import scaled_e4m3
+
+    if scale_algorithm is None:
+        scale_algorithm = {"method": "mse"}
+
+    assert scale_algorithm.get("method") == "mse", (
+        "scale_after_dequant requires scale_algorithm with method='mse'"
+    )
+
+    mse_kwargs = {k: v for k, v in scale_algorithm.items() if k != "method"}
+    mse_calibrate(model, forward_loop=forward_loop, **mse_kwargs)
+
+    seen_modules = set()
+    for name, module in model.named_modules():
+        if module in seen_modules:
+            continue
+        for weight_name in weight_attr_names(module):
+            wq_name = quantizer_attr_names(weight_name).weight_quantizer
+            quantizer = getattr(module, wq_name, None)
+            if not isinstance(quantizer, StaticBlockScaleQuantizer):
+                continue
+            if quantizer.amax is None:
+                continue
+
+            amax = quantizer._amax.float()
+
+            max_representable = quantizer._quant_max_bound
+
+            quantize_scales = _is_quantized_block_scale(quantizer)
+            per_tensor_scale = None
+
+            with same_device_as(amax):
+                if quantize_scales:
+                    global_amax = quantizer._global_amax.float()
+                    per_block_scale = scaled_e4m3(
+                        amax / max_representable,
+                        global_amax / max_representable,
+                        None,
+                        4,
+                        3,
+                    )
+                    per_tensor_scale = global_amax / max_representable
+                else:
+                    per_block_scale = amax / max_representable
+
+            bad = (
+                (per_block_scale == 0) | torch.isinf(per_block_scale) | torch.isnan(per_block_scale)
+            )
+            per_block_scale = torch.where(bad, torch.ones_like(per_block_scale), per_block_scale)
+
+            block_size = quantizer._block_sizes.get(-1, None) or quantizer._block_sizes.get(
+                next(k for k in quantizer._block_sizes if isinstance(k, int)), None
+            )
+            assert block_size is not None, "Could not determine block size"
+
+            with enable_weight_access_and_writeback(module, model):
+                w = getattr(module, weight_name)
+                orig_shape = w.shape
+                w_flat = w.data.float().reshape(-1, block_size)
+                w_flat = w_flat / per_block_scale.view(-1, 1)
+                w.data.copy_(w_flat.reshape(orig_shape).to(w.dtype))
+
+            quantizer.enable_scale_after_dequant(
+                per_block_scale,
+                per_tensor_scale,
+                quantize_scales=quantize_scales,
+            )
+
+        seen_modules.add(module)

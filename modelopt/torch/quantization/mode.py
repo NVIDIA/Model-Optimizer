@@ -44,6 +44,7 @@ from .config import (
     QuantizeAlgoCfgType,
     QuantizeAlgorithmConfig,
     QuantizeConfig,
+    ScaleAfterDequantConfig,
     SmoothQuantCalibConfig,
     SVDQuantConfig,
     _QuantizeExportConfig,
@@ -63,6 +64,7 @@ from .model_calib import (
     local_hessian_calibrate,
     max_calibrate,
     mse_calibrate,
+    scale_after_dequant,
     smoothquant,
     svdquant,
 )
@@ -486,3 +488,15 @@ class GPTQLiteModeDescriptor(BaseCalibrateModeDescriptor):
         return GPTQLiteConfig
 
     _calib_func = gptq_lite
+
+
+@CalibrateModeRegistry.register_mode
+class ScaleAfterDequantModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for scale-after-dequant algorithm."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return ScaleAfterDequantConfig
+
+    _calib_func = scale_after_dequant
