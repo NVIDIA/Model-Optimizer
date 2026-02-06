@@ -678,9 +678,13 @@ def patch_ring_attention_for_ttt():
     # Torch Ring Attention only supports no mask or causal mask. We apply the following patches to enable TTT mask.
 
     if Version(torch.__version__) < Version("2.10.0"):
-        from torch.distributed.tensor.experimental import _attention
-    else:
-        from torch.distributed.tensor.experimental._context_parallel import _attention
+        raise RuntimeError(
+            f"Context parallel TTT only supported for PyTorch >= 2.10.0. "
+            f"Got {torch.__version__}. "
+            f"Please use torch 2.10.0 or cp_size=1."
+        )
+
+    from torch.distributed.tensor.experimental._context_parallel import _attention
 
     # 1. Disable load balance, which is designed for causal mask.
     # This affect how buffers are sharded. So need to be done permanently before accelerate/hf trainer init.
