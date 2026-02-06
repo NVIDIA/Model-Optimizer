@@ -531,7 +531,7 @@ def get_max_batch_size(
     torch.cuda.empty_cache()
 
     free_mem_before, max_allocated_before = _get_free_gpu_mem()
-    use_generate = _should_use_generate(model)
+    use_generate = model_type_is_enc_dec(model)
     infer_method = model.generate if use_generate else model.forward
 
     if sample_input_single_batch is None:

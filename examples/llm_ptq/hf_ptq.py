@@ -15,9 +15,7 @@
 
 import argparse
 import copy
-import io
 import random
-import sys
 import time
 import warnings
 from typing import Any
@@ -29,8 +27,10 @@ from example_utils import (
     build_quant_cfg,
     copy_custom_model_files,
     create_vlm_calibration_loop,
+    get_generation_kwargs,
     get_model,
     get_processor,
+    get_qwen3omni_dataloader,
     get_tokenizer,
     is_enc_dec,
     is_nemotron_vl,
@@ -79,15 +79,7 @@ from modelopt.torch.utils.image_processor import (
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
-from modelopt.torch.utils.video_dataset_utils import (
-    Qwen3OmniVideoProcessor,
-    get_supported_video_datasets,
-    get_video_dataset_dataloader,
-)
-from modelopt.torch.utils.vlm_dataset_utils import (
-    get_supported_vlm_datasets,
-    get_vlm_dataset_dataloader,
-)
+from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
 
@@ -223,47 +215,20 @@ def make_calib_dataloader(
             num_samples=args.calib_size[0],
         )
     elif model_type == "qwen3omni":
-        dataset_name = args.dataset[0] if args.dataset else "cnn_dailymail"
-        # Check if using video dataset (e.g., finevideo)
-        if processor is not None:
-            if dataset_name in get_supported_video_datasets():
-                video_processor = Qwen3OmniVideoProcessor(
-                    processor.tokenizer if hasattr(processor, "tokenizer") else processor,
-                    device=device,
-                    dtype=language_model.dtype,
-                    use_audio_in_video=True,
-                )
-                calib_dataloader = get_video_dataset_dataloader(
-                    dataset_name=dataset_name,
-                    processor=video_processor,
-                    batch_size=args.batch_size,
-                    num_samples=args.calib_size[0],
-                )
-            elif dataset_name in get_supported_vlm_datasets():
-                assert isinstance(processor, Qwen3OmniImageProcessor), (
-                    "The Qwen3OmniImageProcessor must be set."
-                )
-                # Set the dtype for proper tensor conversion in collate_function
-                processor.dtype = language_model.dtype
-                calib_dataloader = get_vlm_dataset_dataloader(
-                    dataset_name=dataset_name,
-                    processor=processor,
-                    batch_size=args.batch_size,
-                    num_samples=args.calib_size[0],
-                )
-        else:
-            # Labels are only needed for gradient-based auto_quantize
-            include_labels = (
-                args.auto_quantize_bits is not None and args.auto_quantize_method == "gradient"
-            )
-            calib_dataloader = get_dataset_dataloader(
-                dataset_name=args.dataset,
-                tokenizer=tokenizer,
-                batch_size=args.batch_size,
-                num_samples=args.calib_size,
-                device=device,
-                include_labels=include_labels,
-            )
+        # Labels are only needed for gradient-based auto_quantize
+        include_labels = (
+            args.auto_quantize_bits is not None and args.auto_quantize_method == "gradient"
+        )
+        calib_dataloader = get_qwen3omni_dataloader(
+            dataset_name=args.dataset[0] if args.dataset else None,
+            processor=processor,
+            tokenizer=tokenizer,
+            batch_size=args.batch_size,
+            num_samples=args.calib_size[0] if processor else args.calib_size,
+            device=device,
+            model_dtype=language_model.dtype,
+            include_labels=include_labels,
+        )
     elif model_type == "whisper":
         assert processor is not None and isinstance(processor, WhisperProcessor), (
             "The AutoProcessor must be set."
@@ -619,17 +584,8 @@ def mono_quantize(
         quant_cfg["quant_cfg"]["*model_encoder*"] = {"enable": False}  # Nemotron-Parse specific
         print("Quantization will only be applied to the decoder (text generation) component")
 
-    # For Qwen3Omni models, disable quantization of conv layers
-    generation_kwargs = {}
-    if model_type == "qwen3omni":
-        print(
-            "Disabling quantization for conv layers, audio tower and visual encoder in Qwen3Omni model"
-        )
-        quant_cfg["quant_cfg"]["*conv*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["*audio_tower*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["*visual*"] = {"enable": False}
-        generation_kwargs["return_audio"] = False
-        generation_kwargs["thinker_max_new_tokens"] = 1
+    # Get model-specific generation kwargs (e.g., for Qwen3Omni)
+    generation_kwargs = get_generation_kwargs(model_type)
 
     if not model_is_already_quantized or calibration_only:
         # quantize the model
@@ -876,20 +832,7 @@ def post_quantize(
     """
 
     if args.verbose:
-        if args.quant_summary_path:
-            # Capture the summary output to a file
-            old_stdout = sys.stdout
-            sys.stdout = buffer = io.StringIO()
-            try:
-                mtq.print_quant_summary(full_model, args.export_path)
-            finally:
-                sys.stdout = old_stdout
-            summary = buffer.getvalue()
-            with open(args.quant_summary_path, "w") as f:
-                f.write(summary)
-            print(f"Quantization summary saved to {args.quant_summary_path}")
-        else:
-            mtq.print_quant_summary(full_model, args.export_path)
+        mtq.print_quant_summary(full_model, save_path=args.quant_summary_path)
         save_expert_token_count_table(full_model, args.export_path)
 
     # Run some samples
