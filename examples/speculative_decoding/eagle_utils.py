@@ -31,7 +31,7 @@ from datasets import load_dataset
 from packaging.version import Version
 from PIL import Image
 from scripts.ar_validate import validate_ar
-from torch.distributed.tensor.experimental._attention import _SDPAMerger
+from torch.distributed.tensor.experimental._context_parallel._attention import _SDPAMerger
 from torch.utils.data import Dataset
 from transformers import AutoProcessor, Trainer, TrainerCallback
 from transformers.trainer_pt_utils import LabelSmoother
