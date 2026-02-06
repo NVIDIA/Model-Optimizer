@@ -35,6 +35,7 @@ from example_utils import (
     is_enc_dec,
     is_nemotron_vl,
     load_mtp_weights,
+    patch_config_for_unified_export,
     run_nemotron_vl_preview,
 )
 from torch.utils.data import DataLoader
@@ -733,6 +734,9 @@ def export_quantized(
                     export_dir=export_path,
                     extra_state_dict=mtp_state_dict,
                 )
+
+            # Exclude non-quantized modules in config.json and hf_quant_config.json
+            patch_config_for_unified_export(model_type, export_path)
 
         # Restore default padding and export the tokenizer as well.
         if tokenizer is not None:

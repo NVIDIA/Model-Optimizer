@@ -882,6 +882,55 @@ def copy_custom_model_files(source_path: str, export_path: str, trust_remote_cod
         print("No custom model files found to copy")
 
 
+def patch_config_for_unified_export(model_type: str, export_path: str) -> None:
+    """Patch config files to add missing exclusion patterns for unified HF export.
+
+    This function adds missing exclusion patterns for modules that should not be quantized
+    (e.g., audio tower, visual encoder, lm_head) to both hf_quant_config.json and config.json.
+
+    Args:
+        export_path: Path to the exported model directory.
+    """
+    if model_type == "qwen3omni":
+        missing_patterns = [
+            "thinker.audio_tower*",
+            "thinker.visual*",
+            "thinker.lm_head",
+        ]
+
+        # (filename, path_to_exclude_list)
+        configs = [
+            ("hf_quant_config.json", ["quantization", "exclude_modules"]),
+            ("config.json", ["quantization_config", "ignore"]),
+        ]
+
+        for filename, keys in configs:
+            filepath = os.path.join(export_path, filename)
+            if not os.path.exists(filepath):
+                continue
+            try:
+                with open(filepath) as f:
+                    config = json.load(f)
+
+                # Navigate to nested key
+                target = config
+                for key in keys[:-1]:
+                    target = target.get(key, {})
+
+                exclude_list = target.get(keys[-1])
+                if exclude_list is None:
+                    continue
+
+                added = [p for p in missing_patterns if p not in exclude_list]
+                if added:
+                    exclude_list.extend(added)
+                    with open(filepath, "w") as f:
+                        json.dump(config, f, indent=2)
+                    print(f"Patched {filename} with exclusions: {added}")
+            except Exception as e:
+                print(f"Warning: Failed to patch {filename}: {e}")
+
+
 def get_qwen3omni_dataloader(
     dataset_name: str | list[str] | None,
     processor: Qwen3OmniImageProcessor | None,
@@ -911,6 +960,7 @@ def get_qwen3omni_dataloader(
     """
     if dataset_name is None:
         dataset_name = ["cnn_dailymail", "nemotron-post-training-dataset-v2"]
+        num_samples = [512, 512]
 
     if processor is not None:
         if dataset_name in get_supported_video_datasets():
