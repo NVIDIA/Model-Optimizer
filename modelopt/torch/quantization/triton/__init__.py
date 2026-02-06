@@ -38,4 +38,8 @@ if torch.cuda.is_available():
         if torch.cuda.get_device_capability() >= (8, 9):
             from .fp4_kernel_hopper import *
 
+        # fp4_kernel_hopper requires compute >= 8.9 (uses tl.float8e4nv)
+        if torch.cuda.get_device_capability() >= (8, 9):
+            from .fp4_kernel_hopper import *
+
         IS_AVAILABLE = True
