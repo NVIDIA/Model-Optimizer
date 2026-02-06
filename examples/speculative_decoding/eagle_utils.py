@@ -31,7 +31,6 @@ from datasets import load_dataset
 from packaging.version import Version
 from PIL import Image
 from scripts.ar_validate import validate_ar
-from torch.distributed.tensor.experimental._context_parallel._attention import _SDPAMerger
 from torch.utils.data import Dataset
 from transformers import AutoProcessor, Trainer, TrainerCallback
 from transformers.trainer_pt_utils import LabelSmoother
@@ -679,13 +678,9 @@ def patch_ring_attention_for_ttt():
     # Torch Ring Attention only supports no mask or causal mask. We apply the following patches to enable TTT mask.
 
     if Version(torch.__version__) < Version("2.10.0"):
-        raise RuntimeError(
-            f"Context parallel TTT only supported for PyTorch >= 2.10.0. "
-            f"Got {torch.__version__}. "
-            f"Please use torch 2.10.0 or cp_size=1."
-        )
-
-    from torch.distributed.tensor.experimental._context_parallel import _attention
+        from torch.distributed.tensor.experimental import _attention
+    else:
+        from torch.distributed.tensor.experimental._context_parallel import _attention
 
     # 1. Disable load balance, which is designed for causal mask.
     # This affect how buffers are sharded. So need to be done permanently before accelerate/hf trainer init.
@@ -702,11 +697,11 @@ def patch_ring_attention_for_ttt():
     )
 
     # 3. Patch merger to skip the blank shard to avoid difference in output.
-    original_sdpa_merger_step = _SDPAMerger.step
+    original_sdpa_merger_step = _attention._SDPAMerger.step
 
     def patched_sdpa_merger_step(self, out: torch.Tensor, lse: torch.Tensor, partial: bool):
         if lse.sum() <= 0:
             return
         return original_sdpa_merger_step(self, out, lse, partial)
 
-    _SDPAMerger.step = patched_sdpa_merger_step
+    _attention._SDPAMerger.step = patched_sdpa_merger_step
