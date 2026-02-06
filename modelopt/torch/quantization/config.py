@@ -494,7 +494,7 @@ NVFP4_DEFAULT_CFG = {
     "algorithm": "max",
 }
 
-NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG = {
+NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": (2, 1),
@@ -502,9 +502,6 @@ NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG = {
             "axis": None,
             "enable": True,
         },
-        # "*input_quantizer": {
-        #     "enable": False,
-        # },
         "*input_quantizer": {
             "num_bits": (2, 1),
             "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},

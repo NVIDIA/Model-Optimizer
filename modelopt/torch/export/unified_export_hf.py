@@ -509,9 +509,7 @@ def _export_quantized_weight(
 
         # Check if this is a static NVFP4 quantizer (has pre-computed scales from MSE calibration)
         # For static NVFP4, weight_scale is already computed from static _amax values in get_weight_scaling_factor
-        is_nvfp4_static = isinstance(weight_quantizer, NVFP4StaticQuantizer) or getattr(
-            weight_quantizer, "_is_nvfp4_static_quantizer", False
-        )
+        is_nvfp4_static = isinstance(weight_quantizer, NVFP4StaticQuantizer)
 
         if not is_nvfp4_static:
             # For dynamic NVFP4, compute scales from weights
