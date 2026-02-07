@@ -31,6 +31,8 @@ class SparseAttentionMethod(ABC):
         # Flag to indicate calibration mode (set by calibrator)
         # Instance attribute to prevent shared state across multiple models
         self._calibration_mode: bool = False
+        # Last computed statistics (set by subclass forward methods, read by SparseAttentionModule)
+        self._last_stats: dict[str, Any] | None = None
 
         # Calibration parameters set by the calibrator after calibration.
         # Exponential model params per phase: {"prefill": {"a": ..., "b": ...}, ...}
