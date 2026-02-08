@@ -24,7 +24,7 @@ HuggingFace/Diffusers attention. This plugin provides:
 """
 
 import logging
-from typing import Optional
+import weakref
 
 import torch
 import torch.nn as nn
@@ -33,9 +33,6 @@ from ..sparse_attention import SparseAttentionModule, SparseAttentionRegistry
 from . import CUSTOM_MODEL_PLUGINS
 
 logger = logging.getLogger(__name__)
-
-# Module-level storage for video_shape extracted by the forward pre-hook.
-_current_vsa_video_shape: tuple[int, int, int] | None = None
 
 
 def _extract_video_shape_hook(module: nn.Module, args: tuple) -> None:
@@ -47,11 +44,11 @@ def _extract_video_shape_hook(module: nn.Module, args: tuple) -> None:
     ``Modality.positions`` tensor, which is available at the LTXModel entry
     point (before ``TransformerArgsPreprocessor`` converts it to RoPE embeddings).
 
-    The result is stored in the module-level ``_current_vsa_video_shape`` so
-    that ``_LTX2SparseAttention._resolve_video_shape()`` can read it``.
+    The result is stored on the model instance as ``module._vsa_video_shape``
+    so that ``_LTX2SparseAttention._resolve_video_shape()`` can read it via
+    its ``_vsa_root_model`` reference.  This avoids module-level global state
+    and is safe for concurrent models.
     """
-    global _current_vsa_video_shape
-
     # LTXModel.forward(self, video: Modality | None, audio, perturbations)
     video = args[0] if len(args) > 0 else None
     if video is None or not hasattr(video, "positions") or video.positions is None:
@@ -75,9 +72,9 @@ def _extract_video_shape_hook(module: nn.Module, args: tuple) -> None:
         seq_len = positions.shape[2]
 
         if t_dim * h_dim * w_dim == seq_len:
-            _current_vsa_video_shape = (t_dim, h_dim, w_dim)
+            module._vsa_video_shape = (t_dim, h_dim, w_dim)
             logger.debug(
-                f"Extracted dit_seq_shape={_current_vsa_video_shape} from "
+                f"Extracted dit_seq_shape={module._vsa_video_shape} from "
                 f"Modality.positions (seq_len={seq_len})"
             )
         else:
@@ -86,8 +83,7 @@ def _extract_video_shape_hook(module: nn.Module, args: tuple) -> None:
                 f"({t_dim * h_dim * w_dim}) != seq_len ({seq_len}), skipping"
             )
     except Exception:
-        # Silently skip -- _resolve_video_shape will fall back to config
-        pass
+        logger.debug("Failed to extract video_shape from Modality.positions", exc_info=True)
 
 
 def _is_ltx2_model(model: nn.Module) -> bool:
@@ -104,9 +100,7 @@ def _is_ltx2_model(model: nn.Module) -> bool:
     """
     if type(model).__name__ == "LTXModel":
         return True
-    return any(
-        type(m).__name__ == "LTXSelfAttention" for m in model.modules()
-    )
+    return any(type(m).__name__ == "LTXSelfAttention" for m in model.modules())
 
 
 def _is_ltx2_attention_module(module: nn.Module, name: str = "") -> bool:
@@ -117,7 +111,7 @@ def _is_ltx2_attention_module(module: nn.Module, name: str = "") -> bool:
 
     Args:
         module: Module to check.
-        name: Module name in model hierarchyx.
+        name: Module name in model hierarchy.
 
     Returns:
         True if module is an LTX-2 attention module.
@@ -132,6 +126,7 @@ def _is_ltx2_attention_module(module: nn.Module, name: str = "") -> bool:
         and hasattr(module, "to_v")
         and hasattr(module, "q_norm")
         and hasattr(module, "k_norm")
+        and hasattr(module, "rope_type")
     )
 
 
@@ -139,9 +134,8 @@ class _LTX2SparseAttention(SparseAttentionModule):
     """Sparse attention wrapper for LTX-2 Attention modules.
 
     This plugin handles all LTX-2 specific logic:
-    - Argument mapping (x -> hidden_states, context -> encoder_hidden_states)
-    - Q/K/V projection and normalization
-    - RoPE application
+    - Q/K/V projection and normalization (using native LTX-2 args: x, context, pe, k_pe)
+    - RoPE application via ltx_core
     - Trainable gate_compress for VSA quality optimization
 
     The plugin computes Q, K, V directly and calls VSA.forward_attention(),
@@ -172,9 +166,9 @@ class _LTX2SparseAttention(SparseAttentionModule):
     def _compute_qkv(
         self,
         x: torch.Tensor,
-        context: Optional[torch.Tensor],
-        pe: Optional[torch.Tensor] = None,
-        k_pe: Optional[torch.Tensor] = None,
+        context: torch.Tensor | None,
+        pe: torch.Tensor | None = None,
+        k_pe: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute Q, K, V projections with LTX-2 specific processing.
 
@@ -208,7 +202,8 @@ class _LTX2SparseAttention(SparseAttentionModule):
             except ModuleNotFoundError:
                 raise ModuleNotFoundError(
                     "LTX-2 VSA plugin requires the 'ltx_core' package for RoPE support. "
-                    "Please install it before using VSA with LTX-2 models."
+                    "The plugin registered successfully, but 'ltx_core' is needed at runtime. "
+                    "Install it with:  pip install ltx-core"
                 ) from None
 
             query = apply_rotary_emb(query, pe, self.rope_type)
@@ -246,7 +241,7 @@ class _LTX2SparseAttention(SparseAttentionModule):
         """Resolve video_shape for the current forward pass.
 
         Resolution order (mirrors FastVideo's metadata flow):
-        1. ``_current_vsa_video_shape`` -- set by the forward pre-hook from
+        1. ``root_model._vsa_video_shape`` -- set by the forward pre-hook from
            ``Modality.positions`` (analogous to ``get_forward_context().attn_metadata``)
         2. ``method.video_shape`` -- explicitly set via the sparsify config
 
@@ -256,11 +251,15 @@ class _LTX2SparseAttention(SparseAttentionModule):
         Returns:
             Tuple (T, H, W) or None if not determinable.
         """
-        # 1. Primary: video_shape extracted by forward pre-hook
-        if _current_vsa_video_shape is not None:
-            t, h, w = _current_vsa_video_shape
-            if t * h * w == seq_len:
-                return _current_vsa_video_shape
+        # 1. Primary: video_shape extracted by forward pre-hook on root model
+        root_ref = getattr(self, "_vsa_root_model_ref", None)
+        root = root_ref() if root_ref is not None else None
+        if root is not None:
+            shape = getattr(root, "_vsa_video_shape", None)
+            if shape is not None:
+                t, h, w = shape
+                if t * h * w == seq_len:
+                    return shape
 
         # 2. Fallback: explicit video_shape from sparsify config
         method = getattr(self, "_sparse_method_instance", None)
@@ -427,6 +426,16 @@ def register_ltx2_attention(model: nn.Module) -> int:
 
     if num_modules > 0:
         logger.info(f"Found {num_modules} LTX-2 Attention modules in model")
+
+        # Store a weak reference to the root model on each attention module so
+        # _resolve_video_shape() can read model._vsa_video_shape without globals.
+        # Using weakref avoids circular module registration (nn.Module.__setattr__
+        # would register a plain Module reference as a submodule, causing infinite
+        # recursion in named_children()).
+        root_ref = weakref.ref(model)
+        for _, module in model.named_modules():
+            if _is_ltx2_attention_module(module):
+                object.__setattr__(module, "_vsa_root_model_ref", root_ref)
 
         # Register forward pre-hook to extract video_shape from Modality.positions
         # before each forward pass -- analogous to FastVideo's

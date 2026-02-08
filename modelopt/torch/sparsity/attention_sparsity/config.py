@@ -613,7 +613,7 @@ class VSAConfig(SparseAttentionConfig):
 
     sparse_cfg: SparseAttentionCfgType = ModeloptField(
         default={
-            "*attention*": {
+            "*attn*": {
                 "method": "vsa",
                 "block_size_3d": (4, 4, 4),
                 "top_k_ratio": 0.5,

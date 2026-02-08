@@ -54,6 +54,7 @@ VSA improves attention performance by using 3D tile-based sparsity:
 """
 
 import argparse
+import copy
 import time
 from pathlib import Path
 
@@ -64,6 +65,7 @@ from ltx_trainer.validation_sampler import GenerationConfig, ValidationSampler
 from ltx_trainer.video_utils import save_video
 
 from modelopt.torch.sparsity.attention_sparsity import sparsify
+from modelopt.torch.sparsity.attention_sparsity.config import VSA_DEFAULT
 
 
 def calculate_expected_tokens(num_frames: int, height: int, width: int) -> int:
@@ -131,26 +133,16 @@ def apply_vsa_to_transformer(
         print("  [WARNING] Input size may be too small for VSA to provide significant benefit.")
         print("     Consider using larger inputs (121+ frames @ 512x768+) for best results.")
 
-    # Configure VSA
-    # NOTE: LTX-2 uses "attn1", "attn2", "audio_attn1", "audio_attn2" naming
-    # Pattern must be "*attn*" not "*attention*" to match these module names
-    sparse_config = {
-        "sparse_cfg": {
-            "*attn*": {
-                "method": "vsa",
-                "video_shape": None,  # Auto-infer from LTX-2's compressed tokens
-                "block_size_3d": (4, 4, 4),  # Standard VSA tile size
-                "top_k_ratio": top_k_ratio,
-            }
-        }
-    }
+    # Configure VSA using the standard preset, overriding top_k_ratio if needed
+    sparse_config = copy.deepcopy(VSA_DEFAULT)
+    # Find the attn pattern key and override top_k_ratio
+    for cfg in sparse_config["sparse_cfg"].values():
+        if isinstance(cfg, dict) and cfg.get("method") == "vsa":
+            cfg["top_k_ratio"] = top_k_ratio
 
     # Apply VSA to transformer
     print("  Applying VSA to attention modules...")
     transformer = sparsify(transformer, sparse_config)
-
-    print(f"  [OK] VSA enabled with {int(top_k_ratio * 100)}% sparsity")
-    print("    Expected: 2-6x attention speedup, 1.5-2x end-to-end speedup")
 
     return transformer
 
@@ -185,7 +177,7 @@ def run_generation(
         video, audio = sampler.generate(config=config, device=device)
 
     elapsed = time.time() - start_time
-    print(f"[OK] Generation completed in {elapsed:.2f}s")
+    print(f"Generation completed in {elapsed:.2f}s")
 
     return video, audio, elapsed
 
@@ -351,7 +343,7 @@ def main() -> None:
         with_text_encoder=True,
         text_encoder_path=args.text_encoder_path,
     )
-    print("[OK] Model components loaded")
+    print("Model components loaded")
 
     # Create generation config
     gen_config = GenerationConfig(
@@ -433,9 +425,9 @@ def main() -> None:
                 audio=audio_baseline,
                 audio_sample_rate=audio_sample_rate,
             )
-            print(f"[OK] Baseline video saved: {args.output_baseline}")
+            print(f"Baseline video saved: {args.output_baseline}")
         except Exception as e:
-            print(f"[FAIL] Baseline generation failed: {e}")
+            print(f"Baseline generation failed: {e}")
             import traceback
 
             traceback.print_exc()
@@ -505,9 +497,9 @@ def main() -> None:
                 audio=audio_vsa,
                 audio_sample_rate=audio_sample_rate,
             )
-            print(f"[OK] VSA video saved: {args.output}")
+            print(f"VSA video saved: {args.output}")
         except Exception as e:
-            print(f"[FAIL] VSA generation failed: {e}")
+            print(f"VSA generation failed: {e}")
             import traceback
 
             traceback.print_exc()
@@ -567,9 +559,9 @@ def main() -> None:
                 audio=audio,
                 audio_sample_rate=audio_sample_rate,
             )
-            print(f"[OK] Video saved: {args.output}")
+            print(f"Video saved: {args.output}")
         except Exception as e:
-            print(f"[FAIL] Generation failed: {e}")
+            print(f"Generation failed: {e}")
             import traceback
 
             traceback.print_exc()
@@ -592,19 +584,11 @@ def main() -> None:
         print(f"  Baseline video: {args.output_baseline}")
         print(f"  VSA video:      {args.output}")
         print()
-        if speedup >= 1.5:
-            print("[OK] Excellent speedup achieved!")
-        elif speedup >= 1.2:
-            print("[OK] Good speedup achieved")
-        else:
-            print("[WARNING] Speedup lower than expected (input may be too small for VSA)")
-        print()
-        print("Compare videos to verify quality is preserved with VSA.")
     else:
         print(f"\nGeneration time: {results['single']:.2f}s")
         print(f"Output: {args.output}")
 
-    print("\n[OK] VSA integration test successful!")
+    print("\nVSA integration test successful!")
     print("=" * 80)
 
 
