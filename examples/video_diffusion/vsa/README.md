@@ -42,14 +42,19 @@ python test_ltx2_vsa_integration.py \
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--top_k_ratio` | 0.5 | Ratio of blocks to keep (0.0-1.0). Lower = more sparse |
-| `--block_size` | 4 4 4 | 3D block size (T H W) for video tiling |
-| `--video_shape` | 16 28 48 | Video dimensions (T H W) after patchification |
-| `--batch_size` | 1 | Batch size for inference |
+| `--checkpoint` | (required) | Path to model checkpoint (.safetensors) |
+| `--text-encoder-path` | (required) | Path to Gemma text encoder directory |
+| `--prompt` | A serene mountain... | Text prompt for generation |
+| `--top-k-ratio` | 0.5 | Ratio of blocks to keep (0.0-1.0). Lower = more sparse |
+| `--num-frames` | 121 | Number of video frames (must be k*8 + 1) |
+| `--height` | 512 | Video height (must be divisible by 32) |
+| `--width` | 768 | Video width (must be divisible by 32) |
+| `--num-inference-steps` | 30 | Number of denoising steps |
+| `--guidance-scale` | 4.0 | Classifier-free guidance scale |
+| `--seed` | 42 | Random seed for reproducibility |
 | `--device` | cuda | Device (cuda/cpu) |
-| `--dtype` | bfloat16 | Data type (float32/float16/bfloat16) |
-
-## Examples
+| `--compare` | off | Run both baseline and VSA for comparison |
+| `--no-vsa` | off | Disable VSA (baseline only) |
 
 ## API Usage
 
@@ -66,7 +71,7 @@ model = mtsa.sparsify(model, config=VSA_DEFAULT)
 # Or with custom configuration
 custom_config = {
     "sparse_cfg": {
-        "*attention*": {
+        "*attn*": {
             "method": "vsa",
             "block_size_3d": (4, 4, 4),
             "top_k_ratio": 0.3,  # 70% sparsity

@@ -514,7 +514,7 @@ class VSAConfig(SparseAttentionConfig):
 
     sparse_cfg: SparseAttentionCfgType = ModeloptField(
         default={
-            "*attention*": {
+            "*attn*": {
                 "method": "vsa",
                 "block_size_3d": (4, 4, 4),
                 "top_k_ratio": 0.5,
@@ -531,10 +531,14 @@ class VSAConfig(SparseAttentionConfig):
     )
 
 
-# Pre-defined VSA Configuration for video diffusion models
+# Pre-defined VSA Configuration for video diffusion models.
+# Pattern "*attn*" matches all LTX-2 attention module names:
+#   - Video self-attention:  attn1, attn2
+#   - Audio self-attention:  audio_attn1, audio_attn2
+#   - Cross-modal attention: audio_to_video_attn, video_to_audio_attn
 VSA_DEFAULT = {
     "sparse_cfg": {
-        "*attention*": {
+        "*attn*": {
             "method": "vsa",
             "block_size_3d": (4, 4, 4),
             "top_k_ratio": 0.5,
@@ -544,26 +548,10 @@ VSA_DEFAULT = {
     },
 }
 
-
-# High sparsity VSA configuration (70% of blocks pruned)
-VSA_HIGH_SPARSITY = {
-    "sparse_cfg": {
-        "*attention*": {
-            "method": "vsa",
-            "block_size_3d": (4, 4, 4),
-            "top_k_ratio": 0.3,
-            "enable": True,
-        },
-        "default": {"enable": False},
-    },
-}
-
-
 __all__ = [
     "SKIP_SOFTMAX_CALIB",
     "SKIP_SOFTMAX_DEFAULT",
     "VSA_DEFAULT",
-    "VSA_HIGH_SPARSITY",
     "CalibrationConfig",
     "FlashSkipSoftmaxConfig",
     "SparseAttentionAttributeConfig",

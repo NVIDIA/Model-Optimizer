@@ -21,12 +21,12 @@ import warnings
 import torch.nn as nn
 import transformers
 
-logger = logging.getLogger(__name__)
-
 from modelopt.torch.opt.dynamic import DynamicModule
 
 from ..sparse_attention import SparseAttentionModule, SparseAttentionRegistry
 from . import CUSTOM_MODEL_PLUGINS
+
+logger = logging.getLogger(__name__)
 
 
 class _GenericSparseAttention(SparseAttentionModule):

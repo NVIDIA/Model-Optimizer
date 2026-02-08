@@ -192,6 +192,6 @@ def save_restore_test(model_cls, device, sparse_config, atol=1e-6):
         output_sparse = model_sparse(test_input)
         output_restored = model_restored(test_input)
 
-    assert torch.allclose(output_sparse, output_restored, atol), (
+    assert torch.allclose(output_sparse, output_restored, atol=atol), (
         "Restored model output doesn't match original"
     )

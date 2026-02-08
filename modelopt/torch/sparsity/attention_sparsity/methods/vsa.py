@@ -27,7 +27,6 @@ The data flow mirrors FastVideo's VideoSparseAttentionImpl:
   tile(Q,K,V,gate) -> Triton kernel -> untile(output)
 """
 
-import logging
 import math
 from typing import Any
 
@@ -40,8 +39,6 @@ from .vsa_utils import (
     get_reverse_tile_partition_indices,
     get_tile_partition_indices,
 )
-
-logger = logging.getLogger(__name__)
 
 
 @register_sparse_method("vsa")
@@ -287,8 +284,12 @@ class VSA(SparseAttentionMethod):
             from fastvideo_kernel import video_sparse_attn as triton_vsa_kernel
         except ModuleNotFoundError:
             raise ModuleNotFoundError(
-                "VSA requires the 'fastvideo_kernel' package for its Triton sparse attention kernel. "
-                "Please install it before using the VSA method."
+                "VSA requires the 'fastvideo_kernel' package for its Triton sparse attention "
+                "kernel.  The VSA method registered successfully, but the kernel is needed at "
+                "runtime.  Install it with:\n"
+                "  git clone https://github.com/FastVideo/FastVideo.git\n"
+                "  cd FastVideo/fastvideo-kernel && ./build.sh\n"
+                "See https://github.com/hao-ai-lab/FastVideo/tree/main/fastvideo-kernel for details."
             ) from None
         output_tiled = triton_vsa_kernel(
             query_tiled,

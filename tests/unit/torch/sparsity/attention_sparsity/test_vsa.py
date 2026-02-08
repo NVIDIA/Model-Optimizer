@@ -261,8 +261,8 @@ class TestVSAAttributeConfig:
 
     def test_vsa_config_defaults(self):
         cfg = VSAConfig()
-        assert "*attention*" in cfg.sparse_cfg
-        assert cfg.sparse_cfg["*attention*"]["method"] == "vsa"
+        assert "*attn*" in cfg.sparse_cfg
+        assert cfg.sparse_cfg["*attn*"]["method"] == "vsa"
 
 
 # ---------------------------------------------------------------------------
@@ -303,14 +303,29 @@ class TestLTX2Detection:
             _is_ltx2_attention_module,
         )
 
-        # Module with LTX-2 attribute signature
+        # Module with LTX-2 attribute signature (includes rope_type)
         m = torch.nn.Module()
         m.to_q = torch.nn.Linear(8, 8)
         m.to_k = torch.nn.Linear(8, 8)
         m.to_v = torch.nn.Linear(8, 8)
         m.q_norm = torch.nn.LayerNorm(8)
         m.k_norm = torch.nn.LayerNorm(8)
+        m.rope_type = "interleaved"
         assert _is_ltx2_attention_module(m) is True
+
+    def test_ltx2_attention_missing_rope_type(self):
+        from modelopt.torch.sparsity.attention_sparsity.plugins.ltx2 import (
+            _is_ltx2_attention_module,
+        )
+
+        # Module with to_q/k/v + norms but NO rope_type — should NOT match
+        m = torch.nn.Module()
+        m.to_q = torch.nn.Linear(8, 8)
+        m.to_k = torch.nn.Linear(8, 8)
+        m.to_v = torch.nn.Linear(8, 8)
+        m.q_norm = torch.nn.LayerNorm(8)
+        m.k_norm = torch.nn.LayerNorm(8)
+        assert _is_ltx2_attention_module(m) is False
 
     def test_non_attention_module(self):
         from modelopt.torch.sparsity.attention_sparsity.plugins.ltx2 import (
