@@ -30,7 +30,7 @@ from typing import Any
 import torch
 from torch.utils.data import DataLoader
 
-from .image_processor import MllamaImageProcessor
+from .image_processor import BaseImageProcessor, MllamaImageProcessor
 from .nemotron_vlm_dataset_utils import NemotronTarPlusJsonlIterable, list_repo_files_cached
 
 # Use dict to store the config for each dataset.
@@ -331,7 +331,7 @@ def get_supported_vlm_datasets() -> list[str]:
 
 def get_vlm_dataset_dataloader(
     dataset_name: str = "scienceqa",
-    processor: Any = None,
+    processor: BaseImageProcessor | Any = None,
     batch_size: int = 1,
     num_samples: int = 512,
     device: str | torch.device | None = None,

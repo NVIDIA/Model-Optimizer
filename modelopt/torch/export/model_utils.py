@@ -31,6 +31,7 @@ MODEL_NAME_TO_TYPE = {
     "ChatGLM": "chatglm",
     "Qwen3Moe": "qwen3moe",
     "Qwen3Next": "qwen3next",
+    "Qwen3OmniMoeForConditionalGeneration": "qwen3omni",
     "QWen": "qwen",
     "RecurrentGemma": "recurrentgemma",
     "Gemma3": "gemma3",

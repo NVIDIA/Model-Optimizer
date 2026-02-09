@@ -45,7 +45,11 @@ except ImportError:
     snapshot_download = None
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.utils.image_processor import BaseImageProcessor, MllamaImageProcessor
+from modelopt.torch.utils.image_processor import (
+    BaseImageProcessor,
+    MllamaImageProcessor,
+    Qwen3OmniImageProcessor,
+)
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
@@ -243,6 +247,27 @@ def build_quant_cfg(
         quant_cfg["quant_cfg"]["*self_attn.q*"] = {"enable": False}
         quant_cfg["quant_cfg"]["*self_attn.kv*"] = {"enable": False}
 
+    if model_type == "qwen3omni":
+        if qformat == "qwen3_nvfp4_qkv_disabled":
+            for proj in ["q_proj", "k_proj", "v_proj"]:
+                quant_cfg["quant_cfg"][f"*thinker.model.layers.*.self_attn.{proj}*"] = {
+                    "enable": False
+                }
+        elif qformat == "qwen3_nvfp4_qkvo_disabled":
+            for proj in ["q_proj", "k_proj", "v_proj", "o_proj"]:
+                quant_cfg["quant_cfg"][f"*thinker.model.layers.*.self_attn.{proj}*"] = {
+                    "enable": False
+                }
+
+        elif qformat == "qwen3_nvfp4_first_and_last_n_disabled":
+            # Disable both first N and last N layers
+            total_layers = 48
+            n_layers_to_disable = 4
+            for i in range(n_layers_to_disable):
+                quant_cfg["quant_cfg"][f"*thinker.model.layers.{i}.*"] = {"enable": False}
+            for i in range(total_layers - n_layers_to_disable, total_layers):
+                quant_cfg["quant_cfg"][f"*thinker.model.layers.{i}.*"] = {"enable": False}
+
     return quant_cfg
 
 
@@ -313,6 +338,19 @@ def get_processor(
         )
 
         return MllamaImageProcessor(processor, device)
+    elif model_type == "qwen3omni":
+        processor = AutoProcessor.from_pretrained(
+            ckpt_path,
+            padding_side="left",
+            **model_kwargs,
+        )
+        if processor.tokenizer.pad_token is None:
+            processor.tokenizer.pad_token = processor.tokenizer.eos_token
+        assert processor.tokenizer.pad_token is not None, (
+            f"Pad token for {ckpt_path} cannot be set!"
+        )
+
+        return Qwen3OmniImageProcessor(processor, device)
 
     return None
 

@@ -316,29 +316,43 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                 [1, model.config.num_mel_bins, feature_extractor.nb_max_frames], dtype=model.dtype
             ).to(model.device)
 
-        if getattr(model.config, "is_encoder_decoder", False):
-            # For encoder-decoder models, we need to pass both the encoder and decoder input ids
-            model(fake_input, decoder_input_ids=decoder_fake_input)
-        elif is_vl_model and "nemotron" in model_type:
-            # For Nemotron VL models, try to run optimization on just the language model part
-            language_model_lineage = get_language_model_from_vl(model)
+        with set_quantizer_by_cfg_context(model, {"*": {"enable": False}}):
+            if getattr(model.config, "is_encoder_decoder", False):
+                # For encoder-decoder models, we need to pass both the encoder and decoder input ids
+                model(fake_input, decoder_input_ids=decoder_fake_input)
+            elif is_vl_model and "nemotron" in model_type:
+                # For Nemotron VL models, try to run optimization on just the language model part
+                language_model_lineage = get_language_model_from_vl(model)
 
-            if language_model_lineage is not None:
-                # Run optimization on just the language model with the same input format as regular LLMs
-                # Use the same fake_input tensor that regular LLMs use
-                language_model = language_model_lineage[-1]
-                print(
-                    f"Running optimization on language model with fake_input shape: {fake_input.shape}"
-                )
-                language_model(fake_input)
+                if language_model_lineage is not None:
+                    # Run optimization on just the language model with the same input format as regular LLMs
+                    # Use the same fake_input tensor that regular LLMs use
+                    language_model = language_model_lineage[-1]
+                    print(
+                        f"Running optimization on language model with fake_input shape: {fake_input.shape}"
+                    )
+                    language_model(fake_input)
+                else:
+                    raise ValueError(
+                        f"Cannot extract language_model from Nemotron VL model (type: {model_type}). "
+                        "This is required for requantization/resmoothing optimization. "
+                        "Please ensure the model architecture is supported or file an issue."
+                    )
+            elif "qwen3omni" in model_type:
+                # For Qwen3Omni, run on the thinker (language model) component
+                # The model has structure: model.thinker.model.layers.*
+                if hasattr(model, "thinker"):
+                    print(
+                        f"Running optimization on Qwen3Omni thinker with fake_input shape: {fake_input.shape}"
+                    )
+                    model.thinker(fake_input)
+                else:
+                    raise ValueError(
+                        f"Cannot extract thinker from Qwen3Omni model (type: {model_type}). "
+                        "This is required for requantization/resmoothing optimization."
+                    )
             else:
-                raise ValueError(
-                    f"Cannot extract language_model from Nemotron VL model (type: {model_type}). "
-                    "This is required for requantization/resmoothing optimization. "
-                    "Please ensure the model architecture is supported or file an issue."
-                )
-        else:
-            model(fake_input)
+                model(fake_input)
 
     input_to_linear, output_to_layernorm = _collect_shared_input_modules(
         model, llm_dummy_forward, collect_layernorms=True
@@ -396,6 +410,19 @@ def _export_quantized_weight(
     weight_quantizer: TensorQuantizer | SequentialQuantizer = getattr(
         sub_module, quantizer_attrs.weight_quantizer
     )
+
+    # Skip export if weight quantizer is disabled or has no amax (not calibrated)
+    if not _is_enabled_quantizer(weight_quantizer):
+        return
+
+    # Check if weight quantizer has calibrated amax
+    def _has_amax(quantizer):
+        if isinstance(quantizer, SequentialQuantizer):
+            return any(hasattr(q, "_amax") and q._amax is not None for q in quantizer)
+        return hasattr(quantizer, "_amax") and quantizer._amax is not None
+
+    if not _has_amax(weight_quantizer):
+        return
     input_quantizer: TensorQuantizer | SequentialQuantizer | None = getattr(
         sub_module, quantizer_attrs.input_quantizer, None
     )
@@ -559,6 +586,7 @@ def _process_quantized_modules(
     model: nn.Module,
     dtype: torch.dtype,
     is_modelopt_qlora: bool = False,
+    pack_weights: bool = True,
 ) -> None:
     """Process all quantized modules in model, export weights in-place.
 
@@ -571,6 +599,7 @@ def _process_quantized_modules(
         dtype: The data type for weight conversion.
         is_modelopt_qlora: Whether the model is a modelopt-trained QLoRA model.
             If True, modules with base_layer attribute are skipped.
+        pack_weights: Whether to pack quantized weights.
     """
     fsdp_module_to_reshard = None
 
@@ -593,8 +622,9 @@ def _process_quantized_modules(
             sub_module.unpack_weight()
         if get_quantization_format(sub_module) != QUANTIZATION_NONE:
             if is_quantlinear(sub_module):
-                with fsdp2_aware_weight_update(model, sub_module, reshard=False):
-                    _export_quantized_weight(sub_module, dtype)
+                if pack_weights:
+                    with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                        _export_quantized_weight(sub_module, dtype)
             elif (
                 "Llama4TextExperts" in type(sub_module).__name__
                 or "GptOssExperts" in type(sub_module).__name__
@@ -611,13 +641,18 @@ def _process_quantized_modules(
                     quantizer_attrs=["gate_up_proj_input_quantizer", "down_proj_input_quantizer"],
                 )
                 # Export the quantized weights
-                with fsdp2_aware_weight_update(model, sub_module, reshard=False):
-                    for weight_name in ["gate_up_proj", "down_proj"]:
-                        _export_quantized_weight(sub_module, dtype, weight_name)
+                if pack_weights:
+                    with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                        for weight_name in ["gate_up_proj", "down_proj"]:
+                            _export_quantized_weight(sub_module, dtype, weight_name)
 
 
 def _export_transformers_checkpoint(
-    model: nn.Module, dtype: torch.dtype | None = None, is_modelopt_qlora: bool = False, **kwargs
+    model: nn.Module,
+    dtype: torch.dtype | None = None,
+    is_modelopt_qlora: bool = False,
+    pack_weights: bool = True,
+    **kwargs,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Exports the torch model to the packed checkpoint with original HF naming.
 
@@ -627,6 +662,7 @@ def _export_transformers_checkpoint(
         model: the full torch model to export. The actual quantized model may be a submodule.
         dtype: the weights data type to export the unquantized layers or the default model data type if None.
         accelerator: the accelerator instance in case of distributed export setup.
+        pack_weights: whether to pack quantized weights (False keeps original shapes for HF reload).
 
     Returns:
         post_state_dict: Dict containing quantized weights
@@ -723,7 +759,7 @@ def _export_transformers_checkpoint(
                 print(f"Adding MTP layer to quantization_config ignore: {pattern}")
 
     # Process all quantized modules and export weights
-    _process_quantized_modules(model, dtype, is_modelopt_qlora)
+    _process_quantized_modules(model, dtype, is_modelopt_qlora, pack_weights)
 
     if accelerator is not None:
         # Gather state_dict from all ranks
@@ -997,7 +1033,12 @@ def export_hf_checkpoint(
         return
 
     try:
-        post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype)
+        # Packed weights are only for TRT-LLM consumption
+        # Set this to true if you want to save the weights in the original precision
+        pack_weights = True
+        post_state_dict, hf_quant_config = _export_transformers_checkpoint(
+            model, dtype, pack_weights=pack_weights
+        )
 
         if hf_quant_config is not None:
             # Save hf_quant_config.json for backward compatibility
@@ -1009,6 +1050,16 @@ def export_hf_checkpoint(
         # Remove hf_quantizer from model so post_state_dict can be exported.
         if getattr(model, "hf_quantizer", None) is not None:
             model.hf_quantizer = None
+
+        # Fix generation_config conflicts before saving
+        # Some models have temperature/top_p/top_k set but do_sample=False which causes validation errors
+        if hasattr(model, "generation_config") and model.generation_config is not None:
+            gen_config = model.generation_config
+            if not getattr(gen_config, "do_sample", True):
+                # Remove sampling-related params when do_sample is False
+                for attr in ["temperature", "top_p", "top_k"]:
+                    if hasattr(gen_config, attr):
+                        setattr(gen_config, attr, None)
 
         # Save model
         model.save_pretrained(
