@@ -31,7 +31,6 @@ from datasets import load_dataset
 from packaging.version import Version
 from PIL import Image
 from scripts.ar_validate import validate_ar
-from torch.distributed.tensor.experimental._attention import _SDPAMerger
 from torch.utils.data import Dataset
 from transformers import AutoProcessor, Trainer, TrainerCallback
 from transformers.trainer_pt_utils import LabelSmoother
@@ -581,7 +580,7 @@ class EagleTrainingPlot(TrainerCallback):
 def get_patched_templated_ring_attn(orig_templated_attn: Callable):
     """
     Return patched version of
-    torch.distributed.tensor.experimental._attention._templated_ring_attention
+    torch.distributed.tensor.experimental._context_parallel._attention._templated_ring_attention
     to support TTT.
     """
 
@@ -630,7 +629,7 @@ def get_patched_templated_ring_attn(orig_templated_attn: Callable):
         return attn_bias
 
     def patched_templated_attn(*args, **kwargs):
-        """Patched version of torch.distributed.tensor.experimental._attention._templated_ring_attention."""
+        """Patched version of _templated_ring_attention."""
         # Get original attention op
         # Sensitive to impl of _templated_ring_attention
         original_op = args[2]
@@ -678,40 +677,35 @@ def patch_ring_attention_for_ttt():
     """Patch torch ring attention to support context parallelism for TTT."""
     # Torch Ring Attention only supports no mask or causal mask. We apply the following patches to enable TTT mask.
 
-    if not (
-        Version(torch.__version__) > Version("2.7.1")
-        and Version(torch.__version__) < Version("2.9.0")
-    ):
+    if Version(torch.__version__) < Version("2.10.0"):
         raise RuntimeError(
-            f"Context parallel TTT only supported for PyTorch 2.8.0 now. "
+            f"Context parallel TTT only supported for PyTorch >= 2.10.0. "
             f"Got {torch.__version__}. "
-            f"Please use nvcr.io/nvidia/pytorch:25.08-py3 or torch 2.8.0 or cp_size=1."
+            f"Please use torch 2.10.0 or cp_size=1."
         )
+
+    from torch.distributed.tensor.experimental._context_parallel import _attention
 
     # 1. Disable load balance, which is designed for causal mask.
     # This affect how buffers are sharded. So need to be done permanently before accelerate/hf trainer init.
-    torch.distributed.tensor.experimental._attention._cp_options.enable_load_balance = False
+    _attention._cp_options.enable_load_balance = False
 
     # 2. Patch templated ring attention for TTT mask.
-    original_templated_ring_attention = (
-        torch.distributed.tensor.experimental._attention._templated_ring_attention
+    original_templated_ring_attention = _attention._templated_ring_attention
+    original_templated_ring_attention_backward = _attention._templated_ring_attention_backward
+    _attention._templated_ring_attention = get_patched_templated_ring_attn(
+        original_templated_ring_attention
     )
-    original_templated_ring_attention_backward = (
-        torch.distributed.tensor.experimental._attention._templated_ring_attention_backward
-    )
-    torch.distributed.tensor.experimental._attention._templated_ring_attention = (
-        get_patched_templated_ring_attn(original_templated_ring_attention)
-    )
-    torch.distributed.tensor.experimental._attention._templated_ring_attention_backward = (
-        get_patched_templated_ring_attn(original_templated_ring_attention_backward)
+    _attention._templated_ring_attention_backward = get_patched_templated_ring_attn(
+        original_templated_ring_attention_backward
     )
 
     # 3. Patch merger to skip the blank shard to avoid difference in output.
-    original_sdpa_merger_step = _SDPAMerger.step
+    original_sdpa_merger_step = _attention._SDPAMerger.step
 
     def patched_sdpa_merger_step(self, out: torch.Tensor, lse: torch.Tensor, partial: bool):
         if lse.sum() <= 0:
             return
         return original_sdpa_merger_step(self, out, lse, partial)
 
-    _SDPAMerger.step = patched_sdpa_merger_step
+    _attention._SDPAMerger.step = patched_sdpa_merger_step

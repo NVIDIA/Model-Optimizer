@@ -37,11 +37,8 @@ def test_llama_eagle3(tiny_llama_path, tiny_daring_anteater_path, tmp_path, eagl
     available_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
     if cp_size == 2 and available_gpus < 2:
         pytest.skip("cp_size=2 requires at least 2 GPUs, but only {} found.".format(available_gpus))
-    if cp_size == 2 and not (
-        Version(torch.__version__) > Version("2.7.0")
-        and Version(torch.__version__) < Version("2.9.0")
-    ):
-        pytest.skip("cp_size=2 requires torch 2.8.0")
+    if cp_size == 2 and not Version(torch.__version__) >= Version("2.10.0"):
+        pytest.skip("cp_size=2 requires torch 2.10.0")
     # Create an ultra-tiny EAGLE config for testing to reduce memory usage
     tiny_eagle_config = {
         "max_position_embeddings": 128,
