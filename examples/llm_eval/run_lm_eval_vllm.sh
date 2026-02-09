@@ -19,12 +19,13 @@
 # Script to run lm-evaluation-harness against a running vLLM OpenAI-compatible server.
 #
 # Usage:
-#   bash run_lm_eval_vllm.sh <model_name> [port] [task]
+#   bash run_lm_eval_vllm.sh <model_name> [port] [task] [host]
 #
 # Arguments:
 #   <model_name>: The name of the model being served (e.g., Qwen/Qwen3-30B-A3B). Used for the 'model' argument in lm_eval.
 #   [port]:       The port the vLLM server is listening on (default: 8000).
 #   [task]:       The lm_eval task(s) to run (default: mmlu).
+#   [host]:       The IP address or hostname of the vLLM server (default: localhost).
 #
 # Example:
 #   # Start vLLM server first (in another terminal):
@@ -35,6 +36,9 @@
 #
 #   # Run for a different task, e.g., hellaswag:
 #   bash run_lm_eval_vllm.sh Qwen/Qwen3-30B-A3B 8000 hellaswag
+#
+#   # Run against a remote server:
+#   bash run_lm_eval_vllm.sh Qwen/Qwen3-30B-A3B 8000 mmlu 10.78.17.40
 # ---
 
 set -e
@@ -42,16 +46,17 @@ set -x
 
 # --- Argument Parsing ---
 if [ -z "$1" ]; then
-  echo "Usage: $0 <model_name> [port] [task]"
+  echo "Usage: $0 <model_name> [port] [task] [host]"
   exit 1
 fi
 MODEL_NAME=$1
 PORT=${2:-8000}       # Default port is 8000 if not provided
 TASK=${3:-mmlu}       # Default task is mmlu if not provided
+HOST=${4:-localhost}  # Default host is localhost if not provided
 
 # --- Environment Setup ---
 export OPENAI_API_KEY="local" # Not strictly required for local, but good practice
-BASE_URL="http://localhost:${PORT}/v1"
+BASE_URL="http://${HOST}:${PORT}/v1"
 COMPLETIONS_URL="${BASE_URL}/completions"
 
 # --- Evaluation ---
