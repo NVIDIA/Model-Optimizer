@@ -637,6 +637,82 @@ def export_quantized(
                     "Unified HF export format does not specify inference tensor parallel or pipeline parallel. "
                     "They will be set at deployment time."
                 )
+            if True:
+                # Disable quantizers
+                # mtq.fold_weight(full_model)
+                # print("Folded weights")
+                print("Disabling quantizers for perplexity evaluation (weights are already QDQ'ed)")
+                mtq.disable_quantizer(full_model, "*")
+                if True:
+                    # mtq.fold_weight(full_model)
+                    import os
+
+                    import torch.nn.functional as F
+                    from datasets import load_dataset
+                    from tqdm import trange
+                    from transformers import AutoTokenizer
+
+                    # Set cache directory to work directory to avoid disk space issues
+                    cache_dir = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)), ".hf_cache"
+                    )
+                    os.makedirs(cache_dir, exist_ok=True)
+                    os.environ["HF_DATASETS_CACHE"] = cache_dir
+                    print(f"Using HuggingFace datasets cache: {cache_dir}")
+
+                    def _get_wikitext2(tokenizer: AutoTokenizer, sequence_length: int):
+                        test_dataset_raw = load_dataset(
+                            "wikitext", "wikitext-2-raw-v1", split="test", cache_dir=cache_dir
+                        )
+                        test_dataset_tok = tokenizer(
+                            "\n\n".join(test_dataset_raw["text"]), return_tensors="pt"
+                        ).input_ids
+                        num_test_sequences = test_dataset_tok.numel() // sequence_length
+                        test_loader = [
+                            test_dataset_tok[:, i * sequence_length : (i + 1) * sequence_length]
+                            for i in range(num_test_sequences)
+                        ]
+                        return test_loader
+
+                    @torch.no_grad()
+                    def _compute_perplexity(model, data, batch_size: int = 1):
+                        num_samples = len(data)
+                        device = next(model.parameters()).device
+                        # Running estimate of negative log-likelihood
+                        nll_running = 0
+                        # Number of tokens processed to far
+                        tokens_processed = 0
+                        # Loop through each batch
+                        for i in trange(
+                            0, num_samples, batch_size, desc="Computing perplexity", leave=False
+                        ):
+                            j = min(i + batch_size, num_samples)
+                            inputs = torch.cat(data[i:j]).to(device)
+                            # Forward pass through the model
+                            lm_logits = model(inputs).logits
+                            # Shift logits and labels for next token prediction
+                            shift_logits = lm_logits[:, :-1, :].contiguous()
+                            shift_labels = inputs[:, 1:]
+                            # Compute loss
+                            loss = F.cross_entropy(
+                                shift_logits.reshape(-1, shift_logits.size(-1)),
+                                shift_labels.reshape(-1),
+                            )
+                            # Calculate negative log likelihood
+                            a = shift_labels.numel() / (tokens_processed + shift_labels.numel())
+                            b = tokens_processed / (tokens_processed + shift_labels.numel())
+                            nll_running = a * loss + b * nll_running
+                            # Update number of processed tokens
+                            tokens_processed += shift_labels.numel()
+                        # Compute perplexity
+                        ppl = nll_running.exp().item()
+                        return ppl
+
+                    eval_data = _get_wikitext2(tokenizer, 2048)
+                    ppl = _compute_perplexity(full_model, eval_data)
+                    print(f"Wikitext-2 perplexity: {round(ppl, 2):.2f}")
+
+            breakpoint()
 
             # Load any missing weights from non-standard safetensors (handled in get_model for non-low-memory mode)
             # Store the MTP layer prefixes on the model for later exclusion from quantization
