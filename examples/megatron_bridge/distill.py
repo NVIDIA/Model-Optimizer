@@ -15,7 +15,7 @@
 """Distillation script for Megatron-Bridge.
 
 Loads student and teacher models directly from HuggingFace checkpoints (local or remote) and saves the distilled model
-to <log_dir>/checkpoints in megatron torch_dist checkpoint format.
+to <output_dir>/checkpoints in megatron distributed checkpoint format.
 
 Example usage to distill a 4B student from an 8B teacher on 8 GPUs:
 
@@ -26,6 +26,7 @@ Example usage to distill a 4B student from an 8B teacher on 8 GPUs:
         --student_hf_path Qwen/Qwen3-4B \
         --tp_size 8 \
         --data_paths 1.0 /path/to/tokenized/data \
+        --data_path_to_cache /path/to/cache/dataset_indices_qwen3 \
         --seq_length 8192 \
         --mbs 1 \
         --gbs 768 \
@@ -36,7 +37,7 @@ Example usage to distill a 4B student from an 8B teacher on 8 GPUs:
         --eval_interval 100 \
         --eval_iters 32 \
         --log_interval 10 \
-        --log_dir /output/qwen3_8b_to_4b_distill
+        --output_dir /output/qwen3_8b_to_4b_distill
 
 Example usage to use mock data for quick testing:
 
@@ -51,7 +52,9 @@ Example usage to use mock data for quick testing:
         --mbs 1 \
         --gbs 8 \
         --train_iters 100 \
-        --log_dir /tmp/test_distill
+        --eval_interval 10 \
+        --eval_iters 4 \
+        --output_dir /tmp/test_distill
 
 If you want to tokenize your own data for a specific tokenizer, you can use the following command:
 
@@ -130,11 +133,14 @@ def get_args():
         "--split", type=str, default="99,1,0", help="Train,Val,Test ratios to split data"
     )
     parser.add_argument(
+        "--data_path_to_cache", type=str, default=None, help="Path to cache the dataset indices"
+    )
+    parser.add_argument(
         "--use_mock_data", action="store_true", help="Use mock data instead of --data_paths"
     )
-    # Training arguments
+    # Training & Eval arguments
     parser.add_argument(
-        "--log_dir", type=str, required=True, help="Folder for logging and checkpoint saving"
+        "--output_dir", type=str, required=True, help="Folder for logging and checkpoint saving"
     )
     parser.add_argument(
         "--seq_length", type=int, default=8192, help="Number of tokens per input sample"
@@ -153,7 +159,13 @@ def get_args():
     parser.add_argument(
         "--eval_iters", type=int, default=32, help="Number of batches per validation stage"
     )
+    # Logging arguments
     parser.add_argument("--log_interval", type=int, default=10, help="Write to log every <N> steps")
+    parser.add_argument(
+        "--wandb_project", type=str, help="Wandb project name (required to enable Wandb logging)"
+    )
+    parser.add_argument("--wandb_entity", type=str, help="Wandb entity name (optional)")
+    parser.add_argument("--wandb_exp_name", type=str, help="Wandb experiment name (optional)")
     args = parser.parse_args()
 
     # Sanity checks
@@ -169,8 +181,8 @@ def get_args():
 
 
 def main(args: argparse.Namespace):
-    checkpoint_dir = os.path.join(args.log_dir, "checkpoints")
-    tensorboard_dir = os.path.join(args.log_dir, "tb_logs")
+    checkpoint_dir = os.path.join(args.output_dir, "checkpoints")
+    tensorboard_dir = os.path.join(args.output_dir, "tb_logs")
 
     # Build student and teacher model providers
     def _build_model_provider(hf_path):
@@ -206,6 +218,7 @@ def main(args: argparse.Namespace):
     # Build dataset config
     dataset_kwargs = {
         "seq_length": args.seq_length,
+        "path_to_cache": args.data_path_to_cache,
         "random_seed": SEED,
         "reset_attention_mask": False,
         "reset_position_ids": False,
@@ -249,6 +262,10 @@ def main(args: argparse.Namespace):
             log_interval=args.log_interval,
             tensorboard_dir=tensorboard_dir,
             log_timers_to_tensorboard=True,
+            # Weights & Biases logging
+            wandb_project=args.wandb_project,
+            wandb_entity=args.wandb_entity,  # optional
+            wandb_exp_name=args.wandb_exp_name,
         ),
         tokenizer=TokenizerConfig(
             tokenizer_type="NullTokenizer", vocab_size=distill_provider.vocab_size
@@ -256,8 +273,10 @@ def main(args: argparse.Namespace):
         checkpoint=CheckpointConfig(
             save_interval=args.eval_interval,
             save=checkpoint_dir,
-            load=checkpoint_dir,
+            load=checkpoint_dir,  # Resume from this directory (if exists)
+            most_recent_k=3,  # Keeps 3 most recent checkpoints (not metric-based)
             ckpt_format="torch_dist",
+            async_save=True,
             fully_parallel_save=True,
             finetune=True,
         ),
