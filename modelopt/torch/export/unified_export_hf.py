@@ -18,6 +18,7 @@
 import collections.abc
 import json
 import re
+import shutil
 import tempfile
 import warnings
 from builtins import ValueError
@@ -954,6 +955,64 @@ def _export_diffusers_checkpoint(
     print(f"Export complete. Saved to: {export_dir}")
 
 
+def _copy_mtp_files_if_needed(model: nn.Module, export_dir: Path) -> None:
+    """Copy MTP (Multi-Token Prediction) safetensors files if they exist.
+
+    Some models like GLM-4.7 have MTP layers stored in separate safetensors files
+    (e.g., mtp.safetensors) that aren't part of the model's state_dict because
+    HuggingFace Transformers doesn't create the corresponding modules.
+
+    This function copies those files to the export directory and updates the
+    model.safetensors.index.json to include the MTP weights.
+
+    Args:
+        model: The model being exported (may have _mtp_files_info attribute)
+        export_dir: The export directory path
+    """
+    mtp_files_info = getattr(model, "_mtp_files_info", None)
+    if not mtp_files_info:
+        return
+
+    export_dir = Path(export_dir)
+    index_file = export_dir / "model.safetensors.index.json"
+
+    # Load existing index if present
+    if index_file.exists():
+        with open(index_file) as f:
+            index_data = json.load(f)
+    else:
+        # Create a basic index structure if it doesn't exist
+        index_data = {"metadata": {}, "weight_map": {}}
+
+    # Copy each MTP file and update the index
+    for mtp_info in mtp_files_info:
+        source_path = Path(mtp_info["source_path"])
+        filename = mtp_info["filename"]
+        weight_map = mtp_info["weight_map"]
+
+        if not source_path.exists():
+            print(f"Warning: MTP source file not found: {source_path}")
+            continue
+
+        dest_path = export_dir / filename
+
+        # Copy the file
+        print(f"Copying MTP file: {filename}")
+        shutil.copy2(source_path, dest_path)
+
+        # Update the weight map in the index
+        for weight_name, file_name in weight_map.items():
+            index_data["weight_map"][weight_name] = file_name
+
+        print(f"✓ Copied {filename} with {len(weight_map)} weights")
+
+    # Write updated index
+    with open(index_file, "w") as f:
+        json.dump(index_data, f, indent=2)
+
+    print("✓ Updated model.safetensors.index.json with MTP weights")
+
+
 def export_hf_checkpoint(
     model: Any,
     dtype: torch.dtype | None = None,
@@ -1018,6 +1077,9 @@ def export_hf_checkpoint(
             state_dict={**post_state_dict, **(extra_state_dict or {})},
             save_modelopt_state=save_modelopt_state,
         )
+
+        # Copy MTP files if present (e.g., GLM-4.7 mtp.safetensors)
+        _copy_mtp_files_if_needed(model, export_dir)
 
         original_config = f"{export_dir}/config.json"
         config_data = {}
