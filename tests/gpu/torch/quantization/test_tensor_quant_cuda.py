@@ -172,7 +172,7 @@ class Testfp4:
                 inputs.abs().amax(),
             )
             assert torch.allclose(quantized_outputs, expected_outputs)
-            if triton_kernel.IS_AVAILABLE and not skip_triton:
+            if hasattr(triton_kernel, "fp4_fake_quant_block") and not skip_triton:
                 quantized_outputs_triton = triton_kernel.fp4_fake_quant_block(
                     inputs, inputs.abs().amax()
                 )
@@ -220,13 +220,13 @@ class Testfp4:
                 num_blocks, 1
             ), torch.concat((test_out,) * (block_size // 8), dim=-1).repeat(num_blocks, 1)
 
-        def _test_static_fp4_kernel(test_in, test_out, scale_value=1.0):
+        def _test_static_fp4_kernel(test_in, test_out, amax_value=6.0):
             inputs, expected_outputs = _get_test_inputs_outputs(test_in, test_out)
             num_blocks = inputs.shape[0]
-            scales = torch.full((num_blocks,), scale_value, device=inputs.device)
+            amax = torch.full((num_blocks,), amax_value, device=inputs.device)
 
             quantized_outputs_triton = triton_kernel.static_blockwise_fp4_fake_quant(
-                inputs, scale=scales, skip_scale_quant=skip_scale_quant
+                inputs, amax=amax, quantize_block_scales=not skip_scale_quant
             )
 
             # Only check exact values when skip_scale_quant=True
@@ -257,49 +257,33 @@ class Testfp4:
             test_out = torch.tensor([[0.5, 1, 1.5, 2, 3, 4, 6, 6]]).cuda() * sign
             _test_static_fp4_kernel(test_in, test_out)
 
-    @pytest.mark.skipif(not triton_kernel.IS_AVAILABLE, reason="triton kernel is not available")
+    @pytest.mark.skipif(
+        not hasattr(triton_kernel, "fp4_fake_quant_block"),
+        reason="fp4_fake_quant_block requires compute >= 8.9",
+    )
     @pytest.mark.parametrize(
         "set_torch_dtype", [torch.float, torch.float16, torch.bfloat16], indirect=True
     )
     @pytest.mark.parametrize("block_size", [16, 32, 64])
     @pytest.mark.parametrize("num_blocks", [4, 8, 16])
-    @pytest.mark.parametrize("use_explicit_amax", [False, True])
-    @pytest.mark.parametrize("use_amax_param", [False, True])
-    def test_static_vs_dynamic_fp4_kernels(
-        self, set_torch_dtype, block_size, num_blocks, use_explicit_amax, use_amax_param
-    ):
+    def test_static_vs_dynamic_fp4_kernels(self, set_torch_dtype, block_size, num_blocks):
         """Test that static kernel with computed scales matches dynamic kernel behavior.
 
         The dynamic kernel computes scales dynamically from block-wise max values with FP8 quantization.
-        This test verifies that the static kernel with pre-computed scales (matching dynamic kernel's logic)
+        This test verifies that the static kernel with pre-computed amax (matching dynamic kernel's logic)
         produces the same results as the dynamic kernel.
-
-        Args:
-            use_amax_param: If True, use the amax parameter instead of scale parameter.
         """
         torch.manual_seed(42)
 
         x = torch.randn(num_blocks, block_size, dtype=torch.float32).cuda() * 10
         block_amax = x.abs().max(dim=1, keepdim=False)[0]
         global_amax = block_amax.max()
-        scales = block_amax / 6.0
-
-        if use_explicit_amax:
-            scale_fp8_quant_amax = global_amax / 6.0
-        else:
-            scale_fp8_quant_amax = None
-
-        if use_amax_param:
-            output_static = triton_kernel.static_blockwise_fp4_fake_quant(
-                x,
-                amax=block_amax,
-                scale_fp8_quant_amax=scale_fp8_quant_amax,
-                skip_scale_quant=False,
-            )
-        else:
-            output_static = triton_kernel.static_blockwise_fp4_fake_quant(
-                x, scale=scales, scale_fp8_quant_amax=scale_fp8_quant_amax, skip_scale_quant=False
-            )
+        output_static = triton_kernel.static_blockwise_fp4_fake_quant(
+            x,
+            amax=block_amax,
+            global_amax=global_amax,
+            quantize_block_scales=True,
+        )
         output_dynamic = triton_kernel.fp4_fake_quant_block(
             x,
             global_amax=global_amax,
@@ -308,11 +292,9 @@ class Testfp4:
             tile_cols=block_size,
         )
 
-        amax_mode = "explicit" if use_explicit_amax else "automatic"
-        param_mode = "amax" if use_amax_param else "scale"
         assert torch.allclose(output_static, output_dynamic, rtol=1e-3, atol=1e-5), (
             f"Static and dynamic kernels produced different outputs "
-            f"(scale_fp8_quant_amax={amax_mode}, param={param_mode}).\n"
+            f"(param=amax).\n"
             f"Max abs diff: {(output_static - output_dynamic).abs().max()}\n"
             f"Mean abs diff: {(output_static - output_dynamic).abs().mean()}\n"
             f"Max relative diff: {((output_static - output_dynamic).abs() / (output_dynamic.abs() + 1e-8)).max()}"

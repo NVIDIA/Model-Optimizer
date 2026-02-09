@@ -64,6 +64,7 @@ from ...utils import is_torch_export_mode
 from ..functional import normalized_hadamard_transform
 
 __all__ = [
+    "NVFP4StaticQuantizer",
     "SequentialQuantizer",
     "TensorQuantizer",
     "TensorQuantizerCache",
@@ -763,16 +764,6 @@ class TensorQuantizer(nn.Module):
                 getattr(self, "_onnx_quantizer_type", None),
                 self._pass_through_bwd,
             )
-        elif self._num_bits == (2, 1) and self.is_static_block_quant:
-            outputs = static_blockwise_fp4_fake_quant(
-                inputs,
-                None,  # scale
-                None,  # scale_fp8_quant_amax
-                False,  # skip_scale_quant
-                inputs.dtype,  # out_dtype
-                self._pass_through_bwd,  # pass_through_bwd
-                amax,  # amax
-            )
         elif isinstance(self._num_bits, tuple):
             # Float-point quantization, e.g., FP8
             E, M = self._num_bits  # noqa: N806
@@ -1247,6 +1238,66 @@ class TensorQuantizer(nn.Module):
             setattr(self, key, value)
         else:
             self.register_buffer(key, value)
+
+
+class NVFP4StaticQuantizer(TensorQuantizer):
+    """TensorQuantizer for NVFP4 static block quantization with two-level scaling.
+
+    Uses _global_amax and inherited _amax for per-block amax values.
+    """
+
+    @classmethod
+    def from_tensor_quantizer(
+        cls, tq: TensorQuantizer, global_amax: torch.Tensor | None = None
+    ) -> "NVFP4StaticQuantizer":
+        """Convert a TensorQuantizer to NVFP4StaticQuantizer in-place.
+
+        Args:
+            tq: The TensorQuantizer to convert.
+            global_amax: Optional global amax value to set on the quantizer.
+        """
+        if isinstance(tq, cls):
+            if global_amax is not None:
+                tq.global_amax = global_amax
+            return tq
+        tq.__class__ = cls
+        tq._is_nvfp4_static_quantizer = True
+        if global_amax is not None:
+            tq.global_amax = global_amax
+        return tq
+
+    @property
+    def global_amax(self):
+        """Return global_amax for quantization."""
+        if not hasattr(self, "_global_amax"):
+            return None
+        return self._global_amax
+
+    @global_amax.setter
+    def global_amax(self, value):
+        if value is None:
+            if hasattr(self, "_global_amax"):
+                self._global_amax = None
+            return
+        if not isinstance(value, torch.Tensor):
+            value = torch.tensor(value)
+        if not hasattr(self, "_global_amax") or self._global_amax is None:
+            self.register_buffer("_global_amax", value.clone().detach())
+        else:
+            self._global_amax.data.copy_(value.clone().detach().to(self._global_amax.device))
+
+    def _fake_quantize(self, inputs):
+        """Fake quantization using two-level scaling with _amax and _global_amax."""
+        if self.amax is not None:
+            return static_blockwise_fp4_fake_quant(
+                inputs,
+                self.amax,
+                self.global_amax,  # Can be None, will be computed internally
+                True,  # quantize_block_scales
+                inputs.dtype,
+                self._pass_through_bwd,
+            )
+        return super()._fake_quantize(inputs)
 
 
 class SequentialQuantizer(nn.Sequential):
