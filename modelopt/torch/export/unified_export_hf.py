@@ -1015,7 +1015,7 @@ def export_hf_checkpoint(
         # Save model
         model.save_pretrained(
             export_dir,
-            state_dict=post_state_dict | extra_state_dict,
+            state_dict={**post_state_dict, **(extra_state_dict or {})},
             save_modelopt_state=save_modelopt_state,
         )
 
