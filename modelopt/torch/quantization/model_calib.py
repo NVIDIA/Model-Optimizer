@@ -1845,12 +1845,18 @@ def sequential_calibrate(
 
     print_rank_0(f"Sequential calibration: Found {len(transformer_layers)} transformer layers")
     gettr = LayerActivationGettr(model)
+    inputs = gettr.get_input_activations(transformer_layers[0], forward_loop)
 
     for layer in transformer_layers:
-        # Get outputs
         inputs = gettr.get_input_activations(layer, forward_loop)
         # Call GPTQ
         calib_func(layer, inputs, **calib_kwargs)
+        del inputs
+        torch.cuda.empty_cache()
+        # Get outputs
+        # outputs = gettr.get_output_activations(layer, inputs)
+        # Update inputs
+        # inputs = [((out, *inp[0][1:]), inp[1]) for inp, out in zip(inputs, outputs)]
 
     print_rank_0("Sequential calibration completed successfully")
 
