@@ -25,7 +25,7 @@ test -f "$CONFIG" || { echo "Config not found: $CONFIG"; exit 1; }
 
 
 # to handle limited memory on GPUs
-export PYTORCH_ALLOC_CONF=expandable_segments:True
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 
 # Single-node, single-GPU FSDP configuration
