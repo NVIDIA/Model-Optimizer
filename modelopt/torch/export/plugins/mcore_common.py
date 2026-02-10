@@ -52,6 +52,8 @@ all_mcore_hf_export_mapping: dict[str, Any] = {
     "LlamaForCausalLMEagle3Deep": eagle3_deep_llama_causal_lm_export,
     "Qwen3ForCausalLM": qwen3_causal_lm_export,
     "Qwen3MoeForCausalLM": qwen3_causal_lm_export,
+    "Qwen3VLForConditionalGeneration": qwen3_causal_lm_export,
+    "Qwen3VLMoeForConditionalGeneration": qwen3_causal_lm_export,
     "Qwen2ForCausalLM": qwen25_causal_lm_export,
     "GptOssForCausalLM": gptoss_causal_lm_export,
 }
