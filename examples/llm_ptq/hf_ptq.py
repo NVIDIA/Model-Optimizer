@@ -714,10 +714,13 @@ def export_quantized(
                     print(f"Wikitext-2 perplexity: {round(ppl, 2):.2f}")
                     print(f"Saving model to {args.export_path}")
                     full_model.save_pretrained(args.export_path)
+
             else:
                 # Load any missing weights from non-standard safetensors (handled in get_model for non-low-memory mode)
                 # Store the MTP layer prefixes on the model for later exclusion from quantization
-                mtp_layer_prefixes, mtp_state_dict = load_mtp_weights(full_model, args.pyt_ckpt_path)
+                mtp_layer_prefixes, mtp_state_dict = load_mtp_weights(
+                    full_model, args.pyt_ckpt_path
+                )
 
                 if mtp_layer_prefixes:
                     full_model._mtp_layer_prefixes = mtp_layer_prefixes
