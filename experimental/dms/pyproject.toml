@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=40.8.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dms"
+version = "0.1.0"
+requires-python = ">=3.10,<=3.13"
+description = "Dynamic Memory Sparsification (DMS) for KV cache compression"
+dependencies = [
+    "transformers==4.57.3",
+    "datasets==4.4.2",
+    "accelerate==1.4.0",
+    "lm_eval[ruler]",
+]
+
+[tool.setuptools.packages.find]
+include = ["dms*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/"]
+pythonpath = ["."]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore:flex_attention called without torch.compile:UserWarning",
+]
