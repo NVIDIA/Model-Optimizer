@@ -316,13 +316,9 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                 [1, model.config.num_mel_bins, feature_extractor.nb_max_frames], dtype=model.dtype
             ).to(model.device)
 
-        # Check if this is Nemotron-Parse (encoder-decoder VL model)
-        architectures = getattr(model.config, "architectures", [])
-        is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
-
-        if is_vl_model and ("nemotron" in model_type or is_nemotron_parse):
-            # For Nemotron VL models (including Nemotron-Parse), run optimization on just the
-            # language model/decoder. This avoids needing pixel_values for the vision encoder.
+        if is_vl_model and "nemotron" in model_type:
+            # For Nemotron VL models, run optimization on just the language model/decoder.
+            # This avoids needing pixel_values for the vision encoder.
             language_model_lineage = get_language_model_from_vl(model)
 
             if language_model_lineage is not None:
@@ -330,11 +326,8 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                 print(
                     f"Running optimization on language model with fake_input shape: {fake_input.shape}"
                 )
-                # For Nemotron-Parse decoder, force use_cache=False to avoid tuple index errors
-                if is_nemotron_parse:
-                    language_model(fake_input, use_cache=False)
-                else:
-                    language_model(fake_input)
+                # Pass use_cache=False to avoid KV cache issues in encoder-decoder models
+                language_model(fake_input, use_cache=False)
             else:
                 raise ValueError(
                     f"Cannot extract language_model from Nemotron VL model (type: {model_type}). "
@@ -412,42 +405,25 @@ def _export_quantized_weight(
 
     if quantization_format == QUANTIZATION_FP8:
         # Convert amax to float32
-        # Note: Use the public 'amax' property, not the private '_amax' attribute
-        if hasattr(weight_quantizer, "_amax") and weight_quantizer._amax is not None:
-            weight_quantizer._amax = weight_quantizer._amax.to(torch.float32)
-            amax_tensor = weight_quantizer._amax
-        else:
-            # Fallback to public amax property
-            amax_tensor = weight_quantizer.amax
-            if amax_tensor is not None and hasattr(amax_tensor, "to"):
-                amax_tensor = amax_tensor.to(torch.float32)
+        weight_quantizer._amax = weight_quantizer._amax.to(torch.float32)
 
-        # Only compute scaling factor if amax_tensor is valid
-        if amax_tensor is not None and hasattr(amax_tensor, "dim"):
-            if amax_tensor.dim() == 1:
-                # Per-tensor amax
-                weight_scaling_factor = torch.tensor(
-                    weight_quantizer.amax.item() / weight_quantizer.maxbound
-                )
-            else:
-                # Per-channel amax
-                weight_scaling_factor = torch.tensor(
-                    weight_quantizer.amax / weight_quantizer.maxbound
-                )
-
-            sub_module.register_buffer(
-                quantizer_attrs.weight_scale,
-                weight_scaling_factor,
+        if weight_quantizer._amax.dim() == 1:
+            # Per-tensor amax
+            weight_scaling_factor = torch.tensor(
+                weight_quantizer.amax.item() / weight_quantizer.maxbound
             )
+        else:
+            # Per-channel amax
+            weight_scaling_factor = torch.tensor(weight_quantizer.amax / weight_quantizer.maxbound)
 
-        if hasattr(input_quantizer, "_amax") or (
-            input_quantizer is not None
-            and hasattr(input_quantizer, "amax")
-            and input_quantizer.amax is not None
-        ):
+        sub_module.register_buffer(
+            quantizer_attrs.weight_scale,
+            weight_scaling_factor,
+        )
+
+        if hasattr(input_quantizer, "_amax"):
             assert input_quantizer is not None
-            if hasattr(input_quantizer, "_amax") and input_quantizer._amax is not None:
-                input_quantizer._amax = input_quantizer._amax.to(torch.float32)
+            input_quantizer._amax = input_quantizer._amax.to(torch.float32)
 
             sub_module.register_buffer(
                 quantizer_attrs.input_scale,
@@ -456,14 +432,9 @@ def _export_quantized_weight(
                 ).squeeze(),
             )
 
-        if hasattr(output_quantizer, "_amax") or (
-            output_quantizer is not None
-            and hasattr(output_quantizer, "amax")
-            and output_quantizer.amax is not None
-        ):
+        if hasattr(output_quantizer, "_amax"):
             assert output_quantizer is not None
-            if hasattr(output_quantizer, "_amax") and output_quantizer._amax is not None:
-                output_quantizer._amax = output_quantizer._amax.to(torch.float32)
+            output_quantizer._amax = output_quantizer._amax.to(torch.float32)
     else:
         # Register weight_scale and input_scale
         if quantization_format == QUANTIZATION_FP8_PB_REAL:
@@ -513,18 +484,6 @@ def _export_quantized_weight(
 
     weight_scale: torch.Tensor | None = getattr(sub_module, quantizer_attrs.weight_scale, None)
     weight_scale_2: torch.Tensor | None = getattr(sub_module, quantizer_attrs.weight_scale_2, None)
-
-    # If weight_scale is None (e.g., quantizer wasn't calibrated), skip quantization for this module
-    # This can happen for modules that were disabled from quantization or have invalid calibration data
-    if weight_scale is None and quantization_format not in [
-        QUANTIZATION_NVFP4,
-        QUANTIZATION_NVFP4_AWQ,
-    ]:
-        # For NVFP4, weight_scale is computed later, so we can't check here
-        print(
-            f"Warning: Skipping quantization for {type(sub_module).__name__} - no weight_scale found"
-        )
-        return
 
     # Transpose weight for bmm-style expert quantization (llama4, gpt-oss)
     # Check if this is a BMM-style expert weight that needs transposition

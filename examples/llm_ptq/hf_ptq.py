@@ -361,6 +361,12 @@ def load_model(args: argparse.Namespace):
     default_pad_token = None
 
     is_nemotron_vl_model = is_nemotron_vl(full_model)
+
+    # Default to image-text calibration for VLM models
+    if is_nemotron_vl_model and not args.calib_with_images:
+        print("Nemotron VL model detected. Enabling image-text calibration by default.")
+        args.calib_with_images = True
+
     if model_type == "mllama":
         processor = get_processor(
             args.pyt_ckpt_path,
@@ -689,7 +695,7 @@ def pre_quantize(
             preview_input_ids,
             args.pyt_ckpt_path,
             "before quantization",
-            allow_fallback=True,
+            allow_fallback=False,
         )
     else:
         # Standard generation for non-Nemotron VL models

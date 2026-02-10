@@ -68,39 +68,26 @@ def run_nemotron_vl_preview(
     """
     from vlm_utils import run_text_only_generation, run_vl_preview_generation
 
-    # Check if this is Nemotron-Parse (encoder-decoder model that requires images)
-    config = full_model.config
-    architectures = getattr(config, "architectures", [])
-    is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
+    print(f"Running text-only preview generation for Nemotron VL model ({stage_name})...")
+    question = tokenizer.decode(input_ids[0], skip_special_tokens=True)
+    generation_config = {
+        "max_new_tokens": 100,
+        "do_sample": False,
+        "eos_token_id": tokenizer.eos_token_id,
+    }
+
+    # Try text-only generation (may fail for encoder-decoder models like Nemotron-Parse)
+    text_response = run_text_only_generation(
+        full_model, tokenizer, question, generation_config, pyt_ckpt_path
+    )
 
     generated_ids = None
-
-    if not is_nemotron_parse:
-        # Only try text-only generation for models that support it (not Nemotron-Parse)
-        print(f"Running text-only preview generation for Nemotron VL model ({stage_name})...")
-        question = tokenizer.decode(input_ids[0], skip_special_tokens=True)
-        generation_config = {
-            "max_new_tokens": 100,
-            "do_sample": False,
-            "eos_token_id": tokenizer.eos_token_id,
-        }
-
-        # Try text-only generation
-        text_response = run_text_only_generation(
-            full_model, tokenizer, question, generation_config, pyt_ckpt_path
-        )
-
-        if text_response is not None:
-            print(f"✅ Text-only generation successful: {text_response[:100]}...")
-            generated_ids = text_response
-        elif allow_fallback:
-            print("Text-only generation failed, falling back to standard generate...")
-            generated_ids = full_model.generate(input_ids, max_new_tokens=100)
-    else:
-        print(
-            f"Skipping text-only generation for Nemotron-Parse ({stage_name}) - "
-            "this encoder-decoder model requires images for all operations."
-        )
+    if text_response is not None:
+        print(f"✅ Text-only generation successful: {text_response[:100]}...")
+        generated_ids = text_response
+    elif allow_fallback:
+        print("Text-only generation failed, falling back to standard generate...")
+        generated_ids = full_model.generate(input_ids, max_new_tokens=100)
 
     # Run additional VL test with images
     print(f"Running additional VL test with images ({stage_name})...")
@@ -111,10 +98,6 @@ def run_nemotron_vl_preview(
 
 def _is_multimodal_config(config):
     """Check if a config indicates a multimodal model (config-only version of is_multimodal_model)."""
-    # Check for Nemotron-Parse encoder-decoder architecture
-    architectures = getattr(config, "architectures", [])
-    is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
-
     return (
         hasattr(config, "vision_config")  # Standard vision config (e.g., Qwen2.5-VL)
         or getattr(config, "model_type", "") == "phi4mm"  # Phi-4 multimodal
@@ -123,7 +106,10 @@ def _is_multimodal_config(config):
         or (
             hasattr(config, "embd_layer") and hasattr(config.embd_layer, "image_embd_layer")
         )  # Image embedding layers
-        or is_nemotron_parse  # Nemotron-Parse conditional generation model
+        or getattr(config, "is_encoder_decoder", False)  # Encoder-decoder VL models
+        or any(  # Architecture-based detection for custom VL models (e.g., Nemotron-Parse)
+            "conditionalgeneration" in arch.lower() for arch in getattr(config, "architectures", [])
+        )
     )
 
 
@@ -176,9 +162,20 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
         )
         allowed_keys = set(forward_params.keys())
 
+        # Check if model is encoder-decoder (needs decoder_input_ids instead of input_ids)
+        is_enc_dec = getattr(full_model.config, "is_encoder_decoder", False)
+
         full_model.eval()
         with torch.no_grad():
             for batch in calib_dataloader:
+                # For encoder-decoder models, rename input_ids → decoder_input_ids
+                # and disable KV caching to avoid tuple index errors in decoder layers
+                if is_enc_dec and "input_ids" in batch and "pixel_values" in batch:
+                    batch["decoder_input_ids"] = batch.pop("input_ids")
+                    if "attention_mask" in batch:
+                        batch["decoder_attention_mask"] = batch.pop("attention_mask")
+                    batch["use_cache"] = False
+
                 # Filter batch to only include parameters the model accepts
                 if accepts_kwargs:
                     call_kwargs = batch
@@ -190,10 +187,8 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
                 # Use safe_nemotron_vl_forward for Nemotron Nano VL (embedding-injection style)
                 # For other VLMs (like Nemotron-Parse), use standard forward
                 if hasattr(full_model, "img_context_token_id"):
-                    # Nemotron Nano VL style
                     safe_nemotron_vl_forward(full_model, call_kwargs)
                 else:
-                    # Standard encoder-decoder or other VLM architectures
                     full_model(**call_kwargs)
 
     return calibrate_loop
@@ -276,20 +271,9 @@ def get_tokenizer(ckpt_path, trust_remote_code=False, **kwargs) -> PreTrainedTok
     if "vila" in ckpt_path.lower():
         ckpt_path += "/llm"
 
-    # Some custom tokenizers (e.g., Nemotron-Parse) print verbose output when loading.
-    # Only suppress stdout for trust_remote_code models where custom tokenizer code may be noisy.
-    if trust_remote_code:
-        import contextlib
-        import io
-
-        with contextlib.redirect_stdout(io.StringIO()):
-            tokenizer = AutoTokenizer.from_pretrained(
-                ckpt_path, trust_remote_code=trust_remote_code, **kwargs
-            )
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(
-            ckpt_path, trust_remote_code=trust_remote_code, **kwargs
-        )
+    tokenizer = AutoTokenizer.from_pretrained(
+        ckpt_path, trust_remote_code=trust_remote_code, **kwargs
+    )
 
     # can't set attribute 'pad_token' for "<unk>"
     # We skip this step for Nemo models
@@ -342,18 +326,9 @@ def get_processor(
 
         return MllamaImageProcessor(processor, device)
     else:
-        # Try to load AutoProcessor for other VL models (e.g., Nemotron-Parse).
-        # Suppress stdout for trust_remote_code models where custom processor code may be noisy.
-        import contextlib
-        import io
-
+        # Try to load AutoProcessor for other VL models (e.g., Nemotron-Parse)
         try:
-            if model_kwargs.get("trust_remote_code", False):
-                with contextlib.redirect_stdout(io.StringIO()):
-                    processor = AutoProcessor.from_pretrained(ckpt_path, **model_kwargs)
-            else:
-                processor = AutoProcessor.from_pretrained(ckpt_path, **model_kwargs)
-
+            processor = AutoProcessor.from_pretrained(ckpt_path, **model_kwargs)
             print(f"Loaded AutoProcessor for model type: {model_type}")
             return processor
         except Exception as e:
@@ -493,22 +468,12 @@ def get_model(
     try:
         hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
 
-        # Check specifically for Nemotron-Parse
-        architectures = getattr(hf_config, "architectures", [])
-        is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
-
         if is_nemotron_vl(hf_config):
-            if is_nemotron_parse:
-                # Nemotron-Parse works fine with device_map="auto"
-                # Keep device_map="auto" to ensure proper device placement
-                print("Detected Nemotron-Parse model from config. Using automatic device mapping.")
-            else:
-                # For other Nemotron VL models, disable device_map for compatibility
-                print(
-                    "Detected Nemotron VL model from config. "
-                    "Disabling automatic device mapping for compatibility."
-                )
-                device_map = None
+            print(
+                "Detected Nemotron VL model from config. "
+                "Disabling automatic device mapping for compatibility."
+            )
+            device_map = None
     except Exception as e:
         print(f"Error: Could not load config from {ckpt_path}: {e}")
         raise RuntimeError(f"Failed to load model configuration from {ckpt_path}") from e
@@ -564,13 +529,17 @@ def get_model(
                 if not hasattr(transformers, architecture):
                     warnings.warn(
                         f"Architecture {architecture} not found in transformers: {transformers.__version__}. "
-                        "Falling back to AutoModel."
+                        "Falling back to AutoModelForCausalLM (or AutoModel for non-causal architectures)."
                     )
                 assert trust_remote_code, (
                     "Please set trust_remote_code to True if you want to use this architecture"
                 )
 
-                auto_model_module = AutoModel
+                # Use AutoModelForCausalLM for causal LMs, AutoModel for encoder-decoder models
+                if getattr(hf_config, "is_encoder_decoder", False):
+                    auto_model_module = AutoModel
+                else:
+                    auto_model_module = AutoModelForCausalLM
                 from_config = auto_model_module.from_config
             else:
                 auto_model_module = getattr(transformers, architecture)
@@ -616,21 +585,6 @@ def get_model(
     if device_map is None and device != "cpu":
         print(f"Moving model to {device} device...")
         model = model.to(device)
-
-    # For Nemotron-Parse, ensure the encoder (including RADIO) is fully on device
-    # The RADIO encoder has buffers that might not be properly moved even with device_map="auto"
-    # This is because custom RADIO modules might not fully support accelerate's device_map
-    if device != "cpu" and hasattr(model, "encoder"):
-        # Check if encoder has any buffers on CPU
-        cpu_buffers = []
-        for name, buffer in model.encoder.named_buffers():
-            if buffer.device.type == "cpu":
-                cpu_buffers.append(name)
-
-        if cpu_buffers:
-            print(f"Found {len(cpu_buffers)} encoder buffers on CPU. Moving encoder to {device}...")
-            model.encoder = model.encoder.to(device)
-            print(f"Encoder moved to {device}")
 
     if device == "cuda" and not is_model_on_gpu(model):
         print("Warning: Some parameters are not on a GPU. Calibration can be slow or hit OOM")
