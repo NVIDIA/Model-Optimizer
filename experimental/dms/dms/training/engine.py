@@ -591,8 +591,8 @@ class CombinedModel(torch.nn.Module):
         student_is_teacher: bool,
         tokenizer: PreTrainedTokenizer,
         process_vocab_using_chunk: int,
-        forward_fn_kwargs_student: dict[str, Any] = {},
-        forward_fn_kwargs_teacher: dict[str, Any] = {},
+        forward_fn_kwargs_student: dict[str, Any] | None = None,
+        forward_fn_kwargs_teacher: dict[str, Any] | None = None,
     ):
         """Initialize the combined model for distillation.
 
@@ -610,6 +610,10 @@ class CombinedModel(torch.nn.Module):
             forward_fn_kwargs_teacher: additional arguments for the teacher forward function
         """
         super().__init__()
+        if forward_fn_kwargs_student is None:
+            forward_fn_kwargs_student = {}
+        if forward_fn_kwargs_teacher is None:
+            forward_fn_kwargs_teacher = {}
         self.student_is_teacher = student_is_teacher
         self.student_model = student_model
         if self.student_is_teacher:
