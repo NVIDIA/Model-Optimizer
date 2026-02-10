@@ -355,6 +355,7 @@ class EagleModule(nn.Module):
         past_key_values: Cache | None = None,
         use_cache: bool | None = None,
         output_attentions: bool | None = False,
+        position_embeddings: torch.Tensor | None = None,
     ):
         """Forward function for EagleModule."""
         batch_size, seq_length, _ = hidden_states.shape
@@ -385,15 +386,16 @@ class EagleModule(nn.Module):
         else:  # EAGLE-1
             hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
 
-        if self.config.eagle_decoder_type == "llama":
-            # Lazy init rope to avoid save/load meta tensor error
-            if not hasattr(self, "rotary_emb"):
-                self.rotary_emb = LlamaRotaryEmbedding(
-                    config=self.config, device=hidden_states.device
-                )
-            position_embeddings = self.rotary_emb(hidden_states, position_ids)
-        else:
-            position_embeddings = None
+        if position_embeddings is None:
+            if self.config.eagle_decoder_type == "llama":
+                # Lazy init rope to avoid save/load meta tensor error
+                if not hasattr(self, "rotary_emb"):
+                    self.rotary_emb = LlamaRotaryEmbedding(
+                        config=self.config, device=hidden_states.device
+                    )
+                position_embeddings = self.rotary_emb(hidden_states, position_ids)
+            else:
+                position_embeddings = None
 
         for decoder_layer in self.layers:
             layer_outputs = decoder_layer(
@@ -500,6 +502,10 @@ class HFEagleModel(EagleModel):
             else output[0].clone().detach()
         )
         self._aux_hidden_states.append(hidden_states)
+
+    def _collect_position_ids_forward_hook(self, module, args, kwargs, output) -> None:
+        """Collect position embeddings from base model intermediate layers, save them in attribute."""
+        self._pos_embeddings = tuple(t.clone().detach() for t in kwargs["position_embeddings"])
 
     def pop_and_gather_aux_hiddens(self):
         """Pop auxiliary hidden states from base model and gather them on the draft model device."""
@@ -609,6 +615,11 @@ class HFEagleModel(EagleModel):
             for layer_idx, layer in enumerate(self._base_model.layers):
                 if layer_idx in self.eagle_config.eagle_aux_hidden_state_layer_ids:
                     layer.register_forward_hook(self._collect_aux_hidden_states_forward_hook)
+
+        # hardcode for qwen3vl
+        self.model.language_model.layers[0].register_forward_hook(
+            self._collect_position_ids_forward_hook, with_kwargs=True
+        )
 
         # delete base model layers for offline training
         if eagle_offline:
@@ -795,6 +806,7 @@ class HFEagleModel(EagleModel):
             position_ids=position_ids,
             use_cache=True,
             past_key_values=eagle_cache,
+            position_embeddings=self._pos_embeddings,
         )
         eagle_lm_head = (
             self.eagle_module.lm_head
