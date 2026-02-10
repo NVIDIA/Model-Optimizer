@@ -214,24 +214,22 @@ class ExportManager:
                 return True
         return False
 
-    def save_checkpoint(self) -> None:
+    def save_checkpoint(self, backbone: torch.nn.Module) -> None:
         """
         Save quantized model checkpoint.
 
+        Args:
+            backbone: The quantized backbone module to save (must be the same instance
+                that was passed to mtq.quantize, as it carries the _modelopt_state).
         """
         if not self.config.quantized_torch_ckpt_path:
             return
 
         ckpt_path = self.config.quantized_torch_ckpt_path
-        if self.pipeline_manager is None:
-            raise RuntimeError("Pipeline manager is required for per-backbone checkpoints.")
-        backbone_pairs = list(self.pipeline_manager.iter_backbones())
-
-        for name, backbone in backbone_pairs:
-            ckpt_path.mkdir(parents=True, exist_ok=True)
-            target_path = ckpt_path / f"{name}.pt"
-            self.logger.info(f"Saving backbone '{name}' to {target_path}")
-            mto.save(backbone, str(target_path))
+        ckpt_path.mkdir(parents=True, exist_ok=True)
+        target_path = ckpt_path / "backbone.pt"
+        self.logger.info(f"Saving backbone to {target_path}")
+        mto.save(backbone, str(target_path))
 
         self.logger.info("Checkpoint saved successfully")
 
@@ -286,14 +284,14 @@ class ExportManager:
         restore_path = self.config.restore_from
         if self.pipeline_manager is None:
             raise RuntimeError("Pipeline manager is required for per-backbone checkpoints.")
-        backbone_pairs = list(self.pipeline_manager.iter_backbones())
+
+        backbone = self.pipeline_manager.get_backbone()
         if restore_path.exists() and restore_path.is_dir():
-            for name, backbone in backbone_pairs:
-                source_path = restore_path / f"{name}.pt"
-                if not source_path.exists():
-                    raise FileNotFoundError(f"Backbone checkpoint not found: {source_path}")
-                self.logger.info(f"Restoring backbone '{name}' from {source_path}")
-                mto.restore(backbone, str(source_path))
+            source_path = restore_path / "backbone.pt"
+            if not source_path.exists():
+                raise FileNotFoundError(f"Backbone checkpoint not found: {source_path}")
+            self.logger.info(f"Restoring backbone from {source_path}")
+            mto.restore(backbone, str(source_path))
         self.logger.info("Backbone checkpoints restored successfully")
 
     # TODO: should not do the any data type
@@ -585,7 +583,7 @@ def main() -> None:
                 mtq.compress(backbone)
                 logger.info("Model compression completed")
 
-            export_manager.save_checkpoint()
+            export_manager.save_checkpoint(backbone)
 
         # TODO (Jingyu): To update this function, as we are focusing more on the torch deployment side.
         check_conv_and_mha(
