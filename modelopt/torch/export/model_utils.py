@@ -147,7 +147,9 @@ def get_language_model_from_vl(model) -> list[nn.Module] | None:
     if hasattr(model, "language_model"):
         return [model, model.language_model]
 
-    # Pattern 3: For encoder-decoder VL models (e.g., Nemotron-Parse), the decoder is the language model
+    # Pattern 3: For encoder-decoder VL models (e.g., Nemotron-Parse), the decoder is the language model.
+    # Note: This is safe because this function is only called when the model is already detected as a VLM.
+    # Non-VLM encoder-decoder models (T5, Bart) won't reach this code path.
     if hasattr(model, "decoder"):
         return [model, model.decoder]
 

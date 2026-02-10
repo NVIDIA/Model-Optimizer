@@ -126,11 +126,7 @@ def run_vl_preview_generation(model, tokenizer, model_path, stage_name):
         else:
             processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
 
-            # Check if this is Nemotron-Parse (uses task prompts instead of chat templates)
-            config = model.config
-            architectures = getattr(config, "architectures", [])
-            is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
-
+            # is_nemotron_parse was already computed above
             if is_nemotron_parse:
                 # Nemotron-Parse uses a specific task prompt format
                 # See: https://huggingface.co/nvidia/NVIDIA-Nemotron-Parse-v1.1#usage-example

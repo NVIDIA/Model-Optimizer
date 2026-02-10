@@ -402,44 +402,15 @@ def load_model(args: argparse.Namespace):
             language_model = extracted_lm
             model_type = extracted_model_type
     else:
-        # Check if this is a Nemotron VL model that needs a processor
-        # Do this BEFORE setting default datasets so we can use image-text data for Nemotron-Parse
-        is_nemotron_vl_model = is_nemotron_vl(full_model)
-
-        # Check specifically for Nemotron-Parse to set appropriate dataset defaults
-        config = full_model.config
-        architectures = getattr(config, "architectures", [])
-        is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
-
         if args.dataset is None:
-            if is_nemotron_parse:
-                # For Nemotron-Parse, default to Nemotron VLM Dataset v2
-                args.dataset = ["nemotron_vlm_v2"]
-                print(
-                    "No dataset specified. Defaulting to 'nemotron_vlm_v2' for Nemotron-Parse "
-                    "(NVIDIA's image-text dataset for better calibration)."
-                )
-            else:
-                # For other models, use text-only datasets
-                args.dataset = ["cnn_dailymail", "nemotron-post-training-dataset-v2"]
-                warnings.warn(
-                    "No dataset specified. Defaulting to cnn_dailymail and nemotron-post-training-dataset-v2."
-                )
-
+            args.dataset = ["cnn_dailymail", "nemotron-post-training-dataset-v2"]
+            warnings.warn(
+                "No dataset specified. Defaulting to cnn_dailymail and nemotron-post-training-dataset-v2."
+            )
         # Adjust calib_size to match dataset length by extending or truncating as needed
         args.calib_size = (args.calib_size + [args.calib_size[-1]] * len(args.dataset))[
             : len(args.dataset)
         ]
-
-        if is_nemotron_vl_model:
-            # Load processor for Nemotron VL models (like Nemotron-Parse)
-            processor = get_processor(
-                args.pyt_ckpt_path,
-                model_type,
-                device,
-                trust_remote_code=args.trust_remote_code,
-            )
-
         tokenizer = get_tokenizer(args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code)
 
         default_padding_side = tokenizer.padding_side

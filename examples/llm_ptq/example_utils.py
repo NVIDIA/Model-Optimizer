@@ -276,33 +276,20 @@ def get_tokenizer(ckpt_path, trust_remote_code=False, **kwargs) -> PreTrainedTok
     if "vila" in ckpt_path.lower():
         ckpt_path += "/llm"
 
-    # Suppress verbose tokenizer output (e.g., printing all special tokens)
-    import contextlib
-    import io
-    import logging
-    import os
+    # Some custom tokenizers (e.g., Nemotron-Parse) print verbose output when loading.
+    # Only suppress stdout for trust_remote_code models where custom tokenizer code may be noisy.
+    if trust_remote_code:
+        import contextlib
+        import io
 
-    # Save current settings
-    old_verbosity = os.environ.get("TOKENIZERS_PARALLELISM", None)
-    transformers_log_level = logging.getLogger("transformers").level
-
-    # Suppress output
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    logging.getLogger("transformers").setLevel(logging.ERROR)
-
-    # Also capture stdout to suppress verbose tokenizer printing
-    with contextlib.redirect_stdout(io.StringIO()):
-        try:
+        with contextlib.redirect_stdout(io.StringIO()):
             tokenizer = AutoTokenizer.from_pretrained(
                 ckpt_path, trust_remote_code=trust_remote_code, **kwargs
             )
-        finally:
-            # Restore original settings
-            if old_verbosity is not None:
-                os.environ["TOKENIZERS_PARALLELISM"] = old_verbosity
-            else:
-                os.environ.pop("TOKENIZERS_PARALLELISM", None)
-            logging.getLogger("transformers").setLevel(transformers_log_level)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(
+            ckpt_path, trust_remote_code=trust_remote_code, **kwargs
+        )
 
     # can't set attribute 'pad_token' for "<unk>"
     # We skip this step for Nemo models
@@ -355,25 +342,17 @@ def get_processor(
 
         return MllamaImageProcessor(processor, device)
     else:
-        # Try to load AutoProcessor for other VL models (e.g., Nemotron-Parse)
-        # This will only work if the model has a processor config
+        # Try to load AutoProcessor for other VL models (e.g., Nemotron-Parse).
+        # Suppress stdout for trust_remote_code models where custom processor code may be noisy.
+        import contextlib
+        import io
+
         try:
-            import contextlib
-            import io
-            import logging
-
-            # Suppress verbose output from processor/tokenizer loading
-            transformers_log_level = logging.getLogger("transformers").level
-            logging.getLogger("transformers").setLevel(logging.ERROR)
-
-            with contextlib.redirect_stdout(io.StringIO()):
-                processor = AutoProcessor.from_pretrained(
-                    ckpt_path,
-                    **model_kwargs,
-                )
-
-            # Restore logging
-            logging.getLogger("transformers").setLevel(transformers_log_level)
+            if model_kwargs.get("trust_remote_code", False):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    processor = AutoProcessor.from_pretrained(ckpt_path, **model_kwargs)
+            else:
+                processor = AutoProcessor.from_pretrained(ckpt_path, **model_kwargs)
 
             print(f"Loaded AutoProcessor for model type: {model_type}")
             return processor
