@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -78,18 +77,14 @@ def log_benchmark_config(args):
         logger.info(f"  Trtexec args: {args.trtexec_benchmark_args}")
 
 
-def run_autotune(args=None) -> int:
+def run_autotune() -> int:
     """Execute the complete pattern-based Q/DQ autotuning workflow.
 
-    This function orchestrates the entire optimization process:
-    1. Parses command-line arguments (if not provided)
-    2. Validates input paths (model, baseline, output directory)
-    3. Initializes TensorRT benchmark instance
-    4. Runs pattern-based region autotuning workflow
-    5. Handles interruptions gracefully with state preservation
-
-    Args:
-        args: Optional parsed command-line arguments. If None, parses sys.argv.
+    Parses command-line arguments, then:
+    1. Validates input paths (model, baseline, output directory)
+    2. Initializes TensorRT benchmark instance
+    3. Runs pattern-based region autotuning workflow
+    4. Handles interruptions gracefully with state preservation
 
     Returns:
         Exit code:
@@ -97,12 +92,10 @@ def run_autotune(args=None) -> int:
         - 1: Autotuning failed (exception occurred)
         - 130: Interrupted by user (Ctrl+C)
     """
-    if args is None:
-        args = _get_autotune_parser().parse_args()
-
+    args = _get_autotune_parser().parse_args()
     model_path = validate_file_path(args.onnx_path, "Model file")
     validate_file_path(args.qdq_baseline, "QDQ baseline model")
-    output_dir = Path(args.output)
+    output_dir = Path(args.output_dir)
 
     log_benchmark_config(args)
     trtexec_args = getattr(args, "trtexec_benchmark_args", None)
@@ -196,10 +189,11 @@ Examples:
         "--onnx_path", "-m", type=str, required=True, help="Path to ONNX model file"
     )
     io_group.add_argument(
-        "--output",
+        "--output_dir",
         "-o",
         type=str,
         default=DEFAULT_OUTPUT_DIR,
+        dest="output_dir",
         help=f"Output directory for results (default: {DEFAULT_OUTPUT_DIR})",
     )
 
@@ -230,7 +224,7 @@ Examples:
         "--state_file",
         type=str,
         default=None,
-        help="State file path for resume capability (default: <output>/autotuner_state.yaml)",
+        help="State file path for resume capability (default: <output_dir>/autotuner_state.yaml)",
     )
     strategy_group.add_argument(
         "--node_filter_list",
