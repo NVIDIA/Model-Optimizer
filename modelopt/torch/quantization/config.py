@@ -336,6 +336,100 @@ INT4_BLOCKWISE_WEIGHT_ONLY_GPTQ_CFG = {
     },
 }
 
+NVFP4_STATIC_WO_GPTQ_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "enable": False,
+        },
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": {
+        "method": "gptq",
+        "use_sequential": True,
+    },
+}
+
+NVFP4_STATIC_WO_GPTQ_LITE_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "enable": False,
+        },
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": {
+        "method": "gptq_lite",
+        "use_sequential": False,
+    },
+}
+
+NVFP4_STATIC_WO_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "enable": False,
+        },
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": {
+        "method": "max",
+        "use_sequential": False,
+    },
+}
+
+NVFP4_STATIC_WO_GPTQ_LITE_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "enable": False,
+        },
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": {
+        "method": "gptq_lite",
+        "use_sequential": False,
+    },
+}
+
+NVFP4_DYNAMIC_WO_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "enable": False,
+        },
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": {
+        "method": "gptq_lite",
+        "use_sequential": False,
+    },
+}
 
 INT4_AWQ_CFG = {
     "quant_cfg": {
