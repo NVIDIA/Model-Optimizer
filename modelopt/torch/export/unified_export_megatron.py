@@ -85,6 +85,26 @@ __all__ = [
 ]
 
 
+class _FusedLayerNormProxy(torch.nn.Module):
+    """Proxy module exposing fused layernorm weights from TELayerNormColumnParallelLinear.
+
+    When using TE spec, the input layernorm and pre-MLP layernorm are fused into the
+    subsequent linear layer (TELayerNormColumnParallelLinear). The layernorm weight is
+    stored as ``layer_norm_weight`` on the fused linear module rather than as a separate
+    ``weight`` on a standalone layernorm module.
+
+    This proxy wraps that fused weight so the existing export rules (which expect a
+    module with a ``.weight`` attribute) can export it with the correct HF key name.
+    """
+
+    def __init__(self, fused_linear: torch.nn.Module):
+        super().__init__()
+        self.weight = fused_linear.layer_norm_weight
+        bias = getattr(fused_linear, "layer_norm_bias", None)
+        if bias is not None:
+            self.bias = bias
+
+
 class GPTModelExporter:
     """Megatron Core GPTModel Exporter.
 
@@ -489,6 +509,17 @@ class GPTModelExporter:
     def _get_transformer_layer_state_dict(self, layer, layer_id):
         if not isinstance(layer.input_layernorm, IdentityOp):
             self.rules["input_layernorm"](layer.input_layernorm, layer_id)
+        elif (
+            "input_layernorm" in self.rules
+            and hasattr(layer, "self_attention")
+            and not isinstance(layer.self_attention, IdentityOp)
+            and hasattr(layer.self_attention, "linear_qkv")
+            and hasattr(layer.self_attention.linear_qkv, "layer_norm_weight")
+        ):
+            # TE spec: input layernorm is fused into TELayerNormColumnParallelLinear
+            self.rules["input_layernorm"](
+                _FusedLayerNormProxy(layer.self_attention.linear_qkv), layer_id
+            )
 
         if not isinstance(layer.self_attention, IdentityOp):
             if "MLASelfAttention" in str(type(layer.self_attention)):
@@ -527,6 +558,14 @@ class GPTModelExporter:
 
         if not isinstance(layer.pre_mlp_layernorm, IdentityOp):
             self.rules["pre_mlp_layernorm"](layer.pre_mlp_layernorm, layer_id)
+        elif (
+            "pre_mlp_layernorm" in self.rules
+            and not isinstance(layer.mlp, IdentityOp)
+            and hasattr(layer.mlp, "linear_fc1")
+            and hasattr(layer.mlp.linear_fc1, "layer_norm_weight")
+        ):
+            # TE spec: pre-MLP layernorm is fused into TELayerNormColumnParallelLinear
+            self.rules["pre_mlp_layernorm"](_FusedLayerNormProxy(layer.mlp.linear_fc1), layer_id)
 
         if not isinstance(layer.mlp, IdentityOp):
             if "MoE" in str(type(layer.mlp)):
@@ -598,6 +637,14 @@ class GPTModelExporter:
     def _get_mamba_layer_state_dict(self, layer, layer_id):
         if not isinstance(layer.norm, IdentityOp):
             self.rules["norm"](layer.norm, layer_id)
+        elif (
+            "norm" in self.rules
+            and hasattr(layer, "mixer")
+            and hasattr(layer.mixer, "in_proj")
+            and hasattr(layer.mixer.in_proj, "layer_norm_weight")
+        ):
+            # TE spec: norm is fused into TELayerNormColumnParallelLinear (in_proj)
+            self.rules["norm"](_FusedLayerNormProxy(layer.mixer.in_proj), layer_id)
 
         self.rules["mixer_norm"](layer.mixer.norm, layer_id)
         self.rules["A_log"](layer.mixer.A_log, layer_id)
