@@ -15,62 +15,9 @@
 """Distillation script for Megatron-Bridge.
 
 Loads student and teacher models directly from HuggingFace checkpoints (local or remote) and saves the distilled model
-to <output_dir>/checkpoints in megatron distributed checkpoint format.
+to `<output_dir>/checkpoints` in megatron distributed checkpoint format.
 
-Example usage to distill a 4B student from an 8B teacher on 8 GPUs:
-
-.. code-block:: bash
-
-    torchrun --nproc_per_node 8 distill.py \
-        --teacher_hf_path Qwen/Qwen3-8B \
-        --student_hf_path Qwen/Qwen3-4B \
-        --tp_size 8 \
-        --data_paths 1.0 /path/to/tokenized/data \
-        --data_path_to_cache /path/to/cache/dataset_indices_qwen3 \
-        --seq_length 8192 \
-        --mbs 1 \
-        --gbs 768 \
-        --train_iters 15000 \
-        --lr 1e-4 \
-        --min_lr 1e-5 \
-        --lr_warmup_iters 50 \
-        --eval_interval 100 \
-        --eval_iters 32 \
-        --log_interval 10 \
-        --output_dir /output/qwen3_8b_to_4b_distill
-
-Example usage to use mock data for quick testing:
-
-.. code-block:: bash
-
-    torchrun --nproc_per_node 8 distill.py \
-        --teacher_hf_path Qwen/Qwen3-0.6B \
-        --student_hf_path Qwen/Qwen3-0.6B \
-        --tp_size 8 \
-        --use_mock_data \
-        --seq_length 512 \
-        --mbs 1 \
-        --gbs 8 \
-        --train_iters 100 \
-        --eval_interval 10 \
-        --eval_iters 4 \
-        --output_dir /tmp/test_distill
-
-If you want to tokenize your own data for a specific tokenizer, you can use the following command:
-
-.. code-block:: python
-
-    from modelopt.torch.utils.plugins import megatron_preprocess_data
-
-    megatron_preprocess_data(
-        input_path="/path/to/your/data.jsonl",
-        output_dir="/path/to/tokenized/data",
-        tokenizer_name_or_path="Qwen/Qwen3-0.6B",
-        json_keys=["text"],
-        workers=32,
-        log_interval=100000,
-        max_sequence_length=256000,
-    )
+See `README.md` in this directory for example usage and data preparation instructions.
 """
 
 import argparse
@@ -106,7 +53,7 @@ SEED = 1234
 def get_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Distillation for Megatron-Bridge.")
-    # Model arguments
+    # Model arguments (accepts HuggingFace input only at the moment)
     parser.add_argument(
         "--student_hf_path",
         type=str,
@@ -142,7 +89,10 @@ def get_args():
         "--output_dir", type=str, required=True, help="Folder for logging and checkpoint saving"
     )
     parser.add_argument(
-        "--seq_length", type=int, default=8192, help="Number of tokens per input sample"
+        "--seq_length",
+        type=int,
+        default=4096,
+        help="Number of tokens per input sample. Use 8192 if your dataset has longer sequences.",
     )
     parser.add_argument("--mbs", type=int, default=1, help="Micro-batch Size")
     parser.add_argument("--gbs", type=int, default=768, help="Global Batch Size")
@@ -187,16 +137,18 @@ def main(args: argparse.Namespace):
     def _build_model_provider(hf_path):
         bridge = AutoBridge.from_hf_pretrained(hf_path)
         provider = bridge.to_megatron_provider(load_weights=True)
+
+        # Override parallelism / training settings
         provider.tensor_model_parallel_size = args.tp_size
         provider.pipeline_model_parallel_size = args.pp_size
         provider.context_parallel_size = 1
         provider.sequence_parallel = args.tp_size > 1
         provider.seq_length = args.seq_length
         provider.pipeline_dtype = torch.bfloat16
-        provider.cross_entropy_fusion_impl = "te"
         return provider
 
-    # TODO: Support megatron-ckpt as an alternative to HF checkpoints
+    # TODO: Support megatron-ckpt as an alternative to HF checkpoints (e.g. /path/to/ckpt/iter_0000000)
+    # Still requires an HF model name or path to build provider correctly
     student_provider = _build_model_provider(args.student_hf_path)
     teacher_provider = _build_model_provider(args.teacher_hf_path)
 

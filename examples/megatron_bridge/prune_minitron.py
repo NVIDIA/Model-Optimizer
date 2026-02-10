@@ -28,8 +28,11 @@ while skipping pruning of num_attention_heads using following defaults:
 
 To see the full usage for advanced configurations, run:
     torchrun --nproc_per_node 1 prune_minitron.py --help
+
+See `README.md` in this directory for more details.
 """
 
+# TODO: Test multi-node pruning
 import argparse
 import json
 import os
@@ -66,9 +69,20 @@ def get_args() -> argparse.Namespace:
         "--output_hf_path", type=str, help="Path to save the pruned model in HF checkpoint format"
     )
 
-    # Uneven Pipeline Parallelism parameters
-    parser.add_argument("--num_layers_in_first_pipeline_stage", type=int, default=None)
-    parser.add_argument("--num_layers_in_last_pipeline_stage", type=int, default=None)
+    # Parallelism arguments
+    parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
+    parser.add_argument(
+        "--num_layers_in_first_pipeline_stage",
+        type=int,
+        default=None,
+        help="Number of layers in the first pipeline stage (Uneven Pipeline Parallelism)",
+    )
+    parser.add_argument(
+        "--num_layers_in_last_pipeline_stage",
+        type=int,
+        default=None,
+        help="Number of layers in the last pipeline stage (Uneven Pipeline Parallelism)",
+    )
 
     # Calibration dataset parameters
     parser.add_argument(
@@ -201,8 +215,7 @@ def get_args() -> argparse.Namespace:
 
 
 def main(args: argparse.Namespace):
-    pp_size = dist.size()
-    print_rank_0(f"Setting pipeline_model_parallel_size to {pp_size}")
+    assert dist.size() == args.pp_size, "Only Pipeline parallelism is supported for pruning."
 
     if args.output_megatron_path and os.path.exists(
         f"{args.output_megatron_path}/latest_checkpointed_iteration.txt"
@@ -218,7 +231,7 @@ def main(args: argparse.Namespace):
         trust_remote_code=args.trust_remote_code,
         provider_overrides={
             "tensor_model_parallel_size": 1,
-            "pipeline_model_parallel_size": pp_size,
+            "pipeline_model_parallel_size": args.pp_size,
             "num_layers_in_first_pipeline_stage": args.num_layers_in_first_pipeline_stage,
             "num_layers_in_last_pipeline_stage": args.num_layers_in_last_pipeline_stage,
             "pipeline_dtype": torch.bfloat16,
