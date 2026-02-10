@@ -315,3 +315,77 @@ class InsertionScheme:
             f"region_output_insertions={len(self.region_outputs)}, "
             f"latency={self.latency_ms:.3f}ms{error_str})"
         )
+
+
+@dataclass
+class Config:
+    """Configuration parameters for QDQ autotuning.
+
+    Controls the autotuning process including performance requirements, quantization
+    parameters, region building, scheme generation, and finetuning behavior.
+
+    Attributes:
+        # Logging
+        verbose: Enable detailed logging of autotuning progress (default: False)
+
+        # Performance Requirements
+        performance_threshold: Minimum speedup ratio to accept a scheme.
+            1.0 = no improvement required, 1.02 = 2% improvement (default: 1.02)
+
+        # Quantization Parameters
+        default_q_scale: Default scale parameter for Q/DQ nodes. Controls quantization
+            granularity. Typical range: 0.01-0.1 (default: 0.1)
+        default_q_zero_point: Default zero-point for Q/DQ nodes. Use 0 for signed int8,
+            128 for unsigned uint8 (default: 0)
+        default_quant_type: Quantization type for Q/DQ nodes. Options: "int8" (default), "fp8"
+
+        # Region Builder Settings
+        maximum_sequence_region_size: Maximum number of nodes in a sequence region during
+            top-down refinement. Prevents overly large merged regions (default: 10)
+        minimum_topdown_search_size: Minimum number of nodes in a region to trigger
+            top-down search during region building (default: 10)
+
+    # Scheme Generation Settings
+    top_percent_to_mutate: Top percentage of best schemes to use as mutation seeds
+        during scheme generation. Range: 0.0-1.0 (default: 0.1 = top 10%)
+    minimum_schemes_to_mutate: Minimum number of schemes to keep as mutation seeds,
+        even if top_percent_to_mutate results in fewer (default: 10)
+    maximum_mutations: Maximum number of mutations to apply to a single scheme
+        during generation (default: 3)
+    maximum_generation_attempts: Maximum attempts to generate a unique new scheme
+        before giving up (default: 100)
+
+    # Pattern Cache Settings
+    pattern_cache_minimum_distance: Minimum edit distance required between schemes in cache.
+        When adding schemes, if a scheme is too similar (distance < minimum_distance)
+        to an existing scheme, only the better-performing one is kept (default: 4)
+    pattern_cache_max_entries_per_pattern: Maximum number of schemes to keep per pattern
+        in pattern cache. Only the top N best-performing schemes are kept for each pattern.
+        Use 0 to keep all schemes (default: 32)
+    """
+
+    # Logging
+    verbose: bool = False
+
+    # Performance Requirements
+    performance_threshold: float = 1.02
+
+    # Quantization Parameters
+    default_q_scale: float = 0.1
+    default_q_zero_point: int = 0
+    default_quant_type: str = "int8"
+    default_dq_dtype: str = "float32"
+
+    # Region Builder Settings
+    maximum_sequence_region_size: int = 10
+    minimum_topdown_search_size: int = 10
+
+    # Scheme Generation Settings
+    top_percent_to_mutate: float = 0.1
+    minimum_schemes_to_mutate: int = 10
+    maximum_mutations: int = 3
+    maximum_generation_attempts: int = 100
+
+    # Pattern Cache Settings
+    pattern_cache_minimum_distance: int = 4
+    pattern_cache_max_entries_per_pattern: int = 32
