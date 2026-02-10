@@ -693,14 +693,16 @@ def export_quantized(
                     "Unified HF export format does not specify inference tensor parallel or pipeline parallel. "
                     "They will be set at deployment time."
                 )
-            if True:
+            if args.export_qdq_weights:
                 # Disable quantizers
-                # mtq.fold_weight(full_model)
-                # print("Folded weights")
+                if "gptq" not in args.qformat:
+                    mtq.fold_weight(full_model)
+                    print("Folded weights")
+
                 print("Disabling quantizers for perplexity evaluation (weights are already QDQ'ed)")
                 mtq.disable_quantizer(full_model, "*")
+
                 if True:
-                    # mtq.fold_weight(full_model)
                     import os
 
                     import torch.nn.functional as F
@@ -768,7 +770,6 @@ def export_quantized(
                     ppl = _compute_perplexity(full_model, eval_data)
                     print(f"Wikitext-2 perplexity: {round(ppl, 2):.2f}")
 
-            breakpoint()
 
             # Load any missing weights from non-standard safetensors (handled in get_model for non-low-memory mode)
             # Store the MTP layer prefixes on the model for later exclusion from quantization
@@ -1243,6 +1244,12 @@ def parse_args() -> argparse.Namespace:
             "utilizing the percentage of available GPU memory as specified by the value passed with gpu_max_mem flag."
             "Helpful in cases where device_map=auto loads model unevenly on GPUs causing GPU OOM during quantization."
         ),
+        default=False,
+        action="store_true",
+    )
+    parser.add_argument(
+        "--export_qdq_weights",
+        help=("Used for GPTQ weights as is without compressed weights for deployment."),
         default=False,
         action="store_true",
     )
