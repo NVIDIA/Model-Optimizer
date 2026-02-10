@@ -148,13 +148,13 @@ def _collect_shared_input_modules(
     def _input_hook(module, input, output):
         """Update dictionary with list of all modules that share the same input."""
         if len(input) > 0 and isinstance(input[0], torch.Tensor):
-        # TODO: Handle DBRX MoE case
-        input_to_linear[input[0]].append(module)
+            # TODO: Handle DBRX MoE case
+            input_to_linear[input[0]].append(module)
 
     def _output_hook(module, input, output):
         """Update dictionary with mapping of layernorms and their outputs."""
         if output_to_layernorm is not None and isinstance(output, torch.Tensor):
-        output_to_layernorm[output] = module
+            output_to_layernorm[output] = module
 
     handles = []
 
@@ -323,29 +323,29 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
         if is_vl_model and ("nemotron" in model_type or is_nemotron_parse):
             # For Nemotron VL models (including Nemotron-Parse), run optimization on just the
             # language model/decoder. This avoids needing pixel_values for the vision encoder.
-                language_model_lineage = get_language_model_from_vl(model)
+            language_model_lineage = get_language_model_from_vl(model)
 
-                if language_model_lineage is not None:
-                    language_model = language_model_lineage[-1]
-                    print(
-                        f"Running optimization on language model with fake_input shape: {fake_input.shape}"
-                    )
-                    # For Nemotron-Parse decoder, force use_cache=False to avoid tuple index errors
-                    if is_nemotron_parse:
-                        language_model(fake_input, use_cache=False)
-                    else:
-                        language_model(fake_input)
+            if language_model_lineage is not None:
+                language_model = language_model_lineage[-1]
+                print(
+                    f"Running optimization on language model with fake_input shape: {fake_input.shape}"
+                )
+                # For Nemotron-Parse decoder, force use_cache=False to avoid tuple index errors
+                if is_nemotron_parse:
+                    language_model(fake_input, use_cache=False)
                 else:
-                    raise ValueError(
-                        f"Cannot extract language_model from Nemotron VL model (type: {model_type}). "
-                        "This is required for requantization/resmoothing optimization. "
-                        "Please ensure the model architecture is supported or file an issue."
-                    )
+                    language_model(fake_input)
+            else:
+                raise ValueError(
+                    f"Cannot extract language_model from Nemotron VL model (type: {model_type}). "
+                    "This is required for requantization/resmoothing optimization. "
+                    "Please ensure the model architecture is supported or file an issue."
+                )
         elif getattr(model.config, "is_encoder_decoder", False):
             # For other encoder-decoder models (non-VL), pass both encoder and decoder input ids
             model(fake_input, decoder_input_ids=decoder_fake_input)
-            else:
-                model(fake_input)
+        else:
+            model(fake_input)
 
     input_to_linear, output_to_layernorm = _collect_shared_input_modules(
         model, llm_dummy_forward, collect_layernorms=True
@@ -440,11 +440,6 @@ def _export_quantized_weight(
                 weight_scaling_factor,
             )
 
-        sub_module.register_buffer(
-            quantizer_attrs.weight_scale,
-            weight_scaling_factor,
-        )
-
         if hasattr(input_quantizer, "_amax") or (
             input_quantizer is not None
             and hasattr(input_quantizer, "amax")
@@ -452,7 +447,7 @@ def _export_quantized_weight(
         ):
             assert input_quantizer is not None
             if hasattr(input_quantizer, "_amax") and input_quantizer._amax is not None:
-            input_quantizer._amax = input_quantizer._amax.to(torch.float32)
+                input_quantizer._amax = input_quantizer._amax.to(torch.float32)
 
             sub_module.register_buffer(
                 quantizer_attrs.input_scale,
@@ -468,7 +463,7 @@ def _export_quantized_weight(
         ):
             assert output_quantizer is not None
             if hasattr(output_quantizer, "_amax") and output_quantizer._amax is not None:
-            output_quantizer._amax = output_quantizer._amax.to(torch.float32)
+                output_quantizer._amax = output_quantizer._amax.to(torch.float32)
     else:
         # Register weight_scale and input_scale
         if quantization_format == QUANTIZATION_FP8_PB_REAL:
@@ -485,7 +480,7 @@ def _export_quantized_weight(
             )
             sub_module.register_buffer(quantizer_attrs.weight_scale, e8m0_scale)
             if hasattr(weight_quantizer, "_scale") and weight_quantizer._scale is not None:
-            del weight_quantizer._scale
+                del weight_quantizer._scale
         else:
             sub_module.register_buffer(
                 quantizer_attrs.weight_scale, get_weight_scaling_factor(sub_module, weight_name)

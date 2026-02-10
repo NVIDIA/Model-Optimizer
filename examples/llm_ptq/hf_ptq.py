@@ -66,7 +66,6 @@ from modelopt.torch.utils.dataset_utils import (
 )
 from modelopt.torch.utils.image_processor import BaseImageProcessor, MllamaImageProcessor
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
-from modelopt.torch.utils.nemotron_vlm_dataset_utils import get_nemotron_vlm_dataset_dataloader
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
@@ -142,7 +141,6 @@ def make_calib_dataloader(
     tokenizer: PreTrainedTokenizerBase | None,
     device: torch.device,
     model_type: str | None,
-    full_model: torch.nn.Module | None = None,
 ) -> tuple[DataLoader, str | None]:
     calib_dataloader = None
     first_text_speech_dataset = None
@@ -525,12 +523,6 @@ def mono_quantize(
             "Consider reducing calib_size to reduce calibration time.\n####\n"
         )
 
-    # Check if this is Nemotron-Parse
-    config = full_model.config
-    architectures = getattr(config, "architectures", [])
-    is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
-    original_forward = None  # Track original forward method if we wrap it
-
     # For Nemotron VL models, disable quantization of vision components
     if is_nemotron_vl_model:
         print("Disabling quantization for vision components in Nemotron VL model")
@@ -569,15 +561,8 @@ def mono_quantize(
         else:
             language_model = mtq.quantize(language_model, quant_cfg, forward_loop=calibrate_loop)
 
-        # Restore original forward method if we wrapped it for Nemotron-Parse
-        if is_nemotron_parse and original_forward is not None:
-            print("Restoring original forward method after calibration")
-            language_model.forward = original_forward
-            original_forward = None
-
-        # For VL models (except Nemotron-Parse), update full_model to use the quantized language model
-        # For Nemotron-Parse, language_model IS full_model, so no update needed
-        if is_nemotron_vl_model and language_model is not full_model:
+        # For VL models, update full_model to use the quantized language model
+        if is_nemotron_vl_model:
             language_model_lineage = get_language_model_from_vl(full_model)
             if language_model_lineage is not None:
                 print("Updating full_model with quantized language_model...")
@@ -717,20 +702,10 @@ def pre_quantize(
     post-quantize generation.
 
     """
-    # Check if this is Nemotron-Parse (encoder-decoder model)
-    config = full_model.config
-    architectures = getattr(config, "architectures", [])
-    is_nemotron_parse = any("nemotronparse" in arch.lower() for arch in architectures)
-
     # Only run single sample for preview
-    # For Nemotron-Parse, use decoder_input_ids instead of input_ids
-    sample_batch = next(iter(calib_dataloader))
-    if is_nemotron_parse and "decoder_input_ids" in sample_batch:
-        preview_input_ids = sample_batch["decoder_input_ids"][0:1]
-    elif model_type == "whisper":
-        preview_input_ids = sample_batch["input_features"][0:1]
-    else:
-        preview_input_ids = sample_batch["input_ids"][0:1]
+    preview_input_ids = next(iter(calib_dataloader))[
+        "input_features" if model_type == "whisper" else "input_ids"
+    ][0:1]
 
     # Generate preview before quantization
     if model_type == "deepseek":
@@ -901,7 +876,7 @@ def quantize_main(
     print(f"Use calib batch_size {args.batch_size}")
 
     calib_dataloader, first_text_speech_dataset = make_calib_dataloader(
-        args, language_model, processor, tokenizer, device, model_type, full_model
+        args, language_model, processor, tokenizer, device, model_type
     )
 
     # Detect if this is a Nemotron VL model using architecture-based detection
