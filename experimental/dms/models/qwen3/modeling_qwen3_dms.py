@@ -37,7 +37,7 @@ from dms.core import (
     DMSBaseModelOutputWithPastAndCR,
     DMSCausalLMOutputWithPastAndCR,
     DMSTrainingStateAux,
-    dms_chunked_prefill,
+    dms_perform_chunked_prefill,
     post_process_attention_output,
     prepare_attention_input,
 )
@@ -334,7 +334,7 @@ class Qwen3ModelDMS(Qwen3PreTrainedModelDMS):
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-        hidden_states, dms_frac_closed = dms_chunked_prefill(
+        hidden_states, dms_frac_closed = dms_perform_chunked_prefill(
             decoder_layers=self.layers[: self.config.num_hidden_layers],
             hidden_states=hidden_states,
             attention_mask=causal_mask_mapping["full_attention"],

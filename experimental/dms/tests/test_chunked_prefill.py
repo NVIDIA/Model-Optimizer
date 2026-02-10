@@ -21,10 +21,10 @@ import torch
 from experimental.dms.tests.utils import add_dms_to_path
 
 try:
-    from dms.core import dms_chunked_prefill
+    from dms.core import dms_perform_chunked_prefill
 except ImportError:
     add_dms_to_path()
-    from dms.core import dms_chunked_prefill
+    from dms.core import dms_perform_chunked_prefill
 
 
 class IdentityDecoderLayer(torch.nn.Module):
@@ -44,7 +44,7 @@ class IdentityDecoderLayer(torch.nn.Module):
         """Return hidden states unchanged, matching the HF decoder layer interface.
 
         All arguments besides hidden_states are accepted but ignored, so that
-        this layer can be used as a drop-in replacement in dms_chunked_prefill.
+        this layer can be used as a drop-in replacement in dms_perform_chunked_prefill.
         """
         return hidden_states, None
 
@@ -56,7 +56,7 @@ def decoder_layers():
 
 
 class TestChunkedPrefill:
-    """Tests for dms_chunked_prefill with identity decoder layers."""
+    """Tests for dms_perform_chunked_prefill with identity decoder layers."""
 
     @pytest.mark.parametrize("seed", range(10))
     def test_chunked_matches_unchunked(self, decoder_layers, seed):
@@ -69,7 +69,7 @@ class TestChunkedPrefill:
 
         hidden_states = torch.randn(batch_size, seq_len, hidden_dim)
 
-        output_no_chunking, _ = dms_chunked_prefill(
+        output_no_chunking, _ = dms_perform_chunked_prefill(
             decoder_layers=decoder_layers,
             hidden_states=hidden_states,
             attention_mask=None,
@@ -82,7 +82,7 @@ class TestChunkedPrefill:
             dms_chunked_prefill=None,
         )
 
-        output_chunking, _ = dms_chunked_prefill(
+        output_chunking, _ = dms_perform_chunked_prefill(
             decoder_layers=decoder_layers,
             hidden_states=hidden_states,
             attention_mask=None,

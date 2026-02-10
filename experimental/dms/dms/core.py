@@ -284,7 +284,7 @@ def run_decoder_layers(
     return hidden_states, dms_frac_closed
 
 
-def dms_chunked_prefill(
+def dms_perform_chunked_prefill(
     decoder_layers: list[torch.nn.Module],
     hidden_states: torch.Tensor,
     attention_mask: torch.Tensor | None,
