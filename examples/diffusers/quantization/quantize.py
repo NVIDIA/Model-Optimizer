@@ -136,6 +136,8 @@ class Quantizer:
                 quant_config = NVFP4_DEFAULT_CONFIG
         else:
             raise NotImplementedError(f"Unknown format {self.config.format}")
+        if self.config.quantize_mha:
+            quant_config["quant_cfg"]["*[qkv]_bmm_quantizer"] = {"num_bits": (4, 3), "axis": None}  # type: ignore[index]
         set_quant_config_attr(
             quant_config,
             self.model_config.trt_high_precision_dtype.value,
@@ -143,7 +145,7 @@ class Quantizer:
             alpha=self.config.alpha,
             lowrank=self.config.lowrank,
         )
-
+        self.logger.info(f"Quant config {quant_config}")
         return quant_config
 
     def quantize_model(
