@@ -388,11 +388,13 @@ def load_mtp_weights_if_needed(model: torch.nn.Module, model_path: str) -> list[
         # Store info for copying during export
         if missing_keys:
             file_weight_map = dict.fromkeys(expected_keys, filename)
-            mtp_files_info.append({
-                "source_path": str(filepath),
-                "filename": filename,
-                "weight_map": file_weight_map,
-            })
+            mtp_files_info.append(
+                {
+                    "source_path": str(filepath),
+                    "filename": filename,
+                    "weight_map": file_weight_map,
+                }
+            )
             print(f"Found {len(expected_keys)} MTP weights in {filename} (will copy during export)")
 
     # Store MTP file info on the model for use during export
