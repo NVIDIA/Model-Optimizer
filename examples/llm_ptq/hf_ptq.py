@@ -31,7 +31,7 @@ from example_utils import (
     get_tokenizer,
     is_enc_dec,
     is_nemotron_vl,
-    load_mtp_weights_if_needed,
+    load_mtp_weights,
     run_nemotron_vl_preview,
 )
 from torch.utils.data import DataLoader
@@ -349,12 +349,6 @@ def load_model(args: argparse.Namespace):
             )
         calibration_only = True
 
-        # Load any missing weights from non-standard safetensors (handled in get_model for non-low-memory mode)
-        # Store the MTP layer prefixes on the model for later exclusion from quantization
-        mtp_layer_prefixes = load_mtp_weights_if_needed(full_model, args.pyt_ckpt_path)
-        if mtp_layer_prefixes:
-            full_model._mtp_layer_prefixes = mtp_layer_prefixes
-
     model_type = get_model_type(full_model)
 
     device = full_model.device
@@ -632,9 +626,17 @@ def export_quantized(
                     "They will be set at deployment time."
                 )
 
+            # Load any missing weights from non-standard safetensors (handled in get_model for non-low-memory mode)
+            # Store the MTP layer prefixes on the model for later exclusion from quantization
+            mtp_layer_prefixes, mtp_state_dict = load_mtp_weights(full_model, args.pyt_ckpt_path)
+
+            if mtp_layer_prefixes:
+                full_model._mtp_layer_prefixes = mtp_layer_prefixes
+
             export_hf_checkpoint(
                 full_model,
                 export_dir=export_path,
+                extra_state_dict=mtp_state_dict,
             )
 
         # Copy custom model files (Python files and JSON configs) if trust_remote_code is used
