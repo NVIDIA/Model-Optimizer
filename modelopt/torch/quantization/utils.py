@@ -152,6 +152,9 @@ def convert_quantization_axis_to_reduce_axis(input, axis):
     return reduce_axis
 
 
+_reduce_amax_count = 0
+
+
 @torch.no_grad()
 def reduce_amax(input, axis=None, keepdims=True, squeeze_scalar=True):
     """Compute the absolute maximum value of a tensor.
@@ -172,6 +175,14 @@ def reduce_amax(input, axis=None, keepdims=True, squeeze_scalar=True):
     Returns:
         The reduced tensor.
     """
+    global _reduce_amax_count
+    _reduce_amax_count += 1
+    if _reduce_amax_count % 10000 == 0:
+        print(
+            f"[DEBUG] reduce_amax called {_reduce_amax_count} times, "
+            f"input shape={input.shape}, device={input.device}",
+            flush=True,
+        )
     # A memory-efficient implementation that avoids copying input tensor
     if axis is None:
         max_val = torch.max(input)

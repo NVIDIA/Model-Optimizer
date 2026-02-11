@@ -507,12 +507,19 @@ def _forward_loop(model: torch.nn.Module, dataloader: DataLoader) -> None:
         infer_method = model.generate if use_generate else model.forward
         max_working_batch_size = None  # Initialize max working batch size as None
 
-        for _, data in enumerate(tqdm(dataloader)):
+        for idx, data in enumerate(tqdm(dataloader)):
+            print(f"[DEBUG] Starting calibration iteration {idx}", flush=True)
             # For generate(), add max_new_tokens to prevent indefinite generation during calibration
             if use_generate:
                 data["max_new_tokens"] = 1
+                # For Qwen3-Omni Thinking models, the thinker's token limit is controlled by
+                # a separate `thinker_max_new_tokens` param (default 1024), not `max_new_tokens`.
+                # Cap it to avoid unbounded chain-of-thought generation during calibration.
+                if "qwen3omni" in model.__class__.__name__.lower():
+                    data["thinker_max_new_tokens"] = 1
             # Process batch and update max working batch size
             max_working_batch_size = _process_batch(data, infer_method, max_working_batch_size)
+            print(f"[DEBUG] Finished calibration iteration {idx}", flush=True)
 
 
 def create_forward_loop(
