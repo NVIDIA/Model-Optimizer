@@ -1,3 +1,4 @@
 saved_models_*
 *.model
 model_config.yaml
+qwen3_omni_30b_nvfp4/

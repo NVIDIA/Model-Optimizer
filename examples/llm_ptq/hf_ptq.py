@@ -766,7 +766,11 @@ def pre_quantize(
     elif model_type == "qwen3omni":
         # Qwen3Omni returns (text_ids, audio) tuple; text_ids has .sequences
         # Pass full batch with all multimodal inputs
-        result = full_model.generate(**calib_batch, max_new_tokens=100)
+        print("[DEBUG] pre_quantize: starting qwen3omni preview generation (max_new_tokens=100)...", flush=True)
+        result = full_model.generate(
+            **calib_batch, max_new_tokens=100, thinker_max_new_tokens=100
+        )
+        print("[DEBUG] pre_quantize: preview generation complete", flush=True)
         if isinstance(result, tuple):
             text_ids, _ = result
             generated_ids_before_ptq = (
@@ -827,7 +831,11 @@ def post_quantize(
     elif model_type == "qwen3omni":
         # Qwen3Omni returns (text_ids, audio) tuple; text_ids has .sequences
         # Pass full batch with all multimodal inputs
-        result = full_model.generate(**calib_batch, max_new_tokens=100)
+        # Note: thinker_max_new_tokens controls the thinker's generation limit (default 1024),
+        # which is separate from max_new_tokens. Cap it to avoid long waits.
+        result = full_model.generate(
+            **calib_batch, max_new_tokens=100, thinker_max_new_tokens=100
+        )
         if isinstance(result, tuple):
             text_ids, _ = result
             generated_ids_after_ptq = (
@@ -958,9 +966,11 @@ def quantize_main(
     # Detect if this is a Nemotron VL model using architecture-based detection
     is_nemotron_vl_model = is_nemotron_vl(full_model)
 
+    print("[DEBUG] quantize_main: calling pre_quantize...", flush=True)
     preview_input_ids, generated_ids_before_ptq, calib_batch = pre_quantize(
         args, full_model, model_type, tokenizer, calib_dataloader, is_nemotron_vl_model
     )
+    print("[DEBUG] quantize_main: pre_quantize done, proceeding to quantization", flush=True)
 
     if args.auto_quantize_bits:
         assert len(args.qformat.split(",")) > 1, (

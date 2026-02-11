@@ -79,9 +79,12 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
     """
     enable_stats_collection(model)
     if forward_loop is None:
+        print("[DEBUG] max_calibrate: no forward_loop, using weight_only_quantize", flush=True)
         weight_only_quantize(model)
     else:
+        print("[DEBUG] max_calibrate: starting forward_loop", flush=True)
         forward_loop(model)
+        print("[DEBUG] max_calibrate: forward_loop complete", flush=True)
     finish_stats_collection(model)
 
     if not distributed_sync:
