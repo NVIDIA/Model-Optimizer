@@ -809,14 +809,10 @@ def quantize_main(
     device: torch.device,
 ):
     if args.batch_size == 0:
-        # Check if this is a vision-language model
-        # For VL models, skip automatic batch size detection and use a conservative default
-        # since proper multimodal input preparation is complex
-        if is_multimodal_model(full_model) or is_nemotron_vl(full_model):
-            print(
-                "Vision-language model detected. Using default batch_size=1 for calibration "
-                "to ensure proper handling of multimodal inputs."
-            )
+        # For VL models with image-text calibration, skip automatic batch size detection
+        # since get_max_batch_size can't handle multimodal inputs
+        if args.calib_with_images:
+            print("Image-text calibration enabled. Using default batch_size=1 for calibration.")
             args.batch_size = 1
         else:
             # Calibration/sparsification will actually take much more memory than regular inference
