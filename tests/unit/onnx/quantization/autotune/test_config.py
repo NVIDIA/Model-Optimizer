@@ -19,12 +19,10 @@ Tests for the Config class in the autotuner.
 Tests configuration parameter validation and defaults.
 """
 
-import unittest
-
 from modelopt.onnx.quantization.autotune.common import Config
 
 
-class TestConfig(unittest.TestCase):
+class TestConfig:
     """Test Config class functionality."""
 
     def test_default_values(self):
