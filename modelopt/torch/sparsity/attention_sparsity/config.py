@@ -104,11 +104,13 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
     @field_validator("backend")
     @classmethod
     def validate_backend(cls, v):
-        """Validate backend is pytorch."""
-        if v != "pytorch":
+        """Validate backend is pytorch or triton."""
+        valid_backends = {"pytorch", "triton"}
+        if v not in valid_backends:
             raise ValueError(
-                f"Invalid backend: {v}. Only 'pytorch' backend is supported. "
-                f"Model must be loaded with attn_implementation='eager'."
+                f"Invalid backend: {v}. Supported backends: {valid_backends}. "
+                f"'pytorch' requires attn_implementation='eager'. "
+                f"'triton' requires the triton package."
             )
         return v
 
