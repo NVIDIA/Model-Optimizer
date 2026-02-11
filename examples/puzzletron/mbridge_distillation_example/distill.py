@@ -22,19 +22,7 @@ It loads both student and teacher models from Megatron-Bridge checkpoint paths
 and supports YAML configuration files and CLI overrides.
 
 Examples:
-    Basic usage with required paths:
-        $ torchrun --nproc_per_node=8 distill.py \
-        --student-ckpt /path/to/student/iter_0000000 \
-        --teacher-ckpt /path/to/teacher/iter_0000000 \
-        --data-path /path/to/tokenized/dataset
-
-    Using CLI overrides:
-        $ torchrun --nproc_per_node=8 distill.py \
-        --student-ckpt /path/to/student/iter_0000000 \
-        --teacher-ckpt /path/to/teacher/iter_0000000 \
-        --data-path /path/to/tokenized/dataset \
-        train.train_iters=10000 \
-        checkpoint.save="/path/to/output"
+    see distill.sh for examples
 """
 
 import argparse
