@@ -1583,56 +1583,6 @@ def prepare_hessian_inverse(h, weight, percdamp):
     return h_inv
 
 
-def quantize_block(full_weight, block_start, block_end, h_inv, quantizer):
-    """Quantize a block of weights group by group (based on quantizer block sizes) with error propagation.
-
-    Args:
-        full_weight: The full weight tensor (needed for INT4 quantization)
-        block_start: Starting column index of the block
-        block_end: Ending column index of the block
-        h_inv: Hessian inverse
-        quantizer: The quantizer to apply
-    Returns:
-        quantized_block: Quantized weights for this block
-        losses: Quantization losses per element
-        errors: Accumulated errors for propagation
-    """
-    # Extract the block we're working on
-    block_weight = full_weight[:, block_start:block_end]
-    block_hinv = h_inv[block_start:block_end, block_start:block_end]
-    block_size = block_end - block_start
-
-    quantized_block = torch.zeros_like(block_weight)
-    losses = torch.zeros_like(block_weight)
-    errors = torch.zeros_like(block_weight)
-
-    # We perform column-wise update for GPTQ within the block
-    group_size = 1
-
-    for group_start in range(0, block_size, group_size):
-        group_end = min(group_start + group_size, block_size)
-        group_cols = slice(group_start, group_end)
-        # Get current column and its Hessian inverse diagonal
-        weight_col = block_weight[:, group_cols]
-        hinv_diag = torch.diag(block_hinv[group_cols, group_cols])
-
-        # Quantize using the full weight, then extract the columns we need
-        quantized_full = quantizer(full_weight)
-        quantized_cols = quantized_full[:, block_start + group_start : block_start + group_end]
-        quantized_block[:, group_cols] = quantized_cols
-
-        # Compute quantization error and loss
-        error = (weight_col - quantized_cols) / hinv_diag
-        losses[:, group_cols] = (weight_col - quantized_cols) ** 2 / (hinv_diag**2) / 2
-        errors[:, group_cols] = error
-
-        # Propagate error to remaining columns in block
-        block_weight[:, group_start:] -= error @ block_hinv[group_start:group_end, group_start:]
-        full_weight[:, block_start:block_end] = block_weight
-
-    return quantized_block, losses, errors
-
-
 def blockwise_weight_update(module, h, block_size, percdamp):
     """Update module weights using GPTQ-style blockwise quantization.
 
@@ -1648,28 +1598,30 @@ def blockwise_weight_update(module, h, block_size, percdamp):
     # Preprocess Hessian: handle dead neurons and add damping
     h_inv = prepare_hessian_inverse(h, weight, percdamp)
 
-    # Initialize output tensors
-    quantized_weight = torch.zeros_like(weight)
-    losses = torch.zeros_like(weight)
-
     # Process weights in blocks
     for block_start in range(0, num_cols, block_size):
         block_end = min(block_start + block_size, num_cols)
+        n_cols = block_end - block_start
+        wblk = weight.clone()
+        errs = torch.zeros_like(wblk[:, block_start:block_end])
+        h_inv_cho_blk = h_inv[block_start:block_end, block_start:block_end]
 
-        quantized_block, block_losses, block_errors = quantize_block(
-            weight, block_start, block_end, h_inv, module.weight_quantizer
-        )
-        # Store results
-        quantized_weight[:, block_start:block_end] = quantized_block
-        losses[:, block_start:block_end] = block_losses
+        for i in range(n_cols):
+            w_ci = wblk[:, block_start + i]
+            d = h_inv_cho_blk[i, i]
+            qdq = module.weight_quantizer(wblk)
+            weight[:, block_start + i] = qdq[:, block_start + i]
+            err = (w_ci - qdq[:, block_start + i]) / d
+            wblk[:, block_start + i : block_end].addr_(err, h_inv_cho_blk[i, i:], alpha=-1)
+            errs[:, i] = err
 
         # Propagate errors to remaining weights
-        weight[:, block_end:] -= block_errors @ h_inv[block_start:block_end, block_end:]
+        weight[:, block_end:].addmm_(errs, h_inv[block_start:block_end, block_end:], alpha=-1)
 
     # Print relative mse error
-    _print_relative_mse_error(quantized_weight, module.weight.float(), h, module.name)
+    _print_relative_mse_error(weight, module.weight.float(), h, module.name)
     # Update module weights
-    module.weight.data = quantized_weight.reshape(module.weight.shape).to(module.weight.data.dtype)
+    module.weight.data = weight.reshape(module.weight.shape).to(module.weight.data.dtype)
 
 
 def gptq_lite(
