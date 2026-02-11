@@ -21,13 +21,7 @@ Note: Full integration tests with TensorRT benchmarking should be in separate in
 """
 
 import os
-import sys
 import tempfile
-
-# Add parent and current directory to path
-_test_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(_test_dir))
-sys.path.insert(0, _test_dir)
 
 import models as _test_models
 import onnx
@@ -205,20 +199,47 @@ class TestQDQAutotuner:
             pytest.skip("No regions discovered")
 
     def test_generate_scheme(self, simple_conv_model):
-        """Test generating an insertion scheme."""
+        """Test generating multiple schemes and that Q/DQ nodes appear in exported model."""
         autotuner = QDQAutotuner(simple_conv_model)
         config = _create_test_config()
         autotuner.initialize(config)
 
-        if len(autotuner.regions) > 0:
-            region = autotuner.regions[0]
-            autotuner.set_profile_region(region)
-            # Generate a scheme
-            scheme_idx = autotuner.generate()
-            # Should return a valid index (>= 0) or -1 if no more unique schemes
-            assert isinstance(scheme_idx, int)
-        else:
+        if len(autotuner.regions) == 0:
             pytest.skip("No regions discovered")
+
+        autotuner.submit(10.0)  # baseline
+        region = autotuner.regions[0]
+        autotuner.set_profile_region(region)
+
+        # Generate multiple schemes and submit a latency for each
+        num_generated = 0
+        while True:
+            scheme_idx = autotuner.generate()
+            if scheme_idx < 0:
+                break
+            assert isinstance(scheme_idx, int)
+            autotuner.submit(10.0 + num_generated * 0.1)  # dummy latency
+            num_generated += 1
+            if num_generated >= 5:  # cap iterations
+                break
+
+        assert num_generated > 0, "Expected at least one scheme to be generated"
+        autotuner.set_profile_region(None, commit=True)
+
+        # Export with Q/DQ and verify Q/DQ nodes are in the model
+        with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as f:
+            output_path = f.name
+        try:
+            autotuner.export_onnx(output_path, insert_qdq=True)
+            exported = onnx.load(output_path)
+            node_ops = [n.op_type for n in exported.graph.node]
+            assert "QuantizeLinear" in node_ops, "Expected QuantizeLinear nodes in exported model"
+            assert "DequantizeLinear" in node_ops, (
+                "Expected DequantizeLinear nodes in exported model"
+            )
+        finally:
+            if os.path.exists(output_path):
+                os.unlink(output_path)
 
     def test_submit_latency(self, simple_conv_model):
         """Test submitting performance measurement."""
