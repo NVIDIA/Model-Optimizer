@@ -750,8 +750,6 @@ class _DynamicEagleGPTModel(EagleModel):
             with FakeTensorMode():
                 d2t = torch.load(draft_vocab_cache, mmap=True)
             self.eagle_config.draft_vocab_size = d2t.shape[0]
-        else:
-            self.eagle_config.draft_vocab_size = self.vocab_size
 
         if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size:
             assert eagle_self_logit_distillation, (
