@@ -42,6 +42,8 @@ from datasets import load_dataset
 from megatron.core.datasets import indexed_dataset
 from transformers import AutoTokenizer
 
+from modelopt.torch.utils import num2hrb
+
 __all__ = ["megatron_preprocess_data"]
 
 
@@ -109,7 +111,7 @@ class _Partition:
     def _print_processing_stats(self, count: int, total_doc_len: int, total_enc_len: int):
         if count % self.log_interval == 0:
             print(
-                f"Processed {count} documents, {total_doc_len} chars, {total_enc_len} tokens",
+                f"Processed {num2hrb(count)} docs = {num2hrb(total_doc_len)} chars = {num2hrb(total_enc_len)} tokens",
                 file=sys.stderr,
             )
 
@@ -202,7 +204,7 @@ def megatron_preprocess_data(
         num_tokens = partition.process_json_file(name, output_dir, encoder)
         final_enc_len += num_tokens
 
-    print(f">>> Total number of tokens: {final_enc_len}")
+    print(f">>> Total number of tokens: {num2hrb(final_enc_len)}")
 
 
 def main():
