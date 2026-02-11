@@ -44,8 +44,12 @@ import os
 from typing import Any
 
 import torch
-from ds_kernel import weight_dequant
 from safetensors.torch import load_file, save_file
+
+try:
+    from ds_kernel import weight_dequant
+except ImportError:
+    weight_dequant = None
 from tqdm import tqdm
 
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
@@ -90,13 +94,15 @@ def remove_quantization_config_from_original_config(export_dir: str) -> None:
     config_path = os.path.join(export_dir, "config.json")
     with open(config_path) as f:
         cfg = json.load(f)
+    if "quantization_config" not in cfg:
+        return
     del cfg["quantization_config"]
     with open(config_path, "w") as f:
         json.dump(cfg, f, indent=2, sort_keys=True)
         f.write("\n")
 
 
-def load_and_preprocess_state_dict(modelopt_state_root, world_size=8):
+def load_and_preprocess_state_dict(modelopt_state_root, world_size=8, skip_remap=False):
     state_dict_list = [
         torch.load(f"{modelopt_state_root}/amax_dict_rank{rank}-mp{world_size}.pt")
         for rank in range(world_size)
@@ -110,7 +116,8 @@ def load_and_preprocess_state_dict(modelopt_state_root, world_size=8):
                 amax = torch.max(amax, merged_state_dict[key].to(amax.device))
             merged_state_dict[key] = amax
 
-    _remap_key(merged_state_dict)
+    if not skip_remap:
+        _remap_key(merged_state_dict)
 
     # set amax for modules to be fused and make sure they share the same input
     for key, amax in merged_state_dict.items():
@@ -128,18 +135,20 @@ def load_and_preprocess_state_dict(modelopt_state_root, world_size=8):
     return merged_state_dict
 
 
-def process_quant_config(quant_config_path: str, save_path: str) -> dict[str, Any]:
+def process_quant_config(quant_config_path: str, save_path: str, skip_remap: bool = False) -> dict[str, Any]:
     with open(quant_config_path) as f:
         quant_config = json.load(f)
 
     if "exclude_modules" in quant_config["quantization"]:
         exclude_dict = dict.fromkeys(quant_config["quantization"]["exclude_modules"])
-        _remap_key(exclude_dict)
+        if not skip_remap:
+            _remap_key(exclude_dict)
         quant_config["quantization"]["exclude_modules"] = list(exclude_dict.keys())
 
     per_layer_quant_config = {}
     if "quantized_layers" in quant_config["quantization"]:
-        _remap_key(quant_config["quantization"]["quantized_layers"])
+        if not skip_remap:
+            _remap_key(quant_config["quantization"]["quantized_layers"])
         per_layer_quant_config = quant_config["quantization"]["quantized_layers"]
 
     with open(save_path, "w") as f:
@@ -207,6 +216,10 @@ def convert_fp8_ckpt_to_nvfp4(
                     # Get scale_inv from the correct file
                     scale_inv = get_tensor(scale_inv_name)
                     fp8_weight_names.append(key)
+                    assert weight_dequant is not None, (
+                        "ds_kernel.weight_dequant is required for FP8 checkpoint conversion. "
+                        "Install ds_kernel or use --model_type hf for bf16 checkpoints."
+                    )
                     bf16_state_dict[key] = weight_dequant(item, scale_inv)
                 except KeyError:
                     print(f"Warning: Missing scale_inv tensor for {key}, skipping conversion")
@@ -299,16 +312,27 @@ if __name__ == "__main__":
     )
     parser.add_argument("--fp8_hf_path", type=str, required=True, help="fp8 hf ckpt.")
     parser.add_argument("--world_size", type=int, required=True, help="world size used by ptq.")
+    parser.add_argument(
+        "--model_type",
+        type=str,
+        choices=["deepseek", "hf"],
+        default="deepseek",
+        help="Model type: 'deepseek' for DeepSeek FP8 ckpt, 'hf' for standard HF bf16 ckpt (e.g. GLM-5).",
+    )
     args = parser.parse_args()
+
+    skip_remap = args.model_type == "hf"
 
     per_layer_quant_config = process_quant_config(
         quant_config_path=os.path.join(args.amax_path, "hf_quant_config.json"),
         save_path=os.path.join(args.fp4_path, "hf_quant_config.json"),
+        skip_remap=skip_remap,
     )
 
     renamed_state_dict = load_and_preprocess_state_dict(
         modelopt_state_root=args.amax_path,
         world_size=args.world_size,
+        skip_remap=skip_remap,
     )
     convert_fp8_ckpt_to_nvfp4(
         renamed_state_dict,
