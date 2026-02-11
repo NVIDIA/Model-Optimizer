@@ -735,6 +735,11 @@ class _DynamicEagleGPTModel(EagleModel):
         self.eagle_config.hidden_size = self.config.hidden_size
         self.eagle_config.vocab_size = self.vocab_size
         self.eagle_config.max_sequence_length = self.max_sequence_length
+        self.eagle_config.draft_vocab_size = (
+            self.vocab_size
+            if self.eagle_config.draft_vocab_size is None
+            else self.eagle_config.draft_vocab_size
+        )
 
         if draft_vocab_cache is not None:
             if not os.path.isfile(draft_vocab_cache):
