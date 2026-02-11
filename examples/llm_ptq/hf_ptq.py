@@ -69,6 +69,8 @@ from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
+from ..speculative_decoding.eagle_utils import make_eagle_supervised_data_module
+
 RAND_SEED = 1234
 
 QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
@@ -316,7 +318,12 @@ def auto_quantize(
 def load_model(args: argparse.Namespace):
     # If low memory mode is enabled, we compress the model while loading the HF checkpoint.
     calibration_only = False
-    if not args.low_memory_mode:
+    if args.specdec_offline_dataset is not None:
+        full_model = AutoModelForCausalLM.from_pretrained(
+            args.pyt_ckpt_path,
+            trust_remote_code=args.trust_remote_code,
+        )
+    elif not args.low_memory_mode:
         full_model = get_model(
             args.pyt_ckpt_path,
             args.device,
@@ -402,27 +409,33 @@ def load_model(args: argparse.Namespace):
             language_model = extracted_lm
             model_type = extracted_model_type
     else:
-        if args.dataset is None:
-            args.dataset = ["cnn_dailymail", "nemotron-post-training-dataset-v2"]
-            warnings.warn(
-                "No dataset specified. Defaulting to cnn_dailymail and nemotron-post-training-dataset-v2."
+        if args.specdec_offline_dataset is not None:
+            language_model = full_model
+        else:
+            if args.dataset is None:
+                args.dataset = ["cnn_dailymail", "nemotron-post-training-dataset-v2"]
+                warnings.warn(
+                    "No dataset specified. Defaulting to cnn_dailymail and nemotron-post-training-dataset-v2."
+                )
+            # Adjust calib_size to match dataset length by extending or truncating as needed
+            args.calib_size = (args.calib_size + [args.calib_size[-1]] * len(args.dataset))[
+                : len(args.dataset)
+            ]
+
+            # We only quantize the language model for VLMs other than the type supported above.
+            extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(
+                full_model
             )
-        # Adjust calib_size to match dataset length by extending or truncating as needed
-        args.calib_size = (args.calib_size + [args.calib_size[-1]] * len(args.dataset))[
-            : len(args.dataset)
-        ]
+            if extracted_lm is not None:
+                language_model = extracted_lm
+                model_type = extracted_model_type
+
         tokenizer = get_tokenizer(args.pyt_ckpt_path, trust_remote_code=args.trust_remote_code)
 
         default_padding_side = tokenizer.padding_side
         default_pad_token = tokenizer.pad_token
         # Left padding usually provides better calibration result.
         tokenizer.padding_side = "left"
-
-        # We only quantize the language model for VLMs other than the type supported above.
-        extracted_lm, extracted_model_type = extract_and_prepare_language_model_from_vl(full_model)
-        if extracted_lm is not None:
-            language_model = extracted_lm
-            model_type = extracted_model_type
 
     if model_type == "phi4mm":
         warnings.warn("Please set the default input_mode to InputMode.LANGUAGE before quantizing.")
@@ -833,16 +846,35 @@ def quantize_main(
 
     print(f"Use calib batch_size {args.batch_size}")
 
-    calib_dataloader, first_text_speech_dataset = make_calib_dataloader(
-        args, language_model, processor, tokenizer, device, model_type
-    )
+    if args.specdec_offline_dataset is not None:
+        data_args = argparse.Namespace(
+            vlm_processor=None,
+            vlm_img_dir=None,
+            data_path=None,
+            offline_data_path=args.specdec_offline_dataset,
+            devlazy_preprocessice=True,
+        )
+        data_module = make_eagle_supervised_data_module(
+            tokenizer, data_args, max_length=args.calib_seq
+        )
+        calib_dataloader = DataLoader(
+            data_module["eval_dataset"],
+            batch_size=args.batch_size,
+            shuffle=False,
+            collate_fn=data_module["data_collator"],
+        )
+    else:
+        calib_dataloader, first_text_speech_dataset = make_calib_dataloader(
+            args, language_model, processor, tokenizer, device, model_type
+        )
 
     # Detect if this is a Nemotron VL model using architecture-based detection
     is_nemotron_vl_model = is_nemotron_vl(full_model)
 
-    preview_input_ids, generated_ids_before_ptq = pre_quantize(
-        args, full_model, model_type, tokenizer, calib_dataloader, is_nemotron_vl_model
-    )
+    if args.specdec_offline_dataset is not None:
+        preview_input_ids, generated_ids_before_ptq = pre_quantize(
+            args, full_model, model_type, tokenizer, calib_dataloader, is_nemotron_vl_model
+        )
 
     if args.auto_quantize_bits:
         assert len(args.qformat.split(",")) > 1, (
@@ -915,17 +947,18 @@ def quantize_main(
             assert model_type != "dbrx", f"Does not support export {model_type} without quantizaton"
             print(f"qformat: {args.qformat}. No quantization applied, export {device} model")
 
-    post_quantize(
-        args,
-        full_model,
-        model_type,
-        tokenizer,
-        processor,
-        preview_input_ids,
-        generated_ids_before_ptq,
-        is_nemotron_vl_model,
-        first_text_speech_dataset,
-    )
+    if args.specdec_offline_dataset is None:
+        post_quantize(
+            args,
+            full_model,
+            model_type,
+            tokenizer,
+            processor,
+            preview_input_ids,
+            generated_ids_before_ptq,
+            is_nemotron_vl_model,
+            first_text_speech_dataset,
+        )
     export_quantized(
         args,
         full_model,
@@ -983,6 +1016,14 @@ def parse_args() -> argparse.Namespace:
             f"dataset choices are {get_supported_datasets()}"
         ),
         type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--specdec_offline_dataset",
+        help=(
+            "If set, the model is a speculative decoding model,"
+            "which uses offline dataset for calibration. "
+        ),
         default=None,
     )
     parser.add_argument(
