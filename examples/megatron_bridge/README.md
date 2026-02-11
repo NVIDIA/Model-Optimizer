@@ -172,6 +172,19 @@ torchrun --nproc_per_node 8 distill.py \
 
 To run the distillation script on a Slurm cluster for multi-node training, you just need use `python` instead of `torchrun` and set the number of nodes using `#SBATCH --nodes=<num_nodes>` clause in your Slurm script.
 
+### Convert Megatron checkpoint to Hugging Face format
+
+To convert the Megatron checkpoint from last iteration (or any intermediate iteration) to Hugging Face format, you need the pruned model config (`--output_hf_path` from `prune_minitron.py` script) and the distilled megatron checkpoint dir (`<distill_output_dir>/checkpoints/iter_<iter_number>`) to run the following command:
+
+```bash
+uv run python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py export \
+    --hf-model <path_to_pruned_hf_ckpt> \
+    --megatron-path <distill_output_dir>/checkpoints/iter_<iter_number> \
+    --hf-path <path_to_save_distilled_hf_ckpt>
+```
+
+For more details, you can refer to the checkpoint conversion scripts in the [Megatron-Bridge README](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/conversion).
+
 ## Quantization
 
 TODO
