@@ -89,44 +89,45 @@ We support calibration for INT8, FP8 and FP4 precision and for both weights and 
 We also provide instructions on deploying and running E2E diffusion pipelines with Model Optimizer quantized INT8 and FP8 Backbone to generate images and measure latency on target GPUs. Note, Jetson devices are not supported at this time due to the incompatibility of the software.
 
 > [!NOTE]
-> Model calibration requires relatively more GPU computing power then deployment.It does not need to be on the same GPUs as the deployment target GPUs. Using the command line below will execute both calibration and ONNX export.
+> Model calibration requires relatively more GPU computing power then deployment. It does not need to be on the same GPUs as the deployment target GPUs. ONNX export and TensorRT engine instructions live in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).
 
-### Quantize and export scripts
+### Quantize scripts
 
-#### 8-bit Quantize and ONNX Export [Script](./quantization/build_sdxl_8bit_engine.sh)
-
-You can run the following script to quantize SDXL backbone to INT8 or FP8 and generate an onnx model built with default settings for SDXL. You can then directly head to the [Build the TRT engine for the Quantized ONNX Backbone](#build-the-trt-engine-for-the-quantized-onnx-backbone) section to run E2E pipeline and generate images.
-
-```sh
-bash build_sdxl_8bit_engine.sh --format {FORMAT} # FORMAT can be int8 or fp8
-```
-
-If you prefer to customize parameters in calibration or run other models, please follow the instructions below.
-
-#### FLUX-Dev|SD3-Medium|SDXL|SDXL-Turbo INT8 [Script](./quantization/quantize.py)
+#### FLUX|SD3|SDXL INT8 [Script](./quantization/quantize.py)
 
 ```sh
 python quantize.py \
-    --model {flux-dev|sdxl-1.0|sdxl-turbo|sd3-medium} \
+    --model {flux-dev|flux-schnell|sdxl-1.0|sdxl-turbo|sd3-medium|sd3.5-medium} \
     --format int8 --batch-size 2 \
     --calib-size 32 --alpha 0.8 --n-steps 20 \
-    --model-dtype {Half/BFloat16} --trt-high-precision-dtype {Half|BFloat16} \
-    --quantized-torch-ckpt-save-path ./{MODEL_NAME}.pt --onnx-dir {ONNX_DIR}
+    --model-dtype {Half/BFloat16} \
+    --quantized-torch-ckpt-save-path ./{MODEL_NAME}.pt \
+    --hf-ckpt-dir ./hf_ckpt
 ```
 
-#### FLUX-Dev|SDXL|SDXL-Turbo|LTX-Video FP8/FP4 [Script](./quantization/quantize.py)
-
-*In our example code, FP4 is only supported for Flux. However, you can modify our script to enable FP4 format support for your own model.*
+#### FLUX|SD3|SDXL|LTX|WAN2.2 FP8/FP4 [Script](./quantization/quantize.py)
 
 ```sh
 python quantize.py \
-    --model {flux-dev|sdxl-1.0|sdxl-turbo|ltx-video-dev} --model-dtype {Half|BFloat16} --trt-high-precision-dtype {Half|BFloat16} \
+    --model {flux-dev|flux-schnell|sdxl-1.0|sdxl-turbo|sd3-medium|sd3.5-medium|ltx-video-dev|wan2.2-t2v-14b|wan2.2-t2v-5b} \
+    --model-dtype {Half|BFloat16} \
     --format {fp8|fp4} --batch-size 2 --calib-size {128|256} --quantize-mha \
     --n-steps 20 --quantized-torch-ckpt-save-path ./{MODEL_NAME}.pt --collect-method default \
-    --onnx-dir {ONNX_DIR}
+    --hf-ckpt-dir ./hf_ckpt
 ```
 
-We recommend using a device with a minimum of 48GB of combined CPU and GPU memory for exporting ONNX models. If not, please use CPU for onnx export.
+#### [LTX-2](https://github.com/Lightricks/LTX-2) FP4 (torch checkpoint export)
+
+```sh
+python quantize.py \
+    --model ltx-2 --format fp4 --batch-size 1 --calib-size 32 --n-steps 40 \
+    --extra-param checkpoint_path=./ltx-2-19b-dev-fp8.safetensors \
+    --extra-param distilled_lora_path=./ltx-2-19b-distilled-lora-384.safetensors \
+    --extra-param spatial_upsampler_path=./ltx-2-spatial-upscaler-x2-1.0.safetensors \
+    --extra-param gemma_root=./gemma-3-12b-it-qat-q4_0-unquantized \
+    --extra-param fp8transformer=true \
+    --quantized-torch-ckpt-save-path ./ltx-2-transformer.pt
+```
 
 #### Important Parameters
 
@@ -135,7 +136,7 @@ We recommend using a device with a minimum of 48GB of combined CPU and GPU memor
 - `calib-size`: For SDXL INT8, we recommend 32 or 64, for SDXL FP8, 128 is recommended.
 - `n_steps`: Recommendation: SD/SDXL 20 or 30, SDXL-Turbo 4.
 
-**Then, we can load the generated checkpoint and export the INT8/FP8 quantized model in the next step. For FP8, we only support the TRT deployment on Ada/Hopper GPUs.**
+**You can use the generated checkpoint directly in PyTorch, export a Hugging Face checkpoint (`--hf-ckpt-dir`) to deploy the model on SGLang/vLLM/TRTLLM, or follow the ONNX/TensorRT workflow in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).**
 
 ## Quantization Aware Training (QAT)
 
@@ -222,113 +223,7 @@ transformer, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
 
 ## Build and Run with TensorRT Compiler Framework
 
-### Build the TRT engine for the Quantized ONNX Backbone
-
-> [!IMPORTANT]
-> TensorRT environment must be setup prior -- Please see [Pre-Requisites](#pre-requisites)
-> INT8 requires **TensorRT version >= 9.2.0**. If you prefer to use the FP8 TensorRT, ensure you have **TensorRT version 10.2.0 or higher**. You can download the latest version of TensorRT at [here](https://developer.nvidia.com/tensorrt/download). Deployment of SVDQuant is currently not supported.
-
-Generate INT8/FP8 Backbone Engine
-
-```bash
-# For SDXL
-trtexec --builderOptimizationLevel=4 --stronglyTyped --onnx=./model.onnx \
-    --minShapes=sample:2x4x128x128,timestep:1,encoder_hidden_states:2x77x2048,text_embeds:2x1280,time_ids:2x6 \
-    --optShapes=sample:16x4x128x128,timestep:1,encoder_hidden_states:16x77x2048,text_embeds:16x1280,time_ids:16x6 \
-    --maxShapes=sample:16x4x128x128,timestep:1,encoder_hidden_states:16x77x2048,text_embeds:16x1280,time_ids:16x6 \
-    --saveEngine=model.plan
-
-# For SD3-Medium
-trtexec --builderOptimizationLevel=4 --stronglyTyped --onnx=./model.onnx \
-    --minShapes=hidden_states:2x16x128x128,timestep:2,encoder_hidden_states:2x333x4096,pooled_projections:2x2048 \
-    --optShapes=hidden_states:16x16x128x128,timestep:16,encoder_hidden_states:16x333x4096,pooled_projections:16x2048 \
-    --maxShapes=hidden_states:16x16x128x128,timestep:16,encoder_hidden_states:16x333x4096,pooled_projections:16x2048 \
-    --saveEngine=model.plan
-
-# For FLUX-Dev FP8
-trtexec --onnx=./model.onnx --fp8 --bf16 --stronglyTyped \
-    --minShapes=hidden_states:1x4096x64,img_ids:4096x3,encoder_hidden_states:1x512x4096,txt_ids:512x3,timestep:1,pooled_projections:1x768,guidance:1 \
-    --optShapes=hidden_states:1x4096x64,img_ids:4096x3,encoder_hidden_states:1x512x4096,txt_ids:512x3,timestep:1,pooled_projections:1x768,guidance:1 \
-    --maxShapes=hidden_states:1x4096x64,img_ids:4096x3,encoder_hidden_states:1x512x4096,txt_ids:512x3,timestep:1,pooled_projections:1x768,guidance:1 \
-    --saveEngine=model.plan
-```
-
-**Please note that `maxShapes` represents the maximum shape of the given tensor. If you want to use a larger batch size or any other dimensions, feel free to adjust the value accordingly.**
-
-### Run End-to-end Stable Diffusion Pipeline with Model Optimizer Quantized ONNX Model and demoDiffusion
-
-#### demoDiffusion
-
-If you want to run end-to-end SD/SDXL pipeline with Model Optimizer quantized UNet to generate images and measure latency on target GPUs, here are the steps:
-
-- Clone a copy of [demo/Diffusion repo](https://github.com/NVIDIA/TensorRT/tree/release/10.2/demo/Diffusion).
-
-- Following the README from demoDiffusion to set up the pipeline, and run a baseline txt2img example (fp16):
-
-```sh
-# SDXL
-python demo_txt2img_xl.py "enchanted winter forest, soft diffuse light on a snow-filled day, serene nature scene, the forest is illuminated by the snow" --negative-prompt "normal quality, low quality, worst quality, low res, blurry, nsfw, nude" --version xl-1.0 --scheduler Euler --denoising-steps 30 --seed 2946901
-# Please refer to the examples provided in the demoDiffusion SD/SDXL pipeline.
-```
-
-Note, it will take some time to build TRT engines for the first time
-
-- Replace the fp16 backbone TRT engine with int8 engine generated in [Build the TRT engine for the Quantized ONNX Backbone](#build-the-trt-engine-for-the-quantized-onnx-backbone), e.g.,:
-
-```sh
-cp -r {YOUR_UNETXL}.plan ./engine/
-```
-
-Note, the engines must be built on the same GPU, and ensure that the INT8 engine name matches the names of the FP16 engines to enable compatibility with the demoDiffusion pipeline.
-
-- Run the above txt2img example command again. You can compare the generated images and latency for fp16 vs int8.
-  Similarly, you could run end-to-end pipeline with Model Optimizer quantized backbone and corresponding examples in demoDiffusion with other diffusion models.
-
-### Running the inference pipeline with DeviceModel
-
-DeviceModel is an interface designed to run TensorRT engines like torch models. It takes torch inputs and returns torch outputs. Under the hood, DeviceModel exports a torch checkpoint to ONNX and then generates a TensorRT engine from it. This allows you to swap the backbone of the diffusion pipeline with DeviceModel and execute the pipeline for your desired prompt.
-
-Generate a quantized torch checkpoint using the [Script](./quantization/quantize.py) shown below:
-
-```bash
-python quantize.py \
-    --model {sdxl-1.0|sdxl-turbo|sd3-medium|flux-dev} \
-    --format fp8 \
-    --batch-size {1|2} \
-    --calib-size 128 \
-    --n-steps 20 \
-    --quantized-torch-ckpt-save-path ./{MODEL}_fp8.pt \
-    --collect-method default
-```
-
-Generate images for the quantized checkpoint with the following [Script](./quantization/diffusion_trt.py):
-
-```bash
-python diffusion_trt.py \
-    --model {sdxl-1.0|sdxl-turbo|sd3-medium|flux-dev} \
-    --prompt "A cat holding a sign that says hello world" \
-    [--override-model-path /path/to/model] \
-    [--restore-from ./{MODEL}_fp8.pt] \
-    [--onnx-load-path {ONNX_DIR}] \
-    [--trt-engine-load-path {ENGINE_DIR}] \
-    [--dq-only] \
-    [--torch] \
-    [--save-image-as /path/to/image] \
-    [--benchmark] \
-    [--torch-compile] \
-    [--skip-image]
-```
-
-This script will save the output image as `./{MODEL}.png` and report the latency of the TensorRT backbone.
-To generate the image with FP16|BF16 precision, you can run the command shown above without the `--restore-from` argument.
-
-While loading a TensorRT engine using the --trt-engine-load-path argument, it is recommended to load only engines generated using this pipeline.
-
-#### Demo Images
-
-| SDXL FP16 | SDXL INT8 |
-|:---------:|:---------:|
-| ![FP16](./quantization/assets/xl_base-fp16.png) | ![INT8](./quantization/assets/xl_base-int8.png) |
+ONNX export and TensorRT engine instructions are documented in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).
 
 ### LoRA
 

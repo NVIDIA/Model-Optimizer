@@ -21,7 +21,6 @@ FP8_DEFAULT_CONFIG = {
         "*weight_quantizer": {"num_bits": (4, 3), "axis": None},
         "*input_quantizer": {"num_bits": (4, 3), "axis": None},
         "*output_quantizer": {"enable": False},
-        "*[qkv]_bmm_quantizer": {"num_bits": (4, 3), "axis": None},
         "*softmax_quantizer": {
             "num_bits": (4, 3),
             "axis": None,
@@ -56,7 +55,6 @@ NVFP4_DEFAULT_CONFIG = {
             "enable": True,
         },
         "*output_quantizer": {"enable": False},
-        "*[qkv]_bmm_quantizer": {"num_bits": (4, 3), "axis": None},
         "*softmax_quantizer": {
             "num_bits": (4, 3),
             "axis": None,
