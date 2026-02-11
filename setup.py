@@ -104,7 +104,6 @@ optional_deps = {
 }
 
 # create "compound" optional dependencies
-optional_deps["qdq-placement"] = [*optional_deps["onnx"], "pycuda>=2026.01"]
 optional_deps["all"] = [
     deps for k in optional_deps if not k.startswith("dev") for deps in optional_deps[k]
 ]
