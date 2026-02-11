@@ -21,7 +21,6 @@ import uuid
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from tensorrt_llm._torch.auto_deploy import LLM
-from tensorrt_llm.builder import BuildConfig
 from tensorrt_llm.llmapi.llm import RequestOutput
 from tensorrt_llm.sampling_params import SamplingParams
 from tensorrt_llm.serve.openai_protocol import (
@@ -45,8 +44,6 @@ def build_runner_from_config(args) -> LLM:
     """Builds a model runner from our config."""
     mto.enable_huggingface_checkpointing()
     model_kwargs = {"max_position_embeddings": args.max_seq_len, "use_cache": False}
-    build_config = BuildConfig(max_seq_len=args.max_seq_len, max_batch_size=args.max_batch_size)
-    build_config.plugin_config.tokens_per_block = args.max_seq_len
 
     llm = LLM(
         model=args.ckpt_path,
