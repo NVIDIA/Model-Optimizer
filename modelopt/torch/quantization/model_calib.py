@@ -15,6 +15,7 @@
 
 """Calibration utilities."""
 
+import contextlib
 import math
 import os
 import warnings
@@ -1789,6 +1790,56 @@ def gptq_lite(
     print_rank_0("GPTQ-lite quantization completed successfully")
 
 
+def _set_input_quantizers_calib_mode(layer: nn.Module):
+    """Set all input quantizers of a layer to calibration mode."""
+    for name, module in layer.named_modules():
+        if (
+            isinstance(module, TensorQuantizer)
+            and "input_quantizer" in name
+            and not module._disabled
+            and not module._dynamic
+            and module._calibrator is not None
+        ):
+            module._calibrator.reset()
+            module.disable_quant()
+            module.enable_calib()
+
+
+def _set_input_quantizers_quant_mode(layer: nn.Module):
+    """Load fresh amaxes and restore all input quantizers of a layer to quant mode."""
+    for name, module in layer.named_modules():
+        if (
+            isinstance(module, TensorQuantizer)
+            and "input_quantizer" in name
+            and not module._disabled
+            and not module._dynamic
+            and module._calibrator is not None
+        ):
+            if module._calibrator.compute_amax() is not None:
+                module.load_calib_amax()
+            module.enable_quant()
+            module.disable_calib()
+
+
+@contextlib.contextmanager
+def _disable_input_quantizers(layer: nn.Module):
+    """Temporarily disable all enabled input quantizers in a layer."""
+    enabled_quantizers = []
+    for name, module in layer.named_modules():
+        if (
+            isinstance(module, TensorQuantizer)
+            and "input_quantizer" in name
+            and not module._disabled
+        ):
+            module.disable()
+            enabled_quantizers.append(module)
+    try:
+        yield
+    finally:
+        for module in enabled_quantizers:
+            module.enable()
+
+
 @torch.no_grad()
 def sequential_calibrate(
     model: nn.Module,
@@ -1836,8 +1887,6 @@ def sequential_calibrate(
     finally:
         input_getter._unpatch_all_layers()
 
-    print_rank_0("Sequential calibration completed successfully")
-
 
 @torch.no_grad()
 def gptq(
@@ -1877,8 +1926,10 @@ def gptq(
     # Phase 2: Register hooks to collect Hessians during forward passes
     def hessian_hook(module, input, output):
         """Hook to intercept activations and update hessian matrix."""
+        if hasattr(module, "input_quantizer") and module.input_quantizer.is_enabled:
+            inp = module.input_quantizer(input[0])
         state = hessian_state[module.name]
-        hessian, n_samples = update_hessian(input[0], state["hessian"], state["n_samples"])
+        hessian, n_samples = update_hessian(inp, state["hessian"], state["n_samples"])
         hessian_state[module.name] = {"hessian": hessian, "n_samples": n_samples}
 
     handles = []
