@@ -25,7 +25,9 @@ This module provides comprehensive TensorRT utilities including:
 - TensorRTPyBenchmark: Uses TensorRT Python API for direct engine profiling
 """
 
+import contextlib
 import ctypes
+import importlib.util
 import os
 import re
 import shutil
@@ -37,23 +39,20 @@ from pathlib import Path
 
 import numpy as np
 
-try:
-    import tensorrt as trt
-
-    TRT_AVAILABLE = True
-except ImportError:
-    TRT_AVAILABLE = False
-
-try:
-    import pycuda.autoinit  # noqa: F401  # Automatically initializes CUDA (side-effect import)
-    import pycuda.driver as cuda
-
-    PYCUDA_AVAILABLE = True
-except ImportError:
-    PYCUDA_AVAILABLE = False
-
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.ort_utils import _check_for_tensorrt
+
+TRT_AVAILABLE = importlib.util.find_spec("tensorrt") is not None
+if TRT_AVAILABLE:
+    import tensorrt as trt
+
+CUDART_AVAILABLE = importlib.util.find_spec("cuda") is not None
+if CUDART_AVAILABLE:
+    try:
+        from cuda import cudart
+    except ImportError:
+        with contextlib.suppress(ImportError):
+            from cuda.bindings import runtime as cudart
 
 
 class Benchmark(ABC):
@@ -93,7 +92,6 @@ class Benchmark(ABC):
                              These plugins will be loaded during engine building.
                              If None, no custom plugins are loaded.
         """
-        global logger
         self.timing_cache_file = timing_cache_file or "/tmp/trtexec_timing.cache"  # nosec B108
         self.warmup_runs = warmup_runs
         self.timing_runs = timing_runs
@@ -204,7 +202,7 @@ class TrtExecBenchmark(Benchmark):
                 trtexec_args = [
                     arg for arg in trtexec_args if "--remoteAutoTuningConfig" not in arg
                 ]
-            self._base_cmd.extend(trtexec_args)
+        self._base_cmd.extend(trtexec_args)
 
         self.logger.debug(f"Base command template: {' '.join(self._base_cmd)}")
 
@@ -250,17 +248,21 @@ class TrtExecBenchmark(Benchmark):
                     log_path = Path(log_file)
                     log_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(log_path, "w") as f:
-                        output = ""
-                        output += f"Command: {' '.join(cmd)}\n"
-                        output += f"Return code: {result.returncode}\n"
-                        output += "=" * 80 + "\n"
-                        output += "STDOUT:\n"
-                        output += "=" * 80 + "\n"
-                        output += result.stdout
-                        output += "\n" + "=" * 80 + "\n"
-                        output += "STDERR:\n"
-                        output += "=" * 80 + "\n"
-                        output += result.stderr
+                        output = "\n".join(
+                            [
+                                f"Command: {' '.join(cmd)}",
+                                f"Return code: {result.returncode}",
+                                "=" * 80,
+                                "STDOUT:",
+                                "=" * 80,
+                                result.stdout,
+                                "\n" + "=" * 80,
+                                "STDERR:",
+                                "=" * 80,
+                                result.stderr,
+                                "\n" + "=" * 80,
+                            ]
+                        )
                         f.write(output)
                     self.logger.debug(f"Saved trtexec logs to: {log_file}")
                 except Exception as e:
@@ -271,8 +273,7 @@ class TrtExecBenchmark(Benchmark):
                 self.logger.error(f"stderr: {result.stderr}")
                 return float("inf")
 
-            match = re.search(self.latency_pattern, result.stdout, re.IGNORECASE)
-            if not match:
+            if not (match := re.search(self.latency_pattern, result.stdout, re.IGNORECASE)):
                 self.logger.warning("Could not parse median latency from trtexec output")
                 self.logger.debug(f"trtexec stdout:\n{result.stdout}")
                 return float("inf")
@@ -319,7 +320,7 @@ class TensorRTPyBenchmark(Benchmark):
                              engine building. If None, no custom plugins are loaded.
 
         Raises:
-            ImportError: If tensorrt or pycuda packages are not available.
+            ImportError: If tensorrt or cuda-python (cudart) packages are not available.
             FileNotFoundError: If a specified plugin library file does not exist.
             RuntimeError: If plugin library loading fails.
         """
@@ -327,8 +328,10 @@ class TensorRTPyBenchmark(Benchmark):
 
         if not TRT_AVAILABLE:
             raise ImportError("TensorRT Python API not available. Please install tensorrt package.")
-        if not PYCUDA_AVAILABLE:
-            raise ImportError("PyCUDA not available. Please install pycuda package.")
+        if not CUDART_AVAILABLE or cudart is None:
+            raise ImportError(
+                "CUDA Runtime (cudart) not available. Please install cuda-python package: pip install cuda-python"
+            )
 
         self.trt_logger = trt.Logger(trt.Logger.WARNING)
         self.builder = trt.Builder(self.trt_logger)
@@ -448,15 +451,8 @@ class TensorRTPyBenchmark(Benchmark):
         Returns:
             Measured median latency in milliseconds
         """
-        config = None
-        network = None
-        parser = None
-        serialized_engine = None
-        engine = None
-        context = None
-        inputs = []
-        outputs = []
-        stream = None
+        config = network = parser = serialized_engine = engine = context = stream_handle = None
+        inputs, outputs = [], []
 
         try:
             self.logger.debug("Creating TensorRT builder...")
@@ -480,13 +476,10 @@ class TensorRTPyBenchmark(Benchmark):
                     self.logger.error(f"  {parser.get_error(error_idx)}")
                 return float("inf")
 
-            has_dynamic_shapes = False
-            for i in range(network.num_inputs):
-                input_tensor = network.get_input(i)
-                shape = input_tensor.shape
-                if any(dim == -1 for dim in shape):
-                    has_dynamic_shapes = True
-                    break
+            has_dynamic_shapes = any(
+                any(dim == -1 for dim in input_tensor.shape)
+                for input_tensor in network.get_inputs()
+            )
 
             if has_dynamic_shapes:
                 profile = self.builder.create_optimization_profile()
@@ -537,6 +530,17 @@ class TensorRTPyBenchmark(Benchmark):
 
             inputs = []
             outputs = []
+            stream_handle = None
+
+            def _alloc_pinned_host(size: int, dtype: np.dtype):
+                nbytes = size * np.dtype(dtype).itemsize
+                err, host_ptr = cudart.cudaMallocHost(nbytes)
+                if err != cudart.cudaError_t.cudaSuccess:
+                    raise RuntimeError(f"cudaMallocHost failed: {err}")
+                addr = int(host_ptr) if hasattr(host_ptr, "__int__") else host_ptr
+                ctype = np.ctypeslib.as_ctypes_type(dtype)
+                arr = np.ctypeslib.as_array((ctype * size).from_address(addr))
+                return host_ptr, arr
 
             for i in range(engine.num_io_tensors):
                 tensor_name = engine.get_tensor_name(i)
@@ -544,46 +548,80 @@ class TensorRTPyBenchmark(Benchmark):
                 shape = context.get_tensor_shape(tensor_name)
 
                 size = trt.volume(shape)
-                host_mem = cuda.pagelocked_empty(size, dtype)
-                device_mem = cuda.mem_alloc(host_mem.nbytes)
+                nbytes = size * np.dtype(dtype).itemsize
+
+                err, device_ptr = cudart.cudaMalloc(nbytes)
+                if err != cudart.cudaError_t.cudaSuccess:
+                    raise RuntimeError(f"cudaMalloc failed: {err}")
+
+                host_ptr, host_mem = _alloc_pinned_host(size, dtype)
 
                 if engine.get_tensor_mode(tensor_name) == trt.TensorIOMode.INPUT:
                     np.copyto(host_mem, np.random.randn(size).astype(dtype))
-                    inputs.append({"host": host_mem, "device": device_mem, "name": tensor_name})
+                    inputs.append(
+                        {
+                            "host_ptr": host_ptr,
+                            "host": host_mem,
+                            "device_ptr": device_ptr,
+                            "nbytes": nbytes,
+                            "name": tensor_name,
+                        }
+                    )
                 else:
-                    outputs.append({"host": host_mem, "device": device_mem, "name": tensor_name})
+                    outputs.append(
+                        {
+                            "host_ptr": host_ptr,
+                            "host": host_mem,
+                            "device_ptr": device_ptr,
+                            "nbytes": nbytes,
+                            "name": tensor_name,
+                        }
+                    )
 
-                context.set_tensor_address(tensor_name, int(device_mem))
+                context.set_tensor_address(tensor_name, int(device_ptr))
 
-            stream = cuda.Stream()
+            err, stream_handle = cudart.cudaStreamCreate()
+            if err != cudart.cudaError_t.cudaSuccess:
+                raise RuntimeError(f"cudaStreamCreate failed: {err}")
+
+            h2d = cudart.cudaMemcpyKind.cudaMemcpyHostToDevice
+            d2h = cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost
 
             self.logger.debug(f"Running {self.warmup_runs} warmup iterations...")
             for _ in range(self.warmup_runs):
                 for inp in inputs:
-                    cuda.memcpy_htod_async(inp["device"], inp["host"], stream)
-                context.execute_async_v3(stream_handle=stream.handle)
+                    cudart.cudaMemcpyAsync(
+                        inp["device_ptr"], inp["host_ptr"], inp["nbytes"], h2d, stream_handle
+                    )
+                context.execute_async_v3(stream_handle)
                 for out in outputs:
-                    cuda.memcpy_dtoh_async(out["host"], out["device"], stream)
-                stream.synchronize()
+                    cudart.cudaMemcpyAsync(
+                        out["host_ptr"], out["device_ptr"], out["nbytes"], d2h, stream_handle
+                    )
+                cudart.cudaStreamSynchronize(stream_handle)
 
             self.logger.debug(f"Running {self.timing_runs} timing iterations...")
             latencies = []
 
             for _ in range(self.timing_runs):
                 for inp in inputs:
-                    cuda.memcpy_htod_async(inp["device"], inp["host"], stream)
+                    cudart.cudaMemcpyAsync(
+                        inp["device_ptr"], inp["host_ptr"], inp["nbytes"], h2d, stream_handle
+                    )
 
-                stream.synchronize()
+                cudart.cudaStreamSynchronize(stream_handle)
                 start = time.perf_counter()
-                context.execute_async_v3(stream_handle=stream.handle)
-                stream.synchronize()
+                context.execute_async_v3(stream_handle)
+                cudart.cudaStreamSynchronize(stream_handle)
                 end = time.perf_counter()
 
                 latency_ms = (end - start) * 1000.0
                 latencies.append(latency_ms)
 
                 for out in outputs:
-                    cuda.memcpy_dtoh_async(out["host"], out["device"], stream)
+                    cudart.cudaMemcpyAsync(
+                        out["host_ptr"], out["device_ptr"], out["nbytes"], d2h, stream_handle
+                    )
 
             latencies = np.array(latencies)
             median_latency = float(np.median(latencies))
@@ -607,20 +645,23 @@ class TensorRTPyBenchmark(Benchmark):
                         else path_or_bytes
                     )
                     with open(log_path, "w") as f:
-                        output = ""
-                        output += "TensorRT Python API Benchmark\n"
-                        output += f"Model: {model_info}\n"
-                        output += f"Build time: {build_time:.2f}s\n"
-                        output += f"Warmup runs: {self.warmup_runs}\n"
-                        output += f"Timing runs: {self.timing_runs}\n"
-                        output += "Latency Statistics:\n"
-                        output += f"  Min:    {min_latency:.3f} ms\n"
-                        output += f"  Max:    {max_latency:.3f} ms\n"
-                        output += f"  Mean:   {mean_latency:.3f} ms\n"
-                        output += f"  Std:    {std_latency:.3f} ms\n"
-                        output += f"  Median: {median_latency:.3f} ms\n"
-                        output += f"All latencies: {latencies.tolist()}\n"
-                        f.write(output)
+                        output = "\n".join(
+                            [
+                                "TensorRT Python API Benchmark",
+                                f"Model: {model_info}",
+                                f"Build time: {build_time:.2f}s",
+                                f"Warmup runs: {self.warmup_runs}",
+                                f"Timing runs: {self.timing_runs}",
+                                "Latency Statistics:",
+                                f"  Min:    {min_latency:.3f} ms",
+                                f"  Max:    {max_latency:.3f} ms",
+                                f"  Mean:   {mean_latency:.3f} ms",
+                                f"  Std:    {std_latency:.3f} ms",
+                                f"  Median: {median_latency:.3f} ms",
+                                f"All latencies: {latencies.tolist()}",
+                            ]
+                        )
+                        f.write(output)  # type: ignore[arg-type]
                     self.logger.debug(f"Saved benchmark logs to: {log_file}")
                 except Exception as e:
                     self.logger.warning(f"Failed to save logs to {log_file}: {e}")
@@ -630,21 +671,24 @@ class TensorRTPyBenchmark(Benchmark):
             return float("inf")
         finally:
             try:
-                [inp["device"].free() for inp in inputs if "device" in inp]
-                [out["device"].free() for out in outputs if "device" in out]
-                for inp in inputs:
-                    if "host" in inp:
-                        del inp["host"]
-                for out in outputs:
-                    if "host" in out:
-                        del out["host"]
-                inputs.clear()
-                outputs.clear()
-                resources = [context, stream, engine, serialized_engine, parser, network, config]
-                for resource in resources:
-                    if resource is not None:
-                        del resource
-                resources.clear()
+                for buf in inputs + outputs:
+                    if "host_ptr" in buf:
+                        cudart.cudaFreeHost(buf["host_ptr"])
+                    if "device_ptr" in buf:
+                        cudart.cudaFree(buf["device_ptr"])
+                if stream_handle is not None:
+                    cudart.cudaStreamDestroy(stream_handle)
+                del (
+                    inputs,
+                    outputs,
+                    stream_handle,
+                    context,
+                    engine,
+                    serialized_engine,
+                    parser,
+                    network,
+                    config,
+                )
             except Exception as cleanup_error:
                 self.logger.warning(f"Error during cleanup: {cleanup_error}")
 
