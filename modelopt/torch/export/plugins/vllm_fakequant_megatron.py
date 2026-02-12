@@ -72,7 +72,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
     def save_pretrained(
         self,
         save_directory: str | os.PathLike,
-        pretrained_model_name_or_path: str | os.PathLike | None = None,
+        pretrained_model_name_or_path: str | os.PathLike,
     ):
         os.makedirs(save_directory, exist_ok=True)
         gather_mcore_vllm_fq_quantized_state_dict(self.model, self.state_dict, save_directory)
@@ -91,7 +91,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
 
 def export_mcore_gpt_to_hf_vllm_fq(
     model: torch.nn.Module,
-    pretrained_model_name_or_path: str | os.PathLike | None = None,
+    pretrained_model_name_or_path: str | os.PathLike,
     export_extra_modules: bool = False,
     dtype: torch.dtype = torch.bfloat16,
     export_dir: Path | str = tempfile.gettempdir(),
