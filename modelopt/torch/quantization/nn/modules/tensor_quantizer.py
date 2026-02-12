@@ -1115,12 +1115,13 @@ class TensorQuantizer(nn.Module):
             if self.pre_quant_scale is not None
             else ""
         )
-        s += (
-            " rotated"
-            if (isinstance(self._rotate, dict) and self._rotate.get("enable", False))
-            or self._rotate
-            else ""
-        )
+        if isinstance(self._rotate, dict):
+            if self._rotate.get("enable", False):
+                s += " rotated"
+                if self._rotate.get("rotate_fp32", False):
+                    s += " (fp32)"
+        elif self._rotate:
+            s += " rotated"
         s += (
             f" calibrator={self._calibrator.__class__.__name__}"
             if (self._calibrator is not None)
