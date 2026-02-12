@@ -106,7 +106,7 @@ def normalized_hadamard_transform(inputs, rotate_fp32=False):
 
     dtype = inputs.dtype
     if rotate_fp32:
-        inputs = inputs.float()
+        inputs = inputs.to(torch.float32)
     outputs = FastHadamardTransform.apply(inputs) / torch.sqrt(
         torch.tensor(inputs.shape[-1], dtype=torch.float32)
     )
