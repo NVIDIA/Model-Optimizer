@@ -15,14 +15,35 @@
 """Export HuggingFace model to vLLM fakequant checkpoint."""
 
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.nn as nn
 
-from modelopt.torch.export.layer_utils import is_quantlinear
+import modelopt.torch.opt as mto
+from modelopt.torch.export.layer_utils import is_attention, is_quantlinear
 from modelopt.torch.quantization.utils import get_quantizer_state_dict
 
 __all__ = ["export_hf_vllm_fq_checkpoint"]
+
+
+def cleanup_for_torch_save(x: Any) -> Any:
+    """Drop callables / local closures (e.g. `<locals>.new_forward`) before torch.save.
+
+    ModelOpt stored state dict may contain local closures like `<locals>.new_forward`
+    which are not picklable. So we need to cleanup the state dict before saving.
+    """
+    if isinstance(x, dict):
+        return {
+            k: cleanup_for_torch_save(v)
+            for k, v in x.items()
+            if not callable(v) and "<locals>" not in str(getattr(v, "__qualname__", ""))
+        }
+    if isinstance(x, list):
+        return [cleanup_for_torch_save(v) for v in x]
+    if isinstance(x, tuple):
+        return tuple(cleanup_for_torch_save(v) for v in x)
+    return x
 
 
 def export_hf_vllm_fq_checkpoint(
@@ -44,12 +65,12 @@ def export_hf_vllm_fq_checkpoint(
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
 
-    amax_dict = {
-        name + "._amax": param["_amax"].detach().clone().cpu()
-        for name, param in get_quantizer_state_dict(model).items()
-        if "_amax" in param
-    }
+    quantizer_state_dict = get_quantizer_state_dict(model)
 
+    modelopt_state = mto.modelopt_state(model)
+    modelopt_state = cleanup_for_torch_save(modelopt_state)
+    modelopt_state["modelopt_state_weights"] = cleanup_for_torch_save(quantizer_state_dict)
+    torch.save(modelopt_state, export_dir / "vllm_fq_modelopt_state.pth")
     # remove quantizer from model
     for _, module in model.named_modules():
         if is_quantlinear(module):
@@ -57,6 +78,15 @@ def export_hf_vllm_fq_checkpoint(
                 if hasattr(module, attr):
                     delattr(module, attr)
             module.export()
-    torch.save(amax_dict, f"{export_dir}/quant_amax.pth")
+        if is_attention(module):
+            for attr in [
+                "q_bmm_quantizer",
+                "k_bmm_quantizer",
+                "v_bmm_quantizer",
+                "softmax_quantizer",
+            ]:
+                if hasattr(module, attr):
+                    delattr(module, attr)
+
     # Save model
     model.save_pretrained(export_dir, state_dict=model.state_dict(), save_modelopt_state=False)

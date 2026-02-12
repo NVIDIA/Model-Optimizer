@@ -88,7 +88,7 @@ class QuantModule(DynamicModule):
 
         self.parallel_state = ParallelState(data_parallel_group=None)
 
-    def modelopt_post_restore(self, prefix: str = ""):
+    def modelopt_post_restore(self, prefix: str = "", model: "torch.nn.Module | None" = None):
         """Post-restore to correctly configure the TensorQuantizer states.
 
         TensorQuantizer states are restored to their shape before saving. Now we need to further configure them.
@@ -97,6 +97,10 @@ class QuantModule(DynamicModule):
             2. For sharded modules the restored states of TensorQuantizer could be incorrect. This is because
                 parallelism such as TP might have been changed between saving and resoring. So we need to re-calculate
                 the state shapes. Hence such modules should override this and implement their own logic.
+
+        Args:
+            prefix: The module name prefix for error messages.
+            model: Optional main model to search for device if not found in this module.
         """
         # Get a parameter or buffer that does not belong to a TensorQuantizer
         non_tq_param_or_buffer = None
@@ -105,6 +109,21 @@ class QuantModule(DynamicModule):
             if not isinstance(parent, TensorQuantizer):
                 non_tq_param_or_buffer = param_or_buffer
                 break
+
+        # If not found (e.g., container modules like vLLM's attn that only have child quantizers),
+        # traverse up to parent's parent to find a module with parameters
+        if non_tq_param_or_buffer is None and model is not None:
+            parts = prefix.split(".")
+            parent_prefix = ".".join(parts[: len(parts) - 1])
+            parent_module = model.get_submodule(parent_prefix) if parent_prefix else model
+            # Look for any parameter in parent module (not just state_dict)
+            for name, param in parent_module.named_parameters():
+                # Skip params that belong to TensorQuantizer submodules
+                param_parent_name = name.rsplit(".", 1)[0] if "." in name else ""
+                param_parent = parent_module.get_submodule(param_parent_name)
+                if not isinstance(param_parent, TensorQuantizer):
+                    non_tq_param_or_buffer = param
+                    break
 
         if non_tq_param_or_buffer is None:
             warnings.warn(
