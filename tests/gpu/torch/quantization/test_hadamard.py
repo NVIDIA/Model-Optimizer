@@ -41,9 +41,17 @@ def test_hadamard_transform(dim):
     xxt_h = x_h @ x_h.T
     # The numerical error can be large, especially for 16-bit floats.
     assert torch.allclose(xxt_h, xxt, atol=0.05)
+    x_h_fp32 = normalized_hadamard_transform(x, rotate_fp32=True)
+    xxt_h_fp32 = x_h_fp32 @ x_h_fp32.T
+    # test the numerical error is smaller when using float32
+    assert torch.allclose(xxt_h_fp32, xxt, atol=1e-6)
 
 
-def test_kv_rotate():
+@pytest.mark.parametrize(
+    "rotate_fp32",
+    [True, False],
+)
+def test_kv_rotate(rotate_fp32):
     mtq.plugins.register_attention_for_kv_quant(SDPAAttention)
     model = nn.Sequential(SDPAAttention())
     mtq.replace_quant_module(model)
@@ -51,27 +59,33 @@ def test_kv_rotate():
     set_quantizer_by_cfg(model, {"*": {"enable": False}})
     dummy_input = SDPAAttention.get_input(device="cuda")
     output_ref = model(dummy_input)
+    if rotate_fp32:
+        rotate = {"enable": True, "rotate_fp32": True}
+        atol = 1e-6
+    else:
+        rotate = True
+        atol = 0.05
     with set_quantizer_by_cfg_context(
         model,
         {
             "*[qk]_bmm_quantizer": {
-                "rotate": True,
+                "rotate": rotate,
             },
         },
     ):
         output_test = model(dummy_input)
-    assert torch.allclose(output_ref, output_test, atol=0.05)
+    assert torch.allclose(output_ref, output_test, atol=atol)
 
     # Test the rotation is actually applied by turning on only one of the query, key quantizers
     with set_quantizer_by_cfg_context(
         model,
         {
             "*k_bmm_quantizer": {
-                "rotate": True,
+                "rotate": rotate,
             },
         },
     ):
         output_test1 = model(dummy_input)
-    assert not torch.allclose(output_ref, output_test1, atol=0.05)
+    assert not torch.allclose(output_ref, output_test1, atol=atol)
 
     mtq.unregister(SDPAAttention)

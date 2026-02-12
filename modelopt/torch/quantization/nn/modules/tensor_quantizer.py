@@ -996,8 +996,14 @@ class TensorQuantizer(nn.Module):
             inputs = inputs * self.pre_quant_scale
 
         # Rotating the input
-        if self._rotate:
-            inputs = normalized_hadamard_transform(inputs)
+        rotate_fp32 = (
+            self._rotate.get("rotate_fp32", False) if isinstance(self._rotate, dict) else False
+        )
+        rotate_enable = (
+            self._rotate.get("enable", False) if isinstance(self._rotate, dict) else self._rotate
+        )
+        if rotate_enable:
+            inputs = normalized_hadamard_transform(inputs, rotate_fp32=rotate_fp32)
 
         if self._disabled:
             # if quantizer is disabled, we still need to track the input dtype for saving the model
@@ -1109,7 +1115,12 @@ class TensorQuantizer(nn.Module):
             if self.pre_quant_scale is not None
             else ""
         )
-        s += " rotated" if self._rotate else ""
+        s += (
+            " rotated"
+            if (isinstance(self._rotate, dict) and self._rotate.get("enable", False))
+            or self._rotate
+            else ""
+        )
         s += (
             f" calibrator={self._calibrator.__class__.__name__}"
             if (self._calibrator is not None)
