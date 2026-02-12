@@ -1,3 +1,7 @@
+# MBridge Distillation Examples
+
+This directory contains examples for knowledge distillation using Megatron-Bridge.
+
 Based on: <https://docs.nvidia.com/nemo/megatron-bridge/0.2.0/training/distillation.html>
 
 ## Setup Steps
@@ -25,13 +29,12 @@ export WORKSPACE=...
      --interactive --gpu 1
    ```
 
-3. **Run distillation:**
-
-   ```bash
-   cd /workspace/Model-Optimizer/examples/puzzletron/mbridge_distillation_example
-   
-   bash distill.sh model.tensor_model_parallel_size=8 model.teacher.tensor_model_parallel_size=8 train.global_batch_size=4 train.micro_batch_size=1 dataset.sequence_length=8192 train.train_iters=5000 logger.log_interval=1
-
-   ```
-
 **Note:** The mount `/opt/megatron-lm` is required because Megatron-Bridge depends on the Megatron-LM submodule.
+
+## Examples
+
+- **`hf_model_distillation/`**: Standard HuggingFace model distillation
+  - See [hf_model_distillation/README.md](hf_model_distillation/README.md) for usage
+
+- **`decilm_model_distillation/`**: Puzzletron DeciLM model distillation
+  - See [decilm_model_distillation/README.md](decilm_model_distillation/README.md) for details
