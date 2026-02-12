@@ -296,6 +296,28 @@ NVFP4_STATIC_WO_GPTQ_CFG = {
     },
 }
 
+NVFP4_STATIC_GPTQ_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": {
+        "method": "gptq",
+        "use_sequential": True,
+    },
+}
+
 NVFP4_STATIC_WO_GPTQ_LITE_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
