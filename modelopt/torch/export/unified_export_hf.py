@@ -589,7 +589,9 @@ def _process_quantized_modules(
         if is_modelopt_qlora and (hasattr(sub_module, "base_layer")):
             continue
 
-        if hasattr(sub_module, "weight_packed"):
+        if hasattr(sub_module, "weight_packed") or (
+            "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1
+        ):
             sub_module.unpack_weight()
         if get_quantization_format(sub_module) != QUANTIZATION_NONE:
             if is_quantlinear(sub_module):

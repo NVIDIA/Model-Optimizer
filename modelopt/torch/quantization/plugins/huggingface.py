@@ -22,6 +22,8 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
+import transformers
+from packaging import version
 from torch import Tensor
 from torch.nn.functional import linear
 
@@ -38,7 +40,6 @@ except ImportError:
     kitchen = None
 
 import torch.nn as nn
-import transformers
 from transformers.models.t5.modeling_t5 import T5Attention
 
 from modelopt.torch.opt.dynamic import DynamicModule
@@ -48,6 +49,7 @@ from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import register
 from ..nn import QuantInputBase, QuantModule, QuantModuleRegistry, TensorQuantizer
 from ..nn.modules.quant_linear import _QuantLinear
+from ..triton.fp8_kernel import weight_dequant
 from ..utils import replace_function
 from .attention import register_attention_for_kv_quant
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear, _QuantFunctionalMixin
@@ -56,6 +58,8 @@ if TYPE_CHECKING:
     from types import ModuleType
 
 __all__ = ["register_hf_attentions_on_the_fly"]
+
+TRANSFORMERS_VERSION_GE_5_0 = version.parse(transformers.__version__) >= version.parse("5.0.0")
 
 
 class _QuantAttention(QuantModule):
@@ -447,10 +451,24 @@ class _QuantSparseMoe(QuantModule):
             # If any of the experts are in calibration mode, we will forward all tokens to all experts
             # This is used only for calibration, we need to re-calculate the actual outputs again using
             # the original top_k
-            original_top_k = self.top_k
-            self.top_k = self.num_experts
-            super().forward(hidden_states)
-            self.top_k = original_top_k
+            if TRANSFORMERS_VERSION_GE_5_0:
+                assert hasattr(self, "gate")
+                # Path for transformers >= 5.0
+                original_top_k = self.gate.topk
+                self.gate.topk = self.gate.num_experts
+                super().forward(hidden_states)
+                self.gate.topk = original_top_k
+            else:
+                # Path for transformers < 5.0
+                original_top_k = self.top_k
+                if hasattr(self, "num_experts"):
+                    self.top_k = self.num_experts
+                elif hasattr(self, "experts"):
+                    self.top_k = self.experts.num_experts
+                else:
+                    raise ValueError(f"Could not find num_experts in module {self}")
+                super().forward(hidden_states)
+                self.top_k = original_top_k
         return super().forward(hidden_states)
 
 
@@ -693,6 +711,51 @@ class _QuantCompressedLinear(QuantModule):
             del self.weight_scale
 
 
+class _QuantFP8Linear(QuantModule):
+    def _setup(self):
+        self.input_quantizer = TensorQuantizer()
+        self.weight_quantizer = TensorQuantizer()
+        assert self.weight_scale_inv.ndim == 2, "Weight scale inverse must be 2D"
+        assert self.weight.ndim == 2, "Weight must be 2D"
+        self.block_size = max(
+            self.weight.shape[0] // self.weight_scale_inv.shape[0],
+            self.weight.shape[1] // self.weight_scale_inv.shape[1],
+        )
+        assert self.block_size == 128, "Block size must be 128"
+
+    def _get_weight_and_scale_inv(self):
+        if isinstance(self.weight, torch.distributed.tensor.DTensor):
+            weight = self.weight._local_tensor.contiguous()
+            scale_inv = self.weight_scale_inv._local_tensor.contiguous()
+        else:
+            weight = self.weight.contiguous()
+            scale_inv = self.weight_scale_inv.contiguous()
+        return weight, scale_inv
+
+    def forward(self, input: Tensor) -> Tensor:
+        if self.weight.element_size() == 1:
+            with torch.cuda.device(self.weight.device):
+                weight, scale_inv = self._get_weight_and_scale_inv()
+                weight = weight_dequant(weight, scale_inv, self.block_size, dtype=input.dtype)
+        else:
+            weight = self.weight
+        return linear(
+            self.input_quantizer(input),
+            self.weight_quantizer(weight),
+            self.bias,
+        )
+
+    def unpack_weight(self):
+        with torch.cuda.device(self.weight.device):
+            weight, scale_inv = self._get_weight_and_scale_inv()
+            self.weight = nn.Parameter(
+                weight_dequant(weight, scale_inv, self.block_size, dtype=torch.get_default_dtype()),
+                requires_grad=False,
+            )
+        if hasattr(self, "weight_scale_inv"):
+            del self.weight_scale_inv
+
+
 try:
     from transformers.models.llama4.modeling_llama4 import Llama4TextExperts, Llama4TextMoe
 
@@ -793,6 +856,14 @@ try:
         QuantModuleRegistry.register({Qwen3VLMoeTextExperts: "hf.Qwen3VLMoeTextExperts"})(
             _QuantQwen3VLMoeTextExperts
         )
+except ImportError:
+    pass
+
+try:
+    from transformers.integrations.finegrained_fp8 import FP8Linear
+
+    if FP8Linear not in QuantModuleRegistry:
+        QuantModuleRegistry.register({FP8Linear: "hf.FP8Linear"})(_QuantFP8Linear)
 except ImportError:
     pass
 
@@ -910,6 +981,17 @@ def register_falcon_linears_on_the_fly(model):
             QuantModuleRegistry.register({linear_type: linear_type.__name__})(_QuantLinear)
 
 
+def register_minimax_m2_moe_on_the_fly(model):
+    """Register MiniMax M2 MoE modules as a QUANT_MODULE.
+
+    MiniMax M2 MoE modules are defined in the model card, so we need to register them on the fly.
+    """
+    if type(model).__name__ in ["MiniMaxM2ForCausalLM"]:
+        moe_type = type(model.model.layers[0].block_sparse_moe)
+        if QuantModuleRegistry.get(moe_type) is None:
+            QuantModuleRegistry.register({moe_type: moe_type.__name__})(_QuantSparseMoe)
+
+
 def _is_supported_hf_model(model):
     """Check if the model a valid model for transformers quantization specific support."""
     supported_models = [transformers.PreTrainedModel]
@@ -975,6 +1057,7 @@ CUSTOM_MODEL_PLUGINS.update(
     [
         register_falcon_linears_on_the_fly,
         register_dbrx_moe_on_the_fly,
+        register_minimax_m2_moe_on_the_fly,
         register_hf_attentions_on_the_fly,
         convert_hf_parallel_linears_on_the_fly,
     ]
