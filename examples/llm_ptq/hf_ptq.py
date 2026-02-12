@@ -625,6 +625,7 @@ def export_quantized(
     tokenizer: PreTrainedTokenizerBase | None,
     default_padding_side,
     default_pad_token,
+    offline_specdec_input: dict | None = None,
 ):
     with torch.inference_mode():
         if model_type is None:
@@ -726,6 +727,7 @@ def export_quantized(
                     full_model,
                     export_dir=export_path,
                     extra_state_dict=mtp_state_dict,
+                    offline_specdec_input=offline_specdec_input,
                 )
 
         # Restore default padding and export the tokenizer as well.
@@ -972,7 +974,7 @@ def quantize_main(
     # Detect if this is a Nemotron VL model using architecture-based detection
     is_nemotron_vl_model = is_nemotron_vl(full_model)
 
-    if args.specdec_offline_dataset is not None:
+    if args.specdec_offline_dataset is None:
         preview_input_ids, generated_ids_before_ptq = pre_quantize(
             args, full_model, model_type, tokenizer, calib_dataloader, is_nemotron_vl_model
         )
@@ -1077,6 +1079,9 @@ def quantize_main(
         tokenizer,
         default_padding_side,
         default_pad_token,
+        offline_specdec_input=next(iter(calib_dataloader), None)
+        if args.specdec_offline_dataset is not None
+        else None,
     )
 
 

@@ -313,7 +313,9 @@ def _fuse_shared_input_modules(
     return fused_linears
 
 
-def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
+def requantize_resmooth_fused_llm_layers(
+    model: torch.nn.Module, offline_specdec_input: dict = None
+):
     """Group modules that take the same input and register shared parameters in module."""
     # TODO: Handle DBRX MoE
     quantization_format = get_quantization_format(model)
@@ -381,6 +383,9 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
         elif getattr(model.config, "is_encoder_decoder", False):
             # For other encoder-decoder models (non-VL), pass both encoder and decoder input ids
             model(fake_input, decoder_input_ids=decoder_fake_input)
+        elif offline_specdec_input is not None:
+            # For offline SpecDec models, we need to pass the specific input format used during training
+            model(**offline_specdec_input)
         else:
             model(fake_input)
 
@@ -758,7 +763,9 @@ def _export_transformers_checkpoint(
 
     # Resmooth and requantize fused layers
     # TODO: Handle mixed precision
-    requantize_resmooth_fused_llm_layers(model)
+    requantize_resmooth_fused_llm_layers(
+        model, offline_specdec_input=kwargs.get("offline_specdec_input")
+    )
 
     # Remove all hooks from the model
     try:
@@ -1130,6 +1137,7 @@ def export_hf_checkpoint(
     components: list[str] | None = None,
     extra_state_dict: dict[str, torch.Tensor] | None = None,
     max_shard_size: int | str = "10GB",
+    offline_specdec_input: dict | None = None,
     **kwargs,
 ):
     """Export quantized HuggingFace model checkpoint (transformers or diffusers).
@@ -1171,7 +1179,9 @@ def export_hf_checkpoint(
         return
 
     try:
-        post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype)
+        post_state_dict, hf_quant_config = _export_transformers_checkpoint(
+            model, dtype, offline_specdec_input=offline_specdec_input
+        )
 
         if hf_quant_config is not None:
             # Save hf_quant_config.json for backward compatibility
