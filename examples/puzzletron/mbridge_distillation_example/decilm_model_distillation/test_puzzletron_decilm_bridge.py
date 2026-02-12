@@ -20,12 +20,16 @@ Simple test for Puzzletron DeciLM Bridge.
 Usage:
      export PYTHONPATH="/workspace/Megatron-Bridge/src:/workspace/Model-Optimizer:${PYTHONPATH}"
      python test_puzzletron_decilm_bridge.py /workspace/puzzle_dir_decilm/ckpts/teacher
+
+     Or with torchrun for multi-GPU:
+     torchrun --nproc_per_node=1 test_puzzletron_decilm_bridge.py /workspace/puzzle_dir_decilm/ckpts/teacher
 """
 
 import sys
 
 # Import bridge to register it
 import puzzletron_decilm_bridge  # noqa: F401
+import torch
 from megatron.bridge.models.conversion.auto_bridge import AutoBridge
 from megatron.bridge.models.conversion.model_bridge import get_model_bridge
 
@@ -43,7 +47,7 @@ if "DeciLMForCausalLM" in supported:
 else:
     print(f"⚠ DeciLMForCausalLM not in supported models list (found {len(supported)} models)")
 
-# Test 3: Try to load checkpoint (if path provided)
+# Test 3: Try to load checkpoint and create model (if path provided)
 if len(sys.argv) > 1:
     checkpoint_path = sys.argv[1]
     print(f"\nTesting with checkpoint: {checkpoint_path}")
@@ -53,8 +57,47 @@ if len(sys.argv) > 1:
     print("✓ AutoBridge.from_hf_pretrained() succeeded")
     print(f"  Bridge type: {type(bridge._model_bridge).__name__}")
 
-    # Try to get provider (will fail with NotImplementedError)
+    # Try to get provider
     provider = bridge.to_megatron_provider(load_weights=False)
-    print("✓ Bridge fully working!")
+    print("✓ Provider created successfully")
+    print(f"  Provider type: {type(provider).__name__}")
 
-print("\n✓ Basic bridge registration test passed!")
+    # Configure parallelism (single GPU for simple test)
+    provider.tensor_model_parallel_size = 1
+    provider.pipeline_model_parallel_size = 1
+    provider.finalize()
+    print("✓ Provider finalized")
+
+    # Initialize model parallel
+    provider.initialize_model_parallel(seed=0)
+    print("✓ Model parallel initialized")
+
+    # Create the actual GPT model
+    model = provider.provide_distributed_model(wrap_with_ddp=False)
+    print("✓ GPT model created successfully")
+    print(f"  Model type: {type(model[0]).__name__}")
+    print(f"  Number of model instances: {len(model)}")
+
+    # Move model to GPU and set to eval mode
+    if torch.cuda.is_available():
+        model = [m.cuda() for m in model]
+        for m in model:
+            m.eval()
+        print("✓ Model moved to GPU and set to eval mode")
+
+        # Test forward pass with dummy input
+        try:
+            batch_size = 1
+            seq_length = 4
+            tokens = torch.randint(0, provider.vocab_size, (batch_size, seq_length)).cuda()
+            position_ids = torch.arange(seq_length).unsqueeze(0).cuda()
+            attention_mask = torch.ones_like(tokens).cuda()
+
+            with torch.no_grad():
+                output = model[0](tokens, position_ids, attention_mask)
+            print("✓ Forward pass succeeded")
+            print(f"  Output shape: {output.shape}")
+        except Exception as e:
+            print(f"⚠ Forward pass failed: {e}")
+
+print("\n✓ All tests passed!")

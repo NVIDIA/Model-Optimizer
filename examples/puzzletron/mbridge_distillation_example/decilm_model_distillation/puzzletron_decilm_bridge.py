@@ -157,9 +157,53 @@ class PuzzletronDeciLMBridge(MegatronModelBridge):
             if hf_config.rope_scaling.get("rope_type") == "llama3":
                 provider_kwargs["rope_scaling_factor"] = hf_config.rope_scaling.get("factor", 8.0)
 
-        # Store entire HF config as JSON (HF format, not MCore format)
-        # This is simpler than NeMo - we don't convert field names, just serialize as-is
-        provider_kwargs["heterogeneous_layers_config_encoded_json"] = hf_config.to_json_string()
+        # Convert HF config format to MCore format for heterogeneous_layers_config_encoded_json
+        # MCore expects ffn_mult (multiplier) but HF uses intermediate_size (absolute)
+        # We need to convert: ffn_mult = intermediate_size / hidden_size
+        import json
+
+        hf_config_dict = json.loads(hf_config.to_json_string())
+        mcore_block_configs = []
+
+        for block in hf_config_dict.get("block_configs", []):
+            mcore_block = {}
+
+            # Copy attention config as-is (n_heads_in_group is already in correct format)
+            if "attention" in block:
+                mcore_block["attention"] = block["attention"]
+
+            # Convert FFN config: intermediate_size -> ffn_mult
+            if "ffn" in block:
+                ffn_config = block["ffn"].copy()
+                if (
+                    "intermediate_size" in ffn_config
+                    and ffn_config["intermediate_size"] is not None
+                ):
+                    # Convert intermediate_size to ffn_mult
+                    intermediate_size = ffn_config.pop("intermediate_size")
+                    ffn_config["ffn_mult"] = intermediate_size / hf_config.hidden_size
+                mcore_block["ffn"] = ffn_config
+            elif "mlp" in block:
+                # Some configs use "mlp" instead of "ffn"
+                mlp_config = block["mlp"].copy()
+                if (
+                    "intermediate_size" in mlp_config
+                    and mlp_config["intermediate_size"] is not None
+                ):
+                    intermediate_size = mlp_config.pop("intermediate_size")
+                    mlp_config["ffn_mult"] = intermediate_size / hf_config.hidden_size
+                mcore_block["ffn"] = mlp_config  # MCore expects "ffn" key
+
+            mcore_block_configs.append(mcore_block)
+
+        # Build MCore format JSON
+        mcore_config = {"block_configs": mcore_block_configs}
+        if "rope_scaling" in hf_config_dict:
+            mcore_config["rope_scaling"] = hf_config_dict["rope_scaling"]
+
+        provider_kwargs["heterogeneous_layers_config_encoded_json"] = json.dumps(
+            mcore_config, ensure_ascii=False
+        )
 
         provider = LlamaNemotronHeterogeneousProvider(**provider_kwargs)
         return provider
