@@ -559,7 +559,7 @@ def _export_quantized_weight(
         )[0]
 
         quantized_weight = to_quantized_weight(
-            weight.to(dtype),
+            weight.to(torch.bfloat16),
             weight_scale,
             quantization_format,
             weight_scale_2,
@@ -576,7 +576,7 @@ def _export_quantized_weight(
         )
 
         quantized_weight = to_quantized_weight(
-            weight.to(dtype),
+            weight.to(torch.bfloat16),
             weight_scale,
             quantization_format,
             weight_scale_2,
