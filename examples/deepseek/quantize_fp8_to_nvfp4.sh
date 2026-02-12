@@ -17,7 +17,7 @@
 set -e  # Exit immediately if any command fails
 
 usage() {
-    echo "Usage: $0 --amax_path <path> --fp4_output_path <path> --fp8_hf_path <path> [--world_size <n>] [--model_type <deepseek|hf>]"
+    echo "Usage: $0 --amax_path <path> --fp4_output_path <path> --fp8_hf_path <path> [--world_size <n>]"
     exit 1
 }
 
@@ -26,7 +26,6 @@ AMAX_PATH=""
 FP4_PATH=""
 FP8_HF_PATH=""
 WORLD_SIZE=8
-MODEL_TYPE="deepseek"
 
 # Parse command-line arguments
 while [[ $# -gt 0 ]]; do
@@ -46,10 +45,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --world_size)
             WORLD_SIZE="$2"
-            shift 2
-            ;;
-        --model_type)
-            MODEL_TYPE="$2"
             shift 2
             ;;
         *)
@@ -93,7 +88,6 @@ python quantize_to_nvfp4.py \
     --amax_path "$AMAX_PATH" \
     --fp4_path "$FP4_PATH" \
     --fp8_hf_path "$FP8_HF_PATH" \
-    --world_size "$WORLD_SIZE" \
-    --model_type "$MODEL_TYPE"
+    --world_size "$WORLD_SIZE"
 
 echo "Quantization command completed successfully."

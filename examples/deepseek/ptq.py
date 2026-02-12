@@ -64,43 +64,24 @@ from modelopt.torch.quantization.utils import (
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 from modelopt.torch.utils.distributed import ParallelState
 
-deekseep_model = None
-weight_dequant = None
-act_quant = None
-fp8_gemm = None
+DS_V3_PATH = Path(__file__).resolve().parent / "DeepSeek-V3/inference"
+DS_V3_2_PATH = Path(__file__).resolve().parent / "DeepSeek-V3.2-Exp/inference"
 
+if DS_V3_2_PATH.exists():
+    sys.path.append(str(DS_V3_2_PATH))
+elif DS_V3_PATH.exists():
+    sys.path.append(str(DS_V3_PATH))
+else:
+    raise ValueError(
+        f"DeepSeek-V3 or DeepSeek-V3.2-Exp not found in {Path(__file__).resolve().parent}"
+    )
 
-def _import_deepseek_deps():
-    """Lazily import DeepSeek-specific dependencies (only needed for --model_type deepseek)."""
-    global deekseep_model, weight_dequant, act_quant, fp8_gemm
-    if deekseep_model is not None:
-        return
-
-    DS_V3_PATH = Path(__file__).resolve().parent / "DeepSeek-V3/inference"
-    DS_V3_2_PATH = Path(__file__).resolve().parent / "DeepSeek-V3.2-Exp/inference"
-
-    if DS_V3_2_PATH.exists():
-        sys.path.append(str(DS_V3_2_PATH))
-    elif DS_V3_PATH.exists():
-        sys.path.append(str(DS_V3_PATH))
-    else:
-        raise ValueError(
-            f"DeepSeek-V3 or DeepSeek-V3.2-Exp not found in {Path(__file__).resolve().parent}"
-        )
-
-    import model as _model  # noqa: E402
-    from ds_kernel import weight_dequant as _weight_dequant  # noqa: E402
-    from kernel import act_quant as _act_quant, fp8_gemm as _fp8_gemm  # noqa: E402
-
-    deekseep_model = _model
-    weight_dequant = _weight_dequant
-    act_quant = _act_quant
-    fp8_gemm = _fp8_gemm
+import model as deekseep_model  # noqa: E402
+from ds_kernel import weight_dequant  # noqa: E402
+from kernel import act_quant, fp8_gemm  # noqa: E402
 
 
 def monkey_patch_deepseek_model():
-    _import_deepseek_deps()
-
     gemm_impl: Literal["bf16", "fp8"] = "bf16"
     block_size = 128
 
@@ -250,106 +231,8 @@ def monkey_patch_deepseek_model():
     mtq.register(original_cls=deekseep_model.MoE, quantized_cls=CalibMoe)
 
 
-def _register_hf_moe_for_calibration(model):
-    """Discover and register the MoE module class from an HF model for calibration.
-
-    This dynamically finds the MoE class (has `experts` + `gate` attributes) and registers it
-    with modelopt's _QuantSparseMoe so all experts see tokens during calibration.
-    """
-    from modelopt.torch.quantization.nn import QuantModuleRegistry
-    from modelopt.torch.quantization.plugins.huggingface import _QuantSparseMoe
-
-    moe_cls = None
-    for _name, module in model.named_modules():
-        cls = type(module)
-        if hasattr(module, "experts") and hasattr(module, "gate") and cls not in QuantModuleRegistry:
-            moe_cls = cls
-            break
-
-    if moe_cls is None:
-        print("Warning: No unregistered MoE module class found in model.")
-        return
-
-    # Check if the MoE class uses standard attribute names (top_k, num_experts)
-    sample = next(m for m in model.modules() if isinstance(m, moe_cls))
-    has_top_k = hasattr(sample, "top_k")
-    has_num_experts = hasattr(sample, "num_experts")
-
-    if has_top_k and has_num_experts:
-        # Standard attribute names - register directly
-        QuantModuleRegistry.register({moe_cls: f"hf.{moe_cls.__name__}"})(_QuantSparseMoe)
-    else:
-        # Need property adapters for non-standard attribute names
-        # Discover the actual attribute names
-        top_k_attr = "top_k" if has_top_k else None
-        num_experts_attr = "num_experts" if has_num_experts else None
-
-        if top_k_attr is None:
-            for attr in ["num_experts_per_tok", "top_k", "topk"]:
-                if hasattr(sample, attr):
-                    top_k_attr = attr
-                    break
-        if num_experts_attr is None:
-            for attr in ["num_experts", "n_routed_experts", "num_local_experts"]:
-                if hasattr(sample, attr):
-                    num_experts_attr = attr
-                    break
-
-        if top_k_attr is None or num_experts_attr is None:
-            print(
-                f"Warning: Could not find top_k/num_experts attributes on {moe_cls.__name__}. "
-                f"Skipping MoE calibration registration."
-            )
-            return
-
-        # Create adapter subclass
-        _top_k_attr = top_k_attr
-        _num_experts_attr = num_experts_attr
-
-        class _QuantAdaptedSparseMoe(_QuantSparseMoe):
-            @property
-            def top_k(self):
-                return getattr(self, _top_k_attr)
-
-            @top_k.setter
-            def top_k(self, value):
-                setattr(self, _top_k_attr, value)
-
-            @property
-            def num_experts(self):
-                return getattr(self, _num_experts_attr)
-
-        QuantModuleRegistry.register({moe_cls: f"hf.{moe_cls.__name__}"})(_QuantAdaptedSparseMoe)
-
-    print(f"Registered MoE class {moe_cls.__name__} for calibration.")
-
-
-def load_hf_model(model_path: str):
-    """Load a HuggingFace model (e.g. GLM-5 bf16 checkpoint).
-
-    Uses device_map="auto" to shard the model across all visible GPUs (single process).
-    """
-    from transformers import AutoModelForCausalLM
-
-    torch.set_default_dtype(torch.bfloat16)
-
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        device_map="auto",
-        trust_remote_code=True,
-        torch_dtype=torch.bfloat16,
-    )
-    model.eval()
-
-    _register_hf_moe_for_calibration(model)
-
-    return model
-
-
 def load_deepseek_model(model_config: str, model_path: str, batch_size: int):
     """Loads the deepseek model to memory."""
-    _import_deepseek_deps()
-
     # get distributed info
     world_size = int(os.getenv("WORLD_SIZE", "1"))
     rank = int(os.getenv("RANK", "0"))
@@ -397,11 +280,9 @@ def ptq(
     batch_size: int,
     calib_size: int,
     mla_quant: str | None = None,
-    model_type: str = "deepseek",
     disable_wo_quant: bool = False,
 ):
-    """Runs Deepseek/HF model PTQ and returns the quantized model."""
-    is_hf = model_type != "deepseek"
+    """Runs Deepseek model PTQ and returns the quantized model."""
 
     # quantize the model
     ## create dataset
@@ -423,22 +304,13 @@ def ptq(
     transformer = model.model if hasattr(model, "model") else model
 
     # make sure all processes are ready before starting the calibration
-    if dist.is_initialized():
-        dist.barrier()
+    dist.barrier()
 
     ## quant config
     mtq_cfg = getattr(mtq, quant_cfg)
 
     # disable head that corresponds to lm_head (for the huggingface checkpoint)
     mtq_cfg["quant_cfg"]["*head*"] = {"enable": False}
-
-    if is_hf:
-        # Disable GLM-5 / HF-specific layers that should not be quantized
-        mtq_cfg["quant_cfg"]["*indexer*"] = {"enable": False}
-        mtq_cfg["quant_cfg"]["*eh_proj*"] = {"enable": False}
-        mtq_cfg["quant_cfg"]["*enorm*"] = {"enable": False}
-        mtq_cfg["quant_cfg"]["*hnorm*"] = {"enable": False}
-        mtq_cfg["quant_cfg"]["*shared_head*"] = {"enable": False}
 
     allowed_mla_quant = [None, "per_tensor_fp8", "nvfp4"]
     assert mla_quant in allowed_mla_quant, f"mla_quant must be {allowed_mla_quant}"
@@ -449,14 +321,11 @@ def ptq(
         mtq_cfg["quant_cfg"]["*attn*weight_quantizer"] = {"num_bits": (4, 3), "axis": None}
         mtq_cfg["quant_cfg"]["*attn*input_quantizer"] = {"num_bits": (4, 3), "axis": None}
     elif mla_quant == "nvfp4":  # for DeepSeek-R1-0528-NVFP4-Turbo
-        if is_hf:
-            mla_linear_layers = ["*q_a_proj*", "*q_b_proj*", "*kv_a_proj*", "*kv_b_proj*", "*o_proj*"]
-            mla_nvfp4_linear_layers = ["*q_a_proj*", "*kv_a_proj*", "*q_b_proj*", "*o_proj*"]
-        else:
-            mla_linear_layers = ["*wq_a*", "*wq_b*", "*wkv_a*", "*wkv_b*", "*wo*"]
-            mla_nvfp4_linear_layers = ["*wq_a*", "*wkv_a*", "*wq_b*", "*wo*"]
+        mla_linear_layers = ["*wq_a*", "*wq_b*", "*wkv_a*", "*wkv_b*", "*wo*"]
+        mla_nvfp4_linear_layers = ["*wq_a*", "*wkv_a*", "*wq_b*", "*wo*"]
         for layer in mla_linear_layers:
             if layer in mla_nvfp4_linear_layers:
+                # wq_a, wkv_a, wq_b, wo use NVFP4 quantization
                 mtq_cfg["quant_cfg"][layer + "_quantizer"] = {
                     "num_bits": (2, 1),
                     "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
@@ -471,14 +340,13 @@ def ptq(
         mtq_cfg["quant_cfg"]["*attn.pe_bmm_quantizer*"] = {"enable": False}
 
     if not disable_wo_quant and "FP4" in quant_cfg:
-        wo_pattern = "*o_proj*" if is_hf else "*wo*"
-        mtq_cfg["quant_cfg"][wo_pattern + "weight_quantizer"] = mtq_cfg["quant_cfg"]["*input_quantizer"]
-        mtq_cfg["quant_cfg"][wo_pattern + "input_quantizer"] = mtq_cfg["quant_cfg"]["*weight_quantizer"]
+        mtq_cfg["quant_cfg"]["*wo*weight_quantizer"] = mtq_cfg["quant_cfg"]["*input_quantizer"]
+        mtq_cfg["quant_cfg"]["*wo*input_quantizer"] = mtq_cfg["quant_cfg"]["*weight_quantizer"]
 
     ## ptq
     transformer = mtq.quantize(transformer, mtq_cfg, calibrate_loop)
 
-    if int(os.environ.get("LOCAL_RANK", "0")) == 0:
+    if int(os.environ["LOCAL_RANK"]) == 0:
         mtq.print_quant_summary(transformer)
 
     return model
@@ -486,15 +354,13 @@ def ptq(
 
 def save_amax_and_quant_config(model, output_path: str, enable_fp8_kvcache: bool = True):
     """Saves the amax values of the model to the output path."""
-    is_distributed = dist.is_initialized()
-    world_size = int(os.getenv("WORLD_SIZE", "1")) if is_distributed else 1
-    rank = int(os.getenv("RANK", "0")) if is_distributed else 0
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
+    rank = int(os.getenv("RANK", "0"))
 
     if rank == 0 and not os.path.exists(output_path):
         os.mkdir(output_path)
 
-    if is_distributed:
-        dist.barrier()
+    dist.barrier()
 
     # save amax
     def state_dict_filter(state_dict):
@@ -511,11 +377,8 @@ def save_amax_and_quant_config(model, output_path: str, enable_fp8_kvcache: bool
     if enable_fp8_kvcache:
         quant_config["quantization"]["kv_cache_quant_algo"] = KV_CACHE_FP8
 
-    if is_distributed:
-        all_quant_configs = [None] * dist.get_world_size()
-        dist.all_gather_object(all_quant_configs, quant_config)
-    else:
-        all_quant_configs = [quant_config]
+    all_quant_configs = [None] * dist.get_world_size()
+    dist.all_gather_object(all_quant_configs, quant_config)
 
     if rank == 0:
         exclude_modules = set()
@@ -531,8 +394,7 @@ def save_amax_and_quant_config(model, output_path: str, enable_fp8_kvcache: bool
         if exclude_modules:
             quant_config["quantization"]["exclude_modules"] = sorted(exclude_modules)
             # add the last layer to the exclude module as the mtp is not loaded in the quantized model
-            layers = model.layers if hasattr(model, "layers") else model.model.layers
-            quant_config["quantization"]["exclude_modules"].append(f"layers.{len(layers)}*")
+            quant_config["quantization"]["exclude_modules"].append(f"layers.{len(model.layers)}*")
         if quantized_layers:
             quant_config["quantization"]["quantized_layers"] = quantized_layers
 
@@ -565,32 +427,14 @@ if __name__ == "__main__":
         default=None,
         help="MLA quantization type: None (disable), per_tensor_fp8, nvfp4",
     )
-    parser.add_argument(
-        "--model_type",
-        type=str,
-        choices=["deepseek", "hf"],
-        default="deepseek",
-        help="Model type: 'deepseek' for DeepSeek FP8 ckpt, 'hf' for standard HF bf16 ckpt (e.g. GLM-5).",
-    )
 
     args = parser.parse_args()
-
-    if args.model_type == "hf":
-        model = load_hf_model(args.model_path)
-    else:
-        model = load_deepseek_model(args.config, args.model_path, args.batch_size)
-
+    model = load_deepseek_model(args.config, args.model_path, args.batch_size)
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_path, trust_remote_code=args.trust_remote_code
     )
     model = ptq(
-        model,
-        tokenizer,
-        args.quant_cfg,
-        args.batch_size,
-        args.calib_size,
-        args.mla_quant,
-        model_type=args.model_type,
-        disable_wo_quant=args.disable_wo_quant,
+        model, tokenizer, args.quant_cfg, args.batch_size, args.calib_size,
+        args.mla_quant, disable_wo_quant=args.disable_wo_quant,
     )
     save_amax_and_quant_config(model, args.output_path, not args.disable_fp8_kvcache)
