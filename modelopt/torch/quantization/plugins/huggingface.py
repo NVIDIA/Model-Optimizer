@@ -734,6 +734,86 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
         return next_states
 
 
+class _QuantQwen3_5MoeExperts(QuantModule):
+    def _setup(self):
+        """Modify the Qwen3_5MoeExperts by using nn.Linear layers."""
+        from accelerate import init_empty_weights
+
+        dtype, device = self.gate_up_proj.dtype, self.gate_up_proj.device
+
+        def _copy_weight(module, weight):
+            module.to_empty(device=device)
+            with torch.no_grad():
+                module.weight.data = weight.detach().data.to(dtype=dtype, device=device)
+
+        expert_dim = self.intermediate_dim
+
+        with init_empty_weights():
+            gate_proj = nn.ModuleList(
+                [
+                    nn.Linear(self.hidden_dim, expert_dim, bias=False)
+                    for _ in range(self.num_experts)
+                ]
+            )
+            up_proj = nn.ModuleList(
+                [
+                    nn.Linear(self.hidden_dim, expert_dim, bias=False)
+                    for _ in range(self.num_experts)
+                ]
+            )
+            down_proj = nn.ModuleList(
+                [
+                    nn.Linear(expert_dim, self.hidden_dim, bias=False)
+                    for _ in range(self.num_experts)
+                ]
+            )
+
+        for idx in range(self.num_experts):
+            # gate_up_proj shape: (num_experts, 2*intermediate_dim, hidden_dim)
+            # Already in (out_features, in_features) format, no transpose needed
+            _copy_weight(gate_proj[idx], self.gate_up_proj[idx, :expert_dim, :])
+            _copy_weight(up_proj[idx], self.gate_up_proj[idx, expert_dim:, :])
+            # down_proj shape: (num_experts, hidden_dim, intermediate_dim)
+            # Already in (out_features, in_features) format
+            _copy_weight(down_proj[idx], self.down_proj[idx])
+
+        delattr(self, "gate_up_proj")
+        delattr(self, "down_proj")
+        self.gate_proj = gate_proj
+        self.up_proj = up_proj
+        self.down_proj = down_proj
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        top_k_index: torch.Tensor,
+        top_k_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        final_hidden_states = torch.zeros_like(hidden_states)
+        with torch.no_grad():
+            expert_mask = torch.nn.functional.one_hot(top_k_index, num_classes=self.num_experts)
+            expert_mask = expert_mask.permute(2, 1, 0)
+            expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+        for expert_idx in expert_hit:
+            expert_idx = expert_idx[0]
+            if expert_idx == self.num_experts:
+                continue
+            with torch.no_grad():
+                top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
+            current_state = hidden_states[token_idx]
+            gate = self.gate_proj[expert_idx](current_state)
+            up = self.up_proj[expert_idx](current_state)
+            current_hidden_states = self.act_fn(gate) * up
+            current_hidden_states = self.down_proj[expert_idx](current_hidden_states)
+            current_hidden_states = (
+                current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
+            )
+            final_hidden_states.index_add_(
+                0, token_idx, current_hidden_states.to(final_hidden_states.dtype)
+            )
+        return final_hidden_states
+
+
 class _QuantDbrxFFN(_QuantSparseMoe):
     @property
     def num_experts(self):
@@ -878,6 +958,46 @@ try:
 
     if FP8Linear not in QuantModuleRegistry:
         QuantModuleRegistry.register({FP8Linear: "hf.FP8Linear"})(_QuantFP8Linear)
+except ImportError:
+    pass
+
+
+class _QuantQwen3_5MoeSparseMoeBlock(_QuantSparseMoe):
+    """Qwen3.5 MoE stores top_k/num_experts in the router (self.gate), not as direct attributes.
+
+    We override forward instead of just bridging attributes because the router (self.gate)
+    uses its own top_k internally for routing decisions. We must modify self.gate.top_k
+    directly so all experts see calibration data.
+    """
+
+    def _setup(self):
+        self.num_experts = self.experts.num_experts
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if any(getattr(m, "_if_calib", False) for m in self.experts.modules()):
+            # Force all tokens to all experts during calibration
+            original_top_k = self.gate.top_k
+            self.gate.top_k = self.num_experts
+            super(_QuantSparseMoe, self).forward(hidden_states)
+            self.gate.top_k = original_top_k
+        return super(_QuantSparseMoe, self).forward(hidden_states)
+
+
+try:
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+        Qwen3_5MoeExperts,
+        Qwen3_5MoeSparseMoeBlock,
+    )
+
+    if Qwen3_5MoeSparseMoeBlock not in QuantModuleRegistry:
+        QuantModuleRegistry.register({Qwen3_5MoeSparseMoeBlock: "hf.Qwen3_5MoeSparseMoeBlock"})(
+            _QuantQwen3_5MoeSparseMoeBlock
+        )
+
+    if Qwen3_5MoeExperts not in QuantModuleRegistry:
+        QuantModuleRegistry.register({Qwen3_5MoeExperts: "hf.Qwen3_5MoeExperts"})(
+            _QuantQwen3_5MoeExperts
+        )
 except ImportError:
     pass
 

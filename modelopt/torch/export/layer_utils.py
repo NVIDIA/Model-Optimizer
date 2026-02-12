@@ -339,6 +339,7 @@ def is_moe(module: nn.Module) -> bool:
             "Qwen2MoeSparseMoeBlock".lower(),
             "Qwen3MoeSparseMoeBlock".lower(),
             "Qwen3NextSparseMoeBlock".lower(),
+            "Qwen3_5MoeSparseMoeBlock".lower(),
         ]
     )
 
@@ -1006,6 +1007,7 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
             "Qwen2MoeSparseMoeBlock",
             "Qwen3MoeSparseMoeBlock",
             "Qwen3NextSparseMoeBlock",
+            "Qwen3_5MoeSparseMoeBlock",
             "DeepseekMoE",
         ],
     ):
@@ -1141,7 +1143,10 @@ def set_expert_quantizer_amax(
     # Apply target amax to quantizers that need it
     for module, attr_name, quantizer in all_quantizers:
         # Check if quantizer needs amax (use property for consistency)
-        needs_amax = getattr(quantizer, "amax", None) is None
+        # Also treat zero amax as needing recalibration — a zero amax is never valid
+        # and indicates the quantizer wasn't activated during calibration
+        amax = getattr(quantizer, "amax", None)
+        needs_amax = amax is None or (isinstance(amax, torch.Tensor) and torch.all(amax == 0))
 
         # Skip dynamic quantizers for input quantizers
         if "input_quantizer" in attr_name and getattr(quantizer, "_dynamic", False):

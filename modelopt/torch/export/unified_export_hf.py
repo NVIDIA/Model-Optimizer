@@ -589,7 +589,7 @@ def _process_quantized_modules(
     """
     fsdp_module_to_reshard = None
 
-    for _, sub_module in model.named_modules():
+    for name, sub_module in model.named_modules():
         # Optimization to perform resharding only once per decoder layer to avoid extra communication overhead
         if isinstance(sub_module, FSDPModule):
             # Every time we encounter a new FSDPModule, the previous decoder layer is fully processed.
@@ -610,8 +610,14 @@ def _process_quantized_modules(
             sub_module.unpack_weight()
         if get_quantization_format(sub_module) != QUANTIZATION_NONE:
             if is_quantlinear(sub_module):
-                with fsdp2_aware_weight_update(model, sub_module, reshard=False):
-                    _export_quantized_weight(sub_module, dtype)
+                try:
+                    with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                        _export_quantized_weight(sub_module, dtype)
+                except AssertionError as e:
+                    raise AssertionError(
+                        f"Failed to export module '{name}' "
+                        f"(type={type(sub_module).__name__}): {e}"
+                    ) from e
             elif (
                 "Llama4TextExperts" in type(sub_module).__name__
                 or "GptOssExperts" in type(sub_module).__name__
@@ -685,6 +691,16 @@ def _export_transformers_checkpoint(
                             if hasattr(linear_module, "input_quantizer"):
                                 set_expert_quantizer_amax(
                                     modules=[linear_module],
+                                    quantizer_attrs=["input_quantizer"],
+                                )
+                elif "Qwen3_5MoeExperts" in type(sub_module.experts).__name__:
+                    # Handle Qwen3.5 MoE experts which use gate_proj/up_proj/down_proj ModuleLists
+                    for expert_linear_name in ["gate_proj", "up_proj", "down_proj"]:
+                        if hasattr(sub_module.experts, expert_linear_name):
+                            linear_modulelist = getattr(sub_module.experts, expert_linear_name)
+                            if hasattr(linear_modulelist, "__iter__"):
+                                set_expert_quantizer_amax(
+                                    modules=list(linear_modulelist),
                                     quantizer_attrs=["input_quantizer"],
                                 )
                 elif isinstance(sub_module.experts, collections.abc.Iterable):
@@ -1047,11 +1063,27 @@ def export_hf_checkpoint(
             model.hf_quantizer = None
 
         # Save model
-        model.save_pretrained(
-            export_dir,
-            state_dict={**post_state_dict, **(extra_state_dict or {})},
-            save_modelopt_state=save_modelopt_state,
-        )
+        # Temporarily disable revert_weight_conversion if available — it doesn't handle
+        # quantized state dicts (scalar scale tensors have 0 dimensions, causing IndexError).
+        _patched_revert = False
+        try:
+            import transformers.core_model_loading as _cml
+
+            _original_revert = _cml.revert_weight_conversion
+            _cml.revert_weight_conversion = lambda model, state_dict: state_dict
+            _patched_revert = True
+        except (ImportError, AttributeError):
+            pass
+
+        try:
+            model.save_pretrained(
+                export_dir,
+                state_dict={**post_state_dict, **(extra_state_dict or {})},
+                save_modelopt_state=save_modelopt_state,
+            )
+        finally:
+            if _patched_revert:
+                _cml.revert_weight_conversion = _original_revert
 
         original_config = f"{export_dir}/config.json"
         config_data = {}
