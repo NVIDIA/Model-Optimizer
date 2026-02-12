@@ -192,7 +192,7 @@ class RegionSearchBase:
 
     def _find_common_reachable_nodes(
         self, node_idx: int, branches: list[int]
-    ) -> tuple[list[dict], set[int]] | None:
+    ) -> tuple[list[dict], set[int]]:
         """Find common reachable nodes from all branches (potential convergence points).
 
         Used as STEP 1 of convergence detection in _find_converge_nodes.
@@ -202,7 +202,7 @@ class RegionSearchBase:
             branches: List of branch head node indices.
 
         Returns:
-            (branch_reachable, common_nodes) if valid; None if no convergence candidates.
+            (branch_reachable, common_nodes)
         """
         branch_reachable = [self.forward_reachable_nodes_map.get(b, {}) for b in branches]
 
