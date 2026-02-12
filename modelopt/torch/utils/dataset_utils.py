@@ -382,8 +382,11 @@ def _process_batch(batch_data, infer_method, max_working_batch_size=None):
     Returns:
         The maximum batch size that worked successfully
     """
-    assert all(torch.is_tensor(data) or data is None for data in batch_data.values()), (
-        "batch_data values must be tensors"
+    assert all(
+        torch.is_tensor(data) or data is None or key == "base_model_outputs"
+        for key, data in batch_data.items()
+    ), (
+        "batch_data values must be tensors or None, except for 'base_model_outputs' which can be any type."
     )
     # Get the batch size of current data
     batch_size = batch_data[next(iter(batch_data.keys()))].shape[0]
