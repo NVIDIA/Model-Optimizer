@@ -33,15 +33,15 @@ print("Testing Puzzletron DeciLM Bridge...")
 print()
 
 # Test 1: Check if bridge is registered
-bridge = get_model_bridge("DeciLMModel")
+bridge = get_model_bridge("DeciLMForCausalLM")
 print(f"✓ Bridge registered: {type(bridge).__name__}")
 
 # Test 2: Check if it's in supported models
 supported = AutoBridge.list_supported_models()
-if "DeciLMModel" in supported:
-    print("✓ DeciLMModel in supported models list")
+if "DeciLMForCausalLM" in supported:
+    print("✓ DeciLMForCausalLM in supported models list")
 else:
-    print(f"⚠ DeciLMModel not in supported models list (found {len(supported)} models)")
+    print(f"⚠ DeciLMForCausalLM not in supported models list (found {len(supported)} models)")
 
 # Test 3: Try to load checkpoint (if path provided)
 if len(sys.argv) > 1:

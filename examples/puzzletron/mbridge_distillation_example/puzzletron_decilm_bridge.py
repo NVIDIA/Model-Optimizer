@@ -40,10 +40,14 @@ from megatron.core.models.gpt.gpt_model import GPTModel
 logger = logging.getLogger(__name__)
 
 
-# Register bridge using string-based registration for DeciLMModel
-# This allows registration even if DeciLMModel is not importable at module level
+# Register bridge using string-based registration for DeciLMForCausalLM
+# This matches the architecture string in the checkpoint's config.json
+# This allows registration even if DeciLMForCausalLM is not importable at module level
 # (e.g., when using trust_remote_code=True)
-@MegatronModelBridge.register_bridge(source="DeciLMModel", target=GPTModel, model_type="decilm")
+# Note: This will override LlamaNemotronBridge registration for DeciLMForCausalLM
+@MegatronModelBridge.register_bridge(
+    source="DeciLMForCausalLM", target=GPTModel, model_type="decilm"
+)
 class PuzzletronDeciLMBridge(MegatronModelBridge):
     """
     Megatron Bridge for Puzzletron DeciLM Causal LM.
