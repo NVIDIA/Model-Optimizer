@@ -14,7 +14,9 @@
 # limitations under the License.
 
 import argparse
+import os
 import random
+import sys
 import time
 import warnings
 from typing import Any
@@ -69,7 +71,8 @@ from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
-from ..speculative_decoding.eagle_utils import make_eagle_supervised_data_module
+sys.path.append(os.path.join(os.path.dirname(__file__), "../speculative_decoding"))
+from eagle_utils import make_eagle_supervised_data_module
 
 RAND_SEED = 1234
 
@@ -813,36 +816,41 @@ def quantize_main(
     device: torch.device,
 ):
     if args.batch_size == 0:
-        # Calibration/sparsification will actually take much more memory than regular inference
-        # due to intermediate tensors for fake quantization. Setting sample_memory_usage_ratio
-        # to 2 to avoid OOM for AWQ/SmoothQuant fake quantization as it will take more memory than inference.
-        sample_memory_usage_ratio = 2 if "awq" in args.qformat or "sq" in args.qformat else 1.1
-        # Whisper model expects mel-spectrogram input features of length 3000
-        # Whisper model needs input of shape (batch_size, num_mel_bins, 3000)
-        # As the encoder of Whisper doesn't have embedding layer, input dtype has to be float
-        # For non-Whisper models (language models), sample_input will be set up inside get_max_batch_size()
-        if model_type == "whisper":
-            max_sample_length = 3000
-            num_mel_bins = language_model.config.num_mel_bins
-            sample_input_single_batch = (
-                torch.ones([1, num_mel_bins, max_sample_length], dtype=language_model.dtype).to(
-                    language_model.device
-                )
-                * 100
-            )
+        if args.specdec_offline_dataset is not None:
+            # Speculative decoding offline model dost not support get_max_batch_size() because of
+            # the customized dataloader, so we set batch_size to 1 to avoid OOM.
+            args.batch_size = 1
         else:
-            sample_input_single_batch = None
+            # Calibration/sparsification will actually take much more memory than regular inference
+            # due to intermediate tensors for fake quantization. Setting sample_memory_usage_ratio
+            # to 2 to avoid OOM for AWQ/SmoothQuant fake quantization as it will take more memory than inference.
+            sample_memory_usage_ratio = 2 if "awq" in args.qformat or "sq" in args.qformat else 1.1
+            # Whisper model expects mel-spectrogram input features of length 3000
+            # Whisper model needs input of shape (batch_size, num_mel_bins, 3000)
+            # As the encoder of Whisper doesn't have embedding layer, input dtype has to be float
+            # For non-Whisper models (language models), sample_input will be set up inside get_max_batch_size()
+            if model_type == "whisper":
+                max_sample_length = 3000
+                num_mel_bins = language_model.config.num_mel_bins
+                sample_input_single_batch = (
+                    torch.ones([1, num_mel_bins, max_sample_length], dtype=language_model.dtype).to(
+                        language_model.device
+                    )
+                    * 100
+                )
+            else:
+                sample_input_single_batch = None
 
-        run_auto_quant = args.auto_quantize_bits is not None
+            run_auto_quant = args.auto_quantize_bits is not None
 
-        args.batch_size = get_max_batch_size(
-            language_model,
-            max_sample_length=args.calib_seq,
-            sample_memory_usage_ratio=sample_memory_usage_ratio if not run_auto_quant else 1.0,
-            sample_input_single_batch=sample_input_single_batch,
-            enable_grad=run_auto_quant,
-        )
-        args.batch_size = min(args.batch_size, sum(args.calib_size))
+            args.batch_size = get_max_batch_size(
+                language_model,
+                max_sample_length=args.calib_seq,
+                sample_memory_usage_ratio=sample_memory_usage_ratio if not run_auto_quant else 1.0,
+                sample_input_single_batch=sample_input_single_batch,
+                enable_grad=run_auto_quant,
+            )
+            args.batch_size = min(args.batch_size, sum(args.calib_size))
 
     print(f"Use calib batch_size {args.batch_size}")
 
@@ -850,8 +858,8 @@ def quantize_main(
         data_args = argparse.Namespace(
             vlm_processor=None,
             vlm_img_dir=None,
-            data_path=None,
-            offline_data_path=args.specdec_offline_dataset,
+            data_path=args.specdec_offline_dataset,
+            offline_data_path=args.specdec_offline_feature,
             devlazy_preprocessice=True,
         )
         data_module = make_eagle_supervised_data_module(
@@ -1019,10 +1027,19 @@ def parse_args() -> argparse.Namespace:
         default=None,
     )
     parser.add_argument(
-        "--specdec_offline_dataset",
+        "--specdec_offline_feature",
         help=(
             "If set, the model is a speculative decoding model,"
             "which uses offline dataset for calibration. "
+        ),
+        default=None,
+    )
+    parser.add_argument(
+        "--specdec_offline_dataset",
+        help=(
+            "Path to the offline dataset for speculative decoding model calibration. "
+            "This should be a JSON or JSONL file or a directory with JSON or JSONL files "
+            "containing the calibration samples. "
         ),
         default=None,
     )
