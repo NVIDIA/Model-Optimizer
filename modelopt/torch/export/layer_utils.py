@@ -1752,7 +1752,7 @@ def _split_fused_qkv_weight_and_scaling(
 
     qkv_in = weight.shape[-1] if weight_dim > 1 else 1
 
-    num_kv_heads = num_kv_heads if num_kv_heads else num_heads
+    num_kv_heads = num_kv_heads or num_heads
     assert num_heads % num_kv_heads == 0, (
         f"num_heads({num_heads}) must be divisible by num_kv_heads({num_kv_heads}))."
     )

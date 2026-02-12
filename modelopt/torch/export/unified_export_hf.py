@@ -1065,15 +1065,23 @@ def export_hf_checkpoint(
         # Save model
         # Temporarily disable revert_weight_conversion if available — it doesn't handle
         # quantized state dicts (scalar scale tensors have 0 dimensions, causing IndexError).
-        _patched_revert = False
-        try:
-            import transformers.core_model_loading as _cml
+        # We must patch both the source module and the importing module since
+        # modeling_utils does `from core_model_loading import revert_weight_conversion`.
+        _patches = []
+        _noop = lambda model, state_dict: state_dict
+        for _mod_path in [
+            "transformers.core_model_loading",
+            "transformers.modeling_utils",
+        ]:
+            try:
+                import importlib
 
-            _original_revert = _cml.revert_weight_conversion
-            _cml.revert_weight_conversion = lambda model, state_dict: state_dict
-            _patched_revert = True
-        except (ImportError, AttributeError):
-            pass
+                _mod = importlib.import_module(_mod_path)
+                if hasattr(_mod, "revert_weight_conversion"):
+                    _patches.append((_mod, getattr(_mod, "revert_weight_conversion")))
+                    setattr(_mod, "revert_weight_conversion", _noop)
+            except (ImportError, AttributeError):
+                pass
 
         try:
             model.save_pretrained(
@@ -1082,8 +1090,8 @@ def export_hf_checkpoint(
                 save_modelopt_state=save_modelopt_state,
             )
         finally:
-            if _patched_revert:
-                _cml.revert_weight_conversion = _original_revert
+            for _mod, _original in _patches:
+                _mod.revert_weight_conversion = _original
 
         original_config = f"{export_dir}/config.json"
         config_data = {}
