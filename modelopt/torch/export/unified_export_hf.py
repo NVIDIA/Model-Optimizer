@@ -270,7 +270,7 @@ def _fuse_shared_input_modules(
 
 
 def requantize_resmooth_fused_llm_layers(
-    model: torch.nn.Module, offline_specdec_input: dict = None
+    model: torch.nn.Module, offline_specdec_input: dict | None = None
 ):
     """Group modules that take the same input and register shared parameters in module."""
     # TODO: Handle DBRX MoE
