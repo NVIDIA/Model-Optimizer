@@ -24,9 +24,6 @@ from modelopt.torch.sparsity.attention_sparsity import sparsify
 from modelopt.torch.sparsity.attention_sparsity.calibration import RulerDatasetBuilder
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 
-# Skip all tests if no GPU available
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="GPU required")
-
 
 class TestRulerDatasetBuilderGPU:
     """Test RULER dataset generation with real tokenizers on GPU."""
@@ -384,7 +381,3 @@ class TestCalibrationEndToEnd:
 
         # Memory should be reasonable (not more than 2GB increase)
         assert memory_increase < 2 * 1024**3  # 2GB
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

@@ -26,8 +26,8 @@ import torch.nn as nn
 from scipy.optimize import curve_fit
 from tqdm import tqdm
 
-from ..sparse_attention import SparseAttentionModule
 from ..stats_manager import SparseAttentionStatsManager
+from ..utils import get_sparse_attention_modules
 
 
 class DynamicThresholdCalibrator:
@@ -113,7 +113,7 @@ class DynamicThresholdCalibrator:
             Dict with calibration results including a, b, r_squared, and num_data_points
         """
         # Extract attention modules
-        attention_modules = [m for m in model.modules() if isinstance(m, SparseAttentionModule)]
+        attention_modules = get_sparse_attention_modules(model)
 
         if not attention_modules:
             raise ValueError("No sparse attention modules found for calibration")

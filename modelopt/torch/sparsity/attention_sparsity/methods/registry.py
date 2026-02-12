@@ -32,6 +32,12 @@ class SparseAttentionMethod(ABC):
         # Instance attribute to prevent shared state across multiple models
         self._calibration_mode: bool = False
 
+        # Calibration parameters set by the calibrator after calibration.
+        # Exponential model params per phase: {"prefill": {"a": ..., "b": ...}, ...}
+        self.calibration_params: dict[str, dict[str, float]] | None = None
+        # Target sparsity ratio per phase: {"prefill": 0.5, "decode": 0.5}
+        self.target_sparse_ratio: dict[str, float] | None = None
+
     @abstractmethod
     def calculate_sparsity(
         self,

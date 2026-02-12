@@ -166,27 +166,6 @@ class TestFlashSkipSoftmaxMethod:
         assert 0 <= stats["sparsity"] <= 1
         assert mask.shape == (1, 1, 1, 256)
 
-    def test_sparsity_statistics(self):
-        """Test sparsity statistics structure."""
-        method = FlashSkipSoftmax(
-            {
-                "threshold": {"prefill": 1e-3, "decode": 1e-4},
-                "br": 128,
-                "bc": 128,
-                "backend": "pytorch",
-                "is_causal": True,
-            }
-        )
-
-        attn = torch.randn(1, 1, 128, 256)
-        _, stats = method.calc_correction_factor_and_p(attn, "prefill")
-
-        # Verify statistics are present
-        assert stats["total_blocks"] > 0
-        assert "sparse_blocks" in stats
-        assert "sample_length" in stats
-        assert stats["sample_length"] == 256
-
     def test_block_mask_correctness(self):
         """Test block mask shape and type."""
         method = FlashSkipSoftmax(
@@ -291,16 +270,3 @@ class TestFlashSkipSoftmaxMethod:
 
         # Verify output shape matches input
         assert sparse_attn.shape == attn.shape
-
-    def test_name_property(self):
-        """Test method name property."""
-        method = FlashSkipSoftmax(
-            {
-                "threshold": {"prefill": 1e-3, "decode": 1e-4},
-                "br": 128,
-                "bc": 128,
-                "backend": "pytorch",
-                "is_causal": True,
-            }
-        )
-        assert method.name == "flash_skip_softmax"

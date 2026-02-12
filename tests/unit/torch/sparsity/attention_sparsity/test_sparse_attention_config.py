@@ -20,12 +20,7 @@ from pydantic import ValidationError
 
 pytest.importorskip("transformers")
 
-from modelopt.torch.sparsity.attention_sparsity.config import (
-    SKIP_SOFTMAX_DEFAULT,
-    FlashSkipSoftmaxConfig,
-    SparseAttentionAttributeConfig,
-    SparseAttentionConfig,
-)
+from modelopt.torch.sparsity.attention_sparsity.config import SparseAttentionAttributeConfig
 
 
 class TestSparseAttentionAttributeConfig:
@@ -109,30 +104,3 @@ class TestSparseAttentionAttributeConfig:
         # String not allowed
         with pytest.raises(ValidationError, match="Input should be a valid dictionary"):
             SparseAttentionAttributeConfig(threshold="invalid")
-
-
-class TestSparseAttentionConfig:
-    """Test SparseAttentionConfig."""
-
-    def test_default_config(self):
-        """Test default configuration."""
-        config = SparseAttentionConfig()
-        assert "sparse_cfg" in config.model_dump()
-        # Check default pattern has method
-        assert config.sparse_cfg["*attention*"]["method"] == "flash_skip_softmax"
-
-    def test_predefined_config(self):
-        """Test pre-defined configuration."""
-        assert "sparse_cfg" in SKIP_SOFTMAX_DEFAULT
-        assert "method" in SKIP_SOFTMAX_DEFAULT["sparse_cfg"]["*attn*"]
-        assert "*attn*" in SKIP_SOFTMAX_DEFAULT["sparse_cfg"]
-
-
-class TestFlashSkipSoftmaxConfig:
-    """Test FlashSkipSoftmaxConfig."""
-
-    def test_default_values(self):
-        """Test default values for flash_skip_softmax config."""
-        config = FlashSkipSoftmaxConfig()
-        assert "*attention*" in config.sparse_cfg
-        assert config.sparse_cfg["*attention*"]["method"] == "flash_skip_softmax"

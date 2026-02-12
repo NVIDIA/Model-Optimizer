@@ -17,7 +17,7 @@
 
 from .calibrate import calibrate_sparse_attention
 from .calibrator import DynamicThresholdCalibrator
-from .dataset import RulerDatasetBuilder
+from .ruler_dataset import RulerDatasetBuilder
 
 __all__ = [
     "DynamicThresholdCalibrator",

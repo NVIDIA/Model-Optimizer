@@ -15,70 +15,29 @@
 
 """Calibration functions for sparse attention."""
 
-import hashlib
-import json
 import warnings
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 import torch
 import torch.nn as nn
 from transformers import AutoTokenizer
 
+from modelopt.torch.utils import get_module_device
+
 from ..config import CalibrationConfig
 from ..conversion import print_sparse_attention_summary
-from ..sparse_attention import SparseAttentionModule
+from ..utils import get_named_sparse_attention_modules
 from .calibrator import DynamicThresholdCalibrator
-from .dataset import RulerDatasetBuilder
+from .ruler_dataset import RulerDatasetBuilder
 
 
-def _get_cache_path(
-    tokenizer_path: str, samples: int, max_seqlen: int, cache_dir: str | None = None
-) -> Path:
-    """Generate cache file path based on calibration parameters.
-
-    Args:
-        tokenizer_path: Path to tokenizer (used in hash)
-        samples: Number of calibration samples
-        max_seqlen: Maximum sequence length
-        cache_dir: Optional cache directory. If None, uses ~/.cache/modelopt/sparse_attention/
-    """
-    # Create a hash of the parameters for the cache filename
-    key = f"{tokenizer_path}_{samples}_{max_seqlen}"
-    hash_str = hashlib.md5(key.encode(), usedforsecurity=False).hexdigest()[:12]
-    filename = f"ruler_cache_{samples}s_{max_seqlen}l_{hash_str}.json"
-
-    if cache_dir:
-        base_dir = Path(cache_dir)
-    else:
-        base_dir = Path.home() / ".cache" / "modelopt" / "sparse_attention"
-
-    return base_dir / filename
-
-
-def _load_cached_data(cache_path: Path) -> list[dict[str, Any]] | None:
-    """Load calibration data from cache if it exists."""
-    if cache_path.exists():
-        try:
-            with open(cache_path) as f:
-                data = json.load(f)
-            print(f"Loaded {len(data)} cached calibration samples from {cache_path}")
-            return data
-        except Exception as e:
-            print(f"Warning: Failed to load cache: {e}")
-    return None
-
-
-def _save_cached_data(cache_path: Path, data: list[dict[str, Any]]) -> None:
-    """Save calibration data to cache."""
-    try:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(cache_path, "w") as f:
-            json.dump(data, f)
-        print(f"Saved calibration samples to cache: {cache_path}")
-    except Exception as e:
-        print(f"Warning: Failed to save cache: {e}")
+def _load_tokenizer(tokenizer_name_or_path: str) -> "AutoTokenizer":
+    """Load tokenizer and ensure pad_token is set."""
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
+    if not tokenizer.pad_token:
+        tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
 
 
 def _extract_tokenizer_from_model(model: nn.Module) -> str:
@@ -147,12 +106,10 @@ def create_calibration_forward_loop(
     Returns:
         Forward loop function that takes model as argument
     """
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
-    if not tokenizer.pad_token:
-        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = _load_tokenizer(tokenizer_name_or_path)
 
     def forward_loop(model: nn.Module) -> None:
-        device = next(model.parameters()).device
+        device = get_module_device(model)
 
         for sample in calibration_data:
             inputs = tokenizer(
@@ -205,12 +162,10 @@ def create_decode_calibration_forward_loop(
     Returns:
         Forward loop function that takes model as argument
     """
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
-    if not tokenizer.pad_token:
-        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer = _load_tokenizer(tokenizer_name_or_path)
 
     def forward_loop(model: nn.Module) -> None:
-        device = next(model.parameters()).device
+        device = get_module_device(model)
 
         for sample in calibration_data:
             inputs = tokenizer(
@@ -291,9 +246,7 @@ def calibrate_sparse_attention(
         return {}
 
     # Get sparse attention modules
-    sparse_modules = [
-        (name, m) for name, m in model.named_modules() if isinstance(m, SparseAttentionModule)
-    ]
+    sparse_modules = get_named_sparse_attention_modules(model)
 
     if not sparse_modules:
         print("No sparse attention modules found for calibration")
@@ -306,29 +259,16 @@ def calibrate_sparse_attention(
     calibration_data = None
 
     if calibrate_prefill or calibrate_decode:
-        # Try to load from cache first
-        cache_path = _get_cache_path(
-            tokenizer,
-            calib_config.samples,
-            calib_config.max_seqlen,
+        builder = RulerDatasetBuilder(
+            samples=calib_config.samples,
+            max_seqlen=calib_config.max_seqlen,
+            tokenizer_name_or_path=tokenizer,
+            num_length_bins=calib_config.num_length_bins,
+            max_length_filter=int(calib_config.max_seqlen * 1.5),
             cache_dir=calib_config.cache_dir,
+            data_dir=calib_config.data_dir,
         )
-        calibration_data = _load_cached_data(cache_path)
-
-        # Generate if not cached
-        if calibration_data is None:
-            builder = RulerDatasetBuilder(
-                samples=calib_config.samples,
-                max_seqlen=calib_config.max_seqlen,
-                tokenizer_name_or_path=tokenizer,
-                num_length_bins=calib_config.num_length_bins,
-                max_length_filter=int(calib_config.max_seqlen * 1.5),
-            )
-            calibration_data = builder.build_calibration_dataset()
-            print(f"Generated {len(calibration_data)} calibration samples")
-
-            # Save to cache for future runs
-            _save_cached_data(cache_path, calibration_data)
+        calibration_data = builder.build_calibration_dataset()
 
     # Initialize results
     calibration_results: dict[str, Any] = {}

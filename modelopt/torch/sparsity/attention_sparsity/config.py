@@ -231,6 +231,15 @@ class CalibrationConfig(ModeloptBaseConfig):
         ),
     )
 
+    data_dir: str | None = ModeloptField(
+        default=None,
+        title="RULER data directory",
+        description=(
+            "Path to RULER data directory (contains 'essays' subdir with Paul Graham .txt files). "
+            "Required for NIAH essay tasks when not using repo layout. Set from example script or CLI."
+        ),
+    )
+
     @field_validator("threshold_trials")
     @classmethod
     def validate_threshold_trials(cls, v):

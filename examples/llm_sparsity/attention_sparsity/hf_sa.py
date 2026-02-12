@@ -171,7 +171,7 @@ def main(args):
     print(f"\nApplying sparse attention: {args.sparse_attn}")
     sparse_config = SPARSE_ATTN_CFG_CHOICES[args.sparse_attn]
 
-    # Override target_sparse_ratio if provided via CLI
+    # Override calibration options if provided via CLI
     if args.target_sparse_ratio is not None:
         sparse_config = copy.deepcopy(sparse_config)
         sparse_cfg = sparse_config.get("sparse_cfg", {})

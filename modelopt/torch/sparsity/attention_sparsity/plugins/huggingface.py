@@ -145,7 +145,7 @@ def validate_eager_attention(model: nn.Module) -> None:
 
 
 # Register plugins
-CUSTOM_MODEL_PLUGINS.update(
+CUSTOM_MODEL_PLUGINS.extend(
     [
         validate_eager_attention,
         register_sparse_attention_on_the_fly,

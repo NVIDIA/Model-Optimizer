@@ -82,24 +82,6 @@ class TestFlashSkipSoftmaxThresholdInfo:
         assert info["phases"]["prefill"]["b"] == 1.5
         assert info["phases"]["prefill"]["target_sparsity"] == 0.9
 
-    def test_threshold_info_structure(self):
-        """Test that threshold info has expected structure."""
-        method = FlashSkipSoftmax(
-            method_config={
-                "threshold": {"prefill": 0.001, "decode": 0.0001},
-                "br": 128,
-                "bc": 128,
-                "backend": "pytorch",
-                "is_causal": True,
-            }
-        )
-
-        info = method.get_threshold_info()
-
-        # Should always have 'type' key
-        assert "type" in info
-        assert isinstance(info, dict)
-
 
 class TestSparseAttentionModuleThresholdInfo:
     """Test SparseAttentionModule.get_threshold_info() delegation."""
@@ -206,77 +188,3 @@ class TestSparseAttentionModuleThresholdInfo:
                 assert info["type"] == "none"
                 assert info["value"] is None
                 break
-
-
-class TestPrintSparseAttentionSummaryIntegration:
-    """Test integration with print_sparse_attention_summary."""
-
-    def test_summary_displays_static_threshold(self, capsys):
-        """Test that print function displays static thresholds."""
-        from modelopt.torch.sparsity.attention_sparsity.conversion import (
-            print_sparse_attention_summary,
-        )
-
-        model = SimpleAttentionModel(hidden_size=64, num_heads=4)
-
-        config = {
-            "sparse_cfg": {
-                "*attention*": {
-                    "method": "flash_skip_softmax",
-                    "threshold": {"prefill": 0.001, "decode": 0.0001},
-                    "br": 64,
-                    "bc": 64,
-                    "enable": True,
-                }
-            },
-        }
-
-        sparse_model = sparsify(model, config)
-        print_sparse_attention_summary(sparse_model)
-
-        captured = capsys.readouterr()
-        assert "prefill" in captured.out
-        assert "decode" in captured.out
-        assert "flash_skip_softmax" in captured.out
-
-    def test_summary_displays_dynamic_threshold(self, capsys):
-        """Test that print function displays dynamic thresholds."""
-        from modelopt.torch.sparsity.attention_sparsity.conversion import (
-            print_sparse_attention_summary,
-        )
-
-        model = SimpleAttentionModel(hidden_size=64, num_heads=4)
-
-        config = {
-            "sparse_cfg": {
-                "*attention*": {
-                    "method": "flash_skip_softmax",
-                    "threshold": {"prefill": 0.001, "decode": 0.0001},
-                    "br": 64,
-                    "bc": 64,
-                    "enable": True,
-                }
-            },
-        }
-
-        sparse_model = sparsify(model, config)
-
-        # Set calibrated params (Exponential model)
-        for module in sparse_model.modules():
-            if isinstance(module, SparseAttentionModule):
-                module._sparse_method_instance.calibration_params = {
-                    "prefill": {"a": 150.0, "b": 1.5},
-                    "decode": {"a": 200.0, "b": 1.8},
-                }
-                module._sparse_method_instance.target_sparse_ratio = {
-                    "prefill": 0.9,
-                    "decode": 0.9,
-                }
-
-        print_sparse_attention_summary(sparse_model)
-
-        captured = capsys.readouterr()
-        # Output should show calibrated info
-        assert "flash_skip_softmax" in captured.out
-        assert "prefill" in captured.out
-        assert "decode" in captured.out

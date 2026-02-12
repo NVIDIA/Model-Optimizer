@@ -17,7 +17,7 @@
 
 # List of model plugins that are called during conversion
 # Each plugin is a callable that takes (model) and performs validation/setup
-CUSTOM_MODEL_PLUGINS: set = set()
+CUSTOM_MODEL_PLUGINS: list = []
 
 
 def register_custom_model_plugins_on_the_fly(model):

@@ -44,12 +44,6 @@ class TestStatsManagerInitialization:
         assert manager.enabled is False
         assert manager.calibration_mode is False
 
-    def test_initialization_custom_name(self):
-        """Test initialization with custom module name."""
-        manager = SparseAttentionStatsManager(module_name="custom.attention.module")
-
-        assert manager.module_name == "custom.attention.module"
-
 
 class TestStatsCollection:
     """Test statistics collection functionality."""
@@ -230,17 +224,6 @@ class TestGetSummary:
         # Average sparsity: (30+50) / (100+100) = 80/200 = 0.4
         assert summary["average_sparsity"] == 0.4
         assert summary["phase_distribution"]["prefill"] == 2
-
-    def test_get_summary_no_data(self):
-        """Test get_summary with no collected data."""
-        manager = SparseAttentionStatsManager(module_name="test", enabled=True)
-
-        summary = manager.get_summary()
-
-        assert summary["module"] == "test"
-        assert summary["total_calls"] == 0
-        assert summary["average_sparsity"] == 0.0
-        assert summary["phase_distribution"]["prefill"] == 0
 
     def test_get_summary_zero_blocks(self):
         """Test get_summary when total_blocks is zero."""

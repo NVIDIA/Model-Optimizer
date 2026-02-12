@@ -133,8 +133,8 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         batch_size, num_heads, seq_q, seq_k = attn_weights.shape
 
         # Calculate threshold
-        calibration_params = getattr(self, "calibration_params", None)
-        target_sparse_ratio = getattr(self, "target_sparse_ratio", None)
+        calibration_params = self.calibration_params
+        target_sparse_ratio = self.target_sparse_ratio
 
         if (
             calibration_params is not None
@@ -319,8 +319,8 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         Returns:
             Dictionary with threshold configuration and calibration info.
         """
-        calibration_params = getattr(self, "calibration_params", None)
-        target_sparse_ratio = getattr(self, "target_sparse_ratio", None)
+        calibration_params = self.calibration_params
+        target_sparse_ratio = self.target_sparse_ratio
 
         if calibration_params is not None and target_sparse_ratio is not None:
             # Per-phase calibrated dynamic threshold using Exponential model

@@ -1,6 +1,6 @@
 # Attention Sparsity for HuggingFace Models
 
-In this tutorial, we demonstrate how to use NVIDIA TensorRT Model Optimizer to apply attention sparsity to HuggingFace models. Attention sparsity reduces computational cost by skipping near-zero attention scores during the softmax computation.
+In this tutorial, we demonstrate how to use NVIDIA Model Optimizer to apply attention sparsity to HuggingFace models. Attention sparsity reduces computational cost by skipping near-zero attention scores during the softmax computation.
 
 ## Getting Started
 
@@ -63,7 +63,7 @@ pip install nvidia-modelopt[hf]
 If using `SKIP_SOFTMAX_CALIB`, you need to download the RULER calibration dataset first:
 
 ```bash
-bash modelopt/torch/sparsity/attention_sparsity/calibration/download_ruler_data.sh
+bash ./download_ruler_data.sh
 ```
 
 This downloads the Paul Graham essays dataset used for generating calibration samples.
@@ -75,7 +75,7 @@ This downloads the Paul Graham essays dataset used for generating calibration sa
 Apply sparse attention with a fixed threshold:
 
 ```bash
-python examples/llm_sparsity/attention_sparsity/hf_sa.py \
+python hf_sa.py \
     --pyt_ckpt_path Qwen/Qwen3-8B \
     --sparse_attn skip_softmax
 ```
@@ -85,7 +85,7 @@ python examples/llm_sparsity/attention_sparsity/hf_sa.py \
 Apply sparse attention with calibrated thresholds for optimal sparsity:
 
 ```bash
-python examples/llm_sparsity/attention_sparsity/hf_sa.py \
+python hf_sa.py \
     --pyt_ckpt_path Qwen/Qwen3-8B \
     --sparse_attn skip_softmax_calib
 ```
@@ -121,7 +121,7 @@ The script automatically compares outputs before and after applying sparse atten
 Export the sparsified model to a HuggingFace checkpoint:
 
 ```bash
-python examples/llm_sparsity/attention_sparsity/hf_sa.py \
+python hf_sa.py \
     --pyt_ckpt_path Qwen/Qwen3-8B \
     --sparse_attn skip_softmax_calib \
     --export_dir ./exported_sparse_model
@@ -161,5 +161,5 @@ model = mtsa.sparsify(model, config=custom_config)
 
 ## References
 
-- [TensorRT Model Optimizer Documentation](https://nvidia.github.io/TensorRT-Model-Optimizer/)
+- [Model Optimizer Documentation](https://nvidia.github.io/Model-Optimizer/)
 - [RULER: What's the Real Context Size of Your Long-Context Language Models?](https://github.com/NVIDIA/RULER)

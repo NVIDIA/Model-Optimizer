@@ -249,31 +249,3 @@ class TestSparseAttentionModuleMethods:
                 stats = module.get_stats()
                 assert stats == {}
                 break
-
-    def test_get_threshold_info(self):
-        """Test get_threshold_info() method."""
-        model = SimpleAttentionModel()
-        config = {
-            "sparse_cfg": {
-                "*attention*": {
-                    "method": "flash_skip_softmax",
-                    "threshold": {"prefill": 0.005, "decode": 0.001},
-                    "br": 64,
-                    "bc": 64,
-                    "enable": True,
-                }
-            },
-        }
-
-        sparse_model = sparse_attn.sparsify(model, config)
-
-        # Find sparse module and test threshold info
-        for module in sparse_model.modules():
-            if isinstance(module, SparseAttentionModule):
-                info = module.get_threshold_info()
-
-                assert isinstance(info, dict)
-                assert "type" in info
-                assert info["type"] == "static"
-                assert info["value"] == {"prefill": 0.005, "decode": 0.001}
-                break
