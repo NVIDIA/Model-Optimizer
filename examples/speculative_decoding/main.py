@@ -184,6 +184,10 @@ def train():
                 model_args.model_name_or_path, trust_remote_code=True
             )
             model.config.num_orig_hidden_layers = model_config.num_hidden_layers
+            if hasattr(model.config, "layer_types"):
+                del (
+                    model.config.layer_types
+                )  # remove layer_types to avoid mismatch with the modified model
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_args.model_name_or_path,
             model_max_length=training_args.training_seq_len,
