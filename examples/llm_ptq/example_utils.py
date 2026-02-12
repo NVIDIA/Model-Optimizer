@@ -16,6 +16,7 @@
 import copy
 import glob
 import inspect
+import json
 import os
 import shutil
 import sys
@@ -27,6 +28,7 @@ import torch
 import transformers
 from accelerate import infer_auto_device_map, init_empty_weights
 from accelerate.utils import get_max_memory
+from safetensors.torch import load_file
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -312,6 +314,97 @@ def get_processor(
         return MllamaImageProcessor(processor, device)
 
     return None
+
+
+def load_mtp_weights(
+    model: torch.nn.Module, model_path: str
+) -> tuple[list[str], dict[str, torch.Tensor]]:
+    """Load MTP weights from the model checkpoint.
+
+    Some models store additional layers in separate safetensors files with non-standard
+    names (e.g., mtp.safetensors). HuggingFace's from_pretrained() may not load these
+    files even though they're referenced in model.safetensors.index.json.
+
+    This function detects such cases and explicitly loads the missing weights.
+
+    Args:
+        model: The loaded model that may be missing weights
+        model_path: Path to the model directory
+
+    Returns:
+        List of layer prefixes that were loaded from non-standard safetensors files.
+        These layers should typically be excluded from quantization.
+        Empty list if no additional weights were loaded.
+        Dictionary of MTP weights that were not loaded into the model state dict.
+    """
+    model_path = Path(model_path)
+    index_file = model_path / "model.safetensors.index.json"
+
+    if not index_file.exists():
+        return [], {}
+
+    # Load the index to find all referenced safetensors files
+    index = json.load(open(index_file))
+    weight_map = index["weight_map"]
+    # Find all files in weight_map whose key or value contains "mtp"
+    mtp_weight_map = {}
+    for k, v in weight_map.items():
+        if "mtp" in k or "mtp" in v:
+            mtp_weight_map.setdefault(v, []).append(k)
+
+    if not mtp_weight_map:
+        return [], {}
+
+    def _extract_layer_prefixes(keys):
+        mtp_layer_prefixes = set()
+        for key in keys:
+            parts = key.split(".")
+            for i, part in enumerate(parts):
+                if part == "layers" and i + 1 < len(parts) and parts[i + 1].isdigit():
+                    prefix = ".".join(parts[: i + 2])
+                    mtp_layer_prefixes.add(prefix)
+                    break
+
+        return mtp_layer_prefixes
+
+    # Flatten mtp_weight_map.values() (list of list of str) to a single list of str
+    mtp_keys = [k for keys in mtp_weight_map.values() for k in keys]
+    mtp_layer_prefixes = _extract_layer_prefixes(mtp_keys)
+
+    # Check which non-standard files exist and have missing weights
+    model_state = model.state_dict()
+    total_loaded = 0
+
+    not_in_state_dict = {}
+
+    for filename, mtp_keys in mtp_weight_map.items():
+        filepath = model_path / filename
+        if not filepath.exists():
+            continue
+
+        print(f"Loading {len(mtp_keys)} mtp weights from {filename}...")
+        weights = load_file(str(filepath), device="cpu")
+        weights = {k: v for k, v in weights.items() if k in mtp_keys}
+        # Load the MTP weights to the model state dict
+        in_state_dict = {k: weights[k] for k in weights if k in model_state}
+        not_in_state_dict = not_in_state_dict | {
+            k: weights[k] for k in weights if k not in model_state
+        }
+
+        if in_state_dict:
+            model.load_state_dict(in_state_dict, strict=False)
+            total_loaded += len(in_state_dict)
+
+    if total_loaded > 0:
+        print(
+            f"✓ Successfully loaded {total_loaded} MTP weights, "
+            f"{len(not_in_state_dict)} MTP weights not in model.state_dict"
+        )
+
+    if mtp_layer_prefixes:
+        print(f"✓ Detected MTP layers to exclude from quantization: {mtp_layer_prefixes}")
+
+    return list(mtp_layer_prefixes), not_in_state_dict
 
 
 def get_dtype(dtype):

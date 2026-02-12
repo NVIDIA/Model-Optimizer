@@ -31,6 +31,7 @@ from example_utils import (
     get_tokenizer,
     is_enc_dec,
     is_nemotron_vl,
+    load_mtp_weights,
     run_nemotron_vl_preview,
 )
 from torch.utils.data import DataLoader
@@ -625,9 +626,17 @@ def export_quantized(
                     "They will be set at deployment time."
                 )
 
+            # Load any missing weights from non-standard safetensors (handled in get_model for non-low-memory mode)
+            # Store the MTP layer prefixes on the model for later exclusion from quantization
+            mtp_layer_prefixes, mtp_state_dict = load_mtp_weights(full_model, args.pyt_ckpt_path)
+
+            if mtp_layer_prefixes:
+                full_model._mtp_layer_prefixes = mtp_layer_prefixes
+
             export_hf_checkpoint(
                 full_model,
                 export_dir=export_path,
+                extra_state_dict=mtp_state_dict,
             )
 
         # Copy custom model files (Python files and JSON configs) if trust_remote_code is used
@@ -877,6 +886,19 @@ def quantize_main(
             QUANT_CFG_CHOICES,
             KV_QUANT_CFG_CHOICES,
         )
+
+        # Exclude MTP layers from quantization if detected (e.g., GLM-4.7's layer 92)
+        # These layers are typically speculative decoding layers that should be exported as-is
+        mtp_layer_prefixes = getattr(full_model, "_mtp_layer_prefixes", None)
+        if mtp_layer_prefixes:
+            import copy
+
+            quant_cfg = copy.deepcopy(quant_cfg)
+            for prefix in mtp_layer_prefixes:
+                # Add exclusion pattern for this MTP layer (e.g., "*layers.92*")
+                pattern = f"*{prefix.split('.')[-2]}.{prefix.split('.')[-1]}*"
+                quant_cfg["quant_cfg"][pattern] = {"enable": False}
+                print(f"Excluding MTP layer from quantization: {pattern}")
 
         if args.qformat in QUANT_CFG_CHOICES:
             mono_quantize(

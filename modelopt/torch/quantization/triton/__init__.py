@@ -22,8 +22,7 @@ from modelopt.torch.utils import import_plugin
 
 IS_AVAILABLE = False
 
-# triton fp8 requires compute_cap >= 89
-if torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9):
+if torch.cuda.is_available():
     with import_plugin(
         "triton",
         msg_if_missing=(
@@ -31,6 +30,11 @@ if torch.cuda.is_available() and torch.cuda.get_device_capability() >= (8, 9):
             "quantization simulations. Try to install triton with `pip install triton`."
         ),
     ):
+        # fp4_kernel works on any CUDA GPU with triton
         from .fp4_kernel import *
+
+        # fp4_kernel_hopper requires compute >= 8.9 (uses tl.float8e4nv)
+        if torch.cuda.get_device_capability() >= (8, 9):
+            from .fp4_kernel_hopper import *
 
         IS_AVAILABLE = True

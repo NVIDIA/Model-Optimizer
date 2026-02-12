@@ -133,7 +133,10 @@ def test_quantize(model_cls, config):
         (SimpleLinear, mtq.INT8_SMOOTHQUANT_CFG),
         (SimpleLinear, mtq.W4A8_AWQ_BETA_CFG),
         (SimpleConvLinear, mtq.INT8_DEFAULT_CFG),
+        (SimpleLinear, NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG),
+        (SimpleLinear, NVFP4_WEIGHT_ACT_MSE_CFG),
     ],
 )
 def test_save_restore(model_cls, quant_config):
-    save_restore_test(model_cls, "cuda", quant_config)
+    test_cpu_restore = quant_config == mtq.INT8_SMOOTHQUANT_CFG
+    save_restore_test(model_cls, "cuda", quant_config, test_cpu_restore=test_cpu_restore)

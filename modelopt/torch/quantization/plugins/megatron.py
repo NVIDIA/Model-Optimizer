@@ -24,7 +24,6 @@ import megatron.core.parallel_state as mcore_parallel
 import megatron.core.tensor_parallel.layers as megatron_parallel
 import megatron.core.transformer.mlp as megatron_mlp
 import megatron.core.transformer.moe.experts as megatron_moe
-import megatron.core.transformer.moe.moe_layer as megatron_moe_layer
 import torch
 from megatron.core.parallel_state import get_data_parallel_group
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
@@ -52,6 +51,7 @@ try:
         TEColumnParallelLinear,
         TEDotProductAttention,
         TELayerNormColumnParallelLinear,
+        TELinear,
         TERowParallelGroupedLinear,
         TERowParallelLinear,
     )
@@ -574,12 +574,21 @@ class _MegatronSequentialMLP(DynamicModule):
             expert.linear_fc1.parallel_state = self.parallel_state
             expert.linear_fc2.parallel_state = self.parallel_state
 
-    def sync_moe_local_experts_amax(self):
+    def layer_sync_moe_local_experts_amax(self):
         """Sync amax across local experts in a SequentialMLP.
 
-        amax across EP and ETP (for RowParallel) are synchronized as part of model_calib.max_calibrate().
-        This function is called to synchronize the amax values across local experts s.t. all localexperts will
-        share the same amax.
+        Synchronize the amax values across local experts in a lyaer such that all local experts will
+        share the same amax. This function operates on a single rank and does not require distributed sync.
+
+        Distributed amax sync across EP and ETP (for RowParallel) happens in model_calib.max_calibrate().
+        This function should be called before the distributed sync to ensure the amax values
+        are synchronized across the layer first.
+
+        Note:
+            Because there are logic which calls collective communication based on whether amax is not None,
+            We need to garuantee that all experts must have amax. Otherwise, there will be deadlock
+            when synchroizing over EP since some ranks may have amax None and not calling the collective
+            communication.
         """
         # Collect amax from all local experts
         amax_dict = {}
@@ -597,8 +606,8 @@ class _MegatronSequentialMLP(DynamicModule):
         # Apply synchronized amax values back to all local experts
         for expert in self.local_experts:
             for name, module in expert.named_modules():
-                if isinstance(module, TensorQuantizer) and module.amax is not None:
-                    module.amax = amax_dict[name].detach().clone().to(module.amax.device)
+                if isinstance(module, TensorQuantizer) and name in amax_dict:
+                    module.amax = amax_dict[name].detach().clone()
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         """Override the default to enable singleton_local_shards.
@@ -624,6 +633,10 @@ if HAS_TE:
 
     @QuantModuleRegistry.register({TEColumnParallelLinear: "te_mcore_ColumnParallelLinear"})
     class _QuantTEMCoreColumnParallelLinear(_QuantTELinear, _MegatronColumnParallelLinear):
+        pass
+
+    @QuantModuleRegistry.register({TELinear: "te_mcore_Linear"})
+    class _QuantTEMCoreLinear(_QuantTELinear):
         pass
 
     @QuantModuleRegistry.register(
@@ -735,35 +748,3 @@ if HAS_TE:
             # Affine KVCache Quant bias vector.
             state_dict = self.state_dict(prefix="", keep_vars=True)
             return make_sharded_tensors_for_checkpoint(state_dict, prefix, {}, sharded_offsets)
-
-
-@QuantModuleRegistry.register({megatron_moe_layer.MoELayer: "megatron_moe_MoELayer"})
-class _QuantMoELayer(QuantModule):
-    """Module to support special handling of token dispatching during calibration.
-
-    During calibration, we forward all tokens to all experts so that all experts see sufficient tokens to calibrate.
-    However, even in calibration mode, the actual top_k routing is used to calculate the actual outputs this instance
-    returns.
-
-    When group routing is used (e.g. DSR1 or V3), with group_topk set, topk can never be all experts (otherwise,
-    the total indices will be out of bound). Since DSR1 is the only model that uses group routing and all experts
-    can be calibrated normally, we disable this WAR when group_topk is used.
-
-    If calibration is not enabled, this module behaves as a normal MoELayer.
-
-    Note:
-        There are new arguments (e.g. padding_mask) passed through the forward function. Since we always pass through
-        all the arguments, we use **args and **kwargs here.
-    """
-
-    def _setup(self):
-        pass
-
-    def forward(self, *args, **kwargs):
-        if any(getattr(m, "_if_calib", False) for m in self.experts.modules()):
-            if self.config.moe_router_num_groups is None:
-                original_top_k = self.router.topk
-                self.router.topk = self.router.num_experts
-                super().forward(*args, **kwargs)
-                self.router.topk = original_top_k
-        return super().forward(*args, **kwargs)

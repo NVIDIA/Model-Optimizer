@@ -16,6 +16,7 @@
 """Calibration utilities."""
 
 import math
+import os
 import warnings
 from functools import partial
 
@@ -23,15 +24,17 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from tqdm import tqdm
 
 from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
+from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
 
-from .calib import MseCalibrator
+from .calib import MseCalibrator, NVFP4MSECalibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
-from .nn import QuantModule, SequentialQuantizer, TensorQuantizer
+from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import (
     disable_calib,
     enable_fake_quant,
@@ -41,6 +44,7 @@ from .utils import (
     is_quantized_linear,
     is_quantized_row_parallel_linear,
     quantizer_attr_names,
+    reduce_amax,
     weight_attr_names,
 )
 
@@ -62,6 +66,34 @@ def weight_only_quantize(model: nn.Module):
         seen_modules.add(module)
 
 
+def _has_expert_parallelism(module: nn.Module) -> bool:
+    """Check if module has expert parallelism enabled."""
+    ps = getattr(module, "parallel_state", None)
+    return ps is not None and ps.expert_model_parallel_group.is_initialized()
+
+
+def _check_moe_calibration_complete(quantizer, parallel_state):
+    """Raise error if MoE calibration is incomplete (some ranks have amax, others don't)."""
+    if isinstance(quantizer, SequentialQuantizer):
+        for _q in quantizer:
+            _check_moe_calibration_complete(_q, parallel_state)
+        return
+    for group in [
+        parallel_state.data_parallel_group,
+        parallel_state.expert_model_parallel_group,
+        parallel_state.tensor_parallel_group,
+    ]:
+        if not group.is_initialized():
+            continue
+        has_amax = getattr(quantizer, "_amax", None) is not None
+        amax_states = DistributedProcessGroup.get_dist_syncd_obj(has_amax, group, lambda objs: objs)
+        if any(amax_states) and not all(amax_states):
+            raise RuntimeError(
+                "MoE calibration incomplete: some experts received no tokens during calibration. "
+                "Increase --calib-size to ensure all experts see calibration data."
+            )
+
+
 @torch.no_grad()
 def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, distributed_sync=True):
     """Calibrate the model using max.
@@ -81,8 +113,20 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
         forward_loop(model)
     finish_stats_collection(model)
 
+    # Sync amax across local experts within each rank (for SequentialMLP)
+    for name, module in model.named_modules():
+        if hasattr(module, "layer_sync_moe_local_experts_amax"):
+            module.layer_sync_moe_local_experts_amax()
+
     if not distributed_sync:
         return
+
+    # Check MoE calibration completeness before sync
+    for name, module in model.named_modules():
+        if isinstance(module, QuantModule) and _has_expert_parallelism(module):
+            for child in module.children():
+                if isinstance(child, (TensorQuantizer, SequentialQuantizer)):
+                    _check_moe_calibration_complete(child, module.parallel_state)
 
     def sync_quantizer_amax_across_dp_ep(quantizer, parallel_state):
         """Synchronize the amax across all ranks in the data parallel and expert parallel groups."""
@@ -95,13 +139,13 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
             quantizer.sync_amax_across_distributed_group(parallel_state.expert_model_parallel_group)
         # TODO: create sync_bias_across_distributed_group
 
-    # Step 1:Sync amax across data parallelism
+    # Step 2:Sync amax across data parallelism
     for name, module in model.named_modules():
         if isinstance(module, QuantModule):
             for child in module.children():
                 if isinstance(child, (TensorQuantizer, SequentialQuantizer)):
                     sync_quantizer_amax_across_dp_ep(child, module.parallel_state)
-    # TP sync:
+    # Step 3: TP sync
     # Objective: the quantization parameters when TP = 8 then changed to TP=4 then back to TP=8 should be the same
 
     # ColumnParallel: X @ [A_1, A_2] (weights split along Cout)
@@ -156,7 +200,6 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
                 axes_for_sync=[None, -1],
                 parallel_state=module.parallel_state,
             )
-
             sync_quantizer_amax_across_tp(
                 module.weight_quantizer,
                 name,
@@ -181,10 +224,6 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
                 axes_for_sync=[None, 0],
                 parallel_state=module.parallel_state,
             )
-
-        # MOE Quantization
-        if hasattr(module, "sync_moe_local_experts_amax"):
-            module.sync_moe_local_experts_amax()
 
         # KV Cache Quantization
         if hasattr(module, "k_bmm_quantizer") and hasattr(module, "v_bmm_quantizer"):
@@ -261,7 +300,7 @@ def mse_calibrate(
     weight_quantizers = []
     seen_modules = set()
 
-    for name, module in model.named_modules():
+    for name, module in list(model.named_modules()):
         if isinstance(module, TensorQuantizer) and not module._disabled:
             if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
                 # Get the initial amax from max calibration
@@ -273,6 +312,24 @@ def mse_calibrate(
                     and module._block_sizes is not None
                     and module._block_sizes.get("scale_bits") == (4, 3)
                 )
+
+                if is_nvfp4_static:
+                    # Compute and set global_amax
+                    global_amax = reduce_amax(initial_amax, axis=None)
+
+                    # Convert to NVFP4StaticQuantizer in-place
+                    NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
+
+                if fp8_scale_sweep and is_nvfp4_static:
+                    # Replace calibrator with NVFP4MSECalibrator
+                    module._calibrator = NVFP4MSECalibrator(
+                        amax=initial_amax,
+                        axis=module._calibrator._axis,
+                        global_amax=module.global_amax,
+                        quant_func=partial(_mse_quant_func, quantizer=module),
+                    )
+                    continue
+
                 if fp8_scale_sweep and not is_nvfp4_static:
                     warnings.warn(
                         f"fp8_scale_sweep is enabled but quantizer '{name}' is not NVFP4 static "
@@ -287,7 +344,6 @@ def mse_calibrate(
                     start_multiplier=start_multiplier,
                     stop_multiplier=stop_multiplier,
                     quant_func=partial(_mse_quant_func, quantizer=module),
-                    fp8_scale_sweep=fp8_scale_sweep and is_nvfp4_static,
                 )
 
     # Identify weight quantizers by checking if they have corresponding weight parameters
@@ -306,40 +362,12 @@ def mse_calibrate(
     # This ensures weights are only calibrated once, not during every forward pass
     for parent_module, weight_name, weight_quantizer in weight_quantizers:
         # Enable calibration mode for the weight quantizer
-        weight_quantizer.disable_quant()
-        weight_quantizer.enable_calib()
-
+        enable_stats_collection(parent_module)
         with enable_weight_access_and_writeback(parent_module, model):
             weight = getattr(parent_module, weight_name)
             weight_quantizer(weight)
-
-    # Step 4: Disable weight quantizers during forward loop
-    for _, _, weight_quantizer in weight_quantizers:
-        weight_quantizer.disable()
-
-    # Step 5: Collect data with MSE calibrators for activation quantizers only
-    enable_stats_collection(model)
-    if forward_loop is None:
-        # If no forward loop, nothing else to do since weights are already calibrated
-        pass
-    else:
-        # Run forward loop - only activation quantizers will collect data
-        forward_loop(model)
-
-    # Step 6: Re-enable weight quantizers before finalizing calibration
-    # This ensures finish_stats_collection processes them correctly
-    for _, _, weight_quantizer in weight_quantizers:
-        weight_quantizer.enable()
-
-    # Step 7: Compute optimal amax and load it for all quantizers (weights + activations)
-    finish_stats_collection(model, method="mse")
-
-    # Step 8: Free GPU memory by clearing calibrator data
-    for name, module in model.named_modules():
-        if isinstance(module, TensorQuantizer) and not module._disabled:
-            if hasattr(module, "_calibrator") and getattr(module, "_calibrator", None) is not None:
-                if hasattr(module._calibrator, "clear"):
-                    module._calibrator.clear()
+        finish_stats_collection(parent_module, method="mse")
+        weight_quantizer._calibrator.reset()
 
     # TODO: Sync amax across distributed processes
 
@@ -355,7 +383,7 @@ def enable_stats_collection(model: nn.Module):
                 module.disable()
 
 
-def finish_stats_collection(model: nn.Module, method: str | None = None):
+def finish_stats_collection(model: nn.Module, method: str | None = None, **kwargs):
     """Finish stats collection for all quantizers in the model."""
     for _, module in model.named_modules():
         if not isinstance(module, TensorQuantizer) or module._disabled:
@@ -363,15 +391,11 @@ def finish_stats_collection(model: nn.Module, method: str | None = None):
 
         cal = getattr(module, "_calibrator", None)
         if cal and not getattr(module, "_dynamic", False):
-            if method in {"mse", "entropy"}:
+            if method in {"entropy"}:
                 if cal.compute_amax(method) is not None:
-                    if method == "entropy":
-                        module.load_calib_amax("entropy")
-                    else:
-                        module.load_calib_amax()
-            elif cal.compute_amax() is not None:
-                # Max calibrator
-                module.load_calib_amax()
+                    module.load_calib_amax("entropy", **kwargs)
+            elif cal.compute_amax(**kwargs) is not None:
+                module.load_calib_amax(**kwargs)
 
         if module.bias_calibrator is not None and module.bias_type == "static":
             module.load_calib_bias()
@@ -1157,3 +1181,321 @@ def svdquant(
             with enable_weight_access_and_writeback(module, model):
                 postprocess(module, name)
     max_calibrate(model, forward_loop)
+
+
+def _print_relative_mse_error(q: torch.Tensor, w: torch.Tensor, h: torch.Tensor, module_name: str):
+    """Print relative mean squared error between quantized and original weights.
+
+    Computes the Hessian-weighted relative MSE between quantized and original weights,
+    providing a measure of quantization quality. This metric is adapted from the GPTQ
+    repository.
+
+    Args:
+        q (torch.Tensor): Quantized weight tensor
+        w (torch.Tensor): Original weight tensor
+        h (torch.Tensor): Hessian matrix used for weighting the error
+        module_name (str): Name of the module for logging purposes
+    Note:
+        Implementation adapted from the GPTQ repository:
+        https://github.com/IST-DASLab/FP-Quant
+    """
+    delta = q - w
+    mse = (delta).mm(h).mul(delta).mean() / (w.mm(h).mul(w).mean() + 1e-6)
+    print(f"[{module_name}] Relative MSE error: {mse.item():.2e}")
+
+
+def update_hessian(input, hessian, n_samples):
+    """Update hessian matrix with new input samples using incremental formula.
+
+    Args:
+        input: Input tensor (batch_size, ..., features)
+        hessian: Current Hessian matrix to update in-place
+        n_samples: Number of samples already processed
+    Returns:
+        Tuple of (updated_hessian, new_sample_count)
+    """
+    batch_size = input.shape[0]
+
+    # Incremental averaging: scale down old hessian
+    hessian *= n_samples / (n_samples + batch_size)
+    n_samples += batch_size
+
+    # Compute outer product: H += (2/n_samples) * X @ X^T
+    # where X is the flattened input reshaped to (features, batch*seq)
+    input_flat = input.reshape(-1, input.shape[-1]).t().float()
+    scaled_input = math.sqrt(2 / n_samples) * input_flat
+    hessian.add_((scaled_input @ scaled_input.t()).to(hessian.device))
+
+    return hessian, n_samples
+
+
+def prepare_hessian_inverse(h, weight, percdamp):
+    """Prepare inverse Hessian with dead neuron handling and damping.
+
+    Args:
+        h: Hessian matrix to update
+        weight: Weight tensor to prepare Hessian for
+        percdamp: Damping percentage for Hessian diagonal
+    Returns:
+        h_inv: Inverse Hessian matrix
+    Implementation adapted from the FP-Quant repository:
+    https://github.com/IST-DASLab/FP-Quant/blob/d2e3092f968262c4de5fb050e1aef568a280dadd/src/quantization/gptq.py#L200
+    """
+    h = h.clone()
+    # Handle dead neurons (zero weight columns)
+    # Get columns with all zeros in weight
+    zero_cols = torch.nonzero(weight.eq(0).all(dim=0)).unsqueeze(-1)
+
+    # Zero out entire rows and columns in Hessian for dead neurons
+    h[zero_cols, :] = 0
+    h[:, zero_cols] = 0
+    h[zero_cols, zero_cols] = 1
+
+    # Add damping to diagonal
+    damp = percdamp * torch.mean(torch.diag(h))
+    diag_indices = torch.arange(h.shape[0], device=h.device)
+    h[diag_indices, diag_indices] += damp
+
+    try:
+        h = torch.cholesky_inverse(torch.linalg.cholesky(h))
+        h_inv = torch.linalg.cholesky(h, upper=True)
+    except (RuntimeError, torch.linalg.LinAlgError):
+        print("Warning: Hessian is not positive definite, using identity matrix")
+        h_inv = torch.eye(h.shape[0], device=h.device, dtype=h.dtype)
+    return h_inv
+
+
+def quantize_block(full_weight, block_start, block_end, h_inv, quantizer):
+    """Quantize a block of weights group by group (based on quantizer block sizes) with error propagation.
+
+    Args:
+        full_weight: The full weight tensor (needed for INT4 quantization)
+        block_start: Starting column index of the block
+        block_end: Ending column index of the block
+        h_inv: Hessian inverse
+        quantizer: The quantizer to apply
+    Returns:
+        quantized_block: Quantized weights for this block
+        losses: Quantization losses per element
+        errors: Accumulated errors for propagation
+    """
+    # Extract the block we're working on
+    block_weight = full_weight[:, block_start:block_end]
+    block_hinv = h_inv[block_start:block_end, block_start:block_end]
+    block_size = block_end - block_start
+
+    quantized_block = torch.zeros_like(block_weight)
+    losses = torch.zeros_like(block_weight)
+    errors = torch.zeros_like(block_weight)
+
+    # We perform column-wise update for GPTQ within the block
+    group_size = 1
+
+    for group_start in range(0, block_size, group_size):
+        group_end = min(group_start + group_size, block_size)
+        group_cols = slice(group_start, group_end)
+        # Get current column and its Hessian inverse diagonal
+        weight_col = block_weight[:, group_cols]
+        hinv_diag = torch.diag(block_hinv[group_cols, group_cols])
+
+        # Quantize using the full weight, then extract the columns we need
+        quantized_full = quantizer(full_weight)
+        quantized_cols = quantized_full[:, block_start + group_start : block_start + group_end]
+        quantized_block[:, group_cols] = quantized_cols
+
+        # Compute quantization error and loss
+        error = (weight_col - quantized_cols) / hinv_diag
+        losses[:, group_cols] = (weight_col - quantized_cols) ** 2 / (hinv_diag**2) / 2
+        errors[:, group_cols] = error
+
+        # Propagate error to remaining columns in block
+        block_weight[:, group_start:] -= error @ block_hinv[group_start:group_end, group_start:]
+        full_weight[:, block_start:block_end] = block_weight
+
+    return quantized_block, losses, errors
+
+
+def blockwise_weight_update(module, h, block_size, percdamp):
+    """Update module weights using GPTQ-style blockwise quantization.
+
+    Args:
+        module: Neural network module with weight and weight_quantizer
+        H: Hessian matrix (d x d)
+        block_size: Size of blocks to process at once
+        percdamp: Damping percentage for Hessian diagonal
+    """
+    weight = module.weight.data.float().clone()
+    _, num_cols = weight.shape
+
+    # Preprocess Hessian: handle dead neurons and add damping
+    h_inv = prepare_hessian_inverse(h, weight, percdamp)
+
+    # Initialize output tensors
+    quantized_weight = torch.zeros_like(weight)
+    losses = torch.zeros_like(weight)
+
+    # Process weights in blocks
+    for block_start in range(0, num_cols, block_size):
+        block_end = min(block_start + block_size, num_cols)
+
+        quantized_block, block_losses, block_errors = quantize_block(
+            weight, block_start, block_end, h_inv, module.weight_quantizer
+        )
+        # Store results
+        quantized_weight[:, block_start:block_end] = quantized_block
+        losses[:, block_start:block_end] = block_losses
+
+        # Propagate errors to remaining weights
+        weight[:, block_end:] -= block_errors @ h_inv[block_start:block_end, block_end:]
+
+    # Print relative mse error
+    _print_relative_mse_error(quantized_weight, module.weight.float(), h, module.name)
+    # Update module weights
+    module.weight.data = quantized_weight.reshape(module.weight.shape).to(module.weight.data.dtype)
+
+
+def gptq_lite(
+    model: nn.Module,
+    forward_loop: ForwardLoop | None = None,
+    percdamp: float = 0.01,
+    block_size: int = 128,
+    hessian_state_path: str | None = None,
+):
+    """GPTQ-lite quantization - a simplified GPTQ variant.
+
+    Key differences from GPTQ:
+    - Layers are quantized in parallel (not sequentially with updated activations)
+    - Uses group-wise updates instead of column-wise updates
+
+    Args:
+        model: Model to be calibrated.
+        forward_loop: Callable that forwards calibration data through the model.
+        percdamp: Percentage of avg Hessian diagonal for damping (default: 0.01).
+        block_size: Block size for GPTQ weight update.
+        hessian_state_path: Path to save/load Hessian state. If None, compute without saving.
+            If path exists, load from it. If path doesnt exist then save computed hessians to path.
+
+    See :class:`GPTQLiteConfig <modelopt.torch.quantization.config.GPTQLiteConfig>` for
+    details on the remaining arguments.
+
+    Note: This feature is currently experimental and may not translate to improved accuracy as expected.
+    """
+    # Dictionary to store hessian matrices: {layer_name: {"hessian": Tensor, "n_samples": int}}
+    hessian_state = {}
+
+    def initialize_hessian_state(tensor_mapping):
+        """Initialize hessian state with zeros."""
+        for name, (shape, device) in tensor_mapping.items():
+            # Use CPU if GPU memory is tight
+            target_device = "cpu" if get_used_gpu_mem_fraction(device) > 0.65 else device
+            hessian_state[name] = {
+                "hessian": torch.zeros(shape, dtype=torch.float32, device=target_device),
+                "n_samples": 0,
+            }
+
+    def load_hessian_state(path, tensor_mapping):
+        """Load hessian state from file."""
+        print_rank_0(f"Loading hessian state from {path}")
+        loaded_state = torch.load(path, map_location="cpu")
+
+        for name, (shape, device) in tensor_mapping.items():
+            if name not in loaded_state:
+                raise KeyError(f"Layer '{name}' not found in loaded hessian state")
+
+            # Move to appropriate device based on memory
+            target_device = "cpu" if get_used_gpu_mem_fraction(device) > 0.65 else device
+            hessian_state[name] = {
+                "hessian": loaded_state[name]["hessian"].to(target_device),
+                "n_samples": loaded_state[name]["n_samples"],
+            }
+
+        print_rank_0(f"Successfully loaded hessian state with {len(hessian_state)} layers")
+
+    def save_hessian_state(path):
+        """Save hessian state to file."""
+        print_rank_0(f"Saving hessian state to {path}")
+        try:
+            # Move to CPU for saving
+            cpu_state = {
+                name: {"hessian": state["hessian"].cpu(), "n_samples": state["n_samples"]}
+                for name, state in hessian_state.items()
+            }
+
+            os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
+            torch.save(cpu_state, path)
+            print_rank_0(f"Successfully saved hessian state to {path}")
+        except Exception as e:
+            print_rank_0(f"Error saving hessian state: {e}")
+            print_rank_0("Continuing execution...")
+
+    def hessian_hook(module, input, output):
+        """Hook to intercept activations and update hessian matrix."""
+        state = hessian_state[module.name]
+        hessian, n_samples = update_hessian(input[0], state["hessian"], state["n_samples"])
+        hessian_state[module.name] = {"hessian": hessian, "n_samples": n_samples}
+
+    # Phase 1: Collect statistics for quantizers
+    max_calibrate(model)
+
+    # Phase 2: Build tensor mapping for all quantized layers
+    tensor_mapping = {}
+    for name, module in model.named_modules():
+        if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
+            in_features = module.weight.shape[-1]
+            tensor_mapping[name] = ((in_features, in_features), module.weight.device)
+            module.name = name  # Attach name for easy access in hooks
+
+    # Phase 3: Load or compute Hessians
+    hessian_exists = hessian_state_path is not None and os.path.exists(hessian_state_path)
+    save_hessians = hessian_state_path is not None and not hessian_exists
+
+    if hessian_exists:
+        print_rank_0(f"Loading hessian state from {hessian_state_path}")
+        load_hessian_state(hessian_state_path, tensor_mapping)
+    else:
+        if forward_loop is None:
+            raise ValueError("forward_loop must be provided when computing Hessians")
+
+        # Initialize hessian state
+        initialize_hessian_state(tensor_mapping)
+
+        # Register hooks to collect activations
+        handles = []
+        for name, module in model.named_modules():
+            if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
+                handles.append(module.register_forward_hook(hessian_hook))
+
+        # Run forward loop to compute hessians
+        print_rank_0("Computing Hessian matrices...")
+        forward_loop(model)
+
+        for handle in handles:
+            handle.remove()
+
+    # Save if configured
+    if save_hessians:
+        try:
+            save_hessian_state(hessian_state_path)
+        except Exception as e:
+            print_rank_0(f"Error saving hessian state: {e}")
+            print_rank_0("Continuing execution...")
+
+    # Phase 4: Update weights using computed Hessians
+    print_rank_0("Updating weights using GPTQ-lite algorithm...")
+
+    quantized_modules = [
+        (name, module)
+        for name, module in model.named_modules()
+        if is_quantized_linear(module) and module.weight_quantizer.is_enabled
+    ]
+
+    # Perform blockwise weight updates
+    for name, module in tqdm(quantized_modules, desc="Quantizing layers"):
+        state = hessian_state[module.name]
+        hessian = state["hessian"].to(module.weight.device)
+        blockwise_weight_update(module, hessian, block_size, percdamp)
+        # Delete hessian state to free memory
+        del hessian_state[module.name]
+        torch.cuda.empty_cache()
+
+    print_rank_0("GPTQ-lite quantization completed successfully")

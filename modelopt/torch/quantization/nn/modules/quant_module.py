@@ -17,10 +17,13 @@
 
 import contextlib
 import warnings
+from typing import Any
 
 import torch
+import torch.nn as nn
 
 from modelopt.torch.opt.dynamic import DynamicModule, _DMRegistryCls
+from modelopt.torch.utils.distributed import ParallelState
 
 from ...tensor_quant import QUANT_DESC_8BIT_PER_TENSOR
 from ...utils import is_torch_export_mode
@@ -35,7 +38,55 @@ __all__ = [
 
 
 class QuantModule(DynamicModule):
-    """A base class for quantized modules."""
+    """A base class for quantized modules.
+
+    In addition, the class also provides ``parallel_state`` attribute that can be used to access
+    the parallel state of the module.
+    """
+
+    _parallel_state: ParallelState
+
+    @classmethod
+    @torch.no_grad()
+    def convert(cls, module: nn.Module, **setup_kwargs: Any) -> "QuantModule":
+        """Convert the module to a dynamic module."""
+        module = super().convert(module, **setup_kwargs)
+
+        # setup parallel state now that the module is converted
+        if module.parallel_state is None:
+            module._initialize_parallel_state()
+
+        return module
+
+    @property
+    def parallel_state(self) -> ParallelState | None:
+        """Return the parallel state of the quant module."""
+        return getattr(self, "_parallel_state", None)
+
+    @parallel_state.setter
+    def parallel_state(self, parallel_state: ParallelState):
+        """Set the parallel state of the dynamic module."""
+        assert isinstance(parallel_state, ParallelState), (
+            "parallel_state must be a ParallelState object!"
+        )
+        self._parallel_state = parallel_state
+
+    def _initialize_parallel_state(self):
+        """Initialize the parallel state of the dynamic module.
+
+        This method is called only if the `QuantModule` does not have a `parallel_state` attribute
+        after `_setup` is called.
+        """
+        if torch.distributed.is_initialized():
+            warnings.warn(
+                f"Distributed training is initialized but no parallel_state is set for {type(self)}. "
+                "Using default parallel_state which has data_parallel_group set to the default process group and "
+                "tensor_parallel_group is unspecified. "
+                "If you are using tensor parallelism for this module, you should set the parallel_state "
+                "in its `_setup` method."
+            )
+
+        self.parallel_state = ParallelState(data_parallel_group=None)
 
     def modelopt_post_restore(self, prefix: str = ""):
         """Post-restore to correctly configure the TensorQuantizer states.
@@ -110,7 +161,26 @@ class QuantInputBase(QuantModule):
     def forward(self, input, *args, **kwargs):
         """Quantize the input before calling the original forward method."""
         input = self.input_quantizer(input)
-        output = super().forward(input, *args, **kwargs)
+        # Check MR: https://github.com/NVIDIA/Model-Optimizer/pull/824
+        if hasattr(self, "_forward_pre_dm"):
+            pre_fwd = getattr(self, "_forward_pre_dm")
+
+            def _is_forward_in_mro(bound_or_func) -> bool:
+                # If this is a bound method, compare its underlying function to any `forward`
+                # implementation in the current MRO. If it matches, it's not an external monkey-patch.
+                if hasattr(bound_or_func, "__func__"):
+                    fn = bound_or_func.__func__
+                    for cls in type(self).mro():
+                        if cls.__dict__.get("forward") is fn:
+                            return True
+                return False
+
+            if pre_fwd is getattr(self, "forward") or _is_forward_in_mro(pre_fwd):
+                output = super().forward(input, *args, **kwargs)
+            else:
+                output = pre_fwd(input, *args, **kwargs)
+        else:
+            output = super().forward(input, *args, **kwargs)
         if isinstance(output, tuple):
             return (self.output_quantizer(output[0]), *output[1:])
         return self.output_quantizer(output)
