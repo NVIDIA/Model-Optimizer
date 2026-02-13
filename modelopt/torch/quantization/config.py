@@ -169,6 +169,7 @@ super_disabled_quantizer_cfg = {
     "*k_proj*": {"enable": False}, # Skip QKV Linear
     "*v_proj*": {"enable": False}, # Skip QKV Linear
     "*o_proj*": {"enable": False}, # Skip Output Linear
+    "*mtp*": {"enable": False}, # Skip MTP (Multi-Token Prediction) layers
 }
 
 SUPER_NVFP4_AGGRESSIVE_CFG = {
