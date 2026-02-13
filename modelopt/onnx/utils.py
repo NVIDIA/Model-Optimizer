@@ -1215,48 +1215,106 @@ def onnx_type_str_to_enum(dtype: str) -> int:
     return getattr(onnx.TensorProto, dtype)
 
 
-def remove_duplicate_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
-    """Removes consecutive Cast nodes that cast to the same type.
+def remove_redundant_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
+    """Removes redundant Cast nodes from an ONNX model.
 
-    Example: Cast(to=FP16) -> Cast(to=FP16) becomes just Cast(to=FP16)
+    Handles three patterns:
+    1. Same-type casts: Cast where input type == output type (no-op)
+    2. Sequential casts: Cast(to=high_prec) -> Cast(to=low_prec), first cast removed
+    3. Constant->Cast folding: Fold cast into preceding Constant node's data
+
+    Args:
+        onnx_model: The ONNX model to optimize.
+
+    Returns:
+        onnx.ModelProto: Model with redundant casts removed.
     """
+    import ml_dtypes
+
     graph = gs.import_onnx(onnx_model)
     removed_count = 0
+
+    # Precision ordering: lower index = higher precision
+    precision_order = {
+        onnx.TensorProto.DOUBLE: 0,
+        onnx.TensorProto.FLOAT: 1,
+        onnx.TensorProto.FLOAT16: 2,
+        onnx.TensorProto.BFLOAT16: 3,
+    }
+
+    def _get_onnx_type(tensor):
+        """Get ONNX type enum from a GS tensor's dtype."""
+        if tensor.dtype is None:
+            return None
+        try:
+            return onnx.helper.np_dtype_to_tensor_dtype(tensor.dtype)
+        except Exception:
+            return None
+
+    def _bypass_cast(node):
+        """Reconnect consumers of cast output to use cast input, removing the cast."""
+        inp = node.inputs[0]
+        out = node.outputs[0]
+        for consumer in list(out.outputs):
+            for i, consumer_inp in enumerate(consumer.inputs):
+                if consumer_inp is out:
+                    consumer.inputs[i] = inp
+        for i, graph_out in enumerate(graph.outputs):
+            if graph_out is out:
+                graph.outputs[i] = inp
+        node.outputs.clear()
 
     for node in list(graph.nodes):
         if node.op != "Cast":
             continue
 
-        # Check if output goes to exactly one Cast node
-        if len(node.outputs) != 1 or len(node.outputs[0].outputs) != 1:
+        cast_to = node.attrs.get("to")
+        if cast_to is None:
             continue
 
-        next_node = node.outputs[0].outputs[0]
-        if next_node.op != "Cast":
+        input_tensor = node.inputs[0]
+        output_tensor = node.outputs[0]
+
+        # Pattern 1: Same-type cast (no-op)
+        input_type = _get_onnx_type(input_tensor)
+        if input_type is not None and input_type == cast_to:
+            _bypass_cast(node)
+            removed_count += 1
+            logger.debug(f"Removed same-type cast: {node.name}")
             continue
 
-        first_to = node.attrs.get("to")
-        second_to = next_node.attrs.get("to")
+        # Pattern 2: Sequential casts where first can be removed
+        # Cast(to=high) -> Cast(to=low): first cast has no effect
+        cast_consumers = output_tensor.outputs
+        if len(cast_consumers) == 1 and cast_consumers[0].op == "Cast":
+            next_cast_to = cast_consumers[0].attrs.get("to")
+            if (
+                cast_to in precision_order
+                and next_cast_to in precision_order
+                and precision_order[cast_to] <= precision_order[next_cast_to]
+            ):
+                _bypass_cast(node)
+                removed_count += 1
+                logger.debug(f"Removed sequential cast: {node.name}")
+                continue
 
-        # Only handle same-type casts
-        if first_to != second_to:
-            continue
-
-        # Bypass the second cast - keep first, remove second
-        input_tensor = node.outputs[0]
-        output_tensor = next_node.outputs[0]
-
-        for consumer in list(output_tensor.outputs):
-            for i, inp in enumerate(consumer.inputs):
-                if inp == output_tensor:
-                    consumer.inputs[i] = input_tensor
-        next_node.outputs.clear()
-        removed_count += 1
-        logger.debug(f"Removed duplicate cast: {next_node.name} (same type as {node.name})")
+        # Pattern 3: Constant -> Cast folding (only if constant has single consumer)
+        if isinstance(input_tensor, Constant) and len(input_tensor.outputs) == 1:
+            try:
+                if cast_to == onnx.TensorProto.BFLOAT16:
+                    input_tensor.values = input_tensor.values.astype(ml_dtypes.bfloat16)
+                else:
+                    cast_dtype = onnx.helper.tensor_dtype_to_np_dtype(cast_to)
+                    input_tensor.values = input_tensor.values.astype(cast_dtype)
+                _bypass_cast(node)
+                removed_count += 1
+                logger.debug(f"Folded Constant->Cast: {node.name}")
+            except Exception as e:
+                logger.debug(f"Failed to fold Constant->Cast {node.name}: {e}")
 
     if removed_count > 0:
         graph.cleanup().toposort()
-        logger.info(f"Removed {removed_count} duplicate Cast nodes")
+        logger.info(f"Removed {removed_count} redundant Cast nodes")
 
     return gs.export_onnx(graph)
 

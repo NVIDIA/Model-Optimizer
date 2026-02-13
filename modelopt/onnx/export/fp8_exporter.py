@@ -127,6 +127,7 @@ class FP8QuantExporter(ONNXQuantExporter):
                     # Create FP8 zero point constant
                     zp_tensor = onnx.TensorProto()
                     zp_tensor.data_type = onnx.TensorProto.FLOAT8E4M3FN
+                    zp_tensor.dims.extend([1])  # 1-element tensor
                     zp_tensor.raw_data = b"\x00"  # Zero in FP8
                     zp_values = LazyValues(zp_tensor)
                     zero_point = gs.Constant(node.name + "_zero_point", zp_values)
