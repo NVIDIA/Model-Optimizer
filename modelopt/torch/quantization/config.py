@@ -162,6 +162,62 @@ _default_disabled_quantizer_cfg = {
     "default": {"enable": False},
 }
 
+super_disabled_quantizer_cfg = {
+    "*fc1_latent_proj*": {"enable": False},  # Skip Latent MOE
+    "*fc2_latent_proj*": {"enable": False},  # Skip Latent MOE
+    "*q_proj*": {"enable": False},  # Skip QKV Linear
+    "*k_proj*": {"enable": False},  # Skip QKV Linear
+    "*v_proj*": {"enable": False},  # Skip QKV Linear
+}
+
+SUPER_NVFP4_CONSERVATIVE_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        **_default_disabled_quantizer_cfg,
+        **super_disabled_quantizer_cfg,
+        "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
+        "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
+    },
+    "algorithm": "max",
+}
+
+SUPER_NVFP4_CONSERVATIVE_GPTQ_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        **_default_disabled_quantizer_cfg,
+        **super_disabled_quantizer_cfg,
+        "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
+        "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
+    },
+    "algorithm": {
+        "method": "gptq",
+        "use_sequential": True,
+    },
+}
+
+
 INT8_DEFAULT_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {"num_bits": 8, "axis": 0},

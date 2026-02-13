@@ -666,4 +666,8 @@ def get_decoder_layers(model: nn.Module, granularity: str = "decoder") -> nn.Mod
     if hasattr(model, "transformer") and hasattr(model.transformer, "h"):
         return model.transformer.h
 
+    # Nemotron Super/Nano
+    if hasattr(model, "backbone") and hasattr(model.backbone, "layers"):
+        return model.backbone.layers
+
     return None
