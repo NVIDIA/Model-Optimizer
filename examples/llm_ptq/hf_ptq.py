@@ -95,6 +95,8 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "nvfp4_static_wo_gptq_lite": mtq.NVFP4_STATIC_WO_GPTQ_LITE_CFG,
     "nvfp4_dynamic_wo_gptq": mtq.NVFP4_DYNAMIC_WO_CFG,
     "nvfp4_static_gptq": mtq.NVFP4_STATIC_GPTQ_CFG,
+    "nemotron_super_nvfp4_conservative_gptq": mtq.SUPER_NVFP4_CONSERVATIVE_GPTQ_CFG,
+    "nemotron_super_nvfp4_conservative": mtq.SUPER_NVFP4_CONSERVATIVE_CFG,
 }
 
 KV_QUANT_CFG_CHOICES = {
@@ -265,6 +267,8 @@ def auto_quantize(
             "nvfp4_static_wo",
             "nvfp4_static_wo_gptq_lite",
             "nvfp4_static_gptq",
+            "nemotron_super_nvfp4_conservative_gptq",
+            "nemotron_super_nvfp4_conservative",
         ]
         for args.qformat in qformat_list
     ), "One or more quantization formats provided are not supported for unified checkpoint export"
@@ -714,8 +718,7 @@ def export_quantized(
                 eval_data = _get_wikitext2(tokenizer, 2048)
                 ppl = _compute_perplexity(full_model, eval_data)
                 print(f"Wikitext-2 perplexity: {round(ppl, 2):.2f}")
-                print(f"Saving model to {args.export_path}")
-                full_model.save_pretrained(args.export_path)
+                breakpoint()
 
             if args.export_qdq_weights:
                 # Disable quantizers
@@ -723,8 +726,8 @@ def export_quantized(
                     mtq.fold_weight(full_model)
                     print("Folded weights")
 
-                print("Disabling quantizers for perplexity evaluation (weights are already QDQ'ed)")
-                mtq.disable_quantizer(full_model, "*")
+                print(f"Saving model to {args.export_path}")
+                full_model.save_pretrained(args.export_path)
 
                 if True:
                     import os
@@ -1060,6 +1063,8 @@ def quantize_main(
                 "nvfp4_static_wo_gptq_lite",
                 "nvfp4_dynamic_wo_gptq",
                 "nvfp4_static_gptq",
+                "nemotron_super_nvfp4_conservative_gptq",
+                "nemotron_super_nvfp4_conservative",
             ]
             or args.kv_cache_qformat in KV_QUANT_CFG_CHOICES
         ), f"Plain quantization format {args.qformat} not supported for HF export path"
