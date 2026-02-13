@@ -759,8 +759,7 @@ def export_quantized(
                 eval_data = _get_wikitext2(tokenizer, 2048)
                 ppl = _compute_perplexity(full_model, eval_data)
                 print(f"Wikitext-2 perplexity: {round(ppl, 2):.2f}")
-                print(f"Saving model to {args.export_path}")
-                full_model.save_pretrained(args.export_path)
+                breakpoint()
 
             if args.export_qdq_weights:
                 # Disable quantizers
@@ -768,8 +767,8 @@ def export_quantized(
                     mtq.fold_weight(full_model)
                     print("Folded weights")
 
-                print("Disabling quantizers for perplexity evaluation (weights are already QDQ'ed)")
-                mtq.disable_quantizer(full_model, "*")
+                print(f"Saving model to {args.export_path}")
+                full_model.save_pretrained(args.export_path)
 
                 if True:
                     import os
