@@ -67,13 +67,22 @@ from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
-# Patch to fix cnn_dailymail streaming issue (TAR extraction not supported in streaming mode)
+# Patch to fix streaming issues (TAR extraction not supported, offline mode issues)
+import os
 import datasets
 _original_load_dataset = datasets.load_dataset
 
 def _patched_load_dataset(*args, **kwargs):
     path = kwargs.get('path') or (args[0] if args else None)
-    if path == 'cnn_dailymail' and kwargs.get('streaming', False):
+    is_streaming = kwargs.get('streaming', False)
+    is_offline = os.environ.get('HF_DATASETS_OFFLINE', '0') == '1' or os.environ.get('HF_HUB_OFFLINE', '0') == '1'
+    
+    # Disable streaming in offline mode (streaming doesn't work well with cached datasets)
+    if is_streaming and is_offline:
+        print(f"[PATCH] Disabling streaming for {path} dataset (offline mode)")
+        kwargs['streaming'] = False
+    # Also disable streaming for cnn_dailymail (TAR extraction not supported)
+    elif path == 'cnn_dailymail' and is_streaming:
         print("[PATCH] Disabling streaming for cnn_dailymail dataset")
         kwargs['streaming'] = False
     return _original_load_dataset(*args, **kwargs)

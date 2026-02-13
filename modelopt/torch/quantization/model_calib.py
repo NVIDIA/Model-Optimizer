@@ -21,6 +21,7 @@ from collections.abc import Callable
 from functools import partial
 
 import torch
+from tqdm import tqdm
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
@@ -299,7 +300,9 @@ def mse_calibrate(
 
     # Step 3: Calibrate weight quantizers ONE AT A TIME with immediate amax computation
     # This prevents massive memory accumulation seen in large models
-    for idx, (parent_module, weight_name, weight_quantizer) in enumerate(weight_quantizers):
+    for idx, (parent_module, weight_name, weight_quantizer) in enumerate(
+        tqdm(weight_quantizers, desc="MSE weight calibration")
+    ):
         # Enable calibration mode for the weight quantizer
         weight_quantizer.disable_quant()
         weight_quantizer.enable_calib()
@@ -791,7 +794,7 @@ def local_hessian_calibrate(
     weight_list = [(name, module) for name, module in weight_quantizers_info
                    if module.weight_quantizer._calibrator is not None]
 
-    for idx, (name, module) in enumerate(weight_list):
+    for idx, (name, module) in enumerate(tqdm(weight_list, desc="Hessian weight calibration")):
         weight_quantizer = module.weight_quantizer
         cal = weight_quantizer._calibrator
 
@@ -854,14 +857,15 @@ def finish_stats_collection(model: nn.Module, method: str | None = None):
 
         cal = getattr(module, "_calibrator", None)
         if cal and not getattr(module, "_dynamic", False):
-            if method in {"mse", "entropy"}:
+            if method in {"mse", "entropy"} and isinstance(cal, MseCalibrator):
+                # MseCalibrator accepts method argument
                 if cal.compute_amax(method) is not None:
                     if method == "entropy":
                         module.load_calib_amax("entropy")
                     else:
                         module.load_calib_amax()
             elif cal.compute_amax() is not None:
-                # Max calibrator
+                # MaxCalibrator and other calibrators don't accept method argument
                 module.load_calib_amax()
 
         if module.bias_calibrator is not None and module.bias_type == "static":
