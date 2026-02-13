@@ -50,6 +50,13 @@ class GptOss20bModelDescriptor(ModelDescriptor):
 
     _DECODER_LAYER_CLS: Type[nn.Module] = None
 
+    @classmethod
+    def create_dummy_block(cls, original_layer: GptOssDecoderLayer, block_index: int) -> nn.Module:
+        dummy_block = DummyBlock(block_index=block_index)
+        # Required by `GptOssModel.forward`.
+        dummy_block.attention_type = original_layer.attention_type
+        return dummy_block
+
     @staticmethod
     def decoder_layer_cls():
         """Get the decoder layer class for GPT-OSS models.
@@ -132,7 +139,7 @@ class GptOss20bModelDescriptor(ModelDescriptor):
                     r"(post_attention_layernorm\.weight"
                     r"|mlp\.router\.weight"
                     r"|mlp\.router\.bias"
-                    r"|mlp\.experts\.((\d+\.)?(gate_up_proj|down_proj)(\.(weight|bias|blocks|scales))?|gate_up_proj_(bias|blocks|scales)|down_proj_(bias|blocks|scales)))$"
+                    r"|mlp\.experts\.(gate_up_proj|down_proj)(_(bias|blocks|scales))?)$"
                 )
                 for layer_idx in range(num_layers)
             }
@@ -190,11 +197,14 @@ class GptOss20bExpertRemovalLayerDescriptor(ExpertRemovalLayerDescriptor):
 
     target_name: str = "mlp"
     moe_prefix_name: str = "model.layers.{layer_idx}.mlp"
-    expert_prefix_name: str = "experts.{expert_idx}"
+    expert_prefix_name: str = "experts"
 
     # Router has both weight and bias
     router_weights: List[str] = field(default_factory=lambda: ["router.weight"])
     router_biases: List[str] = field(default_factory=lambda: ["router.bias"])
+
+    # Fused format: experts stored as single tensors
+    is_fused_experts: bool = True
 
     # Fused format: single tensors containing all experts (test models)
     fused_expert_weights: List[str] = field(
@@ -212,5 +222,12 @@ class GptOss20bExpertRemovalLayerDescriptor(ExpertRemovalLayerDescriptor):
         default_factory=lambda: ["gate_up_proj_bias", "down_proj_bias"]
     )
 
-    # Fused format: experts stored as single tensors
-    is_fused_experts: bool = True
+    def get_modules_names_to_hook(self, model) -> List[Tuple[int, str]]:
+        target_class_name = "GptOssTopKRouter"
+
+        module_names_to_hook = []
+        for module_name, module in model.named_modules():
+            if module_name.endswith(self.target_name) and module.__class__.__name__ == target_class_name:
+                module_names_to_hook.append((self.block_idx_from_module_name(module_name), module_name))
+        return module_names_to_hook
+

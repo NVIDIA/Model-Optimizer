@@ -1,0 +1,21 @@
+defaults:
+  - pruning_defaults
+
+eval_samples: 2500 #10
+activations_log_dir: ${puzzle_dir}/pruning/pruning_scores/expert_removal/${pruning.experiment_id}
+
+pruning_mixin:
+  _target_: modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin.ExpertRemovalPruningMixIn
+  layer_descriptor:
+    _target_: modelopt.torch.puzzletron.anymodel.models.gpt_oss_20b.gpt_oss_20b_model_descriptor.GptOss20bExpertRemovalLayerDescriptor
+    target_name: "mlp.router"
+
+hook_class: ${get_object:utils.activation_hooks.hooks.RankedChoiceVotingHook}
+activation_hooks_kwargs:    # Additional kwargs to pass to the hook init
+
+num_experts_to_keep_list: [24, 16, 8]  # num_experts in teacher is 128
+mlp_init_mode: "ExpertRemoval"
+mlp_init_config_yaml:
+  expert_scores_key: "expert_ranks"
+  layer_prefix_template: "model.layers.{layer_idx}.mlp.router"
+

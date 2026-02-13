@@ -27,6 +27,7 @@ from typing import Dict, List
 from safetensors.torch import load_file, save_file
 from tqdm import tqdm
 from transformers import PretrainedConfig
+from transformers.integrations.mxfp4 import convert_moe_packed_tensors
 
 from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
 from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import BlockConfig
@@ -61,8 +62,9 @@ class Converter(ABC):
                 f"Neither {index_path} nor {single_file_path} found. Cannot determine model format."
             )
 
-    @staticmethod
+    @classmethod
     def convert_model_weights(
+        cls,
         input_dir: Path, output_dir: Path, descriptor: ModelDescriptor, num_hidden_layers: int
     ):
         """Convert model weights to subblock format."""
@@ -95,7 +97,18 @@ class Converter(ABC):
                 data = load_file(os.path.join(input_dir, file))
                 for name in param_names:
                     if param_to_file[name] == file and name in data:
-                        tensors[name] = data[name]
+                        converted_name = cls.convert_weight_name(name)
+                        # Convert MoE packed tensors if quantized is mxfp4 //gpt-oss-20b
+                        if getattr(cls, 'quantized', None) == 'mxfp4':
+                            if name.endswith("_blocks"):
+                                converted_name = converted_name.replace("_blocks", "")
+                                tensors[converted_name] = convert_moe_packed_tensors(data[converted_name+"_blocks"], data[converted_name+"_scales"])
+                            elif name.endswith("_scales"):
+                                continue
+                            else:
+                                tensors[converted_name] = data[name]
+                        else:
+                            tensors[converted_name] = data[name]
 
             # Save this subblock
             print(f"\n✅ Group: {subblock} ({len(tensors)} layers)")
