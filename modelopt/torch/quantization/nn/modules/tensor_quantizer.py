@@ -529,6 +529,20 @@ class TensorQuantizer(nn.Module):
             and self._fake_quant
         )
 
+    @property
+    def rotate_is_enabled(self):
+        """Check if rotate is enabled in quant config."""
+        return self._rotate.get("enable", False) if isinstance(self._rotate, dict) else self._rotate
+
+    @property
+    def rotate_is_fp32(self):
+        """Check if rotation needs to be computed in float32."""
+        return (
+            self._rotate.get("rotate_fp32", False)
+            if isinstance(self._rotate, dict) and self.rotate_is_enabled
+            else False
+        )
+
     def disable_calib(self):
         """Disable calibration."""
         self._if_calib = False
@@ -996,14 +1010,8 @@ class TensorQuantizer(nn.Module):
             inputs = inputs * self.pre_quant_scale
 
         # Rotating the input
-        rotate_fp32 = (
-            self._rotate.get("rotate_fp32", False) if isinstance(self._rotate, dict) else False
-        )
-        rotate_enable = (
-            self._rotate.get("enable", False) if isinstance(self._rotate, dict) else self._rotate
-        )
-        if rotate_enable:
-            inputs = normalized_hadamard_transform(inputs, rotate_fp32=rotate_fp32)
+        if self.rotate_is_enabled:
+            inputs = normalized_hadamard_transform(inputs, rotate_fp32=self.rotate_is_fp32)
 
         if self._disabled:
             # if quantizer is disabled, we still need to track the input dtype for saving the model
@@ -1115,13 +1123,8 @@ class TensorQuantizer(nn.Module):
             if self.pre_quant_scale is not None
             else ""
         )
-        if isinstance(self._rotate, dict):
-            if self._rotate.get("enable", False):
-                s += " rotated"
-                if self._rotate.get("rotate_fp32", False):
-                    s += " (fp32)"
-        elif self._rotate:
-            s += " rotated"
+        s += " rotated" if self.rotate_is_enabled else ""
+        s += " (fp32)" if self.rotate_is_fp32 else ""
         s += (
             f" calibrator={self._calibrator.__class__.__name__}"
             if (self._calibrator is not None)
