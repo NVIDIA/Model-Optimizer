@@ -559,17 +559,10 @@ def local_hessian_calibrate(
     for name, module in name_to_module.items():
         if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
             with enable_weight_access_and_writeback(module, model, name_to_module):
-<<<<<<< HEAD
                 module.hessian_helper = LocalHessianHelper(module, name)
             module.hessian_helper.setup()
             all_patched_modules.append((name, module))
             if module.hessian_helper.is_enabled:
-=======
-                module.local_hessian = LocalHessianHelper(module, name)
-            module.local_hessian.setup()
-            all_patched_modules.append((name, module))
-            if module.local_hessian.is_enabled:
->>>>>>> e391ea1a (add rabbit feedback)
                 weight_quantizers_info.append((name, module))
 
     # Cache activations by running forward loop
@@ -692,11 +685,7 @@ def local_hessian_calibrate(
     # Cleanup and free memory
     LocalHessianHelper.cache_mode = False
     for name, module in all_patched_modules:
-<<<<<<< HEAD
         module.hessian_helper.cleanup()
-=======
-        module.local_hessian.cleanup()
->>>>>>> e391ea1a (add rabbit feedback)
 
     print_rank_0("local_hessian: Calibration complete.")
 
