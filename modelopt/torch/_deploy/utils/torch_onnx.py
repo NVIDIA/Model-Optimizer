@@ -50,8 +50,8 @@ from modelopt.onnx.utils import (
     get_output_names,
     get_output_shapes,
     infer_shapes,
-    remove_duplicate_casts,
     remove_node_training_mode,
+    remove_redundant_casts,
 )
 from modelopt.torch.quantization.export_onnx import configure_linear_module_onnx_quantizers
 from modelopt.torch.utils import flatten_tree, standardize_named_model_args
@@ -589,7 +589,7 @@ def get_onnx_bytes_and_metadata(
         # Change FP32 cast nodes feeding into Concat/Add to FP16
         onnx_opt_graph = change_casts_to_fp16(onnx_opt_graph, ["Concat", "Add"])
 
-    onnx_opt_graph = remove_duplicate_casts(onnx_opt_graph)
+    onnx_opt_graph = remove_redundant_casts(onnx_opt_graph)
 
     # TensorRT expects all scales to be postive
     onnx_opt_graph = replace_zero_scale_with_smallest_nonzero(onnx_opt_graph)
