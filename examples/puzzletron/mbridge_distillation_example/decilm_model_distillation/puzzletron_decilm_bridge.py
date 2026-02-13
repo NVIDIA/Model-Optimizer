@@ -158,8 +158,10 @@ class PuzzletronDeciLMBridge(MegatronModelBridge):
                 provider_kwargs["rope_scaling_factor"] = hf_config.rope_scaling.get("factor", 8.0)
 
         # Convert HF config format to MCore format for heterogeneous_layers_config_encoded_json
-        # MCore expects ffn_mult (multiplier) but HF uses intermediate_size (absolute)
-        # We need to convert: ffn_mult = intermediate_size / hidden_size
+        # MCore's MLPConfig.build_config_from_dict() expects ffn_hidden_size or ffn_mult,
+        # but HF configs use intermediate_size. We convert intermediate_size -> ffn_hidden_size.
+        # Note: LlamaNemotronBridge works because Nemotron models may already have ffn_mult
+        # in their block_configs, but Puzzletron models use intermediate_size.
         import json
 
         hf_config_dict = json.loads(hf_config.to_json_string())
@@ -172,16 +174,15 @@ class PuzzletronDeciLMBridge(MegatronModelBridge):
             if "attention" in block:
                 mcore_block["attention"] = block["attention"]
 
-            # Convert FFN config: intermediate_size -> ffn_mult
+            # Convert FFN config: intermediate_size -> ffn_hidden_size
             if "ffn" in block:
                 ffn_config = block["ffn"].copy()
                 if (
                     "intermediate_size" in ffn_config
                     and ffn_config["intermediate_size"] is not None
                 ):
-                    # Convert intermediate_size to ffn_mult
-                    intermediate_size = ffn_config.pop("intermediate_size")
-                    ffn_config["ffn_mult"] = intermediate_size / hf_config.hidden_size
+                    # Convert intermediate_size to ffn_hidden_size (MCore expects this)
+                    ffn_config["ffn_hidden_size"] = ffn_config.pop("intermediate_size")
                 mcore_block["ffn"] = ffn_config
             elif "mlp" in block:
                 # Some configs use "mlp" instead of "ffn"
@@ -190,8 +191,7 @@ class PuzzletronDeciLMBridge(MegatronModelBridge):
                     "intermediate_size" in mlp_config
                     and mlp_config["intermediate_size"] is not None
                 ):
-                    intermediate_size = mlp_config.pop("intermediate_size")
-                    mlp_config["ffn_mult"] = intermediate_size / hf_config.hidden_size
+                    mlp_config["ffn_hidden_size"] = mlp_config.pop("intermediate_size")
                 mcore_block["ffn"] = mlp_config  # MCore expects "ffn" key
 
             mcore_block_configs.append(mcore_block)

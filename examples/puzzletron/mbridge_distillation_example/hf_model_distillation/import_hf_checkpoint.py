@@ -35,10 +35,10 @@ from megatron.bridge import AutoBridge
 def main():
     """Main function to import HF model and save as Megatron checkpoint."""
     # HuggingFace model path (local directory)
-    hf_model_path = ".../hf_models/meta-llama/Llama-3.2-3B-Instruct"
-
+    # hf_model_path = ".../hf_models/meta-llama/Llama-3.2-3B-Instruct"
+    hf_model_path = "/workspace/hf_models/nvidia/Llama-3_3-Nemotron-Super-49B-v1"
     # Output directory for Megatron checkpoint
-    megatron_checkpoint_path = ".../mbridge_models/meta-llama/Llama-3.2-3B-Instruct"
+    megatron_checkpoint_path = "/workspace/mbridge_models/nvidia/Llama-3_3-Nemotron-Super-49B-v1"
 
     print(f"Importing HuggingFace model from: {hf_model_path}")
     print(f"Saving Megatron checkpoint to: {megatron_checkpoint_path}")
@@ -55,6 +55,7 @@ def main():
         megatron_checkpoint_path,  # Target Megatron checkpoint directory
         dtype="bfloat16",  # Use bfloat16 for efficiency (dtype instead of torch_dtype)
         device_map="auto",  # Automatically place model on available devices
+        trust_remote_code=True,  # Required for DeciLM models with custom code
     )
 
     print(f"\n✓ Successfully saved Megatron checkpoint to: {megatron_checkpoint_path}")
