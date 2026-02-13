@@ -455,8 +455,8 @@ def local_hessian_calibrate(
             """Clean up the forward hook."""
             unpatch_forward_method(self.module, "_forward_no_local_hessian")
             if not debug:
-                if hasattr(self.module, "local_hessian"):
-                    delattr(self.module, "local_hessian")
+                if hasattr(self.module, "hessian_helper"):
+                    delattr(self.module, "hessian_helper")
 
         def accumulate_hessian(self, input_tensor: torch.Tensor):
             """Accumulate local Hessian from input activations.
@@ -499,10 +499,10 @@ def local_hessian_calibrate(
 
     def forward(self, input, *args, **kwargs):
         """Custom forward that collects activations in cache mode."""
-        if LocalHessianHelper.cache_mode and self.local_hessian.is_enabled:
+        if LocalHessianHelper.cache_mode and self.hessian_helper.is_enabled:
             # Get local tensor from DTensor if applicable
             input_local = input.to_local() if hasattr(input, "to_local") else input
-            self.local_hessian.accumulate_hessian(input_local)
+            self.hessian_helper.accumulate_hessian(input_local)
 
         # Forward without quantization during caching
         if LocalHessianHelper.cache_mode:
@@ -526,10 +526,10 @@ def local_hessian_calibrate(
     for name, module in name_to_module.items():
         if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
             with enable_weight_access_and_writeback(module, model, name_to_module):
-                module.local_hessian = LocalHessianHelper(module, name)
-            module.local_hessian.setup()
+                module.hessian_helper = LocalHessianHelper(module, name)
+            module.hessian_helper.setup()
             all_patched_modules.append((name, module))
-            if module.local_hessian.is_enabled:
+            if module.hessian_helper.is_enabled:
                 weight_quantizers_info.append((name, module))
 
     # Cache activations by running forward loop
@@ -543,7 +543,7 @@ def local_hessian_calibrate(
     print_rank_0("local_hessian: Running MSE calibration with local Hessian loss...")
     for name, module in weight_quantizers_info:
         weight_quantizer = module.weight_quantizer
-        helper = module.local_hessian
+        helper = module.hessian_helper
 
         if not hasattr(weight_quantizer, "_amax") or weight_quantizer._amax is None:
             continue
@@ -621,7 +621,7 @@ def local_hessian_calibrate(
     # Cleanup and free memory
     LocalHessianHelper.cache_mode = False
     for name, module in all_patched_modules:
-        module.local_hessian.cleanup()
+        module.hessian_helper.cleanup()
 
     print_rank_0("local_hessian: Calibration complete.")
 
