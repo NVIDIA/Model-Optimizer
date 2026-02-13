@@ -77,6 +77,7 @@ optional_deps = {
         "pytest-cov",
         "pytest-instafail",
         "pytest-timeout",
+        "sentencepiece",  # For test_unified_export_megatron.py, test_vllm_fakequant_megatron_export.py
         "timm",
         "torchprofile>=0.0.4",  # For computing flops of CV models
         "torchvision",

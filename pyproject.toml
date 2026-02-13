@@ -132,8 +132,8 @@ disable_error_code = ["attr-defined"]
 [tool.pytest.ini_options]
 # Default additional options
 # Show a short test summary info for all except passed tests with -ra flag
-# print execution time for 20 slowest tests and generate coverage reports
-addopts = "-v -ra --instafail --cov-report=term-missing --cov-report=html --cov-report=xml:coverage.xml --cov-config=pyproject.toml --durations=20 --strict-markers"
+# print execution time for 50 slowest tests and generate coverage reports
+addopts = "-v -ra --instafail --cov-report=term-missing --cov-report=html --cov-report=xml:coverage.xml --cov-config=pyproject.toml --durations=50 --strict-markers"
 pythonpath = ["tests/"]
 markers = [
     "manual: Only run when --run-manual is given",
