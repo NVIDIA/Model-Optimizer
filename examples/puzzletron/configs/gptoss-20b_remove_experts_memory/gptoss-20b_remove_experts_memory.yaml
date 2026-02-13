@@ -1,0 +1,22 @@
+defaults:
+  - gptoss-20b
+  - _self_
+
+# Input Hugging Face model to compress
+input_hf_model_path: /workspace/hf_models/openai/gpt-oss-20b
+
+# Dataset path for pruning and NAS scoring
+dataset_path: /workspace/datasets/Nemotron-Post-Training-Dataset-v2
+
+# Working directory for compression outputs
+puzzle_dir: /workspace/puzzle_dir
+
+# MIP memory constraint (in MiB)
+mip:
+  human_constraints:
+    target_memory: 45_000 # 45 GiB
+
+# FFN intermediate sizes to search over (heterogeneous architecture)
+# teacher_intermediate_size is 8192, so we use proportionally smaller values
+pruning:
+  intermediate_size_list: [2048, 4096, 6144]
