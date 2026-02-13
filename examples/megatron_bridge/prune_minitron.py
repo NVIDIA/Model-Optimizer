@@ -380,7 +380,9 @@ def main(args: argparse.Namespace):
         AutoModelForCausalLM.from_config(
             hf_cfg, trust_remote_code=args.trust_remote_code
         ).save_pretrained(args.output_hf_path, trust_remote_code=args.trust_remote_code)
-        pruned_bridge = AutoBridge.from_hf_pretrained(args.output_hf_path)
+        pruned_bridge = AutoBridge.from_hf_pretrained(
+            args.output_hf_path, trust_remote_code=args.trust_remote_code
+        )
         pruned_bridge.save_hf_weights(model, args.output_hf_path)
         print_rank_0(f"Saved pruned model to {args.output_hf_path} in HF checkpoint format")
 
