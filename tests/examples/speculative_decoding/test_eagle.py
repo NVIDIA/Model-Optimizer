@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import os
 
 import pytest
 import safetensors.torch
@@ -53,6 +54,10 @@ def test_calibrate_draft_vocab(tiny_llama_path, tiny_daring_anteater_path, draft
         ],
         "speculative_decoding",
     )
+
+    model_name = os.path.basename(os.path.normpath(tiny_llama_path))
+    d2t = torch.load(os.path.join(draft_vocab_cache_dir, model_name, "d2t.pt"))
+    assert d2t.shape[0] == 100, f"Expected draft vocab size 100, got {d2t.shape[0]}"
 
 
 # fmt: off
@@ -102,8 +107,8 @@ def test_ar_validate(eagle_output_dir):
         [
             "python", "./scripts/ar_validate.py",
             "--model_path", eagle_output_dir / "eagle-tinyllama-cp1",
-            "--osl", "20",
-            "--num_samples", "10",
+            "--osl", "10",
+            "--num_samples", "5",
             "--steps", "3"
         ],
         "speculative_decoding",

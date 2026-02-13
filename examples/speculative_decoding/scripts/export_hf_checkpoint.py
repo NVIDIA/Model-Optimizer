@@ -21,8 +21,7 @@ import torch
 
 import modelopt.torch.opt as mto
 from modelopt.torch.export import export_hf_checkpoint
-
-from ..eagle_utils import load_vlm_or_llm_with_kwargs
+from modelopt.torch.speculative.utils import load_vlm_or_llm_with_kwargs
 
 
 def parse_args():

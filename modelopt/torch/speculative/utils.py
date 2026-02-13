@@ -25,6 +25,7 @@ from collections import Counter, defaultdict, deque
 
 import torch
 import torch.distributed
+import transformers
 from huggingface_hub import snapshot_download
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -471,3 +472,16 @@ def enable_cp_ttt_patch():
             yield
         finally:
             modelopt.torch.speculative.plugins.transformers.ENABLE_CP_TTT_PATCH = False
+
+
+def load_vlm_or_llm_with_kwargs(model_name_or_path: str, **kwargs):
+    """Load a VLM or LLM with kwargs. Returns the model and model config."""
+    model_config = transformers.AutoConfig.from_pretrained(
+        model_name_or_path, trust_remote_code=True
+    )
+    if "vl" in model_config.model_type.lower():
+        model_cls = transformers.AutoModelForVision2Seq
+    else:
+        model_cls = transformers.AutoModelForCausalLM
+
+    return model_config, model_cls.from_pretrained(model_name_or_path, **kwargs)

@@ -40,7 +40,6 @@ from accelerate import ParallelismConfig
 from eagle_utils import (
     EagleTrainerWithAccLog,
     EagleTrainingPlot,
-    load_vlm_or_llm_with_kwargs,
     make_eagle_supervised_data_module,
     patch_ring_attention_for_ttt,
 )
@@ -49,6 +48,7 @@ from transformers.trainer_utils import get_last_checkpoint
 
 import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
+from modelopt.torch.speculative.utils import load_vlm_or_llm_with_kwargs
 from modelopt.torch.utils import print_rank_0
 
 torch.manual_seed(0)

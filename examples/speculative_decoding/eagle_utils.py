@@ -167,21 +167,6 @@ def make_eagle_supervised_data_module(
     }
 
 
-def load_vlm_or_llm_with_kwargs(model_name_or_path: str, **kwargs):
-    """Load a VLM or LLM with kwargs. Returns the model and model config."""
-    model_config = transformers.AutoConfig.from_pretrained(
-        model_name_or_path, trust_remote_code=True
-    )
-    if "vl" in model_config.model_type.lower():
-        model_cls = transformers.AutoModelForVision2Seq
-    else:
-        model_cls = transformers.AutoModelForCausalLM
-
-    return model_config, model_cls.from_pretrained(
-        model_name_or_path, trust_remote_code=True, **kwargs
-    )
-
-
 class EagleTrainerWithAccLog(Trainer):
     """Wrapper around Trainer that logs training accuracy."""
 
