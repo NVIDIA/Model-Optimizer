@@ -18,10 +18,11 @@ import argparse
 from accelerate import Accelerator
 from datasets import load_dataset
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 
 import modelopt.torch.opt as mto
 from modelopt.torch.speculative.plugins.transformers import HFARValidation
+from modelopt.torch.speculative.utils import load_vlm_or_llm_with_kwargs
 
 mto.enable_huggingface_checkpointing()
 
@@ -71,7 +72,7 @@ def main():
 
     accelerator = Accelerator()
     # Load model and tokenizer
-    model = AutoModelForCausalLM.from_pretrained(args.model_path, device_map="auto")
+    _, model = load_vlm_or_llm_with_kwargs(args.model_path, device_map="auto")
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     model.eval()
     model = accelerator.prepare(model)
