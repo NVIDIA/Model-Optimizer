@@ -42,6 +42,9 @@ REMOVE_THINK_CHAT_TEMPLATE = (
 def calibrate_frequent_vocab(tokenizer, text, target_vocab_size, output_file=None):
     """Given a calibration text, find the most common vocabs and return the mapping."""
     conversations = tokenizer.apply_chat_template(text)
+    # Transformers5.x returns a BatchEncoding from apply_chat_template
+    if hasattr(conversations, "input_ids"):
+        conversations = conversations.input_ids
     counter = Counter(conversations)
     vocab = counter.most_common(target_vocab_size)
     mapping = torch.zeros(target_vocab_size, dtype=torch.int64)

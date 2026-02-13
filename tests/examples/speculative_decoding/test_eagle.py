@@ -30,6 +30,31 @@ def eagle_output_dir(tmp_path_factory):
     return tmp_path_factory.mktemp("eagle_output_dir")
 
 
+@pytest.fixture(scope="module")
+def draft_vocab_cache_dir(tmp_path_factory):
+    """Eagle output directory shared in this module."""
+    return tmp_path_factory.mktemp("eagle_output_dir")
+
+
+def test_calibrate_draft_vocab(tiny_llama_path, tiny_daring_anteater_path, draft_vocab_cache_dir):
+    """Test calibration of draft vocabulary."""
+    run_example_command(
+        [
+            "python",
+            "./scripts/calibrate_draft_vocab.py",
+            "--model",
+            tiny_llama_path,
+            "--data",
+            tiny_daring_anteater_path,
+            "--draft_vocab_size",
+            "100",
+            "--save_dir",
+            draft_vocab_cache_dir,
+        ],
+        "speculative_decoding",
+    )
+
+
 # fmt: off
 @pytest.mark.parametrize("cp_size", [1, 2])
 def test_llama_eagle3(tiny_llama_path, tiny_daring_anteater_path, tmp_path, eagle_output_dir, cp_size):
@@ -109,20 +134,6 @@ def test_convert_to_vllm_ckpt(tiny_llama_path, eagle_output_dir):
             "--input", eagle_output_dir / "eagle-tinyllama-export",
             "--verifier", tiny_llama_path,
             "--output", eagle_output_dir / "eagle-tinyllama-export-vllm-one-ckpt",
-        ],
-        "speculative_decoding",
-    )
-
-@pytest.mark.skip(reason="Needs dataset conversion to role-content format; consolidate data loading first.")
-def test_calibrate_draft_vocab(tiny_llama_path, tiny_daring_anteater_path,tmp_path):
-    """Test calibration of draft vocabulary."""
-    run_example_command(
-        [
-            "python", "./scripts/calibrate_draft_vocab.py",
-            "--model", tiny_llama_path,
-            "--data", tiny_daring_anteater_path,
-            "--draft_vocab_size", "100",
-            "--save_dir", tmp_path / "draft_vocab_cache",
         ],
         "speculative_decoding",
     )

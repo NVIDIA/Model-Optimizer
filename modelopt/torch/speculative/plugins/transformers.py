@@ -244,7 +244,6 @@ class EagleModule(nn.Module):
             assert config.draft_vocab_size <= config.vocab_size, (
                 "EAGLE module's vocab size should be <= base model vocab size!"
             )
-
             # Initialize the buffers to zero.
             # Their values depend on specific tokenzier and calibrate dataset, and should be set in training script.
             if config.draft_vocab_size < config.vocab_size:
@@ -425,16 +424,26 @@ class HFEagleModel(EagleModel):
     @property
     def _base_llm_config(self):
         """Return the llm config for the base model, from LLM or VLM."""
-        return self.config.llm_config if hasattr(self.config, "llm_config") else self.config
+        return (
+            getattr(self.config, "text_config", None)
+            or getattr(self.config, "llm_config", None)
+            or self.config
+        )
 
     def _find_base_model_parts(self):
         """Find model parts from different models and set base_{part}_path attributes."""
         base_model_parts_mapping = {
-            "base_model_path": ["model", "backbone", "language_model.backbone"],
+            "base_model_path": [
+                "model.language_model",
+                "model",
+                "backbone",
+                "language_model.backbone",
+            ],
             "base_model_embeddings_path": [
                 "model.embed_tokens",
                 "backbone.embeddings",
                 "language_model.backbone.embeddings",
+                "model.language_model.embed_tokens",
             ],
             "base_model_lm_head_path": ["lm_head", "language_model.lm_head"],
         }
@@ -559,20 +568,12 @@ class HFEagleModel(EagleModel):
         ):
             self.config.quantization_config.quantization_config.ignore.append("re:.*eagle_module.*")
 
-        # Use default aux_hidden_state layers if use_aux_hidden_state is True
-        # but no layer id is given
+        # Set default aux_hidden_state layers
         if (
             self.eagle_config.use_aux_hidden_state
             and len(self.eagle_config.eagle_aux_hidden_state_layer_ids) == 0
         ):
             self._set_default_aux_hidden_state_layers()
-
-        if self._base_llm_config.hidden_size != self.eagle_config.hidden_size:
-            raise ValueError(
-                "EAGLE module hidden size "
-                f"{self.eagle_config.hidden_size} must match base model hidden size "
-                f"{self._base_llm_config.hidden_size}!"
-            )
 
         # Freeze all parameters
         if self.eagle_freeze_base_model:
@@ -699,7 +700,7 @@ class HFEagleModel(EagleModel):
         dtypemin = torch.finfo(self._base_llm_config.dtype).min
         q_len = seq_length
         kv_len = seq_length * (1 + ttt_step)
-        if self.eagle_module.config._attn_implementation == "flex_attention":
+        if self.eagle_config._attn_implementation == "flex_attention":
             # Return block mask for flex attention
             block_mask = create_block_mask(msk_func, B=None, H=None, Q_LEN=q_len, KV_LEN=kv_len)
             return block_mask
@@ -717,37 +718,6 @@ class HFEagleModel(EagleModel):
 
             tensor_mask = tensor_mask.repeat(batch_size, 1, 1, 1)
             return tensor_mask
-
-    def _llm_or_vlm_embedding(self, input_ids, kwargs):
-        """Return input embeddings with possibly vision embeddings for VLM."""
-        tok_embeds = self._base_model_embeddings(input_ids)
-
-        # LLM only have token embeddings
-        if "pixel_values" not in kwargs:
-            return tok_embeds
-
-        # Otherwise, insert vision embeddings in tok_embeds
-        if self.config.model_type == "NemotronH_Nano_VL_V2":
-            vit_embeds = self.extract_feature(kwargs["pixel_values"])
-            vit_embeds = vit_embeds[kwargs["image_flags"] == 1]
-            bs, seq_len, hid_size = tok_embeds.shape
-            tok_embeds = tok_embeds.reshape(bs * seq_len, hid_size)
-            input_ids = input_ids.reshape(bs * seq_len)
-            selected = input_ids == self.img_context_token_id
-            try:
-                tok_embeds[selected] = tok_embeds[selected] * 0.0 + vit_embeds.reshape(-1, hid_size)
-            except Exception as e:
-                vit_embeds = vit_embeds.reshape(-1, hid_size)
-                print(
-                    f"warning: {e}, tok_embeds[selected].shape={tok_embeds[selected].shape}, "
-                    f"vit_embeds.shape={vit_embeds.shape}"
-                )
-                n_token = selected.sum()
-                tok_embeds[selected] = tok_embeds[selected] * 0.0 + vit_embeds[:n_token]
-            del vit_embeds
-            return tok_embeds.reshape(bs, seq_len, hid_size)
-        else:
-            raise ValueError(f"VLM model type {self.config.model_type} not supported")
 
     def _base_model_forward(
         self,
@@ -769,6 +739,7 @@ class HFEagleModel(EagleModel):
                 **kwargs,
             )
             past_key_values = getattr(outputs, "past_key_values", None)
+            base_input_embeds = outputs.hidden_states[0]
             base_model_hidden_states = outputs.hidden_states[-1]
             base_model_logits = outputs.logits
 
@@ -780,7 +751,13 @@ class HFEagleModel(EagleModel):
                 labels = labels.view(-1)
                 base_model_loss = loss_fct(loss_logits, labels)
 
-        return base_model_hidden_states, base_model_logits, base_model_loss, past_key_values
+        return (
+            base_input_embeds,
+            base_model_hidden_states,
+            base_model_logits,
+            base_model_loss,
+            past_key_values,
+        )
 
     def _map_logits_to_draft_vocab(self, full_logits):
         reverse_mapping = (
@@ -854,7 +831,12 @@ class HFEagleModel(EagleModel):
             assert past_key_values is None, "past_key_values should be None in training"
 
         if loss_mask is None:
-            loss_mask = torch.ones_like(input_ids, dtype=torch.bool, device=input_ids.device)
+            # By default, mask out padding tokens in loss computation
+            loss_mask = (
+                attention_mask.clone().detach()
+                if attention_mask is not None
+                else torch.ones_like(input_ids, dtype=torch.bool)
+            )
 
         # ====First, we run base model forward====
         if "base_model_outputs" in kwargs:
@@ -867,16 +849,20 @@ class HFEagleModel(EagleModel):
                 base_model_logits = self.lm_head(base_model_hidden_states)
             base_model_loss, past_key_values = None, None
         else:
-            base_model_hidden_states, base_model_logits, base_model_loss, past_key_values = (
-                self._base_model_forward(
-                    input_ids,
-                    attention_mask,
-                    position_ids,
-                    past_key_values,
-                    self.eagle_freeze_base_model,
-                    labels,
-                    **kwargs,
-                )
+            (
+                base_input_embeds,
+                base_model_hidden_states,
+                base_model_logits,
+                base_model_loss,
+                past_key_values,
+            ) = self._base_model_forward(
+                input_ids,
+                attention_mask,
+                position_ids,
+                past_key_values,
+                self.eagle_freeze_base_model,
+                labels,
+                **kwargs,
             )
 
         if not isinstance(past_key_values, Cache):
@@ -907,7 +893,7 @@ class HFEagleModel(EagleModel):
             eagle_cache,
         )
         with torch.no_grad():
-            inputs_embeds = self._llm_or_vlm_embedding(eagle_input_ids, kwargs)
+            inputs_embeds = base_input_embeds.roll(-1, 1)
 
         past_key_values.eagle_cache = eagle_cache
 
@@ -1067,9 +1053,7 @@ class HFEagleModel(EagleModel):
             )
 
             # Use SDPA attention during generation for both stability and performance
-            with temporary_set_config_value(
-                self.eagle_module.config, "_attn_implementation", "sdpa"
-            ):
+            with temporary_set_config_value(self.eagle_config, "_attn_implementation", "sdpa"):
                 _, eagle_prenorm_h, eagle_logits, _ = self._eagle_forward(
                     eagle_input_hidden_states,
                     self._base_model_embeddings(eagle_ids),
