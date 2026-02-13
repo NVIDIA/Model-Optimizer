@@ -31,6 +31,7 @@ from accelerate.utils import get_max_memory
 from safetensors.torch import load_file
 from transformers import (
     AutoConfig,
+    AutoModel,
     AutoModelForCausalLM,
     AutoProcessor,
     AutoTokenizer,
@@ -75,19 +76,18 @@ def run_nemotron_vl_preview(
         "eos_token_id": tokenizer.eos_token_id,
     }
 
-    # Try text-only generation
+    # Try text-only generation (may fail for encoder-decoder models like Nemotron-Parse)
     text_response = run_text_only_generation(
         full_model, tokenizer, question, generation_config, pyt_ckpt_path
     )
 
+    generated_ids = None
     if text_response is not None:
         print(f"✅ Text-only generation successful: {text_response[:100]}...")
         generated_ids = text_response
     elif allow_fallback:
         print("Text-only generation failed, falling back to standard generate...")
         generated_ids = full_model.generate(input_ids, max_new_tokens=100)
-    else:
-        generated_ids = None
 
     # Run additional VL test with images
     print(f"Running additional VL test with images ({stage_name})...")
@@ -106,6 +106,10 @@ def _is_multimodal_config(config):
         or (
             hasattr(config, "embd_layer") and hasattr(config.embd_layer, "image_embd_layer")
         )  # Image embedding layers
+        or getattr(config, "is_encoder_decoder", False)  # Encoder-decoder VL models
+        or any(  # Architecture-based detection for custom VL models (e.g., Nemotron-Parse)
+            "conditionalgeneration" in arch.lower() for arch in getattr(config, "architectures", [])
+        )
     )
 
 
@@ -158,9 +162,20 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
         )
         allowed_keys = set(forward_params.keys())
 
+        # Check if model is encoder-decoder (needs decoder_input_ids instead of input_ids)
+        is_enc_dec = getattr(full_model.config, "is_encoder_decoder", False)
+
         full_model.eval()
         with torch.no_grad():
             for batch in calib_dataloader:
+                # For encoder-decoder models, rename input_ids → decoder_input_ids
+                # and disable KV caching to avoid tuple index errors in decoder layers
+                if is_enc_dec and "input_ids" in batch and "pixel_values" in batch:
+                    batch["decoder_input_ids"] = batch.pop("input_ids")
+                    if "attention_mask" in batch:
+                        batch["decoder_attention_mask"] = batch.pop("attention_mask")
+                    batch["use_cache"] = False
+
                 # Filter batch to only include parameters the model accepts
                 if accepts_kwargs:
                     call_kwargs = batch
@@ -172,10 +187,8 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
                 # Use safe_nemotron_vl_forward for Nemotron Nano VL (embedding-injection style)
                 # For other VLMs (like Nemotron-Parse), use standard forward
                 if hasattr(full_model, "img_context_token_id"):
-                    # Nemotron Nano VL style
                     safe_nemotron_vl_forward(full_model, call_kwargs)
                 else:
-                    # Standard encoder-decoder or other VLM architectures
                     full_model(**call_kwargs)
 
     return calibrate_loop
@@ -312,8 +325,15 @@ def get_processor(
         )
 
         return MllamaImageProcessor(processor, device)
-
-    return None
+    else:
+        # Try to load AutoProcessor for other VL models (e.g., Nemotron-Parse)
+        try:
+            processor = AutoProcessor.from_pretrained(ckpt_path, **model_kwargs)
+            print(f"Loaded AutoProcessor for model type: {model_type}")
+            return processor
+        except Exception as e:
+            print(f"Could not load processor for {model_type}: {e}")
+            return None
 
 
 def load_mtp_weights(
@@ -447,6 +467,7 @@ def get_model(
     # Load config once and handle VL model detection
     try:
         hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
+
         if is_nemotron_vl(hf_config):
             print(
                 "Detected Nemotron VL model from config. "
@@ -466,8 +487,6 @@ def get_model(
         model_kwargs.setdefault("torch_dtype", "auto")
 
     if "vila" in ckpt_path.lower():
-        from transformers import AutoModel
-
         hf_vila = AutoModel.from_pretrained(
             ckpt_path,
             device_map=device_map,
@@ -510,13 +529,17 @@ def get_model(
                 if not hasattr(transformers, architecture):
                     warnings.warn(
                         f"Architecture {architecture} not found in transformers: {transformers.__version__}. "
-                        "Falling back to AutoModelForCausalLM."
+                        "Falling back to AutoModelForCausalLM (or AutoModel for non-causal architectures)."
                     )
                 assert trust_remote_code, (
                     "Please set trust_remote_code to True if you want to use this architecture"
                 )
 
-                auto_model_module = AutoModelForCausalLM
+                # Use AutoModelForCausalLM for causal LMs, AutoModel for encoder-decoder models
+                if getattr(hf_config, "is_encoder_decoder", False):
+                    auto_model_module = AutoModel
+                else:
+                    auto_model_module = AutoModelForCausalLM
                 from_config = auto_model_module.from_config
             else:
                 auto_model_module = getattr(transformers, architecture)
@@ -527,7 +550,7 @@ def get_model(
                 # unless specified by the hf_config.
                 torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)
                 model_kwargs2 = model_kwargs.copy()
-                if auto_model_module != AutoModelForCausalLM:
+                if auto_model_module not in [AutoModelForCausalLM, AutoModel]:
                     model_kwargs2.pop("trust_remote_code", None)
                 model_kwargs2["torch_dtype"] = torch_dtype
                 model_kwargs2.pop("max_memory", None)
