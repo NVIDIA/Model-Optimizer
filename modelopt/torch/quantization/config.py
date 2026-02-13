@@ -163,11 +163,12 @@ _default_disabled_quantizer_cfg = {
 }
 
 _mamba_moe_disabled_quantizer_cfg = {
-    "*fc1_latent_proj*": {"enable": False},  # Skip Latent MOE
-    "*fc2_latent_proj*": {"enable": False},  # Skip Latent MOE
-    "*q_proj*": {"enable": False},  # Skip QKV Linear
-    "*k_proj*": {"enable": False},  # Skip QKV Linear
-    "*v_proj*": {"enable": False},  # Skip QKV Linear
+    "*fc1_latent_proj*": {"enable": False}, # Skip Latent MOE
+    "*fc2_latent_proj*": {"enable": False}, # Skip Latent MOE
+    "*q_proj*": {"enable": False}, # Skip QKV Linear
+    "*k_proj*": {"enable": False}, # Skip QKV Linear
+    "*v_proj*": {"enable": False}, # Skip QKV Linear
+    "*o_proj*": {"enable": False}, # Skip QKV Output Projection
 }
 
 INT8_DEFAULT_CFG = {
