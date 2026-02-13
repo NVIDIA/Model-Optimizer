@@ -17,6 +17,15 @@
 """
 Simple test for Puzzletron DeciLM Bridge.
 
+This test validates:
+1. Bridge registration and model support
+2. Provider creation and model architecture setup
+3. Model initialization and forward pass
+
+NOTE: This test uses load_weights=False, so it creates a model with random initialization.
+It does NOT test weight conversion from HuggingFace to Megatron format.
+For actual weight loading/conversion, use import_decilm_to_mbridge_checkpoint.py
+
 Usage:
      export PYTHONPATH="/workspace/Megatron-Bridge/src:/workspace/Model-Optimizer:${PYTHONPATH}"
      python test_puzzletron_decilm_bridge.py /workspace/puzzle_dir_decilm/ckpts/teacher
@@ -58,9 +67,13 @@ if len(sys.argv) > 1:
     print(f"  Bridge type: {type(bridge._model_bridge).__name__}")
 
     # Try to get provider
+    # NOTE: load_weights=False means we create a model with random initialization.
+    # This test only validates the bridge architecture setup, NOT weight conversion.
+    # For actual weight loading/conversion, use import_decilm_to_mbridge_checkpoint.py
     provider = bridge.to_megatron_provider(load_weights=False)
     print("✓ Provider created successfully")
     print(f"  Provider type: {type(provider).__name__}")
+    print("  NOTE: Model will be initialized with random weights (load_weights=False)")
 
     # Configure parallelism (single GPU for simple test)
     provider.tensor_model_parallel_size = 1
