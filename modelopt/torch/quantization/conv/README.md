@@ -7,12 +7,24 @@ CUDA and Triton kernels for Conv3D via implicit GEMM with optional FP4 fake quan
 ```python
 import torch
 from modelopt.torch.quantization.conv_gemm.implicit_gemm_cuda import conv3d_implicit_gemm_cuda
+from modelopt.torch.quantization.tensor_quant import dynamic_block_quantize_op
 
 x = torch.randn(1, 128, 21, 60, 106, device="cuda")
 w = torch.randn(512, 128, 3, 3, 3, device="cuda")
+block_size=128
 
 # Without quantization (drop-in replacement for F.conv3d)
 out = conv3d_implicit_gemm_cuda(x, w, stride=(1,1,1), padding=(1,1,1))
+
+w = dynamic_block_quantize_op(
+    w,
+    block_size,
+    w.abs().max().unsqueeze(0), # AMAX
+    5,                          # num_bits
+    2,                          # exponent_bits
+    8,                          # scale_num_bits,
+    4,        # scale_exponent_bits
+)
 
 # With FP4 quantization
 out = conv3d_implicit_gemm_cuda(
@@ -21,7 +33,7 @@ out = conv3d_implicit_gemm_cuda(
     padding=(1,1,1),
     act_amax=x.abs().max().unsqueeze(0),
     quant_act=True,
-    FP4_BLOCK_SIZE=128,  # 128 or 256
+    FP4_BLOCK_SIZE=block_size,  # 128 or 256
 )
 ```
 
