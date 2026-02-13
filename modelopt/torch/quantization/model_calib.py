@@ -359,16 +359,42 @@ def mse_calibrate(
                     weight_quantizers.append((parent_module, weight_name, weight_quantizer))
         seen_modules.add(parent_module)
 
-    # Step 3: Calibrate weight quantizers once with MSE calibration
-    # This ensures weights are only calibrated once, not during every forward pass
-    for parent_module, weight_name, weight_quantizer in weight_quantizers:
+    # Step 3: Calibrate weight quantizers ONE AT A TIME with immediate amax computation
+    # This prevents massive memory accumulation seen in large models
+    for idx, (parent_module, weight_name, weight_quantizer) in enumerate(weight_quantizers):
         # Enable calibration mode for the weight quantizer
-        enable_stats_collection(parent_module)
+        weight_quantizer.disable_quant()
+        weight_quantizer.enable_calib()
         with enable_weight_access_and_writeback(parent_module, model):
             weight = getattr(parent_module, weight_name)
             weight_quantizer(weight)
-        finish_stats_collection(parent_module, method="mse")
-        weight_quantizer._calibrator.reset()
+
+        # IMMEDIATELY compute amax and reset calibrator to free memory
+        cal = getattr(weight_quantizer, "_calibrator", None)
+        if cal is not None and cal.compute_amax() is not None:
+            weight_quantizer.load_calib_amax()
+
+        weight_quantizer.enable_quant()
+        weight_quantizer.disable_calib()
+
+        # Synchronize ALL CUDA devices before resetting to ensure all async operations complete
+        # This is critical for multi-GPU setups where tensors may be on different devices
+        if torch.cuda.is_available():
+            for dev_id in range(torch.cuda.device_count()):
+                torch.cuda.synchronize(torch.device(f"cuda:{dev_id}"))
+
+        if cal is not None and hasattr(cal, "reset"):
+            cal.reset()
+
+        if (idx + 1) % 10 == 0 and torch.cuda.is_available():
+            for dev_id in range(torch.cuda.device_count()):
+                torch.cuda.synchronize(torch.device(f"cuda:{dev_id}"))
+            torch.cuda.empty_cache()
+
+    if torch.cuda.is_available():
+        for dev_id in range(torch.cuda.device_count()):
+            torch.cuda.synchronize(torch.device(f"cuda:{dev_id}"))
+        torch.cuda.empty_cache()
 
     # TODO: Sync amax across distributed processes
 
@@ -604,19 +630,50 @@ def local_hessian_calibrate(
                 error_func=error_func,
             )
 
-    # Calibrate weights with local Hessian MSE
-    for name, module in weight_quantizers_info:
-        weight_quantizer = module.weight_quantizer
-        if weight_quantizer._calibrator is None:
-            continue
+    # Free cached memory before heavy calibration
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
-        # Enable calibration mode for the weight quantizer
-        enable_stats_collection(module)
+    # Process weights ONE AT A TIME with immediate amax computation and cleanup
+    weight_list = [
+        (name, module)
+        for name, module in weight_quantizers_info
+        if module.weight_quantizer._calibrator is not None
+    ]
+
+    for idx, (name, module) in enumerate(weight_list):
+        weight_quantizer = module.weight_quantizer
+        cal = weight_quantizer._calibrator
+
+        # Step 1: Calibrate this weight
+        weight_quantizer.disable_quant()
+        weight_quantizer.enable_calib()
         with enable_weight_access_and_writeback(module, model, name_to_module):
             weight = module.weight
             weight_quantizer(weight)
-        finish_stats_collection(module, method="mse")
-        weight_quantizer._calibrator.reset()
+
+        # Step 2: IMMEDIATELY compute amax (before calibration data grows)
+        if cal.compute_amax() is not None:
+            weight_quantizer.load_calib_amax()
+
+        weight_quantizer.enable_quant()
+        weight_quantizer.disable_calib()
+
+        # Step 3: Sync all devices and reset calibrator for next weight
+        if torch.cuda.is_available():
+            for dev_id in range(torch.cuda.device_count()):
+                torch.cuda.synchronize(torch.device(f"cuda:{dev_id}"))
+
+        if hasattr(cal, "reset"):
+            cal.reset()
+
+        if (idx + 1) % 10 == 0 and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    if torch.cuda.is_available():
+        for dev_id in range(torch.cuda.device_count()):
+            torch.cuda.synchronize(torch.device(f"cuda:{dev_id}"))
+        torch.cuda.empty_cache()
 
     # Cleanup and free memory
     LocalHessianHelper.cache_mode = False
