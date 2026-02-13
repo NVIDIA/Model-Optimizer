@@ -198,6 +198,8 @@ def main(args: argparse.Namespace):
             manual_gc=True,
             manual_gc_interval=100,
         ),
+        # TODO: Replace validation args in train with validation config in nemo:26.04
+        # validation=ValidationConfig(eval_interval=args.eval_interval, eval_iters=args.eval_iters),
         optimizer=optimizer_config,
         scheduler=scheduler_config,
         ddp=DistributedDataParallelConfig(
