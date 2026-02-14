@@ -1,0 +1,143 @@
+# LTX-2 Distillation Training Configuration with ModelOpt
+
+# Model Configuration
+model:
+  # Path to the LTX-2 checkpoint (used for both teacher and student)
+  model_path: "/path/to/ltx2/checkpoint.safetensors"
+
+  # Path to Gemma text encoder (required for LTX-2)
+  text_encoder_path: "/path/to/gemma/model"
+
+  # Training mode: "lora" for parameter-efficient training, "full" for all parameters
+  training_mode: "full"
+
+# Distillation Configuration
+distillation:
+  # Path to teacher model (if different from model.model_path)
+  # Set to null to use the same checkpoint as student (loaded without quantization)
+  teacher_model_path: null
+
+  # Weight for task loss: L_total = α * L_task + (1-α) * L_distill
+  # α = 1.0: pure task loss (no distillation)
+  # α = 0.0: pure distillation loss
+  # α = 0.5: equal weighting (recommended starting point)
+  distillation_alpha: 0.0
+
+  # Type of distillation loss
+  # "mse": Mean squared error (recommended - transformer outputs are continuous velocity predictions)
+  # "cosine": Cosine similarity loss (matches direction only, ignores magnitude)
+  distillation_loss_type: "mse"
+
+  # Data type for teacher model (bfloat16 recommended for memory efficiency)
+  teacher_dtype: "bfloat16"
+
+  # ModelOpt Quantization Settings
+  # Name of the mtq config, e.g. FP8_DEFAULT_CFG, INT8_DEFAULT_CFG, NVFP4_DEFAULT_CFG.
+  # Custom configs defined in CUSTOM_QUANT_CONFIGS (distillation_trainer.py) are also supported.
+  quant_cfg: null
+
+  # Full-inference calibration settings (matching PTQ workflow).
+  # Each prompt runs a complete denoising loop through the DiT, covering all noise levels.
+  # Path to a text file with one prompt per line. If null, uses the default
+  # HuggingFace dataset 'Gustavosta/Stable-Diffusion-Prompts' (same as PTQ).
+  calibration_prompts_file: null
+  # Total number of calibration prompts (set to 0 to skip calibration)
+  calibration_size: 128
+  # Number of denoising steps per prompt (matches PTQ --n-steps)
+  calibration_n_steps: 30
+  # CFG guidance scale during calibration (4.0 = PTQ default, calls transformer
+  # twice per step for positive + negative prompt; 1.0 = no CFG, saves memory)
+  calibration_guidance_scale: 4.0
+
+  # Path to restore a previously quantized model (from mto.save)
+  restore_quantized_checkpoint: null
+
+  # Path to save the final quantized model checkpoint
+  save_quantized_checkpoint: null
+
+  # Resume from a full training state checkpoint (saves model + optimizer + RNG + step)
+  # Set to "latest" to auto-find the most recent checkpoint in output_dir/checkpoints/
+  # Or set to an explicit path like "/path/to/checkpoints/step_001000"
+  resume_from_checkpoint: latest
+
+  # Time-limit-aware saving for Slurm jobs.
+  # Minutes after which training must save a checkpoint and exit gracefully.
+  # Set slightly below your Slurm --time limit (e.g. time=30min -> must_save_by: 25).
+  # Timer starts when train() is called (after model loading/calibration).
+  must_save_by: null
+
+  # Debug/Test: Use mock data instead of real preprocessed data
+  # Useful for testing the training pipeline without preparing a dataset
+  use_mock_data: false
+  mock_data_samples: 100
+
+# Training Strategy
+training_strategy:
+  name: "text_to_video"
+  first_frame_conditioning_p: 0.1
+  with_audio: false
+
+# Optimization Configuration
+optimization:
+  learning_rate: 2.0e-6
+  steps: 10000
+  batch_size: 1
+  gradient_accumulation_steps: 4
+  max_grad_norm: 1.0
+  optimizer_type: "adamw"  # Use 8-bit optimizer for memory efficiency
+  scheduler_type: "cosine"
+  enable_gradient_checkpointing: true  # Essential for memory savings
+
+# Acceleration Configuration
+acceleration:
+  mixed_precision_mode: "bf16"
+
+  # NOTE: Set to null - we use ModelOpt quantization instead of ltx-trainer's quanto
+  quantization: null
+
+  # 8-bit text encoder for memory savings
+  load_text_encoder_in_8bit: false
+
+# Data Configuration
+data:
+  # Path to preprocessed training data (created by process_dataset.py)
+  preprocessed_data_root: "/path/to/preprocessed/data"
+  num_dataloader_workers: 2
+
+# Validation Configuration
+validation:
+  prompts:
+    - "A beautiful sunset over the ocean with gentle waves"
+    - "A cat playing with a ball of yarn in a cozy living room"
+  negative_prompt: "worst quality, inconsistent motion, blurry, jittery, distorted"
+  video_dims: [512, 320, 33]  # [width, height, frames]
+  frame_rate: 25.0
+  inference_steps: 30
+  interval: 500  # Validate every 500 steps
+  guidance_scale: 4.0
+  seed: 42
+
+# Checkpointing Configuration
+checkpoints:
+  interval: 1000  # Save checkpoint every 1000 steps
+  keep_last_n: 3  # Keep only last 3 checkpoints
+  precision: "bfloat16"
+
+# Weights & Biases Logging
+wandb:
+  enabled: true
+  project: "ltx2-distillation"
+  entity: null  # Your W&B username or team
+  tags:
+    - "distillation"
+    - "modelopt"
+  log_validation_videos: true
+
+# Flow Matching Configuration
+flow_matching:
+  timestep_sampling_mode: "shifted_logit_normal"
+  timestep_sampling_params: {}
+
+# General Settings
+seed: 42
+output_dir: "./outputs/distillation_experiment"
