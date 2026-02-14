@@ -39,6 +39,10 @@ from .mcore_qwen import (
     qwen25_causal_lm_export,
     qwen25_causal_lm_import,
 )
+from .mcore_qwen3vl import (
+    qwen3vl_causal_lm_export,
+    qwen3vl_causal_lm_import,
+)
 
 all_mcore_hf_export_mapping: dict[str, Any] = {
     "DeepseekV2ForCausalLM": deepseek_causal_lm_export,
@@ -54,6 +58,7 @@ all_mcore_hf_export_mapping: dict[str, Any] = {
     "Qwen3MoeForCausalLM": qwen3_causal_lm_export,
     "Qwen2ForCausalLM": qwen25_causal_lm_export,
     "GptOssForCausalLM": gptoss_causal_lm_export,
+    "Qwen3VLForConditionalGeneration": qwen3vl_causal_lm_export,
 }
 
 all_mcore_hf_import_mapping: dict[str, Any] = {
@@ -66,4 +71,5 @@ all_mcore_hf_import_mapping: dict[str, Any] = {
     "Qwen3MoeForCausalLM": qwen3_causal_lm_import,
     "Qwen2ForCausalLM": qwen25_causal_lm_import,
     "GptOssForCausalLM": gptoss_causal_lm_import,
+    "Qwen3VLForConditionalGeneration": qwen3vl_causal_lm_import,
 }
