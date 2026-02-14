@@ -2,7 +2,7 @@
 
 Knowledge distillation for LTX-2 DiT models using NVIDIA ModelOpt. A frozen **teacher** guides a trainable **student** through a combined loss:
 
-```
+```text
 L_total = α × L_task + (1-α) × L_distill
 ```
 
@@ -69,13 +69,13 @@ acceleration:
 
 ### 3. Run Training
 
-**Single GPU:**
+#### Single GPU
 
 ```bash
 python distillation_trainer.py --config configs/my_experiment.yaml
 ```
 
-**Multi-GPU (single node) with accelerate:**
+#### Multi-GPU (Single Node) with Accelerate
 
 ```bash
 accelerate launch \
@@ -84,7 +84,7 @@ accelerate launch \
     distillation_trainer.py --config configs/my_experiment.yaml
 ```
 
-**Multi-node Training with Accelerate**
+#### Multi-node Training with Accelerate
 
 To launch on multiple nodes, make sure to set the following environment variables on each node:
 
