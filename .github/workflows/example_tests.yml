@@ -56,7 +56,7 @@ jobs:
       match_pattern: "^DCO$|^linux$" # Wait for DCO and Unit tests / linux to pass
       delay: 300s
 
-  ##### PyTorch Example Tests #####
+  ##### PyTorch Example Tests (speculative_decoding requires 26.01 image) #####
   torch-pr:
     needs: [check-file-changes, wait-checks]
     if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
@@ -64,10 +64,13 @@ jobs:
       fail-fast: false
       matrix:
         example: [llm_distill, llm_qat, llm_sparsity]
+        include:
+          - example: speculative_decoding
+            docker_image: "nvcr.io/nvidia/pytorch:26.01-py3"
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/pytorch:25.06-py3"
+      docker_image: ${{ matrix.docker_image || 'nvcr.io/nvidia/pytorch:25.06-py3' }}
       example: ${{ matrix.example }}
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-l4-latest-1
@@ -78,33 +81,14 @@ jobs:
       fail-fast: false
       matrix:
         example: [llm_distill, llm_qat, llm_sparsity]
+        include:
+          - example: speculative_decoding
+            docker_image: "nvcr.io/nvidia/pytorch:26.01-py3"
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/pytorch:25.06-py3"
+      docker_image: ${{ matrix.docker_image || 'nvcr.io/nvidia/pytorch:25.06-py3' }}
       example: ${{ matrix.example }}
-      pip_install_extras: "[hf,dev-test]"
-      runner: linux-amd64-gpu-h100-latest-2
-
-  ##### Speculative Decoding Example Tests (requires 26.01 image) #####
-  speculative-decoding-pr:
-    needs: [check-file-changes, wait-checks]
-    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
-    uses: ./.github/workflows/_example_tests_runner.yml
-    secrets: inherit
-    with:
-      docker_image: "nvcr.io/nvidia/pytorch:26.01-py3"
-      example: speculative_decoding
-      pip_install_extras: "[hf,dev-test]"
-      runner: linux-amd64-gpu-l4-latest-1
-
-  speculative-decoding-non-pr:
-    if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
-    uses: ./.github/workflows/_example_tests_runner.yml
-    secrets: inherit
-    with:
-      docker_image: "nvcr.io/nvidia/pytorch:26.01-py3"
-      example: speculative_decoding
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-h100-latest-2
 
@@ -172,7 +156,7 @@ jobs:
   example-pr-required-check:
     # Run even if example tests are skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
-    needs: [check-file-changes, torch-pr, speculative-decoding-pr, trtllm-pr, onnx-pr]
+    needs: [check-file-changes, torch-pr, trtllm-pr, onnx-pr]
     runs-on: ubuntu-latest
     steps:
       - name: Required GPU tests did not succeed
@@ -180,7 +164,6 @@ jobs:
           needs.check-file-changes.result != 'success' ||
           (needs.check-file-changes.outputs.any_changed == 'true' && (
             needs.torch-pr.result != 'success' ||
-            needs.speculative-decoding-pr.result != 'success' ||
             needs.trtllm-pr.result != 'success' ||
             needs.onnx-pr.result != 'success'
           ))
