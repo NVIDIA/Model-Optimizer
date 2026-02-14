@@ -607,7 +607,7 @@ def _pad6(padding) -> tuple[int, int, int, int, int, int]:
         pd, ph, pw = map(int, padding)
         return (pw, pw, ph, ph, pd, pd)
     assert len(padding) == 6
-    return tuple(map(int, padding))
+    return tuple(map(int, padding))  # type: ignore[return-value]
 
 
 @torch.no_grad()
@@ -620,7 +620,7 @@ def conv3d_implicit_gemm_cuda(
     dilation: tuple[int, int, int] = (1, 1, 1),
     act_amax: torch.Tensor | None = None,
     quant_act: bool = False,
-    FP4_BLOCK_SIZE: int = 256,
+    fp4_block_size: int = 256,
 ) -> torch.Tensor:
     """Optimized CUDA-based Conv3D via implicit GEMM with BF16 WMMA tensor cores.
 
@@ -633,7 +633,7 @@ def conv3d_implicit_gemm_cuda(
         dilation: Convolution dilation (D, H, W)
         act_amax: Activation max value for FP4 quantization
         quant_act: Whether to apply FP4 quantization to activations
-        FP4_BLOCK_SIZE: FP4 quantization block size (128 or 256)
+        fp4_block_size: FP4 quantization block size (128 or 256)
 
     Returns:
         Output tensor [N, Cout, OD, OH, OW]
@@ -641,66 +641,66 @@ def conv3d_implicit_gemm_cuda(
     cuda_mod = _get_cuda_module()
 
     assert x.ndim == 5 and w.ndim == 5
-    N_batch, Cin, D, H, W = x.shape
-    Cout, Cin_w, kD, kH, kW = w.shape
-    assert Cin_w == Cin
+    n_batch, cin, d, h, w_in = x.shape
+    cout, cin_w, kd, kh, kw = w.shape
+    assert cin_w == cin
 
     sd, sh, sw = _triple(stride)
     dd, dh, dw = _triple(dilation)
     pad_wl, pad_wr, pad_hl, pad_hr, pad_dl, pad_dr = _pad6(padding)
 
     x_pad = F.pad(x, (pad_wl, pad_wr, pad_hl, pad_hr, pad_dl, pad_dr))
-    Dp = D + pad_dl + pad_dr
-    Hp = H + pad_hl + pad_hr
-    Wp = W + pad_wl + pad_wr
+    dp = d + pad_dl + pad_dr
+    hp = h + pad_hl + pad_hr
+    wp = w_in + pad_wl + pad_wr
 
-    OD = (Dp - (dd * (kD - 1) + 1)) // sd + 1
-    OH = (Hp - (dh * (kH - 1) + 1)) // sh + 1
-    OW = (Wp - (dw * (kW - 1) + 1)) // sw + 1
+    od = (dp - (dd * (kd - 1) + 1)) // sd + 1
+    oh = (hp - (dh * (kh - 1) + 1)) // sh + 1
+    ow = (wp - (dw * (kw - 1) + 1)) // sw + 1
 
-    M = N_batch * OD * OH * OW
-    K = Cin * kD * kH * kW
+    m = n_batch * od * oh * ow
+    k = cin * kd * kh * kw
 
-    w_flat = w.reshape(Cout, K).transpose(0, 1).contiguous()
+    w_flat = w.reshape(cout, k).transpose(0, 1).contiguous()
 
     x_pad = x_pad.float().contiguous()
     w_flat = w_flat.float().contiguous()
 
     has_bias = bias is not None
-    bias_t = bias.float().contiguous() if has_bias else torch.empty(0, device=x.device)
+    bias_t = bias.float().contiguous() if has_bias else torch.empty(0, device=x.device)  # type: ignore[union-attr]
 
     do_quant = quant_act and act_amax is not None
-    amax_t = act_amax.float().contiguous() if do_quant else torch.empty(0, device=x.device)
+    amax_t = act_amax.float().contiguous() if do_quant else torch.empty(0, device=x.device)  # type: ignore[union-attr]
 
     y_flat = cuda_mod.conv3d_implicit_gemm_cuda(
         x_pad,
         w_flat,
         bias_t,
         amax_t,
-        N_batch,
-        Cin,
-        Dp,
-        Hp,
-        Wp,
-        Cout,
-        OD,
-        OH,
-        OW,
-        kD,
-        kH,
-        kW,
+        n_batch,
+        cin,
+        dp,
+        hp,
+        wp,
+        cout,
+        od,
+        oh,
+        ow,
+        kd,
+        kh,
+        kw,
         sd,
         sh,
         sw,
         dd,
         dh,
         dw,
-        M,
-        K,
+        m,
+        k,
         do_quant,
         has_bias,
-        FP4_BLOCK_SIZE,
+        fp4_block_size,
     )
 
-    y = y_flat.view(N_batch, OD, OH, OW, Cout).permute(0, 4, 1, 2, 3).contiguous()
+    y = y_flat.view(n_batch, od, oh, ow, cout).permute(0, 4, 1, 2, 3).contiguous()
     return y.to(x.dtype)
