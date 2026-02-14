@@ -521,7 +521,7 @@ class DistillationTrainer(LtxvTrainer):
             self._apply_modelopt_quantization()
             gc.collect()
             torch.cuda.empty_cache()
-            print(f"Quantized model: {self._transformer}")
+            logger.info(f"Quantized model: {self._transformer}")
 
     def _needs_fresh_calibration(self) -> bool:
         """Check whether fresh quantization calibration will be needed.
@@ -745,7 +745,7 @@ class DistillationTrainer(LtxvTrainer):
 
         if not self._cached_calibration_embeddings:
             raise RuntimeError(
-                "No cached calibration embeddings available!"
+                "No cached calibration embeddings available! "
                 "Probably the saved checkpoint has no modelopt_state.pt or corrupted."
             )
 
@@ -1045,7 +1045,6 @@ class DistillationTrainer(LtxvTrainer):
             teacher_flat = teacher_pred.flatten(start_dim=2)
             cos_sim = torch.nn.functional.cosine_similarity(student_flat, teacher_flat, dim=-1)
             loss = 1.0 - cos_sim.mean()
-            return loss
         else:
             raise ValueError(f"Unknown distillation loss type: {loss_type}")
 
@@ -1675,7 +1674,7 @@ class DistillationTrainer(LtxvTrainer):
         peak_mem = max(start_mem, end_mem, peak_mem_during_training)
 
         total_time_seconds = train_end_time - train_start_time
-        actual_steps = cfg.optimization.steps - resume_step
+        actual_steps = self._global_step - resume_step
         steps_per_second = actual_steps / total_time_seconds if total_time_seconds > 0 else 0
         samples_per_second = (
             steps_per_second * self._accelerator.num_processes * cfg.optimization.batch_size

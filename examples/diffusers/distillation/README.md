@@ -125,7 +125,7 @@ Before training begins, calibration runs full denoising inference to collect act
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `calibration_prompts_file` | null | Text file with one prompt per line. Use the HuggingFace dataset 'Gustavosta/Stable-Diffusion-Prompts' if not null. |
+| `calibration_prompts_file` | null | Text file with one prompt per line. Use the HuggingFace dataset 'Gustavosta/Stable-Diffusion-Prompts' if null. |
 | `calibration_size` | 128 | Number of prompts (each runs a full denoising loop) |
 | `calibration_n_steps` | 30 | Denoising steps per prompt |
 | `calibration_guidance_scale` | 4.0 | CFG scale (should match inference-time) |

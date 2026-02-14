@@ -5,7 +5,7 @@
 #
 # Usage:
 #   accelerate launch \
-#       --config_file configs/accelerate/fsdp_multinode.yaml \
+#       --config_file configs/accelerate/fsdp.yaml \
 #       --num_processes 16 \
 #       --num_machines 2 \
 #       --machine_rank $MACHINE_RANK \
