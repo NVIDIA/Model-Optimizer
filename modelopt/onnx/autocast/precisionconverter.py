@@ -1147,42 +1147,13 @@ class PrecisionConverter:
         output_type = utils.get_cast_to_type(node)
         return all(inp_type == output_type for inp_type in input_types) and input_types is not None
 
-    def _is_sequential_cast(self, node: onnx.NodeProto) -> bool:
-        assert node.op_type == "Cast"
-        output_type = utils.get_cast_to_type(node)
-
-        # Cast to high precision -> cast to low precision, first cast has no impact and can be safely removed
-        # Cast to low precision -> cast to high precision affects precision and should not be removed
-        precision_order = [
-            TensorProto.DOUBLE,
-            TensorProto.FLOAT,
-            TensorProto.FLOAT16,
-            TensorProto.BFLOAT16,
-        ]
-        consumers = [
-            n for n in utils.get_consumer_nodes(self.model, node.output[0]) if n.op_type == "Cast"
-        ]
-
-        # If the first cast has additional consumers, we should not remove it
-        if len(consumers) != 1:
-            return False
-
-        next_node = consumers[0]
-        first_cast_type = output_type
-        second_cast_type = utils.get_cast_to_type(next_node)
-
-        return (
-            first_cast_type in precision_order
-            and second_cast_type in precision_order
-            and precision_order.index(first_cast_type) <= precision_order.index(second_cast_type)
-        )
-
     def _remove_redundant_casts(self):
         """Removes both sequential casts and casts that don't change precision.
 
         This method optimizes the graph by removing unnecessary cast operations that either:
         1. Don't actually change the data type
         2. Could be replaced by a single cast operation
+        3. Can be folded into a preceding Constant node
         """
         if self.custom_ops:
             self.model = self._propagate_types_shapes_custom_ops(self.model)
@@ -1198,35 +1169,7 @@ class PrecisionConverter:
                     check_type=True,
                 )
 
-        nodes_to_remove = []
-        for node in self.model.graph.node:
-            if node.op_type == "Cast":
-                # Find cast nodes that don't change precision
-                if self._is_same_type_cast(node):
-                    nodes_to_remove.append(node)
-                    self._bypass_cast_node(node)
-                    logger.debug(f"Found redundant same-type cast: {node.name}")
-                    continue
-
-                # Find sequential casts that don't change precision
-                if self._is_sequential_cast(node):
-                    nodes_to_remove.append(node)
-                    self._bypass_cast_node(node)
-                    logger.debug(f"Found removable double-cast: {node.name}")
-
-                # Find foldable Constant -> Cast. Initializers are handled by _convert_initializers.
-                if self._is_foldable_constant_cast_pattern(node):
-                    nodes_to_remove.append(node)
-                    cast_producers = utils.get_producer_nodes(self.model, node.input[0])
-                    assert len(cast_producers) == 1 and cast_producers[0].op_type == "Constant"
-                    constant_producer = cast_producers[0]
-                    self._convert_constant_values(constant_producer, node)
-                    self._bypass_cast_node(node)
-                    logger.debug(f"Found foldable Constant->Cast pattern, removing {node.name}")
-
-        logger.debug(f"Removing redundant casts: {[n.name for n in nodes_to_remove]}")
-        for node in nodes_to_remove:
-            self.model.graph.node.remove(node)
+        self.model = onnx_utils.remove_redundant_casts(self.model)
 
     def _fix_network_output_names(self):
         modified = False
@@ -1359,80 +1302,6 @@ class PrecisionConverter:
         if tensor_name in self.initializer_map:
             return self.initializer_map[tensor_name].data_type
         raise Exception(f"did not find tensor {tensor_name}")
-
-    def _convert_constant_values(self, const_node, cast_node: onnx.NodeProto) -> None:
-        original_tensor = const_node.attribute[0].t
-        if original_tensor.data_type == onnx.TensorProto.BFLOAT16:
-            original_data = onnx_utils.read_f16_tensor_as_fp32(original_tensor)
-        else:
-            original_data = onnx.numpy_helper.to_array(original_tensor)
-
-        # Precompute casted value
-        cast_to_type = utils.get_cast_to_type(cast_node)
-        cast_dtype = onnx.helper.tensor_dtype_to_np_dtype(cast_to_type)
-
-        # Handle bfloat16 conversion manually since numpy doesn't support it natively
-        if cast_to_type == onnx.TensorProto.BFLOAT16:
-            casted_data = original_data.astype(ml_dtypes.bfloat16)
-        else:
-            casted_data = original_data.astype(cast_dtype)
-
-        # Create a new constant node with casted data
-        if cast_to_type == onnx.TensorProto.BFLOAT16:
-            # Create TensorProto manually for bfloat16
-            tensor_proto = onnx.TensorProto()
-            tensor_proto.name = const_node.output[0]
-            tensor_proto.data_type = onnx.TensorProto.BFLOAT16
-            tensor_proto.dims.extend(casted_data.shape)
-            # Convert bfloat16 to raw bytes
-            bf16_bytes = casted_data.astype(ml_dtypes.bfloat16).view(np.uint16)
-            tensor_proto.raw_data = bf16_bytes.tobytes()
-        else:
-            # Create tensor manually to ensure proper handling
-            tensor_proto = onnx.numpy_helper.from_array(casted_data)
-            tensor_proto.name = const_node.output[0]
-
-        new_const_node = onnx.helper.make_node(
-            "Constant",
-            inputs=[],
-            outputs=const_node.output,
-            value=tensor_proto,
-            name=const_node.name,
-        )
-
-        # Replace the original constant node with the new constant node
-        # The scope of this function is to convert the constant node data. Removing the cast is done later.
-        for node in utils.get_consumer_nodes(self.model, const_node.name):
-            for i, input_name in enumerate(node.input):
-                if input_name == const_node.name:
-                    node.input[i] = new_const_node.output[0]
-                    break
-
-        const_idx = -1
-        for i, node in enumerate(self.model.graph.node):
-            if node == const_node:
-                const_idx = i
-                break
-
-        self.model.graph.node.remove(const_node)
-        self.model.graph.node.insert(const_idx, new_const_node)
-        # The Cast node is the sole consumer of the Constant node, guaranteed by _is_foldable_constant_cast_pattern
-        cast_node.input[0] = new_const_node.output[0]
-
-    def _is_foldable_constant_cast_pattern(self, node: onnx.NodeProto) -> bool:
-        """Constant -> Cast and Cast is the only consumer of the Constant node."""
-        assert node.op_type == "Cast"
-
-        producer = utils.get_producer_nodes(self.model, node.input[0])
-
-        const_producer = (
-            producer[0] if len(producer) == 1 and producer[0].op_type == "Constant" else None
-        )
-
-        if const_producer:
-            get_consumer_nodes = utils.get_consumer_nodes(self.model, const_producer.output[0])
-            return len(get_consumer_nodes) == 1 and get_consumer_nodes[0] == node
-        return False
 
     def _sanitize_model(self):
         graph_sanitizer = GraphSanitizer(

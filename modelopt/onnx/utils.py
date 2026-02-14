@@ -433,8 +433,8 @@ def randomize_weights_onnx_bytes(onnx_bytes: bytes, seed: int = 0) -> bytes:
         if len(init.dims) > 1:
             dtype = onnx.helper.tensor_dtype_to_np_dtype(init.data_type)
             if dtype in ["float16", "float32", "float64"]:
-                avg = weight_metadata.get(init.name + "_avg", None)
-                var = weight_metadata.get(init.name + "_var", None)
+                avg = weight_metadata.get(init.name + "_avg")
+                var = weight_metadata.get(init.name + "_var")
                 if avg and var:
                     numpy_array = np.random.normal(float(avg), float(var), size=init.dims).astype(
                         dtype
@@ -1215,6 +1215,110 @@ def onnx_type_str_to_enum(dtype: str) -> int:
     return getattr(onnx.TensorProto, dtype)
 
 
+def remove_redundant_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
+    """Removes redundant Cast nodes from an ONNX model.
+
+    Handles three patterns:
+    1. Same-type casts: Cast where input type == output type (no-op)
+    2. Sequential casts: Cast(to=high_prec) -> Cast(to=low_prec), first cast removed
+    3. Constant->Cast folding: Fold cast into preceding Constant node's data
+
+    Args:
+        onnx_model: The ONNX model to optimize.
+
+    Returns:
+        onnx.ModelProto: Model with redundant casts removed.
+    """
+    import ml_dtypes
+
+    graph = gs.import_onnx(onnx_model)
+    removed_count = 0
+
+    # Precision ordering: lower index = higher precision
+    precision_order = {
+        onnx.TensorProto.DOUBLE: 0,
+        onnx.TensorProto.FLOAT: 1,
+        onnx.TensorProto.FLOAT16: 2,
+        onnx.TensorProto.BFLOAT16: 3,
+    }
+
+    def _get_onnx_type(tensor):
+        """Get ONNX type enum from a GS tensor's dtype."""
+        if tensor.dtype is None:
+            return None
+        try:
+            return onnx.helper.np_dtype_to_tensor_dtype(tensor.dtype)
+        except Exception:
+            return None
+
+    def _bypass_cast(node):
+        """Reconnect consumers of cast output to use cast input, removing the cast."""
+        inp = node.inputs[0]
+        out = node.outputs[0]
+        for consumer in list(out.outputs):
+            for i, consumer_inp in enumerate(consumer.inputs):
+                if consumer_inp is out:
+                    consumer.inputs[i] = inp
+        for i, graph_out in enumerate(graph.outputs):
+            if graph_out is out:
+                graph.outputs[i] = inp
+        node.outputs.clear()
+
+    for node in list(graph.nodes):
+        if node.op != "Cast":
+            continue
+
+        cast_to = node.attrs.get("to")
+        if cast_to is None:
+            continue
+
+        input_tensor = node.inputs[0]
+        output_tensor = node.outputs[0]
+
+        # Pattern 1: Same-type cast (no-op)
+        input_type = _get_onnx_type(input_tensor)
+        if input_type is not None and input_type == cast_to:
+            _bypass_cast(node)
+            removed_count += 1
+            logger.debug(f"Removed same-type cast: {node.name}")
+            continue
+
+        # Pattern 2: Sequential casts where first can be removed
+        # Cast(to=high) -> Cast(to=low): first cast has no effect
+        cast_consumers = output_tensor.outputs
+        if len(cast_consumers) == 1 and cast_consumers[0].op == "Cast":
+            next_cast_to = cast_consumers[0].attrs.get("to")
+            if (
+                cast_to in precision_order
+                and next_cast_to in precision_order
+                and precision_order[cast_to] <= precision_order[next_cast_to]
+            ):
+                _bypass_cast(node)
+                removed_count += 1
+                logger.debug(f"Removed sequential cast: {node.name}")
+                continue
+
+        # Pattern 3: Constant -> Cast folding (only if constant has single consumer)
+        if isinstance(input_tensor, Constant) and len(input_tensor.outputs) == 1:
+            try:
+                if cast_to == onnx.TensorProto.BFLOAT16:
+                    input_tensor.values = input_tensor.values.astype(ml_dtypes.bfloat16)
+                else:
+                    cast_dtype = onnx.helper.tensor_dtype_to_np_dtype(cast_to)
+                    input_tensor.values = input_tensor.values.astype(cast_dtype)
+                _bypass_cast(node)
+                removed_count += 1
+                logger.debug(f"Folded Constant->Cast: {node.name}")
+            except Exception as e:
+                logger.debug(f"Failed to fold Constant->Cast {node.name}: {e}")
+
+    if removed_count > 0:
+        graph.cleanup().toposort()
+        logger.info(f"Removed {removed_count} redundant Cast nodes")
+
+    return gs.export_onnx(graph)
+
+
 def remove_node_training_mode(onnx_model: onnx.ModelProto, node_op_type: str) -> onnx.ModelProto:
     """Remove `training_mode` attribute and extra training outputs from nodes of a given op type.
 
@@ -1263,3 +1367,43 @@ def remove_node_training_mode(onnx_model: onnx.ModelProto, node_op_type: str) ->
         onnx_model.graph.value_info.extend(keep)
 
     return onnx_model
+
+
+def change_casts_to_fp16(model: onnx.ModelProto, target_op_types: list[str]) -> onnx.ModelProto:
+    """Change Cast nodes that cast to FP32 and feed into specified nodes to cast to FP16 instead.
+
+    Args:
+        model: The ONNX model to modify.
+        target_op_types: List of op types to check for. Cast nodes feeding into these will be
+            changed from FP32 to FP16.
+
+    Returns:
+        The modified ONNX model with Cast nodes updated.
+    """
+    # Build a map of tensor name -> consumer nodes
+    tensor_to_consumers: dict[str, list[onnx.NodeProto]] = {}
+    for node in model.graph.node:
+        for inp in node.input:
+            if inp:
+                tensor_to_consumers.setdefault(inp, []).append(node)
+
+    # Find Cast nodes that feed into target ops and change FP32 -> FP16
+    for node in model.graph.node:
+        if node.op_type != "Cast":
+            continue
+
+        # Check if this Cast outputs to a target op type
+        cast_output = node.output[0]
+        consumers = tensor_to_consumers.get(cast_output, [])
+        feeds_target = any(c.op_type in target_op_types for c in consumers)
+
+        if not feeds_target:
+            continue
+
+        # Check if Cast is to FP32, and change to FP16
+        for attr in node.attribute:
+            if attr.name == "to" and attr.i == onnx.TensorProto.FLOAT:
+                attr.i = onnx.TensorProto.FLOAT16
+                break
+
+    return model

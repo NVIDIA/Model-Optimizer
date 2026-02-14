@@ -215,7 +215,7 @@ class NVFP4QuantExporter(ONNXQuantExporter):
         logger.debug(f"Found {len(fp4_qdq_nodes)} FP4QDQ nodes to process")
 
         for node in fp4_qdq_nodes:
-            idx = initializer_indices.get(node.input[0], None)
+            idx = initializer_indices.get(node.input[0])
             assert idx is not None, f"Initializer for weight '{node.input[0]}' not found."
 
             tensor = initializers[idx]
@@ -259,7 +259,7 @@ class NVFP4QuantExporter(ONNXQuantExporter):
         fp4_qdq_nodes = [node for node in graph.node if node.op_type == "TRT_FP4QDQ"]
 
         for node in fp4_qdq_nodes:
-            idx = initializer_indices.get(node.input[0], None)
+            idx = initializer_indices.get(node.input[0])
             assert idx is not None, f"Initializer for weight '{node.input[0]}' not found."
 
             tensor = initializers[idx]
@@ -365,7 +365,7 @@ class NVFP4QuantExporter(ONNXQuantExporter):
         logger.debug(f"Found {len(fp4_qdq_nodes)} FP4QDQ nodes to convert")
 
         for node in fp4_qdq_nodes:
-            idx = initializer_indices.get(node.input[0], None)
+            idx = initializer_indices.get(node.input[0])
             assert idx is not None, f"Initializer for weight '{node.input[0]}' not found."
             initializers_to_delete.append(graph.initializer[idx].name)
 
