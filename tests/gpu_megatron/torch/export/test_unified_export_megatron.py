@@ -21,13 +21,10 @@ from pathlib import Path
 import pytest
 import torch
 import transformers
-from _test_utils.import_helper import skip_if_no_megatron
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import get_forward
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
-
-skip_if_no_megatron(apex_or_te_required=True)
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.speculative as mtsp

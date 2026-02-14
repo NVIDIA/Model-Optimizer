@@ -18,7 +18,6 @@ from functools import partial
 
 import pytest
 import torch
-from _test_utils.import_helper import skip_if_no_megatron
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.megatron.models import (
     MegatronModel,
@@ -41,9 +40,6 @@ from _test_utils.torch.quantization.quantize_common import (
     data_tensor_context_parallel_test_helper,
     verify_kv_cache_amax_sync,
 )
-
-skip_if_no_megatron()
-
 from megatron.core.parallel_state import (
     destroy_model_parallel,
     get_data_parallel_group,

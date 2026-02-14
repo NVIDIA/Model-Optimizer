@@ -55,7 +55,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: Run unit tests (without coverage)
-        run: pip install tox && tox -e py312-torch210-tf_latest-unit
+        # Some issues with torch 2.10 on Windows, so using 2.9 for now
+        run: pip install tox && tox -e py312-torch29-tf_latest-unit
   multi-py:
     if: github.event_name == 'pull_request'
     needs: [linux]
