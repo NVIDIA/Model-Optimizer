@@ -615,8 +615,7 @@ def _process_quantized_modules(
                         _export_quantized_weight(sub_module, dtype)
                 except AssertionError as e:
                     raise AssertionError(
-                        f"Failed to export module '{name}' "
-                        f"(type={type(sub_module).__name__}): {e}"
+                        f"Failed to export module '{name}' (type={type(sub_module).__name__}): {e}"
                     ) from e
             elif (
                 "Llama4TextExperts" in type(sub_module).__name__
