@@ -8,19 +8,18 @@ model:
   # Path to Gemma text encoder (required for LTX-2)
   text_encoder_path: "/path/to/gemma/model"
 
-  # Training mode: "lora" for parameter-efficient training, "full" for all parameters
+  # Training mode: "lora" is not supported yet
   training_mode: "full"
 
 # Distillation Configuration
 distillation:
   # Path to teacher model (if different from model.model_path)
   # Set to null to use the same checkpoint as student (loaded without quantization)
-  teacher_model_path: null
+  teacher_model_path:
 
   # Weight for task loss: L_total = α * L_task + (1-α) * L_distill
   # α = 1.0: pure task loss (no distillation)
   # α = 0.0: pure distillation loss
-  # α = 0.5: equal weighting (recommended starting point)
   distillation_alpha: 0.0
 
   # Type of distillation loss
@@ -34,13 +33,13 @@ distillation:
   # ModelOpt Quantization Settings
   # Name of the mtq config, e.g. FP8_DEFAULT_CFG, INT8_DEFAULT_CFG, NVFP4_DEFAULT_CFG.
   # Custom configs defined in CUSTOM_QUANT_CONFIGS (distillation_trainer.py) are also supported.
-  quant_cfg: null
+  quant_cfg:
 
   # Full-inference calibration settings (matching PTQ workflow).
   # Each prompt runs a complete denoising loop through the DiT, covering all noise levels.
   # Path to a text file with one prompt per line. If null, uses the default
   # HuggingFace dataset 'Gustavosta/Stable-Diffusion-Prompts' (same as PTQ).
-  calibration_prompts_file: null
+  calibration_prompts_file:
   # Total number of calibration prompts (set to 0 to skip calibration)
   calibration_size: 128
   # Number of denoising steps per prompt (matches PTQ --n-steps)
@@ -50,10 +49,10 @@ distillation:
   calibration_guidance_scale: 4.0
 
   # Path to restore a previously quantized model (from mto.save)
-  restore_quantized_checkpoint: null
+  restore_quantized_checkpoint:
 
   # Path to save the final quantized model checkpoint
-  save_quantized_checkpoint: null
+  save_quantized_checkpoint:
 
   # Resume from a full training state checkpoint (saves model + optimizer + RNG + step)
   # Set to "latest" to auto-find the most recent checkpoint in output_dir/checkpoints/
@@ -64,7 +63,7 @@ distillation:
   # Minutes after which training must save a checkpoint and exit gracefully.
   # Set slightly below your Slurm --time limit (e.g. time=30min -> must_save_by: 25).
   # Timer starts when train() is called (after model loading/calibration).
-  must_save_by: null
+  must_save_by:
 
   # Debug/Test: Use mock data instead of real preprocessed data
   # Useful for testing the training pipeline without preparing a dataset
@@ -93,7 +92,7 @@ acceleration:
   mixed_precision_mode: "bf16"
 
   # NOTE: Set to null - we use ModelOpt quantization instead of ltx-trainer's quanto
-  quantization: null
+  quantization:
 
   # 8-bit text encoder for memory savings
   load_text_encoder_in_8bit: false
@@ -127,7 +126,7 @@ checkpoints:
 wandb:
   enabled: true
   project: "ltx2-distillation"
-  entity: null  # Your W&B username or team
+  entity:       # Your W&B username or team
   tags:
     - "distillation"
     - "modelopt"

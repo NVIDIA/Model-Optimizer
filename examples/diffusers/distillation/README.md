@@ -7,9 +7,11 @@ L_total = α × L_task + (1-α) × L_distill
 ```
 
 Currently supported:
-- **Quantization-Aware Distillation (QAD)** — student uses ModelOpt fake quantization 
+
+- **Quantization-Aware Distillation (QAD)** — student uses ModelOpt fake quantization
 
 Planned:
+
 - **Sparsity-Aware Distillation (SAD)** — student uses ModelOpt sparsity
 
 ## Installation
