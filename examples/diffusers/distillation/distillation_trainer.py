@@ -1387,7 +1387,7 @@ class DistillationTrainer(LtxvTrainer):
         self,
         disable_progress_bars: bool = False,
         step_callback=None,
-    ) -> tuple[Path, dict]:
+    ) -> tuple[Path | None, dict]:
         """
         Override parent train() to add full checkpoint resume support.
 
