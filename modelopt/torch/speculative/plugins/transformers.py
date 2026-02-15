@@ -40,6 +40,10 @@ from torch import nn
 from torch.nn import CrossEntropyLoss
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 from transformers import Cache, DynamicCache, PretrainedConfig, PreTrainedModel
+from transformers.models.deepseek_v3.modeling_deepseek_v3 import (
+    DeepseekV3DecoderLayer,
+    DeepseekV3RotaryEmbedding,
+)
 from transformers.models.llama.modeling_llama import (
     LlamaDecoderLayer,
     LlamaRMSNorm,
@@ -379,6 +383,12 @@ class EagleModule(nn.Module):
                     config=self.config, device=hidden_states.device
                 )
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        elif self.config.eagle_decoder_type == "deepseek_v3":
+            if not hasattr(self, "rotary_emb"):
+                self.rotary_emb = DeepseekV3RotaryEmbedding(
+                    config=self.config, device=hidden_states.device
+                )
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
         else:
             position_embeddings = None
 
@@ -535,6 +545,8 @@ class HFEagleModel(EagleModel):
         if eagle_decoder_type == "llama":
             # Use default eagle config
             decoder_cls = LlamaDecoderLayer
+        elif eagle_decoder_type == "deepseek_v3":
+            decoder_cls = DeepseekV3DecoderLayer
         elif eagle_decoder_type == "kimik2":
             decoder_cls = _setup_kimi_k2_decoder()
 
