@@ -519,9 +519,11 @@ class HFEagleModel(EagleModel):
         self._aux_hidden_states.clear()
 
         # Gather aux hidden states on the draft model device
-        aux_h_list = [h.to(self.eagle_module.fc.weight.device) for h in aux_h_list]
+        aux_hiddens = torch.cat(
+            [h.to(self.eagle_module.fc.weight.device) for h in aux_h_list], dim=-1
+        )
 
-        return aux_h_list
+        return aux_hiddens
 
     def _get_eagle_device(self):
         """Return the device where we should place eagle module."""
@@ -789,7 +791,7 @@ class HFEagleModel(EagleModel):
 
         return EagleBaseModelOutput(
             input_embeds=base_input_embeds,
-            aux_hiddens=torch.cat(self.pop_and_gather_aux_hiddens(), dim=-1),
+            aux_hiddens=self.pop_and_gather_aux_hiddens(),
             out_hiddens=base_model_hidden_states,
             logits=base_model_logits,
             loss=base_model_loss,
@@ -936,20 +938,10 @@ class HFEagleModel(EagleModel):
                 classification_loss, acc = self._eagle_loss(
                     # base model predict +1 tok, while eagle predict +2
                     # so we shift base model outputs compared to eagle outputs
-                    base_outputs.logits[:, 1 + i :],
-                    eagle_logit[:, : -(1 + i)],
                     # additionally, we mask the first n tok of eagle outputs at nth TTT step
-                    torch.cat(
-                        (
-                            torch.zeros(
-                                b, ttt_step, dtype=loss_mask.dtype, device=loss_mask.device
-                            ),
-                            loss_mask[:, 1 + ttt_step :]
-                            if i == 0
-                            else loss_mask[:, 1 + ttt_step : -i],
-                        ),
-                        dim=1,
-                    ),
+                    base_outputs.logits[:, 1 + i + ttt_step :],
+                    eagle_logit[:, ttt_step : -(1 + i)],
+                    loss_mask[:, 1 + ttt_step :] if i == 0 else loss_mask[:, 1 + ttt_step : -i],
                 )
                 # Apply loss decay factor to focus on early steps
                 classification_loss *= self.eagle_loss_decay_factor ** (ttt_step + i)
@@ -1034,11 +1026,7 @@ class HFEagleModel(EagleModel):
             # EAGLE-3
             # Only the first iteration input_hidden_states are from aux_hidden_state layers
             # Gather _aux_hidden_states from all devices before concatenation
-            gathered_aux_hidden_states = self.pop_and_gather_aux_hiddens()
-            eagle_input_hidden_states = self.eagle_module.fc(
-                torch.cat(gathered_aux_hidden_states, dim=-1)
-            )
-
+            eagle_input_hidden_states = self.eagle_module.fc(self.pop_and_gather_aux_hiddens())
         else:
             eagle_input_hidden_states = base_model_hidden_states
 
