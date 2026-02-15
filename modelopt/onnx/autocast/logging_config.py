@@ -29,12 +29,15 @@ import sys
 logger = logging.getLogger("modelopt.onnx.autocast")
 
 
-def configure_logging(level=logging.INFO, log_file=None):
+def configure_logging(level=None, log_file=None):
     """Configure logging for all AutoCast components.
+
+    If logging level is provided, it will be used regardless of parent logger log level.
+    Otherwise, inherits from parent logger if exists, or fallback to default: logging.INFO.
 
     Args:
         level: The logging level to use. Can be a string (e.g., "DEBUG", "INFO") or
-               a logging constant (e.g., logging.DEBUG). Default: logging.INFO.
+               a logging constant (e.g., logging.DEBUG) default: None.
         log_file: Optional path to a log file. If provided, logs will be written to this file
                  in addition to stdout (default: None).
     """
@@ -42,12 +45,22 @@ def configure_logging(level=logging.INFO, log_file=None):
     parent_logger = logging.getLogger("modelopt.onnx")
     parent_has_handlers = len(parent_logger.handlers) > 0
 
-    # If parent is configured and no explicit level provided, inherit parent's level
-    if parent_has_handlers and level == logging.INFO:
-        level = parent_logger.level
+    # Determine the logging level to use
+    if level is None:
+        # No explicit level provided - inherit from parent or use default
+        if parent_has_handlers:
+            level = parent_logger.level
+        else:
+            level = logging.INFO
+    # else: use the provided level as-is
 
     # Set level for the autocast logger (accepts both string and int)
     logger.setLevel(level)
+
+    # If parent has handlers (standalone mode), also update parent's level
+    # so the parent's console handler respects the autocast log level
+    if parent_has_handlers:
+        parent_logger.setLevel(level)
 
     # Remove any existing handlers to ensure clean configuration
     for handler in logger.handlers[:]:
@@ -82,7 +95,8 @@ def configure_logging(level=logging.INFO, log_file=None):
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
-        logger.propagate = False
+        # Always propagate to support pytest's caplog fixture in tests
+        logger.propagate = True
 
     # Ensure all child loggers inherit the level setting
     for name in logging.root.manager.loggerDict:
