@@ -675,7 +675,7 @@ class HFEagleModel(EagleModel):
         base_outputs,
     ):
         """Helper function to prepare eagle inputs for the 0th eagle forward pass."""
-        b, seq_length, _ = input_ids.shape
+        b, seq_length = input_ids.shape
         past_kv_len = eagle_cache.get_seq_length() if eagle_cache is not None else 0
         seq_len_with_past = seq_length + past_kv_len
 
@@ -751,6 +751,7 @@ class HFEagleModel(EagleModel):
                 tensor_mask, 0, dtype=self._base_llm_config.dtype, device=self.device
             ).masked_fill(~tensor_mask, dtypemin)
 
+            # Note: (hg) repeat mask for kimi-k2 compatibility
             tensor_mask = tensor_mask.repeat(batch_size, 1, 1, 1)
             return tensor_mask
 
