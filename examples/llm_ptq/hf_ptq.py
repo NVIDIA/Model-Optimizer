@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import argparse
+import os
 import random
 import time
 import warnings
@@ -92,6 +93,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "int4_gptq": mtq.INT4_BLOCKWISE_WEIGHT_ONLY_GPTQ_CFG,
     "nvfp4_static_wo_gptq": mtq.NVFP4_STATIC_WO_GPTQ_CFG,
     "nvfp4_static_wo": mtq.NVFP4_STATIC_WO_CFG,
+    "nvfp4_wo": mtq.NVFP4_WO_CFG,
     "nvfp4_static_wo_gptq_lite": mtq.NVFP4_STATIC_WO_GPTQ_LITE_CFG,
     "nvfp4_dynamic_wo_gptq": mtq.NVFP4_DYNAMIC_WO_CFG,
     "nvfp4_static_gptq": mtq.NVFP4_STATIC_GPTQ_CFG,
@@ -267,6 +269,7 @@ def auto_quantize(
             "nvfp4_static_wo",
             "nvfp4_static_wo_gptq_lite",
             "nvfp4_static_gptq",
+            "nvfp4_wo",
             "nemotron_super_nvfp4_conservative_gptq",
             "nemotron_super_nvfp4_conservative",
         ]
@@ -549,12 +552,59 @@ def mono_quantize(
             else:
                 calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
 
+        # Phase 1: Collect pre-quantization activations (batch_size=1 to save memory)
+        if getattr(args, "measure_activation_mse", False):
+            mse_max_samples = getattr(args, "activation_mse_max_samples", 16)
+            mse_save_dir = getattr(args, "activation_mse_save_dir", None)
+            mse_input_path = getattr(args, "activation_mse_input_path", None)
+
+            # Materialize or load a frozen set of MSE inputs so that the exact
+            # same samples are used across runs and across codebases.
+            if mse_input_path and os.path.isfile(mse_input_path):
+                mse_data = mtq.ActivationMSELogger.load_data(mse_input_path)
+            else:
+                from torch.utils.data import DataLoader as _DataLoader
+
+                mse_dataloader = _DataLoader(calib_dataloader.dataset, batch_size=1, shuffle=False)
+                if mse_input_path:
+                    mse_data = mtq.ActivationMSELogger.materialize_data(
+                        mse_dataloader,
+                        mse_input_path,
+                        max_samples=mse_max_samples,
+                    )
+                else:
+                    # No path given -- materialize in memory only
+                    mse_data = []
+                    for i, batch in enumerate(mse_dataloader):
+                        if i >= mse_max_samples:
+                            break
+                        t = batch["input_ids"] if isinstance(batch, dict) else batch
+                        mse_data.append(t.cpu())
+
+            mse_logger = mtq.ActivationMSELogger(
+                max_samples=mse_max_samples,
+                layer_filter=getattr(args, "activation_mse_layer_filter", None),
+                save_dir=mse_save_dir,
+            )
+            print("\n--- Phase 1: Collecting pre-quantization activations ---")
+            mse_logger.collect(language_model, mse_data, phase="original")
+
         if calibration_only:
             language_model = mtq.calibrate(
                 language_model, quant_cfg["algorithm"], forward_loop=calibrate_loop
             )
         else:
             language_model = mtq.quantize(language_model, quant_cfg, forward_loop=calibrate_loop)
+
+        # Phase 2: Compute MSE against stored pre-quant activations
+        if getattr(args, "measure_activation_mse", False):
+            print("\n--- Phase 2: Computing per-layer activation MSE ---")
+            mse_logger.collect(language_model, mse_data, phase="quantized")
+            mse_logger.compute_mse()
+            print(mse_logger.summary())
+            if mse_save_dir:
+                mse_logger.save()
+            del mse_logger, mse_data
 
         # For VL models, update full_model to use the quantized language model
         if is_nemotron_vl_model:
@@ -1059,6 +1109,7 @@ def quantize_main(
                 "mxfp8",
                 "int4_gptq",
                 "nvfp4_static_wo_gptq",
+                "nvfp4_wo",
                 "nvfp4_static_wo",
                 "nvfp4_static_wo_gptq_lite",
                 "nvfp4_dynamic_wo_gptq",
@@ -1300,6 +1351,34 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Path to checkpoint file for saving/restoring auto_quantize search state "
             "(sensitivity scores, costs, etc.). Only used when auto_quantize_bits is specified."
+        ),
+    )
+    parser.add_argument(
+        "--measure_activation_mse",
+        action="store_true",
+        default=False,
+        help=(
+            "Measure per-layer activation MSE between the original and quantized model. "
+            "Collects activations in memory before quantization, then computes MSE "
+            "incrementally after quantization (no disk I/O)."
+        ),
+    )
+    parser.add_argument(
+        "--activation_mse_max_samples",
+        type=int,
+        default=16,
+        help=(
+            "Maximum number of samples (batch_size=1) to use for activation MSE measurement. "
+            "Memory usage scales linearly with this value."
+        ),
+    )
+    parser.add_argument(
+        "--activation_mse_layer_filter",
+        type=str,
+        default=None,
+        help=(
+            "Optional fnmatch pattern to restrict which layers are measured for MSE "
+            "(e.g., '*self_attn*'). Default: all linear layers in decoder blocks."
         ),
     )
 

@@ -1915,6 +1915,8 @@ def gptq(
         """Hook to intercept activations and update hessian matrix."""
         if hasattr(module, "input_quantizer") and module.input_quantizer.is_enabled:
             inp = module.input_quantizer(input[0])
+        else:
+            inp = input[0]
         state = hessian_state[module.name]
         hessian, n_samples = update_hessian(inp, state["hessian"], state["n_samples"])
         hessian_state[module.name] = {"hessian": hessian, "n_samples": n_samples}
