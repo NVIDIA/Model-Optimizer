@@ -39,11 +39,12 @@ from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
 from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.bridge.models.hf_pretrained.causal_lm import PreTrainedCausalLM
 from megatron.core.models.gpt.gpt_model import GPTModel
+from transformers import LlamaForCausalLM
 
 logger = logging.getLogger(__name__)
 
 
-@MegatronModelBridge.register_bridge(source="LlamaForCausalLM", target=GPTModel, model_type="llama")
+@MegatronModelBridge.register_bridge(source=LlamaForCausalLM, target=GPTModel, model_type="llama")
 class PuzzletronLlamaAnyModelBridge(MegatronModelBridge):
     """
     Megatron Bridge for Puzzletron Llama-based AnyModel checkpoints.
@@ -61,12 +62,30 @@ class PuzzletronLlamaAnyModelBridge(MegatronModelBridge):
     def provider_bridge(self, hf_pretrained: PreTrainedCausalLM) -> GPTModelProvider:
         """Convert HuggingFace Llama AnyModel config to Megatron GPTModelProvider.
 
+        This bridge is registered for all LlamaForCausalLM models, but only handles
+        AnyModel checkpoints (those with block_configs). For regular Llama models,
+        it delegates to the default LlamaBridge.
+
         Args:
             hf_pretrained: HuggingFace PreTrainedCausalLM containing the Llama config
 
         Returns:
             GPTModelProvider configured for Llama AnyModel architecture
         """
+        hf_config = hf_pretrained.config
+
+        # Check if this is an AnyModel checkpoint (has block_configs)
+        is_anymodel = hasattr(hf_config, "block_configs") and hf_config.block_configs
+
+        if not is_anymodel:
+            # Not an AnyModel checkpoint - delegate to default LlamaBridge
+            from megatron.bridge.models.llama.llama_bridge import LlamaBridge
+
+            default_bridge = LlamaBridge()
+            default_bridge.hf_pretrained = hf_pretrained
+            return default_bridge.provider_bridge(hf_pretrained)
+
+        # This is an AnyModel checkpoint - handle it with AnyModel-specific logic
         # TODO: Implement Llama-specific config conversion
         # - Validate block_configs exist
         # - Extract global config values
@@ -74,7 +93,7 @@ class PuzzletronLlamaAnyModelBridge(MegatronModelBridge):
         # - Extract ffn_hidden_size from first valid block
         # - Convert intermediate_size -> ffn_hidden_size in block_configs
         # - Create LlamaNemotronHeterogeneousProvider
-        raise NotImplementedError("provider_bridge() not yet implemented for Llama")
+        raise NotImplementedError("provider_bridge() not yet implemented for Llama AnyModel")
 
     @classmethod
     def megatron_to_hf_config(cls, provider: GPTModelProvider) -> dict:

@@ -15,41 +15,54 @@
 # limitations under the License.
 
 """
-Simple test for Puzzletron DeciLM Bridge.
+Simple test for MBridge inference with Puzzletron models.
 
 This test validates:
 1. Bridge registration and model support
 2. Provider creation and model architecture setup
 3. Model initialization and forward pass
 
+Supports:
+- Puzzletron DeciLM models
+- Puzzletron AnyModel checkpoints (Llama, Mistral, Qwen, etc.)
+
 NOTE: This test uses load_weights=False, so it creates a model with random initialization.
 It does NOT test weight conversion from HuggingFace to Megatron format.
-For actual weight loading/conversion, use import_decilm_to_mbridge_checkpoint.py
+For actual weight loading/conversion, use the import scripts in the respective model_distillation directories.
 
 Usage:
      export PYTHONPATH="/workspace/Megatron-Bridge/src:/workspace/Model-Optimizer:${PYTHONPATH}"
-     python test_puzzletron_decilm_bridge.py /workspace/puzzle_dir_decilm/ckpts/teacher
+     python test_mbridge_inference.py /workspace/puzzle_dir_decilm/ckpts/teacher
+     python test_mbridge_inference.py /workspace/puzzle_dir_anymodel/ckpts/teacher
 
      Or with torchrun for multi-GPU:
-     torchrun --nproc_per_node=1 test_puzzletron_decilm_bridge.py /workspace/puzzle_dir_decilm/ckpts/teacher
+     torchrun --nproc_per_node=1 test_mbridge_inference.py /workspace/puzzle_dir_decilm/ckpts/teacher
 """
 
 import sys
+from pathlib import Path
 
-# Import bridge to register it
-import puzzletron_decilm_bridge  # noqa: F401
-import torch
-from megatron.bridge.models.conversion.auto_bridge import AutoBridge
-from megatron.bridge.models.conversion.model_bridge import get_model_bridge
+# Add sibling directories to path so we can import the bridges
+parent_dir = Path(__file__).parent.parent
+sys.path.insert(0, str(parent_dir / "decilm_model_distillation"))
+sys.path.insert(0, str(parent_dir / "anymodel_model_distillation"))
 
-print("Testing Puzzletron DeciLM Bridge...")
+# Import bridges to register them
+# Import AnyModel bridge to register it (so LlamaBridge is not used for AnyModel)
+import llama_anymodel_bridge  # noqa: F401, E402
+import puzzletron_decilm_bridge  # noqa: F401, E402
+import torch  # noqa: E402
+from megatron.bridge.models.conversion.auto_bridge import AutoBridge  # noqa: E402
+from megatron.bridge.models.conversion.model_bridge import get_model_bridge  # noqa: E402
+
+print("Testing MBridge inference with Puzzletron models...")
 print()
 
-# Test 1: Check if bridge is registered
+# Test 1: Check if bridges are registered
 bridge = get_model_bridge("DeciLMForCausalLM")
-print(f"✓ Bridge registered: {type(bridge).__name__}")
+print(f"✓ DeciLM bridge registered: {type(bridge).__name__}")
 
-# Test 2: Check if it's in supported models
+# Test 2: Check if models are in supported models list
 supported = AutoBridge.list_supported_models()
 if "DeciLMForCausalLM" in supported:
     print("✓ DeciLMForCausalLM in supported models list")
@@ -69,7 +82,7 @@ if len(sys.argv) > 1:
     # Try to get provider
     # NOTE: load_weights=False means we create a model with random initialization.
     # This test only validates the bridge architecture setup, NOT weight conversion.
-    # For actual weight loading/conversion, use import_decilm_to_mbridge_checkpoint.py
+    # For actual weight loading/conversion, use the import scripts in the respective directories.
     provider = bridge.to_megatron_provider(load_weights=False)
     print("✓ Provider created successfully")
     print(f"  Provider type: {type(provider).__name__}")

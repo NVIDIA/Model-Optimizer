@@ -92,6 +92,24 @@ AutoBridge.import_ckpt(
 )
 ```
 
+**What Gets Loaded During Conversion?**
+
+**Important**: During MBridge conversion, the HuggingFace model class is **NOT instantiated**. Only the config and weights are needed:
+
+1. **Config is loaded**: `AutoBridge.from_hf_pretrained()` loads the model configuration using `AutoConfig.from_pretrained()` with `trust_remote_code=True`. This loads the config class (e.g., `DeciLMConfig`) but does not instantiate the model.
+
+2. **Weights are loaded directly from files**: When `load_weights_hf_to_megatron()` accesses weights, it uses `SafeTensorsStateSource` to read weights directly from `.safetensors` files on disk, without loading the model into memory.
+
+3. **Model class is never instantiated**: The actual model class (e.g., `DeciLMForCausalLM`) is never instantiated during conversion. Only the config class needs to be importable (which is why `trust_remote_code=True` is required for custom configs).
+
+**Benefits**:
+
+- **Memory efficient**: Avoids loading the full model into memory
+- **Faster**: Only reads the needed weight tensors from disk
+- **Simpler**: Only requires the config class to be importable, not the modeling code
+
+This means for custom models with `trust_remote_code=True`, you only need the config class to be available, not the full modeling implementation.
+
 ## 3. MBridge Model Loading
 
 **When**: Loading MBridge checkpoint for inference/serving
