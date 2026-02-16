@@ -16,9 +16,10 @@
 """Automatic Q/DQ insertion optimization for ONNX models via pattern-based profiling."""
 
 import copy
+import functools
 import os
 import random
-from collections import deque
+from collections import Counter, deque
 from datetime import datetime, timezone
 
 import numpy as np
@@ -46,9 +47,44 @@ from modelopt.onnx.quantization.autotune.region_search import CombinedRegionSear
 from modelopt.onnx.quantization.fp8 import int8_to_fp8
 from modelopt.onnx.quantization.graph_utils import get_tensor_consumer_node_indices
 
+_MUTATION_SPECS = [
+    ("node_inputs", "node input points", lambda p: (p.node_index, p.input_index)),
+    (
+        "region_composite_inputs",
+        "region composite points",
+        lambda p: (p.region_index, p.input_index),
+    ),
+    (
+        "region_output_points",
+        "region output points",
+        lambda p: (p.region_index, p.node_index, p.output_index),
+    ),
+]
+
+
+def _requires_init(method):
+    """Decorator that raises AutotunerNotInitializedError if initialize() has not been called."""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        if not self.initialized:
+            raise AutotunerNotInitializedError(
+                "QDQAutotunerBase not initialized. Call initialize() first."
+            )
+        return method(self, *args, **kwargs)
+
+    return wrapper
+
 
 class QDQAutotunerBase:
     """Base class for pattern-based Q/DQ node insertion optimization in ONNX models."""
+
+    _DTYPE_MAP = {
+        "int8": np.int8,
+        "uint8": np.uint8,
+        "float16": np.float16,
+        "float32": np.float32,
+    }
 
     def __init__(self, model: onnx.ModelProto | gs.Graph):
         """Initialize the autotuner with an ONNX model.
@@ -85,6 +121,8 @@ class QDQAutotunerBase:
         self.pattern_cache: PatternCache | None = None
 
         logger.debug(f"Initialized autotuner with model type: {type(model).__name__}")
+
+    requires_init = _requires_init
 
     def initialize(
         self, config: Config | None = None, pattern_cache: PatternCache | None = None
@@ -136,6 +174,54 @@ class QDQAutotunerBase:
 
         self.initialized = True
 
+    def _commit_current_pattern(self, save: bool = True) -> None:
+        """Save current pattern schemes to profiled_patterns (if save) and clear current state."""
+        if save and self.current_profile_pattern_schemes is not None:
+            num_schemes = len(self.current_profile_pattern_schemes.schemes)
+            best_scheme = self.current_profile_pattern_schemes.best_scheme
+            best_latency = best_scheme.latency_ms if best_scheme else float("inf")
+
+            samples_before_best, time_to_best = self._compute_convergence_metrics(
+                self.current_profile_pattern_schemes.schemes, best_scheme
+            )
+
+            logger.info(
+                f"Pattern complete: {num_schemes} schemes tested, best latency {best_latency:.3f} ms"
+            )
+            logger.debug(
+                f"Pattern signature: {self.current_profile_pattern_schemes.pattern_signature}"
+            )
+            if samples_before_best is not None:
+                logger.debug(f"Convergence: best found at sample {samples_before_best}")
+            if time_to_best is not None:
+                logger.debug(f"Time to best: {time_to_best:.2f}s")
+            self.profiled_patterns.append(self.current_profile_pattern_schemes)
+
+        self.current_profile_region = None
+        self.current_profile_pattern_schemes = None
+        self.current_insertion_scheme_index = None
+
+    def _seed_from_cache(self, pattern: RegionPattern) -> tuple[PatternSchemes | None, int]:
+        """Seed PatternSchemes from pattern cache for the given pattern. Returns (schemes, num_seeded)."""
+        if self.pattern_cache is None:
+            return None, 0
+        cache_schemes = self.pattern_cache.get_pattern_schemes(pattern.signature)
+        if cache_schemes is None or len(cache_schemes.schemes) == 0:
+            logger.debug("No pattern cache entries for this region")
+            return None, 0
+        pattern_schemes = PatternSchemes()
+        pattern_schemes.pattern = pattern
+        num_seeded = 0
+        for cached_scheme in cache_schemes.schemes:
+            scheme_copy = copy.deepcopy(cached_scheme)
+            scheme_copy.latency_ms = float("inf")
+            scheme_copy.error = False
+            pattern_schemes.schemes.append(scheme_copy)
+            num_seeded += 1
+        logger.debug(f"Seeded {num_seeded} scheme(s) from pattern cache")
+        return pattern_schemes, num_seeded
+
+    @_requires_init
     def set_profile_region(self, region: Region | None, commit: bool = True) -> None:
         """Set the target region for profiling and scheme generation.
 
@@ -155,37 +241,8 @@ class QDQAutotunerBase:
         Raises:
             AutotunerNotInitializedError: If initialize() hasn't been called
         """
-        if not self.initialized:
-            raise AutotunerNotInitializedError(
-                "QDQAutotunerBase not initialized. Call initialize() first."
-            )
-
-        if commit:
-            if self.current_profile_pattern_schemes is not None:
-                num_schemes = len(self.current_profile_pattern_schemes.schemes)
-                best_scheme = self.current_profile_pattern_schemes.best_scheme
-                best_latency = best_scheme.latency_ms if best_scheme else float("inf")
-
-                samples_before_best, time_to_best = self._compute_convergence_metrics(
-                    self.current_profile_pattern_schemes.schemes, best_scheme
-                )
-
-                logger.info(
-                    f"Pattern complete: {num_schemes} schemes tested, best latency {best_latency:.3f} ms"
-                )
-                logger.debug(
-                    f"Pattern signature: {self.current_profile_pattern_schemes.pattern_signature}"
-                )
-                if samples_before_best is not None:
-                    logger.debug(f"Convergence: best found at sample {samples_before_best}")
-                if time_to_best is not None:
-                    logger.debug(f"Time to best: {time_to_best:.2f}s")
-                self.profiled_patterns.append(self.current_profile_pattern_schemes)
-
         if commit or region is None:
-            self.current_profile_region = None
-            self.current_profile_pattern_schemes = None
-            self.current_insertion_scheme_index = None
+            self._commit_current_pattern(save=commit)
             if region is None:
                 return
 
@@ -199,27 +256,7 @@ class QDQAutotunerBase:
             logger.debug(f"Pattern signature: {region_pattern.signature}")
             return
 
-        pattern_schemes = None
-        num_seeded = 0
-
-        if self.pattern_cache is not None:
-            cache_schemes = self.pattern_cache.get_pattern_schemes(region_pattern.signature)
-
-            if cache_schemes is not None and len(cache_schemes.schemes) > 0:
-                pattern_schemes = PatternSchemes()
-                pattern_schemes.pattern = region_pattern
-
-                for cached_scheme in cache_schemes.schemes:
-                    scheme_copy = copy.deepcopy(cached_scheme)
-                    scheme_copy.latency_ms = float("inf")
-                    scheme_copy.error = False
-                    pattern_schemes.schemes.append(scheme_copy)
-                    num_seeded += 1
-
-                logger.debug(f"Seeded {num_seeded} scheme(s) from pattern cache")
-            else:
-                logger.debug("No pattern cache entries for this region")
-
+        pattern_schemes, num_seeded = self._seed_from_cache(region_pattern)
         if pattern_schemes is None:
             pattern_schemes = PatternSchemes()
             pattern_schemes.pattern = region_pattern
@@ -235,6 +272,7 @@ class QDQAutotunerBase:
         )
         logger.debug(f"Pattern signature: {region_pattern.signature}")
 
+    @_requires_init
     def generate(self) -> int:
         """Generate a new Q/DQ insertion scheme for the current pattern or region.
 
@@ -248,11 +286,7 @@ class QDQAutotunerBase:
         7. Adds the scheme to current_profile_pattern_schemes
 
         """
-        if not self.initialized:
-            raise AutotunerNotInitializedError(
-                "QDQAutotunerBase not initialized. Call initialize() first."
-            )
-        elif self.current_profile_pattern_schemes is None:
+        if self.current_profile_pattern_schemes is None:
             raise InvalidSchemeError("No region selected. Call set_profile_region() first.")
 
         pattern_schemes = self.current_profile_pattern_schemes
@@ -314,6 +348,77 @@ class QDQAutotunerBase:
         logger.warning(f"Could not generate unique scheme after {max_attempts} attempts")
         return -1
 
+    def _resolve_scheme_for_region(
+        self, region: Region, best: bool
+    ) -> tuple[InsertionScheme | None, RegionPattern]:
+        """Resolve the insertion scheme to use for a region from profiled/current/cache.
+
+        Args:
+            region: The region to resolve the scheme for
+            best: If True, return the best scheme for the region
+
+        Returns:
+            tuple[InsertionScheme | None, RegionPattern]: The scheme and pattern for the region
+        """
+        pattern = RegionPattern.from_region(region, self.graph)
+        logger.debug(f"Region {region.id} (level {region.level})")
+        logger.debug(f"  → Pattern signature: {pattern.signature}")
+
+        matched = next((ps for ps in self.profiled_patterns if ps.pattern == pattern), None)
+        current_scheme = matched.best_scheme if matched else None
+
+        if matched:
+            if current_scheme:
+                logger.debug(
+                    f"  → Matched profiled pattern (latency={current_scheme.latency_ms:.3f} ms)"
+                )
+            else:
+                logger.debug("  → Matched profiled pattern but no valid schemes")
+
+        if current_scheme is None:
+            pattern_schemes = self.current_profile_pattern_schemes
+            if pattern_schemes is None or pattern != pattern_schemes.pattern:
+                pass
+            elif best:
+                current_scheme = pattern_schemes.best_scheme
+            else:
+                scheme_index = self.current_insertion_scheme_index
+                if scheme_index is not None:
+                    assert scheme_index < len(pattern_schemes.schemes), (
+                        f"Invalid scheme index: {scheme_index}"
+                    )
+                    current_scheme = pattern_schemes.schemes[scheme_index]
+                    logger.debug(f"  → Using current pattern scheme #{scheme_index}")
+
+        if current_scheme is None and self.pattern_cache is not None:
+            cache_schemes = self.pattern_cache.get_pattern_schemes(pattern.signature)
+            if cache_schemes is not None:
+                schemes = cache_schemes.schemes
+                if schemes is not None and len(schemes) == 1 and not schemes[0].is_profiled:
+                    current_scheme = schemes[0]
+                    logger.debug("  → Using imported pattern from cache")
+
+        if current_scheme is None:
+            logger.debug("  → No scheme available, skipping")
+
+        return current_scheme, pattern
+
+    def _exclude_overlapping_insertion_points(
+        self,
+        resolved_insertion_points: set[ResolvedInsertionPoint],
+        region: Region,
+        pattern: RegionPattern,
+    ) -> None:
+        """Remove this region's full insertion points from resolved set so they can be replaced."""
+        full_insertion_scheme = pattern.get_full_insertion_scheme(region, self.graph)
+        assert full_insertion_scheme is not None
+        all_region_ips = pattern.matches(region, self.graph, full_insertion_scheme)
+        assert isinstance(all_region_ips, set)
+        resolved_insertion_points.difference_update(all_region_ips)
+        if all_region_ips:
+            logger.debug(f"  → Excluded {len(all_region_ips)} overlapping insertion points")
+
+    @_requires_init
     def export_onnx(
         self, output_path: str | None = None, insert_qdq: bool = True, best: bool = False
     ) -> bytes:
@@ -339,11 +444,6 @@ class QDQAutotunerBase:
         Raises:
             AutotunerNotInitializedError: If initialize() hasn't been called
         """
-        if not self.initialized:
-            raise AutotunerNotInitializedError(
-                "QDQAutotunerBase not initialized. Call initialize() first."
-            )
-
         output_desc = output_path if output_path is not None else "<bytes>"
         original_quant_type = self.config.default_quant_type
         needs_fp8_conversion = insert_qdq and original_quant_type == "fp8"
@@ -364,58 +464,13 @@ class QDQAutotunerBase:
             logger.debug(f"Resolving Q/DQ insertion points from {len(self.regions)} regions")
 
             for region in self.regions:
-                pattern = RegionPattern.from_region(region, self.graph)
-                logger.debug(f"Region {region.id} (level {region.level})")
-                logger.debug(f"  → Pattern signature: {pattern.signature}")
-
-                matched = next((ps for ps in self.profiled_patterns if ps.pattern == pattern), None)
-                current_scheme = matched.best_scheme if matched else None
-
-                if matched:
-                    if current_scheme:
-                        logger.debug(
-                            f"  → Matched profiled pattern (latency={current_scheme.latency_ms:.3f} ms)"
-                        )
-                    else:
-                        logger.debug("  → Matched profiled pattern but no valid schemes")
-
+                current_scheme, pattern = self._resolve_scheme_for_region(region, best)
                 if current_scheme is None:
-                    current_scheme = self.current_profile_pattern_schemes
-                    if current_scheme is None or pattern != current_scheme.pattern:
-                        pass
-                    elif best:
-                        current_scheme = current_scheme.best_scheme
-                    else:
-                        scheme_index = self.current_insertion_scheme_index
-                        if scheme_index is not None:
-                            assert scheme_index < len(current_scheme.schemes), (
-                                f"Invalid scheme index: {scheme_index}"
-                            )
-                            current_scheme = current_scheme.schemes[scheme_index]
-                            logger.debug(f"  → Using current pattern scheme #{scheme_index}")
-
-                if current_scheme is None and self.pattern_cache is not None:
-                    pattern_schemes = self.pattern_cache.get_pattern_schemes(pattern.signature)
-                    if pattern_schemes is not None:
-                        schemes = pattern_schemes.schemes
-                        if schemes is not None and len(schemes) == 1 and not schemes[0].is_profiled:
-                            current_scheme = schemes[0]
-                            logger.debug("  → Using imported pattern from cache")
-
-                if current_scheme is None:
-                    logger.debug("  → No scheme available, skipping")
                     continue
 
-                full_insertion_scheme = pattern.get_full_insertion_scheme(region, self.graph)
-                assert full_insertion_scheme is not None
-                all_region_ips = pattern.matches(region, self.graph, full_insertion_scheme)
-                assert isinstance(all_region_ips, set)
-                resolved_insertion_points.difference_update(all_region_ips)
-                excluded_tensors = all_region_ips - resolved_insertion_points
-                if excluded_tensors:
-                    logger.debug(
-                        f"  → Excluded {len(excluded_tensors)} overlapping insertion points"
-                    )
+                self._exclude_overlapping_insertion_points(
+                    resolved_insertion_points, region, pattern
+                )
 
                 new_ips = pattern.matches(region, self.graph, current_scheme)
                 if new_ips:
@@ -463,6 +518,7 @@ class QDQAutotunerBase:
         )
         return model_bytes
 
+    @_requires_init
     def submit(self, latency_ms: float, success: bool = True) -> None:
         """Submit performance measurement for the most recently generated scheme.
 
@@ -477,11 +533,6 @@ class QDQAutotunerBase:
             AutotunerNotInitializedError: If initialize() hasn't been called
             InvalidSchemeError: If no pattern or region is set, or no schemes have been generated
         """
-        if not self.initialized:
-            raise AutotunerNotInitializedError(
-                "QDQAutotunerBase not initialized. Call initialize() first."
-            )
-
         if self.baseline_latency_ms is None:
             self.baseline_latency_ms = latency_ms
             logger.info(f"Baseline latency: {latency_ms:.3f} ms")
@@ -598,6 +649,7 @@ class QDQAutotunerBase:
                 f"{self.pattern_cache.total_schemes} schemes"
             )
 
+    @_requires_init
     def load_state(self, input_path: str) -> None:
         """Load autotuner state from a previously saved YAML file.
 
@@ -613,11 +665,6 @@ class QDQAutotunerBase:
             AutotunerNotInitializedError: If initialize() hasn't been called
             FileNotFoundError: If the input_path doesn't exist
         """
-        if not self.initialized:
-            raise AutotunerNotInitializedError(
-                "QDQAutotunerBase not initialized. Call initialize() first."
-            )
-
         with open(input_path) as f:
             state = yaml.safe_load(f)
 
@@ -684,6 +731,7 @@ class QDQAutotunerBase:
         else:
             logger.debug(f"No pattern cache file at {cache_path}")
 
+    @_requires_init
     def import_insertion_points(self, quantized_tensors: set[str] | list[str]) -> None:
         """Import Q/DQ insertion points from a list of quantized tensors and update pattern cache.
 
@@ -699,11 +747,6 @@ class QDQAutotunerBase:
         Raises:
             AutotunerNotInitializedError: If initialize() hasn't been called
         """
-        if not self.initialized:
-            raise AutotunerNotInitializedError(
-                "QDQAutotunerBase not initialized. Call initialize() first."
-            )
-
         if isinstance(quantized_tensors, list):
             quantized_tensors = set(quantized_tensors)
 
@@ -782,14 +825,12 @@ class QDQAutotunerBase:
 
     def _is_region_profiled(self, region: Region) -> bool:
         """Check if a region's pattern has already been fully profiled."""
-
-        def match_pattern(pattern: PatternSchemes, region: Region) -> bool:
-            """Check if a pattern matches a region."""
-            if pattern.pattern is None or not pattern.pattern.matches(region, self.graph):
-                return False
-            return not any(not scheme.is_profiled for scheme in pattern.schemes)
-
-        return any(match_pattern(pattern, region) for pattern in self.profiled_patterns)
+        return any(
+            p.pattern is not None
+            and p.pattern.matches(region, self.graph)
+            and all(s.is_profiled for s in p.schemes)
+            for p in self.profiled_patterns
+        )
 
     def _mutate_insertion_points(
         self, base_points, all_points, point_type: str, max_mutations: int
@@ -904,32 +945,20 @@ class QDQAutotunerBase:
         )
 
         max_mutations = getattr(self.config, "maximum_mutations", 3)
-
         scheme = InsertionScheme()
-        base_node_points = {(p.node_index, p.input_index) for p in base_scheme.node_inputs}
-        scheme.node_inputs = self._mutate_insertion_points(
-            base_node_points, full_insertion_scheme.node_inputs, "node input points", max_mutations
-        )
 
-        base_region_composite_points = {
-            (p.region_index, p.input_index) for p in base_scheme.child_region_inputs
-        }
-        scheme.child_region_inputs = self._mutate_insertion_points(
-            base_region_composite_points,
-            full_insertion_scheme.child_region_inputs,
-            "region composite points",
-            max_mutations,
-        )
-
-        base_region_output_points = {
-            (p.region_index, p.node_index, p.output_index) for p in base_scheme.region_outputs
-        }
-        scheme.region_outputs = self._mutate_insertion_points(
-            base_region_output_points,
-            full_insertion_scheme.region_outputs,
-            "region output points",
-            max_mutations,
-        )
+        for attr, point_type, key_fn in _MUTATION_SPECS:
+            base_points = {key_fn(p) for p in getattr(base_scheme, attr)}
+            setattr(
+                scheme,
+                attr,
+                self._mutate_insertion_points(
+                    base_points,
+                    getattr(full_insertion_scheme, attr),
+                    point_type,
+                    max_mutations,
+                ),
+            )
 
         return scheme
 
@@ -939,9 +968,9 @@ class QDQAutotunerBase:
         new_graph.toposort()
         return new_graph
 
-    def _get_quant_dtype(self, quant_type: str) -> np.dtype:
-        """Get numpy dtype for quantization type."""
-        if quant_type == "fp8":
+    def _resolve_dtype(self, dtype_str: str, default: np.dtype = np.int8) -> np.dtype:
+        """Resolve a dtype string (quant or DQ output) to a numpy dtype."""
+        if dtype_str == "fp8":
             try:
                 return np.dtype(np.float8_e4m3fn)
             except (AttributeError, TypeError):
@@ -951,63 +980,30 @@ class QDQAutotunerBase:
                     "correct results without proper FP8 support."
                 )
                 return np.uint8
-
-        dtype_map = {
-            "int8": np.int8,
-            "uint8": np.uint8,
-        }
-
-        if quant_type not in dtype_map:
-            logger.warning(f"Unknown quantization type '{quant_type}', defaulting to int8")
-            return np.int8
-
-        return dtype_map[quant_type]
-
-    def _get_dq_output_dtype(self, dtype_str: str) -> np.dtype:
-        """Convert DQ dtype string to numpy dtype."""
-        dtype_map = {
-            "float16": np.float16,
-            "float32": np.float32,
-        }
-
-        if hasattr(np, "bfloat16"):
-            dtype_map["bfloat16"] = np.bfloat16
-
-        if dtype_str not in dtype_map:
-            logger.warning(f"Unknown DQ dtype '{dtype_str}', defaulting to float32")
-            return np.float32
-
-        return dtype_map[dtype_str]
+        if hasattr(np, "bfloat16") and dtype_str == "bfloat16":
+            return np.bfloat16
+        if dtype_str in self._DTYPE_MAP:
+            return self._DTYPE_MAP[dtype_str]
+        logger.warning(f"Unknown dtype '{dtype_str}', using default {default}")
+        return default
 
     def _build_tensor_map(self, graph: gs.Graph) -> dict[str, gs.Tensor]:
         """Build mapping from tensor names to tensor objects."""
-        tensor_map = {}
-
+        tensor_map = {t.name: t for t in graph.inputs if hasattr(t, "name") and t.name}
         for node in graph.nodes:
-            for output in node.outputs:
-                if hasattr(output, "name") and output.name:
-                    tensor_map[output.name] = output
-
-        for input_tensor in graph.inputs:
-            if hasattr(input_tensor, "name") and input_tensor.name:
-                tensor_map[input_tensor.name] = input_tensor
-
-        for node in graph.nodes:
-            for input_tensor in node.inputs:
-                if (
-                    isinstance(input_tensor, gs.Constant)
-                    and hasattr(input_tensor, "name")
-                    and input_tensor.name
-                ):
-                    tensor_map[input_tensor.name] = input_tensor
-
+            for t in node.inputs:
+                if hasattr(t, "name") and t.name:
+                    tensor_map[t.name] = t
+            for t in node.outputs:
+                if isinstance(t, gs.Constant) and hasattr(t, "name") and t.name:
+                    tensor_map[t.name] = t
         return tensor_map
 
     def _get_tensor_metadata(
         self, tensor: gs.Tensor, is_constant: bool
     ) -> tuple[tuple | None, np.dtype]:
         """Extract shape and dtype metadata from a tensor."""
-        default_dtype = self._get_dq_output_dtype(self.config.default_dq_dtype)
+        default_dtype = self._resolve_dtype(self.config.default_dq_dtype, np.float32)
 
         if is_constant and hasattr(tensor, "values") and tensor.values is not None:
             return tensor.values.shape, tensor.values.dtype
@@ -1133,7 +1129,7 @@ class QDQAutotunerBase:
         """
         q_scale = self.config.default_q_scale
         quant_type = self.config.default_quant_type
-        quant_dtype = self._get_quant_dtype(quant_type)
+        quant_dtype = self._resolve_dtype(quant_type, np.int8)
 
         logger.debug(f"Q/DQ parameters: type={quant_type}, scale={q_scale}, zero_point=0")
 
@@ -1227,6 +1223,7 @@ class QDQAutotuner(QDQAutotunerBase):
         super().initialize(config, pattern_cache)
         self._search_regions()
 
+    @staticmethod
     def _visit_region_recursively(self, region: Region) -> list[Region]:
         """Recursively traverse region hierarchy and collect all regions.
 
@@ -1288,28 +1285,21 @@ class QDQAutotuner(QDQAutotunerBase):
             minimum_topdown_search_size=self.config.minimum_topdown_search_size,
         )
         self.regions = search.search_regions()
-
         self._reassign_region_ids(self.regions)
         logger.debug(f"Found {len(self.regions)} top-level regions")
 
+        # Flatten the hierarchy into a list of all regions
         all_regions = []
         for region in self.regions:
             all_regions.extend(self._visit_region_recursively(region))
 
-        logger.debug(f"Flattened hierarchy to {len(all_regions)} total regions")
-
-        leaf_regions = [region for region in all_regions if region.type == RegionType.LEAF]
-        other_regions = [region for region in all_regions if region.type != RegionType.LEAF]
-
-        all_regions = leaf_regions + other_regions
+        all_regions.sort(key=lambda r: r.type != RegionType.LEAF)
         self.regions = all_regions
 
-        num_leaf = sum(1 for r in self.regions if r.type == RegionType.LEAF)
-        num_composite = sum(1 for r in self.regions if r.type == RegionType.COMPOSITE)
-        num_root = sum(1 for r in self.regions if r.type == RegionType.ROOT)
-
+        type_counts = Counter(r.type for r in self.regions)
         logger.info(
             f"Discovery complete: {len(self.regions)} regions "
-            f"({num_leaf} LEAF, {num_composite} COMPOSITE, {num_root} ROOT)"
+            f"({type_counts[RegionType.LEAF]} LEAF, {type_counts[RegionType.COMPOSITE]} COMPOSITE, "
+            f"{type_counts[RegionType.ROOT]} ROOT)"
         )
         logger.debug("Regions prioritized: LEAF regions first for profiling")
