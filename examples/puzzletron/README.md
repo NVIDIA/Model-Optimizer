@@ -199,70 +199,37 @@ block_14:  attention  no_op   ffn  intermediate_3072
 
 ## Evaluation
 
-### Local Evaluation with NeMo Evaluator (AnyModel)
+Evaluate AnyModel checkpoints by deploying a local OpenAI-compatible completions endpoint and running benchmarks against it.
 
-AnyModel checkpoints are currently supported via the patched NeMo Evaluator deployable
-in [`examples/puzzletron/evaluation/`](./examples/puzzletron/evaluation/). This deploys a local OpenAI-style completions endpoint that evaluation can be run against.
-
-> **Note:** This flow requires Ray. If it is missing, install it in the container/venv:
->
-> ```bash
-> pip install ray
-> ```
->
-**Deploy the model locally on an interactive node (2 GPUs example):**
+**1. Deploy the model (2 GPUs example):**
 
 ```bash
-# Repo root (not puzzle_dir)
-export MODELOPT_WORKDIR=/path/to/Model-Optimizer
-export NEMO_EXPORT_DEPLOY_DIR=/opt/Export-Deploy #When using a NeMo container, this is where Export-Deploy is located. Adjust, if needed
+# Install the AnyModel-patched deployable (first time only: backs up the original)
+# /opt/Export-Deploy is the default path in NeMo containers — adjust if needed
+cp /opt/Export-Deploy/nemo_deploy/llm/hf_deployable.py /opt/Export-Deploy/nemo_deploy/llm/hf_deployable.py.bak
+cp examples/puzzletron/evaluation/hf_deployable_anymodel.py /opt/Export-Deploy/nemo_deploy/llm/hf_deployable.py
 
-# Example 1: teacher checkpoint
-export CHECKPOINT_PATH=/path/to/ckpts/teacher
-
-# Example 2: pruned checkpoint (solution_0)
-# for pruned checkpoints, for example:
-export CHECKPOINT_PATH=/path/to/ckpts/ffn_8704_attn_no_op
-
-# First time only: back up the original deployable
-cp $NEMO_EXPORT_DEPLOY_DIR/nemo_deploy/llm/hf_deployable.py $NEMO_EXPORT_DEPLOY_DIR/nemo_deploy/llm/hf_deployable.py.bak
-
-cp examples/puzzletron/evaluation/hf_deployable_anymodel.py $NEMO_EXPORT_DEPLOY_DIR/nemo_deploy/llm/hf_deployable.py
+# Start the server (blocks while running — use a separate terminal)
 ray start --head --num-gpus 2 --port 6379 --disable-usage-stats
-
-# Run in a separate terminal (blocks while server is up)
-python $NEMO_EXPORT_DEPLOY_DIR/scripts/deploy/nlp/deploy_ray_hf.py \
-  --model_path $CHECKPOINT_PATH \
-  --model_id anymodel-hf \
-  --num_replicas 1 \
-  --num_gpus 2 \
-  --num_gpus_per_replica 2 \
-  --num_cpus_per_replica 16 \
-  --trust_remote_code \
-  --port 8083 \
-  --device_map "auto" \
-  --cuda_visible_devices "0,1"
+python /opt/Export-Deploy/scripts/deploy/nlp/deploy_ray_hf.py \
+    --model_path path/to/checkpoint \
+    --model_id anymodel-hf \
+    --num_gpus 2 --num_gpus_per_replica 2 --num_cpus_per_replica 16 \
+    --trust_remote_code --port 8083 --device_map "auto" --cuda_visible_devices "0,1"
 ```
 
-Note: `deploy_ray_hf.py` runs a long-lived server. Keep it running in another terminal
-or background it (e.g., tmux) while you run eval. Adjust GPU counts and `cuda_visible_devices` to
-match your node.
-
-**Run MMLU (full run on the interactive node):**
+**2. Run MMLU:**
 
 ```bash
 eval-factory run_eval \
-  --eval_type mmlu \
-  --model_id anymodel-hf \
-  --model_type completions \
-  --model_url http://0.0.0.0:8083/v1/completions/ \
-  --output_dir $PUZZLE_DIR/evals/mmlu_anymodel \
-  --overrides "config.params.parallelism=2,config.params.task=mmlu,config.params.extra.tokenizer=$CHECKPOINT_PATH,config.params.extra.tokenizer_backend=huggingface,config.params.request_timeout=6000"
+    --eval_type mmlu \
+    --model_id anymodel-hf \
+    --model_type completions \
+    --model_url http://0.0.0.0:8083/v1/completions/ \
+    --output_dir examples/puzzletron/evals/mmlu_anymodel
 ```
 
-Note: For a quick debug run, add `,config.params.limit_samples=5` to the `--overrides` list.
-
-Results can be viewed in the generated `results.yml` file.
+For a quick debug run, add `--overrides "config.params.limit_samples=5"`.
 
 ## Inference Performance Benchmarking
 
