@@ -249,7 +249,7 @@ SUPER_NVFP4_CONSERVATIVE_ACTIVATION_ONLY_CFG = {
     "algorithm": "max",
 }
 
-SUPER_NVFP4_CONSERVATIVE_WEIGHT_MSE_FP8_SWEEP_CFG = {
+SUPER_NVFP4_CONSERVATIVE_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": (2, 1),
@@ -274,7 +274,8 @@ SUPER_NVFP4_CONSERVATIVE_WEIGHT_MSE_FP8_SWEEP_CFG = {
     },
 }
 
-SUPER_NVFP4_CONSERVATIVE_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = {
+
+SUPER_NVFP4_CONSERVATIVE_WEIGHT_MSE_FP8_SWEEP_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": (2, 1),
