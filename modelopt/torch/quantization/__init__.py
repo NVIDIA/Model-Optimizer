@@ -19,6 +19,7 @@
 from . import mode, plugins, utils
 
 # Add methods to mtq namespace
+from .activation_mse import ActivationMSELogger, collect_activations, measure_activation_mse
 from .compress import *
 from .config import *
 from .conversion import *
