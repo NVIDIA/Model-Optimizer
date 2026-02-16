@@ -229,10 +229,7 @@ The plot shows how token accuracy changes with different compression rates. High
 
 ## Evaluation
 
-Evaluate AnyModel checkpoints using [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) directly — no deployment server or Ray needed. The wrapper script handles the heterogeneous layer loading automatically.
-
-> **Note:** NeMo containers ship `nvidia_lm_eval`, an NVIDIA fork that occupies the same
-> `lm_eval` namespace. If installed, uninstall it first: `pip uninstall nvidia-lm-eval -y`
+Evaluate AnyModel checkpoints using [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) directly — no deployment server needed.
 
 ```bash
 python examples/puzzletron/evaluation/lm_eval_anymodel.py \
@@ -244,6 +241,9 @@ python examples/puzzletron/evaluation/lm_eval_anymodel.py \
 ```
 
 For a quick smoke test, add `--limit 10`. All standard [lm-eval flags](https://github.com/EleutherAI/lm-evaluation-harness?tab=readme-ov-file#basic-usage) are supported.
+
+> **Note:** NeMo containers may ship `nvidia-lm-eval` which conflicts with upstream `lm-eval`.
+> If so, run `pip uninstall nvidia-lm-eval -y` before installing requirements.
 
 > **Alternative:** For server-based evaluation via an OpenAI-compatible endpoint,
 > see [evaluation/nemo_evaluator_instructions.md](./evaluation/nemo_evaluator_instructions.md).
