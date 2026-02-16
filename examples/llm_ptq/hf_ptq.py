@@ -361,6 +361,12 @@ def load_model(args: argparse.Namespace):
     default_pad_token = None
 
     is_nemotron_vl_model = is_nemotron_vl(full_model)
+
+    # Default to image-text calibration for VLM models
+    if is_nemotron_vl_model and not args.calib_with_images:
+        print("Nemotron VL model detected. Enabling image-text calibration by default.")
+        args.calib_with_images = True
+
     if model_type == "mllama":
         processor = get_processor(
             args.pyt_ckpt_path,
@@ -499,9 +505,12 @@ def mono_quantize(
         print("Disabling quantization for vision components in Nemotron VL model")
         quant_cfg["quant_cfg"]["*vision*"] = {"enable": False}
         quant_cfg["quant_cfg"]["*image*"] = {"enable": False}
-        # Also disable radio model components specifically
+        # Also disable radio model components specifically (for Nemotron-Parse)
         quant_cfg["quant_cfg"]["*radio*"] = {"enable": False}
         quant_cfg["quant_cfg"]["*visual*"] = {"enable": False}
+        quant_cfg["quant_cfg"]["*encoder*"] = {"enable": False}  # Disable encoder
+        quant_cfg["quant_cfg"]["*model_encoder*"] = {"enable": False}  # Nemotron-Parse specific
+        print("Quantization will only be applied to the decoder (text generation) component")
 
     if not model_is_already_quantized or calibration_only:
         if model_type == "gptoss" and args.qformat == "nvfp4_mlp_only":
@@ -686,7 +695,7 @@ def pre_quantize(
             preview_input_ids,
             args.pyt_ckpt_path,
             "before quantization",
-            allow_fallback=True,
+            allow_fallback=False,
         )
     else:
         # Standard generation for non-Nemotron VL models
@@ -800,36 +809,42 @@ def quantize_main(
     device: torch.device,
 ):
     if args.batch_size == 0:
-        # Calibration/sparsification will actually take much more memory than regular inference
-        # due to intermediate tensors for fake quantization. Setting sample_memory_usage_ratio
-        # to 2 to avoid OOM for AWQ/SmoothQuant fake quantization as it will take more memory than inference.
-        sample_memory_usage_ratio = 2 if "awq" in args.qformat or "sq" in args.qformat else 1.1
-        # Whisper model expects mel-spectrogram input features of length 3000
-        # Whisper model needs input of shape (batch_size, num_mel_bins, 3000)
-        # As the encoder of Whisper doesn't have embedding layer, input dtype has to be float
-        # For non-Whisper models (language models), sample_input will be set up inside get_max_batch_size()
-        if model_type == "whisper":
-            max_sample_length = 3000
-            num_mel_bins = language_model.config.num_mel_bins
-            sample_input_single_batch = (
-                torch.ones([1, num_mel_bins, max_sample_length], dtype=language_model.dtype).to(
-                    language_model.device
-                )
-                * 100
-            )
+        # For VL models with image-text calibration, skip automatic batch size detection
+        # since get_max_batch_size can't handle multimodal inputs
+        if args.calib_with_images:
+            print("Image-text calibration enabled. Using default batch_size=1 for calibration.")
+            args.batch_size = 1
         else:
-            sample_input_single_batch = None
+            # Calibration/sparsification will actually take much more memory than regular inference
+            # due to intermediate tensors for fake quantization. Setting sample_memory_usage_ratio
+            # to 2 to avoid OOM for AWQ/SmoothQuant fake quantization as it will take more memory than inference.
+            sample_memory_usage_ratio = 2 if "awq" in args.qformat or "sq" in args.qformat else 1.1
+            # Whisper model expects mel-spectrogram input features of length 3000
+            # Whisper model needs input of shape (batch_size, num_mel_bins, 3000)
+            # As the encoder of Whisper doesn't have embedding layer, input dtype has to be float
+            # For non-Whisper models (language models), sample_input will be set up inside get_max_batch_size()
+            if model_type == "whisper":
+                max_sample_length = 3000
+                num_mel_bins = language_model.config.num_mel_bins
+                sample_input_single_batch = (
+                    torch.ones([1, num_mel_bins, max_sample_length], dtype=language_model.dtype).to(
+                        language_model.device
+                    )
+                    * 100
+                )
+            else:
+                sample_input_single_batch = None
 
-        run_auto_quant = args.auto_quantize_bits is not None
+            run_auto_quant = args.auto_quantize_bits is not None
 
-        args.batch_size = get_max_batch_size(
-            language_model,
-            max_sample_length=args.calib_seq,
-            sample_memory_usage_ratio=sample_memory_usage_ratio if not run_auto_quant else 1.0,
-            sample_input_single_batch=sample_input_single_batch,
-            enable_grad=run_auto_quant,
-        )
-        args.batch_size = min(args.batch_size, sum(args.calib_size))
+            args.batch_size = get_max_batch_size(
+                language_model,
+                max_sample_length=args.calib_seq,
+                sample_memory_usage_ratio=sample_memory_usage_ratio if not run_auto_quant else 1.0,
+                sample_input_single_batch=sample_input_single_batch,
+                enable_grad=run_auto_quant,
+            )
+            args.batch_size = min(args.batch_size, sum(args.calib_size))
 
     print(f"Use calib batch_size {args.batch_size}")
 

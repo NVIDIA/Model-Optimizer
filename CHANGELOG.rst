@@ -22,6 +22,8 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add PTQ support for GLM-4.7, including loading MTP layer weights from a separate ``mtp.safetensors`` file and export as-is.
 - Add support for image-text data calibration in PTQ for Nemotron VL models.
 - Add Megatron Core export/import mapping for Qwen3-VL (``Qwen3VLForConditionalGeneration``) vision-language models. The mapping handles the ``model.language_model.`` weight prefix used by Qwen3-VL and supports both dense and MoE variants.
+- Add PTQ support for Nemotron Parse.
+- Add distillation support for LTX-2. See `examples/diffusers/distillation/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/diffusers/distillation>`_ for more details.
 
 0.41 (2026-01-19)
 ^^^^^^^^^^^^^^^^^

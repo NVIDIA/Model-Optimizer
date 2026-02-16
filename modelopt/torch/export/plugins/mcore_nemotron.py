@@ -58,7 +58,11 @@ nemotron_h_causal_lm_import: dict[str, CustomModuleMapping] = {
     "D": NameRemapping("backbone.layers.{}.mixer.D", REPLICATE),
     "dt_bias": NameRemapping("backbone.layers.{}.mixer.dt_bias", REPLICATE),
     "conv1d": NameRemapping("backbone.layers.{}.mixer.conv1d.", REPLICATE),
-    "in_proj": NameRemapping("backbone.layers.{}.mixer.in_proj.", COL_TP),
+    # mapping layer_norm_weight to None tells _name_remapping to skip it;
+    # the fused layer_norm_weight is loaded separately via the "fused_norm" rule.
+    "in_proj": NameRemapping(
+        "backbone.layers.{}.mixer.in_proj.", COL_TP | {"mapping": {"layer_norm_weight": None}}
+    ),
     "out_proj": NameRemapping("backbone.layers.{}.mixer.out_proj.", ROW_TP),
     # Attention
     "input_layernorm": NameRemapping("backbone.layers.{}.norm.", REPLICATE),
@@ -66,8 +70,13 @@ nemotron_h_causal_lm_import: dict[str, CustomModuleMapping] = {
     "linear_proj": NameRemapping("backbone.layers.{}.mixer.o_proj.", ROW_TP),
     # MLP
     "pre_mlp_layernorm": NameRemapping("backbone.layers.{}.norm.", REPLICATE),
-    "linear_fc1": NameRemapping("backbone.layers.{}.mixer.up_proj.", COL_TP),
+    "linear_fc1": NameRemapping(
+        "backbone.layers.{}.mixer.up_proj.", COL_TP | {"mapping": {"layer_norm_weight": None}}
+    ),
     "linear_fc2": NameRemapping("backbone.layers.{}.mixer.down_proj.", ROW_TP),
+    # Fused layer norm: loads the HF norm weight into fused TELayerNormColumnParallelLinear
+    # modules (in_proj, linear_qkv, linear_fc1) when using TE spec.
+    "fused_norm": NameRemapping("backbone.layers.{}.norm.weight"),
     # MoE
     "router": NameRemapping(
         "backbone.layers.{}.mixer.gate.", {"mapping": {"expert_bias": "e_score_correction_bias"}}
@@ -92,12 +101,14 @@ nemotron_h_causal_lm_import: dict[str, CustomModuleMapping] = {
     "mtp.hnorm": NameRemapping("mtp.layers.{}.hnorm.", {"is_mtp": True}),
     "mtp.eh_proj": NameRemapping("mtp.layers.{}.eh_proj.", {"is_mtp": True}),
     "mtp.final_layernorm": NameRemapping("mtp.layers.{}.final_layernorm.", {"is_mtp": True}),
-    # Grouped local experts in MTP
+    # Grouped local experts (used for TEGroupedMLP in both decoder and MTP layers).
+    # The prefix uses "backbone" for regular decoder layers; when called from MTP
+    # context (is_mtp=True), _grouped_mlp_merging replaces "backbone" with "mtp".
     "experts.linear_fc1": GroupedMLPMerging(
-        "mtp.layers.{}.mixer.experts.{{}}.up_proj", COL_ETP | {"is_mtp": True}
+        "backbone.layers.{}.mixer.experts.{{}}.up_proj", COL_ETP
     ),
     "experts.linear_fc2": GroupedMLPMerging(
-        "mtp.layers.{}.mixer.experts.{{}}.down_proj", ROW_ETP | {"is_mtp": True}
+        "backbone.layers.{}.mixer.experts.{{}}.down_proj", ROW_ETP
     ),
 }
 

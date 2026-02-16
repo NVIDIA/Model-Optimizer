@@ -191,6 +191,8 @@ def get_hf_mbridge_calibration_loop(
             eval_iters=num_iters,
             skip_train=True,
         ),
+        # TODO: Replace validation args in train with validation config in nemo:26.04
+        # validation=ValidationConfig(eval_iters=num_iters, eval_interval=1, skip_train=True),
         dataset=_get_dataset_cfg(
             dataset_name,
             num_samples,
