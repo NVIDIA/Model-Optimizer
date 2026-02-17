@@ -23,6 +23,7 @@ checkpoint's config.json model_type.
 from lm_eval.__main__ import cli_evaluate
 from lm_eval.api.model import T
 from lm_eval.models.huggingface import HFLM
+from transformers import AutoConfig
 
 # Trigger factory registration for all model descriptors
 import modelopt.torch.puzzletron.anymodel.models  # noqa: F401
@@ -49,7 +50,6 @@ def _resolve_descriptor_from_pretrained(pretrained: str | None):
             "pretrained must be set in --model_args "
             "(e.g. --model_args pretrained=/path/to/checkpoint,dtype=bfloat16)."
         )
-    from transformers import AutoConfig
 
     config = AutoConfig.from_pretrained(pretrained, trust_remote_code=True)
     model_type = getattr(config, "model_type", None)
