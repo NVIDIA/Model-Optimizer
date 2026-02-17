@@ -166,13 +166,6 @@ class HeterogeneousBridgeMixin:
                 num_kv_heads = block.attention.num_key_value_heads
                 if num_kv_heads is not None:
                     return num_kv_heads
-            # Also check for n_heads_in_group (DeciLM format) and convert
-            if hasattr(block, "attention") and hasattr(block.attention, "n_heads_in_group"):
-                n_heads_in_group = block.attention.n_heads_in_group
-                if n_heads_in_group is not None:
-                    # n_heads_in_group = num_attention_heads / num_query_groups
-                    # So num_query_groups = num_attention_heads / n_heads_in_group
-                    return hf_config.num_attention_heads // n_heads_in_group
         return None
 
     def _convert_block_config(
@@ -212,10 +205,7 @@ class HeterogeneousBridgeMixin:
             attention_config.pop("num_key_value_heads", None)
 
         # Set num_query_groups if missing
-        if (
-            "num_query_groups" not in attention_config
-            and "n_heads_in_group" not in attention_config
-        ):
+        if "num_query_groups" not in attention_config:
             if default_num_query_groups is not None:
                 attention_config["num_query_groups"] = default_num_query_groups
             else:
