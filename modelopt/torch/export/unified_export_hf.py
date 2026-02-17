@@ -692,16 +692,6 @@ def _export_transformers_checkpoint(
                                     modules=[linear_module],
                                     quantizer_attrs=["input_quantizer"],
                                 )
-                elif "Qwen3_5MoeExperts" in type(sub_module.experts).__name__:
-                    # Handle Qwen3.5 MoE experts which use gate_proj/up_proj/down_proj ModuleLists
-                    for expert_linear_name in ["gate_proj", "up_proj", "down_proj"]:
-                        if hasattr(sub_module.experts, expert_linear_name):
-                            linear_modulelist = getattr(sub_module.experts, expert_linear_name)
-                            if hasattr(linear_modulelist, "__iter__"):
-                                set_expert_quantizer_amax(
-                                    modules=list(linear_modulelist),
-                                    quantizer_attrs=["input_quantizer"],
-                                )
                 elif isinstance(sub_module.experts, collections.abc.Iterable):
                     # For other MoE models (like Mixtral) with iterable experts
                     try:

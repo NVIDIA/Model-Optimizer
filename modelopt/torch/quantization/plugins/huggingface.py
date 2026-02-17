@@ -734,9 +734,27 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
         return next_states
 
 
+class _Qwen3_5MoeExpertModule(nn.Module):
+    """Container for a single Qwen3.5 MoE expert's linear layers.
+
+    Produces the naming pattern: experts.{id}.gate_proj.weight
+    (consistent with standard Qwen3 MoE per-expert module structure).
+    """
+
+    def __init__(self, hidden_dim: int, expert_dim: int):
+        super().__init__()
+        self.gate_proj = nn.Linear(hidden_dim, expert_dim, bias=False)
+        self.up_proj = nn.Linear(hidden_dim, expert_dim, bias=False)
+        self.down_proj = nn.Linear(expert_dim, hidden_dim, bias=False)
+
+
 class _QuantQwen3_5MoeExperts(QuantModule):
     def _setup(self):
-        """Modify the Qwen3_5MoeExperts by using nn.Linear layers."""
+        """Modify the Qwen3_5MoeExperts by using per-expert nn.Module containers.
+
+        This produces the naming pattern: experts.{id}.gate_proj.weight
+        (consistent with standard Qwen3 MoE).
+        """
         from accelerate import init_empty_weights
 
         dtype, device = self.gate_up_proj.dtype, self.gate_up_proj.device
@@ -749,21 +767,9 @@ class _QuantQwen3_5MoeExperts(QuantModule):
         expert_dim = self.intermediate_dim
 
         with init_empty_weights():
-            gate_proj = nn.ModuleList(
+            expert_modules = nn.ModuleList(
                 [
-                    nn.Linear(self.hidden_dim, expert_dim, bias=False)
-                    for _ in range(self.num_experts)
-                ]
-            )
-            up_proj = nn.ModuleList(
-                [
-                    nn.Linear(self.hidden_dim, expert_dim, bias=False)
-                    for _ in range(self.num_experts)
-                ]
-            )
-            down_proj = nn.ModuleList(
-                [
-                    nn.Linear(expert_dim, self.hidden_dim, bias=False)
+                    _Qwen3_5MoeExpertModule(self.hidden_dim, expert_dim)
                     for _ in range(self.num_experts)
                 ]
             )
@@ -771,17 +777,31 @@ class _QuantQwen3_5MoeExperts(QuantModule):
         for idx in range(self.num_experts):
             # gate_up_proj shape: (num_experts, 2*intermediate_dim, hidden_dim)
             # Already in (out_features, in_features) format, no transpose needed
-            _copy_weight(gate_proj[idx], self.gate_up_proj[idx, :expert_dim, :])
-            _copy_weight(up_proj[idx], self.gate_up_proj[idx, expert_dim:, :])
+            _copy_weight(expert_modules[idx].gate_proj, self.gate_up_proj[idx, :expert_dim, :])
+            _copy_weight(expert_modules[idx].up_proj, self.gate_up_proj[idx, expert_dim:, :])
             # down_proj shape: (num_experts, hidden_dim, intermediate_dim)
             # Already in (out_features, in_features) format
-            _copy_weight(down_proj[idx], self.down_proj[idx])
+            _copy_weight(expert_modules[idx].down_proj, self.down_proj[idx])
 
         delattr(self, "gate_up_proj")
         delattr(self, "down_proj")
-        self.gate_proj = gate_proj
-        self.up_proj = up_proj
-        self.down_proj = down_proj
+        # Register expert modules directly as numbered children (like nn.ModuleList)
+        # so the naming pattern is: experts.{id}.gate_proj.weight (no extra nesting)
+        for idx in range(self.num_experts):
+            self.add_module(str(idx), expert_modules[idx])
+
+    def __len__(self):
+        """Support len() so the module is iterable like standard MoE experts."""
+        return self.num_experts
+
+    def __iter__(self):
+        """Support iteration over expert modules."""
+        for idx in range(self.num_experts):
+            yield getattr(self, str(idx))
+
+    def __getitem__(self, idx):
+        """Support indexing to get individual expert modules."""
+        return getattr(self, str(int(idx)))
 
     def forward(
         self,
@@ -801,10 +821,11 @@ class _QuantQwen3_5MoeExperts(QuantModule):
             with torch.no_grad():
                 top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
             current_state = hidden_states[token_idx]
-            gate = self.gate_proj[expert_idx](current_state)
-            up = self.up_proj[expert_idx](current_state)
+            expert = self[expert_idx]
+            gate = expert.gate_proj(current_state)
+            up = expert.up_proj(current_state)
             current_hidden_states = self.act_fn(gate) * up
-            current_hidden_states = self.down_proj[expert_idx](current_hidden_states)
+            current_hidden_states = expert.down_proj(current_hidden_states)
             current_hidden_states = (
                 current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
             )
