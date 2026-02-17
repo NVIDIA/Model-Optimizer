@@ -49,7 +49,13 @@ from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import register
 from ..nn import QuantInputBase, QuantModule, QuantModuleRegistry, TensorQuantizer
 from ..nn.modules.quant_linear import _QuantLinear
-from ..triton import weight_dequant
+from ..triton import IS_AVAILABLE as IS_TRITON_AVAILABLE
+
+if IS_TRITON_AVAILABLE:
+    from ..triton import weight_dequant
+else:
+    weight_dequant = None
+
 from ..utils import replace_function
 from .attention import register_attention_for_kv_quant
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear, _QuantFunctionalMixin
@@ -733,6 +739,7 @@ class _QuantFP8Linear(QuantModule):
         return weight, scale_inv
 
     def forward(self, input: Tensor) -> Tensor:
+        assert weight_dequant is not None, "Triton is not available"
         if self.weight.element_size() == 1:
             with torch.cuda.device(self.weight.device):
                 weight, scale_inv = self._get_weight_and_scale_inv()
@@ -746,6 +753,7 @@ class _QuantFP8Linear(QuantModule):
         )
 
     def unpack_weight(self):
+        assert weight_dequant is not None, "Triton is not available"
         with torch.cuda.device(self.weight.device):
             weight, scale_inv = self._get_weight_and_scale_inv()
             self.weight = nn.Parameter(
