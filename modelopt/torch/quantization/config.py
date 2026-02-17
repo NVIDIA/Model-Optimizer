@@ -156,10 +156,19 @@ _default_disabled_quantizer_cfg = {
     "*mlp.gate.*": {"enable": False},  # Skip the MOE router
     "*mlp.shared_expert_gate.*": {"enable": False},  # Skip the MOE router
     "*linear_attn.conv1d*": {"enable": False},
-    "*mixer.conv1d*": {"enable": False},
+    "*mixer.conv1d*": {"enable": False},  # Skip mamba conv1d
     "*output_layer*": {"enable": False},
     "output.*": {"enable": False},
     "default": {"enable": False},
+}
+
+_mamba_moe_disabled_quantizer_cfg = {
+    "*fc1_latent_proj*": {"enable": False},  # Skip Latent MOE
+    "*fc2_latent_proj*": {"enable": False},  # Skip Latent MOE
+    "*q_proj*": {"enable": False},  # Skip QKV Linear
+    "*k_proj*": {"enable": False},  # Skip QKV Linear
+    "*v_proj*": {"enable": False},  # Skip QKV Linear
+    "*o_proj*": {"enable": False},  # Skip QKV Output Projection
 }
 
 INT8_DEFAULT_CFG = {
@@ -194,6 +203,28 @@ FP8_DEFAULT_CFG = {
         "*weight_quantizer": {"num_bits": (4, 3), "axis": None},
         "*input_quantizer": {"num_bits": (4, 3), "axis": None},
         **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": "max",
+}
+
+MAMBA_MOE_FP8_AGGRESSIVE_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {"num_bits": (4, 3), "axis": None},
+        "*input_quantizer": {"num_bits": (4, 3), "axis": None},
+        **_default_disabled_quantizer_cfg,
+        **_mamba_moe_disabled_quantizer_cfg,
+    },
+    "algorithm": "max",
+}
+
+MAMBA_MOE_FP8_CONSERVATIVE_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {"num_bits": (4, 3), "axis": None},
+        "*input_quantizer": {"num_bits": (4, 3), "axis": None},
+        **_default_disabled_quantizer_cfg,
+        **_mamba_moe_disabled_quantizer_cfg,
+        "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
+        "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
     },
     "algorithm": "max",
 }
@@ -387,6 +418,49 @@ NVFP4_DEFAULT_CFG = {
     },
     "algorithm": "max",
 }
+
+
+MAMBA_MOE_NVFP4_AGGRESSIVE_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        **_default_disabled_quantizer_cfg,
+        **_mamba_moe_disabled_quantizer_cfg,
+    },
+    "algorithm": "max",
+}
+MAMBA_MOE_NVFP4_CONSERVATIVE_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        **_default_disabled_quantizer_cfg,
+        **_mamba_moe_disabled_quantizer_cfg,
+        "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
+        "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
+    },
+    "algorithm": "max",
+}
+
 
 NVFP4_AWQ_LITE_CFG = {
     "quant_cfg": {
@@ -652,6 +726,10 @@ choices: set[str] = {
     "NVFP4_MLP_WEIGHT_ONLY_CFG",
     "MXFP4_MLP_WEIGHT_ONLY_CFG",
     "NVFP4_MLP_ONLY_CFG",
+    "MAMBA_MOE_NVFP4_CONSERVATIVE_CFG",
+    "MAMBA_MOE_NVFP4_AGGRESSIVE_CFG",
+    "MAMBA_MOE_FP8_CONSERVATIVE_CFG",
+    "MAMBA_MOE_FP8_AGGRESSIVE_CFG",
 }
 
 BiasType = Literal["static", "dynamic"]
