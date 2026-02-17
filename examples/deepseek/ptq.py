@@ -56,7 +56,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.model_config import KV_CACHE_FP8
 from modelopt.torch.export.quant_utils import get_quant_config
 from modelopt.torch.quantization.nn import TensorQuantizer
-from modelopt.torch.quantization.triton.fp8_kernel import weight_dequant
+from modelopt.torch.quantization.triton import weight_dequant
 from modelopt.torch.quantization.utils import (
     is_quantized_column_parallel_linear,
     is_quantized_parallel_linear,
