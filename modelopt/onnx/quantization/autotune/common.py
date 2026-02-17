@@ -362,74 +362,31 @@ class PatternSchemes:
         return self.pattern.size if self.pattern else 0
 
     @property
-    def best_scheme_index(self) -> int:
-        """Get index of the best performing scheme (lowest latency).
-
-        Scans all schemes to find the one with minimum latency_ms,
-        excluding schemes with errors.
-        If no schemes exist or all have errors, returns -1.
-
-        Returns:
-            Index of best scheme (without errors), or -1 if no valid schemes available
-        """
-        if len(self.schemes) == 0:
-            return -1
-        min_idx, min_latency = -1, float("inf")
-        for idx, scheme in enumerate(self.schemes):
-            if not scheme.error and scheme.latency_ms < min_latency:
-                min_idx = idx
-                min_latency = scheme.latency_ms
-        return min_idx
-
-    @property
     def best_scheme(self) -> InsertionScheme | None:
         """Get the best performing scheme (lowest latency).
 
-        Convenience property for accessing the optimal scheme directly
-        without needing to look up by index. Excludes schemes with errors.
+        Scans all schemes to find the one with minimum latency_ms,
+        excluding schemes with errors.
 
         Returns:
             InsertionScheme with lowest latency (excluding error schemes),
             or None if no valid schemes exist
         """
-        index = self.best_scheme_index
-        if index < 0 or index >= len(self.schemes):
+        if len(self.schemes) == 0:
             return None
-        return self.schemes[index]
+        min_idx, min_latency = -1, float("inf")
+        for idx, scheme in enumerate(self.schemes):
+            if not scheme.error and scheme.latency_ms < min_latency:
+                min_idx = idx
+                min_latency = scheme.latency_ms
+        if min_idx < 0:
+            return None
+        return self.schemes[min_idx]
 
     @property
     def num_schemes(self) -> int:
         """Get total number of schemes."""
         return len(self.schemes)
-
-    @property
-    def has_schemes(self) -> bool:
-        """Check if any schemes have been added."""
-        return len(self.schemes) > 0
-
-    def add_scheme(self, scheme: InsertionScheme) -> None:
-        """Add a scheme to the collection.
-
-        Args:
-            scheme: InsertionScheme to add
-        """
-        self.schemes.append(scheme)
-
-    def get_measured_schemes(self) -> list[InsertionScheme]:
-        """Get schemes that have been measured (finite latency).
-
-        Returns:
-            List of schemes with performance measurements (excludes unmeasured schemes with inf latency)
-        """
-        return [s for s in self.schemes if s.latency_ms != float("inf")]
-
-    def get_valid_schemes(self) -> list[InsertionScheme]:
-        """Get schemes without errors.
-
-        Returns:
-            List of schemes that completed successfully without errors
-        """
-        return [s for s in self.schemes if not s.error]
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization.
@@ -700,9 +657,7 @@ class PatternCache:
         num_points = (
             len(scheme.node_inputs) + len(scheme.child_region_inputs) + len(scheme.region_outputs)
         )
-        logger.debug(
-            f"Added pattern from region {region.id} with {num_points} insertion points"
-        )
+        logger.debug(f"Added pattern from region {region.id} with {num_points} insertion points")
         # Add patterns from child regions
         if region.type == RegionType.COMPOSITE:
             for child_region in region.get_children():
@@ -717,18 +672,6 @@ class PatternCache:
     def total_schemes(self) -> int:
         """Get total number of schemes across all patterns."""
         return sum(ps.num_schemes for ps in self.pattern_schemes)
-
-    def get_all_pattern_signatures(self) -> list[str]:
-        """Get list of all pattern signatures in pattern cache.
-
-        Returns:
-            List of pattern signature strings
-        """
-        return [ps.pattern_signature for ps in self.pattern_schemes]
-
-    def clear(self) -> None:
-        """Clear all pattern cache data."""
-        self.pattern_schemes.clear()
 
     def merge(self, other: "PatternCache", prefer_existing: bool = True) -> None:
         """Merge another PatternCache into this one.
