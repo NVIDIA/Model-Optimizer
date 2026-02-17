@@ -993,6 +993,36 @@ def _export_diffusers_checkpoint(
     print(f"Export complete. Saved to: {export_dir}")
 
 
+def _revert_weight_conversion_noop(model: Any, state_dict: dict) -> dict:
+    """No-op replacement for transformers' revert_weight_conversion."""
+    return state_dict
+
+
+def _patch_revert_weight_conversion() -> list[tuple[Any, Any]]:
+    """Patch revert_weight_conversion in transformers to avoid IndexError on scalar tensors."""
+    import importlib
+
+    patches: list[tuple[Any, Any]] = []
+    for mod_path in [
+        "transformers.core_model_loading",
+        "transformers.modeling_utils",
+    ]:
+        try:
+            mod = importlib.import_module(mod_path)
+            if hasattr(mod, "revert_weight_conversion"):
+                patches.append((mod, getattr(mod, "revert_weight_conversion")))
+                setattr(mod, "revert_weight_conversion", _revert_weight_conversion_noop)
+        except (ImportError, AttributeError):
+            pass
+    return patches
+
+
+def _unpatch_revert_weight_conversion(patches: list[tuple[Any, Any]]) -> None:
+    """Restore the original revert_weight_conversion functions."""
+    for mod, original in patches:
+        mod.revert_weight_conversion = original
+
+
 def export_hf_checkpoint(
     model: Any,
     dtype: torch.dtype | None = None,
@@ -1056,21 +1086,7 @@ def export_hf_checkpoint(
         # quantized state dicts (scalar scale tensors have 0 dimensions, causing IndexError).
         # We must patch both the source module and the importing module since
         # modeling_utils does `from core_model_loading import revert_weight_conversion`.
-        _patches = []
-        _noop = lambda model, state_dict: state_dict
-        for _mod_path in [
-            "transformers.core_model_loading",
-            "transformers.modeling_utils",
-        ]:
-            try:
-                import importlib
-
-                _mod = importlib.import_module(_mod_path)
-                if hasattr(_mod, "revert_weight_conversion"):
-                    _patches.append((_mod, getattr(_mod, "revert_weight_conversion")))
-                    setattr(_mod, "revert_weight_conversion", _noop)
-            except (ImportError, AttributeError):
-                pass
+        _patches = _patch_revert_weight_conversion()
 
         try:
             model.save_pretrained(
@@ -1079,8 +1095,7 @@ def export_hf_checkpoint(
                 save_modelopt_state=save_modelopt_state,
             )
         finally:
-            for _mod, _original in _patches:
-                _mod.revert_weight_conversion = _original
+            _unpatch_revert_weight_conversion(_patches)
 
         original_config = f"{export_dir}/config.json"
         config_data = {}

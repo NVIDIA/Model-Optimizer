@@ -734,7 +734,7 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
         return next_states
 
 
-class _Qwen3_5MoeExpertModule(nn.Module):
+class _Qwen35MoeExpertModule(nn.Module):
     """Container for a single Qwen3.5 MoE expert's linear layers.
 
     Produces the naming pattern: experts.{id}.gate_proj.weight
@@ -748,7 +748,7 @@ class _Qwen3_5MoeExpertModule(nn.Module):
         self.down_proj = nn.Linear(expert_dim, hidden_dim, bias=False)
 
 
-class _QuantQwen3_5MoeExperts(QuantModule):
+class _QuantQwen35MoeExperts(QuantModule):
     def _setup(self):
         """Modify the Qwen3_5MoeExperts by using per-expert nn.Module containers.
 
@@ -769,7 +769,7 @@ class _QuantQwen3_5MoeExperts(QuantModule):
         with init_empty_weights():
             expert_modules = nn.ModuleList(
                 [
-                    _Qwen3_5MoeExpertModule(self.hidden_dim, expert_dim)
+                    _Qwen35MoeExpertModule(self.hidden_dim, expert_dim)
                     for _ in range(self.num_experts)
                 ]
             )
@@ -983,7 +983,7 @@ except ImportError:
     pass
 
 
-class _QuantQwen3_5MoeSparseMoeBlock(_QuantSparseMoe):
+class _QuantQwen35MoeSparseMoeBlock(_QuantSparseMoe):
     """Qwen3.5 MoE stores top_k/num_experts in the router (self.gate), not as direct attributes.
 
     We override forward instead of just bridging attributes because the router (self.gate)
@@ -1012,12 +1012,12 @@ try:
 
     if Qwen3_5MoeSparseMoeBlock not in QuantModuleRegistry:
         QuantModuleRegistry.register({Qwen3_5MoeSparseMoeBlock: "hf.Qwen3_5MoeSparseMoeBlock"})(
-            _QuantQwen3_5MoeSparseMoeBlock
+            _QuantQwen35MoeSparseMoeBlock
         )
 
     if Qwen3_5MoeExperts not in QuantModuleRegistry:
         QuantModuleRegistry.register({Qwen3_5MoeExperts: "hf.Qwen3_5MoeExperts"})(
-            _QuantQwen3_5MoeExperts
+            _QuantQwen35MoeExperts
         )
 except ImportError:
     pass
