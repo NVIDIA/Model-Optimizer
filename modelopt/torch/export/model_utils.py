@@ -55,6 +55,7 @@ MODEL_NAME_TO_TYPE = {
     "Deepseek": "deepseek",
     "Whisper": "whisper",
     "gptoss": "gptoss",
+    "MiniMax": "minimax",
 }
 
 __doc__ = f"""Utility functions for model type detection and classification.
