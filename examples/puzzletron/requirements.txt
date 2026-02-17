@@ -1,3 +1,2 @@
 lm-eval==0.4.10
 math-verify
-ray
