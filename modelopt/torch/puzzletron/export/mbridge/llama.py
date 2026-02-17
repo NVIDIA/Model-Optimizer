@@ -21,11 +21,11 @@ from megatron.bridge.models.llama.llama_bridge import LlamaBridge
 from megatron.core.models.gpt.gpt_model import GPTModel
 from transformers import LlamaForCausalLM
 
-from modelopt.torch.puzzletron.export.mbridge.base import PuzzletronAnyModelBridgeBase
+from modelopt.torch.puzzletron.export.mbridge.base import PuzzletronAnyModelBridgeMixin
 
 
 @MegatronModelBridge.register_bridge(source=LlamaForCausalLM, target=GPTModel, model_type="llama")
-class PuzzletronLlamaAnyModelBridge(PuzzletronAnyModelBridgeBase, LlamaBridge):
+class PuzzletronLlamaAnyModelBridge(PuzzletronAnyModelBridgeMixin, LlamaBridge):
     """
     Megatron Bridge for Puzzletron Llama-based AnyModel checkpoints.
 
@@ -33,6 +33,6 @@ class PuzzletronLlamaAnyModelBridge(PuzzletronAnyModelBridgeBase, LlamaBridge):
     All Llama-specific settings are inherited from LlamaBridge.
     """
 
-    # provider_bridge() is inherited from PuzzletronAnyModelBridgeBase
+    # provider_bridge() is inherited from PuzzletronAnyModelBridgeMixin
     # It automatically reuses LlamaBridge.provider_bridge() and adds heterogeneous config
     # mapping_registry() is inherited from LlamaBridge

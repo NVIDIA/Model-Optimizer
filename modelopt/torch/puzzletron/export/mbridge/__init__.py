@@ -20,7 +20,7 @@ This module provides bridges for converting Puzzletron AnyModel checkpoints
 """
 
 # Import to register bridges (side effect)
-from modelopt.torch.puzzletron.export.mbridge.base import PuzzletronAnyModelBridgeBase
+from modelopt.torch.puzzletron.export.mbridge.base import PuzzletronAnyModelBridgeMixin
 from modelopt.torch.puzzletron.export.mbridge.llama import (  # noqa: F401
     PuzzletronLlamaAnyModelBridge,
 )
@@ -29,7 +29,7 @@ from modelopt.torch.puzzletron.export.mbridge.qwen3 import (  # noqa: F401
 )
 
 __all__ = [
-    "PuzzletronAnyModelBridgeBase",
+    "PuzzletronAnyModelBridgeMixin",
     "PuzzletronLlamaAnyModelBridge",
     "PuzzletronQwen3AnyModelBridge",
 ]

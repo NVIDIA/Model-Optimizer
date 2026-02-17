@@ -23,7 +23,6 @@ This module provides shared functionality for converting AnyModel checkpoints
 
 import dataclasses
 import json
-import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -35,8 +34,6 @@ from megatron.core.models.gpt.heterogeneous.heterogeneous_layer_specs import (
     get_gpt_heterogeneous_layer_spec,
 )
 from megatron.core.transformer.spec_utils import ModuleSpec
-
-logger = logging.getLogger(__name__)
 
 
 def heterogeneous_layer_spec(config) -> ModuleSpec:
@@ -61,9 +58,6 @@ class GenericHeterogeneousProvider(GPTModelProvider, HeterogeneousTransformerCon
     This provider is model-agnostic and works with any model architecture
     (Llama, Qwen3, Mistral, etc.) that uses block_configs for heterogeneous
     layer specifications. Model-specific settings should be provided via kwargs.
-
-    Unlike LlamaNemotronHeterogeneousProvider, this provider doesn't inherit
-    Llama-specific defaults, making it truly generic.
     """
 
     # Heterogeneous configuration fields
@@ -72,12 +66,18 @@ class GenericHeterogeneousProvider(GPTModelProvider, HeterogeneousTransformerCon
     transformer_layer_spec: ModuleSpec | Callable = heterogeneous_layer_spec
 
 
-class PuzzletronAnyModelBridgeBase:
+class PuzzletronAnyModelBridgeMixin:
     """
-    Base class for Puzzletron AnyModel bridges.
+    Mixin class for Puzzletron AnyModel bridges.
 
     Provides shared functionality for handling AnyModel checkpoints with block_configs.
-    Subclasses should inherit from both this class and their model-specific bridge.
+    This is a mixin - it must be used with multiple inheritance alongside a model-specific
+    bridge (e.g., LlamaBridge, Qwen3Bridge). The mixin calls super() to access methods
+    from the model-specific bridge via Python's Method Resolution Order (MRO).
+
+    Example:
+        class PuzzletronLlamaAnyModelBridge(PuzzletronAnyModelBridgeMixin, LlamaBridge):
+            pass
     """
 
     def provider_bridge(self, hf_pretrained: PreTrainedCausalLM) -> GPTModelProvider:
@@ -98,8 +98,9 @@ class PuzzletronAnyModelBridgeBase:
 
         # Get fully configured provider from parent bridge (includes all model-specific settings)
         # This calls the parent's provider_bridge() method (e.g., LlamaBridge.provider_bridge())
-        # Note: mypy can't see provider_bridge in superclass because this is a mixin,
-        # but it exists in the other parent class (e.g., LlamaBridge) via multiple inheritance
+        # via Python's Method Resolution Order (MRO). The mixin doesn't inherit from
+        # MegatronModelBridge, but super() finds the method in the other parent class.
+        # Note: mypy can't verify this, but it works correctly at runtime.
         parent_provider = super().provider_bridge(hf_pretrained)  # type: ignore[misc]
 
         # Convert provider to dict (captures ALL fields automatically, no duplication)
