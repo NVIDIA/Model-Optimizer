@@ -198,7 +198,7 @@ SUPER_NVFP4_CONSERVATIVE_GPTQ_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
             "axis": None,
             "enable": True,
         },
@@ -316,6 +316,9 @@ NVFP4_STATIC_WO_GPTQ_CFG = {
             "enable": False,
         },
         **_default_disabled_quantizer_cfg,
+        **super_disabled_quantizer_cfg,
+        "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
+        "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
     },
     "algorithm": {
         "method": "gptq",
@@ -338,6 +341,9 @@ NVFP4_STATIC_GPTQ_CFG = {
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
+        **super_disabled_quantizer_cfg,
+        "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
+        "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
     },
     "algorithm": {
         "method": "gptq",
@@ -570,6 +576,9 @@ NVFP4_DEFAULT_CFG = {
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
+        **super_disabled_quantizer_cfg,
+        "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
+        "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
     },
     "algorithm": "max",
 }
@@ -584,6 +593,9 @@ NVFP4_WO_CFG = {
         },
         "*input_quantizer": {"enable": False},
         **_default_disabled_quantizer_cfg,
+        **super_disabled_quantizer_cfg,
+        "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
+        "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
     },
     "algorithm": "max",
 }
@@ -1222,6 +1234,21 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
             "If True, the calibration algorithm is applied sequentially to each decoder block. "
             "Outputs from one layer become inputs to the next, reducing memory usage for large models."
         ),
+    )
+
+    checkpoint_every_n_layers: int | None = ModeloptField(
+        default=None,
+        title="Save intermediate checkpoint every N layers during sequential calibration.",
+    )
+
+    checkpoint_dir: str | None = ModeloptField(
+        default=None,
+        title="Directory for saving/loading intermediate GPTQ checkpoints.",
+    )
+
+    resume_from_layer: int = ModeloptField(
+        default=0,
+        title="Layer index to resume sequential calibration from (0 = start from beginning).",
     )
 
 

@@ -16,6 +16,8 @@
 """Calibration utilities."""
 
 import contextlib
+import datetime
+import json
 import math
 import os
 import warnings
@@ -55,7 +57,7 @@ from .utils import (
     weight_attr_names,
 )
 
-__all__ = ["awq", "max_calibrate", "smoothquant", "svdquant"]
+__all__ = ["awq", "max_calibrate", "save_fake_checkpoint", "smoothquant", "svdquant"]
 
 
 def weight_only_quantize(model: nn.Module):
@@ -1190,7 +1192,13 @@ def svdquant(
     max_calibrate(model, forward_loop)
 
 
-def _print_relative_mse_error(q: torch.Tensor, w: torch.Tensor, h: torch.Tensor, module_name: str):
+def _print_relative_mse_error(
+    q: torch.Tensor,
+    w: torch.Tensor,
+    h: torch.Tensor,
+    module_name: str,
+    n_samples: int | None = None,
+):
     """Print relative mean squared error between quantized and original weights.
 
     Computes the Hessian-weighted relative MSE between quantized and original weights,
@@ -1202,13 +1210,15 @@ def _print_relative_mse_error(q: torch.Tensor, w: torch.Tensor, h: torch.Tensor,
         w (torch.Tensor): Original weight tensor
         h (torch.Tensor): Hessian matrix used for weighting the error
         module_name (str): Name of the module for logging purposes
+        n_samples (int | None): Number of Hessian samples (batches) used for this layer
     Note:
         Implementation adapted from the GPTQ repository:
         https://github.com/IST-DASLab/FP-Quant
     """
     delta = q - w
     mse = (delta).mm(h).mul(delta).mean() / (w.mm(h).mul(w).mean() + 1e-6)
-    print(f"[{module_name}] Relative MSE error: {mse.item():.2e}")
+    suffix = f", n_hessian_samples: {n_samples}" if n_samples is not None else ""
+    print(f"[{module_name}] Relative MSE error: {mse.item():.2e}{suffix}")
 
 
 def update_hessian(input, hessian, n_samples):
@@ -1221,15 +1231,15 @@ def update_hessian(input, hessian, n_samples):
     Returns:
         Tuple of (updated_hessian, new_sample_count)
     """
-    batch_size = input.shape[0]
+    # Flatten to 2D (total_tokens, features) first, so batch_size counts tokens
+    input_flat = input.reshape(-1, input.shape[-1]).t().float()
+    batch_size = input_flat.shape[1]
 
     # Incremental averaging: scale down old hessian
     hessian *= n_samples / (n_samples + batch_size)
     n_samples += batch_size
 
     # Compute outer product: H += (2/n_samples) * X @ X^T
-    # where X is the flattened input reshaped to (features, batch*seq)
-    input_flat = input.reshape(-1, input.shape[-1]).t().float()
     scaled_input = math.sqrt(2 / n_samples) * input_flat
     hessian.add_((scaled_input @ scaled_input.t()).to(hessian.device))
 
@@ -1272,7 +1282,7 @@ def prepare_hessian_inverse(h, weight, percdamp):
     return h_inv
 
 
-def blockwise_weight_update(module, h, block_size, percdamp):
+def blockwise_weight_update(module, h, block_size, percdamp, n_samples=None):
     """Update module weights using GPTQ-style blockwise quantization.
 
     Args:
@@ -1280,6 +1290,7 @@ def blockwise_weight_update(module, h, block_size, percdamp):
         H: Hessian matrix (d x d)
         block_size: Size of blocks to process at once
         percdamp: Damping percentage for Hessian diagonal
+        n_samples: Number of Hessian samples for logging (optional)
     """
     weight = module.weight.data.float().clone()
     _, num_cols = weight.shape
@@ -1308,7 +1319,7 @@ def blockwise_weight_update(module, h, block_size, percdamp):
         weight[:, block_end:].addmm_(errs, h_inv[block_start:block_end, block_end:], alpha=-1)
 
     # Print relative mse error
-    _print_relative_mse_error(weight, module.weight.float(), h, module.name)
+    _print_relative_mse_error(weight, module.weight.float(), h, module.name, n_samples)
     # Update module weights
     module.weight.data = weight.reshape(module.weight.shape).to(module.weight.data.dtype)
 
@@ -1510,36 +1521,160 @@ def _disable_input_quantizers(layer: nn.Module):
             module.enable()
 
 
+def save_fake_checkpoint(model: nn.Module, output_dir: str) -> None:
+    """Save fake quant checkpoint using save_pretrained() (HuggingFace format).
+
+    Args:
+        model: The quantized model to save.
+        output_dir: Directory to write the checkpoint into.
+    """
+    from modelopt.torch.opt.conversion import ModeloptStateManager, modelopt_state
+    from modelopt.torch.quantization.conversion import quantizer_state as get_quantizer_state
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Remove accelerate hooks before saving to avoid pickling errors in modelopt_state.
+    # Accelerate hooks contain local functions (closures like 'add_hook_to_module.<locals>.new_forward')
+    # that can't be pickled. Even after removing hooks from modules, they may still be captured
+    # in closures within quantizer_state metadata when modelopt_state() calls update_last_state_before_save().
+    try:
+        from accelerate.hooks import remove_hook_from_module
+
+        remove_hook_from_module(model, recurse=True)
+    except ImportError:
+        pass
+
+    # Save model weights first (without modelopt_state to avoid pickling error)
+    model.save_pretrained(output_dir, save_modelopt_state=False)
+
+    # Manually save modelopt_state after removing hooks and rebuilding quantizer_state.
+    # We need to rebuild quantizer_state because hooks may have been captured in closures
+    # when quantizer_state() was called during update_last_state_before_save() inside modelopt_state().
+    if ModeloptStateManager.is_converted(model):
+        modelopt_state_path = os.path.join(output_dir, "modelopt_state.pth")
+        state = modelopt_state(model)
+
+        # Rebuild quantizer_state in metadata to remove any hook references captured in closures
+        if "modelopt_state_dict" in state and isinstance(state["modelopt_state_dict"], list):
+            cleaned_state_dict = []
+            for entry in state["modelopt_state_dict"]:
+                if isinstance(entry, tuple) and len(entry) >= 2:
+                    mode_str, state_dict_entry = entry[0], entry[1]
+                    if isinstance(state_dict_entry, dict) and "metadata" in state_dict_entry:
+                        # Rebuild quantizer_state after hooks are removed
+                        cleaned_entry = state_dict_entry.copy()
+                        cleaned_metadata = cleaned_entry["metadata"].copy()
+                        cleaned_metadata["quantizer_state"] = get_quantizer_state(model)
+                        cleaned_entry["metadata"] = cleaned_metadata
+                        cleaned_state_dict.append((mode_str, cleaned_entry))
+                    else:
+                        cleaned_state_dict.append(entry)
+                else:
+                    cleaned_state_dict.append(entry)
+            state["modelopt_state_dict"] = cleaned_state_dict
+
+        torch.save(state, modelopt_state_path)
+        print_rank_0(f"Saved ModelOpt state to {modelopt_state_path}")
+
+
+def _save_gptq_checkpoint(
+    model: nn.Module, checkpoint_dir: str, last_layer_idx: int, total_layers: int
+) -> None:
+    """Save intermediate GPTQ checkpoint with metadata for resume support.
+
+    Saves accelerate hooks before calling save_fake_checkpoint (which removes them),
+    then re-attaches them so the model remains functional for subsequent layers.
+    """
+    print_rank_0(
+        f"Saving GPTQ checkpoint after layer {last_layer_idx}/{total_layers - 1} to {checkpoint_dir}"
+    )
+
+    # Save accelerate hooks before save_fake_checkpoint removes them.
+    # We need to re-attach them after saving so the model keeps working.
+    saved_hooks = {}
+    for name, module in model.named_modules():
+        if hasattr(module, "_hf_hook"):
+            saved_hooks[name] = module._hf_hook
+
+    try:
+        save_fake_checkpoint(model, checkpoint_dir)
+    finally:
+        # Re-attach accelerate hooks so the model keeps working for remaining layers.
+        if saved_hooks:
+            try:
+                from accelerate.hooks import add_hook_to_module
+
+                name_to_module = dict(model.named_modules())
+                for name, hook in saved_hooks.items():
+                    if name in name_to_module:
+                        add_hook_to_module(name_to_module[name], hook)
+                print_rank_0(f"Re-attached {len(saved_hooks)} accelerate hooks")
+            except ImportError:
+                pass
+
+    # Save checkpoint metadata for resume support.
+    meta = {
+        "last_completed_layer": last_layer_idx,
+        "total_layers": total_layers,
+        "timestamp": datetime.datetime.now().isoformat(),
+    }
+    meta_path = os.path.join(checkpoint_dir, "gptq_checkpoint_meta.json")
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print_rank_0(f"GPTQ checkpoint saved (layer {last_layer_idx}/{total_layers - 1})")
+
+
 @torch.no_grad()
 def sequential_calibrate(
     model: nn.Module,
     forward_loop: ForwardLoop,
     calib_func: Callable,
+    checkpoint_every_n_layers: int | None = None,
+    checkpoint_dir: str | None = None,
+    resume_from_layer: int = 0,
     **calib_kwargs,
 ):
     """Sequential calibration - a sequential layer-by-layer calibration algorithm."""
-    # Get amax values for weights and activations
-    max_calibrate(model)
+    # Check if the model already has amax values (e.g. loaded from a GPTQ checkpoint).
+    # If so, skip max_calibrate to avoid overwriting the existing calibration.
+    already_calibrated = any(
+        hasattr(module, "_amax") and module._amax is not None
+        for _, module in model.named_modules()
+        if isinstance(module, TensorQuantizer) and not module._disabled
+    )
 
-    for name, module in list(model.named_modules()):
-        if isinstance(module, TensorQuantizer) and not module._disabled:
-            if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
-                # Get the initial amax from max calibration
-                initial_amax = module._amax.clone().detach()
+    if already_calibrated:
+        print_rank_0(
+            "Model already has amax values (e.g. loaded from checkpoint), "
+            "skipping max_calibrate and NVFP4 conversion"
+        )
+    else:
+        # Get amax values for weights and activations
+        max_calibrate(model)
 
-                is_nvfp4_static = (
-                    module.is_static_block_quant
-                    and module._num_bits == (2, 1)
-                    and module._block_sizes is not None
-                    and module._block_sizes.get("scale_bits") == (4, 3)
-                )
+        for name, module in list(model.named_modules()):
+            if isinstance(module, TensorQuantizer) and not module._disabled:
+                if (
+                    module._calibrator is not None
+                    and not module._dynamic
+                    and hasattr(module, "_amax")
+                ):
+                    # Get the initial amax from max calibration
+                    initial_amax = module._amax.clone().detach()
 
-                if is_nvfp4_static:
-                    # Compute and set global_amax
-                    global_amax = reduce_amax(initial_amax, axis=None)
+                    is_nvfp4_static = (
+                        module.is_static_block_quant
+                        and module._num_bits == (2, 1)
+                        and module._block_sizes is not None
+                        and module._block_sizes.get("scale_bits") == (4, 3)
+                    )
 
-                    # Convert to NVFP4StaticQuantizer in-place
-                    NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
+                    if is_nvfp4_static:
+                        # Compute and set global_amax
+                        global_amax = reduce_amax(initial_amax, axis=None)
+
+                        # Convert to NVFP4StaticQuantizer in-place
+                        NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
 
     transformer_layers = get_decoder_layers(model)
     if transformer_layers is None:
@@ -1548,10 +1683,19 @@ def sequential_calibrate(
             "Sequential calibration requires a model with identifiable transformer layers."
         )
 
-    print_rank_0(f"Sequential calibration: Found {len(transformer_layers)} transformer layers")
+    total_layers = len(transformer_layers)
+    print_rank_0(f"Sequential calibration: Found {total_layers} transformer layers")
+    if resume_from_layer > 0:
+        print_rank_0(
+            f"Resuming from layer {resume_from_layer} (skipping layers 0-{resume_from_layer - 1})"
+        )
     gettr = LayerActivationGettr(model)
 
-    for layer in transformer_layers:
+    for layer_idx, layer in enumerate(transformer_layers):
+        if layer_idx < resume_from_layer:
+            print_rank_0(f"Skipping layer {layer_idx} (already GPTQ'd)")
+            continue
+
         # Set input quantizer amaxe's for current layer modules
         _set_input_quantizers_calib_mode(layer)
         inputs = gettr.get_input_activations(layer, forward_loop)
@@ -1561,6 +1705,27 @@ def sequential_calibrate(
         calib_func(layer, inputs, **calib_kwargs)
         del inputs
         torch.cuda.empty_cache()
+
+        # Periodic checkpoint
+        if (
+            checkpoint_dir is not None
+            and checkpoint_every_n_layers is not None
+            and (layer_idx + 1) % checkpoint_every_n_layers == 0
+        ):
+            _save_gptq_checkpoint(model, checkpoint_dir, layer_idx, total_layers)
+
+    # Save final checkpoint after all layers are completed.
+    # Only save if checkpointing is enabled and at least one layer was actually GPTQ'd
+    # in this run (i.e., resume_from_layer < total_layers). Also skip if the last layer
+    # was already saved by the periodic checkpoint above.
+    if checkpoint_dir is not None and resume_from_layer < total_layers:
+        last_layer_idx = total_layers - 1
+        already_saved = (
+            checkpoint_every_n_layers is not None
+            and (last_layer_idx + 1) % checkpoint_every_n_layers == 0
+        )
+        if not already_saved:
+            _save_gptq_checkpoint(model, checkpoint_dir, last_layer_idx, total_layers)
 
 
 @torch.no_grad()
@@ -1636,7 +1801,9 @@ def gptq(
         if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
             state = hessian_state[module.name]
             hessian = state["hessian"].to(module.weight.device)
-            blockwise_weight_update(module, hessian, block_size, percdamp)
+            blockwise_weight_update(
+                module, hessian, block_size, percdamp, n_samples=state["n_samples"]
+            )
             # Free memory
             del hessian_state[module.name]
             torch.cuda.empty_cache()
