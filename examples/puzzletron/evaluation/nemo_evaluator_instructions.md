@@ -5,6 +5,12 @@
 
 Evaluate AnyModel checkpoints by deploying a local OpenAI-compatible completions endpoint and running benchmarks against it.
 
+This flow requires Ray for serving the model and NeMo Export-Deploy (included in NeMo containers):
+
+```bash
+pip install ray
+```
+
 **1. Deploy the model (2 GPUs example):**
 
 ```bash

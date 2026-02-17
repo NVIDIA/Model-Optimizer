@@ -13,27 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Run lm-eval directly on AnyModel (puzzletron) checkpoints without a deployment server.
+"""Run lm-eval directly on AnyModel (Puzzletron) checkpoints without a deployment server.
 
-AnyModel checkpoints have heterogeneous decoder layers; this script patches
-lm-eval's HFLM to wrap model loading with deci_x_patcher so they load correctly.
-
-Usage:
-    # From the repo root (requires: pip install -e ".[hf,puzzletron]")
-    # Descriptor is auto-detected from the checkpoint's config.json model_type.
-    python examples/puzzletron/evaluation/lm_eval_anymodel.py \
-        --model hf \
-        --model_args pretrained=/path/to/anymodel_checkpoint,dtype=bfloat16,parallelize=True \
-        --tasks mmlu \
-        --num_fewshot 5 \
-        --batch_size 4
-
-    # With sample limit for smoke tests
-    python examples/puzzletron/evaluation/lm_eval_anymodel.py \
-        --model hf \
-        --model_args pretrained=/path/to/anymodel_checkpoint,dtype=bfloat16,parallelize=True \
-        --tasks mmlu \
-        --limit 10
+Patches lm-eval's HFLM to wrap model loading with deci_x_patcher so AnyModel
+Puzzletron checkpoints load correctly. Model descriptor is auto-detected from the
+checkpoint's config.json model_type.
 """
 
 from lm_eval.__main__ import cli_evaluate
