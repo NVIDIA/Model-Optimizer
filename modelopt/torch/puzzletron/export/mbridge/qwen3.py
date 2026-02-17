@@ -21,7 +21,7 @@ from megatron.bridge.models.qwen.qwen3_bridge import Qwen3Bridge
 from megatron.core.models.gpt.gpt_model import GPTModel
 from transformers import Qwen3ForCausalLM
 
-from .anymodel_bridge_base import PuzzletronAnyModelBridgeBase
+from modelopt.torch.puzzletron.export.mbridge.base import PuzzletronAnyModelBridgeBase
 
 
 @MegatronModelBridge.register_bridge(source=Qwen3ForCausalLM, target=GPTModel, model_type="qwen3")

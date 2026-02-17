@@ -21,7 +21,7 @@ from megatron.bridge.models.llama.llama_bridge import LlamaBridge
 from megatron.core.models.gpt.gpt_model import GPTModel
 from transformers import LlamaForCausalLM
 
-from .anymodel_bridge_base import PuzzletronAnyModelBridgeBase
+from modelopt.torch.puzzletron.export.mbridge.base import PuzzletronAnyModelBridgeBase
 
 
 @MegatronModelBridge.register_bridge(source=LlamaForCausalLM, target=GPTModel, model_type="llama")
