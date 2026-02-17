@@ -837,7 +837,6 @@ class LayerActivationGettr:
             output = self._original_forward(*args, **kwargs)
             self.outputs.append(output)
             if getattr(self, "_stop_after_collection", False):
-                print_rank_0("Layer activation getter stopping after collection")
                 raise StopIteration()
             return output
 
@@ -874,11 +873,7 @@ class LayerActivationGettr:
         bind_forward_method(self.model, _early_stop_forward, "_original_forward")
         self._patch_and_initialize_layer(layer, stop_after_collection=True)
         try:
-            print_rank_0(
-                f"Layer activation getter before get_input_activations: {len(layer.inputs)}"
-            )
             forward_loop(self.model)
-            print_rank_0(f"Layer activation getter afterget_input_activations: {len(layer.inputs)}")
             inputs = layer.inputs.copy()
         finally:
             self._unpatch_and_cleanup_layer(layer)
