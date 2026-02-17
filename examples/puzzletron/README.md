@@ -22,6 +22,9 @@ pip install -e .[hf,puzzletron]
 pip install -r examples/puzzletron/requirements.txt
 ```
 
+> **Note:** NeMo containers may ship `nvidia-lm-eval` which may conflict with `lm-eval` that is used for evaluation.
+> If so, run `pip uninstall nvidia-lm-eval -y` before installing requirements.
+
 - For this example we are using 2x NVIDIA H100 80GB HBM3 to show multi-GPU steps. You can use also use s single GPU.
 
 - To make use of [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) and [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2), you need to accept the terms and conditions for the corresponding model and the dataset in the Huggingface Hub. Log in to the Huggingface Hub and enter your HF token.
@@ -229,37 +232,21 @@ The plot shows how token accuracy changes with different compression rates. High
 
 ## Evaluation
 
-Evaluate AnyModel checkpoints by deploying a local OpenAI-compatible completions endpoint and running benchmarks against it.
-
-**1. Deploy the model (2 GPUs example):**
+Evaluate AnyModel checkpoints using [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) directly.
 
 ```bash
-# Install the AnyModel-patched deployable (first time only: backs up the original)
-# /opt/Export-Deploy is the default path in NeMo containers — adjust if needed
-cp /opt/Export-Deploy/nemo_deploy/llm/hf_deployable.py /opt/Export-Deploy/nemo_deploy/llm/hf_deployable.py.bak
-cp examples/puzzletron/evaluation/hf_deployable_anymodel.py /opt/Export-Deploy/nemo_deploy/llm/hf_deployable.py
-
-# Start the server (blocks while running — use a separate terminal)
-ray start --head --num-gpus 2 --port 6379 --disable-usage-stats
-python /opt/Export-Deploy/scripts/deploy/nlp/deploy_ray_hf.py \
-    --model_path path/to/checkpoint \
-    --model_id anymodel-hf \
-    --num_gpus 2 --num_gpus_per_replica 2 --num_cpus_per_replica 16 \
-    --trust_remote_code --port 8083 --device_map "auto" --cuda_visible_devices "0,1"
+python examples/puzzletron/evaluation/lm_eval_anymodel.py \
+    --model hf \
+    --model_args pretrained=path/to/checkpoint,dtype=bfloat16,parallelize=True \
+    --tasks mmlu \
+    --num_fewshot 5 \
+    --batch_size 4
 ```
 
-**2. Run MMLU:**
+For a quick smoke test, add `--limit 10`.
 
-```bash
-eval-factory run_eval \
-    --eval_type mmlu \
-    --model_id anymodel-hf \
-    --model_type completions \
-    --model_url http://0.0.0.0:8083/v1/completions/ \
-    --output_dir examples/puzzletron/evals/mmlu_anymodel
-```
-
-For a quick debug run, add `--overrides "config.params.limit_samples=5"`.
+> **Alternative:** For server-based evaluation via an OpenAI-compatible endpoint,
+> see [evaluation/nemo_evaluator_instructions.md](./evaluation/nemo_evaluator_instructions.md).
 
 ## Inference Performance Benchmarking
 
