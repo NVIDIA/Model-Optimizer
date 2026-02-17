@@ -3,16 +3,9 @@
 > **Recommended approach:** Use lm-eval for direct evaluation without a
 > deployment server. See the main [README](../README.md#evaluation) for details.
 
-This document describes an alternative evaluation flow using NeMo Evaluator.
-It deploys the checkpoint as a local OpenAI-compatible completions endpoint
-and runs evaluation against it.
+Evaluate AnyModel checkpoints by deploying a local OpenAI-compatible completions endpoint and running benchmarks against it.
 
-## Prerequisites
-
-- NeMo container (e.g. `nemo:25.11`) with NeMo Evaluator and NeMo Export-Deploy
-- Ray (`pip install -r examples/puzzletron/requirements.txt`)
-
-## 1. Deploy the model (2 GPUs example)
+**1. Deploy the model (2 GPUs example):**
 
 ```bash
 # Install the AnyModel-patched deployable (first time only: backs up the original)
@@ -29,9 +22,7 @@ python /opt/Export-Deploy/scripts/deploy/nlp/deploy_ray_hf.py \
     --trust_remote_code --port 8083 --device_map "auto" --cuda_visible_devices "0,1"
 ```
 
-Adjust GPU counts and `cuda_visible_devices` to match your node.
-
-## 2. Run MMLU
+**2. Run MMLU:**
 
 ```bash
 eval-factory run_eval \
@@ -39,8 +30,7 @@ eval-factory run_eval \
     --model_id anymodel-hf \
     --model_type completions \
     --model_url http://0.0.0.0:8083/v1/completions/ \
-    --output_dir examples/puzzletron/evals/mmlu_anymodel \
-    --overrides "config.params.task=mmlu,config.params.extra.tokenizer=path/to/checkpoint,config.params.extra.tokenizer_backend=huggingface"
+    --output_dir examples/puzzletron/evals/mmlu_anymodel
 ```
 
-For a quick debug run, add `,config.params.limit_samples=5` to `--overrides`.
+For a quick debug run, add `--overrides "config.params.limit_samples=5"`.
