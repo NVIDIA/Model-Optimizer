@@ -15,10 +15,10 @@
 # limitations under the License.
 
 """
-Base class for Puzzletron AnyModel bridges.
+Mixin class for bridges that support heterogeneous layer architectures.
 
-This module provides shared functionality for converting AnyModel checkpoints
-(heterogeneous layer architectures) to Megatron-Core format.
+This module provides a mixin class for converting models with block_configs
+(heterogeneous layer configurations) to Megatron-Core format via Megatron-Bridge.
 """
 
 import dataclasses
@@ -26,7 +26,6 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 
-import torch
 from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.bridge.models.hf_pretrained.causal_lm import PreTrainedCausalLM
 from megatron.bridge.models.transformer_config import HeterogeneousTransformerConfig
@@ -168,62 +167,6 @@ class HeterogeneousBridgeMixin:
                     # So num_query_groups = num_attention_heads / n_heads_in_group
                     return hf_config.num_attention_heads // n_heads_in_group
         return None
-
-    def _extract_ffn_hidden_size(self, hf_config) -> int | None:
-        """Extract ffn_hidden_size from global config or block_configs."""
-        # Try global config first
-        if hasattr(hf_config, "intermediate_size") and hf_config.intermediate_size is not None:
-            return hf_config.intermediate_size
-
-        # Fall back to block_configs
-        for block in hf_config.block_configs:
-            ffn_config = getattr(block, "ffn", None) or getattr(block, "mlp", None)
-            if ffn_config is not None and hasattr(ffn_config, "intermediate_size"):
-                if ffn_config.intermediate_size is not None:
-                    return ffn_config.intermediate_size
-        return None
-
-    def _get_model_specific_provider_kwargs(self, hf_config, hf_pretrained) -> dict:
-        """
-        Get model-specific provider kwargs.
-
-        Subclasses should override this to add model-specific settings.
-        Base implementation returns empty dict.
-
-        Args:
-            hf_config: HuggingFace model configuration
-            hf_pretrained: HuggingFace pretrained model
-
-        Returns:
-            Dictionary of model-specific provider kwargs
-        """
-        return {}
-
-    def _get_rotary_base_default(self, hf_config) -> float:
-        """
-        Get the default rotary_base value for the model.
-
-        Subclasses should override this if they have a different default.
-
-        Args:
-            hf_config: HuggingFace model configuration
-
-        Returns:
-            Default rotary_base value
-        """
-        return 10000.0
-
-    def _handle_rope_scaling(self, hf_config, provider_kwargs: dict) -> None:
-        """
-        Handle rope scaling configuration.
-
-        Subclasses should override this if they need special rope scaling handling.
-
-        Args:
-            hf_config: HuggingFace model configuration
-            provider_kwargs: Provider kwargs dictionary to update
-        """
-        # Default: no special handling
 
     def _convert_block_config(
         self, block: dict, hf_config, default_num_query_groups: int | None
