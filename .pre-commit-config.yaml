@@ -109,6 +109,7 @@ repos:
               examples/speculative_decoding/main.py|
               examples/speculative_decoding/medusa_utils.py|
               examples/speculative_decoding/server_generate.py|
+              examples/puzzletron/evaluation/hf_deployable_anymodel\.py|
               modelopt/torch/puzzletron/decilm/deci_lm_hf_code/transformers_.*\.py|
           )$
 
