@@ -998,22 +998,31 @@ def _revert_weight_conversion_noop(model: Any, state_dict: dict) -> dict:
     return state_dict
 
 
-def _patch_revert_weight_conversion() -> list[tuple[Any, Any]]:
-    """Patch revert_weight_conversion in transformers to avoid IndexError on scalar tensors."""
+def _try_patch_module(mod_path: str) -> tuple[Any, Any] | None:
+    """Try to patch revert_weight_conversion in a single module."""
     import importlib
 
+    try:
+        mod = importlib.import_module(mod_path)
+        if hasattr(mod, "revert_weight_conversion"):
+            original = getattr(mod, "revert_weight_conversion")
+            setattr(mod, "revert_weight_conversion", _revert_weight_conversion_noop)
+            return (mod, original)
+    except (ImportError, AttributeError):
+        pass
+    return None
+
+
+def _patch_revert_weight_conversion() -> list[tuple[Any, Any]]:
+    """Patch revert_weight_conversion in transformers to avoid IndexError on scalar tensors."""
     patches: list[tuple[Any, Any]] = []
     for mod_path in [
         "transformers.core_model_loading",
         "transformers.modeling_utils",
     ]:
-        try:
-            mod = importlib.import_module(mod_path)
-            if hasattr(mod, "revert_weight_conversion"):
-                patches.append((mod, getattr(mod, "revert_weight_conversion")))
-                setattr(mod, "revert_weight_conversion", _revert_weight_conversion_noop)
-        except (ImportError, AttributeError):
-            pass
+        result = _try_patch_module(mod_path)
+        if result is not None:
+            patches.append(result)
     return patches
 
 
