@@ -450,10 +450,40 @@ class _QuantSparseMoe(QuantModule):
     """
 
     def _setup(self):
-        pass
+        num_experts = 0
+        if hasattr(self, "gate") and hasattr(self.gate, "num_experts"):
+            num_experts = self.gate.num_experts
+        elif hasattr(self, "num_experts"):
+            num_experts = self.num_experts
+        elif hasattr(self, "experts") and hasattr(self.experts, "num_experts"):
+            num_experts = self.experts.num_experts
+
+        self.expert_token_count = torch.zeros(num_experts, dtype=torch.long, device="cpu")
+        self._count_expert_tokens = False
+
+        if hasattr(self, "gate"):
+            self.gate.register_forward_hook(self._gate_forward_hook)
+
+    def _gate_forward_hook(self, module, input, output):
+        if not self._count_expert_tokens:
+            return
+        with torch.no_grad():
+            if isinstance(output, tuple) and len(output) >= 3:
+                # v5.x TopKRouter: returns (logits, scores, indices)
+                indices = output[2]
+            else:
+                # v4.x nn.Linear gate: returns logits tensor
+                logits = output if not isinstance(output, tuple) else output[0]
+                top_k = self.gate.top_k if hasattr(self.gate, "top_k") else self.top_k
+                _, indices = torch.topk(logits.float(), top_k, dim=-1)
+            counts = torch.bincount(
+                indices.reshape(-1).cpu(), minlength=len(self.expert_token_count)
+            )
+            self.expert_token_count += counts
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if any(getattr(m, "_if_calib", False) for m in self.experts.modules()):
+        is_calib = any(getattr(m, "_if_calib", False) for m in self.experts.modules())
+        if is_calib:
             # If any of the experts are in calibration mode, we will forward all tokens to all experts
             # This is used only for calibration, we need to re-calculate the actual outputs again using
             # the original top_k
@@ -475,7 +505,11 @@ class _QuantSparseMoe(QuantModule):
                     raise ValueError(f"Could not find num_experts in module {self}")
                 super().forward(hidden_states)
                 self.top_k = original_top_k
-        return super().forward(hidden_states)
+        # Enable counting only for the real-routing forward during calibration
+        self._count_expert_tokens = is_calib
+        output = super().forward(hidden_states)
+        self._count_expert_tokens = False
+        return output
 
 
 class _QuantLlama4TextExperts(QuantModule):
