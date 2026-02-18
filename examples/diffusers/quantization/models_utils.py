@@ -29,6 +29,7 @@ from utils import (
     filter_func_default,
     filter_func_flux_dev,
     filter_func_ltx_video,
+    filter_func_qwen_image,
     filter_func_wan_video,
 )
 
@@ -46,6 +47,7 @@ class ModelType(str, Enum):
     LTX2 = "ltx-2"
     WAN22_T2V_14b = "wan2.2-t2v-14b"
     WAN22_T2V_5b = "wan2.2-t2v-5b"
+    QWEN_IMAGE_2512 = "qwen-image-2512"
 
 
 def get_model_filter_func(model_type: ModelType) -> Callable[[str], bool]:
@@ -69,6 +71,7 @@ def get_model_filter_func(model_type: ModelType) -> Callable[[str], bool]:
         ModelType.LTX2: filter_func_ltx_video,
         ModelType.WAN22_T2V_14b: filter_func_wan_video,
         ModelType.WAN22_T2V_5b: filter_func_wan_video,
+        ModelType.QWEN_IMAGE_2512: filter_func_qwen_image,
     }
 
     return filter_func_map.get(model_type, filter_func_default)
@@ -86,6 +89,7 @@ MODEL_REGISTRY: dict[ModelType, str] = {
     ModelType.LTX2: "Lightricks/LTX-2",
     ModelType.WAN22_T2V_14b: "Wan-AI/Wan2.2-T2V-A14B-Diffusers",
     ModelType.WAN22_T2V_5b: "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+    ModelType.QWEN_IMAGE_2512: "Qwen/Qwen-Image-2512",
 }
 
 MODEL_PIPELINE: dict[ModelType, type[DiffusionPipeline] | None] = {
@@ -99,6 +103,7 @@ MODEL_PIPELINE: dict[ModelType, type[DiffusionPipeline] | None] = {
     ModelType.LTX2: None,
     ModelType.WAN22_T2V_14b: WanPipeline,
     ModelType.WAN22_T2V_5b: WanPipeline,
+    ModelType.QWEN_IMAGE_2512: DiffusionPipeline,
 }
 
 # Shared dataset configurations
@@ -191,6 +196,16 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
                 "static image, cluttered background, three legs, many people in the background, "
                 "walking backwards"
             ),
+        },
+    },
+    ModelType.QWEN_IMAGE_2512: {
+        "backbone": "transformer",
+        "dataset": _SD_PROMPTS_DATASET,
+        "inference_extra_args": {
+            "height": 1024,
+            "width": 1024,
+            "guidance_scale": 4.0,
+            "negative_prompt": "低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲。",
         },
     },
     ModelType.WAN22_T2V_5b: {
