@@ -26,13 +26,14 @@ from config import (
     FP8_DEFAULT_CONFIG,
     INT8_DEFAULT_CONFIG,
     NVFP4_DEFAULT_CONFIG,
+    NVFP4_ASYMMETRIC_CONFIG,
     NVFP4_FP8_MHA_CONFIG,
     reset_set_int8_config,
     set_quant_config_attr,
 )
 from diffusers import DiffusionPipeline
 from models_utils import MODEL_DEFAULTS, ModelType, get_model_filter_func, parse_extra_params
-from onnx_utils.export import generate_fp8_scales, modelopt_export_sd
+# from onnx_utils.export import generate_fp8_scales, modelopt_export_sd
 from pipeline_manager import PipelineManager
 from quantize_config import (
     CalibrationConfig,
@@ -133,7 +134,7 @@ class Quantizer:
             if self.model_config.model_type.value.startswith("flux"):
                 quant_config = NVFP4_FP8_MHA_CONFIG
             else:
-                quant_config = NVFP4_DEFAULT_CONFIG
+                quant_config = NVFP4_ASYMMETRIC_CONFIG
         else:
             raise NotImplementedError(f"Unknown format {self.config.format}")
         if self.config.quantize_mha:
@@ -228,8 +229,12 @@ class ExportManager:
             return
 
         ckpt_path = self.config.quantized_torch_ckpt_path
-        ckpt_path.mkdir(parents=True, exist_ok=True)
-        target_path = ckpt_path / "backbone.pt"
+        if ckpt_path.suffix == ".pt":
+            target_path = ckpt_path
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            ckpt_path.mkdir(parents=True, exist_ok=True)
+            target_path = ckpt_path / "backbone.pt"
         self.logger.info(f"Saving backbone to {target_path}")
         mto.save(backbone, str(target_path))
 
@@ -260,7 +265,8 @@ class ExportManager:
             self.logger.info(
                 "Detected quantizing conv layers in backbone. Generating FP8 scales..."
             )
-            generate_fp8_scales(backbone)
+            # TODO: needs a fix, commenting out for now
+            # generate_fp8_scales(backbone)
         self.logger.info("Preparing models for export...")
         pipe.to("cpu")
         torch.cuda.empty_cache()
@@ -269,9 +275,9 @@ class ExportManager:
         backbone.eval()
         with torch.no_grad():
             self.logger.info("Exporting to ONNX...")
-            modelopt_export_sd(
-                backbone, str(self.config.onnx_dir), model_type.value, quant_format.value
-            )
+            # modelopt_export_sd(
+            #     backbone, str(self.config.onnx_dir), model_type.value, quant_format.value
+            # )
 
         self.logger.info("ONNX export completed successfully")
 

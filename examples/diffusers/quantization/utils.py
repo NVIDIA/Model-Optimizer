@@ -44,6 +44,14 @@ def filter_func_default(name: str) -> bool:
     return pattern.match(name) is not None
 
 
+def filter_func_qwen_image(name: str) -> bool:
+    """Qwen-Image filter: disable only the 6 standalone layers outside transformer blocks."""
+    pattern = re.compile(
+        r".*(time_text_embed|img_in|txt_in|norm_out|proj_out).*"
+    )
+    return pattern.match(name) is not None
+
+
 def check_conv_and_mha(backbone, if_fp4, quantize_mha):
     for name, module in backbone.named_modules():
         if isinstance(module, (torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d)) and if_fp4:

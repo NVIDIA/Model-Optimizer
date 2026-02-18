@@ -59,3 +59,6 @@ venv/
 **.pickle
 **.tar.gz
 **.nemo
+
+# Ignore experiment run
+examples/diffusers/quantization/experiment_run
