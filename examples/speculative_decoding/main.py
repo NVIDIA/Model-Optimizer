@@ -165,10 +165,10 @@ def train():
     use_offline_training = data_args.offline_data_path is not None
 
     if checkpoint:
-        patch_transformers5_params_loading()
-        _, model = load_vlm_or_llm_with_kwargs(
-            checkpoint, torch_dtype="auto", trust_remote_code=True
-        )
+        with patch_transformers5_params_loading():
+            _, model = load_vlm_or_llm_with_kwargs(
+                checkpoint, torch_dtype="auto", trust_remote_code=True
+            )
         tokenizer = transformers.AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
     else:
         # To avoid OOM for large models, we load and convert model on CPU first.

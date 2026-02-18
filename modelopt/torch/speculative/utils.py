@@ -487,6 +487,7 @@ def load_vlm_or_llm_with_kwargs(model_name_or_path: str, **kwargs):
     return model_config, model_cls.from_pretrained(model_name_or_path, **kwargs)
 
 
+@contextlib.contextmanager
 def patch_transformers5_params_loading():
     """Patch transformers 5.x parameter loading to preserve original `requires_grad` settings.
 
@@ -522,4 +523,8 @@ def patch_transformers5_params_loading():
         # Restore original requires_grad value
         getattr(module_obj, param_name).requires_grad = orig_requires_grad
 
-    core_model_loading.set_param_for_module = patched_set_param_for_module
+    try:
+        core_model_loading.set_param_for_module = patched_set_param_for_module
+        yield
+    finally:
+        core_model_loading.set_param_for_module = orig_set_param_for_module
