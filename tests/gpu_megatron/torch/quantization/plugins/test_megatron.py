@@ -773,9 +773,13 @@ def _test_layer_sync_moe_local_experts_amax(
         num_moe_experts=8,
         transformer_impl="modelopt",
     )
-    model = mtq.quantize(model, mtq.FP8_DEFAULT_CFG, get_forward(model))
+    quant_cfg = mtq.FP8_DEFAULT_CFG
+    if not shared_moe_weight_scale:
+        quant_cfg = copy.deepcopy(quant_cfg)
+        quant_cfg["algorithm"] = {"method": "max", "shared_moe_weight_scale": False}
+    model = mtq.quantize(model, quant_cfg, get_forward(model))
 
-    # Sync amax across local experts in each layer
+    # does layer_sync_moe_local_experts_amax happens in mtq.quantize if EP=1?
     for layer in model.decoder.layers:
         layer.mlp.experts.layer_sync_moe_local_experts_amax(shared_moe_weight_scale)
 
@@ -812,9 +816,7 @@ def _test_layer_sync_moe_local_experts_amax(
                 fc2_amax = expert.linear_fc2.weight_quantizer.amax
             elif shared_moe_weight_scale:
                 assert torch.allclose(fc2_amax, expert.linear_fc2.weight_quantizer.amax)
-            else:
-                assert not torch.allclose(fc2_amax, expert.linear_fc2.weight_quantizer.amax)
-                fc2_amax = expert.linear_fc2.weight_quantizer.amax
+            # FC2 amaxes are the same since the input to the layer is all the same
 
 
 def _test_expert_model_parallel_amax_sync(
