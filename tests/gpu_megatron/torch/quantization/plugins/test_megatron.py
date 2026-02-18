@@ -794,21 +794,27 @@ def _test_layer_sync_moe_local_experts_amax(
             else:
                 assert torch.allclose(fc2_amax, expert.linear_fc2.input_quantizer.amax)
 
-    if shared_moe_weight_scale:
-        for layer in model.decoder.layers:
-            fc1_amax = None
-            fc2_amax = None
-            for expert in layer.mlp.experts.local_experts:
-                assert expert.linear_fc1.weight_quantizer.amax is not None
-                assert expert.linear_fc2.weight_quantizer.amax is not None
-                if fc1_amax is None:
-                    fc1_amax = expert.linear_fc1.weight_quantizer.amax
-                else:
-                    assert torch.allclose(fc1_amax, expert.linear_fc1.weight_quantizer.amax)
-                if fc2_amax is None:
-                    fc2_amax = expert.linear_fc2.weight_quantizer.amax
-                else:
-                    assert torch.allclose(fc2_amax, expert.linear_fc2.weight_quantizer.amax)
+    for layer in model.decoder.layers:
+        fc1_amax = None
+        fc2_amax = None
+        for expert in layer.mlp.experts.local_experts:
+            assert expert.linear_fc1.weight_quantizer.amax is not None
+            assert expert.linear_fc2.weight_quantizer.amax is not None
+            if fc1_amax is None:
+                fc1_amax = expert.linear_fc1.weight_quantizer.amax
+            elif shared_moe_weight_scale:
+                assert torch.allclose(fc1_amax, expert.linear_fc1.weight_quantizer.amax)
+            else:
+                assert not torch.allclose(fc1_amax, expert.linear_fc1.weight_quantizer.amax)
+                fc1_amax = expert.linear_fc1.weight_quantizer.amax  # update most recent amax
+
+            if fc2_amax is None:
+                fc2_amax = expert.linear_fc2.weight_quantizer.amax
+            elif shared_moe_weight_scale:
+                assert torch.allclose(fc2_amax, expert.linear_fc2.weight_quantizer.amax)
+            else:
+                assert not torch.allclose(fc2_amax, expert.linear_fc2.weight_quantizer.amax)
+                fc2_amax = expert.linear_fc2.weight_quantizer.amax
 
 
 def _test_expert_model_parallel_amax_sync(
