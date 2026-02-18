@@ -13,22 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Plugins for sparse attention integration with various frameworks."""
+"""Calibration framework for sparse attention methods."""
 
-# List of model plugins that are called during conversion
-# Each plugin is a callable that takes (model) and performs validation/setup
-CUSTOM_MODEL_PLUGINS: list = []
-
-
-def register_custom_model_plugins_on_the_fly(model):
-    """Applies all registered custom model plugins."""
-    for callback in CUSTOM_MODEL_PLUGINS:
-        callback(model)
-
-
-from . import huggingface  # noqa: E402
+from .calibrate import calibrate_sparse_attention
+from .calibrator import DynamicThresholdCalibrator
+from .ruler_dataset import RulerDatasetBuilder
 
 __all__ = [
-    "CUSTOM_MODEL_PLUGINS",
-    "register_custom_model_plugins_on_the_fly",
+    "DynamicThresholdCalibrator",
+    "RulerDatasetBuilder",
+    "calibrate_sparse_attention",
 ]

@@ -179,6 +179,7 @@ class SeqToSeqModel(EvalModel):
     lora_path: str = ""
     device: str = "cuda"
     load_8bit: bool = False
+    attn_implementation: str | None = None
 
     def load(self):
         if self.model is None:
@@ -188,6 +189,8 @@ class SeqToSeqModel(EvalModel):
             if self.load_8bit:
                 args.update(device_map="auto", load_in_8bit=True)
             args.update(torch_dtype=getattr(torch, self.dtype) if self.dtype != "auto" else "auto")
+            if self.attn_implementation:
+                args["attn_implementation"] = self.attn_implementation
             self.model = AutoModelForSeq2SeqLM.from_pretrained(self.model_path, **args)
             print_gpu_utilization()
             if self.lora_path:
@@ -241,6 +244,8 @@ class CausalModel(SeqToSeqModel):
             if self.load_8bit:
                 args.update(device_map="auto", load_in_8bit=True)
             args.update(torch_dtype=getattr(torch, self.dtype) if self.dtype != "auto" else "auto")
+            if self.attn_implementation:
+                args["attn_implementation"] = self.attn_implementation
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_path, trust_remote_code=True, **args
             )

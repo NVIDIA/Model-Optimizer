@@ -20,6 +20,7 @@ processing pattern for optimal performance.
 """
 
 import math
+from typing import Any
 
 import numpy as np
 import torch
@@ -42,9 +43,10 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             method_config: Configuration dict with threshold, br, bc, is_causal, etc.
                           All required fields should have defaults from SparseAttentionAttributeConfig.
         """
+        super().__init__()
         config = method_config or {}
 
-        # Extract configuration (defaults handled by Pydantic)
+        # Extract configuration
         self.threshold_config = config["threshold"]
         self.br = config["br"]
         self.bc = config["bc"]
@@ -52,23 +54,21 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         self.is_causal = config["is_causal"]
 
         # Optional parameters not in Pydantic config
-        self.enable_correction_factor = config.get("enable_correction_factor", True)
         self.phase = config.get("phase", None)
 
-        # Initialize threshold
-        if isinstance(self.threshold_config, dict):
-            self.threshold = self.threshold_config.get(
-                "default", self.threshold_config.get("prefill", 1e-4)
-            )
-        else:
-            self.threshold = self.threshold_config
+        # Initialize threshold from dict config (prefill phase as default)
+        self.threshold = self.threshold_config.get("prefill", 1e-3)
+
+        # Calibration mode flag (prevents threshold updates during calibration)
+        self._calibration_mode = False
+
+    def set_calibration_mode(self, enabled: bool):
+        """Set calibration mode to prevent _update_threshold from modifying the threshold."""
+        self._calibration_mode = enabled
 
     def _update_threshold(self, phase: str):
         """Update threshold based on phase."""
-        if isinstance(self.threshold_config, dict):
-            self.threshold = self.threshold_config.get(
-                phase, self.threshold_config.get("default", self.threshold)
-            )
+        self.threshold = self.threshold_config.get(phase, self.threshold)
 
     def _infer_phase(self, attention_scores: torch.Tensor) -> str:
         """Infer phase from attention scores shape."""
@@ -133,12 +133,23 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         batch_size, num_heads, seq_q, seq_k = attn_weights.shape
 
         # Calculate threshold
-        threshold_scale_factor = getattr(self, "threshold_scale_factor", None)
-        if threshold_scale_factor:
-            # Use calibrated dynamic threshold: λ = scale_factor / length
-            log_threshold = np.log(threshold_scale_factor / seq_k)
+        calibration_params = self.calibration_params
+        target_sparse_ratio = self.target_sparse_ratio
+
+        if (
+            calibration_params is not None
+            and phase in calibration_params
+            and target_sparse_ratio is not None
+        ):
+            # Use calibrated a, b to compute dynamic threshold
+            # Exponential model: scale_factor = a * exp(b * target_sparsity)
+            a = calibration_params[phase]["a"]
+            b = calibration_params[phase]["b"]
+            target_sparsity = target_sparse_ratio.get(phase, 0.5)
+            scale_factor = a * np.exp(b * target_sparsity)
+            log_threshold = np.log(scale_factor / seq_k)
         else:
-            # Use static threshold from config
+            # Use static threshold from config (no calibration or phase not calibrated)
             log_threshold = np.log(self.threshold)
 
         if phase == "prefill":
@@ -161,7 +172,7 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             # Used by Flash Attention to adjust running sum when max increases
             block_max_larger = torch.ones_like(block_max)
             block_max_larger[..., 1:] = block_max[..., 1:] > block_max_cummax[..., :-1]
-            correction_factor = float(torch.sum(block_max_larger) / torch.numel(block_max_larger))
+            correction_factor = (block_max_larger.sum() / block_max_larger.numel()).item()
 
             # Step 4: Normalize attention scores by cumulative max
             # p represents log-space difference: log(score) - log(cummax)
@@ -184,18 +195,17 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             element_mask = element_mask[:, :, :seq_q, :seq_k]
 
             # Step 8: Calculate sparsity statistics
-            # Count kept blocks (averaged across batch and heads)
-            kept_blocks = block_mask.sum().item() / (batch_size * num_heads)
-
-            # Total valid blocks (lower triangle only for causal attention)
-            # Note: Causal mask pre-applied by attention module, so block_mask naturally
-            # has zeros in upper triangle. We only count lower triangle for denominator.
-            total_blocks = (
-                num_block_rows * (num_block_rows + 1) // 2  # Causal: N(N+1)/2
-                if self.is_causal
-                else num_block_rows * num_block_cols  # Non-causal: N*N
-            )
-            sparsity = 1 - (kept_blocks / total_blocks)
+            if self.is_causal:
+                # For causal attention, only count lower triangle blocks (including diagonal)
+                num_causal_blocks = num_block_rows * (2 * num_block_cols - num_block_rows + 1) // 2
+                total_valid_blocks = batch_size * num_heads * num_causal_blocks
+                dense_blocks = block_mask.sum()
+                total_blocks = num_causal_blocks
+            else:
+                dense_blocks = block_mask.sum()  # Keep as tensor
+                total_valid_blocks = block_mask.numel()
+                total_blocks = num_block_rows * num_block_cols
+            sparsity = 1.0 - dense_blocks.item() / total_valid_blocks
         else:  # decode
             blocked_attn, _, num_block_cols, _, padded_seq_k = self._reshape_to_blocks(
                 attn_weights, 1, self.bc
@@ -216,7 +226,7 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             # Tracks how often the maximum increases (needed for Flash Attention rescaling)
             block_max_larger = torch.ones_like(block_max)
             block_max_larger[..., 1:] = block_max[..., 1:] > block_max_cummax[..., :-1]
-            correction_factor = float(torch.sum(block_max_larger) / torch.numel(block_max_larger))
+            correction_factor = (block_max_larger.sum() / block_max_larger.numel()).item()
 
             # Step 4: Normalize scores by cumulative max
             # p = log(score) - log(cummax) in log-space
@@ -232,14 +242,15 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             element_mask = element_mask.reshape(batch_size, num_heads, 1, padded_seq_k)
             element_mask = element_mask[:, :, :seq_q, :seq_k]
 
-            # Step 7: Calculate statistics
-            kept_blocks = block_mask.sum().item() / (batch_size * num_heads)
+            # Step 7: Calculate sparsity statistics
+            dense_blocks = block_mask.sum()
+            total_valid_blocks = block_mask.numel()
+            sparsity = 1.0 - dense_blocks.item() / total_valid_blocks
             total_blocks = num_block_cols
-            sparsity = 1 - (kept_blocks / total_blocks)
 
         # Create stats dictionary
         stats = {
-            "correction_factor": correction_factor if self.enable_correction_factor else 1.0,
+            "correction_factor": correction_factor,
             "sparsity": sparsity,
             "phase": phase,
             "total_blocks": total_blocks,
@@ -249,27 +260,18 @@ class FlashSkipSoftmax(SparseAttentionMethod):
 
         return element_mask, stats
 
-    def apply_sparsity(
+    def calculate_sparsity(
         self,
-        query: torch.Tensor | None = None,
-        key: torch.Tensor | None = None,
-        value: torch.Tensor | None = None,
-        attention_scores: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        """Apply Flash Attention-aware block-wise sparsity.
+        attention_scores: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict]:
+        """Calculate sparsity mask and statistics for Flash Attention.
 
         Args:
-            query: Query tensor (unused, for API compatibility)
-            key: Key tensor (unused, for API compatibility)
-            value: Value tensor (unused, for API compatibility)
             attention_scores: Attention scores tensor with shape [batch, heads, seq_q, seq_k]
 
         Returns:
-            Tuple with potentially modified attention_scores
+            Tuple of (sparse_mask, stats) where sparse_mask is boolean mask
         """
-        # Attention scores must be provided for sparse attention
-        assert attention_scores is not None, "attention_scores must be provided for apply_sparsity"
-
         # Attention scores are always 4D: [batch, heads, seq_q, seq_k]
         assert len(attention_scores.shape) == 4, (
             f"Expected 4D attention scores, got shape {attention_scores.shape}"
@@ -278,20 +280,78 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         # Infer phase from tensor shape
         phase = self._infer_phase(attention_scores)
 
-        # Update threshold for the detected phase
-        self._update_threshold(phase)
+        # Update threshold for the detected phase (skip during calibration)
+        if not self._calibration_mode:
+            self._update_threshold(phase)
 
-        # Apply block-wise sparsity
+        # Calculate block-wise sparsity mask and stats
         sparse_mask, stats = self.calc_correction_factor_and_p(attention_scores, phase)
 
-        # Store stats for module to collect (doesn't persist across calls)
+        # Store stats for module to collect
         self._last_stats = stats
 
-        # Apply mask to create sparse scores
-        mask_value = torch.finfo(attention_scores.dtype).min
-        sparse_scores = attention_scores.masked_fill(~sparse_mask, mask_value)
+        return sparse_mask, stats
 
-        return query, key, value, sparse_scores
+    def apply_sparsity(
+        self,
+        attention_scores: torch.Tensor,
+        sparse_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Apply sparsity mask to attention scores.
+
+        Args:
+            attention_scores: Attention scores tensor [batch, heads, seq_q, seq_k]
+            sparse_mask: Optional pre-computed boolean mask. If None, calculates internally.
+
+        Returns:
+            Masked attention scores with sparse elements set to dtype minimum
+        """
+        if sparse_mask is None:
+            sparse_mask, _ = self.calculate_sparsity(attention_scores)
+
+        # Apply mask: set masked positions to minimum value (becomes 0 after softmax)
+        mask_value = torch.finfo(attention_scores.dtype).min
+        return attention_scores.masked_fill(~sparse_mask, mask_value)
+
+    def get_threshold_info(self) -> dict[str, Any]:
+        """Get threshold information for this method.
+
+        Returns:
+            Dictionary with threshold configuration and calibration info.
+        """
+        calibration_params = self.calibration_params
+        target_sparse_ratio = self.target_sparse_ratio
+
+        if calibration_params is not None and target_sparse_ratio is not None:
+            # Per-phase calibrated dynamic threshold using Exponential model
+            example_lengths = [1024, 4096, 16384, 65536, 131072]
+            phase_info = {}
+            for phase, params in calibration_params.items():
+                a, b = params["a"], params["b"]
+                target_sparsity = target_sparse_ratio.get(phase, 0.5)
+                scale_factor = a * np.exp(b * target_sparsity)
+                phase_info[phase] = {
+                    "a": a,
+                    "b": b,
+                    "target_sparsity": target_sparsity,
+                    "scale_factor": scale_factor,
+                    "example_thresholds": {
+                        length: scale_factor / length for length in example_lengths
+                    },
+                }
+            return {
+                "type": "dynamic_calibrated",
+                "formula": "threshold = a * exp(b * target_sparsity) / seqlen",
+                "calibration_params": calibration_params,
+                "target_sparse_ratio": target_sparse_ratio,
+                "phases": phase_info,
+            }
+        else:
+            # Static threshold (single value or phase-specific dict)
+            return {
+                "type": "static",
+                "value": self.threshold_config,
+            }
 
     @property
     def name(self) -> str:
