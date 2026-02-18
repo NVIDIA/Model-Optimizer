@@ -198,16 +198,6 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
             ),
         },
     },
-    ModelType.QWEN_IMAGE_2512: {
-        "backbone": "transformer",
-        "dataset": _SD_PROMPTS_DATASET,
-        "inference_extra_args": {
-            "height": 1024,
-            "width": 1024,
-            "guidance_scale": 4.0,
-            "negative_prompt": "低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲。",  # noqa: RUF001
-        },
-    },
     ModelType.WAN22_T2V_5b: {
         **_WAN_BASE_CONFIG,
         "inference_extra_args": {
@@ -221,6 +211,16 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
                 "，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，"  # noqa: RUF001
                 "手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"  # noqa: RUF001
             ),
+        },
+    },
+    ModelType.QWEN_IMAGE_2512: {
+        "backbone": "transformer",
+        "dataset": _SD_PROMPTS_DATASET,
+        "inference_extra_args": {
+            "height": 1024,
+            "width": 1024,
+            "guidance_scale": 4.0,
+            "negative_prompt": "低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲。",  # noqa: RUF001
         },
     },
 }
