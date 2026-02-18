@@ -45,7 +45,7 @@ def filter_func_default(name: str) -> bool:
 
 
 def filter_func_qwen_image(name: str) -> bool:
-    """Qwen-Image filter: disable only the 5 standalone layers outside transformer blocks."""
+    """Qwen-Image filter: disable the 5 standalone modules outside transformer blocks (time_text_embed covers 2 sublayers)."""
     pattern = re.compile(
         r".*(time_text_embed|img_in|txt_in|norm_out|proj_out).*"
     )
