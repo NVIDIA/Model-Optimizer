@@ -99,5 +99,5 @@ def skip_if_onnx_version_above_1_18():
 
     if version.parse(installed_version) > version.parse(required_version):
         pytest.skip(
-            f"{package_name} version {installed_version} is less than required {required_version}"
+            f"{package_name} version {installed_version} is greater than required {required_version}"
         )
