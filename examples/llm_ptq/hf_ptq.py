@@ -53,6 +53,7 @@ from modelopt.torch.export import (
     export_hf_checkpoint,
     export_tensorrt_llm_checkpoint,
     get_model_type,
+    save_expert_token_count_table,
 )
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg, need_calibration
@@ -727,6 +728,7 @@ def post_quantize(
 
     if args.verbose:
         mtq.print_quant_summary(full_model)
+        save_expert_token_count_table(full_model, args.export_path)
 
     # Run some samples
     torch.cuda.empty_cache()

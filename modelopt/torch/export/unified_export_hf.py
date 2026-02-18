@@ -76,7 +76,6 @@ from .model_config import (
     QUANTIZATION_W4A8_NVFP4_FP8,
 )
 from .model_utils import get_language_model_from_vl, is_multimodal_model
-from .moe_utils import save_expert_token_count_table
 from .plugins import export_spec_ckpt_config, export_spec_ckpt_state_dict, spec_opt_only
 from .quant_utils import (
     fuse_prequant_layernorm,
@@ -1003,8 +1002,6 @@ def export_hf_checkpoint(
 
     try:
         post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype)
-
-        save_expert_token_count_table(model, export_dir)
 
         if hf_quant_config is not None:
             # Save hf_quant_config.json for backward compatibility
