@@ -48,6 +48,7 @@ from transformers.trainer_utils import get_last_checkpoint
 
 import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
+from modelopt.torch.speculative.utils import load_vlm_or_llm_with_kwargs
 from modelopt.torch.utils import print_rank_0
 
 torch.manual_seed(0)
@@ -76,9 +77,9 @@ class DataArguments:
         },
     )
     lazy_preprocess: bool = True
-    draft_vocab_cache_dir: str = field(
-        default="draft_vocab_cache",
-        metadata={"help": "Path to the d2t cache directory."},
+    draft_vocab_cache: str | None = field(
+        default=None,
+        metadata={"help": "Path to d2t.pt cache file."},
     )
     vlm_img_dir: str = field(default=None, metadata={"help": "Path to the VLM image directory."})
     vlm_processor: str = field(default=None, metadata={"help": "Path to the VLM processor."})
@@ -97,7 +98,7 @@ class TrainingArguments(transformers.TrainingArguments):
     )
     dataloader_drop_last: bool = field(default=True)
     bf16: bool = field(default=True)
-    mode: Literal["eagle1", "eagle3", "medusa"] = "eagle3"
+    mode: Literal["eagle3", "medusa"] = "eagle3"
     estimate_ar: bool = field(
         default=False, metadata={"help": "Whether to estimate AR during training for logging."}
     )
@@ -147,22 +148,21 @@ def train():
         training_args.parallelism_config.sp_backend = None
     print_rank_0(f"arguments: {model_args}, {training_args}, {medusa_args}, {eagle_args}")
 
-    # Detecting last checkpoint.
-    last_checkpoint = None
-    if os.path.isdir(training_args.output_dir):
-        last_checkpoint = get_last_checkpoint(training_args.output_dir)
+    # Detect checkpoint to resume from
+    last_checkpoint = (
+        get_last_checkpoint(training_args.output_dir)
+        if os.path.isdir(training_args.output_dir)
+        else None
+    )
+    if last_checkpoint:
         print_rank_0(f"Last checkpoint detected: {last_checkpoint}")
 
-    checkpoint = None
-    if training_args.resume_from_checkpoint is not None:
-        checkpoint = training_args.resume_from_checkpoint
-    elif last_checkpoint is not None:
-        checkpoint = last_checkpoint
+    checkpoint = training_args.resume_from_checkpoint or last_checkpoint
 
     use_offline_training = data_args.offline_data_path is not None
 
     if checkpoint:
-        model = transformers.AutoModelForCausalLM.from_pretrained(
+        _, model = load_vlm_or_llm_with_kwargs(
             checkpoint, torch_dtype="auto", trust_remote_code=True
         )
         tokenizer = transformers.AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
@@ -170,7 +170,7 @@ def train():
         # To avoid OOM for large models, we load and convert model on CPU first.
         # Model will be moved to GPU during HF trainer.init().
         offline_kwargs = {"num_hidden_layers": 0} if use_offline_training else {}
-        model = transformers.AutoModelForCausalLM.from_pretrained(
+        model_config, model = load_vlm_or_llm_with_kwargs(
             model_args.model_name_or_path,
             torch_dtype="auto",
             device_map="cpu",
@@ -180,79 +180,48 @@ def train():
         if use_offline_training:
             # When doing offline training, we need to set num_hidden_layers
             # since we override it when loading the model for space savings
-            model_config = transformers.AutoConfig.from_pretrained(
-                model_args.model_name_or_path, trust_remote_code=True
-            )
             model.config.num_orig_hidden_layers = model_config.num_hidden_layers
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_args.model_name_or_path,
             model_max_length=training_args.training_seq_len,
             trust_remote_code=True,
         )
-        if tokenizer.chat_template is None:
-            tokenizer.chat_template = (
-                "{%- for message in messages %}"
-                "{{- '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n' }}"
-                "{%- endfor %}"
-            )
-        if tokenizer.pad_token_id is None:
-            tokenizer.pad_token_id = tokenizer.eos_token_id
-
         if training_args.mode == "medusa":
             config = {
                 "medusa_num_heads": medusa_args.medusa_num_heads,
                 "medusa_num_layers": medusa_args.medusa_num_layers,
             }
             mtsp.convert(model, [("medusa", config)])
-        elif training_args.mode in ["eagle1", "eagle3"]:
-            from modelopt.torch.speculative.config import (
-                default_eagle_config,
-                eagle3_default_config,
-                kimik2_eagle_default_config,
+        elif training_args.mode == "eagle3":
+            custom_config = (
+                json.load(open(eagle_args.eagle_config)) if eagle_args.eagle_config else {}
             )
-
-            if eagle_args.eagle_decoder_type == "kimik2":
-                eagle_architecture_config = kimik2_eagle_default_config
-            else:
-                eagle_architecture_config = {
-                    "eagle1": default_eagle_config,
-                    "eagle3": eagle3_default_config,
-                }[training_args.mode]
-
-            if eagle_args.eagle_config:
-                with open(eagle_args.eagle_config) as f:
-                    custom_config = json.load(f)
-                eagle_architecture_config.update(custom_config)
 
             config = {
                 "eagle_decoder_type": eagle_args.eagle_decoder_type,
                 "eagle_offline": use_offline_training,
-                "eagle_architecture_config": eagle_architecture_config,
+                "eagle_architecture_config": custom_config,
             }
 
             mtsp.convert(model, [("eagle", config)])
 
             # read draft vocab cache
             if model.eagle_config.draft_vocab_size < model.eagle_config.vocab_size:
-                try:
-                    model_name = os.path.basename(os.path.normpath(model_args.model_name_or_path))
-                    vocab_cache_path = os.path.join(
-                        data_args.draft_vocab_cache_dir, model_name, "d2t.pt"
+                if not os.path.isfile(data_args.draft_vocab_cache):
+                    raise FileNotFoundError(
+                        f"Draft vocab cache provided but not found: {data_args.draft_vocab_cache}"
                     )
-                    vocab_cache = torch.load(vocab_cache_path)
-                    model.eagle_module.d2t = vocab_cache
-                    print_rank_0(f"Loaded draft vocab cache from {vocab_cache_path}.")
-                except Exception as e:
-                    raise e
+                model.eagle_module.d2t = torch.load(data_args.draft_vocab_cache)
+                print_rank_0(f"Loaded draft vocab cache from {data_args.draft_vocab_cache}.")
         else:
             raise Exception(f"{training_args.mode} is not supported!")
 
     print_rank_0("Loading dataset...")
     if training_args.mode == "medusa":
         data_module = make_medusa_supervised_data_module(tokenizer, data_args)
-    elif training_args.mode in ["eagle1", "eagle3"]:
+    elif training_args.mode == "eagle3":
         data_module = make_eagle_supervised_data_module(
-            tokenizer, data_args, max_length=training_args.training_seq_len
+            tokenizer, data_args, train_len=training_args.training_seq_len
         )
 
     trainer = EagleTrainerWithAccLog(

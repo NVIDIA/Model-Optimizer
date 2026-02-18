@@ -33,7 +33,7 @@ split -n l/$DP_SIZE --numeric-suffixes=0 -d --additional-suffix=.jsonl $INPUT_FI
 for i in $(seq 0 $((DP_SIZE-1)))
 do
 
-export CUDA_VISIBLE_DEVICES=$i;  python3 collect_hidden_states/compute_hidden_states_trtllm.py --model $MODEL --input-file /tmp/part-0${i}.jsonl --output-dir $OUTPUT_DIR --dp-rank $i &
+export CUDA_VISIBLE_DEVICES=$i;  python3 collect_hidden_states/compute_hidden_states_trtllm.py --model $MODEL --input-data /tmp/part-0${i}.jsonl --output-dir $OUTPUT_DIR --dp-rank $i &
 
 done
 wait

@@ -20,6 +20,7 @@ from torch import nn
 from modelopt.torch.opt.conversion import ModelLikeModule
 from modelopt.torch.opt.dynamic import _DMRegistryCls
 from modelopt.torch.opt.mode import ConvertReturnType, MetadataDict
+from modelopt.torch.speculative.config import eagle3_default_config, kimik2_eagle_default_config
 
 from ..config import EagleConfig
 
@@ -37,6 +38,14 @@ def convert_to_eagle_model(model: nn.Module, config: EagleConfig) -> ConvertRetu
             if issubclass(original_cls, cls):
                 EagleDMRegistry.register({original_cls: "base_model_class"})(EagleDMRegistry[cls])
                 break
+
+    # merge custom config with default config
+    default_arch_config = {
+        "llama": eagle3_default_config,
+        "kimik2": kimik2_eagle_default_config,
+    }[config.eagle_decoder_type]
+    custom_config = config.eagle_architecture_config
+    config.eagle_architecture_config = {**default_arch_config, **custom_config}
 
     eagle_model = EagleDMRegistry.convert(model)
     eagle_model.modify(
