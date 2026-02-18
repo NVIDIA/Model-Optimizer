@@ -485,3 +485,41 @@ def load_vlm_or_llm_with_kwargs(model_name_or_path: str, **kwargs):
         model_cls = transformers.AutoModelForCausalLM
 
     return model_config, model_cls.from_pretrained(model_name_or_path, **kwargs)
+
+
+def patch_transformers5_params_loading():
+    """Patch transformers 5.x parameter loading to preserve original `requires_grad` settings.
+
+    In transformers v5.x, loading a checkpoint forcibly sets parameters' requires_grad,
+    which may unintentionally unfreeze frozen parameters. This monkey-patch restores the original
+    `requires_grad` after loading parameters.
+
+    Reference:
+        https://github.com/huggingface/transformers/blob/v5.0.0.rc1-release/src/transformers/core_model_loading.py#L640
+    """
+    # Skip patching for non-applicable transformers version
+    if importlib.util.find_spec("transformers.core_model_loading") is None:
+        return
+    from transformers import core_model_loading
+
+    if not hasattr(core_model_loading, "set_param_for_module"):
+        return
+
+    orig_set_param_for_module = core_model_loading.set_param_for_module
+
+    def patched_set_param_for_module(*args, **kwargs):
+        """Monkey-patch set_param_for_module to restore original requires_grad."""
+        model, target_name = args[:2]
+        module_path, _, param_name = target_name.rpartition(".")
+        module_obj = model.get_submodule(module_path) if module_path else model
+
+        # Get original requires_grad value
+        orig_requires_grad = getattr(module_obj, param_name).requires_grad
+
+        # Call set_param_for_module
+        orig_set_param_for_module(*args, **kwargs)
+
+        # Restore original requires_grad value
+        getattr(module_obj, param_name).requires_grad = orig_requires_grad
+
+    core_model_loading.set_param_for_module = patched_set_param_for_module

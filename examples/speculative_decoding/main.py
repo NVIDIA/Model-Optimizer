@@ -48,7 +48,10 @@ from transformers.trainer_utils import get_last_checkpoint
 
 import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
-from modelopt.torch.speculative.utils import load_vlm_or_llm_with_kwargs
+from modelopt.torch.speculative.utils import (
+    load_vlm_or_llm_with_kwargs,
+    patch_transformers5_params_loading,
+)
 from modelopt.torch.utils import print_rank_0
 
 torch.manual_seed(0)
@@ -162,6 +165,7 @@ def train():
     use_offline_training = data_args.offline_data_path is not None
 
     if checkpoint:
+        patch_transformers5_params_loading()
         _, model = load_vlm_or_llm_with_kwargs(
             checkpoint, torch_dtype="auto", trust_remote_code=True
         )
