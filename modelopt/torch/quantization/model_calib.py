@@ -95,13 +95,20 @@ def _check_moe_calibration_complete(quantizer, parallel_state):
 
 
 @torch.no_grad()
-def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, distributed_sync=True):
+def max_calibrate(
+    model: nn.Module,
+    forward_loop: ForwardLoop | None = None,
+    distributed_sync=True,
+    shared_moe_weight_scale=True,
+):
     """Calibrate the model using max.
 
     Args:
         model: Model to be calibrated.
         forward_loop: A callable which takes the model as argument and
             forwards calibration data through the model.
+        distributed_sync: Whether to sync amax across distributed processes.
+        shared_moe_weight_scale: Whether to share the weight scale across local experts.
 
     See :class:`MaxCalibConfig <modelopt.torch.quantization.config.MaxCalibConfig>` for
     details on the remaining arguments.
@@ -116,7 +123,7 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
     # Sync amax across local experts within each rank (for SequentialMLP)
     for name, module in model.named_modules():
         if hasattr(module, "layer_sync_moe_local_experts_amax"):
-            module.layer_sync_moe_local_experts_amax()
+            module.layer_sync_moe_local_experts_amax(shared_moe_weight_scale)
 
     if not distributed_sync:
         return

@@ -735,6 +735,85 @@ def test_te_grouped_vs_sequential_quantize(need_4_gpus):
     )
 
 
+@pytest.mark.parametrize("ep_size", [1, 2])
+@pytest.mark.parametrize("moe_grouped_gemm", [True, False])
+@pytest.mark.parametrize("shared_moe_weight_scale", [True, False])
+def test_layer_sync_moe_local_experts_amax(ep_size, moe_grouped_gemm, shared_moe_weight_scale):
+    """Test expert model parallel synchronization."""
+    size = torch.cuda.device_count()
+    if size < ep_size:
+        pytest.skip(f"Requires at least {ep_size} GPUs for expert model parallel test")
+
+    spawn_multiprocess_job(
+        size=size,
+        job=partial(
+            _test_layer_sync_moe_local_experts_amax,
+            ep_size,
+            moe_grouped_gemm,
+            shared_moe_weight_scale,
+        ),
+        backend="nccl",
+    )
+
+
+def _test_layer_sync_moe_local_experts_amax(
+    ep_size, moe_grouped_gemm, shared_moe_weight_scale, rank, size
+):
+    initialize_for_megatron(
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        expert_model_parallel_size=ep_size,
+        expert_tensor_parallel_size=1,
+        seed=SEED,
+    )
+    model = _gpt_model_provider(
+        tp_size=1,
+        ep_size=ep_size,
+        etp_size=1,
+        hidden_size=256,
+        moe_grouped_gemm=moe_grouped_gemm,
+        use_te=moe_grouped_gemm,
+        num_moe_experts=8,
+        transformer_impl="modelopt",
+    )
+    model = mtq.quantize(model, mtq.FP8_DEFAULT_CFG, get_forward(model))
+
+    # Sync amax across local experts in each layer
+    for layer in model.decoder.layers:
+        layer.mlp.experts.layer_sync_moe_local_experts_amax(shared_moe_weight_scale)
+
+    for layer in model.decoder.layers:
+        fc1_amax = None
+        fc2_amax = None
+        for expert in layer.mlp.experts.local_experts:
+            assert expert.linear_fc1.input_quantizer.amax is not None
+            assert expert.linear_fc2.input_quantizer.amax is not None
+            if fc1_amax is None:
+                fc1_amax = expert.linear_fc1.input_quantizer.amax
+            else:
+                assert torch.allclose(fc1_amax, expert.linear_fc1.input_quantizer.amax)
+            if fc2_amax is None:
+                fc2_amax = expert.linear_fc2.input_quantizer.amax
+            else:
+                assert torch.allclose(fc2_amax, expert.linear_fc2.input_quantizer.amax)
+
+    if shared_moe_weight_scale:
+        for layer in model.decoder.layers:
+            fc1_amax = None
+            fc2_amax = None
+            for expert in layer.mlp.experts.local_experts:
+                assert expert.linear_fc1.weight_quantizer.amax is not None
+                assert expert.linear_fc2.weight_quantizer.amax is not None
+                if fc1_amax is None:
+                    fc1_amax = expert.linear_fc1.weight_quantizer.amax
+                else:
+                    assert torch.allclose(fc1_amax, expert.linear_fc1.weight_quantizer.amax)
+                if fc2_amax is None:
+                    fc2_amax = expert.linear_fc2.weight_quantizer.amax
+                else:
+                    assert torch.allclose(fc2_amax, expert.linear_fc2.weight_quantizer.amax)
+
+
 def _test_expert_model_parallel_amax_sync(
     tp_size, ep_size, etp_size, moe_grouped_gemm, config, rank, size
 ):
@@ -814,9 +893,6 @@ def test_expert_parallel_sync(config, ep_size, etp_size, moe_grouped_gemm):
     size = torch.cuda.device_count()
     if size < ep_size * etp_size:
         pytest.skip(f"Requires at least {ep_size * etp_size} GPUs for expert model parallel test")
-
-    if moe_grouped_gemm:
-        pytest.skip("TEGroupedMLP is not enabled in Megatron-LM currently")
 
     spawn_multiprocess_job(
         size=size,
