@@ -1,6 +1,13 @@
 NVIDIA Model Optimizer Changelog (Linux)
 ========================================
 
+0.43 (2026-03-xx)
+^^^^^^^^^^^^^^^^^
+
+**New Features**
+
+- Add sparse attention optimization for transformer models (``modelopt.torch.sparsity.attention_sparsity``). This reduces computational cost by skipping attention computation. Supports calibration for threshold selection on HuggingFace models. See `examples/llm_sparsity/attention_sparsity/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity/attention_sparsity>`_ for usage.
+
 0.42 (2026-02-xx)
 ^^^^^^^^^^^^^^^^^
 
