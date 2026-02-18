@@ -483,8 +483,12 @@ class _QuantSparseMoe(QuantModule):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         is_calib = any(getattr(m, "_if_calib", False) for m in self.experts.modules())
-        if is_calib:
-            # If any of the experts are in calibration mode, we will forward all tokens to all experts
+        is_prequant_scale_enabled = any(
+            getattr(m, "_enable_pre_quant_scale", False) for m in self.experts.modules()
+        )
+        self._count_expert_tokens = is_calib
+        if is_calib and is_prequant_scale_enabled:
+            # If any of the experts are in AWQ calibration mode, we will forward all tokens to all experts
             # This is used only for calibration, we need to re-calculate the actual outputs again using
             # the original top_k
             if TRANSFORMERS_VERSION_GE_5_0:
@@ -506,7 +510,6 @@ class _QuantSparseMoe(QuantModule):
                 super().forward(hidden_states)
                 self.top_k = original_top_k
         # Enable counting only for the real-routing forward during calibration
-        self._count_expert_tokens = is_calib
         output = super().forward(hidden_states)
         self._count_expert_tokens = False
         return output

@@ -55,12 +55,8 @@ def save_expert_token_count_table(model: nn.Module, output_dir: str | Path | Non
         avg = counts.float().mean().item()
         html_parts.append(f"<tr><td>{name}</td>")
         for c in counts.tolist():
-            if avg > 0 and c < avg:
-                # Scale from white (at average) to full red (at zero)
-                ratio = c / avg
-                r_channel = 255
-                gb_channel = int(100 * ratio)
-                style = f' style="background: rgb({r_channel},{gb_channel},{gb_channel});"'
+            if avg > 0 and c < avg * 0.1:
+                style = ' style="background: #ffcccc;"'
             else:
                 style = ""
             html_parts.append(f"<td{style}>{c}</td>")
