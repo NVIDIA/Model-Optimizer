@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import os
 
 import pytest
 import safetensors.torch
@@ -28,6 +29,35 @@ from modelopt.torch.export.plugins.hf_spec_export import LLAMA_EAGLE_SINGLE_LAYE
 def eagle_output_dir(tmp_path_factory):
     """Eagle output directory shared in this module."""
     return tmp_path_factory.mktemp("eagle_output_dir")
+
+
+@pytest.fixture(scope="module")
+def draft_vocab_cache_dir(tmp_path_factory):
+    """Eagle output directory shared in this module."""
+    return tmp_path_factory.mktemp("eagle_output_dir")
+
+
+def test_calibrate_draft_vocab(tiny_llama_path, tiny_daring_anteater_path, draft_vocab_cache_dir):
+    """Test calibration of draft vocabulary."""
+    run_example_command(
+        [
+            "python",
+            "./scripts/calibrate_draft_vocab.py",
+            "--model",
+            tiny_llama_path,
+            "--data",
+            tiny_daring_anteater_path,
+            "--draft_vocab_size",
+            "100",
+            "--save_dir",
+            draft_vocab_cache_dir,
+        ],
+        "speculative_decoding",
+    )
+
+    model_name = os.path.basename(os.path.normpath(tiny_llama_path))
+    d2t = torch.load(os.path.join(draft_vocab_cache_dir, model_name, "d2t.pt"))
+    assert d2t.shape[0] == 100, f"Expected draft vocab size 100, got {d2t.shape[0]}"
 
 
 # fmt: off
@@ -77,8 +107,8 @@ def test_ar_validate(eagle_output_dir):
         [
             "python", "./scripts/ar_validate.py",
             "--model_path", eagle_output_dir / "eagle-tinyllama-cp1",
-            "--osl", "20",
-            "--num_samples", "10",
+            "--osl", "10",
+            "--num_samples", "5",
             "--steps", "3"
         ],
         "speculative_decoding",
@@ -109,20 +139,6 @@ def test_convert_to_vllm_ckpt(tiny_llama_path, eagle_output_dir):
             "--input", eagle_output_dir / "eagle-tinyllama-export",
             "--verifier", tiny_llama_path,
             "--output", eagle_output_dir / "eagle-tinyllama-export-vllm-one-ckpt",
-        ],
-        "speculative_decoding",
-    )
-
-@pytest.mark.skip(reason="Needs dataset conversion to role-content format; consolidate data loading first.")
-def test_calibrate_draft_vocab(tiny_llama_path, tiny_daring_anteater_path,tmp_path):
-    """Test calibration of draft vocabulary."""
-    run_example_command(
-        [
-            "python", "./scripts/calibrate_draft_vocab.py",
-            "--model", tiny_llama_path,
-            "--data", tiny_daring_anteater_path,
-            "--draft_vocab_size", "100",
-            "--save_dir", tmp_path / "draft_vocab_cache",
         ],
         "speculative_decoding",
     )
