@@ -473,10 +473,7 @@ def test_homogeneous_sharded_state_dict(tmp_path, config, compress, meta_device,
 
 @pytest.mark.parametrize(
     "config",
-    [
-        NVFP4_GEMM_KV_CFG,
-        FP8_GEMM_KV_CFG,
-    ],
+    [NVFP4_GEMM_KV_CFG, FP8_GEMM_KV_CFG, mtq.MAMBA_MOE_NVFP4_CONSERVATIVE_CFG],
 )
 def test_homogeneous_sharded_state_dict_hybrid(tmp_path, config):
     """Test sharded state dict for hybrid Mamba MOE models."""
