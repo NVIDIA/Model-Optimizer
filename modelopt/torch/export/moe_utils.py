@@ -39,6 +39,9 @@ def save_expert_token_count_table(model: nn.Module, output_dir: str | Path | Non
         return
 
     num_experts = rows[0][1].shape[0]
+    assert all(r[1].shape[0] == num_experts for r in rows), (
+        "All MoE layers must have the same number of experts"
+    )
     html_parts = [
         "<html><head><style>",
         "table { border-collapse: collapse; font-family: monospace; }",
@@ -70,5 +73,5 @@ def save_expert_token_count_table(model: nn.Module, output_dir: str | Path | Non
     if output_dir is None:
         output_dir = Path(".")
     output_path = Path(output_dir) / ".moe.html"
-    output_path.write_text(html_content)
-    print(f"Expert token count table saved to {output_path}")
+    output_path.write_text(html_content, encoding="utf-8")
+    print(f"\033[1mExpert token count table saved to {output_path}\033[0m")

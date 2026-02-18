@@ -461,6 +461,13 @@ class _QuantSparseMoe(QuantModule):
         self.expert_token_count = torch.zeros(num_experts, dtype=torch.long, device="cpu")
         self._count_expert_tokens = False
 
+        if num_experts == 0:
+            warnings.warn(
+                f"{self.__class__.__name__}: could not resolve num_experts; "
+                "expert routing will not be tracked for this layer."
+            )
+            return
+
         if hasattr(self, "gate"):
             self.gate.register_forward_hook(self._gate_forward_hook)
 
@@ -488,8 +495,7 @@ class _QuantSparseMoe(QuantModule):
             # This is used only for calibration, we need to re-calculate the actual outputs again using
             # the original top_k
             if TRANSFORMERS_VERSION_GE_5_0:
-                assert hasattr(self, "gate")
-                # Path for transformers >= 5.0
+                assert hasattr(self, "gate") and hasattr(self.gate, "top_k")
                 original_top_k = self.gate.top_k
                 self.gate.top_k = self.gate.num_experts
                 super().forward(hidden_states)

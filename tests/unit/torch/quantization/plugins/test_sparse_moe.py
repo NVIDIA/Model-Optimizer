@@ -193,7 +193,14 @@ class TestQuantSparseMoe:
 
         converted = QuantModuleRegistry.convert(moe_block)
         assert hasattr(converted, "expert_token_count")
-        expected_num_experts = moe_block.num_experts if hasattr(moe_block, "num_experts") else 0
+        if hasattr(moe_block, "gate") and hasattr(moe_block.gate, "num_experts"):
+            expected_num_experts = moe_block.gate.num_experts
+        elif hasattr(moe_block, "num_experts"):
+            expected_num_experts = moe_block.num_experts
+        elif hasattr(moe_block, "experts") and hasattr(moe_block.experts, "num_experts"):
+            expected_num_experts = moe_block.experts.num_experts
+        else:
+            expected_num_experts = 0
         assert converted.expert_token_count.shape == (expected_num_experts,)
         assert converted.expert_token_count.dtype == torch.long
         assert (converted.expert_token_count == 0).all()
@@ -298,14 +305,16 @@ class TestQuantSparseMoe:
         converted.expert_token_count.zero_()
         converted._count_expert_tokens = True
 
-        hidden_size = converted.gate.in_features
+        if TRANSFORMERS_VERSION_GE_5_0:
+            hidden_size = converted.gate.weight.shape[1]
+            top_k = converted.gate.top_k
+        else:
+            hidden_size = converted.gate.in_features
+            top_k = converted.top_k if hasattr(converted, "top_k") else converted.gate.top_k
+
         x = torch.randn(8, hidden_size)
         with torch.no_grad():
             converted.gate(x)
-
-        # After one gate call with counting enabled, total assigned tokens should equal
-        # num_tokens * top_k
-        top_k = converted.top_k if hasattr(converted, "top_k") else converted.gate.top_k
         total_assigned = converted.expert_token_count.sum().item()
         assert total_assigned == 8 * top_k
 

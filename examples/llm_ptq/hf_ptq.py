@@ -727,8 +727,12 @@ def post_quantize(
     """
 
     if args.verbose:
-        mtq.print_quant_summary(full_model)
-        save_expert_token_count_table(full_model, args.export_path)
+        try:
+            mtq.print_quant_summary(full_model, args.export_path)
+            save_expert_token_count_table(full_model, args.export_path)
+        except Exception as e:
+            print(f"Error saving quant summary: {e}")
+            print("Continuing with generation...")
 
     # Run some samples
     torch.cuda.empty_cache()
