@@ -43,19 +43,20 @@ Usage:
 import sys
 from pathlib import Path
 
-# Add sibling directories to path so we can import the bridges
+import torch
+from megatron.bridge.models.conversion.auto_bridge import AutoBridge
+from megatron.bridge.models.conversion.model_bridge import get_model_bridge
+
+from modelopt.torch.puzzletron.export.mbridge import (  # noqa: F401
+    PuzzletronLlamaAnyModelBridge,
+    PuzzletronQwen3AnyModelBridge,
+)
+
+# Import DeciLM bridge (still in examples for now)
+# Must be after sys.path modification
 parent_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(parent_dir / "decilm_model_distillation"))
-sys.path.insert(0, str(parent_dir / "anymodel_model_distillation"))
-
-# Import bridges to register them
-# Import AnyModel bridge to register it (so LlamaBridge is not used for AnyModel)
-import llama_anymodel_bridge  # noqa: F401, E402
 import puzzletron_decilm_bridge  # noqa: F401, E402
-import qwen3_anymodel_bridge  # noqa: F401, E402
-import torch  # noqa: E402
-from megatron.bridge.models.conversion.auto_bridge import AutoBridge  # noqa: E402
-from megatron.bridge.models.conversion.model_bridge import get_model_bridge  # noqa: E402
 
 print("Testing MBridge inference with Puzzletron models...")
 print()
