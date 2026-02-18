@@ -940,21 +940,25 @@ def _export_diffusers_checkpoint(
     # Step 5: For pipelines, also save model_index.json
     if is_diffusers_pipe:
         model_index_path = export_dir / "model_index.json"
-        source_path = getattr(pipe, "name_or_path", None) or getattr(
-            getattr(pipe, "config", None), "_name_or_path", None
-        )
+        is_partial_export = components is not None
 
-        # Prefer preserving the original model_index.json when the source is local.
-        if source_path:
-            candidate_model_index = Path(source_path) / "model_index.json"
-            if candidate_model_index.exists():
-                with open(candidate_model_index) as file:
-                    model_index = json.load(file)
-                with open(model_index_path, "w") as file:
-                    json.dump(model_index, file, indent=4)
+        # For full export, preserve original model_index.json when possible.
+        # For partial export, skip this to avoid listing non-exported components.
+        if not is_partial_export:
+            source_path = getattr(pipe, "name_or_path", None) or getattr(
+                getattr(pipe, "config", None), "_name_or_path", None
+            )
+            if source_path:
+                candidate_model_index = Path(source_path) / "model_index.json"
+                if candidate_model_index.exists():
+                    with open(candidate_model_index) as file:
+                        model_index = json.load(file)
+                    with open(model_index_path, "w") as file:
+                        json.dump(model_index, file, indent=4)
 
-        # Fallback to Diffusers-native config serialization.
-        if not model_index_path.exists() and hasattr(pipe, "save_config"):
+        # Full-export fallback to Diffusers-native config serialization.
+        # Partial export skips this for the same reason as above.
+        if not is_partial_export and not model_index_path.exists() and hasattr(pipe, "save_config"):
             pipe.save_config(export_dir)
 
         # Last resort: synthesize a minimal model_index.json from exported components.
