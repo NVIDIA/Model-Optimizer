@@ -55,12 +55,10 @@ def save_expert_token_count_table(model: nn.Module, output_dir: str | Path | Non
         avg = counts.float().mean().item()
         html_parts.append(f"<tr><td>{name}</td>")
         for c in counts.tolist():
-            if avg > 0 and c < avg:
-                # Scale from white (at average) to full red (at zero)
-                ratio = c / avg
-                r_channel = 255
-                gb_channel = int(100 * ratio)
-                style = f' style="background: rgb({r_channel},{gb_channel},{gb_channel});"'
+            if avg > 0 and c < avg * 0.05:
+                style = ' style="background: #ff6666;"'
+            elif avg > 0 and c < avg * 0.1:
+                style = ' style="background: #ffcccc;"'
             else:
                 style = ""
             html_parts.append(f"<td{style}>{c}</td>")
@@ -71,6 +69,6 @@ def save_expert_token_count_table(model: nn.Module, output_dir: str | Path | Non
 
     if output_dir is None:
         output_dir = Path(".")
-    output_path = Path(output_dir) / "moe.html"
+    output_path = Path(output_dir) / ".moe.html"
     output_path.write_text(html_content)
     print(f"Expert token count table saved to {output_path}")
