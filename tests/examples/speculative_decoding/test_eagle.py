@@ -89,13 +89,30 @@ def test_llama_eagle3(tiny_llama_path, tiny_daring_anteater_path, tmp_path, eagl
             "./launch_train.sh",
             "--model", tiny_llama_path,
             "--data", tiny_daring_anteater_path,
-            "--num_epochs", "1",
+            "--num_epochs", "0.25",
             "--lr", "1e-5",
             "--mode", "eagle3",
             "--eagle_config", str(config_file),
             "--output_dir", eagle_output_dir / f"eagle-tinyllama-cp{cp_size}",
             "--training_seq_len", "128", # Match max_position_embeddings
             "--cp_size", str(cp_size),
+        ],
+        "speculative_decoding",
+    )
+
+
+def test_resume_training(tiny_daring_anteater_path, eagle_output_dir):
+    """Test resume training of Eagle3."""
+    run_example_command(
+        [
+            "./launch_train.sh",
+            "--model",  eagle_output_dir / "eagle-tinyllama-cp1",
+            "--data", tiny_daring_anteater_path,
+            "--num_epochs", "0.5",
+            "--lr", "1e-5",
+            "--mode", "eagle3",
+            "--output_dir", eagle_output_dir / "eagle-tinyllama-cp1",
+            "--training_seq_len", "128", # Match max_position_embeddings
         ],
         "speculative_decoding",
     )
