@@ -483,11 +483,15 @@ class _QuantSparseMoe(QuantModule):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         is_calib = any(getattr(m, "_if_calib", False) for m in self.experts.modules())
-        is_prequant_scale_enabled = any(
-            getattr(m, "_enable_pre_quant_scale", False) for m in self.experts.modules()
+        has_prequant_scale = any(
+            getattr(m, "awq_lite", None) is not None or getattr(m, "awq_clip", None) is not None
+            for m in self.experts.modules()
         )
         self._count_expert_tokens = is_calib
-        if is_calib and is_prequant_scale_enabled:
+        import pdb
+
+        pdb.set_trace()
+        if is_calib and has_prequant_scale:
             # If any of the experts are in AWQ calibration mode, we will forward all tokens to all experts
             # This is used only for calibration, we need to re-calculate the actual outputs again using
             # the original top_k
