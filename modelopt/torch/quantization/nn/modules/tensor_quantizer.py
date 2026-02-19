@@ -155,6 +155,10 @@ class TensorQuantizer(nn.Module):
         "_padding",
         # Extra flags added by huggingface
         "_is_hf_initialized",
+        # Extra flags added by accelerate
+        "_hf_hook",
+        "_old_forward",
+        "forward",
         # Extra flags added by deepspeed
         "ds_external_parameters",
         "all_parameters",
