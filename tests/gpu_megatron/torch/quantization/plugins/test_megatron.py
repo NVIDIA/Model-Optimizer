@@ -772,7 +772,6 @@ def _test_layer_sync_moe_local_experts_amax(ep_size, moe_grouped_gemm, rank, siz
     quant_cfg = mtq.FP8_DEFAULT_CFG
     model = mtq.quantize(model, quant_cfg, get_forward(model))
 
-    # does layer_sync_moe_local_experts_amax happens in mtq.quantize if EP=1?
     for layer in model.decoder.layers:
         layer.mlp.experts.layer_sync_moe_local_experts_amax()
 
