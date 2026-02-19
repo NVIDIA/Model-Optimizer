@@ -361,7 +361,9 @@ def mse_calibrate(
 
     # Step 3: Calibrate weight quantizers ONE AT A TIME with immediate amax computation
     # This prevents massive memory accumulation seen in large models
-    for idx, (parent_module, weight_name, weight_quantizer) in enumerate(weight_quantizers):
+    for idx, (parent_module, weight_name, weight_quantizer) in enumerate(
+        tqdm(weight_quantizers, desc="MSE weight calibration")
+    ):
         # Enable calibration mode for the weight quantizer
         weight_quantizer.disable_quant()
         weight_quantizer.enable_calib()
