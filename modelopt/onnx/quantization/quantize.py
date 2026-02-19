@@ -73,6 +73,7 @@ from modelopt.onnx.utils import (
     QDQ_PRECISION_MIN_OPSET,
     duplicate_shared_constants,
     get_opset_version,
+    get_quantized_nodes,
     name_onnx_nodes,
     save_onnx,
 )
@@ -242,6 +243,52 @@ def _preprocess_onnx(
     )
 
 
+def _find_nodes_to_quantize_autotune(
+    onnx_path: str,
+    onnx_model: onnx.ModelProto,
+    quantize_mode: str,
+    trt_plugins: list[str],
+    high_precision_dtype: str = "fp16",
+) -> tuple[list[str], list[str], list[tuple[gs.Node, gs.Node, str]]]:
+    logger.info("Running Auto Q/DQ with TensorRT")
+    from modelopt.onnx.quantization.autotune.insertion_points import get_autotuner_quantizable_ops
+    from modelopt.onnx.quantization.autotune.workflows import (
+        init_benchmark_instance,
+        region_pattern_autotuning_workflow,
+    )
+
+    # Initialize Autotuner with the Python 'tensorrt' package
+    init_benchmark_instance(use_trtexec=False, plugin_libraries=trt_plugins)
+    precision_map = {"fp16": "float16", "fp32": "float32", "bf16": "bfloat16"}
+    autotuner = region_pattern_autotuning_workflow(
+        onnx_model,
+        quant_type=quantize_mode,
+        default_dq_dtype=precision_map[high_precision_dtype],
+    )
+
+    # Export model with Q/DQ insertion
+    onnx_path_autotune = onnx_path.replace(".onnx", ".quant_autotune.onnx")
+    onnx_bytes = autotuner.export_onnx(onnx_path_autotune, insert_qdq=True, best=True)
+    # intermediate_generated_files.append(onnx_path_autotune)
+
+    # Get nodes and op types to quantize
+    onnx_model_autotune = onnx.load_from_string(onnx_bytes)
+    nodes_to_quantize_autotune = get_quantized_nodes(onnx_model_autotune)
+    nodes_to_quantize_autotune_names = [n.name for n in nodes_to_quantize_autotune]
+    op_types_to_quantize = list(get_autotuner_quantizable_ops())
+
+    # Get non-quantizable tensors
+    # List of non-quantizable tensors in the form of (src_node, dst_node, tensor_name)
+    no_quantize_inputs = []
+    for node in nodes_to_quantize_autotune:
+        for idx, inp in enumerate(node.inputs):
+            if inp.inputs and inp.inputs[0].op != "DequantizeLinear":
+                src_node = node.i(idx)
+                no_quantize_inputs.append((src_node, node, inp.name))
+
+    return nodes_to_quantize_autotune_names, op_types_to_quantize, no_quantize_inputs
+
+
 def quantize(
     onnx_path: str,
     quantize_mode: str = "int8",
@@ -275,6 +322,7 @@ def quantize(
     input_shapes_profile: Sequence[dict[str, str]] | None = None,
     direct_io_types: bool = False,
     opset: int | None = None,
+    autotune: bool = False,
     **kwargs: Any,
 ) -> None:
     """Quantizes the provided ONNX model.
@@ -398,6 +446,9 @@ def quantize(
             Target ONNX opset version for the quantized model. If None, uses required minimum opset
             (19 for int8/fp8, 21 for int4, 23 for nvfp4). If the specified opset is lower than the required minimum,
             a warning will be issued and the opset will be upgraded to the required minimum.
+        autotune:
+            If True, detect optimal Q/DQ node placements according to the TensorRT version and platform available.
+            If False, use the default pattern-based quantization approach.
         kwargs:
             Additional keyword arguments for int4 quantization, including:
             - awqlite_alpha_step (float): Alpha step for lite, range [0, 1].
@@ -486,26 +537,40 @@ def quantize(
     # Check op types spelling in 'op_types_to_exclude' and '_to_quantize'
     validate_op_types_spelling(onnx_path, op_types_to_quantize, op_types_to_exclude)
 
-    # (1) If disable_mha_qdq is set, don't add Q/DQ layers to MatMuls in MHA pattern.
-    # (2) else when quantize_mode == "int8", if seq_len > 512, don't add Q/DQ layers to
-    # MatMuls in MHA pattern.
-    # (3) else when quantize_mode == "fp8", if head_size > 256 or head_size <= 8
-    # or mha doesn't meet fp8 fMHA v2 pattern, don't add Q/DQ layers to MatMuls in MHA pattern.
-    nodes_to_exclude = find_nodes_from_mha_to_exclude(
-        onnx_path,
-        use_external_data_format,
-        nodes_to_exclude,
-        disable_mha_qdq,
-        quantize_mode,
-        intermediate_generated_files,
-        calibration_data_reader,
-        calibration_eps,
-    )
+    if not autotune:
+        # (1) If disable_mha_qdq is set, don't add Q/DQ layers to MatMuls in MHA pattern.
+        # (2) else when quantize_mode == "int8", if seq_len > 512, don't add Q/DQ layers to
+        # MatMuls in MHA pattern.
+        # (3) else when quantize_mode == "fp8", if head_size > 256 or head_size <= 8
+        # or mha doesn't meet fp8 fMHA v2 pattern, don't add Q/DQ layers to MatMuls in MHA pattern.
+        nodes_to_exclude = find_nodes_from_mha_to_exclude(
+            onnx_path,
+            use_external_data_format,
+            nodes_to_exclude,
+            disable_mha_qdq,
+            quantize_mode,
+            intermediate_generated_files,
+            calibration_data_reader,
+            calibration_eps,
+        )
 
     if calibrate_per_node and not calibration_shapes:
         calibration_shapes = get_input_shapes(onnx_path)
 
     if quantize_mode in ["fp8", "int8"]:
+        no_quantize_inputs = []
+        if autotune:
+            nodes_to_quantize_autotune, op_types_to_quantize, no_quantize_inputs = (
+                _find_nodes_to_quantize_autotune(
+                    onnx_path,
+                    onnx_model,
+                    quantize_mode,
+                    trt_plugins,
+                    high_precision_dtype,
+                )
+            )
+            nodes_to_quantize.extend(nodes_to_quantize_autotune)
+
         quantize_func = quantize_int8 if quantize_mode == "int8" else quantize_fp8
         onnx_model = quantize_func(
             onnx_path=onnx_path,
@@ -531,8 +596,15 @@ def quantize(
             custom_ops_to_quantize=list(custom_ops_to_quantize.keys()),
             direct_io_types=direct_io_types,
             opset=opset,
+            autotune=autotune,
+            no_quantize_inputs=no_quantize_inputs,
             **kwargs,
         )
+
+        # if autotune:
+        #     # Copy real scales to quantized model
+        #     print()
+
     elif "int4" in quantize_mode:
         onnx_model = quantize_int4(
             onnx_path=onnx_path,

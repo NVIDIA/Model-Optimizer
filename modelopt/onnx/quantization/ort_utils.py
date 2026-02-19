@@ -271,6 +271,7 @@ def configure_ort(
     calibration_eps: list[str] | None = None,
     calibrate_per_node: bool = False,
     custom_ops_to_quantize: list[str] = [],
+    autotune: bool = False,
 ):
     """Configure and patches ORT to support ModelOpt ONNX quantization."""
     logger.info("Configuring ORT for ModelOpt ONNX quantization")
@@ -289,33 +290,34 @@ def configure_ort(
     # Patch ORT modules to fix bugs and support some edge cases
     patch_ort_modules(calibrate_per_node)
 
-    # Remove copy, reduction and activation ops from ORT QDQ registry
-    logger.debug("Removing non-quantizable ops from QDQ registry")
-    for op_type in [
-        "ArgMax",
-        "Concat",
-        "EmbedLayerNormalization",
-        "Gather",
-        "GatherElements",
-        "GatherND",
-        "InstanceNormalization",
-        "LeakyRelu",
-        "Pad",
-        "Relu",
-        "Reshape",
-        "Slice",
-        "Sigmoid",
-        "Softmax",
-        "Split",
-        "Squeeze",
-        "Transpose",
-        "Unsqueeze",
-        "Where",
-    ]:
-        if op_type in QLinearOpsRegistry:
-            del QLinearOpsRegistry[op_type]
-        if op_type in QDQRegistry:
-            del QDQRegistry[op_type]
+    if not autotune:
+        # Remove copy, reduction and activation ops from ORT QDQ registry
+        logger.debug("Removing non-quantizable ops from QDQ registry")
+        for op_type in [
+            "ArgMax",
+            "Concat",
+            "EmbedLayerNormalization",
+            "Gather",
+            "GatherElements",
+            "GatherND",
+            "InstanceNormalization",
+            "LeakyRelu",
+            "Pad",
+            "Relu",
+            "Reshape",
+            "Slice",
+            "Sigmoid",
+            "Softmax",
+            "Split",
+            "Squeeze",
+            "Transpose",
+            "Unsqueeze",
+            "Where",
+        ]:
+            if op_type in QLinearOpsRegistry:
+                del QLinearOpsRegistry[op_type]
+            if op_type in QDQRegistry:
+                del QDQRegistry[op_type]
 
     # Prepare TensorRT friendly quantization settings
     no_output_quantization_op_types = [

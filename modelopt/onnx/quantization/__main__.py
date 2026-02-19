@@ -295,6 +295,13 @@ def get_parser() -> argparse.ArgumentParser:
             "if certain operations require a higher version."
         ),
     )
+    argparser.add_argument(
+        "--autotune",
+        action="store_true",
+        help=(
+            "If set, detect optimal Q/DQ node placements according to the TensorRT version and platform available."
+        ),
+    )
     return argparser
 
 
@@ -362,6 +369,7 @@ def main():
         calibrate_per_node=args.calibrate_per_node,
         direct_io_types=args.direct_io_types,
         opset=args.opset,
+        autotune=args.autotune,
     )
 
 

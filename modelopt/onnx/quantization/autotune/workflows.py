@@ -20,6 +20,8 @@ optimization of ONNX models using pattern-based region analysis and TensorRT per
 """
 
 import fnmatch
+import shutil
+import tempfile
 from pathlib import Path
 
 import onnx
@@ -158,8 +160,8 @@ def _region_matches_filter(region, graph, filter_patterns: list[str]) -> bool:
 
 
 def region_pattern_autotuning_workflow(
-    model_path: str,
-    output_dir: Path,
+    model_path: str | onnx.ModelProto,
+    output_dir: Path | None = None,
     num_schemes_per_region: int = 30,
     pattern_cache_file: str | None = None,
     state_file: str | None = None,
@@ -168,6 +170,7 @@ def region_pattern_autotuning_workflow(
     qdq_baseline_model: str | None = None,
     node_filter_list: list[str] | None = None,
     verbose: bool = False,
+    keep_output_dir: bool = False,
 ) -> QDQAutotuner:
     """Run automated Q/DQ (Quantization/Dequantization) optimization on an ONNX model.
 
@@ -196,7 +199,7 @@ def region_pattern_autotuning_workflow(
 
     Args:
         model_path: Path to ONNX model file to optimize
-        output_dir: Directory for output files (state, logs, models). Created if doesn't exist.
+        output_dir: Directory for output files (state, logs, models). Created if it doesn't exist.
         num_schemes_per_region: Number of Q/DQ insertion schemes to test per region pattern.
                                Higher values explore more configurations but take longer (default: 30)
         pattern_cache_file: Optional path to pattern cache YAML file containing known-good schemes
@@ -211,10 +214,14 @@ def region_pattern_autotuning_workflow(
         node_filter_list: Optional list of wildcard patterns to filter ONNX nodes. Regions
                          without any matching nodes are skipped during autotuning (default: None)
         verbose: Enable verbose logging in Config for detailed autotuner output (default: False)
+        keep_output_dir: If True, keep output_dir, otherwise, remove it at the end of this function.
 
     Returns:
         QDQAutotuner instance after autotuning
     """
+    if not output_dir:
+        output_dir = Path(tempfile.mkdtemp())
+
     output_dir.mkdir(parents=True, exist_ok=True)
     logs_dir = output_dir / "logs"
     logs_dir.mkdir(exist_ok=True)
@@ -225,8 +232,11 @@ def region_pattern_autotuning_workflow(
         state_file = str(output_dir / "autotuner_state.yaml")
     state_path = Path(state_file)
 
-    logger.info(f"Loading model: {model_path}")
-    model = onnx.load(model_path)
+    if isinstance(model_path, str):
+        logger.info(f"Loading model: {model_path}")
+        model = onnx.load(model_path)
+    else:
+        model = model_path
 
     pattern_cache = None
     if pattern_cache_file:
@@ -372,5 +382,11 @@ def region_pattern_autotuning_workflow(
     logger.info(f"  State: {state_path}")
     logger.debug(f"  Logs: {logs_dir}")
     logger.debug(f"  Region models: {models_dir}")
+
+    if not keep_output_dir:
+        logger.debug(
+            f"Removing output dir: {output_dir}. Select 'keep_output_dir=False' if you wish to keep it."
+        )
+        shutil.rmtree(output_dir)
 
     return autotuner

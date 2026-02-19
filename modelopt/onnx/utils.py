@@ -172,6 +172,24 @@ def get_dynamic_graph_inputs(onnx_model: onnx.ModelProto):
     return [inp for inp in graph.inputs if any(isinstance(s, str) or s <= 0 for s in inp.shape)]
 
 
+def get_quantized_nodes(onnx_model: onnx.ModelProto) -> list:
+    """This function returns the nodes preceded by a DQ node.
+
+    Args:
+        onnx_model: ONNX model to traverse.
+
+    Returns:
+        List of quantized nodes.
+    """
+    graph = gs.import_onnx(onnx_model)
+
+    return [
+        node
+        for node in graph.nodes
+        if any(inp.inputs[0].op == "DequantizeLinear" for inp in node.inputs if inp.inputs)
+    ]
+
+
 def _get_all_shapes(container: Any) -> dict[str, list[int]]:
     """This method returns the shape of tensors within a RepeatedCompositeContainer.
 
