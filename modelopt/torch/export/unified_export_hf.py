@@ -54,6 +54,11 @@ from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
 
+try:
+    from modelopt.torch.sparsity.attention_sparsity.conversion import export_sparse_attention_config
+except ImportError:
+    export_sparse_attention_config = None
+
 from .convert_hf_config import convert_hf_quant_config_format
 from .layer_utils import (
     get_expert_linear_names,
@@ -316,27 +321,27 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                 [1, model.config.num_mel_bins, feature_extractor.nb_max_frames], dtype=model.dtype
             ).to(model.device)
 
-        if getattr(model.config, "is_encoder_decoder", False):
-            # For encoder-decoder models, we need to pass both the encoder and decoder input ids
-            model(fake_input, decoder_input_ids=decoder_fake_input)
-        elif is_vl_model and "nemotron" in model_type:
-            # For Nemotron VL models, try to run optimization on just the language model part
+        if is_vl_model and "nemotron" in model_type:
+            # For Nemotron VL models, run optimization on just the language model/decoder.
+            # This avoids needing pixel_values for the vision encoder.
             language_model_lineage = get_language_model_from_vl(model)
 
             if language_model_lineage is not None:
-                # Run optimization on just the language model with the same input format as regular LLMs
-                # Use the same fake_input tensor that regular LLMs use
                 language_model = language_model_lineage[-1]
                 print(
                     f"Running optimization on language model with fake_input shape: {fake_input.shape}"
                 )
-                language_model(fake_input)
+                # Pass use_cache=False to avoid KV cache issues in encoder-decoder models
+                language_model(fake_input, use_cache=False)
             else:
                 raise ValueError(
                     f"Cannot extract language_model from Nemotron VL model (type: {model_type}). "
                     "This is required for requantization/resmoothing optimization. "
                     "Please ensure the model architecture is supported or file an issue."
                 )
+        elif getattr(model.config, "is_encoder_decoder", False):
+            # For other encoder-decoder models (non-VL), pass both encoder and decoder input ids
+            model(fake_input, decoder_input_ids=decoder_fake_input)
         else:
             model(fake_input)
 
@@ -589,7 +594,9 @@ def _process_quantized_modules(
         if is_modelopt_qlora and (hasattr(sub_module, "base_layer")):
             continue
 
-        if hasattr(sub_module, "weight_packed"):
+        if hasattr(sub_module, "weight_packed") or (
+            "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1
+        ):
             sub_module.unpack_weight()
         if get_quantization_format(sub_module) != QUANTIZATION_NONE:
             if is_quantlinear(sub_module):
@@ -930,21 +937,38 @@ def _export_diffusers_checkpoint(
 
             print(f"  Saved to: {component_export_dir}")
 
-    # Step 5: For pipelines, also save the model_index.json
+    # Step 5: For pipelines, also save model_index.json
     if is_diffusers_pipe:
         model_index_path = export_dir / "model_index.json"
-        if hasattr(pipe, "config") and pipe.config is not None:
-            # Save a simplified model_index.json that points to the exported components
+        is_partial_export = components is not None
+
+        # For full export, preserve original model_index.json when possible.
+        # For partial export, skip this to avoid listing non-exported components.
+        if not is_partial_export:
+            source_path = getattr(pipe, "name_or_path", None) or getattr(
+                getattr(pipe, "config", None), "_name_or_path", None
+            )
+            if source_path:
+                candidate_model_index = Path(source_path) / "model_index.json"
+                if candidate_model_index.exists():
+                    with open(candidate_model_index) as file:
+                        model_index = json.load(file)
+                    with open(model_index_path, "w") as file:
+                        json.dump(model_index, file, indent=4)
+
+        # Full-export fallback to Diffusers-native config serialization.
+        # Partial export skips this for the same reason as above.
+        if not is_partial_export and not model_index_path.exists() and hasattr(pipe, "save_config"):
+            pipe.save_config(export_dir)
+
+        # Last resort: synthesize a minimal model_index.json from exported components.
+        if not model_index_path.exists() and hasattr(pipe, "config") and pipe.config is not None:
             model_index = {
                 "_class_name": type(pipe).__name__,
                 "_diffusers_version": diffusers.__version__,
             }
-            # Add component class names for all components
-            # Use the base library name (e.g., "diffusers", "transformers") instead of
-            # the full module path, as expected by diffusers pipeline loading
             for name, comp in all_components.items():
                 module = type(comp).__module__
-                # Extract base library name (first part of module path)
                 library = module.split(".")[0]
                 model_index[name] = [library, type(comp).__name__]
 
@@ -960,6 +984,7 @@ def export_hf_checkpoint(
     export_dir: Path | str = tempfile.gettempdir(),
     save_modelopt_state: bool = False,
     components: list[str] | None = None,
+    extra_state_dict: dict[str, torch.Tensor] | None = None,
 ):
     """Export quantized HuggingFace model checkpoint (transformers or diffusers).
 
@@ -976,6 +1001,7 @@ def export_hf_checkpoint(
         save_modelopt_state: Whether to save the modelopt state_dict.
         components: Only used for diffusers pipelines. Optional list of component names
             to export. If None, all quantized components are exported.
+        extra_state_dict: Extra state dictionary to add to the exported model.
     """
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
@@ -1012,7 +1038,9 @@ def export_hf_checkpoint(
 
         # Save model
         model.save_pretrained(
-            export_dir, state_dict=post_state_dict, save_modelopt_state=save_modelopt_state
+            export_dir,
+            state_dict={**post_state_dict, **(extra_state_dict or {})},
+            save_modelopt_state=save_modelopt_state,
         )
 
         original_config = f"{export_dir}/config.json"
@@ -1023,6 +1051,12 @@ def export_hf_checkpoint(
 
         if hf_quant_config is not None:
             config_data["quantization_config"] = hf_quant_config
+
+        # Add sparse attention config if available
+        if export_sparse_attention_config is not None:
+            sparse_attn_config = export_sparse_attention_config(model)
+            if sparse_attn_config is not None:
+                config_data["sparse_attention_config"] = sparse_attn_config
 
         with open(original_config, "w") as file:
             json.dump(config_data, file, indent=4)

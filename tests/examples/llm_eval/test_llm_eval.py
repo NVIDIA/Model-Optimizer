@@ -36,3 +36,20 @@ def test_llama_eval_fp8():
     finally:
         # Force kill llm-serve if it's still running
         subprocess.run(["pkill", "-f", "llm-serve"], check=False)
+
+
+def test_llama_eval_sparse_attention(tiny_llama_path):
+    """Test sparse attention with llm_eval integration."""
+    try:
+        # Test with default sparse attention config (no quantization)
+        run_llm_ptq_command(
+            model=tiny_llama_path,
+            quant="none",  # No quantization, only sparse attention
+            tasks="lm_eval",
+            lm_eval_tasks="hellaswag",
+            lm_eval_limit=0.05,  # Small limit for fast test
+            sparse_cfg="SKIP_SOFTMAX_DEFAULT",
+            batch=4,
+        )
+    finally:
+        subprocess.run(["pkill", "-f", "llm-serve"], check=False)

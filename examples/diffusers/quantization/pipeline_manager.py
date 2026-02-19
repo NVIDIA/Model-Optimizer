@@ -14,12 +14,15 @@
 # limitations under the License.
 
 import logging
+from collections.abc import Iterator
 from typing import Any
 
 import torch
 from diffusers import DiffusionPipeline, LTXLatentUpsamplePipeline
 from models_utils import MODEL_DEFAULTS, MODEL_PIPELINE, MODEL_REGISTRY, ModelType
 from quantize_config import ModelConfig
+
+import modelopt.torch.quantization as mtq
 
 
 class PipelineManager:
@@ -163,10 +166,37 @@ class PipelineManager:
         if not self.pipe:
             raise RuntimeError("Pipeline not created. Call create_pipeline() first.")
 
+        backbone_pairs = list(self.iter_backbones())
+        if len(backbone_pairs) == 1:
+            return backbone_pairs[0][1]
+        return torch.nn.ModuleList([module for _, module in backbone_pairs])
+
+    def iter_backbones(self) -> Iterator[tuple[str, torch.nn.Module]]:
+        """
+        Yield backbone modules by name, based on a backbone spec.
+
+        Yields:
+            (backbone_name, module) pairs
+        """
+        if not self.pipe:
+            raise RuntimeError("Pipeline not created. Call create_pipeline() first.")
+
+        names = list(self.config.backbone)
+
         if self.config.model_type == ModelType.LTX2:
             self._ensure_ltx2_transformer_cached()
-            return self._transformer
-        return getattr(self.pipe, self.config.backbone)
+            name = names[0] if names else "transformer"
+            yield name, self._transformer
+            return
+
+        if not names:
+            raise RuntimeError("No backbone names provided.")
+
+        for name in names:
+            module = getattr(self.pipe, name, None)
+            if module is None:
+                raise RuntimeError(f"Pipeline missing backbone module '{name}'.")
+            yield name, module
 
     def _ensure_ltx2_transformer_cached(self) -> None:
         if not self.pipe:
@@ -214,3 +244,9 @@ class PipelineManager:
         }
         pipeline_kwargs.update(params)
         return TI2VidTwoStagesPipeline(**pipeline_kwargs)
+
+    def print_quant_summary(self):
+        backbone_pairs = list(self.iter_backbones())
+        for name, backbone in backbone_pairs:
+            self.logger.info(f"{name} quantization info:")
+            mtq.print_quant_summary(backbone)

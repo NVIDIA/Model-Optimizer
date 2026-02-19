@@ -1,0 +1,64 @@
+# DMS debug configuration for Qwen3-1.7B
+# Designed for debugging and code optimization on a limited compute budget.
+
+model:
+  name: Qwen/Qwen3-1.7B
+  dtype: float32
+  forward_fn_kwargs:
+    train_attn_kwargs:
+      kernel_options:
+        BLOCK_M1: 16
+        BLOCK_M2: 16
+        BLOCK_N1: 16
+        BLOCK_N2: 16
+
+dms:
+  alpha_scale: 100.0
+  initial_alpha_offset: 5.0
+  window_size: 512
+  disable_eviction: false
+  separate_alpha: true
+  alpha_per: head
+  tau: 0.1
+  initial_cr: 1.0
+  final_cr: 16.0
+  final_step: 510
+
+data:
+  blend: "OpenR1Math220k:1.0"
+  train_samples: 4000
+  max_length: 8192
+  concat_always_start_new: true
+  process_vocab_using_chunk: 4096
+  tokenizer_kwargs:
+    enable_thinking: true
+
+hf_trainer:
+  output_dir: outputs/qwen3_1.7b_small
+  run_name: dms_qwen3_1.7b_small
+  max_steps: 544
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 16
+  learning_rate: 3.0e-5
+  weight_decay: 0.0
+  warmup_steps: 0
+  lr_scheduler_type: constant
+  save_strategy: steps
+  save_steps: 34
+  save_total_limit: 5
+  logging_strategy: steps
+  logging_steps: 1
+  gradient_checkpointing: false
+  tf32: false
+  bf16: true
+  save_safetensors: false
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  max_grad_norm: 1.0
+  seed: 42
+  fsdp: "full_shard offload"
+  fsdp_config:
+    use_orig_params: true
+    sync_module_states: true
+    activation_checkpointing: true
+  resume_from_checkpoint:       # null = fresh start, "auto" = latest, or explicit path
