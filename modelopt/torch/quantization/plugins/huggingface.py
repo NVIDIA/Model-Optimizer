@@ -1011,14 +1011,16 @@ def register_sparse_moe_on_the_fly(model):
     Walks the model tree, identifies MoE blocks by their structural attributes
     (``gate`` + ``experts``), and registers unregistered ones with ``_QuantSparseMoe``.
     """
-    registered_types = set()
+    visited_types = set()
     for name, module in model.named_modules():
         mod_type = type(module)
 
         # Avoid duplicate registration: skip if we already processed this type
         # in this walk, or if it was previously registered in the QuantModuleRegistry.
-        if mod_type in registered_types or QuantModuleRegistry.get(mod_type) is not None:
+        if mod_type in visited_types or QuantModuleRegistry.get(mod_type) is not None:
             continue
+
+        visited_types.add(mod_type)
 
         if _is_sparse_moe_block(module):
             print(
@@ -1026,7 +1028,6 @@ def register_sparse_moe_on_the_fly(model):
                 f"registering with _QuantSparseMoe.\033[0m"
             )
             QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(_QuantSparseMoe)
-            registered_types.add(mod_type)
 
 
 def _is_supported_hf_model(model):
