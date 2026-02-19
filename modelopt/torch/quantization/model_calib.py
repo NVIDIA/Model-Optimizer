@@ -1863,6 +1863,35 @@ def _set_input_quantizers_quant_mode(layer: nn.Module):
             module.disable_calib()
 
 
+def _set_kv_quantizers_calib_mode(layer: nn.Module):
+    for name, module in layer.named_modules():
+        if (
+            isinstance(module, TensorQuantizer)
+            and ("k_bmm_quantizer" in name or "v_bmm_quantizer" in name)
+            and not module._disabled
+            and not module._dynamic
+            and module._calibrator is not None
+        ):
+            module._calibrator.reset()
+            module.disable_quant()
+            module.enable_calib()
+
+
+def _set_kv_quantizers_quant_mode(layer: nn.Module):
+    for name, module in layer.named_modules():
+        if (
+            isinstance(module, TensorQuantizer)
+            and ("k_bmm_quantizer" in name or "v_bmm_quantizer" in name)
+            and not module._disabled
+            and not module._dynamic
+            and module._calibrator is not None
+        ):
+            if module._calibrator.compute_amax() is not None:
+                module.load_calib_amax()
+            module.enable_quant()
+            module.disable_calib()
+
+
 @contextlib.contextmanager
 def _disable_input_quantizers(layer: nn.Module):
     """Temporarily disable all enabled input quantizers in a layer."""
