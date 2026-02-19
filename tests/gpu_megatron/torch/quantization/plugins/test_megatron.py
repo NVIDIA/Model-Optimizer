@@ -734,8 +734,7 @@ def test_te_grouped_vs_sequential_quantize(need_4_gpus):
 
 @pytest.mark.parametrize("ep_size", [1, 2])
 @pytest.mark.parametrize("moe_grouped_gemm", [True, False])
-@pytest.mark.parametrize("shared_moe_weight_scale", [True, False])
-def test_layer_sync_moe_local_experts_amax(ep_size, moe_grouped_gemm, shared_moe_weight_scale):
+def test_layer_sync_moe_local_experts_amax(ep_size, moe_grouped_gemm):
     """Test expert model parallel synchronization."""
     size = torch.cuda.device_count()
     if size < ep_size:
@@ -747,15 +746,12 @@ def test_layer_sync_moe_local_experts_amax(ep_size, moe_grouped_gemm, shared_moe
             _test_layer_sync_moe_local_experts_amax,
             ep_size,
             moe_grouped_gemm,
-            shared_moe_weight_scale,
         ),
         backend="nccl",
     )
 
 
-def _test_layer_sync_moe_local_experts_amax(
-    ep_size, moe_grouped_gemm, shared_moe_weight_scale, rank, size
-):
+def _test_layer_sync_moe_local_experts_amax(ep_size, moe_grouped_gemm, rank, size):
     initialize_for_megatron(
         tensor_model_parallel_size=1,
         pipeline_model_parallel_size=1,
@@ -774,16 +770,14 @@ def _test_layer_sync_moe_local_experts_amax(
         transformer_impl="modelopt",
     )
     quant_cfg = mtq.FP8_DEFAULT_CFG
-    if not shared_moe_weight_scale:
-        quant_cfg = copy.deepcopy(quant_cfg)
-        quant_cfg["algorithm"] = {"method": "max", "shared_moe_weight_scale": False}
     model = mtq.quantize(model, quant_cfg, get_forward(model))
 
     # does layer_sync_moe_local_experts_amax happens in mtq.quantize if EP=1?
     for layer in model.decoder.layers:
-        layer.mlp.experts.layer_sync_moe_local_experts_amax(shared_moe_weight_scale)
+        layer.mlp.experts.layer_sync_moe_local_experts_amax()
 
     for layer in model.decoder.layers:
+        # Check input quantizer amax is synced across local experts
         fc1_amax = None
         fc2_amax = None
         for expert in layer.mlp.experts.local_experts:
@@ -798,7 +792,7 @@ def _test_layer_sync_moe_local_experts_amax(
             else:
                 assert torch.allclose(fc2_amax, expert.linear_fc2.input_quantizer.amax)
 
-    for layer in model.decoder.layers:
+        # Check weight quantizer amax is different across local experts
         fc1_amax = None
         fc2_amax = None
         for expert in layer.mlp.experts.local_experts:
@@ -806,17 +800,12 @@ def _test_layer_sync_moe_local_experts_amax(
             assert expert.linear_fc2.weight_quantizer.amax is not None
             if fc1_amax is None:
                 fc1_amax = expert.linear_fc1.weight_quantizer.amax
-            elif shared_moe_weight_scale:
-                assert torch.allclose(fc1_amax, expert.linear_fc1.weight_quantizer.amax)
             else:
                 assert not torch.allclose(fc1_amax, expert.linear_fc1.weight_quantizer.amax)
-                fc1_amax = expert.linear_fc1.weight_quantizer.amax  # update most recent amax
-
             if fc2_amax is None:
                 fc2_amax = expert.linear_fc2.weight_quantizer.amax
-            elif shared_moe_weight_scale:
-                assert torch.allclose(fc2_amax, expert.linear_fc2.weight_quantizer.amax)
-            # FC2 amaxes are the same since the input to the layer is all the same
+            else:
+                assert not torch.allclose(fc2_amax, expert.linear_fc2.weight_quantizer.amax)
 
 
 def _test_expert_model_parallel_amax_sync(

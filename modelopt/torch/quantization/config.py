@@ -214,7 +214,6 @@ MAMBA_MOE_FP8_AGGRESSIVE_CFG = {
         **_default_disabled_quantizer_cfg,
         **_mamba_moe_disabled_quantizer_cfg,
     },
-    "algorithm": {"method": "max", "shared_moe_weight_scale": False},
 }
 
 MAMBA_MOE_FP8_CONSERVATIVE_CFG = {
@@ -226,7 +225,6 @@ MAMBA_MOE_FP8_CONSERVATIVE_CFG = {
         "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
         "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
     },
-    "algorithm": {"method": "max", "shared_moe_weight_scale": False},
 }
 
 FP8_PER_CHANNEL_PER_TOKEN_CFG = {
@@ -437,7 +435,6 @@ MAMBA_MOE_NVFP4_AGGRESSIVE_CFG = {
         **_default_disabled_quantizer_cfg,
         **_mamba_moe_disabled_quantizer_cfg,
     },
-    "algorithm": {"method": "max", "shared_moe_weight_scale": False},
 }
 MAMBA_MOE_NVFP4_CONSERVATIVE_CFG = {
     "quant_cfg": {
@@ -458,7 +455,6 @@ MAMBA_MOE_NVFP4_CONSERVATIVE_CFG = {
         "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
         "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
     },
-    "algorithm": {"method": "max", "shared_moe_weight_scale": False},
 }
 
 
