@@ -1,6 +1,14 @@
 NVIDIA Model Optimizer Changelog (Linux)
 ========================================
 
+0.43 (2026-03-xx)
+^^^^^^^^^^^^^^^^^
+
+**New Features**
+
+- User does not need to manually register MOE modules to cover experts calibration coverage in PTQ workflow.
+- ``hf_ptq.py`` now saves the quantization summary and moe expert token count table to the export directory.
+
 0.42 (2026-02-xx)
 ^^^^^^^^^^^^^^^^^
 
