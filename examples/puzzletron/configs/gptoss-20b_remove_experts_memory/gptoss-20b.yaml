@@ -7,7 +7,7 @@ defaults:
   - _self_
 
 puzzle_dir: ???
-descriptor: llama
+descriptor: gpt_oss_20b
 teacher_dir: ${puzzle_dir}/ckpts/teacher/
 replacement_library_path: ${puzzle_dir}/replacement_library.json
 dataset_path: ??? # path to Nemotron-Post-Training-Dataset-v2

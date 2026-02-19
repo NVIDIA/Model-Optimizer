@@ -1,12 +1,30 @@
 #!/usr/bin/env python3
+
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# mypy: ignore-errors
+# 
+
 """
 Create a HuggingFace checkpoint with MXFP4 MoE weights from the original gpt-oss-120b model.
 
 This script:
 1. Copies non-MoE weights from the student model (trained attention, embeddings, etc.)
 2. Extracts MoE expert weights from the original gpt-oss-120b in MXFP4 format
-3. Either loads experts_to_keep.json or deduces expert mappings by comparing weights
-4. Outputs a new checkpoint in decihf format with PACKED MXFP4 expert weights
+3. Deduces expert mappings by comparing weights
+4. Outputs a new pruned (heterogeneous) checkpoint with PACKED MXFP4 expert weights
 """
 
 import argparse
