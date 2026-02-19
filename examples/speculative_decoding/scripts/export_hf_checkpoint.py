@@ -18,10 +18,10 @@
 import argparse
 
 import torch
-from transformers import AutoModelForCausalLM
 
 import modelopt.torch.opt as mto
 from modelopt.torch.export import export_hf_checkpoint
+from modelopt.torch.speculative.utils import load_vlm_or_llm_with_kwargs
 
 
 def parse_args():
@@ -38,11 +38,11 @@ def parse_args():
 mto.enable_huggingface_checkpointing()
 
 args = parse_args()
-model = AutoModelForCausalLM.from_pretrained(args.model_path, torch_dtype="auto")
+_, model = load_vlm_or_llm_with_kwargs(args.model_path, torch_dtype="auto")
 model.eval()
 with torch.inference_mode():
     export_hf_checkpoint(
-        model,  # The quantized model.
-        export_dir=args.export_path,  # The directory where the exported files will be stored.
+        model,
+        export_dir=args.export_path,
     )
 print(f"Exported checkpoint to {args.export_path}")

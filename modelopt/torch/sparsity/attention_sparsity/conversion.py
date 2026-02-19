@@ -21,13 +21,15 @@ from typing import Any
 
 import torch.nn as nn
 
+from modelopt import __version__ as mo_version
 from modelopt.torch.opt.conversion import ModelLikeModule, ModeloptStateManager
 from modelopt.torch.opt.mode import ConvertReturnType, MetadataDict
-from modelopt.torch.utils import get_unwrapped_name
+from modelopt.torch.utils import atomic_print, get_unwrapped_name
 
 from .config import SparseAttentionConfig
-from .plugins.huggingface import register_sparse_attention_on_the_fly
+from .plugins import register_custom_model_plugins_on_the_fly
 from .sparse_attention import SparseAttentionModule, SparseAttentionRegistry
+from .utils import get_named_sparse_attention_modules, get_sparse_attention_modules
 
 
 def is_attn_sparsified(model: nn.Module) -> bool:
@@ -59,8 +61,8 @@ def convert_to_sparse_attention_model(
     # Initialize the true module if necessary
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
 
-    # Register sparse attention modules dynamically
-    register_sparse_attention_on_the_fly(model)
+    # Apply custom model plugins
+    register_custom_model_plugins_on_the_fly(model)
 
     # Replace attention modules with sparse versions
     replace_sparse_attention_modules(model, version=ModeloptStateManager(model).state_version)
@@ -89,7 +91,7 @@ def replace_sparse_attention_modules(model: nn.Module, version=None):
     _replace_sparse_attention_modules(model, version=version)
 
     # Count and report replaced modules
-    replaced_count = sum(isinstance(m, SparseAttentionModule) for _, m in model.named_modules())
+    replaced_count = len(get_sparse_attention_modules(model))
     if replaced_count > 0:
         print(f"Inserted {replaced_count} sparse attention modules")
 
@@ -144,10 +146,7 @@ def set_sparse_attention_attribute(
     # Filter out model-level configs that shouldn't be passed to modules
     module_cfg = {k: v for k, v in attribute_cfg.items() if k != "calibration"}
 
-    for name, module in model.named_modules():
-        if not isinstance(module, SparseAttentionModule):
-            continue
-
+    for name, module in get_named_sparse_attention_modules(model):
         # Check pattern match
         matched = False
         if isinstance(wildcard_or_filter, str):
@@ -192,22 +191,21 @@ def restore_sparse_attention_state(model: nn.Module, state_dict: dict[str, Any])
         model: Model with sparse attention modules
         state_dict: Saved state dictionary
     """
-    for name, module in model.named_modules():
-        if isinstance(module, SparseAttentionModule):
-            module_name = get_unwrapped_name(name, model)
-            if module_name in state_dict:
-                module_state = state_dict[module_name]
+    for name, module in get_named_sparse_attention_modules(model):
+        module_name = get_unwrapped_name(name, model)
+        if module_name in state_dict:
+            module_state = state_dict[module_name]
 
-                # Restore method and config
-                if "method" in module_state:
-                    module._method = module_state["method"]
-                if "method_config" in module_state:
-                    # Restore config attributes
-                    for key, val in module_state["method_config"].items():
-                        setattr(module, f"_{key}", val)
+            # Restore method and config
+            if "method" in module_state:
+                module._method = module_state["method"]
+            if "method_config" in module_state:
+                # Restore config attributes
+                for key, val in module_state["method_config"].items():
+                    setattr(module, f"_{key}", val)
 
-                # Re-setup with restored config
-                module._setup()
+            # Re-setup with restored config
+            module._setup()
 
 
 def update_sparse_attention_metadata(
@@ -222,23 +220,101 @@ def update_sparse_attention_metadata(
     """
     sparse_state = {}
 
-    for name, module in model.named_modules():
-        if isinstance(module, SparseAttentionModule):
-            module_name = get_unwrapped_name(name, model)
+    for name, module in get_named_sparse_attention_modules(model):
+        module_name = get_unwrapped_name(name, model)
 
-            # Save the method configuration that was used
-            # _method_config already contains the validated config dict
-            module_state = {
-                "method": module._sparse_method_instance.name,
-                "method_config": module._method_config.copy(),
-            }
+        # Save the method configuration that was used
+        # _method_config already contains the validated config dict
+        module_state = {
+            "method": module._sparse_method_instance.name,
+            "method_config": module._method_config.copy(),
+        }
 
-            sparse_state[module_name] = module_state
+        sparse_state[module_name] = module_state
 
     metadata["sparse_attention_state"] = sparse_state
     metadata["sparse_attention_config"] = (
         config.model_dump() if hasattr(config, "model_dump") else vars(config)
     )
+
+
+def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
+    """Extract sparse attention config for export to config.json.
+
+    Extracts the calibration parameters (a, b) for the exponential threshold model
+    from the first sparse attention module that has calibrated thresholds.
+
+    The exported config allows computing threshold at runtime:
+        scale_factor = a * exp(b * target_sparsity)
+        threshold = scale_factor / seqlen
+
+    Args:
+        model: Model with sparse attention applied
+
+    Returns:
+        Dictionary with sparse attention config for HuggingFace config.json export.
+        Returns None if no calibrated sparse attention modules found.
+
+    Example output::
+
+        {
+            "config_groups": {
+                "group_0": {"sparse_algo": "softmax_skip", "targets": ["LlamaAttention"]}
+            },
+            "threshold_scale_factor": {
+                "formula": "a * exp(b * target_sparsity)",
+                "prefill": {"a": 7.93, "b": 8.61},
+                "decode": {"a": 0.12, "b": 9.85},
+            },
+            "producer": {"name": "modelopt", "version": "0.37.0"},
+        }
+    """
+    # Collect sparse attention module info
+    calibration_params = None
+    target_classes: set[str] = set()
+
+    for module in get_sparse_attention_modules(model):
+        # Get the original wrapped module's class name
+        if hasattr(module, "get_original_cls_by_level"):
+            original_cls = module.get_original_cls_by_level(level=0)
+            if original_cls is not None:
+                target_classes.add(original_cls.__name__)
+
+        # Get calibration params from first module that has them
+        if calibration_params is None:
+            calibration_params = getattr(module._sparse_method_instance, "calibration_params", None)
+
+    # Return None if no calibration params found
+    if calibration_params is None:
+        return None
+
+    # Build threshold_scale_factor with model parameters
+    threshold_scale_factor: dict[str, Any] = {
+        "formula": "a * exp(b * target_sparsity)",
+    }
+    for phase in ["prefill", "decode"]:
+        if phase in calibration_params:
+            threshold_scale_factor[phase] = {
+                "a": calibration_params[phase]["a"],
+                "b": calibration_params[phase]["b"],
+            }
+
+    # Build the export config
+    export_config: dict[str, Any] = {
+        "config_groups": {
+            "group_0": {
+                "sparse_algo": "softmax_skip",
+                "targets": sorted(target_classes) if target_classes else ["Attention"],
+            }
+        },
+        "threshold_scale_factor": threshold_scale_factor,
+        "producer": {
+            "name": "modelopt",
+            "version": mo_version,
+        },
+    }
+
+    return export_config
 
 
 def disable_sparse_attention(model: nn.Module, wildcard_or_filter_func: str | Callable):
@@ -257,10 +333,7 @@ def disable_sparse_attention(model: nn.Module, wildcard_or_filter_func: str | Ca
         >>> # Disable sparse attention for lm_head
         >>> sparse_attn.disable_sparse_attention(model, "*lm_head*")
     """
-    for name, module in model.named_modules():
-        if not isinstance(module, SparseAttentionModule):
-            continue
-
+    for name, module in get_named_sparse_attention_modules(model):
         matched = False
         if isinstance(wildcard_or_filter_func, str):
             matched = fnmatch.fnmatch(name, wildcard_or_filter_func)
@@ -287,10 +360,7 @@ def enable_sparse_attention(model: nn.Module, wildcard_or_filter_func: str | Cal
         >>> # Re-enable sparse attention for all attention modules
         >>> sparse_attn.enable_sparse_attention(model, "*attention*")
     """
-    for name, module in model.named_modules():
-        if not isinstance(module, SparseAttentionModule):
-            continue
-
+    for name, module in get_named_sparse_attention_modules(model):
         matched = False
         if isinstance(wildcard_or_filter_func, str):
             matched = fnmatch.fnmatch(name, wildcard_or_filter_func)
@@ -299,3 +369,52 @@ def enable_sparse_attention(model: nn.Module, wildcard_or_filter_func: str | Cal
 
         if matched:
             module.enable()
+
+
+def _format_threshold(info: dict) -> str:
+    """Format threshold info for display."""
+    t = info.get("type")
+    if t == "dynamic_calibrated":
+        # Exponential model: threshold = a * exp(b * sparsity) / seqlen
+        params = info.get("calibration_params", {})
+        target = info.get("target_sparse_ratio", {})
+        parts = []
+        for phase in ["prefill", "decode"]:
+            if phase in params:
+                a, b = params[phase]["a"], params[phase]["b"]
+                s = target.get(phase, 0.5)
+                parts.append(f"{phase}: a={a:.4f}, b={b:.2f}, target={s:.0%}")
+        return f"calibrated({', '.join(parts)})"
+    if t == "static":
+        v = info.get("value")
+        if isinstance(v, dict):
+            return f"threshold={v}"
+        return f"threshold={v:.2e}" if isinstance(v, float) else f"threshold={v}"
+    return "threshold=N/A"
+
+
+@atomic_print
+def print_sparse_attention_summary(model: nn.Module):
+    """Print summary of sparse attention modules in the model.
+
+    Args:
+        model: Model with sparse attention applied
+    """
+    sparse_modules = get_named_sparse_attention_modules(model)
+
+    if not sparse_modules:
+        print("No sparse attention modules found")
+        return
+
+    enabled = sum(1 for _, m in sparse_modules if m.is_enabled)
+    print(f"Sparse attention: {enabled}/{len(sparse_modules)} modules enabled")
+
+    # Group by (method, threshold)
+    groups: dict[tuple[str, str], int] = {}
+    for _, module in sparse_modules:
+        method = getattr(module, "_method", "unknown")
+        threshold = _format_threshold(module.get_threshold_info())
+        groups[(method, threshold)] = groups.get((method, threshold), 0) + 1
+
+    for (method, threshold), count in sorted(groups.items()):
+        print(f"  {method}: {count} layers, {threshold}")
