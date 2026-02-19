@@ -10,7 +10,7 @@ This guide shows how to perform knowledge distillation on Puzzletron-compressed 
 
 ## Setup
 
-> **Temporary Setup:** This manual Megatron-Bridge setup is required temporarily until the NeMo docker container includes Megatron-Bridge by default. Once the container is updated, this setup step will no longer be necessary.
+> **Temporary Setup:** The NeMo docker container includes Megatron-Bridge (main branch), but Puzzletron requires a specific version/branch of Megatron-Bridge that is not included by default. This manual setup is required to use the Puzzletron-compatible version. Once the container includes the required version, this setup step will no longer be necessary.
 
 **Note:** Set `$WORKSPACE` to your project root directory before running these commands:
 
@@ -20,11 +20,13 @@ export WORKSPACE=/path/to/your/project
 
 1. **Clone Megatron-Bridge:**
 
-   Clone [Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) into your workspace:
+   Clone [Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) and checkout the specific commit required for Puzzletron:
 
    ```bash
    cd $WORKSPACE
    git clone https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+   cd Megatron-Bridge
+   git checkout 960a718cb8989676b258e107d538642717e22e39
    ```
 
 2. **Initialize Megatron-Bridge submodules:**
