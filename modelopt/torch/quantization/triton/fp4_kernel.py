@@ -24,7 +24,12 @@ import torch
 import triton
 import triton.language as tl
 
-__all__ = ["fp4_dequantize", "static_blockwise_fp4_cast", "static_blockwise_fp4_fake_quant"]
+__all__ = [
+    "fp4_dequantize",
+    "static_blockwise_fp4_cast",
+    "static_blockwise_fp4_fake_quant",
+    "static_blockwise_fp4_step_size",
+]
 
 
 _TORCH_TO_TL_DTYPE = {
@@ -308,8 +313,13 @@ def static_blockwise_fp4_cast_kernel(
     N,
     OUT_DTYPE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    ROUND_MODE: tl.constexpr = 0,
 ):
-    """FP4 cast only -- rounds |x| to nearest FP4 value, no scale/descale."""
+    """FP4 cast only -- rounds |x| to FP4 value, no scale/descale.
+
+    Args:
+        ROUND_MODE: 0 = round-to-nearest-even (RNE, default), 1 = floor (toward zero).
+    """
     pid = tl.program_id(axis=0)
     if pid >= N:
         return
@@ -319,49 +329,86 @@ def static_blockwise_fp4_cast_kernel(
     x_abs = tl.abs(x)
 
     # FP4 values: 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0
-    q_val = tl.where(
-        x_abs <= 0.25,
-        0.0,
-        tl.where(
-            x_abs < 0.75,
-            0.5,
+    if ROUND_MODE == 0:
+        # Round to Nearest Even (RNE) -- midpoint boundaries
+        q_val = tl.where(
+            x_abs <= 0.25,
+            0.0,
             tl.where(
-                x_abs <= 1.25,
-                1.0,
+                x_abs < 0.75,
+                0.5,
                 tl.where(
-                    x_abs < 1.75,
-                    1.5,
+                    x_abs <= 1.25,
+                    1.0,
                     tl.where(
-                        x_abs <= 2.5,
-                        2.0,
+                        x_abs < 1.75,
+                        1.5,
                         tl.where(
-                            x_abs < 3.5,
-                            3.0,
-                            tl.where(x_abs <= 5.0, 4.0, 6.0),
+                            x_abs <= 2.5,
+                            2.0,
+                            tl.where(
+                                x_abs < 3.5,
+                                3.0,
+                                tl.where(x_abs <= 5.0, 4.0, 6.0),
+                            ),
                         ),
                     ),
                 ),
             ),
-        ),
-    )
+        )
+    else:
+        # Floor (toward zero) -- strict lower bounds
+        q_val = tl.where(
+            x_abs < 0.5,
+            0.0,
+            tl.where(
+                x_abs < 1.0,
+                0.5,
+                tl.where(
+                    x_abs < 1.5,
+                    1.0,
+                    tl.where(
+                        x_abs < 2.0,
+                        1.5,
+                        tl.where(
+                            x_abs < 3.0,
+                            2.0,
+                            tl.where(
+                                x_abs < 4.0,
+                                3.0,
+                                tl.where(x_abs < 6.0, 4.0, 6.0),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
 
     y = tl.where(x >= 0, q_val, -q_val)
     tl.store(y_ptr + offs, y.to(OUT_DTYPE))
 
 
+_ROUND_MODE_MAP = {"rne": 0, "down": 1}
+
+
 def static_blockwise_fp4_cast(
     x: torch.Tensor,
     out_dtype: torch.dtype | None = None,
+    rounding: str = "rne",
 ):
-    """FP4 cast: rounds to nearest FP4 value without any scale/descale.
+    """FP4 cast: rounds to FP4 value without any scale/descale.
 
     Input x should already be pre-scaled to [-6, 6] range.
 
     Args:
         x: [NUM_BLOCKS, BLOCK_SIZE] on CUDA.
         out_dtype: Output dtype. Defaults to x.dtype.
+        rounding: Rounding mode -- ``"rne"`` (round to nearest even, default)
+            or ``"down"`` (floor toward zero).
     """
     assert x.ndim == 2
+    if rounding not in _ROUND_MODE_MAP:
+        raise ValueError(f"Unknown rounding mode '{rounding}'. Use one of {list(_ROUND_MODE_MAP)}.")
     NUM_BLOCKS, BLOCK_SIZE = x.shape
 
     if out_dtype is None:
@@ -379,6 +426,92 @@ def static_blockwise_fp4_cast(
             y_flat,
             NUM_BLOCKS,
             OUT_DTYPE=tl_out_dtype,
+            BLOCK_SIZE=BLOCK_SIZE,
+            ROUND_MODE=_ROUND_MODE_MAP[rounding],
+        )
+
+    return y_flat.view_as(x)
+
+
+@triton.jit
+def static_blockwise_fp4_step_size_kernel(
+    x_ptr,
+    y_ptr,
+    N,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Compute step size from current FP4 level to the next level.
+
+    FP4 levels: 0, 0.5, 1, 1.5, 2, 3, 4, 6
+    Step sizes: 0.5, 0.5, 0.5, 0.5, 1.0, 1.0, 2.0, 0.0
+    """
+    pid = tl.program_id(axis=0)
+    if pid >= N:
+        return
+
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    x = tl.load(x_ptr + offs).to(tl.float32)
+    x_abs = tl.abs(x)
+
+    step = tl.where(
+        x_abs < 0.25,
+        0.5,
+        tl.where(
+            x_abs < 0.75,
+            0.5,
+            tl.where(
+                x_abs < 1.25,
+                0.5,
+                tl.where(
+                    x_abs < 1.75,
+                    0.5,
+                    tl.where(
+                        x_abs < 2.5,
+                        1.0,
+                        tl.where(
+                            x_abs < 3.5,
+                            1.0,
+                            tl.where(x_abs < 5.0, 2.0, 0.0),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    tl.store(y_ptr + offs, step.to(tl.float32))
+
+
+def static_blockwise_fp4_step_size(
+    x: torch.Tensor,
+) -> torch.Tensor:
+    """Compute step size from each FP4 level to the next.
+
+    The input should contain FP4-quantized values (floor-rounded).
+    Returns the gap to the next higher FP4 representable value.
+
+    FP4 levels -> step sizes: 0->0.5, 0.5->0.5, 1->0.5, 1.5->0.5,
+    2->1, 3->1, 4->2, 6->0.
+
+    Args:
+        x: [NUM_BLOCKS, BLOCK_SIZE] on CUDA. Should contain floor-rounded FP4 values.
+
+    Returns:
+        Step size tensor of the same shape, in float32.
+    """
+    assert x.ndim == 2
+    NUM_BLOCKS, BLOCK_SIZE = x.shape
+
+    x_flat = x.contiguous().view(-1)
+    y_flat = torch.empty(x_flat.shape, dtype=torch.float32, device=x.device)
+
+    grid = (NUM_BLOCKS,)
+
+    with torch.cuda.device(x.device):
+        static_blockwise_fp4_step_size_kernel[grid](
+            x_flat,
+            y_flat,
+            NUM_BLOCKS,
             BLOCK_SIZE=BLOCK_SIZE,
         )
 

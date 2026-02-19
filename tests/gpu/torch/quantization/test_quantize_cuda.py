@@ -29,7 +29,7 @@ from _test_utils.torch.quantization.quantize_common import (
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.extensions import get_cuda_ext_mx
-from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
+from modelopt.torch.quantization.nn import NVFP4StaticAdaRoundQuantizer, NVFP4StaticQuantizer
 
 NVFP4_WEIGHT_ACT_MSE_CFG = {
     "quant_cfg": {
@@ -83,6 +83,19 @@ NVFP4_WEIGHT_SCALE_LEARN_CFG = {
         "*input_quantizer": {"enable": False},
     },
     "algorithm": {"method": "scale_after_dequant"},
+}
+
+NVFP4_ADAROUND_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {"enable": False},
+    },
+    "algorithm": {"method": "adaround", "temperature": 1.0},
 }
 
 
@@ -208,3 +221,81 @@ def test_scale_after_dequant_grad():
             assert module._per_block_scale.grad is not None
             found = True
     assert found
+
+
+def test_adaround_grad():
+    """Test adaround: quantizers upgraded, round_logits gets gradients, dist_loss works."""
+    if get_cuda_ext_mx() is None:
+        pytest.skip("cuda_ext_mx is not available")
+
+    import copy
+
+    model = nn.Sequential(nn.Linear(32, 64, bias=False), nn.Linear(64, 16, bias=False)).cuda()
+    model_ref = copy.deepcopy(model)
+
+    calib_data = [torch.randn(2, 32, device="cuda") for _ in range(4)]
+
+    def forward_loop(model):
+        for x in calib_data:
+            model(x)
+
+    # Reference: scale_after_dequant only (no adaround)
+    mtq.quantize(model_ref, NVFP4_WEIGHT_SCALE_LEARN_CFG, forward_loop)
+
+    # Step 1: quantize with scale_after_dequant
+    mtq.quantize(model, NVFP4_WEIGHT_SCALE_LEARN_CFG, forward_loop)
+    # Step 2: quantize again with adaround (skips re-quantization, only calibrates)
+    mtq.quantize(model, NVFP4_ADAROUND_CFG, forward_loop)
+
+    # -- 1. Verify quantizers are upgraded to NVFP4StaticAdaRoundQuantizer --
+    adaround_quantizers = [
+        m
+        for m in model.modules()
+        if isinstance(m, NVFP4StaticAdaRoundQuantizer) and m._adaround_enabled
+    ]
+    assert len(adaround_quantizers) > 0, "No NVFP4StaticAdaRoundQuantizer found in model"
+
+    # -- 2. Verify round_logits is a learnable parameter --
+    for q in adaround_quantizers:
+        assert hasattr(q, "round_logits")
+        assert isinstance(q.round_logits, nn.Parameter)
+        assert q.round_logits.requires_grad
+
+    # -- 3. AdaRound Eval mode: outputs should be close to RTN
+    model.eval()
+
+    x = torch.randn(2, 32, device="cuda")
+    out_ref = model_ref(x)
+    out = model(x)
+    assert torch.allclose(out, out_ref, atol=1e-2), (
+        f"Output mismatch: max diff = {(out - out_ref).abs().max().item()}"
+    )
+
+    # -- 4. Forward + backward: verify round_logits gets gradients --
+    model.train()
+    out = model(x)
+    out.sum().backward()
+
+    for q in adaround_quantizers:
+        assert q.round_logits.grad is not None, "round_logits did not receive gradients"
+        assert q.round_logits.grad.abs().sum() > 0, "round_logits gradients are all zero"
+
+    # -- 5. dist_loss is differentiable and returns a scalar --
+    model.zero_grad()
+    total_dist_loss = sum(q.dist_loss() for q in adaround_quantizers)
+    assert total_dist_loss.ndim == 0, "dist_loss should return a scalar"
+    assert total_dist_loss.item() >= 0, "dist_loss should be non-negative"
+    total_dist_loss.backward()
+    for q in adaround_quantizers:
+        assert q.round_logits.grad is not None, (
+            "dist_loss did not produce gradients on round_logits"
+        )
+
+    # -- 6. AdaRound Eval mode: round_prob should be 0 or 1 --
+    model.eval()
+    for q in adaround_quantizers:
+        round_prob = q.get_round_prob()
+        hard = ((round_prob == 0) | (round_prob == 1)).all()
+        # With stretched sigmoid, values near 0/1 are expected but not exact for all entries.
+        # At minimum, no value should be far from {0, 1}.
+        assert hard, "Eval round_prob is not 0 or 1"

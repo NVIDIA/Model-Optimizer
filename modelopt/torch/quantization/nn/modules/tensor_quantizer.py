@@ -58,6 +58,7 @@ from ...tensor_quant import (
     dynamic_block_quant,
     fake_tensor_quant,
     fp4_cast_ste,
+    fp4_step_size,
     int_cast_ste,
     scaled_e4m3,
     static_blockwise_fp4_fake_quant,
@@ -66,6 +67,7 @@ from ...utils import is_torch_export_mode
 from ..functional import normalized_hadamard_transform
 
 __all__ = [
+    "NVFP4StaticAdaRoundQuantizer",
     "NVFP4StaticQuantizer",
     "SequentialQuantizer",
     "StaticBlockScaleQuantizer",
@@ -1374,11 +1376,16 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         self._scale_after_dequant = True
         self._quantize_scales = quantize_scales
 
+    def _fp4_cast(self, inputs):
+        """Cast inputs to FP4 representable values (no scaling)."""
+        return fp4_cast_ste(inputs)
+
     def _fake_quantize(self, inputs):
         """Fake quantization using two-level scaling with _amax and _global_amax."""
         if self._scale_after_dequant:
             scale_raw = self._per_block_scale.clamp(min=0)
 
+<<<<<<< HEAD
             if self._quantize_scales:
                 scale = scaled_e4m3(scale_raw, self._per_tensor_scale, None, 4, 3)
             else:
@@ -1409,6 +1416,135 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
 
 
 NVFP4StaticQuantizer = StaticBlockScaleQuantizer
+
+
+def _safe_sign(x: torch.Tensor) -> torch.Tensor:
+    """Sign function with zeros mapped to +1 to avoid zeroing the rounding term."""
+    sign = torch.sign(x.detach())
+    return torch.where(sign == 0, torch.ones_like(sign), sign)
+
+
+class NVFP4StaticAdaRoundQuantizer(StaticBlockScaleQuantizer):
+    """NVFP4 quantizer with learnable AdaRound rounding decisions.
+
+    Replaces standard round-to-nearest-even (RNE) FP4 casting with a learned
+    rounding scheme:
+
+    1. Floor the pre-scaled weight to the nearest FP4 value below (``w_down``).
+    2. Compute the step size to the next FP4 value above.
+    3. Learn a rounding probability via sigmoid of learnable logits.
+    4. Final value: ``w_down + round_prob * step_size * sign(input)``.
+
+    In **eval mode** hard rounding is used (``round_prob > 0.5``).
+    In **train mode** soft rounding is used (continuous sigmoid).
+
+    Currently only supported with ``_scale_after_dequant`` mode.
+    """
+
+    def __init__(self, *args, **kwargs):
+        """Initialize NVFP4StaticAdaRoundQuantizer."""
+        super().__init__(*args, **kwargs)
+        self._adaround_enabled = False
+        self.temperature = 1.0
+
+    @classmethod
+    def from_nvfp4_quantizer(
+        cls,
+        tq: StaticBlockScaleQuantizer,
+        weight_scaled: torch.Tensor | None = None,
+        temperature: float = 1.0,
+    ) -> "NVFP4StaticAdaRoundQuantizer":
+        """Convert an NVFP4StaticQuantizer to NVFP4StaticAdaRoundQuantizer in-place.
+
+        Args:
+            tq: The NVFP4StaticQuantizer to convert.
+            weight_scaled: Pre-scaled weight tensor of shape ``[num_blocks, block_size]``.
+                If provided, :meth:`enable_adaround` is called immediately.
+            temperature: Sigmoid temperature for the rounding logits.
+        """
+        assert isinstance(tq, StaticBlockScaleQuantizer), (
+            f"Expected StaticBlockScaleQuantizer, got {type(tq)}"
+        )
+        assert tq._scale_after_dequant, "AdaRound only supported with _scale_after_dequant mode."
+        if isinstance(tq, cls):
+            if weight_scaled is not None:
+                tq.enable_adaround(weight_scaled, temperature)
+            return tq
+        tq.__class__ = cls
+        tq._is_nvfp4_static_adaround_quantizer = True
+        tq._adaround_enabled = False
+        tq.temperature = temperature
+        if weight_scaled is not None:
+            tq.enable_adaround(weight_scaled, temperature)
+        return tq
+
+    @torch.no_grad()
+    def enable_adaround(self, weight_scaled: torch.Tensor, temperature: float = 1.0):
+        """Initialize AdaRound parameters from the pre-scaled weight tensor.
+
+        Args:
+            weight_scaled: Pre-scaled weight tensor of shape ``[num_blocks, block_size]``,
+                already divided by per-block scale so values lie in ``[-6, 6]``.
+            temperature: Sigmoid temperature for the rounding logits.
+        """
+        assert weight_scaled.ndim == 2, (
+            f"weight_scaled must be 2D [num_blocks, block_size], got shape {weight_scaled.shape}"
+        )
+        self.temperature = temperature
+
+        w_down = fp4_cast_ste(weight_scaled, None, "down")
+        step = fp4_step_size(w_down)
+
+        # Normalized residual: how far between floor and ceil (in [0, 1])
+        eps = 1e-6
+        round_normalized = torch.where(
+            step > 0,
+            (weight_scaled.abs() - w_down.abs()) / step,
+            torch.zeros_like(step),
+        ).clamp(eps, 1.0 - eps)
+
+        # Inverse sigmoid to get initial logits
+        round_logits_init = temperature * torch.log(round_normalized / (1.0 - round_normalized))
+        round_logits_init = round_logits_init.clamp(-1e6, 1e6)
+
+        self.round_logits = nn.Parameter(round_logits_init.float(), requires_grad=True)
+        self._adaround_enabled = True
+
+    def get_round_prob(self) -> torch.Tensor:
+        """Compute rounding probabilities from logits via sigmoid.
+
+        Uses the ``1.2 / 0.1`` trick to allow the sigmoid output to reach
+        exact 0 and 1 (slightly stretched, then clamped).
+
+        In eval mode, returns hard rounding decisions (0 or 1).
+        In train mode, returns soft (continuous) probabilities.
+        """
+        round_prob = (torch.sigmoid(self.round_logits / self.temperature) * 1.2 - 0.1).clamp(0, 1)
+        if not self.training:
+            round_prob = (round_prob > 0.5).to(round_prob.dtype)
+        return round_prob
+
+    def dist_loss(self, beta: float = 2.0) -> torch.Tensor:
+        """Regularization loss to push rounding probabilities toward 0 or 1.
+
+        Args:
+            beta: Exponent controlling sharpness. Higher values penalize
+                intermediate probabilities more aggressively.
+        """
+        round_prob = self.get_round_prob()
+        return (1.0 - torch.pow((2.0 * round_prob - 1.0).abs(), beta)).mean()
+
+    def _fp4_cast(self, inputs):
+        """AdaRound FP4 cast: floor + learned rounding offset."""
+        assert self._adaround_enabled, (
+            "AdaRound not initialized. Call enable_adaround(weight_scaled) first."
+        )
+
+        w_down = fp4_cast_ste(inputs, None, "down")
+        step = fp4_step_size(w_down)
+        sign = _safe_sign(inputs)
+
+        return w_down + self.get_round_prob() * step * sign
 
 
 class SequentialQuantizer(nn.Sequential):

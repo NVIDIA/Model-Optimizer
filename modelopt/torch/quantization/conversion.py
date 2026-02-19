@@ -35,6 +35,7 @@ from .config import (
     _QuantizeExportConfig,
 )
 from .nn import (
+    NVFP4StaticAdaRoundQuantizer,
     QuantModule,
     QuantModuleRegistry,
     SequentialQuantizer,
@@ -132,6 +133,10 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
                 module, StaticBlockScaleQuantizer
             ):
                 StaticBlockScaleQuantizer.from_tensor_quantizer(module)
+            if state.get("_is_nvfp4_static_adaround_quantizer") and not isinstance(
+                module, NVFP4StaticAdaRoundQuantizer
+            ):
+                NVFP4StaticAdaRoundQuantizer.from_nvfp4_quantizer(module)
             module.set_from_modelopt_state(quantizer_state_dict[name])
 
     for name, module in model.named_modules():

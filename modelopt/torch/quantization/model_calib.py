@@ -35,7 +35,13 @@ from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
 
 from .calib import MseCalibrator, NVFP4MSECalibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
-from .nn import QuantModule, SequentialQuantizer, StaticBlockScaleQuantizer, TensorQuantizer
+from .nn import (
+    NVFP4StaticAdaRoundQuantizer,
+    QuantModule,
+    SequentialQuantizer,
+    StaticBlockScaleQuantizer,
+    TensorQuantizer,
+)
 from .utils import (
     disable_calib,
     enable_fake_quant,
@@ -50,6 +56,7 @@ from .utils import (
 )
 
 __all__ = [
+    "adaround",
     "awq",
     "local_hessian_calibrate",
     "max_calibrate",
@@ -1950,5 +1957,61 @@ def scale_after_dequant(
                 per_tensor_scale,
                 quantize_scales=quantize_scales,
             )
+
+        seen_modules.add(module)
+
+
+@torch.no_grad()
+def adaround(
+    model: nn.Module,
+    forward_loop: ForwardLoop | None = None,
+    temperature: float = 1.0,
+    scale_after_dequant_args: dict | None = None,
+    **kwargs,
+):
+    """Convert NVFP4 quantizers to use AdaRound.
+
+    If the model is not yet in ``scale_after_dequant`` mode,
+    ``scale_after_dequant_args`` can be provided to run
+    :func:`scale_after_dequant` first (calibration + weight pre-scaling).
+
+    Args:
+        model: Quantized model.
+        forward_loop: Calibration data forward loop. Required when
+            ``scale_after_dequant_args`` is provided.
+        temperature: Sigmoid temperature for the rounding logits.
+        scale_after_dequant_args: If provided, call :func:`scale_after_dequant`
+            first with these keyword arguments.  Example::
+
+                {"scale_algorithm": {"method": "mse", "fp8_scale_sweep": True}}
+    """
+    if scale_after_dequant_args is not None:
+        scale_after_dequant(model, forward_loop=forward_loop, **scale_after_dequant_args)
+
+    seen_modules = set()
+    for name, module in model.named_modules():
+        if module in seen_modules:
+            continue
+        for weight_name in weight_attr_names(module):
+            wq_name = quantizer_attr_names(weight_name).weight_quantizer
+            quantizer = getattr(module, wq_name, None)
+            if not isinstance(quantizer, NVFP4StaticQuantizer):
+                continue
+            if not quantizer._scale_after_dequant:
+                continue
+
+            block_size = quantizer._block_sizes.get(-1, None) or quantizer._block_sizes.get(
+                next(k for k in quantizer._block_sizes if isinstance(k, int)), None
+            )
+            assert block_size is not None, "Could not determine block size"
+
+            with enable_weight_access_and_writeback(module, model):
+                w = getattr(module, weight_name)
+                weight_scaled = w.data.float().reshape(-1, block_size)
+
+                # In-place: changes quantizer.__class__ and initializes round_logits
+                NVFP4StaticAdaRoundQuantizer.from_nvfp4_quantizer(
+                    quantizer, weight_scaled=weight_scaled, temperature=temperature
+                )
 
         seen_modules.add(module)

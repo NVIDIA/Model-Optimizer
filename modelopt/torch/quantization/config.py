@@ -1428,6 +1428,33 @@ class ScaleAfterDequantConfig(QuantizeAlgorithmConfig):
     )
 
 
+class AdaRoundConfig(QuantizeAlgorithmConfig):
+    """Config for AdaRound algorithm.
+
+    Converts NVFP4 quantizers to use learnable rounding decisions instead of
+    round-to-nearest-even. If the model is not yet in scale-after-dequant mode,
+    ``scale_after_dequant_args`` can be provided to run that conversion first.
+    """
+
+    method: Literal["adaround"] = ModeloptField("adaround")
+
+    temperature: float = ModeloptField(
+        default=1.0,
+        title="Sigmoid temperature for rounding logits.",
+        description="Controls the sharpness of the soft rounding probabilities during training.",
+    )
+
+    scale_after_dequant_args: dict | None = ModeloptField(
+        default=None,
+        title="Arguments for scale_after_dequant conversion.",
+        description=(
+            "If provided, :func:`scale_after_dequant` is called first with these arguments "
+            "to calibrate and convert the model before enabling AdaRound. "
+            "Example: ``{'scale_algorithm': {'method': 'mse', 'fp8_scale_sweep': True}}``."
+        ),
+    )
+
+
 class GPTQLiteConfig(QuantizeAlgorithmConfig):
     """The config for GPTQ lite.
 

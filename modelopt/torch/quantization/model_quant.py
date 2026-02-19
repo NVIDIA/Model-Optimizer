@@ -228,7 +228,13 @@ def quantize(
 
     Returns: A pytorch model which has been quantized and calibrated.
     """
-    model = apply_mode(model, mode=[("quantize", config)], registry=QuantizeModeRegistry)
+    from .utils import is_quantized
+
+    if not is_quantized(model):
+        model = apply_mode(model, mode=[("quantize", config)], registry=QuantizeModeRegistry)
+    else:
+        # Model is already quantized; skip module replacement but still apply quantizer config.
+        set_quantizer_by_cfg(model, config.get("quant_cfg", {}))
     return calibrate(model, config.get("algorithm"), forward_loop=forward_loop)
 
 

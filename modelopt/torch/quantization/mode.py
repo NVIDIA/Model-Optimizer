@@ -33,6 +33,7 @@ from modelopt.torch.opt.searcher import ForwardLoop
 
 from .compress import compress_convert, compress_restore, update_compress_metadata
 from .config import (
+    AdaRoundConfig,
     AWQClipCalibConfig,
     AWQFullCalibConfig,
     AWQLiteCalibConfig,
@@ -59,6 +60,7 @@ from .conversion import (
     update_quantize_metadata,
 )
 from .model_calib import (
+    adaround,
     awq,
     gptq_lite,
     local_hessian_calibrate,
@@ -500,3 +502,15 @@ class ScaleAfterDequantModeDescriptor(BaseCalibrateModeDescriptor):
         return ScaleAfterDequantConfig
 
     _calib_func = scale_after_dequant
+
+
+@CalibrateModeRegistry.register_mode
+class AdaRoundModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for AdaRound algorithm."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return AdaRoundConfig
+
+    _calib_func = adaround

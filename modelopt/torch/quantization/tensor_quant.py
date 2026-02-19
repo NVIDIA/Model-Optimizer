@@ -642,12 +642,19 @@ class FP4CastSTEFunction(Function):
     """FP4 cast with STE backward -- no scale/descale, just rounding."""
 
     @staticmethod
-    def forward(ctx, x, out_dtype=None):
-        """Forward pass: cast to FP4 using triton kernel."""
+    def forward(ctx, x, out_dtype=None, rounding="rne"):
+        """Forward pass: cast to FP4 using triton kernel.
+
+        Args:
+            x: Input tensor of shape [NUM_BLOCKS, BLOCK_SIZE].
+            out_dtype: Output dtype. Defaults to x.dtype.
+            rounding: Rounding mode -- ``"rne"`` (round to nearest even, default)
+                or ``"down"`` (floor toward zero).
+        """
         if not triton_kernel.IS_AVAILABLE:
             raise RuntimeError("FP4CastSTEFunction requires triton.")
         ctx.save_for_backward(x)
-        return triton_kernel.static_blockwise_fp4_cast(x, out_dtype)
+        return triton_kernel.static_blockwise_fp4_cast(x, out_dtype, rounding=rounding)
 
     @staticmethod
     def backward(ctx, grad_outputs):
@@ -655,7 +662,18 @@ class FP4CastSTEFunction(Function):
         (x,) = ctx.saved_tensors
         # STE with clip mask: pass gradient where |x| <= 6.0
         grad = grad_outputs * (x.abs() <= 6.0).float()
-        return grad, None
+        return grad, None, None
+
+
+def fp4_step_size(x: torch.Tensor) -> torch.Tensor:
+    """Compute FP4 step size (gap to next FP4 level). Always detached, no gradient.
+
+    Args:
+        x: Tensor of shape [NUM_BLOCKS, BLOCK_SIZE] containing floor-rounded FP4 values.
+    """
+    if not triton_kernel.IS_AVAILABLE:
+        raise RuntimeError("fp4_step_size requires triton.")
+    return triton_kernel.static_blockwise_fp4_step_size(x.detach())
 
 
 class IntCastSTEFunction(Function):
