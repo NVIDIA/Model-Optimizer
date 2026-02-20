@@ -62,6 +62,8 @@ optional_deps = {
         "huggingface_hub>=0.24.0",
         "peft>=0.17.0",
         "transformers>=4.53,<5.0",  # Should match modelopt/torch/__init__.py and tox.ini
+        "nltk",
+        "wonderwords",
     ],
     # linter tools
     "dev-lint": [
@@ -77,6 +79,7 @@ optional_deps = {
         "pytest-cov",
         "pytest-instafail",
         "pytest-timeout",
+        "sentencepiece",  # For test_unified_export_megatron.py, test_vllm_fakequant_megatron_export.py
         "timm",
         "torchprofile>=0.0.4",  # For computing flops of CV models
         "torchvision",

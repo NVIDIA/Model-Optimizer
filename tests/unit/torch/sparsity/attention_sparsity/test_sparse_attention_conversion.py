@@ -31,6 +31,7 @@ import modelopt.torch.sparsity.attention_sparsity as sparse_attn
 from modelopt.torch.sparsity.attention_sparsity.conversion import (
     disable_sparse_attention,
     enable_sparse_attention,
+    print_sparse_attention_summary,
 )
 from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 
@@ -59,28 +60,6 @@ class TestSparseAttentionReplacement:
         # Verify replacement occurred
         assert sparse_attention_count > 0
 
-    def test_enable_disable_toggle(self):
-        """Test enabling and disabling sparse attention."""
-        model = SimpleAttentionModel()
-        model = sparse_attn.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
-
-        # Check initially enabled
-        for module in model.modules():
-            if isinstance(module, SparseAttentionModule):
-                assert module.is_enabled
-
-        # Disable all sparse attention modules
-        disable_sparse_attention(model, "*")
-        for module in model.modules():
-            if isinstance(module, SparseAttentionModule):
-                assert not module.is_enabled
-
-        # Re-enable all sparse attention modules
-        enable_sparse_attention(model, "*")
-        for module in model.modules():
-            if isinstance(module, SparseAttentionModule):
-                assert module.is_enabled
-
     def test_pattern_based_replacement(self):
         """Test pattern-based selective replacement."""
         model = SimpleTransformerEncoderLayer()
@@ -90,7 +69,7 @@ class TestSparseAttentionReplacement:
             "sparse_cfg": {
                 "*self_attn*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 1e-4,
+                    "threshold": {"prefill": 1e-4, "decode": 1e-4},
                     "br": 128,
                     "bc": 128,
                     "enable": True,
@@ -121,7 +100,7 @@ class TestConversionEdgeCases:
             "sparse_cfg": {
                 filter_func: {
                     "method": "flash_skip_softmax",
-                    "threshold": 1e-3,
+                    "threshold": {"prefill": 1e-3, "decode": 1e-4},
                     "enable": True,
                 },
             },
@@ -139,7 +118,7 @@ class TestConversionEdgeCases:
             "sparse_cfg": {
                 "*nonexistent*": {
                     "method": "flash_skip_softmax",
-                    "threshold": 1e-3,
+                    "threshold": {"prefill": 1e-3, "decode": 1e-4},
                     "enable": True,
                 },
             },
@@ -150,10 +129,6 @@ class TestConversionEdgeCases:
 
     def test_disable_enable_functions(self):
         """Test disable/enable utility functions."""
-        from modelopt.torch.sparsity.attention_sparsity.conversion import (
-            disable_sparse_attention,
-            enable_sparse_attention,
-        )
 
         model = SimpleAttentionModel()
         model = sparse_attn.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
@@ -169,6 +144,19 @@ class TestConversionEdgeCases:
         for module in model.modules():
             if isinstance(module, SparseAttentionModule):
                 assert module.is_enabled
+
+    def test_print_sparse_attention_summary(self, capsys):
+        """Test print_sparse_attention_summary function."""
+        model = SimpleAttentionModel()
+        model = sparse_attn.sparsify(model, FLASH_SKIP_SOFTMAX_DEFAULT_CFG)
+
+        # Print summary
+        print_sparse_attention_summary(model)
+
+        # Capture output
+        captured = capsys.readouterr()
+        assert "Sparse attention:" in captured.out
+        assert "modules enabled" in captured.out
 
     def test_restore_sparse_attention_model(self):
         """Test save/restore via modelopt_state."""
@@ -192,3 +180,72 @@ class TestConversionEdgeCases:
             if isinstance(module, SparseAttentionModule):
                 assert hasattr(module, "_method")
                 assert module._method == "flash_skip_softmax"
+
+
+class TestSparseAttentionModuleMethods:
+    """Test SparseAttentionModule methods."""
+
+    def test_get_stats_with_stats_manager(self):
+        """Test get_stats() when stats manager exists and is enabled."""
+        model = SimpleAttentionModel()
+        config = {
+            "sparse_cfg": {
+                "*attention*": {
+                    "method": "flash_skip_softmax",
+                    "threshold": {"prefill": 0.001, "decode": 0.0001},
+                    "br": 64,
+                    "bc": 64,
+                    "collect_stats": True,  # Enable stats collection
+                    "enable": True,
+                }
+            },
+        }
+
+        sparse_model = sparse_attn.sparsify(model, config)
+
+        # Find sparse module
+        sparse_module = None
+        for module in sparse_model.modules():
+            if isinstance(module, SparseAttentionModule):
+                sparse_module = module
+                break
+
+        assert sparse_module is not None
+        assert sparse_module._stats_manager is not None
+
+        # Get stats (should return summary)
+        stats = sparse_module.get_stats()
+
+        assert isinstance(stats, dict)
+        assert "module" in stats
+        assert "total_calls" in stats
+        assert "average_sparsity" in stats
+
+    def test_get_stats_without_stats_manager(self):
+        """Test get_stats() when stats manager is None."""
+        model = SimpleAttentionModel()
+        config = {
+            "sparse_cfg": {
+                "*attention*": {
+                    "method": "flash_skip_softmax",
+                    "threshold": {"prefill": 0.001, "decode": 0.0001},
+                    "br": 64,
+                    "bc": 64,
+                    "collect_stats": False,  # Disable stats collection
+                    "enable": True,
+                }
+            },
+        }
+
+        sparse_model = sparse_attn.sparsify(model, config)
+
+        # Find sparse module
+        for module in sparse_model.modules():
+            if isinstance(module, SparseAttentionModule):
+                # Stats manager should be None
+                assert module._stats_manager is None
+
+                # get_stats should return empty dict
+                stats = module.get_stats()
+                assert stats == {}
+                break

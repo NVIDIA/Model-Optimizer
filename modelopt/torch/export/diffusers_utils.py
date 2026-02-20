@@ -16,15 +16,56 @@
 """Code that export quantized Hugging Face models for deployment."""
 
 import warnings
+from collections.abc import Callable
 from contextlib import contextmanager
 from importlib import import_module
 from typing import Any
 
 import torch
 import torch.nn as nn
-from diffusers import DiffusionPipeline
 
 from .layer_utils import is_quantlinear
+
+DiffusionPipeline: type[Any] | None
+ModelMixin: type[Any] | None
+try:  # diffusers is optional for LTX-2 export paths
+    from diffusers import DiffusionPipeline as _DiffusionPipeline
+    from diffusers import ModelMixin as _ModelMixin
+
+    DiffusionPipeline = _DiffusionPipeline
+    ModelMixin = _ModelMixin
+    _HAS_DIFFUSERS = True
+except Exception:  # pragma: no cover
+    DiffusionPipeline = None
+    ModelMixin = None
+    _HAS_DIFFUSERS = False
+
+TI2VidTwoStagesPipeline: type[Any] | None
+try:  # optional for LTX-2 export paths
+    from ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline as _TI2VidTwoStagesPipeline
+
+    TI2VidTwoStagesPipeline = _TI2VidTwoStagesPipeline
+except Exception:  # pragma: no cover
+    TI2VidTwoStagesPipeline = None
+
+
+def is_diffusers_object(model: Any) -> bool:
+    """Return True if model is a diffusers pipeline/component or LTX-2 pipeline."""
+    if not _HAS_DIFFUSERS:
+        return False
+
+    diffusers_types: tuple[type, ...] = ()
+    if DiffusionPipeline is not None:
+        diffusers_types = (*diffusers_types, DiffusionPipeline)
+    if ModelMixin is not None:
+        diffusers_types = (*diffusers_types, ModelMixin)
+    if TI2VidTwoStagesPipeline is not None:
+        diffusers_types = (*diffusers_types, TI2VidTwoStagesPipeline)
+
+    if not diffusers_types:
+        return False
+
+    return isinstance(model, diffusers_types)
 
 
 def generate_diffusion_dummy_inputs(
@@ -288,6 +329,126 @@ def generate_diffusion_dummy_inputs(
     return None
 
 
+def generate_diffusion_dummy_forward_fn(model: nn.Module) -> Callable[[], None]:
+    """Create a dummy forward function for diffusion(-like) models.
+
+    - For diffusers components, this uses `generate_diffusion_dummy_inputs()` and calls `model(**kwargs)`.
+    - For LTX-2 stage-1 transformer (X0Model), the forward signature is
+      `model(video: Modality|None, audio: Modality|None, perturbations: BatchedPerturbationConfig)`,
+      so we build tiny `ltx_core` dataclasses and call the model directly.
+    """
+    # Duck-typed LTX-2 stage-1 transformer wrapper
+    velocity_model = getattr(model, "velocity_model", None)
+    if velocity_model is not None:
+
+        def _ltx2_dummy_forward() -> None:
+            try:
+                from ltx_core.guidance.perturbations import BatchedPerturbationConfig
+                from ltx_core.model.transformer.modality import Modality
+            except Exception as e:  # pragma: no cover
+                raise RuntimeError(
+                    "LTX-2 export requires `ltx_core` to be installed (Modality, BatchedPerturbationConfig)."
+                ) from e
+
+            # Small shapes for speed/memory
+            batch_size = 1
+            v_seq_len = 8
+            a_seq_len = 8
+            ctx_len = 4
+
+            device = next(model.parameters()).device
+            default_dtype = next(model.parameters()).dtype
+
+            def _param_dtype(module: Any, fallback: torch.dtype) -> torch.dtype:
+                w = getattr(getattr(module, "weight", None), "dtype", None)
+                return w if isinstance(w, torch.dtype) else fallback
+
+            def _positions(bounds_dims: int, seq_len: int) -> torch.Tensor:
+                # [B, dims, seq_len, 2] bounds (start/end)
+                pos = torch.zeros(
+                    (batch_size, bounds_dims, seq_len, 2), device=device, dtype=torch.float32
+                )
+                pos[..., 1] = 1.0
+                return pos
+
+            has_video = hasattr(velocity_model, "patchify_proj") and hasattr(
+                velocity_model, "caption_projection"
+            )
+            has_audio = hasattr(velocity_model, "audio_patchify_proj") and hasattr(
+                velocity_model, "audio_caption_projection"
+            )
+            if not has_video and not has_audio:
+                raise ValueError(
+                    "Unsupported LTX-2 velocity model: missing both video and audio preprocessors."
+                )
+
+            video = None
+            if has_video:
+                v_in = int(velocity_model.patchify_proj.in_features)
+                v_caption_in = int(velocity_model.caption_projection.linear_1.in_features)
+                v_latent_dtype = _param_dtype(velocity_model.patchify_proj, default_dtype)
+                v_ctx_dtype = _param_dtype(
+                    velocity_model.caption_projection.linear_1, default_dtype
+                )
+                video = Modality(
+                    enabled=True,
+                    latent=torch.randn(
+                        batch_size, v_seq_len, v_in, device=device, dtype=v_latent_dtype
+                    ),
+                    # LTX `X0Model` uses `timesteps` as the sigma tensor in `to_denoised(sample, velocity, sigma)`.
+                    # It must be broadcastable to `[B, T, D]`, so we use `[B, T, 1]`.
+                    timesteps=torch.full(
+                        (batch_size, v_seq_len, 1), 0.5, device=device, dtype=torch.float32
+                    ),
+                    positions=_positions(bounds_dims=3, seq_len=v_seq_len),
+                    context=torch.randn(
+                        batch_size, ctx_len, v_caption_in, device=device, dtype=v_ctx_dtype
+                    ),
+                    context_mask=None,
+                )
+
+            audio = None
+            if has_audio:
+                a_in = int(velocity_model.audio_patchify_proj.in_features)
+                a_caption_in = int(velocity_model.audio_caption_projection.linear_1.in_features)
+                a_latent_dtype = _param_dtype(velocity_model.audio_patchify_proj, default_dtype)
+                a_ctx_dtype = _param_dtype(
+                    velocity_model.audio_caption_projection.linear_1, default_dtype
+                )
+                audio = Modality(
+                    enabled=True,
+                    latent=torch.randn(
+                        batch_size, a_seq_len, a_in, device=device, dtype=a_latent_dtype
+                    ),
+                    timesteps=torch.full(
+                        (batch_size, a_seq_len, 1), 0.5, device=device, dtype=torch.float32
+                    ),
+                    positions=_positions(bounds_dims=1, seq_len=a_seq_len),
+                    context=torch.randn(
+                        batch_size, ctx_len, a_caption_in, device=device, dtype=a_ctx_dtype
+                    ),
+                    context_mask=None,
+                )
+
+            perturbations = BatchedPerturbationConfig.empty(batch_size)
+            model(video, audio, perturbations)
+
+        return _ltx2_dummy_forward
+
+    # Default: diffusers-style `model(**kwargs)`
+    def _diffusers_dummy_forward() -> None:
+        device = next(model.parameters()).device
+        dtype = next(model.parameters()).dtype
+        dummy_inputs = generate_diffusion_dummy_inputs(model, device, dtype)
+        if dummy_inputs is None:
+            raise ValueError(
+                f"Unknown model type '{type(model).__name__}', cannot generate dummy inputs."
+            )
+        model(**dummy_inputs)
+
+    return _diffusers_dummy_forward
+
+
 def is_qkv_projection(module_name: str) -> bool:
     """Check if a module name corresponds to a QKV projection layer.
 
@@ -377,17 +538,19 @@ def get_qkv_group_key(module_name: str) -> str:
     return f"{parent_path}.{qkv_type}"
 
 
-def get_diffusers_components(
-    model: DiffusionPipeline | nn.Module,
+def get_diffusion_components(
+    model: Any,
     components: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Get all exportable components from a diffusers pipeline.
+    """Get all exportable components from a diffusion(-like) pipeline.
 
-    This function extracts all components from a DiffusionPipeline including
-    nn.Module models, tokenizers, schedulers, feature extractors, etc.
+    Supports:
+    - diffusers `DiffusionPipeline`: returns `pipeline.components`
+    - diffusers component `nn.Module` (e.g., UNet / transformer)
+    - LTX-2 pipeline (duck-typed): returns stage-1 transformer only as `stage_1_transformer`
 
     Args:
-        model: The diffusers pipeline.
+        model: The pipeline or component.
         components: Optional list of component names to filter. If None, all
             components are returned.
 
@@ -395,7 +558,21 @@ def get_diffusers_components(
         Dictionary mapping component names to their instances (can be nn.Module,
         tokenizers, schedulers, etc.).
     """
-    if isinstance(model, DiffusionPipeline):
+    # LTX-2 pipeline: duck-typed stage-1 transformer export
+    stage_1 = getattr(model, "stage_1_model_ledger", None)
+    transformer_fn = getattr(stage_1, "transformer", None)
+    if stage_1 is not None and callable(transformer_fn):
+        all_components: dict[str, Any] = {"stage_1_transformer": stage_1.transformer()}
+        if components is not None:
+            filtered = {name: comp for name, comp in all_components.items() if name in components}
+            missing = set(components) - set(filtered.keys())
+            if missing:
+                warnings.warn(f"Requested components not found in pipeline: {missing}")
+            return filtered
+        return all_components
+
+    # diffusers pipeline
+    if _HAS_DIFFUSERS and DiffusionPipeline is not None and isinstance(model, DiffusionPipeline):
         # Get all components from the pipeline
         all_components = {name: comp for name, comp in model.components.items() if comp is not None}
 
@@ -425,6 +602,10 @@ def get_diffusers_components(
         return all_components
 
     raise TypeError(f"Expected DiffusionPipeline or nn.Module, got {type(model).__name__}")
+
+
+# Backward-compatible alias
+get_diffusers_components = get_diffusion_components
 
 
 @contextmanager

@@ -87,6 +87,7 @@ NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG = {
         mtq.NVFP4_AWQ_LITE_CFG,
         mtq.NVFP4_AWQ_CLIP_CFG,
         mtq.NVFP4_AWQ_FULL_CFG,
+        mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG,
         mtq.MXFP8_DEFAULT_CFG,
         mtq.MXFP6_DEFAULT_CFG,
         mtq.MXFP4_DEFAULT_CFG,
@@ -113,6 +114,7 @@ def test_quantize(model_cls, config):
         mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
         NVFP4_WEIGHT_ACT_MSE_CFG,
         NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG,
+        mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG,
     ]:
         if get_cuda_ext_mx() is None:
             pytest.skip("cuda_ext_mx is not available")
@@ -133,7 +135,10 @@ def test_quantize(model_cls, config):
         (SimpleLinear, mtq.INT8_SMOOTHQUANT_CFG),
         (SimpleLinear, mtq.W4A8_AWQ_BETA_CFG),
         (SimpleConvLinear, mtq.INT8_DEFAULT_CFG),
+        (SimpleLinear, NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG),
+        (SimpleLinear, NVFP4_WEIGHT_ACT_MSE_CFG),
     ],
 )
 def test_save_restore(model_cls, quant_config):
-    save_restore_test(model_cls, "cuda", quant_config)
+    test_cpu_restore = quant_config == mtq.INT8_SMOOTHQUANT_CFG
+    save_restore_test(model_cls, "cuda", quant_config, test_cpu_restore=test_cpu_restore)

@@ -22,6 +22,8 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
+import transformers
+from packaging import version
 from torch import Tensor
 from torch.nn.functional import linear
 
@@ -38,7 +40,6 @@ except ImportError:
     kitchen = None
 
 import torch.nn as nn
-import transformers
 from transformers.models.t5.modeling_t5 import T5Attention
 
 from modelopt.torch.opt.dynamic import DynamicModule
@@ -48,6 +49,13 @@ from ..algorithms import AutoQuantizeGradientSearcher
 from ..conversion import register
 from ..nn import QuantInputBase, QuantModule, QuantModuleRegistry, TensorQuantizer
 from ..nn.modules.quant_linear import _QuantLinear
+from ..triton import IS_AVAILABLE as IS_TRITON_AVAILABLE
+
+if IS_TRITON_AVAILABLE:
+    from ..triton import weight_dequant
+else:
+    weight_dequant = None
+
 from ..utils import replace_function
 from .attention import register_attention_for_kv_quant
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear, _QuantFunctionalMixin
@@ -56,6 +64,8 @@ if TYPE_CHECKING:
     from types import ModuleType
 
 __all__ = ["register_hf_attentions_on_the_fly"]
+
+TRANSFORMERS_VERSION_GE_5_0 = version.parse(transformers.__version__) >= version.parse("5.0.0")
 
 
 class _QuantAttention(QuantModule):
@@ -440,18 +450,72 @@ class _QuantSparseMoe(QuantModule):
     """
 
     def _setup(self):
-        pass
+        num_experts = 0
+        if hasattr(self, "gate") and hasattr(self.gate, "num_experts"):
+            num_experts = self.gate.num_experts
+        elif hasattr(self, "num_experts"):
+            num_experts = self.num_experts
+        elif hasattr(self, "experts") and hasattr(self.experts, "num_experts"):
+            num_experts = self.experts.num_experts
+
+        self.expert_token_count = torch.zeros(num_experts, dtype=torch.long, device="cpu")
+        self._count_expert_tokens = False
+
+        if num_experts == 0:
+            warnings.warn(
+                f"{self.__class__.__name__}: could not resolve num_experts; "
+                "expert routing will not be tracked for this layer."
+            )
+            return
+
+        if hasattr(self, "gate"):
+            self.gate.register_forward_hook(self._gate_forward_hook)
+
+    def _gate_forward_hook(self, module, input, output):
+        if not self._count_expert_tokens:
+            return
+        with torch.no_grad():
+            if isinstance(output, tuple) and len(output) >= 3:
+                # v5.x TopKRouter: returns (logits, scores, indices)
+                indices = output[2]
+            else:
+                # v4.x nn.Linear gate: returns logits tensor
+                logits = output if not isinstance(output, tuple) else output[0]
+                top_k = self.gate.top_k if hasattr(self.gate, "top_k") else self.top_k
+                _, indices = torch.topk(logits.float(), top_k, dim=-1)
+            counts = torch.bincount(
+                indices.reshape(-1).cpu(), minlength=len(self.expert_token_count)
+            )
+            self.expert_token_count += counts
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if any(getattr(m, "_if_calib", False) for m in self.experts.modules()):
+        is_calib = any(getattr(m, "_if_calib", False) for m in self.experts.modules())
+        if is_calib:
             # If any of the experts are in calibration mode, we will forward all tokens to all experts
             # This is used only for calibration, we need to re-calculate the actual outputs again using
             # the original top_k
-            original_top_k = self.top_k
-            self.top_k = self.num_experts
-            super().forward(hidden_states)
-            self.top_k = original_top_k
-        return super().forward(hidden_states)
+            if TRANSFORMERS_VERSION_GE_5_0:
+                assert hasattr(self, "gate") and hasattr(self.gate, "top_k")
+                original_top_k = self.gate.top_k
+                self.gate.top_k = self.gate.num_experts
+                super().forward(hidden_states)
+                self.gate.top_k = original_top_k
+            else:
+                # Path for transformers < 5.0
+                original_top_k = self.top_k
+                if hasattr(self, "num_experts"):
+                    self.top_k = self.num_experts
+                elif hasattr(self, "experts"):
+                    self.top_k = self.experts.num_experts
+                else:
+                    raise ValueError(f"Could not find num_experts in module {self}")
+                super().forward(hidden_states)
+                self.top_k = original_top_k
+        # Enable counting only for the real-routing forward during calibration
+        self._count_expert_tokens = is_calib
+        output = super().forward(hidden_states)
+        self._count_expert_tokens = False
+        return output
 
 
 class _QuantLlama4TextExperts(QuantModule):
@@ -693,11 +757,55 @@ class _QuantCompressedLinear(QuantModule):
             del self.weight_scale
 
 
-try:
-    from transformers.models.llama4.modeling_llama4 import Llama4TextExperts, Llama4TextMoe
+class _QuantFP8Linear(QuantModule):
+    def _setup(self):
+        self.input_quantizer = TensorQuantizer()
+        self.weight_quantizer = TensorQuantizer()
+        assert self.weight_scale_inv.ndim == 2, "Weight scale inverse must be 2D"
+        assert self.weight.ndim == 2, "Weight must be 2D"
+        self.block_size = max(
+            self.weight.shape[0] // self.weight_scale_inv.shape[0],
+            self.weight.shape[1] // self.weight_scale_inv.shape[1],
+        )
+        assert self.block_size == 128, "Block size must be 128"
 
-    if Llama4TextMoe not in QuantModuleRegistry:
-        QuantModuleRegistry.register({Llama4TextMoe: "hf.Llama4TextMoe"})(_QuantSparseMoe)
+    def _get_weight_and_scale_inv(self):
+        if isinstance(self.weight, torch.distributed.tensor.DTensor):
+            weight = self.weight._local_tensor.contiguous()
+            scale_inv = self.weight_scale_inv._local_tensor.contiguous()
+        else:
+            weight = self.weight.contiguous()
+            scale_inv = self.weight_scale_inv.contiguous()
+        return weight, scale_inv
+
+    def forward(self, input: Tensor) -> Tensor:
+        assert weight_dequant is not None, "Triton is not available"
+        if self.weight.element_size() == 1:
+            with torch.cuda.device(self.weight.device):
+                weight, scale_inv = self._get_weight_and_scale_inv()
+                weight = weight_dequant(weight, scale_inv, self.block_size, dtype=input.dtype)
+        else:
+            weight = self.weight
+        return linear(
+            self.input_quantizer(input),
+            self.weight_quantizer(weight),
+            self.bias,
+        )
+
+    def unpack_weight(self):
+        assert weight_dequant is not None, "Triton is not available"
+        with torch.cuda.device(self.weight.device):
+            weight, scale_inv = self._get_weight_and_scale_inv()
+            self.weight = nn.Parameter(
+                weight_dequant(weight, scale_inv, self.block_size, dtype=torch.get_default_dtype()),
+                requires_grad=False,
+            )
+        if hasattr(self, "weight_scale_inv"):
+            del self.weight_scale_inv
+
+
+try:
+    from transformers.models.llama4.modeling_llama4 import Llama4TextExperts
 
     if Llama4TextExperts not in QuantModuleRegistry:
         QuantModuleRegistry.register({Llama4TextExperts: "hf.Llama4TextExperts"})(
@@ -721,50 +829,10 @@ except ImportError:
     pass
 
 try:
-    from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
-
-    if MixtralSparseMoeBlock not in QuantModuleRegistry:
-        QuantModuleRegistry.register({MixtralSparseMoeBlock: "hf.MixtralSparseMoeBlock"})(
-            _QuantSparseMoe
-        )
-except ImportError:
-    pass
-
-try:
     from transformers.models.falcon.modeling_falcon import FalconLinear
 
     if FalconLinear not in QuantModuleRegistry:
         QuantModuleRegistry.register({FalconLinear: "hf.FalconLinear"})(_QuantLinear)
-except ImportError:
-    pass
-
-try:
-    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
-
-    if Qwen3MoeSparseMoeBlock not in QuantModuleRegistry:
-        QuantModuleRegistry.register({Qwen3MoeSparseMoeBlock: "hf.Qwen3MoeSparseMoeBlock"})(
-            _QuantSparseMoe
-        )
-except ImportError:
-    pass
-
-try:
-    from transformers.models.qwen2_moe.modeling_qwen2_moe import Qwen2MoeSparseMoeBlock
-
-    if Qwen2MoeSparseMoeBlock not in QuantModuleRegistry:
-        QuantModuleRegistry.register({Qwen2MoeSparseMoeBlock: "hf.Qwen2MoeSparseMoeBlock"})(
-            _QuantSparseMoe
-        )
-except ImportError:
-    pass
-
-try:
-    from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextSparseMoeBlock
-
-    if Qwen3NextSparseMoeBlock not in QuantModuleRegistry:
-        QuantModuleRegistry.register({Qwen3NextSparseMoeBlock: "hf.Qwen3NextSparseMoeBlock"})(
-            _QuantSparseMoe
-        )
 except ImportError:
     pass
 
@@ -779,20 +847,20 @@ except ImportError:
     pass
 
 try:
-    from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
-        Qwen3VLMoeTextExperts,
-        Qwen3VLMoeTextSparseMoeBlock,
-    )
-
-    if Qwen3VLMoeTextSparseMoeBlock not in QuantModuleRegistry:
-        QuantModuleRegistry.register(
-            {Qwen3VLMoeTextSparseMoeBlock: "hf.Qwen3VLMoeTextSparseMoeBlock"}
-        )(_QuantSparseMoe)
+    from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextExperts
 
     if Qwen3VLMoeTextExperts not in QuantModuleRegistry:
         QuantModuleRegistry.register({Qwen3VLMoeTextExperts: "hf.Qwen3VLMoeTextExperts"})(
             _QuantQwen3VLMoeTextExperts
         )
+except ImportError:
+    pass
+
+try:
+    from transformers.integrations.finegrained_fp8 import FP8Linear
+
+    if FP8Linear not in QuantModuleRegistry:
+        QuantModuleRegistry.register({FP8Linear: "hf.FP8Linear"})(_QuantFP8Linear)
 except ImportError:
     pass
 
@@ -910,6 +978,58 @@ def register_falcon_linears_on_the_fly(model):
             QuantModuleRegistry.register({linear_type: linear_type.__name__})(_QuantLinear)
 
 
+def _is_sparse_moe_block(module):
+    """Check if a module is structurally a sparse MoE block compatible with _QuantSparseMoe.
+
+    All HuggingFace MoE blocks (Mixtral, Qwen3Moe, Qwen2Moe, Qwen3Next, Llama4, MiniMax, etc.)
+    share a common structural pattern: a ``gate`` (TopKRouter) sub-module with routing attributes
+    (``top_k`` and ``num_experts``), and an ``experts`` sub-module.
+
+    This function detects that pattern instead of relying on class names, making it forward-compatible
+    with new MoE architectures. Some MoE models (e.g. Glm4MoeMoE) have ``gate`` and ``experts`` but
+    use a different routing interface (``n_routed_experts`` instead of ``num_experts``, custom
+    ``route_tokens_to_experts``), so we require ``num_experts`` to be present to avoid false positives.
+    """
+    if not hasattr(module, "experts"):
+        return False
+
+    # Primary: gate sub-module has topk/top_k + num_experts (standard TopKRouter pattern)
+    if hasattr(module, "gate"):
+        gate = module.gate
+        has_topk = hasattr(gate, "top_k")
+        has_num_experts = hasattr(gate, "num_experts")
+        if has_topk and has_num_experts:
+            return True
+
+    # Fallback: top_k + num_experts on the block itself (older transformers, e.g. v4.x Qwen3Next)
+    return hasattr(module, "top_k") and hasattr(module, "num_experts")
+
+
+def register_sparse_moe_on_the_fly(model):
+    """Auto-detect and register MOE modules as _QuantSparseMoe.
+
+    Walks the model tree, identifies MoE blocks by their structural attributes
+    (``gate`` + ``experts``), and registers unregistered ones with ``_QuantSparseMoe``.
+    """
+    visited_types = set()
+    for name, module in model.named_modules():
+        mod_type = type(module)
+
+        # Avoid duplicate registration: skip if we already processed this type
+        # in this walk, or if it was previously registered in the QuantModuleRegistry.
+        if mod_type in visited_types or QuantModuleRegistry.get(mod_type) is not None:
+            continue
+
+        visited_types.add(mod_type)
+
+        if _is_sparse_moe_block(module):
+            print(
+                f"\033[1mDetected MOE module '{name}' of type {mod_type.__name__}, "
+                f"registering with _QuantSparseMoe.\033[0m"
+            )
+            QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(_QuantSparseMoe)
+
+
 def _is_supported_hf_model(model):
     """Check if the model a valid model for transformers quantization specific support."""
     supported_models = [transformers.PreTrainedModel]
@@ -975,6 +1095,7 @@ CUSTOM_MODEL_PLUGINS.update(
     [
         register_falcon_linears_on_the_fly,
         register_dbrx_moe_on_the_fly,
+        register_sparse_moe_on_the_fly,
         register_hf_attentions_on_the_fly,
         convert_hf_parallel_linears_on_the_fly,
     ]

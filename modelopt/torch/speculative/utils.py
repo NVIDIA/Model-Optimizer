@@ -25,6 +25,7 @@ from collections import Counter, defaultdict, deque
 
 import torch
 import torch.distributed
+import transformers
 from huggingface_hub import snapshot_download
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -42,6 +43,9 @@ REMOVE_THINK_CHAT_TEMPLATE = (
 def calibrate_frequent_vocab(tokenizer, text, target_vocab_size, output_file=None):
     """Given a calibration text, find the most common vocabs and return the mapping."""
     conversations = tokenizer.apply_chat_template(text)
+    # Transformers5.x returns a BatchEncoding from apply_chat_template
+    if hasattr(conversations, "input_ids"):
+        conversations = conversations.input_ids
     counter = Counter(conversations)
     vocab = counter.most_common(target_vocab_size)
     mapping = torch.zeros(target_vocab_size, dtype=torch.int64)
@@ -468,3 +472,59 @@ def enable_cp_ttt_patch():
             yield
         finally:
             modelopt.torch.speculative.plugins.transformers.ENABLE_CP_TTT_PATCH = False
+
+
+def load_vlm_or_llm_with_kwargs(model_name_or_path: str, **kwargs):
+    """Load a VLM or LLM with kwargs. Returns the model and model config."""
+    model_config = transformers.AutoConfig.from_pretrained(
+        model_name_or_path, trust_remote_code=True
+    )
+    if "vl" in model_config.model_type.lower():
+        model_cls = transformers.AutoModelForVision2Seq
+    else:
+        model_cls = transformers.AutoModelForCausalLM
+
+    return model_config, model_cls.from_pretrained(model_name_or_path, **kwargs)
+
+
+@contextlib.contextmanager
+def patch_transformers5_params_loading():
+    """Patch transformers 5.x parameter loading to preserve original `requires_grad` settings.
+
+    In transformers v5.x, loading a checkpoint forcibly sets parameters' requires_grad,
+    which may unintentionally unfreeze frozen parameters. This monkey-patch restores the original
+    `requires_grad` after loading parameters.
+
+    Reference:
+        https://github.com/huggingface/transformers/blob/v5.0.0.rc1-release/src/transformers/core_model_loading.py#L640
+    """
+    # Skip patching for non-applicable transformers version
+    if importlib.util.find_spec("transformers.core_model_loading") is None:
+        return
+    from transformers import core_model_loading
+
+    if not hasattr(core_model_loading, "set_param_for_module"):
+        return
+
+    orig_set_param_for_module = core_model_loading.set_param_for_module
+
+    def patched_set_param_for_module(*args, **kwargs):
+        """Monkey-patch set_param_for_module to restore original requires_grad."""
+        model, target_name = args[:2]
+        module_path, _, param_name = target_name.rpartition(".")
+        module_obj = model.get_submodule(module_path) if module_path else model
+
+        # Get original requires_grad value
+        orig_requires_grad = getattr(module_obj, param_name).requires_grad
+
+        # Call set_param_for_module
+        orig_set_param_for_module(*args, **kwargs)
+
+        # Restore original requires_grad value
+        getattr(module_obj, param_name).requires_grad = orig_requires_grad
+
+    try:
+        core_model_loading.set_param_for_module = patched_set_param_for_module
+        yield
+    finally:
+        core_model_loading.set_param_for_module = orig_set_param_for_module

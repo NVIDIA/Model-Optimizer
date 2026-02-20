@@ -32,14 +32,14 @@ from safetensors.torch import save_file
 
 try:
     import diffusers
-    from diffusers import DiffusionPipeline, ModelMixin
 
     from .diffusers_utils import (
-        generate_diffusion_dummy_inputs,
-        get_diffusers_components,
+        generate_diffusion_dummy_forward_fn,
+        get_diffusion_components,
         get_qkv_group_key,
         hide_quantizers_from_state_dict,
         infer_dtype_from_model,
+        is_diffusers_object,
         is_qkv_projection,
     )
 
@@ -53,6 +53,11 @@ from modelopt.torch.quantization import set_quantizer_by_cfg_context
 from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
+
+try:
+    from modelopt.torch.sparsity.attention_sparsity.conversion import export_sparse_attention_config
+except ImportError:
+    export_sparse_attention_config = None
 
 from .convert_hf_config import convert_hf_quant_config_format
 from .layer_utils import (
@@ -104,6 +109,22 @@ def _is_enabled_quantizer(quantizer):
         return any(q.is_enabled for q in quantizer)
 
     return False
+
+
+def _save_component_state_dict_safetensors(
+    component: nn.Module, component_export_dir: Path
+) -> None:
+    cpu_state_dict = {k: v.detach().contiguous().cpu() for k, v in component.state_dict().items()}
+    save_file(cpu_state_dict, str(component_export_dir / "model.safetensors"))
+    with open(component_export_dir / "config.json", "w") as f:
+        json.dump(
+            {
+                "_class_name": type(component).__name__,
+                "_export_format": "safetensors_state_dict",
+            },
+            f,
+            indent=4,
+        )
 
 
 def _collect_shared_input_modules(
@@ -220,7 +241,7 @@ def _fuse_shared_input_modules(
 
                     # Fuse each group separately
                     for group_key, group_modules in qkv_groups.items():
-                        if len(group_modules) > 1:
+                        if len(group_modules) >= 2:
                             preprocess_linear_fusion(group_modules, resmooth_only=False)
                             fused_count += 1
                             module_names = [getattr(m, "name", "unknown") for m in group_modules]
@@ -300,27 +321,27 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                 [1, model.config.num_mel_bins, feature_extractor.nb_max_frames], dtype=model.dtype
             ).to(model.device)
 
-        if getattr(model.config, "is_encoder_decoder", False):
-            # For encoder-decoder models, we need to pass both the encoder and decoder input ids
-            model(fake_input, decoder_input_ids=decoder_fake_input)
-        elif is_vl_model and "nemotron" in model_type:
-            # For Nemotron VL models, try to run optimization on just the language model part
+        if is_vl_model and "nemotron" in model_type:
+            # For Nemotron VL models, run optimization on just the language model/decoder.
+            # This avoids needing pixel_values for the vision encoder.
             language_model_lineage = get_language_model_from_vl(model)
 
             if language_model_lineage is not None:
-                # Run optimization on just the language model with the same input format as regular LLMs
-                # Use the same fake_input tensor that regular LLMs use
                 language_model = language_model_lineage[-1]
                 print(
                     f"Running optimization on language model with fake_input shape: {fake_input.shape}"
                 )
-                language_model(fake_input)
+                # Pass use_cache=False to avoid KV cache issues in encoder-decoder models
+                language_model(fake_input, use_cache=False)
             else:
                 raise ValueError(
                     f"Cannot extract language_model from Nemotron VL model (type: {model_type}). "
                     "This is required for requantization/resmoothing optimization. "
                     "Please ensure the model architecture is supported or file an issue."
                 )
+        elif getattr(model.config, "is_encoder_decoder", False):
+            # For other encoder-decoder models (non-VL), pass both encoder and decoder input ids
+            model(fake_input, decoder_input_ids=decoder_fake_input)
         else:
             model(fake_input)
 
@@ -573,7 +594,9 @@ def _process_quantized_modules(
         if is_modelopt_qlora and (hasattr(sub_module, "base_layer")):
             continue
 
-        if hasattr(sub_module, "weight_packed"):
+        if hasattr(sub_module, "weight_packed") or (
+            "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1
+        ):
             sub_module.unpack_weight()
         if get_quantization_format(sub_module) != QUANTIZATION_NONE:
             if is_quantlinear(sub_module):
@@ -694,6 +717,18 @@ def _export_transformers_checkpoint(
 
     quant_config = get_quant_config(model, is_modelopt_qlora=is_modelopt_qlora)
 
+    # Add MTP layer prefixes to exclude_modules if they were excluded from quantization
+    # This ensures they appear in quantization_config["ignore"] in config.json
+    mtp_layer_prefixes = getattr(model, "_mtp_layer_prefixes", None)
+    if mtp_layer_prefixes:
+        exclude_modules = quant_config["quantization"].setdefault("exclude_modules", [])
+        for prefix in mtp_layer_prefixes:
+            # Add wildcard pattern to exclude all submodules under this MTP layer
+            pattern = f"{prefix}*"
+            if pattern not in exclude_modules:
+                exclude_modules.append(pattern)
+                print(f"Adding MTP layer to quantization_config ignore: {pattern}")
+
     # Process all quantized modules and export weights
     _process_quantized_modules(model, dtype, is_modelopt_qlora)
 
@@ -713,7 +748,9 @@ def _export_transformers_checkpoint(
     return quantized_state_dict, quant_config
 
 
-def _fuse_qkv_linears_diffusion(model: nn.Module) -> None:
+def _fuse_qkv_linears_diffusion(
+    model: nn.Module, dummy_forward_fn: Callable[[], None] | None = None
+) -> None:
     """Fuse QKV linear layers that share the same input for diffusion models.
 
     This function uses forward hooks to dynamically identify linear modules that
@@ -728,33 +765,22 @@ def _fuse_qkv_linears_diffusion(model: nn.Module) -> None:
 
     Args:
         model: The diffusion model component (e.g., transformer, unet).
+        dummy_forward_fn: Optional callable to run a dummy forward pass. Use this
+            for diffusion-like models whose forward signature is not compatible
+            with `generate_diffusion_dummy_inputs`.
     """
     quantization_format = get_quantization_format(model)
 
     if quantization_format == QUANTIZATION_NONE:
         return
 
-    # Define the dummy forward function for diffusion models
-    def diffusion_dummy_forward():
-        device = next(model.parameters()).device
-        dtype = next(model.parameters()).dtype
-
-        # Generate appropriate dummy inputs based on model type
-        dummy_inputs = generate_diffusion_dummy_inputs(model, device, dtype)
-
-        if dummy_inputs is None:
-            model_class_name = type(model).__name__
-            raise ValueError(
-                f"Unknown model type '{model_class_name}', cannot generate dummy inputs."
-            )
-
-        # Run forward pass with dummy inputs
-        model(**dummy_inputs)
+    if dummy_forward_fn is None:
+        dummy_forward_fn = generate_diffusion_dummy_forward_fn(model)
 
     # Collect modules sharing the same input
     try:
         input_to_linear, _ = _collect_shared_input_modules(
-            model, diffusion_dummy_forward, collect_layernorms=False
+            model, dummy_forward_fn, collect_layernorms=False
         )
     except Exception as e:
         print(f"Warning: Failed to run dummy forward for QKV fusion: {e}")
@@ -777,20 +803,20 @@ def _fuse_qkv_linears_diffusion(model: nn.Module) -> None:
 
 
 def _export_diffusers_checkpoint(
-    pipe: "DiffusionPipeline | ModelMixin",
+    pipe: Any,
     dtype: torch.dtype | None,
     export_dir: Path,
     components: list[str] | None,
     max_shard_size: int | str = "10GB",
 ) -> None:
-    """Internal: Export Diffusers model/pipeline checkpoint.
+    """Internal: Export diffusion(-like) model/pipeline checkpoint.
 
-    This function handles the export of diffusers models, including
-    DiffusionPipeline and individual ModelMixin components. It exports all
-    components including nn.Module models, tokenizers, schedulers, etc.
+    This function handles the export of:
+    - diffusers models: DiffusionPipeline and individual ModelMixin components.
+    - LTX-2 pipelines (duck-typed): exports stage-1 transformer only.
 
     Args:
-        pipe: The diffusers model or pipeline to export.
+        pipe: The model or pipeline to export.
         dtype: The data type for weight conversion. If None, will be inferred from model.
         export_dir: The directory to save the exported checkpoint.
         components: Optional list of component names to export. Only used for pipelines.
@@ -802,7 +828,7 @@ def _export_diffusers_checkpoint(
     export_dir = Path(export_dir)
 
     # Step 1: Get all pipeline components (nn.Module, tokenizers, schedulers, etc.)
-    all_components = get_diffusers_components(pipe, components)
+    all_components = get_diffusion_components(pipe, components)
 
     if not all_components:
         warnings.warn("No exportable components found in the model.")
@@ -813,6 +839,16 @@ def _export_diffusers_checkpoint(
         name: comp for name, comp in all_components.items() if isinstance(comp, nn.Module)
     }
 
+    # Best-effort diffusers pipeline check (kept for folder layout + model_index.json behavior)
+    is_diffusers_pipe = False
+    if HAS_DIFFUSERS:
+        try:
+            from diffusers import DiffusionPipeline as _DiffusionPipeline
+
+            is_diffusers_pipe = isinstance(pipe, _DiffusionPipeline)
+        except Exception:
+            is_diffusers_pipe = False
+
     # Step 3: Export each nn.Module component with quantization handling
     for component_name, component in module_components.items():
         is_quantized = has_quantized_modules(component)
@@ -821,7 +857,7 @@ def _export_diffusers_checkpoint(
 
         # Determine component export directory
         # For pipelines, each component goes in a subfolder
-        if isinstance(pipe, DiffusionPipeline):
+        if is_diffusers_pipe:
             component_export_dir = export_dir / component_name
         else:
             component_export_dir = export_dir
@@ -845,11 +881,14 @@ def _export_diffusers_checkpoint(
             quant_config = get_quant_config(component, is_modelopt_qlora=False)
 
             # Step 6: Save the component
-            # Note: diffusers ModelMixin.save_pretrained does NOT accept state_dict parameter
-            # (unlike transformers), so we use a context manager to temporarily hide quantizers
-            # from the state dict during save. This avoids saving quantizer buffers like _amax.
-            with hide_quantizers_from_state_dict(component):
-                component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)
+            # - diffusers ModelMixin.save_pretrained does NOT accept state_dict parameter
+            # - for non-diffusers modules (e.g., LTX-2 transformer), fall back to torch.save
+            if hasattr(component, "save_pretrained"):
+                with hide_quantizers_from_state_dict(component):
+                    component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)
+            else:
+                with hide_quantizers_from_state_dict(component):
+                    _save_component_state_dict_safetensors(component, component_export_dir)
 
             # Step 7: Update config.json with quantization info
             if quant_config is not None:
@@ -862,14 +901,16 @@ def _export_diffusers_checkpoint(
                     config_data["quantization_config"] = hf_quant_config
                     with open(config_path, "w") as file:
                         json.dump(config_data, file, indent=4)
-        else:
-            # Non-quantized component: just save as-is
+        # Non-quantized component: just save as-is
+        elif hasattr(component, "save_pretrained"):
             component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)
+        else:
+            _save_component_state_dict_safetensors(component, component_export_dir)
 
         print(f"  Saved to: {component_export_dir}")
 
     # Step 4: Export non-nn.Module components (tokenizers, schedulers, feature extractors, etc.)
-    if isinstance(pipe, DiffusionPipeline):
+    if is_diffusers_pipe:
         for component_name, component in all_components.items():
             # Skip nn.Module components (already handled above)
             if isinstance(component, nn.Module):
@@ -896,21 +937,38 @@ def _export_diffusers_checkpoint(
 
             print(f"  Saved to: {component_export_dir}")
 
-    # Step 5: For pipelines, also save the model_index.json
-    if isinstance(pipe, DiffusionPipeline):
+    # Step 5: For pipelines, also save model_index.json
+    if is_diffusers_pipe:
         model_index_path = export_dir / "model_index.json"
-        if hasattr(pipe, "config") and pipe.config is not None:
-            # Save a simplified model_index.json that points to the exported components
+        is_partial_export = components is not None
+
+        # For full export, preserve original model_index.json when possible.
+        # For partial export, skip this to avoid listing non-exported components.
+        if not is_partial_export:
+            source_path = getattr(pipe, "name_or_path", None) or getattr(
+                getattr(pipe, "config", None), "_name_or_path", None
+            )
+            if source_path:
+                candidate_model_index = Path(source_path) / "model_index.json"
+                if candidate_model_index.exists():
+                    with open(candidate_model_index) as file:
+                        model_index = json.load(file)
+                    with open(model_index_path, "w") as file:
+                        json.dump(model_index, file, indent=4)
+
+        # Full-export fallback to Diffusers-native config serialization.
+        # Partial export skips this for the same reason as above.
+        if not is_partial_export and not model_index_path.exists() and hasattr(pipe, "save_config"):
+            pipe.save_config(export_dir)
+
+        # Last resort: synthesize a minimal model_index.json from exported components.
+        if not model_index_path.exists() and hasattr(pipe, "config") and pipe.config is not None:
             model_index = {
                 "_class_name": type(pipe).__name__,
                 "_diffusers_version": diffusers.__version__,
             }
-            # Add component class names for all components
-            # Use the base library name (e.g., "diffusers", "transformers") instead of
-            # the full module path, as expected by diffusers pipeline loading
             for name, comp in all_components.items():
                 module = type(comp).__module__
-                # Extract base library name (first part of module path)
                 library = module.split(".")[0]
                 model_index[name] = [library, type(comp).__name__]
 
@@ -921,11 +979,12 @@ def _export_diffusers_checkpoint(
 
 
 def export_hf_checkpoint(
-    model: "nn.Module | DiffusionPipeline",
+    model: Any,
     dtype: torch.dtype | None = None,
     export_dir: Path | str = tempfile.gettempdir(),
     save_modelopt_state: bool = False,
     components: list[str] | None = None,
+    extra_state_dict: dict[str, torch.Tensor] | None = None,
 ):
     """Export quantized HuggingFace model checkpoint (transformers or diffusers).
 
@@ -942,17 +1001,17 @@ def export_hf_checkpoint(
         save_modelopt_state: Whether to save the modelopt state_dict.
         components: Only used for diffusers pipelines. Optional list of component names
             to export. If None, all quantized components are exported.
+        extra_state_dict: Extra state dictionary to add to the exported model.
     """
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
 
-    # Check for diffusers models (only when diffusers is installed)
+    is_diffusers_obj = False
     if HAS_DIFFUSERS:
-        from diffusers import DiffusionPipeline, ModelMixin
-
-        if isinstance(model, (DiffusionPipeline, ModelMixin)):
-            _export_diffusers_checkpoint(model, dtype, export_dir, components)
-            return
+        is_diffusers_obj = is_diffusers_object(model)
+    if is_diffusers_obj:
+        _export_diffusers_checkpoint(model, dtype, export_dir, components)
+        return
 
     # Transformers model export
     # NOTE: (hg) Early exit for speculative decoding models
@@ -979,7 +1038,9 @@ def export_hf_checkpoint(
 
         # Save model
         model.save_pretrained(
-            export_dir, state_dict=post_state_dict, save_modelopt_state=save_modelopt_state
+            export_dir,
+            state_dict={**post_state_dict, **(extra_state_dict or {})},
+            save_modelopt_state=save_modelopt_state,
         )
 
         original_config = f"{export_dir}/config.json"
@@ -990,6 +1051,12 @@ def export_hf_checkpoint(
 
         if hf_quant_config is not None:
             config_data["quantization_config"] = hf_quant_config
+
+        # Add sparse attention config if available
+        if export_sparse_attention_config is not None:
+            sparse_attn_config = export_sparse_attention_config(model)
+            if sparse_attn_config is not None:
+                config_data["sparse_attention_config"] = sparse_attn_config
 
         with open(original_config, "w") as file:
             json.dump(config_data, file, indent=4)
