@@ -486,7 +486,7 @@ class _QuantSparseMoe(QuantModule):
                 logits = output if not isinstance(output, tuple) else output[0]
                 top_k = self.gate.top_k if hasattr(self.gate, "top_k") else self.top_k
                 _, indices = torch.topk(logits.float(), top_k, dim=-1)
-            counts = torch.bincount(indices.reshape(-1), minlength=len(self.expert_token_count))
+            counts = torch.bincount(indices.reshape(-1), minlength=self.expert_token_count.shape[0])
             self.expert_token_count += counts.to(self.expert_token_count.device)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
