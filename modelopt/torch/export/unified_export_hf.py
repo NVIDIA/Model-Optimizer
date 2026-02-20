@@ -28,7 +28,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from safetensors.torch import save_file, load_file, safe_open
+from safetensors.torch import load_file, safe_open, save_file
 
 try:
     import diffusers
@@ -134,27 +134,38 @@ def _merge_diffusion_transformer_with_non_transformer_components(
         Tuple of (merged_state_dict, base_metadata) where base_metadata is the original
         safetensors metadata from the base checkpoint.
     """
-
     base_state = load_file(merged_base_safetensor_path)
 
     non_transformer_prefixes = [
-        'vae.', 'audio_vae.', 'vocoder.', 'text_embedding_projection.',
-        'text_encoders.', 'first_stage_model.', 'cond_stage_model.', 'conditioner.',
+        "vae.",
+        "audio_vae.",
+        "vocoder.",
+        "text_embedding_projection.",
+        "text_encoders.",
+        "first_stage_model.",
+        "cond_stage_model.",
+        "conditioner.",
     ]
-    correct_prefix = 'model.diffusion_model.'
-    strip_prefixes = ['diffusion_model.', 'transformer.', '_orig_mod.', 'model.', 'velocity_model.']
+    correct_prefix = "model.diffusion_model."
+    strip_prefixes = ["diffusion_model.", "transformer.", "_orig_mod.", "model.", "velocity_model."]
 
-    base_non_transformer = {k: v for k, v in base_state.items()
-                            if any(k.startswith(p) for p in non_transformer_prefixes)}
-    base_connectors = {k: v for k, v in base_state.items()
-                       if 'embeddings_connector' in k and k.startswith(correct_prefix)}
+    base_non_transformer = {
+        k: v
+        for k, v in base_state.items()
+        if any(k.startswith(p) for p in non_transformer_prefixes)
+    }
+    base_connectors = {
+        k: v
+        for k, v in base_state.items()
+        if "embeddings_connector" in k and k.startswith(correct_prefix)
+    }
 
     prefixed = {}
     for k, v in diffusion_transformer_state_dict.items():
         clean_k = k
         for prefix in strip_prefixes:
             if clean_k.startswith(prefix):
-                clean_k = clean_k[len(prefix):]
+                clean_k = clean_k[len(prefix) :]
                 break
         prefixed[f"{correct_prefix}{clean_k}"] = v
 
@@ -169,10 +180,10 @@ def _merge_diffusion_transformer_with_non_transformer_components(
 
 
 def _save_component_state_dict_safetensors(
-    component: nn.Module, 
-    component_export_dir: Path, 
-    merged_base_safetensor_path: str | None = None, 
-    hf_quant_config: dict | None = None
+    component: nn.Module,
+    component_export_dir: Path,
+    merged_base_safetensor_path: str | None = None,
+    hf_quant_config: dict | None = None,
 ) -> None:
     """Save component state dict as safetensors with optional base checkpoint merge.
 
@@ -188,10 +199,12 @@ def _save_component_state_dict_safetensors(
     metadata: dict[str, str] = {}
     metadata_full: dict[str, str] = {}
     if merged_base_safetensor_path is not None:
-        cpu_state_dict, metadata_full = _merge_diffusion_transformer_with_non_transformer_components(
-            cpu_state_dict,  merged_base_safetensor_path
+        cpu_state_dict, metadata_full = (
+            _merge_diffusion_transformer_with_non_transformer_components(
+                cpu_state_dict, merged_base_safetensor_path
+            )
         )
-    metadata["_export_format"] = "safetensors_state_dict" 
+    metadata["_export_format"] = "safetensors_state_dict"
     metadata["_class_name"] = type(component).__name__
 
     if hf_quant_config is not None:
@@ -201,20 +214,26 @@ def _save_component_state_dict_safetensors(
         quant_algo = hf_quant_config.get("quant_algo", "unknown").lower()
         layer_metadata = {}
         for k in cpu_state_dict:
-            if k.endswith(".weight_scale") or k.endswith(".weight_scale_2"):
+            if k.endswith((".weight_scale", ".weight_scale_2")):
                 layer_name = k.rsplit(".", 1)[0]
                 if layer_name.endswith(".weight"):
                     layer_name = layer_name.rsplit(".", 1)[0]
                 if layer_name not in layer_metadata:
                     layer_metadata[layer_name] = {"format": quant_algo}
-        metadata_full["_quantization_metadata"] = json.dumps({
-            "format_version": "1.0",
-            "layers": layer_metadata,
-        })
+        metadata_full["_quantization_metadata"] = json.dumps(
+            {
+                "format_version": "1.0",
+                "layers": layer_metadata,
+            }
+        )
 
     metadata_full.update(metadata)
-    save_file(cpu_state_dict, str(component_export_dir / "model.safetensors"), metadata=metadata_full if merged_base_safetensor_path is not None else None)
-    
+    save_file(
+        cpu_state_dict,
+        str(component_export_dir / "model.safetensors"),
+        metadata=metadata_full if merged_base_safetensor_path is not None else None,
+    )
+
     with open(component_export_dir / "config.json", "w") as f:
         json.dump(metadata, f, indent=4)
 
@@ -986,7 +1005,7 @@ def _export_diffusers_checkpoint(
             # Step 5: Build quantization config
             quant_config = get_quant_config(component, is_modelopt_qlora=False)
             hf_quant_config = convert_hf_quant_config_format(quant_config) if quant_config else None
-            
+
             # Step 6: Save the component
             # - diffusers ModelMixin.save_pretrained does NOT accept state_dict parameter
             # - for non-diffusers modules (e.g., LTX-2 transformer), fall back to torch.save
@@ -996,8 +1015,8 @@ def _export_diffusers_checkpoint(
             else:
                 with hide_quantizers_from_state_dict(component):
                     _save_component_state_dict_safetensors(
-                        component, 
-                        component_export_dir, 
+                        component,
+                        component_export_dir,
                         merged_base_safetensor_path,
                         hf_quant_config,
                     )
@@ -1014,7 +1033,9 @@ def _export_diffusers_checkpoint(
         elif hasattr(component, "save_pretrained"):
             component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)
         else:
-            _save_component_state_dict_safetensors(component, component_export_dir, merged_base_safetensor_path)
+            _save_component_state_dict_safetensors(
+                component, component_export_dir, merged_base_safetensor_path
+            )
 
         print(f"  Saved to: {component_export_dir}")
 
@@ -1167,7 +1188,9 @@ def export_hf_checkpoint(
     if HAS_DIFFUSERS:
         is_diffusers_obj = is_diffusers_object(model)
     if is_diffusers_obj:
-        _export_diffusers_checkpoint(model, dtype, export_dir, components, merged_base_safetensor_path)
+        _export_diffusers_checkpoint(
+            model, dtype, export_dir, components, merged_base_safetensor_path
+        )
         return
 
     # Transformers model export
