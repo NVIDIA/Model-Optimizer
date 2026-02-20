@@ -503,11 +503,8 @@ class _QuantSparseMoe(QuantModule):
             if TRANSFORMERS_VERSION_GE_5_0:
                 assert hasattr(self, "gate") and hasattr(self.gate, "top_k")
                 original_top_k = self.gate.top_k
-                self.gate.top_k = round(self.gate.num_experts * self._moe_calib_experts_ratio)
-                assert self.gate.top_k >= original_top_k, (
-                    f"moe_calib_experts_ratio {self._moe_calib_experts_ratio},"
-                    f" calib top_k {self.gate.top_k} smaller than original"
-                    f" top_k {original_top_k}"
+                self.gate.top_k = max(
+                    original_top_k, round(self.gate.num_experts * self._moe_calib_experts_ratio)
                 )
                 super().forward(hidden_states)
                 self.gate.top_k = original_top_k
@@ -515,16 +512,16 @@ class _QuantSparseMoe(QuantModule):
                 # Path for transformers < 5.0
                 original_top_k = self.top_k
                 if hasattr(self, "num_experts"):
-                    self.top_k = round(self.num_experts * self._moe_calib_experts_ratio)
+                    self.top_k = max(
+                        original_top_k, round(self.num_experts * self._moe_calib_experts_ratio)
+                    )
                 elif hasattr(self, "experts"):
-                    self.top_k = round(self.experts.num_experts * self._moe_calib_experts_ratio)
+                    self.top_k = max(
+                        original_top_k,
+                        round(self.experts.num_experts * self._moe_calib_experts_ratio),
+                    )
                 else:
                     raise ValueError(f"Could not find num_experts in module {self}")
-                assert self.top_k >= original_top_k, (
-                    f"moe_calib_experts_ratio {self._moe_calib_experts_ratio},"
-                    f" calib top_k {self.top_k} smaller than original"
-                    f" top_k {original_top_k}"
-                )
                 super().forward(hidden_states)
                 self.top_k = original_top_k
             self._count_expert_tokens = False
