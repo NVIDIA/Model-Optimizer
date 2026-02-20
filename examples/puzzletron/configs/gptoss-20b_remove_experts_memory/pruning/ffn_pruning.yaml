@@ -10,7 +10,7 @@ pruning_mixin:
     _target_: modelopt.torch.puzzletron.anymodel.models.gpt_oss_20b.gpt_oss_20b_model_descriptor.GptOss20bExpertRemovalLayerDescriptor
     target_name: "mlp.router"
 
-hook_class: ${get_object:utils.activation_hooks.hooks.RankedChoiceVotingHook}
+hook_class: ${get_object:modelopt.torch.nas.plugins.megatron_hooks.base_hooks.RankedChoiceVotingHook}
 activation_hooks_kwargs:    # Additional kwargs to pass to the hook init
 
 num_experts_to_keep_list: [24, 16, 8]  # num_experts in teacher is 128
