@@ -38,6 +38,7 @@ from .config import (
     AWQLiteCalibConfig,
     CompressConfig,
     GPTQLiteConfig,
+    LocalHessianCalibConfig,
     MaxCalibConfig,
     MseCalibConfig,
     QuantizeAlgoCfgType,
@@ -56,7 +57,15 @@ from .conversion import (
     restore_svdquant_model,
     update_quantize_metadata,
 )
-from .model_calib import awq, gptq_lite, max_calibrate, mse_calibrate, smoothquant, svdquant
+from .model_calib import (
+    awq,
+    gptq_lite,
+    local_hessian_calibrate,
+    max_calibrate,
+    mse_calibrate,
+    smoothquant,
+    svdquant,
+)
 
 __all__ = ["BaseCalibrateModeDescriptor"]
 
@@ -375,6 +384,22 @@ class MseCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
         return MseCalibConfig
 
     _calib_func = mse_calibrate
+
+
+@CalibrateModeRegistry.register_mode
+class LocalHessianModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for local Hessian-weighted MSE calibration algorithm.
+
+    This algorithm uses activation information to optimize per-block scales for weight
+    quantization by minimizing output reconstruction error instead of weight reconstruction error.
+    """
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return LocalHessianCalibConfig
+
+    _calib_func = local_hessian_calibrate
 
 
 @CalibrateModeRegistry.register_mode
