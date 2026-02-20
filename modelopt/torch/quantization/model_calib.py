@@ -106,7 +106,7 @@ def max_calibrate(
         model: Model to be calibrated.
         forward_loop: A callable which takes the model as argument and
             forwards calibration data through the model.
-        distributed_sync: Whether to sync amax across distributed processes.
+        distributed_sync: Whether to sync input_quantizer amax across distributed processes.
 
     See :class:`MaxCalibConfig <modelopt.torch.quantization.config.MaxCalibConfig>` for
     details on the remaining arguments.
@@ -118,7 +118,7 @@ def max_calibrate(
         forward_loop(model)
     finish_stats_collection(model)
 
-    # Sync amax across local experts within each rank (for SequentialMLP)
+    # Sync input_quantizer amax across local experts within each rank (for SequentialMLP)
     for name, module in model.named_modules():
         if hasattr(module, "layer_sync_moe_local_experts_amax"):
             module.layer_sync_moe_local_experts_amax()
