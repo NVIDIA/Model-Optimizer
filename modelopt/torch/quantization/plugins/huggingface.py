@@ -458,8 +458,9 @@ class _QuantSparseMoe(QuantModule):
         elif hasattr(self, "experts") and hasattr(self.experts, "num_experts"):
             num_experts = self.experts.num_experts
 
-        self.expert_token_count = torch.zeros(num_experts, dtype=torch.long, device="cpu")
+        self.expert_token_count = torch.zeros(num_experts, dtype=torch.long, device="cuda")
         self._count_expert_tokens = False
+        self._moe_calib_experts_ratio = None
 
         if num_experts == 0:
             warnings.warn(
@@ -483,36 +484,50 @@ class _QuantSparseMoe(QuantModule):
                 logits = output if not isinstance(output, tuple) else output[0]
                 top_k = self.gate.top_k if hasattr(self.gate, "top_k") else self.top_k
                 _, indices = torch.topk(logits.float(), top_k, dim=-1)
-            counts = torch.bincount(
-                indices.reshape(-1).cpu(), minlength=len(self.expert_token_count)
-            )
-            self.expert_token_count += counts
+            counts = torch.bincount(indices.reshape(-1), minlength=len(self.expert_token_count))
+            self.expert_token_count += counts.to(self.expert_token_count.device)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         is_calib = any(getattr(m, "_if_calib", False) for m in self.experts.modules())
-        if is_calib:
+        self._count_expert_tokens = is_calib
+        if is_calib and self._moe_calib_experts_ratio:
+            self._count_expert_tokens = True
+            assert 0 < self._moe_calib_experts_ratio <= 1, (
+                "moe_calib_experts_ratio must be between 0 and 1"
+            )
             # If any of the experts are in calibration mode, we will forward all tokens to all experts
             # This is used only for calibration, we need to re-calculate the actual outputs again using
             # the original top_k
             if TRANSFORMERS_VERSION_GE_5_0:
                 assert hasattr(self, "gate") and hasattr(self.gate, "top_k")
                 original_top_k = self.gate.top_k
-                self.gate.top_k = self.gate.num_experts
+                self.gate.top_k = round(self.gate.num_experts * self._moe_calib_experts_ratio)
+                assert self.gate.top_k >= original_top_k, (
+                    f"moe_calib_experts_ratio {self._moe_calib_experts_ratio},"
+                    f" calib top_k {self.gate.top_k} smaller than original"
+                    f" top_k {original_top_k}"
+                )
                 super().forward(hidden_states)
                 self.gate.top_k = original_top_k
             else:
                 # Path for transformers < 5.0
                 original_top_k = self.top_k
                 if hasattr(self, "num_experts"):
-                    self.top_k = self.num_experts
+                    self.top_k = round(self.num_experts * self._moe_calib_experts_ratio)
                 elif hasattr(self, "experts"):
-                    self.top_k = self.experts.num_experts
+                    self.top_k = round(self.experts.num_experts * self._moe_calib_experts_ratio)
                 else:
                     raise ValueError(f"Could not find num_experts in module {self}")
+                assert self.top_k >= original_top_k, (
+                    f"moe_calib_experts_ratio {self._moe_calib_experts_ratio},"
+                    f" calib top_k {self.top_k} smaller than original"
+                    f" top_k {original_top_k}"
+                )
                 super().forward(hidden_states)
                 self.top_k = original_top_k
-        # Enable counting only for the real-routing forward during calibration
-        self._count_expert_tokens = is_calib
+            self._count_expert_tokens = False
+        else:
+            self._count_expert_tokens = True
         output = super().forward(hidden_states)
         self._count_expert_tokens = False
         return output

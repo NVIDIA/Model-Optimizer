@@ -201,6 +201,7 @@ def build_quant_cfg(
     model_type,
     quant_cfg_choices,
     kv_quant_cfg_choices,
+    moe_calib_experts_ratio,
 ) -> dict[str, Any]:
     quant_cfg = {}
     assert qformat in quant_cfg_choices, (
@@ -231,6 +232,15 @@ def build_quant_cfg(
             quant_cfg,
             getattr(mtq, kv_quant_cfg_choices[kv_cache_qformat])["quant_cfg"],
         )
+
+    if moe_calib_experts_ratio:
+        if isinstance(quant_cfg["algorithm"], str):
+            quant_cfg["algorithm"] = {
+                "method": quant_cfg["algorithm"],
+                "moe_calib_experts_ratio": moe_calib_experts_ratio,
+            }
+        else:
+            quant_cfg["algorithm"]["moe_calib_experts_ratio"] = moe_calib_experts_ratio
 
     # Gemma 7B has accuracy regression using alpha 1. We set 0.5 instead.
     if model_type == "gemma" and "int8_sq" in qformat:

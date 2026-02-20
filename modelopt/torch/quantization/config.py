@@ -1070,6 +1070,16 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         title="This field specifies the name of the calibration algorithm. If None, no calibration is performed.",
     )
 
+    moe_calib_experts_ratio: float | None = ModeloptField(
+        default=None,
+        title="% of experts to calibrate during forward pass.",
+        description=(
+            "If specified, we force forward tokens to % of experts during the calibration"
+            " pass. This forward is for calibration purpose only and will not affect the"
+            " actual inference."
+        ),
+    )
+
 
 class MaxCalibConfig(QuantizeAlgorithmConfig):
     """The config for max calibration algorithm.
