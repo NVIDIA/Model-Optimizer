@@ -99,7 +99,7 @@ def monkey_patch_deepseek_model():
                 weight = weight_quantizer(weight)
             return F.linear(x, weight, bias)
         elif gemm_impl == "bf16":
-            weight = weight_dequant(weight, weight.scale)
+            weight = weight_dequant(weight, weight.scale, dtype=torch.bfloat16)
             if act_quantizer is not None:
                 x = act_quantizer(x)
             if weight_quantizer is not None:
