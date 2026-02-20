@@ -44,11 +44,11 @@ import os
 from typing import Any
 
 import torch
-from ds_kernel import weight_dequant
 from safetensors.torch import load_file, save_file
 from tqdm import tqdm
 
 from modelopt.torch.quantization.qtensor import NVFP4QTensor
+from modelopt.torch.quantization.triton import weight_dequant
 
 
 def _remap_key(key_dict: dict[str, Any]):
