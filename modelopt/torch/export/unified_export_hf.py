@@ -81,7 +81,7 @@ from .model_config import (
     QUANTIZATION_W4A8_NVFP4_FP8,
 )
 from .model_utils import get_language_model_from_vl, is_multimodal_model
-from .plugins import export_spec_ckpt_config, export_spec_ckpt_state_dict, spec_opt_only
+from .plugins import has_spec_opt
 from .quant_utils import (
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
@@ -978,6 +978,30 @@ def _export_diffusers_checkpoint(
     print(f"Export complete. Saved to: {export_dir}")
 
 
+def _export_speculative_decoding(
+    model: Any, dtype: torch.dtype | None = None, export_dir: Path | str = tempfile.gettempdir()
+) -> None:
+    """Export speculative decoding HuggingFace model checkpoint."""
+    assert has_spec_opt(model), "Model is not optimized for speculative decoding."
+
+    exporter = model.get_exporter(dtype)
+
+    # Export config.json
+    drafter_sd = exporter.extract_state_dict()
+    save_file(drafter_sd, f"{export_dir}/model.safetensors")
+
+    # Export config.json
+    drafter_config = exporter.export_config(model)
+    with open(f"{export_dir}/config.json", "w") as file:
+        json.dump(drafter_config, file, indent=4)
+
+    # Save hf_quant_config.json for backward compatibility
+    hf_quant_config = exporter.export_quant_config()
+    if hf_quant_config:
+        with open(f"{export_dir}/hf_quant_config.json", "w") as file:
+            json.dump(hf_quant_config, file, indent=4)
+
+
 def export_hf_checkpoint(
     model: Any,
     dtype: torch.dtype | None = None,
@@ -1014,12 +1038,9 @@ def export_hf_checkpoint(
         return
 
     # Transformers model export
-    # NOTE: (hg) Early exit for speculative decoding models
-    # This is a temp workaround to avoid error with offline spec ckpt during export
-    if spec_opt_only(model):
-        save_file(export_spec_ckpt_state_dict(model), f"{export_dir}/model.safetensors")
-        with open(f"{export_dir}/config.json", "w") as file:
-            json.dump(export_spec_ckpt_config(model), file, indent=4)
+    # Early exit for speculative decoding models
+    if has_spec_opt(model):
+        _export_speculative_decoding(model, dtype, export_dir)
         return
 
     try:
