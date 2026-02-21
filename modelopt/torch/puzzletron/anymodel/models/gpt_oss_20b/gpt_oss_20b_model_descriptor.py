@@ -27,6 +27,8 @@ from modelopt.torch.puzzletron.anymodel.model_descriptor import (
     ModelDescriptor,
     ModelDescriptorFactory,
 )
+from modelopt.torch.puzzletron.utils.dummy_modules import DummyBlock
+
 from modelopt.torch.puzzletron.anymodel.puzzformer.no_op import (
     MatchingZeros,
     Same,
