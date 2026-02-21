@@ -27,43 +27,43 @@ ALL_SPEC_MODES = ["eagle"]
 
 LLAMA_EAGLE_SINGLE_LAYER = {
     "required": {
-        "layers.0.self_attn.q_proj.weight",
-        "layers.0.self_attn.k_proj.weight",
-        "layers.0.self_attn.v_proj.weight",
-        "layers.0.self_attn.o_proj.weight",
-        "layers.0.mlp.gate_proj.weight",
-        "layers.0.mlp.up_proj.weight",
-        "layers.0.mlp.down_proj.weight",
-        "layers.0.hidden_norm.weight",
-        "layers.0.input_layernorm.weight",
-        "layers.0.post_attention_layernorm.weight",
-        "norm.weight",
-        "fc.weight",
+        "layers.0.self_attn.q_proj",
+        "layers.0.self_attn.k_proj",
+        "layers.0.self_attn.v_proj",
+        "layers.0.self_attn.o_proj",
+        "layers.0.mlp.gate_proj",
+        "layers.0.mlp.up_proj",
+        "layers.0.mlp.down_proj",
+        "layers.0.hidden_norm",
+        "layers.0.input_layernorm",
+        "layers.0.post_attention_layernorm",
+        "norm",
+        "fc",
     },
-    "optional": {"d2t", "lm_head.weight"},
+    "optional": {"d2t", "lm_head"},
 }
 
 KIMIK2_EAGLE_SINGLE_LAYER = {
     "required": {
-        "layers.0.self_attn.kv_a_layernorm.weight",
-        "layers.0.self_attn.q_a_layernorm.weight",
-        "layers.0.self_attn.q_a_proj.weight",
-        "layers.0.self_attn.q_b_proj.weight",
-        "layers.0.self_attn.kv_a_proj_with_mqa.weight",
-        "layers.0.self_attn.kv_b_proj.weight",
-        "layers.0.self_attn.o_proj.weight",
-        "layers.0.mlp.gate_proj.weight",
-        "layers.0.mlp.up_proj.weight",
-        "layers.0.mlp.down_proj.weight",
-        "layers.0.hidden_norm.weight",
-        "layers.0.input_layernorm.weight",
-        "layers.0.post_attention_layernorm.weight",
-        "norm.weight",
-        "fc.weight",
+        "layers.0.self_attn.kv_a_layernorm",
+        "layers.0.self_attn.q_a_layernorm",
+        "layers.0.self_attn.q_a_proj",
+        "layers.0.self_attn.q_b_proj",
+        "layers.0.self_attn.kv_a_proj_with_mqa",
+        "layers.0.self_attn.kv_b_proj",
+        "layers.0.self_attn.o_proj",
+        "layers.0.mlp.gate_proj",
+        "layers.0.mlp.up_proj",
+        "layers.0.mlp.down_proj",
+        "layers.0.hidden_norm",
+        "layers.0.input_layernorm",
+        "layers.0.post_attention_layernorm",
+        "norm",
+        "fc",
     },
     "optional": {
         "d2t",
-        "lm_head.weight",
+        "lm_head",
     },
 }
 
@@ -102,35 +102,29 @@ class EagleExporter:
             "kimik2": KIMIK2_EAGLE_SINGLE_LAYER,
         }[self.eagle_decoder_type]
         # Check that export sd has required keys
-        if self.num_hidden_layers == 1:
-            for key in expected_keys_single_layer["required"]:
-                assert key in export_sd, f"Missing required key: {key}"
-        else:
-            for key in expected_keys_single_layer["required"]:
-                assert key in export_sd, f"Missing required key: {key}"
-            for i in range(1, self.num_hidden_layers):
-                for key in expected_keys_single_layer["required"] - {
-                    "layers.0.hidden_norm.weight",
-                    "layers.0.input_layernorm.weight",
-                    "norm.weight",
-                    "fc.weight",
-                }:
-                    assert key.replace("layers.0", f"layers.{i}") in export_sd, (
-                        f"Missing required key: {key}"
-                    )
+        for key in expected_keys_single_layer["required"]:
+            assert f"{key}.weight" in export_sd, f"Missing required key: {key}.weight"
+        for i in range(1, self.num_hidden_layers):
+            for key in expected_keys_single_layer["required"] - {
+                "layers.0.hidden_norm",
+                "layers.0.input_layernorm",
+                "norm",
+                "fc",
+            }:
+                assert f"{key}.weight".replace("layers.0", f"layers.{i}") in export_sd, (
+                    f"Missing required key: {key}.weight"
+                )
 
         # Check that export sd has no unexpected keys
+        # Note that quantized eagle are allowed to have scales
         allowed_keys_single_layer = (
             expected_keys_single_layer["required"] | expected_keys_single_layer["optional"]
         )
-        if self.num_hidden_layers == 1:
-            for key in export_sd:
-                assert key in allowed_keys_single_layer, f"Unexpected key: {key}"
-        else:
-            for key in export_sd:
-                assert re.sub(r"layers\.\d+\.", "", key) in {
-                    k.replace("layers.0", "") for k in allowed_keys_single_layer
-                }, f"Unexpected key: {key}"
+        for key in export_sd:
+            assert (
+                re.sub(r"layers\.\d+\.", "layers.0.", key.rsplit(".", 1)[0])
+                in allowed_keys_single_layer
+            ), f"Unexpected key: {key}"
 
     def extract_state_dict(self):
         """Extract the state dict of the draft model in deployment format."""
@@ -138,7 +132,7 @@ class EagleExporter:
         for key in self.state_dict:
             if "eagle_module" in key or "lm_head" in key:
                 export_key = key.replace("eagle_module.", "")
-                export_sd[export_key] = copy(self.state_dict[key])
+                export_sd[export_key] = self.state_dict[key].clone()
         # Use base model's lm head if draft model doesn't have one
         if "lm_head.weight" not in export_sd:
             export_sd["lm_head.weight"] = self.state_dict["lm_head.weight"]

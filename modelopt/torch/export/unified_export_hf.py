@@ -98,7 +98,7 @@ from .quant_utils import (
     to_quantized_weight,
 )
 
-__all__ = ["export_hf_checkpoint"]
+__all__ = ["export_hf_checkpoint", "export_speculative_decoding"]
 
 
 def _is_enabled_quantizer(quantizer):
@@ -978,11 +978,16 @@ def _export_diffusers_checkpoint(
     print(f"Export complete. Saved to: {export_dir}")
 
 
-def _export_speculative_decoding(
-    model: Any, dtype: torch.dtype | None = None, export_dir: Path | str = tempfile.gettempdir()
+def export_speculative_decoding(
+    model: torch.nn.Module,
+    dtype: torch.dtype | None = None,
+    export_dir: Path | str = tempfile.gettempdir(),
 ) -> None:
     """Export speculative decoding HuggingFace model checkpoint."""
     assert has_spec_opt(model), "Model is not optimized for speculative decoding."
+
+    export_dir = Path(export_dir)
+    export_dir.mkdir(parents=True, exist_ok=True)
 
     exporter = model.get_exporter(dtype)
 
@@ -1035,12 +1040,6 @@ def export_hf_checkpoint(
         is_diffusers_obj = is_diffusers_object(model)
     if is_diffusers_obj:
         _export_diffusers_checkpoint(model, dtype, export_dir, components)
-        return
-
-    # Transformers model export
-    # Early exit for speculative decoding models
-    if has_spec_opt(model):
-        _export_speculative_decoding(model, dtype, export_dir)
         return
 
     try:

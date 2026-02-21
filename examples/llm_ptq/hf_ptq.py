@@ -51,9 +51,11 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.sparsity as mts
 from modelopt.torch.export import (
     export_hf_checkpoint,
+    export_speculative_decoding,
     export_tensorrt_llm_checkpoint,
     get_model_type,
     save_expert_token_count_table,
+    has_spec_opt,
 )
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg, need_calibration
@@ -565,6 +567,11 @@ def export_quantized(
             model_type = f"unknown:{type(language_model).__name__}"
 
         export_path = args.export_path
+
+        # Early exit for speculative decoding checkpoints
+        if has_spec_opt(full_model):
+            export_speculative_decoding(full_model, export_dir=export_path)
+            return
 
         # Check if the model is a multimodal/VLM model
         is_vlm = is_multimodal_model(full_model)
