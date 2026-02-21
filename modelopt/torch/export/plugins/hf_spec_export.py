@@ -16,7 +16,7 @@
 """Modify state_dict and config for exporting speculative decoding in official format."""
 
 import re
-from copy import copy
+from copy import deepcopy
 
 import torch
 import torch.nn as nn
@@ -147,7 +147,7 @@ class EagleExporter:
             "llama": llama_eagle_template_config,
             "kimik2": kimik2_eagle_template_config,
         }[model.eagle_config.eagle_decoder_type]
-        template_config = copy(template_config)
+        template_config = deepcopy(template_config)
 
         def _get_config_from_draft_or_base(key: str, model: nn.Module):
             if getattr(model._draft_model_config, key, None) is not None:
@@ -178,8 +178,8 @@ class EagleExporter:
         return template_config
 
     def export_quant_config(self):
-        """Export hf_quant_coinfig.json."""
-        return copy(self.hf_quant_config)
+        """Export hf_quant_config.json."""
+        return deepcopy(self.hf_quant_config)
 
 
 class EagleMedusaExporter(EagleExporter):

@@ -54,8 +54,8 @@ from modelopt.torch.export import (
     export_speculative_decoding,
     export_tensorrt_llm_checkpoint,
     get_model_type,
-    save_expert_token_count_table,
     has_spec_opt,
+    save_expert_token_count_table,
 )
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg, need_calibration
@@ -569,8 +569,10 @@ def export_quantized(
         export_path = args.export_path
 
         # Early exit for speculative decoding checkpoints
+        # No tokenizer saving needed for spec ckpts
         if has_spec_opt(full_model):
             export_speculative_decoding(full_model, export_dir=export_path)
+            print(f"Quantized speculative decoding checkpoint exported to: {export_path}")
             return
 
         # Check if the model is a multimodal/VLM model

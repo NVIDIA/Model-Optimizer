@@ -991,7 +991,7 @@ def export_speculative_decoding(
 
     exporter = model.get_exporter(dtype)
 
-    # Export config.json
+    # Export state_dict
     drafter_sd = exporter.extract_state_dict()
     save_file(drafter_sd, f"{export_dir}/model.safetensors")
 
