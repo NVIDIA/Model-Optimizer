@@ -12,8 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import ctypes
 import importlib.metadata
+import os
 import shutil
 
 import pytest
@@ -27,6 +28,23 @@ def skip_if_no_tensorrt():
         _check_for_tensorrt()
     except (AssertionError, ImportError) as e:
         pytest.skip(f"{e}", allow_module_level=True)
+
+    # Also verify that ORT's TensorRT EP can actually load its native library.
+    # The tensorrt Python package may be installed, but ORT's provider shared library
+    # (libonnxruntime_providers_tensorrt.so) could fail to load due to CUDA version
+    # mismatches (e.g., ORT built for CUDA 12 running on a CUDA 13 system).
+    try:
+        import onnxruntime
+
+        ort_capi_dir = os.path.join(os.path.dirname(onnxruntime.__file__), "capi")
+        trt_provider_lib = os.path.join(ort_capi_dir, "libonnxruntime_providers_tensorrt.so")
+        if os.path.isfile(trt_provider_lib):
+            ctypes.CDLL(trt_provider_lib)
+    except OSError as e:
+        pytest.skip(
+            f"ORT TensorRT EP native library cannot be loaded: {e}",
+            allow_module_level=True,
+        )
 
 
 def skip_if_no_trtexec():
@@ -43,18 +61,11 @@ def skip_if_no_libcudnn():
         pytest.skip(f"{e}!", allow_module_level=True)
 
 
-def skip_if_no_megatron(apex_or_te_required: bool = False, mamba_required: bool = False):
+def skip_if_no_megatron(*, te_required: bool = True, mamba_required: bool = False):
     try:
         import megatron  # noqa: F401
     except ImportError:
         pytest.skip("megatron not available", allow_module_level=True)
-
-    try:
-        import apex  # noqa: F401
-
-        has_apex = True
-    except ImportError:
-        has_apex = False
 
     try:
         import transformer_engine  # noqa: F401
@@ -70,8 +81,8 @@ def skip_if_no_megatron(apex_or_te_required: bool = False, mamba_required: bool 
     except ImportError:
         has_mamba = False
 
-    if apex_or_te_required and not has_apex and not has_te:
-        pytest.skip("Apex or TE required for Megatron test", allow_module_level=True)
+    if te_required and not has_te:
+        pytest.skip("TE required for Megatron test", allow_module_level=True)
 
     if mamba_required and not has_mamba:
         pytest.skip("Mamba required for Megatron test", allow_module_level=True)
@@ -88,5 +99,5 @@ def skip_if_onnx_version_above_1_18():
 
     if version.parse(installed_version) > version.parse(required_version):
         pytest.skip(
-            f"{package_name} version {installed_version} is less than required {required_version}"
+            f"{package_name} version {installed_version} is greater than required {required_version}"
         )

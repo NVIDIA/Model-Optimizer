@@ -19,22 +19,17 @@ from functools import partial
 import pytest
 import torch
 import torch.nn.init as init
-from _test_utils.import_helper import skip_if_no_megatron
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import initialize_for_megatron
 from megatron.core import dist_checkpointing
 
+import modelopt.torch.peft as mtpeft
+import modelopt.torch.quantization as mtq
 from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
     restore_sharded_modelopt_state,
     save_sharded_modelopt_state,
 )
-
-skip_if_no_megatron()
-
-
-import modelopt.torch.peft as mtpeft
-import modelopt.torch.quantization as mtq
 from modelopt.torch.peft.lora.layer import LoRAModule
 from modelopt.torch.utils.plugins import megatron_prefill
 
