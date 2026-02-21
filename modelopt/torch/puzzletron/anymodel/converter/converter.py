@@ -208,3 +208,26 @@ class Converter(ABC):
                 return [BlockConfig(...) for layer_idx in range(num_layers)]
         """
         raise NotImplementedError
+
+    @staticmethod
+    def convert_weight_name(name: str) -> str:
+        """
+        Convert weight names during checkpoint conversion.
+        
+        This method can be overridden by subclasses to apply model-specific weight name
+        transformations when converting checkpoints from HuggingFace format to Puzzletron format.
+        
+        Default implementation returns the name unchanged (identity function).
+        
+        Args:
+            name: Original weight name from HuggingFace checkpoint
+            
+        Returns:
+            Converted weight name for Puzzletron format
+            
+        Example:
+            For Qwen2.5-VL, this converts:
+            - visual.* → model.visual.*
+            - model.* → model.language_model.*
+        """
+        return name

@@ -1042,7 +1042,7 @@ class RankedChoiceVotingHook(ForwardHook):
             args: Tuple with one tensor entry (B, T, I)
             output: Router logits of shape (B, T, E)
         """
-        router_logits = output
+        router_logits = output[0] if isinstance(output, tuple) else output
         num_experts = router_logits.shape[-1]
         router_argsort = torch.argsort(router_logits, dim=-1, descending=True)
         router_argsort = router_argsort.view(-1, num_experts).to(torch.int16).cpu()
