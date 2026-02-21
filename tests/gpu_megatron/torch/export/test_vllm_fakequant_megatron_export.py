@@ -18,14 +18,11 @@ from functools import partial
 
 import pytest
 import torch
-from _test_utils.import_helper import skip_if_no_megatron
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_mcore_gpt_to_hf_vllm_fq
-
-skip_if_no_megatron(apex_or_te_required=True)
 
 
 def _test_mcore_vllm_export(tmp_path, quant_cfg, rank, size):

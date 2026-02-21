@@ -17,10 +17,6 @@ from functools import partial
 
 import pytest
 import torch
-from _test_utils.import_helper import skip_if_no_megatron
-
-skip_if_no_megatron(apex_or_te_required=True)
-
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import (
