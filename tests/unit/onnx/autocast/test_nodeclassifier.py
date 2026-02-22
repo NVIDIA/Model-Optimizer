@@ -231,6 +231,42 @@ def test_depth_of_reduction_rule():
     assert rule.check(reduce_init_node) is True
 
 
+@pytest.mark.parametrize(
+    ("axis", "expected_blocked", "expected_depth"),
+    [
+        # Input shape: [10, 20, 100], threshold=40
+        # Negative axis normalization tests
+        (-1, True, 100),  # axis=-1 -> last dim (100) > 40, blocked
+        (-2, False, None),  # axis=-2 -> second to last (20) < 40, not blocked
+        (-3, False, None),  # axis=-3 -> first dim (10) < 40, not blocked
+        # Out-of-bounds axis tests (should return False, not blocked)
+        (10, False, None),  # positive out-of-bounds
+        (-10, False, None),  # negative out-of-bounds after normalization
+    ],
+)
+def test_depth_of_reduction_rule_cumsum_axis(axis, expected_blocked, expected_depth):
+    """Test CumSum axis normalization and bounds checking in DepthOfReductionRule."""
+    axis_init = numpy_helper.from_array(np.array([axis], dtype=np.int64), name="axis")
+    # Input shape: [10, 20, 100] - dims are 10, 20, 100 at indices 0, 1, 2
+    reference_data = {"cumsum_input": np.ones([10, 20, 100], dtype=np.float32)}
+    node_to_init_map = {"cumsum_node": [axis_init]}
+    initializer_map = {"axis": axis_init}
+
+    rule = DepthOfReductionRule(
+        max_depth_of_reduction=40,
+        reference_data=reference_data,
+        node_to_init_map=node_to_init_map,
+        initializer_map=initializer_map,
+    )
+
+    cumsum_node = helper.make_node(
+        "CumSum", ["cumsum_input", "axis"], ["cumsum_output"], name="cumsum_node"
+    )
+    assert rule.check(cumsum_node) is expected_blocked
+    if expected_depth is not None:
+        assert rule.reduction_depth == expected_depth
+
+
 @pytest.mark.skipif(
     Version(ort_version) < Version("1.21.0"), reason="WAR: Requires onnxruntime>=1.21.0"
 )
