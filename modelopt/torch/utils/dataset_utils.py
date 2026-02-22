@@ -247,7 +247,7 @@ def get_dataset_dataloader(
         samples = get_dataset_samples(ds_name, num_sample)
         all_samples.extend(samples)
 
-    batch_encoded = tokenizer.batch_encode_plus(
+    batch_encoded = tokenizer(
         all_samples,
         return_tensors="pt",
         padding=True,
