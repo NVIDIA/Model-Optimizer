@@ -134,7 +134,7 @@ class Quantizer:
             if self.model_config.model_type.value.startswith("flux"):
                 quant_config = NVFP4_FP8_MHA_CONFIG
             else:
-                quant_config = NVFP4_ASYMMETRIC_CONFIG
+                quant_config = NVFP4_DEFAULT_CONFIG
         else:
             raise NotImplementedError(f"Unknown format {self.config.format}")
         if self.config.quantize_mha:
