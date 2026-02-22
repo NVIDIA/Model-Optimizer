@@ -31,6 +31,7 @@ from modelopt.torch.export import export_hf_checkpoint
 from modelopt.torch.sparsity.attention_sparsity.config import (
     SKIP_SOFTMAX_CALIB,
     SKIP_SOFTMAX_DEFAULT,
+    SPARSE24_TRITON,
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 
@@ -43,6 +44,7 @@ mto.enable_huggingface_checkpointing()
 SPARSE_ATTN_CFG_CHOICES = {
     "skip_softmax": SKIP_SOFTMAX_DEFAULT,
     "skip_softmax_calib": SKIP_SOFTMAX_CALIB,
+    "sparse24_triton": SPARSE24_TRITON,
 }
 
 
@@ -144,12 +146,14 @@ def main(args):
 
     print(f"Loading model: {args.pyt_ckpt_path}")
 
-    # Load model and tokenizer
-    # Note: attn_implementation="eager" is required for calibration to work properly
-    # (flash_attention_2 or sdpa would bypass the softmax patching needed for stats collection)
+    # Select attn_implementation based on sparse method:
+    # - skip_softmax methods require "eager" (softmax patching bypassed by flash/sdpa)
+    # - sparse24_triton requires "modelopt_triton" (fused Triton kernel)
+    # No need to specify attn_implementation here — mtsa.sparsify() handles it
+    # automatically based on the sparse config (sets "modelopt_triton" for triton
+    # backend, keeps "eager" for pytorch backend).
     model = AutoModelForCausalLM.from_pretrained(
         args.pyt_ckpt_path,
-        attn_implementation="eager",
         torch_dtype=torch.bfloat16,
     )
     tokenizer = AutoTokenizer.from_pretrained(args.pyt_ckpt_path)
@@ -246,8 +250,8 @@ if __name__ == "__main__":
         "--backend",
         type=str,
         default="pytorch",
-        choices=["pytorch"],
-        help="Backend for sparse attention (default: pytorch). More backends coming soon.",
+        choices=["pytorch", "triton"],
+        help="Backend for sparse attention (default: pytorch). Use 'triton' with sparse24_triton.",
     )
 
     # Sequence length arguments
