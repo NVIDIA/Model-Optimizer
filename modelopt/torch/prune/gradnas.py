@@ -79,37 +79,100 @@ except ImportError:
 class GradientDataManager:
     """Class for managing gradient data for an hparam."""
 
-    def __init__(self, shape, model, reduce_func=lambda x: x):
+    def __init__(
+        self,
+        shape,
+        model,
+        reduce_func=lambda x: x,
+        *,
+        average_scores: bool = True,
+        convergence_tol: float | None = 1e-3,
+        convergence_patience: int = 5,
+        convergence_min_updates: int = 10,
+    ):
         """Initialize GradientDataManager."""
         self.mask = torch.ones(shape, requires_grad=True, device=get_module_device(model))
-        self._score = torch.zeros_like(self.mask, requires_grad=False)
+        self._score_sum = torch.zeros_like(self.mask, requires_grad=False)
         self._reduce_func = reduce_func
+        self._average_scores = average_scores
+        self._num_updates = 0
+        self._convergence_tol = convergence_tol
+        self._convergence_patience = max(convergence_patience, 0)
+        self._convergence_min_updates = max(convergence_min_updates, 0)
+        self._convergence_count = 0
+        self._prev_avg = None
+        self._convergence_eps = 1e-12
 
-    # TODO: Implement score averaging and early stopping based on score convergence
     def process_gradient(self):
         """Process gradient of the mask."""
-        self._score += self.mask.grad.detach().pow(2)
+        self._score_sum += self.mask.grad.detach().pow(2)
+        self._num_updates += 1
+        self._update_convergence()
         self.mask.grad = None
+
+    def _update_convergence(self) -> None:
+        if self._convergence_tol is None or self._convergence_patience <= 0:
+            return
+        avg_score = self._score_sum / self._num_updates
+        if self._prev_avg is not None and self._num_updates >= self._convergence_min_updates:
+            rel_change = (avg_score - self._prev_avg).abs()
+            rel_change = rel_change / self._prev_avg.abs().clamp_min(self._convergence_eps)
+            if torch.mean(rel_change).item() < self._convergence_tol:
+                self._convergence_count += 1
+            else:
+                self._convergence_count = 0
+        self._prev_avg = avg_score.detach()
+
+    @property
+    def is_converged(self) -> bool:
+        """Whether the score has converged based on relative change."""
+        return (
+            self._convergence_patience > 0 and self._convergence_count >= self._convergence_patience
+        )
 
     @property
     def score(self):
         """The score of the hparam based on the stored gradients."""
-        return self._reduce_func(self._score)
+        if self._num_updates == 0:
+            score = self._score_sum
+        elif self._average_scores:
+            score = self._score_sum / self._num_updates
+        else:
+            score = self._score_sum
+        return self._reduce_func(score)
 
 
 def _setup_grad_manager_linear(
     module: dnn._DynamicLinear,
+    *,
+    average_scores: bool,
+    convergence_tol: float | None,
+    convergence_patience: int,
+    convergence_min_updates: int,
 ) -> tuple[GradientDataManager, RemovableHandle]:
     def forward_hook(_modelopt_mask, module, input, output):
         return output * _modelopt_mask
 
-    grad_data = GradientDataManager(module.get_hparam("out_features").max, module)
+    grad_data = GradientDataManager(
+        module.get_hparam("out_features").max,
+        module,
+        average_scores=average_scores,
+        convergence_tol=convergence_tol,
+        convergence_patience=convergence_patience,
+        convergence_min_updates=convergence_min_updates,
+    )
     hook_handle = module.register_forward_hook(partial(forward_hook, grad_data.mask))
     return grad_data, hook_handle
 
 
 def _setup_grad_manager_hf_attention(
-    module: "_DynamicAttention", head_mask_idx: int
+    module: "_DynamicAttention",
+    head_mask_idx: int,
+    *,
+    average_scores: bool,
+    convergence_tol: float | None,
+    convergence_patience: int,
+    convergence_min_updates: int,
 ) -> tuple[GradientDataManager, RemovableHandle]:
     def forward_pre_hook(_modelopt_mask, module, args, kwargs):
         head_mark_in_args = False
@@ -140,6 +203,10 @@ def _setup_grad_manager_hf_attention(
         (module.get_hparam("num_attention_heads").max, 1, 1),
         module,
         reduce_func=lambda x: x.squeeze(),
+        average_scores=average_scores,
+        convergence_tol=convergence_tol,
+        convergence_patience=convergence_patience,
+        convergence_min_updates=convergence_min_updates,
     )
     hook_handle = module.register_forward_pre_hook(
         partial(forward_pre_hook, grad_data.mask), with_kwargs=True
@@ -149,27 +216,29 @@ def _setup_grad_manager_hf_attention(
 
 def _setup_grad_manager_bert_attention(
     module: "_DynamicBertAttention",
+    **kwargs,
 ) -> tuple[GradientDataManager, RemovableHandle]:
     # See forward signature here:
     # https://github.com/huggingface/transformers/blob/b86482/src/transformers/models/bert/modeling_bert.py#L415-L424
 
-    return _setup_grad_manager_hf_attention(module, head_mask_idx=2)
+    return _setup_grad_manager_hf_attention(module, head_mask_idx=2, **kwargs)
 
 
 def _setup_grad_manager_gptj_attention(
     module: "_DynamicGPTJAttention",
+    **kwargs,
 ) -> tuple[GradientDataManager, RemovableHandle]:
     # See forward signature here:
     # https://github.com/huggingface/transformers/blob/0ea42e/src/transformers/models/gptj/modeling_gptj.py#L194-L202
 
-    return _setup_grad_manager_hf_attention(module, head_mask_idx=4)
+    return _setup_grad_manager_hf_attention(module, head_mask_idx=4, **kwargs)
 
 
 class GradientBinarySearcher(BinarySearcher):
     """Binary searcher for gradient algorithm."""
 
     SETUP_GRADIENT_FUNC: dict[
-        type[DynamicModule], Callable[[DynamicModule], tuple[GradientDataManager, RemovableHandle]]
+        type[DynamicModule], Callable[..., tuple[GradientDataManager, RemovableHandle]]
     ]
 
     @property
@@ -177,6 +246,10 @@ class GradientBinarySearcher(BinarySearcher):
         """Get the default config for the searcher."""
         config = super().default_search_config
         config["max_iter_data_loader"] = 128  # Default 50 is not optimal for gradient estimation
+        config["average_scores"] = True
+        config["score_convergence_tol"] = 1e-3
+        config["score_convergence_patience"] = 5
+        config["score_convergence_min_updates"] = 10
         return config
 
     def before_search(self) -> None:
@@ -266,8 +339,13 @@ class GradientBinarySearcher(BinarySearcher):
         for hp_name in hps_for_grad_calc:
             module_name = hp_name.rpartition(".")[0]
             module = self.model.get_submodule(module_name)
-            hp_grad_data[hp_name], mod_to_hook[hp_name] = (
-                GradientBinarySearcher.SETUP_GRADIENT_FUNC[type(module)](module)
+            setup_func = GradientBinarySearcher.SETUP_GRADIENT_FUNC[type(module)]
+            hp_grad_data[hp_name], mod_to_hook[hp_name] = setup_func(
+                module,
+                average_scores=self.config["average_scores"],
+                convergence_tol=self.config["score_convergence_tol"],
+                convergence_patience=self.config["score_convergence_patience"],
+                convergence_min_updates=self.config["score_convergence_min_updates"],
             )
 
         device = get_module_device(self.model)
@@ -284,6 +362,8 @@ class GradientBinarySearcher(BinarySearcher):
             for grad_data in hp_grad_data.values():
                 grad_data.process_gradient()
 
+            if all(grad_data.is_converged for grad_data in hp_grad_data.values()):
+                break
             if idx >= max_iter_data_loader:
                 break
 
