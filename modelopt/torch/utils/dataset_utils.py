@@ -224,7 +224,7 @@ def get_dataset_dataloader(
         A instance of dataloader.
     """
     assert tokenizer is not None, "Please provide a tokenizer."
-    # batch_encode_plus will modify the tokenizer in place, so we need to clone it.
+    # Tokenizer encoding may modify the tokenizer in place, so we need to clone it.
     tokenizer = copy.deepcopy(tokenizer)
 
     if tokenizer.padding_side != "left":
@@ -247,7 +247,7 @@ def get_dataset_dataloader(
         samples = get_dataset_samples(ds_name, num_sample)
         all_samples.extend(samples)
 
-    batch_encoded = tokenizer.batch_encode_plus(
+    batch_encoded = tokenizer(
         all_samples,
         return_tensors="pt",
         padding=True,
