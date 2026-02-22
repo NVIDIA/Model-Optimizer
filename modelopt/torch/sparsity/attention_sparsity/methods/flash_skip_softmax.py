@@ -24,6 +24,9 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
+
+from modelopt.torch.quantization.utils import replace_function
 
 from . import SparseAttentionMethod, register_sparse_method
 
@@ -352,6 +355,19 @@ class FlashSkipSoftmax(SparseAttentionMethod):
                 "type": "static",
                 "value": self.threshold_config,
             }
+
+    def get_sparse_context(self, module: torch.nn.Module):
+        """Return a context manager that patches F.softmax with sparse masking."""
+        original_softmax = F.softmax
+
+        def sparse_softmax(input, dim=-1, *args, **kwargs):
+            sparse_mask, stats = self.calculate_sparsity(input)
+            module._last_stats = stats
+            if not self._calibration_mode:
+                input = self.apply_sparsity(input, sparse_mask)
+            return original_softmax(input, dim, *args, **kwargs)
+
+        return replace_function(torch.nn.functional, "softmax", sparse_softmax)
 
     @property
     def name(self) -> str:

@@ -72,8 +72,8 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         title="Backend implementation.",
         description=(
             "Backend to use for sparse attention computation. "
-            "Only 'pytorch' is supported, which uses softmax patching with F.softmax. "
-            "Requires model to be loaded with attn_implementation='eager'."
+            "'pytorch' uses softmax patching with F.softmax (requires attn_implementation='eager'). "
+            "'triton' uses the fused Triton kernel (requires attn_implementation='modelopt_triton')."
         ),
     )
 
@@ -89,7 +89,17 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         description=(
             "Whether the model uses causal (autoregressive) attention. "
             "If True, sparsity statistics are calculated over the lower triangle only. "
+            "Set to False for cross-attention models. "
             "Defaults to True for decoder-only models like GPT, LLaMA, etc."
+        ),
+    )
+
+    skip_diagonal_blocks: bool = ModeloptField(
+        default=True,
+        title="Skip diagonal blocks.",
+        description=(
+            "When True, keep diagonal tiles dense for 2:4 sparse attention. "
+            "Only used by sparse24_triton method. Defaults to True."
         ),
     )
 
@@ -104,11 +114,12 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
     @field_validator("backend")
     @classmethod
     def validate_backend(cls, v):
-        """Validate backend is pytorch."""
-        if v != "pytorch":
+        """Validate backend is pytorch or triton."""
+        if v not in ("pytorch", "triton"):
             raise ValueError(
-                f"Invalid backend: {v}. Only 'pytorch' backend is supported. "
-                f"Model must be loaded with attn_implementation='eager'."
+                f"Invalid backend: {v}. Supported backends: 'pytorch' (requires "
+                f"attn_implementation='eager'), 'triton' (requires "
+                f"attn_implementation='modelopt_triton')."
             )
         return v
 
@@ -416,10 +427,24 @@ SKIP_SOFTMAX_CALIB = {
     },
 }
 
+# 2:4 structured sparsity via Triton prefill kernel (prefill-only)
+SPARSE24_TRITON = {
+    "sparse_cfg": {
+        "*attn*": {
+            "method": "sparse24_triton",
+            "backend": "triton",
+            "skip_diagonal_blocks": True,
+            "enable": True,
+        },
+        "default": {"enable": False},
+    },
+}
+
 
 __all__ = [
     "SKIP_SOFTMAX_CALIB",
     "SKIP_SOFTMAX_DEFAULT",
+    "SPARSE24_TRITON",
     "CalibrationConfig",
     "FlashSkipSoftmaxConfig",
     "SparseAttentionAttributeConfig",
