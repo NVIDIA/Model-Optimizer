@@ -26,7 +26,12 @@ def make_deepspeed_compatible(model: nn.Module):
     """Make the model compatible with DeepSpeed."""
     try:
         from deepspeed.runtime.zero.parameter_offload import ZeROOrderedDict
-    except ImportError:
+    except (ImportError, FileNotFoundError, RuntimeError):
+        # ImportError: deepspeed not installed
+        # FileNotFoundError: deepspeed installed but CUDA compiler (nvcc) not found.
+        #   DeepSpeed checks for nvcc at import time (via ops/op_builder), which
+        #   fails on runtime-only CUDA installations without the CUDA toolkit.
+        # RuntimeError: other deepspeed initialization failures
         return
     is_deepspeed_zero3_enabled = any(
         hasattr(module, "_parameters") and isinstance(module._parameters, ZeROOrderedDict)

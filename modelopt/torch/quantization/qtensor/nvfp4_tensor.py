@@ -55,8 +55,14 @@ class NVFP4QTensor(BaseQuantizedTensor):
     @classmethod
     def get_weights_scaling_factor_2_from_quantizer(cls, weight_quantizer):
         """Returns per tensor weight scaling factor from the weight_quantizer amax."""
-        # Assert that weight_quantizer has attribute amax
-        assert hasattr(weight_quantizer, "_amax"), "Weight quantizer does not have attribute amax"
+        if not hasattr(weight_quantizer, "_amax") or weight_quantizer._amax is None:
+            raise ValueError(
+                "Weight quantizer does not have _amax attribute. "
+                "This usually means the layer was not calibrated during PTQ — for example, "
+                "if it was offloaded to disk via accelerate's device_map='auto'. "
+                "Call `_ensure_weight_quantizer_calibrated()` before export, "
+                "or increase --calib_size to ensure all experts are activated."
+            )
         return weight_quantizer._amax.float() / (6.0 * 448.0)
 
     @classmethod
