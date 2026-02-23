@@ -209,6 +209,7 @@ def train():
                 "eagle_offline": use_offline_training,
                 "eagle_mix_hidden_states": eagle_args.mix_hidden_states,
                 "eagle_architecture_config": custom_config,
+                "eagle_train_length": training_args.training_seq_len,
             }
 
             mtsp.convert(model, [("eagle", config)])

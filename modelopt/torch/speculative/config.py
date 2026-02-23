@@ -110,3 +110,10 @@ class EagleConfig(ModeloptBaseConfig):
             "Whether to mix hidden states of multiple TTT steps. It is a technique to reduce training cost."
         ),
     )
+
+    eagle_train_length: int = ModeloptField(
+        default=2048,
+        description=(
+            "The length of the training data. Used to set original_max_position_embeddings in rope_scaling."
+        ),
+    )

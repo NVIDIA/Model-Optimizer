@@ -183,6 +183,15 @@ class EagleExporter(SpeculativeDecodingExporter):
                     new_value = str(new_value).replace("torch.", "")
                 template_config[key] = new_value
 
+        # For long context quality, we disable rope scaling for training
+        # and set yarn during export for inference.
+        template_config["rope_scaling"] = {
+            "rope_type": "yarn",
+            "rope_theta": 10000,
+            "factor": 32.0,
+            "original_max_position_embeddings": getattr(self.model,"eagle_train_length", 4096),
+        }
+
         return template_config
 
     def export(self, export_dir: Path | str, dtype: torch.dtype | None = None):
