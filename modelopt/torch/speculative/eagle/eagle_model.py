@@ -35,6 +35,7 @@ class EagleModel(DynamicModule):
         eagle_loss_decay_factor,
         eagle_architecture_config,
         eagle_decoder_type,
+        eagle_train_length,
     ):
         """Base Eagle Model modify function. Child class should implement the details."""
         self.eagle_offline = eagle_offline
@@ -45,3 +46,4 @@ class EagleModel(DynamicModule):
         self.eagle_reuse_base_decoder = eagle_reuse_base_decoder
         self.eagle_loss_decay_factor = eagle_loss_decay_factor
         self.eagle_decoder_type = eagle_decoder_type
+        self.eagle_train_length = eagle_train_length

@@ -693,6 +693,7 @@ class _DynamicEagleGPTModel(EagleModel):
         eagle_loss_decay_factor,
         eagle_architecture_config,
         eagle_decoder_type,
+        eagle_train_length,
     ):
         if self.config.pipeline_model_parallel_size > 1:
             warnings.warn(
@@ -715,6 +716,7 @@ class _DynamicEagleGPTModel(EagleModel):
             eagle_loss_decay_factor=eagle_loss_decay_factor,
             eagle_architecture_config=eagle_architecture_config,
             eagle_decoder_type=eagle_decoder_type,
+            eagle_train_length=eagle_train_length,
         )
 
         # sequence_parallel is not used in offline eagle
