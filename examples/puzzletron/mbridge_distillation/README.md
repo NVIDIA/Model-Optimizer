@@ -5,8 +5,8 @@ This guide shows how to perform knowledge distillation on Puzzletron-compressed 
 ## Overview
 
 1. Set up the environment with Megatron-Bridge
-2. Convert AnyModel checkpoints (student and teacher) to Megatron-Bridge format
-3. Run knowledge distillation training
+2. Prepare tokenized dataset
+3. Run knowledge distillation training directly from HuggingFace checkpoints
 
 ## Setup
 
@@ -78,39 +78,30 @@ megatron_preprocess_data(
 )
 ```
 
-## Step 1: Convert Checkpoints to Megatron-Bridge Format
+## Step 1: Run Knowledge Distillation
 
-Convert both student and teacher checkpoints:
-
-```bash
-# Convert student checkpoint
-torchrun --nproc_per_node=1 examples/puzzletron/mbridge_distillation/import_anymodel_to_mbridge.py \
-    --input-ckpt-path /path/to/student/anymodel/checkpoint \
-    --output-ckpt-path /path/to/student/mbridge/checkpoint
-
-# Convert teacher checkpoint
-torchrun --nproc_per_node=1 examples/puzzletron/mbridge_distillation/import_anymodel_to_mbridge.py \
-    --input-ckpt-path /path/to/teacher/anymodel/checkpoint \
-    --output-ckpt-path /path/to/teacher/mbridge/checkpoint
-```
-
-## Step 2: Run Knowledge Distillation
-
-Run distillation with tokenized dataset:
+Run distillation directly from HuggingFace checkpoints (student and teacher) with tokenized dataset:
 
 ```bash
-torchrun --nproc_per_node=8 examples/puzzletron/mbridge_distillation/distill_anymodel.py \
-    --student-mbridge-ckpt /path/to/student/mbridge/checkpoint/iter_0000000 \
-    --teacher-mbridge-ckpt /path/to/teacher/mbridge/checkpoint/iter_0000000 \
-    --data-path /path/to/tokenized/dataset \
-    --output-dir ./distilled_output \
-    dataset.sequence_length=8192 \
-    model.tensor_model_parallel_size=8 \
-    model.teacher.tensor_model_parallel_size=8 \
-    train.global_batch_size=4 \
-    train.micro_batch_size=1 \
-    train.train_iters=5000 \
-    logger.log_interval=1
+torchrun --nproc_per_node=8 examples/puzzletron/mbridge_distillation/distill_hf_keval.py \
+    --student_hf_path /path/to/student/huggingface/checkpoint \
+    --teacher_hf_path /path/to/teacher/huggingface/checkpoint \
+    --data_paths 1.0 /path/to/tokenized/dataset \
+    --output_dir /workspace/mbridge_distillation/distilled_student \
+    --seq_length 4096 \
+    --tp_size 8 \
+    --pp_size 1 \
+    --mbs 1 \
+    --gbs 4 \
+    --train_iters 100 \
+    --lr 0.0001 \
+    --min_lr 1e-05 \
+    --lr_warmup_iters 10 \
+    --eval_interval 10 \
+    --eval_iters 10 \
+    --log_interval 1
 ```
 
-The distilled checkpoint will be saved to `--output-dir`.
+The distilled checkpoint will be saved to `--output_dir`.
+
+**Note:** The script automatically converts HuggingFace checkpoints to Megatron-Bridge format on-the-fly, so no separate import step is needed.
