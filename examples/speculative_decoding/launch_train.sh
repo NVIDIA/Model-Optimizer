@@ -128,7 +128,7 @@ echo "Total GPUs: $TOTAL_GPU (NUM_NODES: $NUM_NODES, GPU_PER_NODE: $GPU_PER_NODE
 DEFAULT_SAVE_STEPS=$((8192 / TOTAL_GPU))
 
 MODEL=${MODEL:-"TinyLlama/TinyLlama-1.1B-Chat-v1.0"}
-MODE=${MODE:-"eagle"}
+MODE=${MODE:-"eagle3"}
 EAGLE_DECODER_TYPE=${EAGLE_DECODER_TYPE:-"llama"}
 # Set default OUTPUT_DIR to ckpts/{modelname}, where {modelname} is the last part of the model path
 MODEL_BASENAME=$(basename "$MODEL")
@@ -150,14 +150,14 @@ LOG_STEPS=${LOG_STEPS:-100}
 DRAFT_VOCAB_CACHE=${DRAFT_VOCAB_CACHE:-""}
 
 
-if [[ "$MODE" == "eagle" ]]; then
+if [[ "$MODE" == "eagle3" ]]; then
   if [[ -n "$EAGLE_CONFIG" ]]; then
     SPECULATIVE_ARGS="--eagle_config $EAGLE_CONFIG"
   else
     SPECULATIVE_ARGS=""
   fi
 else
-  echo "Only eagle supported for now!"
+  echo "Only eagle3 supported for now!"
   exit 1
 fi
 
