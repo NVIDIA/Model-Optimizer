@@ -14,25 +14,25 @@
 # limitations under the License.
 
 import os
-import sys
 import tempfile
 from pathlib import Path
 
 import onnx
 import pytest
-
 from _test_utils.import_helper import skip_if_no_tensorrt, skip_if_no_trtexec
-import .models as _test_models
+from _test_utils.onnx.quantization.autotune import models as _test_models
 
 from modelopt.onnx.quantization.autotune.workflows import (
     init_benchmark_instance,
     region_pattern_autotuning_workflow,
 )
 
+
 @pytest.fixture
 def simple_conv_model():
     """Simple ONNX model: Input -> Conv -> Relu -> Output. Created via models.py."""
     return _test_models._create_simple_conv_onnx_model()
+
 
 @pytest.mark.parametrize("use_trtexec", [True, False])
 def test_export_quantized_model(use_trtexec, simple_conv_model):
@@ -72,9 +72,6 @@ def test_export_quantized_model(use_trtexec, simple_conv_model):
             if n.op_type in ["QuantizeLinear", "DequantizeLinear"]
         ]
         assert qdq_nodes, "Q/DQ nodes not found in quantized model"
-
-        print("✓ QDQAutotuner export quantized model")
     finally:
         if os.path.exists(output_path):
             os.unlink(output_path)
-
