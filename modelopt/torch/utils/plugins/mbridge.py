@@ -17,6 +17,7 @@
 from collections.abc import Callable
 from typing import Any
 
+import torch
 import torch.nn as nn
 from datasets import DatasetDict
 from megatron.bridge import AutoBridge
@@ -37,6 +38,7 @@ from megatron.bridge.training.config import (
     OptimizerConfig,
     SchedulerConfig,
     TrainingConfig,
+    ValidationConfig,
     runtime_config_update,
 )
 from megatron.bridge.training.eval import evaluate_and_print_results
@@ -52,7 +54,124 @@ from transformers import AutoTokenizer
 
 from modelopt.torch.utils import get_dataset_samples, print_rank_0, warn_rank_0
 
-__all__ = ["get_hf_mbridge_calibration_loop", "load_mbridge_model_from_hf"]
+__all__ = [
+    "get_hf_mbridge_calibration_loop",
+    "load_mbridge_model_from_hf",
+    "resolve_prunable_backbone",
+]
+
+_SUPPORTED_BACKBONE_TYPES = (GPTModel, MambaModel)
+
+
+def _shape_from_hidden_states(t: torch.Tensor) -> tuple[int, int, torch.device] | None:
+    """Infer (batch_size, seq_len, device) from hidden-state like tensors."""
+    if t.ndim >= 3:
+        # Megatron hidden states are [seq, batch, hidden].
+        return t.shape[1], t.shape[0], t.device
+    if t.ndim == 2:
+        dim0, dim1 = t.shape[0], t.shape[1]
+        seq_len, batch_size = (dim0, dim1) if dim0 >= dim1 else (dim1, dim0)
+        return batch_size, seq_len, t.device
+    return None
+
+
+def _shape_from_decoder_input(module: nn.Module | None) -> tuple[int, int, torch.device] | None:
+    """Infer (batch_size, seq_len, device) from decoder.input_tensor."""
+    if module is None:
+        return None
+    decoder = getattr(module, "decoder", None)
+    input_tensor = getattr(decoder, "input_tensor", None)
+    if isinstance(input_tensor, torch.Tensor):
+        return _shape_from_hidden_states(input_tensor)
+    return None
+
+
+def _shape_from_forward_kwargs(kwargs: dict[str, Any]) -> tuple[int, int, torch.device] | None:
+    """Infer (batch_size, seq_len, device) from forward kwargs."""
+    for key in ("input_ids", "labels"):
+        value = kwargs.get(key)
+        if isinstance(value, torch.Tensor) and value.ndim >= 2:
+            return value.shape[0], value.shape[1], value.device
+
+    decoder_input = kwargs.get("decoder_input")
+    if isinstance(decoder_input, torch.Tensor):
+        inferred = _shape_from_hidden_states(decoder_input)
+        if inferred is not None:
+            return inferred
+
+    attention_mask = kwargs.get("attention_mask")
+    if isinstance(attention_mask, torch.Tensor):
+        if attention_mask.ndim == 2:
+            return attention_mask.shape[0], attention_mask.shape[1], attention_mask.device
+        if attention_mask.ndim >= 4:
+            return attention_mask.shape[0], attention_mask.shape[-1], attention_mask.device
+    return None
+
+
+def _infer_batch_shape(
+    kwargs: dict[str, Any], module: nn.Module | None = None
+) -> tuple[int, int, torch.device] | None:
+    """Infer (batch_size, seq_len, device), preferring PP decoder input."""
+    inferred = _shape_from_decoder_input(module)
+    if inferred is not None:
+        return inferred
+    return _shape_from_forward_kwargs(kwargs)
+
+
+def _ensure_mrope_position_ids(
+    module: nn.Module | None, ensured_mrope_ids: set[int] | None = None
+) -> None:
+    """Ensure mRoPE forward receives position_ids.
+
+    Megatron-Bridge's default GPT forward_step only provides position_ids on the first PP stage.
+    For Qwen3-VL mRoPE models, later stages still require position_ids to build rotary embeddings.
+    """
+    if module is None:
+        return
+    if ensured_mrope_ids is not None and id(module) in ensured_mrope_ids:
+        return
+    cfg = getattr(module, "config", None)
+    if getattr(cfg, "position_embedding_type", None) != "mrope":
+        return
+
+    original_forward = module.forward
+
+    def _forward_with_position_ids(*args, **kwargs):
+        if kwargs.get("position_ids") is None:
+            inferred = _infer_batch_shape(kwargs, module)
+            if inferred is not None:
+                batch_size, seq_len, device = inferred
+                kwargs["position_ids"] = (
+                    torch.arange(seq_len, dtype=torch.long, device=device)
+                    .unsqueeze(0)
+                    .expand(batch_size, -1)
+                )
+        return original_forward(*args, **kwargs)
+
+    module.forward = _forward_with_position_ids  # type: ignore[assignment]
+    if ensured_mrope_ids is not None:
+        ensured_mrope_ids.add(id(module))
+
+
+def resolve_prunable_backbone(
+    unwrapped_model: nn.Module,
+) -> tuple[GPTModel | MambaModel, bool, str | None]:
+    """Resolve the mcore text backbone to prune from an unwrapped model.
+
+    Returns:
+        (backbone, is_vlm_wrapper, wrapper_name)
+    """
+    if isinstance(unwrapped_model, _SUPPORTED_BACKBONE_TYPES):
+        return unwrapped_model, False, None
+
+    language_model = getattr(unwrapped_model, "language_model", None)
+    if isinstance(language_model, _SUPPORTED_BACKBONE_TYPES):
+        return language_model, True, type(unwrapped_model).__name__
+
+    raise TypeError(
+        f"Expected {_SUPPORTED_BACKBONE_TYPES}, or a VLM wrapper whose .language_model "
+        f"is one of them. Got {type(unwrapped_model)}"
+    )
 
 
 def load_mbridge_model_from_hf(
@@ -107,7 +226,7 @@ def load_mbridge_model_from_hf(
     model = provider.provide_distributed_model(wrap_with_ddp=False)
     assert len(model) == 1
     unwrapped_model = unwrap_model(model[0])
-    assert isinstance(unwrapped_model, (GPTModel, MambaModel))
+    resolve_prunable_backbone(unwrapped_model)
 
     tokenizer = AutoTokenizer.from_pretrained(
         hf_model_name_or_path, trust_remote_code=trust_remote_code
@@ -234,13 +353,24 @@ def get_hf_mbridge_calibration_loop(
         dp_group=get_data_parallel_group(),
     )
 
+    ensured_mrope_ids: set[int] = set()
+
     def forward_loop(m):
+        eval_model = m if isinstance(m, list) else [m]
+        # mcore_minitron converts modules to DynamicModule before invoking this loop.
+        # Ensure mRoPE modules on the converted eval model always receive position_ids.
+        for local_model in eval_model:
+            local_unwrapped = unwrap_model(local_model)
+            _ensure_mrope_position_ids(local_unwrapped, ensured_mrope_ids)
+            _ensure_mrope_position_ids(
+                getattr(local_unwrapped, "language_model", None), ensured_mrope_ids
+            )
         evaluate_and_print_results(
             state,
             prefix="iteration 1",
             forward_step_func=forward_step,
             data_iterator=train_data_iterator,
-            model=model,
+            model=eval_model,
             config=cfg,
             verbose=True,
             write_to_tensorboard=False,

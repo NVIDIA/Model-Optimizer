@@ -78,12 +78,21 @@ def megatron_prefill(
         )
 
         # NOTE: we don't support traditional positional embedding. Only RoPE or YaRN are supported.
-        position_ids = None
+        # Some multimodal RoPE variants (e.g., mrope) require explicit position_ids.
+        _pos_emb_type = getattr(getattr(model, "config", None), "position_embedding_type", None)
+        if _pos_emb_type == "mrope":
+            position_ids = (
+                torch.arange(seq_len, dtype=torch.long, device=device)
+                .unsqueeze(0)
+                .expand(batch_size, -1)
+            )
+        else:
+            position_ids = None
 
         output_tensor = model(
-            data["tokens"],
-            position_ids,
-            attention_mask,
+            input_ids=data["tokens"],
+            position_ids=position_ids,
+            attention_mask=attention_mask,
             runtime_gather_output=True,
         )
         return output_tensor, _dummy_loss_func
@@ -101,9 +110,17 @@ def megatron_prefill(
     else:
         tokens = input_ids
 
+    data_dict = {"tokens": tokens}
+    if pixel_values is not None:
+        data_dict["pixel_values"] = pixel_values
+    if image_grid_thw is not None:
+        data_dict["image_grid_thw"] = image_grid_thw
+    if image_sizes is not None:
+        data_dict["image_sizes"] = image_sizes
+
     list_of_logits = get_forward_backward_func()(
         forward_step_func=_forward_step_func,
-        data_iterator=[{"tokens": tokens}],
+        data_iterator=[data_dict],
         model=model,
         num_microbatches=1,
         seq_length=tokens.shape[-1],
@@ -208,7 +225,16 @@ def megatron_generate(
             attention_mask = None
 
         # NOTE: we don't support traditional positional embedding. Only RoPE or YaRN are supported.
-        position_ids = None
+        # Some multimodal RoPE variants (e.g., mrope) require explicit position_ids.
+        _pos_emb_type = getattr(getattr(model, "config", None), "position_embedding_type", None)
+        if _pos_emb_type == "mrope":
+            position_ids = (
+                torch.arange(seq_len, dtype=torch.long, device=device)
+                .unsqueeze(0)
+                .expand(batch_size, -1)
+            )
+        else:
+            position_ids = None
 
         # Check if this is a VLM model (has vision inputs)
         _has_pixel_values = data.get("pixel_values") is not None
@@ -246,9 +272,9 @@ def megatron_generate(
         else:
             # For text-only LLM models
             output_tensor = model(
-                data["tokens"],
-                position_ids,
-                attention_mask,
+                input_ids=data["tokens"],
+                position_ids=position_ids,
+                attention_mask=attention_mask,
                 inference_context=inference_context,
                 runtime_gather_output=True,
             )
@@ -286,12 +312,12 @@ def megatron_generate(
             tokens = input_ids
 
         data_dict = {"tokens": tokens}
-        # Vision inputs should only be passed during prefill (step 0), not during decode steps
-        if pixel_values is not None:
+        # Vision inputs are needed during prefill (step 0) and should not be resent during decode.
+        if step == 0 and pixel_values is not None:
             data_dict["pixel_values"] = pixel_values
-        if image_grid_thw is not None:
+        if step == 0 and image_grid_thw is not None:
             data_dict["image_grid_thw"] = image_grid_thw
-        if image_sizes is not None:
+        if step == 0 and image_sizes is not None:
             data_dict["image_sizes"] = image_sizes
 
         list_of_logits = get_forward_backward_func()(

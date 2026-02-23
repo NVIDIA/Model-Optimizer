@@ -41,7 +41,12 @@ import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
 from megatron.bridge.models.nemotronh.nemotron_h_provider import NemotronHModelProvider
-from transformers import AutoConfig, AutoModelForCausalLM
+from transformers import AutoConfig, AutoModel, AutoModelForCausalLM
+
+try:
+    from transformers import AutoModelForImageTextToText
+except ImportError:
+    AutoModelForImageTextToText = None
 
 import modelopt.torch.opt as mto
 import modelopt.torch.prune as mtp
@@ -50,8 +55,55 @@ from modelopt.torch.utils import get_supported_datasets, num2hrb, print_rank_0, 
 from modelopt.torch.utils.plugins.mbridge import (
     get_hf_mbridge_calibration_loop,
     load_mbridge_model_from_hf,
+    resolve_prunable_backbone,
 )
 from modelopt.torch.utils.plugins.megatron_mmlu import megatron_mmlu
+
+SUPPORTED_ARCH_SUFFIXES = (
+    "ForCausalLM",
+    "ForConditionalGeneration",
+    "NemotronH_Nano_VL_V2",
+)
+
+
+def _create_dummy_hf_model(hf_cfg, *, is_vlm_wrapper: bool, trust_remote_code: bool):
+    """Create a dummy HF model from config for bridge-assisted weight export."""
+    auto_classes = [AutoModelForCausalLM]
+    if is_vlm_wrapper and AutoModelForImageTextToText is not None:
+        auto_classes.insert(0, AutoModelForImageTextToText)
+    auto_classes.append(AutoModel)
+    for auto_cls in auto_classes:
+        try:
+            return auto_cls.from_config(hf_cfg, trust_remote_code=trust_remote_code)
+        except (ValueError, KeyError):
+            continue
+    return None
+
+
+def _ensure_bridge_supported_architectures(
+    hf_cfg,
+    *,
+    bridge: AutoBridge,
+    is_vlm_wrapper: bool,
+) -> None:
+    """Ensure exported HF config uses architecture suffixes accepted by AutoBridge."""
+    cfg_arches = list(getattr(hf_cfg, "architectures", []) or [])
+    if not cfg_arches or any(arch.endswith(SUPPORTED_ARCH_SUFFIXES) for arch in cfg_arches):
+        return
+
+    source_arches = list(
+        getattr(getattr(getattr(bridge, "hf_pretrained", None), "config", None), "architectures", [])
+        or []
+    )
+    if any(arch.endswith(SUPPORTED_ARCH_SUFFIXES) for arch in source_arches):
+        hf_cfg.architectures = source_arches
+        return
+
+    target_suffix = "ForConditionalGeneration" if is_vlm_wrapper else "ForCausalLM"
+    hf_cfg.architectures = [
+        f"{arch[:-len('Model')]}{target_suffix}" if arch.endswith("Model") else arch
+        for arch in cfg_arches
+    ]
 
 
 def get_args() -> argparse.Namespace:
@@ -239,6 +291,16 @@ def main(args: argparse.Namespace):
         },
         init_model_parallel=True,
     )
+
+    # For wrapper models that expose a GPT-style language_model, prune only the language model.
+    # Non-language components (e.g., vision towers) are preserved.
+    unwrapped_model, is_vlm_wrapper, wrapper_name = resolve_prunable_backbone(unwrapped_model)
+    if is_vlm_wrapper and wrapper_name is not None:
+        print_rank_0(
+            f"Detected VLM wrapper ({wrapper_name}), "
+            f"extracting language_model ({type(unwrapped_model).__name__}) for pruning"
+        )
+
     print_rank_0(f"\nPruning {unwrapped_model=}")
     print_rank_0(
         f"Original model params: {num2hrb(mtp.mcore_minitron.get_mcore_param_count(unwrapped_model))}"
@@ -377,9 +439,26 @@ def main(args: argparse.Namespace):
         hf_cfg.num_hidden_layers = mcore_cfg.num_layers
 
         # Save dummy pruned HF model to get the correct bridge for saving pruned weights
-        AutoModelForCausalLM.from_config(
-            hf_cfg, trust_remote_code=args.trust_remote_code
-        ).save_pretrained(args.output_hf_path, trust_remote_code=args.trust_remote_code)
+        dummy_model = _create_dummy_hf_model(
+            hf_cfg,
+            is_vlm_wrapper=is_vlm_wrapper,
+            trust_remote_code=args.trust_remote_code,
+        )
+        assert dummy_model is not None, f"Failed to create dummy model from config: {hf_cfg}"
+        dummy_model.save_pretrained(args.output_hf_path, trust_remote_code=args.trust_remote_code)
+
+        # AutoBridge validates config.architectures and only accepts a subset of suffixes.
+        # Some multimodal configs can end up with '*Model' after dummy export.
+        before_arches = list(getattr(hf_cfg, "architectures", []) or [])
+        _ensure_bridge_supported_architectures(
+            hf_cfg,
+            bridge=bridge,
+            is_vlm_wrapper=is_vlm_wrapper,
+        )
+        after_arches = list(getattr(hf_cfg, "architectures", []) or [])
+        if after_arches != before_arches:
+            hf_cfg.save_pretrained(args.output_hf_path)
+
         pruned_bridge = AutoBridge.from_hf_pretrained(
             args.output_hf_path, trust_remote_code=args.trust_remote_code
         )
