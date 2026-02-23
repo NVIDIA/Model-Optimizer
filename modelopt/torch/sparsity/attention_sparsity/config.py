@@ -89,6 +89,7 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         description=(
             "Whether the model uses causal (autoregressive) attention. "
             "If True, sparsity statistics are calculated over the lower triangle only. "
+            "Set to False for cross-attention models. "
             "Defaults to True for decoder-only models like GPT, LLaMA, etc."
         ),
     )

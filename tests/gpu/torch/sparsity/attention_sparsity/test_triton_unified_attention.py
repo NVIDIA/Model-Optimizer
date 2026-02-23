@@ -69,9 +69,9 @@ def _sparse24_top2(x0, x1, x2, x3):
 def _attention_sparse24_ref(q, k, v, scale, bq, ts, skip_diag=True):
     """Reference attention with 2:4 sparsity + diagonal skip. [seq, dim] -> [seq, dim]."""
     n = q.shape[0]
-    S = scale * (q @ k.T)
-    S.masked_fill_(
-        torch.triu(torch.ones(n, n, device=S.device, dtype=torch.bool), 1), float("-inf")
+    scores = scale * (q @ k.T)
+    scores.masked_fill_(
+        torch.triu(torch.ones(n, n, device=scores.device, dtype=torch.bool), 1), float("-inf")
     )
     nqb = (n + bq - 1) // bq
     ntiles = (n + ts - 1) // ts
@@ -84,12 +84,12 @@ def _attention_sparse24_ref(q, k, v, scale, bq, ts, skip_diag=True):
             for row in range(qs, qe):
                 for g in range((ke - ks) // 4):
                     c = ks + g * 4
-                    vals = [S[row, c + i].item() for i in range(4)]
+                    vals = [scores[row, c + i].item() for i in range(4)]
                     mask = _sparse24_top2(*vals)
                     for i in range(4):
                         if not mask[i]:
-                            S[row, c + i] = float("-inf")
-    return F.softmax(S.float(), dim=-1).to(q.dtype) @ v
+                            scores[row, c + i] = float("-inf")
+    return F.softmax(scores.float(), dim=-1).to(q.dtype) @ v
 
 
 @pytest.fixture(scope="module")
@@ -147,6 +147,44 @@ class TestUnifiedAttentionVsSdpa:
             softmax_scale=scale,
         )
         torch.testing.assert_close(o, _sdpa_reference(q, k, v, locs, lens), rtol=tol, atol=tol)
+
+    def test_cross_attention_matches_sdpa(self):
+        """Non-causal cross-attention: different Q and K/V lengths, matches SDPA."""
+        seq_q, seq_k = 6, 10
+        num_heads, num_kv_heads, head_dim = 4, 2, 32
+        scale = 1.0 / (head_dim**0.5)
+
+        torch.manual_seed(501)
+        q = torch.randn(seq_q, num_heads, head_dim, device="cuda", dtype=torch.float32)
+        k = torch.randn(seq_k, num_kv_heads, head_dim, device="cuda", dtype=torch.float32)
+        v = torch.randn(seq_k, num_kv_heads, head_dim, device="cuda", dtype=torch.float32)
+
+        o = torch.empty_like(q)
+        context_attention_fwd(
+            q,
+            k,
+            v,
+            o,
+            b_start_loc=torch.tensor([0], device="cuda", dtype=torch.int32),
+            b_seq_len=torch.tensor([seq_q], device="cuda", dtype=torch.int32),
+            max_input_len=seq_q,
+            is_causal=False,
+            softmax_scale=scale,
+            b_start_loc_k=torch.tensor([0], device="cuda", dtype=torch.int32),
+            b_seq_len_k=torch.tensor([seq_k], device="cuda", dtype=torch.int32),
+            max_input_len_k=seq_k,
+        )
+
+        # Reference: SDPA non-causal
+        q_ref = q.unsqueeze(0).permute(0, 2, 1, 3)  # [1, heads, seq_q, dim]
+        k_ref = k.unsqueeze(0).permute(0, 2, 1, 3)
+        v_ref = v.unsqueeze(0).permute(0, 2, 1, 3)
+        k_ref = k_ref.repeat_interleave(num_heads // num_kv_heads, dim=1)
+        v_ref = v_ref.repeat_interleave(num_heads // num_kv_heads, dim=1)
+        o_ref = F.scaled_dot_product_attention(q_ref, k_ref, v_ref, is_causal=False)
+        o_ref = o_ref.permute(0, 2, 1, 3).squeeze(0)
+
+        torch.testing.assert_close(o, o_ref, rtol=1e-2, atol=1e-2)
 
     def test_decode_matches_sdpa(self):
         """Decode with GQA paged KV cache matches per-sample SDPA."""
@@ -253,7 +291,7 @@ class TestSparse24Attention:
 
     def test_sparse24_output_differs_from_dense(self):
         """Sparse24 enabled produces different (but valid) output vs dense."""
-        seq_lens, total = [16, 24], 40
+        seq_lens, total = [48, 64], 112
         num_heads, num_kv_heads, head_dim = 2, 2, 32
         scale = 1.0 / (head_dim**0.5)
 
@@ -264,13 +302,13 @@ class TestSparse24Attention:
         locs = torch.tensor([0, seq_lens[0]], device="cuda", dtype=torch.int32)
         lens = torch.tensor(seq_lens, device="cuda", dtype=torch.int32)
 
-        kw = dict(
-            b_start_loc=locs,
-            b_seq_len=lens,
-            max_input_len=max(seq_lens),
-            is_causal=True,
-            softmax_scale=scale,
-        )
+        kw = {
+            "b_start_loc": locs,
+            "b_seq_len": lens,
+            "max_input_len": max(seq_lens),
+            "is_causal": True,
+            "softmax_scale": scale,
+        }
 
         o_dense = torch.empty_like(q)
         context_attention_fwd(q, k, v, o_dense, apply_sparse24=False, **kw)
