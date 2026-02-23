@@ -18,6 +18,7 @@
 import logging
 import warnings
 
+import diffusers
 import torch.nn as nn
 import transformers
 
@@ -139,7 +140,9 @@ def validate_eager_attention(model: nn.Module) -> None:
     Args:
         model: Model to validate
     """
-    if not isinstance(model, transformers.PreTrainedModel):
+    if not isinstance(model, transformers.PreTrainedModel) and not isinstance(
+        model, diffusers.models.ModelMixin
+    ):
         return
 
     attn_impl = getattr(model.config, "_attn_implementation", None)
