@@ -195,8 +195,8 @@ else
 fi
 
 if [[ "$HEAD_NODE_IP" != "" ]]; then
-  MULTI_NODE_ARGS="--num_processes $((SLURM_NNODES * GPUS_PER_NODE)) \
-                   --num_machines $SLURM_NNODES \
+  MULTI_NODE_ARGS="--num_processes $((NUM_NODES * GPUS_PER_NODE)) \
+                   --num_machines $NUM_NODES \
                    --rdzv_backend c10d \
                    --main_process_ip $HEAD_NODE_IP \ 
                    --main_process_port 29500"
