@@ -22,6 +22,7 @@ See `README.md` in this directory for example usage and data preparation instruc
 
 import argparse
 import os
+import traceback
 
 import torch
 from megatron.bridge import AutoBridge
@@ -221,9 +222,13 @@ def main(args: argparse.Namespace):
             wandb_exp_name=args.wandb_exp_name,
         ),
         tokenizer=TokenizerConfig(
+            # TODO This replaced tokenizer_type="NullTokenizer"
+            # Why NullTokenizer is not working with container nvidian+nemo+26.02.rc5 and why was it
+            # used in the first place?
             tokenizer_type="HuggingFaceTokenizer",
-            # Use teacher tokenizer as the source of knowledge; fallback to student if teacher unavailable
-            # In distillation, both models should use the same tokenizer to process the same input
+            # Use teacher tokenizer as the source of knowledge;
+            # In distillation, both student and teacher models should use the same tokenizer to
+            # process the same input
             tokenizer_model=args.teacher_hf_path,
             vocab_size=distill_provider.vocab_size,
         ),
@@ -250,5 +255,9 @@ if __name__ == "__main__":
     args = get_args()
     try:
         main(args)
+    except Exception as e:
+        print_rank_0(f"✗ MAIN FAILED: {type(e).__name__}: {e}")
+        print_rank_0(f"Traceback:\n{traceback.format_exc()}")
+        raise
     finally:
         dist.cleanup()
