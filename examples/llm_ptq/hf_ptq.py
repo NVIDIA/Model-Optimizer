@@ -1132,12 +1132,15 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0 / 4,
         help=(
-            "Percentage of experts to calibrate during forward pass. Only used for MOE models. "
-            "This is used to reduce the number of experts to calibrate during forward pass. "
+            "Fraction of experts to calibrate during forward pass (ratio in (0.0, 1.0]). "
+            "Only used for MOE models; used to reduce the number of experts calibrated during the forward pass."
         ),
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not (0.0 < args.moe_calib_experts_ratio <= 1.0):
+        parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
+    return args
 
 
 def main(args: argparse.Namespace):
