@@ -106,7 +106,7 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       NUM_NODES="${1#*=}"
       ;;
-    --head_node_ip*
+    --head_node_ip*)
       if [[ "$1" != *=* ]]; then shift; fi
       HEAD_NODE_IP="${1#*=}"
       ;;
@@ -199,7 +199,7 @@ if [[ "$NUM_NODES" != 1 ]]; then
                    --num_machines $NUM_NODES \
                    --machine_rank $SLURM_PROCID \
                    --rdzv_backend c10d \
-                   --main_process_ip $HEAD_NODE_IP \ 
+                   --main_process_ip $HEAD_NODE_IP \
                    --main_process_port 29500"
 else
   MULTI_NODE_ARGS=""
