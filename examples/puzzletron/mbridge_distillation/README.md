@@ -10,58 +10,28 @@ This guide shows how to perform knowledge distillation on Puzzletron-compressed 
 
 ## Setup
 
-> **Temporary Setup:** The NeMo docker container includes Megatron-Bridge (main branch), but Puzzletron requires a specific version/branch of Megatron-Bridge that is not included by default. This manual setup is required to use the Puzzletron-compatible version. Once the container includes the required version, this setup step will no longer be necessary.
+**Start Docker container:**
 
-**Note:** Set `$WORKSPACE` to your project root directory before running these commands:
+Use the [NeMo 26.02 container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo?version=26.02):
 
 ```bash
-export WORKSPACE=/path/to/your/project
+docker run --gpus all -it --rm \
+  -v /path/to/your/project:/workspace \
+  nvcr.io/nvidia/nemo:26.02 \
+  /bin/bash
 ```
 
-1. **Clone Megatron-Bridge:**
+**Set up the environment inside the container:**
 
-   Clone [Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) and checkout the specific commit required for Puzzletron:
-
-   ```bash
-   cd $WORKSPACE
-   git clone https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
-   cd Megatron-Bridge
-   git checkout 960a718cb8989676b258e107d538642717e22e39
-   ```
-
-2. **Initialize Megatron-Bridge submodules:**
-
-   ```bash
-   cd $WORKSPACE/Megatron-Bridge
-   git submodule init
-   git submodule update
-   ```
-
-3. **Start Docker container with mounts:**
-
-   Use the [NeMo 25.11 container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo?version=25.11):
-
-   ```bash
-   docker run --gpus all -it --rm \
-     -v $WORKSPACE:/workspace \
-     -v $WORKSPACE/Megatron-Bridge/3rdparty/Megatron-LM:/opt/megatron-lm \
-     nvcr.io/nvidia/nemo:25.11 \
-     /bin/bash
-   ```
-
-   **Note:** The mount `/opt/megatron-lm` is required because Megatron-Bridge depends on the Megatron-LM submodule.
-
-4. **Set up the environment inside the container:**
-
-   ```bash
-   export PYTHONPATH="/workspace/Megatron-Bridge/src:/workspace/Model-Optimizer:${PYTHONPATH}"
-   ```
+```bash
+export PYTHONPATH="/workspace/Model-Optimizer:${PYTHONPATH}"
+```
 
 ## Dataset Preparation
 
 This section describes how to prepare datasets for knowledge distillation. We provide examples using a toy dataset (WikiText-103) for illustration purposes, and note how to adapt the process for production datasets like Nemotron-Post-Training-Dataset-v2.
 
-> **Note:** For actual knowledge distillation, use a larger, more representative dataset like [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2).
+> **Note:** The WikiText-103 dataset is a small toy dataset used here only for illustration. For actual knowledge distillation, use a larger, more representative dataset like [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2).
 
 ### Step 1: Download Dataset
 
