@@ -24,9 +24,9 @@ import argparse
 import os
 import traceback
 
+import megatron.bridge.models.distillation_provider
 import torch
 from megatron.bridge import AutoBridge
-from megatron.bridge.models.distillation_provider import convert_to_distillation_provider
 from megatron.bridge.recipes.utils.optimizer_utils import (
     distributed_fused_adam_with_cosine_annealing,
 )
@@ -45,8 +45,28 @@ from megatron.bridge.training.post_training.distillation import ModelOptDistillC
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
 
+# Import heterogeneous bridges BEFORE AutoBridge.from_hf_pretrained() is called to ensure
+# registration takes precedence. The @MegatronModelBridge.register_bridge decorator registers
+# bridges when the module is imported. If both LlamaBridge and PuzzletronLlamaAnyModelBridge
+# register for the same source (LlamaForCausalLM), the dispatch system uses the last registration.
+#
+# Note: Currently, bridges are also registered when distillation_provider is imported
+# below (via mbridge/__init__.py), but this import will be needed once DistillationProvider
+# is upstreamed to Megatron-Bridge and we no longer import from modelopt.torch.puzzletron.
+import modelopt.torch.puzzletron.export.mbridge  # noqa: F401
 import modelopt.torch.utils.distributed as dist
+
+# Use local copy of distillation_provider with fix for heterogeneous models
+# TODO: Remove this local copy once fix is upstreamed to Megatron-Bridge
+from modelopt.torch.puzzletron.export.mbridge.distillation_provider import (
+    DistillationProvider,
+    convert_to_distillation_provider,
+)
 from modelopt.torch.utils import print_rank_0
+
+# Patch upstream module so isinstance checks in distill() work with our local DistillationProvider
+# This must come after all imports since it modifies an imported module
+megatron.bridge.models.distillation_provider.DistillationProvider = DistillationProvider
 
 SEED = 1234
 
