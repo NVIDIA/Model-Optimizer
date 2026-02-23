@@ -529,15 +529,36 @@ def local_hessian_calibrate(
 
     def forward(self, input, *args, **kwargs):
         """Custom forward that collects activations in cache mode."""
-        if LocalHessianHelper.cache_mode and self.hessian_helper.is_enabled:
-            # Get local tensor from DTensor if applicable
-            input_local = input.to_local() if hasattr(input, "to_local") else input
-            self.hessian_helper.accumulate_hessian(input_local)
-
-        # Forward without quantization during caching
+        # Forward without weight quantization during caching
         if LocalHessianHelper.cache_mode:
             self.weight_quantizer.disable()
+
+            # Capture quantized input from the forward pass for Hessian collection
+            captured_quantized = [None]
+            original_forward = None
+            if self.hessian_helper.is_enabled and hasattr(self, "input_quantizer") and self.input_quantizer.is_enabled:
+                original_forward = self.input_quantizer.forward
+
+                def capture_forward(input_tensor):
+                    quantized = original_forward(input_tensor)
+                    captured_quantized[0] = quantized.to_local() if hasattr(quantized, "to_local") else quantized
+                    return quantized
+
+                self.input_quantizer.forward = capture_forward
+
             out = self._forward_no_local_hessian(input, *args, **kwargs)
+
+            # Collect Hessian from the quantized input that was used in forward pass
+            if self.hessian_helper.is_enabled:
+                if hasattr(self, "input_quantizer") and self.input_quantizer.is_enabled:
+                    self.hessian_helper.accumulate_hessian(captured_quantized[0])
+                    if original_forward is not None:
+                        self.input_quantizer.forward = original_forward
+                else:
+                    # No input_quantizer, use raw input
+                    input_local = input.to_local() if hasattr(input, "to_local") else input
+                    self.hessian_helper.accumulate_hessian(input_local)
+
             self.weight_quantizer.enable()
             return out
 
