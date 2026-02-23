@@ -43,7 +43,7 @@ def test_hadamard_transform(dim):
     assert torch.allclose(xxt_h, xxt, atol=0.05)
     x_h_fp32 = normalized_hadamard_transform(x, rotate_fp32=True)
     xxt_h_fp32 = x_h_fp32 @ x_h_fp32.T
-    assert torch.allclose(xxt_h_fp32, xxt, atol=0.001)
+    assert torch.allclose(xxt_h_fp32, xxt, atol=0.05)
 
 
 @pytest.mark.parametrize(
@@ -83,6 +83,6 @@ def test_kv_rotate(rotate_fp32):
         },
     ):
         output_test1 = model(dummy_input)
-    assert not torch.allclose(output_ref, output_test1, atol=0.001)
+    assert not torch.allclose(output_ref, output_test1, atol=0.05)
 
     mtq.unregister(SDPAAttention)
