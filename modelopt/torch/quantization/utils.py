@@ -834,11 +834,10 @@ class LayerActivationGettr:
             """
             assert len(args) >= 1
             self.inputs.append((args, kwargs))
-            output = self._original_forward(*args, **kwargs)
-            self.outputs.append(output)
+            # output = self._original_forward(*args, **kwargs)
+            # self.outputs.append(output)
             if getattr(self, "_stop_after_collection", False):
                 raise StopIteration()
-            return output
 
         bind_forward_method(layer, _forward_w_data_collection, "_original_forward")
         layer.inputs = []

@@ -57,7 +57,14 @@ from .utils import (
     weight_attr_names,
 )
 
-__all__ = ["awq", "local_hessian_calibrate", "max_calibrate", "save_fake_checkpoint", "smoothquant", "svdquant"]
+__all__ = [
+    "awq",
+    "local_hessian_calibrate",
+    "max_calibrate",
+    "save_fake_checkpoint",
+    "smoothquant",
+    "svdquant",
+]
 
 
 def weight_only_quantize(model: nn.Module):
@@ -133,6 +140,26 @@ def max_calibrate(
             module.layer_sync_moe_local_experts_amax()
         elif hasattr(module, "sync_moe_local_experts_amax"):
             module.sync_moe_local_experts_amax()
+
+    for name, module in list(model.named_modules()):
+        if isinstance(module, TensorQuantizer) and not module._disabled:
+            if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
+                # Get the initial amax from max calibration
+                initial_amax = module._amax.clone().detach()
+
+                is_nvfp4_static = (
+                    module.is_static_block_quant
+                    and module._num_bits == (2, 1)
+                    and module._block_sizes is not None
+                    and module._block_sizes.get("scale_bits") == (4, 3)
+                )
+
+                if is_nvfp4_static:
+                    # Compute and set global_amax
+                    global_amax = reduce_amax(initial_amax, axis=None)
+
+                    # Convert to NVFP4StaticQuantizer in-place
+                    NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
 
     if not distributed_sync:
         return
@@ -338,6 +365,7 @@ def mse_calibrate(
 
                 if fp8_scale_sweep and is_nvfp4_static:
                     # Replace calibrator with NVFP4MSECalibrator
+                    print("mse_calibrate: Replacing calibrator with NVFP4MSECalibrator")
                     module._calibrator = NVFP4MSECalibrator(
                         amax=initial_amax,
                         axis=module._calibrator._axis,
@@ -629,6 +657,7 @@ def local_hessian_calibrate(
         error_func = helper.get_error_func()
 
         if fp8_scale_sweep and is_nvfp4_static:
+            print("local_hessian_calibrate: Replacing calibrator with NVFP4MSECalibrator")
             weight_quantizer._calibrator = NVFP4MSECalibrator(
                 amax=initial_amax,
                 axis=weight_quantizer._calibrator._axis if weight_quantizer._calibrator else None,
@@ -1985,47 +2014,7 @@ def sequential_calibrate(
     **calib_kwargs,
 ):
     """Sequential calibration - a sequential layer-by-layer calibration algorithm."""
-    # Check if the model already has amax values (e.g. loaded from a GPTQ checkpoint).
-    # If so, skip max_calibrate to avoid overwriting the existing calibration.
-    already_calibrated = any(
-        hasattr(module, "_amax") and module._amax is not None
-        for _, module in model.named_modules()
-        if isinstance(module, TensorQuantizer) and not module._disabled
-    )
-
-    if already_calibrated:
-        print_rank_0(
-            "Model already has amax values (e.g. loaded from checkpoint), "
-            "skipping max_calibrate and NVFP4 conversion"
-        )
-    else:
-        # Get amax values for weights and activations
-        max_calibrate(model)
-
-        for name, module in list(model.named_modules()):
-            if isinstance(module, TensorQuantizer) and not module._disabled:
-                if (
-                    module._calibrator is not None
-                    and not module._dynamic
-                    and hasattr(module, "_amax")
-                ):
-                    # Get the initial amax from max calibration
-                    initial_amax = module._amax.clone().detach()
-
-                    is_nvfp4_static = (
-                        module.is_static_block_quant
-                        and module._num_bits == (2, 1)
-                        and module._block_sizes is not None
-                        and module._block_sizes.get("scale_bits") == (4, 3)
-                    )
-
-                    if is_nvfp4_static:
-                        # Compute and set global_amax
-                        global_amax = reduce_amax(initial_amax, axis=None)
-
-                        # Convert to NVFP4StaticQuantizer in-place
-                        NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
-
+    print("New sequential flow 2")
     transformer_layers = get_decoder_layers(model)
     if transformer_layers is None:
         raise ValueError(
@@ -2046,19 +2035,22 @@ def sequential_calibrate(
             print_rank_0(f"Skipping layer {layer_idx} (already GPTQ'd)")
             continue
 
-        # Set input quantizer amaxe's for current layer modules
-        _set_input_quantizers_calib_mode(layer)
-        _set_kv_quantizers_calib_mode(layer)
+        # Set input and kv quantizer scales using QDQ'ed weights
         inputs = gettr.get_input_activations(layer, forward_loop)
-        _set_kv_quantizers_quant_mode(layer)
-        _set_input_quantizers_quant_mode(layer)
 
-        # Sync amaxes
-        for name, module in layer.named_modules():
-            if hasattr(module, "layer_sync_moe_local_experts_amax"):
-                module.layer_sync_moe_local_experts_amax()
-            elif hasattr(module, "sync_moe_local_experts_amax"):
-                module.sync_moe_local_experts_amax()
+        # Optionally refine weight quantizer amax per-layer based on MODELOPT_CALIBRATE env var
+        calibrate_method = os.environ.get("MODELOPT_CALIBRATE", "max").lower()
+
+        def _layer_forward_loop(m):
+            for args, kwargs_input in inputs:  # noqa: F821
+                m(*args, **kwargs_input)
+
+        if calibrate_method == "max":
+            max_calibrate(layer, forward_loop=_layer_forward_loop)
+        elif calibrate_method == "mse":
+            mse_calibrate(layer, forward_loop=_layer_forward_loop, fp8_scale_sweep=True)
+        elif calibrate_method == "local_hessian":
+            local_hessian_calibrate(layer, forward_loop=_layer_forward_loop, fp8_scale_sweep=True)
 
         # Call GPTQ
         calib_func(layer, inputs, **calib_kwargs)
@@ -2122,21 +2114,26 @@ def gptq(
             "n_samples": 0,
         }
 
-    # Phase 2: Register hooks to collect Hessians during forward passes
-    def hessian_hook(module, input, output):
-        """Hook to intercept activations and update hessian matrix."""
-        if hasattr(module, "input_quantizer") and module.input_quantizer.is_enabled:
-            inp = module.input_quantizer(input[0])
-        else:
-            inp = input[0]
-        state = hessian_state[module.name]
-        hessian, n_samples = update_hessian(inp, state["hessian"], state["n_samples"])
-        hessian_state[module.name] = {"hessian": hessian, "n_samples": n_samples}
+    # Phase 2: Patch forwards to collect Hessians (similar to local_hessian_calibrate)
+    def _make_hessian_forward(module_name):
+        def hessian_forward(self, input, *args, **kwargs):
+            inp = input.to_local() if hasattr(input, "to_local") else input
+            state = hessian_state[module_name]
+            hessian, n_samples = update_hessian(inp, state["hessian"], state["n_samples"])
+            hessian_state[module_name] = {"hessian": hessian, "n_samples": n_samples}
 
-    handles = []
+            self.weight_quantizer.disable()
+            out = self._forward_no_gptq_hessian(input, *args, **kwargs)
+            self.weight_quantizer.enable()
+            return out
+
+        return hessian_forward
+
+    patched_modules = []
     for name, module in layer.named_modules():
         if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
-            handles.append(module.register_forward_hook(hessian_hook))
+            bind_forward_method(module, _make_hessian_forward(name), "_forward_no_gptq_hessian")
+            patched_modules.append(module)
 
     # Run forward passes with the provided inputs to collect Hessians
     hessian_start = time.time()
@@ -2146,9 +2143,9 @@ def gptq(
     for args, kwargs_input in inputs:
         layer(*args, **kwargs_input)
 
-    # Remove hooks after collecting Hessians
-    for handle in handles:
-        handle.remove()
+    # Unpatch forwards
+    for module in patched_modules:
+        unpatch_forward_method(module, "_forward_no_gptq_hessian")
 
     torch.cuda.synchronize() if torch.cuda.is_available() else None
     hessian_time = time.time() - hessian_start
