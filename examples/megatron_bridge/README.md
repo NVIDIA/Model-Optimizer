@@ -43,7 +43,7 @@ Once inside the container, you need to login with your HuggingFace token to down
 Note that the default dataset for pruning and quantization is [`nemotron-post-training-dataset-v2`](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2), which is gated.
 
 ```bash
-huggingface-cli login --token <your token>
+hf auth login --token <your token>
 ```
 
 ## Pruning
@@ -97,23 +97,40 @@ The [distill.py](distill.py) script loads student and teacher models from Huggin
 ### Data Preparation
 
 The distillation script expects pre-tokenized data in Megatron's binary format (`.bin` / `.idx` files).
-You can tokenize your JSONL dataset using the following function:
 
-```python
-from modelopt.torch.utils.plugins import megatron_preprocess_data
+You can tokenize your JSONL datasets using the following command:
 
-megatron_preprocess_data(
-    input_path="/path/to/your/data.jsonl",
-    output_dir="/path/to/tokenized/data",
-    tokenizer_name_or_path="Qwen/Qwen3-0.6B",
-    json_keys=["text"],  # change to your JSON key if needed
-    workers=32,
-    log_interval=100000,
-    max_sequence_length=256000,  # To avoid rare OOM errors if text is too long
-)
+```bash
+python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
+    --jsonl_paths /path/to/data1.jsonl /path/to/data2.jsonl ... \
+    --json_keys text \
+    --tokenizer Qwen/Qwen3-0.6B \
+    --output_dir /path/to/tokenized/data/qwen3 \
+    --workers 32 \
+    --max_sequence_length 256_000
 ```
 
-If you have multiple JSONL files, you can tokenize them one by one and pass all the paths to the `--data_paths` argument.
+Instead of `--jsonl_paths`, you can also pass a directory path to the `--input_dir` argument to tokenize all JSONL files in the directory.
+We are setting a maximum sequence length of 256k to avoid rare OOM errors in tokenization if text is too long.
+
+If you want to download and tokenize a dataset from Hugging Face Hub directly, you can use the following command:
+
+```bash
+python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
+    --hf_dataset nvidia/Nemotron-Pretraining-SFT-v1 \
+    --hf_name Nemotron-SFT-General \
+    --hf_split train \
+    --hf_max_samples_per_split 10_000_000 \
+    --json_keys text \
+    --tokenizer Qwen/Qwen3-0.6B \
+    --output_dir /path/to/tokenized/data/qwen3 \
+    --workers 32 \
+    --max_sequence_length 256_000
+```
+
+If you skip `--hf_name`, it will download and tokenize all subsets for the dataset.
+If you skip `--hf_split`, it will download and tokenize all splits for the subset.
+If you skip `--hf_max_samples_per_split`, it will download and tokenize all samples for the split.
 
 ### Distillation with Real Data
 
@@ -124,7 +141,7 @@ torchrun --nnodes 1 --nproc_per_node 8 distill.py \
     --tp_size 8 \
     --teacher_hf_path Qwen/Qwen3-8B \
     --student_hf_path Qwen/Qwen3-4B \
-    --data_paths 1.0 /path/to/tokenized/data \
+    --data_paths 1.0 /path/to/tokenized/data/qwen3 \
     --data_path_to_cache /path/to/cache/dataset_indices_qwen3 \
     --seq_length 8192 \
     --mbs 1 \
