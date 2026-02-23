@@ -173,7 +173,7 @@ def generate_teacher_latents(embed_list, split_name):
             # Pipeline divides by 1000 before passing to transformer
             t_normed = (t / 1000).expand(B).to(latents.dtype)
 
-            noise_pred = transformer(
+            velocity_pred = transformer(
                 hidden_states=latents,
                 timestep=t_normed,
                 encoder_hidden_states=prompt_embeds,
@@ -183,7 +183,7 @@ def generate_teacher_latents(embed_list, split_name):
                 return_dict=False,
             )[0]
 
-            latents = scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+            latents = scheduler.step(velocity_pred, t, latents, return_dict=False)[0]
 
             # After scheduler step: snapshot target for assigned samples
             for j in range(B):

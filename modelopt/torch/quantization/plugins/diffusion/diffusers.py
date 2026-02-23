@@ -231,6 +231,20 @@ class FP8SDPA(Function):
         )
 
     @staticmethod
+    def backward(ctx, grad_output):
+        """STE for quantized attention: re-run unquantized SDPA for gradients."""
+        query, key, value, attn_mask = ctx.saved_tensors
+        with torch.enable_grad():
+            q = query.detach().requires_grad_(True)
+            k = key.detach().requires_grad_(True)
+            v = value.detach().requires_grad_(True)
+            out = original_scaled_dot_product_attention(
+                q, k, v, attn_mask=attn_mask,
+            )
+            out.backward(grad_output)
+        return q.grad, k.grad, v.grad, None, None, None, None, None, None, None, None, None
+
+    @staticmethod
     @symbolic_helper.parse_args("v", "v", "v", "v", "f", "b", "v", "t", "t", "t", "s", "b")
     def symbolic(
         g: "GraphContext",
