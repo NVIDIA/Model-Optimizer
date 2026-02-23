@@ -156,11 +156,22 @@ _default_disabled_quantizer_cfg = {
     "*mlp.gate.*": {"enable": False},  # Skip the MOE router
     "*mlp.shared_expert_gate.*": {"enable": False},  # Skip the MOE router
     "*linear_attn.conv1d*": {"enable": False},
-    "*mixer.conv1d*": {"enable": False},  # Skip mamba conv1d
+    "*mixer.conv1d*": {"enable": False},
     "*output_layer*": {"enable": False},
     "output.*": {"enable": False},
     "default": {"enable": False},
 }
+
+super_disabled_quantizer_cfg = {
+    "*fc1_latent_proj*": {"enable": False},  # Skip Latent MOE
+    "*fc2_latent_proj*": {"enable": False},  # Skip Latent MOE
+    "*q_proj*": {"enable": False},  # Skip QKV Linear
+    "*k_proj*": {"enable": False},  # Skip QKV Linear
+    "*v_proj*": {"enable": False},  # Skip QKV Linear
+    "*o_proj*": {"enable": False},  # Skip Output Linear
+    "*mtp*": {"enable": False},  # Skip MTP layers
+}
+
 
 _mamba_moe_disabled_quantizer_cfg = {
     "*fc1_latent_proj*": {"enable": False},  # Skip Latent MOE
@@ -186,7 +197,7 @@ SUPER_NVFP4_CONSERVATIVE_CFG = {
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
-        **_mamba_moe_disabled_quantizer_cfg,
+        **super_disabled_quantizer_cfg,
         "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
         "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
     },
@@ -208,7 +219,7 @@ SUPER_NVFP4_CONSERVATIVE_GPTQ_CFG = {
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
-        **_mamba_moe_disabled_quantizer_cfg,
+        **super_disabled_quantizer_cfg,
         "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
         "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
     },
@@ -341,7 +352,7 @@ NVFP4_STATIC_WO_GPTQ_CFG = {
             "enable": False,
         },
         **_default_disabled_quantizer_cfg,
-        **_mamba_moe_disabled_quantizer_cfg,
+        # **_mamba_moe_disabled_quantizer_cfg,
         "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
         "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
     },
@@ -366,9 +377,6 @@ NVFP4_STATIC_GPTQ_CFG = {
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
-        **_mamba_moe_disabled_quantizer_cfg,
-        "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
-        "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
     },
     "algorithm": {
         "method": "gptq",
