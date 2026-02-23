@@ -221,7 +221,11 @@ def main(args: argparse.Namespace):
             wandb_exp_name=args.wandb_exp_name,
         ),
         tokenizer=TokenizerConfig(
-            tokenizer_type="NullTokenizer", vocab_size=distill_provider.vocab_size
+            tokenizer_type="HuggingFaceTokenizer",
+            # Use teacher tokenizer as the source of knowledge; fallback to student if teacher unavailable
+            # In distillation, both models should use the same tokenizer to process the same input
+            tokenizer_model=args.teacher_hf_path,
+            vocab_size=distill_provider.vocab_size,
         ),
         checkpoint=CheckpointConfig(
             save_interval=args.eval_interval,
