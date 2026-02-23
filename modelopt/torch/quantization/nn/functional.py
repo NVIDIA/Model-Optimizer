@@ -93,7 +93,7 @@ class FastHadamardTransform(Function):
         return fast_hadamard_transform.hadamard_transform(grad_outputs)  # type: ignore[name-defined]
 
 
-def normalized_hadamard_transform(inputs):
+def normalized_hadamard_transform(inputs, rotate_fp32=False):
     """Normalized fast hadamard transform."""
     global fast_hadamard_transform
     try:
@@ -104,6 +104,10 @@ def normalized_hadamard_transform(inputs):
             "`pip install git+https://github.com/Dao-AILab/fast-hadamard-transform.git`"
         )
 
-    return FastHadamardTransform.apply(inputs) / torch.sqrt(
+    dtype = inputs.dtype
+    if rotate_fp32:
+        inputs = inputs.to(torch.float32)
+    outputs = FastHadamardTransform.apply(inputs) / torch.sqrt(
         torch.tensor(inputs.shape[-1], dtype=torch.float32)
     )
+    return outputs.to(dtype) if rotate_fp32 else outputs

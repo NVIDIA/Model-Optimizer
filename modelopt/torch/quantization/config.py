@@ -1033,14 +1033,20 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
             assert v in ["max", "histogram"]
         return v
 
-    rotate: bool = ModeloptField(
+    rotate: bool | dict[str, bool] = ModeloptField(
         default=False,
-        title="""If rotate the input before quantization.""",
-        description=""""If true, the input of the quantizer will be rotated with a hadamard matrix
+        title="""Configuration for rotating the input before quantization.""",
+        description="""Can be a boolean or a dictionary with the following keys:
+        - "enable": Boolean to enable/disable rotation (default: False)
+        - "rotate_fp32": Boolean to compute rotation in float32 precision (default: False)
+
+        If a boolean is provided, it is treated as the "enable" value with "rotate_fp32" defaulting to False.
+
+        When enabled, the input of the quantizer will be rotated with a hadamard matrix
         given by scipy.linalg.hadamard, i.e.
         ``input = input @ scipy.linalg.hadamard(input.shape[-1]) / sqrt(input.shape[-1])``.
 
-        This can be used for ratation based PTQ methods, e.g. QuaRot or SpinQuant.
+        This can be used for rotation based PTQ methods, e.g. QuaRot or SpinQuant.
         See https://arxiv.org/abs/2404.00456 for example.""",
     )
 
