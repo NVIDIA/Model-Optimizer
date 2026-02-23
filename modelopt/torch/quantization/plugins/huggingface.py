@@ -458,8 +458,10 @@ class _QuantSparseMoe(QuantModule):
         elif hasattr(self, "experts") and hasattr(self.experts, "num_experts"):
             num_experts = self.experts.num_experts
 
-        self.expert_token_count = torch.zeros(
-            num_experts, dtype=torch.long, device=next(self.parameters()).device
+        self.register_buffer(
+            "expert_token_count",
+            torch.zeros(num_experts, dtype=torch.long, device=next(self.parameters()).device),
+            persistent=False,
         )
         self._count_expert_tokens = False
         self._moe_calib_experts_ratio = None
