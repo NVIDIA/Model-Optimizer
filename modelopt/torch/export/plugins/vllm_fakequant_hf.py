@@ -27,25 +27,6 @@ from modelopt.torch.quantization.utils import get_quantizer_state_dict
 __all__ = ["export_hf_vllm_fq_checkpoint"]
 
 
-def cleanup_for_torch_save(x: Any) -> Any:
-    """Drop callables / local closures (e.g. `<locals>.new_forward`) before torch.save.
-
-    ModelOpt stored state dict may contain local closures like `<locals>.new_forward`
-    which are not picklable. So we need to cleanup the state dict before saving.
-    """
-    if isinstance(x, dict):
-        return {
-            k: cleanup_for_torch_save(v)
-            for k, v in x.items()
-            if not callable(v) and "<locals>" not in str(getattr(v, "__qualname__", ""))
-        }
-    if isinstance(x, list):
-        return [cleanup_for_torch_save(v) for v in x]
-    if isinstance(x, tuple):
-        return tuple(cleanup_for_torch_save(v) for v in x)
-    return x
-
-
 def export_hf_vllm_fq_checkpoint(
     model: nn.Module,
     export_dir: Path | str,
@@ -68,8 +49,7 @@ def export_hf_vllm_fq_checkpoint(
     quantizer_state_dict = get_quantizer_state_dict(model)
 
     modelopt_state = mto.modelopt_state(model)
-    modelopt_state = cleanup_for_torch_save(modelopt_state)
-    modelopt_state["modelopt_state_weights"] = cleanup_for_torch_save(quantizer_state_dict)
+    modelopt_state["modelopt_state_weights"] = quantizer_state_dict
     torch.save(modelopt_state, export_dir / "vllm_fq_modelopt_state.pth")
     # remove quantizer from model
     for _, module in model.named_modules():
