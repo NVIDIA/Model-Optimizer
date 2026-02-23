@@ -52,11 +52,16 @@ class GenericHeterogeneousProvider(GPTModelProvider, HeterogeneousTransformerCon
     def __getattr__(self, name: str):
         """Handle missing attributes for OmegaConf compatibility.
 
-        OmegaConf conversion tries to access per_block_parameters which may not
-        be initialized when loading from YAML. Return empty list as fallback.
+        Returns empty list for per_block_parameters if not yet initialized (before finalize()).
+        This allows OmegaConf to serialize/deserialize configs without errors. Actual usage
+        should call finalize() first to set per_block_parameters as a real attribute.
         """
         if name == "per_block_parameters":
-            return []
+            # Return existing attribute if set, otherwise [] for OmegaConf compatibility
+            try:
+                return object.__getattribute__(self, name)
+            except AttributeError:
+                return []
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
 
