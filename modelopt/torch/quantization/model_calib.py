@@ -739,6 +739,8 @@ def awq_lite(
     def update_loss(self, out, out_actual, alpha):
         out_actual = out_actual[0] if isinstance(out_actual, tuple) else out_actual
         out = out[0] if isinstance(out, tuple) else out
+        out = out.to_local() if hasattr(out, "to_local") else out
+        out_actual = out_actual.to_local() if hasattr(out_actual, "to_local") else out_actual
         loss = (out - out_actual).float().pow(2).mean()
         self.awq_lite.loss[alpha] += loss.to(self.awq_lite.loss[alpha].device)
 
