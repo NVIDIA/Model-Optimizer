@@ -58,7 +58,7 @@ def gather_mcore_vllm_fq_quantized_state_dict(
             if quantizer_state_dict is not None:
                 merged_quantizer_state_dict.update(quantizer_state_dict)
 
-        torch.save(merged_quantizer_state_dict, save_directory + "/quantizer_state.pth")
+        torch.save(merged_quantizer_state_dict, save_directory + "/vllm_fq_modelopt_state.pth")
     else:
         # Other ranks just send their amax values
         torch.distributed.gather_object(quantizer_state_dict, None, dst=0)
