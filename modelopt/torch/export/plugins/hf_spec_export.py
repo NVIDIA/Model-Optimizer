@@ -175,6 +175,15 @@ class EagleExporter:
         if self.hf_quant_config is not None:
             template_config["quantization_config"] = self.hf_quant_config
 
+        # For long context quality, we disable rope scaling for training
+        # and set yarn during export for inference.
+        template_config["rope_scaling"] = {
+            "rope_type": "yarn",
+            "rope_theta": 10000,
+            "factor": 32.0,
+            "original_max_position_embeddings": model.eagle_train_length,
+        }
+
         return template_config
 
     def export_quant_config(self):

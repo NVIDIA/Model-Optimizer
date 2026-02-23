@@ -58,6 +58,7 @@ def convert_to_eagle_model(model: nn.Module, config: EagleConfig) -> ConvertRetu
         eagle_loss_decay_factor=config.eagle_loss_decay_factor,
         eagle_architecture_config=config.eagle_architecture_config,
         eagle_decoder_type=config.eagle_decoder_type,
+        eagle_train_length=config.eagle_train_length,
     )
 
     # no metadata, all specified via config.

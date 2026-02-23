@@ -560,6 +560,7 @@ class HFEagleModel(EagleModel):
         eagle_loss_decay_factor,
         eagle_architecture_config,
         eagle_decoder_type,
+        eagle_train_length,
     ):
         """Constructor.
 
@@ -576,6 +577,7 @@ class HFEagleModel(EagleModel):
             eagle_loss_decay_factor=eagle_loss_decay_factor,
             eagle_architecture_config=eagle_architecture_config,
             eagle_decoder_type=eagle_decoder_type,
+            eagle_train_length=eagle_train_length,
         )
 
         if eagle_decoder_type == "llama":

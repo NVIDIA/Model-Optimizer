@@ -205,6 +205,7 @@ def train():
                 "eagle_decoder_type": eagle_args.eagle_decoder_type,
                 "eagle_offline": use_offline_training,
                 "eagle_architecture_config": custom_config,
+                "eagle_train_length": training_args.training_seq_len,
             }
 
             mtsp.convert(model, [("eagle", config)])

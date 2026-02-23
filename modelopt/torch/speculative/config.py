@@ -105,3 +105,10 @@ class EagleConfig(ModeloptBaseConfig):
         default="llama",
         description=("The class of eagle decoder to use. Available options: llama, kimik2"),
     )
+
+    eagle_train_length: int = ModeloptField(
+        default=2048,
+        description=(
+            "The length of the training data. Used to set original_max_position_embeddings in rope_scaling."
+        ),
+    )
