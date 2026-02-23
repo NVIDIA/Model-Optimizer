@@ -926,6 +926,143 @@ def awq(
     See :class:`AWQFullCalibConfig <modelopt.torch.quantization.config.AWQFullCalibConfig>` for
     details on the remaining arguments.
     """
+    # HACK: Special handling for Super V3 (NemotronHMOE) with square ReLU
+    # Check if this is a Super V3 model by looking for NemotronHMOE modules
+    is_super_v3 = False
+    moe_down_proj_modules = []
+    moe_up_proj_modules = []
+
+    # Check if this is a Super V3 model by looking for NemotronHMOE modules
+    try:
+        for name, module in model.named_modules():
+            # Check by module type name
+            module_type_name = type(module).__name__
+            is_nemotron_moe = (
+                "NemotronHMOE" in module_type_name
+                or "QuantNemotronHMOE" in module_type_name
+            )
+
+            if is_nemotron_moe:
+                # Verify it has the right structure and collect expert modules
+                if hasattr(module, "experts") and hasattr(module.experts, "__iter__"):
+                    expert_count = 0
+                    for expert in module.experts:
+                        if hasattr(expert, "down_proj") and hasattr(expert, "up_proj"):
+                            expert_count += 1
+                            if is_quantized_linear(expert.down_proj):
+                                moe_down_proj_modules.append(expert.down_proj)
+                                moe_up_proj_modules.append(expert.up_proj)
+                                is_super_v3 = True
+
+                    if expert_count > 0:
+                        print_rank_0(
+                            f"Found Super V3 MoE module at '{name}' "
+                            f"(type: {module_type_name}, experts: {expert_count})"
+                        )
+    except Exception as e:
+        print_rank_0(f"Warning: Error detecting Super V3 model structure: {e}")
+
+    if is_super_v3:
+        print_rank_0(
+            f"Detected Super V3 model with {len(moe_down_proj_modules)} MoE down_proj modules"
+        )
+    else:
+        print_rank_0(
+            "Super V3 detection: No NemotronHMOE modules found. "
+            "Using standard AWQ flow."
+        )
+
+    if is_super_v3 and moe_down_proj_modules:
+        print_rank_0(
+            "Detected Super V3 (NemotronHMOE) model. "
+            "Applying special AWQ handling for square ReLU."
+        )
+
+        # Step 1: Disable all quantizers except MoE down_proj input_quantizer
+        disabled_modules = []
+        for name, module in model.named_modules():
+            if is_quantized_linear(module):
+                # Skip MoE down_proj input_quantizer
+                if module not in moe_down_proj_modules:
+                    if hasattr(module, "input_quantizer") and module.input_quantizer.is_enabled:
+                        module.input_quantizer.disable()
+                        disabled_modules.append((module, "input_quantizer"))
+                    if hasattr(module, "weight_quantizer") and module.weight_quantizer.is_enabled:
+                        module.weight_quantizer.disable()
+                        disabled_modules.append((module, "weight_quantizer"))
+
+        # Step 2: Run AWQ (only on MoE down_proj)
+        if algorithm in ["awq_full", "awq_lite"]:
+            awq_lite(model, forward_loop, **kwargs)
+
+        if algorithm in ["awq_full", "awq_clip"]:
+            awq_clip(model, forward_loop, **kwargs)
+
+        # Step 3: Fold AWQ pre_quant_scale into up_proj weights
+        # Math: s * ReLU²(x) = s * max(x, 0)² = max(√s * x, 0)² (when s > 0)
+        # So: up_proj_weight_new = √s * up_proj_weight_old
+        name_to_module = dict(model.named_modules())
+        for down_proj, up_proj in zip(moe_down_proj_modules, moe_up_proj_modules):
+            if hasattr(down_proj.input_quantizer, "_pre_quant_scale") and hasattr(up_proj, "weight"):
+                pre_quant_scale = down_proj.input_quantizer._pre_quant_scale
+                print_rank_0(
+                    f"Optimal pre_quant_scale for MoE down_proj: "
+                    f"shape={pre_quant_scale.shape}, "
+                    f"min={pre_quant_scale.min().item():.6f}, "
+                    f"max={pre_quant_scale.max().item():.6f}, "
+                    f"mean={pre_quant_scale.mean().item():.6f}"
+                )
+
+                # Ensure pre_quant_scale is positive
+                pre_quant_scale = torch.clamp(
+                    pre_quant_scale, min=torch.finfo(pre_quant_scale.dtype).tiny
+                )
+
+                # Compute sqrt(pre_quant_scale) and reshape to [cout, 1] for broadcasting
+                sqrt_scale = torch.sqrt(pre_quant_scale)
+
+                # Fold into up_proj weight: up_proj_weight[cout, cin] * sqrt_scale[cout, 1]
+                with enable_weight_access_and_writeback(up_proj, model, name_to_module):
+                    up_proj_weight = up_proj.weight  # Shape: [cout, cin]
+                    # Reshape sqrt_scale to [cout, 1] for broadcasting
+                    if sqrt_scale.dim() == 1:
+                        sqrt_scale = sqrt_scale.view(-1, 1)  # [cout, 1]
+                    else:
+                        sqrt_scale = sqrt_scale.unsqueeze(-1)  # [cout, 1]
+
+                    # Apply: up_proj_weight_new = sqrt_scale * up_proj_weight
+                    up_proj.weight = nn.Parameter(
+                        (sqrt_scale * up_proj_weight).to(up_proj.weight.dtype),
+                        requires_grad=False,
+                    )
+
+                    # print_rank_0(
+                    #     f"Folded pre_quant_scale into up_proj weight. "
+                    #     f"Scale shape: {sqrt_scale.shape}, Weight shape: {up_proj_weight.shape}"
+                    # )
+
+                # Remove pre_quant_scale from down_proj since it's now folded into up_proj
+                delattr(down_proj.input_quantizer, "_pre_quant_scale")
+                setattr(down_proj, "fused_with_prequant", True)
+
+        # Step 4: Re-enable previously disabled quantizers
+        for module, quantizer_attr in disabled_modules:
+            quantizer = getattr(module, quantizer_attr)
+            if hasattr(quantizer, "enable"):
+                quantizer.enable()
+
+        # Step 5: Run max_calibrate on all modules
+        max_calibrate(model, forward_loop)
+
+        # Special handling for SequentialQuantizer
+        for name, module in model.named_modules():
+            if is_quantized_linear(module) and isinstance(module.weight_quantizer, SequentialQuantizer):
+                with enable_weight_access_and_writeback(module, model, name_to_module):
+                    max_calibrate(module, lambda linear: linear.weight_quantizer(module.weight))
+
+        return
+
+    # Original AWQ flow for non-Super V3 models
     with SequentialQuantizer.convert_to_single_quantizer(model):
         if algorithm in ["awq_full", "awq_lite"]:
             awq_lite(model, forward_loop, **kwargs)

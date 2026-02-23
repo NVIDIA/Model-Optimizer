@@ -191,6 +191,28 @@ SUPER_NVFP4_AGGRESSIVE_CFG = {
     },
     "algorithm": "max",
 }
+
+SUPER_NVFP4_AGGRESSIVE_AWQ_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        **_default_disabled_quantizer_cfg,
+        **super_disabled_quantizer_cfg,
+    },
+    "algorithm": "awq_lite",
+}
+
+
 SUPER_NVFP4_CONSERVATIVE_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
