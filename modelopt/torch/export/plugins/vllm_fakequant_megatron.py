@@ -99,6 +99,7 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         self,
         module: torch.nn.Module,
         dtype: torch.dtype = torch.float16,
+        prefix: str = "",
     ) -> tuple[dict[str, torch.Tensor], str, int]:
         """Return a state_dict, quantization format, and block_size of the module.
 
@@ -111,6 +112,10 @@ class VllmFqGPTModelExporter(GPTModelExporter):
         """
         name_to_value = {}
         qformat: str = self._get_quantization_format(module)
+        if qformat is None and "norm" not in prefix:
+            # Add exclude layers for vllm fakequant config. Note that if the prefix is not an empty
+            # string then it usually ends with "." which needs to be removed.
+            self.exclude_modules.append(prefix.removesuffix("."))
         block_size = 0
 
         if hasattr(module, "weight") and module.weight is not None:
