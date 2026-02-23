@@ -83,7 +83,7 @@ megatron_preprocess_data(
 Run distillation directly from HuggingFace checkpoints (student and teacher) with tokenized dataset:
 
 ```bash
-torchrun --nproc_per_node=8 examples/puzzletron/mbridge_distillation/distill_hf_keval.py \
+torchrun --nproc_per_node=8 examples/puzzletron/mbridge_distillation/distill_hf.py \
     --student_hf_path /path/to/student/huggingface/checkpoint \
     --teacher_hf_path /path/to/teacher/huggingface/checkpoint \
     --data_paths 1.0 /path/to/tokenized/dataset \
