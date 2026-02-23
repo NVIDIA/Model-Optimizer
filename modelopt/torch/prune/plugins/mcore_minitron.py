@@ -46,6 +46,11 @@ from megatron.core.tensor_parallel import (
     gather_from_tensor_model_parallel_region,
     reduce_from_tensor_model_parallel_region,
 )
+from megatron.core.transformer.attention import SelfAttention
+from megatron.core.transformer.mlp import MLP
+from megatron.core.transformer.moe.experts import SequentialMLP
+from megatron.core.transformer.moe.moe_layer import MoELayer
+from megatron.core.transformer.transformer_layer import TransformerLayer
 from pydantic import create_model
 from tqdm import tqdm
 
@@ -581,8 +586,7 @@ def get_mcore_param_count(model: GPTModel | MambaModel) -> float:
     assert isinstance(model, (GPTModel, MambaModel)), "Model must be a GPTModel or MambaModel"
     if isinstance(model, DynamicModule):
         return _param_num_dynamic(model)
-    else:
-        return _param_num(model)
+    return _param_num(model)
 
 
 def _param_num(model: GPTModel | MambaModel) -> float:
@@ -697,12 +701,65 @@ def get_mcore_minitron_config(
     return config
 
 
+_FORWARD_OVERRIDE_BASE_TYPES = (
+    *tuple(SUPPORTED_MODELS.keys()),
+    SelfAttention,
+    TransformerLayer,
+    MLP,
+    MoELayer,
+    SequentialMLP,
+)
+
+
+def _auto_register_forward_overrides(model: nn.Module) -> None:
+    """Auto-register module subclasses that override forward() but aren't in DMRegistry.
+
+    VLM text models and their submodules often inherit from registered base types
+    but override forward(), causing DMRegistry's forward-identity check to miss them.
+    This scans all modules and registers any such subclasses with the same dynamic
+    module class as their parent.
+    """
+    for mod in model.modules():
+        mod_cls = type(mod)
+        if mod_cls in DMRegistry:
+            continue
+
+        for nn_cls in _FORWARD_OVERRIDE_BASE_TYPES:
+            if mod_cls is nn_cls or not issubclass(mod_cls, nn_cls):
+                continue
+
+            # Subclasses with an identical forward() are already handled by DMRegistry.
+            if mod_cls.forward is nn_cls.forward:
+                break
+
+            # Reuse the parent registry key so existing mode rules still apply.
+            # If we register a brand-new key here, mcore_minitron default divisors
+            # (e.g., hidden/ffn/num_layers) are not picked up for this subclass.
+            parent_dm_cls = DMRegistry.get(nn_cls)
+            if parent_dm_cls is None:
+                continue
+            # DMRegistry.get() returns an auto-generated class
+            # (RegisteredDynamicClass, nn_cls). Reuse the registered dynamic base class
+            # so we don't layer generated classes on top of each other.
+            parent_dm_cls = parent_dm_cls.__mro__[1]
+            if not issubclass(parent_dm_cls, DynamicModule):
+                continue
+            parent_key = DMRegistry.get_key(nn_cls)
+            DMRegistry.register({mod_cls: parent_key})(parent_dm_cls)
+            break
+
+
 def _convert_model_to_dynamic_space(
     model: nn.Module, config: ModeloptBaseConfig | None = None
 ) -> DynamicSpace:
     """Create a dynamic space for the model (in-place)."""
     dynamic_space = DynamicSpace(model)
-    dynamic_space._should_be_converted = lambda mod: isinstance(mod, tuple(SUPPORTED_MODELS.keys()))
+
+    supported_types = tuple(SUPPORTED_MODELS.keys())
+
+    _auto_register_forward_overrides(model)
+
+    dynamic_space._should_be_converted = lambda mod: isinstance(mod, supported_types)
     dynamic_space.convert_to_dynamic(config.model_dump() if config else None, DMRegistry)
     if not dynamic_space.is_configurable():
         raise ApplyModeError(
