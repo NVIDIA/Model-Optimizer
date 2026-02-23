@@ -23,10 +23,10 @@ Note: Full integration tests with TensorRT benchmarking should be in separate in
 import os
 import tempfile
 
-import models as _test_models
 import onnx
 import onnx_graphsurgeon as gs
 import pytest
+from _test_utils.onnx.quantization.autotune.models import _create_simple_conv_onnx_model
 
 from modelopt.onnx.quantization.autotune import Config, QDQAutotuner, RegionPattern
 from modelopt.onnx.quantization.autotune.common import PatternCache, RegionType
@@ -34,8 +34,8 @@ from modelopt.onnx.quantization.autotune.common import PatternCache, RegionType
 
 @pytest.fixture
 def simple_conv_model():
-    """Simple ONNX model: Input -> Conv -> Relu -> Output. Created via models.py."""
-    return _test_models._create_simple_conv_onnx_model()
+    """Simple ONNX model: Input -> Conv -> Relu -> Output. Created via _test_utils models."""
+    return _create_simple_conv_onnx_model()
 
 
 def _create_test_config():
