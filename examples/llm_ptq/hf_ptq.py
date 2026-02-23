@@ -886,7 +886,6 @@ def export_quantized(
                     ppl = _compute_perplexity(full_model, eval_data)
                     print(f"Wikitext-2 perplexity: {round(ppl, 2):.2f}")
 
-
             # Load any missing weights from non-standard safetensors (handled in get_model for non-low-memory mode)
             # Store the MTP layer prefixes on the model for later exclusion from quantization
             if args.vllm_fakequant_export:
