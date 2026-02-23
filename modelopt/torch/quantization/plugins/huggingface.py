@@ -499,7 +499,8 @@ class _QuantSparseMoe(QuantModule):
             assert 0 < self._moe_calib_experts_ratio <= 1, (
                 "moe_calib_experts_ratio must be between 0 and 1"
             )
-            # If any of the experts are in calibration mode, we will forward all tokens to all experts
+            # If any of the experts are in calibration mode, we will forward all tokens to
+            # self._moe_calib_experts_ratio % of the experts to improve the calibration coverage.
             # This is used only for calibration, we need to re-calculate the actual outputs again using
             # the original top_k
             if TRANSFORMERS_VERSION_GE_5_0:

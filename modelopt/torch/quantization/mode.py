@@ -227,6 +227,9 @@ def wrapped_calib_func(
 
     moe_calib_experts_ratio = kwargs.pop("moe_calib_experts_ratio", None)
     if moe_calib_experts_ratio is not None:
+        assert (
+            isinstance(moe_calib_experts_ratio, (int, float)) and 0 < moe_calib_experts_ratio <= 1
+        ), f"Invalid moe_calib_experts_ratio {moe_calib_experts_ratio!r}"
         for module in model.modules():
             if hasattr(module, "_moe_calib_experts_ratio"):
                 module._moe_calib_experts_ratio = moe_calib_experts_ratio

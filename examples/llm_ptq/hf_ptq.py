@@ -1130,10 +1130,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--moe_calib_experts_ratio",
         type=float,
-        default=1.0 / 4,
+        default=1.0,
         help=(
             "Fraction of experts to calibrate during forward pass (ratio in (0.0, 1.0]). "
             "Only used for MOE models; used to reduce the number of experts calibrated during the forward pass."
+            "Does not impact non-MOE models."
         ),
     )
 
