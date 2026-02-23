@@ -114,7 +114,7 @@ class _ParallelLinear(_QuantFunctionalMixin, QuantModule):
         # the dtype can change later.
         self.original_weight_dtype = None if self.weight is None else self.weight.dtype
 
-    def modelopt_post_restore(self, prefix: str = ""):
+    def modelopt_post_restore(self, prefix: str = "", *args, **kwargs):
         """Post restore to correctly configure the TensorQuantizer states for MCore/distributed frameworks.
 
         ModelOpt restores the TensorQuantizer states such as `_amax` and `_pre_quant_scale` to their

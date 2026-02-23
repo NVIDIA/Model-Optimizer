@@ -19,7 +19,8 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from modelopt.torch.export.layer_utils import is_quantlinear
+import modelopt.torch.opt as mto
+from modelopt.torch.export.layer_utils import is_attention, is_quantlinear
 from modelopt.torch.quantization.utils import get_quantizer_state_dict
 
 __all__ = ["export_hf_vllm_fq_checkpoint"]
@@ -44,12 +45,11 @@ def export_hf_vllm_fq_checkpoint(
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
 
-    amax_dict = {
-        name + "._amax": param["_amax"].detach().clone().cpu()
-        for name, param in get_quantizer_state_dict(model).items()
-        if "_amax" in param
-    }
+    quantizer_state_dict = get_quantizer_state_dict(model)
 
+    modelopt_state = mto.modelopt_state(model)
+    modelopt_state["modelopt_state_weights"] = quantizer_state_dict
+    torch.save(modelopt_state, export_dir / "vllm_fq_modelopt_state.pth")
     # remove quantizer from model
     for _, module in model.named_modules():
         if is_quantlinear(module):
@@ -57,6 +57,15 @@ def export_hf_vllm_fq_checkpoint(
                 if hasattr(module, attr):
                     delattr(module, attr)
             module.export()
-    torch.save(amax_dict, f"{export_dir}/quant_amax.pth")
+        if is_attention(module):
+            for attr in [
+                "q_bmm_quantizer",
+                "k_bmm_quantizer",
+                "v_bmm_quantizer",
+                "softmax_quantizer",
+            ]:
+                if hasattr(module, attr):
+                    delattr(module, attr)
+
     # Save model
     model.save_pretrained(export_dir, state_dict=model.state_dict(), save_modelopt_state=False)
