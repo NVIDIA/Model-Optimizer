@@ -40,7 +40,6 @@ from megatron.bridge.training.config import (
     TokenizerConfig,
     TrainingConfig,
 )
-from megatron.bridge.training.distill import distill
 from megatron.bridge.training.post_training.distillation import ModelOptDistillConfig
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.distributed import DistributedDataParallelConfig
@@ -64,9 +63,13 @@ from modelopt.torch.puzzletron.export.mbridge.distillation_provider import (
 )
 from modelopt.torch.utils import print_rank_0
 
-# Patch upstream module so isinstance checks in distill() work with our local DistillationProvider
-# This must come after all imports since it modifies an imported module
+# Patch upstream module BEFORE importing distill() so isinstance checks work with our local DistillationProvider
+# This must happen before distill() is imported because distill.py imports DistillationProvider at module load time
 megatron.bridge.models.distillation_provider.DistillationProvider = DistillationProvider
+
+# Import distill() AFTER patching so it uses the patched DistillationProvider
+
+from megatron.bridge.training.distill import distill  # noqa: E402
 
 SEED = 1234
 
