@@ -106,14 +106,6 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       NUM_NODES="${1#*=}"
       ;;
-    --head_node_ip*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      HEAD_NODE_IP="${1#*=}"
-      ;;
-    --machine_rank*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      MACHINE_RANK="${1#*=}"
-      ;;
     *)
       >&2 printf "Error: Invalid argument ${1#*=}\n"
       exit 1
@@ -125,7 +117,6 @@ done
 set -x
 
 NUM_NODES=${NUM_NODES:-1}
-MACHINE_RANK=${MACHINE_RANK:-0}
 GPU_PER_NODE=${GPU_PER_NODE:-$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)}
 TOTAL_GPU=$((NUM_NODES * GPU_PER_NODE))
 echo "Total GPUs: $TOTAL_GPU (NUM_NODES: $NUM_NODES, GPU_PER_NODE: $GPU_PER_NODE)"
@@ -202,9 +193,9 @@ fi
 if [[ "$HEAD_NODE_IP" != "" ]]; then
   MULTI_NODE_ARGS="--num_processes $TOTAL_GPU \
                    --num_machines $NUM_NODES \
-                   --machine_rank $MACHINE_RANK \
+                   --machine_rank $SLURM_PROCID \
                    --rdzv_backend c10d \
-                   --main_process_ip $HEAD_NODE_IP \ 
+                   --main_process_ip $(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1) \ 
                    --main_process_port 29500"
 else
   MULTI_NODE_ARGS=""
