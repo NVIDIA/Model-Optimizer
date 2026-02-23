@@ -165,7 +165,7 @@ def _save_component_state_dict_safetensors(
     metadata["_export_format"] = "safetensors_state_dict"
     metadata["_class_name"] = type(component).__name__
     metadata_full.update(metadata)
-    
+
     save_file(
         cpu_state_dict,
         str(component_export_dir / "model.safetensors"),
@@ -976,7 +976,9 @@ def _export_diffusers_checkpoint(
             component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)
         else:
             _save_component_state_dict_safetensors(
-                component, component_export_dir, merged_base_safetensor_path,
+                component,
+                component_export_dir,
+                merged_base_safetensor_path,
                 model_type=model_type,
             )
 
