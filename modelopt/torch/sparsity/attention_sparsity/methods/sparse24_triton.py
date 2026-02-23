@@ -143,7 +143,9 @@ class Sparse24Triton(SparseAttentionMethod):
     def get_sparse_context(self, module: torch.nn.Module):
         """Set _apply_sparse24 and _skip_diagonal_blocks on module for the Triton kernel."""
         module._apply_sparse24 = True
-        module._skip_diagonal_blocks = self.skip_diagonal_blocks
+        # Diagonal skip only applies to causal self-attention; for cross-attention
+        # there is no diagonal relationship between Q and K positions.
+        module._skip_diagonal_blocks = self.skip_diagonal_blocks and self.is_causal
         try:
             yield
         finally:

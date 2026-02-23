@@ -293,6 +293,8 @@ def triton_attention_forward(
         (attn_output, None) with attn_output [batch, seq_len, num_heads, head_dim].
     """
     batch, num_heads, seq_len, head_dim = query.shape
+    seq_k = key.shape[2]
+    is_cross_attention = seq_len != seq_k
 
     # Decode: one query token per sequence, full context in K/V
     if seq_len <= 1:
@@ -301,6 +303,7 @@ def triton_attention_forward(
 
     device = query.device
     num_kv_heads = key.shape[1]
+    is_causal = not is_cross_attention
     apply_sparse24 = kwargs.get("apply_sparse24", getattr(module, "_apply_sparse24", False))
     skip_diagonal_blocks = kwargs.get(
         "skip_diagonal_blocks", getattr(module, "_skip_diagonal_blocks", True)
@@ -320,7 +323,7 @@ def triton_attention_forward(
             b_start_loc=b_start_loc,
             b_seq_len=b_seq_len,
             max_input_len=max_input_len,
-            is_causal=True,
+            is_causal=is_causal,
             softmax_scale=scaling,
             apply_sparse24=apply_sparse24,
             skip_diagonal_blocks=skip_diagonal_blocks,
@@ -346,8 +349,15 @@ def triton_attention_forward(
     q = query.permute(0, 2, 1, 3).reshape(-1, num_heads, head_dim).contiguous()
     k = key.permute(0, 2, 1, 3).reshape(-1, num_kv_heads, head_dim).contiguous()
     v = value.permute(0, 2, 1, 3).reshape(-1, num_kv_heads, head_dim).contiguous()
-    b_start_loc = torch.arange(batch, device=device, dtype=torch.int32) * seq_len
-    b_seq_len = torch.full((batch,), seq_len, device=device, dtype=torch.int32)
+    b_start_loc_q = torch.arange(batch, device=device, dtype=torch.int32) * seq_len
+    b_seq_len_q = torch.full((batch,), seq_len, device=device, dtype=torch.int32)
+
+    if is_cross_attention:
+        b_start_loc_k = torch.arange(batch, device=device, dtype=torch.int32) * seq_k
+        b_seq_len_k = torch.full((batch,), seq_k, device=device, dtype=torch.int32)
+    else:
+        b_start_loc_k = None
+        b_seq_len_k = None
 
     o = torch.empty_like(q)
     context_attention_fwd(
@@ -355,13 +365,16 @@ def triton_attention_forward(
         k,
         v,
         o,
-        b_start_loc=b_start_loc,
-        b_seq_len=b_seq_len,
+        b_start_loc=b_start_loc_q,
+        b_seq_len=b_seq_len_q,
         max_input_len=seq_len,
-        is_causal=True,
+        is_causal=is_causal,
         softmax_scale=scaling,
         apply_sparse24=apply_sparse24,
         skip_diagonal_blocks=skip_diagonal_blocks,
+        b_start_loc_k=b_start_loc_k,
+        b_seq_len_k=b_seq_len_k,
+        max_input_len_k=seq_k if is_cross_attention else None,
     )
     attn_output = o.view(batch, seq_len, num_heads, head_dim)
     return (attn_output, None)

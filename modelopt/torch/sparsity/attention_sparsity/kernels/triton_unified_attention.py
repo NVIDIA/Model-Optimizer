@@ -154,6 +154,7 @@ def kernel_unified_attention_2d(
     BLOCK_M: tl.constexpr,
     APPLY_SPARSE24: tl.constexpr,
     SKIP_DIAGONAL_BLOCKS: tl.constexpr,
+    CAUSAL: tl.constexpr,
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -201,15 +202,20 @@ def kernel_unified_attention_2d(
     seq_len = tl.load(seq_lens_ptr + seq_idx)
     context_len = seq_len - cur_batch_query_len
 
-    max_seq_prefix_len = (
-        context_len + q_block_local_idx * BLOCK_Q + (BLOCK_M - 1) // num_queries_per_kv + 1
-    )
-    max_seq_prefix_len = tl.minimum(max_seq_prefix_len, seq_len)
+    if CAUSAL:
+        # Causal: only attend up to the query position
+        max_seq_prefix_len = (
+            context_len + q_block_local_idx * BLOCK_Q + (BLOCK_M - 1) // num_queries_per_kv + 1
+        )
+        max_seq_prefix_len = tl.minimum(max_seq_prefix_len, seq_len)
+    else:
+        # Non-causal (cross-attention): attend to all K/V positions
+        max_seq_prefix_len = seq_len
     num_tiles = cdiv_fn(max_seq_prefix_len, TILE_SIZE)
 
     tile_start = 0
     tile_end = num_tiles
-    if SLIDING_WINDOW > 0:
+    if CAUSAL and SLIDING_WINDOW > 0:
         qpos_lo = q_block_local_idx * BLOCK_Q
         qpos_hi = tl.minimum(
             qpos_lo + (BLOCK_M - 1) // num_queries_per_kv,
@@ -252,17 +258,20 @@ def kernel_unified_attention_2d(
             other=0.0,
         )
 
-        query_abs_pos = context_len + query_pos[:, None]
-        seq_mask = seq_offset[None, :] <= query_abs_pos
-        if SLIDING_WINDOW > 0:
-            seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
+        if CAUSAL:
+            query_abs_pos = context_len + query_pos[:, None]
+            seq_mask = seq_offset[None, :] <= query_abs_pos
+            if SLIDING_WINDOW > 0:
+                seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
+        else:
+            seq_mask = tile_mask[None, :]
 
         S = tl.zeros([BLOCK_M, TILE_SIZE], dtype=tl.float32)
         S += scale * tl.dot(Q, K)
         S = tl.where(query_mask_1[:, None] & query_mask_0[:, None] & seq_mask, S, float("-inf"))
 
         if APPLY_SPARSE24:
-            if SKIP_DIAGONAL_BLOCKS:
+            if CAUSAL and SKIP_DIAGONAL_BLOCKS:
                 tile_key_start = j * TILE_SIZE
                 tile_key_end = tile_key_start + TILE_SIZE
                 query_abs_start = context_len + q_block_local_idx * BLOCK_Q
@@ -283,7 +292,7 @@ def kernel_unified_attention_2d(
         L = L * alpha + l_j
         M = m_j
 
-        if SLIDING_WINDOW > 0:
+        if CAUSAL and SLIDING_WINDOW > 0:
             qpos_lo = q_block_local_idx * BLOCK_Q
             V = tl.where((context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW, V, 0.0)
         acc += tl.dot(P.to(V.dtype), V)
@@ -335,6 +344,7 @@ def kernel_unified_attention_3d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,
     NUM_SEGMENTS_PER_SEQ: tl.constexpr,
+    CAUSAL: tl.constexpr,
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -388,15 +398,18 @@ def kernel_unified_attention_3d(
 
     context_len = seq_len - cur_batch_query_len
 
-    max_seq_prefix_len = (
-        context_len + q_block_local_idx * BLOCK_Q + (BLOCK_M - 1) // num_queries_per_kv + 1
-    )
-    max_seq_prefix_len = tl.minimum(max_seq_prefix_len, seq_len)
+    if CAUSAL:
+        max_seq_prefix_len = (
+            context_len + q_block_local_idx * BLOCK_Q + (BLOCK_M - 1) // num_queries_per_kv + 1
+        )
+        max_seq_prefix_len = tl.minimum(max_seq_prefix_len, seq_len)
+    else:
+        max_seq_prefix_len = seq_len
     num_tiles = cdiv_fn(max_seq_prefix_len, TILE_SIZE)
 
     tile_start = 0
     tile_end = num_tiles
-    if SLIDING_WINDOW > 0:
+    if CAUSAL and SLIDING_WINDOW > 0:
         qpos_lo = q_block_local_idx * BLOCK_Q
         qpos_hi = tl.minimum(
             qpos_lo + (BLOCK_M - 1) // num_queries_per_kv,
@@ -442,10 +455,13 @@ def kernel_unified_attention_3d(
             other=0.0,
         )
 
-        query_abs_pos = context_len + query_pos[:, None]
-        seq_mask = seq_offset[None, :] <= query_abs_pos
-        if SLIDING_WINDOW > 0:
-            seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
+        if CAUSAL:
+            query_abs_pos = context_len + query_pos[:, None]
+            seq_mask = seq_offset[None, :] <= query_abs_pos
+            if SLIDING_WINDOW > 0:
+                seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
+        else:
+            seq_mask = tile_mask[None, :]
 
         S = tl.zeros([BLOCK_M, TILE_SIZE], dtype=tl.float32)
         S += scale * tl.dot(Q, K)
@@ -460,7 +476,7 @@ def kernel_unified_attention_3d(
         L = L * alpha + l_j
         M = m_j
 
-        if SLIDING_WINDOW > 0:
+        if CAUSAL and SLIDING_WINDOW > 0:
             qpos_lo = q_block_local_idx * BLOCK_Q
             V = tl.where((context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW, V, 0.0)
         acc += tl.dot(P.to(V.dtype), V)
@@ -601,8 +617,8 @@ def unified_attention(
         seqused_k: [num_seqs] total sequence length per batch (context + query)
         max_seqlen_k: max sequence length
         softmax_scale: attention scale (e.g. 1/sqrt(head_size))
-        causal: must be True
-        window_size: (q_window, k_window), -1 means disabled
+        causal: True for causal self-attention, False for cross-attention
+        window_size: (q_window, k_window), -1 means disabled; only used when causal=True
         block_table: [num_seqs, max_blocks_per_seq]
         seq_threshold_3D: if set with 3D buffers, use 3D kernel when num_seqs <= this
         num_par_softmax_segments: number of segments for 3D kernel
@@ -614,8 +630,6 @@ def unified_attention(
         skip_diagonal_blocks: If True, keep diagonal tiles dense (local attention
             preserved) when sparse24 is active.
     """
-    assert causal, "Only causal attention is supported"
-
     block_size = v.shape[1]
     num_seqs = seqused_k.shape[0]
     num_query_heads = q.shape[1]
@@ -692,6 +706,7 @@ def unified_attention(
             BLOCK_M=BLOCK_M,
             APPLY_SPARSE24=effective_sparse24,
             SKIP_DIAGONAL_BLOCKS=skip_diagonal_blocks,
+            CAUSAL=causal,
         )
     else:
         kernel_unified_attention_3d[(total_num_q_blocks, num_kv_heads, num_par_softmax_segments)](
@@ -727,6 +742,7 @@ def unified_attention(
             num_seqs=num_seqs,
             BLOCK_M=BLOCK_M,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
+            CAUSAL=causal,
         )
         reduce_segments[(q.shape[0], num_query_heads)](
             output_ptr=out,
@@ -762,10 +778,16 @@ def context_attention_fwd(
     sliding_window_k: int | None = None,
     apply_sparse24: bool = False,
     skip_diagonal_blocks: bool = True,
+    b_start_loc_k: torch.Tensor | None = None,
+    b_seq_len_k: torch.Tensor | None = None,
+    max_input_len_k: int | None = None,
 ) -> None:
-    """Backward-compatible prefill attention over contiguous Q/K/V (packed format).
+    """Prefill attention over contiguous Q/K/V (packed format).
 
     Converts contiguous tensors to paged format and calls unified_attention.
+    For causal self-attention, Q and K/V share the same sequence lengths
+    (``b_seq_len``). For cross-attention (``is_causal=False``), K/V may have
+    different lengths specified via ``b_seq_len_k``.
 
     Note:
         When ``apply_sparse24=True``, TILE_SIZE must be divisible by 4 (the 2:4
@@ -773,18 +795,10 @@ def context_attention_fwd(
         this. Causal-masked elements participate in the 2:4 top-2 selection, which
         may waste sparsity slots near the diagonal.
     """
-    if not is_causal:
-        raise NotImplementedError("Only causal attention is supported by the unified kernel.")
     if q.dim() != 3 or k.dim() != 3 or v.dim() != 3 or o.dim() != 3:
         raise ValueError(
             "q, k, v, o must be rank-3 [total_tokens, num_heads, head_dim]; "
             f"got q.dim()={q.dim()}, k.dim()={k.dim()}, v.dim()={v.dim()}, o.dim()={o.dim()}."
-        )
-    total = q.shape[0]
-    if k.shape[0] != total or v.shape[0] != total or o.shape[0] != total:
-        raise ValueError(
-            "q, k, v, o must have same shape[0] (total_tokens); "
-            f"got {q.shape[0]}, {k.shape[0]}, {v.shape[0]}, {o.shape[0]}."
         )
     head_dim = q.shape[2]
     if k.shape[2] != head_dim or v.shape[2] != head_dim or o.shape[2] != head_dim:
@@ -792,11 +806,8 @@ def context_attention_fwd(
             "q, k, v, o must have same head_dim (shape[2]); "
             f"got {q.shape[2]}, {k.shape[2]}, {v.shape[2]}, {o.shape[2]}."
         )
-    if o.shape[1] != q.shape[1]:
-        raise ValueError(
-            f"o.shape[1] must equal q.shape[1] (num_heads); "
-            f"got o.shape[1]={o.shape[1]}, q.shape[1]={q.shape[1]}."
-        )
+    if o.shape[0] != q.shape[0] or o.shape[1] != q.shape[1]:
+        raise ValueError(f"o must match q shape; got o={o.shape}, q={q.shape}.")
     num_kv_heads = k.shape[1]
     if num_kv_heads <= 0:
         raise ValueError(f"k.shape[1] (num_kv_heads) must be positive; got {num_kv_heads}.")
@@ -805,42 +816,39 @@ def context_attention_fwd(
             f"num_heads (q.shape[1]) must be divisible by num_kv_heads (k.shape[1]); "
             f"got {q.shape[1]} and {num_kv_heads}."
         )
-    if b_start_loc.dim() != 1 or b_seq_len.dim() != 1:
-        raise ValueError(
-            "b_start_loc and b_seq_len must be rank-1; "
-            f"got b_start_loc.dim()={b_start_loc.dim()}, b_seq_len.dim()={b_seq_len.dim()}."
-        )
+
+    # For causal self-attention, Q and K/V share lengths.
+    # For cross-attention, K/V lengths come from separate parameters.
+    if b_seq_len_k is None:
+        # Self-attention: Q and K/V have same total tokens and lengths
+        total_q = q.shape[0]
+        if k.shape[0] != total_q or v.shape[0] != total_q:
+            raise ValueError(
+                "For causal self-attention, q, k, v must have same shape[0]; "
+                f"got {q.shape[0]}, {k.shape[0]}, {v.shape[0]}. "
+                "For cross-attention, pass b_seq_len_k and b_start_loc_k."
+            )
+        b_seq_len_k = b_seq_len
+        b_start_loc_k = b_start_loc
+        max_input_len_k = max_input_len
+
     batch = b_seq_len.shape[0]
-    if b_start_loc.shape[0] != batch:
-        raise ValueError(
-            f"b_start_loc and b_seq_len must have same length (batch_size); "
-            f"got {b_start_loc.shape[0]} and {batch}."
-        )
-    max_seq = int(b_seq_len.max().item())
-    if max_input_len < max_seq:
-        raise ValueError(
-            f"max_input_len must be >= max(b_seq_len); "
-            f"got max_input_len={max_input_len}, max(b_seq_len)={max_seq}."
-        )
-    if batch > 0 and int(b_start_loc[0].item()) != 0:
-        raise ValueError(f"b_start_loc[0] must be 0; got {int(b_start_loc[0].item())}.")
-    if batch > 1:
-        starts = b_start_loc.tolist()
-        for i in range(1, batch):
-            if starts[i] < starts[i - 1]:
-                raise ValueError(
-                    "b_start_loc must be non-decreasing; "
-                    f"got b_start_loc[{i - 1}]={starts[i - 1]}, b_start_loc[{i}]={starts[i]}."
-                )
+    if b_start_loc_k is None:
+        b_start_loc_k = torch.zeros(batch + 1, device=q.device, dtype=torch.int32)
+        b_start_loc_k[1:] = torch.cumsum(b_seq_len_k.to(torch.int64), dim=0)
+        b_start_loc_k = b_start_loc_k[:batch]
+    if max_input_len_k is None:
+        max_input_len_k = int(b_seq_len_k.max().item())
+
     device = q.device
     dtype = q.dtype
-    block_size = ((max_input_len + 31) // 32) * 32
+    block_size = ((max_input_len_k + 31) // 32) * 32
 
     k_cache = torch.zeros((batch, block_size, num_kv_heads, head_dim), device=device, dtype=dtype)
     v_cache = torch.zeros((batch, block_size, num_kv_heads, head_dim), device=device, dtype=dtype)
     for i in range(batch):
-        start = int(b_start_loc[i].item())
-        length = int(b_seq_len[i].item())
+        start = int(b_start_loc_k[i].item())
+        length = int(b_seq_len_k[i].item())
         if length > 0:
             k_cache[i, :length, :, :] = k[start : start + length]
             v_cache[i, :length, :, :] = v[start : start + length]
@@ -849,7 +857,7 @@ def context_attention_fwd(
 
     cu_seqlens_q = torch.zeros(batch + 1, device=device, dtype=torch.int32)
     cu_seqlens_q[1:] = torch.cumsum(b_seq_len.to(torch.int64), dim=0)
-    seqused_k = b_seq_len.to(torch.int32)
+    seqused_k = b_seq_len_k.to(torch.int32)
 
     scale = 1.0 / (head_dim**0.5) if softmax_scale is None else softmax_scale
     sw_q = sliding_window_q if sliding_window_q is not None else -1
