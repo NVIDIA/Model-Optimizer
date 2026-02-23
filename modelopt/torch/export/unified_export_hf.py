@@ -28,14 +28,16 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from safetensors.torch import load_file, safe_open, save_file
+from safetensors.torch import save_file
 
 try:
     import diffusers
 
     from .diffusers_utils import (
+        DIFFUSION_MERGE_FUNCTIONS,
         generate_diffusion_dummy_forward_fn,
         get_diffusion_components,
+        get_diffusion_model_type,
         get_qkv_group_key,
         hide_quantizers_from_state_dict,
         infer_dtype_from_model,
@@ -115,75 +117,12 @@ def _is_enabled_quantizer(quantizer):
     return False
 
 
-def _merge_diffusion_transformer_with_non_transformer_components(
-    diffusion_transformer_state_dict: dict[str, torch.Tensor],
-    merged_base_safetensor_path: str,
-) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
-    """Merge diffusion transformer weights with non-transformer components from a safetensors file.
-
-    Non-transformer components (VAE, vocoder, text encoders) and embeddings connectors are
-    taken from the base checkpoint. Transformer keys are prefixed with 'model.diffusion_model.'
-    for ComfyUI compatibility.
-
-    Args:
-        diffusion_transformer_state_dict: The diffusion transformer state dict (already on CPU).
-        merged_base_safetensor_path: Path to the full base model safetensors file containing
-            all components (transformer, VAE, vocoder, etc.).
-
-    Returns:
-        Tuple of (merged_state_dict, base_metadata) where base_metadata is the original
-        safetensors metadata from the base checkpoint.
-    """
-    base_state = load_file(merged_base_safetensor_path)
-
-    non_transformer_prefixes = [
-        "vae.",
-        "audio_vae.",
-        "vocoder.",
-        "text_embedding_projection.",
-        "text_encoders.",
-        "first_stage_model.",
-        "cond_stage_model.",
-        "conditioner.",
-    ]
-    correct_prefix = "model.diffusion_model."
-    strip_prefixes = ["diffusion_model.", "transformer.", "_orig_mod.", "model.", "velocity_model."]
-
-    base_non_transformer = {
-        k: v
-        for k, v in base_state.items()
-        if any(k.startswith(p) for p in non_transformer_prefixes)
-    }
-    base_connectors = {
-        k: v
-        for k, v in base_state.items()
-        if "embeddings_connector" in k and k.startswith(correct_prefix)
-    }
-
-    prefixed = {}
-    for k, v in diffusion_transformer_state_dict.items():
-        clean_k = k
-        for prefix in strip_prefixes:
-            if clean_k.startswith(prefix):
-                clean_k = clean_k[len(prefix) :]
-                break
-        prefixed[f"{correct_prefix}{clean_k}"] = v
-
-    merged = dict(base_non_transformer)
-    merged.update(base_connectors)
-    merged.update(prefixed)
-    with safe_open(merged_base_safetensor_path, framework="pt", device="cpu") as f:
-        base_metadata = f.metadata() or {}
-
-    del base_state
-    return merged, base_metadata
-
-
 def _save_component_state_dict_safetensors(
     component: nn.Module,
     component_export_dir: Path,
     merged_base_safetensor_path: str | None = None,
     hf_quant_config: dict | None = None,
+    model_type: str | None = None,
 ) -> None:
     """Save component state dict as safetensors with optional base checkpoint merge.
 
@@ -194,40 +133,39 @@ def _save_component_state_dict_safetensors(
             from this base safetensors file.
         hf_quant_config: If provided, embed quantization config in safetensors metadata
             and per-layer _quantization_metadata for ComfyUI.
+        model_type: Key into ``DIFFUSION_MERGE_FUNCTIONS`` for the model-specific merge.
+            Required when ``merged_base_safetensor_path`` is not None.
     """
     cpu_state_dict = {k: v.detach().contiguous().cpu() for k, v in component.state_dict().items()}
     metadata: dict[str, str] = {}
     metadata_full: dict[str, str] = {}
-    if merged_base_safetensor_path is not None:
-        cpu_state_dict, metadata_full = (
-            _merge_diffusion_transformer_with_non_transformer_components(
-                cpu_state_dict, merged_base_safetensor_path
+    if merged_base_safetensor_path is not None and model_type is not None:
+        merge_fn = DIFFUSION_MERGE_FUNCTIONS[model_type]
+        cpu_state_dict, metadata_full = merge_fn(cpu_state_dict, merged_base_safetensor_path)
+        if hf_quant_config is not None:
+            metadata_full["quantization_config"] = json.dumps(hf_quant_config)
+
+            # Build per-layer _quantization_metadata for ComfyUI
+            quant_algo = hf_quant_config.get("quant_algo", "unknown").lower()
+            layer_metadata = {}
+            for k in cpu_state_dict:
+                if k.endswith((".weight_scale", ".weight_scale_2")):
+                    layer_name = k.rsplit(".", 1)[0]
+                    if layer_name.endswith(".weight"):
+                        layer_name = layer_name.rsplit(".", 1)[0]
+                    if layer_name not in layer_metadata:
+                        layer_metadata[layer_name] = {"format": quant_algo}
+            metadata_full["_quantization_metadata"] = json.dumps(
+                {
+                    "format_version": "1.0",
+                    "layers": layer_metadata,
+                }
             )
-        )
+
     metadata["_export_format"] = "safetensors_state_dict"
     metadata["_class_name"] = type(component).__name__
-
-    if hf_quant_config is not None:
-        metadata_full["quantization_config"] = json.dumps(hf_quant_config)
-
-        # Build per-layer _quantization_metadata for ComfyUI
-        quant_algo = hf_quant_config.get("quant_algo", "unknown").lower()
-        layer_metadata = {}
-        for k in cpu_state_dict:
-            if k.endswith((".weight_scale", ".weight_scale_2")):
-                layer_name = k.rsplit(".", 1)[0]
-                if layer_name.endswith(".weight"):
-                    layer_name = layer_name.rsplit(".", 1)[0]
-                if layer_name not in layer_metadata:
-                    layer_metadata[layer_name] = {"format": quant_algo}
-        metadata_full["_quantization_metadata"] = json.dumps(
-            {
-                "format_version": "1.0",
-                "layers": layer_metadata,
-            }
-        )
-
     metadata_full.update(metadata)
+    
     save_file(
         cpu_state_dict,
         str(component_export_dir / "model.safetensors"),
@@ -959,6 +897,9 @@ def _export_diffusers_checkpoint(
         warnings.warn("No exportable components found in the model.")
         return
 
+    # Resolve model type once (only needed when merging with a base checkpoint)
+    model_type = get_diffusion_model_type(pipe) if merged_base_safetensor_path else None
+
     # Separate nn.Module components for quantization-aware export
     module_components = {
         name: comp for name, comp in all_components.items() if isinstance(comp, nn.Module)
@@ -1019,6 +960,7 @@ def _export_diffusers_checkpoint(
                         component_export_dir,
                         merged_base_safetensor_path,
                         hf_quant_config,
+                        model_type,
                     )
             # Step 7: Update config.json with quantization info
             if hf_quant_config is not None:
@@ -1034,7 +976,8 @@ def _export_diffusers_checkpoint(
             component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)
         else:
             _save_component_state_dict_safetensors(
-                component, component_export_dir, merged_base_safetensor_path
+                component, component_export_dir, merged_base_safetensor_path,
+                model_type=model_type,
             )
 
         print(f"  Saved to: {component_export_dir}")
