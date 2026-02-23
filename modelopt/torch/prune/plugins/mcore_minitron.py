@@ -317,6 +317,7 @@ class MCoreMinitronSearcher(BaseSearcher):
         # Prune homogeneously
         self._prune(export_config, prune_depth=True)
 
+        # TODO: Rename to hybrid_layer_pattern after https://github.com/NVIDIA/Megatron-LM/pull/3377
         # Update hybrid_override_pattern if pruning is done on a hybrid model
         if isinstance(self.model, MambaModel):
             print_rank_0(f"Original hybrid_override_pattern: {self.model.hybrid_override_pattern}")

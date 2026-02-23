@@ -163,7 +163,7 @@ def main(args: argparse.Namespace):
         lr_warmup_iters=args.lr_warmup_iters,
         max_lr=args.lr,
         min_lr=args.min_lr,
-        adam_beta2=0.98,
+        adam_beta2=0.95,
     )
 
     # Build dataset config
@@ -227,7 +227,7 @@ def main(args: argparse.Namespace):
             save_interval=args.eval_interval,
             save=checkpoint_dir,
             load=checkpoint_dir,  # Resume from this directory (if exists)
-            most_recent_k=3,  # Keeps 3 most recent checkpoints (not metric-based)
+            most_recent_k=5,  # Keeps 5 most recent checkpoints (not metric-based)
             ckpt_format="torch_dist",
             async_save=True,
             fully_parallel_save=True,
@@ -238,7 +238,9 @@ def main(args: argparse.Namespace):
 
     print_rank_0("\nStarting distillation...")
     distill(config)
-    print_rank_0(f"\nDistillation done! Saved checkpoint to {checkpoint_dir}\n")
+    print_rank_0(
+        f"\nDistillation done! Saved checkpoint to {checkpoint_dir} in megatron distributed checkpoint format.\n"
+    )
 
 
 if __name__ == "__main__":
