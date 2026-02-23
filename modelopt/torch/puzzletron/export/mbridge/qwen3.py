@@ -24,7 +24,7 @@ from transformers import Qwen3ForCausalLM
 from modelopt.torch.puzzletron.export.mbridge.base import HeterogeneousBridgeMixin
 
 
-@MegatronModelBridge.register_bridge(source=Qwen3ForCausalLM, target=GPTModel, model_type="qwen3")
+@MegatronModelBridge.register_bridge(source=Qwen3ForCausalLM, target=GPTModel)
 class PuzzletronQwen3AnyModelBridge(HeterogeneousBridgeMixin, Qwen3Bridge):
     """
     Megatron Bridge for Puzzletron Qwen3-based AnyModel checkpoints.

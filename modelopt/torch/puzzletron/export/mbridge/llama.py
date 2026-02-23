@@ -24,7 +24,7 @@ from transformers import LlamaForCausalLM
 from modelopt.torch.puzzletron.export.mbridge.base import HeterogeneousBridgeMixin
 
 
-@MegatronModelBridge.register_bridge(source=LlamaForCausalLM, target=GPTModel, model_type="llama")
+@MegatronModelBridge.register_bridge(source=LlamaForCausalLM, target=GPTModel)
 class PuzzletronLlamaAnyModelBridge(HeterogeneousBridgeMixin, LlamaBridge):
     """
     Megatron Bridge for Puzzletron Llama-based AnyModel checkpoints.
