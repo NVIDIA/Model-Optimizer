@@ -245,15 +245,7 @@ def main(args: argparse.Namespace):
             wandb_exp_name=args.wandb_exp_name,
         ),
         tokenizer=TokenizerConfig(
-            # TODO This replaced tokenizer_type="NullTokenizer"
-            # Why NullTokenizer is not working with container nvidian+nemo+26.02.rc5 and why was it
-            # used in the first place?
-            tokenizer_type="HuggingFaceTokenizer",
-            # Use teacher tokenizer as the source of knowledge;
-            # In distillation, both student and teacher models should use the same tokenizer to
-            # process the same input
-            tokenizer_model=args.teacher_hf_path,
-            vocab_size=distill_provider.vocab_size,
+            tokenizer_type="NullTokenizer", vocab_size=distill_provider.vocab_size
         ),
         checkpoint=CheckpointConfig(
             save_interval=args.eval_interval,
