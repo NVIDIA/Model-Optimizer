@@ -28,6 +28,7 @@ import onnx_graphsurgeon as gs
 import yaml
 
 from modelopt.onnx.logging_config import logger
+from modelopt.onnx.op_types import is_linear_op
 from modelopt.onnx.quantization.autotune.common import (
     AutotunerNotInitializedError,
     Config,
@@ -415,12 +416,8 @@ class QDQAutotunerBase:
         all_region_ips = pattern.matches(region, self.graph, full_insertion_scheme)
         for ip in all_region_ips:
             node = self.graph.nodes[ip.node_index]
-            # Conv/ConvTranspose inputs and weights must be excluded together
-            if (
-                node.op in ["Conv", "ConvTranspose"]
-                and ip.input_index == 0
-                and len(node.inputs) >= 2
-            ):
+            # Conv/ConvTranspose/Gemm/MatMul inputs and weights must be excluded together
+            if is_linear_op(node.op) and ip.input_index == 0 and len(node.inputs) >= 2:
                 resolved_insertion_points.discard(ip)
                 resolved_insertion_points.discard(
                     ResolvedInsertionPoint(
