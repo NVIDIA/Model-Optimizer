@@ -637,15 +637,7 @@ def unpatch_forward_method(module: nn.Module, orig_forward_cache_name: str):
 
 
 def get_decoder_layers(model: nn.Module, granularity: str = "decoder") -> nn.ModuleList | None:
-    """Get the decoder layers from a model for sequential calibration.
-
-    Args:
-        model: The model to extract decoder layers from.
-        granularity: The type of layers to extract. Currently only "decoder" is supported.
-
-    Returns:
-        A ModuleList of decoder layers, or None if not found.
-    """
+    """Detect the decoder layers from a model for sequential calibration."""
     if granularity != "decoder":
         raise ValueError(f"Unsupported granularity: {granularity}. Only 'decoder' is supported.")
 
