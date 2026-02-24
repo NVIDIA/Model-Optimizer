@@ -74,14 +74,6 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       EAGLE_CONFIG="${1#*=}"
       ;;
-    --fsdp_transformer_layer_cls_to_wrap*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP="${1#*=}"
-      ;;
-    --num_gpu*)
-      if [[ "$1" != *=* ]]; then shift; fi
-      NUM_GPU="${1#*=}"
-      ;;
     --disable_tqdm*)
       if [[ "$1" != *=* ]]; then shift; fi
       DISABLE_TQDM="${1#*=}"
@@ -101,6 +93,22 @@ while [ $# -gt 0 ]; do
     --ar_validate_steps*)
       if [[ "$1" != *=* ]]; then shift; fi
       AR_VALIDATE_STEPS="${1#*=}"
+      ;;
+    --cp_size*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      CP_SIZE="${1#*=}"
+      ;;
+    --dp_size*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      DP_SHARD_SIZE="${1#*=}"
+      ;;
+    --log_steps*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      LOG_STEPS="${1#*=}"
+      ;;
+    --draft_vocab_cache*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      DRAFT_VOCAB_CACHE="${1#*=}"
       ;;
     *)
       >&2 printf "Error: Invalid argument ${1#*=}\n"
@@ -126,11 +134,9 @@ OUTPUT_DIR=${OUTPUT_DIR:-"ckpts/${MODEL_BASENAME}-$(date +%Y%m%d_%H%M)"}
 NUM_EPOCHS=${NUM_EPOCHS:-1}
 SAVE_STEPS=${SAVE_STEPS:-$DEFAULT_SAVE_STEPS}
 LR=${LR:-"1e-4"}
-TRAIN_BS=${TRAIN_BS:-4}
+TRAIN_BS=${TRAIN_BS:-1}
 MEDUSA_NUM_HEADS=${MEDUSA_NUM_HEADS:-1}
 MEDUSA_NUM_LAYERS=${MEDUSA_NUM_LAYERS:-1}
-FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP=${FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP:-"LlamaDecoderLayer"}
-NUM_GPU=${NUM_GPU:-1}
 TRAINING_SEQ_LEN=${TRAINING_SEQ_LEN:-2048}
 OFFLINE_DATA_PATH=${OFFLINE_DATA_PATH:-""}
 DISABLE_TQDM=${DISABLE_TQDM:-False}
@@ -138,6 +144,10 @@ VLM_PROCESSOR=${VLM_PROCESSOR:-}
 VLM_IMG_DIR=${VLM_IMG_DIR:-}
 AR_VALIDATE_STEPS=${AR_VALIDATE_STEPS:-1000}
 ESTIMATE_AR=${ESTIMATE_AR:-False}
+CP_SIZE=${CP_SIZE:-1}
+DP_SHARD_SIZE=${DP_SHARD_SIZE:-$((GPU_COUNT/CP_SIZE))}
+LOG_STEPS=${LOG_STEPS:-100}
+DRAFT_VOCAB_CACHE=${DRAFT_VOCAB_CACHE:-""}
 
 if [[ "$MODE" == "medusa" ]]; then
   SPECULATIVE_ARGS="--medusa_num_heads $MEDUSA_NUM_HEADS --medusa_num_layers $MEDUSA_NUM_LAYERS"
@@ -163,11 +173,6 @@ else
   OFFLINE_TRAINING_ARGS=""
 fi
 
-if [[ "$NUM_GPU" == 1 ]]; then
-  MULTI_GPU=""
-else
-  MULTI_GPU="--multi_gpu"
-fi
 
 if [[ "$VLM_PROCESSOR" != "" ]]; then
   VLM_ARGS="--vlm_processor $VLM_PROCESSOR --vlm_img_dir $VLM_IMG_DIR"
@@ -175,9 +180,25 @@ else
   VLM_ARGS=""
 fi
 
+if [[ "$GPU_COUNT" -gt 1 ]]; then
+  #Use FSDP2 when multi GPU available
+  FSDP_ARGS="--fsdp 'full_shard' --fsdp_config fsdp_config.json"
+else
+  #Otherwise, single GPU training
+  FSDP_ARGS=""
+fi
+
+
+if [[ "$DRAFT_VOCAB_CACHE" != "" ]]; then
+  DRAFT_VOCAB_CACHE_ARGS="--draft_vocab_cache $DRAFT_VOCAB_CACHE"
+else
+  DRAFT_VOCAB_CACHE_ARGS=""
+fi
+
+
 # Disable tokenizers parallelism to avoid warning
 export TOKENIZERS_PARALLELISM=False
-CMD="accelerate launch $MULTI_GPU --mixed_precision bf16 main.py \
+CMD="accelerate launch --mixed_precision bf16 main.py \
     --mode $MODE \
     --eagle_decoder_type $EAGLE_DECODER_TYPE \
     --model_name_or_path $MODEL \
@@ -197,15 +218,19 @@ CMD="accelerate launch $MULTI_GPU --mixed_precision bf16 main.py \
     --weight_decay 0.0 \
     --warmup_steps 100 \
     --lr_scheduler_type linear \
-    --logging_steps 100 \
+    --logging_steps $LOG_STEPS \
     --tf32 True \
     --data_path $DATA \
     --disable_tqdm $DISABLE_TQDM \
     --estimate_ar $ESTIMATE_AR \
     --ar_validate_steps $AR_VALIDATE_STEPS \
+    $DRAFT_VOCAB_CACHE_ARGS \
     $VLM_ARGS \
     $OFFLINE_TRAINING_ARGS \
     $SPECULATIVE_ARGS \
+    $FSDP_ARGS \
+    --cp_size $CP_SIZE \
+    --dp_shard_size $DP_SHARD_SIZE \
 "
 
 start_time=$(date +%s)

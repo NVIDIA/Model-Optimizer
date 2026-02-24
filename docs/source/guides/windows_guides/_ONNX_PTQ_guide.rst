@@ -155,4 +155,4 @@ To save a quantized ONNX model with external data, use the following code:
 Deploy Quantized ONNX Model
 ---------------------------
 
-Inference of the quantized models can be done using tools like `GenAI <https://github.com/microsoft/onnxruntime-genai/>`_, `OnnxRunTime (ORT) <https://onnxruntime.ai//>`_. These APIs can do inference on backends like DML. For details about DirectML deployment of quantized models, see :ref:`DirectML_Deployment`. Also, refer `example scripts <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/onnx_ptq/>`_ for any possible model-specific inference guidance or script (if any).
+Inference of the quantized models can be done using tools like `GenAI <https://github.com/microsoft/onnxruntime-genai/>`_, `OnnxRunTime (ORT) <https://onnxruntime.ai//>`_. These APIs can do inference on backends like DML, CUDA, TensorRT-RTX. For details about onnxruntime deployment of quantized models, see :ref:`Onnxruntime_Deployment` deployment guide. Also, refer `example scripts <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/onnx_ptq/>`_ for any possible model-specific inference guidance or script (if any).

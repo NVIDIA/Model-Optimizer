@@ -1,6 +1,39 @@
 NVIDIA Model Optimizer Changelog (Linux)
 ========================================
 
+0.43 (2026-03-xx)
+^^^^^^^^^^^^^^^^^
+
+**New Features**
+
+- User does not need to manually register MOE modules to cover experts calibration coverage in PTQ workflow.
+- ``hf_ptq.py`` now saves the quantization summary and moe expert token count table to the export directory.
+- Add sparse attention optimization for transformer models (``modelopt.torch.sparsity.attention_sparsity``). This reduces computational cost by skipping attention computation. Supports calibration for threshold selection on HuggingFace models. See `examples/llm_sparsity/attention_sparsity/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity/attention_sparsity>`_ for usage.
+- Add support for rotating the input before quantization for RHT.
+
+0.42 (2026-02-xx)
+^^^^^^^^^^^^^^^^^
+
+**Bug Fixes**
+
+- Fix calibration data generation with multiple samples in the ONNX workflow.
+
+**New Features**
+
+- Add standalone type inference option (``--use_standalone_type_inference``) in ONNX AutoCast as an alternative to ONNX's ``infer_shapes``. This experimental feature performs type-only inference without shape inference, useful as a workaround when shape inference fails or to avoid unnecessary shape inference overhead.
+- Add support for Kimi K2 Thinking model quantization from the original int4 checkpoint.
+- Add support for ``params`` constraint based automatic neural architecture search in Minitron pruning (``mcore_minitron``) as an alternative to manual pruning (using ``export_config``). See `examples/pruning/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning>`_ for more details on its usage.
+- New example for Minitron pruning with Megatron-Bridge framework along with advanced pruning usage with new ``params`` constraint based pruning. Also add example for distillation with Megatron-Bridge framework. Check `examples/megatron_bridge/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge>`_ for example scripts.
+- Add support for calibration data with multiple samples in ``npz`` format in the ONNX Autocast workflow.
+- Add ``--opset`` option to ONNX quantization CLI to specify the target opset version for the quantized model.
+- Add support for context parallelism in Eagle speculative decoding for huggingface and megatron core models.
+- Add unified Hugging Face export support for diffusers pipelines/components.
+- Add LTX-2 and Wan2.2 (T2V) support in the diffusers quantization workflow.
+- Add PTQ support for GLM-4.7, including loading MTP layer weights from a separate ``mtp.safetensors`` file and export as-is.
+- Add support for image-text data calibration in PTQ for Nemotron VL models.
+- Add PTQ support for Nemotron Parse.
+- Add distillation support for LTX-2. See `examples/diffusers/distillation/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/diffusers/distillation>`_ for more details.
+
 0.41 (2026-01-19)
 ^^^^^^^^^^^^^^^^^
 
@@ -84,7 +117,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 
 **Documentation**
 
-- Add general guidelines for Minitron pruning and distillation. See `examples/pruning/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning#pruning-guidelines>`_ for more details.
+- Add general guidelines for Minitron pruning and distillation. See `pruning guidelines <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/pruning#pruning-guidelines>`_ for more details.
 - Added example for exporting QLoRA checkpoint for vLLM deployment. Refer to `examples/llm_qat/README.md <https://github.com/NVIDIA/Model-Optimizer/blob/79ef31bc7269ba4da0cfab446da5b64509cbfcef/examples/llm_qat/README.md#qlora-deployment>`_ for more details
 
 0.37 (2025-10-08)
@@ -209,7 +242,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add support for UNet ONNX quantization.
 - Enable ``concat_elimination`` pass by default to improve the performance of quantized ONNX models.
 - Enable Redundant Cast elimination pass by default in :meth:`moq.quantize <modelopt.onnx.quantization.quantize>`.
-- Add new attribute ``parallel_state`` to :class:`DynamicModule <modelopt.torch.opt.dynamic.DynamicModule>` to support distributed parallelism such as data parallel and tensor parallel.
+- Add new attribute ``parallel_state`` to :class:`QuantModule <modelopt.torch.quantization.nn.modules.quant_module.QuantModule>` to support distributed parallelism such as data parallel and tensor parallel.
 - Add MXFP8, NVFP4 quantized ONNX export support.
 - Add new example for torch quantization to ONNX for MXFP8, NVFP4 precision.
 

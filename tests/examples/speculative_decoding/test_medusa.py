@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+import pytest
 from _test_utils.examples.run_command import run_example_command
 
 
@@ -32,7 +32,7 @@ def _run_hf_ptq(model_path, output_dir, qformat):
     )
 
 
-def test_llama_medusa_fp8_qat(tiny_llama_path, num_gpus, tiny_daring_anteater_path, tmp_path):
+def test_llama_medusa_fp8_qat(tiny_llama_path, tiny_daring_anteater_path, tmp_path):
     medusa_path = tmp_path / "medusa-tinyllama"
 
     # Test Medusa
@@ -43,7 +43,6 @@ def test_llama_medusa_fp8_qat(tiny_llama_path, num_gpus, tiny_daring_anteater_pa
             "--data", tiny_daring_anteater_path,
             "--num_epochs", "1",
             "--lr", "1e-5",
-            "--num_gpu", str(num_gpus),
             "--mode", "medusa",
             "--output_dir", medusa_path,
             "--medusa_num_heads", "2",
@@ -51,6 +50,8 @@ def test_llama_medusa_fp8_qat(tiny_llama_path, num_gpus, tiny_daring_anteater_pa
         ],
         "speculative_decoding",
     )
+
+    pytest.skip("speculative decoding uses transformers 5.x, quantization example uses transformers 4.x")
 
     # Test PTQ on Medusa
     _run_hf_ptq(medusa_path, tmp_path / "medusa-tinyllama-hf", "fp8")

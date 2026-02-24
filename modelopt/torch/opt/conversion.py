@@ -526,6 +526,7 @@ def restore_from_modelopt_state(model: ModelLike, modelopt_state: dict[str, Any]
         model = ...  # Create the model-like object
 
         # Restore the previously saved modelopt state followed by model weights
+        # Security NOTE: weights_only=False is used here on ModelOpt-generated state_dict, not on untrusted user input
         mto.restore_from_modelopt_state(
             model, torch.load("modelopt_state.pt", weights_only=False)
         )  # Restore modelopt state
