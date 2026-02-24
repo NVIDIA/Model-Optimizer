@@ -1104,7 +1104,7 @@ def export_hf_checkpoint(
     save_modelopt_state: bool = False,
     components: list[str] | None = None,
     extra_state_dict: dict[str, torch.Tensor] | None = None,
-    merged_base_safetensor_path: str | None = None,
+    **kwargs,
 ):
     """Export quantized HuggingFace model checkpoint (transformers or diffusers).
 
@@ -1122,10 +1122,12 @@ def export_hf_checkpoint(
         components: Only used for diffusers pipelines. Optional list of component names
             to export. If None, all quantized components are exported.
         extra_state_dict: Extra state dictionary to add to the exported model.
-        merged_base_safetensor_path: If provided, merge the exported diffusion transformer
-            with non-transformer components (VAE, vocoder, etc.) from this base safetensors
-            file. Only used for diffusion model exports (e.g., LTX-2).
+        **kwargs: Internal-only keyword arguments. Supported keys:
+            merged_base_safetensor_path (str | None): If provided, merge the exported
+                diffusion transformer with non-transformer components (VAE, vocoder, etc.)
+                from this base safetensors file. Only used for diffusion model exports.
     """
+    merged_base_safetensor_path: str | None = kwargs.get("merged_base_safetensor_path")
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
 
