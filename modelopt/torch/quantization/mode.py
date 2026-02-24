@@ -238,6 +238,9 @@ def wrapped_calib_func(
 
     if func is not None:
         if sequential:
+            assert method in ["max"], (
+                f"Sequential calibration currently only supports max calibration, got {method}"
+            )
             # Wrap with sequential processing
             sequential_calibrate(
                 model,
