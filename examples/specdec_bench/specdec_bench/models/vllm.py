@@ -51,10 +51,13 @@ class VLLMModel(Model):
             }
         elif kwargs.get("speculative_algorithm") == "DRAFT_TARGET":
             specdec = {
-                "method": "draft_target",
+                "method": "draft_model",
                 "model": kwargs.get("draft_model_dir"),
                 "num_speculative_tokens": kwargs.get("speculative_num_steps", 3),
             }
+            if kwargs.get("parallel_draft_block_sizes") is not None:
+                specdec["disable_padded_drafter_batch"] = True
+                specdec["parallel_draft_block_sizes"] = kwargs.get("parallel_draft_block_sizes")
         elif kwargs.get("speculative_algorithm") == "MTP":
             specdec = {
                 "method": "mtp",
@@ -62,15 +65,22 @@ class VLLMModel(Model):
             }
         elif kwargs.get("speculative_algorithm") == "NONE":
             specdec = None
+
+        if specdec is None:
+            num_speculative_tokens = 1
+        else:
+            num_speculative_tokens = specdec.get("num_speculative_tokens", 3)
         engine_args = AsyncEngineArgs(
             model=model_dir,
-            trust_remote_code=True,
+            trust_remote_code=kwargs.get("trust_remote_code", False),
             tensor_parallel_size=kwargs.get("tensor_parallel_size", 1),
             enable_expert_parallel=kwargs.get("moe_expert_parallel_size", 1) > 1,
             enable_prefix_caching=kwargs.get("prefix_cache", False),
             speculative_config=specdec,
-            max_num_seqs=max_concurrent_requests,
+            max_num_seqs=max_concurrent_requests * num_speculative_tokens,
             skip_tokenizer_init=False,
+            async_scheduling=kwargs.get("async_scheduling", True),
+            enforce_eager=False,
         )
         self.model = AsyncLLM.from_engine_args(engine_args)
         self.sampling_kwargs = sampling_kwargs
@@ -88,6 +98,8 @@ class VLLMModel(Model):
         output_dict = {}
         self.sampling_config.max_tokens = max_length
         self.sampling_config.stop_token_ids = [end_id]
+        if end_id == -1:
+            self.sampling_config.ignore_eos = True
 
         outputs, timing, full_tokens = await self.generate(prompt_ids, request_id, turn_id)
 
