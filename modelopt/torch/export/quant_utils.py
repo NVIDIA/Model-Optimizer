@@ -25,11 +25,16 @@ import torch
 import torch.nn as nn
 
 from modelopt import __version__
-from modelopt.torch.quantization.model_calib import enable_stats_collection, finish_stats_collection
+from modelopt.torch.quantization.model_calib import (
+    enable_stats_collection,
+    finish_stats_collection,
+    svd,
+)
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.qtensor import (
     FP8QTensor,
     MXFP4QTensor,
+    MXFP8QTensor,
     NVFP4QTensor,
     QTensorWrapper,
 )
@@ -54,9 +59,11 @@ from .model_config import (
     QUANTIZATION_INT8_SQ,
     QUANTIZATION_INT8_WO,
     QUANTIZATION_MXFP4,
+    QUANTIZATION_MXFP8,
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
     QUANTIZATION_NVFP4_AWQ,
+    QUANTIZATION_NVFP4_SVDQUANT,
     QUANTIZATION_W4A8_AWQ,
     QUANTIZATION_W4A8_MXFP4_FP8,
     QUANTIZATION_W4A8_NVFP4_FP8,
@@ -165,7 +172,7 @@ def resmooth_and_get_scale(
         )
         new_weights.append(weight)
         # If NVFP4_AWQ then we view the scales as uint8 to allow for cat later
-        if quantization == QUANTIZATION_NVFP4_AWQ:
+        if quantization in [QUANTIZATION_NVFP4_AWQ, QUANTIZATION_NVFP4_SVDQUANT]:
             scale, _ = NVFP4QTensor.get_weights_scaling_factor(weight, group_size).view(torch.uint8)
         else:
             scale = get_scaling_factor_from_weight(weight, group_size)
@@ -176,7 +183,7 @@ def resmooth_and_get_scale(
     return (
         torch.cat(new_weights, dim=0),
         resmoothed_scales.view(torch.float8_e4m3fn)
-        if quantization == QUANTIZATION_NVFP4_AWQ
+        if quantization in [QUANTIZATION_NVFP4_AWQ, QUANTIZATION_NVFP4_SVDQUANT]
         else resmoothed_scales,  # if NVFP4_AWQ we view the scales back as float8_e4m3fn after cat
         new_pre_quant_scale,
     )
@@ -231,6 +238,31 @@ def get_scaling_factor(quantizer: TensorQuantizer) -> torch.Tensor:
     return scaling_factor
 
 
+def _ensure_weight_quantizer_calibrated(
+    weight_quantizer: TensorQuantizer, weight: torch.Tensor, module_name: str = ""
+) -> None:
+    """Calibrate weight quantizer if amax is not set.
+
+    This is a lazy calibration pattern used during export when weight quantizers
+    may not have been calibrated during the main calibration phase.
+
+    Args:
+        weight_quantizer: The weight quantizer to calibrate
+        weight: The weight tensor to use for calibration
+        module_name: Optional module name for better warning messages
+    """
+    if not hasattr(weight_quantizer, "_amax") or weight_quantizer._amax is None:
+        warn(
+            f"Weight quantizer{f' for {module_name}' if module_name else ''} was not calibrated. "
+            f"Computing amax from weights. This may occur if: "
+            f"some experts were not activated during calibration (expected for MoE models), try increasing --calib_size"
+        )
+        weight_quantizer.reset_amax()
+        enable_stats_collection(weight_quantizer)
+        weight_quantizer(weight)
+        finish_stats_collection(weight_quantizer)
+
+
 def get_activation_scaling_factor(
     module: nn.Module, input_quantizer_name: str = "input_quantizer"
 ) -> torch.Tensor:
@@ -243,6 +275,7 @@ def get_activation_scaling_factor(
     if get_quantization_format(module) in [
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
+        QUANTIZATION_NVFP4_SVDQUANT,
     ]:
         return NVFP4QTensor.get_activation_scaling_factor(input_quantizer)
     return get_scaling_factor(input_quantizer)
@@ -270,8 +303,13 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
     if quantization_format in [
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
+        QUANTIZATION_NVFP4_SVDQUANT,
         QUANTIZATION_W4A8_NVFP4_FP8,
     ]:
+        # Calibrate weight quantizer if amax is not set
+        module_name = f"{type(module).__name__}.{weight_name}"
+        _ensure_weight_quantizer_calibrated(weight_quantizer, weight, module_name)
+
         if quantization_format == QUANTIZATION_W4A8_NVFP4_FP8:
             # weight_scaling_factor_2 for w4a8 needs to be amax/448, so that the wsf is in range 448/6.
             # This is because the kernel dequantizes weight to fp8, which is in range 448.
@@ -290,6 +328,9 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
         return MXFP4QTensor.quantize(weight, block_size=weight_quantizer.block_sizes[-1])[
             1
         ].reshape(*weight.shape[:-1], -1)
+
+    if quantization_format == QUANTIZATION_MXFP8:
+        return MXFP8QTensor.get_weights_scaling_factor_from_quantizer(weight, weight_quantizer)
     return get_scaling_factor(weight_quantizer)
 
 
@@ -300,12 +341,26 @@ def get_weight_scaling_factor_2(module: nn.Module, weight_name: str = "weight") 
     if weight_quantizer is None:
         return None
 
-    if get_quantization_format(module) in [
+    quantization_format = get_quantization_format(module)
+
+    # Calibrate weight quantizer if amax is not set for all NVFP4 variants
+    if quantization_format in [
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
+        QUANTIZATION_NVFP4_SVDQUANT,
+        QUANTIZATION_W4A8_NVFP4_FP8,
+    ]:
+        weight = getattr(module, weight_name)
+        module_name = f"{type(module).__name__}.{weight_name}"
+        _ensure_weight_quantizer_calibrated(weight_quantizer, weight, module_name)
+
+    if quantization_format in [
+        QUANTIZATION_NVFP4,
+        QUANTIZATION_NVFP4_AWQ,
+        QUANTIZATION_NVFP4_SVDQUANT,
     ]:
         return NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(weight_quantizer)
-    elif get_quantization_format(module) == QUANTIZATION_W4A8_NVFP4_FP8:
+    elif quantization_format == QUANTIZATION_W4A8_NVFP4_FP8:
         # weight_scaling_factor_2 for w4a8 needs to be amax/448, so that the wsf is in range 448/6.
         # This is because the kernel dequantizes weight to fp8, which is in range 448.
         return weight_quantizer._amax.float() / 448.0
@@ -345,18 +400,27 @@ def get_kv_cache_bias(kv_module: nn.Module) -> list[torch.Tensor]:
     return kv_bias
 
 
-def get_kv_cache_scaling_factor(kv_module: nn.Module) -> list[torch.Tensor]:
-    """Returns the kv_cache scaling factor if output quantizer is set. Else returns None by default."""
-    if not hasattr(kv_module, "k_bmm_quantizer") or not hasattr(kv_module, "v_bmm_quantizer"):
+def get_kv_cache_scaling_factor(self_attention_module: nn.Module) -> list[torch.Tensor | None]:
+    """Get the K and V BMM scaling factors for the self attention module.
+
+    Args:
+        self_attention_module: The self attention module to get the K and V BMM scaling factors from.
+
+    Returns:
+        The K and V BMM scaling factors.
+    """
+    if not hasattr(self_attention_module, "k_bmm_quantizer") or not hasattr(
+        self_attention_module, "v_bmm_quantizer"
+    ):
         return [None, None]
 
     scaling_factors = [
-        get_scaling_factor(getattr(kv_module, quantizer))
+        get_scaling_factor(getattr(self_attention_module, quantizer))
         for quantizer in ("k_bmm_quantizer", "v_bmm_quantizer")
     ]
 
     # For FP8, we recommend default kv cache scaling factor to be 1.
-    if get_kv_cache_dtype(kv_module) == KV_CACHE_FP8:
+    if get_kv_cache_dtype(self_attention_module) == KV_CACHE_FP8:
         for i, factor in enumerate(scaling_factors):
             if factor.item() > 0.5:
                 warn(
@@ -366,7 +430,6 @@ def get_kv_cache_scaling_factor(kv_module: nn.Module) -> list[torch.Tensor]:
             scaling_factors[i] = torch.max(
                 factor, torch.tensor([1.0], dtype=torch.float, device=factor.device)
             )
-
     return scaling_factors
 
 
@@ -396,6 +459,23 @@ def get_kv_cache_dtype(modules: list[nn.Module] | nn.Module) -> str | None:
             if quantizer_attr and quantizer_attr.is_enabled:
                 num_bits_list.append(quantizer_attr.num_bits)
                 is_affine &= hasattr(quantizer_attr, "_bias_value")
+
+    return _compute_kv_cache_dtype(num_bits_list)
+
+
+def _compute_kv_cache_dtype(num_bits_list: list[int | tuple[int, int]]) -> str | None:
+    """Returns the kv_cache dtype.
+
+    If num_bits of output_quantizer is (4, 3) then returns FP8; if it is 8, returns int8,
+    otherwise returns None.
+
+    Args:
+        modules: The module or list of modules to inspect.
+
+    Returns:
+        The kv_cache dtype.
+    """
+    is_affine = True
 
     if (4, 3) in num_bits_list:
         return KV_CACHE_FP8
@@ -474,6 +554,14 @@ def get_quantization_format(module) -> str | None:
         if weight_quantizer.num_bits == (4, 3):
             if weight_quantizer.block_sizes:
                 assert weight_quantizer.block_sizes[-1] > 0, "Invalid block_sizes for FP8 quantizer"
+                # Check if this is MXFP8 (dynamic block quantization with scale_bits (8, 0))
+                block_sizes = getattr(weight_quantizer, "block_sizes")
+                if (
+                    isinstance(block_sizes, dict)
+                    and block_sizes.get("type", "static") == "dynamic"
+                    and block_sizes.get("scale_bits") == (8, 0)
+                ):
+                    return QUANTIZATION_MXFP8
                 if weight_quantizer.fake_quant:
                     return QUANTIZATION_FP8_PB_WO
                 else:
@@ -487,6 +575,8 @@ def get_quantization_format(module) -> str | None:
             block_sizes = getattr(weight_quantizer, "block_sizes")
             scale_bits = block_sizes.get("scale_bits")
 
+            if input_quantizer is not None and hasattr(weight_quantizer, "svdquant_lora_a"):
+                return QUANTIZATION_NVFP4_SVDQUANT
             if input_quantizer is not None and hasattr(input_quantizer, "_pre_quant_scale"):
                 return QUANTIZATION_NVFP4_AWQ
             if getattr(layer, "fused_with_prequant", False):
@@ -660,13 +750,21 @@ def process_layer_quant_config(layer_config_dict):
         elif v == "w4a8_nvfp4_fp8":
             layer_config = {
                 "quant_algo": "W4A8_NVFP4_FP8",
-                "group_size": layer_config_dict[prefix + ".awq_block_size"],
-                "has_zero_point": False,
-                "pre_quant_scale": True,
+                "group_size": block_size_value,
             }
         elif v == "w4a8_mxfp4_fp8":
             layer_config = {
                 "quant_algo": "W4A8_MXFP4_FP8",
+                "group_size": block_size_value,
+            }
+        elif v == "nvfp4_svdquant":
+            layer_config = {
+                "quant_algo": "NVFP4_SVD",
+                "group_size": block_size_value,
+            }
+        elif v == "mxfp8":
+            layer_config = {
+                "quant_algo": "MXFP8",
                 "group_size": block_size_value,
             }
         else:
@@ -773,6 +871,9 @@ def to_quantized_weight(
     if quantization in [QUANTIZATION_INT8_SQ, QUANTIZATION_INT8_WO]:
         return (weight / weights_scaling_factor[:, None]).round().clamp(-128, 127).to(torch.int8)
 
+    if quantization == QUANTIZATION_MXFP8:
+        return MXFP8QTensor.quantize_with_scale(weight, weights_scaling_factor)
+
     if quantization == QUANTIZATION_FP8_PB_WO:
         return FP8QTensor.quantize(
             weight, weights_scaling_factor.squeeze(), block_sizes={-1: block_size, -2: block_size}
@@ -813,7 +914,12 @@ def to_quantized_weight(
     if quantization in [QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ]:
         return pack_int4_in_uint8(weight, weights_scaling_factor)
 
-    if quantization in [QUANTIZATION_NVFP4, QUANTIZATION_NVFP4_AWQ, QUANTIZATION_W4A8_NVFP4_FP8]:
+    if quantization in [
+        QUANTIZATION_NVFP4,
+        QUANTIZATION_NVFP4_AWQ,
+        QUANTIZATION_W4A8_NVFP4_FP8,
+        QUANTIZATION_NVFP4_SVDQUANT,
+    ]:
         assert block_size is not None, "Block size not passed. Unable to quantize to NVFP4 format."
         assert weights_scaling_factor2 is not None, (
             "Weights scaling factor 2 not passed. Unable to quantize to NVFP4 format"
@@ -881,7 +987,13 @@ def postprocess_state_dict(
         "v_bmm_quantizer._bias_value": "v_proj.v_bias",
         "input_quantizer._pre_quant_scale": "pre_quant_scale",
     }
-    skip_keys = ["output_quantizer", "_amax", "_bias_value", "input_quantizer._pre_quant_scale"]
+    skip_keys = [
+        "output_quantizer",
+        "_amax",
+        "_bias_value",
+        "input_quantizer._pre_quant_scale",
+        "weight_shape",
+    ]
 
     # For modelopt-trained LoRA models, we need to remove the base_layer prefix from the keys for deployment
     if is_modelopt_qlora:
@@ -931,7 +1043,6 @@ def postprocess_state_dict(
                     # We export real value for KV_CACHE_NVFP4
                     if quantization == KV_CACHE_FP8:
                         value.clamp_(min=1.0)
-
                 post_state_dict[prefix + new_suffix] = value
                 break
 
@@ -1006,6 +1117,40 @@ def _update_pre_quant_scale(module, new_pre_quant_scale):
     enable_stats_collection(module.weight_quantizer)
     module.weight_quantizer(module.weight)
     finish_stats_collection(module.weight_quantizer)
+
+
+def _update_svdquant(modules, new_pre_quant_scale):
+    """Updates the pre_quant_scale, svdquant_lora_a and svdquant_lora_b matrices when pre_quant_scale is changed."""
+    new_pre_quant_scale = new_pre_quant_scale.to(torch.float32)
+    lora_a = [m.weight_quantizer.svdquant_lora_a.to(torch.float32) for m in modules]
+    lora_b = [m.weight_quantizer.svdquant_lora_b.to(torch.float32) for m in modules]
+    weight = [m.weight.to(torch.float32) for m in modules]
+    old_pre_quant_scale = [m.input_quantizer._pre_quant_scale.to(torch.float32) for m in modules]
+    weight = [
+        (w + (lb @ la)) * (s / new_pre_quant_scale)
+        for w, la, lb, s in zip(weight, lora_a, lora_b, old_pre_quant_scale)
+    ]
+    weight_concatenated = torch.cat(weight, dim=0)
+    lb, la = svd(weight_concatenated, rank=lora_a[0].shape[0])
+    weight_concatenated -= lb @ la
+    weight_concatenated = weight_concatenated.to(modules[0].weight.dtype)
+    la = la.to(modules[0].weight_quantizer.svdquant_lora_a.dtype)
+    lb = lb.to(modules[0].weight_quantizer.svdquant_lora_b.dtype)
+    new_pre_quant_scale = new_pre_quant_scale.to(modules[0].input_quantizer.pre_quant_scale.dtype)
+
+    index = 0
+    for i, module in enumerate(modules):
+        module.input_quantizer.pre_quant_scale = new_pre_quant_scale
+        module.weight_quantizer.svdquant_lora_a = la
+        assert lora_b[i].shape[0] == module.weight.shape[0]
+        module.weight_quantizer.svdquant_lora_b = lb[index : index + lora_b[i].shape[0], :]
+        module.weight = nn.Parameter(weight_concatenated[index : index + lora_b[i].shape[0], :])
+        index += lora_b[i].shape[0]
+        # Redo weights collection
+        module.weight_quantizer.reset_amax()
+        enable_stats_collection(module.weight_quantizer)
+        module.weight_quantizer(module.weight)
+        finish_stats_collection(module.weight_quantizer)
 
 
 # Format: (list of target modules, tuple of (linear_to_fuse_into, linear_from_with_scale))
@@ -1101,6 +1246,16 @@ def fuse_prequant_to_linear(model: torch.nn.Module, fuse_grouped_heads=False):
                     setattr(linear_pqs_from, "fused_with_prequant", True)
 
 
+def _layernorm_uses_weight_plus_one(module: torch.nn.Module) -> bool:
+    if any(
+        name in type(module).__name__
+        for name in ["LayerNorm1P", "GemmaRMSNorm", "Gemma2RMSNorm", "Gemma3RMSNorm"]
+    ):
+        return True
+
+    return bool(hasattr(module, "zero_centered_gamma") and module.zero_centered_gamma)
+
+
 def fuse_prequant_layernorm(
     layernorm_module: torch.nn.Module,
     modules: list[torch.Tensor],
@@ -1116,13 +1271,17 @@ def fuse_prequant_layernorm(
         fused_bias = bias * avg_pre_quant_scale
         layernorm_output_scaled = (normalization(input) * fused_weight) + fused_bias
     """
-    layernorm_module.weight = torch.nn.Parameter(
-        layernorm_module.weight * getattr(modules[0].input_quantizer, "_pre_quant_scale")
+    pre_quant_scale = getattr(modules[0].input_quantizer, "_pre_quant_scale").to(
+        layernorm_module.weight.device
     )
+    if _layernorm_uses_weight_plus_one(layernorm_module):
+        # For norms that use (1 + weight) in forward, fold pre_quant_scale into the effective weight.
+        fused_weight = (layernorm_module.weight + 1.0) * pre_quant_scale - 1.0
+    else:
+        fused_weight = layernorm_module.weight * pre_quant_scale
+    layernorm_module.weight = torch.nn.Parameter(fused_weight.to(layernorm_module.weight.dtype))
     if hasattr(layernorm_module, "bias") and layernorm_module.bias is not None:
-        layernorm_module.bias = torch.nn.Parameter(
-            layernorm_module.bias * getattr(modules[0].input_quantizer, "_pre_quant_scale")
-        )
+        layernorm_module.bias = torch.nn.Parameter(layernorm_module.bias * pre_quant_scale)
     # Pre_quant_scales of modules must not be exported, since they have been fused with layernorm
     for module in modules:
         delattr(module.input_quantizer, "_pre_quant_scale")
@@ -1146,9 +1305,14 @@ def preprocess_linear_fusion(modules: list[torch.nn.Module], resmooth_only=False
                 dim=0,
             )
 
-            for module in modules:
-                if not torch.equal(module.input_quantizer.pre_quant_scale, avg_prequant_scale):
-                    _update_pre_quant_scale(module, avg_prequant_scale)
+            if all(
+                getattr(m.weight_quantizer, "svdquant_lora_a", None) is not None for m in modules
+            ):
+                _update_svdquant(modules, avg_prequant_scale)
+            else:
+                for module in modules:
+                    if not torch.equal(module.input_quantizer.pre_quant_scale, avg_prequant_scale):
+                        _update_pre_quant_scale(module, avg_prequant_scale)
 
         if resmooth_only:
             return
@@ -1286,3 +1450,18 @@ def get_quant_config(
         quant_config["quantization"]["kv_cache_quant_algo"] = kv_cache_format
 
     return quant_config
+
+
+def has_quantized_modules(model: nn.Module) -> bool:
+    """Check if a model has any quantized modules.
+
+    Args:
+        model: The model to check.
+
+    Returns:
+        True if the model contains quantized modules, False otherwise.
+    """
+    return any(
+        get_quantization_format(sub_module) != QUANTIZATION_NONE
+        for _, sub_module in model.named_modules()
+    )

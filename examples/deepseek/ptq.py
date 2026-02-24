@@ -56,6 +56,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.model_config import KV_CACHE_FP8
 from modelopt.torch.export.quant_utils import get_quant_config
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.triton import weight_dequant
 from modelopt.torch.quantization.utils import (
     is_quantized_column_parallel_linear,
     is_quantized_parallel_linear,
@@ -77,7 +78,6 @@ else:
     )
 
 import model as deekseep_model  # noqa: E402
-from ds_kernel import weight_dequant  # noqa: E402
 from kernel import act_quant, fp8_gemm  # noqa: E402
 
 
@@ -99,7 +99,7 @@ def monkey_patch_deepseek_model():
                 weight = weight_quantizer(weight)
             return F.linear(x, weight, bias)
         elif gemm_impl == "bf16":
-            weight = weight_dequant(weight, weight.scale)
+            weight = weight_dequant(weight, weight.scale, dtype=torch.bfloat16)
             if act_quantizer is not None:
                 x = act_quantizer(x)
             if weight_quantizer is not None:
@@ -311,7 +311,7 @@ def ptq(
     # disable head that corresponds to lm_head (for the huggingface checkpoint)
     mtq_cfg["quant_cfg"]["*head*"] = {"enable": False}
 
-    allowed_mla_quant = [None, "per_tensor_fp8"]
+    allowed_mla_quant = [None, "per_tensor_fp8", "nvfp4"]
     assert mla_quant in allowed_mla_quant, f"mla_quant must be {allowed_mla_quant}"
 
     if not mla_quant:
@@ -319,12 +319,32 @@ def ptq(
     elif mla_quant == "per_tensor_fp8":
         mtq_cfg["quant_cfg"]["*attn*weight_quantizer"] = {"num_bits": (4, 3), "axis": None}
         mtq_cfg["quant_cfg"]["*attn*input_quantizer"] = {"num_bits": (4, 3), "axis": None}
+    elif mla_quant == "nvfp4":  # for DeepSeek-R1-0528-NVFP4-Turbo
+        mla_linear_layers = ["*wq_a*", "*wq_b*", "*wkv_a*", "*wkv_b*", "*wo*"]
+        mla_nvfp4_linear_layers = ["*wq_a*", "*wkv_a*", "*wq_b*", "*wo*"]
+        for layer in mla_linear_layers:
+            if layer in mla_nvfp4_linear_layers:
+                # wq_a, wkv_a, wq_b, wo use NVFP4 quantization
+                mtq_cfg["quant_cfg"][layer + "_quantizer"] = {
+                    "num_bits": (2, 1),
+                    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                    "axis": None,
+                    "enable": True,
+                }
+            else:
+                mtq_cfg["quant_cfg"][layer + "_quantizer"] = {"enable": False}
+
+        # Disable BMM quantizers
+        mtq_cfg["quant_cfg"]["*attn.kv_bmm_quantizer*"] = {"enable": False}
+        mtq_cfg["quant_cfg"]["*attn.pe_bmm_quantizer*"] = {"enable": False}
 
     if not args.disable_wo_quant and "FP4" in quant_cfg:
         mtq_cfg["quant_cfg"]["*wo*weight_quantizer"] = mtq_cfg["quant_cfg"]["*input_quantizer"]
         mtq_cfg["quant_cfg"]["*wo*input_quantizer"] = mtq_cfg["quant_cfg"]["*weight_quantizer"]
+
     ## ptq
     transformer = mtq.quantize(transformer, mtq_cfg, calibrate_loop)
+
     if int(os.environ["LOCAL_RANK"]) == 0:
         mtq.print_quant_summary(transformer)
 
@@ -407,11 +427,17 @@ if __name__ == "__main__":
     parser.add_argument("--disable_fp8_kvcache", action="store_true", help="disable fp8 kvcache.")
     parser.add_argument("--disable_wo_quant", action="store_true", help="disable MLA wo quant.")
     parser.add_argument("--trust_remote_code", action="store_true", help="trust remote code.")
+    parser.add_argument(
+        "--mla_quant",
+        type=str,
+        default=None,
+        help="MLA quantization type: None (disable), per_tensor_fp8, nvfp4",
+    )
 
     args = parser.parse_args()
     model = load_deepseek_model(args.config, args.model_path, args.batch_size)
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_path, trust_remote_code=args.trust_remote_code
     )
-    model = ptq(model, tokenizer, args.quant_cfg, args.batch_size, args.calib_size)
+    model = ptq(model, tokenizer, args.quant_cfg, args.batch_size, args.calib_size, args.mla_quant)
     save_amax_and_quant_config(model, args.output_path, not args.disable_fp8_kvcache)

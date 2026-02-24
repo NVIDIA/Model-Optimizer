@@ -13,6 +13,7 @@ Before using ModelOpt-Windows, the following components must be installed:
       - NVIDIA GPU and Graphics Driver
       - Python version >= 3.10 and < 3.13
       - Visual Studio 2022 / MSVC / C/C++ Build Tools
+      - CUDA Toolkit, CuDNN for using CUDA path during calibration (e.g. for calibration of ONNX models using `onnxruntime-gpu` or CUDA EP)
 
 Update ``PATH`` environment variable as needed for above prerequisites.
 
@@ -26,45 +27,38 @@ It is recommended to use a virtual environment for managing Python dependencies.
       $ python -m venv .\myEnv
       $ .\myEnv\Scripts\activate
 
-In the newly created virtual environment, none of the required packages (e.g., onnx, onnxruntime, onnxruntime-directml, onnxruntime-gpu, nvidia-modelopt) will be pre-installed.
+In the newly created virtual environment, none of the required packages (e.g., onnx, onnxruntime, onnxruntime-directml, onnxruntime-gpu, nvidia-modelopt etc.) will be pre-installed.
 
 **3.  Install ModelOpt-Windows Wheel**
 
-To install the ModelOpt-Windows wheel, run the following command:
+To install the ONNX module of ModelOpt-Windows, run the following command:
 
 .. code-block:: bash
 
     pip install "nvidia-modelopt[onnx]"
 
-This command installs ModelOpt-Windows and its ONNX module, along with the *onnxruntime-directml* (v1.20.0) package. If ModelOpt-Windows is installed without the additional parameter, only the bare minimum dependencies will be installed, without the relevant module and dependencies.
+If you install ModelOpt-Windows without the extra ``[onnx]`` option, only the minimal core dependencies and the PyTorch module (``torch``) will be installed. Support for ONNX model quantization requires installing with ``[onnx]``.
 
-**4. Setup ONNX Runtime (ORT) for Calibration**
+**4. ONNX Model Quantization: Setup ONNX Runtime Execution Provider for Calibration**
 
-The ONNX Post-Training Quantization (PTQ) process involves running the base model with user-supplied inputs, a process called calibration. The user-supplied model inputs are referred to as calibration data. To perform calibration, the base model must be run using a suitable ONNX Execution Provider (EP), such as *DmlExecutionProvider* (DirectML EP) or *CUDAExecutionProvider* (CUDA EP). There are different ONNX Runtime packages for each EP:
+The Post-Training Quantization (PTQ) process for ONNX models usually involves running the base model with user-supplied inputs, a process called calibration. The user-supplied model inputs are referred to as calibration data. To perform calibration, the base model must be run using a suitable ONNX Execution Provider (EP), such as *DmlExecutionProvider* (DirectML EP) or *CUDAExecutionProvider* (CUDA EP). There are different ONNX Runtime packages for each EP:
 
 - *onnxruntime-directml* provides the DirectML EP.
+- *onnxruntime-trt-rtx* provides TensorRT-RTX EP.
 - *onnxruntime-gpu* provides the CUDA EP.
 - *onnxruntime* provides the CPU EP.
 
-By default, ModelOpt-Windows installs *onnxruntime-directml* and uses the DirectML EP (v1.20.0) for calibration. No additional dependencies are required.
-If you prefer to use the CUDA EP for calibration, uninstall the existing *onnxruntime-directml* package and install the *onnxruntime-gpu* package, which requires CUDA and cuDNN dependencies:
-
-- Uninstall *onnxruntime-directml*:
-
-  .. code-block:: bash
-
-      pip uninstall onnxruntime-directml
+By default, ModelOpt-Windows installs *onnxruntime-gpu*. The default CUDA version needed for *onnxruntime-gpu* since v1.19.0 is 12.x. The *onnxruntime-gpu* package (i.e. CUDA EP) has CUDA and cuDNN dependencies:
 
 - Install CUDA and cuDNN:
     - For the ONNX Runtime GPU package, you need to install the appropriate version of CUDA and cuDNN. Refer to the `CUDA Execution Provider requirements <https://onnxruntime.ai/docs/install/#cuda-and-cudnn/>`_ for compatible versions of CUDA and cuDNN.
 
-- Install ONNX Runtime GPU (CUDA 12.x):
+If you need to use any other EP for calibration, you can uninstall the existing *onnxruntime-gpu* package and install the corresponding package. For example, to use the DirectML EP, you can uninstall the existing *onnxruntime-gpu* package and install the *onnxruntime-directml* package:
 
   .. code-block:: bash
 
-      pip install onnxruntime-gpu
-
-  - The default CUDA version for *onnxruntime-gpu* since v1.19.0 is 12.x.
+      pip uninstall onnxruntime-gpu
+      pip install onnxruntime-directml
 
 **5. Setup GPU Acceleration Tool for Quantization**
 
@@ -75,8 +69,9 @@ By default, ModelOpt-Windows utilizes the `cupy-cuda12x <https://cupy.dev//>`_ t
 Ensure the following steps are verified:
       - **Task Manager**: Check that the GPU appears in the Task Manager, indicating that the graphics driver is installed and functioning.
       - **Python Interpreter**: Open the command line and type python. The Python interpreter should start, displaying the Python version.
-      - **Onnxruntime Package**: Ensure that one of the following is installed:
+      - **Onnxruntime Package**: Ensure that exactly one of the following is installed:
             - *onnxruntime-directml* (DirectML EP)
+            - *onnxruntime-trt-rtx* (TensorRT-RTX EP)
             - *onnxruntime-gpu* (CUDA EP)
             - *onnxruntime* (CPU EP)
       - **Onnx and Onnxruntime Import**: Ensure that following python command runs successfully.

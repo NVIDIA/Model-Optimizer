@@ -6,6 +6,7 @@ This repository contains an example to demontrate 8-bit quantization of SAM2 ONN
 
 - [ONNX export and Inference tool](#onnx-export-and-inference-tool)
 - [Quantization](#quantization)
+- [Support Matrix](#support-matrix)
 - [Validated Settings](#validated-settings)
 - [Troubleshoot](#troubleshoot)
 
@@ -58,6 +59,14 @@ Example command-line:
 python .\sam2_onnx_quantization.py --onnx_path=E:\base\sam2_hiera_large.encoder.onnx --output_path=E:\quant\sam2_hiera_large.encoder.onnx --image_dir=E:\sam_image_dataset
 
 ```
+
+## Support Matrix
+
+| Model | ONNX INT8 Max (W8A8) | ONNX FP8 Max (W8A8) |
+| :---: | :---: | :---: |
+| sam2-hiera-large | ✅ | ✅ |
+
+> *`ONNX INT8 Max` means INT8 (W8A8) quantization of ONNX model using Max calibration. Similar holds true for the term `ONNX FP8 Max`.*
 
 ## Validated Settings
 

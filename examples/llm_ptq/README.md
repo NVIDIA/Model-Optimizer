@@ -109,6 +109,9 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 | QWen3 MOE, Next <sup>6</sup> | ✅ | - | - | - | ✅ |
 | QwQ | ✅ | - | - | - | ✅ |
 | DeepSeek V3, R1, V3.1, V3.2<sup>7</sup> | - | - | - | - | ✅ |
+| GLM-4.7<sup>8</sup> | ✅ | - | - | - | ✅ |
+| Kimi K2 | - | - | - | - | ✅ |
+| MiniMax M2.1 | - | - | - | - | ✅ |
 | T5 | ✅ | ✅ | ✅ | ✅ | - |
 | Whisper | ✅ | ❌ | ❌ | ❌ | - |
 
@@ -120,7 +123,8 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 > *<sup>4.</sup>For some models, KV cache quantization may result in a higher accuracy penalty.* \
 > *<sup>5.</sup>A selective set of the popular models are internally tested. The actual model support list may be longer. NVFP4 inference requires Blackwell GPUs and TensorRT-LLM v0.17 or later* \
 > *<sup>6.</sup>Some models currently support export to HF format only.* \
-> *<sup>7.</sup>[PTQ for DeepSeek](../deepseek/README.md)*
+> *<sup>7.</sup>[PTQ for DeepSeek](../deepseek/README.md)* \
+> *<sup>8.</sup>GLM-4.7 has MTP (Multi-Token Prediction) layers that are automatically loaded and excluded from quantization.*
 
 > *The accuracy loss after PTQ may vary depending on the actual model and the quantization method. Different models may have different accuracy loss and usually the accuracy loss is more significant when the base model is small. If the accuracy after PTQ is not meeting the requirement, please try either modifying [hf_ptq.py](./hf_ptq.py) and disabling the KV cache quantization or using the [QAT](./../llm_qat/README.md) instead.*
 
@@ -160,6 +164,23 @@ scripts/huggingface_example.sh --model $HF_PATH --quant [fp8|nvfp4|int8_sq|int4_
 #### Deepseek R1
 
 [PTQ for DeepSeek](../deepseek/README.md) shows how to quantize the DeepSeek model with FP4 and export to TensorRT-LLM.
+
+#### VLM calibration with image-text pairs (e.g., Nemotron VL)
+
+For vision-language models, calibration quality can likely improve by using image-text pairs instead of text-only data, especially on visual understanding tasks:
+
+```bash
+python hf_ptq.py \
+  --pyt_ckpt_path <huggingface_model_card> \
+  --qformat nvfp4 \
+  --export_path <quantized_ckpt_path> \
+  --trust_remote_code \
+  --calib_with_images \
+  --calib_size 512
+```
+
+> Note: when `--calib_with_images` is set, `--calib_size` must be a single value, and the calibration dataset is nvidia/nemotron_vlm_dataset_v2.
+This functionality is currently in beta and has been tested on `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16`.
 
 ### NeMo Example Script
 
@@ -226,7 +247,7 @@ export HF_PATH=<the downloaded LLaMA checkpoint from the Hugging Face hub, or si
 # --auto_quantize_bits specifies the constraint for `AutoQuantize`
 # --quant specifies the formats to be searched for `AutoQuantize`
 # NOTE: auto_quantize_bits cannot be lower than the number of bits for the smallest quantization format in --quant
-scripts/huggingface_example.sh --type llama --model $HF_PATH --quant w4a8_awq,fp8 --auto_quantize_bits 4.8 --tp [1|2|4|8]  --calib_batch_size 4
+scripts/huggingface_example.sh --model $HF_PATH --quant w4a8_awq,fp8 --auto_quantize_bits 4.8 --calib_batch_size 4
 ```
 
 The above example perform `AutoQuantize` where the less quantization accuracy sensitive layers are quantized with `w4a8_awq` (specified by `--quant w4a8_awq`) and the more sensitive layers
