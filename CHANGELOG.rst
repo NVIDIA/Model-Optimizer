@@ -4,6 +4,10 @@ NVIDIA Model Optimizer Changelog (Linux)
 0.43 (2026-03-xx)
 ^^^^^^^^^^^^^^^^^
 
+**Bug Fixes**
+
+- Upgraded ORT to 1.24.2 to solve various bugs: 5615343, 5597780, 5371126.
+
 **New Features**
 
 - User does not need to manually register MOE modules to cover experts calibration coverage in PTQ workflow.
