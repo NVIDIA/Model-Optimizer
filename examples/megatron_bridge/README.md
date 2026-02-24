@@ -128,6 +128,9 @@ python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
     --max_sequence_length 256_000
 ```
 
+The [Nemotron-Pretraining-SFT-v1](https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-SFT-v1) dataset is huge, so it will take a while to download and tokenize. You can also split the large `.jsonl` into multiple files (e.g. 10M samples per file using `split -l 10000000 -d --additional-suffix=.jsonl <file>.jsonl <file>_part`) and tokenize them parallelly.
+To quickly test the script, you can try the [nvidia/Nemotron-Pretraining-Dataset-sample](https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-Dataset-sample) dataset.
+
 If you skip `--hf_name`, it will download and tokenize all subsets for the dataset.
 If you skip `--hf_split`, it will download and tokenize all splits for the subset.
 If you skip `--hf_max_samples_per_split`, it will download and tokenize all samples for the split.

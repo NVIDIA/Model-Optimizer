@@ -137,7 +137,8 @@ class _Partition:
     ):
         if count % self.log_interval == 0 or force_print:
             print(
-                f"\tProcessed {num2hrb(count)} docs = {num2hrb(total_doc_len)} chars = {num2hrb(total_enc_len)} tokens"
+                f"\tProcessed {num2hrb(count)} docs = {num2hrb(total_doc_len)} chars = {num2hrb(total_enc_len)} tokens",
+                flush=True,
             )
 
     def process_json_file(
