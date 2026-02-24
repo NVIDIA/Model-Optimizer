@@ -41,7 +41,7 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
             "weights": {"dynamic": False, "num_bits": 8, "type": "float", "strategy": "channel"},
         }
     elif quant_algo == "NVFP4":
-        gs = group_size if group_size else 16
+        gs = group_size or 16
         return {
             "input_activations": {
                 "dynamic": False,
@@ -52,7 +52,7 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
             "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": gs},
         }
     elif quant_algo in ("NVFP4_AWQ", "W4A16_AWQ", "W4A8_AWQ"):
-        gs = group_size if group_size else 128
+        gs = group_size or 128
         weight_bits = 4
         act_bits = 8 if "A8" in quant_algo else 4
         return {
@@ -84,13 +84,13 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
             },
         }
     elif quant_algo in ("W4A8_NVFP4_FP8", "W4A8_MXFP4_FP8"):
-        gs = group_size if group_size else 16
+        gs = group_size or 16
         return {
             "input_activations": {"dynamic": False, "num_bits": 8, "type": "float"},
             "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": gs},
         }
     elif quant_algo == "MXFP8":
-        gs = group_size if group_size else 32
+        gs = group_size or 32
         return {
             "input_activations": {
                 "dynamic": False,
