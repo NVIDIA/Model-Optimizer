@@ -236,7 +236,7 @@ def wrapped_calib_func(
             sequential_calibrate(
                 model,
                 forward_loop=forward_loop,
-                calib_func=func, 
+                calib_func=func,
                 **kwargs,
             )
         else:
