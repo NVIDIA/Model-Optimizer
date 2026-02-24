@@ -56,7 +56,7 @@ if IS_TRITON_AVAILABLE:
 else:
     weight_dequant = None
 
-from ..utils import replace_function
+from ..utils import LayerActivationCollector, replace_function
 from .attention import register_attention_for_kv_quant
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear, _QuantFunctionalMixin
 
@@ -1042,6 +1042,55 @@ def _is_supported_hf_model(model):
     return isinstance(model, tuple(supported_models))
 
 
+def is_homogenous_hf_model(model: nn.Module) -> bool:
+    decoder_layers = get_homogeneous_hf_decoder_layers(model)
+    if decoder_layers is None or len(decoder_layers) == 0:
+        return False
+    layer_classes = {type(layer) for layer in decoder_layers}
+    return len(layer_classes) == 1
+
+
+def get_homogeneous_hf_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
+    if not _is_supported_hf_model(model):
+        return None
+
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        return model.model.layers
+
+    return None
+
+
+def build_hf_homogenous_next_layer_inputs_hook(model: nn.Module):
+    def _extract_hidden_states(layer_output):
+        if isinstance(layer_output, tuple):
+            return layer_output[0]
+        if isinstance(layer_output, dict):
+            if "hidden_states" in layer_output:
+                return layer_output["hidden_states"]
+        return layer_output
+
+    def _build_next_layer_inputs_hook(prev_layer, cached_inputs):
+        next_inputs = []
+        for args, kwargs in cached_inputs:
+            prev_output = prev_layer(*args, **kwargs)
+            hidden_states = _extract_hidden_states(prev_output)
+            if len(args) >= 1:
+                next_args = (hidden_states, *args[1:])
+                next_kwargs = kwargs
+            elif "hidden_states" in kwargs:
+                next_args = args
+                next_kwargs = dict(kwargs)
+                next_kwargs["hidden_states"] = hidden_states
+            else:
+                raise ValueError(
+                    "Unable to build next-layer inputs without hidden_states in args/kwargs."
+                )
+            next_inputs.append((next_args, next_kwargs))
+        return next_inputs
+
+    return _build_next_layer_inputs_hook
+
+
 @contextmanager
 def setup_model_for_gradient_checkpointing(model: nn.Module):
     use_cache = None
@@ -1089,6 +1138,14 @@ AutoQuantizeGradientSearcher.register_custom_support(
     _is_supported_hf_model,
     setup_model_for_gradient_checkpointing,
     _is_param_grad_enabled_for_auto_quantize,
+)
+
+LayerActivationCollector.register_decoder_layer_support(
+    is_homogenous_hf_model, get_homogeneous_hf_decoder_layers
+)
+
+LayerActivationCollector.register_next_layer_input_support(
+    is_homogenous_hf_model, build_hf_homogenous_next_layer_inputs_hook
 )
 
 CUSTOM_MODEL_PLUGINS.update(

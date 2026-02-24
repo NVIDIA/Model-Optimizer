@@ -23,6 +23,7 @@ import torch.nn as nn
 from _test_utils.torch.misc import set_seed
 from _test_utils.torch.transformers_models import (
     create_tiny_llama_dir,
+    get_tiny_gpt_oss,
     get_tiny_llama,
     get_tiny_qwen3_moe,
     tf_modelopt_state_and_output_tester,
@@ -30,6 +31,11 @@ from _test_utils.torch.transformers_models import (
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry
+from modelopt.torch.quantization.plugins.huggingface import (
+    get_homogeneous_hf_decoder_layers,
+    is_homogenous_hf_model,
+)
+from modelopt.torch.quantization.utils import LayerActivationCollector
 
 pytest.importorskip("transformers")
 
@@ -199,3 +205,24 @@ def test_quantized_transformers_save_restore(tmp_path, model_cls, quant_config):
 
     model_test = model_cls.from_pretrained(tiny_llama_dir / "modelopt_model")
     tf_modelopt_state_and_output_tester(model_ref, model_test)
+
+
+def test_is_homogenous_hf_model_llama():
+    model = get_tiny_llama()
+    assert is_homogenous_hf_model(model)
+
+
+def test_is_homogenous_hf_model_gpt_oss():
+    model = get_tiny_gpt_oss(num_hidden_layers=1)
+    assert is_homogenous_hf_model(model)
+
+
+def test_hf_decoder_discoverer_registration_path():
+    model = get_tiny_llama()
+    assert any(
+        is_supported is is_homogenous_hf_model and discoverer is get_homogeneous_hf_decoder_layers
+        for is_supported, discoverer in LayerActivationCollector._decoder_layer_support
+    )
+    assert LayerActivationCollector.get_decoder_layers(model) is get_homogeneous_hf_decoder_layers(
+        model
+    )

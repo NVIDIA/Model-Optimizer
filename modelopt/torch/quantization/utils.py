@@ -824,8 +824,43 @@ class LayerActivationCollector:
     patching layers to capture inputs/outputs during forward passes
     """
 
+    _next_layer_input_support: list[tuple[Any, Any]] = []
+    _decoder_layer_support: list[tuple[Any, Any]] = []
+
     def __init__(self, model: nn.Module):
         self.model = model
+        self._previous_layer = None
+        self._previous_layer_inputs = None
+
+    @staticmethod
+    def get_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
+        """Return decoder layers supported by sequential calibration."""
+        for is_supported, discoverer in LayerActivationCollector._decoder_layer_support:
+            if not is_supported(model):
+                continue
+            decoder_layers = discoverer(model)
+            if decoder_layers is not None:
+                return decoder_layers
+        return None
+
+    @staticmethod
+    def is_supported(model: nn.Module) -> bool:
+        """Whether the model supports decoder-layer sequential calibration."""
+        return LayerActivationCollector.get_decoder_layers(model) is not None
+
+    @classmethod
+    def register_next_layer_input_support(
+        cls, is_supported: Any, build_next_layer_inputs_hook: Any
+    ):
+        entry = (is_supported, build_next_layer_inputs_hook)
+        if entry not in cls._next_layer_input_support:
+            cls._next_layer_input_support.append(entry)
+
+    @classmethod
+    def register_decoder_layer_support(cls, is_supported: Any, discoverer: Any):
+        entry = (is_supported, discoverer)
+        if entry not in cls._decoder_layer_support:
+            cls._decoder_layer_support.append(entry)
 
     @staticmethod
     def _patch_and_initialize_layer(layer: torch.nn.Module, stop_after_collection: bool = False):
@@ -851,8 +886,15 @@ class LayerActivationCollector:
         if hasattr(layer, "inputs"):
             del layer.inputs
 
+    def _resolve_next_layer_inputs_hook(self):
+        for is_supported, build_next_layer_inputs_hook in self._next_layer_input_support:
+            if not is_supported(self.model):
+                continue
+            return build_next_layer_inputs_hook(self.model)
+        return None
+
     @torch.no_grad()
-    def get_input_activations(self, layer: torch.nn.Module, forward_loop: ForwardLoop) -> list:
+    def _collect_input_activations(self, layer: torch.nn.Module, forward_loop: ForwardLoop) -> list:
         # Wrap model forward to catch _EarlyStopForward per-batch
         def _early_stop_forward(self, *args, **kwargs):
             try:
@@ -869,4 +911,20 @@ class LayerActivationCollector:
             self._unpatch_and_cleanup_layer(layer)
             unpatch_forward_method(self.model, "_original_forward")
 
+        return inputs
+
+    @torch.no_grad()
+    def get_input_activations(self, layer: torch.nn.Module, forward_loop: ForwardLoop) -> list:
+        is_first_layer = self._previous_layer is None or self._previous_layer_inputs is None
+        if is_first_layer:
+            inputs = self._collect_input_activations(layer, forward_loop)
+        else:
+            next_layer_inputs_hook = self._resolve_next_layer_inputs_hook()
+            if next_layer_inputs_hook is None:
+                inputs = self._collect_input_activations(layer, forward_loop)
+            else:
+                inputs = next_layer_inputs_hook(self._previous_layer, self._previous_layer_inputs)
+
+        self._previous_layer = layer
+        self._previous_layer_inputs = inputs
         return inputs
