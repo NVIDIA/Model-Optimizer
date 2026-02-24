@@ -162,6 +162,7 @@ _default_disabled_quantizer_cfg = {
     "default": {"enable": False},
 }
 
+
 _mamba_moe_disabled_quantizer_cfg = {
     "*fc1_latent_proj*": {"enable": False},  # Skip Latent MOE
     "*fc2_latent_proj*": {"enable": False},  # Skip Latent MOE
@@ -170,6 +171,7 @@ _mamba_moe_disabled_quantizer_cfg = {
     "*v_proj*": {"enable": False},  # Skip QKV Linear
     "*o_proj*": {"enable": False},  # Skip QKV Output Projection
 }
+
 
 INT8_DEFAULT_CFG = {
     "quant_cfg": {
@@ -264,7 +266,6 @@ INT4_BLOCKWISE_WEIGHT_ONLY_CFG = {
     },
     "algorithm": "max",
 }
-
 
 INT4_AWQ_CFG = {
     "quant_cfg": {
@@ -418,6 +419,7 @@ NVFP4_DEFAULT_CFG = {
     },
     "algorithm": "max",
 }
+
 
 NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG = {
     "quant_cfg": {
@@ -1097,6 +1099,15 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         title="This field specifies the name of the calibration algorithm. If None, no calibration is performed.",
     )
 
+    use_sequential: bool = ModeloptField(
+        default=False,
+        title="Enable sequential layer-by-layer calibration.",
+        description=(
+            "If True, the calibration algorithm is applied sequentially to each decoder block. "
+            "Outputs from one layer become inputs to the next, reducing memory usage for large models."
+        ),
+    )
+
 
 class MaxCalibConfig(QuantizeAlgorithmConfig):
     """The config for max calibration algorithm.
@@ -1379,6 +1390,44 @@ class GPTQLiteConfig(QuantizeAlgorithmConfig):
     """
 
     method: Literal["gptq_lite"] = ModeloptField("gptq_lite")
+    percdamp: float | None = ModeloptField(
+        default=0.01,
+        gt=0.0,
+        le=1.0,
+        title="Percentage damping factor.",
+        description="The percentage of average Hessian diagonal used for damping.",
+    )
+    block_size: int | None = ModeloptField(
+        default=128,
+        title="Block size for GPTQ weight update.",
+        description="""The block size for GPTQ weight update, which must be a multiple of the
+        group_size used in the quantization.""",
+    )
+    hessian_state_path: str | None = ModeloptField(
+        default=None,
+        title="Path to the Hessian state file.",
+        description="""The path to the Hessian state file. If hessian path exists, we load from
+         hessian file instead of recomputing them.""",
+    )
+
+
+class GPTQConfig(QuantizeAlgorithmConfig):
+    """The config for GPTQ lite.
+
+    GPTQ lite is a variant of GPTQ that does not exactly follow the official GPTQ implementation.
+
+    GPTQ lite does not perform sequential quantization of layers. This means that the updated
+    activations are not used to process the next layer.
+
+    The default values are taken from the official GPTQ implementation:
+    https://github.com/IST-DASLab/FP-Quant/blob/d2e3092f968262c4de5fb050e1aef568a280dadd/src/quantization/gptq.py#L35
+
+    Note: This feature is currently experimental and may not translate to improved accuracy as expected.
+
+
+    """
+
+    method: Literal["gptq"] = ModeloptField("gptq")
     percdamp: float | None = ModeloptField(
         default=0.01,
         gt=0.0,

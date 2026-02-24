@@ -1308,10 +1308,19 @@ class NVFP4StaticQuantizer(TensorQuantizer):
     def _fake_quantize(self, inputs):
         """Fake quantization using two-level scaling with _amax and _global_amax."""
         if self.amax is not None:
+            # Ensure amax/global_amax are on the same device as inputs.
+            # After from_pretrained with device_map, quantizer buffers may remain
+            # on CPU while model weights/activations are on GPU.
+            amax = self.amax
+            if amax.device != inputs.device:
+                amax = amax.to(inputs.device)
+            global_amax = self.global_amax
+            if global_amax is not None and global_amax.device != inputs.device:
+                global_amax = global_amax.to(inputs.device)
             return static_blockwise_fp4_fake_quant(
                 inputs,
-                self.amax,
-                self.global_amax,  # Can be None, will be computed internally
+                amax,
+                global_amax,  # Can be None, will be computed internally
                 True,  # quantize_block_scales
                 inputs.dtype,
                 self._pass_through_bwd,

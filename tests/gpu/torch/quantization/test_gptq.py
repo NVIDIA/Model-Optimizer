@@ -20,7 +20,9 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.export.unified_export_hf import _export_quantized_weight
 from modelopt.torch.quantization.model_calib import blockwise_weight_update, update_hessian
+from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 from modelopt.torch.utils.dataset_utils import create_forward_loop, get_dataset_dataloader
 
 RAND_SEED = 42
@@ -154,6 +156,91 @@ def test_gptq_updates(block_size, dim, model_weight, expect_weight_change):
         assert not torch.allclose(model.weight.data, q_dq_weight), "Weight should not be equal"
     else:
         assert torch.allclose(model.weight.data, q_dq_weight), "Weight should be equal"
+
+
+def test_gptq_export_roundtrip():
+    """Test that GPTQ export + dequantize produces weights matching in-memory QDQ."""
+    torch.manual_seed(RAND_SEED)
+    dim = 128
+    block_size = 4
+
+    # Step 1: Create a simple linear model and quantize to install NVFP4 quantizers
+    model = torch.nn.Linear(dim, dim).to("cuda")
+    model.name = "linear"
+    original_weight = model.weight.data.clone()
+    input_tensor = torch.randn(2, 16, dim).to("cuda")
+    quant_cfg = mtq.NVFP4_DEFAULT_CFG
+
+    mtq.quantize(model, quant_cfg, forward_loop=lambda m: m(input_tensor))
+
+    # Restore original weight before GPTQ
+    model.weight.data = original_weight.clone()
+
+    # Step 2: Perform GPTQ — compute Hessian and update weights
+    hessian = torch.zeros(dim, dim, dtype=torch.float32)
+    n_samples = 0
+    hessian, n_samples = update_hessian(input_tensor, hessian, n_samples)
+    hessian = hessian.to("cuda")
+
+    blockwise_weight_update(model, hessian, block_size, percdamp=0.1)
+
+    # Save the QDQ reference from the quantizer applied to GPTQ'd weights
+    gptq_weight_shape = model.weight.data.shape
+    gptq_weight_dtype = model.weight.data.dtype
+    qdq_ref = model.weight.data.clone()
+
+    # Step 3: Export — converts weight to packed NVFP4 and registers scale buffers
+    _export_quantized_weight(model, torch.bfloat16)
+
+    # Verify export produced the expected buffers
+    assert hasattr(model, "weight_scale"), "Export should register weight_scale buffer"
+    assert hasattr(model, "weight_scale_2"), "Export should register weight_scale_2 buffer"
+
+    # Step 4: Dequantize the exported packed weight and compare with QDQ reference
+    packed_weight = model.weight.data
+    weight_scale = model.weight_scale
+    weight_scale_2 = model.weight_scale_2
+
+    nvfp4_qtensor = NVFP4QTensor(gptq_weight_shape, gptq_weight_dtype, packed_weight)
+    deq_weight = nvfp4_qtensor.dequantize(
+        dtype=torch.bfloat16,
+        scale=weight_scale,
+        double_scale=weight_scale_2,
+        block_sizes={-1: 16},
+    )
+
+    assert deq_weight.shape == qdq_ref.shape, (
+        f"Shape mismatch: dequantized {deq_weight.shape} vs QDQ ref {qdq_ref.shape}"
+    )
+    diff = (deq_weight - qdq_ref.to(torch.bfloat16)).abs()
+    max_diff = diff.max().item()
+    max_diff_idx = diff.argmax().item()
+    max_diff_row = max_diff_idx // deq_weight.shape[1]
+    max_diff_col = max_diff_idx % deq_weight.shape[1]
+    num_mismatched = (diff > 1e-3).sum().item()
+    total_elements = diff.numel()
+
+    print("\n--- Diff Stats ---")
+    print(f"  Max diff:  {max_diff}")
+    print(f"  Mean diff: {diff.mean().item()}")
+    print(f"  Median diff: {diff.median().item()}")
+    print(f"  Std diff:  {diff.std().item()}")
+    print(
+        f"  Mismatched (>1e-3): {num_mismatched}/{total_elements} "
+        f"({100 * num_mismatched / total_elements:.2f}%)"
+    )
+    print(
+        f"  Max diff at [{max_diff_row}, {max_diff_col}]: "
+        f"deq={deq_weight[max_diff_row, max_diff_col].item()}, "
+        f"qdq_ref={qdq_ref[max_diff_row, max_diff_col].item()}"
+    )
+
+    assert torch.allclose(deq_weight, qdq_ref.to(torch.bfloat16), atol=1e-2), (
+        f"Dequantized weight does not match QDQ reference. "
+        f"Max diff: {max_diff} at [{max_diff_row}, {max_diff_col}] "
+        f"(deq={deq_weight[max_diff_row, max_diff_col].item()}, "
+        f"qdq_ref={qdq_ref[max_diff_row, max_diff_col].item()})"
+    )
 
 
 @pytest.mark.parametrize(
