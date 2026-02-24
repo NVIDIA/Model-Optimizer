@@ -50,9 +50,14 @@ from megatron.core.models.mamba import MambaModel
 from megatron.core.parallel_state import get_data_parallel_group
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.utils import unwrap_model
-from transformers import AutoTokenizer
+from transformers import AutoProcessor, AutoTokenizer
 
 from modelopt.torch.utils import get_dataset_samples, print_rank_0, warn_rank_0
+from modelopt.torch.utils.plugins.megatron_generate import megatron_generate
+from modelopt.torch.utils.vlm_dataset_utils import (
+    get_supported_vlm_datasets,
+    get_vlm_dataset_dataloader,
+)
 
 __all__ = [
     "get_hf_mbridge_calibration_loop",
@@ -263,6 +268,150 @@ def _get_dataset_cfg(
     return dataset_cfg
 
 
+def _get_hf_mbridge_vlm_calibration_loop(
+    *,
+    model: list[MegatronModule],
+    provider: GPTModelProvider | MambaModelProvider,
+    hf_model_name_or_path: str,
+    trust_remote_code: bool,
+    dataset_name: str,
+    num_samples: int,
+    micro_batch_size: int,
+) -> Callable[[nn.Module], None]:
+    """Create a VLM image+text calibration loop for Megatron-Bridge pruning.
+
+    This follows the same idea used in Megatron-Bridge VLM PTQ examples: build multimodal
+    batches via AutoProcessor and drive forward passes with `megatron_generate` (prefill + 1 token).
+    """
+    supported_vlm_datasets = set(get_supported_vlm_datasets())
+    if dataset_name not in supported_vlm_datasets:
+        raise ValueError(
+            f"Unsupported VLM calibration dataset: {dataset_name}. "
+            f"Supported VLM datasets: {sorted(supported_vlm_datasets)}"
+        )
+
+    print_rank_0(f"Using image-text calibration dataset: {dataset_name}")
+    processor = AutoProcessor.from_pretrained(
+        hf_model_name_or_path,
+        trust_remote_code=trust_remote_code,
+    )
+    calibration_model = unwrap_model(model[0])
+    model_device = next(calibration_model.parameters()).device
+    calib_dataloader = get_vlm_dataset_dataloader(
+        dataset_name=dataset_name,
+        processor=processor,
+        batch_size=micro_batch_size,
+        num_samples=num_samples,
+        device=model_device,
+        # NOTE: For Qwen3-VL style processors, `truncation=max_length` can break image-token alignment
+        # in the processor check (`Mismatch in image token count ...`). We therefore disable truncation
+        # here and skip over-length samples in the forward loop below.
+        max_length=None,
+        require_image=True,
+    )
+    max_seq_length = int(provider.seq_length)
+
+    def forward_loop(_m):
+        eval_model = unwrap_model(model[0])
+        eval_model.eval()
+        processed_steps = 0
+        skipped_long_samples = 0
+        seen_samples = 0
+        log_every = max(1, num_samples // 10)
+        next_log = log_every
+        show_progress = (
+            not torch.distributed.is_available()
+            or not torch.distributed.is_initialized()
+            or torch.distributed.get_rank() == 0
+        )
+        progress_bar = None
+        if show_progress:
+            try:
+                from tqdm.auto import tqdm
+
+                progress_bar = tqdm(total=num_samples, desc="VLM calib", dynamic_ncols=True)
+            except Exception:
+                progress_bar = None
+        with torch.no_grad():
+            for batch in calib_dataloader:
+                # Batch is expected to be multimodal model kwargs from processor.
+                input_ids = batch.get("input_ids")
+                if input_ids is None:
+                    raise ValueError(
+                        "VLM calibration batch is missing `input_ids`. "
+                        "Please check processor / dataset compatibility."
+                    )
+                batch_size = int(input_ids.shape[0])
+                seen_samples += batch_size
+                if progress_bar is not None:
+                    progress_bar.update(batch_size)
+                seq_len = int(input_ids.shape[-1])
+                if seq_len > max_seq_length:
+                    skipped_long_samples += 1
+                    if skipped_long_samples <= 3:
+                        warn_rank_0(
+                            f"Skipping over-length VLM calibration sample (seq_len={seq_len} > "
+                            f"seq_length={max_seq_length})."
+                        )
+                    if progress_bar is not None:
+                        progress_bar.set_postfix(
+                            processed=processed_steps,
+                            skipped=skipped_long_samples,
+                            refresh=False,
+                        )
+                    elif seen_samples >= next_log:
+                        print_rank_0(
+                            f"VLM calibration progress: seen={seen_samples}/{num_samples}, "
+                            f"processed={processed_steps}, skipped={skipped_long_samples}"
+                        )
+                        next_log += log_every
+                    continue
+                megatron_generate(
+                    model=eval_model,
+                    input_ids=input_ids,
+                    pixel_values=batch.get("pixel_values"),
+                    image_grid_thw=batch.get("image_grid_thw"),
+                    image_sizes=batch.get("image_sizes"),
+                    osl=1,
+                    enable_kv_cache=False,
+                    disable_tqdm=True,
+                )
+                processed_steps += 1
+                if progress_bar is not None:
+                    progress_bar.set_postfix(
+                        processed=processed_steps,
+                        skipped=skipped_long_samples,
+                        refresh=False,
+                    )
+                elif seen_samples >= next_log:
+                    print_rank_0(
+                        f"VLM calibration progress: seen={seen_samples}/{num_samples}, "
+                        f"processed={processed_steps}, skipped={skipped_long_samples}"
+                    )
+                    next_log += log_every
+
+        if progress_bar is not None:
+            progress_bar.close()
+
+        if processed_steps == 0:
+            raise RuntimeError(
+                "No valid VLM calibration samples were processed. "
+                f"All samples exceeded seq_length={max_seq_length}. "
+                "Try increasing --seq_length, using a different --calib_dataset_name, "
+                "or using smaller / fewer samples."
+            )
+        if skipped_long_samples > 0:
+            warn_rank_0(
+                f"Skipped {skipped_long_samples} over-length VLM calibration samples."
+            )
+        print_rank_0(
+            f"VLM calibration done: seen={seen_samples}, processed={processed_steps}, "
+            f"skipped={skipped_long_samples}"
+        )
+
+    return forward_loop
+
+
 def get_hf_mbridge_calibration_loop(
     *,
     model: list[MegatronModule],
@@ -274,6 +423,7 @@ def get_hf_mbridge_calibration_loop(
     num_samples: int = 512,
     micro_batch_size: int = 1,
     global_batch_size: int = 1,
+    calib_with_images: bool = False,
 ) -> Callable[[nn.Module], None]:
     """Get a modelopt calibration loop for a Megatron-Bridge model.
 
@@ -296,6 +446,18 @@ def get_hf_mbridge_calibration_loop(
             f"{global_batch_size=} is smaller than {micro_batch_size=}. Setting gbs to {micro_batch_size}."
         )
         global_batch_size = micro_batch_size
+
+    if calib_with_images:
+        return _get_hf_mbridge_vlm_calibration_loop(
+            model=model,
+            provider=provider,
+            hf_model_name_or_path=hf_model_name_or_path,
+            trust_remote_code=trust_remote_code,
+            dataset_name=dataset_name,
+            num_samples=num_samples,
+            micro_batch_size=micro_batch_size,
+        )
+
     num_iters = num_samples // global_batch_size
 
     # NOTE: Issue with NemotronH tokenizer's len() hence using use_fast=True as a WAR
