@@ -33,6 +33,8 @@ from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_me
 if TYPE_CHECKING:
     from collections.abc import Generator
 
+    from modelopt.torch.opt.searcher import ForwardLoop
+
 __all__ = [
     "EXPORT_MODE",
     "convert_quantization_axis_to_reduce_axis",
@@ -910,5 +912,4 @@ class LayerActivationCollector:
         finally:
             self._unpatch_and_cleanup_layer(layer)
             unpatch_forward_method(self.model, "_original_forward")
-
         return inputs
