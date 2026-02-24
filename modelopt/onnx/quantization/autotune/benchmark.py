@@ -15,7 +15,8 @@
 
 """TensorRT Utilities and Benchmark Module.
 
-This module provides comprehensive TensorRT utilities including:
+This benchmark module is used to evaluate ONNX model performance.
+It provides comprehensive TensorRT utilities including:
 - Benchmark framework for measuring TensorRT engine performance
 - Graph utilities for tensor analysis
 
@@ -36,6 +37,7 @@ import tempfile
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -49,10 +51,23 @@ if TRT_AVAILABLE:
 CUDART_AVAILABLE = importlib.util.find_spec("cuda") is not None
 if CUDART_AVAILABLE:
     try:
-        from cuda import cudart
+        from cuda.bindings import runtime as cudart
     except ImportError:
         with contextlib.suppress(ImportError):
-            from cuda.bindings import runtime as cudart
+            from cuda import cudart  # deprecated: prefer cuda.bindings.runtime
+
+
+def _validate_shape_range(min_shape: list, opt_shape: list, max_shape: list) -> None:
+    """Raise ValueError if shape lengths differ or if min <= opt <= max fails at any dimension."""
+    if len(min_shape) != len(opt_shape) or len(opt_shape) != len(max_shape):
+        raise ValueError("min_shape, opt_shape, and max_shape must have the same length")
+    for i, (min_d, opt_d, max_d) in enumerate(zip(min_shape, opt_shape, max_shape)):
+        if min_d > opt_d or opt_d > max_d:
+            raise ValueError(
+                f"Invalid shape range at dimension {i}: "
+                f"min={min_d}, opt={opt_d}, max={max_d}. "
+                f"Must satisfy min <= opt <= max"
+            )
 
 
 class Benchmark(ABC):
@@ -151,19 +166,15 @@ class TrtExecBenchmark(Benchmark):
         timing_runs: int = 10,
         plugin_libraries: list[str] | None = None,
         trtexec_path: str = "trtexec",
-        trtexec_args: list | None = None,
+        trtexec_args: list[str] | None = None,
     ):
         """Initialize the trtexec benchmark.
 
         Args:
-            timing_cache_file: Path to TensorRT timing cache file for faster
-                              subsequent builds. Defaults to '/tmp/trtexec_timing.cache'.
-            warmup_runs: Number of warmup iterations before timing measurements.
-            timing_runs: Number of iterations for latency measurement. Results
-                        are averaged across these runs.
-            plugin_libraries: List of paths to TensorRT plugin shared libraries (.so files).
-                             These plugins will be loaded by trtexec during engine building.
-                             If None, no custom plugins are loaded.
+            timing_cache_file: See :meth:`Benchmark.__init__`.
+            warmup_runs: See :meth:`Benchmark.__init__`.
+            timing_runs: See :meth:`Benchmark.__init__`.
+            plugin_libraries: See :meth:`Benchmark.__init__`.
             trtexec_path: Path to trtexec binary. Defaults to 'trtexec' which
                          looks for the binary in PATH.
             trtexec_args: Additional command-line arguments to pass to trtexec.
@@ -231,6 +242,7 @@ class TrtExecBenchmark(Benchmark):
         self,
         path_or_bytes: str | bytes,
         log_file: str | None = None,
+        flush_timing_cache: bool = False,
     ) -> float:
         """Run benchmark using trtexec.
 
@@ -424,49 +436,34 @@ class TensorRTPyBenchmark(Benchmark):
             opt_shape: Optimal/default shape for this input. List of integers.
             max_shape: Maximum shape for this input. List of integers.
         """
-        if len(min_shape) != len(opt_shape) or len(opt_shape) != len(max_shape):
-            raise ValueError("min_shape, opt_shape, and max_shape must have the same length")
-
-        for i, (min_dim, opt_dim, max_dim) in enumerate(zip(min_shape, opt_shape, max_shape)):
-            if not (min_dim <= opt_dim <= max_dim):
-                raise ValueError(
-                    f"Invalid shape range at dimension {i}: "
-                    f"min={min_dim}, opt={opt_dim}, max={max_dim}. "
-                    f"Must satisfy min <= opt <= max"
-                )
-
+        _validate_shape_range(min_shape, opt_shape, max_shape)
         self._shape_configs[input_name] = (min_shape, opt_shape, max_shape)
         self.logger.debug(
             f"Set shapes for input '{input_name}': "
             f"min={min_shape}, opt={opt_shape}, max={max_shape}"
         )
 
-    def run(
+    def _build_engine(
         self,
         path_or_bytes: str | bytes,
-        log_file: str | None = None,
         flush_timing_cache: bool = False,
-    ) -> float:
-        """Run benchmark using TensorRT Python API.
+    ) -> tuple[bytes | None, float | None]:
+        """Build a serialized TensorRT engine from ONNX model data.
 
         Args:
-            path_or_bytes: Path to the ONNX model (str) or raw model data (bytes)
-            log_file: Optional path to save benchmark logs
+            path_or_bytes: Path to the ONNX model (str) or raw model data (bytes).
+            flush_timing_cache: If True, save the timing cache to disk after build.
 
         Returns:
-            Measured median latency in milliseconds
+            (serialized_engine, build_time) on success, or (None, None) on parse/build failure.
         """
-        config = network = parser = serialized_engine = engine = context = stream_handle = None
-        inputs, outputs = [], []
-
+        config = self.builder.create_builder_config()
+        network = self.builder.create_network(self.network_flags)
+        parser = trt.OnnxParser(network, self.trt_logger)
         try:
-            self.logger.debug("Creating TensorRT builder...")
-            config = self.builder.create_builder_config()
             config.set_flag(trt.BuilderFlag.DIRECT_IO)
             if not config.set_timing_cache(self._timing_cache, ignore_mismatch=True):
                 self.logger.warning("Failed to set timing cache to builder config")
-            network = self.builder.create_network(self.network_flags)
-            parser = trt.OnnxParser(network, self.trt_logger)
             if isinstance(path_or_bytes, bytes):
                 self.logger.debug(f"Parsing ONNX model from bytes (size: {len(path_or_bytes)})")
                 model_data = path_or_bytes
@@ -479,7 +476,7 @@ class TensorRTPyBenchmark(Benchmark):
                 self.logger.error("Failed to parse ONNX model")
                 for error_idx in range(parser.num_errors):
                     self.logger.error(f"  {parser.get_error(error_idx)}")
-                return float("inf")
+                return (None, None)
 
             has_dynamic_shapes = any(
                 any(dim == -1 for dim in network.get_input(i).shape)
@@ -518,117 +515,200 @@ class TensorRTPyBenchmark(Benchmark):
 
             if serialized_engine is None:
                 self.logger.error("Failed to build TensorRT engine")
-                return float("inf")
+                return (None, None)
 
             self.logger.debug(f"Engine built successfully in {build_time:.2f}s")
 
             if flush_timing_cache:
                 self._save_timing_cache()
 
-            engine = self.runtime.deserialize_cuda_engine(serialized_engine)
+            return (serialized_engine, build_time)
+        finally:
+            del parser, network, config
 
-            if engine is None:
-                self.logger.error("Failed to deserialize engine")
+    def _allocate_buffers(
+        self,
+        engine: "trt.ICudaEngine",
+        context: "trt.IExecutionContext",
+    ) -> tuple[list[dict], list[dict], Any]:
+        """Allocate host and device buffers for engine I/O and set tensor addresses.
+
+        Args:
+            engine: Deserialized TensorRT engine.
+            context: Execution context with tensor shapes set.
+
+        Returns:
+            (inputs, outputs, stream_handle) where inputs/outputs are lists of buffer dicts
+            with keys host_ptr, host, device_ptr, nbytes, name; stream_handle is a CUDA stream.
+
+        Raises:
+            RuntimeError: If CUDA allocation or stream creation fails.
+        """
+
+        def _alloc_pinned_host(size: int, dtype: np.dtype):
+            nbytes = size * np.dtype(dtype).itemsize
+            err, host_ptr = cudart.cudaMallocHost(nbytes)
+            if err != cudart.cudaError_t.cudaSuccess:
+                raise RuntimeError(f"cudaMallocHost failed: {err}")
+            addr = int(host_ptr) if hasattr(host_ptr, "__int__") else host_ptr
+            ctype = np.ctypeslib.as_ctypes_type(dtype)
+            arr = np.ctypeslib.as_array((ctype * size).from_address(addr))
+            return host_ptr, arr
+
+        inputs = []
+        outputs = []
+
+        for i in range(engine.num_io_tensors):
+            tensor_name = engine.get_tensor_name(i)
+            dtype = trt.nptype(engine.get_tensor_dtype(tensor_name))
+            shape = context.get_tensor_shape(tensor_name)
+
+            size = trt.volume(shape)
+            nbytes = size * np.dtype(dtype).itemsize
+
+            err, device_ptr = cudart.cudaMalloc(nbytes)
+            if err != cudart.cudaError_t.cudaSuccess:
+                raise RuntimeError(f"cudaMalloc failed: {err}")
+
+            host_ptr, host_mem = _alloc_pinned_host(size, dtype)
+
+            if engine.get_tensor_mode(tensor_name) == trt.TensorIOMode.INPUT:
+                np.copyto(host_mem, np.random.randn(size).astype(dtype))
+                inputs.append(
+                    {
+                        "host_ptr": host_ptr,
+                        "host": host_mem,
+                        "device_ptr": device_ptr,
+                        "nbytes": nbytes,
+                        "name": tensor_name,
+                    }
+                )
+            else:
+                outputs.append(
+                    {
+                        "host_ptr": host_ptr,
+                        "host": host_mem,
+                        "device_ptr": device_ptr,
+                        "nbytes": nbytes,
+                        "name": tensor_name,
+                    }
+                )
+
+            context.set_tensor_address(tensor_name, int(device_ptr))
+
+        err, stream_handle = cudart.cudaStreamCreate()
+        if err != cudart.cudaError_t.cudaSuccess:
+            raise RuntimeError(f"cudaStreamCreate failed: {err}")
+
+        return (inputs, outputs, stream_handle)
+
+    def _setup_execution_context(
+        self, serialized_engine: bytes
+    ) -> tuple["trt.ICudaEngine | None", "trt.IExecutionContext | None"]:
+        """Deserialize the engine and create an execution context.
+
+        Args:
+            serialized_engine: Serialized TensorRT engine bytes.
+
+        Returns:
+            (engine, context) or (None, None) if deserialization fails.
+        """
+        engine = self.runtime.deserialize_cuda_engine(serialized_engine)
+        if engine is None:
+            self.logger.error("Failed to deserialize engine")
+            return (None, None)
+        context = engine.create_execution_context()
+        return (engine, context)
+
+    def _run_warmup(
+        self,
+        context: "trt.IExecutionContext",
+        inputs: list[dict],
+        outputs: list[dict],
+        stream_handle: Any,
+    ) -> None:
+        """Run warmup iterations to stabilize GPU state and cache."""
+        h2d = cudart.cudaMemcpyKind.cudaMemcpyHostToDevice
+        d2h = cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost
+        self.logger.debug(f"Running {self.warmup_runs} warmup iterations...")
+        for _ in range(self.warmup_runs):
+            for inp in inputs:
+                cudart.cudaMemcpyAsync(
+                    inp["device_ptr"], inp["host_ptr"], inp["nbytes"], h2d, stream_handle
+                )
+            context.execute_async_v3(stream_handle)
+            for out in outputs:
+                cudart.cudaMemcpyAsync(
+                    out["host_ptr"], out["device_ptr"], out["nbytes"], d2h, stream_handle
+                )
+            cudart.cudaStreamSynchronize(stream_handle)
+
+    def _run_timing(
+        self,
+        context: "trt.IExecutionContext",
+        inputs: list[dict],
+        outputs: list[dict],
+        stream_handle: Any,
+    ) -> np.ndarray:
+        """Run timing iterations and return per-run latencies in milliseconds."""
+        h2d = cudart.cudaMemcpyKind.cudaMemcpyHostToDevice
+        d2h = cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost
+        self.logger.debug(f"Running {self.timing_runs} timing iterations...")
+        latencies = []
+        for _ in range(self.timing_runs):
+            for inp in inputs:
+                cudart.cudaMemcpyAsync(
+                    inp["device_ptr"], inp["host_ptr"], inp["nbytes"], h2d, stream_handle
+                )
+
+            cudart.cudaStreamSynchronize(stream_handle)
+            start = time.perf_counter()
+            context.execute_async_v3(stream_handle)
+            cudart.cudaStreamSynchronize(stream_handle)
+            end = time.perf_counter()
+
+            latency_ms = (end - start) * 1000.0
+            latencies.append(latency_ms)
+
+            for out in outputs:
+                cudart.cudaMemcpyAsync(
+                    out["host_ptr"], out["device_ptr"], out["nbytes"], d2h, stream_handle
+                )
+
+        return np.array(latencies)
+
+    def run(
+        self,
+        path_or_bytes: str | bytes,
+        log_file: str | None = None,
+        flush_timing_cache: bool = False,
+    ) -> float:
+        """Run benchmark using TensorRT Python API.
+
+        Args:
+            path_or_bytes: Path to the ONNX model (str) or raw model data (bytes)
+            log_file: Optional path to save benchmark logs
+            flush_timing_cache: If True, save the timing cache to disk after engine build.
+
+        Returns:
+            Measured median latency in milliseconds
+        """
+        serialized_engine = engine = context = stream_handle = None
+        inputs, outputs = [], []
+
+        try:
+            serialized_engine, build_time = self._build_engine(path_or_bytes, flush_timing_cache)
+            if serialized_engine is None or build_time is None:
                 return float("inf")
 
-            context = engine.create_execution_context()
+            engine, context = self._setup_execution_context(serialized_engine)
+            if engine is None or context is None:
+                return float("inf")
 
-            inputs = []
-            outputs = []
-            stream_handle = None
+            inputs, outputs, stream_handle = self._allocate_buffers(engine, context)
+            self._run_warmup(context, inputs, outputs, stream_handle)
+            latencies = self._run_timing(context, inputs, outputs, stream_handle)
 
-            def _alloc_pinned_host(size: int, dtype: np.dtype):
-                nbytes = size * np.dtype(dtype).itemsize
-                err, host_ptr = cudart.cudaMallocHost(nbytes)
-                if err != cudart.cudaError_t.cudaSuccess:
-                    raise RuntimeError(f"cudaMallocHost failed: {err}")
-                addr = int(host_ptr) if hasattr(host_ptr, "__int__") else host_ptr
-                ctype = np.ctypeslib.as_ctypes_type(dtype)
-                arr = np.ctypeslib.as_array((ctype * size).from_address(addr))
-                return host_ptr, arr
-
-            for i in range(engine.num_io_tensors):
-                tensor_name = engine.get_tensor_name(i)
-                dtype = trt.nptype(engine.get_tensor_dtype(tensor_name))
-                shape = context.get_tensor_shape(tensor_name)
-
-                size = trt.volume(shape)
-                nbytes = size * np.dtype(dtype).itemsize
-
-                err, device_ptr = cudart.cudaMalloc(nbytes)
-                if err != cudart.cudaError_t.cudaSuccess:
-                    raise RuntimeError(f"cudaMalloc failed: {err}")
-
-                host_ptr, host_mem = _alloc_pinned_host(size, dtype)
-
-                if engine.get_tensor_mode(tensor_name) == trt.TensorIOMode.INPUT:
-                    np.copyto(host_mem, np.random.randn(size).astype(dtype))
-                    inputs.append(
-                        {
-                            "host_ptr": host_ptr,
-                            "host": host_mem,
-                            "device_ptr": device_ptr,
-                            "nbytes": nbytes,
-                            "name": tensor_name,
-                        }
-                    )
-                else:
-                    outputs.append(
-                        {
-                            "host_ptr": host_ptr,
-                            "host": host_mem,
-                            "device_ptr": device_ptr,
-                            "nbytes": nbytes,
-                            "name": tensor_name,
-                        }
-                    )
-
-                context.set_tensor_address(tensor_name, int(device_ptr))
-
-            err, stream_handle = cudart.cudaStreamCreate()
-            if err != cudart.cudaError_t.cudaSuccess:
-                raise RuntimeError(f"cudaStreamCreate failed: {err}")
-
-            h2d = cudart.cudaMemcpyKind.cudaMemcpyHostToDevice
-            d2h = cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost
-
-            self.logger.debug(f"Running {self.warmup_runs} warmup iterations...")
-            for _ in range(self.warmup_runs):
-                for inp in inputs:
-                    cudart.cudaMemcpyAsync(
-                        inp["device_ptr"], inp["host_ptr"], inp["nbytes"], h2d, stream_handle
-                    )
-                context.execute_async_v3(stream_handle)
-                for out in outputs:
-                    cudart.cudaMemcpyAsync(
-                        out["host_ptr"], out["device_ptr"], out["nbytes"], d2h, stream_handle
-                    )
-                cudart.cudaStreamSynchronize(stream_handle)
-
-            self.logger.debug(f"Running {self.timing_runs} timing iterations...")
-            latencies = []
-
-            for _ in range(self.timing_runs):
-                for inp in inputs:
-                    cudart.cudaMemcpyAsync(
-                        inp["device_ptr"], inp["host_ptr"], inp["nbytes"], h2d, stream_handle
-                    )
-
-                cudart.cudaStreamSynchronize(stream_handle)
-                start = time.perf_counter()
-                context.execute_async_v3(stream_handle)
-                cudart.cudaStreamSynchronize(stream_handle)
-                end = time.perf_counter()
-
-                latency_ms = (end - start) * 1000.0
-                latencies.append(latency_ms)
-
-                for out in outputs:
-                    cudart.cudaMemcpyAsync(
-                        out["host_ptr"], out["device_ptr"], out["nbytes"], d2h, stream_handle
-                    )
-
-            latencies = np.array(latencies)
             median_latency = float(np.median(latencies))
             mean_latency = float(np.mean(latencies))
             std_latency = float(np.std(latencies))
@@ -684,9 +764,6 @@ class TensorRTPyBenchmark(Benchmark):
                     context,
                     engine,
                     serialized_engine,
-                    parser,
-                    network,
-                    config,
                 )
             except Exception as cleanup_error:
                 self.logger.warning(f"Error during cleanup: {cleanup_error}")

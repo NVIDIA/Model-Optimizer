@@ -48,10 +48,10 @@ class TestTensorRTPyBenchmark:
     def _require_tensorrt_and_cudart(self):
         pytest.importorskip("tensorrt")
         try:
-            from cuda import cudart  # noqa: F401
+            from cuda.bindings import runtime  # noqa: F401
         except ImportError:
             try:
-                from cuda.bindings import runtime  # noqa: F401
+                from cuda import cudart  # noqa: F401  # deprecated: prefer cuda.bindings.runtime
             except ImportError:
                 pytest.skip("cuda-python (cudart) not available", allow_module_level=False)
 
