@@ -399,9 +399,9 @@ SKIP_SOFTMAX_DEFAULT = {
 SKIP_SOFTMAX_CALIB = {
     "sparse_cfg": {
         "calibration": {
-            "target_sparse_ratio": {"prefill": 0.9, "decode": 0.9},
+            "target_sparse_ratio": {"prefill": 0.5, "decode": 0.5},
             "samples": 64,
-            "max_seqlen": 65536,
+            "max_seqlen": 16384,
             "chunk_size": 4096,
         },
         "*attn*": {
