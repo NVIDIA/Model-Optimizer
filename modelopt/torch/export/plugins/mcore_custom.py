@@ -274,6 +274,59 @@ def save_safetensors(state_dict, save_directory: str | os.PathLike):
             json.dump(safetensor_index, f, indent=4)
 
 
+def save_safetensors_by_layer_index(
+    layer_state_dicts: dict[int, dict[str, torch.Tensor]],
+    total_layers: int,
+    save_directory: str | os.PathLike,
+    name_template: str = "model-{:05d}-of-{:05d}",
+):
+    """Save safetensors by layer index.
+
+    Args:
+        layer_state_dicts: A dictionary of layer state dictionaries.
+        total_layers: Total number of layers.
+        save_directory: Path to the save directory.
+        name_template: Template for the filename.
+    """
+    for layer_index, layer_state_dict in layer_state_dicts.items():
+        filename = name_template.format(layer_index, total_layers)
+        meta_filename = filename + ".json"
+        ckpt_filename = filename + ".safetensors"
+
+        weight_map = {}
+        layer_total_size = 0
+        for key, val in layer_state_dict.items():
+            tensor_size = val.numel() * val.element_size()
+            layer_total_size += tensor_size
+            weight_map[key] = ckpt_filename
+
+        with open(save_directory + "/" + meta_filename, "w") as f:
+            json.dump(
+                {"metadata": {"total_size": layer_total_size}, "weight_map": weight_map},
+                f,
+                indent=4,
+            )
+        save_file(layer_state_dict, save_directory + "/" + ckpt_filename, metadata={"format": "pt"})
+
+    # [TODO]: this global barrier needs to be replaced with something safer
+    torch.distributed.barrier()
+
+    if torch.distributed.get_rank() == 0:
+        safetensor_index = {
+            "metadata": {"total_size": 0},
+            "weight_map": {},
+        }
+        for layer_index in range(total_layers):
+            meta_filename = name_template.format(layer_index + 1, total_layers) + ".json"
+            with open(save_directory + "/" + meta_filename) as f:
+                shard = json.load(f)
+            safetensor_index["metadata"]["total_size"] += shard["metadata"]["total_size"]
+            safetensor_index["weight_map"].update(shard["weight_map"])
+
+        with open(save_directory + "/model.safetensors.index.json", "w") as f:
+            json.dump(safetensor_index, f, indent=4)
+
+
 def _get_safetensors_file(pretrained_model_path: str | Path, key: str) -> Path | None:
     """Given a tensor key return the safetensors file that contains this tensor if exists.
 

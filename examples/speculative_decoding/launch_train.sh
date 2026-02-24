@@ -102,6 +102,14 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       DP_SHARD_SIZE="${1#*=}"
       ;;
+    --log_steps*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      LOG_STEPS="${1#*=}"
+      ;;
+    --draft_vocab_cache*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      DRAFT_VOCAB_CACHE="${1#*=}"
+      ;;
     *)
       >&2 printf "Error: Invalid argument ${1#*=}\n"
       exit 1
@@ -126,7 +134,7 @@ OUTPUT_DIR=${OUTPUT_DIR:-"ckpts/${MODEL_BASENAME}-$(date +%Y%m%d_%H%M)"}
 NUM_EPOCHS=${NUM_EPOCHS:-1}
 SAVE_STEPS=${SAVE_STEPS:-$DEFAULT_SAVE_STEPS}
 LR=${LR:-"1e-4"}
-TRAIN_BS=${TRAIN_BS:-4}
+TRAIN_BS=${TRAIN_BS:-1}
 MEDUSA_NUM_HEADS=${MEDUSA_NUM_HEADS:-1}
 MEDUSA_NUM_LAYERS=${MEDUSA_NUM_LAYERS:-1}
 TRAINING_SEQ_LEN=${TRAINING_SEQ_LEN:-2048}
@@ -138,6 +146,8 @@ AR_VALIDATE_STEPS=${AR_VALIDATE_STEPS:-1000}
 ESTIMATE_AR=${ESTIMATE_AR:-False}
 CP_SIZE=${CP_SIZE:-1}
 DP_SHARD_SIZE=${DP_SHARD_SIZE:-$((GPU_COUNT/CP_SIZE))}
+LOG_STEPS=${LOG_STEPS:-100}
+DRAFT_VOCAB_CACHE=${DRAFT_VOCAB_CACHE:-""}
 
 if [[ "$MODE" == "medusa" ]]; then
   SPECULATIVE_ARGS="--medusa_num_heads $MEDUSA_NUM_HEADS --medusa_num_layers $MEDUSA_NUM_LAYERS"
@@ -179,6 +189,13 @@ else
 fi
 
 
+if [[ "$DRAFT_VOCAB_CACHE" != "" ]]; then
+  DRAFT_VOCAB_CACHE_ARGS="--draft_vocab_cache $DRAFT_VOCAB_CACHE"
+else
+  DRAFT_VOCAB_CACHE_ARGS=""
+fi
+
+
 # Disable tokenizers parallelism to avoid warning
 export TOKENIZERS_PARALLELISM=False
 CMD="accelerate launch --mixed_precision bf16 main.py \
@@ -201,12 +218,13 @@ CMD="accelerate launch --mixed_precision bf16 main.py \
     --weight_decay 0.0 \
     --warmup_steps 100 \
     --lr_scheduler_type linear \
-    --logging_steps 100 \
+    --logging_steps $LOG_STEPS \
     --tf32 True \
     --data_path $DATA \
     --disable_tqdm $DISABLE_TQDM \
     --estimate_ar $ESTIMATE_AR \
     --ar_validate_steps $AR_VALIDATE_STEPS \
+    $DRAFT_VOCAB_CACHE_ARGS \
     $VLM_ARGS \
     $OFFLINE_TRAINING_ARGS \
     $SPECULATIVE_ARGS \

@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-import torch.nn as nn
 from calibration import Calibrator
 from config import (
     FP8_DEFAULT_CONFIG,
@@ -137,6 +136,8 @@ class Quantizer:
                 quant_config = NVFP4_DEFAULT_CONFIG
         else:
             raise NotImplementedError(f"Unknown format {self.config.format}")
+        if self.config.quantize_mha:
+            quant_config["quant_cfg"]["*[qkv]_bmm_quantizer"] = {"num_bits": (4, 3), "axis": None}  # type: ignore[index]
         set_quant_config_attr(
             quant_config,
             self.model_config.trt_high_precision_dtype.value,
@@ -144,7 +145,7 @@ class Quantizer:
             alpha=self.config.alpha,
             lowrank=self.config.lowrank,
         )
-
+        self.logger.info(f"Quant config {quant_config}")
         return quant_config
 
     def quantize_model(
@@ -180,16 +181,23 @@ class Quantizer:
 class ExportManager:
     """Handles model export operations."""
 
-    def __init__(self, config: ExportConfig, logger: logging.Logger):
+    def __init__(
+        self,
+        config: ExportConfig,
+        logger: logging.Logger,
+        pipeline_manager: PipelineManager | None = None,
+    ):
         """
         Initialize export manager.
 
         Args:
             config: Export configuration
             logger: Logger instance
+            pipeline_manager: Pipeline manager for per-backbone IO
         """
         self.config = config
         self.logger = logger
+        self.pipeline_manager = pipeline_manager
 
     def _has_conv_layers(self, model: torch.nn.Module) -> bool:
         """
@@ -213,13 +221,18 @@ class ExportManager:
         Save quantized model checkpoint.
 
         Args:
-            backbone: Model backbone to save
+            backbone: The quantized backbone module to save (must be the same instance
+                that was passed to mtq.quantize, as it carries the _modelopt_state).
         """
         if not self.config.quantized_torch_ckpt_path:
             return
 
-        self.logger.info(f"Saving quantized checkpoint to {self.config.quantized_torch_ckpt_path}")
-        mto.save(backbone, str(self.config.quantized_torch_ckpt_path))
+        ckpt_path = self.config.quantized_torch_ckpt_path
+        ckpt_path.mkdir(parents=True, exist_ok=True)
+        target_path = ckpt_path / "backbone.pt"
+        self.logger.info(f"Saving backbone to {target_path}")
+        mto.save(backbone, str(target_path))
+
         self.logger.info("Checkpoint saved successfully")
 
     def export_onnx(
@@ -262,19 +275,26 @@ class ExportManager:
 
         self.logger.info("ONNX export completed successfully")
 
-    def restore_checkpoint(self, backbone: nn.Module) -> None:
+    def restore_checkpoint(self) -> None:
         """
         Restore a previously quantized model.
 
-        Args:
-            backbone: Model backbone to restore into
         """
         if not self.config.restore_from:
             return
 
-        self.logger.info(f"Restoring model from {self.config.restore_from}")
-        mto.restore(backbone, str(self.config.restore_from))
-        self.logger.info("Model restored successfully")
+        restore_path = self.config.restore_from
+        if self.pipeline_manager is None:
+            raise RuntimeError("Pipeline manager is required for per-backbone checkpoints.")
+
+        backbone = self.pipeline_manager.get_backbone()
+        if restore_path.exists() and restore_path.is_dir():
+            source_path = restore_path / "backbone.pt"
+            if not source_path.exists():
+                raise FileNotFoundError(f"Backbone checkpoint not found: {source_path}")
+            self.logger.info(f"Restoring backbone from {source_path}")
+            mto.restore(backbone, str(source_path))
+        self.logger.info("Backbone checkpoints restored successfully")
 
     # TODO: should not do the any data type
     def export_hf_ckpt(self, pipe: Any) -> None:
@@ -333,9 +353,13 @@ def create_argument_parser() -> argparse.ArgumentParser:
     )
     model_group.add_argument(
         "--backbone",
-        type=str,
+        nargs="+",
         default=None,
-        help="model backbone in the DiffusionPipeline to work on, if not provided use default based on model type",
+        help=(
+            "Model backbone(s) in the DiffusionPipeline to work on. "
+            "Provide one name or multiple names separated by space or comma. "
+            "If not provided use default based on model type."
+        ),
     )
     model_group.add_argument(
         "--model-dtype",
@@ -464,7 +488,7 @@ def main() -> None:
 
     model_type = ModelType(args.model)
     if args.backbone is None:
-        args.backbone = MODEL_DEFAULTS[model_type]["backbone"]
+        args.backbone = [MODEL_DEFAULTS[model_type]["backbone"]]
     s = time.time()
 
     model_dtype = {"default": DataType(args.model_dtype).torch_dtype}
@@ -536,15 +560,11 @@ def main() -> None:
         pipeline_manager.setup_device()
 
         backbone = pipeline_manager.get_backbone()
-        export_manager = ExportManager(export_config, logger)
+        export_manager = ExportManager(export_config, logger, pipeline_manager)
 
         if export_config.restore_from and export_config.restore_from.exists():
-            export_manager.restore_checkpoint(backbone)
+            export_manager.restore_checkpoint()
 
-            if export_config.quantized_torch_ckpt_path and not export_config.restore_from.samefile(
-                export_config.restore_from
-            ):
-                export_manager.save_checkpoint(backbone)
         else:
             logger.info("Initializing calibration...")
             calibrator = Calibrator(pipeline_manager, calib_config, model_config.model_type, logger)
@@ -567,10 +587,12 @@ def main() -> None:
 
             export_manager.save_checkpoint(backbone)
 
+        # TODO (Jingyu): To update this function, as we are focusing more on the torch deployment side.
         check_conv_and_mha(
             backbone, quant_config.format == QuantFormat.FP4, quant_config.quantize_mha
         )
-        mtq.print_quant_summary(backbone)
+
+        pipeline_manager.print_quant_summary()
 
         export_manager.export_onnx(
             pipe,

@@ -17,30 +17,56 @@
 
 """Processing large data to tokenize for pretraining.
 
-Usage:
+Usage to tokenize one or more JSONL files:
 
-```python
-from modelopt.torch.utils.plugins import megatron_preprocess_data
-
-megatron_preprocess_data(
-    input_path="path/to/input/data",
-    output_dir="path/to/output/dir",
-    tokenizer_name_or_path="hf_model_name",
-    json_keys=["name of json key(s) to tokenize"],
-)
+```bash
+python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
+    --jsonl_paths path/to/input/data1.jsonl path/to/input/data2.jsonl ... \
+    --json_keys text \
+    --output_dir /path/to/tokenized/Qwen3/ \
+    --tokenizer Qwen/Qwen3-0.6B
 ```
+
+Usage to tokenize all JSONL files in a directory:
+
+```bash
+python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
+    --input_dir /path/to/input/data/ \
+    --json_keys text \
+    --output_dir /path/to/tokenized/Qwen3/ \
+    --tokenizer Qwen/Qwen3-0.6B
+```
+
+Usage to download and tokenize a dataset from Hugging Face Hub:
+
+```bash
+python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
+    --hf_dataset nvidia/Nemotron-Pretraining-Dataset-sample \
+    --hf_name Nemotron-SFT-Code \
+    --hf_split train \
+    --json_keys text \
+    --tokenizer Qwen/Qwen3-0.6B \
+    --output_dir /path/to/tokenized/Qwen3/
+```
+
+NOTE: If you skip --hf_name, it will download and tokenize all subsets for the dataset.
+If you skip --hf_split, it will download and tokenize all splits for the subset.
 """
 
 import argparse
 import json
 import multiprocessing
-import sys
+import os
 from pathlib import Path
+from warnings import warn
 
 import requests
 from datasets import load_dataset
+from huggingface_hub.utils import build_hf_headers
 from megatron.core.datasets import indexed_dataset
 from transformers import AutoTokenizer
+
+from modelopt.torch.utils import num2hrb
 
 __all__ = ["megatron_preprocess_data"]
 
@@ -106,11 +132,13 @@ class _Partition:
         self.log_interval = log_interval
         self.workers = workers
 
-    def _print_processing_stats(self, count: int, total_doc_len: int, total_enc_len: int):
-        if count % self.log_interval == 0:
+    def _print_processing_stats(
+        self, count: int, total_doc_len: int, total_enc_len: int, *, force_print: bool = False
+    ):
+        if count % self.log_interval == 0 or force_print:
             print(
-                f"Processed {count} documents, {total_doc_len} chars, {total_enc_len} tokens",
-                file=sys.stderr,
+                f"\tProcessed {num2hrb(count)} docs = {num2hrb(total_doc_len)} chars = {num2hrb(total_enc_len)} tokens",
+                flush=True,
             )
 
     def process_json_file(
@@ -118,7 +146,7 @@ class _Partition:
     ):
         output_prefix = Path(output_dir) / Path(input_file_name).stem
 
-        print("Opening", input_file_name)
+        print(f"\nOpening {input_file_name}")
         fin = open(input_file_name, encoding="utf-8")
 
         pool = multiprocessing.Pool(self.workers, initializer=encoder.initializer)
@@ -140,7 +168,7 @@ class _Partition:
             )
 
         if not builders:
-            print(f"Output files corresponding to {input_file_name} already exist, skipping")
+            print(f"\t[SKIP] Output files corresponding to {input_file_name} already exist")
             return 0
 
         total_doc_len, total_enc_len, final_enc_len = 0, 0, 0
@@ -151,6 +179,7 @@ class _Partition:
             for key in doc:
                 builders[key].add_document(doc[key], sentence_lens[key])
             self._print_processing_stats(i, total_doc_len, total_enc_len)
+        self._print_processing_stats(i, total_doc_len, total_enc_len, force_print=True)
 
         fin.close()
         for key in builders:
@@ -159,8 +188,92 @@ class _Partition:
         return final_enc_len
 
 
+def _download_hf_dataset(
+    dataset: str,
+    output_dir: str | Path,
+    json_keys: list[str],
+    name: str | None = None,
+    split: str | None = "train",
+    max_samples_per_split: int | None = None,
+) -> list[str]:
+    """Download a Hugging Face dataset and save as JSONL files.
+
+    Returns:
+        List of paths to downloaded JSONL files.
+    """
+    print(f"Downloading dataset {dataset} from Hugging Face")
+    jsonl_paths: list[str] = []
+
+    try:
+        response = requests.get(
+            f"https://datasets-server.huggingface.co/splits?dataset={dataset}",
+            headers=build_hf_headers(),
+            timeout=10,
+        )
+        response.raise_for_status()
+    except requests.RequestException as e:
+        raise RuntimeError(f"Failed to fetch dataset splits for {dataset}: {e}") from e
+
+    response_json = response.json()
+    print(f"\nFound {len(response_json['splits'])} total splits for {dataset}:")
+    for entry in response_json["splits"]:
+        print(f"\t{entry}")
+
+    splits_to_process = []
+    for entry in response_json["splits"]:
+        if name is not None and name != entry.get("config", None):
+            continue
+        if split is not None and split != entry["split"]:
+            continue
+        splits_to_process.append(entry)
+
+    print(f"\nFound {len(splits_to_process)} splits to process:")
+    for entry in splits_to_process:
+        print(f"\t{entry}")
+
+    for entry in splits_to_process:
+        skip_processing = False
+        path = entry["dataset"]
+        name = entry.get("config", None)
+        split = entry["split"]
+        if max_samples_per_split is not None:
+            split = f"{split}[:{max_samples_per_split}]"
+        jsonl_file_path = f"{output_dir}/raw/{path.replace('/', '--')}_{name}_{split}.jsonl"
+
+        print(f"\nLoading HF dataset {path=}, {name=}, {split=}")
+        if os.path.exists(jsonl_file_path):
+            jsonl_paths.append(jsonl_file_path)
+            print(f"\t[SKIP] Raw dataset {jsonl_file_path} already exists")
+            continue
+        ds = load_dataset(path=path, name=name, split=split)
+
+        for key in json_keys:
+            if key not in ds.features:
+                warn(f"[SKIP] {key=} not found in {ds.features=}")
+                skip_processing = True
+                break
+
+        if skip_processing:
+            continue
+
+        print(f"Saving raw dataset to {jsonl_file_path}")
+        ds.to_json(jsonl_file_path)
+        jsonl_paths.append(jsonl_file_path)
+
+    print(f"\n\nTokenizing JSONL paths: {jsonl_paths}\n")
+    return jsonl_paths
+
+
 def megatron_preprocess_data(
-    input_path: str | Path | list[str] | list[Path],
+    *,
+    input_dir: str | Path | None = None,
+    jsonl_paths: str | Path | list[str] | list[Path] | None = None,
+    # Hugging Face Hub dataset arguments
+    hf_dataset: str | None = None,
+    hf_name: str | None = None,
+    hf_split: str | None = "train",
+    hf_max_samples_per_split: int | None = None,
+    # Other arguments
     output_dir: str | Path,
     tokenizer_name_or_path: str,
     json_keys: list[str] = ["text"],
@@ -171,25 +284,48 @@ def megatron_preprocess_data(
 ):
     """Process large data for pretraining.
 
+    Exactly one of ``input_dir``, ``jsonl_paths``, or ``hf_dataset`` must be provided.
+
     Args:
-        input_path (str | Path | list): Path to file or directory
-            containing input JSONL files, or list of paths to JSONL files
-        output_dir (str | Path): Path to directory to save binary output files
-        tokenizer_name_or_path (str): Name or path of the Hugging Face tokenizer to use
-        json_keys (list, optional): List of keys to extract from json. Defaults to ["text"]
-        append_eod (bool, optional): Append an <eod> token to the end of a document. Defaults to False
-        max_sequence_length (int, optional): Maximum tokenized sequence length. Defaults to None
-        workers (int, optional): Number of worker processes to launch. Defaults to 1
-        log_interval (int, optional): Interval between progress updates. Defaults to 1000
+        input_dir (str | Path, optional): Directory containing JSONL files to tokenize.
+        jsonl_paths (str | Path | list, optional): One or more paths to JSONL files.
+        hf_dataset (str, optional): Hugging Face Hub dataset name or path to download and tokenize.
+        hf_name (str, optional): Hugging Face Hub dataset subset name. Downloads all subsets if None.
+        hf_split (str, optional): Hugging Face Hub dataset split. Defaults to "train".
+        hf_max_samples_per_split (int, optional): Maximum number of samples to download per split from Hugging Face Hub.
+            Skip to download all samples.
+        output_dir (str | Path): Path to directory to save binary output files.
+        tokenizer_name_or_path (str): Name or path of the Hugging Face tokenizer to use.
+        json_keys (list, optional): List of keys to extract from json. Defaults to ["text"].
+        append_eod (bool, optional): Append an <eod> token to the end of a document. Defaults to False.
+        max_sequence_length (int, optional): Maximum tokenized sequence length. Defaults to None.
+        workers (int, optional): Number of worker processes to launch. Defaults to 1.
+        log_interval (int, optional): Interval between progress updates. Defaults to 100000.
     """
-    if isinstance(input_path, list):
-        file_names = input_path
-    elif Path(input_path).is_file():
-        file_names = [input_path]
-    else:
-        file_names = sorted(Path(input_path).glob("*.jsonl"))
+    num_sources = sum(x is not None for x in (input_dir, jsonl_paths, hf_dataset))
+    if num_sources != 1:
+        raise ValueError(
+            "Exactly one of `input_dir`, `jsonl_paths`, or `hf_dataset` must be provided."
+        )
+
+    if hf_dataset is not None:
+        jsonl_paths = _download_hf_dataset(
+            hf_dataset,
+            output_dir,
+            json_keys,
+            name=hf_name,
+            split=hf_split,
+            max_samples_per_split=hf_max_samples_per_split,
+        )
+
+    if input_dir is not None:
+        file_names = sorted(Path(input_dir).glob("*.jsonl"))
         if not file_names:
-            raise ValueError(f"No JSONL files found in input path: {input_path}")
+            raise ValueError(f"No JSONL files found in input directory: {input_dir}")
+    elif isinstance(jsonl_paths, (str, Path)):
+        file_names = [jsonl_paths]  # type: ignore[list-item]
+    else:
+        file_names = list(jsonl_paths)  # type: ignore[arg-type]
 
     Path(output_dir).mkdir(exist_ok=True)
     vocab_size = AutoTokenizer.from_pretrained(tokenizer_name_or_path).vocab_size
@@ -202,32 +338,43 @@ def megatron_preprocess_data(
         num_tokens = partition.process_json_file(name, output_dir, encoder)
         final_enc_len += num_tokens
 
-    print(f">>> Total number of tokens: {final_enc_len}")
+    print(f"\n\n>>> Total number of tokens currently processed: {num2hrb(final_enc_len)}")
 
 
 def main():
-    """Sample main function to process large data for pretraining.
-
-    Example usage:
-
-    >>> python megatron_preprocess_data.py \
-            --dataset "nvidia/Nemotron-Pretraining-Dataset-sample" \
-            --tokenizer "meta-llama/Llama-3.2-1B-Instruct" \
-            --output_dir "./processed_data"
-    """
+    """Sample main function to process large data for pretraining."""
     parser = argparse.ArgumentParser(prog="megatron_preprocess_data")
-    parser.add_argument("--input_path", type=str, default=None, help="Input path.")
-    parser.add_argument(
-        "--dataset",
+    # Dataset arguments (pre-downloaded .jsonl files or download from Hugging Face Hub)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--input_dir", type=str, help="Directory containing JSONL files")
+    group.add_argument(
+        "--jsonl_paths", nargs="+", type=str, help="One or more paths to JSONL files"
+    )
+    group.add_argument(
+        "--hf_dataset",
         type=str,
-        default="nvidia/Nemotron-Pretraining-Dataset-sample",
-        help="Hugging Face Hub dataset name or path",
+        help="Hugging Face Hub dataset path to download and tokenize",
     )
-    parser.add_argument("--subset", type=str, default=None, help="Hugging Face Hub dataset subset")
-    parser.add_argument("--split", type=str, default="train", help="Hugging Face Hub dataset split")
     parser.add_argument(
-        "--output_dir", type=str, default="./processed_data", help="Output directory"
+        "--hf_name",
+        type=str,
+        default=None,
+        help="Hugging Face Hub dataset subset name. Skip to download and tokenize all subsets for the dataset.",
     )
+    parser.add_argument(
+        "--hf_split",
+        type=str,
+        default="train",
+        help="Hugging Face Hub dataset split. Skip to download and tokenize all splits for the subset.",
+    )
+    parser.add_argument(
+        "--hf_max_samples_per_split",
+        type=int,
+        default=None,
+        help="Maximum number of samples to download per split from Hugging Face Hub. Skip to download all samples.",
+    )
+    # Other arguments
+    parser.add_argument("--output_dir", type=str, required=True, help="Output directory")
     parser.add_argument("--tokenizer", type=str, required=True, help="Tokenizer name or path")
     parser.add_argument("--json_keys", nargs="+", default=["text"], help="JSON keys to tokenize")
     parser.add_argument("--append_eod", action="store_true", help="Append <eod> token")
@@ -235,51 +382,21 @@ def main():
         "--max_sequence_length", type=int, default=None, help="Maximum sequence length"
     )
     parser.add_argument("--workers", type=int, default=8, help="Number of worker processes")
-    parser.add_argument("--log_interval", type=int, default=1000, help="Log interval")
+    parser.add_argument("--log_interval", type=int, default=100000, help="Log interval")
     args = parser.parse_args()
 
-    if args.input_path is None:
-        args.input_path = []
-
-        try:
-            response = requests.get(
-                f"https://datasets-server.huggingface.co/splits?dataset={args.dataset}",
-                timeout=10,
-            )
-            response.raise_for_status()
-        except requests.RequestException as e:
-            print(f"Failed to fetch dataset splits for {args.dataset}: {e}")
-            return
-
-        for entry in response.json()["splits"]:
-            skip_processing = False
-            name = entry["dataset"]
-            subset = entry.get("config", None)
-            split = entry["split"]
-
-            if args.subset is not None and args.subset != subset:
-                skip_processing = True
-            if args.split is not None and args.split != split:
-                skip_processing = True
-
-            print(f"Loading dataset {name} with subset {subset} and split {split}")
-            dataset = load_dataset(name, subset, split=split)
-
-            for key in args.json_keys:
-                if key not in dataset.features:
-                    print(f"Key {key} not found in dataset features. Skipping...")
-                    skip_processing = True
-                    break
-
-            if skip_processing:
-                continue
-
-            json_file_path = args.output_dir + "/" + name + "_" + subset + "_" + split + ".jsonl"
-            dataset.to_json(json_file_path)
-            args.input_path += [json_file_path]
+    print("\n==================== Arguments ====================")
+    for k, v in args.__dict__.items():
+        print(f"{k:<35} {v}")
+    print("===================================================\n")
 
     megatron_preprocess_data(
-        input_path=args.input_path,
+        input_dir=args.input_dir,
+        jsonl_paths=args.jsonl_paths,
+        hf_dataset=args.hf_dataset,
+        hf_name=args.hf_name,
+        hf_split=args.hf_split,
+        hf_max_samples_per_split=args.hf_max_samples_per_split,
         output_dir=args.output_dir,
         tokenizer_name_or_path=args.tokenizer,
         json_keys=args.json_keys,

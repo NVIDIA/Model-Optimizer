@@ -59,10 +59,18 @@ jobs:
   gpu-tests-pr:
     needs: [check-file-changes, wait-checks]
     if: needs.check-file-changes.outputs.any_changed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - example: cuda13-gpu
+            timeout: 90
+          - example: cuda13-gpu-megatron
+            timeout: 120
     runs-on: linux-amd64-gpu-l4-latest-1
-    timeout-minutes: 120
+    timeout-minutes: ${{ matrix.timeout }}
     container: &gpu_container
-      image: nvcr.io/nvidia/pytorch:25.06-py3
+      image: nvcr.io/nvidia/pytorch:26.01-py3
       env:
         GIT_DEPTH: 1000 # For correct version for tests/gpu/torch/quantization/plugins/test_megatron.py
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
@@ -74,11 +82,19 @@ jobs:
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
       - name: Run gpu tests
-        run: pip install tox-current-env && tox -e py312-cuda12-gpu --current-env
+        run: pip install tox-current-env && tox -e ${{ matrix.example }} --current-env
   gpu-tests-non-pr:
     if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - example: cuda13-gpu
+            timeout: 90
+          - example: cuda13-gpu-megatron
+            timeout: 120
     runs-on: linux-amd64-gpu-h100-latest-2
-    timeout-minutes: 150
+    timeout-minutes: ${{ matrix.timeout }}
     container: *gpu_container
     steps: *gpu_steps
   gpu-pr-required-check:

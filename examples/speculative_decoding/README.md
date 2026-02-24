@@ -242,6 +242,17 @@ To add a system prompt, use the `--system_prompt <system_prompt_text>` argument.
 
 For large scale data generation, please see [SLURM prepare data](SLURM_prepare_data.md) for SLURM support.
 
+### Configuring Draft Model
+
+For EAGLE‑1 and EAGLE‑3 we provide a [default model architecture config](https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt/torch/speculative/config.py#L37) in ModelOpt. You can override default settings by providing an additional JSON dict. E.g. To use 2-layer eagle with 8192 intermediate size for MLP, set `eagle_config.json` to:
+
+```json
+{
+    "num_hidden_layers": 2,
+    "intermediate_size":8192
+}
+```
+
 ### Draft Vocabulary Compression
 
 We can optionally use smaller vocab size for the draft model for faster training and inference. E.g. Llama3.2-1B has a vocab size of 128256. In this example, we construct a draft vocab mapping of size 32k by finding the most commonly appeared vocabs in our training set:
@@ -252,15 +263,7 @@ python scripts/calibrate_draft_vocab.py --model meta-llama/Llama-3.2-1B-Instruct
 
 This will produce a `d2t.pt` file in `save_dir`, which is the mapping from draft token to target token. During inference, draft tokens can be mapped back to target tokens by `target_token = draft_token + d2t[draft_token]`.
 
-### Configuring Draft Model
-
-For EAGLE‑1 and EAGLE‑3 we provide a [default model architecture config](https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt/torch/speculative/config.py#L37) in ModelOpt. You can override default settings by providing an additional JSON dict. In this example, we override `draft_vocab_size` in `eagle_config.json`:
-
-```json
-{
-    "draft_vocab_size": 32000
-}
-```
+Then, simply set `{"draft_vocab_size":32000}` in `eagle_config.json` and include `--draft_vocab_cache <path_to_d2t.pt>` when running `./launch_train.sh`. The draft model will use this provided vocab table during training and export.
 
 ### Interact with `modelopt.torch.speculative`
 
