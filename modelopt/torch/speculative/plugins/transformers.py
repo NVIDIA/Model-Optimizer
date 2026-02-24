@@ -48,7 +48,7 @@ from transformers.models.llama.modeling_llama import (
 )
 from transformers.trainer_pt_utils import LabelSmoother
 from transformers.utils import ModelOutput
-from transformers.utils.quantization_config import QuantizationMethod
+from transformers.utils.quantization_config import CompressedTensorsConfig
 
 from ..eagle.conversion import EagleDMRegistry
 from ..eagle.eagle_model import EagleModel
@@ -585,12 +585,9 @@ class HFEagleModel(EagleModel):
             self.eagle_config._attn_implementation = "sdpa"
 
         # Patch for Kimi-K2-Thinking, avoid quantizing drafter
-        if (
-            hasattr(self.config, "quantization_config")
-            and self.config.quantization_config.quant_method
-            == QuantizationMethod.COMPRESSED_TENSORS
-        ):
-            self.config.quantization_config.quantization_config.ignore.append("re:.*eagle_module.*")
+        quant_config = getattr(self.config, "quantization_config", None)
+        if isinstance(quant_config, CompressedTensorsConfig):
+            quant_config.ignore.append("re:.*eagle_module.*")
 
         # Set default aux_hidden_state layers
         if (
