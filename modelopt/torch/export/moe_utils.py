@@ -48,7 +48,7 @@ def save_expert_token_count_table(model: nn.Module, output_dir: str | Path | Non
         "th, td { border: 1px solid #ccc; padding: 4px 8px; text-align: right; }",
         "th { background: #f0f0f0; }",
         "</style></head><body>",
-        "<h2>Expert Token Counts (per MoE layer)</h2>",
+        "<h2>Expert Calib Token Counts (per MoE layer)</h2>",
         "<table><tr><th>Layer/Expert</th>",
     ]
     html_parts.extend(f"<th>{i}</th>" for i in range(num_experts))

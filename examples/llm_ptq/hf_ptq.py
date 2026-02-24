@@ -906,6 +906,7 @@ def quantize_main(
             model_type,
             QUANT_CFG_CHOICES,
             KV_QUANT_CFG_CHOICES,
+            args.moe_calib_experts_ratio,
         )
 
         # Exclude MTP layers from quantization if detected (e.g., GLM-4.7's layer 92)
@@ -1126,8 +1127,21 @@ def parse_args() -> argparse.Namespace:
             "(sensitivity scores, costs, etc.). Only used when auto_quantize_bits is specified."
         ),
     )
+    parser.add_argument(
+        "--moe_calib_experts_ratio",
+        type=float,
+        default=1.0,
+        help=(
+            "Fraction of experts to calibrate during forward pass (ratio in (0.0, 1.0]). "
+            "Only used for MOE models; used to reduce the number of experts calibrated during the forward pass."
+            "Does not impact non-MOE models."
+        ),
+    )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not (0.0 < args.moe_calib_experts_ratio <= 1.0):
+        parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
+    return args
 
 
 def main(args: argparse.Namespace):
