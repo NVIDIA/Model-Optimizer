@@ -19,6 +19,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add support for context parallelism in Eagle speculative decoding for huggingface and megatron core models.
 - Add PTQ support for GLM-4.7, including loading MTP layer weights from a separate ``mtp.safetensors`` file and export as-is.
 - Add support for image-text data calibration in PTQ for Nemotron VL models.
+- Add support for advanced weight scale search for NVFP4 quantization and its export path.
 
 0.41 (2026-01-19)
 ^^^^^^^^^^^^^^^^^

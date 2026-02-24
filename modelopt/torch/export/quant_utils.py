@@ -41,6 +41,7 @@ from modelopt.torch.quantization.qtensor import (
 from modelopt.torch.quantization.utils import (
     QuantizerAttrNames,
     quantizer_attr_names,
+    reduce_block_amax,
     weight_attr_names,
 )
 from modelopt.torch.utils import clear_cuda_cache
@@ -238,6 +239,36 @@ def get_scaling_factor(quantizer: TensorQuantizer) -> torch.Tensor:
     return scaling_factor
 
 
+def _get_nvfp4_block_size(
+    weight_quantizer: NVFP4StaticQuantizer, weight: torch.Tensor, module_name: str = ""
+) -> int:
+    """Return block size for NVFP4 from quantizer's block_sizes; raise if missing."""
+    prefix = f"NVFP4StaticQuantizer{f' for {module_name}' if module_name else ''}"
+    block_sizes = weight_quantizer.block_sizes
+    if block_sizes is None:
+        raise ValueError(f"{prefix} has no block_sizes; cannot compute per-block amax from weight.")
+    block_size = block_sizes.get(-1) or block_sizes.get(weight.dim() - 1)
+    if block_size is None:
+        raise ValueError(
+            f"{prefix} block_sizes has no -1 or last-dim key; cannot compute per-block amax."
+        )
+    return block_size
+
+
+def _set_amax_from_tensor(weight_quantizer: TensorQuantizer, tensor: torch.Tensor) -> None:
+    """Set quantizer _amax buffer from tensor; copy in-place if same shape, else replace buffer."""
+    if (
+        hasattr(weight_quantizer, "_amax")
+        and weight_quantizer._amax is not None
+        and weight_quantizer._amax.shape == tensor.shape
+    ):
+        weight_quantizer._amax.data.copy_(tensor.to(weight_quantizer._amax.device))
+    else:
+        if hasattr(weight_quantizer, "_amax"):
+            delattr(weight_quantizer, "_amax")
+        weight_quantizer.register_buffer("_amax", tensor.clone().detach())
+
+
 def _ensure_weight_quantizer_calibrated(
     weight_quantizer: TensorQuantizer, weight: torch.Tensor, module_name: str = ""
 ) -> None:
@@ -246,11 +277,34 @@ def _ensure_weight_quantizer_calibrated(
     This is a lazy calibration pattern used during export when weight quantizers
     may not have been calibrated during the main calibration phase.
 
+    For NVFP4StaticQuantizer, _amax is per-block amax and _global_amax is the max over
+    blocks; both are computed from the weight when missing.
+
     Args:
         weight_quantizer: The weight quantizer to calibrate
         weight: The weight tensor to use for calibration
         module_name: Optional module name for better warning messages
     """
+    if isinstance(weight_quantizer, NVFP4StaticQuantizer):
+        need_per_block = not hasattr(weight_quantizer, "_amax") or weight_quantizer._amax is None
+        need_global = (
+            not hasattr(weight_quantizer, "_global_amax") or weight_quantizer.global_amax is None
+        )
+        if not (need_per_block or need_global):
+            return
+        block_size = _get_nvfp4_block_size(weight_quantizer, weight, module_name)
+        warn(
+            f"NVFP4StaticQuantizer{f' for {module_name}' if module_name else ''} was not fully calibrated. "
+            f"Computing per-block amax and global_amax from weights. This may occur if: "
+            f"some experts were not activated during calibration (expected for MoE models), try increasing --calib_size"
+        )
+        per_block_amax = reduce_block_amax(weight, block_sizes={-1: block_size})
+        if need_per_block:
+            _set_amax_from_tensor(weight_quantizer, per_block_amax.to(weight.device))
+        if need_global:
+            weight_quantizer.global_amax = per_block_amax.max()
+        return
+
     if not hasattr(weight_quantizer, "_amax") or weight_quantizer._amax is None:
         warn(
             f"Weight quantizer{f' for {module_name}' if module_name else ''} was not calibrated. "

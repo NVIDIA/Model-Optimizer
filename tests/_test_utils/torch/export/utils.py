@@ -119,6 +119,18 @@ partial_nvfp4_config = {
             "axis": None,
             "enable": True,
         },
+        "*.2.weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*.2.input_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
         "default": {"enable": False},
     },
     "algorithm": "max",
