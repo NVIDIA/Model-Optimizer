@@ -28,7 +28,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from modelopt.torch.opt.searcher import ForwardLoop
-from modelopt.torch.quantization.utils import LayerActivationGettr
+from modelopt.torch.quantization.utils import LayerActivationCollector
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 from modelopt.torch.utils.network import (
@@ -1850,10 +1850,9 @@ def sequential_calibrate(
 
     print_rank_0(f"Sequential calibration: Found {len(transformer_layers)} transformer layers")
 
-    gettr = LayerActivationGettr(model)
-    inputs = gettr.get_input_activations(transformer_layers[0], forward_loop)
+    gettr = LayerActivationCollector(model)
 
-    for layer_idx, layer in enumerate(transformer_layers):
+    for _, layer in enumerate(transformer_layers):
         # Get updated input activations to the current layer
         inputs = gettr.get_input_activations(layer, forward_loop)
 

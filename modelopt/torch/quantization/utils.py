@@ -813,7 +813,11 @@ def update_quant_cfg_with_kv_cache_quant(
     return quant_cfg
 
 
-class LayerActivationGettr:
+class _EarlyStopForwardError(Exception):
+    """Error to stop the forward pass after collection."""
+
+
+class LayerActivationCollector:
     """Helper class for collecting layer activations during forward passes.
 
     This class allows for sequential layer calibration by
@@ -825,53 +829,44 @@ class LayerActivationGettr:
 
     @staticmethod
     def _patch_and_initialize_layer(layer: torch.nn.Module, stop_after_collection: bool = False):
-        """Patch a layer to collect inputs and outputs during forward passes."""
+        """Patch a layer to collect inputs during forward passes."""
 
         def _forward_w_data_collection(self, *args, **kwargs):
-            """Custom forward that collects inputs and outputs.
-
-            Note: 'self' refers to the patched layer.
-            """
-            assert len(args) >= 1
+            # Note: 'self' refers to the patched layer.
+            assert len(args) >= 1, (
+                f"Expected at least 1 positional arg, got {len(args)} args and {list(kwargs.keys())} kwargs"
+            )
             # Only collect the inputs to the layer
             self.inputs.append((args, kwargs))
-            if getattr(self, "_stop_after_collection", False):
-                raise StopIteration()
+            if stop_after_collection:
+                raise _EarlyStopForwardError()  # Stop the forward pass after collection
 
         bind_forward_method(layer, _forward_w_data_collection, "_original_forward")
         layer.inputs = []
-        layer._stop_after_collection = stop_after_collection
 
     @staticmethod
     def _unpatch_and_cleanup_layer(layer: torch.nn.Module):
-        """Restore a layer's original forward method and clean up."""
-        unpatch_forward_method(layer, "_original_forward")
-        del layer.inputs
-        if hasattr(layer, "_stop_after_collection"):
-            del layer._stop_after_collection
+        if hasattr(layer, "_original_forward"):
+            unpatch_forward_method(layer, "_original_forward")
+        if hasattr(layer, "inputs"):
+            del layer.inputs
 
+    @torch.no_grad()
     def get_input_activations(self, layer: torch.nn.Module, forward_loop: ForwardLoop) -> list:
-        """Collect input activations for a layer by running the forward loop.
-
-        Propagation stops at the patched layer for each batch (saves compute by not running deeper layers),
-        but the forward_loop continues to process all batches.
-
-        This function is typically used to collect input activations for the first decoder layer of the model.
-        """
-
-        # Wrap model forward to catch StopIteration per-batch
+        # Wrap model forward to catch _EarlyStopForward per-batch
         def _early_stop_forward(self, *args, **kwargs):
             try:
                 return self._original_forward(*args, **kwargs)
-            except StopIteration:
+            except _EarlyStopForwardError:
                 return None  # Stop propagation but allow next batch
 
-        bind_forward_method(self.model, _early_stop_forward, "_original_forward")
-        self._patch_and_initialize_layer(layer, stop_after_collection=True)
         try:
+            bind_forward_method(self.model, _early_stop_forward, "_original_forward")
+            self._patch_and_initialize_layer(layer, stop_after_collection=True)
             forward_loop(self.model)
             inputs = layer.inputs.copy()
         finally:
             self._unpatch_and_cleanup_layer(layer)
             unpatch_forward_method(self.model, "_original_forward")
+
         return inputs
