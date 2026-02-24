@@ -1861,7 +1861,7 @@ def sequential_calibrate(
             for args, kwargs_input in inputs:  # noqa: F821
                 m(*args, **kwargs_input)
 
-        # Call GPTQ
-        calib_func(layer, inputs, forward_loop=_layer_forward_loop, **calib_kwargs)
+        # Call calibration function
+        calib_func(layer, _layer_forward_loop, **calib_kwargs)
         del inputs
         torch.cuda.empty_cache()
