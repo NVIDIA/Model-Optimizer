@@ -361,7 +361,6 @@ def mse_calibrate(
 
                 if fp8_scale_sweep and is_nvfp4_static:
                     # Replace calibrator with NVFP4MSECalibrator
-                    print("mse_calibrate: Replacing calibrator with NVFP4MSECalibrator")
                     module._calibrator = NVFP4MSECalibrator(
                         amax=initial_amax,
                         axis=module._calibrator._axis,
@@ -653,7 +652,6 @@ def local_hessian_calibrate(
         error_func = helper.get_error_func()
 
         if fp8_scale_sweep and is_nvfp4_static:
-            print("local_hessian_calibrate: Replacing calibrator with NVFP4MSECalibrator")
             weight_quantizer._calibrator = NVFP4MSECalibrator(
                 amax=initial_amax,
                 axis=weight_quantizer._calibrator._axis if weight_quantizer._calibrator else None,
