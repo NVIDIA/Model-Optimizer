@@ -495,6 +495,11 @@ def _export_quantized_weight(
         expert_type in type(sub_module).__name__
         for expert_type in ["Llama4TextExperts", "GptOssExperts"]
     )
+    if is_bmm_expert_weight and isinstance(weight_quantizer, NVFP4StaticQuantizer):
+        warnings.warn(
+            "NVFP4StaticQuantizer with BMM-style expert weights (e.g. Llama4TextExperts, "
+            "GptOssExperts) is not yet supported; export may produce incorrect results."
+        )
 
     if quantization_format in [
         QUANTIZATION_NVFP4,
@@ -507,17 +512,11 @@ def _export_quantized_weight(
             weight, is_bmm_expert_weight=is_bmm_expert_weight
         )
 
-        # Check if this is a static NVFP4 quantizer (has pre-computed scales from MSE calibration)
-        # For static NVFP4, weight_scale is already computed from static _amax values in get_weight_scaling_factor
-        is_nvfp4_static = isinstance(weight_quantizer, NVFP4StaticQuantizer)
-
-        if not is_nvfp4_static:
-            # For dynamic NVFP4, compute scales from weights
-            weight_scale = NVFP4QTensor.get_weights_scaling_factor(
-                weight,
-                block_size=block_size,
-                weights_scaling_factor_2=weight_scale_2,
-            )[0]
+        weight_scale = NVFP4QTensor.get_weights_scaling_factor(
+            weight,
+            block_size=block_size,
+            weights_scaling_factor_2=weight_scale_2,
+        )[0]
 
         quantized_weight = to_quantized_weight(
             weight.to(dtype),
