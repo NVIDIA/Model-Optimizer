@@ -156,20 +156,10 @@ _default_disabled_quantizer_cfg = {
     "*mlp.gate.*": {"enable": False},  # Skip the MOE router
     "*mlp.shared_expert_gate.*": {"enable": False},  # Skip the MOE router
     "*linear_attn.conv1d*": {"enable": False},
-    "*mixer.conv1d*": {"enable": False},
+    "*mixer.conv1d*": {"enable": False},  # Skip mamba conv1d
     "*output_layer*": {"enable": False},
     "output.*": {"enable": False},
     "default": {"enable": False},
-}
-
-super_disabled_quantizer_cfg = {
-    "*fc1_latent_proj*": {"enable": False},  # Skip Latent MOE
-    "*fc2_latent_proj*": {"enable": False},  # Skip Latent MOE
-    "*q_proj*": {"enable": False},  # Skip QKV Linear
-    "*k_proj*": {"enable": False},  # Skip QKV Linear
-    "*v_proj*": {"enable": False},  # Skip QKV Linear
-    "*o_proj*": {"enable": False},  # Skip Output Linear
-    "*mtp*": {"enable": False},  # Skip MTP layers
 }
 
 
@@ -180,53 +170,6 @@ _mamba_moe_disabled_quantizer_cfg = {
     "*k_proj*": {"enable": False},  # Skip QKV Linear
     "*v_proj*": {"enable": False},  # Skip QKV Linear
     "*o_proj*": {"enable": False},  # Skip QKV Output Projection
-}
-
-SUPER_NVFP4_CONSERVATIVE_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        **_default_disabled_quantizer_cfg,
-        **super_disabled_quantizer_cfg,
-        "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
-        "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
-    },
-    "algorithm": "max",
-}
-
-SUPER_NVFP4_CONSERVATIVE_GPTQ_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        **_default_disabled_quantizer_cfg,
-        **super_disabled_quantizer_cfg,
-        "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
-        "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
-    },
-    "algorithm": {
-        "method": "gptq",
-        "use_sequential": True,
-    },
 }
 
 
@@ -322,113 +265,6 @@ INT4_BLOCKWISE_WEIGHT_ONLY_CFG = {
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": "max",
-}
-
-INT4_BLOCKWISE_WEIGHT_ONLY_GPTQ_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {"num_bits": 4, "block_sizes": {-1: 128}, "enable": True},
-        "*input_quantizer": {"enable": False},
-        **_default_disabled_quantizer_cfg,
-    },
-    "algorithm": {
-        "method": "gptq",
-        "use_sequential": True,
-    },
-}
-
-NVFP4_STATIC_WO_GPTQ_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "enable": False,
-        },
-        **_default_disabled_quantizer_cfg,
-    },
-    "algorithm": {
-        "method": "gptq",
-        "use_sequential": True,
-    },
-}
-
-NVFP4_STATIC_WO_GPTQ_LITE_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "enable": False,
-        },
-        **_default_disabled_quantizer_cfg,
-    },
-    "algorithm": {
-        "method": "gptq_lite",
-        "use_sequential": False,
-    },
-}
-
-NVFP4_STATIC_WO_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "enable": False,
-        },
-        **_default_disabled_quantizer_cfg,
-    },
-    "algorithm": {
-        "method": "max",
-        "use_sequential": False,
-    },
-}
-
-NVFP4_STATIC_WO_GPTQ_LITE_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "enable": False,
-        },
-        **_default_disabled_quantizer_cfg,
-    },
-    "algorithm": {
-        "method": "gptq_lite",
-        "use_sequential": False,
-    },
-}
-
-NVFP4_DYNAMIC_WO_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "enable": False,
-        },
-        **_default_disabled_quantizer_cfg,
-    },
-    "algorithm": {
-        "method": "gptq_lite",
-        "use_sequential": False,
-    },
 }
 
 INT4_AWQ_CFG = {
@@ -580,7 +416,6 @@ NVFP4_DEFAULT_CFG = {
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
-        **super_disabled_quantizer_cfg,
         "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
         "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
     },
@@ -900,145 +735,6 @@ NVFP4_MLP_ONLY_CFG = {
             "pass_through_bwd": True,
         },
         **_default_disabled_quantizer_cfg,
-    },
-    "algorithm": "max",
-}
-
-SUPER_NVFP4_AGGRESSIVE_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        **_default_disabled_quantizer_cfg,
-        **super_disabled_quantizer_cfg,
-    },
-    "algorithm": {
-        "method": "mse",
-        "fp8_scale_sweep": True,
-    },
-}
-
-SUPER_NVFP4_AGGRESSIVE_LOCAL_HESSIAN_W4A4_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        **_default_disabled_quantizer_cfg,
-        **super_disabled_quantizer_cfg,
-    },
-    "algorithm": {
-        "method": "local_hessian",
-        "fp8_scale_sweep": True,
-    },
-}
-
-SUPER_NVFP4_CONSERVATIVE_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        **_default_disabled_quantizer_cfg,
-        **super_disabled_quantizer_cfg,
-        "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
-        "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
-    },
-    "algorithm": {
-        "method": "mse",
-        "fp8_scale_sweep": True,
-    },
-}
-
-SUPER_NVFP4_CONSERVATIVE_LOCAL_HESSIAN_W4A4_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        **_default_disabled_quantizer_cfg,
-        **super_disabled_quantizer_cfg,
-        "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
-        "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
-    },
-    "algorithm": {
-        "method": "local_hessian",
-        "fp8_scale_sweep": True,
-    },
-}
-
-SUPER_NVFP4_AGGRESSIVE_GPTQ_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        **_default_disabled_quantizer_cfg,
-        **super_disabled_quantizer_cfg,
-    },
-    "algorithm": {
-        "method": "gptq",
-        "use_sequential": True,
-    },
-}
-
-SUPER_NVFP4_AGGRESSIVE_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        **_default_disabled_quantizer_cfg,
-        **super_disabled_quantizer_cfg,
     },
     "algorithm": "max",
 }

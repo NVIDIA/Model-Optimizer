@@ -895,11 +895,6 @@ def quantize_main(
                 "w4a8_mxfp4_fp8",
                 "nvfp4_mlp_only",
                 "mxfp8",
-                "int4_gptq",
-                "nvfp4_static_wo_gptq",
-                "nvfp4_static_wo",
-                "nvfp4_static_wo_gptq_lite",
-                "nvfp4_dynamic_wo_gptq",
             ]
             or args.kv_cache_qformat in KV_QUANT_CFG_CHOICES
         ), f"Plain quantization format {args.qformat} not supported for HF export path"
