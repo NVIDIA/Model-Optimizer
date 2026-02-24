@@ -31,11 +31,7 @@ from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.quantization.utils import LayerActivationCollector
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
-from modelopt.torch.utils.network import (
-    bind_forward_method,
-    get_decoder_layers,
-    unpatch_forward_method,
-)
+from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
 
 from .calib import MseCalibrator, NVFP4MSECalibrator
@@ -1852,20 +1848,17 @@ def sequential_calibrate(
     if forward_loop is None:
         raise ValueError("forward_loop must not be None for sequential calibration.")
 
-    transformer_layers = get_decoder_layers(model)
-    if transformer_layers is None:
-        raise ValueError(
-            "Could not find transformer layers in model'. "
-            "Sequential calibration requires a model with identifiable transformer layers."
-        )
+    transformer_layers = LayerActivationCollector.get_decoder_layers(model)
+    assert transformer_layers is not None
 
     print_rank_0(f"Sequential calibration: Found {len(transformer_layers)} transformer layers")
+    if len(transformer_layers) == 0:
+        return
 
-    gettr = LayerActivationCollector(model)
+    input_getter = LayerActivationCollector(model)
 
     for layer in transformer_layers:
-        # Get updated input activations to the current layer
-        layer_inputs = gettr.get_input_activations(layer, forward_loop)
+        layer_inputs = input_getter.get_input_activations(layer, forward_loop)
 
         # Define a forward loop for the current layer
         def _layer_forward_loop(m, _inputs=layer_inputs):

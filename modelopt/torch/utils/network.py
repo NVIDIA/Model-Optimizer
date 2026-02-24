@@ -634,4 +634,3 @@ def unpatch_forward_method(module: nn.Module, orig_forward_cache_name: str):
     with temporarily_remove_accelerate_hook(module):
         setattr(module, "forward", getattr(module, orig_forward_cache_name))
         delattr(module, orig_forward_cache_name)
-
