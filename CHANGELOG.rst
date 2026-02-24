@@ -6,7 +6,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 
 **Bug Fixes**
 
-- Upgraded ORT to 1.24.2 to solve various bugs: 5615343, 5597780, 5371126.
+- Upgraded ORT to 1.24.2 to solve various bugs.
 
 **New Features**
 
