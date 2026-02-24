@@ -44,7 +44,7 @@ import onnx_graphsurgeon as gs
 import onnxslim
 
 from modelopt.onnx.logging_config import configure_logging, logger
-from modelopt.onnx.op_types import is_data_dependent_shape_op
+from modelopt.onnx.op_types import get_activation_ops, is_data_dependent_shape_op
 from modelopt.onnx.quantization.calib_utils import (
     CalibrationDataProvider,
     CalibrationDataType,
@@ -249,7 +249,7 @@ def _find_nodes_to_quantize_autotune(
     quantize_mode: str,
     trt_plugins: list[str],
     high_precision_dtype: str = "fp16",
-) -> tuple[list[str], list[str], list[tuple[gs.Node, gs.Node, str]]]:
+) -> tuple[list[str], list[str], list[tuple[gs.Node, gs.Node, str]], list[str]]:
     logger.info("Running Auto Q/DQ with TensorRT")
     from modelopt.onnx.quantization.autotune.insertion_points import get_autotuner_quantizable_ops
     from modelopt.onnx.quantization.autotune.workflows import (
@@ -277,16 +277,43 @@ def _find_nodes_to_quantize_autotune(
     nodes_to_quantize_autotune_names = [n.name for n in nodes_to_quantize_autotune]
     op_types_to_quantize = list(get_autotuner_quantizable_ops())
 
-    # Get non-quantizable tensors
+    # Get non-quantizable tensors and identify op types whose outputs are quantized.
     # List of non-quantizable tensors in the form of (src_node, dst_node, tensor_name)
     no_quantize_inputs = []
+    # List of ops to enable output quantization.
+    #   By default, all ONNX standard ops have output quantization disabled due to TensorRT's quantization recipe
+    #   (inputs and weights only). However, this causes QDQRemovableActivation (used for Relu, Sigmoid, etc.) to exit
+    #   early when it checks is_tensor_quantized() on its input, producing no Q/DQ between e.g. Add and Relu. This list
+    #   will be used in configure_ort() to enable output quantization of the ops included in it.
+    op_types_needing_output_quant = set()
     for node in nodes_to_quantize_autotune:
         for idx, inp in enumerate(node.inputs):
             if inp.inputs and inp.inputs[0].op != "DequantizeLinear":
                 src_node = node.i(idx)
                 no_quantize_inputs.append((src_node, node, inp.name))
+            elif (
+                inp.inputs
+                and inp.inputs[0].op == "DequantizeLinear"
+                and node.op in get_activation_ops()
+            ):
+                # Trace back through DQ→Q to find the node whose output is being quantized.
+                # Path: node.input ← DQ ← quantized_tensor ← Q ← original_tensor ← producer
+                dq_node = inp.inputs[0]
+                quantized_tensor = dq_node.inputs[0]  # Q's output (= DQ's input)
+                if quantized_tensor.inputs:
+                    q_node = quantized_tensor.inputs[0]  # QuantizeLinear node
+                    if q_node.op == "QuantizeLinear" and q_node.inputs:
+                        original_tensor = q_node.inputs[0]  # e.g. Add_output_0
+                        if original_tensor.inputs:
+                            producer = original_tensor.inputs[0]  # e.g. Add
+                            op_types_needing_output_quant.add(producer.op)
 
-    return nodes_to_quantize_autotune_names, op_types_to_quantize, no_quantize_inputs
+    return (
+        nodes_to_quantize_autotune_names,
+        op_types_to_quantize,
+        no_quantize_inputs,
+        list(op_types_needing_output_quant),
+    )
 
 
 def quantize(
@@ -558,18 +585,22 @@ def quantize(
         calibration_shapes = get_input_shapes(onnx_path)
 
     if quantize_mode in ["fp8", "int8"]:
-        no_quantize_inputs = []
         if autotune:
-            nodes_to_quantize_autotune, op_types_to_quantize, no_quantize_inputs = (
-                _find_nodes_to_quantize_autotune(
-                    onnx_path,
-                    onnx_model,
-                    quantize_mode,
-                    trt_plugins,
-                    high_precision_dtype,
-                )
+            (
+                nodes_to_quantize_autotune,
+                op_types_to_quantize,
+                no_quantize_inputs,
+                op_types_needing_output_quant,
+            ) = _find_nodes_to_quantize_autotune(
+                onnx_path,
+                onnx_model,
+                quantize_mode,
+                trt_plugins,
+                high_precision_dtype,
             )
             nodes_to_quantize.extend(nodes_to_quantize_autotune)
+            kwargs["no_quantize_inputs"] = no_quantize_inputs
+            kwargs["op_types_needing_output_quant"] = op_types_needing_output_quant
 
         quantize_func = quantize_int8 if quantize_mode == "int8" else quantize_fp8
         onnx_model = quantize_func(
@@ -597,13 +628,8 @@ def quantize(
             direct_io_types=direct_io_types,
             opset=opset,
             autotune=autotune,
-            no_quantize_inputs=no_quantize_inputs,
             **kwargs,
         )
-
-        # if autotune:
-        #     # Copy real scales to quantized model
-        #     print()
 
     elif "int4" in quantize_mode:
         onnx_model = quantize_int4(

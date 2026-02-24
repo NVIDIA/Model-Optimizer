@@ -134,7 +134,6 @@ def quantize(
     direct_io_types: bool = False,
     opset: int | None = None,
     autotune: bool = False,
-    no_quantize_inputs: list[tuple[Node, Node, str]] | None = None,
     **kwargs,
 ) -> onnx.ModelProto:
     """Applies INT8 quantization to an ONNX file using the compiler friendly heuristics.
@@ -192,13 +191,13 @@ def quantize(
         calibration_eps,
         calibrate_per_node,
         custom_ops_to_quantize,
-        autotune,
+        kwargs.get("op_types_needing_output_quant"),
     )
     logger.info(f"Quantizable op types: {[t for t in quantizable_op_types if t in op_types]}")
 
     # Collect node names to include in quantization
     nodes_to_quantize = nodes_to_quantize or []
-    no_quantize_inputs = no_quantize_inputs or []
+    no_quantize_inputs = kwargs.get("no_quantize_inputs", [])
     if not autotune:
         nodes_to_quantize = expand_node_names_from_patterns(graph, nodes_to_quantize)
         if not nodes_to_quantize:

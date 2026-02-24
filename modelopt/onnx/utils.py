@@ -173,13 +173,13 @@ def get_dynamic_graph_inputs(onnx_model: onnx.ModelProto):
 
 
 def get_quantized_nodes(onnx_model: onnx.ModelProto) -> list:
-    """This function returns the nodes preceded by a DQ node.
+    """This function returns the nodes preceded by a DQ node or followed by a Q node.
 
     Args:
         onnx_model: ONNX model to traverse.
 
     Returns:
-        List of quantized nodes.
+        List of quantized nodes (input or output).
     """
     graph = gs.import_onnx(onnx_model)
 
@@ -187,6 +187,7 @@ def get_quantized_nodes(onnx_model: onnx.ModelProto) -> list:
         node
         for node in graph.nodes
         if any(inp.inputs[0].op == "DequantizeLinear" for inp in node.inputs if inp.inputs)
+        or any(out.outputs[0].op == "QuantizeLinear" for out in node.outputs if out.outputs)
     ]
 
 
