@@ -669,4 +669,5 @@ def get_decoder_layers(model: nn.Module, granularity: str = "decoder") -> nn.Mod
     if hasattr(model, "backbone") and hasattr(model.backbone, "layers"):
         return model.backbone.layers
 
+    print("No decoder layers found for model, returning None")
     return None
