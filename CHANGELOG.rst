@@ -6,7 +6,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 
 **Bug Fixes**
 
-- Upgraded ORT to 1.24.2 to solve various bugs.
+- ONNX Runtime dependency upgraded to 1.24 to solve various bugs.
 
 **New Features**
 
