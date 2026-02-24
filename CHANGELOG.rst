@@ -6,7 +6,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 
 **Bug Fixes**
 
-- ONNX Runtime dependency upgraded to 1.24 to solve various bugs.
+- ONNX Runtime dependency upgraded to 1.24 to solve missing graph outputs when using the TensorRT Execution Provider.
 
 **New Features**
 
