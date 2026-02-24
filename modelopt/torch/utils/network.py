@@ -634,3 +634,39 @@ def unpatch_forward_method(module: nn.Module, orig_forward_cache_name: str):
     with temporarily_remove_accelerate_hook(module):
         setattr(module, "forward", getattr(module, orig_forward_cache_name))
         delattr(module, orig_forward_cache_name)
+
+
+def get_decoder_layers(model: nn.Module, granularity: str = "decoder") -> nn.ModuleList | None:
+    """Get the decoder layers from a model for sequential calibration.
+
+    Args:
+        model: The model to extract decoder layers from.
+        granularity: The type of layers to extract. Currently only "decoder" is supported.
+
+    Returns:
+        A ModuleList of decoder layers, or None if not found.
+    """
+    if granularity != "decoder":
+        raise ValueError(f"Unsupported granularity: {granularity}. Only 'decoder' is supported.")
+
+    # HuggingFace transformers pattern: model.model.layers
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        return model.model.layers
+
+    # Megatron/MCore pattern: model.decoder.layers
+    if hasattr(model, "decoder") and hasattr(model.decoder, "layers"):
+        return model.decoder.layers
+
+    # Direct layers attribute (some models)
+    if hasattr(model, "layers") and isinstance(model.layers, nn.ModuleList):
+        return model.layers
+
+    # GPT-style: model.transformer.h
+    if hasattr(model, "transformer") and hasattr(model.transformer, "h"):
+        return model.transformer.h
+
+    # Nemotron Super/Nano
+    if hasattr(model, "backbone") and hasattr(model.backbone, "layers"):
+        return model.backbone.layers
+
+    return None
