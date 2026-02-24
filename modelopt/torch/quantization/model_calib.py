@@ -15,9 +15,6 @@
 
 """Calibration utilities."""
 
-import contextlib
-import datetime
-import json
 import math
 import os
 import warnings
@@ -61,7 +58,6 @@ __all__ = [
     "awq",
     "local_hessian_calibrate",
     "max_calibrate",
-    "save_fake_checkpoint",
     "smoothquant",
     "svdquant",
 ]
@@ -1922,7 +1918,6 @@ def gptq(
     # Unpatch forwards
     for module in patched_modules:
         unpatch_forward_method(module, "_forward_no_gptq_hessian")
-
 
     # Phase 3: Update weights using computed Hessians (same as gptq_lite)
     print_rank_0("Updating weights using GPTQ algorithm...")

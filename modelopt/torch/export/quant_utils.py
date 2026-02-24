@@ -45,7 +45,7 @@ from modelopt.torch.quantization.utils import (
 )
 from modelopt.torch.utils import clear_cuda_cache
 
-from ..quantization.nn import NVFP4StaticQuantizer, SequentialQuantizer, TensorQuantizer
+from ..quantization.nn import SequentialQuantizer, TensorQuantizer
 from .model_config import (
     KV_CACHE_FP8,
     KV_CACHE_INT8,
@@ -299,19 +299,16 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
         return get_scaling_factor(weight_quantizer[0])
 
     quantization_format = get_quantization_format(module)
-
-    # Handle NVFP4 variants (static or dynamic)
-    is_nvfp4_static = isinstance(weight_quantizer, NVFP4StaticQuantizer)
-    if is_nvfp4_static or quantization_format in [
+    # If NVFP4, we need to return quantized per_block scaling factors
+    if quantization_format in [
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
         QUANTIZATION_NVFP4_SVDQUANT,
         QUANTIZATION_W4A8_NVFP4_FP8,
     ]:
-        # Calibrate weight quantizer if amax is not set (only needed for dynamic quantizers)
-        if not is_nvfp4_static:
-            module_name = f"{type(module).__name__}.{weight_name}"
-            _ensure_weight_quantizer_calibrated(weight_quantizer, weight, module_name)
+        # Calibrate weight quantizer if amax is not set
+        module_name = f"{type(module).__name__}.{weight_name}"
+        _ensure_weight_quantizer_calibrated(weight_quantizer, weight, module_name)
 
         if quantization_format == QUANTIZATION_W4A8_NVFP4_FP8:
             # weight_scaling_factor_2 for w4a8 needs to be amax/448, so that the wsf is in range 448/6.
@@ -321,10 +318,9 @@ def get_weight_scaling_factor(module: nn.Module, weight_name: str = "weight") ->
             weight_scaling_factor_2 = NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(
                 weight_quantizer
             )
-        # Unified method handles both static and dynamic quantizers
-        return NVFP4QTensor.get_weights_scaling_factor_from_quantizer(
-            weight_quantizer,
+        return NVFP4QTensor.get_weights_scaling_factor(
             weight,
+            weight_quantizer.block_sizes[-1],
             weight_scaling_factor_2.to(weight.device),
         )[0]
 
@@ -347,26 +343,27 @@ def get_weight_scaling_factor_2(module: nn.Module, weight_name: str = "weight") 
 
     quantization_format = get_quantization_format(module)
 
-    is_nvfp4_static = isinstance(weight_quantizer, NVFP4StaticQuantizer)
-    if is_nvfp4_static or quantization_format in [
+    # Calibrate weight quantizer if amax is not set for all NVFP4 variants
+    if quantization_format in [
         QUANTIZATION_NVFP4,
         QUANTIZATION_NVFP4_AWQ,
         QUANTIZATION_NVFP4_SVDQUANT,
         QUANTIZATION_W4A8_NVFP4_FP8,
     ]:
-        # Calibrate weight quantizer if amax is not set (only needed for dynamic quantizers)
-        if not is_nvfp4_static:
-            weight = getattr(module, weight_name)
-            module_name = f"{type(module).__name__}.{weight_name}"
-            _ensure_weight_quantizer_calibrated(weight_quantizer, weight, module_name)
+        weight = getattr(module, weight_name)
+        module_name = f"{type(module).__name__}.{weight_name}"
+        _ensure_weight_quantizer_calibrated(weight_quantizer, weight, module_name)
 
-        if quantization_format == QUANTIZATION_W4A8_NVFP4_FP8:
-            # weight_scaling_factor_2 for w4a8 needs to be amax/448, so that the wsf is in range 448/6.
-            # This is because the kernel dequantizes weight to fp8, which is in range 448.
-            return weight_quantizer._amax.float() / 448.0
-        else:
-            # Unified method handles both static and dynamic quantizers
-            return NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(weight_quantizer)
+    if quantization_format in [
+        QUANTIZATION_NVFP4,
+        QUANTIZATION_NVFP4_AWQ,
+        QUANTIZATION_NVFP4_SVDQUANT,
+    ]:
+        return NVFP4QTensor.get_weights_scaling_factor_2_from_quantizer(weight_quantizer)
+    elif quantization_format == QUANTIZATION_W4A8_NVFP4_FP8:
+        # weight_scaling_factor_2 for w4a8 needs to be amax/448, so that the wsf is in range 448/6.
+        # This is because the kernel dequantizes weight to fp8, which is in range 448.
+        return weight_quantizer._amax.float() / 448.0
 
     # SequentialQuantizer is required
     if not isinstance(weight_quantizer, SequentialQuantizer) or not weight_quantizer[-1].is_enabled:
@@ -738,7 +735,7 @@ def process_layer_quant_config(layer_config_dict):
             layer_config = {"quant_algo": "W8A16"}
         elif v == "int8_sq":
             layer_config = {"quant_algo": "W8A8_SQ_PER_CHANNEL"}
-        elif v in ["nvfp4", "nvfp4_static"]:
+        elif v == "nvfp4":
             layer_config = {
                 "quant_algo": "NVFP4",
                 "group_size": block_size_value,
@@ -1342,18 +1339,6 @@ def preprocess_linear_fusion(modules: list[torch.nn.Module], resmooth_only=False
                 for module in modules:
                     module.weight_quantizer[-1].amax = weight_amax
 
-        # Handle NVFP4StaticQuantizer: unify global_amax for fused layers
-        elif isinstance(modules[0].weight_quantizer, NVFP4StaticQuantizer):
-            global_amax_list = [
-                m.weight_quantizer.global_amax
-                for m in modules
-                if m.weight_quantizer.global_amax is not None
-            ]
-            if global_amax_list:
-                unified_global_amax = torch.max(torch.stack(global_amax_list))
-                for module in modules:
-                    module.weight_quantizer.global_amax = unified_global_amax
-
         elif (
             modules[0].weight_quantizer.is_enabled
             and modules[0].weight_quantizer.amax is not None
@@ -1437,22 +1422,6 @@ def get_quant_config(
             # Fallback to default weight quantizer if no specific weight quantizer found
             if block_size == 0:
                 block_size = get_weight_block_size(module)
-
-            # Static NVFP4 uses pre-computed per-block scales from MSE calibration
-            if quantization_format == QUANTIZATION_NVFP4:
-                weight_quantizer = getattr(module, "weight_quantizer", None)
-                if weight_quantizer is None:
-                    # Try to get from first weight attribute
-                    for wn in weight_names:
-                        weight_quantizer = getattr(
-                            module, quantizer_attr_names(wn).weight_quantizer, None
-                        )
-                        if weight_quantizer is not None:
-                            break
-                if weight_quantizer is not None:
-                    is_static = isinstance(weight_quantizer, NVFP4StaticQuantizer)
-                    if is_static:
-                        quantization_format = "nvfp4_static"
 
             # Construct per layer config dictionary
             layer_config_dict[name + ".quantization"] = quantization_format

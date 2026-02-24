@@ -833,7 +833,7 @@ class LayerActivationGettr:
             Note: 'self' refers to the patched layer.
             """
             assert len(args) >= 1
-            #Only collect the inputs to the layer
+            # Only collect the inputs to the layer
             self.inputs.append((args, kwargs))
             if getattr(self, "_stop_after_collection", False):
                 raise StopIteration()
