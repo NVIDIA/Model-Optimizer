@@ -524,7 +524,6 @@ class PatternCache:
                     distance = scheme.distance(existing_scheme)
                     if distance < self.minimum_distance:
                         # Schemes are too similar, keep the better one
-                        too_similar = True
                         if scheme.latency_ms < existing_scheme.latency_ms:
                             # New scheme is better; mark existing for removal
                             existing_to_remove = existing_scheme
@@ -540,10 +539,6 @@ class PatternCache:
                 if existing_to_remove is not None:
                     filtered_schemes.remove(existing_to_remove)
                 if not too_similar:
-                    filtered_schemes.append(scheme)
-                elif schemes_to_replace:
-                    for scheme_to_replace in schemes_to_replace:
-                        filtered_schemes.remove(scheme_to_replace)
                     filtered_schemes.append(scheme)
 
             sorted_schemes = filtered_schemes
