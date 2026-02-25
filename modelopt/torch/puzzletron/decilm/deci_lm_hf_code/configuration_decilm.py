@@ -20,7 +20,7 @@ import dataclasses
 import warnings
 from typing import Any
 
-from transformers.utils import is_flash_attn_2_available, is_torch_sdpa_available
+from transformers.utils import is_flash_attn_2_available # , is_torch_sdpa_available
 
 from .block_config import BlockConfig
 from .transformers_4_44_2__configuration_llama import LlamaConfig
@@ -119,7 +119,8 @@ class DeciLMConfig(LlamaConfig):
     def _choose_llama4_attn_implementation(self, llama4_attn_implementation):
         self.llama4_attn_implementation = llama4_attn_implementation
         if self.llama4_attn_implementation is None:
-            if is_torch_sdpa_available():
+            # if is_torch_sdpa_available():
+            if True:
                 _print_once("auto-setting llama4_attn_implementation to sdpa")
                 self.llama4_attn_implementation = "sdpa"
             else:

@@ -1,0 +1,133 @@
+# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Knowledge distillation: student and teacher are AnyModel checkpoints.
+# Requires apply_patch() from patch_automodel. Set model and teacher_model paths and descriptors.
+# anymodel_descriptor must match a ModelOpt ModelDescriptorFactory name (e.g. gpt_oss_20b, llama, qwen2, qwen3).
+#
+# KD loss (kd_loss_fn._target_): use loss.KDLoss for TP-aware KD on precomputed logits.
+# CE is computed by loss_fn and mixed with KD via kd_ratio in the recipe.
+# If running under a different package name, use that module path (e.g. automodel_distillation.loss.KDLoss).
+#
+# To run:
+#   torchrun --nproc_per_node <N> -m automodel_distillation.run --mode kd -c kd.yaml
+# Override: model.pretrained_model_name_or_path=/path/to/student model.anymodel_descriptor=llama ...
+
+step_scheduler:
+  global_batch_size: 128
+  local_batch_size: 4
+  ckpt_every_steps: 200
+  val_every_steps: 100
+  num_epochs: 2
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 5
+
+rng:
+  _target_: nemo_automodel.components.training.rng.StatefulRNG
+  seed: 1111
+  ranked: true
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_pretrained
+  pretrained_model_name_or_path: ./heterogeneous_ckpts/meta-llama-Llama-3.1-8B-Instruct/  # student checkpoint dir
+  anymodel_descriptor: llama  # e.g. gpt_oss_20b, llama, qwen2, qwen3
+  force_hf: true
+  torch_dtype: bf16
+  trust_remote_code: true
+
+teacher_model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_pretrained
+  pretrained_model_name_or_path: ./heterogeneous_ckpts/meta-llama-Llama-3.1-8B-Instruct-teacher/  # teacher checkpoint dir
+  anymodel_descriptor: llama  # same format as model.anymodel_descriptor
+  force_hf: true
+  torch_dtype: bf16
+  trust_remote_code: true
+
+checkpoint:
+  enabled: true
+  checkpoint_dir: checkpoints/
+  model_save_format: safetensors
+  save_consolidated: false
+
+distributed:
+  dp_size: none
+  tp_size: 2
+  cp_size: 1
+  ep_size: 1
+  sequence_parallel: false
+  pp_size: 1
+  pipeline:
+    pp_schedule: interleaved1f1b
+    pp_microbatch_size: 1
+    scale_grads_in_schedule: false
+    round_virtual_stages_to_pp_multiple: up
+    dtype: bf16
+
+distributed_config:
+  _target_: nemo_automodel.components.distributed.config.FSDP2Config
+  activation_checkpointing: false
+
+compile_config:
+  enabled: true
+
+packed_sequence:
+  packed_sequence_size: 1024
+  split_across_pack: false
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.te_parallel_ce.TEParallelCrossEntropy
+
+# 0 = pure CE (better to run pretrain instead of loading a teacher and not using it)
+# 1 = pure KD (common practice for puzzletron distillation)
+kd_ratio: 1.0
+
+kd_loss_fn:
+  _target_: loss.KDLoss
+  ignore_index: -100
+  temperature: 1.0
+  fp32_upcast: true
+
+optimizer:
+  _target_: torch.optim.Adam
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  lr: 1.0e-5
+  weight_decay: 0
+
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.squad.make_squad_dataset
+  dataset_name: rajpurkar/squad
+  split: train
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn: nemo_automodel.components.datasets.utils.default_collater
+  shuffle: false
+
+validation_dataset:
+  _target_: nemo_automodel.components.datasets.llm.squad.make_squad_dataset
+  dataset_name: rajpurkar/squad
+  split: validation
+
+validation_dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  collate_fn: nemo_automodel.components.datasets.utils.default_collater
+
+# wandb:
+#   project: <your_project>
+#   entity: <your_entity>
+#   name: <your_run_name>
+#   save_dir: <your_save_dir>
