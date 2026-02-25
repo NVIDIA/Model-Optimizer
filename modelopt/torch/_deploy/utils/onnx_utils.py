@@ -45,14 +45,3 @@ def _get_onnx_external_data_tensors(model: onnx.ModelProto) -> list[str]:
         if tensor.HasField("data_location") and tensor.data_location == onnx.TensorProto.EXTERNAL
     ]
     return model_tensors_ext
-
-
-def check_model_uses_external_data(model: onnx.ModelProto) -> bool:
-    """
-    Checks if the model uses external data.
-    """
-    model_tensors = _get_initializer_tensors(model)
-    return any(
-        tensor.HasField("data_location") and tensor.data_location == onnx.TensorProto.EXTERNAL
-        for tensor in model_tensors
-    )

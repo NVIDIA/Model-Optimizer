@@ -27,7 +27,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import nullcontext
 from typing import Any, final
-from warnings import warn
 
 import numpy as np
 import pulp
@@ -35,7 +34,7 @@ import torch
 import torch.nn as nn
 
 from modelopt.torch.utils import distributed as dist
-from modelopt.torch.utils import no_stdout, run_forward_loop
+from modelopt.torch.utils import no_stdout, print_rank_0, run_forward_loop, warn_rank_0
 
 LimitsTuple = tuple[float, float]
 ConstraintsDict = dict[str, str | float | dict | None]
@@ -212,6 +211,7 @@ class BaseSearcher(ABC):
             return None
 
         def forward_loop_with_silence_check(m: nn.Module) -> None:
+            print_rank_0("Running forward loop...")
             with no_stdout() if silent else nullcontext():
                 if data_loader is not None:
                     run_forward_loop(
@@ -243,12 +243,11 @@ class BaseSearcher(ABC):
         if checkpoint is None:
             return False
         if not os.path.exists(checkpoint):
-            if dist.is_master():
-                warn(f"Checkpoint {checkpoint} does not exist! Initializing from scratch.")
+            warn_rank_0(f"Checkpoint {checkpoint} does not exist! Initializing from scratch.")
             return False
 
         # iterate through state dict and load keys
-        print(f"Loading searcher state from {checkpoint}...")
+        print_rank_0(f"Loading searcher state from {checkpoint}...")
         # Security NOTE: weights_only=False is used here on ModelOpt-generated ckpt, not on untrusted user input
         state_dict = torch.load(checkpoint, weights_only=False)
         assert state_dict.keys() == self.state_dict().keys(), "Keys in checkpoint don't match!"

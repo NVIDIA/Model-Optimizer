@@ -24,6 +24,8 @@ from megatron.core.timers import Timer
 from megatron.core.transformer import MegatronModule
 from tqdm import tqdm
 
+__all__ = ["megatron_generate", "megatron_prefill"]
+
 
 def get_current_memory_info():
     """Get current memory usage."""
@@ -210,13 +212,48 @@ def megatron_generate(
         # NOTE: we don't support traditional positional embedding. Only RoPE or YaRN are supported.
         position_ids = None
 
-        output_tensor = model(
-            data["tokens"],
-            position_ids,
-            attention_mask,
-            inference_context=inference_context,
-            runtime_gather_output=True,
-        )
+        # Check if this is a VLM model (has vision inputs)
+        _has_pixel_values = data.get("pixel_values") is not None
+        _has_image_grid_thw = data.get("image_grid_thw") is not None
+        _has_image_sizes = data.get("image_sizes") is not None
+        has_vision_inputs = _has_pixel_values or _has_image_grid_thw or _has_image_sizes
+
+        if has_vision_inputs:
+            # For VLM models:
+            # - position_ids: [batch, seq_len] (required for RoPE with multi-modal positions)
+            # - attention_mask: [batch, seq_len] (simple 1D boolean mask, not 4D causal)
+            vlm_position_ids = (
+                torch.arange(seq_len, dtype=torch.long, device=device)
+                .unsqueeze(0)
+                .expand(batch_size, -1)
+            )
+            vlm_attention_mask = torch.ones((batch_size, seq_len), dtype=torch.bool, device=device)
+
+            forward_args = {
+                "input_ids": data["tokens"],
+                "position_ids": vlm_position_ids,
+                "attention_mask": vlm_attention_mask,
+                "inference_context": inference_context,
+                "runtime_gather_output": True,
+            }
+            # Add vision inputs
+            if _has_pixel_values:
+                forward_args["pixel_values"] = data["pixel_values"]
+            if _has_image_grid_thw:
+                forward_args["image_grid_thw"] = data["image_grid_thw"]
+            if _has_image_sizes:
+                forward_args["image_sizes"] = data["image_sizes"]
+
+            output_tensor = model(**forward_args)
+        else:
+            # For text-only LLM models
+            output_tensor = model(
+                data["tokens"],
+                position_ids,
+                attention_mask,
+                inference_context=inference_context,
+                runtime_gather_output=True,
+            )
         return output_tensor, _dummy_loss_func
 
     disable_tqdm = disable_tqdm or torch.distributed.get_rank() > 0
@@ -250,9 +287,18 @@ def megatron_generate(
         else:
             tokens = input_ids
 
+        data_dict = {"tokens": tokens}
+        # Vision inputs should only be passed during prefill (step 0), not during decode steps
+        if pixel_values is not None:
+            data_dict["pixel_values"] = pixel_values
+        if image_grid_thw is not None:
+            data_dict["image_grid_thw"] = image_grid_thw
+        if image_sizes is not None:
+            data_dict["image_sizes"] = image_sizes
+
         list_of_logits = get_forward_backward_func()(
             forward_step_func=_forward_step_func,
-            data_iterator=[{"tokens": tokens}],
+            data_iterator=[data_dict],
             model=model,
             num_microbatches=1,
             seq_length=tokens.shape[-1],

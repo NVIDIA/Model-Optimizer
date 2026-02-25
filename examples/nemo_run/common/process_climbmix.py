@@ -67,7 +67,7 @@ if __name__ == "__main__":
     print("Tokenizing ClimbMix dataset...")
     input_paths = [raw_dir / name for name in subset_filenames]
     megatron_preprocess_data(
-        input_paths,
+        jsonl_paths=input_paths,
         output_dir=proc_dir,
         tokenizer_name_or_path=args.tokenizer,
         append_eod=True,

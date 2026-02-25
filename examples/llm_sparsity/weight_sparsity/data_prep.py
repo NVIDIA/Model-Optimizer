@@ -19,7 +19,7 @@ import os
 
 from datasets import load_dataset
 
-dataset_id = "cnn_dailymail"
+dataset_id = "abisee/cnn_dailymail"
 dataset_config = "3.0.0"
 text_column = "article"
 summary_column = "highlights"

@@ -56,18 +56,21 @@ jobs:
       match_pattern: "^DCO$|^linux$" # Wait for DCO and Unit tests / linux to pass
       delay: 300s
 
-  ##### PyTorch Example Tests #####
+  ##### PyTorch Example Tests (speculative_decoding requires 26.01 image) #####
   torch-pr:
     needs: [check-file-changes, wait-checks]
     if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
     strategy:
       fail-fast: false
       matrix:
-        example: [llm_distill, llm_qat, llm_sparsity, speculative_decoding]
+        example: [llm_distill, llm_qat, llm_sparsity]
+        include:
+          - example: speculative_decoding
+            docker_image: "26.01"
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/pytorch:25.06-py3"
+      docker_image: "nvcr.io/nvidia/pytorch:${{ matrix.docker_image || '26.01' }}-py3"
       example: ${{ matrix.example }}
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-l4-latest-1
@@ -77,11 +80,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [llm_distill, llm_qat, llm_sparsity, speculative_decoding]
+        example: [llm_distill, llm_qat, llm_sparsity]
+        include:
+          - example: speculative_decoding
+            docker_image: "26.01"
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/pytorch:25.06-py3"
+      docker_image: "nvcr.io/nvidia/pytorch:${{ matrix.docker_image || '26.01' }}-py3"
       example: ${{ matrix.example }}
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-h100-latest-2
@@ -97,7 +103,7 @@ jobs:
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc4"
+      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6.post3"
       example: ${{ matrix.example }}
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-h100-latest-1
@@ -111,7 +117,7 @@ jobs:
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc4"
+      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6.post3"
       example: ${{ matrix.example }}
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-h100-latest-2
@@ -127,7 +133,7 @@ jobs:
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/tensorrt:25.08-py3"
+      docker_image: "nvcr.io/nvidia/tensorrt:26.01-py3"
       example: ${{ matrix.example }}
       pip_install_extras: "[all,dev-test]"
       runner: linux-amd64-gpu-l4-latest-1
@@ -141,7 +147,7 @@ jobs:
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/tensorrt:25.08-py3"
+      docker_image: "nvcr.io/nvidia/tensorrt:26.01-py3"
       example: ${{ matrix.example }}
       pip_install_extras: "[all,dev-test]"
       runner: linux-amd64-gpu-l4-latest-1

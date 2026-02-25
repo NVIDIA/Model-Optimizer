@@ -21,7 +21,7 @@ class BaseRunner:
         self.metrics = metrics
         self.prompt_ar = []
 
-    async def run(self, prompt_ids, max_length, end_id, request_id, turn_id):
+    async def run(self, prompt_ids, max_length, end_id, sampling_kwargs):
         raise NotImplementedError()
 
     def process_metrics_final(self, text_outputs):

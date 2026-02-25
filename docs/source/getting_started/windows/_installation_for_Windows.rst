@@ -25,7 +25,7 @@ The following system requirements are necessary to install and use Model Optimiz
 +-------------------------+-----------------------------+
 
 .. note::
-   - Make sure to use GPU-compatible driver and other dependencies (e.g. torch etc.). For instance, support for Blackwell GPU might be present in Nvidia 570+ driver, and CUDA-12.8.
+   - Make sure to use GPU-compatible driver and other dependencies (e.g. torch etc.). For instance, support for Blackwell GPU might be present in Nvidia 570+ driver, and CUDA-12.8+.
    - We currently support *Single-GPU* configuration.
 
 The Model Optimizer - Windows can be used in following ways:

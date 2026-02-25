@@ -156,10 +156,19 @@ _default_disabled_quantizer_cfg = {
     "*mlp.gate.*": {"enable": False},  # Skip the MOE router
     "*mlp.shared_expert_gate.*": {"enable": False},  # Skip the MOE router
     "*linear_attn.conv1d*": {"enable": False},
-    "*mixer.conv1d*": {"enable": False},
+    "*mixer.conv1d*": {"enable": False},  # Skip mamba conv1d
     "*output_layer*": {"enable": False},
     "output.*": {"enable": False},
     "default": {"enable": False},
+}
+
+_mamba_moe_disabled_quantizer_cfg = {
+    "*fc1_latent_proj*": {"enable": False},  # Skip Latent MOE
+    "*fc2_latent_proj*": {"enable": False},  # Skip Latent MOE
+    "*q_proj*": {"enable": False},  # Skip QKV Linear
+    "*k_proj*": {"enable": False},  # Skip QKV Linear
+    "*v_proj*": {"enable": False},  # Skip QKV Linear
+    "*o_proj*": {"enable": False},  # Skip QKV Output Projection
 }
 
 INT8_DEFAULT_CFG = {
@@ -194,6 +203,28 @@ FP8_DEFAULT_CFG = {
         "*weight_quantizer": {"num_bits": (4, 3), "axis": None},
         "*input_quantizer": {"num_bits": (4, 3), "axis": None},
         **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": "max",
+}
+
+MAMBA_MOE_FP8_AGGRESSIVE_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {"num_bits": (4, 3), "axis": None},
+        "*input_quantizer": {"num_bits": (4, 3), "axis": None},
+        **_default_disabled_quantizer_cfg,
+        **_mamba_moe_disabled_quantizer_cfg,
+    },
+    "algorithm": "max",
+}
+
+MAMBA_MOE_FP8_CONSERVATIVE_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {"num_bits": (4, 3), "axis": None},
+        "*input_quantizer": {"num_bits": (4, 3), "axis": None},
+        **_default_disabled_quantizer_cfg,
+        **_mamba_moe_disabled_quantizer_cfg,
+        "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
+        "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
     },
     "algorithm": "max",
 }
@@ -233,6 +264,7 @@ INT4_BLOCKWISE_WEIGHT_ONLY_CFG = {
     },
     "algorithm": "max",
 }
+
 
 INT4_AWQ_CFG = {
     "quant_cfg": {
@@ -387,7 +419,7 @@ NVFP4_DEFAULT_CFG = {
     "algorithm": "max",
 }
 
-NVFP4_WEIGHT_ACT_MSE_CFG = {
+NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": (2, 1),
@@ -404,12 +436,52 @@ NVFP4_WEIGHT_ACT_MSE_CFG = {
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": {
-        "method": "mse",
-        "step_size": 0.25,
-        "start_multiplier": 0.25,
-        "stop_multiplier": 2.0,
+        "method": "local_hessian",
+        "fp8_scale_sweep": True,
     },
 }
+
+MAMBA_MOE_NVFP4_AGGRESSIVE_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        **_default_disabled_quantizer_cfg,
+        **_mamba_moe_disabled_quantizer_cfg,
+    },
+    "algorithm": "max",
+}
+MAMBA_MOE_NVFP4_CONSERVATIVE_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        **_default_disabled_quantizer_cfg,
+        **_mamba_moe_disabled_quantizer_cfg,
+        "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
+        "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
+    },
+    "algorithm": "max",
+}
+
 
 NVFP4_AWQ_LITE_CFG = {
     "quant_cfg": {
@@ -675,6 +747,10 @@ choices: set[str] = {
     "NVFP4_MLP_WEIGHT_ONLY_CFG",
     "MXFP4_MLP_WEIGHT_ONLY_CFG",
     "NVFP4_MLP_ONLY_CFG",
+    "MAMBA_MOE_NVFP4_CONSERVATIVE_CFG",
+    "MAMBA_MOE_NVFP4_AGGRESSIVE_CFG",
+    "MAMBA_MOE_FP8_CONSERVATIVE_CFG",
+    "MAMBA_MOE_FP8_AGGRESSIVE_CFG",
 }
 
 BiasType = Literal["static", "dynamic"]
@@ -957,14 +1033,20 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
             assert v in ["max", "histogram"]
         return v
 
-    rotate: bool = ModeloptField(
+    rotate: bool | dict[str, bool] = ModeloptField(
         default=False,
-        title="""If rotate the input before quantization.""",
-        description=""""If true, the input of the quantizer will be rotated with a hadamard matrix
+        title="""Configuration for rotating the input before quantization.""",
+        description="""Can be a boolean or a dictionary with the following keys:
+        - "enable": Boolean to enable/disable rotation (default: False)
+        - "rotate_fp32": Boolean to compute rotation in float32 precision (default: False)
+
+        If a boolean is provided, it is treated as the "enable" value with "rotate_fp32" defaulting to False.
+
+        When enabled, the input of the quantizer will be rotated with a hadamard matrix
         given by scipy.linalg.hadamard, i.e.
         ``input = input @ scipy.linalg.hadamard(input.shape[-1]) / sqrt(input.shape[-1])``.
 
-        This can be used for ratation based PTQ methods, e.g. QuaRot or SpinQuant.
+        This can be used for rotation based PTQ methods, e.g. QuaRot or SpinQuant.
         See https://arxiv.org/abs/2404.00456 for example.""",
     )
 
@@ -1015,6 +1097,16 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         title="This field specifies the name of the calibration algorithm. If None, no calibration is performed.",
     )
 
+    moe_calib_experts_ratio: float | None = ModeloptField(
+        default=None,
+        title="% of experts to calibrate during forward pass.",
+        description=(
+            "If specified, we force forward tokens to % of experts during the calibration"
+            " pass. This forward is for calibration purpose only and will not affect the"
+            " actual inference."
+        ),
+    )
+
 
 class MaxCalibConfig(QuantizeAlgorithmConfig):
     """The config for max calibration algorithm.
@@ -1040,6 +1132,8 @@ class MseCalibConfig(QuantizeAlgorithmConfig):
     reconstruction error of a tensor after uniform Q→DQ:
 
         s* = argmin_s  E[(X - DQ(Q(X; s)))^2],   X ∈ {weights | activations}
+
+    When fp8_scale_sweep is enabled, step_size is ignored.
     """
 
     method: Literal["mse"] = ModeloptField("mse")
@@ -1066,10 +1160,85 @@ class MseCalibConfig(QuantizeAlgorithmConfig):
         description="Ending multiplier for amax search range (multiplies initial amax).",
     )
 
+    fp8_scale_sweep: bool | None = ModeloptField(
+        default=False,
+        title="Enable FP8 scale sweep for NVFP4 per-block quantization.",
+        description="If True, sweep all 128 FP8 E4M3 scale values instead of using multipliers. "
+        "Only applies to NVFP4 weight quantization. When enabled, num_steps, step_size, "
+        "start_multiplier, and stop_multiplier are ignored.",
+    )
+
     distributed_sync: bool | None = ModeloptField(
         default=True,
         title="Whether to sync the amax across the distributed processes.",
         description="If True, the amax will be synced across the distributed processes.",
+    )
+
+
+class LocalHessianCalibConfig(QuantizeAlgorithmConfig):
+    """Configuration for local Hessian-weighted MSE calibration.
+
+    This algorithm uses activation information to optimize per-block scales for weight
+    quantization. It minimizes the output reconstruction error by weighting the loss
+    with the local Hessian matrix computed from input activations.
+
+    The local Hessian loss for each block is: ``(dw @ H @ dw.T)`` where:
+    - ``dw = weight - quantized_weight`` (weight reconstruction error per block)
+    - ``H = X @ X.T`` is the local Hessian computed from input activations X
+
+    """
+
+    method: Literal["local_hessian"] = ModeloptField("local_hessian")
+
+    step_size: float | None = ModeloptField(
+        default=0.1,
+        gt=0.0,
+        title="Step size for amax search.",
+        description="Step size between amax candidates. The number of candidates is computed as "
+        "ceil((stop_multiplier - start_multiplier) / step_size) + 1.",
+    )
+
+    start_multiplier: float | None = ModeloptField(
+        default=0.25,
+        gt=0.0,
+        title="Starting multiplier for amax search.",
+        description="Starting multiplier for amax search range (multiplies initial amax).",
+    )
+
+    stop_multiplier: float | None = ModeloptField(
+        default=4.0,
+        gt=0.0,
+        title="Ending multiplier for amax search.",
+        description="Ending multiplier for amax search range (multiplies initial amax).",
+    )
+
+    fp8_scale_sweep: bool | None = ModeloptField(
+        default=True,
+        title="Enable FP8 scale sweep for NVFP4 per-block quantization.",
+        description="If True, sweep over all 128 possible FP8 E4M3 scale values "
+        "for NVFP4 per-block quantization instead of using multipliers. "
+        "This is the recommended setting for NVFP4 quantization.",
+    )
+
+    block_size: int | None = ModeloptField(
+        default=16,
+        gt=0,
+        title="Block size for local Hessian computation.",
+        description="The block size used for computing the local Hessian matrix. "
+        "This should match the block size used in the quantization config. "
+        "Default is 16 for NVFP4.",
+    )
+
+    distributed_sync: bool | None = ModeloptField(
+        default=True,
+        title="Whether to sync the amax across the distributed processes.",
+        description="If True, the amax will be synced across the distributed processes.",
+    )
+
+    debug: bool | None = ModeloptField(
+        default=False,
+        title="Debug mode.",
+        description="If True, module's local Hessian metadata will be kept as a module attribute.",
     )
 
 
@@ -1200,6 +1369,44 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
             "Specifies the rank of the LoRA used in the SVDQuant method, "
             "which captures outliers from the original weights."
         ),
+    )
+
+
+class GPTQLiteConfig(QuantizeAlgorithmConfig):
+    """The config for GPTQ lite.
+
+    GPTQ lite is a variant of GPTQ that does not exactly follow the official GPTQ implementation.
+
+    GPTQ lite does not perform sequential quantization of layers. This means that the updated
+    activations are not used to process the next layer.
+
+    The default values are taken from the official GPTQ implementation:
+    https://github.com/IST-DASLab/FP-Quant/blob/d2e3092f968262c4de5fb050e1aef568a280dadd/src/quantization/gptq.py#L35
+
+    Note: This feature is currently experimental and may not translate to improved accuracy as expected.
+
+
+    """
+
+    method: Literal["gptq_lite"] = ModeloptField("gptq_lite")
+    percdamp: float | None = ModeloptField(
+        default=0.01,
+        gt=0.0,
+        le=1.0,
+        title="Percentage damping factor.",
+        description="The percentage of average Hessian diagonal used for damping.",
+    )
+    block_size: int | None = ModeloptField(
+        default=128,
+        title="Block size for GPTQ weight update.",
+        description="""The block size for GPTQ weight update, which must be a multiple of the
+        group_size used in the quantization.""",
+    )
+    hessian_state_path: str | None = ModeloptField(
+        default=None,
+        title="Path to the Hessian state file.",
+        description="""The path to the Hessian state file. If hessian path exists, we load from
+         hessian file instead of recomputing them.""",
     )
 
 
