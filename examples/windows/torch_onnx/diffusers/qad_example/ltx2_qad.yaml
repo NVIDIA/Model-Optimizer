@@ -1,0 +1,78 @@
+# LTX-2 QAD Training Configuration
+model:
+  model_source: "/lustre/fsw/portfolios/adlr/projects/adlr_psx_numerics/users/ynankani/ComfyUI/models/checkpoints/ltx-av-step-1933500-split-new-vae.safetensors"
+  training_mode: "full"
+  load_checkpoint: null
+  text_encoder_path: "/lustre/fsw/portfolios/adlr/users/dhutchins/models/gemma"
+
+conditioning:
+  mode: "audio_video"         
+  first_frame_conditioning_p: 0.1  
+
+optimization:
+  learning_rate: 1e-6          # Low LR for QAD (distillation)
+  steps: 300
+  batch_size: 1
+  gradient_accumulation_steps: 4
+  max_grad_norm: 1.0
+  optimizer_type: "adamw"
+  scheduler_type: "linear"
+  scheduler_params: {}
+  enable_gradient_checkpointing: true
+
+acceleration:
+  mixed_precision_mode: "bf16"
+  quantization: null           # We use ModelOpt, not LTX quantization
+  load_text_encoder_in_8bit: true
+
+data:
+  preprocessed_data_root: "/lustre/fsw/portfolios/adlr/users/scavallari/ltx-qad/qad-dataset"
+  num_dataloader_workers: 2
+
+validation:
+  prompts:
+    - "a professional portrait video of a person with blurry bokeh background"
+    - "a video of a person wearing a nice suit"
+  negative_prompt: "worst quality, inconsistent motion, blurry, jittery, distorted"
+  images: null # Set to a list of image paths to use first-frame conditioning, or null to disable
+  video_dims: [768, 448, 89] # [width, height, frames]
+  seed: 42
+  inference_steps: 50
+  interval: null # Set to null to disable validation
+  videos_per_prompt: 1
+  guidance_scale: 3.5
+
+checkpoints:
+  interval: 2300  # Save a checkpoint every N steps, set to null to disable
+  keep_last_n: -1 # Keep only the N most recent checkpoints, set to -1 to keep all
+
+
+# Flow matching configuration
+flow_matching:
+  timestep_sampling_mode: "shifted_logit_normal" # Options: "uniform", "shifted_logit_normal"
+  timestep_sampling_params: {}
+
+# HuggingFace Hub configuration
+hub:
+  push_to_hub: false # Whether to push the model weights to the Hugging Face Hub
+  hub_model_id: null # Hugging Face Hub repository ID (e.g., 'username/repo-name'). Must be provided if `push_to_hub` is set to True
+
+# W&B configuration
+wandb:
+  enabled: false  # Set to true to enable W&B logging
+  project: "ltxv-trainer"
+  entity: null  # Your W&B username or team
+  tags: []
+  log_validation_videos: true
+
+# QAD-specific configuration (not part of LtxvTrainerConfig)
+# These can also be overridden via CLI: --calib-size, --kd-loss-weight, --exclude-blocks
+qad:
+  calib_size: 10
+  kd_loss_weight: 1.0
+  exclude_blocks: [0, 1, 46, 47]
+  skip_inference_ckpt: false
+
+# General configuration
+seed: 42
+output_dir: "outputs/ltx2_qad"
