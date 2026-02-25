@@ -208,6 +208,27 @@ def test_auto_quantize_disable_layers():
     assert not best_model.mlp.input_quantizer.is_enabled
 
 
+def test_auto_quantize_disabled_layers_no_poison():
+    """disabled_layers must only affect the matched layers, not all subsequent layer groups."""
+    model = TransformerBlock()
+
+    best_model, _ = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 5.0},
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        data_loader=[model.get_input() for _ in range(2)],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        disabled_layers=["*mlp*"],
+        num_calib_steps=2,
+        num_score_steps=2,
+    )
+
+    assert not best_model.mlp.input_quantizer.is_enabled
+    hparam = best_model.attn.q_proj.get_hparam("quant_recipe")
+    assert QuantRecipe(mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG) in hparam.choices
+
+
 INT4INT8_AWQ_CFG = {
     "quant_cfg": {
         "*weight_quantizer": [
