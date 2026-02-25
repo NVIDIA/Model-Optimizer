@@ -517,9 +517,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             disabled = any(disabled for _, _, disabled, _ in module_info_list)
             score_modules = [score_module for _, _, _, score_module in module_info_list]
 
-            quant_recipes = None if disabled else quant_recipes
+            _quant_recipes = None if disabled else quant_recipes
             hparam = QuantRecipeHparam(
-                quant_recipes,
+                _quant_recipes,
                 quant_modules=quant_modules,
                 score_modules=score_modules,
                 name=str(group_key),
