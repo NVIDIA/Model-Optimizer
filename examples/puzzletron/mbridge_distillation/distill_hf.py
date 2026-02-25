@@ -22,7 +22,9 @@ See `README.md` in this directory for example usage and data preparation instruc
 
 import argparse
 import os
+import shutil
 import traceback
+from pathlib import Path
 
 import megatron.bridge.models.distillation_provider
 import torch
@@ -72,6 +74,61 @@ megatron.bridge.models.distillation_provider.DistillationProvider = Distillation
 from megatron.bridge.training.distill import distill  # noqa: E402
 
 SEED = 1234
+
+
+def _export_to_hf_and_copy_config(
+    student_hf_path: str,
+    checkpoint_dir: str,
+    train_iters: int,
+    hf_export_path: str,
+    hf_model: str,
+) -> None:
+    """
+    Export Megatron checkpoint to HuggingFace format and copy config.json from student model.
+
+    Args:
+        student_hf_path: Path to the original student HuggingFace model (source of config.json)
+        checkpoint_dir: Base directory where Megatron checkpoints are stored
+        train_iters: Number of training iterations (used to construct final checkpoint path)
+        hf_export_path: Directory path where the HuggingFace model will be saved
+        hf_model: HuggingFace model ID to use as template for export (e.g., meta-llama/Llama-3.1-8B-Instruct)
+    """
+    print_rank_0(f"\n{'=' * 80}")
+    print_rank_0("Exporting to HuggingFace format...")
+    print_rank_0(f"{'=' * 80}\n")
+
+    # Construct path to final checkpoint iteration (format: iter_0000100 for 100 iterations)
+    final_iter_dir = Path(checkpoint_dir) / f"iter_{train_iters:07d}"
+    print_rank_0(f"📂 Using final checkpoint: {final_iter_dir}")
+
+    # Use the final iteration directory for export (export_ckpt will validate it exists)
+    megatron_path = str(final_iter_dir)
+
+    # Create bridge using standard model ID (not AnyModel checkpoint) to avoid sharding structure issues
+    print_rank_0("🌉 Creating bridge...")
+    print_rank_0(f"   Using model ID: {hf_model}")
+    bridge = AutoBridge.from_hf_pretrained(hf_model, trust_remote_code=True)
+
+    print_rank_0("📤 Exporting to HuggingFace format...")
+    bridge.export_ckpt(
+        megatron_path=megatron_path,
+        hf_path=hf_export_path,
+        show_progress=True,
+        strict=True,
+    )
+
+    print_rank_0(f"✅ Successfully exported model to: {hf_export_path}")
+
+    # Copy config.json from student model to exported model (preserves block_configs)
+    student_config_path = Path(student_hf_path) / "config.json"
+    exported_config_path = Path(hf_export_path) / "config.json"
+
+    print_rank_0(f"📋 Copying config.json from student model: {student_config_path}")
+    shutil.copy(student_config_path, exported_config_path)
+    print_rank_0(f"✅ Copied config.json to: {exported_config_path}")
+
+    print_rank_0(f"\n{'=' * 80}")
+    print_rank_0("Export complete!")
 
 
 def get_args():
@@ -139,6 +196,23 @@ def get_args():
     )
     parser.add_argument("--wandb_entity", type=str, help="Wandb entity name (optional)")
     parser.add_argument("--wandb_exp_name", type=str, help="Wandb experiment name (optional)")
+    # Export arguments
+    parser.add_argument(
+        "--hf-export-path",
+        type=str,
+        default=None,
+        help=(
+            "Path where to save the HuggingFace export. "
+            "If provided, exports checkpoint to HF format after distillation."
+        ),
+    )
+    parser.add_argument(
+        "--hf-model",
+        type=str,
+        required=True,
+        help="HuggingFace model ID to use as template for export (e.g., meta-llama/Llama-3.1-8B-Instruct). "
+        "Should match the base architecture of the student model.",
+    )
     args = parser.parse_args()
 
     # Sanity checks
@@ -263,6 +337,36 @@ def main(args: argparse.Namespace):
     print_rank_0("\nStarting distillation...")
     distill(config)
     print_rank_0(f"\nDistillation done! Saved checkpoint to {checkpoint_dir}\n")
+
+    # Export to HuggingFace format if hf_export_path is provided
+    if args.hf_export_path:
+        # Wait for all ranks to finish distillation before export
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
+        # Save rank before destroying process group (dist.rank() won't work after destruction)
+        is_rank_0 = dist.rank() == 0
+
+        # Destroy process group on all ranks - export_ckpt will create its own temporary one
+        # This prevents cleanup from hanging (cleanup tries to barrier, but rank 0 would be gone)
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+
+        # Only rank 0 exports
+        if is_rank_0:
+            try:
+                _export_to_hf_and_copy_config(
+                    student_hf_path=args.student_hf_path,
+                    checkpoint_dir=checkpoint_dir,
+                    train_iters=args.train_iters,
+                    hf_export_path=args.hf_export_path,
+                    hf_model=args.hf_model,
+                )
+            except Exception as e:
+                print(f"⚠️  Export failed: {e}")
+                import traceback
+
+                traceback.print_exc()
 
 
 if __name__ == "__main__":
