@@ -30,7 +30,7 @@ class TestFlashSkipSoftmaxMethod:
         """Test phase detection from attention score shape."""
         method = FlashSkipSoftmax(
             {
-                "threshold": 1e-3,
+                "threshold": {"prefill": 1e-3, "decode": 1e-4},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
@@ -70,30 +70,11 @@ class TestFlashSkipSoftmaxMethod:
         method._update_threshold("prefill")
         assert method.threshold == 1e-3
 
-    def test_threshold_update_static_config(self):
-        """Test threshold with static float config."""
-        method = FlashSkipSoftmax(
-            {
-                "threshold": 5e-4,
-                "br": 128,
-                "bc": 128,
-                "backend": "pytorch",
-                "is_causal": True,
-            }
-        )
-
-        initial_threshold = method.threshold
-        assert initial_threshold == 5e-4
-
-        # Should not change for static config
-        method._update_threshold("decode")
-        assert method.threshold == 5e-4
-
     def test_block_reshaping_divisible(self):
         """Test block reshaping with divisible sequence lengths."""
         method = FlashSkipSoftmax(
             {
-                "threshold": 1e-3,
+                "threshold": {"prefill": 1e-3, "decode": 1e-4},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
@@ -116,7 +97,7 @@ class TestFlashSkipSoftmaxMethod:
         """Test block reshaping with non-divisible lengths."""
         method = FlashSkipSoftmax(
             {
-                "threshold": 1e-3,
+                "threshold": {"prefill": 1e-3, "decode": 1e-4},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
@@ -139,7 +120,7 @@ class TestFlashSkipSoftmaxMethod:
         """Test correction factor for prefill phase."""
         method = FlashSkipSoftmax(
             {
-                "threshold": 1e-3,
+                "threshold": {"prefill": 1e-3, "decode": 1e-4},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
@@ -166,7 +147,7 @@ class TestFlashSkipSoftmaxMethod:
         """Test correction factor for decode phase."""
         method = FlashSkipSoftmax(
             {
-                "threshold": 1e-5,
+                "threshold": {"prefill": 1e-3, "decode": 1e-5},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
@@ -185,32 +166,11 @@ class TestFlashSkipSoftmaxMethod:
         assert 0 <= stats["sparsity"] <= 1
         assert mask.shape == (1, 1, 1, 256)
 
-    def test_sparsity_statistics(self):
-        """Test sparsity statistics structure."""
-        method = FlashSkipSoftmax(
-            {
-                "threshold": 1e-3,
-                "br": 128,
-                "bc": 128,
-                "backend": "pytorch",
-                "is_causal": True,
-            }
-        )
-
-        attn = torch.randn(1, 1, 128, 256)
-        _, stats = method.calc_correction_factor_and_p(attn, "prefill")
-
-        # Verify statistics are present
-        assert stats["total_blocks"] > 0
-        assert "sparse_blocks" in stats
-        assert "sample_length" in stats
-        assert stats["sample_length"] == 256
-
     def test_block_mask_correctness(self):
         """Test block mask shape and type."""
         method = FlashSkipSoftmax(
             {
-                "threshold": 1e-3,
+                "threshold": {"prefill": 1e-3, "decode": 1e-4},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
@@ -229,7 +189,7 @@ class TestFlashSkipSoftmaxMethod:
     def test_causal_vs_noncausal(self):
         """Test total_blocks calculation for causal vs non-causal."""
         config_base = {
-            "threshold": 1e-3,
+            "threshold": {"prefill": 1e-3, "decode": 1e-4},
             "br": 128,
             "bc": 128,
             "backend": "pytorch",
@@ -248,35 +208,65 @@ class TestFlashSkipSoftmaxMethod:
         assert stats_causal["total_blocks"] == 3
         assert stats_noncausal["total_blocks"] == 4
 
-    def test_apply_sparsity_assertions(self):
-        """Test apply_sparsity input validation."""
+    def test_calculate_sparsity_assertions(self):
+        """Test calculate_sparsity input validation."""
         method = FlashSkipSoftmax(
             {
-                "threshold": 1e-3,
+                "threshold": {"prefill": 1e-3, "decode": 1e-4},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
                 "is_causal": True,
             }
         )
-
-        # Test: attention_scores required
-        with pytest.raises(AssertionError, match="attention_scores must be provided"):
-            method.apply_sparsity()
 
         # Test: 4D shape required
         with pytest.raises(AssertionError, match="Expected 4D"):
-            method.apply_sparsity(attention_scores=torch.randn(2, 64, 64))  # 3D
+            method.calculate_sparsity(attention_scores=torch.randn(2, 64, 64))  # 3D
 
-    def test_name_property(self):
-        """Test method name property."""
+    def test_apply_sparsity_with_mask(self):
+        """Test apply_sparsity with pre-computed mask."""
         method = FlashSkipSoftmax(
             {
-                "threshold": 1e-3,
+                "threshold": {"prefill": 1e-3, "decode": 1e-4},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
                 "is_causal": True,
             }
         )
-        assert method.name == "flash_skip_softmax"
+
+        attn = torch.randn(2, 4, 128, 256)
+
+        # Calculate sparsity first
+        sparse_mask, stats = method.calculate_sparsity(attn)
+
+        # Apply sparsity with pre-computed mask
+        sparse_attn = method.apply_sparsity(attn, sparse_mask)
+
+        # Verify output shape matches input
+        assert sparse_attn.shape == attn.shape
+
+        # Verify masked positions have min value
+        mask_value = torch.finfo(attn.dtype).min
+        assert (sparse_attn[~sparse_mask] == mask_value).all()
+
+    def test_apply_sparsity_without_mask(self):
+        """Test apply_sparsity calculates mask internally when None."""
+        method = FlashSkipSoftmax(
+            {
+                "threshold": {"prefill": 1e-3, "decode": 1e-4},
+                "br": 128,
+                "bc": 128,
+                "backend": "pytorch",
+                "is_causal": True,
+            }
+        )
+
+        attn = torch.randn(2, 4, 128, 256)
+
+        # Apply sparsity without pre-computed mask
+        sparse_attn = method.apply_sparsity(attn)
+
+        # Verify output shape matches input
+        assert sparse_attn.shape == attn.shape

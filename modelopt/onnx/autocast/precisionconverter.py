@@ -97,6 +97,7 @@ class PrecisionConverter:
         max_ir_version: int | None = None,
         trt_plugins: list[str] | None = [],
         tensor_block_dict: dict[str, dict[str, list[int]]] = {},
+        use_standalone_type_inference: bool = False,
     ) -> None:
         """Initialize PrecisionConverter.
 
@@ -114,6 +115,7 @@ class PrecisionConverter:
             max_ir_version: Max IR version for conversion.
             trt_plugins: List of custom TensorRT plugin library paths in .so format (compiled shared library).
             tensor_block_dict: Dictionary of tensors (operation type and I/O indices) that should remain in FP32.
+            use_standalone_type_inference: Use standalone type inference instead of ONNX's infer_shapes.
         """
         self.model = deepcopy(model)
         self.value_info_map = value_info_map
@@ -140,6 +142,7 @@ class PrecisionConverter:
         self.min_opset = min_opset
         self.max_ir_version = max_ir_version
         self.trt_plugins = trt_plugins
+        self.use_standalone_type_inference = use_standalone_type_inference
 
         # Detect additional ops not supported in low precision according to the model's opset version
         self.op_types_not_supported_in_low_precision = OP_TYPES_NOT_SUPPORTED_IN_LOW_PRECISION + (
@@ -172,7 +175,7 @@ class PrecisionConverter:
             onnx.ModelProto: The converted mixed precision model.
         """
         try:
-            self.model = onnx_utils.check_model(self.model)
+            onnx_utils.check_model(self.model)
         except onnx.checker.ValidationError as e:
             logger.error(f"Internal error: onnx.checker failed on input model {e}")
             raise Exception(
@@ -254,10 +257,14 @@ class PrecisionConverter:
             # Clear type/shape information for intermediates and outputs (including subgraphs)
             self._clear_types_and_shapes_recursive(self.model.graph)
             # Populate type information with inferred types
-            self.model = onnx_utils.infer_shapes(self.model, strict_mode=True, check_type=False)
+            self.model = onnx_utils.infer_types(
+                self.model, self.use_standalone_type_inference, strict_mode=True, check_type=False
+            )
             self._ensure_types_are_defined()
             # Sanity check: Verify type correctness
-            self.model = onnx_utils.infer_shapes(self.model, strict_mode=True, check_type=True)
+            self.model = onnx_utils.infer_types(
+                self.model, self.use_standalone_type_inference, strict_mode=True, check_type=True
+            )
 
         # Update value_info_map and initializer_map with casts we added
         self.value_info_map, self.initializer_map, self.node_to_init_map = utils.setup_mappings(
@@ -282,9 +289,9 @@ class PrecisionConverter:
     ) -> None:
         """Recursively clear type/shape information for a graph and all its subgraphs.
 
-        This is necessary for control flow operators (Scan, If, Loop) which have subgraphs.
-        For subgraphs, preserve value_info for outer scope variables (not produced by nodes in subgraph).
-        For main graph, clear all value_info.
+        If use_standalone_type_inference is True, we clear only types, not shapes.
+        For subgraphs, input types/shapes are cleared, so that the input types/shapes are propagated
+        from the main graph.
 
         Args:
             graph: The ONNX graph to clear types and shapes for.
@@ -301,9 +308,10 @@ class PrecisionConverter:
                 for inp in g.input:
                     if inp.type.HasField("tensor_type"):
                         inp.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
-                        for idx, d in enumerate(inp.type.tensor_type.shape.dim):
-                            if d.dim_value:
-                                inp.type.tensor_type.shape.dim[idx].dim_param = "unk"
+                        if not self.use_standalone_type_inference:
+                            for idx, d in enumerate(inp.type.tensor_type.shape.dim):
+                                if d.dim_value:
+                                    inp.type.tensor_type.shape.dim[idx].dim_param = "unk"
 
             if is_sub:
                 # Identify which tensors are produced by nodes in this subgraph
@@ -315,9 +323,10 @@ class PrecisionConverter:
                 for vi in g.value_info:
                     if vi.name in subgraph_outputs:
                         vi.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
-                        for idx, d in enumerate(vi.type.tensor_type.shape.dim):
-                            if d.dim_value:
-                                vi.type.tensor_type.shape.dim[idx].dim_param = "unk"
+                        if not self.use_standalone_type_inference:
+                            for idx, d in enumerate(vi.type.tensor_type.shape.dim):
+                                if d.dim_value:
+                                    vi.type.tensor_type.shape.dim[idx].dim_param = "unk"
             else:
                 for vi in g.value_info:
                     vi.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
@@ -328,9 +337,10 @@ class PrecisionConverter:
             # Clear outputs for both main graph and subgraphs
             for out in g.output:
                 out.type.tensor_type.elem_type = onnx.TensorProto.UNDEFINED
-                for idx, d in enumerate(out.type.tensor_type.shape.dim):
-                    if d.dim_value:
-                        out.type.tensor_type.shape.dim[idx].dim_param = "unk"
+                if not self.use_standalone_type_inference:
+                    for idx, d in enumerate(out.type.tensor_type.shape.dim):
+                        if d.dim_value:
+                            out.type.tensor_type.shape.dim[idx].dim_param = "unk"
 
         utils.walk_subgraphs_recursive(graph, _clear_callback, is_subgraph=is_subgraph)
 
@@ -347,6 +357,8 @@ class PrecisionConverter:
                 return node.inputs[1].dtype  # scale type
             elif node.op == "QuantizeLinear":
                 return node.inputs[2].dtype  # zero_point type
+            elif node.op == "ConstantOfShape":
+                return node.attrs["value"].dtype
             elif not inp.dtype or inp.dtype == onnx.TensorProto.UNDEFINED:
                 return None
             elif node.op not in self.custom_ops:
@@ -1175,8 +1187,16 @@ class PrecisionConverter:
         if self.custom_ops:
             self.model = self._propagate_types_shapes_custom_ops(self.model)
         else:
-            self.model = onnx_utils.infer_shapes(self.model, strict_mode=True)
-            self.model = onnx_utils.infer_shapes(self.model, strict_mode=True, check_type=True)
+            self.model = onnx_utils.infer_types(
+                self.model, self.use_standalone_type_inference, strict_mode=True
+            )
+            if not self.use_standalone_type_inference:
+                self.model = onnx_utils.infer_types(
+                    self.model,
+                    self.use_standalone_type_inference,
+                    strict_mode=True,
+                    check_type=True,
+                )
 
         nodes_to_remove = []
         for node in self.model.graph.node:
@@ -1261,7 +1281,12 @@ class PrecisionConverter:
             if self.custom_ops:
                 self.model = self._propagate_types_shapes_custom_ops(self.model)
             else:
-                self.model = onnx_utils.infer_shapes(self.model, strict_mode=True, check_type=True)
+                self.model = onnx_utils.infer_types(
+                    self.model,
+                    self.use_standalone_type_inference,
+                    strict_mode=True,
+                    check_type=True,
+                )
             self.value_info_map, self.initializer_map, self.node_to_init_map = utils.setup_mappings(
                 self.model
             )
@@ -1418,6 +1443,11 @@ class PrecisionConverter:
         )
         graph_sanitizer.sanitize()
         self.model = graph_sanitizer.model
+
+        # Update value_info_map and initializer_map after sanitizing model
+        self.value_info_map, self.initializer_map, self.node_to_init_map = utils.setup_mappings(
+            self.model
+        )
 
     def _create_skip_inputs_mapping(self, tensor_block_dict: dict[str, dict[str, list[int]]] = {}):
         """Create mapping of op types to indices of inputs that should not be converted to low precision."""

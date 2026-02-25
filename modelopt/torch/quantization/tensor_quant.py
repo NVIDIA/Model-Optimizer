@@ -171,6 +171,7 @@ def _dynamic_block_quantize_impl(
             num_bits == (2, 1)  # type: ignore[comparison-overlap]
             and scale_bits == (4, 3)
             and triton_kernel.IS_AVAILABLE
+            and hasattr(triton_kernel, "fp4_fake_quant_block")  # requires compute >= 8.9
             and not DISABLE_TRITON_KERNEL
             and amax is not None
         ):
@@ -562,6 +563,40 @@ class DynamicBlockQuantizationFunction(Function):
         return _fake_quant_backward_function(ctx, grad_outputs, num_args=9)
 
 
+class StaticBlockwiseFP4FakeQuantFunction(Function):
+    """Static blockwise FP4 fake quantization functional."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        x,
+        amax,
+        global_amax=None,
+        quantize_block_scales=True,
+        out_dtype=None,
+        pass_through_bwd=False,
+    ):
+        """Forward method."""
+        if not triton_kernel.IS_AVAILABLE:
+            raise RuntimeError(
+                "static_blockwise_fp4_fake_quant requires triton. "
+                "Install with `pip install triton`."
+            )
+        _save_for_backward_if_needed(ctx, pass_through_bwd, x, amax)
+        return triton_kernel.static_blockwise_fp4_fake_quant(
+            x,
+            amax,
+            global_amax,
+            quantize_block_scales,
+            out_dtype,
+        )
+
+    @staticmethod
+    def backward(ctx, grad_outputs):
+        """Implements straight through estimation with clipping."""
+        return _fake_quant_backward_function(ctx, grad_outputs, num_args=6)
+
+
 def _tensor_quant(inputs, amax, num_bits=8, unsigned=False, narrow_range=True):
     """Shared function body between TensorQuantFunction and FakeTensorQuantFunction."""
     # Fine scale, per channel scale will be handled by broadcasting, which could be tricky. Pop a warning.
@@ -606,3 +641,4 @@ def _tensor_quant(inputs, amax, num_bits=8, unsigned=False, narrow_range=True):
 fake_tensor_quant = FakeTensorQuantFunction.apply
 scaled_e4m3 = ScaledE4M3Function.apply
 dynamic_block_quant = DynamicBlockQuantizationFunction.apply
+static_blockwise_fp4_fake_quant = StaticBlockwiseFP4FakeQuantFunction.apply

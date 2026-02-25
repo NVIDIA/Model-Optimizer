@@ -79,6 +79,7 @@ def _patch_model_init_for_modelopt(cls, model_path, extra_context=None):
         modelopt_state_path = _get_modelopt_state_path(model_path)
         _original__init__(self, *args, **kwargs)
         if os.path.isfile(modelopt_state_path):
+            # Security NOTE: weights_only=False is used on ModelOpt-generated state_dict, not on untrusted user input
             modelopt_state = torch.load(modelopt_state_path, map_location="cpu", weights_only=False)
             with extra_context() if extra_context else nullcontext():
                 restore_from_modelopt_state(self, modelopt_state)

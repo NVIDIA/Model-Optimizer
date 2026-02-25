@@ -33,11 +33,10 @@ class MTBench(Dataset):
     def __init__(self, path, num_samples=80, **kwargs):
         self.data: list[Request] = []  # list of list of questions.
         self.num_samples = num_samples
-        self.path = path
-        self._preprocess()
+        self._preprocess(path)
 
-    def _preprocess(self):
-        with open(self.path) as f:
+    def _preprocess(self, path):
+        with open(path) as f:
             for json_line in f:
                 line = json.loads(json_line)
                 key = "turns" if "turns" in line else "prompt"

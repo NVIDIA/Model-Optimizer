@@ -49,8 +49,7 @@ optional_deps = {
         "onnx~=1.19.0",
         "onnxconverter-common~=1.16.0",
         "onnxruntime~=1.22.0 ; platform_machine == 'aarch64' or platform_system == 'Darwin'",
-        "onnxruntime-gpu~=1.22.0 ; platform_machine != 'aarch64' and platform_system != 'Darwin' and platform_system != 'Windows'",  # noqa: E501
-        "onnxruntime-gpu==1.23.2; platform_system == 'Windows'",
+        "onnxruntime-gpu~=1.22.0 ; platform_machine != 'aarch64' and platform_system != 'Darwin'",
         "onnxscript",  # For autocast opset conversion and test_onnx_dynamo_export unit test
         "onnxslim>=0.1.76",
         "polygraphy>=0.49.22",
@@ -63,6 +62,8 @@ optional_deps = {
         "huggingface_hub>=0.24.0",
         "peft>=0.17.0",
         "transformers>=4.53,<5.0",  # Should match modelopt/torch/__init__.py and tox.ini
+        "nltk",
+        "wonderwords",
     ],
     # linter tools
     "dev-lint": [
@@ -78,6 +79,7 @@ optional_deps = {
         "pytest-cov",
         "pytest-instafail",
         "pytest-timeout",
+        "sentencepiece",  # For test_unified_export_megatron.py, test_vllm_fakequant_megatron_export.py
         "timm",
         "torchprofile>=0.0.4",  # For computing flops of CV models
         "torchvision",

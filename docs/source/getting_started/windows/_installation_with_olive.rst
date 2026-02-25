@@ -4,7 +4,7 @@
 Install ModelOpt-Windows with Olive
 ===================================
 
-ModelOpt-Windows can be installed and used through Olive to quantize Large Language Models (LLMs) in ONNX format for deployment with DirectML. Follow the steps below to configure Olive for use with ModelOpt-Windows.
+ModelOpt-Windows can be installed and used through Olive to perform model optimization using quantization technique. Follow the steps below to configure Olive for use with ModelOpt-Windows.
 
 Setup Steps for Olive with ModelOpt-Windows
 -------------------------------------------
@@ -17,7 +17,7 @@ Setup Steps for Olive with ModelOpt-Windows
 
          pip install olive-ai[nvmo]
 
-   - **Install Prerequisites:** Ensure all required dependencies are installed. Use the following commands to install the necessary packages:
+   - **Install Prerequisites:** Ensure all required dependencies are installed. For example, to use DirectML Execution-Provider (EP) based onnxruntime and onnxruntime-genai packages, run the following commands:
 
      .. code-block:: shell
 
@@ -31,11 +31,11 @@ Setup Steps for Olive with ModelOpt-Windows
 **2. Configure Olive for Model Optimizer – Windows**
 
    - **New Olive Pass:** Olive introduces a new pass, ``NVModelOptQuantization`` (or “nvmo”), specifically designed for model quantization using Model Optimizer – Windows.
-   - **Add to Configuration:** To apply quantization to your target model, include this pass in the Olive configuration file. [Refer `phi3 <https://github.com/microsoft/Olive/tree/main/examples/phi3#quantize-models-with-nvidia-Model-Optimizer>`_ Olive example].
+   - **Add to Configuration:** To apply quantization to your target model, include this pass in the Olive configuration file. [Refer `this <https://github.com/microsoft/Olive/blob/main/docs/source/features/quantization.md#nvidia-tensorrt-model-optimizer-windows>`_ guide for details about this pass.].
 
 **3. Setup Other Passes in Olive Configuration**
 
-   - **Add Other Passes:** Add additional passes to the Olive configuration file as needed for the desired Olive workflow of your input model. [Refer `phi3 <https://github.com/microsoft/Olive/tree/main/examples/phi3#quantize-models-with-nvidia-Model-Optimizer>`_ Olive example]
+   - **Add Other Passes:** Add additional passes to the Olive configuration file as needed for the desired Olive workflow of your input model.
 
 **4. Install other dependencies**
 
@@ -62,4 +62,4 @@ Setup Steps for Olive with ModelOpt-Windows
 **Note**:
 
 #. Currently, the Model Optimizer - Windows only supports Onnx Runtime GenAI based LLM models in the Olive workflow.
-#. To try out different LLMs and EPs in the Olive workflow of ModelOpt-Windows, refer the details provided in `phi3 <https://github.com/microsoft/Olive/tree/main/examples/phi3#quantize-models-with-nvidia-Model-Optimizer>`_ Olive example.
+#. To get started with Olive, refer to the official `Olive documentation <https://microsoft.github.io/Olive/>`_.

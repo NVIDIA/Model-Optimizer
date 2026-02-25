@@ -30,7 +30,7 @@ class AATiming(Metric):
             raise ImportError(
                 "Please install tiktoken to use the AATiming metric, or remove the metric from the run command"
             )
-        self.enc = tiktoken.get_encoding("cl100k_base")
+        self.enc = tiktoken.get_encoding("o200k_base")
         self.base_tokenizer = base_tokenizer
         self.total_tokens = []
 
