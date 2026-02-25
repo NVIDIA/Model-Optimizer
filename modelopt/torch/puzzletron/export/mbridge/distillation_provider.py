@@ -134,12 +134,29 @@ class DistillationProvider(TransformerConfig):
         from megatron.bridge.training.utils.config_utils import _ConfigContainerBase
 
         result = {"_target_": f"{self._super_class.__module__}.{self._super_class.__qualname__}"}
-        for field in fields(self):
-            if field.name.startswith("_") or field.name in ["teacher", "kd_config"]:
+
+        # Include all fields from the original provider class (self._super_class), not just DistillationProvider
+        # This ensures fields like heterogeneous_layers_config_encoded_json are preserved
+        excluded_fields = {"teacher", "kd_config"}
+        for field in fields(self._super_class):
+            if field.name.startswith("_") or field.name in excluded_fields:
                 continue
-            result[field.name] = _ConfigContainerBase._convert_value_to_dict(
-                getattr(self, field.name)
-            )
+            # Only include if the field exists on this instance (it should, since we converted from the original provider)
+            if hasattr(self, field.name):
+                result[field.name] = _ConfigContainerBase._convert_value_to_dict(
+                    getattr(self, field.name)
+                )
+
+        # Also include any additional fields from DistillationProvider itself (if any)
+        for field in fields(self):
+            if field.name.startswith("_") or field.name in excluded_fields:
+                continue
+            # Skip if already included from _super_class
+            if field.name not in result:
+                result[field.name] = _ConfigContainerBase._convert_value_to_dict(
+                    getattr(self, field.name)
+                )
+
         return result
 
     def __setattr__(self, name, value):
