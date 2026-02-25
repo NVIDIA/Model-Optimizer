@@ -1,4 +1,19 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 QAD (Quantization-Aware Distillation) for LTX-2 using the native LTX training loop + ModelOpt.
 
@@ -34,7 +49,6 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
-from torch.utils.data import DataLoader
 
 # LTX imports
 from ltx_core.model_loader import load_transformer
@@ -43,6 +57,7 @@ from ltxv_trainer.datasets import PrecomputedDataset
 from ltxv_trainer.timestep_samplers import SAMPLERS
 from ltxv_trainer.trainer import LtxvTrainer
 from ltxv_trainer.training_strategies import get_training_strategy
+from torch.utils.data import DataLoader
 
 # ModelOpt imports
 import modelopt.torch.distill as mtd
@@ -50,22 +65,30 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.distill.distillation_model import DistillationModel
 from modelopt.torch.quantization.config import NVFP4_DEFAULT_CFG
-from modelopt.torch.quantization.nn import TensorQuantizer
 
 logger = logging.getLogger(__name__)
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
 QUANTIZER_KEYWORDS = [
-    "_amax", "_zero_point",
-    "input_quantizer", "weight_quantizer", "output_quantizer",
+    "_amax",
+    "_zero_point",
+    "input_quantizer",
+    "weight_quantizer",
+    "output_quantizer",
 ]
 TEACHER_KEYWORDS = ["_teacher_model"]
 LOSS_KEYWORDS = ["_loss_modules"]
 
 NON_TRANSFORMER_PREFIXES = [
-    "vae.", "audio_vae.", "vocoder.", "text_embedding_projection.",
-    "text_encoders.", "first_stage_model.", "cond_stage_model.", "conditioner.",
+    "vae.",
+    "audio_vae.",
+    "vocoder.",
+    "text_embedding_projection.",
+    "text_encoders.",
+    "first_stage_model.",
+    "cond_stage_model.",
+    "conditioner.",
 ]
 STRIP_PREFIXES = ["diffusion_model.", "transformer.", "_orig_mod.", "model."]
 CORRECT_PREFIX = "model.diffusion_model."
@@ -88,6 +111,7 @@ SENSITIVE_LAYER_PATTERNS = [
 
 # ─── Multi-node safety ───────────────────────────────────────────────────────
 
+
 def is_global_rank0() -> bool:
     """Global rank 0 check — safe for multi-node shared filesystem writes."""
     if dist.is_initialized():
@@ -96,6 +120,7 @@ def is_global_rank0() -> bool:
 
 
 # ─── Format detection and loading ─────────────────────────────────────────────
+
 
 def detect_format(path: str) -> str:
     """Detect whether file is safetensors or torch pickle."""
@@ -119,6 +144,7 @@ def load_state_dict_any_format(path: str, label: str = "") -> tuple[dict, dict |
     else:
         try:
             from safetensors.torch import load_file, safe_open
+
             with safe_open(path, framework="pt", device="cpu") as f:
                 metadata = f.metadata() or {}
             return load_file(path, device="cpu"), metadata
@@ -129,12 +155,17 @@ def load_state_dict_any_format(path: str, label: str = "") -> tuple[dict, dict |
 
 def _load_safetensors_manual(path: str) -> tuple[dict, dict]:
     """Manual safetensors parser for files with oversized headers."""
-    DTYPE_MAP = {
-        "F64": torch.float64, "F32": torch.float32,
-        "F16": torch.float16, "BF16": torch.bfloat16,
-        "I64": torch.int64, "I32": torch.int32,
-        "I16": torch.int16, "I8": torch.int8,
-        "U8": torch.uint8, "BOOL": torch.bool,
+    dtype_map = {
+        "F64": torch.float64,
+        "F32": torch.float32,
+        "F16": torch.float16,
+        "BF16": torch.bfloat16,
+        "I64": torch.int64,
+        "I32": torch.int32,
+        "I16": torch.int16,
+        "I8": torch.int8,
+        "U8": torch.uint8,
+        "BOOL": torch.bool,
     }
     with open(path, "rb") as f:
         header_size = struct.unpack("<Q", f.read(8))[0]
@@ -145,7 +176,7 @@ def _load_safetensors_manual(path: str) -> tuple[dict, dict]:
     state_dict = {}
     with open(path, "rb") as f:
         for k, info in header.items():
-            torch_dtype = DTYPE_MAP[info["dtype"]]
+            torch_dtype = dtype_map[info["dtype"]]
             start, end = info["data_offsets"]
             f.seek(data_start + start)
             tensor = torch.frombuffer(bytearray(f.read(end - start)), dtype=torch_dtype)
@@ -156,6 +187,7 @@ def _load_safetensors_manual(path: str) -> tuple[dict, dict]:
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
+
 
 def is_removable_key(k: str) -> str | None:
     """Return removal reason if key should be removed, else None."""
@@ -187,8 +219,7 @@ def move_batch_to_device(batch: dict, device: torch.device) -> dict:
     for k, v in batch.items():
         if isinstance(v, dict):
             result[k] = {
-                ik: iv.to(device) if isinstance(iv, torch.Tensor) else iv
-                for ik, iv in v.items()
+                ik: iv.to(device) if isinstance(iv, torch.Tensor) else iv for ik, iv in v.items()
             }
         elif isinstance(v, torch.Tensor):
             result[k] = v.to(device)
@@ -218,14 +249,17 @@ def apply_connector(training_batch, connector, conditioning_mode: str):
     else:
         final_prompt_embeds = prompt_embeds_v
 
-    training_batch = training_batch.model_copy(update={
-        "prompt_embeds": final_prompt_embeds,
-        "prompt_attention_mask": prompt_attention_mask,
-    })
+    training_batch = training_batch.model_copy(
+        update={
+            "prompt_embeds": final_prompt_embeds,
+            "prompt_attention_mask": prompt_attention_mask,
+        }
+    )
     return training_batch
 
 
 # ─── Quantization config builder ─────────────────────────────────────────────
+
 
 def build_quant_config(
     exclude_blocks: list[int] | None = None,
@@ -268,17 +302,17 @@ def build_quant_config(
 
 # ─── Distillation loss ───────────────────────────────────────────────────────
 
+
 class DiffusionMSELoss(torch.nn.modules.loss._Loss):
     """MSE loss between student and teacher outputs for distillation."""
 
     def forward(self, student_output, teacher_output):
         print(f"Student shape: {student_output.shape}, Teacher shape: {teacher_output.shape}")
-        return torch.nn.functional.mse_loss(
-            student_output.float(), teacher_output.float()
-        )
+        return torch.nn.functional.mse_loss(student_output.float(), teacher_output.float())
 
 
 # ─── QAD Trainer ──────────────────────────────────────────────────────────────
+
 
 class LtxvQADTrainer(LtxvTrainer):
     """Extends LtxvTrainer with ModelOpt quantization and distillation.
@@ -400,6 +434,7 @@ class LtxvQADTrainer(LtxvTrainer):
                         failures += 1
                         if failures == 1:
                             import traceback
+
                             logger.warning(
                                 f"Calibration batch {i} failed:\n{traceback.format_exc()}"
                             )
@@ -407,7 +442,7 @@ class LtxvQADTrainer(LtxvTrainer):
                             logger.warning(f"Calibration batch {i} failed: {e}")
                         if failures > calib_steps * 0.5:
                             logger.error(
-                                f"Too many calibration failures ({failures}/{i+1}), aborting"
+                                f"Too many calibration failures ({failures}/{i + 1}), aborting"
                             )
                             return
                         continue
@@ -469,7 +504,8 @@ class LtxvQADTrainer(LtxvTrainer):
             elif isinstance(v, list):
                 model_inputs[k] = [
                     t.to(dtype=model_dtype)
-                    if isinstance(t, torch.Tensor) and t.is_floating_point() else t
+                    if isinstance(t, torch.Tensor) and t.is_floating_point()
+                    else t
                     for t in v
                 ]
 
@@ -507,7 +543,6 @@ class LtxvQADTrainer(LtxvTrainer):
 
         if is_global_rank0() and state_dict is not None:
             save_dir.mkdir(exist_ok=True, parents=True)
-            total_keys = len(state_dict)
 
             # 1. Extract amax values BEFORE filtering
             amax_dict = extract_amax_values(state_dict)
@@ -516,7 +551,9 @@ class LtxvQADTrainer(LtxvTrainer):
                 with open(amax_path, "w") as f:
                     json.dump(
                         {"total_amax_keys": len(amax_dict), "amax_values": amax_dict},
-                        f, indent=2, sort_keys=True,
+                        f,
+                        indent=2,
+                        sort_keys=True,
                     )
                 logger.info(f"Saved {len(amax_dict)} amax values to {amax_path}")
 
@@ -541,6 +578,7 @@ class LtxvQADTrainer(LtxvTrainer):
             # 3. Match dtypes with base model
             try:
                 from safetensors.torch import load_file as _load_base
+
                 base_state = _load_base(self._config.model.model_source)
                 dtype_fixed = 0
                 for k in clean_state:
@@ -551,8 +589,7 @@ class LtxvQADTrainer(LtxvTrainer):
                         ref_dtype = base_state[k].dtype
                     else:
                         ref_dtype = (
-                            torch.bfloat16
-                            if clean_state[k].dtype == torch.float32 else None
+                            torch.bfloat16 if clean_state[k].dtype == torch.float32 else None
                         )
 
                     if ref_dtype is not None and clean_state[k].dtype != ref_dtype:
@@ -565,12 +602,10 @@ class LtxvQADTrainer(LtxvTrainer):
                 logger.warning(f"Could not load base model for dtype matching: {e}")
 
             # 4. Save as safetensors (atomic: write to .tmp, then rename)
-            save_size_gb = sum(
-                v.numel() * v.element_size() for v in clean_state.values()
-            ) / (1024**3)
-            logger.info(
-                f"Saving checkpoint: {len(clean_state)} keys, {save_size_gb:.2f} GB"
+            save_size_gb = sum(v.numel() * v.element_size() for v in clean_state.values()) / (
+                1024**3
             )
+            logger.info(f"Saving checkpoint: {len(clean_state)} keys, {save_size_gb:.2f} GB")
 
             tmp_path = saved_weights_path.with_suffix(".safetensors.tmp")
             save_file(clean_state, str(tmp_path))
@@ -582,12 +617,9 @@ class LtxvQADTrainer(LtxvTrainer):
                 unwrapped = self._accelerator.unwrap_model(self._transformer)
                 modelopt_state = mto.modelopt_state(unwrapped)
                 from modelopt.torch.quantization.utils import get_quantizer_state_dict
-                modelopt_state["modelopt_state_weights"] = get_quantizer_state_dict(
-                    unwrapped
-                )
-                modelopt_path = (
-                    save_dir / f"modelopt_state_step_{self._global_step:05d}.pth"
-                )
+
+                modelopt_state["modelopt_state_weights"] = get_quantizer_state_dict(unwrapped)
+                modelopt_path = save_dir / f"modelopt_state_step_{self._global_step:05d}.pth"
                 torch.save(modelopt_state, str(modelopt_path))
                 logger.info(f"Saved modelopt state to {modelopt_path}")
             except Exception as e:
@@ -600,6 +632,7 @@ class LtxvQADTrainer(LtxvTrainer):
 
 
 # ─── Standalone inference checkpoint creation ─────────────────────────────────
+
 
 def create_inference_checkpoint(
     trained_path: str,
@@ -640,7 +673,7 @@ def create_inference_checkpoint(
     print(f"  Loaded {len(trained_state)} keys")
 
     # ── Step 2: Extract amax values ──
-    print(f"\n[2/7] Extracting amax values...")
+    print("\n[2/7] Extracting amax values...")
     amax_dict = extract_amax_values(trained_state)
     if amax_dict:
         amax_path = output_path.parent / (output_path.stem + "_amax.json")
@@ -648,14 +681,16 @@ def create_inference_checkpoint(
         with open(amax_path, "w") as f:
             json.dump(
                 {"total_amax_keys": len(amax_dict), "amax_values": amax_dict},
-                f, indent=2, sort_keys=True,
+                f,
+                indent=2,
+                sort_keys=True,
             )
         print(f"  Saved {len(amax_dict)} amax values to: {amax_path}")
     else:
         print("  No amax values found")
 
     # ── Step 3: Remove teacher / loss / quantizer keys ──
-    print(f"\n[3/7] Cleaning: removing teacher, loss, and quantizer keys...")
+    print("\n[3/7] Cleaning: removing teacher, loss, and quantizer keys...")
     removal_counts = {"quantizer": 0, "teacher": 0, "loss": 0}
     cleaned = {}
     for k, v in trained_state.items():
@@ -679,7 +714,7 @@ def create_inference_checkpoint(
     print(f"  Loaded {len(base_state)} keys")
 
     # ── Step 5: Match dtypes with base ──
-    print(f"\n[5/7] Matching dtypes with base model...")
+    print("\n[5/7] Matching dtypes with base model...")
     dtype_fixed = 0
     dtype_mismatches = []
     for k in cleaned:
@@ -695,12 +730,14 @@ def create_inference_checkpoint(
             match_source = "fallback (fp32->bf16)"
 
         if ref_dtype is not None and cleaned[k].dtype != ref_dtype:
-            dtype_mismatches.append({
-                "key": k,
-                "trained": str(cleaned[k].dtype),
-                "base": str(ref_dtype),
-                "source": match_source,
-            })
+            dtype_mismatches.append(
+                {
+                    "key": k,
+                    "trained": str(cleaned[k].dtype),
+                    "base": str(ref_dtype),
+                    "source": match_source,
+                }
+            )
             cleaned[k] = cleaned[k].to(ref_dtype)
             dtype_fixed += 1
 
@@ -733,7 +770,7 @@ def create_inference_checkpoint(
             clean_k = k
             for pfx in STRIP_PREFIXES:
                 if clean_k.startswith(pfx):
-                    clean_k = clean_k[len(pfx):]
+                    clean_k = clean_k[len(pfx) :]
                     break
             prefixed[f"{CORRECT_PREFIX}{clean_k}"] = v
             stats["fixed"] += 1
@@ -744,13 +781,12 @@ def create_inference_checkpoint(
     print(f"  Non-transformer: {stats['non_transformer_skipped']} (skipped)")
 
     # ── Step 7: Merge with base ──
-    print(f"\n[7/7] Merging with base model...")
+    print("\n[7/7] Merging with base model...")
 
-    base_non_transformer = {
-        k: v for k, v in base_state.items() if is_non_transformer(k)
-    }
+    base_non_transformer = {k: v for k, v in base_state.items() if is_non_transformer(k)}
     base_connectors = {
-        k: v for k, v in base_state.items()
+        k: v
+        for k, v in base_state.items()
         if "embeddings_connector" in k and k.startswith(CORRECT_PREFIX)
     }
     del base_state
@@ -766,23 +802,23 @@ def create_inference_checkpoint(
     del base_non_transformer, base_connectors, prefixed
 
     total_params = sum(v.numel() for v in merged.values())
-    total_gb = sum(v.numel() * v.element_size() for v in merged.values()) / (1024 ** 3)
+    total_gb = sum(v.numel() * v.element_size() for v in merged.values()) / (1024**3)
     print(f"\n  Final: {len(merged)} keys, {total_params:,} params, {total_gb:.2f} GB")
 
     # ── Save (atomic) ──
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = output_path.with_suffix(".safetensors.tmp")
-    print(f"\n  Saving as safetensors...")
+    print("\n  Saving as safetensors...")
     save_file(merged, str(tmp_path), metadata=base_metadata)
     tmp_path.rename(output_path)
 
-    file_size_gb = output_path.stat().st_size / (1024 ** 3)
+    file_size_gb = output_path.stat().st_size / (1024**3)
 
     print("\n" + "=" * 80)
     print("Inference Checkpoint Created!")
     print("=" * 80)
     print(f"  Path:   {output_path}")
-    print(f"  Format: safetensors")
+    print("  Format: safetensors")
     print(f"  Size:   {file_size_gb:.2f} GB")
     print(f"  Keys:   {len(merged)}")
     if amax_dict:
@@ -795,6 +831,7 @@ def create_inference_checkpoint(
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="QAD for LTX-2 (Native Trainer + ModelOpt)",
@@ -806,23 +843,33 @@ def parse_args():
     # ── Train command ──
     train_parser = subparsers.add_parser("train", help="Run QAD training")
     train_parser.add_argument(
-        "--config", type=str, required=True,
+        "--config",
+        type=str,
+        required=True,
         help="Path to LTX training config YAML",
     )
     train_parser.add_argument(
-        "--calib-size", type=int, default=512,
+        "--calib-size",
+        type=int,
+        default=512,
         help="Number of calibration batches for PTQ",
     )
     train_parser.add_argument(
-        "--kd-loss-weight", type=float, default=0.5,
+        "--kd-loss-weight",
+        type=float,
+        default=0.5,
         help="KD loss weight (0=pure hard loss, 1=pure KD loss)",
     )
     train_parser.add_argument(
-        "--exclude-blocks", type=int, nargs="*", default=[0, 1, 46, 47],
+        "--exclude-blocks",
+        type=int,
+        nargs="*",
+        default=[0, 1, 46, 47],
         help="Transformer block indices to exclude from quantization",
     )
     train_parser.add_argument(
-        "--skip-inference-ckpt", action="store_true",
+        "--skip-inference-ckpt",
+        action="store_true",
         help="Skip creating inference checkpoint after training",
     )
 
@@ -832,15 +879,21 @@ def parse_args():
         help="Create inference checkpoint from trained weights",
     )
     infer_parser.add_argument(
-        "--trained", type=str, required=True,
+        "--trained",
+        type=str,
+        required=True,
         help="Path to trained checkpoint (any format)",
     )
     infer_parser.add_argument(
-        "--base", type=str, required=True,
+        "--base",
+        type=str,
+        required=True,
         help="Path to base model checkpoint",
     )
     infer_parser.add_argument(
-        "--output", type=str, required=True,
+        "--output",
+        type=str,
+        required=True,
         help="Output path for inference .safetensors",
     )
 
@@ -906,11 +959,11 @@ def main():
     # Resolve QAD params: CLI args override YAML values, YAML overrides defaults
     calib_size = args.calib_size if args.calib_size != 512 else qad_config.get("calib_size", 512)
     kd_loss_weight = (
-        args.kd_loss_weight if args.kd_loss_weight != 0.5
-        else qad_config.get("kd_loss_weight", 0.5)
+        args.kd_loss_weight if args.kd_loss_weight != 0.5 else qad_config.get("kd_loss_weight", 0.5)
     )
     exclude_blocks = (
-        args.exclude_blocks if args.exclude_blocks != [0, 1, 46, 47]
+        args.exclude_blocks
+        if args.exclude_blocks != [0, 1, 46, 47]
         else qad_config.get("exclude_blocks", [0, 1, 46, 47])
     )
     skip_inference_ckpt = args.skip_inference_ckpt or qad_config.get("skip_inference_ckpt", False)
@@ -939,21 +992,14 @@ def main():
 
     logger.info(f"Training complete! Checkpoint: {saved_path}")
     logger.info(
-        f"Steps/sec: {stats.steps_per_second:.2f}, "
-        f"Peak GPU: {stats.peak_gpu_memory_gb:.2f} GB"
+        f"Steps/sec: {stats.steps_per_second:.2f}, Peak GPU: {stats.peak_gpu_memory_gb:.2f} GB"
     )
 
-    if (
-        not skip_inference_ckpt
-        and is_global_rank0()
-        and saved_path is not None
-    ):
+    if not skip_inference_ckpt and is_global_rank0() and saved_path is not None:
         create_inference_checkpoint(
             trained_path=str(saved_path),
             base_path=config.model.model_source,
-            output_path=str(
-                Path(config.output_dir) / "ltx2_qad_inference.safetensors"
-            ),
+            output_path=str(Path(config.output_dir) / "ltx2_qad_inference.safetensors"),
         )
 
 

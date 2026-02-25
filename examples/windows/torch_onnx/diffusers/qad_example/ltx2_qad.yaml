@@ -2,12 +2,12 @@
 model:
   model_source: "/lustre/fsw/portfolios/adlr/projects/adlr_psx_numerics/users/ynankani/ComfyUI/models/checkpoints/ltx-av-step-1933500-split-new-vae.safetensors"
   training_mode: "full"
-  load_checkpoint: null
+  load_checkpoint:
   text_encoder_path: "/lustre/fsw/portfolios/adlr/users/dhutchins/models/gemma"
 
 conditioning:
-  mode: "audio_video"         
-  first_frame_conditioning_p: 0.1  
+  mode: "audio_video"
+  first_frame_conditioning_p: 0.1
 
 optimization:
   learning_rate: 1e-6          # Low LR for QAD (distillation)
@@ -22,7 +22,7 @@ optimization:
 
 acceleration:
   mixed_precision_mode: "bf16"
-  quantization: null           # We use ModelOpt, not LTX quantization
+  quantization:                # We use ModelOpt, not LTX quantization
   load_text_encoder_in_8bit: true
 
 data:
@@ -34,11 +34,11 @@ validation:
     - "a professional portrait video of a person with blurry bokeh background"
     - "a video of a person wearing a nice suit"
   negative_prompt: "worst quality, inconsistent motion, blurry, jittery, distorted"
-  images: null # Set to a list of image paths to use first-frame conditioning, or null to disable
+  images:      # Set to a list of image paths to use first-frame conditioning, or null to disable
   video_dims: [768, 448, 89] # [width, height, frames]
   seed: 42
   inference_steps: 50
-  interval: null # Set to null to disable validation
+  interval:      # Set to null to disable validation
   videos_per_prompt: 1
   guidance_scale: 3.5
 
@@ -55,13 +55,13 @@ flow_matching:
 # HuggingFace Hub configuration
 hub:
   push_to_hub: false # Whether to push the model weights to the Hugging Face Hub
-  hub_model_id: null # Hugging Face Hub repository ID (e.g., 'username/repo-name'). Must be provided if `push_to_hub` is set to True
+  hub_model_id:      # Hugging Face Hub repository ID (e.g., 'username/repo-name'). Must be provided if `push_to_hub` is set to True
 
 # W&B configuration
 wandb:
   enabled: false  # Set to true to enable W&B logging
   project: "ltxv-trainer"
-  entity: null  # Your W&B username or team
+  entity:       # Your W&B username or team
   tags: []
   log_validation_videos: true
 

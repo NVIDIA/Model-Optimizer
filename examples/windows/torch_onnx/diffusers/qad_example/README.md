@@ -121,7 +121,6 @@ accelerate launch --config_file fsdp_custom.yaml sample_example_qad_diffusers.py
     --config ltx2_qad.yaml \
 ```
 
-
 Checkpoints are saved under `output_dir` (e.g. `outputs/ltx2_qad/checkpoints/`) as safetensors plus optional amax and modelopt state files.
 
 ### 4. Create inference checkpoint (ComfyUI-compatible)
