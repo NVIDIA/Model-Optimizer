@@ -16,6 +16,7 @@
 """Automatic Q/DQ insertion optimization for ONNX models via pattern-based profiling."""
 
 import copy
+import dataclasses
 import functools
 import os
 import random
@@ -217,6 +218,8 @@ class QDQAutotunerBase:
             scheme_copy = copy.deepcopy(cached_scheme)
             scheme_copy.latency_ms = float("inf")
             scheme_copy.error = False
+            if hasattr(scheme_copy, "profile_timestamp"):
+                scheme_copy.profile_timestamp = None
             pattern_schemes.schemes.append(scheme_copy)
             num_seeded += 1
         logger.debug(f"Seeded {num_seeded} scheme(s) from pattern cache")
@@ -458,18 +461,12 @@ class QDQAutotunerBase:
             AutotunerNotInitializedError: If initialize() hasn't been called
         """
         output_desc = output_path if output_path is not None else "<bytes>"
-        original_quant_type = self.config.default_quant_type
-        needs_fp8_conversion = insert_qdq and original_quant_type == "fp8"
         resolved_insertion_points = set()
 
         logger.debug(
             f"Exporting model to {output_desc} (insert_qdq={insert_qdq}, "
             f"regions={len(self.regions)}, profiled_patterns={len(self.profiled_patterns)})"
         )
-
-        if needs_fp8_conversion:
-            logger.debug("FP8 conversion: creating INT8 model first")
-            self.config.default_quant_type = "int8"
 
         if insert_qdq:
             matched_regions = 0
@@ -501,20 +498,28 @@ class QDQAutotunerBase:
 
         logger.debug(f"Inserting {unique_tensors} Q/DQ pairs into graph")
 
-        if insert_qdq and resolved_insertion_points:
-            self._insert_qdq_at_tensors(graph_copy, resolved_insertion_points)
+        original_quant_type = self.config.default_quant_type
 
-        logger.debug("Serializing to ONNX format")
-        model = gs.export_onnx(graph_copy)
+        try:
+            needs_fp8_conversion = original_quant_type == "fp8"
+            if insert_qdq and resolved_insertion_points:
+                if needs_fp8_conversion:
+                    logger.debug("FP8 conversion: creating INT8 model first")
+                    self.config.default_quant_type = "int8"
+                self._insert_qdq_at_tensors(graph_copy, resolved_insertion_points)
 
-        if insert_qdq and resolved_insertion_points:
-            self._fix_zero_point_initializers(model)
+            logger.debug("Serializing to ONNX format")
+            model = gs.export_onnx(graph_copy)
 
-        if needs_fp8_conversion:
-            logger.debug("Converting INT8 to FP8")
-            model = int8_to_fp8(model)
+            if insert_qdq and resolved_insertion_points:
+                self._fix_zero_point_initializers(model)
 
-        self.config.default_quant_type = original_quant_type
+            if needs_fp8_conversion:
+                logger.debug("Converting INT8 to FP8")
+                model = int8_to_fp8(model)
+        finally:
+            self.config.default_quant_type = original_quant_type
+
         model_bytes = model.SerializeToString()
         quant_type_str = "baseline"
         output_dest = ""
@@ -631,12 +636,7 @@ class QDQAutotunerBase:
         state = {
             "baseline_latency_ms": self.baseline_latency_ms,
             "current_profile_pattern_schemes_signature": current_pattern_sig,
-            "config": {
-                "default_q_scale": self.config.default_q_scale,
-                "default_q_zero_point": self.config.default_q_zero_point,
-                "default_quant_type": self.config.default_quant_type,
-                "verbose": self.config.verbose,
-            },
+            "config": dataclasses.asdict(self.config),
             "patterns": [pattern_schemes.to_dict() for pattern_schemes in self.profiled_patterns],
         }
 
@@ -687,15 +687,11 @@ class QDQAutotunerBase:
 
         if "config" in state:
             config_data = state["config"]
-            if "default_q_scale" in config_data:
-                self.config.default_q_scale = config_data["default_q_scale"]
-            if "default_q_zero_point" in config_data:
-                self.config.default_q_zero_point = config_data["default_q_zero_point"]
-            if "default_quant_type" in config_data:
-                self.config.default_quant_type = config_data["default_quant_type"]
-            if "verbose" in config_data:
-                self.config.verbose = config_data["verbose"]
-            logger.debug(f"Config merged: quant_type={self.config.default_quant_type}")
+            if isinstance(config_data, dict):
+                default_dict = dataclasses.asdict(Config())
+                default_dict.update({k: v for k, v in config_data.items() if k in default_dict})
+                self.config = Config(**default_dict)
+                logger.debug(f"Config restored: quant_type={self.config.default_quant_type}")
 
         if "patterns" in state:
             num_loaded_patterns = 0
@@ -1063,6 +1059,7 @@ class QDQAutotunerBase:
         output_dtype: np.dtype,
         quant_dtype: np.dtype,
         q_scale: float,
+        q_zero_point: int,
     ) -> tuple[gs.Node, gs.Node]:
         """Create QuantizeLinear and DequantizeLinear node pair.
 
@@ -1074,6 +1071,7 @@ class QDQAutotunerBase:
             quant_dtype: Dtype for quantized values
             quant_type: Quantization type string
             q_scale: Quantization scale
+            q_zero_point: Quantization zero point
 
         Returns:
             Tuple of (q_node, dq_node)
@@ -1093,7 +1091,7 @@ class QDQAutotunerBase:
         )
 
         q_scale_values = np.array([q_scale], dtype=scale_dtype)
-        q_zp_values = np.array([0], dtype=quant_dtype)
+        q_zp_values = np.array([q_zero_point], dtype=quant_dtype)
         q_inputs = [
             qdq_input,
             gs.Constant(f"q_scale_{tensor_name}", values=q_scale_values),
@@ -1109,7 +1107,7 @@ class QDQAutotunerBase:
         )
 
         dq_scale_values = np.array([q_scale], dtype=scale_dtype)
-        dq_zp_values = np.array([0], dtype=quant_dtype)
+        dq_zp_values = np.array([q_zero_point], dtype=quant_dtype)
         dq_inputs = [
             q_node.outputs[0],
             gs.Constant(f"dq_scale_{tensor_name}", values=dq_scale_values),
@@ -1141,10 +1139,13 @@ class QDQAutotunerBase:
             resolved_insertion_points: Set of ResolvedInsertionPoint objects specifying where to insert Q/DQ
         """
         q_scale = self.config.default_q_scale
+        q_zero_point = self.config.default_q_zero_point
         quant_type = self.config.default_quant_type
         quant_dtype = self._resolve_dtype(quant_type, np.int8)
 
-        logger.debug(f"Q/DQ parameters: type={quant_type}, scale={q_scale}, zero_point=0")
+        logger.debug(
+            f"Q/DQ parameters: type={quant_type}, scale={q_scale}, zero_point={q_zero_point}"
+        )
 
         resolved_insertion_points = merge_resolved_insertion_points(
             graph, resolved_insertion_points
@@ -1192,6 +1193,7 @@ class QDQAutotunerBase:
                 output_dtype,
                 quant_dtype,
                 q_scale,
+                q_zero_point,
             )
 
             graph.nodes.extend([q_node, dq_node])
