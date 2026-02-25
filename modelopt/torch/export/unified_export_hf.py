@@ -501,9 +501,9 @@ def _export_quantized_weight(
         for expert_type in ["Llama4TextExperts", "GptOssExperts"]
     )
     if is_bmm_expert_weight and isinstance(weight_quantizer, NVFP4StaticQuantizer):
-        warnings.warn(
+        raise ValueError(
             "NVFP4StaticQuantizer with BMM-style expert weights (e.g. Llama4TextExperts, "
-            "GptOssExperts) is not yet supported; export may produce incorrect results."
+            "GptOssExperts) is not yet supported."
         )
 
     if quantization_format in [

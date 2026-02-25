@@ -773,6 +773,7 @@ choices: set[str] = {
     "MAMBA_MOE_NVFP4_AGGRESSIVE_CFG",
     "MAMBA_MOE_FP8_CONSERVATIVE_CFG",
     "MAMBA_MOE_FP8_AGGRESSIVE_CFG",
+    "NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG",
 }
 
 BiasType = Literal["static", "dynamic"]
