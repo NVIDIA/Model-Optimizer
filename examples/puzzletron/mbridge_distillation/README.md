@@ -7,6 +7,7 @@ This guide shows how to perform knowledge distillation on Puzzletron-compressed 
 1. Set up the environment with Megatron-Bridge
 2. Prepare tokenized dataset
 3. Run knowledge distillation training directly from HuggingFace checkpoints
+4. Review MMLU evaluation results (before/after distillation)
 
 ## Setup
 
@@ -33,9 +34,9 @@ This section describes how to prepare datasets for knowledge distillation. We pr
 
 > **Note:** The WikiText-103 dataset is a small toy dataset used here only for illustration. For actual knowledge distillation, use a larger, more representative dataset like [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2).
 
-### Step 1: Download Dataset
+### Download Dataset
 
-First, download the dataset and save it in JSONL format. For WikiText-103, you can use the following script:
+Download the dataset and save it in JSONL format. For WikiText-103, you can use the following script:
 
 ```python
 # download_hf_wikitext_dataset.py
@@ -57,9 +58,9 @@ with open(f"{DATA_PATH}/wikitext-train.jsonl", "w") as file:
 print(f"Raw dataset saved to {DATA_PATH}/wikitext-train.jsonl")
 ```
 
-### Step 2: Tokenize Dataset
+### Tokenize Dataset
 
-Next, tokenize the JSONL dataset using the tokenizer from your model. This converts the text data into token IDs that can be used for training:
+Tokenize the JSONL dataset using the tokenizer from your model. This converts the text data into token IDs that can be used for training:
 
 ```python
 # tokenize_wikitext_dataset.py
@@ -78,7 +79,7 @@ megatron_preprocess_data(
 )
 ```
 
-## Step 1: Run Knowledge Distillation
+## Run Knowledge Distillation
 
 Run distillation directly from HuggingFace checkpoints (student and teacher) with tokenized dataset:
 
@@ -87,7 +88,9 @@ torchrun --nproc_per_node=8 examples/puzzletron/mbridge_distillation/distill_hf.
     --student_hf_path /path/to/student/huggingface/checkpoint \
     --teacher_hf_path /path/to/teacher/huggingface/checkpoint \
     --data_paths 1.0 /path/to/tokenized/dataset \
-    --output_dir /workspace/mbridge_distillation/distilled_student \
+    --output_dir /path/to/distilled/checkpoint \
+    --hf-export-path /path/to/exported/hf/model \
+    --hf-model meta-llama/Llama-3.1-8B-Instruct \
     --seq_length 4096 \
     --tp_size 8 \
     --pp_size 1 \
@@ -102,6 +105,49 @@ torchrun --nproc_per_node=8 examples/puzzletron/mbridge_distillation/distill_hf.
     --log_interval 1
 ```
 
-The distilled checkpoint will be saved to `--output_dir`.
+**Notes:**
 
-**Note:** The script automatically converts HuggingFace checkpoints to Megatron-Bridge format on-the-fly, so no separate import step is needed.
+- The distilled Megatron-Bridge checkpoint will be saved to `--output_dir/checkpoints/iter_<train_iters>`.
+- Add `--hf-export-path` to automatically export the final checkpoint to HuggingFace format after distillation. When using `--hf-export-path`, you must also provide `--hf-model` to specify the HuggingFace model ID to use as a template for export (e.g., `meta-llama/Llama-3.1-8B-Instruct`). The `--hf-model` should match the base architecture of the student model. The exported model can be evaluated for accuracy using the evaluation tools described in the main [README.md](../README.md#evaluation).
+- For production use, use larger datasets like [Nemotron-Pretraining-SFT-v1](https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-SFT-v1) and train for more iterations. See the [Megatron-Bridge distillation tutorial](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge#distillation) for best practices.
+
+## MMLU Evaluation Results
+
+This section presents MMLU evaluation results for knowledge distillation experiments compressing Llama-3.1-8B-Instruct.
+
+### Successful Case: 56,810 MiB Model
+
+Distillation results for a pruned checkpoint (56,810 MiB memory constraint, 0.5x compression rate):
+
+| Model | MMLU | Humanities | Other | Social Sciences | STEM |
+|-------|------|------------|-------|-----------------|------|
+| Before distillation | 0.2316 | 0.2462 | 0.2292 | 0.2250 | 0.2274 |
+| After distillation | 0.2960 | 0.3146 | 0.3085 | 0.2925 | 0.2768 |
+| Teacher (meta-llama/Llama-3.1-8B-Instruct) | 0.6839 | 0.7231 | 0.7038 | 0.7667 | 0.5911 |
+
+**Key observations:**
+
+- MMLU accuracy (average across all categories) improved from 23.16% to 29.60% (+6.44 percentage points)
+- All individual category scores (Humanities, Other, Social Sciences, STEM) improved, demonstrating effective knowledge transfer from teacher to student
+
+### Regression Case: 78,000 MiB Model
+
+Distillation results for a larger checkpoint (78,000 MiB memory constraint) showing regression due to overfitting on the small WikiText-103 dataset (evaluated with limit 100):
+
+| Model | MMLU | Humanities | Other | Social Sciences | STEM |
+|-------|------|------------|-------|-----------------|------|
+| Before distillation | 0.6626 | 0.7069 | 0.6892 | 0.7525 | 0.5574 |
+| After distillation | 0.6496 | 0.6862 | 0.6677 | 0.7433 | 0.5532 |
+| Teacher (meta-llama/Llama-3.1-8B-Instruct) | 0.6839 | 0.7231 | 0.7038 | 0.7667 | 0.5911 |
+
+**Key observations:**
+
+- MMLU accuracy (average across all categories) decreased from 66.26% to 64.96% (-1.30 percentage points) after distillation
+- The model overfitted to the small WikiText-103 dataset, causing performance regression
+- This demonstrates the critical importance of using larger, more diverse datasets for knowledge distillation
+
+### Recommendations
+
+- **For successful distillation:** Use larger production datasets like [nvidia/Nemotron-Pretraining-SFT-v1](https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-SFT-v1) instead of WikiText-103
+- **Training duration:** Train for more iterations to ensure proper convergence
+- **See the [Megatron-Bridge distillation tutorial](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge#distillation) for best practices**
