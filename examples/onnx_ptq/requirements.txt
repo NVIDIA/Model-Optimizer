@@ -1,5 +1,5 @@
 datasets>=2.14.4
 optimum
-sentencepiece
+sentencepiece>=0.2.1
 timm
 torchvision

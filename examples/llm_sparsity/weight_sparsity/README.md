@@ -4,6 +4,17 @@ In this tutorial, we demonstrate how to use Nvidia Model Optimizer to perform Po
 
 To learn more about the sparsity feature, please refer to the [documentation](https://nvidia.github.io/Model-Optimizer/guides/6_sparsity.html).
 
+## Pre-Requisites
+
+### Installation
+
+Install Model Optimizer with `hf` dependencies using `pip` from [PyPI](https://pypi.org/project/nvidia-modelopt/) and install the requirements for the example:
+
+```bash
+pip install -U nvidia-modelopt[hf]
+pip install -r requirements.txt
+```
+
 ## Getting Started
 
 ### Post-Training Sparsification (PTS) for PyTorch models

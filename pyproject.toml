@@ -74,6 +74,7 @@ hf = [
     "huggingface_hub>=0.24.0",
     "nltk",
     "peft>=0.17.0",
+    "sentencepiece>=0.2.1",                                                           # Also implicitly used in test_unified_export_megatron, test_vllm_fakequant_megatron_export
     "transformers>=4.53,<5.0",                                                        # Should match modelopt/torch/__init__.py and tox.ini
     "wonderwords",
 ]
@@ -98,7 +99,6 @@ dev-test = [
     "pytest-cov",
     "pytest-instafail",
     "pytest-timeout",
-    "sentencepiece",
     "timm",
     "torchprofile>=0.0.4",     # optional dependency for modelopt.torch
     "torchvision",
