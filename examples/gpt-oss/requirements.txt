@@ -1,8 +1,4 @@
-accelerate
-datasets
-deepspeed
 kernels>=0.9.0
-peft>=0.17.0
 torch>2.7.1
 trackio
 transformers>=4.55.0

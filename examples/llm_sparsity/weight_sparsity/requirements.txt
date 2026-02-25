@@ -1,3 +1,2 @@
 flash-attn
-sentencepiece>=0.2.0
 tensorboardX

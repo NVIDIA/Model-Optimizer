@@ -66,9 +66,10 @@ optional_deps = {
         "deepspeed>=0.9.6 ; platform_system != 'Darwin' and platform_system != 'Windows'",
         "diffusers>=0.32.2",
         "huggingface_hub>=0.24.0",
-        "peft>=0.17.0",
-        "transformers>=4.53,<5.0",  # Should match modelopt/torch/__init__.py and tox.ini
         "nltk",
+        "peft>=0.17.0",
+        "sentencepiece>=0.2.1",  # Also implicitly used in test_unified_export_megatron, test_vllm_fakequant_megatron_export # noqa: E501
+        "transformers>=4.53,<5.0",  # Should match modelopt/torch/__init__.py and tox.ini
         "wonderwords",
     ],
     # linter tools
@@ -85,7 +86,6 @@ optional_deps = {
         "pytest-cov",
         "pytest-instafail",
         "pytest-timeout",
-        "sentencepiece",  # For test_unified_export_megatron.py, test_vllm_fakequant_megatron_export.py
         "timm",
         "torchprofile>=0.0.4",  # For computing flops of CV models
         "torchvision",
