@@ -338,6 +338,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         r"^(.*?)\.(q_proj|k_proj|v_proj)$",  # q_proj, k_proj, v_proj for llama like models
         # gate_proj, up_proj, down_proj for Qwen3 like MoE models
         r"^(.*?\.mlp\.experts)\.\d+\.(gate_proj|up_proj|down_proj)$",
+        r"^(.*?\.mixer\.experts)\.\d+\.(up_proj|down_proj)$",  # NemotronH MoE experts
         r"^(.*?)\.(gate_proj|up_proj)$",  # gate_proj, up_proj for llama like models
         r"^(.*?)\.(\d+\.(w1|w2|w3))$",  # mixtral experts
         r"^(.*?)\.((w1_linear|w2_linear|w3_linear)\.\d+)$",  # dbrx experts
@@ -517,9 +518,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             disabled = any(disabled for _, _, disabled, _ in module_info_list)
             score_modules = [score_module for _, _, _, score_module in module_info_list]
 
-            quant_recipes = None if disabled else quant_recipes
+            _quant_recipes = None if disabled else quant_recipes
             hparam = QuantRecipeHparam(
-                quant_recipes,
+                _quant_recipes,
                 quant_modules=quant_modules,
                 score_modules=score_modules,
                 name=str(group_key),
@@ -756,6 +757,7 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
     score_module_rules = [
         # Use MLP layer output for gate_proj, up_proj, down_proj for Qwen3 like MoE models (local and shared experts)
         r"^(.*?\.mlp)\.experts\.\d+\.(gate_proj|up_proj|down_proj)$",
+        r"^(.*?\.mixer)\.experts\.\d+\.(up_proj|down_proj)$",  # NemotronH MoE experts
         r"^(.*?)\.(\d+\.(w1|w2|w3))$",  # mixtral experts
         r"^(.*?)\.((w1_linear|w2_linear|w3_linear)\.\d+)$",  # dbrx experts
     ]
