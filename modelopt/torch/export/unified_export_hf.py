@@ -131,9 +131,9 @@ def _save_component_state_dict_safetensors(
         component_export_dir: Directory to save model.safetensors and config.json.
         merged_base_safetensor_path: If provided, merge the exported transformer weights
             with non-transformer components (VAE, vocoder, text encoders, etc.) from this
-            base safetensors file and add quantization metadata to produce a single-file checkpoint compatible with
-            ComfyUI. This should be the path to a full base model ``.safetensors`` file,
-            e.g. ``"path/to/ltx-2-19b-dev.safetensors"``.
+            base safetensors file and add quantization metadata to produce a single-file
+            checkpoint compatible with ComfyUI. This should be the path to a full base
+            model ``.safetensors`` file, e.g. ``"path/to/ltx-2-19b-dev.safetensors"``.
         hf_quant_config: If provided, embed quantization config in safetensors metadata
             and per-layer _quantization_metadata for ComfyUI.
         model_type: Key into ``DIFFUSION_MERGE_FUNCTIONS`` for the model-specific merge.
@@ -870,9 +870,9 @@ def _export_diffusers_checkpoint(
             If None, all components are exported.
         merged_base_safetensor_path: If provided, merge the exported transformer weights
             with non-transformer components (VAE, vocoder, text encoders, etc.) from this
-            base safetensors file and add quantization metadata to produce a single-file checkpoint compatible with
-            ComfyUI. This should be the path to a full base model ``.safetensors`` file,
-            e.g. ``"path/to/ltx-2-19b-dev.safetensors"``.
+            base safetensors file and add quantization metadata to produce a single-file
+            checkpoint compatible with ComfyUI. This should be the path to a full base
+            model ``.safetensors`` file, e.g. ``"path/to/ltx-2-19b-dev.safetensors"``.
         max_shard_size: Maximum size of each shard file. If the model exceeds this size,
             it will be sharded into multiple files and a .safetensors.index.json will be
             created. Use smaller values like "5GB" or "2GB" to force sharding.
@@ -1114,9 +1114,10 @@ def export_hf_checkpoint(
         **kwargs: Internal-only keyword arguments. Supported keys:
             merged_base_safetensor_path (str | None): If provided, merge the exported
                 diffusion transformer weights with non-transformer components (VAE, vocoder,
-                text encoders, etc.) from this base safetensors file and add quantization metadata to produce a single-file
-                checkpoint compatible with ComfyUI. This should be the path to a full base
-                model ``.safetensors`` file, e.g. ``"path/to/ltx-2-19b-dev.safetensors"``.
+                text encoders, etc.) from this base safetensors file and add quantization
+                metadata to produce a single-file checkpoint compatible with ComfyUI. This
+                should be the path to a full base model ``.safetensors`` file,
+                e.g. ``"path/to/ltx-2-19b-dev.safetensors"``.
                 Only used for diffusion model exports.
     """
     merged_base_safetensor_path: str | None = kwargs.get("merged_base_safetensor_path")
