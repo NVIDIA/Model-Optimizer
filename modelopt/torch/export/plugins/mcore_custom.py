@@ -445,7 +445,10 @@ def _get_safetensor_slices(
                 elif len(shape) == 3:
                     # For packed ETP case, Llama4 uses 3D tensor for local experts
                     # For gpt-oss case, gpt-oss uses 3D tensor for scales of local experts
-                    if sharding_dim == 1:
+                    # For Conv1d weights in mamba layer
+                    if sharding_dim == 0:
+                        tensor = tensor_slice[rank_offset : rank_offset + per_rank_size, :, :]
+                    elif sharding_dim == 1:
                         tensor = tensor_slice[:, rank_offset : rank_offset + per_rank_size, :]
                     elif sharding_dim == 2:
                         tensor = tensor_slice[:, :, rank_offset : rank_offset + per_rank_size]
