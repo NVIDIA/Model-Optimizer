@@ -111,7 +111,8 @@ repos:
               examples/speculative_decoding/main.py|
               examples/speculative_decoding/medusa_utils.py|
               examples/speculative_decoding/server_generate.py|
-              examples/puzzletron/evaluation/hf_deployable_anymodel\.py|
+              examples/puzzletron/evaluation/lm_eval_anymodel.py|
+              modelopt/torch/puzzletron/anymodel/models/gpt_oss_20b/gpt_oss_pruned_to_mxfp4.py|
               modelopt/torch/puzzletron/decilm/deci_lm_hf_code/transformers_.*\.py|
               experimental/dms/models/qwen3/configuration_qwen3_dms.py|
               experimental/dms/models/qwen3/modeling_qwen3_dms.py|
