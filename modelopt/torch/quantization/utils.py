@@ -841,6 +841,8 @@ class LayerActivationCollector:
             if stop_after_collection:
                 raise _EarlyStopForwardError()  # Stop the forward pass after collection
 
+            return self._original_forward(*args, **kwargs)
+
         bind_forward_method(layer, _forward_w_data_collection, "_original_forward")
         layer.inputs = []
 

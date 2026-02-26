@@ -1135,7 +1135,8 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         title="Enable sequential layer-by-layer calibration.",
         description=(
             "If True, the calibration algorithm is applied sequentially to each decoder block. "
-            "Outputs from one layer become inputs to the next, reducing memory usage for large models."
+            "The current approach recomputes a full forward pass per layer to propagate updated activations,"
+            "incurring O(N²) cost. Future revisions will add caching to eliminate redundant passes."
         ),
     )
 

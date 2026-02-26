@@ -637,7 +637,11 @@ def unpatch_forward_method(module: nn.Module, orig_forward_cache_name: str):
 
 
 def get_decoder_layers(model: nn.Module, granularity: str = "decoder") -> nn.ModuleList | None:
-    """Detect the decoder layers from a model for sequential calibration."""
+    """Detect the decoder layers from a model for sequential calibration.
+
+    This temporary decoder-layer detection heuristic will be replaced with a more robust solution
+    that also supports FSDP/DDP models.
+    """
     if granularity != "decoder":
         raise ValueError(f"Unsupported granularity: {granularity}. Only 'decoder' is supported.")
 

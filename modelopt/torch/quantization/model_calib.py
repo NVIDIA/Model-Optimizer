@@ -1852,16 +1852,16 @@ def sequential_calibrate(
 
     gettr = LayerActivationCollector(model)
 
-    for _, layer in enumerate(transformer_layers):
+    for layer in transformer_layers:
         # Get updated input activations to the current layer
-        inputs = gettr.get_input_activations(layer, forward_loop)
+        layer_inputs = gettr.get_input_activations(layer, forward_loop)
 
         # Define a forward loop for the current layer
-        def _layer_forward_loop(m):
-            for args, kwargs_input in inputs:  # noqa: F821
+        def _layer_forward_loop(m, _inputs=layer_inputs):
+            for args, kwargs_input in _inputs:
                 m(*args, **kwargs_input)
 
         # Call calibration function
         calib_func(layer, _layer_forward_loop, **calib_kwargs)
-        del inputs
+        del layer_inputs
         torch.cuda.empty_cache()
