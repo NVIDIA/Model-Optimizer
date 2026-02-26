@@ -64,6 +64,10 @@ class AcceptanceRate(Metric):
         for request_id, turns in self.prompt_ar.items():
             self.out["Request_AR"][request_id] = {}
             for turn_id, turn in turns.items():
+                if len(turn) > 1 and turn[0] <= 1:
+                    turn = turn[1:] # Skip prefill if it is 1 or less, indicating no specdec
+                if len(turn) > 1:
+                    turn = turn[:-1] # Skip final acceptance due to EOS truncating speculation
                 ar = sum(turn) / len(turn)
                 self.out["Request_AR"][request_id][turn_id] = ar
                 all_ar.append(ar)
