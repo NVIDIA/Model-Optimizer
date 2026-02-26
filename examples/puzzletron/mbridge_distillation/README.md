@@ -113,32 +113,49 @@ torchrun --nproc_per_node=8 examples/puzzletron/mbridge_distillation/distill_hf.
 
 ## MMLU Evaluation Results
 
-This section presents MMLU evaluation results for knowledge distillation experiments compressing Llama-3.1-8B-Instruct.
+This section presents MMLU evaluation results for knowledge distillation experiments compressing Qwen3-8B and Llama-3.1-8B-Instruct.
 
-### Successful Case: 56,810 MiB Model
+### Successful Case: Qwen3-8B (80% of original)
 
-Distillation results for a pruned checkpoint (56,810 MiB memory constraint, 0.5x compression rate):
+Distillation results for a memory-compressed Qwen3-8B checkpoint (80% of original size):
+
+| Model | MMLU | Humanities | Other | Social Sci | STEM |
+|-------|------|------------|-------|------------|------|
+| 80% pre-distillation | 0.5910 | 0.5046 | 0.6363 | 0.6831 | 0.5855 |
+| 80% post-distillation | 0.6921 | 0.5906 | 0.7316 | 0.7975 | 0.7016 |
+| Original Qwen3-8B | 0.7493 | 0.6648 | 0.7856 | 0.8385 | 0.7526 |
+
+**Key observations:**
+
+- MMLU accuracy improved from 59.10% to 69.21% (+10.11 percentage points) after distillation
+- Achieved with just 100 iterations on WikiText-103, demonstrating efficient knowledge transfer
+- Recovery of 64% of the gap to the teacher model (from 59.10% to 69.21%, closing 64% of the gap from 59.10% to 74.93%)
+- All individual category scores (Humanities, Other, Social Sciences, STEM) improved significantly
+
+### Successful Case: Llama-3.1-8B-Instruct (50% of original, 56,810 MiB)
+
+Distillation results for a pruned Llama-3.1-8B-Instruct checkpoint (50% of original size, 56,810 MiB memory constraint):
 
 | Model | MMLU | Humanities | Other | Social Sciences | STEM |
 |-------|------|------------|-------|-----------------|------|
 | Before distillation | 0.2316 | 0.2462 | 0.2292 | 0.2250 | 0.2274 |
 | After distillation | 0.2960 | 0.3146 | 0.3085 | 0.2925 | 0.2768 |
-| Teacher (meta-llama/Llama-3.1-8B-Instruct) | 0.6839 | 0.7231 | 0.7038 | 0.7667 | 0.5911 |
+| Original Llama-3.1-8B-Instruct | 0.6839 | 0.7231 | 0.7038 | 0.7667 | 0.5911 |
 
 **Key observations:**
 
 - MMLU accuracy (average across all categories) improved from 23.16% to 29.60% (+6.44 percentage points)
 - All individual category scores (Humanities, Other, Social Sciences, STEM) improved, demonstrating effective knowledge transfer from teacher to student
 
-### Regression Case: 78,000 MiB Model
+### Regression Case: Llama-3.1-8B-Instruct (69% of original, 78,000 MiB)
 
-Distillation results for a larger checkpoint (78,000 MiB memory constraint) showing regression due to overfitting on the small WikiText-103 dataset (evaluated with limit 100):
+Distillation results for a pruned Llama-3.1-8B-Instruct checkpoint (approximately 69% of original size, 78,000 MiB memory constraint) showing regression due to overfitting on the small WikiText-103 dataset (evaluated with limit 100):
 
 | Model | MMLU | Humanities | Other | Social Sciences | STEM |
 |-------|------|------------|-------|-----------------|------|
 | Before distillation | 0.6626 | 0.7069 | 0.6892 | 0.7525 | 0.5574 |
 | After distillation | 0.6496 | 0.6862 | 0.6677 | 0.7433 | 0.5532 |
-| Teacher (meta-llama/Llama-3.1-8B-Instruct) | 0.6839 | 0.7231 | 0.7038 | 0.7667 | 0.5911 |
+| Original Llama-3.1-8B-Instruct | 0.6839 | 0.7231 | 0.7038 | 0.7667 | 0.5911 |
 
 **Key observations:**
 
