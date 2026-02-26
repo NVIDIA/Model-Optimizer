@@ -35,7 +35,8 @@ docker run \
   ${DOCKER_IMAGE} bash
 ```
 
-Alternatively you can manually update the file 
+Alternatively you can manually update the file
+
 ```bash
 # Install the AnyModel-patched deployable (first time only: backs up the original)
 # /opt/Export-Deploy is the default path in NeMo containers — adjust if needed

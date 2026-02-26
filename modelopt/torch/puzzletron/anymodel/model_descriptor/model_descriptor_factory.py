@@ -17,8 +17,9 @@
 import inspect
 from typing import Callable, Type
 
-from modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor import ModelDescriptor
 from transformers import AutoConfig
+
+from modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor import ModelDescriptor
 
 __all__ = ["ModelDescriptorFactory"]
 
@@ -34,12 +35,11 @@ _MODEL_TYPE_TO_DESCRIPTOR = {
     "gpt_oss_20b": "gpt_oss_20b",
 }
 
+
 def resolve_descriptor_from_pretrained(pretrained: str | None, trust_remote_code: bool = True):
     """Resolve the model descriptor by loading the checkpoint config and mapping model_type."""
     if not pretrained:
-        raise ValueError(
-            "pretrained must be provided"
-        )
+        raise ValueError("pretrained must be provided")
 
     config = AutoConfig.from_pretrained(pretrained, trust_remote_code=trust_remote_code)
     model_type = getattr(config, "model_type", None)
@@ -56,6 +56,7 @@ def resolve_descriptor_from_pretrained(pretrained: str | None, trust_remote_code
         f"Cannot auto-detect descriptor for model_type='{model_type}'. "
         f"Known model types: {known}. Add this model_type to _MODEL_TYPE_TO_DESCRIPTOR if supported."
     )
+
 
 class ModelDescriptorFactory:
     """Factory for registering and retrieving ModelDescriptor classes."""

@@ -64,8 +64,7 @@ class Converter(ABC):
 
     @classmethod
     def convert_model_weights(
-        cls,
-        input_dir: Path, output_dir: Path, descriptor: ModelDescriptor, num_hidden_layers: int
+        cls, input_dir: Path, output_dir: Path, descriptor: ModelDescriptor, num_hidden_layers: int
     ):
         """Convert model weights to subblock format."""
         param_to_file = Converter._get_weight_map(input_dir)
@@ -99,10 +98,13 @@ class Converter(ABC):
                     if param_to_file[name] == file and name in data:
                         converted_name = cls.convert_weight_name(name)
                         # Convert MoE packed tensors if quantized is mxfp4 //gpt-oss-20b
-                        if getattr(cls, 'quantized', None) == 'mxfp4':
+                        if getattr(cls, "quantized", None) == "mxfp4":
                             if name.endswith("_blocks"):
                                 converted_name = converted_name.replace("_blocks", "")
-                                tensors[converted_name] = convert_moe_packed_tensors(data[converted_name+"_blocks"], data[converted_name+"_scales"])
+                                tensors[converted_name] = convert_moe_packed_tensors(
+                                    data[converted_name + "_blocks"],
+                                    data[converted_name + "_scales"],
+                                )
                             elif name.endswith("_scales"):
                                 continue
                             else:
@@ -213,18 +215,18 @@ class Converter(ABC):
     def convert_weight_name(name: str) -> str:
         """
         Convert weight names during checkpoint conversion.
-        
+
         This method can be overridden by subclasses to apply model-specific weight name
         transformations when converting checkpoints from HuggingFace format to Puzzletron format.
-        
+
         Default implementation returns the name unchanged (identity function).
-        
+
         Args:
             name: Original weight name from HuggingFace checkpoint
-            
+
         Returns:
             Converted weight name for Puzzletron format
-            
+
         Example:
             For Qwen2.5-VL, this converts:
             - visual.* → model.visual.*

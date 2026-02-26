@@ -23,7 +23,7 @@ mlp_init_mode: "Truncate" # PruneByActivationsLog
 
 ## KV-heads pruning
 n_heads_in_group_list:
-gqa_init_mode: "AverageKV" 
+gqa_init_mode: "AverageKV"
 
 ## Hidden dimension pruning
 hidden_size_list:

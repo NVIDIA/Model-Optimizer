@@ -38,11 +38,9 @@
 # limitations under the License.
 
 
+import json
 import logging
 from typing import Any
-import json
-import os
-import sys
 
 import numpy as np
 import torch
@@ -54,7 +52,12 @@ from nemo_export_deploy_common.import_utils import (
     null_decorator,
 )
 from peft import PeftModel
-from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer, AutoConfig
+from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
+
+from modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor_factory import (
+    resolve_descriptor_from_pretrained,
+)
+from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
 
 try:
     from pytriton.decorators import batch
@@ -74,13 +77,6 @@ LOGGER = logging.getLogger("NeMo")
 
 SUPPORTED_TASKS = ["text-generation"]
 
-modelopt_workdir = os.environ.get("MODELOPT_WORKDIR") or os.environ.get(
-    "PUZZLE_WORKDIR"
-)
-if modelopt_workdir and modelopt_workdir not in sys.path:
-    sys.path.insert(0, modelopt_workdir)
-from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
-from modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor_factory import resolve_descriptor_from_pretrained
 
 class HuggingFaceLLMDeploy(ITritonDeployable):
     """A Triton inference server compatible wrapper for HuggingFace models.
@@ -175,7 +171,9 @@ class HuggingFaceLLMDeploy(ITritonDeployable):
             # See: modelopt/torch/puzzletron/anymodel/puzzformer/utils.py
             # =========================================================================
 
-            descriptor = resolve_descriptor_from_pretrained(self.hf_model_id_path, trust_remote_code=hf_kwargs.get("trust_remote_code", False))
+            descriptor = resolve_descriptor_from_pretrained(
+                self.hf_model_id_path, trust_remote_code=hf_kwargs.get("trust_remote_code", False)
+            )
 
             with deci_x_patcher(model_descriptor=descriptor):
                 self.model = AutoModelForCausalLM.from_pretrained(

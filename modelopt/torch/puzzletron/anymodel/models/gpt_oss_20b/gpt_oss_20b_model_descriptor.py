@@ -27,8 +27,6 @@ from modelopt.torch.puzzletron.anymodel.model_descriptor import (
     ModelDescriptor,
     ModelDescriptorFactory,
 )
-from modelopt.torch.puzzletron.utils.dummy_modules import DummyBlock
-
 from modelopt.torch.puzzletron.anymodel.puzzformer.no_op import (
     MatchingZeros,
     Same,
@@ -44,6 +42,7 @@ from modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin import (
 # Production models use MXFP4 quantized MoE with combined tensors
 # (gate_up_proj_blocks, down_proj_blocks), which is not yet supported.
 from modelopt.torch.puzzletron.pruning.pruning_mixin import PruningMixIn
+from modelopt.torch.puzzletron.utils.dummy_modules import DummyBlock
 
 
 @ModelDescriptorFactory.register_decorator("gpt_oss_20b")
@@ -229,7 +228,11 @@ class GptOss20bExpertRemovalLayerDescriptor(ExpertRemovalLayerDescriptor):
 
         module_names_to_hook = []
         for module_name, module in model.named_modules():
-            if module_name.endswith(self.target_name) and module.__class__.__name__ == target_class_name:
-                module_names_to_hook.append((self.block_idx_from_module_name(module_name), module_name))
+            if (
+                module_name.endswith(self.target_name)
+                and module.__class__.__name__ == target_class_name
+            ):
+                module_names_to_hook.append(
+                    (self.block_idx_from_module_name(module_name), module_name)
+                )
         return module_names_to_hook
-

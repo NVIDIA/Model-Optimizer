@@ -51,14 +51,18 @@ from lm_eval.models.huggingface import HFLM
 
 # Trigger factory registration for all model descriptors
 import modelopt.torch.puzzletron.anymodel.models  # noqa: F401
-from modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor_factory import resolve_descriptor_from_pretrained
+from modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor_factory import (
+    resolve_descriptor_from_pretrained,
+)
 from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
 
 
 def create_from_arg_obj(cls: type[T], arg_dict: dict, additional_config: dict | None = None) -> T:
     """Override HFLM.create_from_arg_obj to wrap model loading with deci_x_patcher."""
     pretrained = arg_dict.get("pretrained")
-    descriptor = resolve_descriptor_from_pretrained(pretrained, trust_remote_code=arg_dict.get("trust_remote_code", False))
+    descriptor = resolve_descriptor_from_pretrained(
+        pretrained, trust_remote_code=arg_dict.get("trust_remote_code", False)
+    )
 
     additional_config = {} if additional_config is None else additional_config
     additional_config = {k: v for k, v in additional_config.items() if v is not None}
