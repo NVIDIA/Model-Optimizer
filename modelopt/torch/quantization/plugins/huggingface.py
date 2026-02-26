@@ -983,38 +983,12 @@ except ImportError:
     pass
 
 
-class _QuantQwen35MoeSparseMoeBlock(_QuantSparseMoe):
-    """Qwen3.5 MoE stores top_k/num_experts in the router (self.gate), not as direct attributes.
-
-    We override forward instead of just bridging attributes because the router (self.gate)
-    uses its own top_k internally for routing decisions. We must modify self.gate.top_k
-    directly so all experts see calibration data.
-    """
-
-    def _setup(self):
-        self.num_experts = self.experts.num_experts
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if any(getattr(m, "_if_calib", False) for m in self.experts.modules()):
-            # Force all tokens to all experts during calibration
-            original_top_k = self.gate.top_k
-            self.gate.top_k = self.num_experts
-            super(_QuantSparseMoe, self).forward(hidden_states)
-            self.gate.top_k = original_top_k
-        return super(_QuantSparseMoe, self).forward(hidden_states)
-
-
 try:
-    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
-        Qwen3_5MoeExperts,
-        Qwen3_5MoeSparseMoeBlock,
-    )
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeExperts
 
-    if Qwen3_5MoeSparseMoeBlock not in QuantModuleRegistry:
-        QuantModuleRegistry.register({Qwen3_5MoeSparseMoeBlock: "hf.Qwen3_5MoeSparseMoeBlock"})(
-            _QuantQwen35MoeSparseMoeBlock
-        )
-
+    # Qwen3_5MoeSparseMoeBlock registration is handled by register_sparse_moe_on_the_fly
+    # (auto-detected via gate.top_k + gate.num_experts + experts pattern).
+    # Only the fused expert weights need explicit registration.
     if Qwen3_5MoeExperts not in QuantModuleRegistry:
         QuantModuleRegistry.register({Qwen3_5MoeExperts: "hf.Qwen3_5MoeExperts"})(
             _QuantQwen35MoeExperts

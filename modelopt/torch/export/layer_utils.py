@@ -327,21 +327,12 @@ def is_mlp(module: nn.Module) -> bool:
 
 def is_moe(module: nn.Module) -> bool:
     """Returns whether the module is an MOE layer."""
-    return any(
-        key in type(module).__name__.lower()
-        for key in [
-            "MixtralSparseMoeBlock".lower(),
-            "ArcticMoE".lower(),
-            "DbrxFFN".lower(),
-            "MoELayer".lower(),
-            "PhimoeSparseMoeBlock".lower(),
-            "DeepseekMoE".lower(),
-            "Qwen2MoeSparseMoeBlock".lower(),
-            "Qwen3MoeSparseMoeBlock".lower(),
-            "Qwen3NextSparseMoeBlock".lower(),
-            "Qwen3_5MoeSparseMoeBlock".lower(),
-        ]
-    )
+    name = type(module).__name__.lower()
+    # Auto-detect common MoE patterns
+    if name.endswith("sparsemoeblock") or "moelayer" in name:
+        return True
+    # Explicit matches for non-standard naming
+    return any(key in name for key in ["arcticmoe", "deepseekmoe", "dbrxffn"])
 
 
 def is_quantlinear(module: nn.Module) -> bool:
