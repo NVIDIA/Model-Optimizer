@@ -157,6 +157,7 @@ def run_simple(args):
         tensor_parallel_size=args.tp_size,
         moe_expert_parallel_size=args.ep_size,
         trust_remote_code=args.trust_remote_code,
+        parallel_drafting=args.parallel_drafting,
         **engine_args,
     )
 
@@ -286,6 +287,7 @@ if __name__ == "__main__":
         "--output_length", type=int, required=False, default=4096, help="Output length"
     )
     parser.add_argument("--draft_length", type=int, required=False, default=3, help="Draft length")
+    parser.add_argument("--parallel_drafting", action="store_true", help="Enable parallel drafting")
     parser.add_argument(
         "--tp_size", type=int, required=False, default=4, help="Tensor parallel size"
     )
