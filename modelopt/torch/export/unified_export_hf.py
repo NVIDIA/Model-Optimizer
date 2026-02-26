@@ -993,6 +993,11 @@ def _export_diffusers_checkpoint(
     print(f"Export complete. Saved to: {export_dir}")
 
 
+# TODO: Remove this workaround once HuggingFace fixes revert_weight_conversion to handle
+# scalar (0-d) tensors. The bug is in transformers' Chunk.convert() which calls
+# tensor.size(self.dim) on quantization scale buffers that are 0-d scalars, causing
+# IndexError. Confirmed still present in transformers 5.2.0.
+# See: transformers/core_model_loading.py, Chunk.convert()
 def _revert_weight_conversion_noop(model: Any, state_dict: dict) -> dict:
     """No-op replacement for transformers' revert_weight_conversion."""
     return state_dict
