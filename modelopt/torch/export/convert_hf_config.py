@@ -15,6 +15,7 @@
 
 """Convert modelopt quantization export config to align with llm-compressor config format."""
 
+import warnings
 from collections import defaultdict
 from typing import Any
 
@@ -51,23 +52,21 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
             },
             "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": gs},
         }
-    elif quant_algo in ("NVFP4_AWQ", "W4A16_AWQ", "W4A8_AWQ"):
+    elif quant_algo == "W4A16_AWQ":
         gs = group_size or 128
-        weight_bits = 4
-        act_bits = 8 if "A8" in quant_algo else 4
+        return {
+            "weights": {"dynamic": False, "num_bits": 4, "type": "int", "group_size": gs},
+        }
+    elif quant_algo in ("NVFP4_AWQ", "W4A8_AWQ"):
+        gs = group_size or 128
         return {
             "input_activations": {
                 "dynamic": False,
-                "num_bits": act_bits,
+                "num_bits": 8,
                 "type": "float",
                 "group_size": gs,
             },
-            "weights": {
-                "dynamic": False,
-                "num_bits": weight_bits,
-                "type": "float",
-                "group_size": gs,
-            },
+            "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": gs},
         }
     elif quant_algo == "W8A16":
         return {
@@ -101,7 +100,12 @@ def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) 
             "weights": {"dynamic": False, "num_bits": 8, "type": "float", "group_size": gs},
         }
     else:
-        # Fallback: store the raw algo name so downstream consumers can still inspect it.
+        warnings.warn(
+            f"Unsupported quantization algorithm '{quant_algo}' in "
+            f"_quant_algo_to_group_config. The resulting config group will not contain "
+            f"'input_activations' or 'weights' keys and may not be compatible with "
+            f"compressed-tensors consumers. Please add explicit support for this algorithm."
+        )
         return {"quant_algo": quant_algo}
 
 
