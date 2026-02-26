@@ -631,10 +631,14 @@ def _prefix_wildcard_summarize_exclude_modules(unquantized_layers, quantized_lay
     """
 
     def all_matching_prefix_wildcards(name):
-        # include all possible prefix wildcards, and the exact name itself
+        # Include the exact name and prefix wildcards at segment boundaries only (at each '.'),
+        # At each boundary add both "prefix*" and "prefix.*"
         wildcards = {name}
-        for i in range(len(name) + 1):
-            wildcards.add(name[:i] + "*")
+        for i in range(len(name)):
+            if name[i] == ".":
+                wildcards.add(name[:i] + "*")
+                wildcards.add(name[: i + 1] + "*")
+        wildcards.add(name + "*")
         return wildcards
 
     def next_formatted_matching_prefix_wildcards(name: str) -> Generator[list[str], None, None]:
@@ -782,11 +786,10 @@ def process_layer_quant_config(layer_config_dict):
         per_layer_config["quant_algo"] = "MIXED_PRECISION"
     elif len(quantization_formats) == 1 and quantization_config is not None:
         per_layer_config.update(quantization_config)
-        per_layer_config["exclude_modules"] = sorted(
-            _prefix_wildcard_summarize_exclude_modules(
-                exclude_modules, per_layer_config["quantized_layers"].keys()
-            )
+        summarized = _prefix_wildcard_summarize_exclude_modules(
+            exclude_modules, per_layer_config["quantized_layers"].keys()
         )
+        per_layer_config["exclude_modules"] = sorted(summarized)
         per_layer_config.pop("quantized_layers")
 
     return per_layer_config

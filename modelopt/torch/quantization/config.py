@@ -460,6 +460,7 @@ MAMBA_MOE_NVFP4_AGGRESSIVE_CFG = {
     },
     "algorithm": "max",
 }
+
 MAMBA_MOE_NVFP4_CONSERVATIVE_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
