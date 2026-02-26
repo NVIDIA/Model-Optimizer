@@ -1,5 +1,2 @@
-flash-attn
-openai
-py7zr
-sentencepiece>=0.2.0
-tensorboardX
+accelerate==1.12.0
+transformers==5.0.0rc1

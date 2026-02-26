@@ -120,6 +120,13 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         self._functionals_to_replace = value
 
     def _setup(self):
+        if getattr(self, "fuse_wgrad_accumulation", False):
+            warnings.warn(
+                "fuse_wgrad_accumulation is not supported with ModelOpt quantization. "
+                "Setting fuse_wgrad_accumulation to False."
+            )
+            self.fuse_wgrad_accumulation = False
+
         # GroupedMLP stores the weights as weight0, weight1, etc. To run setup in order to
         # initialize the quantizer states, self.weight is used to extract shape, dtype etc. Assigning
         # self.weight0 to self.weight to run the quantizer states initialization.
@@ -130,6 +137,9 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         super()._setup()
         # Remove self.weight after setup.
         delattr(self, "weight")
+
+        # TODO: GroupedLinear supports weights split by `num_gemms`, to support quantization
+        # with static parameters beyond per-tensor, we need to support a unique quantizer for each gemm.
 
     def modelopt_post_restore(self, prefix: str = ""):
         # GroupedMLP stores the weights as weight0, weight1, etc. To run post_restore in order to
@@ -146,7 +156,17 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         _assert_te_fp8_enabled()
         idx = 1 if func_name == "_forward" else 0
         inp = args[idx]
-        num_gemms = len(args[idx + 1])
+
+        # Handle both old and new TE signatures (changed in PR #2377 in TE 2.10)
+        # New signature (TE >= 2.10): forward(ctx, inp, non_tensor_args: Tuple, *weights_and_biases)
+        # Old signature (TE < 2.10): forward(ctx, inp, m_splits: List[int], use_bias, ...)
+        if Version("2.10") <= _TE_VERSION:
+            # New signature: non_tensor_args is a tuple, m_splits is the first element
+            num_gemms = len(args[idx + 1][0])
+        else:
+            # Old signature: m_splits is directly args[idx + 1]
+            num_gemms = len(args[idx + 1])
+
         weights_and_biases = args[-2 * num_gemms :]
         weights, biases = weights_and_biases[:num_gemms], weights_and_biases[num_gemms:]
         quantized_inputs = self.input_quantizer(inp)

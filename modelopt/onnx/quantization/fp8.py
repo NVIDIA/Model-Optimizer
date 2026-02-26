@@ -102,7 +102,7 @@ def int8_to_fp8(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
             )
             zero_point = initializers[zero_point_idx]
             dtype = onnx.helper.tensor_dtype_to_np_dtype(zero_point.data_type)
-            vals = np.array(zero_point.int32_data, dtype=dtype).tobytes()
+            vals = np.array(zero_point.int32_data, dtype=dtype).tobytes() or zero_point.raw_data
 
             np_zero_point = onnx.helper.make_tensor(
                 zero_point_name, onnx.TensorProto.FLOAT8E4M3FN, zero_point.dims, vals, raw=True
@@ -182,6 +182,7 @@ def quantize(
     calibrate_per_node: bool = False,
     custom_ops_to_quantize: list[str] = [],
     direct_io_types: bool = False,
+    opset: int | None = None,
     **kwargs,
 ) -> onnx.ModelProto:
     """Applies FP8 GEMM only quantization to an ONNX file.
@@ -328,6 +329,7 @@ def quantize(
             tensor_block_dict=custom_ops_to_cast_fp32 or {},
             low_precision_type=high_precision_dtype,
             trt_plugins=trt_extra_plugin_lib_paths,
+            opset=opset,
         )
 
         current_opsets = {opset.domain: opset.version for opset in onnx_model.opset_import}

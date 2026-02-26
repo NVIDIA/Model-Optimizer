@@ -1,0 +1,108 @@
+# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Pretrain/finetune with a heterogeneous (AnyModel) checkpoint.
+# Requires apply_patch() from patch_automodel so from_pretrained accepts anymodel_descriptor.
+#
+# Set pretrained_model_name_or_path to your checkpoint directory.
+# anymodel_descriptor must match a ModelOpt ModelDescriptorFactory name, e.g.:
+#   gpt_oss_20b, llama, qwen2, qwen3, mistral_small, nemotron_h, nemotron_h_v2, qwen3_vl
+# block_configs_path is optional; if omitted, block_configs are auto-detected from
+#   <pretrained_model_name_or_path>/block_configs.json when present.
+#
+# To run (from repo root or examples/puzzletron/automodel_distillation):
+#   torchrun --nproc_per_node <N> -m automodel_distillation.run --mode pretrain -c pretrain.yaml
+# Override config on the command line, e.g.:
+#   model.pretrained_model_name_or_path=/path/to/checkpoint model.anymodel_descriptor=llama
+
+step_scheduler:
+  global_batch_size: 16
+  local_batch_size: 2
+  ckpt_every_steps: 2000
+  num_epochs: 1
+  max_steps: 60
+
+dist_env:
+  backend: nccl
+  timeout_minutes: 5
+
+model:
+  _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_pretrained
+  # Set to your AnyModel checkpoint directory (must contain config and weights; optional block_configs.json)
+  pretrained_model_name_or_path: null  # e.g. /path/to/heterogeneous_checkpoint
+  # ModelOpt descriptor name (see list in header comment)
+  anymodel_descriptor: null  # e.g. gpt_oss_20b or llama
+  force_hf: true
+  torch_dtype: bf16
+  trust_remote_code: true
+  # block_configs_path: null  # optional; default auto-detect from checkpoint dir
+
+checkpoint:
+  enabled: false
+  checkpoint_dir: checkpoints/
+  model_save_format: torch_save
+  save_consolidated: false
+
+dataset:
+  _target_: nemo_automodel.components.datasets.llm.squad.make_squad_dataset
+  dataset_name: rajpurkar/squad
+  split: train
+
+dataloader:
+  _target_: torchdata.stateful_dataloader.StatefulDataLoader
+  shuffle: false
+  collate_fn: nemo_automodel.components.datasets.utils.default_collater
+
+loss_fn:
+  _target_: nemo_automodel.components.loss.te_parallel_ce.TEParallelCrossEntropy
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 2.0e-5
+  betas: [0.9, 0.95]
+  weight_decay: 0.1
+
+distributed:
+  dp_size: none
+  tp_size: 1
+  sequence_parallel: false
+  cp_size: 1
+  ep_size: 1
+  pp_size: 1
+  pipeline:
+    pp_schedule: interleaved1f1b
+    pp_microbatch_size: 1
+    scale_grads_in_schedule: false
+    round_virtual_stages_to_pp_multiple: up
+    dtype: bf16
+
+distributed_config:
+  _target_: nemo_automodel.components.distributed.config.FSDP2Config
+  sequence_parallel: false
+  activation_checkpointing: true
+
+packed_sequence:
+  packed_sequence_size: 2048
+  split_across_pack: false
+
+lr_scheduler:
+  lr_decay_style: cosine
+  min_lr: 1.0e-6
+  lr_warmup_steps: 15
+
+# wandb:
+#   project: <your_project>
+#   entity: <your_entity>
+#   name: <your_run_name>
+#   save_dir: <your_save_dir>

@@ -33,6 +33,7 @@ from modelopt.onnx.autocast.logging_config import logger
 from modelopt.onnx.autocast.nodeclassifier import NodeClassifier, NodeRuleBase
 from modelopt.onnx.autocast.precisionconverter import PrecisionConverter
 from modelopt.onnx.autocast.referencerunner import ReferenceRunner
+from modelopt.onnx.utils import get_min_opset_for_precisions, get_qdq_precisions
 
 """
 FP16 accuracy decreases in accordance with the data's magnitude.
@@ -61,6 +62,7 @@ def convert_to_mixed_precision(
     trt_plugins_precision: list[str] = [],
     max_depth_of_reduction: int | None = None,
     opset: int | None = None,
+    use_standalone_type_inference: bool = False,
 ) -> onnx.ModelProto:
     """Convert model to mixed precision.
 
@@ -83,8 +85,11 @@ def convert_to_mixed_precision(
         trt_plugins_precision: List indicating the precision for each custom op.
         max_depth_of_reduction: Maximum depth of reduction for node classification.
         opset: Target ONNX opset version. If None, uses default minimum opset based on low_precision_type
-               (22 for bf16, 13 for fp16). The opset may be automatically increased if certain operations
+               (22 for bf16, 19 for fp16). The opset may be automatically increased if certain operations
                require a higher version.
+        use_standalone_type_inference: If True, use standalone type inference implementation instead of ONNX's
+                                  infer_shapes. This is a workaround (WAR) when only type inference is
+                                  needed without shape inference. Default: False.
 
     Returns:
         onnx.ModelProto: The converted mixed precision model.
@@ -132,7 +137,7 @@ def convert_to_mixed_precision(
     model = graph_sanitizer.model
 
     # Setup internal mappings
-    model = onnx_utils.infer_shapes(model)
+    model = onnx_utils.infer_types(model, use_standalone_type_inference)
     value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
 
     # Automatically add 'trt' to list of providers if custom ops are detected
@@ -164,6 +169,7 @@ def convert_to_mixed_precision(
         low_precision_type=low_precision_type,
         init_conversion_max_bytes=init_conversion_max_bytes,
         custom_ops=graph_sanitizer.custom_ops,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
 
     # Obtain reference data
@@ -196,6 +202,8 @@ def convert_to_f16(
     op_block_list: list[str] = [],
     tensor_block_dict: dict[str, dict[str, list[int]]] = {},
     trt_plugins: list[str] | None = [],
+    use_standalone_type_inference: bool = False,
+    opset: int | None = None,
 ) -> onnx.ModelProto:
     """Convert model to mixed precision, using PrecisionConverter.
 
@@ -208,13 +216,48 @@ def convert_to_f16(
         op_block_list: List of operation types that should remain in FP32.
         tensor_block_dict: Dictionary of tensors (operation type and I/O indices) that should remain in FP32.
         trt_plugins: List of TensorRT plugin library paths in .so format (compiled shared library).
+        use_standalone_type_inference: If True, use standalone type inference implementation instead of ONNX's
+                                  infer_shapes. This is a workaround (WAR) when only type inference is
+                                  needed without shape inference. Default: False.
+        opset: Target ONNX opset version. If None, uses default minimum opset based on precision type
+               (22 for bf16, 19 for fp16) and Q/DQ node requirements. The opset may be automatically
+               increased if Q/DQ nodes in the model require a higher version (e.g., FP8 requires 19,
+               INT4 requires 21, NVFP4 requires 23).
     """
     assert low_precision_type in ["fp16", "bf16"], "low_precision_type must be either fp16 or bf16"
 
-    # Opset 21 is needed for NVFP4 quantization support (DQ with 'block_size' attribute)
+    # Check Q/DQ precision types in the model and determine required opset
+    qdq_precisions = get_qdq_precisions(model)
+    qdq_min_opset = get_min_opset_for_precisions(qdq_precisions)
+
+    # Base minimum opset for FP16/BF16 conversion
+    # Opset 19 is the first to support fp16 scales in Q/DQ nodes
+    base_min_opset = 22 if low_precision_type == "bf16" else 19
+
+    # Determine target opset version
+    if opset is not None:
+        min_opset = opset
+        # Check if Q/DQ nodes require a higher opset
+        if qdq_precisions and qdq_min_opset > min_opset:
+            logger.warning(
+                f"Model contains Q/DQ nodes with precisions {qdq_precisions} that require "
+                f"opset >= {qdq_min_opset}. Upgrading from specified opset {opset} to {qdq_min_opset}."
+            )
+            min_opset = qdq_min_opset
+        # Also ensure we meet base minimum for precision type
+        if min_opset < base_min_opset:
+            logger.warning(
+                f"Opset {min_opset} is below minimum opset {base_min_opset} for {low_precision_type}. "
+                f"Upgrading to opset {base_min_opset}."
+            )
+            min_opset = base_min_opset
+    else:
+        # Use the highest required opset between base and Q/DQ requirements
+        min_opset = max(base_min_opset, qdq_min_opset)
+
     sanitizer = GraphSanitizer(
         model,
-        min_opset=21,
+        min_opset=min_opset,
         trt_plugins=trt_plugins,
         max_ir_version=LATEST_IR_VERSION_SUPPORTED_BY_ORT,
     )
@@ -225,7 +268,7 @@ def convert_to_f16(
     model = sanitizer.model
 
     # Setup internal mappings
-    model = onnx_utils.infer_shapes(model)
+    model = onnx_utils.infer_types(model, use_standalone_type_inference)
     value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
 
     precision_converter = PrecisionConverter(
@@ -237,6 +280,7 @@ def convert_to_f16(
         low_precision_type=low_precision_type,
         custom_ops=sanitizer.custom_ops,
         tensor_block_dict=tensor_block_dict,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
     high_precision_nodes = [node.name for node in model.graph.node if node.op_type in op_block_list]
     low_precision_nodes = [

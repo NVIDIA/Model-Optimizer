@@ -630,3 +630,394 @@ class TestFP4QDQTo2DQ:
             # Verify Cast nodes are added for input type conversion
             cast_nodes = [node for node in converted_model.graph.node if node.op_type == "Cast"]
             assert len(cast_nodes) >= 1  # At least one cast node should be added
+
+
+def create_test_model_with_int4_dq_matmul():
+    """Create a simple test model with INT4 DequantizeLinear -> MatMul pattern.
+
+    Returns the model and original weight/scale arrays for verification.
+    """
+    from modelopt.onnx.quantization.quant_utils import pack_float32_to_4bit_cpp_based
+
+    # Create INT4 quantized weight tensor (K=32, N=16)
+    # Using int8 storage for INT4 values in range [-8, 7]
+    weight_data = np.random.randint(-8, 8, size=(32, 16), dtype=np.int8)
+
+    # Pack INT4 data (2 values per byte) for ORT compatibility
+    packed_weight = pack_float32_to_4bit_cpp_based(weight_data, signed=True).astype(np.int8)
+    weight_tensor = helper.make_tensor(
+        "weight",
+        TensorProto.INT4,
+        dims=weight_data.shape,
+        vals=packed_weight.tobytes(),
+        raw=True,
+    )
+
+    # Create scale tensor for block quantization (block_size=32, so 1 scale per column)
+    scale_data = np.random.uniform(0.1, 1.0, size=(1, 16)).astype(np.float16)
+    scale_tensor = numpy_helper.from_array(scale_data, "scale")
+
+    # Create input tensor for MatMul (batch=4, K=32)
+    input_tensor = helper.make_tensor_value_info("input", TensorProto.FLOAT16, [4, 32])
+
+    # Create DequantizeLinear node with INT4 blocked quantization
+    dq_node = helper.make_node(
+        "DequantizeLinear",
+        inputs=["weight", "scale"],
+        outputs=["dq_output"],
+        name="weight_dq",
+        axis=0,
+        block_size=32,
+    )
+
+    # Create MatMul node: input (4, 32) @ weight (32, 16) -> output (4, 16)
+    matmul_node = helper.make_node(
+        "MatMul",
+        inputs=["input", "dq_output"],
+        outputs=["output"],
+        name="matmul",
+    )
+
+    graph = helper.make_graph(
+        nodes=[dq_node, matmul_node],
+        name="test_graph",
+        inputs=[input_tensor],
+        outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT16, [4, 16])],
+        initializer=[weight_tensor, scale_tensor],
+    )
+
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)])
+    model.ir_version = 10  # ORT only supports IR version up to 10
+    return model, weight_data, scale_data
+
+
+class TestColumnMajorTransformation:
+    """Test suite for column-major storage transformation functions."""
+
+    def test_column_major_transformation_graph_structure(self):
+        """Test that column-major transformation produces correct graph structure.
+
+        Verifies: DQ(W) -> MatMul becomes DQ(W^T) -> Transpose -> MatMul
+        """
+        import onnx_graphsurgeon as gs
+
+        from modelopt.onnx.quantization.qdq_utils import (
+            apply_column_major_transformation,
+            insert_transpose_nodes_for_column_major,
+        )
+
+        model, original_weight, original_scale = create_test_model_with_int4_dq_matmul()
+
+        # Get weights and scales as dicts (simulating what int4.py does)
+        weights_dict = {"weight": original_weight.copy()}
+        scales_dict = {"scale": original_scale.copy()}
+
+        # Apply column-major transformation (transposes in-place)
+        apply_column_major_transformation(weights_dict, scales_dict)
+
+        # Verify weights and scales are transposed
+        assert weights_dict["weight"].shape == (16, 32), (
+            f"Expected transposed weight shape (16, 32), got {weights_dict['weight'].shape}"
+        )
+        assert scales_dict["scale"].shape == (16, 1), (
+            f"Expected transposed scale shape (16, 1), got {scales_dict['scale'].shape}"
+        )
+
+        # Verify the transposed values match
+        assert np.array_equal(weights_dict["weight"], original_weight.T)
+        assert np.array_equal(scales_dict["scale"], original_scale.T)
+
+        # Now test insert_transpose_nodes_for_column_major on a graph
+        # Create a fresh model and apply the full transformation
+        model2, _, _ = create_test_model_with_int4_dq_matmul()
+        graph2 = gs.import_onnx(model2)
+
+        # Add transpose nodes for column-major
+        insert_transpose_nodes_for_column_major(graph2)
+
+        # Export and verify structure
+        transformed_model = gs.export_onnx(graph2)
+
+        # Check that Transpose node was added
+        node_types = [node.op_type for node in transformed_model.graph.node]
+        assert "Transpose" in node_types, "Transpose node should be added after DQ"
+        assert "DequantizeLinear" in node_types
+        assert "MatMul" in node_types
+
+        # Verify the order: DQ -> Transpose -> MatMul
+        dq_node = next(n for n in transformed_model.graph.node if n.op_type == "DequantizeLinear")
+        transpose_node = next(n for n in transformed_model.graph.node if n.op_type == "Transpose")
+        matmul_node = next(n for n in transformed_model.graph.node if n.op_type == "MatMul")
+
+        # DQ output should be Transpose input
+        assert dq_node.output[0] == transpose_node.input[0], "DQ output should feed into Transpose"
+        # Transpose output should be MatMul weight input
+        assert transpose_node.output[0] == matmul_node.input[1], (
+            "Transpose output should feed into MatMul"
+        )
+
+        # Verify transpose permutation is [1, 0]
+        perm_attr = next((a for a in transpose_node.attribute if a.name == "perm"), None)
+        assert perm_attr is not None, "Transpose should have perm attribute"
+        assert list(perm_attr.ints) == [1, 0], "Transpose perm should be [1, 0]"
+
+    def test_column_major_transformation_output_equivalence(self):
+        """Test that column-major transformed graph produces equivalent output.
+
+        Creates two graphs:
+        1. Original: DQ(W) -> MatMul
+        2. Transformed: DQ(W^T) -> Transpose -> MatMul
+
+        Verifies both produce the same output for the same input.
+        """
+        import onnxruntime as ort
+
+        from modelopt.onnx.quantization.quant_utils import pack_float32_to_4bit_cpp_based
+
+        # Create original model
+        original_model, original_weight, original_scale = create_test_model_with_int4_dq_matmul()
+
+        # Create input data
+        input_data = np.random.randn(4, 32).astype(np.float16)
+
+        # Run original model
+        original_session = ort.InferenceSession(original_model.SerializeToString())
+        original_output = original_session.run(None, {"input": input_data})[0]
+
+        # Create transformed model
+        # We need to manually create a model with transposed weights
+        transposed_weight = original_weight.T.copy()  # Shape: (16, 32)
+        transposed_scale = original_scale.T.copy()  # Shape: (16, 1)
+
+        # Pack INT4 data (2 values per byte) for ORT compatibility
+        packed_transposed_weight = pack_float32_to_4bit_cpp_based(
+            transposed_weight, signed=True
+        ).astype(np.int8)
+        weight_tensor = helper.make_tensor(
+            "weight",
+            TensorProto.INT4,
+            dims=transposed_weight.shape,
+            vals=packed_transposed_weight.tobytes(),
+            raw=True,
+        )
+        scale_tensor = numpy_helper.from_array(transposed_scale, "scale")
+
+        input_tensor = helper.make_tensor_value_info("input", TensorProto.FLOAT16, [4, 32])
+
+        # DQ node with axis=1 for column-major (transposed weight)
+        dq_node = helper.make_node(
+            "DequantizeLinear",
+            inputs=["weight", "scale"],
+            outputs=["dq_output"],
+            name="weight_dq",
+            axis=1,
+            block_size=32,
+        )
+
+        # Transpose node to convert back: (16, 32) -> (32, 16)
+        transpose_node = helper.make_node(
+            "Transpose",
+            inputs=["dq_output"],
+            outputs=["transpose_output"],
+            name="transpose_back",
+            perm=[1, 0],
+        )
+
+        # MatMul: input (4, 32) @ transposed_back (32, 16) -> output (4, 16)
+        matmul_node = helper.make_node(
+            "MatMul",
+            inputs=["input", "transpose_output"],
+            outputs=["output"],
+            name="matmul",
+        )
+
+        transformed_graph = helper.make_graph(
+            nodes=[dq_node, transpose_node, matmul_node],
+            name="test_graph",
+            inputs=[input_tensor],
+            outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT16, [4, 16])],
+            initializer=[weight_tensor, scale_tensor],
+        )
+
+        transformed_model = helper.make_model(
+            transformed_graph, opset_imports=[helper.make_opsetid("", 21)]
+        )
+        transformed_model.ir_version = 10  # ORT only supports IR version up to 10
+
+        # Run transformed model
+        transformed_session = ort.InferenceSession(transformed_model.SerializeToString())
+        transformed_output = transformed_session.run(None, {"input": input_data})[0]
+
+        # Print output values for visibility
+        print(f"Original model output shape: {original_output.shape}")
+        print(f"Transformed model output shape: {transformed_output.shape}")
+        print(f"Original output (first 5): {original_output.flatten()[:5]}")
+        print(f"Transformed output (first 5): {transformed_output.flatten()[:5]}")
+
+        # Verify outputs are equivalent (allowing small numerical tolerance)
+        assert original_output.shape == transformed_output.shape, (
+            f"Output shapes should match: {original_output.shape} vs {transformed_output.shape}"
+        )
+        np.testing.assert_allclose(
+            original_output,
+            transformed_output,
+            rtol=1e-3,
+            atol=1e-3,
+            err_msg="Column-major transformed model should produce equivalent output",
+        )
+
+    def test_column_major_gemm_trans_b_flip(self):
+        """Test that Gemm with transB=1 gets flipped to transB=0 for column-major.
+
+        When weights are already transposed (column-major), Gemm nodes with transB=1
+        should have transB flipped to 0 instead of inserting a Transpose node.
+        Also verifies output equivalence between original and transformed models.
+        """
+        import onnx_graphsurgeon as gs
+        import onnxruntime as ort
+
+        from modelopt.onnx.quantization.qdq_utils import (
+            apply_column_major_transformation,
+            insert_transpose_nodes_for_column_major,
+        )
+        from modelopt.onnx.quantization.quant_utils import pack_float32_to_4bit_cpp_based
+
+        # Original model: weight (N=16, K=32) with Gemm transB=1
+        # Gemm computes: A @ B^T = (4, 32) @ (16, 32)^T = (4, 16)
+        weight_data = np.random.randint(-8, 8, size=(16, 32), dtype=np.int8)  # Shape (N, K)
+        scale_data = np.random.uniform(0.1, 1.0, size=(16, 1)).astype(np.float16)
+
+        # Pack INT4 data for original model
+        packed_weight = pack_float32_to_4bit_cpp_based(weight_data, signed=True).astype(np.int8)
+        weight_tensor = helper.make_tensor(
+            "weight",
+            TensorProto.INT4,
+            dims=weight_data.shape,
+            vals=packed_weight.tobytes(),
+            raw=True,
+        )
+        scale_tensor = numpy_helper.from_array(scale_data, "scale")
+
+        input_tensor = helper.make_tensor_value_info("input", TensorProto.FLOAT16, [4, 32])
+
+        dq_node = helper.make_node(
+            "DequantizeLinear",
+            inputs=["weight", "scale"],
+            outputs=["dq_output"],
+            name="weight_dq",
+            axis=1,
+            block_size=32,
+        )
+
+        gemm_node = helper.make_node(
+            "Gemm",
+            inputs=["input", "dq_output"],
+            outputs=["output"],
+            name="gemm",
+            transB=1,
+        )
+
+        graph = helper.make_graph(
+            nodes=[dq_node, gemm_node],
+            name="test_graph",
+            inputs=[input_tensor],
+            outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT16, [4, 16])],
+            initializer=[weight_tensor, scale_tensor],
+        )
+
+        original_model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)])
+        original_model.ir_version = 10
+
+        # Run original model
+        input_data = np.random.randn(4, 32).astype(np.float16)
+        original_session = ort.InferenceSession(original_model.SerializeToString())
+        original_output = original_session.run(None, {"input": input_data})[0]
+
+        # Apply column-major transformation using the actual functions
+        weights_dict = {"weight": weight_data.copy()}
+        scales_dict = {"scale": scale_data.copy()}
+        apply_column_major_transformation(weights_dict, scales_dict)
+
+        # Build transformed model with transposed weights/scales
+        transposed_weight = weights_dict["weight"]  # Now (32, 16)
+        transposed_scale = scales_dict["scale"]  # Now (1, 16)
+
+        packed_transposed = pack_float32_to_4bit_cpp_based(transposed_weight, signed=True).astype(
+            np.int8
+        )
+        transposed_weight_tensor = helper.make_tensor(
+            "weight",
+            TensorProto.INT4,
+            dims=transposed_weight.shape,
+            vals=packed_transposed.tobytes(),
+            raw=True,
+        )
+        transposed_scale_tensor = numpy_helper.from_array(transposed_scale, "scale")
+
+        # Build model with transposed weights but keep transB=1 initially
+        dq_node_col = helper.make_node(
+            "DequantizeLinear",
+            inputs=["weight", "scale"],
+            outputs=["dq_output"],
+            name="weight_dq",
+            axis=0,
+            block_size=32,
+        )
+
+        gemm_node_col = helper.make_node(
+            "Gemm",
+            inputs=["input", "dq_output"],
+            outputs=["output"],
+            name="gemm",
+            transB=1,  # Still transB=1, will be flipped by insert_transpose_nodes_for_column_major
+        )
+
+        col_graph = helper.make_graph(
+            nodes=[dq_node_col, gemm_node_col],
+            name="test_graph",
+            inputs=[input_tensor],
+            outputs=[helper.make_tensor_value_info("output", TensorProto.FLOAT16, [4, 16])],
+            initializer=[transposed_weight_tensor, transposed_scale_tensor],
+        )
+
+        col_model = helper.make_model(col_graph, opset_imports=[helper.make_opsetid("", 21)])
+        col_model.ir_version = 10
+
+        # Apply insert_transpose_nodes_for_column_major to flip transB
+        gs_graph = gs.import_onnx(col_model)
+        insert_transpose_nodes_for_column_major(gs_graph)
+        transformed_model = gs.export_onnx(gs_graph)
+        transformed_model.ir_version = 10  # ORT only supports IR version up to 10
+
+        # Verify transB was flipped to 0
+        gemm_nodes = [n for n in transformed_model.graph.node if n.op_type == "Gemm"]
+        assert len(gemm_nodes) == 1
+        trans_b_attr = next((a for a in gemm_nodes[0].attribute if a.name == "transB"), None)
+        trans_b_value = trans_b_attr.i if trans_b_attr else 0
+        assert trans_b_value == 0, f"transB should be 0, got {trans_b_value}"
+
+        # Verify no Transpose node was added
+        transpose_nodes = [n for n in transformed_model.graph.node if n.op_type == "Transpose"]
+        assert len(transpose_nodes) == 0, (
+            f"No Transpose should be added, found {len(transpose_nodes)}"
+        )
+
+        # Run transformed model and verify output equivalence
+        transformed_session = ort.InferenceSession(transformed_model.SerializeToString())
+        transformed_output = transformed_session.run(None, {"input": input_data})[0]
+
+        print(f"Original model output shape: {original_output.shape}")
+        print(f"Transformed model output shape: {transformed_output.shape}")
+        print(f"Original output (first 5): {original_output.flatten()[:5]}")
+        print(f"Transformed output (first 5): {transformed_output.flatten()[:5]}")
+
+        np.testing.assert_allclose(
+            original_output,
+            transformed_output,
+            rtol=1e-3,
+            atol=1e-3,
+            err_msg="Gemm transB flip should produce equivalent output",
+        )
+
+        print(f"transB flipped: 1 -> {trans_b_value}")
+        print(f"Transpose nodes: {len(transpose_nodes)}")

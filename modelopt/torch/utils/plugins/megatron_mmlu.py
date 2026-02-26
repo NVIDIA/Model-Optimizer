@@ -47,6 +47,8 @@ from datasets import load_dataset
 
 from .megatron_generate import megatron_generate
 
+__all__ = ["megatron_mmlu"]
+
 
 def _get_all_subjects():
     """All subjects (anatomy, ...) can be acquired from querying all subsets and splits."""

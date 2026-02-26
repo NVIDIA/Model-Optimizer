@@ -15,6 +15,7 @@
 
 import pytest
 import torch
+import torch.nn.functional as F
 from _test_utils.torch.misc import compare_outputs
 from _test_utils.torch.opt.utils import apply_mode_with_sampling
 from torchvision.models.mobilenetv2 import InvertedResidual
@@ -22,8 +23,18 @@ from torchvision.models.mobilenetv2 import InvertedResidual
 import modelopt.torch.distill as mtd
 import modelopt.torch.nas as mtn
 import modelopt.torch.opt as mto
+import modelopt.torch.quantization as mtq
 import modelopt.torch.sparsity as mts
 from modelopt.torch.utils.distributed import _serialize
+
+
+class SimpleLinearModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(4, 4)
+
+    def forward(self, x):
+        return self.linear(x)
 
 
 def get_model():
@@ -228,3 +239,101 @@ def test_sparse_quantized_module():
     model = mtn.export(model)
     assert torch.equal(conv.weight, weight_expected)
     assert torch.equal(conv._parameters["weight"], weight_expected), "Weight should be overwritten!"
+
+
+def test_sparse_quantize_kd_linear_forward_backward():
+    """Ensure sparse + quantize + distill works for linear forward/backward."""
+    model = SimpleLinearModel()
+    teacher_model = SimpleLinearModel()
+
+    called = {"patched_forward": 0, "input_q": 0, "weight_q": 0, "pass": 0}
+
+    def _make_patched_forward(linear):
+        def patched_forward(x):
+            called["patched_forward"] += 1
+            w = linear.weight
+            b = linear.bias if linear.bias is not None else None
+            return F.linear(x, w, b)
+
+        return patched_forward
+
+    model.linear.forward = _make_patched_forward(model.linear)
+    teacher_model.linear.forward = _make_patched_forward(teacher_model.linear)
+
+    def _get_linear_kd_mode():
+        config = {
+            "teacher_model": teacher_model,
+            "criterion": {("linear", "linear"): mtd.LogitsDistillationLoss()},
+            "loss_balancer": mtd.StaticLossBalancer(),
+        }
+        return [("kd_loss", config)]
+
+    model = mto.apply_mode(model, mode="sparse_magnitude", init_state=True)
+    model = mto.apply_mode(model, mode="quantize")
+    model = mto.apply_mode(model, mode=_get_linear_kd_mode())
+
+    def _count_quant_input(_m, _inp, _out):
+        called["input_q"] += 1
+
+    def _count_quant_weight(_m, _inp, _out):
+        called["weight_q"] += 1
+
+    model.linear.input_quantizer.register_forward_hook(_count_quant_input)
+    model.linear.weight_quantizer.register_forward_hook(_count_quant_weight)
+
+    model.train()
+    x = torch.randn(2, 4)
+    target = torch.randn(2, 4)
+    output = model(x)
+    loss = F.mse_loss(output, target)
+    loss.backward()
+
+    assert output.shape == target.shape
+    assert any(p.grad is not None for p in model.parameters() if p.requires_grad), (
+        "Expected gradients on student parameters."
+    )
+    assert called["patched_forward"] == 2
+    assert called["input_q"] == 1
+    assert called["weight_q"] == 1
+
+
+def test_chained_modes_preserve_forward_patching_during_quantize():
+    """Ensure chained modes do not break runtime forward patching during quantize."""
+    model = InvertedResidual(16, 32, 1, 6).to(torch.float16)
+    model = mto.apply_mode(model, mode="fastnas", init_state=True)
+    model = mto.apply_mode(model, mode="export_nas")
+
+    conv = model.conv[0][0]
+    called = {"patched_forward": 0, "input_q": 0, "weight_q": 0}
+
+    def patched_forward(x):
+        called["patched_forward"] += 1
+        return F.conv2d(
+            x,
+            conv.weight,
+            conv.bias,
+            conv.stride,
+            conv.padding,
+            conv.dilation,
+            conv.groups,
+        )
+
+    conv.forward = patched_forward
+
+    def _count_input(_m, _inp, _out):
+        called["input_q"] += 1
+
+    def _count_weight(_m, _inp, _out):
+        called["weight_q"] += 1
+
+    def forward_loop(model):
+        conv.input_quantizer.register_forward_hook(_count_input)
+        conv.weight_quantizer.register_forward_hook(_count_weight)
+        x = torch.randn(1, 16, 8, 8, dtype=torch.float16)
+        model(x)
+
+    mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop)
+
+    assert called["patched_forward"] == 1
+    assert called["input_q"] == 1
+    assert called["weight_q"] == 1
