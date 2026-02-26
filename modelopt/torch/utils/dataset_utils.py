@@ -247,13 +247,41 @@ def get_dataset_dataloader(
         samples = get_dataset_samples(ds_name, num_sample)
         all_samples.extend(samples)
 
-    batch_encoded = tokenizer.batch_encode_plus(
-        all_samples,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=max_sample_length,
-    )
+    if hasattr(tokenizer, "batch_encode_plus"):
+        batch_encoded = tokenizer.batch_encode_plus(
+            all_samples,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=max_sample_length,
+        )
+    else:
+        # Fallback for tokenizers (e.g. TokenizersBackend in transformers 5.x) that only
+        # implement _encode_plus and lack _batch_encode_plus / batch_encode_plus.
+        from torch.nn.utils.rnn import pad_sequence
+
+        from transformers import BatchEncoding
+
+        pad_id = tokenizer.pad_token_id or 0
+        left_pad = getattr(tokenizer, "padding_side", "right") == "left"
+        encoded_list = [
+            tokenizer._encode_plus(s, return_tensors="pt", truncation=True, max_length=max_sample_length)
+            for s in all_samples
+        ]
+        input_ids = [e["input_ids"].squeeze(0) for e in encoded_list]
+        attention_mask = [e["attention_mask"].squeeze(0) for e in encoded_list]
+        if left_pad:
+            # pad_sequence pads on the right; flip, pad, flip back for left padding
+            input_ids = pad_sequence(
+                [t.flip(0) for t in input_ids], batch_first=True, padding_value=pad_id
+            ).flip(1)
+            attention_mask = pad_sequence(
+                [t.flip(0) for t in attention_mask], batch_first=True, padding_value=0
+            ).flip(1)
+        else:
+            input_ids = pad_sequence(input_ids, batch_first=True, padding_value=pad_id)
+            attention_mask = pad_sequence(attention_mask, batch_first=True, padding_value=0)
+        batch_encoded = BatchEncoding({"input_ids": input_ids, "attention_mask": attention_mask})
     if device:
         batch_encoded = batch_encoded.to(device)
 

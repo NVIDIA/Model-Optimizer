@@ -1,16 +1,28 @@
 #!/bin/bash
 set -e
 
-JOBID=${1:?Usage: $0 <job_id> [--skip-convert]}
+JOBID=${1:?Usage: $0 <job_id> [--skip-convert] [--amax-path <path>] [--mla-quant <type>]}
 SKIP_CONVERT=false
-[[ "${2}" == "--skip-convert" ]] && SKIP_CONVERT=true
+AMAX_PATH=/fsw/models/glm-5-nvfp4-amax
+MLA_QUANT=""
+
+# Parse optional flags
+shift
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --skip-convert) SKIP_CONVERT=true ;;
+        --amax-path) AMAX_PATH="$2"; shift ;;
+        --mla-quant) MLA_QUANT="$2"; shift ;;
+        *) echo "Unknown argument: $1"; exit 1 ;;
+    esac
+    shift
+done
 
 CONTAINER_IMAGE=$(readlink -f ~/fsw/containers/modelopt-v2.sqsh)
 CONTAINER_MOUNTS=$(readlink -f ~/fsw):/fsw
 
 HF_CKPT=/fsw/models/glm-5-bf16
 DS_CKPT=/fsw/models/glm-5-ds
-AMAX_PATH=/fsw/models/glm-5-nvfp4-amax
 DS_V3_2_DIR=/fsw/Model-Optimizer/examples/deepseek/DeepSeek-V3.2-Exp
 GLM5_CONFIG=${DS_V3_2_DIR}/inference/config_glm5.json
 
@@ -43,5 +55,6 @@ torchrun --nproc-per-node 8 --master_port=12346 ptq.py \
     --output_path '"${AMAX_PATH}"' \
     --trust_remote_code \
     --batch_size 8 \
-    --calib_size 512
+    --calib_size 512 \
+    '"${MLA_QUANT:+--mla_quant $MLA_QUANT}"'
 '

@@ -244,6 +244,12 @@ def convert_fp8_ckpt_to_nvfp4(
                 input_scale_key = layer_name + ".input_quantizer._amax"
 
                 if amax_key in renamed_state_dict:
+                    # If per_layer_quant_config is non-empty (MIXED_PRECISION) but this layer is
+                    # not listed, it was excluded from quantization (e.g. lm_head). Skip quant.
+                    if per_layer_quant_config and layer_name not in per_layer_quant_config:
+                        new_dict[key] = item
+                        continue
+
                     # default quant is NVFP4
                     is_nvfp4 = (
                         not per_layer_quant_config
