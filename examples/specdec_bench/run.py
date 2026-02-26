@@ -35,6 +35,7 @@ engines_available = {
     "SPECBENCH_MEDUSA": models.SpecBenchMedusaModel,
 }
 datasets_available = {
+    "humaneval": datasets.HumanEval,
     "mtbench": datasets.MTBench,
     "random": datasets.RandomToken,
     "specbench": datasets.SpecBench,
