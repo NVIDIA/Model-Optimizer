@@ -17,6 +17,7 @@ import json
 
 import pytest
 from _test_utils.torch.diffusers_models import get_tiny_dit, get_tiny_flux, get_tiny_unet
+from _test_utils.torch.misc import minimum_sm
 
 pytest.importorskip("diffusers")
 
@@ -87,9 +88,18 @@ def test_export_diffusers_unet_quantized_matches_llm_config(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize("model_factory", [get_tiny_unet, get_tiny_dit, get_tiny_flux])
-def test_export_diffusers_real_quantized(tmp_path, model_factory):
+@pytest.mark.parametrize(
+    ("config_id", "quant_cfg"),
+    [
+        ("int8", mtq.INT8_DEFAULT_CFG),
+        ("int8_smoothquant", mtq.INT8_SMOOTHQUANT_CFG),
+        ("fp8", mtq.FP8_DEFAULT_CFG),
+        pytest.param("fp4", mtq.NVFP4_DEFAULT_CFG, marks=minimum_sm(89)),
+    ],
+)
+def test_export_diffusers_real_quantized(tmp_path, model_factory, config_id, quant_cfg):
     model = model_factory()
-    export_dir = tmp_path / f"export_{type(model).__name__}_real_quant"
+    export_dir = tmp_path / f"export_{type(model).__name__}_{config_id}_real_quant"
 
     def _calib_fn(m):
         param = next(m.parameters())
@@ -97,9 +107,14 @@ def test_export_diffusers_real_quantized(tmp_path, model_factory):
         assert dummy_inputs is not None
         m(**dummy_inputs)
 
-    mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward_loop=_calib_fn)
+    mtq.quantize(model, quant_cfg, forward_loop=_calib_fn)
 
-    export_hf_checkpoint(model, export_dir=export_dir)
+    try:
+        export_hf_checkpoint(model, export_dir=export_dir)
+    except AssertionError as e:
+        if "block size" in str(e) and config_id == "fp4":
+            pytest.skip(f"Tiny model weights incompatible with FP4 block quantization: {e}")
+        raise
 
     config_path = export_dir / "config.json"
     assert config_path.exists()
