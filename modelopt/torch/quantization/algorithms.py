@@ -28,6 +28,7 @@ from typing import Any
 import regex as re
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from tqdm import tqdm
 
 from modelopt.torch.opt.conversion import ModeloptStateManager
@@ -1063,10 +1064,6 @@ def _get_softmax(logits: torch.Tensor, return_log_prob: bool = False) -> torch.T
         return torch.exp(log_prob)
 
 
-def _get_p_log_q(p: torch.Tensor, log_q: torch.Tensor) -> torch.Tensor:
-    return torch.sum(p * log_q).float()
-
-
 def _get_prob_from_logits(
     logits: torch.Tensor, return_log_prob: bool = False, lm_head: nn.Module = None
 ) -> torch.Tensor:
@@ -1081,11 +1078,10 @@ def _get_prob_from_logits(
 
 
 def _get_kl_div_loss(
-    prob_unquant: torch.Tensor, logits_quant: torch.Tensor, lm_head: nn.Module = None
+    log_prob_unquant: torch.Tensor, logits_quant: torch.Tensor, lm_head: nn.Module = None
 ) -> torch.Tensor:
     log_prob_quant = _get_prob_from_logits(logits_quant, return_log_prob=True, lm_head=lm_head)
-    # We dont need to calculate the full kl div loss here, just get - p*log_q
-    return -_get_p_log_q(prob_unquant, log_prob_quant)
+    return F.kl_div(log_prob_quant, log_prob_unquant, reduction="sum", log_target=True)
 
 
 def _get_lm_head(model: nn.Module) -> nn.Module:
@@ -1154,9 +1150,9 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
         ):
             set_to_unquantized()
             logits_unquant = self.config["forward_step"](self.model, data)
-            prob_unquant = _get_prob_from_logits(
+            log_prob_unquant = _get_prob_from_logits(
                 logits_unquant,
-                return_log_prob=False,
+                return_log_prob=True,
                 lm_head=_get_lm_head(self.model),
             )
 
@@ -1170,7 +1166,9 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
                         continue
                     hparam.active = recipe
                     logits_quant = self.config["forward_step"](self.model, data)
-                    score = _get_kl_div_loss(prob_unquant, logits_quant, _get_lm_head(self.model))
+                    score = _get_kl_div_loss(
+                        log_prob_unquant, logits_quant, _get_lm_head(self.model)
+                    )
                     if hparam._importance_dict[recipe][hparam.score_modules[0]] is None:
                         hparam._importance_dict[recipe][hparam.score_modules[0]] = score
                     else:
