@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+from collections import OrderedDict
+
 import numpy as np
 import pytest
 from onnx import TensorProto, helper, numpy_helper
@@ -27,7 +30,7 @@ from modelopt.onnx.autocast.nodeclassifier import (
     IORangeRule,
     NodeClassifier,
 )
-from modelopt.onnx.autocast.referencerunner import ReferenceRunner
+from modelopt.onnx.autocast.referencerunner import ReferenceRunner, TensorStats
 
 configure_logging("DEBUG")
 
@@ -382,3 +385,178 @@ def test_node_classifier_force_include(test_model):
     assert "mul_node" in fp16_nodes
     assert "add_node" in fp32_nodes
     assert not set(fp16_nodes).intersection(set(fp32_nodes))
+
+
+def test_io_range_rule_with_tensor_stats():
+    """Test IORangeRule with TensorStats objects (multi-batch aggregated data)."""
+    # Create TensorStats objects with aggregated statistics
+    reference_outputs = {
+        "out1": TensorStats(absmax=9000.0, min_val=-5000.0, max_val=9000.0, shape=(1,)),
+        "out2": TensorStats(absmax=11000.0, min_val=-11000.0, max_val=11000.0, shape=(1,)),
+        "out3": TensorStats(absmax=9000.0, min_val=-9000.0, max_val=5000.0, shape=(1,)),
+        "out4": TensorStats(absmax=11000.0, min_val=-8000.0, max_val=11000.0, shape=(1,)),
+    }
+
+    rule = IORangeRule(10000, reference_outputs, node_to_init_map={})
+
+    node1 = helper.make_node("TestOp", [], ["out1"], name="node1")
+    node2 = helper.make_node("TestOp", [], ["out2"], name="node2")
+    node3 = helper.make_node("TestOp", [], ["out3"], name="node3")
+    node4 = helper.make_node("TestOp", [], ["out4"], name="node4")
+    node5 = helper.make_node("TestOp", ["out1"], [], name="node5")
+    node6 = helper.make_node("TestOp", ["out2"], [], name="node6")
+    node7 = helper.make_node("TestOp", ["out3"], [], name="node7")
+    node8 = helper.make_node("TestOp", ["out4"], [], name="node8")
+
+    # out1: absmax=9000 < 10000, should not be blocked
+    assert rule.check(node1) is False
+    # out2: absmax=11000 > 10000, should be blocked
+    assert rule.check(node2) is True
+    # out3: absmax=9000 < 10000, should not be blocked
+    assert rule.check(node3) is False
+    # out4: absmax=11000 > 10000, should be blocked
+    assert rule.check(node4) is True
+    # Input out1: absmax=9000 < 10000, should not be blocked
+    assert rule.check(node5) is False
+    # Input out2: absmax=11000 > 10000, should be blocked
+    assert rule.check(node6) is True
+    # Input out3: absmax=9000 < 10000, should not be blocked
+    assert rule.check(node7) is False
+    # Input out4: absmax=11000 > 10000, should be blocked
+    assert rule.check(node8) is True
+
+
+def test_io_range_rule_mixed_numpy_and_tensor_stats():
+    """Test IORangeRule with mixed numpy arrays and TensorStats objects."""
+    reference_outputs = {
+        "out1": np.array([9000], dtype=np.float32),  # Raw numpy array
+        "out2": TensorStats(
+            absmax=11000.0, min_val=-11000.0, max_val=11000.0, shape=(1,)
+        ),  # TensorStats
+    }
+
+    rule = IORangeRule(10000, reference_outputs, node_to_init_map={})
+
+    node1 = helper.make_node("TestOp", [], ["out1"], name="node1")
+    node2 = helper.make_node("TestOp", [], ["out2"], name="node2")
+
+    # out1: numpy array with absmax=9000 < 10000, should not be blocked
+    assert rule.check(node1) is False
+    # out2: TensorStats with absmax=11000 > 10000, should be blocked
+    assert rule.check(node2) is True
+
+
+def test_depth_of_reduction_rule_with_tensor_stats():
+    """Test DepthOfReductionRule with TensorStats objects."""
+    # Create TensorStats objects for reference data
+    reference_data = {
+        "matmul_output": TensorStats(absmax=1.0, min_val=0.0, max_val=1.0, shape=(10, 30)),
+        "small_matmul_output": TensorStats(absmax=1.0, min_val=0.0, max_val=1.0, shape=(5, 8)),
+        "conv_output": TensorStats(absmax=1.0, min_val=0.0, max_val=1.0, shape=(1, 64, 62, 62)),
+        "small_conv_output": TensorStats(
+            absmax=1.0, min_val=0.0, max_val=1.0, shape=(1, 16, 15, 15)
+        ),
+        "matmul_input_a": TensorStats(absmax=1.0, min_val=0.0, max_val=1.0, shape=(10, 50)),
+        "matmul_input_b": TensorStats(absmax=1.0, min_val=0.0, max_val=1.0, shape=(50, 30)),
+        "small_matmul_a": TensorStats(absmax=1.0, min_val=0.0, max_val=1.0, shape=(5, 10)),
+        "small_matmul_b": TensorStats(absmax=1.0, min_val=0.0, max_val=1.0, shape=(10, 8)),
+        "conv_input": TensorStats(absmax=1.0, min_val=0.0, max_val=1.0, shape=(1, 32, 64, 64)),
+        "conv_weight": TensorStats(absmax=1.0, min_val=0.0, max_val=1.0, shape=(64, 32, 3, 3)),
+        "small_conv_input": TensorStats(absmax=1.0, min_val=0.0, max_val=1.0, shape=(1, 8, 16, 16)),
+    }
+
+    node_to_init_map = {
+        "matmul_node": [],
+        "small_matmul_node": [],
+        "conv_node": [],
+        "small_conv_node": [],
+    }
+    initializer_map = {}
+
+    rule = DepthOfReductionRule(
+        max_depth_of_reduction=40,
+        reference_data=reference_data,
+        node_to_init_map=node_to_init_map,
+        initializer_map=initializer_map,
+    )
+
+    # MatMul nodes
+    matmul_node = helper.make_node(
+        "MatMul", ["matmul_input_a", "matmul_input_b"], ["matmul_output"], name="matmul_node"
+    )
+    small_matmul_node = helper.make_node(
+        "MatMul",
+        ["small_matmul_a", "small_matmul_b"],
+        ["small_matmul_output"],
+        name="small_matmul_node",
+    )
+
+    # Conv nodes
+    conv_node = helper.make_node(
+        "Conv", ["conv_input", "conv_weight"], ["conv_output"], name="conv_node"
+    )
+    small_conv_node = helper.make_node(
+        "Conv",
+        ["small_conv_input", "small_conv_weight"],
+        ["small_conv_output"],
+        name="small_conv_node",
+    )
+
+    # Test MatMul: reduction depth 50 > 40, should be blocked
+    assert rule.check(matmul_node) is True
+
+    # Test small MatMul: reduction depth 10 < 40, should not be blocked
+    assert rule.check(small_matmul_node) is False
+
+    # Test Conv: reduction depth 288 > 40, should be blocked
+    assert rule.check(conv_node) is True
+
+    # Test small Conv: reduction depth 32 < 40, should not be blocked
+    assert rule.check(small_conv_node) is False
+
+
+@pytest.mark.skipif(
+    Version(ort_version) < Version("1.21.0"), reason="WAR: Requires onnxruntime>=1.21.0"
+)
+def test_node_classifier_with_multi_batch_calibration(test_model):
+    """Test NodeClassifier with multi-batch calibration data."""
+    import tempfile
+
+    node_to_init_map = {key: [] for key in ["add_node", "mul_node"]}
+
+    # Create multiple batches of calibration data
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Batch 1: small values
+        inputs1 = {"X": np.array([[0.1, 0.2], [0.2, 0.3]], dtype=np.float32)}
+        np.savez(os.path.join(temp_dir, "batch_001.npz"), **inputs1)
+
+        # Batch 2: medium values
+        inputs2 = {"X": np.array([[0.3, 0.4], [0.4, 0.5]], dtype=np.float32)}
+        np.savez(os.path.join(temp_dir, "batch_002.npz"), **inputs2)
+
+        # Batch 3: larger values (but still within fp16 range)
+        inputs3 = {"X": np.array([[0.5, 0.6], [0.6, 0.7]], dtype=np.float32)}
+        np.savez(os.path.join(temp_dir, "batch_003.npz"), **inputs3)
+
+        ref_runner = ReferenceRunner(test_model)
+        classifier = NodeClassifier(
+            model=test_model,
+            node_to_init_map=node_to_init_map,
+            data_max=4.1,
+        )
+
+        # Run with multi-batch calibration directory
+        ref_outputs_dict = ref_runner.run(temp_dir)
+
+        # Should get TensorStats objects
+        assert isinstance(ref_outputs_dict, OrderedDict)
+        # At least one output should be TensorStats (if multiple batches)
+        has_tensor_stats = any(isinstance(v, TensorStats) for v in ref_outputs_dict.values())
+        assert has_tensor_stats
+
+        # Run classification
+        fp16_nodes, fp32_nodes = classifier.run(ref_outputs_dict)
+
+        # Verify classification works correctly
+        assert len(fp16_nodes) + len(fp32_nodes) == 2
+        assert not set(fp16_nodes).intersection(set(fp32_nodes))

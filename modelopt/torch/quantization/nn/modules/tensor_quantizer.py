@@ -156,6 +156,10 @@ class TensorQuantizer(nn.Module):
         "_padding",
         # Extra flags added by huggingface
         "_is_hf_initialized",
+        # Extra flags added by accelerate
+        "_hf_hook",
+        "_old_forward",
+        "forward",
         # Extra flags added by deepspeed
         "ds_external_parameters",
         "all_parameters",
@@ -523,6 +527,20 @@ class TensorQuantizer(nn.Module):
             self.block_sizes is not None
             and self.block_sizes.get("type", None) != "dynamic"
             and self._fake_quant
+        )
+
+    @property
+    def rotate_is_enabled(self):
+        """Check if rotate is enabled in quant config."""
+        return self._rotate.get("enable", False) if isinstance(self._rotate, dict) else self._rotate
+
+    @property
+    def rotate_is_fp32(self):
+        """Check if rotation needs to be computed in float32."""
+        return (
+            self._rotate.get("rotate_fp32", False)
+            if isinstance(self._rotate, dict) and self.rotate_is_enabled
+            else False
         )
 
     def disable_calib(self):
@@ -992,8 +1010,8 @@ class TensorQuantizer(nn.Module):
             inputs = inputs * self.pre_quant_scale
 
         # Rotating the input
-        if self._rotate:
-            inputs = normalized_hadamard_transform(inputs)
+        if self.rotate_is_enabled:
+            inputs = normalized_hadamard_transform(inputs, rotate_fp32=self.rotate_is_fp32)
 
         if self._disabled:
             # if quantizer is disabled, we still need to track the input dtype for saving the model
@@ -1105,7 +1123,8 @@ class TensorQuantizer(nn.Module):
             if self.pre_quant_scale is not None
             else ""
         )
-        s += " rotated" if self._rotate else ""
+        s += " rotated" if self.rotate_is_enabled else ""
+        s += " (fp32)" if self.rotate_is_fp32 else ""
         s += (
             f" calibrator={self._calibrator.__class__.__name__}"
             if (self._calibrator is not None)

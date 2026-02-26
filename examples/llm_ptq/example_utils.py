@@ -201,6 +201,7 @@ def build_quant_cfg(
     model_type,
     quant_cfg_choices,
     kv_quant_cfg_choices,
+    moe_calib_experts_ratio: float | None = None,
 ) -> dict[str, Any]:
     quant_cfg = {}
     assert qformat in quant_cfg_choices, (
@@ -232,6 +233,20 @@ def build_quant_cfg(
             getattr(mtq, kv_quant_cfg_choices[kv_cache_qformat])["quant_cfg"],
         )
 
+    if moe_calib_experts_ratio:
+        assert 0 < moe_calib_experts_ratio <= 1, "moe_calib_experts_ratio must be between 0 and 1"
+        if isinstance(quant_cfg["algorithm"], str):
+            quant_cfg["algorithm"] = {
+                "method": quant_cfg["algorithm"],
+                "moe_calib_experts_ratio": moe_calib_experts_ratio,
+            }
+        elif isinstance(quant_cfg["algorithm"], dict):
+            quant_cfg["algorithm"]["moe_calib_experts_ratio"] = moe_calib_experts_ratio
+        else:
+            warnings.warn(
+                f"Quantization algorithm: {quant_cfg['algorithm']} does not support setting moe_calib_experts_ratio"
+            )
+
     # Gemma 7B has accuracy regression using alpha 1. We set 0.5 instead.
     if model_type == "gemma" and "int8_sq" in qformat:
         quant_cfg["algorithm"] = {"method": "smoothquant", "alpha": 0.5}
@@ -243,7 +258,7 @@ def build_quant_cfg(
         quant_cfg["quant_cfg"]["*image*"] = {"enable": False}
         quant_cfg["quant_cfg"]["*vision*"] = {"enable": False}
 
-    if model_type in ["qwen3moe", "qwen3next"] and qformat == "nvfp4":
+    if model_type in ["qwen3moe", "qwen3next", "minimax"] and qformat == "nvfp4":
         # Disable the attention projection layers to retain accuracy
         quant_cfg["quant_cfg"]["model*.*attn*in_proj*"] = {"enable": False}
         quant_cfg["quant_cfg"]["model*.*attn*q_proj*"] = {"enable": False}

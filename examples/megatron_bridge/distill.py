@@ -66,6 +66,7 @@ def get_args():
         required=True,
         help="HuggingFace model name or path for the teacher (e.g. Qwen/Qwen3-8B)",
     )
+    parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
     # Parallelism arguments
     parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
@@ -135,7 +136,7 @@ def main(args: argparse.Namespace):
 
     # Build student and teacher model providers
     def _build_model_provider(hf_path):
-        bridge = AutoBridge.from_hf_pretrained(hf_path)
+        bridge = AutoBridge.from_hf_pretrained(hf_path, trust_remote_code=args.trust_remote_code)
         provider = bridge.to_megatron_provider(load_weights=True)
 
         # Override parallelism / training settings
@@ -163,7 +164,7 @@ def main(args: argparse.Namespace):
         lr_warmup_iters=args.lr_warmup_iters,
         max_lr=args.lr,
         min_lr=args.min_lr,
-        adam_beta2=0.98,
+        adam_beta2=0.95,
     )
 
     # Build dataset config
@@ -227,7 +228,7 @@ def main(args: argparse.Namespace):
             save_interval=args.eval_interval,
             save=checkpoint_dir,
             load=checkpoint_dir,  # Resume from this directory (if exists)
-            most_recent_k=3,  # Keeps 3 most recent checkpoints (not metric-based)
+            most_recent_k=5,  # Keeps 5 most recent checkpoints (not metric-based)
             ckpt_format="torch_dist",
             async_save=True,
             fully_parallel_save=True,
@@ -238,7 +239,9 @@ def main(args: argparse.Namespace):
 
     print_rank_0("\nStarting distillation...")
     distill(config)
-    print_rank_0(f"\nDistillation done! Saved checkpoint to {checkpoint_dir}\n")
+    print_rank_0(
+        f"\nDistillation done! Saved checkpoint to {checkpoint_dir} in megatron distributed checkpoint format.\n"
+    )
 
 
 if __name__ == "__main__":

@@ -14,13 +14,13 @@ Latest Model Optimizer (``nvidia-modelopt``) currently has the following system 
 +-------------------------+-----------------------------+
 | Python                  |  >=3.10,<3.13               |
 +-------------------------+-----------------------------+
-| CUDA                    |  >=12.0                     |
+| CUDA                    |  12.x, 13.x                 |
 +-------------------------+-----------------------------+
 | PyTorch                 |  >=2.6                      |
 +-------------------------+-----------------------------+
-| TensorRT-LLM (Optional) |  1.2.0rc4                   |
+| TensorRT-LLM (Optional) |  >=1.0                      |
 +-------------------------+-----------------------------+
-| ONNX Runtime (Optional) |  1.22                       |
+| ONNX Runtime (Optional) |  1.24                       |
 +-------------------------+-----------------------------+
 | TensorRT (Optional)     |  >=10.0                     |
 +-------------------------+-----------------------------+
@@ -125,6 +125,10 @@ Additionally, we support installing dependencies for following 3rd-party package
         - Optional dependencies
     *   - Huggingface (``transformers``, ``diffusers``, etc.)
         - ``[hf]``
+
+**CUDA specific dependencies**
+
+* By default, ``cupy-cuda12x`` is installed for INT4 ONNX quantization. If you have CUDA 13, you need to run ``pip uninstall -y cupy-cuda12x`` and ``pip install cupy-cuda13x`` after installing ``nvidia-modelopt[onnx]``.
 
 **Accelerated Quantization with Triton Kernels**
 

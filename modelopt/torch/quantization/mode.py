@@ -38,6 +38,7 @@ from .config import (
     AWQLiteCalibConfig,
     CompressConfig,
     GPTQLiteConfig,
+    LocalHessianCalibConfig,
     MaxCalibConfig,
     MseCalibConfig,
     QuantizeAlgoCfgType,
@@ -56,7 +57,15 @@ from .conversion import (
     restore_svdquant_model,
     update_quantize_metadata,
 )
-from .model_calib import awq, gptq_lite, max_calibrate, mse_calibrate, smoothquant, svdquant
+from .model_calib import (
+    awq,
+    gptq_lite,
+    local_hessian_calibrate,
+    max_calibrate,
+    mse_calibrate,
+    smoothquant,
+    svdquant,
+)
 
 __all__ = ["BaseCalibrateModeDescriptor"]
 
@@ -215,6 +224,15 @@ def wrapped_calib_func(
     if method is not None and "awq" in method:
         # For backward compatibility
         kwargs["algorithm"] = method
+
+    moe_calib_experts_ratio = kwargs.pop("moe_calib_experts_ratio", None)
+    if moe_calib_experts_ratio is not None:
+        assert (
+            isinstance(moe_calib_experts_ratio, (int, float)) and 0 < moe_calib_experts_ratio <= 1
+        ), f"Invalid moe_calib_experts_ratio {moe_calib_experts_ratio!r}"
+        for module in model.modules():
+            if hasattr(module, "_moe_calib_experts_ratio"):
+                module._moe_calib_experts_ratio = moe_calib_experts_ratio
 
     if func is not None:
         # Call the function with forward_loop as a separate argument
@@ -375,6 +393,22 @@ class MseCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
         return MseCalibConfig
 
     _calib_func = mse_calibrate
+
+
+@CalibrateModeRegistry.register_mode
+class LocalHessianModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for local Hessian-weighted MSE calibration algorithm.
+
+    This algorithm uses activation information to optimize per-block scales for weight
+    quantization by minimizing output reconstruction error instead of weight reconstruction error.
+    """
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return LocalHessianCalibConfig
+
+    _calib_func = local_hessian_calibrate
 
 
 @CalibrateModeRegistry.register_mode

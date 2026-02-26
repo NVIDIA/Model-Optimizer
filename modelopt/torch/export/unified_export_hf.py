@@ -50,9 +50,18 @@ except ImportError:
 from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
-from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import (
+    NVFP4StaticQuantizer,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
+
+try:
+    from modelopt.torch.sparsity.attention_sparsity.conversion import export_sparse_attention_config
+except ImportError:
+    export_sparse_attention_config = None
 
 from .convert_hf_config import convert_hf_quant_config_format
 from .layer_utils import (
@@ -491,6 +500,11 @@ def _export_quantized_weight(
         expert_type in type(sub_module).__name__
         for expert_type in ["Llama4TextExperts", "GptOssExperts"]
     )
+    if is_bmm_expert_weight and isinstance(weight_quantizer, NVFP4StaticQuantizer):
+        raise ValueError(
+            "NVFP4StaticQuantizer with BMM-style expert weights (e.g. Llama4TextExperts, "
+            "GptOssExperts) is not yet supported."
+        )
 
     if quantization_format in [
         QUANTIZATION_NVFP4,
@@ -502,6 +516,7 @@ def _export_quantized_weight(
         weight, _ = maybe_transpose_expert_weight_dimensions(
             weight, is_bmm_expert_weight=is_bmm_expert_weight
         )
+
         weight_scale = NVFP4QTensor.get_weights_scaling_factor(
             weight,
             block_size=block_size,
@@ -589,7 +604,9 @@ def _process_quantized_modules(
         if is_modelopt_qlora and (hasattr(sub_module, "base_layer")):
             continue
 
-        if hasattr(sub_module, "weight_packed"):
+        if hasattr(sub_module, "weight_packed") or (
+            "QuantFP8Linear" in type(sub_module).__name__ and sub_module.weight.element_size() <= 1
+        ):
             sub_module.unpack_weight()
         if get_quantization_format(sub_module) != QUANTIZATION_NONE:
             if is_quantlinear(sub_module):
@@ -930,21 +947,38 @@ def _export_diffusers_checkpoint(
 
             print(f"  Saved to: {component_export_dir}")
 
-    # Step 5: For pipelines, also save the model_index.json
+    # Step 5: For pipelines, also save model_index.json
     if is_diffusers_pipe:
         model_index_path = export_dir / "model_index.json"
-        if hasattr(pipe, "config") and pipe.config is not None:
-            # Save a simplified model_index.json that points to the exported components
+        is_partial_export = components is not None
+
+        # For full export, preserve original model_index.json when possible.
+        # For partial export, skip this to avoid listing non-exported components.
+        if not is_partial_export:
+            source_path = getattr(pipe, "name_or_path", None) or getattr(
+                getattr(pipe, "config", None), "_name_or_path", None
+            )
+            if source_path:
+                candidate_model_index = Path(source_path) / "model_index.json"
+                if candidate_model_index.exists():
+                    with open(candidate_model_index) as file:
+                        model_index = json.load(file)
+                    with open(model_index_path, "w") as file:
+                        json.dump(model_index, file, indent=4)
+
+        # Full-export fallback to Diffusers-native config serialization.
+        # Partial export skips this for the same reason as above.
+        if not is_partial_export and not model_index_path.exists() and hasattr(pipe, "save_config"):
+            pipe.save_config(export_dir)
+
+        # Last resort: synthesize a minimal model_index.json from exported components.
+        if not model_index_path.exists() and hasattr(pipe, "config") and pipe.config is not None:
             model_index = {
                 "_class_name": type(pipe).__name__,
                 "_diffusers_version": diffusers.__version__,
             }
-            # Add component class names for all components
-            # Use the base library name (e.g., "diffusers", "transformers") instead of
-            # the full module path, as expected by diffusers pipeline loading
             for name, comp in all_components.items():
                 module = type(comp).__module__
-                # Extract base library name (first part of module path)
                 library = module.split(".")[0]
                 model_index[name] = [library, type(comp).__name__]
 
@@ -1027,6 +1061,12 @@ def export_hf_checkpoint(
 
         if hf_quant_config is not None:
             config_data["quantization_config"] = hf_quant_config
+
+        # Add sparse attention config if available
+        if export_sparse_attention_config is not None:
+            sparse_attn_config = export_sparse_attention_config(model)
+            if sparse_attn_config is not None:
+                config_data["sparse_attention_config"] = sparse_attn_config
 
         with open(original_config, "w") as file:
             json.dump(config_data, file, indent=4)

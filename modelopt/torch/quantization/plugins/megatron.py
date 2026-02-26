@@ -575,10 +575,10 @@ class _MegatronSequentialMLP(DynamicModule):
             expert.linear_fc2.parallel_state = self.parallel_state
 
     def layer_sync_moe_local_experts_amax(self):
-        """Sync amax across local experts in a SequentialMLP.
+        """Sync input quantizer amax across local experts in a SequentialMLP.
 
-        Synchronize the amax values across local experts in a lyaer such that all local experts will
-        share the same amax. This function operates on a single rank and does not require distributed sync.
+        Ensures all experts have the same input quantizer amax.This function operates
+        on a single rank and does not require distributed sync.
 
         Distributed amax sync across EP and ETP (for RowParallel) happens in model_calib.max_calibrate().
         This function should be called before the distributed sync to ensure the amax values
@@ -586,15 +586,19 @@ class _MegatronSequentialMLP(DynamicModule):
 
         Note:
             Because there are logic which calls collective communication based on whether amax is not None,
-            We need to garuantee that all experts must have amax. Otherwise, there will be deadlock
-            when synchroizing over EP since some ranks may have amax None and not calling the collective
+            We need to guarantee that all experts must have amax. Otherwise, there will be deadlock
+            when synchronizing over EP since some ranks may have amax None and not calling the collective
             communication.
         """
         # Collect amax from all local experts
         amax_dict = {}
         for expert in self.local_experts:
             for name, module in expert.named_modules():
-                if isinstance(module, TensorQuantizer) and module.amax is not None:
+                if (
+                    isinstance(module, TensorQuantizer)
+                    and module.amax is not None
+                    and "input_quantizer" in name
+                ):
                     stored_amax = amax_dict.get(name)
                     amax_tensor = module.amax.detach().clone()
                     amax_dict[name] = (

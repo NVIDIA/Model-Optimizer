@@ -56,6 +56,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.export.model_config import KV_CACHE_FP8
 from modelopt.torch.export.quant_utils import get_quant_config
 from modelopt.torch.quantization.nn import TensorQuantizer
+from modelopt.torch.quantization.triton import weight_dequant
 from modelopt.torch.quantization.utils import (
     is_quantized_column_parallel_linear,
     is_quantized_parallel_linear,
@@ -77,7 +78,6 @@ else:
     )
 
 import model as deekseep_model  # noqa: E402
-from ds_kernel import weight_dequant  # noqa: E402
 from kernel import act_quant, fp8_gemm  # noqa: E402
 
 
@@ -99,7 +99,7 @@ def monkey_patch_deepseek_model():
                 weight = weight_quantizer(weight)
             return F.linear(x, weight, bias)
         elif gemm_impl == "bf16":
-            weight = weight_dequant(weight, weight.scale)
+            weight = weight_dequant(weight, weight.scale, dtype=torch.bfloat16)
             if act_quantizer is not None:
                 x = act_quantizer(x)
             if weight_quantizer is not None:
