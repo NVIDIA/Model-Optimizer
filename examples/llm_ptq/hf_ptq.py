@@ -1088,9 +1088,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip_generate",
         help=(
-            "Skip the pre/post-quantization generation preview calls. "
-            "Use this for very large models that cannot run forward passes "
-            "(e.g. models split across GPU and CPU via device_map)."
+            "Skip pre/post-quantization preview calls that invoke model.generate(). "
+            "Note: this does not skip calibration or batch-size probing. "
+            "For very large models, pair with --batch_size 1 to avoid max-batch probing."
         ),
         default=False,
         action="store_true",
