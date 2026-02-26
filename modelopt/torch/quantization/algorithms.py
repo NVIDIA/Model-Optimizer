@@ -39,10 +39,9 @@ from modelopt.torch.utils import create_param_grad_clear_hook, print_rank_0, rep
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState, is_master
 
 from . import config as mtq_config
-from . import model_calib
 from .config import QuantizeConfig, QuantizerAttributeConfig
 from .conversion import set_quantizer_by_cfg
-from .nn import QuantLinearConvBase, QuantModule, SequentialQuantizer, TensorQuantizer
+from .nn import QuantLinearConvBase, QuantModule, TensorQuantizer
 from .utils import is_quantized_linear
 
 
@@ -149,23 +148,6 @@ class QuantRecipe(CustomHPType):
 
     def __hash__(self) -> int:
         return hash(self._str_repr)
-
-    @staticmethod
-    def disable_folding_pqs_to_weights():
-        """Disable the folding of pre_quant_scale to weights."""
-        model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS = False
-
-    @staticmethod
-    def fold_pqs_to_weights(model):
-        """Fold the pre_quant_scale in weight_quantizers to weights."""
-        model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS = True
-        for name, module in model.named_modules():
-            if is_quantized_linear(module):
-                with SequentialQuantizer.convert_to_single_quantizer(model):
-                    if module.weight_quantizer.pre_quant_scale is not None:
-                        weight_pqs = module.weight_quantizer.pre_quant_scale
-                        delattr(module.weight_quantizer, "_pre_quant_scale")
-                        model_calib._apply_weight_pre_quant_scale(module, weight_pqs)
 
 
 class QuantRecipeHparam(Hparam):
@@ -600,24 +582,27 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             self.model, search_recipes, self.config["disabled_layers"]
         )
 
-        QuantRecipe.disable_folding_pqs_to_weights()
+        # auto_quantize only supports max algorithm
+        for recipe in search_recipes:
+            if recipe == QuantRecipe(quant_cfg=None):
+                continue
+            algo = recipe.config.algorithm
+            assert algo is None or algo == "max", (
+                f"auto_quantize only supports 'max' algorithm, got '{algo}' for {recipe}. "
+                "Run auto_quantize with max-algorithm formats, then use "
+                "get_config_from_auto_quantize() to generate a config and modify "
+                "the algorithm for your desired calibration method."
+            )
 
         # Iterate over the search recipes and calibrate the quantizers for each recipe
         for recipe in search_recipes:
             if recipe == QuantRecipe(quant_cfg=None):  # No-quant format
                 continue
 
-            # Lets reduce the number of calibration steps for AWQ since it takes longer
-            num_calib_steps = (
-                self.config["num_calib_steps"]
-                if "awq" not in str(recipe.config.algorithm)
-                else max(1, self.config["num_calib_steps"] // 4)
-            )
-
             def forward_loop(model):
                 self._run_func(
                     self.config["forward_step"],
-                    num_iters=num_calib_steps,
+                    num_iters=self.config["num_calib_steps"],
                     desc=f"Calibrating for {recipe}",
                 )
 
@@ -718,8 +703,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.best["recipe"] = best_recipe
         self.best["constraints"] = {"effective_bits": effective_bits_from_search}
         self.best["score"] = best_scores
-
-        QuantRecipe.fold_pqs_to_weights(self.model)
 
 
 def _get_auto_quantize_score(grad_output, output_diff):

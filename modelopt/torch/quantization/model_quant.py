@@ -251,7 +251,7 @@ def auto_quantize(
     model: nn.Module,
     constraints: dict[str, float | str] = {"effective_bits": 4.8},
     quantization_formats: list[dict[str, Any] | str] = [
-        mtq.NVFP4_AWQ_LITE_CFG,
+        mtq.NVFP4_DEFAULT_CFG,
         mtq.FP8_DEFAULT_CFG,
     ],
     data_loader: Iterable | None = None,
@@ -300,27 +300,12 @@ def auto_quantize(
             Internally we always add "do not quantize" as a choice. Therefore, it is possible that a layer is
             not quantized by any of the quantization formats.
 
-            Custom quantization formats can also be defined and used as a quantization format. This is a  experimental
-            feature and the results may not be optimal. Here is an example:
+            .. note::
 
-            .. code-block:: python
-
-                INT8_CUSTOM_QUANT_CFG = {
-                    "quant_cfg": {
-                        "*weight_quantizer": {"num_bits": 8, "axis": 0},
-                        "*input_quantizer": {"num_bits": 8, "axis": None},
-                    },
-                    "algorithm": "smoothquant",
-                }
-
-                mtq.auto_quantize(
-                    model,
-                    constraints,
-                    quantization_formats=["INT4_AWQ_CFG", INT8_CUSTOM_QUANT_CFG],
-                )
-
-            Internally we always add "do not quantize" as a choice. Therefore, it is possible that a layer is
-            not quantized by any of the quantization formats.
+                Only ``max`` algorithm formats are supported. To use a different calibration algorithm
+                (e.g. AWQ), run ``auto_quantize`` with ``max``-algorithm formats, then use
+                :func:`get_config_from_auto_quantize` to extract the per-layer config and swap the
+                ``"algorithm"`` field before passing to :func:`quantize`.
 
             .. note::
 
@@ -338,8 +323,8 @@ def auto_quantize(
              .. code-block:: python
 
                 # A valid `quantization_formats` argument
-                # This will search for the best per-layer quantization from FP8, W4A8_AWQ_BETA_CFG or No quantization
-                quantization_formats = [mtq.FP8_DEFAULT_CFG, mtq.W4A8_AWQ_BETA_CFG]
+                # This will search for the best per-layer quantization from NVFP4 and FP8 or No quantization
+                quantization_formats = [mtq.NVFP4_DEFAULT_CFG, mtq.FP8_DEFAULT_CFG]
 
         data_loader: An iterator that yields data that is to be used for calibrating quantized layers and estimating
             ``auto_quantize`` scores.
@@ -530,6 +515,9 @@ def get_config_from_auto_quantize(search_state, constraints=None):
 
             # Or use the original result
             config = mtq.get_config_from_auto_quantize(search_state)
+
+            # To use a different calibration algorithm (e.g. AWQ), swap the algorithm field:
+            config["algorithm"] = "awq_lite"
 
             fresh_model = load_model(...)
             mtq.quantize(fresh_model, config, forward_loop=calibrate_loop)

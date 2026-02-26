@@ -756,24 +756,13 @@ def disable_pre_quant_scale_and_resmooth(linear: nn.Module, delete_pre_quant_sca
         linear.input_quantizer._enable_pre_quant_scale = False
 
 
-# A global variable used during auto_quantize to avoid folding pre_quant_scale to weights
-_ENABLE_FOLDING_PQS_TO_WEIGHTS = True
-
-
 @torch.no_grad()
 def _apply_weight_pre_quant_scale(linear, pre_quant_scale):
-    if _ENABLE_FOLDING_PQS_TO_WEIGHTS:
-        linear.weight.data.copy_(
-            (linear.weight * pre_quant_scale.to(linear.weight.device).squeeze()[None, :]).to(
-                linear.weight.dtype
-            )
-        )
-    else:
-        linear.weight_quantizer._enable_pre_quant_scale = True
-        linear.weight_quantizer.pre_quant_scale = pre_quant_scale.squeeze()[None, :].to(
+    linear.weight.data.copy_(
+        (linear.weight * pre_quant_scale.to(linear.weight.device).squeeze()[None, :]).to(
             linear.weight.dtype
         )
-
+    )
     linear.weight_quantizer.reset_amax()
     max_calibrate(linear, lambda linear: linear.weight_quantizer(linear.weight))
 

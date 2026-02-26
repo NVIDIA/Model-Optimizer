@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
 import io
 
 import pytest
@@ -108,14 +107,14 @@ def test_quant_recipe_hparam():
     assert torch.allclose(output_test, output_ref)
 
 
-# use this config to test custom quantization config
+# use this config to test custom quantization config (must use max algorithm for auto_quantize)
 INT8_CUSTOM_QUANT_TEST_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {"num_bits": 8, "axis": 0},
         "*input_quantizer": {"num_bits": 8, "axis": None},
         **_default_disabled_quantizer_cfg,
     },
-    "algorithm": "smoothquant",
+    "algorithm": "max",
 }
 
 
@@ -127,10 +126,9 @@ INT8_CUSTOM_QUANT_TEST_CFG = {
     ("search_formats", "min_bits", "search_bits"),
     [
         ([mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG], 4.0, 6.0),
-        ([mtq.INT4_AWQ_CFG, mtq.INT8_SMOOTHQUANT_CFG], 4.0, 6.0),
-        ([mtq.INT4_AWQ_CFG, INT8_CUSTOM_QUANT_TEST_CFG], 4.0, 6.0),
-        ([mtq.INT8_SMOOTHQUANT_CFG], 8.0, 11.0),
-        ([None, mtq.INT8_SMOOTHQUANT_CFG], 8.0, 11.0),
+        ([mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, INT8_CUSTOM_QUANT_TEST_CFG], 4.0, 6.0),
+        ([mtq.INT8_DEFAULT_CFG], 8.0, 11.0),
+        ([None, mtq.INT8_DEFAULT_CFG], 8.0, 11.0),
     ],
 )
 @pytest.mark.parametrize(
@@ -229,44 +227,13 @@ def test_auto_quantize_disabled_layers_no_poison():
     assert QuantRecipe(mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG) in hparam.choices
 
 
-INT4INT8_AWQ_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": [
-            {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}, "enable": True},
-            {"num_bits": 8, "axis": None, "enable": True},
-        ],
-        "*input_quantizer": {"num_bits": 8, "axis": None, "enable": True},
-        "default": {"enable": False},
-    },
-    "algorithm": "awq_lite",
-}
-
-
-@pytest.mark.parametrize("config", [mtq.INT4_AWQ_CFG, mtq.INT8_SMOOTHQUANT_CFG, INT4INT8_AWQ_CFG])
-def test_pqs_folding(config):
-    model_ref = SimpleLinear()
-    state_dict_ref = copy.deepcopy(model_ref.state_dict())
-    inputs = model_ref.get_input()
-    mtq.quantize(model_ref, config, lambda model: model(inputs))
-
-    model_test = SimpleLinear()
-    model_test.load_state_dict(state_dict_ref)
-    QuantRecipe.disable_folding_pqs_to_weights()
-    mtq.quantize(model_test, config, lambda model: model(inputs))
-
-    assert torch.allclose(model_ref(inputs), model_test(inputs))
-
-    QuantRecipe.fold_pqs_to_weights(model_test)
-    assert torch.allclose(model_ref(inputs), model_test(inputs))
-
-
 def _test_data_parallel_auto_quantize(rank, size):
     model = SimpleLinear()
 
     model, search_history = mtq.auto_quantize(
         model,
         constraints={"effective_bits": 11.0},
-        quantization_formats=[mtq.INT8_SMOOTHQUANT_CFG],
+        quantization_formats=[mtq.INT8_DEFAULT_CFG],
         data_loader=[model.get_input() for _ in range(2)],
         forward_step=lambda model, batch: model(batch),
         loss_func=lambda output, data: output.sum(),
