@@ -17,7 +17,6 @@ import json
 
 import pytest
 from _test_utils.torch.diffusers_models import get_tiny_dit, get_tiny_flux, get_tiny_unet
-from _test_utils.torch.misc import minimum_sm
 
 pytest.importorskip("diffusers")
 
@@ -94,7 +93,7 @@ def test_export_diffusers_unet_quantized_matches_llm_config(tmp_path, monkeypatc
         ("int8", mtq.INT8_DEFAULT_CFG),
         ("int8_smoothquant", mtq.INT8_SMOOTHQUANT_CFG),
         ("fp8", mtq.FP8_DEFAULT_CFG),
-        pytest.param("fp4", mtq.NVFP4_DEFAULT_CFG, marks=minimum_sm(89)),
+        ("fp4", mtq.NVFP4_DEFAULT_CFG),
     ],
 )
 def test_export_diffusers_real_quantized(tmp_path, model_factory, config_id, quant_cfg):
