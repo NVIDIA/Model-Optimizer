@@ -30,7 +30,7 @@ from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.opt.utils import forward_with_reshard
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
-from modelopt.torch.utils import atomic_print
+from modelopt.torch.utils import atomic_print, print_rank_0
 
 from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher, QuantRecipe
 from .config import QuantizeAlgoCfgType
@@ -41,6 +41,7 @@ from .nn import QuantModule, TensorQuantizer
 __all__ = [
     "auto_quantize",
     "calibrate",
+    "compute_quantization_mse",
     "disable_quantizer",
     "enable_quantizer",
     "fold_weight",
@@ -516,6 +517,91 @@ def print_quant_summary(model: nn.Module):
             print(f"{name:80} {mod}")
             count += 1
     print(f"{count} TensorQuantizers found in model")
+
+
+@torch.no_grad()
+def compute_quantization_mse(
+    model: nn.Module,
+    forward_loop: ForwardLoop,
+    wildcards: str | Callable | list[str | Callable] = "*",
+) -> dict[str, float]:
+    """Compute the mean-squared quantization error for selected quantizers.
+
+    Runs ``forward_loop`` through the model while recording, for every matching
+    :class:`TensorQuantizer`, the MSE between the original float tensor and
+    its fake-quantized (Q→DQ) counterpart. Values are averaged over all
+    calibration batches.
+
+    Args:
+        model: A quantized model (output of :func:`quantize`).
+        forward_loop: Callable that takes ``model`` and runs data through it.
+        wildcards: One or more fnmatch glob patterns (or callable filters)
+            matched against :class:`TensorQuantizer` module names in
+            ``model.named_modules()``.  Follows the same convention as
+            ``quant_cfg`` wildcard keys.  Defaults to ``"*"`` (all quantizers).
+
+    Returns:
+        A dict mapping each matched quantizer's fully-qualified name to its
+        mean MSE (float).  Quantizers that are disabled or not in fake-quant
+        mode are skipped and absent from the output.
+
+    Example::
+
+        mse = mtq.compute_quantization_mse(
+            model,
+            forward_loop,
+            wildcards=["*k_bmm_quantizer", "*v_bmm_quantizer"],
+        )
+        for name, err in sorted(mse.items()):
+            print(f"{name}: {err:.4e}")
+    """
+    if isinstance(wildcards, (str, Callable)):
+        wildcards = [wildcards]
+
+    def _matches(name: str) -> bool:
+        return any(
+            fnmatch.fnmatch(name, w) if isinstance(w, str) else w(name)
+            for w in wildcards
+        )
+
+    accumulators: dict[str, dict] = {}  # name -> {"sum": float, "count": int}
+    hooks = []
+
+    for name, module in model.named_modules():
+        if not isinstance(module, TensorQuantizer):
+            continue
+        if not _matches(name):
+            continue
+        if not (module._if_quant and module._fake_quant):
+            print_rank_0(
+                f"[compute_quantization_mse] Skipping {name}: "
+                f"_if_quant={module._if_quant}, _fake_quant={module._fake_quant}"
+            )
+            continue
+
+        accumulators[name] = {"sum": 0.0, "count": 0}
+
+        def _make_hook(acc):
+            def hook(mod, inp, out):
+                original = inp[0].detach().float()
+                quantized = out.detach().float()
+                acc["sum"] += torch.mean((original - quantized) ** 2).item()
+                acc["count"] += 1
+
+            return hook
+
+        hooks.append(module.register_forward_hook(_make_hook(accumulators[name])))
+
+    forward_loop(model)
+
+    for h in hooks:
+        h.remove()
+
+    return {
+        name: acc["sum"] / acc["count"]
+        for name, acc in accumulators.items()
+        if acc["count"] > 0
+    }
 
 
 def fold_weight(model: nn.Module):
