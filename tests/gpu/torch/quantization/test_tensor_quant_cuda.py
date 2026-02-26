@@ -145,6 +145,19 @@ class TestScaledE4M3:
         xq_test = tensor_quant.scaled_e4m3(x, amax, None, 4, 3)
         assert torch.allclose(xq_test, xq_ref)
 
+    @pytest.mark.parametrize("device", ["cuda", "cpu"])
+    def test_zero_amax_is_finite(self, device):
+        x = torch.randn(4, 4, device=device, dtype=torch.float32)
+        amax = torch.zeros((1,), device=device)
+        xq = tensor_quant.scaled_e4m3(x, amax, None, 4, 3)
+        assert torch.isfinite(xq).all()
+
+    def test_zero_amax_per_channel_is_finite(self):
+        x = torch.randn(2, 3, 4, device="cuda", dtype=torch.float32)
+        amax = torch.tensor([1.0, 0.0, 1.0], device="cuda").view(1, 3, 1)
+        xq = tensor_quant.scaled_e4m3(x, amax, None, 4, 3)
+        assert torch.isfinite(xq).all()
+
 
 class Testfp4:
     @pytest.mark.skipif(get_cuda_ext_mx() is None, reason="cuda_ext_mx is not available")

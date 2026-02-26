@@ -71,7 +71,10 @@ at::Tensor fake_e4m3fy_with_axis(at::Tensor inputs, at::Tensor amax, int axis) {
   int axis_size = inputs.size(axis);
   int outer_size = inputs.stride(axis);
 
-  auto scale = 448.f / amax;
+  const float epsilon = 1.0f / (1 << 24);
+  auto zero_amax_mask = amax <= epsilon;
+  auto safe_amax = at::where(zero_amax_mask, torch::ones_like(amax), amax);
+  auto scale = 448.f / safe_amax;
   auto inv_scale = 1.f / scale;
 
   auto stream = c10::cuda::getCurrentCUDAStream();
@@ -88,7 +91,10 @@ at::Tensor fake_e4m3fy(at::Tensor inputs, at::Tensor amax) {
   inputs = inputs.contiguous();
   amax = amax.view(-1).to(at::kFloat);
   size_t numel = inputs.numel();
-  at::Tensor scale = 448.f / amax;
+  const float epsilon = 1.0f / (1 << 24);
+  auto zero_amax_mask = amax <= epsilon;
+  auto safe_amax = at::where(zero_amax_mask, torch::ones_like(amax), amax);
+  at::Tensor scale = 448.f / safe_amax;
   auto inv_scale = 1.f / scale;
   auto outputs = torch::empty_like(inputs);
   auto stream = c10::cuda::getCurrentCUDAStream();
