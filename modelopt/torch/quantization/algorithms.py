@@ -1288,10 +1288,14 @@ def get_config_from_auto_quantize(search_state, constraints=None):
             continue
         module_names = search_state["candidate_stats"][hparam_name]["module_names"]
         for module_name in module_names:
-            for quantizer_attr in ("input_quantizer", "weight_quantizer", "output_quantizer"):
+            for quantizer_attr in ("input_quantizer", "weight_quantizer"):
                 matched_cfg = _match_quantizer_cfg(recipe.config.quant_cfg, quantizer_attr)
                 if matched_cfg is not None:
                     quant_cfg[f"{module_name}.{quantizer_attr}"] = matched_cfg
+    quant_cfg = {
+        k: v.model_dump() if isinstance(v, mtq_config.QuantizerAttributeConfig) else v
+        for k, v in quant_cfg.items()
+    }
     return {"quant_cfg": quant_cfg, "algorithm": "max"}
 
 
