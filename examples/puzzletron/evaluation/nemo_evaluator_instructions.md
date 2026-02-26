@@ -8,17 +8,44 @@ Evaluate AnyModel checkpoints by deploying a local OpenAI-compatible completions
 This flow requires Ray for serving the model and NeMo Export-Deploy (included in NeMo containers):
 
 ```bash
-pip install ray
+pip install -r examples/puzzletron/requirements.txt
 ```
 
 **1. Deploy the model (2 GPUs example):**
 
+We need to patch the `hf_deployable.py` script from Export-Deploy. Best way is to do it as a mount in docker run:
+
+```bash
+export MODELOPT_DIR=${PWD}/Model-Optimizer # or set to your local Model-Optimizer repository path if you have cloned it
+if [ ! -d "${MODELOPT_DIR}" ]; then
+  git clone https://github.com/NVIDIA/Model-Optimizer.git ${MODELOPT_DIR}
+fi
+
+export DOCKER_IMAGE=nvcr.io/nvidia/nemo:26.02
+docker run \
+  --gpus all \
+  --shm-size=16GB \
+  --net=host \
+  --ulimit memlock=-1 \
+  --rm -it \
+  -v ${MODELOPT_DIR}:/opt/Model-Optimizer \
+  -v ${MODELOPT_DIR}/modelopt:/opt/venv/lib/python3.12/site-packages/modelopt \
+  -v ${MODELOPT_DIR}/examples/puzzletron/evaluation/hf_deployable_anymodel.py:/opt/Export-Deploy/nemo_deploy/llm/hf_deployable.py \
+  -w /opt/Model-Optimizer/examples/megatron_bridge \
+  ${DOCKER_IMAGE} bash
+```
+
+Alternatively you can manually update the file 
 ```bash
 # Install the AnyModel-patched deployable (first time only: backs up the original)
 # /opt/Export-Deploy is the default path in NeMo containers — adjust if needed
 cp /opt/Export-Deploy/nemo_deploy/llm/hf_deployable.py /opt/Export-Deploy/nemo_deploy/llm/hf_deployable.py.bak
 cp examples/puzzletron/evaluation/hf_deployable_anymodel.py /opt/Export-Deploy/nemo_deploy/llm/hf_deployable.py
+```
 
+Now start ray server and deploy the model
+
+```bash
 # Start the server (blocks while running — use a separate terminal)
 ray start --head --num-gpus 2 --port 6379 --disable-usage-stats
 python /opt/Export-Deploy/scripts/deploy/nlp/deploy_ray_hf.py \
