@@ -16,19 +16,23 @@
 """Support quantization for VLLM layers."""
 
 import importlib
+from contextlib import contextmanager
 
 import torch
-import vllm.attention as vllm_attention
-import vllm.model_executor.layers.fused_moe.layer as vllm_fused_moe_layer
-import vllm.model_executor.layers.linear as vllm_linear
-from vllm.attention.layers.cross_attention import CrossAttention
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
-from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_tp_group
 
 from ...utils.distributed import ParallelState
 from ..nn import QuantLinearConvBase, QuantModule, QuantModuleRegistry, TensorQuantizer
 
 # Try multiple import paths for vLLM compatibility across versions
+if importlib.util.find_spec("vllm.attention"):
+    import vllm.attention as vllm_attention  # vllm < 0.16.0
+else:
+    import vllm.model_executor.layers.attention as vllm_attention  # vllm >= 0.16.0
+
+import vllm.model_executor.layers.fused_moe.layer as vllm_fused_moe_layer
+import vllm.model_executor.layers.linear as vllm_linear
+from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_tp_group
+
 vllm_shared_fused_moe_layer = None
 for module_path in [
     "vllm.model_executor.layers.fused_moe.shared_fused_moe",  # 0.11.0+
@@ -40,8 +44,25 @@ for module_path in [
     except ImportError:
         continue
 
+
+if importlib.util.find_spec("vllm.attention.layers"):  # vllm < 0.15.0
+    from vllm.attention.layers.cross_attention import CrossAttention
+    from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
+else:
+    try:
+        from vllm.model_executor.layers.attention.cross_attention import CrossAttention
+    except ImportError:
+        CrossAttention = None
+    try:
+        from vllm.model_executor.layers.attention.encoder_only_attention import EncoderOnlyAttention
+    except ImportError:
+        EncoderOnlyAttention = None
+
+if importlib.util.find_spec("vllm.attention.layer"):
+    import vllm.attention.layer as vllm_attention
+
 try:
-    from vllm.attention.layer import MLAAttention as VllmMLAAttention
+    VllmMLAAttention = vllm_attention.MLAAttention
 except ImportError:
     VllmMLAAttention = None
 
@@ -178,54 +199,59 @@ class _QuantFusedMoEBase(QuantModule):
         *args,
         **kwargs,
     ):
+        kernel = getattr(
+            vllm_fused_moe_package,
+            "_invoke_fused_moe_kernel",
+            getattr(vllm_fused_moe_package, "_dispatch_fused_moe_kernel", None),
+        )
+        if kernel is None:
+            raise ValueError("fused_moe kernel not found")
+
         if B is self.w13_weight:
             # First layer of expert
             A = self.w13_input_quantizer(A)  # noqa: N806
             if self.w13_weight_quantizer.is_enabled:
-                original_weight = self.w13_weight
-                self.w13_weight = self.w13_weight_quantizer(self.w13_weight)
-                vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
-                self.w13_weight = original_weight
+                orig, self.w13_weight = self.w13_weight, self.w13_weight_quantizer(self.w13_weight)
+                kernel(A, B, C, *args, **kwargs)
+                self.w13_weight = orig
             else:
-                vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
+                kernel(A, B, C, *args, **kwargs)
             if self.w13_output_quantizer.is_enabled:
                 C[:] = self.w13_output_quantizer(C)
         elif B is self.w2_weight:
             A = self.w2_input_quantizer(A)  # noqa: N806
             if self.w2_weight_quantizer.is_enabled:
-                original_weight = self.w2_weight
-                self.w2_weight = self.w2_weight_quantizer(self.w2_weight)
-                vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
-                self.w2_weight = original_weight
+                orig, self.w2_weight = self.w2_weight, self.w2_weight_quantizer(self.w2_weight)
+                kernel(A, B, C, *args, **kwargs)
+                self.w2_weight = orig
             else:
-                vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
+                kernel(A, B, C, *args, **kwargs)
             if self.w2_output_quantizer.is_enabled:
                 C[:] = self.w2_output_quantizer(C)
         else:
             raise ValueError("Cannot determine first or second layer of expert")
 
+    @contextmanager
+    def _patch_moe_kernel(self):
+        """Temporarily replace vLLM fused_moe kernel with quantized version."""
+        for attr, backup in [
+            ("invoke_fused_moe_kernel", "_invoke_fused_moe_kernel"),
+            ("dispatch_fused_moe_kernel", "_dispatch_fused_moe_kernel"),
+        ]:
+            if hasattr(vllm_fused_moe_package, attr):
+                orig = getattr(vllm_fused_moe_package, attr)
+                setattr(vllm_fused_moe_package, backup, orig)
+                setattr(vllm_fused_moe_package, attr, self.invoke_fused_moe_quantized)
+                try:
+                    yield
+                finally:
+                    setattr(vllm_fused_moe_package, attr, orig)
+                return
+        raise ValueError("fused_moe_kernel is not found")
+
     def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
-        # This is again due to the bad coding of vLLM
-        # fused_moe submodule is overwritten by the fused_moe function
-        # so we need to import the fused_moe module explicitly
-        assert vllm_fused_moe_package.invoke_fused_moe_kernel is not None
-        # This context manager will conflict with torch.compile
-        # with replace_function(
-        #     vllm_fused_moe_package,
-        #     "invoke_fused_moe_kernel",
-        #     self.invoke_fused_moe_quantized,
-        # ):
-        try:
-            vllm_fused_moe_package._invoke_fused_moe_kernel = (  # type: ignore[attr-defined]
-                vllm_fused_moe_package.invoke_fused_moe_kernel
-            )
-            vllm_fused_moe_package.invoke_fused_moe_kernel = self.invoke_fused_moe_quantized  # type: ignore[attr-defined]
-            output = super().forward(hidden_states, router_logits)
-            return output
-        finally:
-            vllm_fused_moe_package.invoke_fused_moe_kernel = (  # type: ignore[attr-defined]
-                vllm_fused_moe_package._invoke_fused_moe_kernel
-            )
+        with self._patch_moe_kernel():
+            return super().forward(hidden_states, router_logits)
 
     @torch.no_grad()
     def fold_weight(self):
@@ -278,14 +304,18 @@ class _QuantVLLMAttention(QuantModule):
         return super().forward(query, key, value, *args, **kwargs)
 
 
-@QuantModuleRegistry.register({CrossAttention: "vllm_CrossAttention"})
-class _QuantVLLMCrossAttention(_QuantVLLMAttention):
-    pass
+if CrossAttention is not None:
+
+    @QuantModuleRegistry.register({CrossAttention: "vllm_CrossAttention"})
+    class _QuantVLLMCrossAttention(_QuantVLLMAttention):
+        pass
 
 
-@QuantModuleRegistry.register({EncoderOnlyAttention: "vllm_EncoderOnlyAttention"})
-class _QuantVLLMEncoderOnlyAttention(_QuantVLLMAttention):
-    pass
+if EncoderOnlyAttention is not None:
+
+    @QuantModuleRegistry.register({EncoderOnlyAttention: "vllm_EncoderOnlyAttention"})
+    class _QuantVLLMEncoderOnlyAttention(_QuantVLLMAttention):
+        pass
 
 
 if VllmMLAAttention is not None:
