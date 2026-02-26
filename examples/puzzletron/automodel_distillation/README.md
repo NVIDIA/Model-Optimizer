@@ -88,12 +88,11 @@ torchrun --nproc_per_node=2 \
 Below is an example job setup: NeMo AutoModel container, clone AutoModel main, install it and upgrade Transformers, then run KD from a directory that contains your config and run script (e.g. a copy of this example or the RealAnyModel layout).
 
 ```bash
-# Submit interactive job (example with your cluster’s submit_job)
-submit_job --partition interactive --time 2.0 \
-  --image nvcr.io/nvidia/nemo-automodel:25.11.00 \
-  --mounts "/path/to/AutoModel/:/opt/Automodel/,/lustre:/lustre" \
-  --interactive --gpu 2 --skip_image_check --email_mode=never \
-  --command='bash'
+# Submit interactive job
+srun --partition=interactive --time=2:00:00 --gres=gpu:2 \
+     --container-image=nvcr.io/nvidia/nemo-automodel:25.11.00 \
+     --container-mounts="/path/to/AutoModel/:/opt/Automodel/" \
+     --pty bash
 
 # Inside the container
 source /opt/venv/bin/activate
