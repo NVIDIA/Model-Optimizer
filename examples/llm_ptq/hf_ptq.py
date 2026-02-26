@@ -690,7 +690,9 @@ def pre_quantize(
     ][0:1]
 
     # Generate preview before quantization
-    if model_type == "deepseek":
+    if args.skip_generate:
+        generated_ids_before_ptq = None
+    elif model_type == "deepseek":
         # DeepSeek generation may go OOM, so we skip it
         generated_ids_before_ptq = None
     elif is_nemotron_vl_model and tokenizer is not None:
@@ -703,7 +705,6 @@ def pre_quantize(
             allow_fallback=False,
         )
     else:
-        # Standard generation for non-Nemotron VL models
         generated_ids_before_ptq = full_model.generate(preview_input_ids, max_new_tokens=100)
     if model_type == "gptoss" and args.qformat == "nvfp4_mlp_only":
         print("Applying nvfp4 quantization (MoE only) for gpt-oss")
@@ -1083,6 +1084,16 @@ def parse_args() -> argparse.Namespace:
         help="Print verbose output (e.g. quantization summary). Disable by --no-verbose.",
         default=True,
         action=argparse.BooleanOptionalAction,
+    )
+    parser.add_argument(
+        "--skip_generate",
+        help=(
+            "Skip the pre/post-quantization generation preview calls. "
+            "Use this for very large models that cannot run forward passes "
+            "(e.g. models split across GPU and CPU via device_map)."
+        ),
+        default=False,
+        action="store_true",
     )
     parser.add_argument(
         "--low_memory_mode",
