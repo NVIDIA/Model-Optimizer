@@ -418,3 +418,44 @@ def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
         pytest.approx(state_dict_1["best"]["constraints"]["effective_bits"])
         == state_dict_2["best"]["constraints"]["effective_bits"]
     )
+
+
+@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+def test_get_config_from_auto_quantize(method):
+    model = TransformerBlock()
+
+    _, search_state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 6.0},
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        data_loader=[model.get_input() for _ in range(4)],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+        method=method,
+    )
+
+    # Verify search_state has method and module_names
+    assert search_state["method"] == method
+    for stats in search_state["candidate_stats"].values():
+        assert "module_names" in stats
+        assert len(stats["module_names"]) > 0
+
+    # Use stored best recipe
+    config = mtq.get_config_from_auto_quantize(search_state)
+    assert "quant_cfg" in config
+    assert config["quant_cfg"]["*"] == {"enable": False}
+    assert config["algorithm"] == "max"
+
+    # Re-solve with different constraints
+    config_resoled = mtq.get_config_from_auto_quantize(
+        search_state, constraints={"effective_bits": 12.0}
+    )
+    assert "quant_cfg" in config_resoled
+
+    # Apply config to a fresh model
+    fresh_model = TransformerBlock()
+    fresh_model = mtq.quantize(fresh_model, config, forward_loop=lambda m: m(model.get_input()))
+    output = fresh_model(model.get_input())
+    assert output is not None

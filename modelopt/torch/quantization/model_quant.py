@@ -33,10 +33,12 @@ from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
 from modelopt.torch.utils import atomic_print
 
 from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher, QuantRecipe
+from .algorithms import get_config_from_auto_quantize as _get_config_from_auto_quantize
 from .config import QuantizeAlgoCfgType
 from .conversion import set_quantizer_attribute
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import QuantModule, TensorQuantizer
+from .utils import is_quantized
 
 __all__ = [
     "auto_quantize",
@@ -44,6 +46,7 @@ __all__ = [
     "disable_quantizer",
     "enable_quantizer",
     "fold_weight",
+    "get_config_from_auto_quantize",
     "postprocess_amax",
     "print_quant_summary",
     "quantize",
@@ -228,8 +231,14 @@ def quantize(
 
     Returns: A pytorch model which has been quantized and calibrated.
     """
-    model = apply_mode(model, mode=[("quantize", config)], registry=QuantizeModeRegistry)
-    return calibrate(model, config.get("algorithm"), forward_loop=forward_loop)
+    if isinstance(config, QuantizeConfig):
+        config_dict = dict(config)
+    else:
+        config_dict = config
+        config = QuantizeConfig(**config_dict)
+    if not is_quantized(model):
+        model = apply_mode(model, mode=[("quantize", config_dict)], registry=QuantizeModeRegistry)
+    return calibrate(model, config.algorithm, forward_loop=forward_loop)
 
 
 # TODO: create a config interface for auto_quantize and expose setting
@@ -495,6 +504,37 @@ def auto_quantize(
     searcher.search(model, constraints, config=search_config)  # type: ignore[arg-type]
 
     return model, searcher.state_dict()
+
+
+def get_config_from_auto_quantize(search_state, constraints=None):
+    """Build a flat quant config from auto_quantize search_state.
+
+    Re-solves for ``constraints`` if provided, otherwise uses the stored best recipe.
+
+    Args:
+        search_state: The state dict returned by :func:`auto_quantize`.
+        constraints: Optional dict, e.g. ``{"effective_bits": 5.5}``, to re-solve for a
+            different target without re-running calibration or scoring.
+
+    Returns:
+        A config dict suitable for :func:`quantize`.
+
+    Example:
+
+        .. code-block:: python
+
+            model, search_state = mtq.auto_quantize(model, ...)
+
+            # Re-solve for a different effective_bits target (cheap, no GPU needed)
+            config = mtq.get_config_from_auto_quantize(search_state, {"effective_bits": 5.5})
+
+            # Or use the original result
+            config = mtq.get_config_from_auto_quantize(search_state)
+
+            fresh_model = load_model(...)
+            mtq.quantize(fresh_model, config, forward_loop=calibrate_loop)
+    """
+    return _get_config_from_auto_quantize(search_state, constraints)
 
 
 def disable_quantizer(model: nn.Module, wildcard_or_filter_func: str | Callable):
