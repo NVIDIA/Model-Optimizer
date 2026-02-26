@@ -1841,6 +1841,9 @@ def sequential_calibrate(
     **calib_kwargs,
 ):
     """Sequential calibration - a sequential layer-by-layer calibration algorithm."""
+    if forward_loop is None:
+        raise ValueError("forward_loop must not be None for sequential calibration.")
+
     transformer_layers = get_decoder_layers(model)
     if transformer_layers is None:
         raise ValueError(

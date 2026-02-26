@@ -237,6 +237,8 @@ def wrapped_calib_func(
                 module._moe_calib_experts_ratio = moe_calib_experts_ratio
 
     if func is not None:
+        if forward_loop is None:
+            raise ValueError("forward_loop is required for calibration but got None.")
         if sequential:
             assert method in ["max"], (
                 f"Sequential calibration currently only supports max calibration, got {method}"
