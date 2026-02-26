@@ -29,6 +29,7 @@ class DiffuserHfExportModel(NamedTuple):
     format_type: str
     quant_algo: str
     collect_method: str
+    model_dtype: str = "Half"
 
     def quantize_and_export_hf(self, tmp_path: Path) -> Path:
         hf_ckpt_dir = tmp_path / f"{self.name}_{self.format_type}_hf_ckpt"
@@ -55,6 +56,8 @@ class DiffuserHfExportModel(NamedTuple):
             self.quant_algo,
             "--collect-method",
             self.collect_method,
+            "--model-dtype",
+            self.model_dtype,
             "--trt-high-precision-dtype",
             self.dtype,
             "--hf-ckpt-dir",
@@ -82,6 +85,7 @@ class DiffuserHfExportModel(NamedTuple):
             format_type="int8",
             quant_algo="smoothquant",
             collect_method="min-mean",
+            model_dtype="BFloat16",
         ),
         pytest.param(
             DiffuserHfExportModel(
@@ -102,6 +106,7 @@ class DiffuserHfExportModel(NamedTuple):
                 format_type="fp4",
                 quant_algo="max",
                 collect_method="default",
+                model_dtype="BFloat16",
             ),
             marks=minimum_sm(89),
         ),
