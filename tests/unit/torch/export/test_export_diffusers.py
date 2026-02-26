@@ -16,6 +16,7 @@
 import json
 
 import pytest
+import torch
 from _test_utils.torch.diffusers_models import get_tiny_dit, get_tiny_flux, get_tiny_unet
 
 pytest.importorskip("diffusers")
@@ -93,7 +94,6 @@ def test_export_diffusers_unet_quantized_matches_llm_config(tmp_path, monkeypatc
         ("int8", mtq.INT8_DEFAULT_CFG),
         ("int8_smoothquant", mtq.INT8_SMOOTHQUANT_CFG),
         ("fp8", mtq.FP8_DEFAULT_CFG),
-        ("fp4", mtq.NVFP4_DEFAULT_CFG),
     ],
 )
 def test_export_diffusers_real_quantized(tmp_path, model_factory, config_id, quant_cfg):
@@ -108,12 +108,30 @@ def test_export_diffusers_real_quantized(tmp_path, model_factory, config_id, qua
 
     mtq.quantize(model, quant_cfg, forward_loop=_calib_fn)
 
-    try:
-        export_hf_checkpoint(model, export_dir=export_dir)
-    except AssertionError as e:
-        if "block size" in str(e) and config_id == "fp4":
-            pytest.skip(f"Tiny model weights incompatible with FP4 block quantization: {e}")
-        raise
+    export_hf_checkpoint(model, export_dir=export_dir)
+
+    config_path = export_dir / "config.json"
+    assert config_path.exists()
+
+    config_data = _load_config(config_path)
+    assert "quantization_config" in config_data
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="FP4 export requires NVIDIA GPU")
+def test_export_diffusers_real_quantized_fp4(tmp_path):
+    """FP4 export test using get_tiny_dit (the only tiny model with FP4-compatible weight shapes)."""
+    model = get_tiny_dit()
+    export_dir = tmp_path / "export_DiTTransformer2DModel_fp4_real_quant"
+
+    def _calib_fn(m):
+        param = next(m.parameters())
+        dummy_inputs = generate_diffusion_dummy_inputs(m, param.device, param.dtype)
+        assert dummy_inputs is not None
+        m(**dummy_inputs)
+
+    mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, forward_loop=_calib_fn)
+
+    export_hf_checkpoint(model, export_dir=export_dir)
 
     config_path = export_dir / "config.json"
     assert config_path.exists()
