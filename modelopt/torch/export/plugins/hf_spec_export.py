@@ -15,11 +15,15 @@
 
 """Modify state_dict and config for exporting speculative decoding in official format."""
 
+import json
 import re
+from abc import abstractmethod
 from copy import deepcopy
+from pathlib import Path
 
 import torch
 import torch.nn as nn
+from safetensors.torch import save_file
 
 from .hf_spec_configs import kimik2_eagle_template_config, llama_eagle_template_config
 
@@ -80,20 +84,27 @@ def has_quant_opt(model: nn.Module):
     return any(mode[0] == "quantize" for mode in opt_modes)
 
 
-class EagleExporter:
+class SpeculativeDecodingExporter:
+    """Export an modelopt speculative decoding checkpoint to deployment format."""
+
+    def __init__(self, model: nn.Module):
+        """Initialize the SpeculativeDecodingExporter."""
+        self.model = model
+
+    @abstractmethod
+    def export(self, export_dir: Path | str, dtype: torch.dtype | None = None):
+        """Export the model to the deployment format."""
+        raise NotImplementedError("Subclasses must implement this method.")
+
+
+class EagleExporter(SpeculativeDecodingExporter):
     """Draft model exporter for Eagle."""
 
-    def __init__(self, model: nn.Module, dtype: torch.dtype | None = None):
+    def __init__(self, model: nn.Module):
         """Initialize the EagleExporter."""
-        self.model = model
+        super().__init__(model)
         self.eagle_decoder_type = model.eagle_config.eagle_decoder_type
         self.num_hidden_layers = model.eagle_config.num_hidden_layers
-        if has_quant_opt(model):
-            from ..unified_export_hf import _export_transformers_checkpoint
-
-            self.state_dict, self.hf_quant_config = _export_transformers_checkpoint(model, dtype)
-        else:
-            self.state_dict, self.hf_quant_config = model.state_dict(), None
 
     def _check_valid_sd(self, export_sd: dict):
         """Check the export state dict is valid, otherwise raise Exception."""
@@ -126,27 +137,27 @@ class EagleExporter:
                 in allowed_keys_single_layer
             ), f"Unexpected key: {key}"
 
-    def extract_state_dict(self):
-        """Extract the state dict of the draft model in deployment format."""
+    def _extract_state_dict(self, full_state_dict: dict):
+        """Extract and return eagle state dict in deployment format."""
         export_sd = {}
-        for key in self.state_dict:
+        for key in full_state_dict:
             if "eagle_module" in key or "lm_head" in key:
                 export_key = key.replace("eagle_module.", "")
-                export_sd[export_key] = self.state_dict[key].clone()
+                export_sd[export_key] = full_state_dict[key].clone()
         # Use base model's lm head if draft model doesn't have one
         if "lm_head.weight" not in export_sd:
-            export_sd["lm_head.weight"] = self.state_dict["lm_head.weight"]
+            export_sd["lm_head.weight"] = full_state_dict["lm_head.weight"]
 
         self._check_valid_sd(export_sd)
 
         return export_sd
 
-    def export_config(self, model):
+    def _export_config(self):
         """Export config.json in deployment format."""
         template_config: dict = {
             "llama": llama_eagle_template_config,
             "kimik2": kimik2_eagle_template_config,
-        }[model.eagle_config.eagle_decoder_type]
+        }[self.model.eagle_config.eagle_decoder_type]
         template_config = deepcopy(template_config)
 
         def _get_config_from_draft_or_base(key: str, model: nn.Module):
@@ -163,39 +174,62 @@ class EagleExporter:
                 # for eagle config, we find it in model.eagle_config
                 for sub_key in value:
                     if value[sub_key] is None:
-                        value[sub_key] = _get_config_from_draft_or_base(sub_key, model)
+                        value[sub_key] = _get_config_from_draft_or_base(sub_key, self.model)
             elif value is None:
                 # First, we try to load fron eagle config.
-                new_value = _get_config_from_draft_or_base(key, model)
+                new_value = _get_config_from_draft_or_base(key, self.model)
                 # If the value is a torch.dtype, we convert to string for serialization.
                 if isinstance(new_value, torch.dtype):
                     new_value = str(new_value).replace("torch.", "")
                 template_config[key] = new_value
 
-        if self.hf_quant_config is not None:
-            template_config["quantization_config"] = self.hf_quant_config
-
         return template_config
 
-    def export_quant_config(self):
-        """Export hf_quant_config.json."""
-        return deepcopy(self.hf_quant_config)
+    def export(self, export_dir: Path | str, dtype: torch.dtype | None = None):
+        """Export the model to the deployment format."""
+        # Make export dir
+        export_dir = Path(export_dir)
+        export_dir.mkdir(parents=True, exist_ok=True)
+
+        # Export quantized modules
+        if has_quant_opt(self.model):
+            from ..unified_export_hf import _export_transformers_checkpoint
+
+            full_sd, hf_quant_config = _export_transformers_checkpoint(self.model, dtype)
+        else:
+            full_sd, hf_quant_config = self.model.state_dict(), None
+
+        # Export state dit
+        drafter_sd = self._extract_state_dict(full_sd)
+        save_file(drafter_sd, f"{export_dir}/model.safetensors")
+
+        # Export config
+        drafter_config = self._export_config()
+        if hf_quant_config is not None:
+            drafter_config["quantization_config"] = hf_quant_config
+        with open(f"{export_dir}/config.json", "w") as file:
+            json.dump(drafter_config, file, indent=4)
+
+        # Export hf_quant_config for backward compatibility
+        if hf_quant_config is not None:
+            with open(f"{export_dir}/hf_quant_config.json", "w") as file:
+                json.dump(hf_quant_config, file, indent=4)
 
 
 class EagleMedusaExporter(EagleExporter):
     """Draft model exporter for EagleMedusa."""
 
-    def __init__(self, model: nn.Module, dtype: torch.dtype | None = None):
+    def __init__(self, model: nn.Module):
         """Initialize the EagleMedusaExporter."""
-        super().__init__(model, dtype)
+        super().__init__(model)
         self.parallel_draft_step = model.eagle_config.parallel_draft_step
         self.parallel_draft_heads_num_layers = model.eagle_config.parallel_draft_heads_num_layers
         # NOTE: tmp: bypassing format check for parallel draft
         self._check_valid_sd = lambda *args, **kwargs: None
 
-    def extract_state_dict(self):
+    def _extract_state_dict(self, full_state_dict: dict):
         """Extract the state dict of the draft model in deployment format."""
-        export_sd = super().extract_state_dict()
+        export_sd = super()._extract_state_dict(full_state_dict)
         if self.parallel_draft_step <= 1:
             return export_sd
 
