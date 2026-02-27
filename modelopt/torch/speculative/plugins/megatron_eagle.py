@@ -1121,12 +1121,18 @@ class _DynamicEagleGPTModel(EagleModel):
                 hidden_states = gather_from_sequence_parallel_region(hidden_states)
             logits_sbh = gather_from_tensor_model_parallel_region(logits_sbh)
             # In case of VLM, there will be other fields for pixels.
+            aux_hidden = None
+            if self.eagle_config.use_aux_hidden_state:
+                aux_hidden = eagle_module_input_hidden_states.squeeze(1).cpu()
+
+            hidden_states_cpu = None
+            if hidden_states is not None:
+                hidden_states_cpu = hidden_states.squeeze(1).cpu()
+
             return {
                 "input_ids": input_ids.squeeze(0).cpu(),
-                "aux_hidden_states": eagle_module_input_hidden_states.squeeze(1).cpu()
-                if self.eagle_config.use_aux_hidden_state
-                else None,
-                "hidden_states": hidden_states.squeeze(1).cpu(),
+                "aux_hidden_states": aux_hidden,
+                "hidden_states": hidden_states_cpu,
             }
         else:
             eagle_module_input_hidden_states = self._get_eagle_input_hidden_states(
