@@ -378,6 +378,12 @@ def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
         "Expected restore message when resuming from checkpoint"
     )
 
+    # Verify method is correctly persisted in checkpoint and state dicts
+    saved = torch.load(checkpoint_path, weights_only=False)
+    assert saved["method"] == method
+    assert state_dict_1["method"] == method
+    assert state_dict_2["method"] == method
+
     # Results should be identical when using same constraint
     assert state_dict_1["candidate_stats"] == state_dict_2["candidate_stats"]
     assert state_dict_1["best"]["recipe"] == state_dict_2["best"]["recipe"]

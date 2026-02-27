@@ -318,7 +318,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
     candidate_stats: dict[str, dict[str, list[float]]]
     best: dict[str, Any]
-    method_name: str
+    method_name: str = None
 
     quant_grouping_rules = [
         r"^(.*?)\.(q_proj|k_proj|v_proj)$",  # q_proj, k_proj, v_proj for llama like models
@@ -350,7 +350,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     def default_state_dict(self) -> SearchStateDict:
         """Get the default state dict for AutoQuantize."""
         return {
-            "method": None,
+            "method": self.method_name,
             "candidate_stats": defaultdict(dict),
             "best": {"recipe": {}, "constraints": {}, "score": float("inf"), "is_satisfied": False},
         }
@@ -575,6 +575,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         from modelopt.torch.quantization.model_quant import calibrate
 
         super().before_search()
+        self.method = self.method_name  # re-assert after possible checkpoint load
 
         search_recipes = self._get_search_recipes(self.config["quantization_formats"])
         self._verify_constraint(search_recipes)
@@ -666,7 +667,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
     def run_search(self):
         """Search for the best per-layer quantization configuration and return the best model and configuration."""
-        self.method = self.method_name
         verbose = self.config["verbose"]
         assert len(self.constraints) == 1 and "effective_bits" in self.constraints, (
             f"`constraints` must contain only 'effective_bits' constraint. "
