@@ -17,16 +17,17 @@ import math
 
 import torch
 import torch.nn as nn
-from _test_utils.torch.export.utils import ToyModel, partial_w4a8_config
+from _test_utils.torch.export.utils import ToyModel, partial_nvfp4_config, partial_w4a8_config
 from torch.nn import functional as F
 from torch.nn import init
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
 from modelopt.torch.quantization.nn.modules.quant_module import QuantModule, QuantModuleRegistry
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import TensorQuantizer
 from modelopt.torch.quantization.tensor_quant import QUANT_DESC_8BIT_PER_TENSOR
-from modelopt.torch.quantization.utils import quantizer_attr_names
+from modelopt.torch.quantization.utils import quantizer_attr_names, reduce_block_amax
 
 
 class ToyLinear(nn.Module):
@@ -121,3 +122,61 @@ def test_export_per_block_quantized_weight():
     assert hasattr(model.linears[2], quantizer_attrs.output_quantizer)
     assert not getattr(model.linears[2], quantizer_attrs.output_quantizer).is_enabled
     assert not hasattr(model.linears[2], quantizer_attrs.output_scale)
+
+
+def test_export_nvfp4_static_weight_dynamic_vs_static_match():
+    """Dynamic vs static NVFP4 export: same weight and scales after export even when amaxs are
+    cleared on one layer (lazy calibration via _ensure_weight_quantizer_calibrated fills them from weights).
+    """
+    device = "cuda"
+    dims = [32, 32, 32, 32]
+    block_size = 16
+    calib_input = torch.randn(1, 4, 32, device=device)
+    nvfp4_layer_indices = [1, 2]  # layers with NVFP4 enabled in partial_nvfp4_config
+
+    torch.manual_seed(42)
+    model_dynamic = ToyModel(dims=dims).to(device)
+    mtq.quantize(model_dynamic, partial_nvfp4_config, lambda x: x(calib_input))
+
+    torch.manual_seed(42)
+    model_static = ToyModel(dims=dims).to(device)
+    mtq.quantize(model_static, partial_nvfp4_config, lambda x: x(calib_input))
+
+    # Convert NVFP4 layers to NVFP4StaticQuantizer with per-block and global amax
+    for idx in nvfp4_layer_indices:
+        layer = model_static.linears[idx]
+        weight = layer.weight.data
+        per_block_amax = reduce_block_amax(weight, block_sizes={-1: block_size})
+        tq = layer.weight_quantizer
+        if hasattr(tq, "_amax"):
+            delattr(tq, "_amax")
+        tq.register_buffer("_amax", per_block_amax.to(weight.device).clone().detach())
+        NVFP4StaticQuantizer.from_tensor_quantizer(tq, global_amax=per_block_amax.max())
+
+    # Clear amaxs on layer 1 to exercise lazy calibration during export
+    for linear, is_static in [(model_dynamic.linears[1], False), (model_static.linears[1], True)]:
+        wq = linear.weight_quantizer
+        if hasattr(wq, "_amax"):
+            delattr(wq, "_amax")
+        if is_static and hasattr(wq, "_global_amax"):
+            delattr(wq, "_global_amax")
+
+    quantizer_attrs = quantizer_attr_names("weight")
+    for idx in nvfp4_layer_indices:
+        _export_quantized_weight(model_dynamic.linears[idx], torch.float32, "weight")
+        _export_quantized_weight(model_static.linears[idx], torch.float32, "weight")
+
+    for idx in nvfp4_layer_indices:
+        dyn_linear = model_dynamic.linears[idx]
+        sta_linear = model_static.linears[idx]
+        assert torch.equal(dyn_linear.weight, sta_linear.weight), (
+            f"Layer {idx}: exported NVFP4 weight should match (dynamic vs static)"
+        )
+        assert torch.allclose(
+            getattr(dyn_linear, quantizer_attrs.weight_scale).float(),
+            getattr(sta_linear, quantizer_attrs.weight_scale).float(),
+        ), f"Layer {idx}: weight_scale should match"
+        assert torch.allclose(
+            getattr(dyn_linear, quantizer_attrs.weight_scale_2).float(),
+            getattr(sta_linear, quantizer_attrs.weight_scale_2).float(),
+        ), f"Layer {idx}: weight_scale_2 should match"

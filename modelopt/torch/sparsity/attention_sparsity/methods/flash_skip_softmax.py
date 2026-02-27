@@ -173,17 +173,18 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             block_max_larger = torch.ones_like(block_max)
             block_max_larger[..., 1:] = block_max[..., 1:] > block_max_cummax[..., :-1]
             correction_factor = (block_max_larger.sum() / block_max_larger.numel()).item()
+            del block_max, block_max_larger
 
-            # Step 4: Normalize attention scores by cumulative max
-            # p represents log-space difference: log(score) - log(cummax)
-            p = blocked_attn - block_max_cummax[..., None]
+            # Step 4 & 5: Compute threshold mask directly without storing p.
+            # Fusing the subtraction and comparison avoids allocating a second
+            # full attention-matrix-sized tensor alongside blocked_attn.
+            p_larger_than_thresh = (blocked_attn - block_max_cummax[..., None]) > log_threshold
+            del block_max_cummax
 
-            # Step 5: Apply threshold and create block-level mask
-            # Keep blocks where at least one element exceeds log(threshold)
-            p_larger_than_thresh = p > log_threshold
             # Reduce over bc (128 cols), then br (128 rows) to get block-level decision
             # Result: [batch, heads, block_rows, block_cols]
             block_mask = p_larger_than_thresh.any(dim=-1).any(dim=-2)
+            del p_larger_than_thresh
 
             # Step 6: Expand block mask back to element level
             # All 128x128 elements in a block share the same mask value
@@ -227,15 +228,14 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             block_max_larger = torch.ones_like(block_max)
             block_max_larger[..., 1:] = block_max[..., 1:] > block_max_cummax[..., :-1]
             correction_factor = (block_max_larger.sum() / block_max_larger.numel()).item()
+            del block_max, block_max_larger
 
-            # Step 4: Normalize scores by cumulative max
-            # p = log(score) - log(cummax) in log-space
-            p = blocked_attn - block_max_cummax[..., None]
+            # Step 4 & 5: Compute threshold mask directly without storing p.
+            p_larger_than_thresh = (blocked_attn - block_max_cummax[..., None]) > log_threshold
+            del block_max_cummax
 
-            # Step 5: Apply threshold and create block mask
-            # Keep blocks where at least one element exceeds threshold
-            p_larger_than_thresh = p > log_threshold
             block_mask = p_larger_than_thresh.any(dim=-1, keepdim=False)
+            del p_larger_than_thresh
 
             # Step 6: Expand to element level and remove padding
             element_mask = block_mask[..., None].expand_as(blocked_attn)

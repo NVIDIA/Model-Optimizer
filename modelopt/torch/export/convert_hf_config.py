@@ -15,7 +15,98 @@
 
 """Convert modelopt quantization export config to align with llm-compressor config format."""
 
+import warnings
+from collections import defaultdict
 from typing import Any
+
+
+def _quant_algo_to_group_config(quant_algo: str, group_size: int | None = None) -> dict[str, Any]:
+    """Map a per-layer quant_algo string to compressed-tensors config group details.
+
+    Args:
+        quant_algo: The quantization algorithm name (e.g. "FP8", "NVFP4").
+        group_size: Optional group size for block-wise quantization algorithms.
+
+    Returns:
+        Dictionary with ``input_activations`` and ``weights`` entries suitable for
+        a compressed-tensors ``config_groups`` entry.
+    """
+    if quant_algo == "FP8":
+        return {
+            "input_activations": {"dynamic": False, "num_bits": 8, "type": "float"},
+            "weights": {"dynamic": False, "num_bits": 8, "type": "float"},
+        }
+    elif quant_algo == "FP8_PER_CHANNEL_PER_TOKEN":
+        return {
+            "input_activations": {"dynamic": False, "num_bits": 8, "type": "float"},
+            "weights": {"dynamic": False, "num_bits": 8, "type": "float", "strategy": "channel"},
+        }
+    elif quant_algo == "NVFP4":
+        gs = group_size or 16
+        return {
+            "input_activations": {
+                "dynamic": False,
+                "num_bits": 4,
+                "type": "float",
+                "group_size": gs,
+            },
+            "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": gs},
+        }
+    elif quant_algo == "W4A16_AWQ":
+        gs = group_size or 128
+        return {
+            "weights": {"dynamic": False, "num_bits": 4, "type": "int", "group_size": gs},
+        }
+    elif quant_algo in ("NVFP4_AWQ", "W4A8_AWQ"):
+        gs = group_size or 128
+        return {
+            "input_activations": {
+                "dynamic": False,
+                "num_bits": 8,
+                "type": "float",
+                "group_size": gs,
+            },
+            "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": gs},
+        }
+    elif quant_algo == "W8A16":
+        return {
+            "weights": {"dynamic": False, "num_bits": 8, "type": "int"},
+        }
+    elif quant_algo == "W8A8_SQ_PER_CHANNEL":
+        return {
+            "input_activations": {"dynamic": False, "num_bits": 8, "type": "int"},
+            "weights": {
+                "dynamic": False,
+                "num_bits": 8,
+                "type": "int",
+                "strategy": "channel",
+            },
+        }
+    elif quant_algo in ("W4A8_NVFP4_FP8", "W4A8_MXFP4_FP8"):
+        gs = group_size or 16
+        return {
+            "input_activations": {"dynamic": False, "num_bits": 8, "type": "float"},
+            "weights": {"dynamic": False, "num_bits": 4, "type": "float", "group_size": gs},
+        }
+    elif quant_algo == "MXFP8":
+        gs = group_size or 32
+        return {
+            "input_activations": {
+                "dynamic": False,
+                "num_bits": 8,
+                "type": "float",
+                "group_size": gs,
+            },
+            "weights": {"dynamic": False, "num_bits": 8, "type": "float", "group_size": gs},
+        }
+    else:
+        warnings.warn(
+            f"Unsupported quantization algorithm '{quant_algo}' in "
+            f"_quant_algo_to_group_config. The resulting config group will not contain "
+            f"'input_activations' or 'weights' keys and may not be compatible with "
+            f"compressed-tensors consumers. Please add explicit support for this algorithm."
+        )
+        return {"quant_algo": quant_algo}
 
 
 def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, Any]:
@@ -92,6 +183,30 @@ def convert_hf_quant_config_format(input_config: dict[str, Any]) -> dict[str, An
             "targets": ["Linear"],
         }
         new_config["config_groups"] = {"group_0": config_group_details}
+    elif quant_algo_value == "MIXED_PRECISION":
+        quantized_layers = original_quantization_details.get("quantized_layers", {})
+
+        # Group layers by their unique quantization config so each distinct
+        # (quant_algo, group_size, ...) combination becomes one config_group.
+        algo_to_layers: dict[tuple, list[str]] = defaultdict(list)
+        for layer_name, layer_cfg in quantized_layers.items():
+            # Create a hashable key from the layer config
+            key = tuple(sorted(layer_cfg.items()))
+            algo_to_layers[key].append(layer_name)
+
+        config_groups: dict[str, Any] = {}
+        for idx, (config_key, layer_names) in enumerate(algo_to_layers.items()):
+            layer_cfg = dict(config_key)
+            algo = layer_cfg.get("quant_algo", "")
+            layer_group_size = layer_cfg.get("group_size")
+
+            group_config = _quant_algo_to_group_config(algo, layer_group_size)
+            group_config["targets"] = sorted(layer_names)
+            config_groups[f"group_{idx}"] = group_config
+
+        new_config["config_groups"] = config_groups
+        # Preserve the full per-layer detail for consumers that need it.
+        new_config["quantized_layers"] = quantized_layers
 
     exclude_modules = original_quantization_details.get("exclude_modules")
 
