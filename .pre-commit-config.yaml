@@ -1,4 +1,4 @@
-# NOTE: Make sure to update version in dev requirements (setup.py) as well!
+# NOTE: Make sure to update version in dev requirements (pyproject.toml) as well!
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

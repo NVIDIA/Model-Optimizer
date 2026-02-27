@@ -10,7 +10,7 @@ on:
       - ".github/workflows/unit_tests.yml"
       - "modelopt/**"
       - "tests/unit/**"
-      - "setup.py"
+      - "pyproject.toml"
       - "tox.ini"
   schedule:
     - cron: "0 0 * * *" # Nightly

@@ -42,7 +42,7 @@ jobs:
             .github/workflows/example_tests.yml
             examples/**
             modelopt/**
-            setup.py
+            pyproject.toml
             tests/examples/**
           fail_on_initial_diff_error: true
   wait-checks:

@@ -43,8 +43,8 @@ jobs:
             .github/workflows/gpu_tests.yml
             modelopt/**
             tests/gpu/**
+            pyproject.toml
             tox.ini
-            setup.py
           fail_on_initial_diff_error: true
   wait-checks:
     needs: [check-file-changes]
