@@ -9,27 +9,27 @@ ModelOpt's Speculative Decoding module (:mod:`modelopt.torch.speculative <modelo
 enables your model to generate multiple tokens in each generate step. This can be useful for reducing the
 latency of your model and speeds up inference.
 
-Below are the speculative decoding algorithms supported by ModelOpt:
-- Medusa
-- EAGLE
+ModelOpt implements the **EAGLE3** algorithm for speculative decoding, which predicts future hidden
+states through a lightweight autoregressive decoder to achieve high token acceptance rates.
 
-
-Follow the steps described below to obtain a model with Medusa or EAGLE speculative decoding using ModelOpt's
-Speculative Decoding module :mod:`modelopt.torch.speculative`:
+Follow the steps described below to obtain a model with EAGLE3 speculative decoding:
 
 #.  **Convert your model via** :meth:`mtsp.convert <modelopt.torch.speculative.speculative_decoding.convert>`:
-    Add Medusa heads or EAGLE module to your model.
-#.  **Fine-tune Medusa heads or EAGLE module**: Fine-tune the Medusa heads or EAGLE module.
-    The base model is recommended to be frozen.
+    Attach the EAGLE3 draft module to your base model.
+#.  **Fine-tune the EAGLE3 module**: Fine-tune the draft module using online or offline training.
+    The base model is frozen throughout.
 #.  **Checkpoint and re-load**: Save the model via :meth:`mto.save <modelopt.torch.opt.conversion.save>` and
     restore via :meth:`mto.restore <modelopt.torch.opt.conversion.restore>`
+#.  **Export**: Export the checkpoint to a deployment-compatible format using
+    :func:`export_speculative_decoding <modelopt.torch.export.export_speculative_decoding>`.
+#.  **Deploy**: Serve the exported model with TRT-LLM, vLLM, or SGLang.
 
 .. _speculative_conversion:
 
 Convert
 =======
 
-You can convert your model to a speculative decoding model using :meth:`mtsp.convert()
+You can convert your model to an EAGLE3 speculative decoding model using :meth:`mtsp.convert()
 <modelopt.torch.speculative.speculative_decoding.convert>`.
 
 Example usage:
@@ -40,32 +40,50 @@ Example usage:
     from transformers import AutoModelForCausalLM, AutoTokenizer
     import modelopt.torch.speculative as mtsp
 
-    # User-defined model
-    model = AutoModelForCausalLM.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
-    tokenizer = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+    # Load base model
+    model = AutoModelForCausalLM.from_pretrained(
+        "meta-llama/Llama-3.2-1B-Instruct",
+        torch_dtype="auto",
+        device_map="cpu",       # load on CPU first to avoid OOM; moved to GPU by the trainer
+    )
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B-Instruct")
     tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    if mode == "medusa":
-        # Configure and convert to medusa
-        config = {
-            "medusa_num_heads": 2,
-            "medusa_num_layers": 1,
-            }
-    elif mode == "eagle":
-        config = {
-            "eagle_num_layers": 1
-            }
-    mtsp.convert(model, [(mode, config)])
+    # Configure and convert to EAGLE3
+    config = {
+        "eagle_decoder_type": "llama",          # decoder architecture; use "kimik2" for Kimi-K2 models
+        "eagle_architecture_config": {
+            "num_hidden_layers": 1,             # depth of the draft decoder (default: 1)
+            # "intermediate_size": 8192,        # MLP hidden size (default: inferred from base model)
+        },
+    }
+    mtsp.convert(model, [("eagle", config)])
+
+.. note::
+
+    The ``eagle_architecture_config`` dict overrides default EAGLE3 architecture settings.
+    ``hidden_size``, ``vocab_size``, and ``max_position_embeddings`` are automatically inferred
+    from the base model and do not need to be set manually. See the
+    `example eagle_config.json <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/speculative_decoding/eagle_config.json>`_
+    for all available options.
 
 
-Fine-tune speculative decoding model and store/restore the model
-----------------------------------------------------------------
+Fine-tune EAGLE3 module
+------------------------
 
-After converting to a speculative decoding model, you need to fine-tune the decoding module:
+After conversion, fine-tune the draft module. The base model weights are frozen by default
+(controlled by ``eagle_freeze_base_model`` in ``EagleConfig``). ModelOpt supports two training
+modes depending on hardware constraints:
+
+Online Training
+^^^^^^^^^^^^^^^
+
+In online training the base model and draft module are co-located in GPU memory. The base model
+performs forward passes at each training step to produce hidden states for the draft module.
+This is recommended for smaller base models (e.g., 1B–8B parameters).
 
 .. code-block:: python
 
-    import os
     from transformers import Trainer
     import modelopt.torch.opt as mto
 
@@ -78,12 +96,125 @@ After converting to a speculative decoding model, you need to fine-tune the deco
     trainer.save_state()
     trainer.save_model("<path to the output directory>")
 
+.. note::
 
-To restore the saved speculative decoding model:
+    `FSDP2 <https://pytorch.org/docs/stable/fsdp.html>`_ is used by default for distributed training.
+    For long-context training, context parallelism can be enabled by setting ``cp_size > 1`` in
+    ``ParallelismConfig``.
+
+.. tip::
+
+    Training on conversations generated by the base model (rather than human-written data) improves
+    acceptance rates, since the draft module learns to mimic the target distribution more closely.
+    See the ``scripts/server_generate.py`` script in the example directory for data synthesis.
+
+Offline Training
+^^^^^^^^^^^^^^^^
+
+For large base models (e.g., 70B+ parameters) that cannot be co-located with the draft module in
+GPU memory, you can pre-compute and dump hidden states to disk, then train only the draft module.
+This decouples base model inference from draft model training and significantly reduces GPU memory
+requirements.
+
+.. note::
+
+    Offline training requires several to tens of terabytes of disk storage depending on dataset
+    size and base model hidden dimension.
+
+**Step 1 — Dump hidden states to disk**
+
+Two backends are supported:
+
+.. code-block:: bash
+
+    # Recommended: TRT-LLM backend (higher throughput)
+    python collect_hidden_states/compute_hidden_states_trtllm.py \
+        --model $BASE_MODEL \
+        --input-file input_conversations/daring-anteater.jsonl \
+        --output-dir $HIDDEN_STATES_DIR
+
+    # Alternative: HuggingFace backend
+    python collect_hidden_states/compute_hidden_states_hf.py \
+        --model $BASE_MODEL \
+        --input-file input_conversations/daring-anteater.jsonl \
+        --output-dir $HIDDEN_STATES_DIR
+
+Each output ``.pt`` file contains the tokenized input and the corresponding hidden states from
+all required layers of the base model.
+
+**Step 2 — Convert and train using pre-computed hidden states**
+
+Set ``eagle_offline=True`` in the config to enable offline mode, then point the data loader to
+the pre-computed hidden state files:
+
+.. code-block:: python
+
+    config = {
+        "eagle_decoder_type": "llama",
+        "eagle_offline": True,                  # use pre-computed hidden states; skip base model forward pass
+        "eagle_architecture_config": {
+            "num_hidden_layers": 1,
+        },
+    }
+    mtsp.convert(model, [("eagle", config)])
+
+    # Then train as usual, with offline_data_path pointing to $HIDDEN_STATES_DIR
+
+
+Checkpoint and re-load
+-----------------------
+
+To restore the saved EAGLE3 model:
 
 .. code-block:: python
 
     model = AutoModelForCausalLM.from_pretrained("<path to the output directory>")
+
+
+Validation
+==========
+
+After online training, you can evaluate the acceptance rate (AR) on MT-Bench to gauge draft quality
+before exporting:
+
+.. code-block:: bash
+
+    python scripts/ar_validate.py --model_path $ONLINE_CKPT
+
+.. note::
+
+    In-framework AR evaluation is supported only for online training checkpoints. For offline
+    training checkpoints, export the model first and evaluate with a serving framework.
+
+
+Export
+======
+
+After training, export the ModelOpt checkpoint to a deployment-compatible format that can be
+served by TRT-LLM, vLLM, or SGLang:
+
+.. code-block:: python
+
+    from modelopt.torch.export import export_speculative_decoding
+
+    export_speculative_decoding(model, export_dir="<export_path>")
+
+Alternatively, use the provided export script from the example directory:
+
+.. code-block:: bash
+
+    python scripts/export_hf_checkpoint.py \
+        --model_path $OUTPUT_DIR \
+        --export_path $EXPORT_PATH
+
+The exported checkpoint separates the base model and draft module weights into independent
+directories that serving frameworks can load directly.
+
+
+Deployment
+==========
+
+The exported checkpoint can be deployed on TRT-LLM, vLLM, or SGLang.
 
 .. _speculative-concepts:
 
@@ -95,34 +226,38 @@ concepts and terminology.
 
 Speculative decoding
 --------------------
+
 The standard way of generating text from a language model is with autoregressive decoding: one token
 is generated each step and appended to the input context for the next token generation. This means
 to generate *K* tokens it will take *K* serial runs of the model. Inference from large autoregressive
 models like Transformers can be slow and expensive. Therefore, various *speculative decoding* algorithms
 have been proposed to accelerate text generation, especially in latency critical applications.
 
-Typically, a short draft of length *K* is generated using a faster, auto-regressive model, called draft
-model. This can be attained with either a parallel model or by calling the draft model *K* times.
-Then, a larger and more powerful model, called target model, is used to score the draft. Last, a sampling
-scheme is used to decide which draft to accept by the target model, recovering the distribution of the
-target model in the process.
+Typically, a short draft of length *K* is generated using a faster model, called the *draft model*.
+Then, a larger and more powerful model, called the *target model*, verifies the draft in a single
+forward pass. A sampling scheme decides which draft tokens to accept, recovering the output
+distribution of the target model in the process.
 
-Medusa algorithm
+EAGLE3 algorithm
 ----------------
 
-There are many ways to achieve speculative decoding. A popular approach is Medusa where instead of
-using an additional draft model, it introduces a few additional decoding heads to predict multiple
-future tokens simultaneously. During generation, these heads each produce multiple likely words for
-the corresponding position. These options are then combined and processed using a tree-based attention
-mechanism. Finally, a typical acceptance scheme is employed to pick the longest plausible prefix from
-the candidates for further decoding. Since the draft model is the target model itself, this guarantees
-the output distribution is the same as that of the target model.
+EAGLE3 attaches a lightweight autoregressive decoder (the draft module) to a frozen base model.
+Unlike token-level autoregression, the draft module operates at the *feature level*: it predicts
+future hidden states, which are then projected to token logits. Autoregression over hidden states
+is an easier task than over tokens, so the draft module achieves high prediction accuracy with low
+compute cost.
 
-EAGLE algorithm
----------------
+Compared to earlier EAGLE versions, EAGLE3 uses auxiliary hidden states from **multiple intermediate
+layers** of the base model as additional input to the draft decoder, not just the final layer output.
+This richer signal enables the draft module to more accurately predict the base model's next-layer
+representations, resulting in higher token acceptance rates and greater inference speedup.
 
-Unlike Medusa that predicts future tokens based on the base model hidden states, EAGLE predicts
-future hidden states through a lightweight autoregressive decoder, which is then used to
-predict the future tokens. Since autoregression at the feature (hidden states) level is simpler
-than at the token level, EAGLE can predict future tokens more accurately than Medusa. Therefore, it
-achieves higher speedup.
+Key training parameters exposed through ``EagleConfig``:
+
+- ``eagle_freeze_base_model`` *(default: True)*: Keep the base model weights frozen during training.
+- ``eagle_self_logit_distillation`` *(default: True)*: Apply logit-level distillation loss in
+  addition to hidden state regression, further improving acceptance rates.
+- ``eagle_offline`` *(default: False)*: Use pre-computed hidden states from disk instead of running
+  the base model forward pass at each step (for large model offline training).
+- ``eagle_loss_decay_factor`` *(default: 0.9)*: Exponential decay applied to losses at successive
+  draft steps, weighting earlier steps more heavily.
