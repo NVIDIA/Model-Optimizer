@@ -633,6 +633,14 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         self.save_search_checkpoint(verbose=self.config["verbose"])
 
     @staticmethod
+    def _print_recipe_summary(best_recipe, total_cost, total_weight_size, prefix="AutoQuantize"):
+        for name, recipe in best_recipe.items():
+            print_rank_0(f"{prefix} best recipe for {name.replace('.quant_recipe', '')}: {recipe}")
+        effective_bits = (total_cost / total_weight_size) * 16
+        print_rank_0(f"{prefix} effective bits: {effective_bits:.2f}")
+        return effective_bits
+
+    @staticmethod
     def _get_total_weight_size(modules):
         return sum(
             (
@@ -689,16 +697,13 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             get_hparam(self.model, name).active = best_format
             best_constraints += best_hparam_recipe_info["costs"]
             best_scores += best_hparam_recipe_info["scores"]
-            if verbose:
-                print_rank_0(
-                    f"AutoQuantize best recipe for {name.replace('.quant_recipe', '')}: {best_recipe[name]}"
-                )
 
-        effective_bits_from_search = (best_constraints / total_weight_size) * 16
         if verbose:
-            print_rank_0(
-                f"AutoQuantize effective bits from search: {effective_bits_from_search: .2f}"
+            effective_bits_from_search = self._print_recipe_summary(
+                best_recipe, best_constraints, total_weight_size
             )
+        else:
+            effective_bits_from_search = (best_constraints / total_weight_size) * 16
 
         self.best["recipe"] = best_recipe
         self.best["constraints"] = {"effective_bits": effective_bits_from_search}
@@ -1248,7 +1253,7 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
 AutoQuantizeSearcher = AutoQuantizeGradientSearcher
 
 
-def get_config_from_auto_quantize(search_state, constraints=None):
+def get_config_from_auto_quantize(search_state, constraints=None, verbose=False):
     """Build a flat quant config dict from auto_quantize search_state.
 
     Re-solves for ``constraints`` if provided, otherwise uses the best recipe from the search.
@@ -1256,12 +1261,13 @@ def get_config_from_auto_quantize(search_state, constraints=None):
     Args:
         search_state: The state dict returned by :func:`auto_quantize`.
         constraints: Optional dict with ``effective_bits`` key to re-solve for a new target.
+        verbose: If True, prints the per-layer recipe assignments.
 
     Returns:
         A config dict suitable for :func:`quantize`.
     """
     if constraints is not None:
-        best_recipe = _resolve_best_recipe(search_state, constraints)
+        best_recipe = _resolve_best_recipe(search_state, constraints, verbose=verbose)
     else:
         best_recipe = search_state["best"]["recipe"]
 
@@ -1282,7 +1288,7 @@ def get_config_from_auto_quantize(search_state, constraints=None):
     return {"quant_cfg": quant_cfg, "algorithm": "max"}
 
 
-def _resolve_best_recipe(search_state, constraints):
+def _resolve_best_recipe(search_state, constraints, verbose=False):
     effective_bits = constraints["effective_bits"]
     compression = effective_bits / 16.0
     candidate_stats = search_state["candidate_stats"]
@@ -1295,8 +1301,16 @@ def _resolve_best_recipe(search_state, constraints):
     else:
         searcher = AutoQuantizeKLDivSearcher()
     searcher.candidate_stats = candidate_stats
-    best_recipe_info, _ = searcher.run_search_with_stats(max_weight_size)
-    return {name: info["format"] for name, info in best_recipe_info.items()}
+    best_recipe_info, _ = searcher.run_search_with_stats(max_weight_size, verbose=verbose)
+
+    best_recipe = {name: info["format"] for name, info in best_recipe_info.items()}
+    if verbose:
+        total_cost = sum(info["costs"] for info in best_recipe_info.values())
+        _AutoQuantizeBaseSearcher._print_recipe_summary(
+            best_recipe, total_cost, total_weight_size, prefix="get_config_from_auto_quantize"
+        )
+
+    return best_recipe
 
 
 def _match_quantizer_cfg(quant_cfg, quantizer_attr):

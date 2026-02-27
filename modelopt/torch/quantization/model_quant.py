@@ -491,7 +491,7 @@ def auto_quantize(
     return model, searcher.state_dict()
 
 
-def get_config_from_auto_quantize(search_state, constraints=None):
+def get_config_from_auto_quantize(search_state, constraints=None, verbose=False):
     """Build a flat quant config from auto_quantize search_state.
 
     Re-solves for ``constraints`` if provided, otherwise uses the stored best recipe.
@@ -500,6 +500,7 @@ def get_config_from_auto_quantize(search_state, constraints=None):
         search_state: The state dict returned by :func:`auto_quantize`.
         constraints: Optional dict, e.g. ``{"effective_bits": 5.5}``, to re-solve for a
             different target without re-running calibration or scoring.
+        verbose: If True, prints the per-layer recipe assignments.
 
     Returns:
         A config dict suitable for :func:`quantize`.
@@ -522,7 +523,7 @@ def get_config_from_auto_quantize(search_state, constraints=None):
             fresh_model = load_model(...)
             mtq.quantize(fresh_model, config, forward_loop=calibrate_loop)
     """
-    return _get_config_from_auto_quantize(search_state, constraints)
+    return _get_config_from_auto_quantize(search_state, constraints, verbose=verbose)
 
 
 def disable_quantizer(model: nn.Module, wildcard_or_filter_func: str | Callable):
