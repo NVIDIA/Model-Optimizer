@@ -112,13 +112,6 @@ class HeterogeneousBridgeMixin:
         )
         return GenericHeterogeneousProvider(**provider_kwargs)
 
-    @classmethod
-    def megatron_to_hf_config(cls, provider: GPTModelProvider) -> dict:
-        raise NotImplementedError(
-            "megatron_to_hf_config() not yet implemented for AnyModel bridges. "
-            "AnyModel bridges require special handling for heterogeneous layer configurations."
-        )
-
     def _build_heterogeneous_config_json(self, hf_config) -> str:
         """Build heterogeneous layers config JSON from HF config."""
 
