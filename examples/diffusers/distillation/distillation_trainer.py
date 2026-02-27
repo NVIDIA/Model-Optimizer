@@ -591,10 +591,9 @@ class DistillationTrainer(LtxvTrainer):
                         f"Resuming: restoring quantization architecture from "
                         f"{modelopt_state_path} (weights loaded later by accelerator)"
                     )
-                    # Security NOTE: weights_only=False is used on ModelOpt-generated state,
-                    # not on untrusted user input.
-                    state = torch.load(modelopt_state_path, weights_only=False, map_location="cpu")
-                    self._transformer = mto.restore_from_modelopt_state(self._transformer, state)
+                    self._transformer = mto.restore_from_modelopt_state(
+                        self._transformer, modelopt_state_path=modelopt_state_path
+                    )
                     logger.info("Quantization architecture restored for resume")
                     return
                 else:

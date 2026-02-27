@@ -129,9 +129,7 @@ Here is the example workflow of restoring the ModelOpt-modified model architectu
     model = ...
 
     # Restore the model architecture using the saved `modelopt_state`
-    # Security NOTE: weights_only=False is used here on ModelOpt-generated state_dict, not on untrusted user input
-    modelopt_state = torch.load("modelopt_state.pth", weights_only=False)
-    model = mto.restore_from_modelopt_state(model, modelopt_state)
+    model = mto.restore_from_modelopt_state(model, modelopt_state_path="modelopt_state.pth")
 
     # Load the model weights separately after restoring the model architecture
     custom_method_to_load_model_weights(model)
