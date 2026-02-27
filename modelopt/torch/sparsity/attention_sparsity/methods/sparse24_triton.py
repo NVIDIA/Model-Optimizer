@@ -141,15 +141,24 @@ class Sparse24Triton(SparseAttentionMethod):
 
     @contextlib.contextmanager
     def get_sparse_context(self, module: torch.nn.Module):
-        """Set _apply_sparse24 and _skip_diagonal_blocks on module for the Triton kernel."""
+        """Set _apply_sparse24 and _skip_diagonal_blocks on module for the Triton kernel.
+
+        Sets both module attributes (for the transformers ``ALL_ATTENTION_FUNCTIONS``
+        path) and a thread-local (for the diffusers ``dispatch_attention_fn`` path).
+        """
+        from modelopt.torch.sparsity.attention_sparsity.kernels.diffusers_triton_attention import (
+            set_sparse24_context,
+        )
+
+        effective_skip = self.skip_diagonal_blocks and self.is_causal
         module._apply_sparse24 = True
-        # Diagonal skip only applies to causal self-attention; for cross-attention
-        # there is no diagonal relationship between Q and K positions.
-        module._skip_diagonal_blocks = self.skip_diagonal_blocks and self.is_causal
+        module._skip_diagonal_blocks = effective_skip
+        set_sparse24_context(True, effective_skip)
         try:
             yield
         finally:
             module._apply_sparse24 = False
+            set_sparse24_context(False, True)
 
     def get_threshold_info(self) -> dict[str, Any]:
         """Return fixed 2:4 pattern info."""

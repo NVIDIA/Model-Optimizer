@@ -23,6 +23,7 @@ IS_AVAILABLE = False
 context_attention_fwd = None
 context_attention = None
 register_triton_attention = None
+register_diffusers_triton_attention = None
 set_sparse24 = None
 
 if torch.cuda.is_available():
@@ -47,10 +48,18 @@ if torch.cuda.is_available():
             set_sparse24 = _set_sparse24
             _register_triton_attention()
 
+        with import_plugin("diffusers"):
+            from .diffusers_triton_attention import (
+                register_diffusers_triton_attention as _register_diffusers_triton_attention,
+            )
+
+            register_diffusers_triton_attention = _register_diffusers_triton_attention
+
 __all__ = [
     "IS_AVAILABLE",
     "context_attention",
     "context_attention_fwd",
+    "register_diffusers_triton_attention",
     "register_triton_attention",
     "set_sparse24",
 ]
