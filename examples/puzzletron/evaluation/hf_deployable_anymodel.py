@@ -1,10 +1,35 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# Adapted from https://github.com/EleutherAI/lm-evaluation-harness/tree/aa457edc3d64d81530159cd3a182932320c78f8c
+
+# MIT License
+#
+# Copyright (c) 2020 EleutherAI
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +38,7 @@
 # limitations under the License.
 
 
+import json
 import logging
 from typing import Any
 
@@ -27,6 +53,11 @@ from nemo_export_deploy_common.import_utils import (
 )
 from peft import PeftModel
 from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
+
+from modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor_factory import (
+    resolve_descriptor_from_pretrained,
+)
+from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
 
 try:
     from pytriton.decorators import batch
@@ -139,18 +170,12 @@ class HuggingFaceLLMDeploy(ITritonDeployable):
             # Wraps model loading with deci_x_patcher for heterogeneous layer configs.
             # See: modelopt/torch/puzzletron/anymodel/puzzformer/utils.py
             # =========================================================================
-            import os
-            import sys
 
-            modelopt_workdir = os.environ.get("MODELOPT_WORKDIR") or os.environ.get(
-                "PUZZLE_WORKDIR"
+            descriptor = resolve_descriptor_from_pretrained(
+                self.hf_model_id_path, trust_remote_code=hf_kwargs.get("trust_remote_code", False)
             )
-            if modelopt_workdir and modelopt_workdir not in sys.path:
-                sys.path.insert(0, modelopt_workdir)
-            from modelopt.torch.puzzletron.anymodel.models.llama import LlamaModelDescriptor
-            from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
 
-            with deci_x_patcher(model_descriptor=LlamaModelDescriptor):
+            with deci_x_patcher(model_descriptor=descriptor):
                 self.model = AutoModelForCausalLM.from_pretrained(
                     self.hf_model_id_path,
                     torch_dtype=torch_dtype,
@@ -587,8 +612,6 @@ class HuggingFaceLLMDeploy(ITritonDeployable):
                 - log_probs: Optional list of log probabilities if compute_logprob is True
                 - top_logprobs: Optional list of top log probabilities if n_top_logprobs > 0
         """
-        import json
-
         try:
             prompts = inputs.pop("prompts")
             temperature = inputs.pop("temperature", 1.0)

@@ -17,9 +17,45 @@
 import inspect
 from typing import Callable, Type
 
+from transformers import AutoConfig
+
 from modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor import ModelDescriptor
 
 __all__ = ["ModelDescriptorFactory"]
+
+# Map from HuggingFace config.model_type (in checkpoint config.json) to ModelDescriptorFactory name.
+# Local to this script; add entries when supporting new model types for auto-detection.
+_MODEL_TYPE_TO_DESCRIPTOR = {
+    "llama": "llama",
+    "mistral": "mistral_small",
+    "qwen2": "qwen2",
+    "qwen3": "qwen3",
+    "nemotron_h": "nemotron_h",
+    "nemotron_h_v2": "nemotron_h_v2",
+    "gpt_oss_20b": "gpt_oss_20b",
+}
+
+
+def resolve_descriptor_from_pretrained(pretrained: str | None, trust_remote_code: bool = True):
+    """Resolve the model descriptor by loading the checkpoint config and mapping model_type."""
+    if not pretrained:
+        raise ValueError("pretrained must be provided")
+
+    config = AutoConfig.from_pretrained(pretrained, trust_remote_code=trust_remote_code)
+    model_type = getattr(config, "model_type", None)
+
+    if model_type and model_type in _MODEL_TYPE_TO_DESCRIPTOR:
+        detected = _MODEL_TYPE_TO_DESCRIPTOR[model_type]
+        print(
+            f"[resolve_descriptor_from_pretrained] Auto-detected model_type='{model_type}' → descriptor='{detected}'"
+        )
+        return ModelDescriptorFactory.get(detected)
+
+    known = sorted(_MODEL_TYPE_TO_DESCRIPTOR.keys())
+    raise ValueError(
+        f"Cannot auto-detect descriptor for model_type='{model_type}'. "
+        f"Known model types: {known}. Add this model_type to _MODEL_TYPE_TO_DESCRIPTOR if supported."
+    )
 
 
 class ModelDescriptorFactory:
