@@ -253,8 +253,6 @@ def wrapped_calib_func(
         else:
             # Direct calibration (existing behavior)
             func(model, forward_loop=forward_loop, **kwargs)
-    else:
-        raise ValueError(f"No calibration function provided for method: {method}")
 
     # Lets get the latest metadata for the quantizer states
     metadata = {}
