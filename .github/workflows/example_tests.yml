@@ -60,7 +60,7 @@ jobs:
   torch-pr:
     needs: [check-file-changes, wait-checks]
     if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
-    strategy:
+    strategy: &torch_strategy
       fail-fast: false
       matrix:
         example: [llm_distill, llm_qat, llm_sparsity]
@@ -73,24 +73,18 @@ jobs:
       docker_image: "nvcr.io/nvidia/pytorch:${{ matrix.docker_image || '26.01' }}-py3"
       example: ${{ matrix.example }}
       pip_install_extras: "[hf,dev-test]"
-      runner: linux-amd64-gpu-l4-latest-1
+      runner: linux-amd64-gpu-h100-latest-1
 
   torch-non-pr:
     if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
-    strategy:
-      fail-fast: false
-      matrix:
-        example: [llm_distill, llm_qat, llm_sparsity]
-        include:
-          - example: speculative_decoding
-            docker_image: "26.01"
+    strategy: *torch_strategy
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
       docker_image: "nvcr.io/nvidia/pytorch:${{ matrix.docker_image || '26.01' }}-py3"
       example: ${{ matrix.example }}
       pip_install_extras: "[hf,dev-test]"
-      runner: linux-amd64-gpu-h100-latest-2
+      runner: linux-amd64-gpu-rtxpro6000-latest-2
 
   ##### TensorRT-LLM Example Tests #####
   trtllm-pr:
@@ -99,14 +93,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example: [llm_ptq] # vlm_ptq temporarily disabled due to pipeline error
+        example: [llm_ptq, vlm_ptq]
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
       docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6.post3"
       example: ${{ matrix.example }}
       pip_install_extras: "[hf,dev-test]"
-      runner: linux-amd64-gpu-h100-latest-1
+      runner: linux-amd64-gpu-rtxpro6000-latest-1
 
   trtllm-non-pr:
     if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
@@ -120,13 +114,13 @@ jobs:
       docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6.post3"
       example: ${{ matrix.example }}
       pip_install_extras: "[hf,dev-test]"
-      runner: linux-amd64-gpu-h100-latest-2
+      runner: linux-amd64-gpu-rtxpro6000-latest-2
 
   ##### ONNX/TensorRT Example Tests #####
   onnx-pr:
     needs: [check-file-changes, wait-checks]
     if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
-    strategy:
+    strategy: &onnx_strategy
       fail-fast: false
       matrix:
         example: [diffusers, torch_onnx]
@@ -140,17 +134,14 @@ jobs:
 
   onnx-non-pr:
     if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
-    strategy:
-      fail-fast: false
-      matrix:
-        example: [diffusers, torch_onnx]
+    strategy: *onnx_strategy
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
       docker_image: "nvcr.io/nvidia/tensorrt:26.01-py3"
       example: ${{ matrix.example }}
       pip_install_extras: "[all,dev-test]"
-      runner: linux-amd64-gpu-l4-latest-1
+      runner: linux-amd64-gpu-rtxpro6000-latest-2
 
   ##### Required Check for PR #####
   example-pr-required-check:
