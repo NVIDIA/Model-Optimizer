@@ -124,7 +124,10 @@ def create_parallel_state():
     """Create a parallel state for vLLM."""
     dp_group = get_dp_group().device_group
     tp_group = get_tp_group().device_group
-    ep_group = get_ep_group().device_group
+    try:
+        ep_group = get_ep_group().device_group
+    except AssertionError:
+        ep_group = None
     return ParallelState(dp_group, tp_group, ep_group)
 
 
@@ -199,33 +202,25 @@ class _QuantFusedMoEBase(QuantModule):
         *args,
         **kwargs,
     ):
-        kernel = getattr(
-            vllm_fused_moe_package,
-            "_invoke_fused_moe_kernel",
-            getattr(vllm_fused_moe_package, "_dispatch_fused_moe_kernel", None),
-        )
-        if kernel is None:
-            raise ValueError("fused_moe kernel not found")
-
         if B is self.w13_weight:
             # First layer of expert
             A = self.w13_input_quantizer(A)  # noqa: N806
             if self.w13_weight_quantizer.is_enabled:
                 orig, self.w13_weight = self.w13_weight, self.w13_weight_quantizer(self.w13_weight)
-                kernel(A, B, C, *args, **kwargs)
+                vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
                 self.w13_weight = orig
             else:
-                kernel(A, B, C, *args, **kwargs)
+                vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
             if self.w13_output_quantizer.is_enabled:
                 C[:] = self.w13_output_quantizer(C)
         elif B is self.w2_weight:
             A = self.w2_input_quantizer(A)  # noqa: N806
             if self.w2_weight_quantizer.is_enabled:
                 orig, self.w2_weight = self.w2_weight, self.w2_weight_quantizer(self.w2_weight)
-                kernel(A, B, C, *args, **kwargs)
+                vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
                 self.w2_weight = orig
             else:
-                kernel(A, B, C, *args, **kwargs)
+                vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
             if self.w2_output_quantizer.is_enabled:
                 C[:] = self.w2_output_quantizer(C)
         else:
@@ -234,13 +229,10 @@ class _QuantFusedMoEBase(QuantModule):
     @contextmanager
     def _patch_moe_kernel(self):
         """Temporarily replace vLLM fused_moe kernel with quantized version."""
-        for attr, backup in [
-            ("invoke_fused_moe_kernel", "_invoke_fused_moe_kernel"),
-            ("dispatch_fused_moe_kernel", "_dispatch_fused_moe_kernel"),
-        ]:
+        for attr in ["invoke_fused_moe_kernel", "invoke_fused_moe_triton_kernel"]:
             if hasattr(vllm_fused_moe_package, attr):
                 orig = getattr(vllm_fused_moe_package, attr)
-                setattr(vllm_fused_moe_package, backup, orig)
+                setattr(vllm_fused_moe_package, "_invoke_fused_moe_kernel", orig)
                 setattr(vllm_fused_moe_package, attr, self.invoke_fused_moe_quantized)
                 try:
                     yield
