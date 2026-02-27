@@ -72,6 +72,7 @@ jobs:
     with:
       docker_image: "nvcr.io/nvidia/pytorch:${{ matrix.docker_image || '26.01' }}-py3"
       example: ${{ matrix.example }}
+      timeout_minutes: 30
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-h100-latest-1
 
@@ -83,6 +84,7 @@ jobs:
     with:
       docker_image: "nvcr.io/nvidia/pytorch:${{ matrix.docker_image || '26.01' }}-py3"
       example: ${{ matrix.example }}
+      timeout_minutes: 30
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-rtxpro6000-latest-2
 
@@ -97,7 +99,7 @@ jobs:
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6.post3"
+      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc5"
       example: ${{ matrix.example }}
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-rtxpro6000-latest-1
@@ -111,7 +113,7 @@ jobs:
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
-      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc6.post3"
+      docker_image: "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc5"
       example: ${{ matrix.example }}
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-rtxpro6000-latest-2
