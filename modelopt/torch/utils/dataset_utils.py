@@ -330,14 +330,9 @@ def get_dataset_dataloader(
     """Get a dataloader with the dataset name and tokenizer of the target model.
 
     Args:
-    <<<<<<< HEAD
         dataset_name: Name of the dataset to load, or a path to a ``.jsonl`` file.
             If a ``.jsonl`` file is provided, each line must be a JSON object with a ``text`` field.
-        tokenizer: Instancne of Hugginface tokenizer.
-    =======
-        dataset_name: Name of the dataset to load.
         tokenizer: Instance of HuggingFace tokenizer.
-    >>>>>>> origin/main
         batch_size: Batch size of the returned dataloader.
         num_samples: Number of samples from the dataset.
         max_sample_length: Maximum length of a sample.
