@@ -104,9 +104,7 @@ def _test_speculative_gpt_model(algo, num_layers, activation_func, normalization
         ("eagle3", 2, "swiglu", "RMSNorm"),  # GQA
     ],
 )
-def test_speculative_gpt_model(
-    algo, num_medusa_heads_or_eagle_layers, activation_func, normalization
-):
+def test_speculative_gpt_model(algo, num_layers, activation_func, normalization):
     if algo == "eagle3":
         try:
             import megatron.core.post_training  # noqa: F401
@@ -118,7 +116,7 @@ def test_speculative_gpt_model(
         job=partial(
             _test_speculative_gpt_model,
             algo,
-            num_medusa_heads_or_eagle_layers,
+            num_layers,
             activation_func,
             normalization,
         ),
