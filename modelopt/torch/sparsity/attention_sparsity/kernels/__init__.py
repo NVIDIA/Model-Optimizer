@@ -24,6 +24,7 @@ context_attention_fwd = None
 context_attention = None
 register_triton_attention = None
 register_diffusers_triton_attention = None
+register_ltx_triton_attention = None
 set_sparse24 = None
 
 if torch.cuda.is_available():
@@ -55,11 +56,19 @@ if torch.cuda.is_available():
 
             register_diffusers_triton_attention = _register_diffusers_triton_attention
 
+        with import_plugin("ltx_core"):
+            from .ltx_triton_attention import (
+                register_ltx_triton_attention as _register_ltx_triton_attention,
+            )
+
+            register_ltx_triton_attention = _register_ltx_triton_attention
+
 __all__ = [
     "IS_AVAILABLE",
     "context_attention",
     "context_attention_fwd",
     "register_diffusers_triton_attention",
+    "register_ltx_triton_attention",
     "register_triton_attention",
     "set_sparse24",
 ]
