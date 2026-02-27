@@ -291,7 +291,7 @@ def region_pattern_autotuning_workflow(
 
     for region_idx, region in enumerate(regions):
         logger.info(
-            f"Region {region_idx + 1}/{len(regions)} (ID={region.id}, level={region.get_level()})"
+            f"Region {region_idx + 1}/{len(regions)} (ID={region.id}, level={region.level})"
         )
 
         if node_filter_list and not _region_matches_filter(
@@ -340,7 +340,7 @@ def region_pattern_autotuning_workflow(
         else:
             logger.info(f"  Tested {schemes_tested} schemes")
 
-        region_model_path = models_dir / f"region_{region.id}_level_{region.get_level()}.onnx"
+        region_model_path = models_dir / f"region_{region.id}_level_{region.level}.onnx"
         autotuner.export_onnx(str(region_model_path), insert_qdq=True, best=True)
         logger.debug(f"  Saved best model: {region_model_path.name}")
 
