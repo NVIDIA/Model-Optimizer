@@ -61,30 +61,10 @@ def skip_if_no_libcudnn():
         pytest.skip(f"{e}!", allow_module_level=True)
 
 
-def skip_if_no_megatron(*, te_required: bool = True, mamba_required: bool = False):
-    try:
-        import megatron  # noqa: F401
-    except ImportError:
-        pytest.skip("megatron not available", allow_module_level=True)
-
-    try:
-        import transformer_engine  # noqa: F401
-
-        has_te = True
-    except ImportError:
-        has_te = False
-
+def skip_if_no_mamba():
     try:
         import mamba_ssm  # noqa: F401
-
-        has_mamba = True
     except ImportError:
-        has_mamba = False
-
-    if te_required and not has_te:
-        pytest.skip("TE required for Megatron test", allow_module_level=True)
-
-    if mamba_required and not has_mamba:
         pytest.skip("Mamba required for Megatron test", allow_module_level=True)
 
 

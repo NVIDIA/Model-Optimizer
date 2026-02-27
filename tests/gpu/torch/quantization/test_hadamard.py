@@ -18,7 +18,14 @@ import pytest
 import torch
 import torch.nn as nn
 
-pytest.importorskip("fast_hadamard_transform")
+fast_hadamard_transform = pytest.importorskip("fast_hadamard_transform")
+
+try:
+    fast_hadamard_transform.hadamard_transform(torch.randn(1, 2, device="cuda"))
+except Exception:
+    pytest.skip(
+        "fast_hadamard_transform CUDA kernels not available for this GPU", allow_module_level=True
+    )
 
 from _test_utils.torch.quantization.models import SDPAAttention
 

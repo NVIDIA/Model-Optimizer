@@ -18,12 +18,8 @@ from warnings import warn
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from _test_utils.import_helper import skip_if_no_megatron
-from huggingface_hub import constants as hf_constants
-
-skip_if_no_megatron()
-
 from _test_utils.torch.megatron.utils import initialize_for_megatron
+from huggingface_hub import constants as hf_constants
 from megatron.core.models.gpt import GPTModel
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_layer_local_spec,
