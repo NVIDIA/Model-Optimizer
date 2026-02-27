@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import copy
 from functools import partial
 
 import pytest
@@ -104,14 +103,12 @@ def _test_speculative_gpt_model(algo, num_layers, activation_func, normalization
         ("eagle3", 2, "swiglu", "RMSNorm"),  # GQA
     ],
 )
-def test_speculative_gpt_model(
-    dist_workers, algo, num_medusa_heads_or_eagle_layers, activation_func, normalization
-):
+def test_speculative_gpt_model(dist_workers, algo, num_layers, activation_func, normalization):
     dist_workers.run(
         partial(
             _test_speculative_gpt_model,
             algo,
-            num_medusa_heads_or_eagle_layers,
+            num_layers,
             activation_func,
             normalization,
         ),
