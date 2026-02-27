@@ -37,6 +37,8 @@ class GptOss20bConverter(Converter):
     All layers use MoE FFN (no standard dense FFN layers).
     """
 
+    quantized = "mxfp4"
+
     @staticmethod
     def create_block_configs_from_main_config(config: PretrainedConfig) -> List[BlockConfig]:
         """Create block configs for GPT-OSS-20B layers.
