@@ -36,9 +36,11 @@ def _register_triton_backend_if_needed(model: nn.Module, config: SparseAttention
     """Register the Triton attention backend and set attn_implementation if needed.
 
     When the config uses ``backend="triton"``, this function:
-    1. Registers the Triton kernel with HF's ``ALL_ATTENTION_FUNCTIONS``.
-    2. Sets ``model.config._attn_implementation = "modelopt_triton"`` so the
-       model dispatches to the Triton kernel at forward time.
+    1. Registers the Triton kernel with HF's ``ALL_ATTENTION_FUNCTIONS`` (transformers).
+    2. Registers the Triton kernel with diffusers' ``_AttentionBackendRegistry``.
+    3. Patches LTX-2 ``Attention.attention_function`` to route to the Triton kernel.
+    4. Sets ``model.config._attn_implementation = "modelopt_triton"`` so
+       transformers models dispatch to the Triton kernel at forward time.
 
     This is called automatically during ``mtsa.sparsify()`` so users never need
     to manually call ``register_triton_attention()`` or set ``attn_implementation``.
@@ -50,10 +52,21 @@ def _register_triton_backend_if_needed(model: nn.Module, config: SparseAttention
     if not needs_triton:
         return
 
-    from .kernels import register_triton_attention
+    from .kernels import (
+        register_diffusers_triton_attention,
+        register_ltx_triton_attention,
+        register_triton_attention,
+    )
 
     if register_triton_attention is not None:
         register_triton_attention()
+
+    if register_diffusers_triton_attention is not None:
+        register_diffusers_triton_attention()
+
+    # Patch LTX-2 Attention modules (model-specific, not a global registry)
+    if register_ltx_triton_attention is not None:
+        register_ltx_triton_attention(model)
 
     # Set attn_implementation on the model so HF dispatches to the Triton kernel.
     # HF's ALL_ATTENTION_FUNCTIONS is checked at forward time, not construction time,
