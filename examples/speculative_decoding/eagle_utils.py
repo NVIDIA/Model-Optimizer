@@ -211,6 +211,9 @@ class EagleTrainingPlot(TrainerCallback):
 
         # log to wandb
         if wandb and is_master():
+            logs = kwargs.get("logs") or {}
+            if logs:
+                wandb.log({k: v for k, v in logs.items() if v is not None}, step=state.global_step)
             for i, draft_acc in enumerate(average_acc):
                 for j, step_acc in enumerate(draft_acc):
                     wandb.log(

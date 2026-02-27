@@ -765,6 +765,12 @@ def _test_layer_sync_moe_local_experts_amax(ep_size, moe_grouped_gemm, rank, siz
         num_moe_experts=8,
         transformer_impl="modelopt",
     )
+    # Make weight initialization different across experts, otherwise experts will have similar amax values
+    for layer in model.decoder.layers:
+        for i, expert in enumerate(layer.mlp.experts.local_experts):
+            expert.linear_fc1.weight.data.fill_(0.1 + i * 0.05)
+            expert.linear_fc2.weight.data.fill_(0.2 + i * 0.05)
+
     quant_cfg = mtq.FP8_DEFAULT_CFG
     model = mtq.quantize(model, quant_cfg, get_forward(model))
 

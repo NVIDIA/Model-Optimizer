@@ -81,6 +81,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "w4a8_awq": mtq.W4A8_AWQ_BETA_CFG,
     "nvfp4": mtq.NVFP4_DEFAULT_CFG,
     "nvfp4_awq": mtq.NVFP4_AWQ_LITE_CFG,
+    "nvfp4_mse": mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG,
     "fp8_pb_wo": mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
     "fp8_pc_pt": mtq.FP8_PER_CHANNEL_PER_TOKEN_CFG,
     "w4a8_nvfp4_fp8": mtq.W4A8_NVFP4_FP8_CFG,
@@ -649,15 +650,18 @@ def export_quantized(
                 extra_state_dict=mtp_state_dict,
             )
 
-        # Copy custom model files (Python files and JSON configs) if trust_remote_code is used
-        copy_custom_model_files(args.pyt_ckpt_path, export_path, args.trust_remote_code)
-
         # Restore default padding and export the tokenizer as well.
         if tokenizer is not None:
             tokenizer.padding_side = default_padding_side
             if default_pad_token is not None:
                 tokenizer.pad_token = default_pad_token
             tokenizer.save_pretrained(export_path)
+
+        # Copy custom model files (Python files and JSON configs) if trust_remote_code is used.
+        # This must run AFTER tokenizer.save_pretrained() so original tokenizer files
+        # from the source checkpoint take precedence over regenerated ones (which may
+        # differ in format due to newer transformers versions).
+        copy_custom_model_files(args.pyt_ckpt_path, export_path, args.trust_remote_code)
 
         end_time = time.time()
         print(
@@ -890,6 +894,7 @@ def quantize_main(
                 "fp8",
                 "nvfp4",
                 "nvfp4_awq",
+                "nvfp4_mse",
                 "w4a8_awq",
                 "fp8_pb_wo",
                 "w4a8_mxfp4_fp8",

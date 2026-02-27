@@ -415,7 +415,7 @@ def test_get_scaling_factor(
         (
             partial_nvfp4_config,
             {
-                "exclude_modules": ["linears.0", "linears.2"],
+                "exclude_modules": ["linears.0"],
                 "group_size": 16,
                 "kv_cache_quant_algo": None,
                 "quant_algo": "NVFP4",

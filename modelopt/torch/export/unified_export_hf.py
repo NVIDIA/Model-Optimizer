@@ -50,7 +50,11 @@ except ImportError:
 from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
-from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import (
+    NVFP4StaticQuantizer,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
 
@@ -496,6 +500,11 @@ def _export_quantized_weight(
         expert_type in type(sub_module).__name__
         for expert_type in ["Llama4TextExperts", "GptOssExperts"]
     )
+    if is_bmm_expert_weight and isinstance(weight_quantizer, NVFP4StaticQuantizer):
+        raise ValueError(
+            "NVFP4StaticQuantizer with BMM-style expert weights (e.g. Llama4TextExperts, "
+            "GptOssExperts) is not yet supported."
+        )
 
     if quantization_format in [
         QUANTIZATION_NVFP4,
@@ -507,6 +516,7 @@ def _export_quantized_weight(
         weight, _ = maybe_transpose_expert_weight_dimensions(
             weight, is_bmm_expert_weight=is_bmm_expert_weight
         )
+
         weight_scale = NVFP4QTensor.get_weights_scaling_factor(
             weight,
             block_size=block_size,
@@ -579,7 +589,7 @@ def _process_quantized_modules(
     """
     fsdp_module_to_reshard = None
 
-    for _, sub_module in model.named_modules():
+    for name, sub_module in model.named_modules():
         # Optimization to perform resharding only once per decoder layer to avoid extra communication overhead
         if isinstance(sub_module, FSDPModule):
             # Every time we encounter a new FSDPModule, the previous decoder layer is fully processed.
@@ -600,8 +610,13 @@ def _process_quantized_modules(
             sub_module.unpack_weight()
         if get_quantization_format(sub_module) != QUANTIZATION_NONE:
             if is_quantlinear(sub_module):
-                with fsdp2_aware_weight_update(model, sub_module, reshard=False):
-                    _export_quantized_weight(sub_module, dtype)
+                try:
+                    with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                        _export_quantized_weight(sub_module, dtype)
+                except AssertionError as e:
+                    raise AssertionError(
+                        f"Failed to export module '{name}' (type={type(sub_module).__name__}): {e}"
+                    ) from e
             elif (
                 "Llama4TextExperts" in type(sub_module).__name__
                 or "GptOssExperts" in type(sub_module).__name__
@@ -978,6 +993,50 @@ def _export_diffusers_checkpoint(
     print(f"Export complete. Saved to: {export_dir}")
 
 
+# TODO: Remove this workaround once HuggingFace fixes revert_weight_conversion to handle
+# scalar (0-d) tensors. The bug is in transformers' Chunk.convert() which calls
+# tensor.size(self.dim) on quantization scale buffers that are 0-d scalars, causing
+# IndexError. Confirmed still present in transformers 5.2.0.
+# See: transformers/core_model_loading.py, Chunk.convert()
+def _revert_weight_conversion_noop(model: Any, state_dict: dict) -> dict:
+    """No-op replacement for transformers' revert_weight_conversion."""
+    return state_dict
+
+
+def _try_patch_module(mod_path: str) -> tuple[Any, Any] | None:
+    """Try to patch revert_weight_conversion in a single module."""
+    import importlib
+
+    try:
+        mod = importlib.import_module(mod_path)
+        if hasattr(mod, "revert_weight_conversion"):
+            original = getattr(mod, "revert_weight_conversion")
+            setattr(mod, "revert_weight_conversion", _revert_weight_conversion_noop)
+            return (mod, original)
+    except (ImportError, AttributeError):
+        pass
+    return None
+
+
+def _patch_revert_weight_conversion() -> list[tuple[Any, Any]]:
+    """Patch revert_weight_conversion in transformers to avoid IndexError on scalar tensors."""
+    patches: list[tuple[Any, Any]] = []
+    for mod_path in [
+        "transformers.core_model_loading",
+        "transformers.modeling_utils",
+    ]:
+        result = _try_patch_module(mod_path)
+        if result is not None:
+            patches.append(result)
+    return patches
+
+
+def _unpatch_revert_weight_conversion(patches: list[tuple[Any, Any]]) -> None:
+    """Restore the original revert_weight_conversion functions."""
+    for mod, original in patches:
+        mod.revert_weight_conversion = original
+
+
 def export_hf_checkpoint(
     model: Any,
     dtype: torch.dtype | None = None,
@@ -1037,11 +1096,20 @@ def export_hf_checkpoint(
             model.hf_quantizer = None
 
         # Save model
-        model.save_pretrained(
-            export_dir,
-            state_dict={**post_state_dict, **(extra_state_dict or {})},
-            save_modelopt_state=save_modelopt_state,
-        )
+        # Temporarily disable revert_weight_conversion if available — it doesn't handle
+        # quantized state dicts (scalar scale tensors have 0 dimensions, causing IndexError).
+        # We must patch both the source module and the importing module since
+        # modeling_utils does `from core_model_loading import revert_weight_conversion`.
+        _patches = _patch_revert_weight_conversion()
+
+        try:
+            model.save_pretrained(
+                export_dir,
+                state_dict={**post_state_dict, **(extra_state_dict or {})},
+                save_modelopt_state=save_modelopt_state,
+            )
+        finally:
+            _unpatch_revert_weight_conversion(_patches)
 
         original_config = f"{export_dir}/config.json"
         config_data = {}
