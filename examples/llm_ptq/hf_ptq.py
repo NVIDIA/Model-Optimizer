@@ -650,15 +650,18 @@ def export_quantized(
                 extra_state_dict=mtp_state_dict,
             )
 
-        # Copy custom model files (Python files and JSON configs) if trust_remote_code is used
-        copy_custom_model_files(args.pyt_ckpt_path, export_path, args.trust_remote_code)
-
         # Restore default padding and export the tokenizer as well.
         if tokenizer is not None:
             tokenizer.padding_side = default_padding_side
             if default_pad_token is not None:
                 tokenizer.pad_token = default_pad_token
             tokenizer.save_pretrained(export_path)
+
+        # Copy custom model files (Python files and JSON configs) if trust_remote_code is used.
+        # This must run AFTER tokenizer.save_pretrained() so original tokenizer files
+        # from the source checkpoint take precedence over regenerated ones (which may
+        # differ in format due to newer transformers versions).
+        copy_custom_model_files(args.pyt_ckpt_path, export_path, args.trust_remote_code)
 
         end_time = time.time()
         print(

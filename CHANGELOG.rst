@@ -16,6 +16,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add sparse attention optimization for transformer models (``modelopt.torch.sparsity.attention_sparsity``). This reduces computational cost by skipping attention computation. Supports calibration for threshold selection on HuggingFace models. See `examples/llm_sparsity/attention_sparsity/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity/attention_sparsity>`_ for usage.
 - Add support for rotating the input before quantization for RHT.
 - Add support for advanced weight scale search for NVFP4 quantization and its export path.
+- Enable PTQ workflow for Qwen3.5 MoE models.
 
 0.42 (2026-02-xx)
 ^^^^^^^^^^^^^^^^^
