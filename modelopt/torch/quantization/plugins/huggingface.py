@@ -1081,11 +1081,15 @@ def setup_model_for_gradient_checkpointing(model: nn.Module):
                 "Disable gradient checkpointing after AutoQuantize if this is not desired!"
             )
             model.gradient_checkpointing_enable({"use_reentrant": True})
-            model.train()  # Model needs to be in training mode to enable gradient checkpointing
-            # Set all dropout layers to eval mode for deterministic auto-quantize scores
-            for name, module in model.named_modules():
-                if isinstance(model, torch.nn.Dropout):
-                    module.eval()
+            for m in model.modules():
+                if hasattr(m, "gradient_checkpointing"):
+                    m.train()  # Make sure the module is in training mode to enable gradient checkpointing
+                else:
+                    # Eval mode for non-checkpointed modules to avoid fused kernels
+                    # that bypass linear layers. E.g. in nemotron-h, the Mamba layer's
+                    # training path uses a fused kernel that takes out_proj weights
+                    # directly, skipping the linear module's forward (and thus quantization).
+                    m.eval()
         except Exception as e:
             warnings.warn(
                 f"AutoQuantize: Error enabling gradient checkpointing for huggingface model due to: {e}, "
