@@ -61,8 +61,12 @@ def test_calibrate_draft_vocab(tiny_llama_path, tiny_daring_anteater_path, draft
 
 
 # fmt: off
-@pytest.mark.parametrize("cp_size", [1, 2])
-def test_llama_eagle3(tiny_llama_path, tiny_daring_anteater_path, tmp_path, eagle_output_dir, cp_size):
+@pytest.mark.parametrize(("cp_size", "mix_hidden_states"), [(1, "false"), (2, "false"), (1, "true"), (2, "true")])
+def test_llama_eagle3(tiny_llama_path,
+                      tiny_daring_anteater_path,
+                      tmp_path, eagle_output_dir,
+                      cp_size,
+                      mix_hidden_states):
     """Test Eagle3 training with a tiny llama model, using different cp_size values."""
     available_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
     if cp_size == 2 and available_gpus < 2:
@@ -96,6 +100,7 @@ def test_llama_eagle3(tiny_llama_path, tiny_daring_anteater_path, tmp_path, eagl
             "--output_dir", eagle_output_dir / f"eagle-tinyllama-cp{cp_size}",
             "--training_seq_len", "128", # Match max_position_embeddings
             "--cp_size", str(cp_size),
+            "--mix_hidden_states", mix_hidden_states,
         ],
         "speculative_decoding",
     )

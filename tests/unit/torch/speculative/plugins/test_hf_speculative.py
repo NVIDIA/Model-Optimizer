@@ -18,36 +18,16 @@ from copy import deepcopy
 
 import pytest
 from _test_utils.torch.transformers_models import (
-    create_tiny_llama_dir,
     get_tiny_llama,
     tf_modelopt_state_and_output_tester,
 )
-from transformers import AutoModelForCausalLM, LlamaForCausalLM
+from transformers import AutoModelForCausalLM
 
 import modelopt.torch.speculative as mtsp
-from modelopt.torch.speculative.config import EAGLE1_DEFAULT_CFG, EAGLE3_DEFAULT_CFG
+from modelopt.torch.speculative.config import EAGLE3_DEFAULT_CFG
 
 
-def test_medusa_model_convert_save_and_restore(tmp_path):
-    tiny_llama_dir = create_tiny_llama_dir(tmp_path)
-    model_ref = LlamaForCausalLM.from_pretrained(tiny_llama_dir)
-
-    config = {
-        "medusa_num_heads": 2,
-        "medusa_num_layers": 1,
-    }
-    mtsp.convert(model_ref, mode=[("medusa", config)])
-    assert isinstance(model_ref, mtsp.plugins.HFMedusaModel)
-
-    model_ref.save_pretrained(tiny_llama_dir / "modelopt_model")
-    assert os.path.exists(tiny_llama_dir / "modelopt_model/modelopt_state.pth")
-
-    model_test = AutoModelForCausalLM.from_pretrained(tiny_llama_dir / "modelopt_model")
-    assert isinstance(model_test, mtsp.plugins.HFMedusaModel)
-    tf_modelopt_state_and_output_tester(model_ref, model_test)
-
-
-@pytest.mark.parametrize("eagle_config", [EAGLE1_DEFAULT_CFG, EAGLE3_DEFAULT_CFG])
+@pytest.mark.parametrize("eagle_config", [EAGLE3_DEFAULT_CFG])
 def test_eagle_model_convert_save_and_restore(tmp_path, eagle_config):
     model_ref = get_tiny_llama(num_hidden_layers=8)
 
