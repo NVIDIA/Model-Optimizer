@@ -133,6 +133,7 @@ def create_calibration_forward_loop(
                             use_cache=True,
                         )
                         past_key_values = outputs.past_key_values
+                        del outputs  # Free logits between chunks
 
                     # Clean up KV cache
                     del past_key_values
@@ -182,15 +183,14 @@ def create_decode_calibration_forward_loop(
                     model.config._attn_implementation = "flash_attention_2"
                     outputs = model(input_ids, use_cache=True)
                     past_key_values = outputs.past_key_values
+                    next_token = outputs.logits[:, -1:, :].argmax(dim=-1)
+                    del outputs  # Free large prefill logits [B, seqlen, vocab] before decode loop
 
                     # Step 2: Switch to eager for decode (enables softmax hook)
                     model.config._attn_implementation = "eager"
 
                     # Step 3: Manual decode loop for explicit control over token generation
                     # model.generate() method is not used here because it doesn't allow explicit control over KV cache
-                    # Get the last token's logits and sample next token
-                    next_token = outputs.logits[:, -1:, :].argmax(dim=-1)
-
                     for _ in range(num_decode_tokens):
                         outputs = model(
                             next_token,
@@ -199,6 +199,7 @@ def create_decode_calibration_forward_loop(
                         )
                         past_key_values = outputs.past_key_values
                         next_token = outputs.logits[:, -1:, :].argmax(dim=-1)
+                        del outputs  # Free decode logits between steps
                 finally:
                     # Restore original attention implementation
                     model.config._attn_implementation = original_attn_impl
