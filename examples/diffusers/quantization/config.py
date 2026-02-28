@@ -32,7 +32,7 @@ FP8_DEFAULT_CONFIG = {
 
 INT8_DEFAULT_CONFIG = {
     "quant_cfg": {
-        "*weight_quantizer": {"num_bits": 8, "axis": None},
+        "*weight_quantizer": {"num_bits": 8, "axis": 0},
         "*input_quantizer": {"num_bits": 8, "axis": None},
         "*output_quantizer": {"enable": False},
         "default": {"enable": False},
