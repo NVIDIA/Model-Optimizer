@@ -2,227 +2,34 @@
 Speculative Decoding
 ====================
 
-Introduction
-============
-
 ModelOpt's Speculative Decoding module (:mod:`modelopt.torch.speculative <modelopt.torch.speculative>`)
-enables your model to generate multiple tokens in each generate step. This can be useful for reducing the
-latency of your model and speeds up inference.
+enables your model to generate multiple tokens in each generate step, reducing inference latency.
 
-ModelOpt implements the **EAGLE3** algorithm for speculative decoding, which predicts future hidden
-states through a lightweight autoregressive decoder to achieve high token acceptance rates.
+ModelOpt implements the **EAGLE3** algorithm, which attaches a lightweight autoregressive draft
+module to a frozen base model. The draft module operates at the feature level—predicting future
+hidden states rather than tokens directly—to achieve high acceptance rates at low compute cost.
 
-Follow the steps described below to obtain a model with EAGLE3 speculative decoding:
 
-#.  **Convert your model via** :meth:`mtsp.convert <modelopt.torch.speculative.speculative_decoding.convert>`:
-    Attach the EAGLE3 draft module to your base model.
-#.  **Fine-tune the EAGLE3 module**: Fine-tune the draft module using online or offline training.
-    The base model is frozen throughout.
-#.  **Checkpoint and re-load**: Save the model via :meth:`mto.save <modelopt.torch.opt.conversion.save>` and
-    restore via :meth:`mto.restore <modelopt.torch.opt.conversion.restore>`
-#.  **Export**: Export the checkpoint to a deployment-compatible format using
-    :func:`export_speculative_decoding <modelopt.torch.export.export_speculative_decoding>`.
-#.  **Deploy**: Serve the exported model with TRT-LLM, vLLM, or SGLang.
 
-.. _speculative_conversion:
+.. toctree::
+    :maxdepth: 1
+    :caption: Module Guide
 
-Convert
-=======
+    ./_speculative_module_guide.rst
 
-You can convert your model to an EAGLE3 speculative decoding model using :meth:`mtsp.convert()
-<modelopt.torch.speculative.speculative_decoding.convert>`.
+.. toctree::
+    :maxdepth: 1
+    :caption: EAGLE
 
-Example usage:
+    ./_eagle_workflow.rst
+    ./_eagle_config_reference.rst
+    ./_eagle_best_practices.rst
 
-.. code-block:: python
-
-    import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    import modelopt.torch.speculative as mtsp
-
-    # Load base model
-    model = AutoModelForCausalLM.from_pretrained(
-        "meta-llama/Llama-3.2-1B-Instruct",
-        torch_dtype="auto",
-        device_map="cpu",       # load on CPU first to avoid OOM; moved to GPU by the trainer
-    )
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B-Instruct")
-    tokenizer.pad_token_id = tokenizer.eos_token_id
-
-    # Configure and convert to EAGLE3
-    config = {
-        "eagle_decoder_type": "llama",          # decoder architecture; use "kimik2" for Kimi-K2 models
-        "eagle_architecture_config": {
-            "num_hidden_layers": 1,             # depth of the draft decoder (default: 1)
-            # "intermediate_size": 8192,        # MLP hidden size (default: inferred from base model)
-        },
-    }
-    mtsp.convert(model, [("eagle", config)])
-
-.. note::
-
-    The ``eagle_architecture_config`` dict overrides default EAGLE3 architecture settings.
-    ``hidden_size``, ``vocab_size``, and ``max_position_embeddings`` are automatically inferred
-    from the base model and do not need to be set manually. See the
-    `example eagle_config.json <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/speculative_decoding/eagle_config.json>`_
-    for all available options.
-
-
-Fine-tune EAGLE3 module
-------------------------
-
-After conversion, fine-tune the draft module. The base model weights are frozen by default
-(controlled by ``eagle_freeze_base_model`` in ``EagleConfig``). ModelOpt supports two training
-modes depending on hardware constraints:
-
-Online Training
-^^^^^^^^^^^^^^^
-
-In online training the base model and draft module are co-located in GPU memory. The base model
-performs forward passes at each training step to produce hidden states for the draft module.
-This is recommended for smaller base models (e.g., 1B–8B parameters).
-
-.. code-block:: python
-
-    from transformers import Trainer
-    import modelopt.torch.opt as mto
-
-    mto.enable_huggingface_checkpointing()
-
-    trainer = Trainer(model=model, processing_class=tokenizer, args=training_args, **data_module)
-    trainer._move_model_to_device(model, trainer.args.device)
-
-    trainer.train(resume_from_checkpoint=checkpoint)
-    trainer.save_state()
-    trainer.save_model("<path to the output directory>")
-
-.. note::
-
-    `FSDP2 <https://pytorch.org/docs/stable/fsdp.html>`_ is used by default for distributed training.
-    For long-context training, context parallelism can be enabled by setting ``cp_size > 1`` in
-    ``ParallelismConfig``.
-
-.. tip::
-
-    Training on conversations generated by the base model (rather than human-written data) improves
-    acceptance rates, since the draft module learns to mimic the target distribution more closely.
-    See the ``scripts/server_generate.py`` script in the example directory for data synthesis.
-
-Offline Training
-^^^^^^^^^^^^^^^^
-
-For large base models (e.g., 70B+ parameters) that cannot be co-located with the draft module in
-GPU memory, you can pre-compute and dump hidden states to disk, then train only the draft module.
-This decouples base model inference from draft model training and significantly reduces GPU memory
-requirements.
-
-.. note::
-
-    Offline training requires several to tens of terabytes of disk storage depending on dataset
-    size and base model hidden dimension.
-
-**Step 1 — Dump hidden states to disk**
-
-Two backends are supported:
-
-.. code-block:: bash
-
-    # Recommended: TRT-LLM backend (higher throughput)
-    python collect_hidden_states/compute_hidden_states_trtllm.py \
-        --model $BASE_MODEL \
-        --input-file input_conversations/daring-anteater.jsonl \
-        --output-dir $HIDDEN_STATES_DIR
-
-    # Alternative: HuggingFace backend
-    python collect_hidden_states/compute_hidden_states_hf.py \
-        --model $BASE_MODEL \
-        --input-file input_conversations/daring-anteater.jsonl \
-        --output-dir $HIDDEN_STATES_DIR
-
-Each output ``.pt`` file contains the tokenized input and the corresponding hidden states from
-all required layers of the base model.
-
-**Step 2 — Convert and train using pre-computed hidden states**
-
-Set ``eagle_offline=True`` in the config to enable offline mode, then point the data loader to
-the pre-computed hidden state files:
-
-.. code-block:: python
-
-    config = {
-        "eagle_decoder_type": "llama",
-        "eagle_offline": True,                  # use pre-computed hidden states; skip base model forward pass
-        "eagle_architecture_config": {
-            "num_hidden_layers": 1,
-        },
-    }
-    mtsp.convert(model, [("eagle", config)])
-
-    # Then train as usual, with offline_data_path pointing to $HIDDEN_STATES_DIR
-
-
-Checkpoint and re-load
------------------------
-
-To restore the saved EAGLE3 model:
-
-.. code-block:: python
-
-    model = AutoModelForCausalLM.from_pretrained("<path to the output directory>")
-
-
-Validation
-==========
-
-After online training, you can evaluate the acceptance rate (AR) on MT-Bench to gauge draft quality
-before exporting:
-
-.. code-block:: bash
-
-    python scripts/ar_validate.py --model_path $ONLINE_CKPT
-
-.. note::
-
-    In-framework AR evaluation is supported only for online training checkpoints. For offline
-    training checkpoints, export the model first and evaluate with a serving framework.
-
-
-Export
-======
-
-After training, export the ModelOpt checkpoint to a deployment-compatible format that can be
-served by TRT-LLM, vLLM, or SGLang:
-
-.. code-block:: python
-
-    from modelopt.torch.export import export_speculative_decoding
-
-    export_speculative_decoding(model, export_dir="<export_path>")
-
-Alternatively, use the provided export script from the example directory:
-
-.. code-block:: bash
-
-    python scripts/export_hf_checkpoint.py \
-        --model_path $OUTPUT_DIR \
-        --export_path $EXPORT_PATH
-
-The exported checkpoint separates the base model and draft module weights into independent
-directories that serving frameworks can load directly.
-
-
-Deployment
-==========
-
-The exported checkpoint can be deployed on TRT-LLM, vLLM, or SGLang.
 
 .. _speculative-concepts:
 
 Speculative Decoding Concepts
-=============================
-
-Below, we will provide an overview of ModelOpt's speculative decoding feature as well as its basic
-concepts and terminology.
+==============================
 
 Speculative decoding
 --------------------
@@ -251,13 +58,3 @@ Compared to earlier EAGLE versions, EAGLE3 uses auxiliary hidden states from **m
 layers** of the base model as additional input to the draft decoder, not just the final layer output.
 This richer signal enables the draft module to more accurately predict the base model's next-layer
 representations, resulting in higher token acceptance rates and greater inference speedup.
-
-Key training parameters exposed through ``EagleConfig``:
-
-- ``eagle_freeze_base_model`` *(default: True)*: Keep the base model weights frozen during training.
-- ``eagle_self_logit_distillation`` *(default: True)*: Apply logit-level distillation loss in
-  addition to hidden state regression, further improving acceptance rates.
-- ``eagle_offline`` *(default: False)*: Use pre-computed hidden states from disk instead of running
-  the base model forward pass at each step (for large model offline training).
-- ``eagle_loss_decay_factor`` *(default: 0.9)*: Exponential decay applied to losses at successive
-  draft steps, weighting earlier steps more heavily.
