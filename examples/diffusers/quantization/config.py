@@ -33,7 +33,7 @@ FP8_DEFAULT_CONFIG = {
 INT8_DEFAULT_CONFIG = {
     "quant_cfg": {
         "*weight_quantizer": {"num_bits": 8, "axis": 0},
-        "*input_quantizer": {"num_bits": 8, "axis": 0},
+        "*input_quantizer": {"num_bits": 8, "axis": None},
         "*output_quantizer": {"enable": False},
         "default": {"enable": False},
     },
@@ -112,8 +112,10 @@ def set_quant_config_attr(quant_config, trt_high_precision_dtype, quant_algo, **
 
 
 def reset_set_int8_config(quant_config, percentile, n_steps, collect_method, backbone):
-    """
-    Configure INT8 quantization with different settings for Conv2d and Linear layers.
+    """Add PercentileCalibrator to Conv2d input quantizers.
+
+    Linear layers are left unchanged — their axis settings come from the base
+    quant_config (e.g. INT8_SMOOTHQUANT_CFG or INT8_DEFAULT_CONFIG).
 
     Args:
         quant_config: The quantization configuration dictionary
@@ -122,31 +124,9 @@ def reset_set_int8_config(quant_config, percentile, n_steps, collect_method, bac
         collect_method: Method for collecting calibration statistics
         backbone: The model backbone to analyze layer types
     """
-
-    # Build a mapping of layer names to their types
-    layer_type_map = {}
     for name, module in backbone.named_modules():
-        if isinstance(module, (nn.Linear, nn.Conv2d)):
-            layer_type_map[name] = type(module)
-
-    quant_config["quant_cfg"] = {}
-    for layer_name, layer_type in layer_type_map.items():
-        wq_name = f"*{layer_name}*weight_quantizer*"
-        aq_name = f"*{layer_name}*input_quantizer*"
-        if layer_type is nn.Linear:
-            quant_config["quant_cfg"][wq_name] = {
-                "num_bits": 8,
-                "axis": 0,
-            }
-            quant_config["quant_cfg"][aq_name] = {
-                "num_bits": 8,
-                "axis": -1,
-            }
-        else:
-            quant_config["quant_cfg"][wq_name] = {
-                "num_bits": 8,
-                "axis": 0,
-            }
+        if isinstance(module, nn.Conv2d):
+            aq_name = f"*{name}*input_quantizer*"
             quant_config["quant_cfg"][aq_name] = {
                 "num_bits": 8,
                 "axis": None,
