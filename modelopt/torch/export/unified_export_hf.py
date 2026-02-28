@@ -1111,14 +1111,13 @@ def export_hf_checkpoint(
         components: Only used for diffusers pipelines. Optional list of component names
             to export. If None, all quantized components are exported.
         extra_state_dict: Extra state dictionary to add to the exported model.
-        **kwargs: Internal-only keyword arguments. Supported keys:
-            merged_base_safetensor_path (str | None): If provided, merge the exported
-                diffusion transformer weights with non-transformer components (VAE, vocoder,
-                text encoders, etc.) from this base safetensors file and add quantization
-                metadata to produce a single-file checkpoint compatible with ComfyUI. This
-                should be the path to a full base model ``.safetensors`` file,
-                e.g. ``"path/to/ltx-2-19b-dev.safetensors"``.
-                Only used for diffusion model exports.
+        **kwargs: Internal-only keyword arguments. Supported key: merged_base_safetensor_path
+            (str, optional). When provided, merges the exported diffusion transformer
+            weights with non-transformer components (VAE, vocoder, text encoders, etc.)
+            from this base safetensors file to produce a single-file checkpoint
+            compatible with ComfyUI. Value should be the path to a full base model
+            ``.safetensors`` file (e.g. ``"path/to/ltx-2-19b-dev.safetensors"``).
+            Only used for diffusion model exports.
     """
     merged_base_safetensor_path: str | None = kwargs.get("merged_base_safetensor_path")
     export_dir = Path(export_dir)
