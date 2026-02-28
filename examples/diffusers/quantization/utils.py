@@ -52,6 +52,35 @@ def filter_func_qwen_image(name: str) -> bool:
     return pattern.match(name) is not None
 
 
+def make_qwen_image_filter(config_id: int):
+    """Build a Qwen-Image filter with configurable sensitive-layer exclusion.
+
+    config_id is a 4-bit int (0-15):
+        bit 0 (1)  -> disable img_mod
+        bit 1 (2)  -> disable txt_mod
+        bit 2 (4)  -> disable img_mlp.net.2  (img_mlp_down)
+        bit 3 (8)  -> disable txt_mlp.net.2  (txt_mlp_down)
+
+    Base layers (always disabled): time_text_embed, img_in, txt_in, norm_out, proj_out
+    """
+    parts = [r"time_text_embed|img_in|txt_in|norm_out|proj_out"]
+    if config_id & 1:
+        parts.append(r"img_mod")
+    if config_id & 2:
+        parts.append(r"txt_mod")
+    if config_id & 4:
+        parts.append(r"img_mlp\.net\.2")
+    if config_id & 8:
+        parts.append(r"txt_mlp\.net\.2")
+    combined = "|".join(parts)
+    pattern = re.compile(r".*(" + combined + r").*")
+
+    def _filter(name: str) -> bool:
+        return pattern.match(name) is not None
+
+    return _filter
+
+
 def check_conv_and_mha(backbone, if_fp4, quantize_mha):
     for name, module in backbone.named_modules():
         if isinstance(module, (torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d)) and if_fp4:

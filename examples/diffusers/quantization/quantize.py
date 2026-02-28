@@ -89,7 +89,8 @@ class Quantizer:
     """Handles model quantization operations."""
 
     def __init__(
-        self, config: QuantizationConfig, model_config: ModelConfig, logger: logging.Logger
+        self, config: QuantizationConfig, model_config: ModelConfig, logger: logging.Logger,
+        filter_config: int | None = None,
     ):
         """
         Initialize quantizer.
@@ -98,10 +99,12 @@ class Quantizer:
             config: Quantization configuration
             model_config: Model configuration
             logger: Logger instance
+            filter_config: Optional 4-bit int for Qwen-Image sensitive-layer combos
         """
         self.config = config
         self.model_config = model_config
         self.logger = logger
+        self.filter_config = filter_config
 
     def get_quant_config(self, n_steps: int, backbone: torch.nn.Module) -> Any:
         """
@@ -133,6 +136,8 @@ class Quantizer:
         elif self.config.format == QuantFormat.FP4:
             if self.model_config.model_type.value.startswith("flux"):
                 quant_config = NVFP4_FP8_MHA_CONFIG
+            elif self.config.asymmetric:
+                quant_config = NVFP4_ASYMMETRIC_CONFIG
             else:
                 quant_config = NVFP4_DEFAULT_CONFIG
         else:
@@ -169,8 +174,8 @@ class Quantizer:
         self.logger.info("Starting model quantization...")
         mtq.quantize(backbone, quant_config, forward_loop)
         # Get model-specific filter function
-        model_filter_func = get_model_filter_func(self.model_config.model_type)
-        self.logger.info(f"Using filter function for {self.model_config.model_type.value}")
+        model_filter_func = get_model_filter_func(self.model_config.model_type, self.filter_config)
+        self.logger.info(f"Using filter function for {self.model_config.model_type.value} (filter_config={self.filter_config})")
 
         self.logger.info("Disabling specific quantizers...")
         mtq.disable_quantizer(backbone, model_filter_func)
@@ -442,6 +447,19 @@ def create_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Compress quantized weights to reduce memory footprint (FP8/FP4 only)",
     )
+    quant_group.add_argument(
+        "--asymmetric",
+        action="store_true",
+        help="Use asymmetric quantization (NVFP4_ASYMMETRIC_CONFIG) instead of symmetric for FP4",
+    )
+    quant_group.add_argument(
+        "--filter-config",
+        type=int,
+        default=None,
+        help="4-bit int (0-15) for Qwen-Image sensitive-layer filter combos. "
+             "bit0=img_mod, bit1=txt_mod, bit2=img_mlp_down, bit3=txt_mlp_down. "
+             "Set bit=1 to keep that layer in BF16 (disable quantization).",
+    )
 
     calib_group = parser.add_argument_group("Calibration Configuration")
     calib_group.add_argument("--batch-size", type=int, default=2, help="Batch size for calibration")
@@ -529,6 +547,7 @@ def main() -> None:
             lowrank=args.lowrank,
             quantize_mha=args.quantize_mha,
             compress=args.compress,
+            asymmetric=args.asymmetric,
         )
 
         if args.prompts_file is not None:
@@ -576,7 +595,7 @@ def main() -> None:
             calibrator = Calibrator(pipeline_manager, calib_config, model_config.model_type, logger)
             batched_prompts = calibrator.load_and_batch_prompts()
 
-            quantizer = Quantizer(quant_config, model_config, logger)
+            quantizer = Quantizer(quant_config, model_config, logger, filter_config=args.filter_config)
             backbone_quant_config = quantizer.get_quant_config(calib_config.n_steps, backbone)
 
             # Pipe loads the ckpt just before the inference.

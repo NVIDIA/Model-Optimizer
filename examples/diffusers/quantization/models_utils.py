@@ -31,6 +31,7 @@ from utils import (
     filter_func_ltx_video,
     filter_func_qwen_image,
     filter_func_wan_video,
+    make_qwen_image_filter,
 )
 
 
@@ -50,16 +51,21 @@ class ModelType(str, Enum):
     QWEN_IMAGE_2512 = "qwen-image-2512"
 
 
-def get_model_filter_func(model_type: ModelType) -> Callable[[str], bool]:
+def get_model_filter_func(model_type: ModelType, filter_config: int | None = None) -> Callable[[str], bool]:
     """
     Get the appropriate filter function for a given model type.
 
     Args:
         model_type: The model type enum
+        filter_config: Optional 4-bit int (0-15) for Qwen-Image sensitive-layer combos.
+                       If provided and model is qwen-image, uses make_qwen_image_filter.
 
     Returns:
         A filter function appropriate for the model type
     """
+    if model_type == ModelType.QWEN_IMAGE_2512 and filter_config is not None:
+        return make_qwen_image_filter(filter_config)
+
     filter_func_map = {
         ModelType.FLUX_DEV: filter_func_flux_dev,
         ModelType.FLUX_SCHNELL: filter_func_default,
