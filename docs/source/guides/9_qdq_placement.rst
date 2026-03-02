@@ -33,15 +33,15 @@ The easiest way to use the autotuner is via the command-line interface:
 
 .. code-block:: bash
 
-   # Basic usage - INT8 quantization
-   python -m modelopt.onnx.quantization.autotune --model model.onnx --output ./results
+   # Basic usage - INT8 quantization (output default: ./autotuner_output)
+   python -m modelopt.onnx.quantization.autotune --onnx_path model.onnx
 
-   # FP8 quantization with more exploration
+   # Specify output dir and FP8 with more schemes
    python -m modelopt.onnx.quantization.autotune \
-       --model model.onnx \
-       --output ./results \
-       --quant-type fp8 \
-       --schemes-per-region 50
+       --onnx_path model.onnx \
+       --output_dir ./results \
+       --quant_type fp8 \
+       --schemes_per_region 50
 
 The command will:
 
@@ -80,11 +80,13 @@ For programmatic control, use the workflow function:
        init_benchmark_instance
    )
 
-   # Initialize TensorRT benchmark
+   # When using the workflow from Python, the CLI normally calls init_benchmark_instance
+   # for you. If you run the workflow directly, call it first:
    init_benchmark_instance(
+       use_trtexec=False,
        timing_cache_file="timing.cache",
        warmup_runs=5,
-       timing_runs=20
+       timing_runs=20,
    )
 
    # Run autotuning workflow
@@ -92,7 +94,7 @@ For programmatic control, use the workflow function:
        model_path="model.onnx",
        output_dir=Path("./results"),
        num_schemes_per_region=30,
-       quant_type="int8"
+       quant_type="int8",
    )
 
 How It Works
@@ -144,16 +146,16 @@ Pattern cache files store the best Q/DQ schemes from previous optimization runs.
 
    # First optimization (cold start)
    python -m modelopt.onnx.quantization.autotune \
-       --model model_v1.onnx \
-       --output ./run1
+       --onnx_path model_v1.onnx \
+       --output_dir ./run1
 
    # The pattern cache is saved to ./run1/autotuner_state_pattern_cache.yaml
 
    # Second optimization with warm-start
    python -m modelopt.onnx.quantization.autotune \
-       --model model_v2.onnx \
-       --output ./run2 \
-       --pattern-cache ./run1/autotuner_state_pattern_cache.yaml
+       --onnx_path model_v2.onnx \
+       --output_dir ./run2 \
+       --pattern_cache ./run1/autotuner_state_pattern_cache.yaml
 
 By prioritizing cached schemes, the second test run has the potential to discover optimal configurations much more quickly.
 
@@ -171,9 +173,9 @@ If you have a pre-quantized baseline model (e.g., from manual optimization or an
 .. code-block:: bash
 
    python -m modelopt.onnx.quantization.autotune \
-       --model model.onnx \
-       --output ./results \
-       --qdq-baseline manually_quantized.onnx
+       --onnx_path model.onnx \
+       --output_dir ./results \
+       --qdq_baseline manually_quantized.onnx
 
 The autotuner will:
 
@@ -196,15 +198,15 @@ Long optimizations can be interrupted (Ctrl+C, cluster preemption, crashes) and 
 
    # Start optimization
    python -m modelopt.onnx.quantization.autotune \
-       --model model.onnx \
-       --output ./results
+       --onnx_path model.onnx \
+       --output_dir ./results
    
    # ... interrupted after 2 hours ...
    
    # Resume from checkpoint (just run the same command)
    python -m modelopt.onnx.quantization.autotune \
-       --model model.onnx \
-       --output ./results
+       --onnx_path model.onnx \
+       --output_dir ./results
 
 The autotuner automatically:
 
@@ -220,9 +222,9 @@ If your model uses custom TensorRT operations, provide the plugin libraries:
 .. code-block:: bash
 
    python -m modelopt.onnx.quantization.autotune \
-       --model model.onnx \
-       --output ./results \
-       --plugin-libraries /path/to/plugin1.so /path/to/plugin2.so
+       --onnx_path model.onnx \
+       --output_dir ./results \
+       --plugin_libraries /path/to/plugin1.so /path/to/plugin2.so
 
 Low-Level API Usage
 ===================
@@ -235,10 +237,18 @@ Basic Workflow
 .. code-block:: python
 
    import onnx
-   from modelopt.onnx.quantization.autotune import (
-       QDQAutotuner,
-       Config,
-       TensorRTPyBenchmark
+   from modelopt.onnx.quantization.autotune import QDQAutotuner, Config
+   from modelopt.onnx.quantization.autotune.workflows import (
+       init_benchmark_instance,
+       benchmark_onnx_model,
+   )
+
+   # Initialize global benchmark (required before benchmark_onnx_model)
+   init_benchmark_instance(
+       use_trtexec=False,
+       timing_cache_file="timing.cache",
+       warmup_runs=5,
+       timing_runs=20,
    )
 
    # Load model
@@ -246,22 +256,12 @@ Basic Workflow
 
    # Initialize autotuner with automatic region discovery
    autotuner = QDQAutotuner(model)
-   config = Config(
-       default_quant_type="int8",
-       verbose=True
-   )
+   config = Config(default_quant_type="int8", verbose=True)
    autotuner.initialize(config)
-
-   # Setup TensorRT benchmark
-   benchmark = TensorRTPyBenchmark(
-       timing_cache_file="timing.cache",
-       warmup_runs=5,
-       timing_runs=100
-   )
 
    # Measure baseline (no Q/DQ)
    autotuner.export_onnx("baseline.onnx", insert_qdq=False)
-   baseline_latency = benchmark.run("baseline.onnx")
+   baseline_latency = benchmark_onnx_model("baseline.onnx")
    autotuner.submit(baseline_latency)
    print(f"Baseline: {baseline_latency:.2f} ms")
 
@@ -275,7 +275,9 @@ Basic Workflow
        # Set current profile region
        autotuner.set_profile_region(region, commit=(region_idx > 0))
        
-       # Check if already profiled (for crash recovery)
+       # After set_profile_region(), None means this region's pattern was already
+       # profiled (e.g. from a loaded state file). There are no new schemes to
+       # generate, so skip to the next region.
        if autotuner.current_profile_pattern_schemes is None:
            print("  Already profiled, skipping")
            continue
@@ -292,7 +294,7 @@ Basic Workflow
            model_bytes = autotuner.export_onnx(None, insert_qdq=True)
            
            # Measure performance
-           latency = benchmark.run(model_bytes)
+           latency = benchmark_onnx_model(model_bytes)
            success = latency != float('inf')
            autotuner.submit(latency, success=success)
            
@@ -340,7 +342,7 @@ Create and use pattern caches:
    from modelopt.onnx.quantization.autotune import PatternCache
 
    # Load existing cache
-   cache = PatternCache.load("pattern_cache.yaml")
+   cache = PatternCache.load("autotuner_state_pattern_cache.yaml")
    print(f"Loaded {cache.num_patterns} patterns")
 
    # Initialize autotuner with cache
@@ -360,7 +362,7 @@ Extract patterns from pre-quantized models:
 .. code-block:: python
 
    import onnx
-   from modelopt.onnx.quantization.autotune.qdq_utils import get_quantized_tensors
+   from modelopt.onnx.quantization.qdq_utils import get_quantized_tensors
 
    # Load baseline model with Q/DQ nodes
    baseline_model = onnx.load("quantized_baseline.onnx")
@@ -389,57 +391,53 @@ The ``Config`` class controls autotuner behavior:
    from modelopt.onnx.quantization.autotune import Config
 
    config = Config(
-       # Quantization settings
        default_quant_type="int8",             # "int8" or "fp8"
-       default_q_scale=0.1,                   # Default scale for Q/DQ nodes
-       default_q_zero_point=0,                # Default zero-point (0 for int8)
-       
-       # Scheme generation settings
-       top_percent_to_mutate=0.1,             # Top 10% schemes for mutation
-       minimum_schemes_to_mutate=10,          # Min schemes to keep as seeds
-       maximum_mutations=3,                   # Max mutations per scheme
-       maximum_generation_attempts=100,       # Max attempts to generate unique scheme
-       
-       # Pattern cache settings
-       pattern_cache_minimum_distance=4,      # Min edit distance for diversity
-       pattern_cache_max_entries_per_pattern=32,  # Max schemes per pattern
-       
-       # Region discovery settings
-       maximum_sequence_region_size=10,       # Max nodes in sequence regions
-       minimum_topdown_search_size=10,        # Min nodes for top-down search
-       
-       # Logging
-       verbose=True                           # Detailed logging
+       default_dq_dtype="float32",            # DQ output: float16, float32, bfloat16
+       default_q_scale=0.1,
+       default_q_zero_point=0,
+       top_percent_to_mutate=0.1,
+       minimum_schemes_to_mutate=10,
+       maximum_mutations=3,
+       maximum_generation_attempts=100,
+       pattern_cache_minimum_distance=4,
+       pattern_cache_max_entries_per_pattern=32,
+       maximum_sequence_region_size=10,
+       minimum_topdown_search_size=10,
+       verbose=True,
    )
 
 Command-Line Arguments
 ----------------------
 
-Full list of CLI options:
+Arguments use underscores. Short options: ``-m`` (onnx_path), ``-o`` (output_dir), ``-s`` (schemes_per_region), ``-v`` (verbose). Run ``python -m modelopt.onnx.quantization.autotune --help`` for full help.
 
 .. code-block:: text
 
    Model and Output:
-     --model, -m              Path to ONNX model file
-     --output, -o             Output directory (default: ./autotuner_output)
+     --onnx_path, -m          Path to ONNX model file (required)
+     --output_dir, -o        Output directory (default: ./autotuner_output)
 
    Autotuning Strategy:
-     --schemes-per-region, -s Number of schemes per region (default: 30)
-     --pattern-cache          Pattern cache YAML file for warm-start
-     --qdq-baseline           QDQ baseline model to import patterns
-     --state-file             State file path for resume capability
+     --schemes_per_region, -s Number of schemes per region (default: 30)
+     --pattern_cache         Pattern cache YAML for warm-start
+     --qdq_baseline          QDQ baseline model to import patterns
+     --state_file            State file path for resume
+     --node_filter_list      File of wildcard patterns; regions with no matching nodes are skipped
 
    Quantization:
-     --quant-type             Quantization type: int8 or fp8 (default: int8)
+     --quant_type            int8 or fp8 (default: int8)
+     --default_dq_dtype      float16, float32, or bfloat16 (default: float32)
 
    TensorRT Benchmark:
-     --timing-cache           TensorRT timing cache file
-     --warmup-runs            Number of warmup runs (default: 5)
-     --timing-runs            Number of timing runs (default: 20)
-     --plugin-libraries       TensorRT plugin .so files (optional)
+     --use_trtexec           Use trtexec instead of TensorRT Python API
+     --timing_cache          TensorRT timing cache file
+     --warmup_runs           Warmup runs (default: 5)
+     --timing_runs           Timing runs (default: 20)
+     --plugin_libraries      TensorRT plugin .so files (optional)
+     --trtexec_benchmark_args Extra trtexec args (e.g. for remote autotuning)
 
    Logging:
-     --verbose, -v            Enable debug logging
+     --verbose, -v           Enable debug logging
 
 Best Practices
 ==============
@@ -447,12 +445,11 @@ Best Practices
 Choosing Scheme Count
 ---------------------
 
-The ``--schemes-per-region`` parameter controls exploration depth:
+The ``--schemes_per_region`` parameter controls exploration depth:
 
 * **30-50 schemes**: Fast exploration, good for quick experiments
 * **50-100 schemes**: Balanced (recommended for most cases)
 * **100-200+ schemes**: Thorough exploration, use with pattern cache
-
 
 For models with many small regions, start with fewer schemes. For models with many big regions, start with more schemes.
 
@@ -505,20 +502,20 @@ Pattern cache is most effective when:
 
    # Optimize first model and save patterns
    python -m modelopt.onnx.quantization.autotune \
-       --model bert_base.onnx \
-       --output ./bert_base_run \
-       --schemes-per-region 50
+       --onnx_path bert_base.onnx \
+       --output_dir ./bert_base_run \
+       --schemes_per_region 50
 
    # Use patterns for similar models
    python -m modelopt.onnx.quantization.autotune \
-       --model bert_large.onnx \
-       --output ./bert_large_run \
-       --pattern-cache ./bert_base_run/pattern_cache.yaml
+       --onnx_path bert_large.onnx \
+       --output_dir ./bert_large_run \
+       --pattern_cache ./bert_base_run/autotuner_state_pattern_cache.yaml
 
    python -m modelopt.onnx.quantization.autotune \
-       --model roberta_base.onnx \
-       --output ./roberta_run \
-       --pattern-cache ./bert_base_run/pattern_cache.yaml
+       --onnx_path roberta_base.onnx \
+       --output_dir ./roberta_run \
+       --pattern_cache ./bert_base_run/autotuner_state_pattern_cache.yaml
 
 Interpreting Results
 --------------------
@@ -616,11 +613,11 @@ Possible causes:
 
 .. code-block:: bash
 
-   # Solution: Check TensorRT logs in ./output/logs/
+   # Solution: Check TensorRT logs in output_dir/logs/
    # Add plugins if needed
    python -m modelopt.onnx.quantization.autotune \
-       --model model.onnx \
-       --plugin-libraries /path/to/plugin.so
+       --onnx_path model.onnx \
+       --plugin_libraries /path/to/plugin.so
 
 **Issue: Optimization is very slow**
 
@@ -632,8 +629,8 @@ Possible causes:
 
    # Faster exploration with fewer schemes
    python -m modelopt.onnx.quantization.autotune \
-       --model model.onnx \
-       --schemes-per-region 15
+       --onnx_path model.onnx \
+       --schemes_per_region 15
 
 **Issue: Out of GPU memory during optimization**
 
@@ -665,7 +662,7 @@ Enable verbose logging to see detailed information:
 .. code-block:: bash
 
    python -m modelopt.onnx.quantization.autotune \
-       --model model.onnx \
+       --onnx_path model.onnx \
        --verbose
 
 Check TensorRT build logs for each scheme:
@@ -690,23 +687,16 @@ To understand how the autotuner partitions your model into regions, use the regi
 .. code-block:: bash
 
    # Basic inspection - shows region hierarchy and statistics
-   python -m modelopt.onnx.quantization.autotune.region_search \
-       --model model.onnx
+   python -m modelopt.onnx.quantization.autotune.region_inspect --model model.onnx
 
    # Verbose mode for detailed debug information
-   python -m modelopt.onnx.quantization.autotune.region_search \
-       --model model.onnx \
-       --verbose
+   python -m modelopt.onnx.quantization.autotune.region_inspect --model model.onnx --verbose
 
    # Custom maximum sequence size (default: 10)
-   python -m modelopt.onnx.quantization.autotune.region_search \
-       --model model.onnx \
-       --max-sequence-size 20
+   python -m modelopt.onnx.quantization.autotune.region_inspect --model model.onnx --max-sequence-size 20
 
    # Include all regions (even without quantizable operations)
-   python -m modelopt.onnx.quantization.autotune.region_search \
-       --model model.onnx \
-       --include-all-regions
+   python -m modelopt.onnx.quantization.autotune.region_inspect --model model.onnx --include-all-regions
 
 **What this tool shows:**
 
@@ -747,7 +737,7 @@ To understand how the autotuner partitions your model into regions, use the regi
 This helps you understand:
 
 * **Number of patterns**: More regions = more unique patterns = longer optimization
-* **Region sizes**: Very large regions might need adjustment via ``--max-sequence-size``
+* **Region sizes**: Very large regions might need adjustment via ``--max-sequence-size`` (region_inspect)
 * **Model structure**: Identifies divergent/convergent patterns (skip connections, branches)
 
 API Reference
@@ -766,7 +756,8 @@ Key Classes:
 Key Functions:
 
 * :func:`~modelopt.onnx.quantization.autotune.workflows.region_pattern_autotuning_workflow` - Complete optimization workflow
-* :func:`~modelopt.onnx.quantization.autotune.workflows.benchmark_onnx_model` - Benchmark model with TensorRT
+* :func:`~modelopt.onnx.quantization.autotune.workflows.init_benchmark_instance` - Initialize global TensorRT benchmark (call before benchmark_onnx_model when using workflow from Python)
+* :func:`~modelopt.onnx.quantization.autotune.workflows.benchmark_onnx_model` - Benchmark ONNX model with TensorRT
 
 Frequently Asked Questions
 ==========================
@@ -822,10 +813,10 @@ Example 1: Basic Optimization
 
    # Optimize a ResNet model with INT8 quantization
    python -m modelopt.onnx.quantization.autotune \
-       --model resnet50.onnx \
-       --output ./resnet50_optimized \
-       --quant-type int8 \
-       --schemes-per-region 30
+       --onnx_path resnet50.onnx \
+       --output_dir ./resnet50_optimized \
+       --quant_type int8 \
+       --schemes_per_region 30
 
 Example 2: Transfer Learning with Pattern Cache
 ------------------------------------------------
@@ -834,17 +825,17 @@ Example 2: Transfer Learning with Pattern Cache
 
    # Optimize GPT-2 small
    python -m modelopt.onnx.quantization.autotune \
-       --model gpt2_small.onnx \
-       --output ./gpt2_small_run \
-       --quant-type fp8 \
-       --schemes-per-region 50
+       --onnx_path gpt2_small.onnx \
+       --output_dir ./gpt2_small_run \
+       --quant_type fp8 \
+       --schemes_per_region 50
 
    # Reuse patterns for GPT-2 medium (much faster)
    python -m modelopt.onnx.quantization.autotune \
-       --model gpt2_medium.onnx \
-       --output ./gpt2_medium_run \
-       --quant-type fp8 \
-       --pattern-cache ./gpt2_small_run/pattern_cache.yaml
+       --onnx_path gpt2_medium.onnx \
+       --output_dir ./gpt2_medium_run \
+       --quant_type fp8 \
+       --pattern_cache ./gpt2_small_run/autotuner_state_pattern_cache.yaml
 
 Example 3: Import from Manual Baseline
 ---------------------------------------
@@ -854,10 +845,10 @@ Example 3: Import from Manual Baseline
    # You have a manually quantized baseline
    # Import its patterns as starting point
    python -m modelopt.onnx.quantization.autotune \
-       --model model.onnx \
-       --output ./auto_optimized \
-       --qdq-baseline manually_quantized.onnx \
-       --schemes-per-region 40
+       --onnx_path model.onnx \
+       --output_dir ./auto_optimized \
+       --qdq_baseline manually_quantized.onnx \
+       --schemes_per_region 40
 
 Example 4: Full Python Workflow
 --------------------------------
@@ -882,9 +873,13 @@ Example 4: Full Python Workflow
        model_path="model.onnx",
        output_dir=Path("./results"),
        num_schemes_per_region=30,
+       pattern_cache_file=None,
+       state_file=None,
        quant_type="int8",
-       pattern_cache_file=None,  # Cold start
-       qdq_baseline_model=None   # No baseline import
+       default_dq_dtype="float32",
+       qdq_baseline_model=None,
+       node_filter_list=None,
+       verbose=False,
    )
    
    # Access results
@@ -904,7 +899,7 @@ The ``modelopt.onnx.quantization.autotune`` module provides a powerful automated
 **Next Steps:**
 
 * Try the quick start example on your model
-* Experiment with different ``--schemes-per-region`` values
+* Experiment with different ``--schemes_per_region`` values
 * Build a pattern cache library for your model family
 * Integrate optimized models into your deployment pipeline
 
