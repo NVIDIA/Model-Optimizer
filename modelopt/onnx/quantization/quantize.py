@@ -249,6 +249,7 @@ def _find_nodes_to_quantize_autotune(
     quantize_mode: str,
     trt_plugins: list[str],
     high_precision_dtype: str = "fp16",
+    intermediate_generated_files: list[str] = [],
 ) -> tuple[list[str], list[str], list[tuple[gs.Node, gs.Node, str]], list[str]]:
     logger.info("Running Auto Q/DQ with TensorRT")
     from modelopt.onnx.quantization.autotune.insertion_points import get_autotuner_quantizable_ops
@@ -270,7 +271,7 @@ def _find_nodes_to_quantize_autotune(
     # Export model with Q/DQ insertion
     onnx_path_autotune = onnx_path.replace(".onnx", ".quant_autotune.onnx")
     onnx_bytes = autotuner.export_onnx(onnx_path_autotune, insert_qdq=True, best=True)
-    # intermediate_generated_files.append(onnx_path_autotune)
+    intermediate_generated_files.append(onnx_path_autotune)
 
     # Get nodes and op types to quantize
     onnx_model_autotune = onnx.load_from_string(onnx_bytes)
@@ -598,6 +599,7 @@ def quantize(
                 quantize_mode,
                 trt_plugins,
                 high_precision_dtype,
+                intermediate_generated_files,
             )
             nodes_to_quantize.extend(nodes_to_quantize_autotune)
             kwargs["no_quantize_inputs"] = no_quantize_inputs
