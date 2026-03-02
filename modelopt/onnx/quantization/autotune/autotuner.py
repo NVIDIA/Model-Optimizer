@@ -22,19 +22,6 @@ from modelopt.onnx.quantization.autotune.autotuner_base import QDQAutotunerBase
 from modelopt.onnx.quantization.autotune.common import Config, PatternCache, Region, RegionType
 from modelopt.onnx.quantization.autotune.region_search import CombinedRegionSearch
 
-_MUTATION_SPECS = [
-    ("node_inputs", "node input points", lambda p: (p.node_index, p.input_index)),
-    (
-        "child_region_inputs",
-        "region composite points",
-        lambda p: (p.region_index, p.input_index),
-    ),
-    (
-        "region_outputs",
-        "region output points",
-        lambda p: (p.region_index, p.node_index, p.output_index),
-    ),
-]
 
 class QDQAutotuner(QDQAutotunerBase):
     """Q/DQ autotuner with automatic region discovery around compute-intensive ops."""
