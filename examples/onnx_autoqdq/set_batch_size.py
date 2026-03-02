@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,9 +25,25 @@ Usage:
 """
 
 import argparse
+import sys
 
 import onnx
-from onnx import shape_inference
+
+from modelopt.onnx.utils import check_model, infer_shapes, save_onnx
+
+
+def _validate_onnx_model_path(path: str) -> None:
+    """Ensure the model path has a .onnx extension for consistent output path generation."""
+    if not path.lower().endswith(".onnx"):
+        print(f"Error: Model path must end with '.onnx', got: {path}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _validate_batch_size(batch_size: int) -> None:
+    """Ensure batch size is a positive integer to prevent invalid model configurations."""
+    if batch_size < 1:
+        print(f"Error: Batch size must be a positive integer, got: {batch_size}", file=sys.stderr)
+        sys.exit(1)
 
 
 def set_batch_size(model_path: str, batch_size: int, output_path: str) -> None:
@@ -68,20 +84,21 @@ def set_batch_size(model_path: str, batch_size: int, output_path: str) -> None:
     )
 
     # Run shape inference to propagate the batch size through the model
+    # Use modelopt's infer_shapes to support models with external data and large models
     print("Running shape inference...")
     try:
-        model = shape_inference.infer_shapes(model)
+        model = infer_shapes(model)
     except Exception as e:
         print(f"Warning: Shape inference failed: {e}")
         print("Continuing without shape inference...")
 
-    # Save the modified model
+    # Save the modified model (handles external data and IR > max ORT supported)
     print(f"Saving modified model to {output_path}...")
-    onnx.save(model, output_path)
+    save_onnx(model, output_path)
 
-    # Verify the saved model
+    # Verify the saved model (handles external data and large models)
     print("Verifying model...")
-    onnx.checker.check_model(output_path)
+    check_model(model)
     print("✓ Model saved and verified successfully!")
 
 
@@ -109,9 +126,13 @@ Examples:
 
     args = parser.parse_args()
 
-    # Generate output path if not provided
+    _validate_onnx_model_path(args.model)
+    _validate_batch_size(args.batch_size)
+
+    # Generate output path if not provided (requires .onnx extension, validated above)
     if args.output is None:
-        base_name = args.model.rsplit(".", 1)[0]
+        parts = args.model.rsplit(".", 1)
+        base_name = parts[0] if len(parts) == 2 else args.model
         args.output = f"{base_name}.bs{args.batch_size}.onnx"
 
     set_batch_size(args.model, args.batch_size, args.output)
