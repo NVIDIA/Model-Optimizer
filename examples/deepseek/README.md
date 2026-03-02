@@ -73,3 +73,20 @@ We provide a one-step-script which will:
 ```bash
 ./quantize_fp8_to_nvfp4.sh --amax_path $FP4_QUANT_PATH --fp4_output_path $HF_FP4_PATH --fp8_hf_path $HF_FP8_CKPT --world_size 8
 ```
+
+#### W4AFP8 for V3 & R1
+
+firstly , prepare a trtllm image, like
+```bash
+docker run --rm -it --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 --gpus=all \
+	nvcr.io/nvidia/tensorrt-llm/release
+```
+then we can operate modelopt in the docker pod as (Trtllm example)[https://github.com/NVIDIA/TensorRT-LLM/blob/main/examples/models/core/deepseek_v3/README.md?plain=1]
+but we should notice that just using the latest DeepSeek-V3.git is ok, because there is a dtype bug in bias proto at commit 1398800.
+
+#### W4AFP8 for V3.1
+
+The basic operation is the same as V3.
+But we need to notice two point:
+1. use config_v3.1.json or add "scale_fmt":"ue8m0" in config_671B.json.ue8m0 is a key item as it was used in training of V3.1
+2. set gemm_impl to fp8 (default is bf16) to enbale ue8m0 quant kernel
