@@ -50,6 +50,11 @@ from transformers.trainer_pt_utils import LabelSmoother
 from transformers.utils import ModelOutput
 from transformers.utils.quantization_config import CompressedTensorsConfig
 
+from ...export.plugins.hf_spec_export import (
+    EagleExporter,
+    EagleMedusaExporter,
+    SpeculativeDecodingExporter,
+)
 from ..eagle.conversion import EagleDMRegistry
 from ..eagle.eagle_model import EagleModel
 from ..eagle.utils import expand_mask, make_causal_mask
@@ -449,6 +454,18 @@ class HFEagleModel(EagleModel):
             or getattr(self.config, "llm_config", None)
             or self.config
         )
+
+    @property
+    def _draft_model_config(self):
+        """Return the llm config for the draft model."""
+        return self.eagle_config
+
+    def get_exporter(self) -> SpeculativeDecodingExporter:
+        """Get the exporter for the draft model."""
+        exporter_cls = (
+            EagleExporter if self.eagle_config.parallel_draft_step <= 1 else EagleMedusaExporter
+        )
+        return exporter_cls(self)
 
     def _find_base_model_parts(self):
         """Find model parts from different models and set base_{part}_path attributes."""
