@@ -61,6 +61,7 @@ Models:
   * Llama 4, 3.x (FP8, NVFP4)
   * Qwen 3, 2.5 (FP8, NVFP4)
   * Qwen 3 MoE (FP8, NVFP4)
+  * Qwen 3-VL (FP8, NVFP4)
   * Deepseek R1/V3 (NVFP4)
   * Mixtral 8x7B (FP8, NVFP4)
   * Medusa (FP8)
