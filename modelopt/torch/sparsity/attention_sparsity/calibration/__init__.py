@@ -17,10 +17,13 @@
 
 from .calibrate import calibrate_sparse_attention
 from .calibrator import DynamicThresholdCalibrator
+from .head_stability_calibrator import HeadStabilityCalibrator, calibrate_head_cache
 from .ruler_dataset import RulerDatasetBuilder
 
 __all__ = [
     "DynamicThresholdCalibrator",
+    "HeadStabilityCalibrator",
     "RulerDatasetBuilder",
+    "calibrate_head_cache",
     "calibrate_sparse_attention",
 ]

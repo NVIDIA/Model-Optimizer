@@ -24,4 +24,4 @@ __all__ = [
 ]
 
 # Import method implementations to trigger registration
-from . import flash_skip_softmax, sparse24_triton
+from . import flash_skip_softmax, head_cache, sparse24_triton

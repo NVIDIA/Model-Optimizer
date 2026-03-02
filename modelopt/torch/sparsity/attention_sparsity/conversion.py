@@ -32,6 +32,27 @@ from .sparse_attention import SparseAttentionModule, SparseAttentionRegistry
 from .utils import get_named_sparse_attention_modules, get_sparse_attention_modules
 
 
+def _register_head_cache_backend_if_needed(model: nn.Module, config: SparseAttentionConfig) -> None:
+    """Register head-cache attention backends if the config uses method='head_cache'.
+
+    Patches LTX-2 attention modules and registers diffusers backend for head caching.
+    """
+    sparse_cfg = config.sparse_cfg if hasattr(config, "sparse_cfg") else {}
+    needs_head_cache = any(
+        isinstance(v, dict) and v.get("method") == "head_cache" for v in sparse_cfg.values()
+    )
+    if not needs_head_cache:
+        return
+
+    from .kernels import register_diffusers_head_cache_attention, register_ltx_head_cache_attention
+
+    if register_ltx_head_cache_attention is not None:
+        register_ltx_head_cache_attention(model)
+
+    if register_diffusers_head_cache_attention is not None:
+        register_diffusers_head_cache_attention()
+
+
 def _register_triton_backend_if_needed(model: nn.Module, config: SparseAttentionConfig) -> None:
     """Register the Triton attention backend and set attn_implementation if needed.
 
@@ -107,6 +128,9 @@ def convert_to_sparse_attention_model(
 
     # Register Triton attention backend and set attn_implementation if needed
     _register_triton_backend_if_needed(model, config)
+
+    # Register head-cache attention backends if needed
+    _register_head_cache_backend_if_needed(model, config)
 
     # Apply custom model plugins
     register_custom_model_plugins_on_the_fly(model)
@@ -432,12 +456,32 @@ def _format_threshold(info: dict) -> str:
                 s = target.get(phase, 0.5)
                 parts.append(f"{phase}: a={a:.4f}, b={b:.2f}, target={s:.0%}")
         return f"calibrated({', '.join(parts)})"
+    if t == "head_cache":
+        v = info.get("value", 0.97)
+        sparse24 = info.get("apply_sparse24", False)
+        extra = "+sparse24" if sparse24 else ""
+        return f"head_cache(sim_threshold={v}{extra})"
     if t == "static":
         v = info.get("value")
         if isinstance(v, dict):
             return f"threshold={v}"
         return f"threshold={v:.2e}" if isinstance(v, float) else f"threshold={v}"
     return "threshold=N/A"
+
+
+def reset_head_cache(model: nn.Module) -> None:
+    """Reset head cache state for all modules (call before each new generation).
+
+    Clears cached outputs and resets step counters so that the first step of a
+    new generation always computes all heads.
+
+    Args:
+        model: Model with head_cache sparse attention applied.
+    """
+    for module in get_sparse_attention_modules(model):
+        state = getattr(module, "_head_cache_state", None)
+        if state is not None:
+            state.reset()
 
 
 @atomic_print

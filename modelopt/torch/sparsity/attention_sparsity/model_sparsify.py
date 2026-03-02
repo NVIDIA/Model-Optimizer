@@ -23,8 +23,10 @@ from modelopt.torch.opt.conversion import apply_mode
 from modelopt.torch.opt.searcher import ForwardLoop
 
 from .calibration import calibrate_sparse_attention
+from .calibration.head_stability_calibrator import calibrate_head_cache
 from .config import SparseAttentionConfig
 from .mode import SparseAttentionModeRegistry
+from .utils import get_named_sparse_attention_modules
 
 __all__ = [
     "calibrate",
@@ -168,10 +170,19 @@ def calibrate(
         config: Sparse attention configuration with calibration settings
         forward_loop: Optional callable that forwards calibration data through the model.
             If provided, uses this for calibration data.
-            If None, will auto-generate RULER dataset for calibration.
+            If None, will auto-generate RULER dataset for calibration (LLM methods only).
 
     Returns:
         The calibrated model with optimized sparse attention thresholds.
     """
+    # Run head cache calibration if any modules use head_cache method
+    has_head_cache = any(
+        hasattr(m, "_sparse_method_instance") and m._sparse_method_instance.name == "head_cache"
+        for _, m in get_named_sparse_attention_modules(model)
+    )
+    if has_head_cache and forward_loop is not None:
+        calibrate_head_cache(model, forward_loop)
+        return model
+
     calibrate_sparse_attention(model, config, forward_loop=forward_loop)
     return model

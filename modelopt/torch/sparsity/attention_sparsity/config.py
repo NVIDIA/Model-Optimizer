@@ -103,6 +103,26 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         ),
     )
 
+    similarity_threshold: float = ModeloptField(
+        default=0.97,
+        title="Head cache similarity threshold.",
+        description=(
+            "Cosine similarity threshold for head caching (0.0 to 1.0). "
+            "Heads with mean similarity >= threshold across consecutive steps are cached. "
+            "Higher = fewer heads cached (safer quality). Lower = more heads cached (faster). "
+            "Only used by head_cache method."
+        ),
+    )
+
+    apply_sparse24: bool = ModeloptField(
+        default=False,
+        title="Apply 2:4 sparsity on dynamic heads.",
+        description=(
+            "When True, apply 2:4 structured sparsity on the dynamic (non-cached) heads. "
+            "Only used by head_cache method. Composable with temporal caching."
+        ),
+    )
+
     @field_validator("method")
     @classmethod
     def validate_method(cls, v):
@@ -440,8 +460,24 @@ SPARSE24_TRITON = {
     },
 }
 
+# Per-head temporal caching for diffusion models
+# Caches stable head outputs across denoising steps; reuses them on alternating steps.
+HEAD_CACHE = {
+    "sparse_cfg": {
+        "*attn*": {
+            "method": "head_cache",
+            "backend": "triton",
+            "similarity_threshold": 0.97,
+            "apply_sparse24": False,
+            "enable": True,
+        },
+        "default": {"enable": False},
+    },
+}
+
 
 __all__ = [
+    "HEAD_CACHE",
     "SKIP_SOFTMAX_CALIB",
     "SKIP_SOFTMAX_DEFAULT",
     "SPARSE24_TRITON",

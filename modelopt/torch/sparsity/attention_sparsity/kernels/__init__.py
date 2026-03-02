@@ -25,6 +25,8 @@ context_attention = None
 register_triton_attention = None
 register_diffusers_triton_attention = None
 register_ltx_triton_attention = None
+register_ltx_head_cache_attention = None
+register_diffusers_head_cache_attention = None
 set_sparse24 = None
 
 if torch.cuda.is_available():
@@ -63,11 +65,28 @@ if torch.cuda.is_available():
 
             register_ltx_triton_attention = _register_ltx_triton_attention
 
+# Head cache kernels (no Triton dependency, just need ltx_core or diffusers)
+with import_plugin("ltx_core"):
+    from .ltx_head_cache_attention import (
+        register_ltx_head_cache_attention as _register_ltx_head_cache,
+    )
+
+    register_ltx_head_cache_attention = _register_ltx_head_cache
+
+with import_plugin("diffusers"):
+    from .diffusers_head_cache_attention import (
+        register_diffusers_head_cache_attention as _register_diffusers_head_cache,
+    )
+
+    register_diffusers_head_cache_attention = _register_diffusers_head_cache
+
 __all__ = [
     "IS_AVAILABLE",
     "context_attention",
     "context_attention_fwd",
+    "register_diffusers_head_cache_attention",
     "register_diffusers_triton_attention",
+    "register_ltx_head_cache_attention",
     "register_ltx_triton_attention",
     "register_triton_attention",
     "set_sparse24",
