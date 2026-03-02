@@ -447,8 +447,11 @@ class PatternSchemes:
     def __str__(self) -> str:
         """String representation for debugging."""
         best_latency = self.best_scheme.latency_ms if self.best_scheme else 0.0
+        pattern_str = self.pattern_signature[:40] + (
+            "..." if len(self.pattern_signature) > 40 else ""
+        )
         return (
-            f"PatternSchemes(pattern='{self.pattern_signature[:40]}...', "
+            f"PatternSchemes(pattern='{pattern_str}', "
             f"schemes={self.num_schemes}, best_latency={best_latency:.3f}ms)"
         )
 
@@ -516,19 +519,22 @@ class PatternCache:
             for scheme in sorted_schemes:
                 # Check if this scheme is too similar to any already-filtered scheme
                 too_similar = False
+                existing_to_remove = None  # at most one; remove after inner loop
                 for existing_scheme in filtered_schemes:
                     distance = scheme.distance(existing_scheme)
                     if distance < self.minimum_distance:
                         # Schemes are too similar, keep the better one
                         if scheme.latency_ms < existing_scheme.latency_ms:
-                            # New scheme is better, remove existing and add new
-                            filtered_schemes.remove(existing_scheme)
+                            # New scheme is better; mark existing for removal
+                            existing_to_remove = existing_scheme
                             break
                         else:
                             # Existing scheme is better, skip new one
                             too_similar = True
                             break
 
+                if existing_to_remove is not None:
+                    filtered_schemes.remove(existing_to_remove)
                 if not too_similar:
                     filtered_schemes.append(scheme)
 
