@@ -17,14 +17,12 @@
 """
 Import AnyModel checkpoint to Megatron-Bridge format.
 
-This script converts a HuggingFace AnyModel checkpoint to Megatron-Bridge format,
-similar to NeMo's convert_hf_to_nemo.
+This script converts a HuggingFace AnyModel checkpoint to Megatron-Bridge format.
 
 Usage:
     cd /workspace/Model-Optimizer
 
-    # TODO: remove this once Megatron-Bridge is installed in the environment
-    export PYTHONPATH="/workspace/Megatron-Bridge/src:/workspace/Model-Optimizer:${PYTHONPATH}"
+    export PYTHONPATH="/workspace/Model-Optimizer:${PYTHONPATH}"
 
     torchrun --nproc_per_node=1 examples/puzzletron/mbridge_distillation/import_anymodel_to_mbridge.py \
         --input-ckpt-path /path/to/anymodel/checkpoint \
