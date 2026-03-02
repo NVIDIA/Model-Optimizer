@@ -43,7 +43,6 @@ from eagle_utils import (
     make_eagle_supervised_data_module,
     patch_ring_attention_for_ttt,
 )
-from medusa_utils import make_medusa_supervised_data_module
 from transformers.trainer_utils import get_last_checkpoint
 
 import modelopt.torch.opt as mto
@@ -127,6 +126,10 @@ class EagleArguments:
         default="llama",
         metadata={"help": "The class of eagle decoder to use. Available options: llama, kimik2"},
     )
+    mix_hidden_states: bool = field(
+        default=False,
+        metadata={"help": "Whether to mix hidden states from previous TTT step."},
+    )
 
 
 def train():
@@ -204,6 +207,7 @@ def train():
             config = {
                 "eagle_decoder_type": eagle_args.eagle_decoder_type,
                 "eagle_offline": use_offline_training,
+                "eagle_mix_hidden_states": eagle_args.mix_hidden_states,
                 "eagle_architecture_config": custom_config,
             }
 
@@ -221,9 +225,7 @@ def train():
             raise Exception(f"{training_args.mode} is not supported!")
 
     print_rank_0("Loading dataset...")
-    if training_args.mode == "medusa":
-        data_module = make_medusa_supervised_data_module(tokenizer, data_args)
-    elif training_args.mode == "eagle3":
+    if training_args.mode == "eagle3":
         data_module = make_eagle_supervised_data_module(
             tokenizer, data_args, train_len=training_args.training_seq_len
         )

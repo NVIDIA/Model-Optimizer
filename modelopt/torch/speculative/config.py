@@ -29,12 +29,6 @@ eagle_mtp_default_config = deepcopy(default_eagle_config)
 eagle3_default_config.update({"use_aux_hidden_state": True, "use_last_layernorm": True})
 eagle_mtp_default_config.update({"use_last_layernorm": True, "use_mtp_layernorm": True})
 
-EAGLE1_DEFAULT_CFG = {
-    "algorithm": "eagle",
-    "config": {
-        "eagle_architecture_config": deepcopy(default_eagle_config),
-    },
-}
 
 EAGLE3_DEFAULT_CFG = {
     "algorithm": "eagle",
@@ -104,4 +98,15 @@ class EagleConfig(ModeloptBaseConfig):
     eagle_decoder_type: str = ModeloptField(
         default="llama",
         description=("The class of eagle decoder to use. Available options: llama, kimik2"),
+    )
+
+    eagle_ttt_steps: int = ModeloptField(
+        default=4, description=("The number of train-time-test steps in training.")
+    )
+
+    eagle_mix_hidden_states: bool = ModeloptField(
+        default=False,
+        description=(
+            "Whether to mix hidden states of multiple TTT steps. It is a technique to reduce training cost."
+        ),
     )

@@ -21,18 +21,14 @@ from _test_utils.torch.megatron.models import get_mcore_gpt_model
 
 import modelopt.torch.speculative as mtsp
 from modelopt.torch.speculative.plugins.megatron_eagle import _DynamicEagleGPTModel
-from modelopt.torch.speculative.plugins.megatron_medusa import _DynamicMedusaGPTModel
 
 ALGO_TO_CONFIG = {
-    "eagle1": mtsp.config.EAGLE1_DEFAULT_CFG,
     "eagle3": mtsp.config.EAGLE3_DEFAULT_CFG,
     "eagle-mtp": mtsp.config.EAGLE_MTP_DEFAULT_CFG,
 }
 
 
-def _test_speculative_gpt_model(
-    algo, num_medusa_heads_or_eagle_layers, activation_func, normalization, rank, size
-):
+def _test_speculative_gpt_model(algo, num_layers, activation_func, normalization, rank, size):
     num_attention_heads = 8
     num_query_groups = size
     max_sequence_length = 32
@@ -51,22 +47,10 @@ def _test_speculative_gpt_model(
         normalization=normalization,
     ).cuda()
 
-    if algo == "medusa":
-        config = {
-            "medusa_num_heads": num_medusa_heads_or_eagle_layers,
-            "medusa_num_layers": 1,
-        }
-
-        model = mtsp.convert(model, [("medusa", config)])
-
-        # Type checking
-        assert isinstance(model, _DynamicMedusaGPTModel)
-    elif algo in {"eagle1", "eagle3"}:
+    if algo == "eagle3":
         mtsp_config = ALGO_TO_CONFIG[algo]
 
-        mtsp_config["config"]["eagle_architecture_config"]["num_hidden_layers"] = (
-            num_medusa_heads_or_eagle_layers
-        )
+        mtsp_config["config"]["eagle_architecture_config"]["num_hidden_layers"] = num_layers
         mtsp_config["config"]["eagle_architecture_config"]["hidden_size"] = model.config.hidden_size
         mtsp_config["config"]["eagle_architecture_config"]["vocab_size"] = model.vocab_size
         mtsp_config["config"]["eagle_architecture_config"]["draft_vocab_size"] = model.vocab_size
@@ -89,14 +73,6 @@ def _test_speculative_gpt_model(
         assert len(first_layer.self_attention._forward_pre_hooks) > 0
         # Eagle3 last layer has a forward hook to extrat the pre_norm hidden_state
         assert len(last_layer._forward_hooks) > 0
-    elif algo == "eagle1":
-        first_layer = model.eagle_module.decoder.layers[0]
-        last_layer = model.eagle_module.decoder.layers[-1]
-        # Eagle1 QKV input_dim the same as hidden_size
-        assert first_layer.self_attention.linear_qkv.weight.shape[-1] == model.config.hidden_size
-        # No forward_hook or forward_pre_hook are needed
-        assert len(first_layer.self_attention._forward_pre_hooks) == 0
-        assert len(last_layer._forward_hooks) == 0
 
     # Bfloat16
     model = model.to(torch.bfloat16)
@@ -113,19 +89,7 @@ def _test_speculative_gpt_model(
     assert logits.shape[1] == max_sequence_length
     assert logits.shape[2] == vocab_size / size
 
-    if algo == "medusa":
-        # When label provided, model.forward should return
-        # medusa_loss[b, s * (num_medusa_heads + 1), b]
-        labels = torch.randint(
-            0,
-            vocab_size,
-            (batch_size, max_sequence_length),
-        ).cuda()
-        medusa_loss = model(prompt_tokens, position_ids, attention_mask, labels=labels)
-
-        assert medusa_loss.shape[0] == batch_size
-        assert medusa_loss.shape[1] == max_sequence_length
-    elif algo in {"eagle1", "eagle3"}:
+    if algo == "eagle3":
         labels = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
         eagle_loss = model(prompt_tokens, position_ids, attention_mask, labels=labels)
 
@@ -134,20 +98,14 @@ def _test_speculative_gpt_model(
 
 
 @pytest.mark.parametrize(
-    ("algo", "num_medusa_heads_or_eagle_layers", "activation_func", "normalization"),
+    ("algo", "num_layers", "activation_func", "normalization"),
     [
-        ("eagle1", 1, "squared_relu", "LayerNorm"),  # MHA
-        ("eagle1", 2, "swiglu", "RMSNorm"),  # GQA
         ("eagle3", 1, "swiglu", "RMSNorm"),  # GQA
         ("eagle3", 2, "swiglu", "RMSNorm"),  # GQA
-        ("medusa", 1, "squared_relu", "LayerNorm"),  # MHA
-        ("medusa", 2, "swiglu", "RMSNorm"),  # GQA
     ],
 )
-def test_speculative_gpt_model(
-    algo, num_medusa_heads_or_eagle_layers, activation_func, normalization
-):
-    if algo == "eagle":
+def test_speculative_gpt_model(algo, num_layers, activation_func, normalization):
+    if algo == "eagle3":
         try:
             import megatron.core.post_training  # noqa: F401
         except ImportError:
@@ -158,7 +116,7 @@ def test_speculative_gpt_model(
         job=partial(
             _test_speculative_gpt_model,
             algo,
-            num_medusa_heads_or_eagle_layers,
+            num_layers,
             activation_func,
             normalization,
         ),

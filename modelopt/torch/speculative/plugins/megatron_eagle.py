@@ -15,6 +15,7 @@
 
 """Plugin to add EAGLE support for Megatron-Core GPT model."""
 
+import contextlib
 import copy
 import warnings
 from contextlib import contextmanager
@@ -448,20 +449,21 @@ class EagleModule(MegatronModule):
             self._num_aux_hidden_states if self._num_aux_hidden_states > 0 else 2
         )
 
-        # This linear was previously a ColumnParallelLinear. We changed it to a TELinear
-        # since ColumnParallelLinear will have try to gather the input sequence when sequence
-        # parallel is used and does not allow gathering the outputs.
-        with torch.device(device):
-            self.fc = TELinear(
-                config.hidden_size * fc_input_size_multiplier,
-                config.hidden_size,
-                parallel_mode="duplicated",
-                config=config,
-                init_method=(lambda w: None),  # not used
-                bias=bias,
-                skip_bias_add=False,
-                skip_weight_param_allocation=False,
-            )
+        if config.use_aux_hidden_state:
+            # This linear was previously a ColumnParallelLinear. We changed it to a TELinear
+            # since ColumnParallelLinear will have try to gather the input sequence when sequence
+            # parallel is used and does not allow gathering the outputs.
+            with torch.device(device):
+                self.fc = TELinear(
+                    config.hidden_size * fc_input_size_multiplier,
+                    config.hidden_size,
+                    parallel_mode="duplicated",
+                    config=config,
+                    init_method=(lambda w: None),  # not used
+                    bias=bias,
+                    skip_bias_add=False,
+                    skip_weight_param_allocation=False,
+                )
 
         self.rotary_pos_emb = rotary_pos_emb
 
@@ -606,13 +608,9 @@ class EagleModule(MegatronModule):
             embeddings = self.enorm(embeddings)
             hidden_states = self.hnorm(hidden_states)
 
-        # EAGLE-1 uses [s, b, h] input but EAGLE-3 uses [s, b, 2h] input
         if self._num_aux_hidden_states == 0:
-            # [s, b, 2h]
-            decoder_input = torch.cat((embeddings, hidden_states), dim=-1)
-            decoder_input = self.fc(decoder_input)[0]
+            decoder_input = hidden_states
         else:
-            # EAGLE-3 forward
             # EAGLE-3 uses self.fc outside eagle_module forward to convert hidden_states from [s, b, 3h]
             self._embeddings = self.enorm(embeddings)
             decoder_input = hidden_states
@@ -693,6 +691,8 @@ class _DynamicEagleGPTModel(EagleModel):
         eagle_loss_decay_factor,
         eagle_architecture_config,
         eagle_decoder_type,
+        eagle_ttt_steps,
+        eagle_mix_hidden_states,
     ):
         if self.config.pipeline_model_parallel_size > 1:
             warnings.warn(
@@ -715,6 +715,8 @@ class _DynamicEagleGPTModel(EagleModel):
             eagle_loss_decay_factor=eagle_loss_decay_factor,
             eagle_architecture_config=eagle_architecture_config,
             eagle_decoder_type=eagle_decoder_type,
+            eagle_ttt_steps=eagle_ttt_steps,
+            eagle_mix_hidden_states=eagle_mix_hidden_states,
         )
 
         # sequence_parallel is not used in offline eagle
@@ -824,7 +826,7 @@ class _DynamicEagleGPTModel(EagleModel):
             self.kld = logits_kld_loss
 
     def _get_eagle_input_hidden_states(self, hidden_states: torch.Tensor, apply_fc: bool = True):
-        """When _aux_hidden_states is not empty for online, then this is EAGLE-3.
+        """Get input hidden_states for EAGLE.
 
         Args:
             hidden_states: last hidden_states
@@ -879,18 +881,6 @@ class _DynamicEagleGPTModel(EagleModel):
         # [s,b] -> [b,s]
         padded_input_ids = padded_input_ids.transpose(0, 1).contiguous()
 
-        attn_mask = attention_mask.clone().detach()
-        # [b, 1, sq, sk] -> [sq, 1, b, sk]
-        attn_mask = attn_mask.transpose(0, 2).contiguous()
-        attn_mask = gather_from_sequence_parallel_region(
-            attn_mask, group=get_context_parallel_group()
-        )
-        # [sq, 1, b, sk] -> [b, 1, sq, sk]
-        attn_mask = attn_mask.transpose(0, 2).contiguous()
-        attn_mask[:, :, :-1, :-1] = attn_mask[:, :, 1:, 1:]
-        attn_mask[:, :, -1, :] = True
-        attn_mask[:, :, :, -1] = True
-
         eagle_inputs = {}
 
         eagle_inputs["input_ids"] = padded_input_ids
@@ -903,14 +893,29 @@ class _DynamicEagleGPTModel(EagleModel):
 
         eagle_inputs["hidden_states"] = hidden_states
 
-        attn_mask = set_multi_step_attention_mask(attn_mask, ttt_step)
-        # [b, 1, sq, sk] -> [sq, 1, b, sk]
-        attn_mask = attn_mask.transpose(0, 2).contiguous()
-        attn_mask = scatter_to_sequence_parallel_region(
-            attn_mask, group=get_context_parallel_group()
-        )
-        # [sq, 1, b, sk] -> [b, 1, sq, sk]
-        eagle_inputs["attention_mask"] = attn_mask.transpose(0, 2).contiguous()
+        if self.eagle_mix_hidden_states:
+            eagle_inputs["attention_mask"] = attention_mask
+        else:
+            attn_mask = attention_mask.clone().detach()
+            # [b, 1, sq, sk] -> [sq, 1, b, sk]
+            attn_mask = attn_mask.transpose(0, 2).contiguous()
+            attn_mask = gather_from_sequence_parallel_region(
+                attn_mask, group=get_context_parallel_group()
+            )
+            # [sq, 1, b, sk] -> [b, 1, sq, sk]
+            attn_mask = attn_mask.transpose(0, 2).contiguous()
+            attn_mask[:, :, :-1, :-1] = attn_mask[:, :, 1:, 1:]
+            attn_mask[:, :, -1, :] = True
+            attn_mask[:, :, :, -1] = True
+
+            attn_mask = set_multi_step_attention_mask(attn_mask, ttt_step)
+            # [b, 1, sq, sk] -> [sq, 1, b, sk]
+            attn_mask = attn_mask.transpose(0, 2).contiguous()
+            attn_mask = scatter_to_sequence_parallel_region(
+                attn_mask, group=get_context_parallel_group()
+            )
+            # [sq, 1, b, sk] -> [b, 1, sq, sk]
+            eagle_inputs["attention_mask"] = attn_mask.transpose(0, 2).contiguous()
 
         eagle_inputs["rotary_pos_emb"] = torch.cat(
             [rotary_pos_emb] * (ttt_step + 1),
@@ -1055,7 +1060,6 @@ class _DynamicEagleGPTModel(EagleModel):
         packed_seq_params: PackedSeqParams = None,
         extra_block_kwargs: dict | None = None,
         return_eagle_inputs: bool = False,
-        ttt_steps=4,
         **kwargs,
     ) -> torch.Tensor:
         if position_ids is None or attention_mask is None:
@@ -1068,11 +1072,6 @@ class _DynamicEagleGPTModel(EagleModel):
                 raise ValueError("return_eagle_inputs is unsupported in EAGLE offline mode.")
             aux_hidden_states = kwargs.get("aux_hidden_states")
             hidden_states = kwargs.get("hidden_states")
-            if aux_hidden_states is None or hidden_states is None:
-                raise ValueError(
-                    "EAGLE offline mode requires kwargs: aux_hidden_states=[s,b,k*h], "
-                    "hidden_states=[s,b,h]."
-                )
         else:
             # When return_eagle_inputs is True, return decoder_input_for_eagle.
             # For LLM, decoder_input_for_eagle is just the text embeddings. However, for VLM
@@ -1097,15 +1096,17 @@ class _DynamicEagleGPTModel(EagleModel):
             output_weight = self.shared_embedding_or_output_weight()
         logits_sbh, _ = self.output_layer(hidden_states, weight=output_weight)
 
-        # EAGLE kv cache
-        eagle_inference_context = StaticInferenceContext(
-            input_ids.shape[0],
-            input_ids.shape[1] * ttt_steps,
-        )
+        if not self.eagle_mix_hidden_states:
+            # EAGLE kv cache
+            eagle_inference_context = StaticInferenceContext(
+                input_ids.shape[0],
+                input_ids.shape[1] * self.eagle_ttt_steps,
+            )
 
         if self.eagle_offline:
             eagle_module_input_hidden_states = self._get_eagle_input_hidden_states(
-                aux_hidden_states, apply_fc=self.eagle_config.use_aux_hidden_state
+                aux_hidden_states if self.eagle_config.use_aux_hidden_state else hidden_states,
+                apply_fc=self.eagle_config.use_aux_hidden_state,
             )
         # If EAGLE-3, aux_hidden_states are gathered by the forward_hook
         elif return_eagle_inputs:
@@ -1120,14 +1121,22 @@ class _DynamicEagleGPTModel(EagleModel):
                 hidden_states = gather_from_sequence_parallel_region(hidden_states)
             logits_sbh = gather_from_tensor_model_parallel_region(logits_sbh)
             # In case of VLM, there will be other fields for pixels.
+            aux_hidden = None
+            if self.eagle_config.use_aux_hidden_state:
+                aux_hidden = eagle_module_input_hidden_states.squeeze(1).cpu()
+
+            hidden_states_cpu = None
+            if hidden_states is not None:
+                hidden_states_cpu = hidden_states.squeeze(1).cpu()
+
             return {
                 "input_ids": input_ids.squeeze(0).cpu(),
-                "aux_hidden_states": eagle_module_input_hidden_states.squeeze(1).cpu(),
-                "hidden_states": hidden_states.squeeze(1).cpu(),
+                "aux_hidden_states": aux_hidden,
+                "hidden_states": hidden_states_cpu,
             }
         else:
             eagle_module_input_hidden_states = self._get_eagle_input_hidden_states(
-                hidden_states, apply_fc=True
+                hidden_states, apply_fc=self.eagle_config.use_aux_hidden_state
             )
 
         if labels is not None:
@@ -1150,7 +1159,7 @@ class _DynamicEagleGPTModel(EagleModel):
                 loss = 0.0 * loss
 
         acc = []
-        for ttt_step in range(ttt_steps):
+        for ttt_step in range(self.eagle_ttt_steps):
             eagle_inputs = self._get_eagle_module_inputs(
                 input_ids=input_ids,
                 hidden_states=eagle_module_input_hidden_states,
@@ -1159,36 +1168,65 @@ class _DynamicEagleGPTModel(EagleModel):
                 ttt_step=ttt_step,
             )
 
-            with te_dot_product_attention_with_cp(
-                eagle_inputs["attention_mask"], self.eagle_config.num_attention_heads
+            with (
+                te_dot_product_attention_with_cp(
+                    eagle_inputs["attention_mask"], self.eagle_config.num_attention_heads
+                )
+                if not self.eagle_mix_hidden_states
+                else contextlib.nullcontext()
             ):
-                _, eagle_logits, eagle_module_input_hidden_states = self._eagle_forward(
+                _, eagle_logits, eagle_module_output_hidden_states = self._eagle_forward(
                     eagle_inputs,
                     output_weight,
                     inference_params=inference_params,
                     packed_seq_params=packed_seq_params,
-                    inference_context=eagle_inference_context,
+                    inference_context=None
+                    if self.eagle_mix_hidden_states
+                    else eagle_inference_context,
                     **(extra_block_kwargs or {}),
                 )
 
             if self.config.sequence_parallel:
-                eagle_module_input_hidden_states = gather_from_sequence_parallel_region(
-                    eagle_module_input_hidden_states
+                eagle_module_output_hidden_states = gather_from_sequence_parallel_region(
+                    eagle_module_output_hidden_states
                 )
-            eagle_module_input_hidden_states = torch.cat(
+            eagle_module_output_hidden_states = torch.cat(
                 (
                     torch.zeros(
                         (
                             1,
-                            eagle_module_input_hidden_states.shape[1],
-                            eagle_module_input_hidden_states.shape[2],
+                            eagle_module_output_hidden_states.shape[1],
+                            eagle_module_output_hidden_states.shape[2],
                         ),
-                        dtype=eagle_module_input_hidden_states.dtype,
-                        device=eagle_module_input_hidden_states.device,
+                        dtype=eagle_module_output_hidden_states.dtype,
+                        device=eagle_module_output_hidden_states.device,
                     ),
-                    eagle_module_input_hidden_states[:-1, :, :],
+                    eagle_module_output_hidden_states[:-1, :, :],
                 )
             )
+
+            if self.eagle_mix_hidden_states:
+                seq_len_s, batch_size, _ = eagle_module_output_hidden_states.shape
+                num_to_replace = max(1, seq_len_s // (2**ttt_step + 1))
+
+                # Randomly select positions for each batch to replace
+                rand_indices = torch.stack(
+                    [
+                        torch.randperm(seq_len_s, device=eagle_module_output_hidden_states.device)[
+                            :num_to_replace
+                        ]
+                        for _ in range(batch_size)
+                    ],
+                    dim=0,
+                )
+
+                for batch_idx in range(batch_size):
+                    eagle_module_input_hidden_states[rand_indices[batch_idx], batch_idx, :] = (
+                        eagle_module_output_hidden_states[rand_indices[batch_idx], batch_idx, :]
+                    )
+            else:
+                eagle_module_input_hidden_states = eagle_module_output_hidden_states
+
             if self.config.sequence_parallel:
                 eagle_module_input_hidden_states = scatter_to_sequence_parallel_region(
                     eagle_module_input_hidden_states
