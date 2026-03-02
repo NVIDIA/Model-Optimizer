@@ -40,7 +40,7 @@ Clone and install:
 
 ```bash
 git clone https://github.com/NVIDIA/Model-Optimizer
-cd experimental/dms
+cd Model-Optimizer/experimental/dms
 pip install -e .
 ```
 
