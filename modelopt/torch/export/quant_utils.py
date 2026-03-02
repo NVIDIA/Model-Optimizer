@@ -57,6 +57,7 @@ from .model_config import (
     QUANTIZATION_FP8_PB_WO,
     QUANTIZATION_FP8_PC_PT,
     QUANTIZATION_INT4_AWQ,
+    QUANTIZATION_INT4_WO,
     QUANTIZATION_INT8_SQ,
     QUANTIZATION_INT8_WO,
     QUANTIZATION_MXFP4,
@@ -595,7 +596,10 @@ def get_quantization_format(module) -> str | None:
             assert len(weight_quantizer.block_sizes) > 0 and weight_quantizer.block_sizes[-1] > 0, (
                 "Invalid block_sizes for INT4 quantizer"
             )
-            return QUANTIZATION_INT4_AWQ
+            if hasattr(weight_quantizer, "pre_quant_scale") and weight_quantizer.pre_quant_scale:
+                return QUANTIZATION_INT4_AWQ
+            else:
+                return QUANTIZATION_INT4_WO
 
         if weight_quantizer.num_bits == 8:
             if input_quantizer is not None and input_quantizer.is_enabled:
@@ -772,6 +776,13 @@ def process_layer_quant_config(layer_config_dict):
         elif v == "int4_awq":
             layer_config = {
                 "quant_algo": "W4A16_AWQ",
+                "group_size": block_size_value,
+                "has_zero_point": False,
+                "pre_quant_scale": True,
+            }
+        elif v == "int4_wo":
+            layer_config = {
+                "quant_algo": "W4A16",
                 "group_size": block_size_value,
                 "has_zero_point": False,
                 "pre_quant_scale": True,
@@ -963,7 +974,7 @@ def to_quantized_weight(
                     )
         return (weight / weights_scaling_factor[:, None]).to(torch.float8_e4m3fn)
 
-    if quantization in [QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ]:
+    if quantization in [QUANTIZATION_INT4_AWQ, QUANTIZATION_W4A8_AWQ, QUANTIZATION_INT4_WO]:
         return pack_int4_in_uint8(weight, weights_scaling_factor)
 
     if quantization in [
