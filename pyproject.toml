@@ -31,17 +31,18 @@ dependencies = [
     # Common
     "ninja",            # for faster building of C++ / CUDA extensions
     "numpy",
-    "packaging",
-    "pydantic>=2.0",
     "nvidia-ml-py>=12",
-    "rich",
-    "scipy",
+    "packaging",
+    "setuptools>=80",   # torch.utils.cpp_extension imports setuptools at load time
+    "torch>=2.6",
     "tqdm",
     # modelopt.torch
     "pulp",
+    "pydantic>=2.0",
     "regex",
+    "rich",
     "safetensors",
-    "torch>=2.6",
+    "scipy",
 ]
 
 [project.optional-dependencies]
@@ -71,9 +72,9 @@ hf = [
     "deepspeed>=0.9.6; platform_system != 'Darwin' and platform_system != 'Windows'",
     "diffusers>=0.32.2",
     "huggingface_hub>=0.24.0",
+    "nltk",
     "peft>=0.17.0",
     "transformers>=4.53,<5.0",                                                        # Should match modelopt/torch/__init__.py and tox.ini
-    "nltk",
     "wonderwords",
 ]
 dev-lint = [
@@ -93,14 +94,13 @@ dev-docs = [
     "sphinx-togglebutton>=0.3.2",
 ]
 dev-test = [
-    "coverage",
     "pytest",
     "pytest-cov",
     "pytest-instafail",
     "pytest-timeout",
     "sentencepiece",
     "timm",
-    "torchprofile>=0.0.4",
+    "torchprofile>=0.0.4",     # optional dependency for modelopt.torch
     "torchvision",
     "torch-geometric",
     "tox>4.18",
@@ -118,6 +118,10 @@ include = ["modelopt*"]
 
 [tool.setuptools.package-data]
 modelopt = ["**/*.h", "**/*.cpp", "**/*.cu"]
+
+[tool.uv]
+managed = true
+# override-dependencies = ["torch; sys_platform == 'never'"]
 
 
 ####################################################################################################
@@ -254,7 +258,6 @@ markers = [
 
 
 [tool.coverage.run]
-# measure branch coverage in addition to statement coverage
 branch = false
 include = ["modelopt/*"]
 omit = ["*/plugins/*", "*/export/*"]

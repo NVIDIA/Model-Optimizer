@@ -18,6 +18,10 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add support for advanced weight scale search for NVFP4 quantization and its export path.
 - Enable PTQ workflow for Qwen3.5 MoE models.
 
+**Misc**
+
+- Migrated project metadata from ``setup.py`` to a fully declarative ``pyproject.toml``.
+
 0.42 (2026-02-xx)
 ^^^^^^^^^^^^^^^^^
 
