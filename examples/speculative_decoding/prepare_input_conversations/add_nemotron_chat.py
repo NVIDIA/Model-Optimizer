@@ -182,7 +182,7 @@ async def main(args: argparse.Namespace) -> None:
 
         with args.mapping_file.open("r", encoding="utf-8") as f:
             ordered_source_indices: list[int] = [
-                int(line.strip()) for line in f if line.strip()
+                int(line.strip()) for line in f if line.strip().isdigit()
             ]
         print(f"Mapping file loaded: {len(ordered_source_indices)} entries.")
 
