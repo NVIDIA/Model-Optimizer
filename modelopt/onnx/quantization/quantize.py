@@ -249,7 +249,7 @@ def _find_nodes_to_quantize_autotune(
     quantize_mode: str,
     trt_plugins: list[str],
     high_precision_dtype: str = "fp16",
-    intermediate_generated_files: list[str] = [],
+    intermediate_generated_files: list[str] | None = None,
 ) -> tuple[list[str], list[str], list[tuple[gs.Node, gs.Node, str]], list[str]]:
     logger.info("Running Auto Q/DQ with TensorRT")
     from modelopt.onnx.quantization.autotune.insertion_points import get_autotuner_quantizable_ops
@@ -257,6 +257,9 @@ def _find_nodes_to_quantize_autotune(
         init_benchmark_instance,
         region_pattern_autotuning_workflow,
     )
+
+    if intermediate_generated_files is None:
+        intermediate_generated_files = []
 
     # Initialize Autotuner with the Python 'tensorrt' package
     init_benchmark_instance(use_trtexec=False, plugin_libraries=trt_plugins)

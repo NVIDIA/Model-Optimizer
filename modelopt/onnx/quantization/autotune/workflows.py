@@ -385,7 +385,7 @@ def region_pattern_autotuning_workflow(
 
     if not keep_output_dir:
         logger.debug(
-            f"Removing output dir: {output_dir}. Select 'keep_output_dir=False' if you wish to keep it."
+            f"Removing output dir: {output_dir}. Set 'keep_output_dir=True' if you wish to keep it."
         )
         shutil.rmtree(output_dir)
 
