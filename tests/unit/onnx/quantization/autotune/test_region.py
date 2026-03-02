@@ -59,6 +59,7 @@ def test_parent_child_relationship(parent_with_children):
     assert parent.get_children() == [child1, child2]
     assert child1.parent == child2.parent == parent
 
+
 def test_add_and_get_nodes(leaf):
     leaf.nodes.update([0, 1, 2])
     assert set(leaf.get_nodes()) == {0, 1, 2}
@@ -77,6 +78,7 @@ def test_region_size_recursive(parent_with_children):
     child2.nodes.update([2, 3, 4])
     parent.nodes.add(5)
     assert len(parent.get_region_nodes_and_descendants()) == 6
+
 
 def test_metadata(leaf):
     leaf.metadata.update({"pattern": "Conv->Relu", "quantizable": "true"})
