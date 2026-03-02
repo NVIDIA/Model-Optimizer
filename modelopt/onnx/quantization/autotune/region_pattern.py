@@ -21,7 +21,7 @@ from typing import Union, overload
 import onnx_graphsurgeon as gs
 
 from modelopt.onnx.op_types import get_symmetric_ops
-from modelopt.onnx.quantization.autotune.common import InsertionScheme, PatternSchemes, Region
+from modelopt.onnx.quantization.autotune.common import InsertionScheme, Region
 from modelopt.onnx.quantization.autotune.insertion_points import (
     ChildRegionInputInsertionPoint,
     ChildRegionOutputInsertionPoint,
@@ -161,9 +161,6 @@ class RegionPattern:
                        is provided but other is not a Region
             TypeError: If other is neither RegionPattern nor Region
         """
-        if isinstance(scheme, PatternSchemes):
-            return set()
-
         if isinstance(other, RegionPattern):
             if scheme is not None:
                 raise ValueError("scheme parameter can only be used when matching against a Region")
