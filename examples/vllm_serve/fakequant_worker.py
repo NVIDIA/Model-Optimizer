@@ -152,6 +152,11 @@ quant_config: dict[str, Any] = {
     "quant_cfg": os.environ.get("QUANT_CFG", None),
     "kv_quant_cfg": os.environ.get("KV_QUANT_CFG", None),
     "amax_file_path": os.environ.get("AMAX_FILE_PATH", None),
+    # When "fp8": cast NVFP4-dequantized K/V to FP8 (scale=1.0) so vLLM's
+    # FlashInfer backend runs FP8 attention math. Safe because dequantized
+    # K/V max equals the calibrated global_amax, which is << 448 (FP8 max)
+    # for standard models. Requires --kv-cache-dtype fp8.
+    "kv_attn_math": os.environ.get("KV_ATTN_MATH", None),
 }
 
 
@@ -184,6 +189,43 @@ def _create_new_data_cls(data_cls, **kwargs):
     valid_params = {field.name for field in dataclasses.fields(data_cls)}
     filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
     return data_cls(**filtered_kwargs)
+
+
+def _enable_fp8_attn_for_nvfp4_kv(model: torch.nn.Module) -> None:
+    """Set FP8 KV cache scales to 1.0 for NVFP4 KV + FP8 attention math.
+
+    NVFP4-dequantized K/V values have max = calibrated global_amax, which is
+    << 448 (FP8 E4M3 max) for standard models, so a direct cast (scale=1.0)
+    is safe. Disables dynamic scale computation to preserve scale=1.0 during
+    the subsequent warmup.
+    """
+    try:
+        from vllm.model_executor.layers.attention.attention import Attention
+    except ImportError:
+        warnings.warn(
+            "Could not import vllm Attention layer; skipping FP8 KV scale setup."
+        )
+        return
+
+    num_layers = 0
+    for module in model.modules():
+        if isinstance(module, Attention):
+            module._k_scale.fill_(1.0)
+            module._v_scale.fill_(1.0)
+            module._k_scale_float = 1.0
+            module._v_scale_float = 1.0
+            # Disable dynamic scale computation so warmup does not overwrite 1.0
+            module.calculate_kv_scales = False
+            num_layers += 1
+
+    if num_layers == 0:
+        warnings.warn(
+            "KV_ATTN_MATH=fp8 is set but no vLLM Attention layers were found. "
+            "FP8 attention math will not take effect."
+        )
+        return
+
+    print(f"Set FP8 KV cache scales to 1.0 on {num_layers} attention layers.")
 
 
 def _fakequant_run_prolog_worker(self) -> None:
@@ -333,6 +375,14 @@ def _fakequant_run_prolog_worker(self) -> None:
     for name, module in model.named_modules():
         if name.endswith("weight_quantizer"):
             assert not module.is_enabled, f"quantizer {name} is still enabled"
+
+    if quant_config.get("kv_attn_math") == "fp8":
+        if not self.cache_config.cache_dtype.startswith("fp8"):
+            raise ValueError(
+                "KV_ATTN_MATH=fp8 requires --kv-cache-dtype fp8 to be passed to vLLM, "
+                f"but got kv-cache-dtype={self.cache_config.cache_dtype!r}."
+            )
+        _enable_fp8_attn_for_nvfp4_kv(model)
 
 
 class FakeQuantWorker(BaseWorker):
