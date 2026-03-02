@@ -53,11 +53,11 @@ nemotron_h_causal_lm_import: dict[str, CustomModuleMapping] = {
     "output_layer": NameRemapping("lm_head.", COL_TP),
     # Mamba
     "norm": NameRemapping("backbone.layers.{}.norm.", REPLICATE),
-    "mixer_norm": NameRemapping("backbone.layers.{}.mixer.norm.", REPLICATE),
-    "A_log": NameRemapping("backbone.layers.{}.mixer.A_log", REPLICATE),
-    "D": NameRemapping("backbone.layers.{}.mixer.D", REPLICATE),
-    "dt_bias": NameRemapping("backbone.layers.{}.mixer.dt_bias", REPLICATE),
-    "conv1d": NameRemapping("backbone.layers.{}.mixer.conv1d.", REPLICATE),
+    "mixer_norm": NameRemapping("backbone.layers.{}.mixer.norm.", COL_TP),
+    "A_log": NameRemapping("backbone.layers.{}.mixer.A_log", COL_TP),
+    "D": NameRemapping("backbone.layers.{}.mixer.D", COL_TP),
+    "dt_bias": NameRemapping("backbone.layers.{}.mixer.dt_bias", COL_TP),
+    "conv1d": NameRemapping("backbone.layers.{}.mixer.conv1d.", COL_TP),
     # mapping layer_norm_weight to None tells _name_remapping to skip it;
     # the fused layer_norm_weight is loaded separately via the "fused_norm" rule.
     "in_proj": NameRemapping(
