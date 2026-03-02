@@ -99,7 +99,12 @@ def generate_diffusion_dummy_inputs(
         except (ImportError, AttributeError):
             return fallback
 
-    is_flux = _is_model_type(
+    is_flux2 = _is_model_type(
+        "diffusers.models.transformers",
+        "Flux2Transformer2DModel",
+        model_class_name == "Flux2Transformer2DModel",
+    )
+    is_flux = not is_flux2 and _is_model_type(
         "diffusers.models.transformers",
         "FluxTransformer2DModel",
         "flux" in model_class_name.lower(),
@@ -156,6 +161,37 @@ def generate_diffusion_dummy_inputs(
         }
         if guidance_embeds:
             dummy_inputs["guidance"] = torch.tensor([3.5], device=device, dtype=torch.float32)
+        return dummy_inputs
+
+    def _flux2_inputs() -> dict[str, torch.Tensor]:
+        # Flux2Transformer2DModel: 3D hidden_states (batch, seq_len, in_channels)
+        # Requires: hidden_states, encoder_hidden_states, timestep, img_ids, txt_ids
+        # Unlike Flux1, Flux2 does NOT use pooled_projections.
+        # RoPE uses 4 axes (32,32,32,32) so img_ids/txt_ids have 4 columns.
+        in_channels = getattr(cfg, "in_channels", 128)
+        joint_attention_dim = getattr(cfg, "joint_attention_dim", 15360)
+        axes_dims_rope = getattr(cfg, "axes_dims_rope", (32, 32, 32, 32))
+        guidance_embeds = getattr(cfg, "guidance_embeds", True)
+
+        # Use small dimensions for dummy forward
+        img_seq_len = 16  # 4x4 latent grid
+        text_seq_len = 8
+        rope_ndim = len(axes_dims_rope)
+
+        dummy_inputs = {
+            "hidden_states": torch.randn(
+                batch_size, img_seq_len, in_channels, device=device, dtype=dtype
+            ),
+            "encoder_hidden_states": torch.randn(
+                batch_size, text_seq_len, joint_attention_dim, device=device, dtype=dtype
+            ),
+            "timestep": torch.tensor([0.5], device=device, dtype=dtype).expand(batch_size),
+            "img_ids": torch.zeros(img_seq_len, rope_ndim, device=device, dtype=torch.float32),
+            "txt_ids": torch.zeros(text_seq_len, rope_ndim, device=device, dtype=torch.float32),
+            "return_dict": False,
+        }
+        if guidance_embeds:
+            dummy_inputs["guidance"] = torch.tensor([4.0], device=device, dtype=torch.float32)
         return dummy_inputs
 
     def _sd3_inputs() -> dict[str, torch.Tensor]:
@@ -311,6 +347,7 @@ def generate_diffusion_dummy_inputs(
         return dummy_inputs
 
     model_input_builders = [
+        ("flux2", is_flux2, _flux2_inputs),
         ("flux", is_flux, _flux_inputs),
         ("sd3", is_sd3, _sd3_inputs),
         ("dit", is_dit, _dit_inputs),

@@ -33,6 +33,15 @@ if parse_version(diffusers.__version__) >= parse_version("0.35.0"):
     from diffusers.models.transformers.transformer_flux import FluxAttention
     from diffusers.models.transformers.transformer_ltx import LTXAttention
     from diffusers.models.transformers.transformer_wan import WanAttention
+
+    try:
+        from diffusers.models.transformers.transformer_flux2 import (
+            Flux2Attention,
+            Flux2ParallelSelfAttention,
+        )
+    except ImportError:
+        Flux2Attention = None
+        Flux2ParallelSelfAttention = None
 else:
     AttentionModuleMixin = type("_dummy_type_no_instance", (), {})  # pylint: disable=invalid-name
 from torch.autograd import Function
@@ -190,6 +199,12 @@ if AttentionModuleMixin.__module__.startswith(diffusers.__name__):
     QuantModuleRegistry.register({FluxAttention: "FluxAttention"})(_QuantAttentionModuleMixin)
     QuantModuleRegistry.register({WanAttention: "WanAttention"})(_QuantAttentionModuleMixin)
     QuantModuleRegistry.register({LTXAttention: "LTXAttention"})(_QuantAttentionModuleMixin)
+    if Flux2Attention is not None:
+        QuantModuleRegistry.register({Flux2Attention: "Flux2Attention"})(_QuantAttentionModuleMixin)
+    if Flux2ParallelSelfAttention is not None:
+        QuantModuleRegistry.register({Flux2ParallelSelfAttention: "Flux2ParallelSelfAttention"})(
+            _QuantAttentionModuleMixin
+        )
 
 
 original_scaled_dot_product_attention = F.scaled_dot_product_attention
