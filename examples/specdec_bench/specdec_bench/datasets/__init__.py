@@ -13,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .humaneval import HumanEval
 from .mtbench import MTBench
 from .random_token import RandomToken
 from .specbench import SpecBench
 from .speed import SPEEDBench
 
-__all__ = ["MTBench", "RandomToken", "SPEEDBench", "SpecBench"]
+__all__ = ["HumanEval", "MTBench", "RandomToken", "SPEEDBench", "SpecBench"]

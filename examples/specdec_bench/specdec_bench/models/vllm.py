@@ -65,6 +65,9 @@ class VLLMModel(Model):
             }
         elif kwargs.get("speculative_algorithm") == "NONE":
             specdec = None
+        
+        if kwargs.get("parallel_drafting") and specdec is not None:
+            specdec["parallel_drafting"] = True
 
         if specdec is None:
             num_speculative_tokens = 1
