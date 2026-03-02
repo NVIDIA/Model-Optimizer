@@ -60,6 +60,10 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add support to enable custom emulated quantization backend. See :meth:`register_quant_backend <modelopt.torch.quantization.nn.modules.tensor_quantizer.register_quant_backend>`` for more details. See an example in ``tests/unit/torch/quantization/test_custom_backend.py``.
 - Add ``examples/llm_qad`` for QAD training with Megatron-LM.
 
+**Bug Fixes**
+
+- Synchronize MSE calibration amax across distributed groups (DP/EP/TP) to keep quantization parameters consistent.
+
 **Deprecations**
 
 - Deprecate ``num_query_groups`` parameter in Minitron pruning (``mcore_minitron``). You can use ModelOpt 0.40.0 or earlier instead if you need to prune it.
