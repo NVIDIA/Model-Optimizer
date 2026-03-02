@@ -16,6 +16,7 @@
 """Utility functions for getting samples and forward loop function for different datasets."""
 
 import copy
+import json
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 from warnings import warn
@@ -110,6 +111,47 @@ __all__ = [
 ]
 
 
+def _get_jsonl_text_samples(jsonl_path: str, num_samples: int) -> list[str]:
+    """Load up to ``num_samples`` entries from a JSONL file using the ``text`` field.
+
+    Each non-empty line must be a JSON object containing a ``text`` field.
+    """
+    if num_samples <= 0:
+        return []
+
+    samples: list[str] = []
+
+    with open(jsonl_path, encoding="utf-8") as f:
+        for line_idx, line in enumerate(f, start=1):
+            if len(samples) >= num_samples:
+                break
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"Invalid JSON in JSONL file {jsonl_path} at line {line_idx}: {e}"
+                ) from e
+
+            if not isinstance(obj, dict):
+                raise ValueError(
+                    f"Expected a JSON object in JSONL file {jsonl_path} at line {line_idx}, "
+                    f"got {type(obj)}."
+                )
+
+            if "text" not in obj:
+                raise ValueError(
+                    f"Missing required field 'text' in JSONL file {jsonl_path} at line {line_idx}."
+                )
+
+            samples.append(str(obj["text"]))
+
+    return samples
+
+
 def _normalize_splits(split: str | list[str]) -> list[str]:
     """Ensure split is always a list."""
     return [split] if isinstance(split, str) else list(split)
@@ -181,7 +223,7 @@ def get_dataset_samples(
     ``messages``/``conversations`` (chat), ``prompt``, ``text``, or ``input``.
 
     Args:
-        dataset_name: Name or HuggingFace path of the dataset to load.
+        dataset_name: Name or HuggingFace path of the dataset to load, or a path to a ``.jsonl``/``.jsonl.gz`` file.
         num_samples: Number of samples to load from the dataset.
         apply_chat_template: Whether to apply the chat template to the samples
             (if supported by the dataset).  For unregistered datasets with a
@@ -196,6 +238,10 @@ def get_dataset_samples(
     Returns:
         Samples: The list of samples.
     """
+    # Local JSONL file path support (each line is a JSON object with a `text` field).
+    if dataset_name.endswith(".jsonl"):
+        return _get_jsonl_text_samples(dataset_name, num_samples)
+
     from datasets import load_dataset
 
     is_registered = dataset_name in SUPPORTED_DATASET_CONFIG
@@ -284,7 +330,8 @@ def get_dataset_dataloader(
     """Get a dataloader with the dataset name and tokenizer of the target model.
 
     Args:
-        dataset_name: Name of the dataset to load.
+        dataset_name: Name of the dataset to load, or a path to a ``.jsonl`` file.
+            If a ``.jsonl`` file is provided, each line must be a JSON object with a ``text`` field.
         tokenizer: Instance of HuggingFace tokenizer.
         batch_size: Batch size of the returned dataloader.
         num_samples: Number of samples from the dataset.

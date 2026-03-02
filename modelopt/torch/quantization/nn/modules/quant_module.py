@@ -119,7 +119,7 @@ class QuantModule(DynamicModule):
             if isinstance(module, TensorQuantizer):
                 module.to(non_tq_param_or_buffer.device)
 
-    def fold_weight(self):
+    def fold_weight(self, keep_attrs: bool = False):
         """Fold the weight for faster eval."""
         # Handle all attributes that end with _weight_quantizer
         for name in dir(self):
@@ -138,13 +138,14 @@ class QuantModule(DynamicModule):
                 weight = getattr(self, weight_name)
                 weight.data.copy_(attr(weight.float()).to(weight.dtype))
                 attr.disable()
-                _attrs = [
-                    "_pre_quant_scale",
-                    "_amax",
-                ]
-                for attr_name in _attrs:
-                    if hasattr(attr, attr_name):
-                        delattr(attr, attr_name)
+                if not keep_attrs:
+                    _attrs = [
+                        "_pre_quant_scale",
+                        "_amax",
+                    ]
+                    for attr_name in _attrs:
+                        if hasattr(attr, attr_name):
+                            delattr(attr, attr_name)
 
 
 QuantModuleRegistry = _DMRegistryCls("Quant", QuantModule)

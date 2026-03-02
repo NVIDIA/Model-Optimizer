@@ -363,9 +363,9 @@ class HFRowParallelLinear(HFParallelLinear):
 class _QuantHFParallelLinear(_ParallelLinear):
     _functionals_to_replace = [(torch.nn.functional, "linear")]
 
-    def fold_weight(self):
+    def fold_weight(self, keep_attrs: bool = False):
         with self.enable_weight_access_and_writeback():
-            super().fold_weight()
+            super().fold_weight(keep_attrs)
 
     @contextmanager
     def enable_weight_access_and_writeback(self):
