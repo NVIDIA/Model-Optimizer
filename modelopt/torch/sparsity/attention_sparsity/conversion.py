@@ -32,6 +32,37 @@ from .sparse_attention import SparseAttentionModule, SparseAttentionRegistry
 from .utils import get_named_sparse_attention_modules, get_sparse_attention_modules
 
 
+def _register_triton_backend_if_needed(model: nn.Module, config: SparseAttentionConfig) -> None:
+    """Register the Triton attention backend and set attn_implementation if needed.
+
+    When the config uses ``backend="triton"``, this function:
+    1. Registers the Triton kernel with HF's ``ALL_ATTENTION_FUNCTIONS``.
+    2. Sets ``model.config._attn_implementation = "modelopt_triton"`` so the
+       model dispatches to the Triton kernel at forward time.
+
+    This is called automatically during ``mtsa.sparsify()`` so users never need
+    to manually call ``register_triton_attention()`` or set ``attn_implementation``.
+    """
+    sparse_cfg = config.sparse_cfg if hasattr(config, "sparse_cfg") else {}
+    needs_triton = any(
+        isinstance(v, dict) and v.get("backend") == "triton" for v in sparse_cfg.values()
+    )
+    if not needs_triton:
+        return
+
+    from .kernels import register_triton_attention
+
+    if register_triton_attention is not None:
+        register_triton_attention()
+
+    # Set attn_implementation on the model so HF dispatches to the Triton kernel.
+    # HF's ALL_ATTENTION_FUNCTIONS is checked at forward time, not construction time,
+    # so this works even after the model is already loaded.
+    model_config = getattr(model, "config", None)
+    if model_config is not None:
+        model_config._attn_implementation = "modelopt_triton"
+
+
 def is_attn_sparsified(model: nn.Module) -> bool:
     """Check if a model has sparse attention applied.
 
@@ -60,6 +91,9 @@ def convert_to_sparse_attention_model(
     """
     # Initialize the true module if necessary
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
+
+    # Register Triton attention backend and set attn_implementation if needed
+    _register_triton_backend_if_needed(model, config)
 
     # Apply custom model plugins
     register_custom_model_plugins_on_the_fly(model)

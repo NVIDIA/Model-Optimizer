@@ -70,6 +70,18 @@ class SparseAttentionMethod(ABC):
             Masked attention scores with sparse elements set to -inf
         """
 
+    def get_sparse_context(self, module: torch.nn.Module):
+        """Return a context manager that activates this method's sparsity during forward.
+
+        Each method subclass implements its own activation mechanism:
+        - Softmax-patching methods replace F.softmax during the forward pass.
+        - Kernel-fused methods set flags on ``module`` that the kernel reads.
+
+        Args:
+            module: The SparseAttentionModule wrapping the attention layer.
+        """
+        raise NotImplementedError(f"{type(self).__name__} must implement get_sparse_context()")
+
     def get_threshold_info(self) -> dict[str, Any]:
         """Get threshold information for display/debugging.
 
