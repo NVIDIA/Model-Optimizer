@@ -682,17 +682,7 @@ class _DynamicEagleGPTModel(EagleModel):
 
     def modify(
         self,
-        eagle_offline,
-        eagle_hidden_state_distillation,
-        eagle_self_logit_distillation,
-        eagle_freeze_base_model,
-        eagle_report_acc,
-        eagle_reuse_base_decoder,
-        eagle_loss_decay_factor,
-        eagle_architecture_config,
-        eagle_decoder_type,
-        eagle_ttt_steps,
-        eagle_mix_hidden_states,
+        config,
     ):
         if self.config.pipeline_model_parallel_size > 1:
             warnings.warn(
@@ -705,26 +695,14 @@ class _DynamicEagleGPTModel(EagleModel):
         if hasattr(self.config, "hetereogenous_dist_checkpoint"):
             self.config.hetereogenous_dist_checkpoint = True
 
-        super().modify(
-            eagle_offline=eagle_offline,
-            eagle_hidden_state_distillation=eagle_hidden_state_distillation,
-            eagle_self_logit_distillation=eagle_self_logit_distillation,
-            eagle_freeze_base_model=eagle_freeze_base_model,
-            eagle_report_acc=eagle_report_acc,
-            eagle_reuse_base_decoder=eagle_reuse_base_decoder,
-            eagle_loss_decay_factor=eagle_loss_decay_factor,
-            eagle_architecture_config=eagle_architecture_config,
-            eagle_decoder_type=eagle_decoder_type,
-            eagle_ttt_steps=eagle_ttt_steps,
-            eagle_mix_hidden_states=eagle_mix_hidden_states,
-        )
+        super().modify(config)
 
         # sequence_parallel is not used in offline eagle
         if self.eagle_offline:
             self.config.sequence_parallel = False
 
         self.eagle_config = dict_to_config(
-            eagle_architecture_config,
+            config.eagle_architecture_config,
             self.config.use_cpu_initialization,
             self.config.fp16,
             self.config.bf16,
@@ -740,7 +718,7 @@ class _DynamicEagleGPTModel(EagleModel):
         )
 
         if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size:
-            assert eagle_self_logit_distillation, (
+            assert self.eagle_self_logit_distillation, (
                 "Only logit distillation is supported when draft_vocab_size != vocab_size!"
             )
 

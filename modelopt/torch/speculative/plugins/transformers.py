@@ -549,45 +549,23 @@ class HFEagleModel(EagleModel):
 
     def modify(
         self,
-        eagle_offline,
-        eagle_hidden_state_distillation,
-        eagle_self_logit_distillation,
-        eagle_freeze_base_model,
-        eagle_report_acc,
-        eagle_reuse_base_decoder,
-        eagle_loss_decay_factor,
-        eagle_architecture_config,
-        eagle_decoder_type,
-        eagle_ttt_steps,
-        eagle_mix_hidden_states,
+        config,
     ):
         """Constructor.
 
         Args:
             config: The config for eagle decoder layers.
         """
-        super().modify(
-            eagle_offline=eagle_offline,
-            eagle_hidden_state_distillation=eagle_hidden_state_distillation,
-            eagle_self_logit_distillation=eagle_self_logit_distillation,
-            eagle_freeze_base_model=eagle_freeze_base_model,
-            eagle_report_acc=eagle_report_acc,
-            eagle_reuse_base_decoder=eagle_reuse_base_decoder,
-            eagle_loss_decay_factor=eagle_loss_decay_factor,
-            eagle_architecture_config=eagle_architecture_config,
-            eagle_decoder_type=eagle_decoder_type,
-            eagle_ttt_steps=eagle_ttt_steps,
-            eagle_mix_hidden_states=eagle_mix_hidden_states,
-        )
+        super().modify(config)
 
-        if eagle_decoder_type == "llama":
+        if self.eagle_decoder_type == "llama":
             # Use default eagle config
             decoder_cls = LlamaDecoderLayer
-        elif eagle_decoder_type == "kimik2":
+        elif self.eagle_decoder_type == "kimik2":
             decoder_cls = _setup_kimi_k2_decoder()
 
-        self.eagle_config = PretrainedConfig.from_dict(eagle_architecture_config)
-        self.eagle_config.eagle_decoder_type = eagle_decoder_type
+        self.eagle_config = PretrainedConfig.from_dict(config.eagle_architecture_config)
+        self.eagle_config.eagle_decoder_type = self.eagle_decoder_type
         # Hidden size and vocab size must match base model
         self.eagle_config.hidden_size = self._base_llm_config.hidden_size
         self.eagle_config.vocab_size = self._base_llm_config.vocab_size
@@ -626,14 +604,14 @@ class HFEagleModel(EagleModel):
         self.eagle_module.to(self._base_model.dtype).to(self._get_eagle_device())
 
         # EAGLE-3 auxiliary hidden_states
-        if (not eagle_offline) and self.eagle_config.use_aux_hidden_state:
+        if (not self.eagle_offline) and self.eagle_config.use_aux_hidden_state:
             self._aux_hidden_states = []
             for layer_idx, layer in enumerate(self._base_model.layers):
                 if layer_idx in self.eagle_config.eagle_aux_hidden_state_layer_ids:
                     layer.register_forward_hook(self._collect_aux_hidden_states_forward_hook)
 
         # delete base model layers for offline training
-        if eagle_offline:
+        if self.eagle_offline:
             self._base_model._modules.pop("layers")
 
         # NOTE: this is a temporary hack to bypass hf trainer check:
