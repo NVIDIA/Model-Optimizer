@@ -45,6 +45,11 @@ import onnxslim
 
 from modelopt.onnx.logging_config import configure_logging, logger
 from modelopt.onnx.op_types import get_activation_ops, is_data_dependent_shape_op
+from modelopt.onnx.quantization.autotune.insertion_points import get_autotuner_quantizable_ops
+from modelopt.onnx.quantization.autotune.workflows import (
+    init_benchmark_instance,
+    region_pattern_autotuning_workflow,
+)
 from modelopt.onnx.quantization.calib_utils import (
     CalibrationDataProvider,
     CalibrationDataType,
@@ -252,12 +257,6 @@ def _find_nodes_to_quantize_autotune(
     intermediate_generated_files: list[str] | None = None,
 ) -> tuple[list[str], list[str], list[tuple[gs.Node, gs.Node, str]], list[str]]:
     logger.info("Running Auto Q/DQ with TensorRT")
-    from modelopt.onnx.quantization.autotune.insertion_points import get_autotuner_quantizable_ops
-    from modelopt.onnx.quantization.autotune.workflows import (
-        init_benchmark_instance,
-        region_pattern_autotuning_workflow,
-    )
-
     if intermediate_generated_files is None:
         intermediate_generated_files = []
 
