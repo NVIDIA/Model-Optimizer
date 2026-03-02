@@ -177,7 +177,7 @@ class EagleTrainerWithAccLog(Trainer):
         kwargs.pop("num_items_in_batch", None)
         loss, outputs = super().compute_loss(return_outputs=True, *args, **kwargs)
         if hasattr(outputs, "train_acc"):
-            self.state.training_accs.append(outputs.train_acc)
+            self.state.training_accs.append([acc.item() for acc in outputs.train_acc])
         return loss
 
 
