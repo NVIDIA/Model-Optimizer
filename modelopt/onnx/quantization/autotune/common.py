@@ -531,9 +531,6 @@ class PatternCache:
                         else:
                             # Existing scheme is better, skip new one
                             too_similar = True
-                            if scheme.latency_ms < existing_scheme.latency_ms:
-                                # New scheme is better, mark existing for replacement
-                                schemes_to_replace.append(existing_scheme)
                             break
 
                 if existing_to_remove is not None:

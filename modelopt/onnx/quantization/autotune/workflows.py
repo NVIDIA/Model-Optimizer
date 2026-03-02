@@ -170,7 +170,7 @@ def region_pattern_autotuning_workflow(
     qdq_baseline_model: str | None = None,
     node_filter_list: list[str] | None = None,
     verbose: bool = False,
-    keep_output_dir: bool = False,
+    keep_output_dir: bool = True,
 ) -> QDQAutotuner:
     """Run automated Q/DQ (Quantization/Dequantization) optimization on an ONNX model.
 

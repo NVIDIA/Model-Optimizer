@@ -264,6 +264,7 @@ def _find_nodes_to_quantize_autotune(
         onnx_model,
         quant_type=quantize_mode,
         default_dq_dtype=precision_map[high_precision_dtype],
+        keep_output_dir=False,
     )
 
     # Export model with Q/DQ insertion
@@ -296,7 +297,7 @@ def _find_nodes_to_quantize_autotune(
                 and inp.inputs[0].op == "DequantizeLinear"
                 and node.op in get_activation_ops()
             ):
-                # Trace back through DQ→Q to find the node whose output is being quantized.
+                # Trace back through DQ → Q to find the node whose output is being quantized.
                 # Path: node.input ← DQ ← quantized_tensor ← Q ← original_tensor ← producer
                 dq_node = inp.inputs[0]
                 quantized_tensor = dq_node.inputs[0]  # Q's output (= DQ's input)
