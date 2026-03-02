@@ -28,9 +28,14 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from modelopt.torch.opt.searcher import ForwardLoop
+from modelopt.torch.quantization.utils import LayerActivationCollector
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
-from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
+from modelopt.torch.utils.network import (
+    bind_forward_method,
+    get_decoder_layers,
+    unpatch_forward_method,
+)
 from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
 
 from .calib import MseCalibrator, NVFP4MSECalibrator
@@ -49,7 +54,14 @@ from .utils import (
     weight_attr_names,
 )
 
-__all__ = ["awq", "local_hessian_calibrate", "max_calibrate", "smoothquant", "svdquant"]
+__all__ = [
+    "awq",
+    "local_hessian_calibrate",
+    "max_calibrate",
+    "sequential_calibrate",
+    "smoothquant",
+    "svdquant",
+]
 
 
 def weight_only_quantize(model: nn.Module):
@@ -1819,3 +1831,40 @@ def gptq_lite(
         torch.cuda.empty_cache()
 
     print_rank_0("GPTQ-lite quantization completed successfully")
+
+
+@torch.no_grad()
+def sequential_calibrate(
+    model: nn.Module,
+    forward_loop: ForwardLoop,
+    calib_func: Callable,
+    **calib_kwargs,
+):
+    """Sequential calibration - a sequential layer-by-layer calibration algorithm."""
+    if forward_loop is None:
+        raise ValueError("forward_loop must not be None for sequential calibration.")
+
+    transformer_layers = get_decoder_layers(model)
+    if transformer_layers is None:
+        raise ValueError(
+            "Could not find transformer layers in model'. "
+            "Sequential calibration requires a model with identifiable transformer layers."
+        )
+
+    print_rank_0(f"Sequential calibration: Found {len(transformer_layers)} transformer layers")
+
+    gettr = LayerActivationCollector(model)
+
+    for layer in transformer_layers:
+        # Get updated input activations to the current layer
+        layer_inputs = gettr.get_input_activations(layer, forward_loop)
+
+        # Define a forward loop for the current layer
+        def _layer_forward_loop(m, _inputs=layer_inputs):
+            for args, kwargs_input in _inputs:
+                m(*args, **kwargs_input)
+
+        # Call calibration function
+        calib_func(layer, _layer_forward_loop, **calib_kwargs)
+        del layer_inputs
+        torch.cuda.empty_cache()

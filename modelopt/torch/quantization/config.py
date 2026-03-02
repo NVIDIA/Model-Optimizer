@@ -1130,6 +1130,16 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         ),
     )
 
+    use_sequential: bool = ModeloptField(
+        default=False,
+        title="Enable sequential layer-by-layer calibration.",
+        description=(
+            "If True, the calibration algorithm is applied sequentially to each decoder block. "
+            "The current approach recomputes a full forward pass per layer to propagate updated activations,"
+            "incurring O(N²) cost. Future revisions will add caching to eliminate redundant passes."
+        ),
+    )
+
 
 class MaxCalibConfig(QuantizeAlgorithmConfig):
     """The config for max calibration algorithm.
