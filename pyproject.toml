@@ -6,6 +6,122 @@ requires = ["cython", "setuptools>=80", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools_scm]
+fallback_version = "0.0.0"
+
+
+####################################################################################################
+###############################  PROJECT METADATA  #################################################
+####################################################################################################
+[project]
+name = "nvidia-modelopt"
+dynamic = ["version"]
+description = "Nvidia Model Optimizer: a unified model optimization and deployment toolkit."
+readme = { text = "Checkout https://github.com/nvidia/Model-Optimizer for more information.", content-type = "text/markdown" }
+license = "Apache-2.0"
+license-files = ["LICENSE_HEADER"]
+requires-python = ">=3.10,<3.13"
+authors = [{ name = "NVIDIA Corporation" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    # Common
+    "ninja",            # for faster building of C++ / CUDA extensions
+    "numpy",
+    "nvidia-ml-py>=12",
+    "packaging",
+    "setuptools>=80",   # torch.utils.cpp_extension imports setuptools at load time
+    "torch>=2.6",
+    "tqdm",
+    # modelopt.torch
+    "pulp",
+    "pydantic>=2.0",
+    "regex",
+    "rich",
+    "safetensors",
+    "scipy",
+]
+
+[project.optional-dependencies]
+onnx = [
+    "cppimport",
+    "cupy-cuda12x; platform_machine != 'aarch64' and platform_system != 'Darwin'",
+    "lief",
+    "ml_dtypes",
+    "onnx-graphsurgeon",
+    "onnx~=1.19.0",
+    "onnxconverter-common~=1.16.0",
+    # ORT for Windows
+    "onnxruntime-gpu==1.22.0; platform_system == 'Windows'",
+    # ORT with Python <= 3.10
+    "onnxruntime~=1.22.0; python_version <= '3.10' and (platform_machine == 'aarch64' or platform_system == 'Darwin')",
+    "onnxruntime-gpu~=1.22.0; python_version <= '3.10' and platform_machine != 'aarch64' and platform_system != 'Darwin' and platform_system != 'Windows'",
+    # ORT with Python > 3.10
+    "onnxruntime~=1.24.2; python_version > '3.10' and (platform_machine == 'aarch64' or platform_system == 'Darwin')",
+    "onnxruntime-gpu~=1.24.2; python_version > '3.10' and platform_machine != 'aarch64' and platform_system != 'Darwin' and platform_system != 'Windows'",
+    "onnxscript",
+    "onnxslim>=0.1.76",
+    "polygraphy>=0.49.22",
+]
+hf = [
+    "accelerate>=1.0.0",
+    "datasets>=3.0.0",
+    "deepspeed>=0.9.6; platform_system != 'Darwin' and platform_system != 'Windows'",
+    "diffusers>=0.32.2",
+    "huggingface_hub>=0.24.0",
+    "nltk",
+    "peft>=0.17.0",
+    "transformers>=4.53,<5.0",                                                        # Should match modelopt/torch/__init__.py and tox.ini
+    "wonderwords",
+]
+dev-lint = [
+    "bandit[toml]==1.7.9", # security/compliance checks
+    "mypy==1.17.1",
+    "pre-commit==4.3.0",
+    "ruff==0.12.11",
+]
+dev-docs = [
+    "autodoc_pydantic>=2.1.0",
+    "sphinx~=8.1.0",
+    "sphinx-argparse>=0.5.2",
+    "sphinx-autobuild>=2024.10.3",
+    "sphinx-copybutton>=0.5.2",
+    "sphinx-inline-tabs>=2023.4.21",
+    "sphinx-rtd-theme~=3.0.0",
+    "sphinx-togglebutton>=0.3.2",
+]
+dev-test = [
+    "pytest",
+    "pytest-cov",
+    "pytest-instafail",
+    "pytest-timeout",
+    "sentencepiece",
+    "timm",
+    "torchprofile>=0.0.4",     # optional dependency for modelopt.torch
+    "torchvision",
+    "torch-geometric",
+    "tox>4.18",
+    "tox-current-env>=0.0.12",
+]
+# Compound extras via self-references
+all = ["nvidia-modelopt[onnx,hf]"]
+dev = ["nvidia-modelopt[all,dev-docs,dev-lint,dev-test]"]
+
+[project.urls]
+Homepage = "https://github.com/NVIDIA/Model-Optimizer"
+
+[tool.setuptools.packages.find]
+include = ["modelopt*"]
+
+[tool.setuptools.package-data]
+modelopt = ["**/*.h", "**/*.cpp", "**/*.cu"]
+
+[tool.uv]
+managed = true
+# override-dependencies = ["torch; sys_platform == 'never'"]
 
 
 ####################################################################################################
@@ -142,7 +258,6 @@ markers = [
 
 
 [tool.coverage.run]
-# measure branch coverage in addition to statement coverage
 branch = false
 include = ["modelopt/*"]
 omit = ["*/plugins/*", "*/export/*"]
