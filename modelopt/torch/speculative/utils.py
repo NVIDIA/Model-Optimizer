@@ -39,6 +39,8 @@ REMOVE_THINK_CHAT_TEMPLATE = (
     "{% if '</think>' in content %}{% set content = content.split('</think>')[-1] %}{% endif %}"
 )
 
+MODELS_NEED_LAYER_TYPE_HANDLE = ["Qwen3MoeForCausalLM"]
+
 
 def calibrate_frequent_vocab(tokenizer, text, target_vocab_size, output_file=None):
     """Given a calibration text, find the most common vocabs and return the mapping."""
@@ -483,6 +485,10 @@ def load_vlm_or_llm_with_kwargs(model_name_or_path: str, **kwargs):
         model_cls = transformers.AutoModelForVision2Seq
     else:
         model_cls = transformers.AutoModelForCausalLM
+
+    if kwargs.get("num_hidden_layers") == 0:
+        if not set(model_config.architectures).issubset(set(MODELS_NEED_LAYER_TYPE_HANDLE)):
+            kwargs["layer_types"] = []
 
     return model_config, model_cls.from_pretrained(model_name_or_path, **kwargs)
 

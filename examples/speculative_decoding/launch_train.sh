@@ -120,6 +120,7 @@ done
 
 set -x
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 NUM_NODES=${NUM_NODES:-1}
 GPU_PER_NODE=${GPU_PER_NODE:-$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)}
 TOTAL_GPU=$((NUM_NODES * GPU_PER_NODE))
@@ -181,7 +182,7 @@ fi
 
 if [[ "$TOTAL_GPU" -gt 1 ]]; then
   #Use FSDP2 when multi GPU available
-  FSDP_ARGS="--fsdp 'full_shard' --fsdp_config fsdp_config.json"
+  FSDP_ARGS="--fsdp 'full_shard' --fsdp_config ${SCRIPT_DIR}/fsdp_config.json"
 else
   #Otherwise, single GPU training
   FSDP_ARGS=""
@@ -207,7 +208,7 @@ fi
 
 # Disable tokenizers parallelism to avoid warning
 export TOKENIZERS_PARALLELISM=False
-CMD="accelerate launch $MULTI_NODE_ARGS --mixed_precision bf16 main.py \
+CMD="accelerate launch $MULTI_NODE_ARGS --mixed_precision bf16 ${SCRIPT_DIR}/main.py \
     --mode $MODE \
     --eagle_decoder_type $EAGLE_DECODER_TYPE \
     --model_name_or_path $MODEL \
