@@ -20,6 +20,7 @@ Performing finetuning with Quantization Aware Training solves these issues. The 
 Install the necessary dependencies:
 
 ```bash
+pip install -U nvidia-modelopt[hf]
 pip install -r requirements.txt
 ```
 

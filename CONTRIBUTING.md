@@ -39,36 +39,41 @@ To run the pre-commit hooks without committing, use:
 pre-commit run --all-files
 ```
 
+## 🔒 Security coding practices
+
+All contributors must follow the security coding practices documented in *Security Coding Practices for
+Contributors* section of [SECURITY.md](./SECURITY.md#security-coding-practices-for-contributors) page.
+
+Any security-sensitive exception requires review and approval from `@NVIDIA/modelopt-setup-codeowners`.
+
+## 📋 Copying code from other sources
+
+The utilization of third-party code requires authorization via the Open Source Review Board (OSRB) team and needs to follow proper guidance on contributing code.
+
+If you are an external contributor, seek guidance from `@NVIDIA/modelopt-setup-codeowners` for next steps. For internal contributors, follow the steps below:
+
+- **File NVBug for use of open-source code:**
+  Clone NVBug 2885977 and add your use case. Copying code from permissive licensed repositories (e.g. MIT, Apache 2) is generally self-checkout but for other licenses, it is necessary to get expert guidance before merging your PR.
+- **License header format:** The file which has code copied from another third-party GitHub repository should have the following in order:
+  1. A reference link (with commit hash) to the source from which the code was copied.
+  1. The original repository's Copyright / License.
+  1. The NVIDIA Apache 2.0 Copyright / License header.
+
+  See [`modelopt/torch/speculative/eagle/utils.py`](./modelopt/torch/speculative/eagle/utils.py)
+  for an example of the correct license header format.
+- **Exclude from license pre-commit hook:** Exclude copied files from the license pre-commit hook so it doesn't auto-add the NVIDIA Apache 2.0 license on top of the file. Add the file path to the `exclude` list in the `insert-license` hook in [`.pre-commit-config.yaml`](./.pre-commit-config.yaml).
+
 ## 📝 Writing tests
 
-We use [pytest](https://docs.pytest.org/) for all tests. The tests are organized into the following directories:
+We use [pytest](https://docs.pytest.org/) for all tests. For any new features / examples, make sure to add tests and that the coverage check in your PR passes. The tests are organized into the following directories:
 
 - `tests/unit`: Fast cpu-based unit tests for the core ModelOpt library. They should not take more than a few seconds to run.
 - `tests/gpu`: Fast GPU-based unit tests for the core ModelOpt library. In most cases, they should not take more than a few seconds to run.
+- `tests/gpu_megatron`: Fast GPU-based unit tests for the core ModelOpt library for Megatron-Core features. In most cases, they should not take more than a few seconds to run.
+- `tests/gpu_trtllm`: Fast GPU-based unit tests for the core ModelOpt library for TensorRT-LLM features. In most cases, they should not take more than a few seconds to run.
 - `tests/examples`: Integration tests for ModelOpt examples. They should not take more than a few minutes to run. Please refer to [example test README](./tests/examples/README.md) for more details.
 
 Please refer to [tox.ini](./tox.ini) for more details on how to run the tests and their dependencies.
-
-### Code Coverage
-
-For any new features / examples, make sure to they are covered by the tests and that the Codecov coverage check in your PR passes.
-
-## Submitting your code
-
-- If you are an external contributor, create a fork of the repository.
-- Rebase (not merge) your code to the most recent commit of the `main` branch. We want to ensure a linear history;
-  see [Merge vs Rebase](https://www.atlassian.com/git/tutorials/merging-vs-rebasing). Remember to test again locally after rebasing to catch any new issues before pushing to your PR.
-
-```bash
-git pull
-git rebase origin/main
-git push origin <branch> --force-with-lease
-```
-
-- When pushing the rebased (or any) branch, use `git push --force-with-lease` instead of `git push --force`.
-- Submit a pull request and let auto-assigned reviewers (based on [CODEOWNERS](./.github/CODEOWNERS)) review your PR.
-- If any CI/CD checks fail, fix the issues and push again.
-- Once your PR is approved and all checks pass, one of the reviewers will merge the PR.
 
 ## ✍️ Signing your work
 
@@ -135,3 +140,9 @@ git push origin <branch> --force-with-lease
 
     (d) I understand and agree that this project and the contribution are public and that a record of the contribution (including all personal information I submit with it, including my sign-off) is maintained indefinitely and may be redistributed consistent with this project or the open source license(s) involved.
   ```
+
+## Submitting your code
+
+- Submit a pull request and let auto-assigned reviewers (based on [CODEOWNERS](./.github/CODEOWNERS)) review your PR.
+- If any CI/CD checks fail, fix the issues and push again.
+- Once your PR is approved and all checks pass, one of the reviewers will merge the PR.

@@ -28,7 +28,6 @@ from tqdm import tqdm
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.distill.plugins.huggingface import KDTrainer
-from modelopt.torch.opt.conversion import restore_from_modelopt_state
 from modelopt.torch.opt.plugins import ModelOptHFTrainer
 from modelopt.torch.utils import print_rank_0
 
@@ -233,10 +232,9 @@ class QATTrainer(ModelOptHFTrainer):
         print_rank_0(f"Saved modelopt state to {self._modelopt_state_path}")
 
     def _restore_modelopt_state_with_weights(self):
-        # Security NOTE: weights_only=False is used here on ModelOpt-generated state_dict, not on untrusted user input
-        modelopt_state = torch.load(self._modelopt_state_path, weights_only=False)
+        modelopt_state = mto.load_modelopt_state(self._modelopt_state_path)
         modelopt_weights = modelopt_state.pop("modelopt_state_weights", None)
-        restore_from_modelopt_state(self.model, modelopt_state)
+        mto.restore_from_modelopt_state(self.model, modelopt_state)
         if modelopt_weights is not None:
             set_quantizer_state_dict(self.model, modelopt_weights)
         print_rank_0("Restored modelopt state with weights.")

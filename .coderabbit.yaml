@@ -4,7 +4,35 @@ reviews:
   profile: chill
   collapse_walkthrough: true
   poem: false
+  path_instructions:
+    - path: "modelopt/**/*.py"
+      instructions: &security_instructions |
+        Review all modelopt package and examples Python changes against the security coding practices in
+        SECURITY.md. Flag any of the following as CRITICAL security issues,
+        request changes, and fail the check if ANY are present:
+        1. torch.load(..., weights_only=False) with no inline comment justifying why it is safe
+           (e.g. confirming the file is internally-generated and not user-supplied).
+        2. numpy.load(..., allow_pickle=True) with no inline comment justifying why it is safe.
+           Should expose allow_pickle as a caller-configurable parameter defaulting to False, not hardcode True.
+        3. trust_remote_code=True hardcoded for transformers model or tokenizer loading.
+           Code should expose it as a caller-configurable parameter defaulting to False, not hardcode True.
+        4. eval() or exec() on any input that could originate from outside the process.
+        5. Any use of "# nosec" comments to bypass Bandit security checks is not allowed.
+           If a security-sensitive pattern is genuinely necessary, the PR must be reviewed and approved
+           by @NVIDIA/modelopt-setup-codeowners with an explicit justification in the PR description.
+    - path: "examples/**/*.py"
+      instructions: *security_instructions
   auto_review:
-    auto_incremental_review: false
+    auto_incremental_review: true
     drafts: false
     base_branches: ["main", "release/.*", "feature/.*"]
+  pre_merge_checks:
+    custom_checks:
+      - name: "Security anti-patterns"
+        mode: "error"
+        instructions: *security_instructions
+knowledge_base:
+  code_guidelines:
+    filePatterns:
+      - "CONTRIBUTING.md"
+      - "SECURITY.md"
