@@ -38,7 +38,7 @@ def configure_logging(level=logging.INFO, log_file=None):
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)
 
-    formatter = logging.Formatter("[modelopt][onnx] - %(levelname)s - %(message)s")
+    formatter = logging.Formatter("%(asctime)s - [modelopt][onnx] - %(levelname)s - %(message)s")
 
     # Add file handler if log_file is specified
     if log_file:
