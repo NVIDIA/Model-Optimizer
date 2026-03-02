@@ -1,5 +1,5 @@
 ====================================================
-Automatic Q/DQ Placement Optimizer Architecture
+Automatic ONNX Q/DQ Placement Optimizer Architecture
 ====================================================
 
 .. contents:: Table of Contents
@@ -9,7 +9,7 @@ Automatic Q/DQ Placement Optimizer Architecture
 Overview
 ========
 
-The ``modelopt.onnx.quantization.autotune`` module provides an automatic optimization framework for Quantize/Dequantize (Q/DQ) node placement in ONNX models. The system partitions ONNX computation graphs into smaller regions and systematically searches for optimal Q/DQ insertion points to minimize TensorRT inference latency while maintaining model accuracy.
+The ``modelopt.onnx.quantization.autotune`` module provides an automatic optimization framework for Quantize/Dequantize (Q/DQ) node placement in ONNX models. The system partitions ONNX computation graphs into smaller regions and systematically searches for optimal Q/DQ insertion points to minimize TensorRT inference latency.
 
 **Key Capabilities:**
 
@@ -26,7 +26,7 @@ Architecture Overview
 Core Design Principles
 ----------------------
 
-1. **Hierarchical Region Partitioning**: The module decomposes ONNX graphs into a hierarchical tree of regions, enabling focused optimization at different granularity levels.
+1. **Hierarchical Region Partitioning**: This module decomposes ONNX graphs into a hierarchical tree of regions, enabling focused optimization at different granularity levels.
 
 2. **Pattern-Based Scheme Sharing**: Regions with identical topological structure share the same pattern signature. Optimization schemes are portable across all regions matching a pattern, reducing the search space significantly.
 
@@ -41,38 +41,43 @@ Module Structure
 
    autotune/
    ├── Core API
-   │   ├── autotuner.py          # QDQAutotuner and QDQAutotunerBase classes
-   │   ├── workflows.py           # High-level workflow functions
+   │   ├── autotuner.py           # QDQAutotuner (automatic region discovery)
+   │   ├── autotuner_base.py      # QDQAutotunerBase (core optimization logic)
+   │   ├── workflows.py           # High-level workflow and benchmark helpers
    │   └── common.py              # Data structures (Region, Config, PatternCache, etc.)
    │
    ├── Region Management
-   │   ├── region_search.py       # Automatic region discovery and partitioning
-   │   └── region_pattern.py      # Structural pattern analysis and matching
+   │   ├── region_search.py       # CombinedRegionSearch (region discovery)
+   │   ├── region_pattern.py      # RegionPattern (structural pattern matching)
+   │   └── region_inspect.py      # CLI to inspect region search (debugging)
    │
-   ├── Q/DQ Insertion
-   │   ├── insertion_points.py    # Insertion point definitions and resolution
-   │   └── qdq_utils.py          # Q/DQ node analysis utilities
+   ├── Q/DQ Insertion & Export
+   │   ├── insertion_points.py    # Insertion point types and resolution
+   │   └── export_utils.py        # Q/DQ node creation and ONNX export
    │
    ├── Benchmarking
-   │   └── tensorrt_utils.py      # TensorRT benchmarking and graph utilities
+   │   └── benchmark.py           # TensorRTPyBenchmark, TrtExecBenchmark
    │
    └── Entry Points
-       ├── __init__.py            # Public API exports
-       └── __main__.py            # Command-line interface
+   │   ├── __init__.py            # Public API exports
+   │   └── __main__.py            # Command-line interface
+   │
+   Q/DQ analysis (used for baseline import) lives in the parent package:
+   modelopt.onnx.quantization.qdq_utils (e.g. get_quantized_tensors).
 
 
 Key Components
 ==============
 
-1. Autotuner (autotuner.py)
----------------------------
+1. Autotuner (autotuner.py, autotuner_base.py)
+------------------------------------------------
 
 The autotuner is the central orchestrator of the Q/DQ optimization process.
 
 QDQAutotunerBase
 ~~~~~~~~~~~~~~~~
 
-Base class providing core optimization functionality:
+Base class (in ``autotuner_base.py``) providing core optimization functionality:
 
 * **Scheme Generation**: Creates candidate Q/DQ insertion schemes for regions
 * **Model Export**: Generates ONNX models with specified Q/DQ insertions applied
@@ -93,7 +98,7 @@ Base class providing core optimization functionality:
 * ``initialize(config, pattern_cache)``: Configure autotuner and prepare for profiling
 * ``set_profile_region(region, commit)``: Select region to profile and commit previous results
 * ``generate()``: Generate a new insertion scheme for current region
-* ``export_onnx(path, insert_qdq)``: Export model with Q/DQ nodes
+* ``export_onnx(path_or_none, insert_qdq, best=False)``: Export model with Q/DQ nodes. If path is ``None``, returns serialized model bytes (for in-memory benchmarking). When ``best=True``, exports using the current region's best scheme so far.
 * ``submit(latency, success)``: Record performance measurement for current scheme
 * ``save_state(path)`` / ``load_state(path)``: Persist/restore optimization state
 
@@ -104,7 +109,7 @@ Concrete implementation with automatic region discovery:
 
 * Inherits from ``QDQAutotunerBase``
 * Automatically discovers regions during initialization using ``CombinedRegionSearch``
-* Default choice for most use cases
+* For custom partitioning, users can implement their own region search by subclassing ``RegionSearchBase`` and overriding ``_search_regions()`` in a subclass of ``QDQAutotuner`` to use it.
 
 **Initialization Process:**
 
@@ -140,7 +145,6 @@ Multi-strategy region discovery combining:
 
 * ``RegionSearchBase``: Base class with graph traversal utilities
 * ``CombinedRegionSearch``: Main region discovery implementation
-* Supports forward-only, backward-only, and bidirectional search
 
 **Region Types:**
 
@@ -180,6 +184,17 @@ Represents the topological signature of a region:
 **Key Methods:**
 
 * ``from_region(region, graph)``: Generate pattern from region
+
+Region Inspection (region_inspect.py)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+CLI and helper for debugging region discovery without running benchmarks:
+
+* **Entry point**: ``python -m modelopt.onnx.quantization.autotune.region_inspect --model model.onnx``
+* **inspect_region_search(onnx_path, max_sequence_size=10, include_all_regions=False)**: Loads the model, runs ``CombinedRegionSearch``, and prints region hierarchy, node counts, and summary statistics. Returns the list of discovered regions.
+* **Options**: ``--verbose`` / ``-v`` for debug logging; ``--max-sequence-size`` for sequence region size; ``--include-all-regions`` to include regions without major quantizable ops (Conv, MatMul, etc.).
+
+Use this to verify how the autotuner partitions the graph before or during tuning.
 
 3. Q/DQ Insertion Points
 ------------------------
@@ -222,23 +237,22 @@ Collection of insertion points with performance metadata:
 * Success/failure status
 * Unique fingerprint for deduplication
 
-**Resolution Process:**
+**Resolution process**
 
-1. Take pattern-relative insertion points
-2. Map node/region indices to actual graph elements
-3. Resolve to concrete tensor names
-4. Handle merging and deduplication
-5. Generate Q/DQ nodes at specified locations
+Insertion points and schemes are pattern-relative (node/region indices within the pattern), so the same scheme applies to every region that matches the pattern. Before adding Q/DQ nodes to the ONNX graph, the autotuner resolves them to concrete tensor names in the current model:
 
-Q/DQ Utilities (qdq_utils.py)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+1. Take pattern-relative insertion points from the scheme
+2. Map node/region indices to actual graph elements for the target region
+3. Resolve to concrete tensor names (producer/consumer)
+4. Merge and deduplicate so each tensor gets at most one Q/DQ pair
+5. Create and insert Q/DQ nodes at the resolved locations (see ``export_utils``)
 
-Low-level utility for Q/DQ node analysis:
+Q/DQ Analysis (modelopt.onnx.quantization.qdq_utils)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-* ``get_quantized_tensors(model)``: Extract tensor names with Q/DQ nodes from ONNX model
+The autotune package uses the parent quantization package for Q/DQ analysis:
 
-This function is primarily used for importing Q/DQ patterns from existing quantized models
-into the autotuner for warm-start optimization.
+* **get_quantized_tensors(onnx_model)** — Returns the set of tensor names that have Q/DQ nodes in the given ONNX model. Used by the workflow when ``qdq_baseline_model`` is provided to import insertion patterns from an existing quantized model for warm-start.
 
 4. Workflows (workflows.py)
 ---------------------------
@@ -292,25 +306,25 @@ Main workflow for pattern-based Q/DQ optimization:
 * **Baseline Import**: Extracts quantization patterns from existing QDQ models
 * **Progressive Saving**: State saved after each region for crash recovery
 
-Benchmarking Functions
-~~~~~~~~~~~~~~~~~~~~~~
+Benchmarking Functions (workflows.py)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-* ``benchmark_onnx_model(model_path)``: Benchmark ONNX model with TensorRT
-* ``init_benchmark_instance(timing_cache, warmup, timing)``: Initialize global TensorRT benchmark
+* ``benchmark_onnx_model(model_path, log_file=None, flush_timing_cache=False)``: Run global benchmark on ONNX model (path or bytes); returns median latency in ms or ``float('inf')`` on failure.
+* ``init_benchmark_instance(use_trtexec=False, plugin_libraries=None, timing_cache_file=None, warmup_runs=5, timing_runs=20, trtexec_args=None)``: Initialize the global TensorRT benchmark used by the workflow (must be called before ``benchmark_onnx_model``).
 
-5. Benchmarking (tensorrt_utils.py)
-------------------------------------
+5. Benchmarking (benchmark.py)
+-------------------------------
 
-TensorRT integration for performance measurement and graph utilities.
+TensorRT integration for performance measurement.
 
 Benchmark Classes
 ~~~~~~~~~~~~~~~~~
 
-**Abstract Benchmark Interface:**
+**Abstract interface (Benchmark):**
 
-* ``run(model_path, log_file)``: Benchmark model and return median latency (ms)
+* ``run(model_path, log_file=None, flush_timing_cache=False)``: Benchmark model (file path or bytes) and return median latency (ms).
 
-**TensorRTPyBenchmark** (Default)
+**TensorRTPyBenchmark** (default)
 
 Uses TensorRT Python API:
 
@@ -318,44 +332,33 @@ Uses TensorRT Python API:
 * Persistent Builder/Runtime/Logger instances
 * Efficient for repeated benchmarking
 * Timing cache support for faster engine builds
-* Custom TensorRT plugin library loading
+* Optional plugin library paths (list of ``.so`` paths)
 
-**TrtExecBenchmark** (Alternative)
+**TrtExecBenchmark** (optional, ``--use_trtexec``)
 
 Uses ``trtexec`` command-line tool:
 
-* Spawns subprocess for each benchmark
-* More isolated but slower
-* Useful when Python API has issues
-* Custom TensorRT plugin library loading
+* Spawns subprocess per benchmark
+* Useful when Python API is unavailable or for remote autotuning (e.g. ``--trtexec_benchmark_args "--remoteAutoTuningConfig=..."``)
+* Supports same timing cache, warmup/timing runs, and plugin libraries
+* ``trtexec_args``: optional list of extra arguments passed to trtexec
 
-**Benchmarking Process:**
+**Benchmarking process:**
 
-1. Parse ONNX model
+1. Parse ONNX model (from path or bytes)
 2. Build TensorRT engine with optimization
 3. Load timing cache (if available)
-4. Run warmup iterations (default: 5)
-5. Run timing iterations (default: 10-100)
-6. Compute median latency
-7. Update timing cache
+4. Warmup iterations (default: 5)
+5. Timing iterations (default: 20)
+6. Median latency reported; timing cache updated
 
 **Configuration:**
 
-* Timing cache file path (persistent across runs)
-* Warmup iterations (eliminate cold-start effects)
-* Timing iterations (statistical stability)
-* Plugin library paths (custom TensorRT plugins)
-
-Graph Utilities
-~~~~~~~~~~~~~~~
-
-**get_tensor_consumer_node_indices(graph)**
-
-Builds a mapping from tensor names to the indices of nodes that consume them:
-
-* Input: ONNX GraphSurgeon graph
-* Output: Dictionary mapping tensor names to lists of consuming node indices
-* Used for efficient graph traversal and insertion point resolution
+* ``timing_cache_file``: Path to TensorRT timing cache (default: system temp ``trtexec_timing.cache``)
+* ``warmup_runs``: Warmup iterations (default: 5)
+* ``timing_runs``: Timed iterations (default: 20)
+* ``plugin_libraries``: List of TensorRT plugin ``.so`` paths (optional)
+* ``trtexec_args``: Extra arguments for trtexec (optional; only when ``use_trtexec=True``)
 
 6. Configuration (common.py)
 -----------------------------
@@ -371,13 +374,16 @@ pattern cache behavior.
 
 * ``verbose`` (bool): Enable detailed logging of autotuning progress (default: False)
 
+**Performance:**
+
+* ``performance_threshold`` (float): Minimum speedup ratio to accept a scheme; 1.0 = no improvement required, 1.02 = 2% (default: 1.02)
+
 **Quantization Parameters:**
 
-* ``default_q_scale`` (float): Default scale parameter for Q/DQ nodes. Controls quantization 
-  granularity. Typical range: 0.01-0.1 (default: 0.1)
-* ``default_q_zero_point`` (int): Default zero-point for Q/DQ nodes. Use 0 for signed int8, 
-  128 for unsigned uint8 (default: 0)
-* ``default_quant_type`` (str): Quantization type for Q/DQ nodes. Options: "int8" (default), "fp8"
+* ``default_q_scale`` (float): Default scale parameter for Q/DQ nodes. Typical range: 0.01-0.1 (default: 0.1)
+* ``default_q_zero_point`` (int): Default zero-point for Q/DQ nodes; 0 for signed int8, 128 for uint8 (default: 0)
+* ``default_quant_type`` (str): Quantization type for Q/DQ nodes: "int8" (default), "fp8"
+* ``default_dq_dtype`` (str): Dtype for DequantizeLinear output when not inferred: "float32" (default), "float16", "bfloat16"
 
 **Region Builder Settings:**
 
@@ -411,22 +417,16 @@ pattern cache behavior.
 .. code-block:: python
 
    from modelopt.onnx.quantization.autotune import Config
-   
+
    config = Config(
-       # Quantization settings
        default_quant_type="fp8",
+       default_dq_dtype="float16",
        default_q_scale=0.05,
-       
-       # Scheme generation
-       top_percent_to_mutate=0.2,   # Use top 20% schemes as seeds
-       maximum_mutations=5,          # More aggressive mutation
-       
-       # Pattern cache
-       pattern_cache_minimum_distance=2,  # Require more diversity
-       pattern_cache_max_entries_per_pattern=64,  # Keep more schemes
-       
-       # Logging
-       verbose=True
+       top_percent_to_mutate=0.2,
+       maximum_mutations=5,
+       pattern_cache_minimum_distance=2,
+       pattern_cache_max_entries_per_pattern=64,
+       verbose=True,
    )
 
 PatternCache Class
@@ -441,9 +441,9 @@ Stores top-performing schemes for pattern-based warm-start:
 
 **Cache Operations:**
 
-* ``add_scheme(pattern, scheme)``: Add scheme with diversity check
-* ``get_schemes(pattern)``: Retrieve schemes for pattern
-* ``save(path)`` / ``load(path)``: Persist to file
+* ``add_pattern_schemes(pattern_schemes)``: Add a ``PatternSchemes`` instance (with diversity filtering)
+* ``get_pattern_schemes(pattern_signature)``: Return ``PatternSchemes`` for a pattern signature, or ``None``
+* ``save(path)`` / ``load(path)``: Persist cache to YAML / load from YAML
 
 Region Class
 ~~~~~~~~~~~~
@@ -578,26 +578,20 @@ State is saved after each region optimization:
 
 **State File Contents (YAML):**
 
+State is saved to ``autotuner_state.yaml`` (or ``--state_file``). The pattern cache is saved alongside as ``<state_base>_pattern_cache.yaml`` (e.g. ``autotuner_state_pattern_cache.yaml``).
+
 .. code-block:: yaml
 
    baseline_latency_ms: 12.5
-   profiled_patterns:
-     pattern_abc123:
-       schemes:
-         - insertion_points: [...]
-           latency_ms: 11.2
-           success: true
-         - insertion_points: [...]
-           latency_ms: 11.8
-           success: true
+   current_profile_pattern_schemes_signature: null   # or pattern sig if interrupted mid-region
+   config: { ... }
+   patterns:
+     - pattern_signature: "abc123..."
+       schemes: [...]
        best_scheme_index: 0
-   profiled_regions:
-     - region_id: 1
-       scheme_index: 0
-       committed: true
-     - region_id: 2
-       scheme_index: 0
-       committed: false
+     - pattern_signature: "def456..."
+       schemes: [...]
+       best_scheme_index: 1
 
 **Crash Recovery:**
 
@@ -703,39 +697,7 @@ Boundary Computation Algorithm
 Insertion Point Selection
 =========================
 
-Types of Insertion Points
---------------------------
-
-The autotuner considers multiple insertion strategies:
-
-Node Input Quantization
-~~~~~~~~~~~~~~~~~~~~~~~
-
-Quantize data flowing into specific operations:
-
-* Most common strategy
-* Targets compute-intensive ops (Conv, MatMul)
-* Reduces precision of activations
-* Can be applied to individual inputs of multi-input operations
-
-Region Output Quantization
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Quantize data at child region boundaries:
-
-* For composite regions
-* Quantizes outputs of entire subgraphs
-* Useful for quantizing residual connections
-* Maintains precision within subregions
-
-Child Region Input Quantization
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Quantize data entering child regions:
-
-* Complements region output quantization
-* Controls precision at subregion boundaries
-* Enables hierarchical quantization strategies
+The autotuner uses the same three insertion point types described in **3. Q/DQ Insertion Points** (``NodeInputInsertionPoint``, ``RegionOutputInsertionPoint``, ``ChildRegionInputInsertionPoint``). In practice: **node input** quantization is the most common (e.g. at Conv/MatMul inputs); **region output** and **child region input** quantization apply at composite-region boundaries (e.g. residual connections) and enable hierarchical strategies.
 
 Scheme Generation Strategies
 -----------------------------
@@ -811,45 +773,99 @@ Usage Patterns
 Command-Line Interface
 ----------------------
 
+**Prog:** ``modelopt.onnx.quantization.autotune``. Arguments use underscores. Short options: ``-m`` (onnx_path), ``-o`` (output_dir), ``-s`` (schemes_per_region), ``-v`` (verbose). Run ``python -m modelopt.onnx.quantization.autotune --help`` for full help.
+
+Command-line arguments
+^^^^^^^^^^^^^^^^^^^^^^
+
+**Model and output**
+
+* ``--onnx_path``, ``-m`` (required) — Path to ONNX model file.
+* ``--output_dir``, ``-o`` — Output directory for results. Default: ``./autotuner_output``.
+
+**Autotuning strategy**
+
+* ``--schemes_per_region``, ``-s`` — Number of schemes to test per region. Default: ``30``.
+* ``--pattern_cache`` — Path to pattern cache YAML for warm-start. Default: ``None``.
+* ``--qdq_baseline`` — Path to QDQ baseline ONNX model to import quantization patterns. Default: ``None``.
+* ``--state_file`` — State file path for resume. Default: ``<output_dir>/autotuner_state.yaml``.
+* ``--node_filter_list`` — Path to file of wildcard patterns (one per line); regions with no matching nodes are skipped. Default: ``None``.
+
+**Quantization**
+
+* ``--quant_type`` — Quantization data type. Choices: ``int8``, ``fp8``. Default: ``int8``.
+* ``--default_dq_dtype`` — Default DQ output dtype when not deduced. Choices: ``float16``, ``float32``, ``bfloat16``. Default: ``float32``.
+
+**TensorRT benchmark**
+
+* ``--use_trtexec`` — Use trtexec for benchmarking instead of TensorRT Python API. Default: ``False``.
+* ``--timing_cache`` — TensorRT timing cache file path. Default: system temp ``trtexec_timing.cache``.
+* ``--warmup_runs`` — Number of warmup runs. Default: ``5``.
+* ``--timing_runs`` — Number of timing runs. Default: ``20``.
+* ``--plugin_libraries``, ``--plugins`` — TensorRT plugin libraries (``.so``), space-separated. Default: ``None``.
+* ``--trtexec_benchmark_args`` — Extra arguments to trtexec as a single quoted string (e.g. ``'--fp16 --workspace=4096'`` or ``'--remoteAutoTuningConfig=...'``). Default: ``None``.
+
+**Logging**
+
+* ``--verbose``, ``-v`` — Enable verbose DEBUG logging.
+
 Basic Usage
 ~~~~~~~~~~~
 
 .. code-block:: bash
 
-   # Default INT8 quantization
-   python -m modelopt.onnx.quantization.autotune \
-       --model model.onnx \
-       --output ./output
+   # Default INT8 quantization (output dir default: ./autotuner_output)
+   python -m modelopt.onnx.quantization.autotune --onnx_path model.onnx
 
-   # FP8 quantization with more exploration
+   # Specify output and FP8 with more schemes
    python -m modelopt.onnx.quantization.autotune \
-       --model model.onnx \
-       --output ./output \
-       --quant-type fp8 \
-       --schemes-per-region 50
+       --onnx_path model.onnx \
+       --output_dir ./output \
+       --quant_type fp8 \
+       --schemes_per_region 50
 
 Advanced Usage
 ~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
-   # With pattern cache warm-start
+   # Pattern cache warm-start
    python -m modelopt.onnx.quantization.autotune \
-       --model model.onnx \
-       --output ./output \
-       --pattern-cache ./previous_run/pattern_cache.yaml
+       --onnx_path model.onnx \
+       --output_dir ./output \
+       --pattern_cache ./previous_run/autotuner_state_pattern_cache.yaml
 
    # Import patterns from existing QDQ model
    python -m modelopt.onnx.quantization.autotune \
-       --model model.onnx \
-       --output ./output \
-       --qdq-baseline quantized_baseline.onnx
+       --onnx_path model.onnx \
+       --output_dir ./output \
+       --qdq_baseline quantized_baseline.onnx
 
-   # Resume after interruption (automatic)
+   # Custom state file and node filter (skip regions with no matching nodes)
    python -m modelopt.onnx.quantization.autotune \
-       --model model.onnx \
-       --output ./output
-   # Automatically detects and loads state file
+       --onnx_path model.onnx \
+       --output_dir ./output \
+       --state_file ./output/custom_state.yaml \
+       --node_filter_list nodes_to_include.txt
+
+   # Resume after interruption: rerun with same output_dir; state is auto-loaded
+   python -m modelopt.onnx.quantization.autotune \
+       --onnx_path model.onnx \
+       --output_dir ./output
+
+   # Use trtexec and pass extra args (e.g. remote autotuning)
+   python -m modelopt.onnx.quantization.autotune \
+       --onnx_path model.onnx \
+       --output_dir ./output \
+       --use_trtexec \
+       --trtexec_benchmark_args "--remoteAutoTuningConfig=..."
+
+   # Custom timing cache and DQ dtype
+   python -m modelopt.onnx.quantization.autotune \
+       --onnx_path model.onnx \
+       --output_dir ./output \
+       --timing_cache /path/to/cache \
+       --default_dq_dtype float16
 
 Python API
 ----------
@@ -861,59 +877,68 @@ High-Level Workflow
 
    from pathlib import Path
    from modelopt.onnx.quantization.autotune.workflows import (
-       region_pattern_autotuning_workflow
+       region_pattern_autotuning_workflow,
    )
 
-   # Pattern-based optimization (recommended)
+   # Pattern-based optimization (recommended). Call init_benchmark_instance first if not using CLI.
    autotuner = region_pattern_autotuning_workflow(
        model_path="model.onnx",
        output_dir=Path("./output"),
        num_schemes_per_region=30,
+       pattern_cache_file=None,
+       state_file=None,
        quant_type="int8",
-       pattern_cache_file="pattern_cache.yaml",
-       qdq_baseline_model="baseline.onnx"
+       default_dq_dtype="float32",
+       qdq_baseline_model=None,
+       node_filter_list=None,
+       verbose=False,
    )
 
 Low-Level API
 ~~~~~~~~~~~~~
 
+Initialize the global benchmark with ``init_benchmark_instance``, then use ``benchmark_onnx_model`` for measurements. The workflow uses this same global; when calling the workflow from Python you do not need to call ``init_benchmark_instance`` yourself (the CLI does it).
+
 .. code-block:: python
 
    import onnx
-   from modelopt.onnx.quantization.autotune import (
-       QDQAutotuner, Config, TensorRTPyBenchmark
+   from modelopt.onnx.quantization.autotune import QDQAutotuner, Config
+   from modelopt.onnx.quantization.autotune.workflows import (
+       init_benchmark_instance,
+       benchmark_onnx_model,
    )
 
-   # Load and initialize
+   # Initialize benchmark (required before benchmark_onnx_model)
+   init_benchmark_instance(
+       use_trtexec=False,
+       timing_cache_file="/tmp/timing.cache",
+       warmup_runs=5,
+       timing_runs=20,
+   )
+
+   # Load and initialize autotuner
    model = onnx.load("model.onnx")
    autotuner = QDQAutotuner(model)
    config = Config(default_quant_type="fp8")
    autotuner.initialize(config)
 
-   # Setup benchmark
-   benchmark = TensorRTPyBenchmark(
-       timing_cache_file="/tmp/timing.cache"
-   )
-
    # Measure baseline
    autotuner.export_onnx("baseline.onnx", insert_qdq=False)
-   baseline_latency = benchmark.run("baseline.onnx")
+   baseline_latency = benchmark_onnx_model("baseline.onnx")
    autotuner.submit(baseline_latency)
 
    # Profile each region
    for region in autotuner.regions:
        autotuner.set_profile_region(region, commit=True)
-       
-       for _ in range(30):  # Test 30 schemes
+       for _ in range(30):
            scheme_idx = autotuner.generate()
            if scheme_idx == -1:
                break
-           
            model_bytes = autotuner.export_onnx(None, insert_qdq=True)
-           latency = benchmark.run(model_bytes)
-           autotuner.submit(latency, success=(latency != float('inf')))
+           latency = benchmark_onnx_model(model_bytes)
+           autotuner.submit(latency, success=(latency != float("inf")))
 
-   # Finalize
+   # Finalize and export
    autotuner.set_profile_region(None, commit=True)
    autotuner.export_onnx("optimized.onnx", insert_qdq=True)
 
@@ -1085,8 +1110,8 @@ Glossary
 References
 ==========
 
-* **ONNX Specification**: https://onnx.ai/
-* **ONNX Quantization**: https://onnx.ai/onnx/technical/quantization.html
+* **ONNX**: https://onnx.ai/
+* **ONNX Technical Details** (numeric types, quantization-related): https://onnx.ai/onnx/technical/index.html
 * **TensorRT Documentation**: https://docs.nvidia.com/deeplearning/tensorrt/
-* **NVIDIA ModelOpt**: https://github.com/NVIDIA/TensorRT-Model-Optimizer
-* **Graph Surgery**: https://github.com/NVIDIA/TensorRT/tree/main/tools/onnx-graphsurgeon
+* **NVIDIA Model Optimizer (ModelOpt)**: https://github.com/NVIDIA/Model-Optimizer
+* **ONNX GraphSurgeon**: https://github.com/NVIDIA/TensorRT/tree/main/tools/onnx-graphsurgeon
