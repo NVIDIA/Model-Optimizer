@@ -906,6 +906,11 @@ def to_quantized_weight(
     if isinstance(weight, QTensorWrapper):
         return weight.data
 
+    if weight.dim() == 3:
+        # for MOE stacked weights
+        # Clear GPU cache to avoid pontential GPU OOM issues for large models.
+        clear_cuda_cache()
+
     if quantization == QUANTIZATION_FP8:
         # Fix RuntimeError: Promotion for Float8 Types is not supported, attempted to promote Float8_e4m3fn and Float
         # in speculative decoding fp8 model export
@@ -914,9 +919,6 @@ def to_quantized_weight(
             return weight
 
         if weight.dim() == 3:
-            # for MOE stacked weights
-            # Clear GPU cache to avoid pontential GPU OOM issues for large models.
-            clear_cuda_cache()
             return (weight / weights_scaling_factor.unsqueeze(-1)).to(torch.float8_e4m3fn)
         return (weight / weights_scaling_factor).to(torch.float8_e4m3fn)
 
