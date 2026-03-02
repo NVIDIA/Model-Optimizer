@@ -535,6 +535,47 @@ class _QuantSparseMoe(QuantModule):
         return output
 
 
+class _QuantNemotronHMOE(QuantModule):
+    """Quantized MoE module for NemotronH (Nano/Super) with expert amax sync.
+
+    Synchronizes activation quantizer amax across local experts in a layer via
+    layer_sync_moe_local_experts_amax(), which is called by the calibration pipeline
+    (model_calib.max_calibrate()) so that all experts share the same amax before
+    distributed sync. Weight quantizers are left unchanged.
+    """
+
+    def _setup(self):
+        pass
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return super().forward(hidden_states)
+
+    def layer_sync_moe_local_experts_amax(self):
+        """Sync activation quantizer amax across local experts in this MoE layer.
+
+        Only activation quantizers are synchronized; weight quantizers are unchanged.
+        """
+        if not hasattr(self, "experts"):
+            return
+        amax_dict = {}
+        for expert in self.experts:
+            for name, mod in expert.named_modules():
+                if "weight_quantizer" in name:
+                    continue
+                if isinstance(mod, TensorQuantizer) and mod.amax is not None:
+                    stored = amax_dict.get(name)
+                    amax_tensor = mod.amax.detach().clone()
+                    amax_dict[name] = (
+                        amax_tensor if stored is None else torch.maximum(stored, amax_tensor)
+                    )
+        for expert in self.experts:
+            for name, mod in expert.named_modules():
+                if "weight_quantizer" in name:
+                    continue
+                if isinstance(mod, TensorQuantizer) and mod.amax is not None and name in amax_dict:
+                    mod.amax = amax_dict[name].detach().clone().to(mod.amax.device)
+
+
 class _QuantLlama4TextExperts(QuantModule):
     def _setup(self):
         self.gate_up_proj_input_quantizer = TensorQuantizer()
@@ -1097,6 +1138,26 @@ def register_dbrx_moe_on_the_fly(model):
             QuantModuleRegistry.register({moe_type: moe_type.__name__})(_QuantDbrxExpertGLU)
 
 
+def register_nemotron_h_moe_on_the_fly(model):
+    """Register NemotronH MoE modules (Nano/Super) as _QuantNemotronHMOE.
+
+    NemotronH MoE is used in NVIDIA Nemotron-3-Nano and Super architectures and may be
+    loaded via trust_remote_code with a class named NemotronHMOE.
+    """
+    visited_types = set()
+    for name, module in model.named_modules():
+        mod_type = type(module)
+        if mod_type in visited_types or QuantModuleRegistry.get(mod_type) is not None:
+            continue
+        if mod_type.__name__ == "NemotronHMOE":
+            visited_types.add(mod_type)
+            print(
+                f"\033[1mDetected NemotronH MOE module '{name}', "
+                f"registering with _QuantNemotronHMOE.\033[0m"
+            )
+            QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(_QuantNemotronHMOE)
+
+
 def register_falcon_linears_on_the_fly(model):
     """Register Falcon linear modules as a QUANT_MODULE.
 
@@ -1227,6 +1288,7 @@ CUSTOM_MODEL_PLUGINS.update(
     [
         register_falcon_linears_on_the_fly,
         register_dbrx_moe_on_the_fly,
+        register_nemotron_h_moe_on_the_fly,
         register_sparse_moe_on_the_fly,
         register_hf_attentions_on_the_fly,
         convert_hf_parallel_linears_on_the_fly,
