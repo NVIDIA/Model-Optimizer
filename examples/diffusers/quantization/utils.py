@@ -55,11 +55,15 @@ def check_conv_and_mha(backbone, if_fp4, quantize_mha):
         elif isinstance(module, (Attention, AttentionModuleMixin)):
             head_size = int(module.inner_dim / module.heads)
             if not quantize_mha or head_size % 16 != 0:
-                module.q_bmm_quantizer.disable()
-                module.k_bmm_quantizer.disable()
-                module.v_bmm_quantizer.disable()
-                module.softmax_quantizer.disable()
-                module.bmm2_output_quantizer.disable()
+                for attr in (
+                    "q_bmm_quantizer",
+                    "k_bmm_quantizer",
+                    "v_bmm_quantizer",
+                    "softmax_quantizer",
+                    "bmm2_output_quantizer",
+                ):
+                    if hasattr(module, attr):
+                        getattr(module, attr).disable()
                 setattr(module, "_disable_fp8_mha", True)
 
                 print(f"Disabled Attention layer quantization for layer {name}")
