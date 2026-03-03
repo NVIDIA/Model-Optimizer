@@ -1134,7 +1134,13 @@ def _is_sparse_moe_block(module):
             return True
 
     # Fallback: top_k + num_experts on the block itself (older transformers, e.g. v4.x Qwen3Next)
-    return hasattr(module, "top_k") and hasattr(module, "num_experts")
+    if hasattr(module, "top_k"):
+        num_experts = len(module.experts)
+        if not hasattr(module, "num_experts"):
+            module.num_experts = num_experts
+        else:
+            assert module.num_experts == num_experts
+        return True
 
 
 def register_sparse_moe_on_the_fly(model):
