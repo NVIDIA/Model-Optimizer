@@ -263,7 +263,6 @@ def _find_nodes_to_quantize_autotune(
         onnx_model,
         quant_type=quantize_mode,
         default_dq_dtype=precision_map[high_precision_dtype],
-        keep_output_dir=False,
     )
     return autotuner.get_ort_quantization_config()
 

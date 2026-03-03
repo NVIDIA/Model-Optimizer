@@ -20,7 +20,6 @@ optimization of ONNX models using pattern-based region analysis and TensorRT per
 """
 
 import fnmatch
-import shutil
 import tempfile
 from pathlib import Path
 
@@ -170,7 +169,6 @@ def region_pattern_autotuning_workflow(
     qdq_baseline_model: str | None = None,
     node_filter_list: list[str] | None = None,
     verbose: bool = False,
-    keep_output_dir: bool = True,
 ) -> QDQAutotuner:
     """Run automated Q/DQ (Quantization/Dequantization) optimization on an ONNX model.
 
@@ -214,7 +212,6 @@ def region_pattern_autotuning_workflow(
         node_filter_list: Optional list of wildcard patterns to filter ONNX nodes. Regions
                          without any matching nodes are skipped during autotuning (default: None)
         verbose: Enable verbose logging in Config for detailed autotuner output (default: False)
-        keep_output_dir: If True, keep output_dir, otherwise, remove it at the end of this function.
 
     Returns:
         QDQAutotuner instance after autotuning
@@ -382,11 +379,5 @@ def region_pattern_autotuning_workflow(
     logger.info(f"  State: {state_path}")
     logger.debug(f"  Logs: {logs_dir}")
     logger.debug(f"  Region models: {models_dir}")
-
-    if not keep_output_dir:
-        logger.debug(
-            f"Removing output dir: {output_dir}. Set 'keep_output_dir=True' if you wish to keep it."
-        )
-        shutil.rmtree(output_dir)
 
     return autotuner
