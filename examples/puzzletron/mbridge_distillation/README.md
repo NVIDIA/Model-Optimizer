@@ -30,54 +30,28 @@ export PYTHONPATH="/workspace/Model-Optimizer:${PYTHONPATH}"
 
 ## Dataset Preparation
 
-This section describes how to prepare datasets for knowledge distillation. We provide examples using a toy dataset (WikiText-103) for illustration purposes, and note how to adapt the process for production datasets like Nemotron-Post-Training-Dataset-v2.
+This section describes how to prepare datasets for knowledge distillation. We provide examples using WikiText-103, which is a small dataset that can still produce decent results (see the Qwen3-8B example below showing +10.11 percentage point improvement). For production use, larger datasets like [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2) are recommended.
 
-> **Note:** The WikiText-103 dataset is a small toy dataset used here only for illustration. For actual knowledge distillation, use a larger, more representative dataset like [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2).
+### Download and Tokenize Dataset
 
-### Download Dataset
+Download and tokenize the dataset in a single step. This downloads the dataset from HuggingFace, tokenizes it, and saves it in the Megatron format (`.bin` and `.idx` files):
 
-Download the dataset and save it in JSONL format. For WikiText-103, you can use the following script:
-
-```python
-# download_hf_wikitext_dataset.py
-import json
-import os
-from datasets import load_dataset
-
-DATA_PATH = "path/to/hf_datasets/wikitext-103-v1"
-# Load the WikiText-103 dataset
-dataset = load_dataset("wikitext", "wikitext-103-v1", split="train")
-
-# Define the destination folder
-os.makedirs(DATA_PATH, exist_ok=True)
-
-# Save splits to JSONL files
-with open(f"{DATA_PATH}/wikitext-train.jsonl", "w") as file:
-    file.writelines(json.dumps(item) + "\n" for item in dataset)
-
-print(f"Raw dataset saved to {DATA_PATH}/wikitext-train.jsonl")
+```bash
+python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
+    --hf_dataset Salesforce/wikitext \
+    --hf_name wikitext-103-v1 \
+    --hf_split train \
+    --output_dir path/to/hf_datasets/wikitext-103-v1 \
+    --tokenizer meta-llama/Llama-3.1-8B-Instruct \
+    --json_keys text \
+    --workers 32
 ```
 
-### Tokenize Dataset
+This will create:
 
-Tokenize the JSONL dataset using the tokenizer from your model. This converts the text data into token IDs that can be used for training:
-
-```python
-# tokenize_wikitext_dataset.py
-from modelopt.torch.utils.plugins import megatron_preprocess_data
-
-DATA_PATH = "path/to/hf_datasets/wikitext-103-v1"
-HF_MODEL_NAME_OR_PATH = "path/to/your/model/checkpoint"
-
-megatron_preprocess_data(
-    input_path=f"{DATA_PATH}/wikitext-train.jsonl",
-    output_dir=DATA_PATH,
-    tokenizer_name_or_path=HF_MODEL_NAME_OR_PATH,
-    json_keys=["text"],
-    workers=32,
-    log_interval=100000,
-)
-```
+- `Salesforce--wikitext_wikitext-103-v1_train_text_document.bin` - Binary tokenized data
+- `Salesforce--wikitext_wikitext-103-v1_train_text_document.idx` - Index file for the binary data
+- `Salesforce--wikitext_wikitext-103-v1_train_text_document/cache/` - Cache directory (created after running distillation)
 
 ## Run Knowledge Distillation
 
@@ -87,7 +61,7 @@ Run distillation directly from HuggingFace checkpoints (student and teacher) wit
 torchrun --nproc_per_node=8 examples/puzzletron/mbridge_distillation/distill_hf.py \
     --student_hf_path /path/to/student/huggingface/checkpoint \
     --teacher_hf_path /path/to/teacher/huggingface/checkpoint \
-    --data_paths 1.0 /path/to/tokenized/dataset \
+    --data_paths 1.0 /path/to/hf_datasets/wikitext-103-v1/Salesforce--wikitext_wikitext-103-v1_train_text_document \
     --output_dir /path/to/distilled/checkpoint \
     --hf-export-path /path/to/exported/hf/model \
     --hf-model meta-llama/Llama-3.1-8B-Instruct \
@@ -165,6 +139,6 @@ Distillation results for a pruned Llama-3.1-8B-Instruct checkpoint (approximatel
 
 ### Recommendations
 
-- **For successful distillation:** Use larger production datasets like [nvidia/Nemotron-Pretraining-SFT-v1](https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-SFT-v1) instead of WikiText-103
+- **For production distillation:** Use larger production datasets like [nvidia/Nemotron-Pretraining-SFT-v1](https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-SFT-v1) for better results and to avoid overfitting (see regression case above)
 - **Training duration:** Train for more iterations to ensure proper convergence
 - **See the [Megatron-Bridge distillation tutorial](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge#distillation) for best practices**
