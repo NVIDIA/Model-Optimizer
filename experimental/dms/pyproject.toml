@@ -7,6 +7,7 @@ name = "dms"
 version = "0.1.0"
 requires-python = ">=3.10,<3.14"
 description = "Dynamic Memory Sparsification (DMS) for KV cache compression"
+# NOTE: Run `uv lock --upgrade` in this directory to update the dependencies for vulnerability scanning.
 dependencies = [
     "transformers==4.57.3",
     "datasets==4.4.2",
@@ -24,3 +25,7 @@ filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore:flex_attention called without torch.compile:UserWarning",
 ]
+
+[tool.uv]
+managed = true
+override-dependencies = ["torch; sys_platform == 'never'"]
