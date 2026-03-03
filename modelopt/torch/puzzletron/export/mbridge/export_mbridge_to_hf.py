@@ -32,6 +32,11 @@ def export_to_hf_and_copy_config(
     """
     Export Megatron checkpoint to HuggingFace format and copy config.json from student model.
 
+    TODO: This script should not be needed (manually copying config.json from
+    student model to exported model). Remove it once export_to_hf() in AutoBridge
+    supports copying/preserving config.json from student model.
+
+
     Args:
         student_hf_path: Path to the original student HuggingFace model (source of config.json)
         checkpoint_dir: Base directory where Megatron checkpoints are stored

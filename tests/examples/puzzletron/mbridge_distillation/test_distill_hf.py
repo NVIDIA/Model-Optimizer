@@ -144,6 +144,7 @@ def _prepare_student_and_teacher_models(project_root_path: Path, tmp_path: Path)
 
     # Create student model using utility function
     # This uses local config files and preserves model-specific settings
+    # TODO: Make the student model using different ffn sizes across layers.
     create_and_save_small_hf_model(
         output_path=str(student_hf_dir),
         vocab_size=tokenizer.vocab_size,
