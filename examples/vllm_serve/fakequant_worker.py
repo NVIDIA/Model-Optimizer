@@ -108,7 +108,6 @@ def _fakequant_run_prolog_worker(self) -> None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model = self.model_runner.model
-    print(model)
     if quant_config["modelopt_state_path"]:
         print(f"Loading modelopt state from {quant_config['modelopt_state_path']}")
         # Load on CPU to avoid failures when the checkpoint was saved from a different
