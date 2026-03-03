@@ -14,8 +14,6 @@
 # limitations under the License.
 
 
-import torch
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.megatron.models import get_mcore_qwen3_600m
 from _test_utils.torch.megatron.utils import initialize_for_megatron
 from transformers import AutoTokenizer
@@ -25,7 +23,7 @@ from modelopt.torch.utils.plugins import megatron_generate, megatron_mmlu
 SEED = 1234
 
 
-def _test_megatron_generate(rank, size):
+def _test_megatron_generate_and_mmlu(rank, size):
     initialize_for_megatron(tensor_model_parallel_size=size, seed=SEED)
 
     model = get_mcore_qwen3_600m(tensor_model_parallel_size=size).cuda().eval()
@@ -49,11 +47,5 @@ def _test_megatron_generate(rank, size):
     assert megatron_mmlu(model, tokenizer) > 0.24
 
 
-def test_megatron_generate():
-    size = torch.cuda.device_count()
-
-    spawn_multiprocess_job(
-        size=size,
-        job=_test_megatron_generate,
-        backend="nccl",
-    )
+def test_megatron_generate_and_mmlu(dist_workers):
+    dist_workers.run(_test_megatron_generate_and_mmlu)

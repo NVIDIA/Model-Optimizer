@@ -16,7 +16,6 @@
 from functools import partial
 
 import torch
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import run_mcore_inference_with_dummy_input
 from _test_utils.torch.misc import set_seed
@@ -33,13 +32,13 @@ SEED = 1234
 
 def _test_logits_kl_loss(rank, size):
     """Test basic LogitsKLLoss with simple forward/backward pass."""
-    channel_divisor = 4
+    set_seed(SEED)
 
     num_layers = 2
-    hidden_size = channel_divisor * 2
+    hidden_size = 8
     num_attention_heads = 4
     num_query_groups = 2
-    ffn_hidden_size = channel_divisor * 2
+    ffn_hidden_size = 8
     max_sequence_length = 8
     vocab_size = 32
     batch_size = 2
@@ -124,13 +123,13 @@ def _test_logits_kl_loss(rank, size):
 
 def _test_topk_logits_kl_loss(top_k, rank, size):
     """Test TopKLogitsKLLoss with simple forward/backward pass."""
-    channel_divisor = 4
+    set_seed(SEED)
 
     num_layers = 2
-    hidden_size = channel_divisor * 2
+    hidden_size = 8
     num_attention_heads = 4
     num_query_groups = 2
-    ffn_hidden_size = channel_divisor * 2
+    ffn_hidden_size = 8
     max_sequence_length = 8
     vocab_size = 128
     batch_size = 2
@@ -213,21 +212,11 @@ def _test_topk_logits_kl_loss(top_k, rank, size):
     loss["kd_loss"].backward()
 
 
-def test_logits_kl_loss():
+def test_logits_kl_loss(dist_workers):
     """Test LogitsKLLoss with TP parallelism."""
-    set_seed(SEED)
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=_test_logits_kl_loss,
-        backend="nccl",
-    )
+    dist_workers.run(_test_logits_kl_loss)
 
 
-def test_topk_logits_kl_loss(top_k: int = 5):
+def test_topk_logits_kl_loss(dist_workers, top_k: int = 5):
     """Test TopKLogitsKLLoss with TP parallelism."""
-    set_seed(SEED)
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_topk_logits_kl_loss, top_k),
-        backend="nccl",
-    )
+    dist_workers.run(partial(_test_topk_logits_kl_loss, top_k))

@@ -19,7 +19,6 @@ from _test_utils.import_helper import skip_if_no_mamba
 
 skip_if_no_mamba()
 
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.megatron.models import get_mcore_mamba_hybrid_model
 from _test_utils.torch.megatron.utils import run_mcore_inference
 from megatron.core.parallel_state import is_pipeline_first_stage, is_pipeline_last_stage
@@ -131,10 +130,8 @@ def _test_mamba_search_space(rank, size):
     assert not any(named_dynamic_modules(model))
 
 
-def test_mamba_search_space():
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(), job=_test_mamba_search_space, backend="nccl"
-    )
+def test_mamba_search_space(dist_workers):
+    dist_workers.run(_test_mamba_search_space)
 
 
 def test_mamba_num_heads_hp():

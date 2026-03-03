@@ -21,11 +21,7 @@ from functools import partial
 import pytest
 import torch
 import torch.nn as nn
-from _test_utils.torch.distributed.utils import (
-    get_device_counts,
-    spawn_multiprocess_job,
-    synchronize_state_dict,
-)
+from _test_utils.torch.distributed.utils import synchronize_state_dict
 from torch.distributed._composable.fsdp.fully_shard import fully_shard
 
 import modelopt.torch.quantization as mtq
@@ -123,18 +119,12 @@ def _test_nested_fsdp2_backward(rank, size, quant_cfg):
     assert torch.allclose(out_ref_1, out_quant_after_1, rtol=1e-4)
 
 
-@pytest.mark.parametrize("device_count", get_device_counts())
-def test_fsdp_simple_linear(device_count):
-    spawn_multiprocess_job(size=device_count, job=_test_fsdp2_simple_linear, backend="nccl")
+def test_fsdp_simple_linear(dist_workers):
+    dist_workers.run(_test_fsdp2_simple_linear)
 
 
-@pytest.mark.parametrize("device_count", get_device_counts())
 @pytest.mark.parametrize(
     "quant_cfg", [mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_SMOOTHQUANT_CFG, mtq.INT4_AWQ_CFG]
 )
-def test_nested_fsdp2_backward(device_count, quant_cfg):
-    spawn_multiprocess_job(
-        size=device_count,
-        job=partial(_test_nested_fsdp2_backward, quant_cfg=quant_cfg),
-        backend="nccl",
-    )
+def test_nested_fsdp2_backward(quant_cfg, dist_workers):
+    dist_workers.run(partial(_test_nested_fsdp2_backward, quant_cfg=quant_cfg))

@@ -13,12 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pytest
 
-pytest.importorskip("transformers")
 from functools import partial
 
-from _test_utils.torch.distributed.utils import get_device_counts, spawn_multiprocess_job
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
 from transformers import AutoModelForCausalLM
 
@@ -32,10 +29,5 @@ def _test_transformers_multi_process(rank, size, tmp_path):
 
 
 # TODO: remove this test and add test for TP sharded transformers models after we support TP sharded models
-@pytest.mark.parametrize("device_count", get_device_counts())
-def test_transformers_multi_process(tmp_path, device_count):
-    spawn_multiprocess_job(
-        size=device_count,
-        job=partial(_test_transformers_multi_process, tmp_path=tmp_path),
-        backend="nccl",
-    )
+def test_transformers_multi_process(dist_workers, tmp_path):
+    dist_workers.run(partial(_test_transformers_multi_process, tmp_path=tmp_path))

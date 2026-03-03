@@ -12,11 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
 from functools import partial
 
 import pytest
 import torch
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 
 import modelopt.torch.speculative as mtsp
@@ -62,7 +62,7 @@ def _test_speculative_gpt_model(
         # Type checking
         assert isinstance(model, _DynamicMedusaGPTModel)
     elif algo in {"eagle1", "eagle3"}:
-        mtsp_config = ALGO_TO_CONFIG[algo]
+        mtsp_config = copy.deepcopy(ALGO_TO_CONFIG[algo])
 
         mtsp_config["config"]["eagle_architecture_config"]["num_hidden_layers"] = (
             num_medusa_heads_or_eagle_layers
@@ -145,22 +145,14 @@ def _test_speculative_gpt_model(
     ],
 )
 def test_speculative_gpt_model(
-    algo, num_medusa_heads_or_eagle_layers, activation_func, normalization
+    dist_workers, algo, num_medusa_heads_or_eagle_layers, activation_func, normalization
 ):
-    if algo == "eagle":
-        try:
-            import megatron.core.post_training  # noqa: F401
-        except ImportError:
-            pytest.skip("megatron.core.post_training not found")
-
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(
+    dist_workers.run(
+        partial(
             _test_speculative_gpt_model,
             algo,
             num_medusa_heads_or_eagle_layers,
             activation_func,
             normalization,
         ),
-        backend="nccl",
     )

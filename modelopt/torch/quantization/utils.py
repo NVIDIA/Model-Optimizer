@@ -15,8 +15,6 @@
 
 """Quantization utilities."""
 
-from __future__ import annotations
-
 from collections import namedtuple
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any
@@ -28,13 +26,12 @@ from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
 from torch.distributed.tensor import Replicate
 
+from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.utils import get_unwrapped_name, print_rank_0
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
 if TYPE_CHECKING:
     from collections.abc import Generator
-
-    from modelopt.torch.opt.searcher import ForwardLoop
 
 __all__ = [
     "EXPORT_MODE",
@@ -220,7 +217,7 @@ def reduce_sum(input, axis=None, keepdims=True):
     return output
 
 
-def weight_attr_names(module: nn.Module) -> Generator[str, None, None]:
+def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
     """Get the weight param attribute names in a converted module, non-recursive.
 
     We consider the following two cases for each weight param attribute:

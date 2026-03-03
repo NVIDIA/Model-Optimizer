@@ -24,7 +24,6 @@ from _test_utils.import_helper import skip_if_no_mamba
 
 skip_if_no_mamba()
 
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.megatron.models import get_mcore_mamba_hybrid_model
 from _test_utils.torch.megatron.utils import (
     run_mcore_inference,
@@ -48,6 +47,7 @@ SEED = 1234
 
 
 def _test_mcore_mamba_parameter_sorting(rank, size):
+    set_seed(SEED)
     # Use relatively bigger model here for more accurate test for sorting
     channel_divisor = 64
 
@@ -117,13 +117,8 @@ def _test_mcore_mamba_parameter_sorting(rank, size):
     compare_outputs(y1, y2, rtol=1e-5, atol=1e-3)
 
 
-def test_mcore_mamba_parameter_sorting():
-    set_seed(SEED)
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=_test_mcore_mamba_parameter_sorting,
-        backend="nccl",
-    )
+def test_mcore_mamba_parameter_sorting(dist_workers):
+    dist_workers.run(_test_mcore_mamba_parameter_sorting)
 
 
 def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
@@ -234,15 +229,14 @@ def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
     prune_minitron(model, constraints, {"checkpoint": ckpt_path}, channel_divisor)
 
 
-def test_mcore_mamba_hybrid_pruning(tmp_path):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_mcore_mamba_hybrid_pruning, tmp_path / "modelopt_minitron_scores.pth"),
-        backend="nccl",
+def test_mcore_mamba_hybrid_pruning(dist_workers, tmp_path):
+    dist_workers.run(
+        partial(_test_mcore_mamba_hybrid_pruning, tmp_path / "modelopt_minitron_scores.pth")
     )
 
 
 def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
+    set_seed(SEED)
     channel_divisor = 4
 
     # TODO: MoE in MambaModel requires Mcore 0.16+
@@ -382,16 +376,11 @@ def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
         assert actual.score == score, (actual.score, score)
 
 
-def test_mcore_mamba_hybrid_pruning_nas(tmp_path):
-    set_seed(SEED)
+def test_mcore_mamba_hybrid_pruning_nas(dist_workers, tmp_path):
     if torch.cuda.device_count() > 4:
         pytest.skip("Skipping test for more than 4 GPUs")
     if "E" in Symbols.VALID:
         pytest.skip("TODO: Update test for MoE in Mamba (Mcore 0.16+)")
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(
-            _test_mcore_mamba_hybrid_pruning_nas, tmp_path / "modelopt_minitron_scores.pth"
-        ),
-        backend="nccl",
+    dist_workers.run(
+        partial(_test_mcore_mamba_hybrid_pruning_nas, tmp_path / "modelopt_minitron_scores.pth"),
     )

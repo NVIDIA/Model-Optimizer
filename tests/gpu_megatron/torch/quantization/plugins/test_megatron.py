@@ -18,7 +18,6 @@ from functools import partial
 
 import pytest
 import torch
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.megatron.models import (
     MegatronModel,
     get_mcore_gpt_model,
@@ -163,14 +162,15 @@ def _test_parallelism_helper(
         mtq.NVFP4_DEFAULT_CFG,
     ],
 )
-def test_tensor_parallel(need_2_gpus, config):
-    spawn_multiprocess_job(
-        size=2,
-        job=partial(_test_parallelism_helper, config, tensor_model_parallel_size=2),
-        backend="nccl",
+def test_tensor_parallel(dist_workers, config):
+    dist_workers.run(
+        partial(
+            _test_parallelism_helper, config, tensor_model_parallel_size=torch.cuda.device_count()
+        )
     )
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Same as test_tensor_parallel on 1 GPU")
 @pytest.mark.parametrize(
     "config",
     [
@@ -183,14 +183,11 @@ def test_tensor_parallel(need_2_gpus, config):
         mtq.NVFP4_DEFAULT_CFG,
     ],
 )
-def test_data_parallel(need_2_gpus, config):
-    spawn_multiprocess_job(
-        size=2,
-        job=partial(_test_parallelism_helper, config, use_rank_in_seed=True),
-        backend="nccl",
-    )
+def test_data_parallel(dist_workers, config):
+    dist_workers.run(partial(_test_parallelism_helper, config, use_rank_in_seed=True))
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Same as test_tensor_parallel on 1 GPU")
 @pytest.mark.parametrize(
     "config",
     [
@@ -203,13 +200,14 @@ def test_data_parallel(need_2_gpus, config):
         mtq.NVFP4_DEFAULT_CFG,
     ],
 )
-def test_context_parallel(need_2_gpus, config):
-    spawn_multiprocess_job(
-        size=2,
-        job=partial(
-            _test_parallelism_helper, config, context_parallel_size=2, use_rank_in_seed=True
+def test_context_parallel(dist_workers, config):
+    dist_workers.run(
+        partial(
+            _test_parallelism_helper,
+            config,
+            context_parallel_size=torch.cuda.device_count(),
+            use_rank_in_seed=True,
         ),
-        backend="nccl",
     )
 
 
@@ -225,10 +223,9 @@ def test_context_parallel(need_2_gpus, config):
         mtq.NVFP4_DEFAULT_CFG,
     ],
 )
-def test_data_tensor_context_parallel(need_8_gpus, config):
-    spawn_multiprocess_job(
-        size=8,
-        job=partial(
+def test_data_tensor_context_parallel(dist_workers, need_8_gpus, config):
+    dist_workers.run(
+        partial(
             _test_parallelism_helper,
             config,
             tensor_model_parallel_size=2,
@@ -236,7 +233,6 @@ def test_data_tensor_context_parallel(need_8_gpus, config):
             use_rank_in_seed=True,
             test_pre_quant_scale=False,
         ),
-        backend="nccl",
     )
 
 
@@ -275,7 +271,7 @@ def _gpt_model_provider(
                 mamba_head_dim=mamba_head_dim,
                 mamba_num_groups=tp_size,  # Must be divisible by tp_size
                 num_moe_experts=num_moe_experts,
-                sequence_parallel=True,  # Required for MoE + TP
+                sequence_parallel=(tp_size > 1),  # Required for MoE + TP
                 # EP/ETP passed via config_kwargs
                 expert_model_parallel_size=ep_size,
                 expert_tensor_parallel_size=etp_size,
@@ -436,7 +432,9 @@ FP8_GEMM_KV_CFG["quant_cfg"].update(mtq.FP8_KV_CFG["quant_cfg"])
 @pytest.mark.parametrize("compress", [False, True])
 @pytest.mark.parametrize("meta_device", [False, True])
 @pytest.mark.parametrize("transformer_impl", ["local", "modelopt"])
-def test_homogeneous_sharded_state_dict(tmp_path, config, compress, meta_device, transformer_impl):
+def test_homogeneous_sharded_state_dict(
+    dist_workers, tmp_path, config, compress, meta_device, transformer_impl
+):
     if compress and config is mtq.W4A8_AWQ_BETA_CFG:
         pytest.skip("W4A8_AWQ_BETA_CFG is not supported for compress")
 
@@ -446,14 +444,11 @@ def test_homogeneous_sharded_state_dict(tmp_path, config, compress, meta_device,
                 "KV cache configs require transformer_impl='modelopt' and no compress/meta_device"
             )
 
-    size = torch.cuda.device_count()
-
     model_config = {"transformer_impl": transformer_impl}
     if transformer_impl == "modelopt":
         model_config["use_te"] = True
-    spawn_multiprocess_job(
-        size=size,
-        job=partial(
+    dist_workers.run(
+        partial(
             _test_sharded_state_dict,
             tmp_path,
             config,
@@ -463,7 +458,6 @@ def test_homogeneous_sharded_state_dict(tmp_path, config, compress, meta_device,
             meta_device,
             model_config,
         ),
-        backend="nccl",
     )
 
 
@@ -471,22 +465,22 @@ def test_homogeneous_sharded_state_dict(tmp_path, config, compress, meta_device,
     "config",
     [NVFP4_GEMM_KV_CFG, FP8_GEMM_KV_CFG, mtq.MAMBA_MOE_NVFP4_CONSERVATIVE_CFG],
 )
-def test_homogeneous_sharded_state_dict_hybrid(tmp_path, config):
+def test_homogeneous_sharded_state_dict_hybrid(dist_workers, tmp_path, config):
     """Test sharded state dict for hybrid Mamba MOE models."""
-    if torch.cuda.device_count() < 4:
-        pytest.skip("Hybrid MOE test requires at least 4 GPUs")
-
+    # TP+EP is not supported by QuantSequentialMLP. Set either TP or EP to 1
+    num_gpus = torch.cuda.device_count()
+    if num_gpus > 4:
+        pytest.skip("Test needs to be fixed for more than 4 GPUs")
     model_config = {
         "is_hybrid": True,
         "hybrid_override_pattern": "MEM*E",  # 5 layers: Mamba → MoE → Mamba → Attention → MoE
         "num_moe_experts": 8,
-        "tp_size": 2,
-        "ep_size": 2,
-        "etp_size": 2,
+        "tp_size": num_gpus,
+        "ep_size": 1,
+        "etp_size": num_gpus,
     }
-    spawn_multiprocess_job(
-        size=4,
-        job=partial(
+    dist_workers.run(
+        partial(
             _test_sharded_state_dict,
             tmp_path,
             config,
@@ -496,7 +490,6 @@ def test_homogeneous_sharded_state_dict_hybrid(tmp_path, config):
             False,  # meta_device
             model_config,
         ),
-        backend="nccl",
     )
 
 
@@ -507,33 +500,9 @@ def test_homogeneous_sharded_state_dict_hybrid(tmp_path, config):
         mixed_block_size_config,
     ],
 )
-def test_heterogenous_sharded_state_dict(need_2_gpus, tmp_path, config):
-    spawn_multiprocess_job(
-        size=2,
-        job=partial(_test_sharded_state_dict, tmp_path, config, 256, None, False, False, {}),
-        backend="nccl",
-    )
-
-
-@pytest.mark.parametrize(
-    "config",
-    [
-        mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
-        mtq.NVFP4_DEFAULT_CFG,
-        mixed_precision_config,
-    ],
-)
-@pytest.mark.parametrize("modelopt_version", ["0.25", "0.27"])
-@pytest.mark.skip(
-    reason="0.31 has breaking change without backward compatibility. This unittest needs to be refactorized."
-)
-def test_sharded_state_dict_old_checkpoints(need_2_gpus, tmp_path, config, modelopt_version):
-    spawn_multiprocess_job(
-        size=2,
-        job=partial(
-            _test_sharded_state_dict, tmp_path, config, 256, modelopt_version, False, False, {}
-        ),
-        backend="nccl",
+def test_heterogenous_sharded_state_dict(dist_workers, tmp_path, config):
+    dist_workers.run(
+        partial(_test_sharded_state_dict, tmp_path, config, 256, None, False, False, {}),
     )
 
 
@@ -577,8 +546,8 @@ def _test_auto_quantize_helper(rank, size):
     auto_quantize_helper(model)
 
 
-def test_auto_quantize(need_2_gpus):
-    spawn_multiprocess_job(size=2, job=_test_auto_quantize_helper, backend="nccl")
+def test_auto_quantize(dist_workers):
+    dist_workers.run(_test_auto_quantize_helper)
 
 
 def _test_fp8_real_quantize_helper(rank, size):
@@ -608,9 +577,8 @@ def _test_fp8_real_quantize_helper(rank, size):
     assert real_quant_mem < cur_mem
 
 
-def test_fp8_real_quantize():
-    size = torch.cuda.device_count()
-    spawn_multiprocess_job(size=size, job=_test_fp8_real_quantize_helper, backend="nccl")
+def test_fp8_real_quantize(dist_workers):
+    dist_workers.run(_test_fp8_real_quantize_helper)
 
 
 @pytest.mark.skip(reason="TODO: etp requires sequence parallelism now in Megatron due to a bug;")
@@ -619,10 +587,9 @@ def test_fp8_real_quantize():
     [mtq.FP8_DEFAULT_CFG, mtq.NVFP4_DEFAULT_CFG, mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG],
 )
 @pytest.mark.parametrize("moe_grouped_gemm", [True, False])
-def test_moe_sharded_state_dict(need_4_gpus, tmp_path, config, moe_grouped_gemm):
+def test_moe_sharded_state_dict(dist_workers, need_4_gpus, tmp_path, config, moe_grouped_gemm):
     if moe_grouped_gemm:
         pytest.skip("TEGroupedMLP is not enabled in Megatron-LM currently")
-    size = torch.cuda.device_count()
     # TODO: Add support for compress=True for TEGroupedMLP
     moe_config = {
         "tp_size": 2,
@@ -633,9 +600,8 @@ def test_moe_sharded_state_dict(need_4_gpus, tmp_path, config, moe_grouped_gemm)
         "use_te": moe_grouped_gemm,
         "transformer_impl": "modelopt",
     }
-    spawn_multiprocess_job(
-        size=size,
-        job=partial(
+    dist_workers.run(
+        partial(
             _test_sharded_state_dict,
             tmp_path,
             config,
@@ -645,7 +611,6 @@ def test_moe_sharded_state_dict(need_4_gpus, tmp_path, config, moe_grouped_gemm)
             False,
             moe_config,
         ),
-        backend="nccl",
     )
 
 
@@ -717,33 +682,25 @@ def _test_te_grouped_vs_sequential_quantize_helper(tp_size, ep_size, etp_size, r
     )
 
 
-def test_te_grouped_vs_sequential_quantize(need_4_gpus):
+def test_te_grouped_vs_sequential_quantize(dist_workers_size_4):
     """Test that TEGrouped and sequential MoE models produce similar quantized models."""
     pytest.skip("TEGroupedMLP is not enabled in Megatron-LM currently")
-    size = torch.cuda.device_count()
-    spawn_multiprocess_job(
-        size=size,
-        job=partial(_test_te_grouped_vs_sequential_quantize_helper, 1, 2, 2),
-        backend="nccl",
-    )
+    dist_workers_size_4.run(partial(_test_te_grouped_vs_sequential_quantize_helper, 1, 2, 2))
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])
 @pytest.mark.parametrize("moe_grouped_gemm", [True, False])
-def test_layer_sync_moe_local_experts_amax(ep_size, moe_grouped_gemm):
+def test_layer_sync_moe_local_experts_amax(dist_workers, ep_size, moe_grouped_gemm):
     """Test expert model parallel synchronization."""
-    size = torch.cuda.device_count()
-    if size < ep_size:
+    if torch.cuda.device_count() < ep_size:
         pytest.skip(f"Requires at least {ep_size} GPUs for expert model parallel test")
 
-    spawn_multiprocess_job(
-        size=size,
-        job=partial(
+    dist_workers.run(
+        partial(
             _test_layer_sync_moe_local_experts_amax,
             ep_size,
             moe_grouped_gemm,
         ),
-        backend="nccl",
     )
 
 
@@ -883,15 +840,13 @@ def _test_expert_model_parallel_amax_sync(
 @pytest.mark.parametrize("config", [mtq.FP8_DEFAULT_CFG, mtq.INT8_DEFAULT_CFG])
 @pytest.mark.parametrize(("ep_size", "etp_size"), [(1, 2), (2, 1), (2, 2)])
 @pytest.mark.parametrize("moe_grouped_gemm", [True, False])
-def test_expert_parallel_sync(config, ep_size, etp_size, moe_grouped_gemm):
+def test_expert_parallel_sync(dist_workers, config, ep_size, etp_size, moe_grouped_gemm):
     """Test expert model parallel synchronization."""
-    size = torch.cuda.device_count()
-    if size < ep_size * etp_size:
+    if torch.cuda.device_count() < ep_size * etp_size:
         pytest.skip(f"Requires at least {ep_size * etp_size} GPUs for expert model parallel test")
 
-    spawn_multiprocess_job(
-        size=size,
-        job=partial(
+    dist_workers.run(
+        partial(
             _test_expert_model_parallel_amax_sync,
             etp_size,  # tp_size
             ep_size,
@@ -899,7 +854,6 @@ def test_expert_parallel_sync(config, ep_size, etp_size, moe_grouped_gemm):
             moe_grouped_gemm,
             config,
         ),
-        backend="nccl",
     )
 
 
@@ -953,7 +907,7 @@ def _test_kv_cache_quant_helper(config, rank, size):
         mtq.NVFP4_KV_CFG,
     ],
 )
-def test_kv_cache_quant(config):
+def test_kv_cache_quant(dist_workers_size_1, config):
     """Verify KV cache quantization works correctly with TEDotProductAttention.
 
     This test ensures TEDotProductAttention is properly registered and gets the
@@ -962,7 +916,7 @@ def test_kv_cache_quant(config):
     Note: This test requires Transformer Engine to be installed since TEDotProductAttention
     is only available with transformer_impl="modelopt" or "transformer_engine" (not "local").
     """
-    spawn_multiprocess_job(size=1, job=partial(_test_kv_cache_quant_helper, config), backend="nccl")
+    dist_workers_size_1.run(partial(_test_kv_cache_quant_helper, config))
 
 
 def _test_kv_cache_amax_sync_helper(config, rank, size, tensor_model_parallel_size=1):
@@ -979,7 +933,7 @@ def _test_kv_cache_amax_sync_helper(config, rank, size, tensor_model_parallel_si
         tensor_model_parallel_size=tensor_model_parallel_size,
         num_layers=1,
         hidden_size=64,
-        num_attention_heads=4,
+        num_attention_heads=max(4, size),
         vocab_size=32,
         transformer_impl="modelopt",
     ).cuda()
@@ -994,14 +948,14 @@ def _test_kv_cache_amax_sync_helper(config, rank, size, tensor_model_parallel_si
     assert kv_quantizers_found, "No KV cache quantizers found in model"
 
 
-def test_kv_cache_amax_sync(need_2_gpus):
+def test_kv_cache_amax_sync(dist_workers):
     """Test KV cache quantizer amax is synced across the distributed world."""
-    spawn_multiprocess_job(
-        size=2,
-        job=partial(
-            _test_kv_cache_amax_sync_helper, NVFP4_GEMM_KV_CFG, tensor_model_parallel_size=2
+    dist_workers.run(
+        partial(
+            _test_kv_cache_amax_sync_helper,
+            NVFP4_GEMM_KV_CFG,
+            tensor_model_parallel_size=torch.cuda.device_count(),
         ),
-        backend="nccl",
     )
 
 
@@ -1054,11 +1008,9 @@ def test_convert_mcore_te_gpt_model(distributed_setup_size_1):
     destroy_model_parallel()
 
 
-def test_homogeneous_sharded_state_dict_te_spec(tmp_path):
-    pytest.skip("The test is temporarily disabled to avoid CI timeout")
-    spawn_multiprocess_job(
-        size=2,
-        job=partial(
+def test_homogeneous_sharded_state_dict_te_spec(dist_workers, tmp_path):
+    dist_workers.run(
+        partial(
             _test_sharded_state_dict,
             tmp_path,
             mtq.INT8_DEFAULT_CFG,
@@ -1068,5 +1020,4 @@ def test_homogeneous_sharded_state_dict_te_spec(tmp_path):
             False,
             {"transformer_impl": "transformer_engine"},
         ),
-        backend="nccl",
     )

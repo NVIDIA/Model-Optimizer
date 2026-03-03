@@ -64,10 +64,10 @@ jobs:
       matrix:
         include:
           - example: gpu
-            timeout: 60
+            timeout: 45
             container_image: pytorch:26.01-py3
           - example: gpu-megatron
-            timeout: 90
+            timeout: 45
             container_image: pytorch:26.01-py3
           - example: gpu-trtllm
             timeout: 30

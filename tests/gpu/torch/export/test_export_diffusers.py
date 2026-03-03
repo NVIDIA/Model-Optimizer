@@ -18,8 +18,6 @@ import json
 import pytest
 from _test_utils.torch.diffusers_models import get_tiny_dit, get_tiny_flux, get_tiny_unet
 
-pytest.importorskip("diffusers")
-
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.diffusers_utils import generate_diffusion_dummy_inputs
 from modelopt.torch.export.unified_export_hf import export_hf_checkpoint
