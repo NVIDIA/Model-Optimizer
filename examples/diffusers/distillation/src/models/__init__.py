@@ -1,50 +1,59 @@
 """Model backend registry.
 
-Maps model names to their (ModelLoader, strategy_factory, InferencePipeline) tuple.
-Strategy is returned as a factory callable because it may need to be initialized
+Maps model names to their (ModelLoader, adapter_factory, InferencePipeline) tuple.
+Adapter is returned as a factory callable because it may need to be initialized
 with model-specific components after the model is loaded.
 
-Usage:
-    loader, create_strategy, pipeline_cls = get_model_backend("wan")
+Usage::
+
+    @register_backend("wan")
+    def _wan_backend(variant):
+        ...
+
+    loader, create_adapter, pipeline_cls = get_model_backend("wan", variant="ti2v-5B")
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
 
-from ..interfaces import InferencePipeline, ModelLoader, TrainingStrategy
+from ..interfaces import InferencePipeline, ModelLoader, TrainingForwardAdapter
 
-BackendTuple = tuple[ModelLoader, Callable[..., TrainingStrategy], type[InferencePipeline] | None]
+BackendTuple = tuple[ModelLoader, Callable[..., TrainingForwardAdapter], Callable[..., InferencePipeline] | None]
 
-_REGISTRY: dict[str, Callable[[], BackendTuple]] = {}
-
-
-def register_backend(name: str, factory: Callable[[], BackendTuple]) -> None:
-    _REGISTRY[name] = factory
+_REGISTRY: dict[str, Callable[[str | None], BackendTuple]] = {}
 
 
-def get_model_backend(name: str) -> BackendTuple:
+def register_backend(name: str):
+    """Decorator that registers a backend factory under *name*."""
+    def decorator(factory: Callable[[str | None], BackendTuple]):
+        if name in _REGISTRY:
+            raise ValueError(f"Backend '{name}' is already registered.")
+        _REGISTRY[name] = factory
+        return factory
+    return decorator
+
+
+def get_model_backend(name: str, variant: str | None = None) -> BackendTuple:
     if name not in _REGISTRY:
         available = ", ".join(_REGISTRY.keys()) or "(none)"
         raise ValueError(f"Unknown model backend '{name}'. Available: {available}")
-    return _REGISTRY[name]()
+    return _REGISTRY[name](variant)
 
 
-def _register_builtin_backends() -> None:
-    def _wan_backend() -> BackendTuple:
-        from .wan import WanInferencePipeline, WanModelLoader, create_wan_strategy
+@register_backend("wan")
+def _wan_backend(variant: str | None) -> BackendTuple:
+    from .wan import WanInferencePipeline, WanModelLoader, create_wan_adapter
 
-        return WanModelLoader(), create_wan_strategy, WanInferencePipeline
-
-    register_backend("wan", _wan_backend)
-
-    # LTX-2 backend (requires ltx-core)
-    def _ltx2_backend() -> BackendTuple:
-        from .ltx2 import LTX2InferencePipeline, LTX2ModelLoader, create_ltx2_strategy
-
-        return LTX2ModelLoader(), create_ltx2_strategy, LTX2InferencePipeline
-
-    register_backend("ltx2", _ltx2_backend)
+    return (
+        WanModelLoader(variant),
+        lambda: create_wan_adapter(variant),
+        lambda: WanInferencePipeline(variant),
+    )
 
 
-_register_builtin_backends()
+@register_backend("ltx2")
+def _ltx2_backend(variant: str | None) -> BackendTuple:
+    from .ltx2 import LTX2InferencePipeline, LTX2ModelLoader, create_ltx2_adapter
+
+    return LTX2ModelLoader(), create_ltx2_adapter, LTX2InferencePipeline

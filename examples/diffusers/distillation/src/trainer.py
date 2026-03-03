@@ -2,7 +2,7 @@
 
 Supports quantization-aware and sparsity-aware distillation using ModelOpt,
 with Accelerate + FSDP for distributed training. Model-specific logic is
-delegated to pluggable interfaces (ModelLoader, TrainingStrategy, InferencePipeline).
+delegated to pluggable interfaces (ModelLoader, TrainingForwardAdapter, InferencePipeline).
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from .interfaces import (
     CachedEmbeddings,
     InferencePipeline,
     ModelLoader,
-    TrainingStrategy,
+    TrainingForwardAdapter,
     free_gpu_memory,
 )
 
@@ -56,12 +56,12 @@ class DistillationTrainer:
         self,
         config: TrainerConfig,
         model_loader: ModelLoader,
-        strategy: TrainingStrategy,
+        training_adapter: TrainingForwardAdapter,
         inference_pipeline: InferencePipeline | None = None,
     ) -> None:
         self._config = config
         self._loader = model_loader
-        self._strategy = strategy
+        self._adapter = training_adapter
         self._inference_pipeline = inference_pipeline
 
         self._global_step = 0
@@ -413,8 +413,8 @@ class DistillationTrainer:
         distributed = self._accelerator.distributed_type != DistributedType.NO
 
         if cfg.distillation.use_mock_data:
-            mock_shape = getattr(self._strategy, "MOCK_LATENT_SHAPE", (48, 4, 32, 32))
-            mock_text_dim = getattr(self._strategy, "MOCK_TEXT_EMBED_DIM", 4096)
+            mock_shape = getattr(self._adapter, "MOCK_LATENT_SHAPE", (48, 4, 32, 32))
+            mock_text_dim = getattr(self._adapter, "MOCK_TEXT_EMBED_DIM", 4096)
             mock_kwargs = {
                 "latent_shape": mock_shape,
                 "text_embed_dim": mock_text_dim,
@@ -505,15 +505,15 @@ class DistillationTrainer:
         noise = torch.randn_like(latents)
         timesteps = self._sample_timesteps(B, device).to(dtype=wdtype)
 
-        # Strategy: prepare model-specific inputs
-        inputs = self._strategy.prepare_inputs(batch, noise, timesteps)
+        # Adapter: prepare model-specific inputs
+        inputs = self._adapter.prepare_inputs(batch, noise, timesteps)
 
         # Student forward
-        student_pred = self._strategy.forward_model(self._student, inputs)
+        student_pred = self._adapter.forward_model(self._student, inputs)
 
         # Task loss
         if alpha > 0:
-            task_loss = self._strategy.compute_task_loss(
+            task_loss = self._adapter.compute_task_loss(
                 student_pred, inputs.targets, inputs.loss_mask
             )
         else:
@@ -522,7 +522,7 @@ class DistillationTrainer:
         # Distillation loss
         if alpha < 1.0:
             with torch.no_grad():
-                teacher_pred = self._strategy.forward_model(self._teacher, inputs)
+                teacher_pred = self._adapter.forward_model(self._teacher, inputs)
             distill_loss = self._compute_distillation_loss(
                 student_pred, teacher_pred, inputs.loss_mask
             )
@@ -596,16 +596,16 @@ class DistillationTrainer:
             noise = torch.randn_like(latents)
             timesteps = self._sample_timesteps(B, device)
 
-            inputs = self._strategy.prepare_inputs(batch, noise, timesteps)
-            student_pred = self._strategy.forward_model(self._student, inputs)
+            inputs = self._adapter.prepare_inputs(batch, noise, timesteps)
+            student_pred = self._adapter.forward_model(self._student, inputs)
 
             if alpha > 0:
-                tl = self._strategy.compute_task_loss(student_pred, inputs.targets, inputs.loss_mask)
+                tl = self._adapter.compute_task_loss(student_pred, inputs.targets, inputs.loss_mask)
             else:
                 tl = torch.tensor(0.0, device=device)
 
             if alpha < 1.0:
-                teacher_pred = self._strategy.forward_model(self._teacher, inputs)
+                teacher_pred = self._adapter.forward_model(self._teacher, inputs)
                 dl = self._compute_distillation_loss(student_pred, teacher_pred, inputs.loss_mask)
             else:
                 dl = torch.tensor(0.0, device=device)

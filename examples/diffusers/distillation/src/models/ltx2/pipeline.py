@@ -21,6 +21,25 @@ import torch.nn as nn
 from torch import Tensor
 
 from ...interfaces import CachedEmbeddings, free_gpu_memory
+from .._deps import LTX_CORE_AVAILABLE, LTX_TRAINER_AVAILABLE
+
+if LTX_TRAINER_AVAILABLE:
+    from ltx_trainer.model_loader import (
+        load_text_encoder,
+        load_video_vae_decoder,
+        load_video_vae_encoder,
+    )
+
+if LTX_CORE_AVAILABLE:
+    from ltx_core.components.diffusion_steps import EulerDiffusionStep
+    from ltx_core.components.guiders import CFGGuider
+    from ltx_core.components.noisers import GaussianNoiser
+    from ltx_core.components.patchifiers import VideoLatentPatchifier
+    from ltx_core.components.schedulers import LTX2Scheduler
+    from ltx_core.model.transformer.modality import Modality
+    from ltx_core.model.transformer.model import X0Model
+    from ltx_core.tools import VideoLatentTools
+    from ltx_core.types import SpatioTemporalScaleFactors, VideoLatentShape, VideoPixelShape
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +60,8 @@ class LTX2InferencePipeline:
     def load_components(
         self, model_config, device: str, dtype: torch.dtype
     ) -> None:
-        from ltx_trainer.model_loader import (
-            load_text_encoder,
-            load_video_vae_decoder,
-            load_video_vae_encoder,
-        )
+        if not LTX_TRAINER_AVAILABLE:
+            raise ImportError("The 'ltx_trainer' package is required for LTX-2 inference components.")
 
         checkpoint_path = model_config.model_path
         text_encoder_path = model_config.text_encoder_path
@@ -151,15 +167,8 @@ class LTX2InferencePipeline:
         config: dict,
         device: str,
     ) -> list[Tensor]:
-        from ltx_core.components.diffusion_steps import EulerDiffusionStep
-        from ltx_core.components.guiders import CFGGuider
-        from ltx_core.components.noisers import GaussianNoiser
-        from ltx_core.components.patchifiers import VideoLatentPatchifier
-        from ltx_core.components.schedulers import LTX2Scheduler
-        from ltx_core.model.transformer.modality import Modality
-        from ltx_core.model.transformer.model import X0Model
-        from ltx_core.tools import VideoLatentTools
-        from ltx_core.types import SpatioTemporalScaleFactors, VideoLatentShape, VideoPixelShape
+        if not LTX_CORE_AVAILABLE:
+            raise ImportError("The 'ltx_core' package is required for LTX-2 inference.")
 
         height = config.get("height", 544)
         width = config.get("width", 960)

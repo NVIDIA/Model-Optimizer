@@ -2,7 +2,7 @@
 
 Three protocols define the contract between the unified trainer and model backends:
 - ModelLoader: load the transformer architecture from checkpoint
-- TrainingStrategy: noise application, model forward, task loss (stateful)
+- TrainingForwardAdapter: noise application, model forward, task loss (stateful)
 - InferencePipeline: validation video generation + data preprocessing (optional)
 """
 
@@ -20,7 +20,7 @@ from torch import Tensor
 
 @dataclass
 class StrategyOutputs:
-    """Output from TrainingStrategy.prepare_inputs()."""
+    """Output from TrainingForwardAdapter.prepare_inputs()."""
 
     noisy_input: Any
     targets: Tensor
@@ -56,10 +56,10 @@ class ModelLoader(Protocol):
 
 
 @runtime_checkable
-class TrainingStrategy(Protocol):
-    """Model-specific training logic.
+class TrainingForwardAdapter(Protocol):
+    """Model-specific training forward logic.
 
-    Strategies are *stateful* -- they may hold references to model-specific
+    Adapters are *stateful* -- they may hold references to model-specific
     components (patchifiers, embedding connectors, etc.) that are initialized
     by the model backend's factory function.
     """

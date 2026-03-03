@@ -1,4 +1,4 @@
-"""LTX-2 training strategy.
+"""LTX-2 training forward adapter.
 
 Handles patchification, Modality construction, position generation,
 first-frame conditioning, and loss computation for the LTX-2 model.
@@ -23,8 +23,8 @@ from ...interfaces import StrategyOutputs
 _LTX2_LATENT_CHANNELS = 128
 
 
-class LTX2Strategy:
-    """Flow matching training strategy for LTX-2.
+class LTX2TrainingForwardAdapter:
+    """Flow matching training forward adapter for LTX-2.
 
     Stateful: holds the patchifier and scale factor references needed for
     position generation. These are lightweight ltx-core objects.
@@ -184,12 +184,12 @@ class LTX2Strategy:
         return mask
 
 
-def create_ltx2_strategy(**kwargs) -> LTX2Strategy:
-    """Factory for LTX2Strategy.
+def create_ltx2_adapter(**kwargs) -> LTX2TrainingForwardAdapter:
+    """Factory for LTX2TrainingForwardAdapter.
 
     Accepts fps and first_frame_conditioning_p as keyword args.
     """
-    return LTX2Strategy(
+    return LTX2TrainingForwardAdapter(
         fps=kwargs.get("fps", 25.0),
         first_frame_conditioning_p=kwargs.get("first_frame_conditioning_p", 0.0),
     )

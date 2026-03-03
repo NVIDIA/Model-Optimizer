@@ -1,5 +1,11 @@
-from .loader import WanModelLoader
+from .loader import WanModelLoader, get_variant_config
 from .pipeline import WanInferencePipeline
-from .strategy import WanStrategy, create_wan_strategy
+from .adapter import WanTrainingForwardAdapter, create_wan_adapter
 
-__all__ = ["WanModelLoader", "WanStrategy", "WanInferencePipeline", "create_wan_strategy"]
+__all__ = [
+    "WanInferencePipeline",
+    "WanModelLoader",
+    "WanTrainingForwardAdapter",
+    "create_wan_adapter",
+    "get_variant_config",
+]

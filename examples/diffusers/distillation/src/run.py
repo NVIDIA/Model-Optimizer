@@ -69,17 +69,18 @@ def main():
 
     # Resolve model backend
     model_name = trainer_config.model.model_name
-    logger.info(f"Using model backend: {model_name}")
-    loader, create_strategy, pipeline_cls = get_model_backend(model_name)
+    model_variant = trainer_config.model.model_variant
+    logger.info(f"Using model backend: {model_name}" + (f" (variant={model_variant})" if model_variant else ""))
+    loader, create_adapter, pipeline_cls = get_model_backend(model_name, variant=model_variant)
 
-    strategy = create_strategy()
+    adapter = create_adapter()
     pipeline = pipeline_cls() if pipeline_cls is not None else None
 
     # Create trainer and run
     trainer = DistillationTrainer(
         config=trainer_config,
         model_loader=loader,
-        strategy=strategy,
+        training_adapter=adapter,
         inference_pipeline=pipeline,
     )
 

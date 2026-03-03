@@ -6,6 +6,7 @@
 
 model:
   model_name: "wan"
+  model_variant: "ti2v-5B"             # ti2v-5B | t2v-A14B | i2v-A14B
   model_path: "/path/to/Wan2.2/checkpoint"
   dtype: "bfloat16"
 

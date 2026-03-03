@@ -6,6 +6,7 @@ the unified trainer's cached-embeddings protocol.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 
@@ -14,6 +15,11 @@ import torch.nn as nn
 from torch import Tensor
 
 from ...interfaces import CachedEmbeddings, free_gpu_memory
+from .._deps import WAN_AVAILABLE
+
+if WAN_AVAILABLE:
+    from wan.modules.t5 import T5EncoderModel
+    from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -24,38 +30,43 @@ class WanInferencePipeline:
     Manages T5 text encoder and VAE lifecycles:
     - T5 is loaded, used for embedding, then permanently deleted.
     - VAE stays on CPU during training, briefly moves to GPU for decode/encode.
+
+    Adapts to different Wan variants (ti2v-5B, t2v-A14B, etc.) via the
+    variant metadata from the loader module.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, variant: str | None = None) -> None:
+        from .loader import get_variant_config
+
         self._text_encoder = None
         self._vae = None
+        self._var = get_variant_config(variant)
         self._config = None
 
     def load_components(
         self, model_config, device: str, dtype: torch.dtype
     ) -> None:
-        from wan.configs.wan_ti2v_5B import ti2v_5B
-        from wan.modules.t5 import T5EncoderModel
-        from wan.modules.vae2_2 import Wan2_2_VAE
+        if not WAN_AVAILABLE:
+            raise ImportError("The 'wan' package is required for the Wan model backend.")
 
-        # Accept either a ModelConfig object or a plain path string
         path = str(getattr(model_config, "model_path", model_config))
-        self._config = ti2v_5B
+        self._config = self._var["config"]()
 
         t5_path = os.path.join(path, self._config.t5_checkpoint)
-        t5_tokenizer = self._config.t5_tokenizer
         self._text_encoder = T5EncoderModel(
             text_len=self._config.text_len,
             dtype=dtype,
             device=torch.device("cpu"),
             checkpoint_path=t5_path,
-            tokenizer_path=t5_tokenizer,
+            tokenizer_path=self._config.t5_tokenizer,
         )
 
+        vae_mod = importlib.import_module(self._var["vae_module"])
+        vae_cls = getattr(vae_mod, self._var["vae_class"])
         vae_path = os.path.join(path, self._config.vae_checkpoint)
-        self._vae = Wan2_2_VAE(vae_pth=vae_path, device=device)
+        self._vae = vae_cls(vae_pth=vae_path, device=device)
 
-        logger.info("Wan inference components loaded (T5 + VAE)")
+        logger.info(f"Wan inference components loaded (T5 + {self._var['vae_class']})")
 
     def encode_prompts(
         self,
@@ -110,8 +121,6 @@ class WanInferencePipeline:
         config: dict,
         device: str,
     ) -> list[Tensor]:
-        from wan.utils.fm_solvers_unipc import FlowUniPCMultistepScheduler
-
         assert self._vae is not None
         assert self._config is not None
 
@@ -132,16 +141,18 @@ class WanInferencePipeline:
         patch_size = self._config.patch_size
         seq_len = n_f * (n_h // patch_size[1]) * (n_w // patch_size[2])
 
-        scheduler = FlowUniPCMultistepScheduler(
-            num_train_timesteps=1000, shift=1, use_dynamic_shifting=False
-        )
-        scheduler.set_timesteps(num_steps, device=device, shift=shift)
-        timesteps = scheduler.timesteps
-
         videos = []
         generator = torch.Generator(device=device).manual_seed(seed)
 
         for emb in cached_embeds:
+            # Scheduler must be re-created per sample because its internal
+            # step_index is not reset between runs.
+            scheduler = FlowUniPCMultistepScheduler(
+                num_train_timesteps=1000, shift=1, use_dynamic_shifting=False
+            )
+            scheduler.set_timesteps(num_steps, device=device, shift=shift)
+            timesteps = scheduler.timesteps
+
             context = [emb.positive["context"].to(device)]
             context_null = [emb.negative["context"].to(device)]
 
@@ -153,12 +164,17 @@ class WanInferencePipeline:
             with torch.amp.autocast("cuda", dtype=torch.bfloat16), torch.no_grad():
                 for t in timesteps:
                     timestep = torch.stack([t])
-                    # Per-token timestep expansion (simplified from official code)
                     timestep_expanded = timestep.expand(1, seq_len)
 
-                    noise_pred_cond = model(latents, t=timestep_expanded, context=context, seq_len=seq_len)[0]
-                    noise_pred_uncond = model(latents, t=timestep_expanded, context=context_null, seq_len=seq_len)[0]
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+                    noise_pred_cond = model(
+                        latents, t=timestep_expanded, context=context, seq_len=seq_len,
+                    )[0]
+                    noise_pred_uncond = model(
+                        latents, t=timestep_expanded, context=context_null, seq_len=seq_len,
+                    )[0]
+                    noise_pred = noise_pred_uncond + guidance_scale * (
+                        noise_pred_cond - noise_pred_uncond
+                    )
 
                     temp_x0 = scheduler.step(
                         noise_pred.unsqueeze(0), t, latent.unsqueeze(0),
@@ -167,13 +183,11 @@ class WanInferencePipeline:
                     latent = temp_x0.squeeze(0)
                     latents = [latent]
 
-            # VAE decode
             self._vae.model.to(device)
             with torch.no_grad():
                 decoded = self._vae.decode([latent])
             self._vae.model.cpu()
 
-            # decoded[0] is [C, F, H, W] in [-1, 1] -> [0, 1]
             video = ((decoded[0] + 1.0) / 2.0).clamp(0, 1).float().cpu()
             videos.append(video)
 

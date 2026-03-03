@@ -6,7 +6,8 @@ from pydantic import BaseModel, Field
 
 
 class ModelConfig(BaseModel):
-    model_name: str = Field(description="Model backend name (e.g. 'wan', 'ltx2'). Selects the loader/strategy/pipeline from models/ registry.")
+    model_name: str = Field(description="Model backend name (e.g. 'wan', 'ltx2'). Selects the loader/adapter/pipeline from models/ registry.")
+    model_variant: str | None = Field(default=None, description="Variant within a model family, e.g. 'ti2v-5B', 't2v-A14B'. Backend-specific.")
     model_path: str = Field(description="Path to model checkpoint directory or file.")
     text_encoder_path: str | None = Field(default=None, description="Path to text encoder model (e.g. Gemma directory for LTX-2). Required by some model backends.")
     dtype: str = Field(default="bfloat16", description="Model dtype: bfloat16, float16, or float32.")
