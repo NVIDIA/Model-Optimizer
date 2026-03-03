@@ -93,14 +93,3 @@ def _create_simple_resnet18_onnx_model():  #  -> onnx.ModelProto:
     input_tensor = torch.zeros(1, 3, 1024, 1024)
 
     return model, input_tensor
-    # buf = io.BytesIO()
-    # torch.onnx.export(
-    #     model,
-    #     dummy_input,
-    #     buf,
-    #     input_names=["input"],
-    #     output_names=["output"],
-    #     opset_version=17,
-    # )
-    # buf.seek(0)
-    # return onnx.load_from_string(buf.read())
