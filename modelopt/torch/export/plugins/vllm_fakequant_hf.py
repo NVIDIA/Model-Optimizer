@@ -66,6 +66,7 @@ def export_hf_vllm_fq_checkpoint(
             ]:
                 if hasattr(module, attr):
                     delattr(module, attr)
+            module.export()
 
     # Save model
     model.save_pretrained(export_dir, state_dict=model.state_dict(), save_modelopt_state=False)

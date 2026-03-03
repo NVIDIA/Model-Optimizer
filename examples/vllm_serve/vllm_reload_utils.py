@@ -15,11 +15,18 @@
 
 import re
 from collections import defaultdict
+from collections.abc import Callable
 from typing import Any
 
 import torch
 from vllm.distributed.parallel_state import get_tp_group
+from modelopt.torch.opt.conversion import ModeloptStateManager, _check_init_modellike, ModelLikeModule
 
+from modelopt.torch.quantization.conversion import (
+    convert_to_quantized_model,
+    restore_quantizer_state,
+)
+from modelopt.torch.quantization.utils import is_quantized
 
 def _values_equal(v1: Any, v2: Any) -> bool:
     """Compare values, handling dicts with tensors."""
@@ -60,16 +67,14 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
         return ("group", group_key, value)
 
     # Check if this is an expert gate/up projection
-    if "mixer" not in key:
-        expert_gate_up_match = re.search(
-            r"(.*\.experts)\.\d+\.(gate|up)_proj\.([^.]+_quantizer)(\..+)?$", key
-        )
-        if expert_gate_up_match:
-            suffix = expert_gate_up_match.group(4) or ""
-            group_key = (
-                expert_gate_up_match.group(1) + ".w13_" + expert_gate_up_match.group(3) + suffix
-            )
-            return ("group", group_key, value)
+    # if "mixer" not in key:
+    expert_gate_up_match = re.search(
+        r"(.*\.experts)\.\d+\.(gate|up)_proj\.([^.]+_quantizer)(\..+)?$", key
+    )
+    if expert_gate_up_match:
+        suffix = expert_gate_up_match.group(4) or ""
+        group_key = expert_gate_up_match.group(1) + ".w13_" + expert_gate_up_match.group(3) + suffix
+        return ("group", group_key, value)
 
     # Check if this is a non-expert gate/up projection that needs merging
     if "mixer" not in key and "experts" not in key:
@@ -80,17 +85,17 @@ def _convert_key_for_vllm(key: str, value: Any) -> tuple[str, str | None, Any]:
             return ("group", group_key, value)
 
     # Check if this is an expert down_proj
-    if "mixer" not in key:
-        expert_down_match = re.search(
-            r"(.*\.experts)\.\d+\.down_proj\.([^.]+_quantizer)(\..+)?$", key
-        )
-        if expert_down_match:
-            suffix = expert_down_match.group(3) or ""
-            group_key = expert_down_match.group(1) + ".w2_" + expert_down_match.group(2) + suffix
-            return ("group", group_key, value)
+    # if "mixer" not in key:
+    expert_down_match = re.search(r"(.*\.experts)\.\d+\.down_proj\.([^.]+_quantizer)(\..+)?$", key)
+    if expert_down_match:
+        suffix = expert_down_match.group(3) or ""
+        group_key = expert_down_match.group(1) + ".w2_" + expert_down_match.group(2) + suffix
+        return ("group", group_key, value)
 
     # Transform bmm_quantizer keys: self_attn.q/k/v_bmm_quantizer -> self_attn.attn.q/k/v_bmm_quantizer
-    bmm_match = re.search(r"(.*\.self_attn)\.([qkv]_bmm_quantizer.*)$", key)
+    bmm_match = re.search(r"(.*\.self_attn)\.([qkv]_bmm_quantizer.*)$", key) or re.search(
+        r"(.*\.mixer)\.([qkv]_bmm_quantizer.*)$", key
+    )
     if bmm_match:
         new_key = bmm_match.group(1) + ".attn." + bmm_match.group(2)
         return ("copy", new_key, value)
@@ -173,7 +178,9 @@ def _merge_values_require_identical(merged_key: str, key_value_pairs: list[tuple
 
 
 def convert_dict_to_vllm(
-    state_dict: dict[str, Any], merge_mode: str = "max_or_concat"
+    state_dict: dict[str, Any],
+    merge_mode: str = "max_or_concat",
+    map_fun: Callable[[str, Any], tuple[str, Any]] = lambda x: x,
 ) -> dict[str, Any]:
     """
     Common implementation for converting quantizer state from HF to vLLM format.
@@ -201,10 +208,12 @@ def convert_dict_to_vllm(
             _, value = key_value_pairs[0]
             vllm_state_dict[merged_key] = value
 
-    return vllm_state_dict
+    return map_fun(vllm_state_dict)
 
 
-def convert_modelopt_state_to_vllm(modelopt_state: dict[str, Any]) -> dict[str, Any]:
+def convert_modelopt_state_to_vllm(
+    modelopt_state: dict[str, Any], map_fun: Callable[[str, Any], tuple[str, Any]] = lambda x: x
+) -> dict[str, Any]:
     """
     Convert modelopt state from HuggingFace format to vLLM compatible format.
 
@@ -222,7 +231,7 @@ def convert_modelopt_state_to_vllm(modelopt_state: dict[str, Any]) -> dict[str, 
         current_mode_quant_state = current_mode_metadata.pop("quantizer_state", {})
         if current_mode_quant_state:
             current_mode_metadata["quantizer_state"] = convert_dict_to_vllm(
-                current_mode_quant_state, merge_mode="require_identical"
+                current_mode_quant_state, merge_mode="require_identical", map_fun=map_fun
             )
         else:
             current_mode_metadata.pop("quantizer_state", None)
@@ -230,6 +239,91 @@ def convert_modelopt_state_to_vllm(modelopt_state: dict[str, Any]) -> dict[str, 
         modelopt_state_dict[idx] = (current_mode[0], current_mode[1])
     modelopt_state["modelopt_state_dict"] = modelopt_state_dict
     return modelopt_state
+
+
+def filter_modelopt_state_quantizer_state_for_model(
+    modelopt_state: dict[str, Any], model: torch.nn.Module
+) -> None:
+    """
+    Align quantizer_state in modelopt_state metadata with the model.
+
+    - Removes keys not in the model (handles TP sharding - each rank has a subset).
+    - Removes keys only when the quantizer is disabled (in the model).
+    - Adds keys for quantizers in the model but not in metadata (e.g. disabled/excluded).
+    Modifies modelopt_state in place. Call after convert_to_quantized_model so the model has
+    quantizers.
+
+    Args:
+        modelopt_state: Modelopt state dict (modified in place)
+        model: Model with quantizers (must already be converted)
+    """
+    from modelopt.torch.quantization.conversion import quantizer_state
+    from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+    from modelopt.torch.utils import get_unwrapped_name
+
+    model_qstate = quantizer_state(model)
+    model_keys = set(model_qstate.keys())
+    # Build name -> is_enabled for quantizers in the model
+    disabled_keys = set()
+    for name, module in model.named_modules():
+        if isinstance(module, (TensorQuantizer, SequentialQuantizer)):
+            unwrapped_name = get_unwrapped_name(name, model)
+            if not getattr(module, "is_enabled", True):
+                disabled_keys.add(unwrapped_name)
+
+    for mode_entry in modelopt_state.get("modelopt_state_dict", []):
+        metadata = mode_entry[1].get("metadata", {})
+        if "quantizer_state" in metadata:
+            saved = metadata["quantizer_state"]
+            # Keep keys that exist in the model, but remove if quantizer is disabled
+            filtered = {
+                k: v
+                for k, v in saved.items()
+                if k in model_keys and k not in disabled_keys
+            }
+            # Add state for quantizers in model but not in metadata (e.g. disabled/excluded)
+            for k in model_keys - filtered.keys():
+                filtered[k] = model_qstate[k]
+            metadata["quantizer_state"] = filtered
+
+
+def restore_from_modelopt_state_vllm(
+    model: torch.nn.Module, modelopt_state: dict[str, Any]
+) -> torch.nn.Module:
+    """
+    vLLM-specific restore that filters quantizer_state to match the model before restore.
+
+    Handles TP sharding (each rank has a subset of quantizers) and excluded disabled quantizers
+    by running convert first, filtering metadata to model keys, then restoring. Uses the same
+    restore logic as restore_from_modelopt_state but with filtering for quantize modes.
+    """
+    model = model if isinstance(model, torch.nn.Module) else ModelLikeModule(model)
+    manager = ModeloptStateManager(model=model, init_state=True)
+    manager.load_state_dict(
+        modelopt_state["modelopt_state_dict"], modelopt_state["modelopt_version"]
+    )
+
+    for i, (m, config, metadata) in enumerate(manager.modes_with_states()):
+        if i == 0:
+            model = _check_init_modellike(model, m)
+        # For quantize modes: convert first (if not already), filter metadata to model keys, then restore state.
+        # This handles TP (model has subset of quantizers) and excluded disabled quantizers.
+        if "quantizer_state" in metadata:
+            if not is_quantized(model):
+                convert_to_quantized_model(model, config)
+            filter_modelopt_state_quantizer_state_for_model(
+                {"modelopt_state_dict": manager._state}, model
+            )
+            # Re-fetch metadata after filtering (manager._state was modified in place)
+            metadata = manager._state[i][1]["metadata"]
+            model = restore_quantizer_state(model, config, metadata)
+        else:
+            model = m.restore(model, config, metadata)
+
+    if not manager.has_state and isinstance(model, ModelLikeModule):
+        model = model.init_modellike()
+    assert not isinstance(model, ModelLikeModule), "Model must be a regular Module now!"
+    return model
 
 
 def process_state_dict_for_tp(saved_qstate_dict, current_state_dict):
