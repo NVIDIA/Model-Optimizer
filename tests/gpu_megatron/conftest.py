@@ -12,8 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-from contextlib import suppress
+import contextlib
 
 import pytest
 import torch
@@ -22,17 +21,24 @@ from megatron.core.parallel_state import destroy_model_parallel
 
 import modelopt.torch.utils.distributed as dist
 
+apex_destroy = None
+with contextlib.suppress(ImportError):
+    from apex.transformer.parallel_state import destroy_model_parallel as apex_destroy
+
 
 def megatron_worker_teardown(rank, world_size):
     """Clean up model-parallel state between tests in persistent workers."""
     if dist.is_initialized():
         dist.barrier()
-    with suppress(Exception):
+    try:
         destroy_model_parallel()
-    with suppress(Exception):
-        from apex.transformer.parallel_state import destroy_model_parallel as apex_destroy
-
-        apex_destroy()
+    except Exception as e:
+        print(f"Error destroying model parallel: {e}")
+    if apex_destroy is not None:
+        try:
+            apex_destroy()
+        except Exception as e:
+            print(f"Error destroying model parallel with Apex: {e}")
     torch.cuda.empty_cache()
 
 

@@ -16,7 +16,6 @@
 import os
 import socket
 import traceback
-from contextlib import suppress
 
 import torch
 import torch.distributed as dist
@@ -72,8 +71,10 @@ def default_worker_teardown(rank, world_size):
         from accelerate.state import AcceleratorState
 
         AcceleratorState._reset_state()
-    except Exception:
+    except ImportError:
         pass
+    except Exception as e:
+        print(f"Error resetting AcceleratorState: {e}")
     torch.cuda.empty_cache()
 
 
@@ -146,15 +147,23 @@ class DistributedWorkerPool:
             if cmd is None:
                 break
             fn, args, kwargs = cmd
+            status = "ok"
+            tb = None
             try:
                 fn(rank, world_size, *args, **kwargs)
-                result_queue.put(("ok", rank, None))
             except Exception:
-                result_queue.put(("error", rank, traceback.format_exc()))
+                status = "error"
+                tb = traceback.format_exc()
             finally:
                 if teardown_fn is not None:
-                    with suppress(Exception):
+                    try:
                         teardown_fn(rank, world_size)
+                    except Exception as e:
+                        print(f"Error tearing down worker: {e}")
+                        status = "error"
+                        teardown_tb = traceback.format_exc()
+                        tb = (tb + "\n" if tb else "") + f"[teardown] {teardown_tb}"
+            result_queue.put((status, rank, tb))
 
         dist.destroy_process_group()
 
@@ -184,6 +193,8 @@ class DistributedWorkerPool:
             p.join(timeout=60)
             if p.is_alive():
                 p.terminate()
+                # Ensure the terminated process is fully reaped to avoid zombies.
+                p.join(timeout=10)
 
 
 def synchronize_state_dict(model: nn.Module):
