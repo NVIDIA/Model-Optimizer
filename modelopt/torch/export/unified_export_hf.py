@@ -1084,6 +1084,8 @@ def _unpatch_revert_weight_conversion(patches: list[tuple[Any, Any]]) -> None:
     """Restore the original revert_weight_conversion functions."""
     for mod, original in patches:
         mod.revert_weight_conversion = original
+
+
 def export_speculative_decoding(
     model: torch.nn.Module,
     dtype: torch.dtype | None = None,
