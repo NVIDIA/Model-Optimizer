@@ -1411,9 +1411,8 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
 class ScaleAfterDequantConfig(QuantizeAlgorithmConfig):
     """Config for scale-after-dequant algorithm.
 
-    Runs MSE calibration, then converts static block quantizers (FP4 or INT)
-    to learnable-amax mode for fine-tuning. For FP4 quantizers, FP8 scale
-    sweep is recommended. For INT quantizers, plain MSE calibration suffices.
+    Runs calibration (mse, local_hessian, or max), then converts static block
+    quantizers to learnable-scale mode for fine-tuning.
     """
 
     method: Literal["scale_after_dequant"] = ModeloptField("scale_after_dequant")
@@ -1422,7 +1421,8 @@ class ScaleAfterDequantConfig(QuantizeAlgorithmConfig):
         default=None,
         title="Scale calibration algorithm to run first.",
         description=(
-            "Must have method='mse'. Optional keys include 'fp8_scale_sweep' for FP4 formats. "
+            "Dict with 'method' key: 'mse', 'local_hessian', or 'max'. "
+            "Optional keys include 'fp8_scale_sweep' for FP4 formats. "
             "Defaults to {'method': 'mse'} if None."
         ),
     )

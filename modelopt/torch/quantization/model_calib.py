@@ -35,7 +35,7 @@ from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
 
 from .calib import MseCalibrator, NVFP4MSECalibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
-from .nn import QuantModule, SequentialQuantizer, StaticBlockScaleQuantizer, TensorQuantizer
+from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, StaticBlockScaleQuantizer, TensorQuantizer
 from .utils import (
     disable_calib,
     enable_fake_quant,
@@ -591,42 +591,29 @@ def local_hessian_calibrate(
 
         initial_amax = weight_quantizer._amax.clone().detach()
 
-        def quant_func(x, amax, quantizer=weight_quantizer):
-            original_amax = quantizer._amax.clone() if hasattr(quantizer, "_amax") else None
-            quantizer._amax = amax
-
-            with (
-                enable_quant(quantizer),
-                disable_calib(quantizer),
-                enable_fake_quant(quantizer),
-            ):
-                if hasattr(quantizer, "_original_shape"):
-                    x = quantizer._reset_to_original_shape(x)
-                xq = quantizer(x)
-                if hasattr(quantizer, "_block_reshape_size"):
-                    xq = xq.reshape(quantizer._block_reshape_size)
-
-            if original_amax is not None:
-                quantizer._amax = original_amax
-            else:
-                delattr(quantizer, "_amax")
-
-            return xq
-
-        is_nvfp4_static = (
+        is_static_block_scale = (
             weight_quantizer.is_static_block_quant
-            and weight_quantizer._num_bits == (2, 1)
             and weight_quantizer._block_sizes is not None
-            and weight_quantizer._block_sizes.get("scale_bits") == (4, 3)
+            and (
+                (
+                    weight_quantizer._num_bits == (2, 1)
+                    and weight_quantizer._block_sizes.get("scale_bits") == (4, 3)
+                )
+                or isinstance(weight_quantizer._num_bits, int)
+            )
         )
 
-        if is_nvfp4_static:
-            global_amax = reduce_amax(initial_amax, axis=None)
-            NVFP4StaticQuantizer.from_tensor_quantizer(weight_quantizer, global_amax=global_amax)
+        if is_static_block_scale:
+            if _is_quantized_block_scale(weight_quantizer):
+                global_amax = reduce_amax(initial_amax, axis=None)
+            else:
+                global_amax = None
+            StaticBlockScaleQuantizer.from_tensor_quantizer(weight_quantizer, global_amax=global_amax)
 
+        quant_func = partial(_mse_quant_func, quantizer=weight_quantizer)
         error_func = helper.get_error_func()
 
-        if fp8_scale_sweep and is_nvfp4_static:
+        if fp8_scale_sweep and is_static_block_scale:
             weight_quantizer._calibrator = NVFP4MSECalibrator(
                 amax=initial_amax,
                 axis=weight_quantizer._calibrator._axis if weight_quantizer._calibrator else None,
@@ -1838,6 +1825,28 @@ def _is_quantized_block_scale(quantizer: StaticBlockScaleQuantizer) -> bool:
     return scale_bits == (4, 3)
 
 
+def _convert_to_static_block_quantizers(model: nn.Module):
+    """Convert eligible TensorQuantizers to StaticBlockScaleQuantizer."""
+    for name, module in model.named_modules():
+        if isinstance(module, TensorQuantizer) and not module._disabled:
+            if not hasattr(module, "_amax") or module._amax is None:
+                continue
+            is_static_block_scale = (
+                module.is_static_block_quant
+                and module._block_sizes is not None
+                and (
+                    (module._num_bits == (2, 1) and module._block_sizes.get("scale_bits") == (4, 3))
+                    or isinstance(module._num_bits, int)
+                )
+            )
+            if is_static_block_scale:
+                if _is_quantized_block_scale(module):
+                    global_amax = reduce_amax(module._amax.clone().detach(), axis=None)
+                else:
+                    global_amax = None
+                StaticBlockScaleQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
+
+
 @torch.no_grad()
 def scale_after_dequant(
     model: nn.Module,
@@ -1851,20 +1860,31 @@ def scale_after_dequant(
         model: Quantized model.
         forward_loop: Calibration data forward loop.
         scale_algorithm: Calibration algorithm config to run first.
-            For FP4 quantizers, defaults to MSE with fp8_scale_sweep=True.
-            For INT quantizers, defaults to MSE calibration.
+            Dict with 'method' key: 'mse', 'local_hessian', or 'max'.
+            Defaults to {'method': 'mse'} if None.
     """
     from .tensor_quant import scaled_e4m3
 
     if scale_algorithm is None:
         scale_algorithm = {"method": "mse"}
 
-    assert scale_algorithm.get("method") == "mse", (
-        "scale_after_dequant requires scale_algorithm with method='mse'"
+    method = scale_algorithm.get("method")
+    supported = ("mse", "local_hessian", "max")
+    assert method in supported, (
+        f"scale_after_dequant: method must be one of {supported}, got '{method}'"
     )
 
-    mse_kwargs = {k: v for k, v in scale_algorithm.items() if k != "method"}
-    mse_calibrate(model, forward_loop=forward_loop, **mse_kwargs)
+    algo_kwargs = {k: v for k, v in scale_algorithm.items() if k != "method"}
+    calib_funcs = {
+        "mse": mse_calibrate,
+        "local_hessian": local_hessian_calibrate,
+        "max": max_calibrate,
+    }
+    calib_funcs[method](model, forward_loop=forward_loop, **algo_kwargs)
+
+    # max_calibrate doesn't convert to StaticBlockScaleQuantizer, so do it here
+    if method == "max":
+        _convert_to_static_block_quantizers(model)
 
     seen_modules = set()
     for name, module in model.named_modules():
