@@ -48,7 +48,6 @@ from transformers.models.llama.modeling_llama import (
 )
 from transformers.trainer_pt_utils import LabelSmoother
 from transformers.utils import ModelOutput
-from transformers.utils.quantization_config import CompressedTensorsConfig
 
 from ..eagle.conversion import EagleDMRegistry
 from ..eagle.eagle_model import EagleModel
@@ -63,6 +62,7 @@ from ..utils import (
     get_ttt_msk_func,
     temporary_set_config_value,
 )
+from .hf_model_patches import apply_model_patch
 
 __all__ = ["HFARValidation", "HFEagleModel", "HFMedusaModel"]
 
@@ -584,11 +584,6 @@ class HFEagleModel(EagleModel):
         if self.eagle_config._attn_implementation is None:
             self.eagle_config._attn_implementation = "sdpa"
 
-        # Patch for Kimi-K2-Thinking, avoid quantizing drafter
-        quant_config = getattr(self.config, "quantization_config", None)
-        if isinstance(quant_config, CompressedTensorsConfig):
-            quant_config.ignore.append("re:.*eagle_module.*")
-
         # Set default aux_hidden_state layers
         if (
             self.eagle_config.use_aux_hidden_state
@@ -627,6 +622,9 @@ class HFEagleModel(EagleModel):
 
         self.num_ttt_steps = 4  # NOTE: (hg) hardcoded for now. Might add to config later.
         self._cached_attn_blk_masks = {}
+
+        # Apply model-specific patch if needed
+        apply_model_patch(self)
 
     def _get_ttt_attention_mask(self, batch_size, seq_length, ttt_step):
         # compile and cached flex attention masks in first call
@@ -750,8 +748,6 @@ class HFEagleModel(EagleModel):
                 tensor_mask, 0, dtype=self._base_llm_config.dtype, device=self.device
             ).masked_fill(~tensor_mask, dtypemin)
 
-            # Note: (hg) repeat mask for kimi-k2 compatibility
-            tensor_mask = tensor_mask.repeat(batch_size, 1, 1, 1)
             return tensor_mask
 
     def _base_model_forward(
