@@ -247,9 +247,6 @@ def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
     mamba_num_heads = 8
     mamba_head_dim = 16
     mamba_num_groups = 2
-    num_moe_experts = None
-    moe_ffn_hidden_size = None
-    moe_shared_expert_intermediate_size = None
     num_moe_experts = 8
     moe_ffn_hidden_size = 16
     moe_shared_expert_intermediate_size = 16
@@ -334,7 +331,7 @@ def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
         )
     ]
     # fmt: off
-    if sorted_layers == [1, 4, 3, 2]:
+    if sorted_layers == [1, 4, 3, 2]:  # PP 1/2
         expected_top_k = [
             [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 6, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 20}, 10482.0, 112.0],  # noqa: E501
             [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 6, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 24}, 10472.0, 118.0],  # noqa: E501
@@ -361,9 +358,10 @@ def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
         assert actual.score == score, (actual.score, score)
 
 
+@pytest.mark.skipif(
+    torch.cuda.device_count() > 2, reason="Assertions not configured for more than 2 GPUs"
+)
 def test_mcore_mamba_hybrid_pruning_nas(dist_workers, tmp_path):
-    if torch.cuda.device_count() > 4:
-        pytest.skip("Skipping test for more than 4 GPUs")
     dist_workers.run(
         partial(_test_mcore_mamba_hybrid_pruning_nas, tmp_path / "modelopt_minitron_scores.pth"),
     )

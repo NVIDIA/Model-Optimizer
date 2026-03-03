@@ -436,14 +436,13 @@ def test_adapter_gradient_flow_freeze_base_model(dist_workers, lora_config, tmp_
 
 def _test_adapter_gradient_flow_freeze_lora_model(lora_config, tmp_path, rank, size):
     hidden_size = 512
-    local_cfg = copy.deepcopy(lora_config)
-    local_cfg["freeze_lora_weights"] = True
-    local_cfg["freeze_base_model"] = False
-
     initialize_for_megatron(tensor_model_parallel_size=size, pipeline_model_parallel_size=1)
     model = _gpt_model_provider(tp_size=size, hidden_size=hidden_size)
     prompt_tokens = torch.randint(0, model.vocab_size, (2, model.max_sequence_length)).cuda()
 
+    local_cfg = copy.deepcopy(lora_config)
+    local_cfg["freeze_lora_weights"] = True
+    local_cfg["freeze_base_model"] = False
     mtpeft.update_model(model, local_cfg)
     model.train()
 
@@ -485,14 +484,13 @@ def test_adapter_gradient_flow_freeze_lora_model(dist_workers, lora_config, tmp_
 
 def _test_adapter_gradient_flow(lora_config, tmp_path, rank, size):
     hidden_size = 512
-    lora_config = copy.deepcopy(lora_config)
-    lora_config["freeze_lora_weights"] = False
-    lora_config["freeze_base_model"] = False
-
     initialize_for_megatron(tensor_model_parallel_size=size, pipeline_model_parallel_size=1)
     model = _gpt_model_provider(tp_size=size, hidden_size=hidden_size)
     prompt_tokens = torch.randint(0, model.vocab_size, (2, model.max_sequence_length)).cuda()
 
+    lora_config = copy.deepcopy(lora_config)
+    lora_config["freeze_lora_weights"] = False
+    lora_config["freeze_base_model"] = False
     mtpeft.update_model(model, lora_config)
     model.train()
 
@@ -529,13 +527,13 @@ def test_adapter_gradient_flow(dist_workers, lora_config, tmp_path):
 
 def _test_adapter_gradient_flow_freeze_lora_with_api(lora_config, tmp_path, rank, size):
     hidden_size = 256
-
     initialize_for_megatron(tensor_model_parallel_size=size, pipeline_model_parallel_size=1)
     model = _gpt_model_provider(tp_size=size, hidden_size=hidden_size)
     prompt_tokens = torch.randint(0, model.vocab_size, (2, model.max_sequence_length)).cuda()
+
+    lora_config = copy.deepcopy(lora_config)
     lora_config["freeze_lora_weights"] = False
     lora_config["freeze_base_model"] = False
-
     mtpeft.update_model(model, lora_config)
     # Freeze the self_attention layers only
     mtpeft.freeze_lora_weights(model, layer_patterns="*self_attention*")
