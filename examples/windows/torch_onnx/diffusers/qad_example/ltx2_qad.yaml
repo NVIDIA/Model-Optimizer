@@ -1,12 +1,12 @@
 # LTX-2 QAD Training Configuration
 model:
-  model_source: "/lustre/fsw/portfolios/adlr/projects/adlr_psx_numerics/users/ynankani/ComfyUI/models/checkpoints/ltx-av-step-1933500-split-new-vae.safetensors"
+  model_path: "/lustre/fsw/portfolios/adlr/projects/adlr_psx_numerics/users/ynankani/ComfyUI/models/checkpoints/ltx-av-step-1933500-split-new-vae.safetensors"
   training_mode: "full"
   load_checkpoint:
   text_encoder_path: "/lustre/fsw/portfolios/adlr/users/dhutchins/models/gemma"
 
-conditioning:
-  mode: "audio_video"
+training_strategy:
+  name: "text_to_video"
   first_frame_conditioning_p: 0.1
 
 optimization:

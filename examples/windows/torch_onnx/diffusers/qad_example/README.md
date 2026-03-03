@@ -64,21 +64,19 @@ pip install torch accelerate safetensors pyyaml
 Run the LTX preprocessing script to extract latents and text embeddings from your videos. Use `preprocess_dataset.py` with the following arguments (matching the LTX training pipeline):
 
 ```bash
-
-    https://github.com/Lightricks/LTX-2/blob/main/packages/ltx-trainer/scripts/process_dataset.py /path/to/videos \
-    --resolution-buckets=384x256x97,256x160x121 \
-    --output-dir=/path/to/preprocessed \
-    --model-source=/path/to/ltx2/checkpoint.safetensors \
-    --batch-size=4 \
-    --encoder-type=gemma \
-    --text-encoder-path=/path/to/gemma \
+python scripts/process_dataset.py /path/to/dataset.json \
+    --resolution-buckets 384x256x97 \
+    --output-dir /path/to/preprocessed \
+    --model-path /path/to/ltx2/checkpoint.safetensors \
+    --text-encoder-path /path/to/gemma \
+    --batch-size 4 \
     --with-audio \
     --decode
 ```
 
-- **Positional**: path to input videos (directory).
-- **Required**: `--resolution-buckets`, `--output-dir`, `--model-source`, `--encoder-type`, `--text-encoder-path`.
-- **Optional**: `--batch-size` (default 4), `--with-audio`, `--decode` (decode and save videos).
+- **Positional**: path to dataset metadata file (CSV/JSON/JSONL with captions and video paths).
+- **Required**: `--resolution-buckets`, `--model-path`, `--text-encoder-path`.
+- **Optional**: `--output-dir` (defaults to `.precomputed` in dataset dir), `--batch-size` (default 1), `--with-audio`, `--decode` (decode and save videos for verification).
 
 Set `data.preprocessed_data_root` in your config (step 2) to the same path as `--output-dir`.
 
@@ -88,7 +86,7 @@ On a **Slurm cluster**, run the same script via `srun` and `torchrun` (set `MAST
 
 Edit `ltx2_qad.yaml` and set:
 
-- `model.model_source` – path to base LTX checkpoint (e.g. `.safetensors`)
+- `model.model_path` – path to base LTX checkpoint (e.g. `.safetensors`)
 - `model.text_encoder_path` – path to Gemma text encoder
 - `data.preprocessed_data_root` – path to preprocessed LTX dataset
 
@@ -125,6 +123,11 @@ Checkpoints are saved under `output_dir` (e.g. `outputs/ltx2_qad/checkpoints/`) 
 
 ### 4. Create inference checkpoint (ComfyUI-compatible)
 
+**ComfyUI** is a node-based interface for running diffusion models (Stable Diffusion, LTX, etc.). You load your exported checkpoint in ComfyUI to generate images or videos from prompts and workflows.
+
+- **ComfyUI**: [github.com/comfyanonymous/ComfyUI](https://github.com/comfyanonymous/ComfyUI)
+- **ComfyUI documentation**: [comfyanonymous.github.io/ComfyUI_examples](https://comfyanonymous.github.io/ComfyUI_examples/) (examples and node docs)
+
 To build a single inference checkpoint compatible with ComfyUI, use the PTQ checkpoint merger:
 
 ```bash
@@ -144,7 +147,7 @@ This produces a single `.safetensors` file you can load in ComfyUI.
 
 ## How it works
 
-1. **Model load** – Base transformer is loaded via `ltx_core.model_loader.load_transformer`.
+1. **Model load** – Base transformer is loaded via `ltx_trainer.model_loader.load_transformer`.
 2. **PTQ calibration** – ModelOpt `mtq.quantize` runs a calibration loop using the LTX dataset and training strategy; NVFP4 config excludes sensitive layers and optionally specific blocks.
 3. **Distillation** – A full-precision teacher (same checkpoint) is loaded and the quantized model is wrapped with ModelOpt `mtd.convert` (KD loss).
 4. **Training** – Standard LTX training loop with an overridden `_training_step` that adds KD loss via ModelOpt’s loss balancer.

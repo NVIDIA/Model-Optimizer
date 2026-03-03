@@ -51,12 +51,12 @@ import torch
 import torch.distributed as dist
 
 # LTX imports
-from ltx_core.model_loader import load_transformer
-from ltxv_trainer.config import LtxvTrainerConfig
-from ltxv_trainer.datasets import PrecomputedDataset
-from ltxv_trainer.timestep_samplers import SAMPLERS
-from ltxv_trainer.trainer import LtxvTrainer
-from ltxv_trainer.training_strategies import get_training_strategy
+from ltx_trainer.model_loader import load_transformer
+from ltx_trainer.config import LtxTrainerConfig
+from ltx_trainer.datasets import PrecomputedDataset
+from ltx_trainer.timestep_samplers import SAMPLERS
+from ltx_trainer.trainer import LtxvTrainer
+from ltx_trainer.training_strategies import get_training_strategy
 from torch.utils.data import DataLoader
 
 # ModelOpt imports
@@ -228,34 +228,18 @@ def move_batch_to_device(batch: dict, device: torch.device) -> dict:
     return result
 
 
-def apply_connector(training_batch, connector, conditioning_mode: str):
-    """Apply Gemma connector to prompt embeddings."""
-    device = training_batch.prompt_embeds.device
-    connector.to(device)
+def apply_connectors(batch, text_encoder):
+    """Apply text encoder connectors to transform pre-computed prompt embeddings."""
+    conditions = batch["conditions"]
+    device = conditions["prompt_embeds"].device
+    text_encoder.to(device)
 
-    prompt_embeds_v, prompt_attention_mask = connector.preprocess_prompt_embeds(
-        training_batch.prompt_embeds,
-        training_batch.prompt_attention_mask,
-        is_audio=False,
+    video_embeds, audio_embeds, attention_mask = text_encoder._run_connectors(
+        conditions["prompt_embeds"], conditions["prompt_attention_mask"]
     )
-
-    if conditioning_mode == "audio_video":
-        prompt_embeds_a, _ = connector.preprocess_prompt_embeds(
-            training_batch.prompt_embeds,
-            training_batch.prompt_attention_mask,
-            is_audio=True,
-        )
-        final_prompt_embeds = torch.cat([prompt_embeds_v, prompt_embeds_a], dim=-1)
-    else:
-        final_prompt_embeds = prompt_embeds_v
-
-    training_batch = training_batch.model_copy(
-        update={
-            "prompt_embeds": final_prompt_embeds,
-            "prompt_attention_mask": prompt_attention_mask,
-        }
-    )
-    return training_batch
+    conditions["video_prompt_embeds"] = video_embeds
+    conditions["audio_prompt_embeds"] = audio_embeds
+    conditions["prompt_attention_mask"] = attention_mask
 
 
 # ─── Quantization config builder ─────────────────────────────────────────────
@@ -304,11 +288,32 @@ def build_quant_config(
 
 
 class DiffusionMSELoss(torch.nn.modules.loss._Loss):
-    """MSE loss between student and teacher outputs for distillation."""
+    """MSE loss between student and teacher outputs for distillation.
+
+    Handles the new model output format where forward returns a tuple
+    of (video_pred, audio_pred) instead of a single tensor.
+    """
+
+    def __init__(self, video_weight: float = 0.95, audio_weight: float = 0.05):
+        super().__init__()
+        self.video_weight = video_weight
+        self.audio_weight = audio_weight
 
     def forward(self, student_output, teacher_output):
-        print(f"Student shape: {student_output.shape}, Teacher shape: {teacher_output.shape}")
-        return torch.nn.functional.mse_loss(student_output.float(), teacher_output.float())
+        if isinstance(student_output, tuple):
+            video_student, audio_student = student_output
+            video_teacher, audio_teacher = teacher_output
+            loss = self.video_weight * torch.nn.functional.mse_loss(
+                video_student.float(), video_teacher.float()
+            )
+            if audio_student is not None and audio_teacher is not None:
+                loss = loss + self.audio_weight * torch.nn.functional.mse_loss(
+                    audio_student.float(), audio_teacher.float()
+                )
+            return loss
+        return torch.nn.functional.mse_loss(
+            student_output.float(), teacher_output.float()
+        )
 
 
 # ─── QAD Trainer ──────────────────────────────────────────────────────────────
@@ -330,7 +335,7 @@ class LtxvQADTrainer(LtxvTrainer):
 
     def __init__(
         self,
-        trainer_config: LtxvTrainerConfig,
+        trainer_config: LtxTrainerConfig,
         quant_cfg: dict,
         calib_size: int = 512,
         kd_loss_weight: float = 0.5,
@@ -351,9 +356,9 @@ class LtxvQADTrainer(LtxvTrainer):
         self._run_calibration()
         self._setup_distillation()
 
-        self._vae = self._vae.to("cpu")
-        if not self._config.acceleration.load_text_encoder_in_8bit:
-            self._text_encoder = self._text_encoder.to("cpu")
+        self._vae_decoder = self._vae_decoder.to("cpu")
+        if self._vae_encoder is not None:
+            self._vae_encoder = self._vae_encoder.to("cpu")
 
         self._transformer.to(torch.bfloat16)
         self._transformer = self._accelerator.prepare(self._transformer)
@@ -372,7 +377,7 @@ class LtxvQADTrainer(LtxvTrainer):
         logger.info("Running PTQ calibration...")
 
         if not hasattr(self, "_training_strategy") or self._training_strategy is None:
-            self._training_strategy = get_training_strategy(self._config.conditioning)
+            self._training_strategy = get_training_strategy(self._config.training_strategy)
 
         data_sources = self._training_strategy.get_data_sources()
         dataset = PrecomputedDataset(
@@ -394,12 +399,11 @@ class LtxvQADTrainer(LtxvTrainer):
         calib_steps = min(self._calib_size, len(dataset))
         strategy = self._training_strategy
         device = self._accelerator.device
-        connector = self._connector
-        conditioning_mode = self._config.conditioning.mode
+        text_encoder = self._text_encoder
 
         self._transformer.to(device)
-        if connector is not None:
-            connector.to(device)
+        if text_encoder is not None:
+            text_encoder.to(device)
 
         def calibration_forward_loop(model):
             model.eval()
@@ -416,19 +420,17 @@ class LtxvQADTrainer(LtxvTrainer):
                     batch = move_batch_to_device(batch, device)
 
                     try:
-                        training_batch = strategy.prepare_batch(batch, timestep_sampler)
+                        if text_encoder is not None and "conditions" in batch:
+                            apply_connectors(batch, text_encoder)
 
-                        if connector is not None:
-                            training_batch = apply_connector(
-                                training_batch, connector, conditioning_mode
-                            )
-
-                        model_inputs = strategy.prepare_model_inputs(training_batch)
-                        model_dtype = next(model.parameters()).dtype
-                        for k, v in model_inputs.items():
-                            if isinstance(v, torch.Tensor) and v.is_floating_point():
-                                model_inputs[k] = v.to(dtype=model_dtype)
-                        model(**model_inputs)
+                        model_inputs = strategy.prepare_training_inputs(
+                            batch, timestep_sampler
+                        )
+                        model(
+                            video=model_inputs.video,
+                            audio=model_inputs.audio,
+                            perturbations=None,
+                        )
 
                     except Exception as e:
                         failures += 1
@@ -466,10 +468,10 @@ class LtxvQADTrainer(LtxvTrainer):
         """Load teacher from same checkpoint and wrap with DistillationModel."""
         logger.info("Setting up distillation...")
 
-        checkpoint_path = self._config.model.model_source
+        checkpoint_path = self._config.model.model_path
 
         teacher = load_transformer(
-            checkpoint_or_state=checkpoint_path,
+            checkpoint_path=checkpoint_path,
             device="cpu",
             dtype=torch.bfloat16,
         )
@@ -488,29 +490,26 @@ class LtxvQADTrainer(LtxvTrainer):
 
     def _training_step(self, batch):
         """Override: use strategy's loss + add distillation loss."""
-        training_batch = self._training_strategy.prepare_batch(batch, self._timestep_sampler)
+        conditions = batch["conditions"]
+        video_embeds, audio_embeds, attention_mask = self._text_encoder._run_connectors(
+            conditions["prompt_embeds"], conditions["prompt_attention_mask"]
+        )
+        conditions["video_prompt_embeds"] = video_embeds
+        conditions["audio_prompt_embeds"] = audio_embeds
+        conditions["prompt_attention_mask"] = attention_mask
 
-        if self._connector is not None:
-            training_batch = apply_connector(
-                training_batch, self._connector, self._config.conditioning.mode
-            )
+        model_inputs = self._training_strategy.prepare_training_inputs(
+            batch, self._timestep_sampler
+        )
 
-        model_inputs = self._training_strategy.prepare_model_inputs(training_batch)
-
-        model_dtype = next(self._transformer.parameters()).dtype
-        for k, v in model_inputs.items():
-            if isinstance(v, torch.Tensor) and v.is_floating_point():
-                model_inputs[k] = v.to(dtype=model_dtype)
-            elif isinstance(v, list):
-                model_inputs[k] = [
-                    t.to(dtype=model_dtype)
-                    if isinstance(t, torch.Tensor) and t.is_floating_point()
-                    else t
-                    for t in v
-                ]
-
-        model_pred = self._transformer(**model_inputs)
-        hard_loss = self._training_strategy.compute_loss(model_pred, training_batch)
+        video_pred, audio_pred = self._transformer(
+            video=model_inputs.video,
+            audio=model_inputs.audio,
+            perturbations=None,
+        )
+        hard_loss = self._training_strategy.compute_loss(
+            video_pred, audio_pred, model_inputs
+        )
 
         unwrapped = self._accelerator.unwrap_model(self._transformer)
         if isinstance(unwrapped, DistillationModel) and unwrapped.training:
@@ -579,7 +578,7 @@ class LtxvQADTrainer(LtxvTrainer):
             try:
                 from safetensors.torch import load_file as _load_base
 
-                base_state = _load_base(self._config.model.model_source)
+                base_state = _load_base(self._config.model.model_path)
                 dtype_fixed = 0
                 for k in clean_state:
                     base_key = f"{CORRECT_PREFIX}{k}"
@@ -951,10 +950,10 @@ def main():
     with open(args.config) as f:
         config_dict = yaml.safe_load(f)
 
-    # Extract QAD-specific config (not part of LtxvTrainerConfig)
+    # Extract QAD-specific config (not part of LtxTrainerConfig)
     qad_config = config_dict.pop("qad", {})
 
-    config = LtxvTrainerConfig(**config_dict)
+    config = LtxTrainerConfig(**config_dict)
 
     # Resolve QAD params: CLI args override YAML values, YAML overrides defaults
     calib_size = args.calib_size if args.calib_size != 512 else qad_config.get("calib_size", 512)
@@ -974,7 +973,7 @@ def main():
     logger.info("QAD for LTX-2 (Native LTX Trainer + ModelOpt)")
     logger.info("=" * 80)
     logger.info(f"Config:          {args.config}")
-    logger.info(f"Model:           {config.model.model_source}")
+    logger.info(f"Model:           {config.model.model_path}")
     logger.info(f"Data:            {config.data.preprocessed_data_root}")
     logger.info(f"Output:          {config.output_dir}")
     logger.info(f"Calib size:      {calib_size}")
@@ -998,7 +997,7 @@ def main():
     if not skip_inference_ckpt and is_global_rank0() and saved_path is not None:
         create_inference_checkpoint(
             trained_path=str(saved_path),
-            base_path=config.model.model_source,
+            base_path=config.model.model_path,
             output_path=str(Path(config.output_dir) / "ltx2_qad_inference.safetensors"),
         )
 
