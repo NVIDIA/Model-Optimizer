@@ -48,6 +48,7 @@ dependencies = [
 [project.optional-dependencies]
 onnx = [
     "cppimport",
+    "cuda-python",
     "cupy-cuda12x; platform_machine != 'aarch64' and platform_system != 'Darwin'",
     "lief",
     "ml_dtypes",

@@ -33,6 +33,40 @@ DEFAULT_DQ_DTYPE = "float32"
 DEFAULT_TIMING_CACHE = str(Path(tempfile.gettempdir()) / "trtexec_timing.cache")
 DEFAULT_WARMUP_RUNS = 5
 DEFAULT_TIMING_RUNS = 20
+MODE_PRESETS = {
+    "quick": {"schemes_per_region": 30, "warmup_runs": 10, "timing_runs": 50},
+    "default": {"schemes_per_region": 50, "warmup_runs": 50, "timing_runs": 100},
+    "extensive": {"schemes_per_region": 200, "warmup_runs": 50, "timing_runs": 200},
+}
+
+
+class _StoreWithExplicitFlag(argparse.Action):
+    """Store the value and set an 'explicit' flag on the namespace so mode presets do not override."""
+
+    def __init__(self, explicit_attr: str, *args, **kwargs):
+        self._explicit_attr = explicit_attr
+        super().__init__(*args, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        setattr(namespace, self._explicit_attr, True)
+
+
+def apply_mode_presets(args) -> None:
+    """Apply --mode preset to schemes_per_region, warmup_runs, timing_runs.
+
+    Only applies preset for an option when that option was not explicitly set on the
+    command line (explicit flags override the preset even when the value equals the default).
+    """
+    if args.mode not in MODE_PRESETS:
+        return
+    preset = MODE_PRESETS[args.mode]
+    if not getattr(args, "_explicit_num_schemes", False):
+        args.num_schemes = preset["schemes_per_region"]
+    if not getattr(args, "_explicit_warmup_runs", False):
+        args.warmup_runs = preset["warmup_runs"]
+    if not getattr(args, "_explicit_timing_runs", False):
+        args.timing_runs = preset["timing_runs"]
 
 
 def validate_file_path(path: str | None, description: str) -> Path | None:
@@ -94,6 +128,7 @@ def run_autotune() -> int:
         - 130: Interrupted by user (Ctrl+C)
     """
     args = _get_autotune_parser().parse_args()
+    apply_mode_presets(args)
     model_path = validate_file_path(args.onnx_path, "Model file")
     validate_file_path(args.qdq_baseline, "QDQ baseline model")
     output_dir = Path(args.output_dir)
@@ -167,6 +202,12 @@ Examples:
   # Basic usage
   python -m modelopt.onnx.quantization.autotune --onnx_path model.onnx
 
+  # Quick mode (fewer schemes and benchmark runs for fast iteration)
+  python -m modelopt.onnx.quantization.autotune --onnx_path model.onnx --mode quick
+
+  # Extensive mode (more schemes and runs for thorough tuning)
+  python -m modelopt.onnx.quantization.autotune --onnx_path model.onnx --mode extensive
+
   # Import patterns from QDQ baseline model
   python -m modelopt.onnx.quantization.autotune \\
       --onnx_path model.onnx --qdq_baseline baseline.onnx
@@ -199,12 +240,25 @@ Examples:
     # Autotuning Strategy
     strategy_group = parser.add_argument_group("Autotuning Strategy")
     strategy_group.add_argument(
+        "--mode",
+        type=str,
+        default="default",
+        choices=["quick", "default", "extensive"],
+        help="Preset for schemes_per_region, warmup_runs, and timing_runs. "
+        "'quick': fewer schemes/runs for fast iteration; "
+        "'default': balanced; "
+        "'extensive': more schemes/runs for thorough tuning. "
+        "Explicit --schemes_per_region, --warmup_runs, --timing_runs override the preset.",
+    )
+    strategy_group.add_argument(
         "--schemes_per_region",
         "-s",
         type=int,
         default=DEFAULT_NUM_SCHEMES,
         dest="num_schemes",
-        help=f"Number of schemes to test per region (default: {DEFAULT_NUM_SCHEMES})",
+        action=_StoreWithExplicitFlag,
+        explicit_attr="_explicit_num_schemes",
+        help=f"Number of schemes to test per region (default: {DEFAULT_NUM_SCHEMES}; overridden by --mode)",
     )
     strategy_group.add_argument(
         "--pattern_cache",
@@ -268,13 +322,17 @@ Examples:
         "--warmup_runs",
         type=int,
         default=DEFAULT_WARMUP_RUNS,
-        help=f"Number of warmup runs (default: {DEFAULT_WARMUP_RUNS})",
+        action=_StoreWithExplicitFlag,
+        explicit_attr="_explicit_warmup_runs",
+        help=f"Number of warmup runs (default: {DEFAULT_WARMUP_RUNS}; overridden by --mode)",
     )
     trt_group.add_argument(
         "--timing_runs",
         type=int,
         default=DEFAULT_TIMING_RUNS,
-        help=f"Number of timing runs (default: {DEFAULT_TIMING_RUNS})",
+        action=_StoreWithExplicitFlag,
+        explicit_attr="_explicit_timing_runs",
+        help=f"Number of timing runs (default: {DEFAULT_TIMING_RUNS}; overridden by --mode)",
     )
     trt_group.add_argument(
         "--plugin_libraries",
