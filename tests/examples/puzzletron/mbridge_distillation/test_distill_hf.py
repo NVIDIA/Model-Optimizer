@@ -19,6 +19,7 @@ from pathlib import Path
 from _test_utils.examples.run_command import run_example_command
 from _test_utils.torch.distributed.utils import get_free_port
 from _test_utils.torch.puzzletron.utils import create_and_save_small_hf_model, create_tokenizer
+from transformers import AutoModelForCausalLM
 
 from modelopt.torch.puzzletron.anymodel import convert_model
 
@@ -105,15 +106,13 @@ def test_distill_hf(project_root_path: Path, tmp_path: Path):
     run_config_path = output_dir / "checkpoints" / f"iter_{train_iters:07d}" / "run_config.yaml"
     assert run_config_path.exists(), f"Expected run_config.yaml to exist at: {run_config_path}"
 
-    # Verify HF export was created
-    config_path = hf_export_dir / "config.json"
-    assert config_path.exists(), f"HF export should contain config.json at: {config_path}"
-
-    # Check for model weights index file
-    weight_index_path = hf_export_dir / "model.safetensors.index.json"
-    assert weight_index_path.exists(), (
-        f"HF export should contain model.safetensors.index.json at: {weight_index_path}"
+    # Verify that the distilled model can be loaded in HuggingFace format
+    model = AutoModelForCausalLM.from_pretrained(
+        str(hf_export_dir),
+        local_files_only=True,
+        trust_remote_code=True,
     )
+    assert model is not None, "Failed to load distilled model with AutoModelForCausalLM"
 
     print(
         f"PYTEST SUMMARY: test_distill_hf test has finished successfully. "
