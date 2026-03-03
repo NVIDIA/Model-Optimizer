@@ -1,0 +1,15 @@
+{
+    "draft_vocab_size": 32000,
+    "initializer_range": 0.02,
+    "rms_norm_eps": 1e-06,
+    "_attn_implementation": "flex_attention",
+    "rope_scaling": {
+        "beta_fast": 32.0,
+        "beta_slow": 1.0,
+        "factor": 32.0,
+        "original_max_position_embeddings": 4096,
+        "rope_type": "yarn",
+        "truncate": false
+    },
+    "rope_theta": 150000
+}
