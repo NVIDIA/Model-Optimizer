@@ -53,11 +53,11 @@ def get_split_parquet_urls(dataset_id: str, split_name: str) -> list[str]:
         ValueError: If no parquet files are found for the requested split.
     """
     all_files = list(list_repo_files(dataset_id, repo_type="dataset"))
-    split_files = [
+    split_files = sorted(
         f
         for f in all_files
         if f.endswith(".parquet") and Path(f).name.startswith(f"{split_name}-")
-    ]
+    )
     if not split_files:
         err_msg = (
             f"No parquet files found for split '{split_name}' in {dataset_id}. "
@@ -127,12 +127,10 @@ def parse_nemotron_conversation(raw_conversations: list) -> list[dict] | None:
     msgs = []
     for msg in raw_conversations:
         # Resolve role field (datasets may use "from" or "role")
-        if "from" in msg:
-            role = msg["from"].lower()
-        elif "role" in msg:
-            role = msg["role"].lower()
-        else:
+        raw_role = msg.get("from") or msg.get("role")
+        if not isinstance(raw_role, str):
             continue
+        role = raw_role.lower()
 
         # Normalize role names to standard values
         if role in ("human", "user"):
@@ -182,7 +180,7 @@ async def main(args: argparse.Namespace) -> None:
 
         with args.mapping_file.open("r", encoding="utf-8") as f:
             ordered_source_indices: list[int] = [
-                int(line.strip()) for line in f if line.strip()
+                int(line.strip()) for line in f if line.strip().isdigit()
             ]
         print(f"Mapping file loaded: {len(ordered_source_indices)} entries.")
 
