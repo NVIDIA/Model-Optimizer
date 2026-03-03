@@ -77,7 +77,7 @@ def test_distill_hf(project_root_path: Path, tmp_path: Path):
         "--split",
         "99,1,0",
         "--mbs",
-        "2",  # Increased from 1 to reduce iteration overhead
+        "1",
         "--gbs",
         "4",  # Global batch size
         "--train_iters",
