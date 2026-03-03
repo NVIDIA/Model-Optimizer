@@ -49,11 +49,10 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
-
 # LTX imports
-from ltx_trainer.model_loader import load_transformer
 from ltx_trainer.config import LtxTrainerConfig
 from ltx_trainer.datasets import PrecomputedDataset
+from ltx_trainer.model_loader import load_transformer
 from ltx_trainer.timestep_samplers import SAMPLERS
 from ltx_trainer.trainer import LtxvTrainer
 from ltx_trainer.training_strategies import get_training_strategy
@@ -311,9 +310,7 @@ class DiffusionMSELoss(torch.nn.modules.loss._Loss):
                     audio_student.float(), audio_teacher.float()
                 )
             return loss
-        return torch.nn.functional.mse_loss(
-            student_output.float(), teacher_output.float()
-        )
+        return torch.nn.functional.mse_loss(student_output.float(), teacher_output.float())
 
 
 # ─── QAD Trainer ──────────────────────────────────────────────────────────────
@@ -423,9 +420,7 @@ class LtxvQADTrainer(LtxvTrainer):
                         if text_encoder is not None and "conditions" in batch:
                             apply_connectors(batch, text_encoder)
 
-                        model_inputs = strategy.prepare_training_inputs(
-                            batch, timestep_sampler
-                        )
+                        model_inputs = strategy.prepare_training_inputs(batch, timestep_sampler)
                         model(
                             video=model_inputs.video,
                             audio=model_inputs.audio,
@@ -507,9 +502,7 @@ class LtxvQADTrainer(LtxvTrainer):
             audio=model_inputs.audio,
             perturbations=None,
         )
-        hard_loss = self._training_strategy.compute_loss(
-            video_pred, audio_pred, model_inputs
-        )
+        hard_loss = self._training_strategy.compute_loss(video_pred, audio_pred, model_inputs)
 
         unwrapped = self._accelerator.unwrap_model(self._transformer)
         if isinstance(unwrapped, DistillationModel) and unwrapped.training:
