@@ -34,10 +34,11 @@ from megatron.core.transformer.attention import SelfAttention
 from megatron.core.transformer.dot_product_attention import DotProductAttention
 from megatron.core.transformer.mlp import MLP
 from megatron.core.transformer.moe import moe_utils
-from megatron.core.transformer.moe.experts import SequentialMLP
+from megatron.core.transformer.moe.experts import GroupedMLP, SequentialMLP
 from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
+from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.transformer_layer import TransformerLayer
 
 from modelopt.torch.nas.modules import DynamicModuleList
@@ -56,7 +57,12 @@ from ..traced_hp import TracedHp
 SUPPORTED_MODELS = {GPTModel: "megatron.core.models.gpt.GPTModel"}
 
 try:
-    from megatron.core.extensions.transformer_engine import TEDotProductAttention
+    from megatron.core.extensions.transformer_engine import (
+        TEDotProductAttention,
+        TEColumnParallelLinear,
+        TELayerNormColumnParallelLinear,
+        TERowParallelLinear,
+    )
 
     HAS_TE = True
 except ImportError:
@@ -76,12 +82,35 @@ except ImportError:
 
 __all__ = []
 
+try:
+    from megatron.core.transformer.moe.experts import TEGroupedMLP
+except ImportError:
+    TEGroupedMLP = None
+
+
+def _ensure_te_compat(mod):
+    """Ensure TE layers have Megatron-compatible attributes (input_size, output_size, etc.)."""
+    if not hasattr(mod, "input_size") and hasattr(mod, "in_features"):
+        mod.input_size = mod.in_features
+    if not hasattr(mod, "output_size") and hasattr(mod, "out_features"):
+        mod.output_size = mod.out_features
+    tp_size = getattr(mod, "tp_size", 1)
+    if not hasattr(mod, "output_size_per_partition") and hasattr(mod, "output_size"):
+        mod.output_size_per_partition = mod.output_size // tp_size
+    if not hasattr(mod, "input_size_per_partition") and hasattr(mod, "input_size"):
+        mod.input_size_per_partition = mod.input_size // tp_size
+
 
 class _DynamicParallelLinear(DynamicModule):
     """A parallel linear layer with dynamic hyperparams."""
 
+    _LN_WEIGHT_ATTRS = ("layer_norm_weight", "ln_weight", "gamma")
+    _LN_BIAS_ATTRS = ("layer_norm_bias", "ln_bias", "beta")
+
     def _setup(self, *, input_size: TracedHp | None = None, output_size: TracedHp | None = None):
         # register hyperparameters
+        _ensure_te_compat(self)
+
         if input_size is None:
             input_size = TracedHp(list(range(1, self.input_size + 1)))
         self._register_hparam("input_size", input_size)
@@ -100,7 +129,33 @@ class _DynamicParallelLinear(DynamicModule):
 
     @staticmethod
     def _get_bias(mod: "_DynamicParallelLinear", bias: torch.Tensor | None) -> torch.Tensor | None:
+        if bias is None or bias.numel() == 0:
+            return bias
         return get_sliced_tensor(mod, bias, "output_size")
+
+    @classmethod
+    def _register_te_layernorm_dynamic_attrs(cls, mod: "_DynamicParallelLinear") -> None:
+        """Slice TE LayerNorm params to match active input_size when present."""
+        for attr_name in cls._LN_WEIGHT_ATTRS:
+            if hasattr(mod, attr_name):
+                mod._register_dynamic_attribute(attr_name, cls._get_layernorm_weight)
+        for attr_name in cls._LN_BIAS_ATTRS:
+            if hasattr(mod, attr_name):
+                mod._register_dynamic_attribute(attr_name, cls._get_layernorm_bias)
+
+    @staticmethod
+    def _get_layernorm_weight(
+        mod: "_DynamicParallelLinear", weight: torch.Tensor
+    ) -> torch.Tensor:
+        return get_sliced_tensor(mod, weight, "input_size")
+
+    @staticmethod
+    def _get_layernorm_bias(
+        mod: "_DynamicParallelLinear", bias: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        if bias is None or bias.numel() == 0:
+            return bias
+        return get_sliced_tensor(mod, bias, "input_size")
 
 
 @DMRegistry.register(
@@ -114,6 +169,7 @@ class _DynamicColumnParallelLinear(_DynamicParallelLinear):
         self._register_dynamic_attribute(
             "output_size_per_partition", lambda mod, val: mod.output_size
         )
+        self._register_te_layernorm_dynamic_attrs(self)
 
 
 @DMRegistry.register({RowParallelLinear: "megatron.core.tensor_parallel.layers.RowParallelLinear"})
@@ -295,12 +351,23 @@ class NumAttentionHeadsHp(TracedHp):
         return selected_attn_heads
 
 
-# NOTE: We provide a parent class since we do not register to DMRegistry.
-class _DynamicQKVColumnParallelLinear(DynamicModule, ColumnParallelLinear):
+# NOTE: We do not register to DMRegistry. The original module's class is included
+# in the MRO via the overridden convert() to preserve TE/Megatron forward methods.
+class _DynamicQKVColumnParallelLinear(DynamicModule):
     """An mcore ColumnParallelLinear layer for linear_qkv with dynamic attributes."""
+
+    @classmethod
+    def convert(cls, module, **setup_kwargs):
+        original_cls = type(module)
+        if not issubclass(cls, original_cls):
+            actual_cls = type(cls.__name__, (cls, original_cls), {})
+            return DynamicModule.convert.__func__(actual_cls, module, **setup_kwargs)
+        return super().convert(module, **setup_kwargs)
 
     def _setup(self, *, num_attention_heads: NumAttentionHeadsHp, hidden_size: TracedHp):
         """Setup the _DynamicQKVColumnParallelLinear dynamic module with global hidden_size hparam."""
+        _ensure_te_compat(self)
+
         self._register_hparam("input_size", hidden_size)
         self._register_hparam("num_attention_heads", num_attention_heads)
         self._register_dynamic_attribute(
@@ -313,6 +380,7 @@ class _DynamicQKVColumnParallelLinear(DynamicModule, ColumnParallelLinear):
         )
         self._register_dynamic_attribute("weight", self._get_weight)
         self._register_dynamic_attribute("bias", self._get_bias)
+        _DynamicParallelLinear._register_te_layernorm_dynamic_attrs(self)
 
     def _get_output_size_indices(self) -> torch.LongTensor:
         """Get the indices of the output size based on sorted + pruned attention heads.
@@ -390,17 +458,27 @@ class _DynamicQKVColumnParallelLinear(DynamicModule, ColumnParallelLinear):
         mod: "_DynamicQKVColumnParallelLinear", bias: torch.Tensor | None
     ) -> torch.Tensor | None:
         """Return the bias tensor of the linear layer."""
-        if bias is None:
+        if bias is None or bias.numel() == 0:
             return bias
         return get_sliced_tensor_by_slices(bias, [mod._get_output_size_indices()])
 
 
-# NOTE: We provide a parent class since we do not register to DMRegistry.
-class _DynamicProjRowParallelLinear(DynamicModule, RowParallelLinear):
-    """An mcore RowParallelLinear layer for linear_qkv with dynamic attributes."""
+# NOTE: We do not register to DMRegistry. See _DynamicQKVColumnParallelLinear.convert().
+class _DynamicProjRowParallelLinear(DynamicModule):
+    """An mcore RowParallelLinear layer for linear_proj with dynamic attributes."""
+
+    @classmethod
+    def convert(cls, module, **setup_kwargs):
+        original_cls = type(module)
+        if not issubclass(cls, original_cls):
+            actual_cls = type(cls.__name__, (cls, original_cls), {})
+            return DynamicModule.convert.__func__(actual_cls, module, **setup_kwargs)
+        return super().convert(module, **setup_kwargs)
 
     def _setup(self, *, num_attention_heads: NumAttentionHeadsHp, hidden_size: TracedHp):
         """Setup the _DynamicProjRowParallelLinear dynamic module with global hidden_size hparam."""
+        _ensure_te_compat(self)
+
         self._register_hparam("output_size", hidden_size)
         self._register_hparam("num_attention_heads", num_attention_heads)
         self._register_dynamic_attribute(
@@ -436,6 +514,8 @@ class _DynamicProjRowParallelLinear(DynamicModule, RowParallelLinear):
         mod: "_DynamicProjRowParallelLinear", bias: torch.Tensor | None
     ) -> torch.Tensor | None:
         """Return the bias tensor of the linear layer."""
+        if bias is None or bias.numel() == 0:
+            return bias
         return get_sliced_tensor(mod, bias, "output_size")
 
 
@@ -562,6 +642,27 @@ class _DynamicSequentialMLP(DynamicModule):
         return super().export()
 
 
+_GROUPED_MLP_TYPES = {
+    GroupedMLP: "megatron.core.transformer.moe.experts.GroupedMLP",
+}
+if TEGroupedMLP is not None:
+    _GROUPED_MLP_TYPES[TEGroupedMLP] = "megatron.core.transformer.moe.experts.TEGroupedMLP"
+
+
+@DMRegistry.register(_GROUPED_MLP_TYPES)
+class _DynamicGroupedMLP(DynamicModule):
+    """Dynamic wrapper for grouped MoE experts.
+
+    GroupedMLP/TEGroupedMLP pack experts into grouped kernels and do not expose a
+    per-expert ModuleList like SequentialMLP. For now we only register the expert
+    count hparam as fixed so conversion succeeds without changing grouped expert layout.
+    """
+
+    def _setup(self, *, hidden_size: TracedHp):
+        del hidden_size  # Unused for grouped experts in current implementation
+        self._register_hparam("num_local_experts", TracedHp([self.num_local_experts]))
+
+
 @DMRegistry.register({MoELayer: "megatron.core.transformer.moe.moe_layer.MoELayer"})
 class _DynamicMoELayer(DynamicModule):
     """A MoELayer with dynamic hyperparams."""
@@ -604,8 +705,9 @@ class _DynamicMoELayer(DynamicModule):
         expert_hp.choices = list(set(expert_hp.choices) & choices | {expert_hp.original})
 
         # Modify expert FFN hparam choices
-        for expert in self.experts.local_experts:
-            expert.modify(ffn_hidden_size_divisor=ffn_hidden_size_divisor)
+        if hasattr(self.experts, "local_experts"):
+            for expert in self.experts.local_experts:
+                expert.modify(ffn_hidden_size_divisor=ffn_hidden_size_divisor)
         if self.use_shared_expert:
             self.shared_experts.modify(ffn_hidden_size_divisor)
 
@@ -645,12 +747,15 @@ class _DynamicTransformerLayer(DynamicModule):
         """Setup the TransformerLayer dynamic module with global hidden_size hparam."""
         # Convert the layernorms, self-attention, and mlp/moe layers to dynamic modules
         # NOTE: Mamba stack layers have either Attention or MLP, not both unlike GPT models
+        # NOTE: IdentityOp is a no-op module (no parameters) used by some VLM architectures
         if isinstance(self.self_attention, SelfAttention):
-            DMRegistry.convert(self.input_layernorm, num_features=hidden_size)
+            if not isinstance(self.input_layernorm, IdentityOp):
+                DMRegistry.convert(self.input_layernorm, num_features=hidden_size)
             DMRegistry.convert(self.self_attention, hidden_size=hidden_size)
 
         if isinstance(self.mlp, (MLP, MoELayer)):
-            DMRegistry.convert(self.pre_mlp_layernorm, num_features=hidden_size)
+            if not isinstance(self.pre_mlp_layernorm, IdentityOp):
+                DMRegistry.convert(self.pre_mlp_layernorm, num_features=hidden_size)
             DMRegistry.convert(self.mlp, hidden_size=hidden_size)
 
     def modify(
@@ -671,10 +776,12 @@ class _DynamicTransformerLayer(DynamicModule):
     def export(self):
         """Export the dynamic module to a torch.nn.Module."""
         if isinstance(self.self_attention, SelfAttention):
-            self.input_layernorm.export()
+            if not isinstance(self.input_layernorm, IdentityOp):
+                self.input_layernorm.export()
             self.self_attention.export()
         if isinstance(self.mlp, (MLP, MoELayer)):
-            self.pre_mlp_layernorm.export()
+            if not isinstance(self.pre_mlp_layernorm, IdentityOp):
+                self.pre_mlp_layernorm.export()
             self.mlp.export()
         return super().export()
 
@@ -1063,3 +1170,30 @@ class _DynamicMCoreLanguageModel(DynamicModule):
             ).export()
             self.output_layer.export()
         return super().export()
+
+
+# TE linear layer registrations ###################################################################
+# Transformer Engine linear layers use a different class hierarchy than Megatron's
+# ColumnParallelLinear/RowParallelLinear. Register them explicitly so DMRegistry.convert
+# can handle them (e.g. in the MLP path).
+if HAS_TE:
+    DMRegistry.register(
+        {
+            TEColumnParallelLinear: (
+                "megatron.core.extensions.transformer_engine.TEColumnParallelLinear"
+            ),
+            TELayerNormColumnParallelLinear: (
+                "megatron.core.extensions.transformer_engine.TELayerNormColumnParallelLinear"
+            ),
+        }
+    )(_DynamicColumnParallelLinear)
+
+    DMRegistry.register(
+        {
+            TERowParallelLinear: (
+                "megatron.core.extensions.transformer_engine.TERowParallelLinear"
+            ),
+        }
+    )(_DynamicRowParallelLinear)
+
+

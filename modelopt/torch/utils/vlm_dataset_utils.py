@@ -402,6 +402,22 @@ def get_vlm_dataset_dataloader(
             repo_id = SUPPORTED_VLM_DATASET_CONFIG[dataset_name]["config"]["path"]
         image_root = getattr(processor, "_modelopt_vlm_image_root", None)
 
+        def _apply_chat_template(prompt_messages: list[dict[str, Any]]) -> str | None:
+            # Prefer processor-level template because multimodal processors may override tokenizer behavior.
+            proc_template_fn = getattr(processor, "apply_chat_template", None)
+            if callable(proc_template_fn):
+                with contextlib.suppress(Exception):
+                    return proc_template_fn(
+                        prompt_messages, tokenize=False, add_generation_prompt=True
+                    )
+            tok = getattr(processor, "tokenizer", None)
+            if tok is not None and hasattr(tok, "apply_chat_template"):
+                with contextlib.suppress(Exception):
+                    return tok.apply_chat_template(
+                        prompt_messages, tokenize=False, add_generation_prompt=True
+                    )
+            return None
+
         pairs: list[tuple[str, Any]] = []
         for ex in examples:
             messages = ex.get("messages")
@@ -414,8 +430,7 @@ def get_vlm_dataset_dataloader(
 
             # Prompt extraction
             prompt = None
-            tok = getattr(processor, "tokenizer", None)
-            if tok is not None and messages is not None:
+            if messages is not None:
                 trimmed = _messages_up_to_last_user(messages) or []
                 # For some Nemotron-style templates, the image content expects an empty string.
                 # Keep the actual image path separate for loading; blank it in the prompt message.
@@ -426,17 +441,27 @@ def get_vlm_dataset_dataloader(
                         for part in content:
                             if isinstance(part, dict) and part.get("type") == "image":
                                 part["image"] = ""
-                with contextlib.suppress(Exception):
-                    prompt = tok.apply_chat_template(
-                        prompt_msgs, tokenize=False, add_generation_prompt=True
-                    )
+                prompt = _apply_chat_template(prompt_msgs)
 
             if prompt is None:
                 # Fallback: best-effort question-only prompt.
                 q = ex.get("question")
                 if q is None and messages is not None:
                     q = _extract_text_from_messages(messages)
-                prompt = q or "Describe the image."
+                fallback_text = q or "Describe the image."
+
+                # For datasets without native `messages` (e.g., scienceqa/coco), synthesize a multimodal
+                # chat turn so image placeholder tokens are inserted in the prompt template.
+                synthetic_messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "image": ""},
+                            {"type": "text", "text": fallback_text},
+                        ],
+                    }
+                ]
+                prompt = _apply_chat_template(synthetic_messages) or fallback_text
 
             pairs.append((prompt, img))
 

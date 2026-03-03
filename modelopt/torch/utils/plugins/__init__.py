@@ -23,6 +23,9 @@ with import_plugin("megatron_generate"):
 with import_plugin("megatron_mmlu"):
     from .megatron_mmlu import *
 
+with import_plugin("megatron_mmmu"):
+    from .megatron_mmmu import *
+
 with import_plugin("megatron_preprocess_data"):
     from .megatron_preprocess_data import *
 

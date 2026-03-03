@@ -17,6 +17,7 @@
 from collections.abc import Callable
 from typing import Any
 
+import torch
 import torch.nn as nn
 from datasets import DatasetDict
 from megatron.bridge import AutoBridge
@@ -37,6 +38,7 @@ from megatron.bridge.training.config import (
     OptimizerConfig,
     SchedulerConfig,
     TrainingConfig,
+    ValidationConfig,
     runtime_config_update,
 )
 from megatron.bridge.training.eval import evaluate_and_print_results
@@ -48,11 +50,133 @@ from megatron.core.models.mamba import MambaModel
 from megatron.core.parallel_state import get_data_parallel_group
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.utils import unwrap_model
-from transformers import AutoTokenizer
+from transformers import AutoProcessor, AutoTokenizer
 
 from modelopt.torch.utils import get_dataset_samples, print_rank_0, warn_rank_0
+from modelopt.torch.utils.plugins.megatron_generate import megatron_generate
+from modelopt.torch.utils.vlm_dataset_utils import (
+    get_supported_vlm_datasets,
+    get_vlm_dataset_dataloader,
+)
 
-__all__ = ["get_hf_mbridge_calibration_loop", "load_mbridge_model_from_hf"]
+__all__ = [
+    "get_hf_mbridge_calibration_loop",
+    "load_mbridge_model_from_hf",
+    "resolve_prunable_backbone",
+]
+
+_SUPPORTED_BACKBONE_TYPES = (GPTModel, MambaModel)
+
+
+def _shape_from_hidden_states(t: torch.Tensor) -> tuple[int, int, torch.device] | None:
+    """Infer (batch_size, seq_len, device) from hidden-state like tensors."""
+    if t.ndim >= 3:
+        # Megatron hidden states are [seq, batch, hidden].
+        return t.shape[1], t.shape[0], t.device
+    if t.ndim == 2:
+        dim0, dim1 = t.shape[0], t.shape[1]
+        seq_len, batch_size = (dim0, dim1) if dim0 >= dim1 else (dim1, dim0)
+        return batch_size, seq_len, t.device
+    return None
+
+
+def _shape_from_decoder_input(module: nn.Module | None) -> tuple[int, int, torch.device] | None:
+    """Infer (batch_size, seq_len, device) from decoder.input_tensor."""
+    if module is None:
+        return None
+    decoder = getattr(module, "decoder", None)
+    input_tensor = getattr(decoder, "input_tensor", None)
+    if isinstance(input_tensor, torch.Tensor):
+        return _shape_from_hidden_states(input_tensor)
+    return None
+
+
+def _shape_from_forward_kwargs(kwargs: dict[str, Any]) -> tuple[int, int, torch.device] | None:
+    """Infer (batch_size, seq_len, device) from forward kwargs."""
+    for key in ("input_ids", "labels"):
+        value = kwargs.get(key)
+        if isinstance(value, torch.Tensor) and value.ndim >= 2:
+            return value.shape[0], value.shape[1], value.device
+
+    decoder_input = kwargs.get("decoder_input")
+    if isinstance(decoder_input, torch.Tensor):
+        inferred = _shape_from_hidden_states(decoder_input)
+        if inferred is not None:
+            return inferred
+
+    attention_mask = kwargs.get("attention_mask")
+    if isinstance(attention_mask, torch.Tensor):
+        if attention_mask.ndim == 2:
+            return attention_mask.shape[0], attention_mask.shape[1], attention_mask.device
+        if attention_mask.ndim >= 4:
+            return attention_mask.shape[0], attention_mask.shape[-1], attention_mask.device
+    return None
+
+
+def _infer_batch_shape(
+    kwargs: dict[str, Any], module: nn.Module | None = None
+) -> tuple[int, int, torch.device] | None:
+    """Infer (batch_size, seq_len, device), preferring PP decoder input."""
+    inferred = _shape_from_decoder_input(module)
+    if inferred is not None:
+        return inferred
+    return _shape_from_forward_kwargs(kwargs)
+
+
+def _ensure_mrope_position_ids(
+    module: nn.Module | None, ensured_mrope_ids: set[int] | None = None
+) -> None:
+    """Ensure mRoPE forward receives position_ids.
+
+    Megatron-Bridge's default GPT forward_step only provides position_ids on the first PP stage.
+    For Qwen3-VL mRoPE models, later stages still require position_ids to build rotary embeddings.
+    """
+    if module is None:
+        return
+    if ensured_mrope_ids is not None and id(module) in ensured_mrope_ids:
+        return
+    cfg = getattr(module, "config", None)
+    if getattr(cfg, "position_embedding_type", None) != "mrope":
+        return
+
+    original_forward = module.forward
+
+    def _forward_with_position_ids(*args, **kwargs):
+        if kwargs.get("position_ids") is None:
+            inferred = _infer_batch_shape(kwargs, module)
+            if inferred is not None:
+                batch_size, seq_len, device = inferred
+                kwargs["position_ids"] = (
+                    torch.arange(seq_len, dtype=torch.long, device=device)
+                    .unsqueeze(0)
+                    .expand(batch_size, -1)
+                )
+        return original_forward(*args, **kwargs)
+
+    module.forward = _forward_with_position_ids  # type: ignore[assignment]
+    if ensured_mrope_ids is not None:
+        ensured_mrope_ids.add(id(module))
+
+
+def resolve_prunable_backbone(
+    unwrapped_model: nn.Module,
+) -> tuple[GPTModel | MambaModel, bool, str | None]:
+    """Resolve the mcore text backbone to prune from an unwrapped model.
+
+    Returns:
+        (backbone, is_vlm_wrapper, wrapper_name)
+    """
+    if isinstance(unwrapped_model, _SUPPORTED_BACKBONE_TYPES):
+        return unwrapped_model, False, None
+
+    language_model = getattr(unwrapped_model, "language_model", None)
+    if isinstance(language_model, _SUPPORTED_BACKBONE_TYPES):
+        return language_model, True, type(unwrapped_model).__name__
+
+    raise TypeError(
+        f"Expected {_SUPPORTED_BACKBONE_TYPES}, or a VLM wrapper whose .language_model "
+        f"is one of them. Got {type(unwrapped_model)}"
+    )
 
 
 def load_mbridge_model_from_hf(
@@ -107,7 +231,7 @@ def load_mbridge_model_from_hf(
     model = provider.provide_distributed_model(wrap_with_ddp=False)
     assert len(model) == 1
     unwrapped_model = unwrap_model(model[0])
-    assert isinstance(unwrapped_model, (GPTModel, MambaModel))
+    resolve_prunable_backbone(unwrapped_model)
 
     tokenizer = AutoTokenizer.from_pretrained(
         hf_model_name_or_path, trust_remote_code=trust_remote_code
@@ -144,6 +268,150 @@ def _get_dataset_cfg(
     return dataset_cfg
 
 
+def _get_hf_mbridge_vlm_calibration_loop(
+    *,
+    model: list[MegatronModule],
+    provider: GPTModelProvider | MambaModelProvider,
+    hf_model_name_or_path: str,
+    trust_remote_code: bool,
+    dataset_name: str,
+    num_samples: int,
+    micro_batch_size: int,
+) -> Callable[[nn.Module], None]:
+    """Create a VLM image+text calibration loop for Megatron-Bridge pruning.
+
+    This follows the same idea used in Megatron-Bridge VLM PTQ examples: build multimodal
+    batches via AutoProcessor and drive forward passes with `megatron_generate` (prefill + 1 token).
+    """
+    supported_vlm_datasets = set(get_supported_vlm_datasets())
+    if dataset_name not in supported_vlm_datasets:
+        raise ValueError(
+            f"Unsupported VLM calibration dataset: {dataset_name}. "
+            f"Supported VLM datasets: {sorted(supported_vlm_datasets)}"
+        )
+
+    print_rank_0(f"Using image-text calibration dataset: {dataset_name}")
+    processor = AutoProcessor.from_pretrained(
+        hf_model_name_or_path,
+        trust_remote_code=trust_remote_code,
+    )
+    calibration_model = unwrap_model(model[0])
+    model_device = next(calibration_model.parameters()).device
+    calib_dataloader = get_vlm_dataset_dataloader(
+        dataset_name=dataset_name,
+        processor=processor,
+        batch_size=micro_batch_size,
+        num_samples=num_samples,
+        device=model_device,
+        # NOTE: For Qwen3-VL style processors, `truncation=max_length` can break image-token alignment
+        # in the processor check (`Mismatch in image token count ...`). We therefore disable truncation
+        # here and skip over-length samples in the forward loop below.
+        max_length=None,
+        require_image=True,
+    )
+    max_seq_length = int(provider.seq_length)
+
+    def forward_loop(_m):
+        eval_model = unwrap_model(model[0])
+        eval_model.eval()
+        processed_steps = 0
+        skipped_long_samples = 0
+        seen_samples = 0
+        log_every = max(1, num_samples // 10)
+        next_log = log_every
+        show_progress = (
+            not torch.distributed.is_available()
+            or not torch.distributed.is_initialized()
+            or torch.distributed.get_rank() == 0
+        )
+        progress_bar = None
+        if show_progress:
+            try:
+                from tqdm.auto import tqdm
+
+                progress_bar = tqdm(total=num_samples, desc="VLM calib", dynamic_ncols=True)
+            except Exception:
+                progress_bar = None
+        with torch.no_grad():
+            for batch in calib_dataloader:
+                # Batch is expected to be multimodal model kwargs from processor.
+                input_ids = batch.get("input_ids")
+                if input_ids is None:
+                    raise ValueError(
+                        "VLM calibration batch is missing `input_ids`. "
+                        "Please check processor / dataset compatibility."
+                    )
+                batch_size = int(input_ids.shape[0])
+                seen_samples += batch_size
+                if progress_bar is not None:
+                    progress_bar.update(batch_size)
+                seq_len = int(input_ids.shape[-1])
+                if seq_len > max_seq_length:
+                    skipped_long_samples += 1
+                    if skipped_long_samples <= 3:
+                        warn_rank_0(
+                            f"Skipping over-length VLM calibration sample (seq_len={seq_len} > "
+                            f"seq_length={max_seq_length})."
+                        )
+                    if progress_bar is not None:
+                        progress_bar.set_postfix(
+                            processed=processed_steps,
+                            skipped=skipped_long_samples,
+                            refresh=False,
+                        )
+                    elif seen_samples >= next_log:
+                        print_rank_0(
+                            f"VLM calibration progress: seen={seen_samples}/{num_samples}, "
+                            f"processed={processed_steps}, skipped={skipped_long_samples}"
+                        )
+                        next_log += log_every
+                    continue
+                megatron_generate(
+                    model=eval_model,
+                    input_ids=input_ids,
+                    pixel_values=batch.get("pixel_values"),
+                    image_grid_thw=batch.get("image_grid_thw"),
+                    image_sizes=batch.get("image_sizes"),
+                    osl=1,
+                    enable_kv_cache=False,
+                    disable_tqdm=True,
+                )
+                processed_steps += 1
+                if progress_bar is not None:
+                    progress_bar.set_postfix(
+                        processed=processed_steps,
+                        skipped=skipped_long_samples,
+                        refresh=False,
+                    )
+                elif seen_samples >= next_log:
+                    print_rank_0(
+                        f"VLM calibration progress: seen={seen_samples}/{num_samples}, "
+                        f"processed={processed_steps}, skipped={skipped_long_samples}"
+                    )
+                    next_log += log_every
+
+        if progress_bar is not None:
+            progress_bar.close()
+
+        if processed_steps == 0:
+            raise RuntimeError(
+                "No valid VLM calibration samples were processed. "
+                f"All samples exceeded seq_length={max_seq_length}. "
+                "Try increasing --seq_length, using a different --calib_dataset_name, "
+                "or using smaller / fewer samples."
+            )
+        if skipped_long_samples > 0:
+            warn_rank_0(
+                f"Skipped {skipped_long_samples} over-length VLM calibration samples."
+            )
+        print_rank_0(
+            f"VLM calibration done: seen={seen_samples}, processed={processed_steps}, "
+            f"skipped={skipped_long_samples}"
+        )
+
+    return forward_loop
+
+
 def get_hf_mbridge_calibration_loop(
     *,
     model: list[MegatronModule],
@@ -155,6 +423,7 @@ def get_hf_mbridge_calibration_loop(
     num_samples: int = 512,
     micro_batch_size: int = 1,
     global_batch_size: int = 1,
+    calib_with_images: bool = False,
 ) -> Callable[[nn.Module], None]:
     """Get a modelopt calibration loop for a Megatron-Bridge model.
 
@@ -177,6 +446,18 @@ def get_hf_mbridge_calibration_loop(
             f"{global_batch_size=} is smaller than {micro_batch_size=}. Setting gbs to {micro_batch_size}."
         )
         global_batch_size = micro_batch_size
+
+    if calib_with_images:
+        return _get_hf_mbridge_vlm_calibration_loop(
+            model=model,
+            provider=provider,
+            hf_model_name_or_path=hf_model_name_or_path,
+            trust_remote_code=trust_remote_code,
+            dataset_name=dataset_name,
+            num_samples=num_samples,
+            micro_batch_size=micro_batch_size,
+        )
+
     num_iters = num_samples // global_batch_size
 
     # NOTE: Issue with NemotronH tokenizer's len() hence using use_fast=True as a WAR
@@ -234,13 +515,24 @@ def get_hf_mbridge_calibration_loop(
         dp_group=get_data_parallel_group(),
     )
 
+    ensured_mrope_ids: set[int] = set()
+
     def forward_loop(m):
+        eval_model = m if isinstance(m, list) else [m]
+        # mcore_minitron converts modules to DynamicModule before invoking this loop.
+        # Ensure mRoPE modules on the converted eval model always receive position_ids.
+        for local_model in eval_model:
+            local_unwrapped = unwrap_model(local_model)
+            _ensure_mrope_position_ids(local_unwrapped, ensured_mrope_ids)
+            _ensure_mrope_position_ids(
+                getattr(local_unwrapped, "language_model", None), ensured_mrope_ids
+            )
         evaluate_and_print_results(
             state,
             prefix="iteration 1",
             forward_step_func=forward_step,
             data_iterator=train_data_iterator,
-            model=model,
+            model=eval_model,
             config=cfg,
             verbose=True,
             write_to_tensorboard=False,
