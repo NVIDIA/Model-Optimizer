@@ -441,7 +441,7 @@ class QDQAutotunerBase:
     def get_resolved_insertion_points(
         self, best: bool = True, verbose: bool = False
     ) -> set[ResolvedInsertionPoint]:
-        """Compute Q/DQ insertion points for the best schemes without exporting the model.
+        """Compute Q/DQ insertion points for the best schemes (assuming best=True).
 
         Args:
             best: If True, use the best scheme for each region. If False, use the current scheme.
@@ -513,7 +513,20 @@ class QDQAutotunerBase:
                         if getattr(inp, "name", None) == ip.tensor_name:
                             covered.add((consumer_idx, inp_idx))
 
+        # Nodes that consume a covered (DQ-fed) input
         quantized_node_indices: set[int] = {node_idx for node_idx, _ in covered}
+
+        # Also include producer nodes of covered inputs: a producer whose output feeds a
+        # covered slot needs to be in nodes_to_quantize so ORT can place Q on its output
+        # (e.g., Add must be included when Q/DQ sits between Add and Relu).
+        node_name_to_idx = {node.name: i for i, node in enumerate(graph.nodes)}
+        for node_idx, inp_idx in covered:
+            tensor = graph.nodes[node_idx].inputs[inp_idx]
+            if tensor.inputs:
+                producer_idx = node_name_to_idx.get(tensor.inputs[0].name)
+                if producer_idx is not None:
+                    quantized_node_indices.add(producer_idx)
+
         nodes_to_quantize = [graph.nodes[i].name for i in quantized_node_indices]
         op_types_to_quantize = list(get_autotuner_quantizable_ops())
 
@@ -527,6 +540,7 @@ class QDQAutotunerBase:
                         no_quantize_inputs.append((inp.inputs[0], node, inp.name))
 
         # Producer op types whose output feeds a covered activation-op input
+        # (e.g., to support Add->Q/DQ->Relu patterns)
         op_types_needing_output_quant: set[str] = set()
         for node_idx, inp_idx in covered:
             node = graph.nodes[node_idx]
