@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import contextlib
 import io
 from functools import partial
@@ -31,7 +30,6 @@ from _test_utils.torch.megatron.utils import (
 )
 from _test_utils.torch.misc import compare_outputs, set_seed
 from _test_utils.torch.nas_prune.minitron_common import prune_minitron
-from megatron.core.ssm.mamba_hybrid_layer_allocation import Symbols
 from megatron.core.ssm.mamba_layer import MambaLayer
 from megatron.core.transformer.identity_op import IdentityOp
 
@@ -239,23 +237,22 @@ def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
     set_seed(SEED)
     channel_divisor = 4
 
-    # TODO: MoE in MambaModel requires Mcore 0.16+
     num_layers = 4  # Atleast one of "M, *, -, E" blocks
-    hybrid_pattern = "M*-M"  # "ME*-"
+    hybrid_pattern = "ME*-"
     hidden_size = 16
     ffn_hidden_size = 32
     num_attention_heads = 16
     num_query_groups = 4
     mamba_state_dim = 4
-    mamba_num_heads = 16
+    mamba_num_heads = 8
     mamba_head_dim = 16
     mamba_num_groups = 2
     num_moe_experts = None
     moe_ffn_hidden_size = None
     moe_shared_expert_intermediate_size = None
-    # num_moe_experts = 8
-    # moe_ffn_hidden_size = 16
-    # moe_shared_expert_intermediate_size = 16
+    num_moe_experts = 8
+    moe_ffn_hidden_size = 16
+    moe_shared_expert_intermediate_size = 16
     vocab_size = 32
     batch_size = 2
 
@@ -280,7 +277,7 @@ def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
     ).cuda()
 
     param_count = get_mcore_param_count(model)
-    assert param_count == 31776.0, param_count
+    assert param_count == 14984.0, param_count
 
     def forward_loop(m):
         for _ in range(2):
@@ -295,9 +292,9 @@ def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
             + c.mamba_num_heads
             + c.mamba_head_dim
             + c.num_attention_heads
-            # + c.num_moe_experts
-            # + c.moe_ffn_hidden_size
-            # + c.moe_shared_expert_intermediate_size
+            + c.num_moe_experts
+            + c.moe_ffn_hidden_size
+            + c.moe_shared_expert_intermediate_size
         )
 
     constraints = {"params": int(param_count * 0.7)}
@@ -307,7 +304,7 @@ def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
         "score_func": score_func,
         "max_width_pruning": 0.5,
         "max_depth_pruning": 0.5,
-        "hparams_to_skip": ["num_attention_heads"],
+        "hparams_to_skip": ["num_attention_heads", "moe_shared_expert_intermediate_size"],
         "top_k": 10,
     }
 
@@ -322,12 +319,13 @@ def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
     if rank == 0:
         assert "Search space for num_layers: [3, 4]" in captured_output
         assert "Search space for hidden_size: [12, 16]" in captured_output
-        assert "Search space for mamba_num_heads: [10, 12, 14, 16]" in captured_output
+        assert "Search space for mamba_num_heads: [6, 8]" in captured_output
         assert "Search space for mamba_head_dim: [12, 16]" in captured_output
-        assert "Search space for ffn_hidden_size: [20, 24, 28, 32]" in captured_output
-        assert "Total search space in consideration: 128" in captured_output
+        assert "Search space for num_moe_experts: [5, 6, 7, 8]" in captured_output
+        assert "Search space for moe_ffn_hidden_size: [12, 16]" in captured_output
+        assert "Total search space in consideration: 512" in captured_output
 
-    # NOTE: Slight variation in layer ordering for Attention and MLP depending on PP configuration
+    # NOTE: Slight variation in layer ordering for MoE / Attention / MLP depending on PP configuration
     # This affects param counts when num_layers is pruned
     sorted_layers = [
         layer
@@ -336,37 +334,24 @@ def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
         )
     ]
     # fmt: off
-    if sorted_layers == [1, 4, 2, 3]:
+    if sorted_layers == [1, 4, 3, 2]:
         expected_top_k = [
-            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 14, "mamba_head_dim": 12, "ffn_hidden_size": 32}, 22196.0, 94.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 14, "mamba_head_dim": 12, "ffn_hidden_size": 28}, 22068.0, 90.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 14, "mamba_head_dim": 12, "ffn_hidden_size": 24}, 21940.0, 86.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 14, "mamba_head_dim": 16, "ffn_hidden_size": 32}, 21916.0, 94.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 14, "mamba_head_dim": 16, "ffn_hidden_size": 28}, 21820.0, 90.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 14, "mamba_head_dim": 12, "ffn_hidden_size": 20}, 21812.0, 82.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 14, "mamba_head_dim": 16, "ffn_hidden_size": 24}, 21724.0, 86.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 14, "mamba_head_dim": 16, "ffn_hidden_size": 20}, 21628.0, 82.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 10, "mamba_head_dim": 16, "ffn_hidden_size": 32}, 21180.0, 94.0],  # noqa: E501
-            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 14, "mamba_head_dim": 12, "ffn_hidden_size": 20}, 21140.0, 81.0],  # noqa: E501
-        ]
-    elif sorted_layers == [1, 4, 3, 2]:
-        expected_top_k = [
-            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 14, "mamba_head_dim": 12, "ffn_hidden_size": 32}, 22196.0, 94.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 14, "mamba_head_dim": 12, "ffn_hidden_size": 28}, 22068.0, 90.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 14, "mamba_head_dim": 12, "ffn_hidden_size": 24}, 21940.0, 86.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 14, "mamba_head_dim": 16, "ffn_hidden_size": 32}, 21916.0, 94.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 14, "mamba_head_dim": 16, "ffn_hidden_size": 28}, 21820.0, 90.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 14, "mamba_head_dim": 12, "ffn_hidden_size": 20}, 21812.0, 82.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 14, "mamba_head_dim": 16, "ffn_hidden_size": 24}, 21724.0, 86.0],  # noqa: E501
-            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 14, "mamba_head_dim": 16, "ffn_hidden_size": 20}, 21628.0, 82.0],  # noqa: E501
-            [{"num_layers": 3, "hidden_size": 16, "mamba_num_heads": 14, "mamba_head_dim": 12, "ffn_hidden_size": 32}, 21524.0, 93.0],  # noqa: E501
-            [{"num_layers": 3, "hidden_size": 12, "mamba_num_heads": 14, "mamba_head_dim": 16, "ffn_hidden_size": 32}, 21412.0, 93.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 6, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 20}, 10482.0, 112.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 6, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 24}, 10472.0, 118.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 8, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 20}, 10400.0, 112.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 7, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 32}, 10388.0, 123.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 6, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 20}, 10376.0, 114.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 7, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 28}, 10370.0, 117.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 5, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 32}, 10338.0, 123.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 7, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 28}, 10292.0, 119.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 12, "mamba_num_heads": 8, "mamba_head_dim": 16, "num_moe_experts": 5, "moe_ffn_hidden_size": 16, "ffn_hidden_size": 32}, 10268.0, 125.0],  # noqa: E501
+            [{"num_layers": 4, "hidden_size": 16, "mamba_num_heads": 6, "mamba_head_dim": 12, "num_moe_experts": 7, "moe_ffn_hidden_size": 12, "ffn_hidden_size": 24}, 10242.0, 113.0],  # noqa: E501
         ]
     else:
-        raise RuntimeError(f"FIXME: Non deterministic test, assertions may fail: {sorted_layers}")
+        raise RuntimeError(f"FIXME: Non deterministic test, assertions may fail: {sorted_layers=}")
     # fmt: on
 
-    assert get_mcore_param_count(model) == 22196.0
+    assert get_mcore_param_count(model) == 10268.0
 
     top_k = searcher_state["top_k_candidates_per_constraint"][constraints["params"]]
     assert len(top_k) == 10
@@ -379,8 +364,6 @@ def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
 def test_mcore_mamba_hybrid_pruning_nas(dist_workers, tmp_path):
     if torch.cuda.device_count() > 4:
         pytest.skip("Skipping test for more than 4 GPUs")
-    if "E" in Symbols.VALID:
-        pytest.skip("TODO: Update test for MoE in Mamba (Mcore 0.16+)")
     dist_workers.run(
         partial(_test_mcore_mamba_hybrid_pruning_nas, tmp_path / "modelopt_minitron_scores.pth"),
     )
