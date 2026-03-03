@@ -29,10 +29,10 @@ from vllm_reload_utils import (
     convert_dict_to_vllm,
     convert_modelopt_state_to_vllm,
     process_state_dict_for_tp,
+    restore_from_modelopt_state_vllm,
 )
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.opt.conversion import restore_from_modelopt_state
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 
 
@@ -108,6 +108,7 @@ def _fakequant_run_prolog_worker(self) -> None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model = self.model_runner.model
+    print(model)
     if quant_config["modelopt_state_path"]:
         print(f"Loading modelopt state from {quant_config['modelopt_state_path']}")
         # Load on CPU to avoid failures when the checkpoint was saved from a different
@@ -116,11 +117,12 @@ def _fakequant_run_prolog_worker(self) -> None:
             quant_config["modelopt_state_path"], weights_only=False, map_location="cpu"
         )
         modelopt_weights = modelopt_state.pop("modelopt_state_weights", None)
-        modelopt_state = convert_modelopt_state_to_vllm(modelopt_state)
-        restore_from_modelopt_state(model, modelopt_state)
+        map_fun = self.model_runner.model.hf_to_vllm_mapper.apply_dict
+        modelopt_state = convert_modelopt_state_to_vllm(modelopt_state, map_fun=map_fun)
+        restore_from_modelopt_state_vllm(model, modelopt_state)
 
         if modelopt_weights is not None:
-            modelopt_weights = convert_dict_to_vllm(modelopt_weights)
+            modelopt_weights = convert_dict_to_vllm(modelopt_weights, map_fun=map_fun)
             mtq.utils.set_quantizer_state_dict(model, modelopt_weights)
 
     else:
