@@ -51,20 +51,31 @@ def _ltx_sparse24_attention(
 
     Reshapes to the packed ``[total, H, D]`` format expected by
     ``context_attention_fwd``, runs the kernel with ``apply_sparse24=True``,
-    and reshapes back.
+    and reshapes back.  Supports both self-attention (seq_q == seq_k) and
+    cross-attention (seq_q != seq_k).
     """
-    batch, seq_len, hd = q.shape
+    batch, seq_q, hd = q.shape
+    seq_k = k.shape[1]
     dim_head = hd // heads
     device = q.device
 
     # LTX-2 uses the same number of heads for Q, K, V (no GQA)
-    q_packed = q.reshape(batch * seq_len, heads, dim_head).contiguous()
-    k_packed = k.reshape(batch * seq_len, heads, dim_head).contiguous()
-    v_packed = v.reshape(batch * seq_len, heads, dim_head).contiguous()
+    q_packed = q.reshape(batch * seq_q, heads, dim_head).contiguous()
+    k_packed = k.reshape(batch * seq_k, heads, dim_head).contiguous()
+    v_packed = v.reshape(batch * seq_k, heads, dim_head).contiguous()
     o = torch.empty_like(q_packed)
 
-    b_start_loc = torch.arange(batch, device=device, dtype=torch.int32) * seq_len
-    b_seq_len = torch.full((batch,), seq_len, device=device, dtype=torch.int32)
+    b_start_loc = torch.arange(batch, device=device, dtype=torch.int32) * seq_q
+    b_seq_len = torch.full((batch,), seq_q, device=device, dtype=torch.int32)
+
+    if seq_q != seq_k:
+        b_start_loc_k = torch.arange(batch, device=device, dtype=torch.int32) * seq_k
+        b_seq_len_k = torch.full((batch,), seq_k, device=device, dtype=torch.int32)
+        max_input_len_k = seq_k
+    else:
+        b_start_loc_k = None
+        b_seq_len_k = None
+        max_input_len_k = None
 
     context_attention_fwd(
         q_packed,
@@ -73,14 +84,17 @@ def _ltx_sparse24_attention(
         o,
         b_start_loc=b_start_loc,
         b_seq_len=b_seq_len,
-        max_input_len=seq_len,
+        max_input_len=seq_q,
         is_causal=False,
         softmax_scale=None,
         apply_sparse24=True,
         skip_diagonal_blocks=skip_diagonal_blocks,
+        b_start_loc_k=b_start_loc_k,
+        b_seq_len_k=b_seq_len_k,
+        max_input_len_k=max_input_len_k,
     )
 
-    return o.view(batch, seq_len, heads * dim_head)
+    return o.view(batch, seq_q, heads * dim_head)
 
 
 # ---------------------------------------------------------------------------
@@ -92,8 +106,8 @@ class _Sparse24LTXAttentionWrapper:
     """Wraps an LTX-2 ``AttentionCallable``; routes to Triton when sparse context is active.
 
     When the thread-local ``apply_sparse24`` flag is set (by
-    ``Sparse24Triton.get_sparse_context``) and the query/key sequence lengths
-    match (self-attention), the call is forwarded to the Triton sparse24 kernel.
+    ``Sparse24Triton.get_sparse_context``), the call is forwarded to the Triton
+    sparse24 kernel for both self-attention and cross-attention.
     Otherwise the original attention function is called unchanged.
     """
 
@@ -110,9 +124,7 @@ class _Sparse24LTXAttentionWrapper:
     ) -> torch.Tensor:
         apply_sparse24, skip_diagonal_blocks = get_sparse24_context()
 
-        seq_q = q.shape[1]
-        seq_k = k.shape[1]
-        can_use_triton = apply_sparse24 and seq_q == seq_k
+        can_use_triton = apply_sparse24
 
         if can_use_triton:
             return _ltx_sparse24_attention(q, k, v, heads, skip_diagonal_blocks)

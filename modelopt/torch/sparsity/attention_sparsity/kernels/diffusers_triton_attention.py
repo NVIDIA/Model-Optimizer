@@ -73,19 +73,30 @@ def _diffusers_sparse24_attention(
 
     Reshapes to the packed ``[total, H, D]`` format expected by
     ``context_attention_fwd``, runs the kernel with ``apply_sparse24=True``,
-    and reshapes back.
+    and reshapes back.  Supports both self-attention (seq_q == seq_k) and
+    cross-attention (seq_q != seq_k).
     """
-    batch, seq_len, num_heads, head_dim = query.shape
+    batch, seq_q, num_heads, head_dim = query.shape
+    seq_k = key.shape[1]
     num_kv_heads = key.shape[2]
     device = query.device
 
-    q = query.reshape(batch * seq_len, num_heads, head_dim).contiguous()
-    k = key.reshape(batch * seq_len, num_kv_heads, head_dim).contiguous()
-    v = value.reshape(batch * seq_len, num_kv_heads, head_dim).contiguous()
+    q = query.reshape(batch * seq_q, num_heads, head_dim).contiguous()
+    k = key.reshape(batch * seq_k, num_kv_heads, head_dim).contiguous()
+    v = value.reshape(batch * seq_k, num_kv_heads, head_dim).contiguous()
     o = torch.empty_like(q)
 
-    b_start_loc = torch.arange(batch, device=device, dtype=torch.int32) * seq_len
-    b_seq_len = torch.full((batch,), seq_len, device=device, dtype=torch.int32)
+    b_start_loc = torch.arange(batch, device=device, dtype=torch.int32) * seq_q
+    b_seq_len = torch.full((batch,), seq_q, device=device, dtype=torch.int32)
+
+    if seq_q != seq_k:
+        b_start_loc_k = torch.arange(batch, device=device, dtype=torch.int32) * seq_k
+        b_seq_len_k = torch.full((batch,), seq_k, device=device, dtype=torch.int32)
+        max_input_len_k = seq_k
+    else:
+        b_start_loc_k = None
+        b_seq_len_k = None
+        max_input_len_k = None
 
     context_attention_fwd(
         q,
@@ -94,14 +105,17 @@ def _diffusers_sparse24_attention(
         o,
         b_start_loc=b_start_loc,
         b_seq_len=b_seq_len,
-        max_input_len=seq_len,
+        max_input_len=seq_q,
         is_causal=is_causal,
         softmax_scale=scale,
         apply_sparse24=True,
         skip_diagonal_blocks=skip_diagonal_blocks,
+        b_start_loc_k=b_start_loc_k,
+        b_seq_len_k=b_seq_len_k,
+        max_input_len_k=max_input_len_k,
     )
 
-    return o.view(batch, seq_len, num_heads, head_dim)
+    return o.view(batch, seq_q, num_heads, head_dim)
 
 
 # ---------------------------------------------------------------------------
@@ -149,9 +163,7 @@ def register_diffusers_triton_attention() -> bool:
     ) -> torch.Tensor:
         apply_sparse24, skip_diagonal_blocks = get_sparse24_context()
 
-        seq_q = query.shape[1]
-        seq_k = key.shape[1]
-        can_use_triton = apply_sparse24 and seq_q == seq_k
+        can_use_triton = apply_sparse24
 
         if can_use_triton:
             return _diffusers_sparse24_attention(
