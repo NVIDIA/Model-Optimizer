@@ -120,7 +120,11 @@ class QuantModule(DynamicModule):
             for name, param in parent_module.named_parameters():
                 # Skip params that belong to TensorQuantizer submodules
                 param_parent_name = name.rsplit(".", 1)[0] if "." in name else ""
-                param_parent = parent_module.get_submodule(param_parent_name)
+                param_parent = (
+                    parent_module.get_submodule(param_parent_name)
+                    if param_parent_name
+                    else parent_module
+                )
                 if not isinstance(param_parent, TensorQuantizer):
                     non_tq_param_or_buffer = param
                     break
