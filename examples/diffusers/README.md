@@ -126,7 +126,9 @@ python quantize.py \
     --extra-param spatial_upsampler_path=./ltx-2-spatial-upscaler-x2-1.0.safetensors \
     --extra-param gemma_root=./gemma-3-12b-it-qat-q4_0-unquantized \
     --extra-param fp8transformer=true \
-    --quantized-torch-ckpt-save-path ./ltx-2-transformer.pt
+    --quantized-torch-ckpt-save-path ./ltx-2-transformer.pt \
+    --hf-ckpt-dir ./LTX2-NVFP4/ \
+    --extra-param merged_base_safetensor_path=./ltx-2-19b-dev-fp8.safetensors
 ```
 
 #### Important Parameters
