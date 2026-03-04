@@ -54,9 +54,7 @@ def get_split_parquet_urls(dataset_id: str, split_name: str) -> list[str]:
     """
     all_files = list(list_repo_files(dataset_id, repo_type="dataset"))
     split_files = sorted(
-        f
-        for f in all_files
-        if f.endswith(".parquet") and Path(f).name.startswith(f"{split_name}-")
+        f for f in all_files if f.endswith(".parquet") and Path(f).name.startswith(f"{split_name}-")
     )
     if not split_files:
         err_msg = (
@@ -79,7 +77,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Maximum number of samples to load from the dataset. "
-            f"The chat split contains ~627,720 samples. "
+            "The chat split contains ~627,720 samples. "
             "If not provided, all samples are loaded."
         ),
     )
