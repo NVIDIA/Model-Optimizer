@@ -1369,7 +1369,25 @@ def _is_supported_hf_model(model):
     return isinstance(model, tuple(supported_models))
 
 
+def is_nemotron_h_model(model: nn.Module) -> bool:
+    return get_nemotron_h_decoder_layers(model) is not None
+
+
+def get_nemotron_h_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
+    if not _is_supported_hf_model(model):
+        return None
+
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        layers = model.model.layers
+        if len(layers) > 0 and hasattr(layers[0], "block_type"):
+            return layers
+
+    return None
+
+
 def is_homogenous_hf_model(model: nn.Module) -> bool:
+    if is_nemotron_h_model(model):
+        return False
     decoder_layers = get_homogeneous_hf_decoder_layers(model)
     if decoder_layers is None or len(decoder_layers) == 0:
         return False
@@ -1387,15 +1405,16 @@ def get_homogeneous_hf_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
     return None
 
 
-def build_hf_homogenous_next_layer_inputs_hook(model: nn.Module):
-    def _extract_hidden_states(layer_output):
-        if isinstance(layer_output, tuple):
-            return layer_output[0]
-        if isinstance(layer_output, dict):
-            if "hidden_states" in layer_output:
-                return layer_output["hidden_states"]
-        return layer_output
+def _extract_hidden_states(layer_output):
+    if isinstance(layer_output, tuple):
+        return layer_output[0]
+    if isinstance(layer_output, dict):
+        if "hidden_states" in layer_output:
+            return layer_output["hidden_states"]
+    return layer_output
 
+
+def build_hf_homogenous_next_layer_inputs_hook(model: nn.Module):
     def _build_next_layer_inputs_hook(prev_layer, cached_inputs):
         next_inputs = []
         for args, kwargs in cached_inputs:
@@ -1416,6 +1435,69 @@ def build_hf_homogenous_next_layer_inputs_hook(model: nn.Module):
         return next_inputs
 
     return _build_next_layer_inputs_hook
+
+
+def build_nemotron_h_next_layer_inputs_hook(model):
+    """Build a hook that propagates hidden_states and reconstructs per-block-type masks.
+
+    Captures the original attention_mask via a forward pre-hook on model.model, then
+    reconstructs the correct mask for each layer's block_type using create_causal_mask
+    (for attention) or _update_mamba_mask (for mamba).
+
+    Returns (hook, handle) where handle must be removed after first-layer collection.
+    """
+    inner_model = model.model
+    layers = inner_model.layers
+    next_block_type_for = {layers[i]: layers[i + 1].block_type for i in range(len(layers) - 1)}
+
+    update_mamba_mask = getattr(inner_model, "_update_mamba_mask", None)
+
+    try:
+        from transformers.masking_utils import create_causal_mask
+    except ImportError:
+        create_causal_mask = None
+
+    cached_original_masks = []
+
+    def _capture_attention_mask(module, args, kwargs):
+        cached_original_masks.append(kwargs.get("attention_mask"))
+
+    handle = inner_model.register_forward_pre_hook(_capture_attention_mask, with_kwargs=True)
+
+    base_hook = build_hf_homogenous_next_layer_inputs_hook(model)
+
+    def hook(prev_layer, cached_inputs):
+        next_inputs = base_hook(prev_layer, cached_inputs)
+
+        next_block_type = next_block_type_for.get(prev_layer)
+        if next_block_type is None:
+            return next_inputs
+
+        for i, (args, kwargs) in enumerate(next_inputs):
+            original_mask = cached_original_masks[i] if i < len(cached_original_masks) else None
+
+            if next_block_type == "mamba" and update_mamba_mask is not None:
+                mask = update_mamba_mask(original_mask, kwargs.get("cache_position"))
+            elif next_block_type == "attention" and create_causal_mask is not None:
+                hidden_states = args[0] if args else kwargs["hidden_states"]
+                mask = create_causal_mask(
+                    config=inner_model.config,
+                    input_embeds=hidden_states,
+                    attention_mask=original_mask,
+                    cache_position=kwargs.get("cache_position"),
+                    past_key_values=kwargs.get("past_key_values"),
+                    position_ids=kwargs.get("position_ids"),
+                )
+            else:
+                mask = None
+
+            next_kwargs = dict(kwargs)
+            next_kwargs["attention_mask"] = mask
+            next_inputs[i] = (args, next_kwargs)
+
+        return next_inputs
+
+    return hook, handle
 
 
 @contextmanager
@@ -1472,7 +1554,15 @@ AutoQuantizeGradientSearcher.register_custom_support(
 )
 
 LayerActivationCollector.register_decoder_layer_support(
+    is_nemotron_h_model, get_nemotron_h_decoder_layers
+)
+
+LayerActivationCollector.register_decoder_layer_support(
     is_homogenous_hf_model, get_homogeneous_hf_decoder_layers
+)
+
+LayerActivationCollector.register_next_layer_input_support(
+    is_nemotron_h_model, build_nemotron_h_next_layer_inputs_hook
 )
 
 LayerActivationCollector.register_next_layer_input_support(
