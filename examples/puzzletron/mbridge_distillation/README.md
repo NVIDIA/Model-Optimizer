@@ -11,21 +11,27 @@ This guide shows how to perform knowledge distillation on Puzzletron-compressed 
 
 ## Setup
 
+**Clone Model-Optimizer repo:**
+
+The NeMo container does not include Model-Optimizer examples, so you need to clone the Model-Optimizer repo:
+
+```bash
+export MODELOPT_DIR=${PWD}/Model-Optimizer
+git clone https://github.com/NVIDIA/Model-Optimizer.git ${MODELOPT_DIR}
+```
+
 **Start Docker container:**
 
 Use the [NeMo 26.02 container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo?version=26.02):
 
 ```bash
+# Recommended to mount a workspace directory for storing datasets and distilled models
 docker run --gpus all -it --rm \
   -v /path/to/your/project:/workspace \
+  -v ${MODELOPT_DIR}:/opt/Model-Optimizer \
+  -v ${MODELOPT_DIR}/modelopt:/opt/venv/lib/python3.12/site-packages/modelopt \
   nvcr.io/nvidia/nemo:26.02 \
   /bin/bash
-```
-
-**Set up the environment inside the container:**
-
-```bash
-export PYTHONPATH="/workspace/Model-Optimizer:${PYTHONPATH}"
 ```
 
 ## Dataset Preparation
@@ -58,6 +64,8 @@ This will create:
 Run distillation directly from HuggingFace checkpoints (student and teacher) with tokenized dataset:
 
 ```bash
+# Run from /opt/Model-Optimizer directory inside the container
+cd /opt/Model-Optimizer
 torchrun --nproc_per_node=8 examples/puzzletron/mbridge_distillation/distill_hf.py \
     --student_hf_path /path/to/student/huggingface/checkpoint \
     --teacher_hf_path /path/to/teacher/huggingface/checkpoint \

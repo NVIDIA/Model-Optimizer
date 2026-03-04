@@ -14,8 +14,6 @@
 # limitations under the License.
 
 
-from pathlib import Path
-
 import pytest
 import torch
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
@@ -41,9 +39,3 @@ def tiny_llama_path(tmp_path_factory):
             intermediate_size=512,
         )
     )
-
-
-@pytest.fixture
-def project_root_path(request: pytest.FixtureRequest) -> Path:
-    """Fixture providing the project root path for tests."""
-    return Path(request.config.rootpath)
