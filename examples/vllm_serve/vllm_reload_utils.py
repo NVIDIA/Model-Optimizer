@@ -20,8 +20,12 @@ from typing import Any
 
 import torch
 from vllm.distributed.parallel_state import get_tp_group
-from modelopt.torch.opt.conversion import ModeloptStateManager, _check_init_modellike, ModelLikeModule
 
+from modelopt.torch.opt.conversion import (
+    ModelLikeModule,
+    ModeloptStateManager,
+    _check_init_modellike,
+)
 from modelopt.torch.quantization.conversion import (
     convert_to_quantized_model,
     restore_quantizer_state,
@@ -180,7 +184,7 @@ def _merge_values_require_identical(merged_key: str, key_value_pairs: list[tuple
 def convert_dict_to_vllm(
     state_dict: dict[str, Any],
     merge_mode: str = "max_or_concat",
-    map_fun: Callable[[str, Any], tuple[str, Any]] = lambda x: x,
+    map_fun: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     Common implementation for converting quantizer state from HF to vLLM format.
@@ -207,12 +211,13 @@ def convert_dict_to_vllm(
             # Single key, just rename it
             _, value = key_value_pairs[0]
             vllm_state_dict[merged_key] = value
-
-    return map_fun(vllm_state_dict)
+    print(f"map_fun in convert_dict_to_vllm: {map_fun}")
+    return map_fun(vllm_state_dict) if map_fun is not None else vllm_state_dict
 
 
 def convert_modelopt_state_to_vllm(
-    modelopt_state: dict[str, Any], map_fun: Callable[[str, Any], tuple[str, Any]] = lambda x: x
+    modelopt_state: dict[str, Any],
+    map_fun: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     Convert modelopt state from HuggingFace format to vLLM compatible format.
@@ -277,9 +282,7 @@ def filter_modelopt_state_quantizer_state_for_model(
             saved = metadata["quantizer_state"]
             # Keep keys that exist in the model, but remove if quantizer is disabled
             filtered = {
-                k: v
-                for k, v in saved.items()
-                if k in model_keys and k not in disabled_keys
+                k: v for k, v in saved.items() if k in model_keys and k not in disabled_keys
             }
             # Add state for quantizers in model but not in metadata (e.g. disabled/excluded)
             for k in model_keys - filtered.keys():
