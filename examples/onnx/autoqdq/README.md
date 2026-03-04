@@ -4,22 +4,22 @@ This example demonstrates automated Q/DQ (Quantize/Dequantize) node placement op
 
 ## Table of Contents
 
-- [Prerequisites](#prerequisites)
-  - [Get the Model](#get-the-model)
-  - [Set Fixed Batch Size](#set-fixed-batch-size)
-  - [What's in This Directory](#whats-in-this-directory)
-- [Quick Start](#quick-start)
-  - [Basic Usage](#basic-usage)
-  - [FP8 Quantization](#fp8-quantization)
-  - [Faster Exploration](#faster-exploration)
-- [Output Structure](#output-structure)
-- [Region Inspection](#region-inspection)
-- [Using the Optimized Model](#using-the-optimized-model)
-- [Pattern Cache](#pattern-cache)
-- [Optimize from Existing QDQ Model](#optimize-from-existing-qdq-model)
-- [Remote Autotuning with TensorRT](#remote-autotuning-with-tensorrt)
-- [Programmatic API Usage](#programmatic-api-usage)
-- [Documentation](#documentation)
+<div align="center">
+
+| **Section** | **Description** | **Link** | **Docs** |
+| :------------: | :------------: | :------------: | :------------: |
+| Prerequisites | Get the model, set fixed batch size, and directory overview | [Link](#prerequisites) | |
+| Quick Start | Basic usage, FP8 quantization, and faster exploration | [Link](#quick-start) | |
+| Output Structure | Output workspace layout and files | [Link](#output-structure) | |
+| Region Inspection | Debug region discovery and partitioning | [Link](#region-inspection) | |
+| Using the Optimized Model | Deploy with TensorRT | [Link](#using-the-optimized-model) | |
+| Pattern Cache | Reuse learned patterns on similar models | [Link](#pattern-cache) | |
+| Optimize from Existing QDQ Model | Start from an existing quantized model | [Link](#optimize-from-existing-qdq-model) | |
+| Remote Autotuning with TensorRT | Offload autotuning to remote hardware | [Link](#remote-autotuning-with-tensorrt) | |
+| Programmatic API Usage | Python API and low-level control | [Link](#programmatic-api-usage) | |
+| Documentation | User guide and API reference | [Link](#documentation) | [docs](https://nvidia.github.io/Model-Optimizer/) |
+
+</div>
 
 ## Prerequisites
 
@@ -34,23 +34,16 @@ curl -L -o resnet50_Opset17.onnx https://github.com/onnx/models/raw/main/Compute
 
 ### Set Fixed Batch Size
 
-The downloaded model has a dynamic batch size. For best performance with TensorRT benchmarking, set a fixed batch size:
+The downloaded model has a dynamic batch size. For best performance with TensorRT benchmarking, set a fixed batch size using Polygraphy:
 
 ```bash
-# Set batch size to 128 using the provided script
-python3 set_batch_size.py resnet50_Opset17.onnx --batch-size 128 --output resnet50.bs128.onnx
-
-# Or for other batch sizes
-python3 set_batch_size.py resnet50_Opset17.onnx --batch-size 1 --output resnet50.bs1.onnx
+polygraphy surgeon sanitize --override-input-shapes x:[128,3,1024,1024] -o resnet50_Opset17_bs128.onnx resnet50_Opset17.onnx
 ```
 
-This creates `resnet50.bs128.onnx` with a fixed batch size of 128, which is optimal for TensorRT performance benchmarking.
-
-**Note:** The script requires the `onnx` package.
+For other batch sizes, change the first dimension in the shape (e.g. `x:[1,3,1024,1024]` for batch size 1).
 
 ### What's in This Directory
 
-- `set_batch_size.py` - Script to convert dynamic batch size models to fixed batch size
 - `README.md` - This guide
 
 **Note:** ONNX model files are not included in the repository (excluded via `.gitignore`). Download and prepare them using the instructions above.
@@ -64,7 +57,7 @@ Optimize the ResNet50 model with INT8 quantization:
 ```bash
 # Using the fixed batch size model
 python3 -m modelopt.onnx.quantization.autotune \
-    --onnx_path resnet50.bs128.onnx \
+    --onnx_path resnet50_Opset17_bs128.onnx \
     --output_dir ./resnet50_results \
     --quant_type int8 \
     --schemes_per_region 30
@@ -92,7 +85,7 @@ For FP8 quantization:
 
 ```bash
 python3 -m modelopt.onnx.quantization.autotune \
-    --onnx_path resnet50.bs128.onnx \
+    --onnx_path resnet50_Opset17_bs128.onnx \
     --output_dir ./resnet50_fp8_results \
     --quant_type fp8 \
     --schemes_per_region 50
@@ -104,7 +97,7 @@ For quick experiments, reduce the number of schemes:
 
 ```bash
 python3 -m modelopt.onnx.quantization.autotune \
-    --onnx_path resnet50.bs128.onnx \
+    --onnx_path resnet50_Opset17_bs128.onnx \
     --output_dir ./resnet50_quick \
     --schemes_per_region 15
 ```
@@ -133,16 +126,16 @@ To debug how the autotuner discovers and partitions regions in your model, use t
 
 ```bash
 # Basic inspection (regions with quantizable ops only)
-python3 -m modelopt.onnx.quantization.autotune.region_inspect --model resnet50.bs128.onnx
+python3 -m modelopt.onnx.quantization.autotune.region_inspect --model resnet50_Opset17_bs128.onnx
 
 # Verbose mode for detailed debug logging
-python3 -m modelopt.onnx.quantization.autotune.region_inspect --model resnet50.bs128.onnx --verbose
+python3 -m modelopt.onnx.quantization.autotune.region_inspect --model resnet50_Opset17_bs128.onnx --verbose
 
 # Custom maximum sequence region size
-python3 -m modelopt.onnx.quantization.autotune.region_inspect --model resnet50.bs128.onnx --max-sequence-size 20
+python3 -m modelopt.onnx.quantization.autotune.region_inspect --model resnet50_Opset17_bs128.onnx --max-sequence-size 20
 
 # Include all regions (including those without Conv/MatMul etc.)
-python3 -m modelopt.onnx.quantization.autotune.region_inspect --model resnet50.bs128.onnx --include-all-regions
+python3 -m modelopt.onnx.quantization.autotune.region_inspect --model resnet50_Opset17_bs128.onnx --include-all-regions
 ```
 
 Short option: `-m` for `--model`, `-v` for `--verbose`. Use this to verify region boundaries and counts before or during autotuning.
@@ -164,16 +157,16 @@ Reuse learned patterns on similar models (warm-start):
 ```bash
 # First optimization on ResNet50
 python3 -m modelopt.onnx.quantization.autotune \
-    --onnx_path resnet50.bs128.onnx \
+    --onnx_path resnet50_Opset17_bs128.onnx \
     --output_dir ./resnet50_run
 
 # Download and prepare ResNet101 (or any similar model)
-curl -L -o resnet101_Opset17.onnx https://github.com/onnx/models/blob/main/Computer_Vision/resnet101_Opset17_torch_hub/resnet101_Opset17.onnx
-python3 set_batch_size.py resnet101_Opset17.onnx --batch-size 128 --output resnet101.bs128.onnx
+curl -L -o resnet101_Opset17.onnx https://github.com/onnx/models/raw/main/Computer_Vision/resnet101_Opset17_torch_hub/resnet101_Opset17.onnx
+polygraphy surgeon sanitize --override-input-shapes x:[128,3,1024,1024] -o resnet101_Opset17_bs128.onnx resnet101_Opset17.onnx
 
 # Reuse patterns from ResNet50 on ResNet101 
 python3 -m modelopt.onnx.quantization.autotune \
-    --onnx_path resnet101.bs128.onnx \
+    --onnx_path resnet101_Opset17_bs128.onnx \
     --output_dir ./resnet101_run \
     --pattern_cache ./resnet50_run/autotuner_state_pattern_cache.yaml
 ```
@@ -185,7 +178,7 @@ If the user already have a quantized model, he can use it as a starting point to
 ```bash
 # Use an existing QDQ model as baseline (imports quantization patterns)
 python3 -m modelopt.onnx.quantization.autotune \
-    --onnx_path resnet50.bs128.onnx \
+    --onnx_path resnet50_Opset17_bs128.onnx \
     --output_dir ./resnet50_improved \
     --qdq_baseline resnet50_quantized.onnx \
     --schemes_per_region 40
@@ -216,7 +209,7 @@ from modelopt.onnx.quantization import quantize
 # Create dummy calibration data (replace with real data for production)
 dummy_input = np.random.randn(128, 3, 224, 224).astype(np.float32)
 quantize(
-    'resnet50.bs128.onnx',
+    'resnet50_Opset17_bs128.onnx',
     calibration_data=dummy_input,
     calibration_method='entropy',
     output_path='resnet50_quantized.onnx'
@@ -226,7 +219,7 @@ quantize(
 # Step 2: Use the quantized baseline for autotuning
 # The autotuner will try to find better Q/DQ placements than the initial quantization
 python3 -m modelopt.onnx.quantization.autotune \
-    --onnx_path resnet50.bs128.onnx \
+    --onnx_path resnet50_Opset17_bs128.onnx \
     --output_dir ./resnet50_autotuned \
     --qdq_baseline resnet50_quantized.onnx \
     --schemes_per_region 50
@@ -242,7 +235,7 @@ To use remote autotuning during Q/DQ placement optimization, run with `trtexec` 
 
 ```bash
 python3 -m modelopt.onnx.quantization.autotune \
-    --onnx_path resnet50.bs128.onnx \
+    --onnx_path resnet50_Opset17_bs128.onnx \
     --output_dir ./resnet50_remote_autotuned \
     --schemes_per_region 50 \
     --use_trtexec \
