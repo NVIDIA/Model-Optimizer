@@ -831,6 +831,7 @@ class LayerActivationCollector:
         self.model = model
         self._previous_layer = None
         self._previous_layer_inputs = None
+        self._next_layer_inputs_hook = None
 
     @staticmethod
     def get_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
@@ -887,11 +888,19 @@ class LayerActivationCollector:
             del layer.inputs
 
     def _resolve_next_layer_inputs_hook(self):
+        """Resolve the next-layer inputs hook from the registry.
+
+        Returns (hook, handle) where handle is an optional RemovableHandle for
+        pre-collection cleanup. If the factory returns just a hook, handle is None.
+        """
         for is_supported, build_next_layer_inputs_hook in self._next_layer_input_support:
             if not is_supported(self.model):
                 continue
-            return build_next_layer_inputs_hook(self.model)
-        return None
+            result = build_next_layer_inputs_hook(self.model)
+            if isinstance(result, tuple):
+                return result
+            return result, None
+        return None, None
 
     @torch.no_grad()
     def _collect_input_activations(self, layer: torch.nn.Module, forward_loop: ForwardLoop) -> list:
@@ -917,13 +926,14 @@ class LayerActivationCollector:
     def get_input_activations(self, layer: torch.nn.Module, forward_loop: ForwardLoop) -> list:
         is_first_layer = self._previous_layer is None or self._previous_layer_inputs is None
         if is_first_layer:
+            self._next_layer_inputs_hook, handle = self._resolve_next_layer_inputs_hook()
+            inputs = self._collect_input_activations(layer, forward_loop)
+            if handle is not None:
+                handle.remove()
+        elif self._next_layer_inputs_hook is None:
             inputs = self._collect_input_activations(layer, forward_loop)
         else:
-            next_layer_inputs_hook = self._resolve_next_layer_inputs_hook()
-            if next_layer_inputs_hook is None:
-                inputs = self._collect_input_activations(layer, forward_loop)
-            else:
-                inputs = next_layer_inputs_hook(self._previous_layer, self._previous_layer_inputs)
+            inputs = self._next_layer_inputs_hook(self._previous_layer, self._previous_layer_inputs)
 
         self._previous_layer = layer
         self._previous_layer_inputs = inputs
