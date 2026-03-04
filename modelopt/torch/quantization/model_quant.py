@@ -30,7 +30,7 @@ from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.opt.utils import forward_with_reshard
 from modelopt.torch.quantization.config import QuantizeConfig
 from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
-from modelopt.torch.utils import atomic_print, print_rank_0
+from modelopt.torch.utils import atomic_print
 
 from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher, QuantRecipe
 from .config import QuantizeAlgoCfgType
@@ -588,13 +588,6 @@ def compute_quantization_mse(
             continue
         if not _matches(name):
             continue
-        if not (module._if_quant and module._fake_quant):
-            print_rank_0(
-                f"[compute_quantization_mse] Skipping {name}: "
-                f"_if_quant={module._if_quant}, _fake_quant={module._fake_quant}"
-            )
-            continue
-
         accumulators[name] = {"sum": 0.0, "count": 0}
 
         def _make_hook(acc):
@@ -608,10 +601,11 @@ def compute_quantization_mse(
 
         hooks.append(module.register_forward_hook(_make_hook(accumulators[name])))
 
-    forward_loop(model)
-
-    for h in hooks:
-        h.remove()
+    try:
+        forward_loop(model)
+    finally:
+        for h in hooks:
+            h.remove()
 
     return {
         name: acc["sum"] / acc["count"] for name, acc in accumulators.items() if acc["count"] > 0
