@@ -30,6 +30,7 @@ docker run --gpus all -it --rm \
   -v /path/to/your/project:/workspace \
   -v ${MODELOPT_DIR}:/opt/Model-Optimizer \
   -v ${MODELOPT_DIR}/modelopt:/opt/venv/lib/python3.12/site-packages/modelopt \
+  -w /opt/Model-Optimizer \
   nvcr.io/nvidia/nemo:26.02 \
   /bin/bash
 ```
@@ -64,8 +65,6 @@ This will create:
 Run distillation directly from HuggingFace checkpoints (student and teacher) with tokenized dataset:
 
 ```bash
-# Run from /opt/Model-Optimizer directory inside the container
-cd /opt/Model-Optimizer
 torchrun --nproc_per_node=8 examples/puzzletron/mbridge_distillation/distill_hf.py \
     --student_hf_path /path/to/student/huggingface/checkpoint \
     --teacher_hf_path /path/to/teacher/huggingface/checkpoint \
