@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from pathlib import Path
-
 import pytest
 import torch
 import torch.distributed as dist
@@ -59,9 +57,3 @@ def set_torch_dtype(request):
 @pytest.fixture(scope="session", autouse=True)
 def enable_hf_checkpointing():
     mto.enable_huggingface_checkpointing()
-
-
-@pytest.fixture
-def project_root_path(request: pytest.FixtureRequest) -> Path:
-    """Fixture providing the project root path for tests."""
-    return Path(request.config.rootpath)

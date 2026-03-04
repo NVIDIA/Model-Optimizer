@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import platform
+from pathlib import Path
 
 import pytest
 
@@ -57,3 +58,9 @@ def pytest_collection_modifyitems(config, items):
 def skip_on_windows():
     if platform.system() == "Windows":
         pytest.skip("Skipping on Windows")
+
+
+@pytest.fixture
+def project_root_path(request: pytest.FixtureRequest) -> Path:
+    """Fixture providing the project root path for tests."""
+    return Path(request.config.rootpath)
