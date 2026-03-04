@@ -211,7 +211,6 @@ def convert_dict_to_vllm(
             # Single key, just rename it
             _, value = key_value_pairs[0]
             vllm_state_dict[merged_key] = value
-    print(f"map_fun in convert_dict_to_vllm: {map_fun}")
     return map_fun(vllm_state_dict) if map_fun is not None else vllm_state_dict
 
 
