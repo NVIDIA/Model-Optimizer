@@ -44,6 +44,7 @@ from eagle_utils import (
     patch_ring_attention_for_ttt,
 )
 from medusa_utils import make_medusa_supervised_data_module
+from packaging.version import Version
 from transformers.trainer_utils import get_last_checkpoint
 
 import modelopt.torch.opt as mto
@@ -53,6 +54,8 @@ from modelopt.torch.speculative.utils import (
     patch_transformers5_params_loading,
 )
 from modelopt.torch.utils import print_rank_0
+
+TRANSFORMERS_VERSION = Version(transformers.__version__)
 
 torch.manual_seed(0)
 mto.enable_huggingface_checkpointing()
@@ -142,9 +145,10 @@ def train():
     model_args, data_args, training_args, medusa_args, eagle_args = (
         parser.parse_args_into_dataclasses()
     )
-    training_args.parallelism_config = ParallelismConfig(
-        cp_size=training_args.cp_size, dp_shard_size=training_args.dp_shard_size
-    )
+    if Version("5.0") <= TRANSFORMERS_VERSION:
+        training_args.parallelism_config = ParallelismConfig(
+            cp_size=training_args.cp_size, dp_shard_size=training_args.dp_shard_size
+        )
     if training_args.cp_size > 1:
         patch_ring_attention_for_ttt()
         # Specific patch to accelerate 1.12.0. Removable after move to 1.13.0

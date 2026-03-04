@@ -122,9 +122,16 @@ set -x
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 NUM_NODES=${NUM_NODES:-1}
-GPU_PER_NODE=${GPU_PER_NODE:-$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)}
-TOTAL_GPU=$((NUM_NODES * GPU_PER_NODE))
-echo "Total GPUs: $TOTAL_GPU (NUM_NODES: $NUM_NODES, GPU_PER_NODE: $GPU_PER_NODE)"
+if [[ "$NUM_NODES" != 1 ]]; then
+  #Multi Node Training
+  GPU_PER_NODE=${GPU_PER_NODE:-$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)}
+  TOTAL_GPU=$((NUM_NODES * GPU_PER_NODE))
+  echo "Total GPUs: $TOTAL_GPU (NUM_NODES: $NUM_NODES, GPU_PER_NODE: $GPU_PER_NODE)"
+else
+  #Single Node Training, GPU can be specified by $CUDA_VISIBLE_DEVICES
+  TOTAL_GPU=$(python -c "import torch; print(torch.cuda.device_count())")
+  echo "Total GPUs: $TOTAL_GPU (Single Node Training)"
+fi
 # Calculate save_steps
 DEFAULT_SAVE_STEPS=$((8192 / TOTAL_GPU))
 
@@ -180,14 +187,16 @@ else
   VLM_ARGS=""
 fi
 
+FSDP_ARGS=""
 if [[ "$TOTAL_GPU" -gt 1 ]]; then
-  #Use FSDP2 when multi GPU available
-  FSDP_ARGS="--fsdp 'full_shard' --fsdp_config ${SCRIPT_DIR}/fsdp_config.json"
-else
-  #Otherwise, single GPU training
-  FSDP_ARGS=""
+  # Use FSDP when multi GPU available, default to FSDP1
+  FSDP_ARGS="$FSDP_ARGS --fsdp 'full_shard'"
+  TRANSFORMERS_5=$(python -c "from packaging.version import Version; import transformers; print(Version(transformers.__version__) >= Version('5.0'))" 2>/dev/null)
+  if [[ "$TRANSFORMERS_5" == "True" ]]; then
+    # For transformers >= 5.0, use FSDP2
+    FSDP_ARGS="$FSDP_ARGS --fsdp_config ${SCRIPT_DIR}/fsdp_config.json"
+  fi
 fi
-
 
 if [[ "$DRAFT_VOCAB_CACHE" != "" ]]; then
   DRAFT_VOCAB_CACHE_ARGS="--draft_vocab_cache $DRAFT_VOCAB_CACHE"

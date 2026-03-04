@@ -422,11 +422,9 @@ def _setup_kimi_k2_decoder():
     # Import required modules
     config_module_path = os.path.join(kimi_k2_path, "configuration_deepseek.py")
     model_module_path = os.path.join(kimi_k2_path, "modeling_deepseek.py")
-
     _import_module_from_path(
         config_module_path, f"{KIMI_K2_PACKAGE_NAME}.configuration_deepseek", KIMI_K2_PACKAGE_NAME
     )
-
     kimi_k2_module = _import_module_from_path(
         model_module_path, f"{KIMI_K2_PACKAGE_NAME}.modeling_deepseek", KIMI_K2_PACKAGE_NAME
     )
@@ -442,6 +440,16 @@ def _setup_kimi_k2_decoder():
 
     kimi_k2_module.DeepseekV3Attention._init_rope = lambda self: None
     kimi_k2_module.DeepseekV3Attention.forward = patched_fwd_with_lazy_rope_init
+
+    # Kimi implementation is based on older transformers which use "past_key_value" argument
+    # We patch it to "past_key_values" for compatibility
+    original_decoder_layer_forward = kimi_k2_module.DeepseekV3DecoderLayer.forward
+
+    def patched_decoder_layer_fwd(self, *args, **kwargs):
+        kwargs["past_key_value"] = kwargs.get("past_key_values")
+        return original_decoder_layer_forward(self, *args, **kwargs)
+
+    kimi_k2_module.DeepseekV3DecoderLayer.forward = patched_decoder_layer_fwd
 
     return getattr(kimi_k2_module, "DeepseekV3DecoderLayer")
 
