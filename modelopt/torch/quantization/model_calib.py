@@ -34,7 +34,7 @@ from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelSt
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
 
-from .calib import MseCalibrator, NVFP4MSECalibrator
+from .calib import MaxCalibrator, MseCalibrator, NVFP4MSECalibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
 from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import (
@@ -284,11 +284,11 @@ def mse_calibrate(
     stop_multiplier: float = 4.0,
     fp8_scale_sweep: bool = False,
 ):
-    """Calibrate the model using MSE-based amax search.
+    """Calibrate the model using MSE-based amax search (weight quantizers only).
 
-    This calibration method first uses max calibration to get initial amax values,
-    then searches for better amax values by minimizing the MSE between original
-    and quantized tensors.
+    This calibration method first uses max calibration to get initial amax values
+    for all quantizers, then runs MSE-based amax search only for weight
+    quantizers. Activation quantizers keep their max-calibration amax.
 
     Args:
         model: Model to be calibrated.
@@ -406,7 +406,37 @@ def mse_calibrate(
             torch.cuda.synchronize(torch.device(f"cuda:{dev_id}"))
         torch.cuda.empty_cache()
 
+    replace_mse_calibrators_with_max(model)
+
     # TODO: Sync amax across distributed processes
+
+
+def replace_mse_calibrators_with_max(model: nn.Module) -> int:
+    """Replace MseCalibrator and NVFP4MSECalibrator with MaxCalibrator after calibration.
+
+    Call this after :func:`mse_calibrate` or :func:`local_hessian_calibrate` so that
+    downstream steps (e.g. GPTQ or another calibration pass) can run correctly, since
+    advanced algorithms (MSE, local_hessian) all start with max calibration and expect
+    MaxCalibrator on quantizers that still need calibration.
+
+    Args:
+        model: The calibrated model.
+
+    Returns:
+        Number of calibrators replaced.
+    """
+    replaced_count = 0
+    for name, module in model.named_modules():
+        if isinstance(module, TensorQuantizer) and not module._disabled:
+            if hasattr(module, "_calibrator") and module._calibrator is not None:
+                if isinstance(module._calibrator, (MseCalibrator, NVFP4MSECalibrator)):
+                    module._calibrator = MaxCalibrator(
+                        num_bits=module._num_bits,
+                        axis=module._axis,
+                        unsigned=module._unsigned,
+                    )
+                    replaced_count += 1
+    return replaced_count
 
 
 @torch.no_grad()
@@ -421,7 +451,10 @@ def local_hessian_calibrate(
     block_size: int = 16,
     debug: bool = False,
 ):
-    """Calibrate the model using local Hessian-weighted MSE search.
+    """Calibrate the model using local Hessian-weighted MSE search (weight quantizers only).
+
+    Only weight quantizers are calibrated; activation quantizers keep their
+    max-calibration amax from the initial max calibration pass.
 
     Instead of minimizing weight error ``||W - Wq||²``, this minimizes Hessian-weighted error
     ``loss = (W - Wq)ᵀ H (W - Wq)`` where ``H = X @ X.T`` approximates output reconstruction
@@ -542,12 +575,18 @@ def local_hessian_calibrate(
             # Capture quantized input from the forward pass for Hessian collection
             captured_quantized = [None]
             original_forward = None
-            if self.hessian_helper.is_enabled and hasattr(self, "input_quantizer") and self.input_quantizer.is_enabled:
+            if (
+                self.hessian_helper.is_enabled
+                and hasattr(self, "input_quantizer")
+                and self.input_quantizer.is_enabled
+            ):
                 original_forward = self.input_quantizer.forward
 
                 def capture_forward(input_tensor):
                     quantized = original_forward(input_tensor)
-                    captured_quantized[0] = quantized.to_local() if hasattr(quantized, "to_local") else quantized
+                    captured_quantized[0] = (
+                        quantized.to_local() if hasattr(quantized, "to_local") else quantized
+                    )
                     return quantized
 
                 self.input_quantizer.forward = capture_forward
@@ -710,6 +749,8 @@ def local_hessian_calibrate(
     LocalHessianHelper.cache_mode = False
     for name, module in all_patched_modules:
         module.hessian_helper.cleanup()
+
+    replace_mse_calibrators_with_max(model)
 
     print_rank_0("local_hessian: Calibration complete.")
 
