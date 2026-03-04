@@ -184,7 +184,7 @@ def _merge_values_require_identical(merged_key: str, key_value_pairs: list[tuple
 
 def convert_dict_to_vllm(
     state_dict: dict[str, Any],
-    merge_mode: str = "max_or_concat",
+    max_or_concat: bool = True,
     map_fun: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
@@ -192,16 +192,12 @@ def convert_dict_to_vllm(
 
     Args:
         state_dict: Input state dict
-        fuse_experts: Whether to fuse expert projections
-        merge_mode: Mode to merge grouped values, "max_or_concat" or "require_identical"
+        max_or_concat: Whether to merge grouped values by taking max/concatenate or require identical
+        map_fun: Function to map the state dict to vLLM format
     """
     vllm_state_dict, merge_groups = _group_keys_for_vllm(state_dict)
 
-    merge_fn = (
-        _merge_values_require_identical
-        if merge_mode == "require_identical"
-        else _merge_values_by_max_or_concat
-    )
+    merge_fn = _merge_values_by_max_or_concat if max_or_concat else _merge_values_require_identical
 
     # Merge grouped values
     for merged_key, key_value_pairs in merge_groups.items():
@@ -236,7 +232,7 @@ def convert_modelopt_state_to_vllm(
         current_mode_quant_state = current_mode_metadata.pop("quantizer_state", {})
         if current_mode_quant_state:
             current_mode_metadata["quantizer_state"] = convert_dict_to_vllm(
-                current_mode_quant_state, merge_mode="require_identical", map_fun=map_fun
+                current_mode_quant_state, max_or_concat=False, map_fun=map_fun
             )
         else:
             current_mode_metadata.pop("quantizer_state", None)
@@ -338,30 +334,41 @@ def process_state_dict_for_tp(saved_qstate_dict, current_state_dict):
     result = {}
     for key, value in saved_qstate_dict.items():
         if key in current_state_dict:
-            expected_shape = current_state_dict[key].shape
-            if value.shape != expected_shape:
+            expected = current_state_dict[key]
+            if not hasattr(value, "shape") or not hasattr(expected, "shape"):
+                result[key] = value
+                continue
+            expected_shape = expected.shape
+            value_shape = value.shape
+            if value_shape != expected_shape:
+                # Verify compatible rank before indexing
+                if len(value_shape) != len(expected_shape):
+                    raise ValueError(
+                        f"Cannot infer TP shard dim for {key}: rank mismatch "
+                        f"(checkpoint rank={len(value_shape)}, expected rank={len(expected_shape)})"
+                    )
                 # Find the dimension that was tensor-parallel sharded.
                 # We expect exactly one dimension to satisfy:
                 #   checkpoint_dim == expected_dim * tp_world_size
                 shard_dims = [
                     d
                     for d in range(len(expected_shape))
-                    if value.shape[d] == expected_shape[d] * tp_world_size
+                    if value_shape[d] == expected_shape[d] * tp_world_size
                 ]
                 if len(shard_dims) != 1:
                     raise ValueError(
                         f"Cannot infer TP shard dim for {key}: "
-                        f"expected_shape={tuple(expected_shape)}, checkpoint_shape={tuple(value.shape)}, "
+                        f"expected_shape={tuple(expected_shape)}, checkpoint_shape={tuple(value_shape)}"
                     )
 
                 shard_dim = shard_dims[0]
                 shard_size = expected_shape[shard_dim]
                 start = tp_rank * shard_size
                 end = start + shard_size
-                if end > value.shape[shard_dim]:
+                if end > value_shape[shard_dim]:
                     raise ValueError(
                         f"TP shard out of bounds for {key}: "
-                        f"expected_shape={tuple(expected_shape)}, checkpoint_shape={tuple(value.shape)})"
+                        f"expected_shape={tuple(expected_shape)}, checkpoint_shape={tuple(value_shape)}"
                     )
                 value = value.narrow(shard_dim, start, shard_size).contiguous()
         result[key] = value
