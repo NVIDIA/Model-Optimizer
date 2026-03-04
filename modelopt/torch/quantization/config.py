@@ -697,13 +697,11 @@ MXFP4_MLP_WEIGHT_ONLY_CFG = {
             "num_bits": (2, 1),
             "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             "enable": True,
-            "pass_through_bwd": True,
         },
         "*block_sparse_moe*weight_quantizer": {
             "num_bits": (2, 1),
             "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             "enable": True,
-            "pass_through_bwd": True,
         },
         **_default_disabled_quantizer_cfg,
     },
@@ -720,7 +718,6 @@ NVFP4_MLP_WEIGHT_ONLY_CFG = {
                 "scale_bits": (4, 3),
             },  # Note: block_size is 32 here
             "enable": True,
-            "pass_through_bwd": True,
         },
         "*block_sparse_moe*weight_quantizer": {
             "num_bits": (2, 1),
@@ -730,7 +727,6 @@ NVFP4_MLP_WEIGHT_ONLY_CFG = {
                 "scale_bits": (4, 3),
             },  # Note: block_size is 32 here
             "enable": True,
-            "pass_through_bwd": True,
         },
         **_default_disabled_quantizer_cfg,
     },
@@ -741,7 +737,6 @@ _nvfp4_quantizer = {
     "num_bits": (2, 1),
     "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
     "enable": True,
-    "pass_through_bwd": True,
 }
 
 _nvfp4_mlp_only_quant_cfg = {
@@ -1100,7 +1095,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
     )
 
     pass_through_bwd: bool = ModeloptField(
-        default=False,
+        default=True,
         title="If set to true, fake quantization will be a pass through for gradient computation.",
         description="""
         Gradient computation where fake quantization is pass through is called
