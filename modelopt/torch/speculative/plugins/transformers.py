@@ -908,14 +908,11 @@ class HFEagleModel(EagleModel):
         # ====Run eagle forward with extra training-time-test steps====
         for ttt_step in range(self.eagle_ttt_steps):
             # TODO: (hg) during cp training, this mask is not used. Maybe turn it off then.
-            if self.eagle_mix_hidden_states:
-                eagle_attention_mask = eagle_attn_mask_0
-            else:
-                eagle_attention_mask = (
-                    eagle_attn_mask_0
-                    if ttt_step == 0
-                    else self._get_ttt_attention_mask(b, seq_length, ttt_step)
-                )
+            eagle_attention_mask = (
+                eagle_attn_mask_0
+                if self.eagle_mix_hidden_states or ttt_step == 0
+                else self._get_ttt_attention_mask(b, seq_length, ttt_step)
+            )
             with (
                 enable_cp_ttt_patch()
                 if self.training and not self.eagle_mix_hidden_states
@@ -935,20 +932,14 @@ class HFEagleModel(EagleModel):
                 num_to_replace = max(1, seq_len_s // (2**ttt_step + 1))
 
                 # Randomly select positions for each batch to replace
-                rand_indices = torch.stack(
-                    [
-                        torch.randperm(seq_len_s, device=eagle_input_hiddens.device)[
-                            :num_to_replace
-                        ]
-                        for _ in range(batch_size)
-                    ],
-                    dim=0,
-                )
+                rand_indices = torch.rand(
+                    batch_size, seq_len_s, device=eagle_input_hiddens.device
+                ).argsort(dim=1)[:, :num_to_replace]
 
-                for batch_idx in range(batch_size):
-                    eagle_input_hiddens[batch_idx, rand_indices[batch_idx], :] = (
-                        eagle_output_hiddens[batch_idx, rand_indices[batch_idx], :]
-                    )
+                batch_indices = torch.arange(batch_size)[:, None]
+                eagle_input_hiddens[batch_indices, rand_indices] = eagle_output_hiddens[
+                    batch_indices, rand_indices
+                ]
             else:
                 eagle_input_hiddens = eagle_output_hiddens
 
