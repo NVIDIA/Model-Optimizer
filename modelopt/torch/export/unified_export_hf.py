@@ -87,7 +87,7 @@ from .model_config import (
     QUANTIZATION_W4A8_NVFP4_FP8,
 )
 from .model_utils import get_language_model_from_vl, is_multimodal_model
-from .plugins import export_spec_ckpt_config, export_spec_ckpt_state_dict, spec_opt_only
+from .plugins import SpeculativeDecodingExporter, has_spec_opt
 from .quant_utils import (
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
@@ -104,7 +104,7 @@ from .quant_utils import (
     to_quantized_weight,
 )
 
-__all__ = ["export_hf_checkpoint"]
+__all__ = ["export_hf_checkpoint", "export_speculative_decoding"]
 
 
 def _is_enabled_quantizer(quantizer):
@@ -1086,6 +1086,18 @@ def _unpatch_revert_weight_conversion(patches: list[tuple[Any, Any]]) -> None:
         mod.revert_weight_conversion = original
 
 
+def export_speculative_decoding(
+    model: torch.nn.Module,
+    dtype: torch.dtype | None = None,
+    export_dir: Path | str = tempfile.gettempdir(),
+) -> None:
+    """Export speculative decoding HuggingFace model checkpoint."""
+    assert has_spec_opt(model), "Model is not optimized for speculative decoding."
+
+    exporter: SpeculativeDecodingExporter = model.get_exporter()
+    exporter.export(export_dir, dtype)
+
+
 def export_hf_checkpoint(
     model: Any,
     dtype: torch.dtype | None = None,
@@ -1130,15 +1142,6 @@ def export_hf_checkpoint(
         _export_diffusers_checkpoint(
             model, dtype, export_dir, components, merged_base_safetensor_path
         )
-        return
-
-    # Transformers model export
-    # NOTE: (hg) Early exit for speculative decoding models
-    # This is a temp workaround to avoid error with offline spec ckpt during export
-    if spec_opt_only(model):
-        save_file(export_spec_ckpt_state_dict(model), f"{export_dir}/model.safetensors")
-        with open(f"{export_dir}/config.json", "w") as file:
-            json.dump(export_spec_ckpt_config(model), file, indent=4)
         return
 
     try:
