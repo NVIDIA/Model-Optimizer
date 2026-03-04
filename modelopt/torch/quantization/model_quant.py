@@ -537,6 +537,7 @@ def fold_weight(model: nn.Module, keep_attrs: bool = False):
         if isinstance(module, QuantModule):
             module.fold_weight(keep_attrs)
 
+
 @torch.no_grad()
 def compute_quantization_mse(
     model: nn.Module,
