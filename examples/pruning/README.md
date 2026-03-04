@@ -212,35 +212,6 @@ Checkout the BERT pruning example in [chained_optimizations](../chained_optimiza
 which showcases the usage of GradNAS for pruning BERT model for Question Answering followed by fine-tuning
 with distillation and quantization. The example also demonstrates how to save and restore pruned models.
 
-## Examples
-
-### Minitron Pruning for Megatron-LM / NeMo Framework LLMs (e.g. Qwen 3, Nemotron Nano)
-
-Checkout the Minitron pruning example for the [Megatron-LM Framework](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt#-pruning) or [NeMo Framework](https://docs.nvidia.com/nemo-framework/user-guide/latest/model-optimization/pruning/pruning.html) which showcases the usage of the powerful Minitron pruning algorithm developed by NVIDIA Research for pruning LLMs like Llama-3.1-8B, Qwen3-8B, Nemotron-Nano-9B-v2, Nemotron-3-Nano-30B-A3B, etc.
-Both frameworks support importing from a Hugging Face pretrained checkpoint.
-
-You can also look at the NeMo tutorial notebooks [here](https://github.com/NVIDIA-NeMo/NeMo/tree/main/tutorials/llm/qwen/pruning-distillation) which showcase the usage of Minitron pruning followed by distillation for Qwen3-8B step-by-step in NeMo framework. Hugging Face models can also be converted to NeMo format and used subsequently as shown in the tutorial.
-
-Some of the models pruned using Minitron method followed by distillation and post-training are:
-
-- [Minitron Collection on Hugging Face](https://huggingface.co/collections/nvidia/minitron)
-- [NVIDIA-Nemotron-Nano-9B-v2](https://huggingface.co/nvidia/NVIDIA-Nemotron-Nano-9B-v2)
-
-### FastNAS Pruning for PyTorch Computer Vision Models
-
-Check out the FastNAS pruning example usage in the [documentation](https://nvidia.github.io/Model-Optimizer/guides/3_pruning.html#pruning-and-subnet-search).
-
-You can also take a look at FastNAS pruning interactive notebook [cifar_resnet](./cifar_resnet.ipynb) in this directory
-which showcases the usage of FastNAS for pruning a ResNet 20 model for the CIFAR-10 dataset. The notebook
-also shows how to profile the model to understand the search space of possible pruning options and demonstrates
-how to save and restore pruned models.
-
-### GradNAS Pruning for HuggingFace Language Models (e.g. BERT)
-
-Checkout the BERT pruning example in [chained_optimizations](../chained_optimizations/README.md) directory
-which showcases the usage of GradNAS for pruning BERT model for Question Answering followed by fine-tuning
-with distillation and quantization. The example also demonstrates how to save and restore pruned models.
-
 ## Pruning Guidelines
 
 ### Minitron
