@@ -699,6 +699,12 @@ MXFP4_MLP_WEIGHT_ONLY_CFG = {
             "enable": True,
             "pass_through_bwd": True,
         },
+        "*block_sparse_moe*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "enable": True,
+            "pass_through_bwd": True,
+        },
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": None,
@@ -716,26 +722,46 @@ NVFP4_MLP_WEIGHT_ONLY_CFG = {
             "enable": True,
             "pass_through_bwd": True,
         },
+        "*block_sparse_moe*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {
+                -1: 32,
+                "type": "dynamic",
+                "scale_bits": (4, 3),
+            },  # Note: block_size is 32 here
+            "enable": True,
+            "pass_through_bwd": True,
+        },
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": "max",
 }
 
+_nvfp4_quantizer = {
+    "num_bits": (2, 1),
+    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+    "enable": True,
+    "pass_through_bwd": True,
+}
+
+_nvfp4_mlp_only_quant_cfg = {
+    "*mlp*weight_quantizer": _nvfp4_quantizer,
+    "*mlp*input_quantizer": _nvfp4_quantizer,
+    "*block_sparse_moe*weight_quantizer": _nvfp4_quantizer,
+    "*block_sparse_moe*input_quantizer": _nvfp4_quantizer,
+    **_default_disabled_quantizer_cfg,
+}
+
 NVFP4_MLP_ONLY_CFG = {
+    "quant_cfg": _nvfp4_mlp_only_quant_cfg,
+    "algorithm": "max",
+}
+
+NVFP4_OMLP_ONLY_CFG = {
     "quant_cfg": {
-        "*mlp*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "enable": True,
-            "pass_through_bwd": True,
-        },
-        "*mlp*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "enable": True,
-            "pass_through_bwd": True,
-        },
-        **_default_disabled_quantizer_cfg,
+        "*o_proj*weight_quantizer": _nvfp4_quantizer,
+        "*o_proj*input_quantizer": _nvfp4_quantizer,
+        **_nvfp4_mlp_only_quant_cfg,
     },
     "algorithm": "max",
 }
@@ -1081,7 +1107,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         'Straight-Through Estimator (STE)'. STE does not require saving of the input tensor for
         performing backward pass and hence consumes less memory.
 
-        If set to False, we will use STE with zeroed outlier gradients. This setting could
+        If set to False, we will use STE with zeroed outlier gradients. This setting may
         yield better QAT accuracy depending on the quantization format. However, this setting
         requires saving of the input tensor for computing gradients which uses more memory.
 
