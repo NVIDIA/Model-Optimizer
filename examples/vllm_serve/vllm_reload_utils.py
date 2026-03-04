@@ -32,6 +32,7 @@ from modelopt.torch.quantization.conversion import (
 )
 from modelopt.torch.quantization.utils import is_quantized
 
+
 def _values_equal(v1: Any, v2: Any) -> bool:
     """Compare values, handling dicts with tensors."""
     if isinstance(v1, dict) and isinstance(v2, dict):
