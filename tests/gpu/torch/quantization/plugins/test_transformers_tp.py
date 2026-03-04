@@ -13,26 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from functools import partial
 
-import pytest
 import torch
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
-
-import modelopt.torch.quantization as mtq
-
-pytest.importorskip("transformers")
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
 from transformers import AutoModelForCausalLM
 
+import modelopt.torch.quantization as mtq
+
 
 def _test_transformers_tp(model_path, rank, size):
-    torch.manual_seed(0)
-    os.environ["LOCAL_RANK"] = str(rank)
-    torch.set_default_device(f"cuda:{rank}")
     model_tp = AutoModelForCausalLM.from_pretrained(model_path, tp_plan="auto")
-    input_ids = torch.randint(0, model_tp.config.vocab_size, (10, 512))
+    input_ids = torch.randint(0, model_tp.config.vocab_size, (10, 512), device=f"cuda:{rank}")
     mtq.quantize(model_tp, mtq.NVFP4_AWQ_LITE_CFG, lambda model: model(input_ids))
     outputs_ref = model_tp(input_ids)  # Test that the model forward pass works
 
@@ -41,6 +33,6 @@ def _test_transformers_tp(model_path, rank, size):
     assert torch.allclose(outputs_ref.logits, outputs_test.logits, atol=1e-4)
 
 
-def test_transformers_tp(need_2_gpus, tmp_path):
+def test_transformers_tp(need_2_gpus, dist_workers, tmp_path):
     model_path = create_tiny_llama_dir(tmp_path)
-    spawn_multiprocess_job(size=2, job=partial(_test_transformers_tp, model_path), backend="nccl")
+    dist_workers.run(partial(_test_transformers_tp, model_path))

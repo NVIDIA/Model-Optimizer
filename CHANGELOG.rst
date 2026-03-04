@@ -1,14 +1,26 @@
-NVIDIA Model Optimizer Changelog (Linux)
-========================================
+NVIDIA Model Optimizer Changelog
+================================
 
 0.43 (2026-03-xx)
 ^^^^^^^^^^^^^^^^^
+
+**Bug Fixes**
+
+- ONNX Runtime dependency upgraded to 1.24 to solve missing graph outputs when using the TensorRT Execution Provider.
 
 **New Features**
 
 - User does not need to manually register MOE modules to cover experts calibration coverage in PTQ workflow.
 - ``hf_ptq.py`` now saves the quantization summary and moe expert token count table to the export directory.
+- Add ``--moe_calib_experts_ratio`` flag in ``hf_ptq.py`` to specify the ratio of experts to calibrate during forward pass to improve expert coverage during calibration. Default to all the experts.
 - Add sparse attention optimization for transformer models (``modelopt.torch.sparsity.attention_sparsity``). This reduces computational cost by skipping attention computation. Supports calibration for threshold selection on HuggingFace models. See `examples/llm_sparsity/attention_sparsity/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity/attention_sparsity>`_ for usage.
+- Add support for rotating the input before quantization for RHT.
+- Add support for advanced weight scale search for NVFP4 quantization and its export path.
+- Enable PTQ workflow for Qwen3.5 MoE models.
+
+**Misc**
+
+- Migrated project metadata from ``setup.py`` to a fully declarative ``pyproject.toml``.
 
 0.42 (2026-02-xx)
 ^^^^^^^^^^^^^^^^^
@@ -30,6 +42,7 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add LTX-2 and Wan2.2 (T2V) support in the diffusers quantization workflow.
 - Add PTQ support for GLM-4.7, including loading MTP layer weights from a separate ``mtp.safetensors`` file and export as-is.
 - Add support for image-text data calibration in PTQ for Nemotron VL models.
+- Add support for advanced weight scale search for NVFP4 quantization and its export path.
 - Add PTQ support for Nemotron Parse.
 - Add distillation support for LTX-2. See `examples/diffusers/distillation/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/diffusers/distillation>`_ for more details.
 
@@ -58,6 +71,13 @@ NVIDIA Model Optimizer Changelog (Linux)
 **Backward Breaking Changes**
 
 - Remove ``torchprofile`` as a default dependency from ModelOpt as its used only for flops-based FastNAS pruning (computer vision models). It can be installed separately if needed.
+
+**Windows Support**
+
+- Fix ONNX 1.19 compatibility issues with CuPy during ONNX INT4 AWQ quantization. ONNX 1.19 uses ml_dtypes.int4 instead of numpy.int8 which caused CuPy failures.
+- Add support for ONNX Mixed Precision Weight-only quantization using INT4 and INT8 precisions. Refer quantization `example for GenAI LLMs <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/onnx_ptq/genai_llm>`_.
+- Add support for some diffusion models' quantization on Windows. Refer `example script <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/torch_onnx/diffusers>`_ for details.
+- Add `Perplexity <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/accuracy_benchmark/perplexity_metrics>`_ and `KL-Divergence <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/accuracy_benchmark/kl_divergence_metrics>`_ accuracy benchmarks.
 
 0.40 (2025-12-12)
 ^^^^^^^^^^^^^^^^^
@@ -186,6 +206,10 @@ NVIDIA Model Optimizer Changelog (Linux)
 - Add NeMo 2 Simplified Flow examples for quantization aware training/distillation (QAT/QAD), speculative decoding, pruning & distillation.
 - Fix a Qwen3 MOE model export issue.
 
+**Windows Support**
+
+- Model Optimizer for Windows now supports `NvTensorRtRtx <https://onnxruntime.ai/docs/execution-providers/TensorRTRTX-ExecutionProvider.html>`_ execution-provider.
+
 0.31 (2025-06-04)
 ^^^^^^^^^^^^^^^^^
 
@@ -267,6 +291,11 @@ NVIDIA Model Optimizer Changelog (Linux)
 - (Experimental) Improve support for ONNX models with custom TensorRT op:
    - Add support for ``--calibration_shapes`` flag.
    - Add automatic type and shape tensor propagation for full ORT support with TensorRT EP.
+
+**Windows Support**
+
+- New LLM models like DeepSeek etc. are supported with ONNX INT4 AWQ quantization on Windows. Refer `Windows Support Matrix <https://nvidia.github.io/Model-Optimizer/guides/0_support_matrix.html>`_ for details about supported features and models.
+- Model Optimizer for Windows now supports ONNX INT8 and FP8 quantization (W8A8) of SAM2 and Whisper models. Check `example scripts <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/onnx_ptq>`_ for getting started with quantizing these models.
 
 **Known Issues**
 
@@ -370,6 +399,18 @@ NVIDIA Model Optimizer Changelog (Linux)
 - :meth:`mtq.auto_quantize <modelopt.torch.quantization.model_quant.auto_quantize>` now supports search based automatic
   quantization for NeMo & MCore models (in addition to HuggingFace models).
 - Add ``num_layers`` and ``hidden_size`` pruning support for NeMo / Megatron-core models.
+
+**Windows Support**
+
+- This is the first official release of Model Optimizer for Windows
+- **ONNX INT4 Quantization:** :meth:`modelopt.onnx.quantization.quantize_int4 <modelopt.onnx.quantization.int4.quantize>` now supports ONNX INT4 quantization for DirectML and TensorRT* deployment. See :ref:`Support_Matrix` for details about supported features and models.
+- **LLM Quantization with Olive:** Enabled LLM quantization through Olive, streamlining model optimization workflows. Refer `Olive example <https://github.com/microsoft/Olive/tree/main/examples/phi3#quantize-models-with-nvidia-Model-Optimizer>`_.
+- **DirectML Deployment Guide:** Added DML deployment guide. Refer :ref:`Onnxruntime_Deployment` deployment guide for details.
+- **MMLU Benchmark for Accuracy Evaluations:** Introduced `MMLU benchmarking <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/windows/accuracy_benchmark/README.md>`_ for accuracy evaluation of ONNX models on DirectML (DML).
+- **Published quantized ONNX models collection:** Published quantized ONNX models at HuggingFace `NVIDIA collections <https://huggingface.co/collections/nvidia/optimized-onnx-models-for-nvidia-rtx-gpus>`_.
+
+
+\* *This version includes experimental features such as TensorRT deployment of ONNX INT4 models, PyTorch quantization and sparsity. These are currently unverified on Windows.*
 
 
 0.17 (2024-09-11)

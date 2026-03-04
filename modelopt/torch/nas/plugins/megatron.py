@@ -203,17 +203,12 @@ class _DynamicMLP(DynamicModule):
     Use for standard MLP and inside MoE layers (SequentialMLP and SharedExpertMLP).
     """
 
-    def _setup(self, *, hidden_size: TracedHp):
+    def _setup(self, *, hidden_size: TracedHp, hp_name: str):
         """Setup the MLP dynamic module with global hidden_size hparam."""
         assert self.input_size == self.config.hidden_size, (
             "MLP input_size must be equal to hidden_size"
         )
-        if isinstance(self, SharedExpertMLP):
-            self.hparam_name = "moe_shared_expert_intermediate_size"
-        elif self.config.num_moe_experts is not None:
-            self.hparam_name = "moe_ffn_hidden_size"
-        else:
-            self.hparam_name = "ffn_hidden_size"
+        self.hparam_name = hp_name
 
         ffn_hidden_size = TracedHp(list(range(1, self.config.ffn_hidden_size + 1)))
         self._register_hparam(self.hparam_name, ffn_hidden_size)
@@ -552,7 +547,7 @@ class _DynamicSequentialMLP(DynamicModule):
         DynamicModuleList.convert(self.local_experts)
         self.local_experts.depth = num_moe_experts  # Reuse same hparam for depth
         for expert in self.local_experts:
-            DMRegistry.convert(expert, hidden_size=hidden_size)
+            DMRegistry.convert(expert, hidden_size=hidden_size, hp_name="moe_ffn_hidden_size")
 
     def export(self) -> torch.nn.Module:
         """Export the dynamic module to a standard SequentialMLP."""
@@ -582,7 +577,11 @@ class _DynamicMoELayer(DynamicModule):
             lambda mod, val: num_moe_experts_hp.active,  # EP = 1
         )
         if self.use_shared_expert:
-            DMRegistry.convert(self.shared_experts, hidden_size=hidden_size)
+            DMRegistry.convert(
+                self.shared_experts,
+                hidden_size=hidden_size,
+                hp_name="moe_shared_expert_intermediate_size",
+            )
 
     def forward(self, *args, **kwargs):
         """Forward pass for the MoE layer."""
@@ -651,7 +650,11 @@ class _DynamicTransformerLayer(DynamicModule):
 
         if isinstance(self.mlp, (MLP, MoELayer)):
             DMRegistry.convert(self.pre_mlp_layernorm, num_features=hidden_size)
-            DMRegistry.convert(self.mlp, hidden_size=hidden_size)
+            if isinstance(self.mlp, MoELayer):
+                setup_kwargs = {}
+            else:
+                setup_kwargs = {"hp_name": "ffn_hidden_size"}
+            DMRegistry.convert(self.mlp, hidden_size=hidden_size, **setup_kwargs)
 
     def modify(
         self,

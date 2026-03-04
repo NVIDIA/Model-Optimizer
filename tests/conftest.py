@@ -16,6 +16,11 @@
 import platform
 
 import pytest
+import torch
+import torch.distributed as dist
+from _test_utils.torch.distributed.utils import init_process
+
+import modelopt.torch.opt as mto
 
 
 @pytest.fixture(scope="session")
@@ -57,3 +62,53 @@ def pytest_collection_modifyitems(config, items):
 def skip_on_windows():
     if platform.system() == "Windows":
         pytest.skip("Skipping on Windows")
+
+
+@pytest.fixture(scope="session")
+def num_gpus():
+    return torch.cuda.device_count()
+
+
+@pytest.fixture(scope="session")
+def cuda_capability():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    return torch.cuda.get_device_capability()
+
+
+@pytest.fixture
+def distributed_setup_size_1():
+    init_process(rank=0, size=1, backend="nccl")
+    yield
+    dist.destroy_process_group()
+
+
+@pytest.fixture
+def need_2_gpus():
+    if torch.cuda.device_count() < 2:
+        pytest.skip("Need at least 2 GPUs to run this test")
+
+
+@pytest.fixture
+def need_4_gpus():
+    if torch.cuda.device_count() < 4:
+        pytest.skip("Need at least 4 GPUs to run this test")
+
+
+@pytest.fixture
+def need_8_gpus():
+    if torch.cuda.device_count() < 8:
+        pytest.skip("Need at least 8 GPUs to run this test")
+
+
+@pytest.fixture(scope="module")
+def set_torch_dtype(request):
+    orig_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(request.param)
+    yield
+    torch.set_default_dtype(orig_dtype)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def enable_hf_checkpointing():
+    mto.enable_huggingface_checkpointing()

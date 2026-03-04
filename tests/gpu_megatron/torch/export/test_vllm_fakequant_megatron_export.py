@@ -18,14 +18,10 @@ from functools import partial
 
 import pytest
 import torch
-from _test_utils.import_helper import skip_if_no_megatron
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_mcore_gpt_to_hf_vllm_fq
-
-skip_if_no_megatron(apex_or_te_required=True)
 
 
 def _test_mcore_vllm_export(tmp_path, quant_cfg, rank, size):
@@ -110,10 +106,6 @@ def _test_mcore_vllm_export(tmp_path, quant_cfg, rank, size):
 
 
 @pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG])
-def test_mcore_vllm_export(tmp_path, quant_cfg):
+def test_mcore_vllm_export(dist_workers_size_1, tmp_path, quant_cfg):
     """Wrapper test function for mcore vLLM export."""
-    spawn_multiprocess_job(
-        size=1,
-        job=partial(_test_mcore_vllm_export, tmp_path, quant_cfg),
-        backend="nccl",
-    )
+    dist_workers_size_1.run(partial(_test_mcore_vllm_export, tmp_path, quant_cfg))

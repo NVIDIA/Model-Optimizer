@@ -363,9 +363,9 @@ class HFRowParallelLinear(HFParallelLinear):
 class _QuantHFParallelLinear(_ParallelLinear):
     _functionals_to_replace = [(torch.nn.functional, "linear")]
 
-    def fold_weight(self):
+    def fold_weight(self, keep_attrs: bool = False):
         with self.enable_weight_access_and_writeback():
-            super().fold_weight()
+            super().fold_weight(keep_attrs)
 
     @contextmanager
     def enable_weight_access_and_writeback(self):
@@ -458,8 +458,13 @@ class _QuantSparseMoe(QuantModule):
         elif hasattr(self, "experts") and hasattr(self.experts, "num_experts"):
             num_experts = self.experts.num_experts
 
-        self.expert_token_count = torch.zeros(num_experts, dtype=torch.long, device="cpu")
+        self.register_buffer(
+            "expert_token_count",
+            torch.zeros(num_experts, dtype=torch.long, device=next(self.parameters()).device),
+            persistent=False,
+        )
         self._count_expert_tokens = False
+        self._moe_calib_experts_ratio = None
 
         if num_experts == 0:
             warnings.warn(
@@ -483,36 +488,48 @@ class _QuantSparseMoe(QuantModule):
                 logits = output if not isinstance(output, tuple) else output[0]
                 top_k = self.gate.top_k if hasattr(self.gate, "top_k") else self.top_k
                 _, indices = torch.topk(logits.float(), top_k, dim=-1)
-            counts = torch.bincount(
-                indices.reshape(-1).cpu(), minlength=len(self.expert_token_count)
-            )
-            self.expert_token_count += counts
+            counts = torch.bincount(indices.reshape(-1), minlength=self.expert_token_count.shape[0])
+            self.expert_token_count += counts.to(self.expert_token_count.device)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         is_calib = any(getattr(m, "_if_calib", False) for m in self.experts.modules())
-        if is_calib:
-            # If any of the experts are in calibration mode, we will forward all tokens to all experts
+        self._count_expert_tokens = is_calib
+        if is_calib and self._moe_calib_experts_ratio:
+            self._count_expert_tokens = True
+            assert 0 < self._moe_calib_experts_ratio <= 1, (
+                "moe_calib_experts_ratio must be between 0 and 1"
+            )
+            # If any of the experts are in calibration mode, we will forward all tokens to
+            # self._moe_calib_experts_ratio % of the experts to improve the calibration coverage.
             # This is used only for calibration, we need to re-calculate the actual outputs again using
             # the original top_k
             if TRANSFORMERS_VERSION_GE_5_0:
                 assert hasattr(self, "gate") and hasattr(self.gate, "top_k")
                 original_top_k = self.gate.top_k
-                self.gate.top_k = self.gate.num_experts
+                self.gate.top_k = max(
+                    original_top_k, round(self.gate.num_experts * self._moe_calib_experts_ratio)
+                )
                 super().forward(hidden_states)
                 self.gate.top_k = original_top_k
             else:
                 # Path for transformers < 5.0
                 original_top_k = self.top_k
                 if hasattr(self, "num_experts"):
-                    self.top_k = self.num_experts
+                    self.top_k = max(
+                        original_top_k, round(self.num_experts * self._moe_calib_experts_ratio)
+                    )
                 elif hasattr(self, "experts"):
-                    self.top_k = self.experts.num_experts
+                    self.top_k = max(
+                        original_top_k,
+                        round(self.experts.num_experts * self._moe_calib_experts_ratio),
+                    )
                 else:
                     raise ValueError(f"Could not find num_experts in module {self}")
                 super().forward(hidden_states)
                 self.top_k = original_top_k
-        # Enable counting only for the real-routing forward during calibration
-        self._count_expert_tokens = is_calib
+            self._count_expert_tokens = False
+        else:
+            self._count_expert_tokens = True
         output = super().forward(hidden_states)
         self._count_expert_tokens = False
         return output
@@ -717,6 +734,107 @@ class _QuantQwen3VLMoeTextExperts(QuantModule):
         return next_states
 
 
+class _Qwen35MoeExpertModule(nn.Module):
+    """Container for a single Qwen3.5 MoE expert's linear layers.
+
+    Produces the naming pattern: experts.{id}.gate_proj.weight
+    (consistent with standard Qwen3 MoE per-expert module structure).
+    """
+
+    def __init__(self, hidden_dim: int, expert_dim: int):
+        super().__init__()
+        self.gate_proj = nn.Linear(hidden_dim, expert_dim, bias=False)
+        self.up_proj = nn.Linear(hidden_dim, expert_dim, bias=False)
+        self.down_proj = nn.Linear(expert_dim, hidden_dim, bias=False)
+
+
+class _QuantQwen35MoeExperts(QuantModule):
+    def _setup(self):
+        """Modify the Qwen3_5MoeExperts by using per-expert nn.Module containers.
+
+        This produces the naming pattern: experts.{id}.gate_proj.weight
+        (consistent with standard Qwen3 MoE).
+        """
+        from accelerate import init_empty_weights
+
+        dtype, device = self.gate_up_proj.dtype, self.gate_up_proj.device
+
+        def _copy_weight(module, weight):
+            module.to_empty(device=device)
+            with torch.no_grad():
+                module.weight.data = weight.detach().data.to(dtype=dtype, device=device)
+
+        expert_dim = self.intermediate_dim
+
+        with init_empty_weights():
+            expert_modules = nn.ModuleList(
+                [
+                    _Qwen35MoeExpertModule(self.hidden_dim, expert_dim)
+                    for _ in range(self.num_experts)
+                ]
+            )
+
+        for idx in range(self.num_experts):
+            # gate_up_proj shape: (num_experts, 2*intermediate_dim, hidden_dim)
+            # Already in (out_features, in_features) format, no transpose needed
+            _copy_weight(expert_modules[idx].gate_proj, self.gate_up_proj[idx, :expert_dim, :])
+            _copy_weight(expert_modules[idx].up_proj, self.gate_up_proj[idx, expert_dim:, :])
+            # down_proj shape: (num_experts, hidden_dim, intermediate_dim)
+            # Already in (out_features, in_features) format
+            _copy_weight(expert_modules[idx].down_proj, self.down_proj[idx])
+
+        delattr(self, "gate_up_proj")
+        delattr(self, "down_proj")
+        # Register expert modules directly as numbered children (like nn.ModuleList)
+        # so the naming pattern is: experts.{id}.gate_proj.weight (no extra nesting)
+        for idx in range(self.num_experts):
+            self.add_module(str(idx), expert_modules[idx])
+
+    def __len__(self):
+        """Support len() so the module is iterable like standard MoE experts."""
+        return self.num_experts
+
+    def __iter__(self):
+        """Support iteration over expert modules."""
+        for idx in range(self.num_experts):
+            yield getattr(self, str(idx))
+
+    def __getitem__(self, idx):
+        """Support indexing to get individual expert modules."""
+        return getattr(self, str(int(idx)))
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        top_k_index: torch.Tensor,
+        top_k_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        final_hidden_states = torch.zeros_like(hidden_states)
+        with torch.no_grad():
+            expert_mask = torch.nn.functional.one_hot(top_k_index, num_classes=self.num_experts)
+            expert_mask = expert_mask.permute(2, 1, 0)
+            expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+        for expert_idx in expert_hit:
+            expert_idx = expert_idx[0]
+            if expert_idx == self.num_experts:
+                continue
+            with torch.no_grad():
+                top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
+            current_state = hidden_states[token_idx]
+            expert = self[expert_idx]
+            gate = expert.gate_proj(current_state)
+            up = expert.up_proj(current_state)
+            current_hidden_states = self.act_fn(gate) * up
+            current_hidden_states = expert.down_proj(current_hidden_states)
+            current_hidden_states = (
+                current_hidden_states * top_k_weights[token_idx, top_k_pos, None]
+            )
+            final_hidden_states.index_add_(
+                0, token_idx, current_hidden_states.to(final_hidden_states.dtype)
+            )
+        return final_hidden_states
+
+
 class _QuantDbrxFFN(_QuantSparseMoe):
     @property
     def num_experts(self):
@@ -865,6 +983,20 @@ except ImportError:
     pass
 
 
+try:
+    from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeExperts
+
+    # Qwen3_5MoeSparseMoeBlock registration is handled by register_sparse_moe_on_the_fly
+    # (auto-detected via gate.top_k + gate.num_experts + experts pattern).
+    # Only the fused expert weights need explicit registration.
+    if Qwen3_5MoeExperts not in QuantModuleRegistry:
+        QuantModuleRegistry.register({Qwen3_5MoeExperts: "hf.Qwen3_5MoeExperts"})(
+            _QuantQwen35MoeExperts
+        )
+except ImportError:
+    pass
+
+
 class _QuantGptOssExperts(_QuantFunctionalMixin):
     """Quantized wrapper for `transformers.GptOssExperts`.
 
@@ -983,7 +1115,7 @@ def _is_sparse_moe_block(module):
 
     All HuggingFace MoE blocks (Mixtral, Qwen3Moe, Qwen2Moe, Qwen3Next, Llama4, MiniMax, etc.)
     share a common structural pattern: a ``gate`` (TopKRouter) sub-module with routing attributes
-    (``top_k`` and ``num_experts``), and an ``experts`` sub-module.
+    (``top_k``, some may have ``num_experts``), and an ``experts`` sub-module.
 
     This function detects that pattern instead of relying on class names, making it forward-compatible
     with new MoE architectures. Some MoE models (e.g. Glm4MoeMoE) have ``gate`` and ``experts`` but
@@ -1002,7 +1134,12 @@ def _is_sparse_moe_block(module):
             return True
 
     # Fallback: top_k + num_experts on the block itself (older transformers, e.g. v4.x Qwen3Next)
-    return hasattr(module, "top_k") and hasattr(module, "num_experts")
+    if hasattr(module, "top_k"):
+        if not hasattr(module, "num_experts") and hasattr(module.experts, "__len__"):
+            module.num_experts = len(module.experts)
+        return hasattr(module, "num_experts")
+
+    return False
 
 
 def register_sparse_moe_on_the_fly(model):

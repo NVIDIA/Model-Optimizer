@@ -72,10 +72,7 @@ def _new_load_adapter(self, model_id, adapter_name, *args, **kwargs):
         assert adapter_name in self.peft_config, (
             f"ModelOpt modified model should have adapter_name={adapter_name} in peft_config"
         )
-        # Security NOTE: weights_only=False is used here on ModelOpt-generated state_dict, not on untrusted user input
-        restore_from_modelopt_state(
-            self, torch.load(modelopt_state_path, map_location="cpu", weights_only=False)
-        )
+        restore_from_modelopt_state(self, modelopt_state_path=modelopt_state_path)
 
     outputs = self._modelopt_cache["load_adapter"](self, model_id, adapter_name, *args, **kwargs)
 

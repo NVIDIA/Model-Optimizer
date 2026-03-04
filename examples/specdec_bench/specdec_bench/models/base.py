@@ -18,7 +18,7 @@ class Model:
     def __init__(self, model_dir, tokenizer, max_draft_length):
         raise NotImplementedError
 
-    async def run(self, prompt_ids, max_length, end_id, request_id, turn_id):
+    async def run(self, prompt_ids, sampling_params, request_id, turn_id):
         """
         prompt_ids is list of tokens
         output is list of list of tokens

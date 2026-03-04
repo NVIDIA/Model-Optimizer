@@ -139,6 +139,10 @@ if [ -n "$CALIB_SEQ" ]; then
     PTQ_ARGS+=" --calib_seq=$CALIB_SEQ "
 fi
 
+if [ -n "$MOE_CALIB_EXPERTS_RATIO" ]; then
+    PTQ_ARGS+=" --moe_calib_experts_ratio=$MOE_CALIB_EXPERTS_RATIO "
+fi
+
 if ! $VERBOSE; then
     PTQ_ARGS+=" --no-verbose "
 fi

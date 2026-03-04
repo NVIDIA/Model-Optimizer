@@ -213,7 +213,9 @@ class PipelineManager:
         distilled_lora_strength = params.pop("distilled_lora_strength", 0.8)
         spatial_upsampler_path = params.pop("spatial_upsampler_path", None)
         gemma_root = params.pop("gemma_root", None)
-        fp8transformer = params.pop("fp8transformer", False)
+        fp8_quantization = params.pop("fp8_quantization", None) or params.pop(
+            "fp8transformer", False
+        )
 
         if not checkpoint_path:
             raise ValueError("Missing required extra_param: checkpoint_path.")
@@ -225,6 +227,7 @@ class PipelineManager:
             raise ValueError("Missing required extra_param: gemma_root.")
 
         from ltx_core.loader import LTXV_LORA_COMFY_RENAMING_MAP, LoraPathStrengthAndSDOps
+        from ltx_core.quantization import QuantizationPolicy
         from ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline
 
         distilled_lora = [
@@ -240,7 +243,7 @@ class PipelineManager:
             "spatial_upsampler_path": str(spatial_upsampler_path),
             "gemma_root": str(gemma_root),
             "loras": [],
-            "fp8transformer": bool(fp8transformer),
+            "quantization": QuantizationPolicy.fp8_cast() if fp8_quantization else None,
         }
         pipeline_kwargs.update(params)
         return TI2VidTwoStagesPipeline(**pipeline_kwargs)

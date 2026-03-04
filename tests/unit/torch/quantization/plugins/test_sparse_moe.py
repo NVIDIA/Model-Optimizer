@@ -133,10 +133,18 @@ class TestIsSparseBlock:
         module.gate = gate
         assert _is_sparse_moe_block(module) is False
 
-    def test_block_level_only_top_k_returns_false(self):
-        """Only top_k on block (no num_experts) -> fallback fails."""
+    def test_block_level_top_k_infers_num_experts(self):
+        """top_k on block + experts with __len__ -> num_experts is inferred, returns True."""
         module = nn.Module()
         module.experts = nn.ModuleList([nn.Linear(8, 8)])
+        module.top_k = 2
+        assert _is_sparse_moe_block(module) is True
+        assert module.num_experts == 1
+
+    def test_block_level_top_k_no_len_returns_false(self):
+        """top_k on block but experts has no __len__ -> cannot infer num_experts, returns False."""
+        module = nn.Module()
+        module.experts = nn.Module()
         module.top_k = 2
         assert _is_sparse_moe_block(module) is False
 

@@ -98,6 +98,7 @@ def test_simple_linear(tmp_path, dtype: str):
         output_names=["output"],
         export_params=True,
         opset_version=17,
+        dynamo=False,
     )
 
     onnx_model = NVFP4QuantExporter.process_model(onnx.load(onnx_path))

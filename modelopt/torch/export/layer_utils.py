@@ -327,20 +327,12 @@ def is_mlp(module: nn.Module) -> bool:
 
 def is_moe(module: nn.Module) -> bool:
     """Returns whether the module is an MOE layer."""
-    return any(
-        key in type(module).__name__.lower()
-        for key in [
-            "MixtralSparseMoeBlock".lower(),
-            "ArcticMoE".lower(),
-            "DbrxFFN".lower(),
-            "MoELayer".lower(),
-            "PhimoeSparseMoeBlock".lower(),
-            "DeepseekMoE".lower(),
-            "Qwen2MoeSparseMoeBlock".lower(),
-            "Qwen3MoeSparseMoeBlock".lower(),
-            "Qwen3NextSparseMoeBlock".lower(),
-        ]
-    )
+    name = type(module).__name__.lower()
+    # Auto-detect common MoE patterns
+    if name.endswith("sparsemoeblock") or "moelayer" in name:
+        return True
+    # Explicit matches for non-standard naming
+    return any(key in name for key in ["arcticmoe", "deepseekmoe", "dbrxffn"])
 
 
 def is_quantlinear(module: nn.Module) -> bool:
@@ -1006,6 +998,7 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
             "Qwen2MoeSparseMoeBlock",
             "Qwen3MoeSparseMoeBlock",
             "Qwen3NextSparseMoeBlock",
+            "Qwen3_5MoeSparseMoeBlock",
             "DeepseekMoE",
         ],
     ):
@@ -1141,7 +1134,10 @@ def set_expert_quantizer_amax(
     # Apply target amax to quantizers that need it
     for module, attr_name, quantizer in all_quantizers:
         # Check if quantizer needs amax (use property for consistency)
-        needs_amax = getattr(quantizer, "amax", None) is None
+        # Also treat zero amax as needing recalibration — a zero amax is never valid
+        # and indicates the quantizer wasn't activated during calibration
+        amax = getattr(quantizer, "amax", None)
+        needs_amax = amax is None or (isinstance(amax, torch.Tensor) and torch.all(amax == 0))
 
         # Skip dynamic quantizers for input quantizers
         if "input_quantizer" in attr_name and getattr(quantizer, "_dynamic", False):
@@ -1747,7 +1743,7 @@ def _split_fused_qkv_weight_and_scaling(
 
     qkv_in = weight.shape[-1] if weight_dim > 1 else 1
 
-    num_kv_heads = num_kv_heads if num_kv_heads else num_heads
+    num_kv_heads = num_kv_heads or num_heads
     assert num_heads % num_kv_heads == 0, (
         f"num_heads({num_heads}) must be divisible by num_kv_heads({num_kv_heads}))."
     )

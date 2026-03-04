@@ -19,7 +19,6 @@ import pytest
 import torch
 import torch.nn as nn
 from _test_utils.torch.distributed.fsdp_test import run_fsdp_test
-from _test_utils.torch.distributed.utils import get_device_counts, spawn_multiprocess_job
 
 from modelopt.torch.nas.search_space import SearchSpace
 from modelopt.torch.opt.conversion import apply_mode
@@ -38,18 +37,14 @@ def _sample_subnet(model):
     SearchSpace(model).sample(sample_func=min)
 
 
-@pytest.mark.parametrize("device_count", get_device_counts())
 @pytest.mark.parametrize("use_orig_params", [False, True])
-def test_fsdp(device_count, use_orig_params):
-    # run test
-    spawn_multiprocess_job(
-        size=device_count,
-        job=partial(
+def test_fsdp(dist_workers, use_orig_params):
+    dist_workers.run(
+        partial(
             run_fsdp_test,
             _get_test_case,
             "0",
             _sample_subnet,
             fsdp_kwargs={"use_orig_params": use_orig_params},
         ),
-        backend="nccl",
     )

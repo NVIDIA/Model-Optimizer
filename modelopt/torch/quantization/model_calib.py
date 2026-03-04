@@ -28,9 +28,14 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from modelopt.torch.opt.searcher import ForwardLoop
+from modelopt.torch.quantization.utils import LayerActivationCollector
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
-from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
+from modelopt.torch.utils.network import (
+    bind_forward_method,
+    get_decoder_layers,
+    unpatch_forward_method,
+)
 from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
 
 from .calib import MseCalibrator, NVFP4MSECalibrator
@@ -49,7 +54,14 @@ from .utils import (
     weight_attr_names,
 )
 
-__all__ = ["awq", "local_hessian_calibrate", "max_calibrate", "smoothquant", "svdquant"]
+__all__ = [
+    "awq",
+    "local_hessian_calibrate",
+    "max_calibrate",
+    "sequential_calibrate",
+    "smoothquant",
+    "svdquant",
+]
 
 
 def weight_only_quantize(model: nn.Module):
@@ -96,13 +108,18 @@ def _check_moe_calibration_complete(quantizer, parallel_state):
 
 
 @torch.no_grad()
-def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, distributed_sync=True):
+def max_calibrate(
+    model: nn.Module,
+    forward_loop: ForwardLoop | None = None,
+    distributed_sync=True,
+):
     """Calibrate the model using max.
 
     Args:
         model: Model to be calibrated.
         forward_loop: A callable which takes the model as argument and
             forwards calibration data through the model.
+        distributed_sync: Whether to sync input_quantizer amax across distributed processes.
 
     See :class:`MaxCalibConfig <modelopt.torch.quantization.config.MaxCalibConfig>` for
     details on the remaining arguments.
@@ -114,7 +131,7 @@ def max_calibrate(model: nn.Module, forward_loop: ForwardLoop | None = None, dis
         forward_loop(model)
     finish_stats_collection(model)
 
-    # Sync amax across local experts within each rank (for SequentialMLP)
+    # Sync input_quantizer amax across local experts within each rank (for SequentialMLP)
     for name, module in model.named_modules():
         if hasattr(module, "layer_sync_moe_local_experts_amax"):
             module.layer_sync_moe_local_experts_amax()
@@ -1038,6 +1055,8 @@ def awq_lite(
     def update_loss(self, out, out_actual, alpha):
         out_actual = out_actual[0] if isinstance(out_actual, tuple) else out_actual
         out = out[0] if isinstance(out, tuple) else out
+        out = out.to_local() if hasattr(out, "to_local") else out
+        out_actual = out_actual.to_local() if hasattr(out_actual, "to_local") else out_actual
         loss = (out - out_actual).float().pow(2).mean()
         self.awq_lite.loss[alpha] += loss.to(self.awq_lite.loss[alpha].device)
 
@@ -1812,3 +1831,40 @@ def gptq_lite(
         torch.cuda.empty_cache()
 
     print_rank_0("GPTQ-lite quantization completed successfully")
+
+
+@torch.no_grad()
+def sequential_calibrate(
+    model: nn.Module,
+    forward_loop: ForwardLoop,
+    calib_func: Callable,
+    **calib_kwargs,
+):
+    """Sequential calibration - a sequential layer-by-layer calibration algorithm."""
+    if forward_loop is None:
+        raise ValueError("forward_loop must not be None for sequential calibration.")
+
+    transformer_layers = get_decoder_layers(model)
+    if transformer_layers is None:
+        raise ValueError(
+            "Could not find transformer layers in model'. "
+            "Sequential calibration requires a model with identifiable transformer layers."
+        )
+
+    print_rank_0(f"Sequential calibration: Found {len(transformer_layers)} transformer layers")
+
+    gettr = LayerActivationCollector(model)
+
+    for layer in transformer_layers:
+        # Get updated input activations to the current layer
+        layer_inputs = gettr.get_input_activations(layer, forward_loop)
+
+        # Define a forward loop for the current layer
+        def _layer_forward_loop(m, _inputs=layer_inputs):
+            for args, kwargs_input in _inputs:
+                m(*args, **kwargs_input)
+
+        # Call calibration function
+        calib_func(layer, _layer_forward_loop, **calib_kwargs)
+        del layer_inputs
+        torch.cuda.empty_cache()
