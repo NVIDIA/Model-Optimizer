@@ -93,7 +93,7 @@ def run_autotune() -> int:
         - 1: Autotuning failed (exception occurred)
         - 130: Interrupted by user (Ctrl+C)
     """
-    args = _get_autotune_parser().parse_args()
+    args = get_parser().parse_args()
     model_path = validate_file_path(args.onnx_path, "Model file")
     validate_file_path(args.qdq_baseline, "QDQ baseline model")
     output_dir = Path(args.output_dir)
@@ -154,6 +154,11 @@ def run_autotune() -> int:
     except Exception as e:
         logger.error(f"\nAutotuning failed: {e}", exc_info=args.verbose)
         return 1
+
+
+def get_parser() -> argparse.ArgumentParser:
+    """Return the autotune CLI argument parser (for Sphinx and programmatic use)."""
+    return _get_autotune_parser()
 
 
 def _get_autotune_parser() -> argparse.ArgumentParser:
