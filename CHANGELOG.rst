@@ -17,6 +17,7 @@ NVIDIA Model Optimizer Changelog
 - Add support for rotating the input before quantization for RHT.
 - Add support for advanced weight scale search for NVFP4 quantization and its export path.
 - Enable PTQ workflow for Qwen3.5 MoE models.
+- Add :meth:`compute_quantization_mse <modelopt.torch.quantization.model_quant.compute_quantization_mse>` API to measure per-quantizer mean-squared quantization error, with flexible wildcard and callable filtering.
 
 **Misc**
 

@@ -15,7 +15,6 @@
 
 """Unit tests for mtq.compute_quantization_mse()."""
 
-import pytest
 import torch
 from _test_utils.torch.quantization.models import SimpleLinear
 
@@ -68,14 +67,16 @@ class TestComputeQuantizationMse:
         model, forward_loop = _make_quantized_model()
         mse = mtq.compute_quantization_mse(model, forward_loop, wildcards="*weight_quantizer")
         assert len(mse) > 0
-        assert all("weight_quantizer" in k for k in mse.keys())
+        assert all("weight_quantizer" in k for k in mse)
         # No input quantizers should appear
-        assert not any("input_quantizer" in k for k in mse.keys())
+        assert not any("input_quantizer" in k for k in mse)
 
     def test_list_of_wildcards(self):
         """A list of patterns should return the union of matched quantizers."""
         model, forward_loop = _make_quantized_model()
-        mse_weight = mtq.compute_quantization_mse(model, forward_loop, wildcards="*weight_quantizer")
+        mse_weight = mtq.compute_quantization_mse(
+            model, forward_loop, wildcards="*weight_quantizer"
+        )
         mse_input = mtq.compute_quantization_mse(model, forward_loop, wildcards="*input_quantizer")
         mse_both = mtq.compute_quantization_mse(
             model, forward_loop, wildcards=["*weight_quantizer", "*input_quantizer"]
@@ -86,11 +87,9 @@ class TestComputeQuantizationMse:
         """A callable wildcard should select quantizers by arbitrary predicate."""
         model, forward_loop = _make_quantized_model()
         # Pick only quantizers belonging to the first linear layer (net.0)
-        mse = mtq.compute_quantization_mse(
-            model, forward_loop, wildcards=lambda n: "net.0" in n
-        )
+        mse = mtq.compute_quantization_mse(model, forward_loop, wildcards=lambda n: "net.0" in n)
         assert len(mse) > 0
-        assert all("net.0" in k for k in mse.keys())
+        assert all("net.0" in k for k in mse)
 
     def test_disabled_quantizer_absent_from_result(self):
         """A quantizer disabled after calibration must not appear in the output."""
@@ -130,14 +129,10 @@ class TestComputeQuantizationMse:
         model, forward_loop = _make_quantized_model()
 
         hooks_before = sum(
-            len(m._forward_hooks)
-            for m in model.modules()
-            if isinstance(m, TensorQuantizer)
+            len(m._forward_hooks) for m in model.modules() if isinstance(m, TensorQuantizer)
         )
         mtq.compute_quantization_mse(model, forward_loop)
         hooks_after = sum(
-            len(m._forward_hooks)
-            for m in model.modules()
-            if isinstance(m, TensorQuantizer)
+            len(m._forward_hooks) for m in model.modules() if isinstance(m, TensorQuantizer)
         )
         assert hooks_after == hooks_before

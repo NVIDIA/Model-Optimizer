@@ -573,14 +573,11 @@ def compute_quantization_mse(
         for name, err in sorted(mse.items()):
             print(f"{name}: {err:.4e}")
     """
-    if isinstance(wildcards, (str, Callable)):
+    if not isinstance(wildcards, list):
         wildcards = [wildcards]
 
     def _matches(name: str) -> bool:
-        return any(
-            fnmatch.fnmatch(name, w) if isinstance(w, str) else w(name)
-            for w in wildcards
-        )
+        return any(fnmatch.fnmatch(name, w) if isinstance(w, str) else w(name) for w in wildcards)
 
     accumulators: dict[str, dict] = {}  # name -> {"sum": float, "count": int}
     hooks = []
@@ -616,7 +613,5 @@ def compute_quantization_mse(
         h.remove()
 
     return {
-        name: acc["sum"] / acc["count"]
-        for name, acc in accumulators.items()
-        if acc["count"] > 0
+        name: acc["sum"] / acc["count"] for name, acc in accumulators.items() if acc["count"] > 0
     }
