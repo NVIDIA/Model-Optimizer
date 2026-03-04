@@ -21,7 +21,6 @@ from pathlib import Path
 import pytest
 import torch
 import transformers
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import get_forward
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
@@ -166,12 +165,11 @@ def _test_unified_export_megatron(
     ],
 )
 def test_unified_export_megatron(
-    tmp_path, model_type, arch, extra_module, quant_config, kv_cache_quant_cfg
+    dist_workers_size_1, tmp_path, model_type, arch, extra_module, quant_config, kv_cache_quant_cfg
 ):
     # TODO: Fix TP>1 failures
-    spawn_multiprocess_job(
-        size=1,  # torch.cuda.device_count(),
-        job=partial(
+    dist_workers_size_1.run(
+        partial(
             _test_unified_export_megatron,
             tmp_path,
             model_type,
@@ -180,7 +178,6 @@ def test_unified_export_megatron(
             quant_config,
             kv_cache_quant_cfg,
         ),
-        backend="nccl",
     )
 
 
@@ -215,11 +212,7 @@ def _test_unified_import_megatron(tiny_llama_dir, rank, size):
     import_mcore_gpt_from_hf(model, tiny_llama_dir)
 
 
-def test_unified_import_megatron(tmp_path):
+def test_unified_import_megatron(dist_workers, tmp_path):
     num_gpus = torch.cuda.device_count()
     tiny_llama_dir = create_tiny_llama_dir(tmp_path, num_key_value_heads=num_gpus)
-    spawn_multiprocess_job(
-        size=num_gpus,
-        job=partial(_test_unified_import_megatron, tiny_llama_dir),
-        backend="nccl",
-    )
+    dist_workers.run(partial(_test_unified_import_megatron, tiny_llama_dir))

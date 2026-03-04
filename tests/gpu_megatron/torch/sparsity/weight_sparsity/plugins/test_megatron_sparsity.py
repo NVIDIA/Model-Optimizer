@@ -15,7 +15,6 @@
 
 from functools import partial
 
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.megatron.models import MegatronModel
 from _test_utils.torch.megatron.utils import initialize_for_megatron, sharded_state_dict_test_helper
 from _test_utils.torch.sparsity.utils import sample_subnet_with_sparsity
@@ -37,5 +36,5 @@ def _test_sharded_state_dict(tmp_path, rank, size):
     sharded_state_dict_test_helper(tmp_path, model_ref, model_test, lambda model: model(input))
 
 
-def test_sharded_state_dict(tmp_path):
-    spawn_multiprocess_job(size=1, job=partial(_test_sharded_state_dict, tmp_path), backend="nccl")
+def test_sharded_state_dict(dist_workers, tmp_path):
+    dist_workers.run(partial(_test_sharded_state_dict, tmp_path))

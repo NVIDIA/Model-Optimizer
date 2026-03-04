@@ -15,10 +15,7 @@
 
 import pytest
 import torch
-
-pytest.importorskip("transformers")
-
-from transformers import LlamaConfig, LlamaForCausalLM
+from transformers import LlamaConfig, LlamaForCausalLM, Qwen3MoeConfig, Qwen3MoeForCausalLM
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.quant_utils import fuse_prequant_to_linear
@@ -108,8 +105,6 @@ def test_pattern_fuse_prequant(quant_config, attention_kv_heads_pair):
 )
 def test_pattern_fuse_prequant_moe(quant_config):
     """Test pattern_fuse_prequant on Qwen3 MoE sparse MLP."""
-    pytest.importorskip("transformers")
-    from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
     # Create a tiny Qwen3MoE model for testing
     config = Qwen3MoeConfig(

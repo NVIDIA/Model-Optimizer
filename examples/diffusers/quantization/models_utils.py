@@ -163,11 +163,10 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
         "backbone": "transformer",
         "dataset": _SD_PROMPTS_DATASET,
         "inference_extra_args": {
-            "height": 1024,
-            "width": 1536,
+            "height": 768,
+            "width": 1280,
             "num_frames": 121,
             "frame_rate": 24.0,
-            "cfg_guidance_scale": 4.0,
             "negative_prompt": "worst quality, inconsistent motion, blurry, jittery, distorted",
         },
     },

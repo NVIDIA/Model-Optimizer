@@ -1,4 +1,4 @@
-# NOTE: Make sure to update version in dev requirements (setup.py) as well!
+# NOTE: Make sure to update version in dev requirements (pyproject.toml) as well!
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
@@ -7,6 +7,7 @@ repos:
         args: [--maxkb=500, --enforce-all]
         exclude: >
           (?x)^(
+              uv.lock|
               examples/diffusers/quantization/assets/.*.png|
               examples/diffusers/cache_diffusion/assets/.*.png|
           )$
@@ -27,12 +28,14 @@ repos:
         # See: commit hooks modifies block_config.py leading to test_puzzletron.py failing (#25) · Issues · omniml / modelopt · GitLab
         exclude: >
           (?x)^(
+              ^examples/specdec_bench/specdec_bench/datasets/speed\.py$|
               modelopt/torch/puzzletron/decilm/deci_lm_hf_code/block_config\.py|
               modelopt/torch/puzzletron/decilm/deci_lm_hf_code/transformers_.*\.py
           )$
       - id: ruff-format
         exclude: >
           (?x)^(
+              ^examples/specdec_bench/specdec_bench/datasets/speed\.py$|
               modelopt/torch/puzzletron/decilm/deci_lm_hf_code/block_config\.py|
               modelopt/torch/puzzletron/decilm/deci_lm_hf_code/transformers_.*\.py|
               examples/specdec_bench/specdec_bench/datasets/speed\.py

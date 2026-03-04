@@ -66,6 +66,7 @@ def get_args():
         required=True,
         help="HuggingFace model name or path for the teacher (e.g. Qwen/Qwen3-8B)",
     )
+    parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
     # Parallelism arguments
     parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
@@ -135,7 +136,7 @@ def main(args: argparse.Namespace):
 
     # Build student and teacher model providers
     def _build_model_provider(hf_path):
-        bridge = AutoBridge.from_hf_pretrained(hf_path)
+        bridge = AutoBridge.from_hf_pretrained(hf_path, trust_remote_code=args.trust_remote_code)
         provider = bridge.to_megatron_provider(load_weights=True)
 
         # Override parallelism / training settings

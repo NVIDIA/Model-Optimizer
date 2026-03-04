@@ -419,6 +419,28 @@ NVFP4_DEFAULT_CFG = {
     "algorithm": "max",
 }
 
+NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": {
+        "method": "mse",
+        "fp8_scale_sweep": True,
+    },
+}
+
 NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
@@ -751,6 +773,7 @@ choices: set[str] = {
     "MAMBA_MOE_NVFP4_AGGRESSIVE_CFG",
     "MAMBA_MOE_FP8_CONSERVATIVE_CFG",
     "MAMBA_MOE_FP8_AGGRESSIVE_CFG",
+    "NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG",
 }
 
 BiasType = Literal["static", "dynamic"]
@@ -1095,6 +1118,26 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
     method: Literal[None] = ModeloptField(
         None,
         title="This field specifies the name of the calibration algorithm. If None, no calibration is performed.",
+    )
+
+    moe_calib_experts_ratio: float | None = ModeloptField(
+        default=None,
+        title="% of experts to calibrate during forward pass.",
+        description=(
+            "If specified, we force forward tokens to % of experts during the calibration"
+            " pass. This forward is for calibration purpose only and will not affect the"
+            " actual inference."
+        ),
+    )
+
+    use_sequential: bool = ModeloptField(
+        default=False,
+        title="Enable sequential layer-by-layer calibration.",
+        description=(
+            "If True, the calibration algorithm is applied sequentially to each decoder block. "
+            "The current approach recomputes a full forward pass per layer to propagate updated activations,"
+            "incurring O(N²) cost. Future revisions will add caching to eliminate redundant passes."
+        ),
     )
 
 

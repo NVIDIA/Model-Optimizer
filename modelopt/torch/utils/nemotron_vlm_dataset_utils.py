@@ -23,8 +23,6 @@ We join the tar images with the JSONL messages by the shared filename and yield 
 VLM calibration pipeline.
 """
 
-from __future__ import annotations
-
 import functools
 import json
 import os

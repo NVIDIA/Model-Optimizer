@@ -36,11 +36,13 @@ try:
     from .diffusers_utils import (
         generate_diffusion_dummy_forward_fn,
         get_diffusion_components,
+        get_diffusion_model_type,
         get_qkv_group_key,
         hide_quantizers_from_state_dict,
         infer_dtype_from_model,
         is_diffusers_object,
         is_qkv_projection,
+        merge_diffusion_checkpoint,
     )
 
     HAS_DIFFUSERS = True
@@ -50,7 +52,11 @@ except ImportError:
 from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
-from modelopt.torch.quantization.nn import SequentialQuantizer, TensorQuantizer
+from modelopt.torch.quantization.nn import (
+    NVFP4StaticQuantizer,
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 from modelopt.torch.quantization.qtensor import MXFP8QTensor, NVFP4QTensor
 from modelopt.torch.quantization.utils import fsdp2_aware_weight_update, quantizer_attr_names
 
@@ -112,19 +118,48 @@ def _is_enabled_quantizer(quantizer):
 
 
 def _save_component_state_dict_safetensors(
-    component: nn.Module, component_export_dir: Path
+    component: nn.Module,
+    component_export_dir: Path,
+    merged_base_safetensor_path: str | None = None,
+    hf_quant_config: dict | None = None,
+    model_type: str | None = None,
 ) -> None:
+    """Save component state dict as safetensors with optional base checkpoint merge.
+
+    Args:
+        component: The nn.Module to save.
+        component_export_dir: Directory to save model.safetensors and config.json.
+        merged_base_safetensor_path: If provided, merge the exported transformer weights
+            with non-transformer components (VAE, vocoder, text encoders, etc.) from this
+            base safetensors file and add quantization metadata to produce a single-file
+            checkpoint compatible with ComfyUI. This should be the path to a full base
+            model ``.safetensors`` file, e.g. ``"path/to/ltx-2-19b-dev.safetensors"``.
+        hf_quant_config: If provided, embed quantization config in safetensors metadata
+            and per-layer _quantization_metadata for ComfyUI.
+        model_type: Key into ``DIFFUSION_MERGE_FUNCTIONS`` for the model-specific merge.
+            Required when ``merged_base_safetensor_path`` is not None.
+    """
     cpu_state_dict = {k: v.detach().contiguous().cpu() for k, v in component.state_dict().items()}
-    save_file(cpu_state_dict, str(component_export_dir / "model.safetensors"))
-    with open(component_export_dir / "config.json", "w") as f:
-        json.dump(
-            {
-                "_class_name": type(component).__name__,
-                "_export_format": "safetensors_state_dict",
-            },
-            f,
-            indent=4,
+    metadata: dict[str, str] = {}
+    metadata_full: dict[str, str] = {}
+
+    if merged_base_safetensor_path is not None and model_type is not None:
+        cpu_state_dict, metadata_full = merge_diffusion_checkpoint(
+            cpu_state_dict, merged_base_safetensor_path, model_type, hf_quant_config
         )
+
+    metadata["_export_format"] = "safetensors_state_dict"
+    metadata["_class_name"] = type(component).__name__
+    metadata_full.update(metadata)
+
+    save_file(
+        cpu_state_dict,
+        str(component_export_dir / "model.safetensors"),
+        metadata=metadata_full if merged_base_safetensor_path is not None else None,
+    )
+
+    with open(component_export_dir / "config.json", "w") as f:
+        json.dump(metadata, f, indent=4)
 
 
 def _collect_shared_input_modules(
@@ -496,6 +531,11 @@ def _export_quantized_weight(
         expert_type in type(sub_module).__name__
         for expert_type in ["Llama4TextExperts", "GptOssExperts"]
     )
+    if is_bmm_expert_weight and isinstance(weight_quantizer, NVFP4StaticQuantizer):
+        raise ValueError(
+            "NVFP4StaticQuantizer with BMM-style expert weights (e.g. Llama4TextExperts, "
+            "GptOssExperts) is not yet supported."
+        )
 
     if quantization_format in [
         QUANTIZATION_NVFP4,
@@ -507,6 +547,7 @@ def _export_quantized_weight(
         weight, _ = maybe_transpose_expert_weight_dimensions(
             weight, is_bmm_expert_weight=is_bmm_expert_weight
         )
+
         weight_scale = NVFP4QTensor.get_weights_scaling_factor(
             weight,
             block_size=block_size,
@@ -579,7 +620,7 @@ def _process_quantized_modules(
     """
     fsdp_module_to_reshard = None
 
-    for _, sub_module in model.named_modules():
+    for name, sub_module in model.named_modules():
         # Optimization to perform resharding only once per decoder layer to avoid extra communication overhead
         if isinstance(sub_module, FSDPModule):
             # Every time we encounter a new FSDPModule, the previous decoder layer is fully processed.
@@ -600,8 +641,13 @@ def _process_quantized_modules(
             sub_module.unpack_weight()
         if get_quantization_format(sub_module) != QUANTIZATION_NONE:
             if is_quantlinear(sub_module):
-                with fsdp2_aware_weight_update(model, sub_module, reshard=False):
-                    _export_quantized_weight(sub_module, dtype)
+                try:
+                    with fsdp2_aware_weight_update(model, sub_module, reshard=False):
+                        _export_quantized_weight(sub_module, dtype)
+                except AssertionError as e:
+                    raise AssertionError(
+                        f"Failed to export module '{name}' (type={type(sub_module).__name__}): {e}"
+                    ) from e
             elif (
                 "Llama4TextExperts" in type(sub_module).__name__
                 or "GptOssExperts" in type(sub_module).__name__
@@ -807,6 +853,7 @@ def _export_diffusers_checkpoint(
     dtype: torch.dtype | None,
     export_dir: Path,
     components: list[str] | None,
+    merged_base_safetensor_path: str | None = None,
     max_shard_size: int | str = "10GB",
 ) -> None:
     """Internal: Export diffusion(-like) model/pipeline checkpoint.
@@ -821,6 +868,11 @@ def _export_diffusers_checkpoint(
         export_dir: The directory to save the exported checkpoint.
         components: Optional list of component names to export. Only used for pipelines.
             If None, all components are exported.
+        merged_base_safetensor_path: If provided, merge the exported transformer weights
+            with non-transformer components (VAE, vocoder, text encoders, etc.) from this
+            base safetensors file and add quantization metadata to produce a single-file
+            checkpoint compatible with ComfyUI. This should be the path to a full base
+            model ``.safetensors`` file, e.g. ``"path/to/ltx-2-19b-dev.safetensors"``.
         max_shard_size: Maximum size of each shard file. If the model exceeds this size,
             it will be sharded into multiple files and a .safetensors.index.json will be
             created. Use smaller values like "5GB" or "2GB" to force sharding.
@@ -833,6 +885,9 @@ def _export_diffusers_checkpoint(
     if not all_components:
         warnings.warn("No exportable components found in the model.")
         return
+
+    # Resolve model type once (only needed when merging with a base checkpoint)
+    model_type = get_diffusion_model_type(pipe) if merged_base_safetensor_path else None
 
     # Separate nn.Module components for quantization-aware export
     module_components = {
@@ -879,6 +934,7 @@ def _export_diffusers_checkpoint(
 
             # Step 5: Build quantization config
             quant_config = get_quant_config(component, is_modelopt_qlora=False)
+            hf_quant_config = convert_hf_quant_config_format(quant_config) if quant_config else None
 
             # Step 6: Save the component
             # - diffusers ModelMixin.save_pretrained does NOT accept state_dict parameter
@@ -888,12 +944,15 @@ def _export_diffusers_checkpoint(
                     component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)
             else:
                 with hide_quantizers_from_state_dict(component):
-                    _save_component_state_dict_safetensors(component, component_export_dir)
-
+                    _save_component_state_dict_safetensors(
+                        component,
+                        component_export_dir,
+                        merged_base_safetensor_path,
+                        hf_quant_config,
+                        model_type,
+                    )
             # Step 7: Update config.json with quantization info
-            if quant_config is not None:
-                hf_quant_config = convert_hf_quant_config_format(quant_config)
-
+            if hf_quant_config is not None:
                 config_path = component_export_dir / "config.json"
                 if config_path.exists():
                     with open(config_path) as file:
@@ -905,7 +964,12 @@ def _export_diffusers_checkpoint(
         elif hasattr(component, "save_pretrained"):
             component.save_pretrained(component_export_dir, max_shard_size=max_shard_size)
         else:
-            _save_component_state_dict_safetensors(component, component_export_dir)
+            _save_component_state_dict_safetensors(
+                component,
+                component_export_dir,
+                merged_base_safetensor_path,
+                model_type=model_type,
+            )
 
         print(f"  Saved to: {component_export_dir}")
 
@@ -978,6 +1042,50 @@ def _export_diffusers_checkpoint(
     print(f"Export complete. Saved to: {export_dir}")
 
 
+# TODO: Remove this workaround once HuggingFace fixes revert_weight_conversion to handle
+# scalar (0-d) tensors. The bug is in transformers' Chunk.convert() which calls
+# tensor.size(self.dim) on quantization scale buffers that are 0-d scalars, causing
+# IndexError. Confirmed still present in transformers 5.2.0.
+# See: transformers/core_model_loading.py, Chunk.convert()
+def _revert_weight_conversion_noop(model: Any, state_dict: dict) -> dict:
+    """No-op replacement for transformers' revert_weight_conversion."""
+    return state_dict
+
+
+def _try_patch_module(mod_path: str) -> tuple[Any, Any] | None:
+    """Try to patch revert_weight_conversion in a single module."""
+    import importlib
+
+    try:
+        mod = importlib.import_module(mod_path)
+        if hasattr(mod, "revert_weight_conversion"):
+            original = getattr(mod, "revert_weight_conversion")
+            setattr(mod, "revert_weight_conversion", _revert_weight_conversion_noop)
+            return (mod, original)
+    except (ImportError, AttributeError):
+        pass
+    return None
+
+
+def _patch_revert_weight_conversion() -> list[tuple[Any, Any]]:
+    """Patch revert_weight_conversion in transformers to avoid IndexError on scalar tensors."""
+    patches: list[tuple[Any, Any]] = []
+    for mod_path in [
+        "transformers.core_model_loading",
+        "transformers.modeling_utils",
+    ]:
+        result = _try_patch_module(mod_path)
+        if result is not None:
+            patches.append(result)
+    return patches
+
+
+def _unpatch_revert_weight_conversion(patches: list[tuple[Any, Any]]) -> None:
+    """Restore the original revert_weight_conversion functions."""
+    for mod, original in patches:
+        mod.revert_weight_conversion = original
+
+
 def export_hf_checkpoint(
     model: Any,
     dtype: torch.dtype | None = None,
@@ -985,6 +1093,7 @@ def export_hf_checkpoint(
     save_modelopt_state: bool = False,
     components: list[str] | None = None,
     extra_state_dict: dict[str, torch.Tensor] | None = None,
+    **kwargs,
 ):
     """Export quantized HuggingFace model checkpoint (transformers or diffusers).
 
@@ -1002,7 +1111,15 @@ def export_hf_checkpoint(
         components: Only used for diffusers pipelines. Optional list of component names
             to export. If None, all quantized components are exported.
         extra_state_dict: Extra state dictionary to add to the exported model.
+        **kwargs: Internal-only keyword arguments. Supported key: merged_base_safetensor_path
+            (str, optional). When provided, merges the exported diffusion transformer
+            weights with non-transformer components (VAE, vocoder, text encoders, etc.)
+            from this base safetensors file to produce a single-file checkpoint
+            compatible with ComfyUI. Value should be the path to a full base model
+            ``.safetensors`` file (e.g. ``"path/to/ltx-2-19b-dev.safetensors"``).
+            Only used for diffusion model exports.
     """
+    merged_base_safetensor_path: str | None = kwargs.get("merged_base_safetensor_path")
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1010,7 +1127,9 @@ def export_hf_checkpoint(
     if HAS_DIFFUSERS:
         is_diffusers_obj = is_diffusers_object(model)
     if is_diffusers_obj:
-        _export_diffusers_checkpoint(model, dtype, export_dir, components)
+        _export_diffusers_checkpoint(
+            model, dtype, export_dir, components, merged_base_safetensor_path
+        )
         return
 
     # Transformers model export
@@ -1037,11 +1156,20 @@ def export_hf_checkpoint(
             model.hf_quantizer = None
 
         # Save model
-        model.save_pretrained(
-            export_dir,
-            state_dict={**post_state_dict, **(extra_state_dict or {})},
-            save_modelopt_state=save_modelopt_state,
-        )
+        # Temporarily disable revert_weight_conversion if available — it doesn't handle
+        # quantized state dicts (scalar scale tensors have 0 dimensions, causing IndexError).
+        # We must patch both the source module and the importing module since
+        # modeling_utils does `from core_model_loading import revert_weight_conversion`.
+        _patches = _patch_revert_weight_conversion()
+
+        try:
+            model.save_pretrained(
+                export_dir,
+                state_dict={**post_state_dict, **(extra_state_dict or {})},
+                save_modelopt_state=save_modelopt_state,
+            )
+        finally:
+            _unpatch_revert_weight_conversion(_patches)
 
         original_config = f"{export_dir}/config.json"
         config_data = {}

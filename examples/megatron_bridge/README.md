@@ -105,10 +105,12 @@ python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
     --jsonl_paths /path/to/data1.jsonl /path/to/data2.jsonl ... \
     --json_keys text \
     --tokenizer Qwen/Qwen3-0.6B \
-    --output_dir /path/to/tokenized/data/qwen3 \
+    --output_dir tokenized_qwen3 \
     --workers 32 \
     --max_sequence_length 256_000
 ```
+
+This will create `tokenized_qwen3/data1_text_document.{bin,idx}` and `tokenized_qwen3/data2_text_document.{bin,idx}` files. We can use these files in the distillation script by passing `--data_paths 1.0 tokenized_qwen3/data1_text_document 1.0 tokenized_qwen3/data2_text_document` (equal weight for both datasets).
 
 Instead of `--jsonl_paths`, you can also pass a directory path to the `--input_dir` argument to tokenize all JSONL files in the directory.
 We are setting a maximum sequence length of 256k to avoid rare OOM errors in tokenization if text is too long.
@@ -123,12 +125,12 @@ python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
     --hf_max_samples_per_split 10_000_000 \
     --json_keys text \
     --tokenizer Qwen/Qwen3-0.6B \
-    --output_dir /path/to/tokenized/data/qwen3 \
+    --output_dir tokenized_qwen3 \
     --workers 32 \
     --max_sequence_length 256_000
 ```
 
-The [Nemotron-Pretraining-SFT-v1](https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-SFT-v1) dataset is huge, so it will take a while to download and tokenize. You can also split the large `.jsonl` into multiple files (e.g. 10M samples per file using `split -l 10000000 -d --additional-suffix=.jsonl <file>.jsonl <file>_part`) and tokenize them parallelly.
+The [Nemotron-Pretraining-SFT-v1](https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-SFT-v1) dataset is huge, so it will take a few hours to download and tokenize. You can also split the large `.jsonl` into multiple files (e.g. 10M samples per file using `split -l 10000000 -d --additional-suffix=.jsonl <file>.jsonl <file>_part`) and tokenize them parallelly via the `--jsonl_paths` argument.
 To quickly test the script, you can try the [nvidia/Nemotron-Pretraining-Dataset-sample](https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-Dataset-sample) dataset.
 
 If you skip `--hf_name`, it will download and tokenize all subsets for the dataset.
@@ -144,7 +146,7 @@ torchrun --nnodes 1 --nproc_per_node 8 distill.py \
     --tp_size 8 \
     --teacher_hf_path Qwen/Qwen3-8B \
     --student_hf_path Qwen/Qwen3-4B \
-    --data_paths 1.0 /path/to/tokenized/data/qwen3 \
+    --data_paths 1.0 tokenized_qwen3/data1_text_document 1.0 tokenized_qwen3/data2_text_document \
     --data_path_to_cache /path/to/cache/dataset_indices_qwen3 \
     --seq_length 8192 \
     --mbs 1 \

@@ -19,7 +19,6 @@ from functools import partial
 import pytest
 import torch
 import torch.nn.init as init
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import initialize_for_megatron
 from megatron.core import dist_checkpointing
@@ -254,12 +253,8 @@ def _test_forward_with_one_lora(lora_config, rank, size):
         SELECTIVE_LAYER_LORA_CFG,
     ],
 )
-def test_forward_with_one_lora(lora_config):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_forward_with_one_lora, lora_config),
-        backend="nccl",
-    )
+def test_forward_with_one_lora(dist_workers, lora_config):
+    dist_workers.run(partial(_test_forward_with_one_lora, lora_config))
 
 
 def _test_forward_with_two_loras(lora_config_1, lora_config_2, rank, size):
@@ -310,12 +305,8 @@ def _test_forward_with_two_loras(lora_config_1, lora_config_2, rank, size):
         (DEFAULT_LORA_CFG_RANDOM_INIT_TEST, DEFAULT_LORA_CFG_RANDOM_INIT_SMALL_RANK_TEST),
     ],
 )
-def test_forward_with_two_loras(lora_config_1, lora_config_2):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_forward_with_two_loras, lora_config_1, lora_config_2),
-        backend="nccl",
-    )
+def test_forward_with_two_loras(dist_workers, lora_config_1, lora_config_2):
+    dist_workers.run(partial(_test_forward_with_two_loras, lora_config_1, lora_config_2))
 
 
 # TODO: Rank check
@@ -356,12 +347,8 @@ def _test_attr_changes_with_one_lora(lora_config, rank, size):
         DEFAULT_LORA_CFG_RANDOM_INIT_TEST,
     ],
 )
-def test_attr_changes_with_one_lora(lora_config):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_attr_changes_with_one_lora, lora_config),
-        backend="nccl",
-    )
+def test_attr_changes_with_one_lora(dist_workers, lora_config):
+    dist_workers.run(partial(_test_attr_changes_with_one_lora, lora_config))
 
 
 def _test_mcore_save_restore(lora_config, tmp_path, rank, size):
@@ -398,12 +385,8 @@ def _test_mcore_save_restore(lora_config, tmp_path, rank, size):
         DEFAULT_LORA_CFG_RANDOM_INIT_TEST,
     ],
 )
-def test_mcore_save_restore(lora_config, tmp_path):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_mcore_save_restore, lora_config, str(tmp_path)),
-        backend="nccl",
-    )
+def test_mcore_save_restore(dist_workers, lora_config, tmp_path):
+    dist_workers.run(partial(_test_mcore_save_restore, lora_config, str(tmp_path)))
 
 
 def _test_adapter_gradient_flow_freeze_base_model(lora_config, tmp_path, rank, size):
@@ -445,24 +428,21 @@ def _test_adapter_gradient_flow_freeze_base_model(lora_config, tmp_path, rank, s
         LARGE_LORA_CFG_RANDOM_INIT_TEST,  # Use random init so gradients flow to both lora_a and lora_b
     ],
 )
-def test_adapter_gradient_flow_freeze_base_model(lora_config, tmp_path):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_adapter_gradient_flow_freeze_base_model, lora_config, str(tmp_path)),
-        backend="nccl",
+def test_adapter_gradient_flow_freeze_base_model(dist_workers, lora_config, tmp_path):
+    dist_workers.run(
+        partial(_test_adapter_gradient_flow_freeze_base_model, lora_config, str(tmp_path))
     )
 
 
 def _test_adapter_gradient_flow_freeze_lora_model(lora_config, tmp_path, rank, size):
     hidden_size = 512
-    local_cfg = copy.deepcopy(lora_config)
-    local_cfg["freeze_lora_weights"] = True
-    local_cfg["freeze_base_model"] = False
-
     initialize_for_megatron(tensor_model_parallel_size=size, pipeline_model_parallel_size=1)
     model = _gpt_model_provider(tp_size=size, hidden_size=hidden_size)
     prompt_tokens = torch.randint(0, model.vocab_size, (2, model.max_sequence_length)).cuda()
 
+    local_cfg = copy.deepcopy(lora_config)
+    local_cfg["freeze_lora_weights"] = True
+    local_cfg["freeze_base_model"] = False
     mtpeft.update_model(model, local_cfg)
     model.train()
 
@@ -496,23 +476,21 @@ def _test_adapter_gradient_flow_freeze_lora_model(lora_config, tmp_path, rank, s
         LARGE_LORA_CFG_RANDOM_INIT_TEST,  # Use random init so gradients flow to both lora_a and lora_b
     ],
 )
-def test_adapter_gradient_flow_freeze_lora_model(lora_config, tmp_path):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_adapter_gradient_flow_freeze_lora_model, lora_config, str(tmp_path)),
-        backend="nccl",
+def test_adapter_gradient_flow_freeze_lora_model(dist_workers, lora_config, tmp_path):
+    dist_workers.run(
+        partial(_test_adapter_gradient_flow_freeze_lora_model, lora_config, str(tmp_path))
     )
 
 
 def _test_adapter_gradient_flow(lora_config, tmp_path, rank, size):
     hidden_size = 512
-    lora_config["freeze_lora_weights"] = False
-    lora_config["freeze_base_model"] = False
-
     initialize_for_megatron(tensor_model_parallel_size=size, pipeline_model_parallel_size=1)
     model = _gpt_model_provider(tp_size=size, hidden_size=hidden_size)
     prompt_tokens = torch.randint(0, model.vocab_size, (2, model.max_sequence_length)).cuda()
 
+    lora_config = copy.deepcopy(lora_config)
+    lora_config["freeze_lora_weights"] = False
+    lora_config["freeze_base_model"] = False
     mtpeft.update_model(model, lora_config)
     model.train()
 
@@ -543,23 +521,19 @@ def _test_adapter_gradient_flow(lora_config, tmp_path, rank, size):
         LARGE_LORA_CFG_RANDOM_INIT_TEST,  # Use random init so gradients flow to both lora_a and lora_b
     ],
 )
-def test_adapter_gradient_flow(lora_config, tmp_path):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_adapter_gradient_flow, lora_config, str(tmp_path)),
-        backend="nccl",
-    )
+def test_adapter_gradient_flow(dist_workers, lora_config, tmp_path):
+    dist_workers.run(partial(_test_adapter_gradient_flow, lora_config, str(tmp_path)))
 
 
 def _test_adapter_gradient_flow_freeze_lora_with_api(lora_config, tmp_path, rank, size):
     hidden_size = 256
-
     initialize_for_megatron(tensor_model_parallel_size=size, pipeline_model_parallel_size=1)
     model = _gpt_model_provider(tp_size=size, hidden_size=hidden_size)
     prompt_tokens = torch.randint(0, model.vocab_size, (2, model.max_sequence_length)).cuda()
+
+    lora_config = copy.deepcopy(lora_config)
     lora_config["freeze_lora_weights"] = False
     lora_config["freeze_base_model"] = False
-
     mtpeft.update_model(model, lora_config)
     # Freeze the self_attention layers only
     mtpeft.freeze_lora_weights(model, layer_patterns="*self_attention*")
@@ -624,11 +598,9 @@ def _test_adapter_gradient_flow_freeze_lora_with_api(lora_config, tmp_path, rank
         LARGE_LORA_CFG_RANDOM_INIT_TEST,
     ],
 )
-def test_adapter_gradient_flow_freeze_lora_with_api(lora_config, tmp_path):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_adapter_gradient_flow_freeze_lora_with_api, lora_config, str(tmp_path)),
-        backend="nccl",
+def test_adapter_gradient_flow_freeze_lora_with_api(dist_workers, lora_config, tmp_path):
+    dist_workers.run(
+        partial(_test_adapter_gradient_flow_freeze_lora_with_api, lora_config, str(tmp_path))
     )
 
 
@@ -675,12 +647,8 @@ def _test_quantize_then_lora(lora_config, tmp_path, rank, size):
         LARGE_LORA_CFG_RANDOM_INIT_TEST,  # Use random init so gradients flow to both lora_a and lora_b
     ],
 )
-def test_quantize_then_lora(lora_config, tmp_path):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_quantize_then_lora, lora_config, str(tmp_path)),
-        backend="nccl",
-    )
+def test_quantize_then_lora(dist_workers, lora_config, tmp_path):
+    dist_workers.run(partial(_test_quantize_then_lora, lora_config, str(tmp_path)))
 
 
 def _test_lora_then_quantize(lora_config, tmp_path, rank, size):
@@ -736,12 +704,8 @@ def _test_lora_then_quantize(lora_config, tmp_path, rank, size):
         LARGE_LORA_CFG_RANDOM_INIT_TEST,  # Use random init so gradients flow to both lora_a and lora_b
     ],
 )
-def test_lora_then_quantize(lora_config, tmp_path):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_lora_then_quantize, lora_config, str(tmp_path)),
-        backend="nccl",
-    )
+def test_lora_then_quantize(dist_workers, lora_config, tmp_path):
+    dist_workers.run(partial(_test_lora_then_quantize, lora_config, str(tmp_path)))
 
 
 def _test_mcore_quantize_then_lora_save_restore(lora_config, tmp_path, rank, size):
@@ -799,11 +763,9 @@ def _test_mcore_quantize_then_lora_save_restore(lora_config, tmp_path, rank, siz
         DEFAULT_LORA_CFG_RANDOM_INIT_TEST,
     ],
 )
-def test_mcore_quantize_then_lora_save_restore(lora_config, tmp_path):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_mcore_quantize_then_lora_save_restore, lora_config, str(tmp_path)),
-        backend="nccl",
+def test_mcore_quantize_then_lora_save_restore(dist_workers, lora_config, tmp_path):
+    dist_workers.run(
+        partial(_test_mcore_quantize_then_lora_save_restore, lora_config, str(tmp_path))
     )
 
 
@@ -866,9 +828,7 @@ def _test_mcore_lora_then_quantize_save_restore(lora_config, tmp_path, rank, siz
         DEFAULT_LORA_CFG_RANDOM_INIT_TEST,
     ],
 )
-def test_mcore_lora_then_quantize_save_restore(lora_config, tmp_path):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_mcore_lora_then_quantize_save_restore, lora_config, str(tmp_path)),
-        backend="nccl",
+def test_mcore_lora_then_quantize_save_restore(dist_workers, lora_config, tmp_path):
+    dist_workers.run(
+        partial(_test_mcore_lora_then_quantize_save_restore, lora_config, str(tmp_path))
     )

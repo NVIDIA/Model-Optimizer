@@ -331,11 +331,7 @@ class MCoreMinitronSearcher(BaseSearcher):
             )
             print_rank_0(f"Pruned hybrid_override_pattern: {self.model.hybrid_override_pattern}")
 
-    def _prune(
-        self,
-        export_config: dict,
-        prune_depth: bool = True,
-    ) -> None:
+    def _prune(self, export_config: dict, prune_depth: bool = True) -> None:
         """Prune the model homogeneously based on the export_config by setting active choices for configurable hparams.
 
         Args:
