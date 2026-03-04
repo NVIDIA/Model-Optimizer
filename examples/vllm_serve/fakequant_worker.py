@@ -113,7 +113,7 @@ def _fakequant_run_prolog_worker(self) -> None:
         # Load on CPU to avoid failures when the checkpoint was saved from a different
         # GPU mapping
         modelopt_state = torch.load(
-            quant_config["modelopt_state_path"], weights_only=False, map_location="cpu"
+            quant_config["modelopt_state_path"], weights_only=True, map_location="cpu"
         )
         modelopt_weights = modelopt_state.pop("modelopt_state_weights", None)
         map_fun = (
@@ -142,51 +142,62 @@ def _fakequant_run_prolog_worker(self) -> None:
 
         def calibrate_loop(model: Any = None) -> None:
             for batch_idx, batch in tqdm(enumerate(calib_dataloader)):
-                input_ids = batch["input_ids"][0]
+                input_ids_batch = batch["input_ids"]
 
-                # Convert tensor to list of integers for vLLM compatibility
-                if torch.is_tensor(input_ids):
-                    input_ids_list = input_ids.cpu().tolist()
+                # Convert to list of flat token id lists (one per sequence in batch)
+                if torch.is_tensor(input_ids_batch):
+                    input_ids_batch = input_ids_batch.cpu()
+                    # Handle both [batch_size, seq_len] and [seq_len]
+                    if input_ids_batch.dim() == 1:
+                        input_ids_batch = input_ids_batch.unsqueeze(0)
+                    input_ids_list_batch = [seq.tolist() for seq in input_ids_batch]
                 else:
-                    input_ids_list = list(input_ids)
+                    input_ids_list_batch = [
+                        list(seq) if not isinstance(seq, list) else seq for seq in input_ids_batch
+                    ]
+                    if input_ids_list_batch and isinstance(input_ids_list_batch[0], int):
+                        input_ids_list_batch = [input_ids_list_batch]
 
                 num_groups = len(self.model_runner.kv_cache_config.kv_cache_groups)
                 empty_block_ids = tuple([] for _ in range(num_groups))
 
-                req_id = f"req-{batch_idx}"
-                # Pass all possible parameters - the helper will filter based on vLLM version
-                new_req = _create_new_data_cls(
-                    NewRequestData,
-                    req_id=req_id,
-                    prompt_token_ids=input_ids_list,
-                    # Old API parameters
-                    mm_kwargs=[],  # TODO: remove this when vllm <= 0.11 is outdated
-                    mm_hashes=[],  # TODO: remove this when vllm <= 0.11 is outdated
-                    mm_positions=[],  # TODO: remove this when vllm <= 0.11 is outdated
-                    # New API parameter
-                    mm_features=[],
-                    sampling_params=SamplingParams(max_tokens=1),
-                    pooling_params=None,
-                    block_ids=empty_block_ids,
-                    num_computed_tokens=0,
-                    lora_request=None,
-                )
+                scheduled_new_reqs = []
+                num_scheduled_tokens = {}
+                total_tokens = 0
+                for seq_idx, input_ids_list in enumerate(input_ids_list_batch):
+                    req_id = f"req-{batch_idx}-{seq_idx}"
+                    new_req = _create_new_data_cls(
+                        NewRequestData,
+                        req_id=req_id,
+                        prompt_token_ids=input_ids_list,
+                        mm_kwargs=[],
+                        mm_hashes=[],
+                        mm_positions=[],
+                        mm_features=[],
+                        sampling_params=SamplingParams(max_tokens=1),
+                        pooling_params=None,
+                        block_ids=empty_block_ids,
+                        num_computed_tokens=0,
+                        lora_request=None,
+                    )
+                    scheduled_new_reqs.append(new_req)
+                    num_scheduled_tokens[req_id] = len(input_ids_list)
+                    total_tokens += len(input_ids_list)
 
                 scheduler_output = _create_new_data_cls(
                     SchedulerOutput,
-                    scheduled_new_reqs=[new_req],
+                    scheduled_new_reqs=scheduled_new_reqs,
                     scheduled_cached_reqs=CachedRequestData.make_empty(),
-                    num_scheduled_tokens={req_id: len(input_ids_list)},
-                    total_num_scheduled_tokens=len(input_ids_list),
+                    num_scheduled_tokens=num_scheduled_tokens,
+                    total_num_scheduled_tokens=total_tokens,
                     scheduled_spec_decode_tokens={},
                     scheduled_encoder_inputs={},
                     num_common_prefix_blocks=[0] * num_groups,
                     finished_req_ids=set(),
                     free_encoder_mm_hashes=[],
                     kv_connector_metadata=None,
-                    # Old API parameters
-                    structured_output_request_ids={},  # TODO: remove this when vllm <= 0.11 is outdated
-                    grammar_bitmask=None,  # TODO: remove this when vllm <= 0.11 is outdated
+                    structured_output_request_ids={},
+                    grammar_bitmask=None,
                 )
                 output = self.execute_model(scheduler_output)
                 if hasattr(self, "sample_tokens"):
@@ -220,7 +231,9 @@ def _fakequant_run_prolog_worker(self) -> None:
             print(f"Loading quantizer values from {quantizer_file_path}")
             # Load on CPU to avoid failures when the checkpoint was saved from a different
             # GPU mapping
-            saved_quant_dict = torch.load(quantizer_file_path, map_location="cpu")
+            saved_quant_dict = torch.load(
+                quantizer_file_path, weights_only=True, map_location="cpu"
+            )
             # convert quant keys to vLLM format
             if hasattr(self.model_runner.model, "hf_to_vllm_mapper"):
                 saved_quant_dict = self.model_runner.model.hf_to_vllm_mapper.apply_dict(
@@ -229,7 +242,7 @@ def _fakequant_run_prolog_worker(self) -> None:
                 saved_quant_dict = {
                     key.replace("quantizer_", "quantizer._"): value
                     for key, value in saved_quant_dict.items()
-                    if key.endswith("quantizer_")
+                    if "quantizer_" in key
                 }
             saved_quant_dict = convert_dict_to_vllm(saved_quant_dict)
 
