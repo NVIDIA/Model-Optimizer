@@ -56,7 +56,7 @@ if IS_TRITON_AVAILABLE:
 else:
     weight_dequant = None
 
-from ..utils import replace_function
+from ..utils import replace_function, sync_moe_expert_amax
 from .attention import register_attention_for_kv_quant
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear, _QuantFunctionalMixin
 
@@ -440,31 +440,34 @@ _transposed_quantize = _TransposedQuantization.apply
 
 
 class _QuantSparseMoe(QuantModule):
-    """Module to support special handling of token dispatching during calibration.
+    """Quantization wrapper for HuggingFace sparse MoE blocks.
 
-    During calibration, we forward all tokens to all experts so that all experts see sufficient tokens to calibrate.
-    However, even in calibration mode, the actual top_k routing is used to calculate the actual outputs this instance
-    returns.
+    Supports ``layer_sync_moe_local_experts_amax`` to sync input quantizer amax across experts.
 
-    If calibration is not enabled, this module behaves as a normal MoELayer.
+    Optionally supports two config-driven features (disabled by default):
+    - ``_moe_calib_experts_ratio``: force-forward tokens to more experts during calibration.
+    - ``_moe_count_expert_calib_tokens``: count tokens routed to each expert during calibration.
+
+    When both are disabled, forward is a direct pass-through with zero overhead.
     """
 
     def _setup(self):
-        num_experts = 0
-        if hasattr(self, "gate") and hasattr(self.gate, "num_experts"):
-            num_experts = self.gate.num_experts
-        elif hasattr(self, "num_experts"):
-            num_experts = self.num_experts
-        elif hasattr(self, "experts") and hasattr(self.experts, "num_experts"):
-            num_experts = self.experts.num_experts
-
-        self.register_buffer(
-            "expert_token_count",
-            torch.zeros(num_experts, dtype=torch.long, device=next(self.parameters()).device),
-            persistent=False,
-        )
-        self._count_expert_tokens = False
         self._moe_calib_experts_ratio = None
+        self._moe_count_expert_calib_tokens = False
+        self._token_counting_initialized = False
+
+    def _init_token_counting(self):
+        """Lazy-init token counting infra (buffer + gate hook). Called once from forward."""
+        self._token_counting_initialized = True
+        num_experts = 0
+        for obj in [getattr(self, "gate", None), self, getattr(self, "experts", None)]:
+            if obj is not None:
+                for attr in ("num_experts", "n_routed_experts"):
+                    if hasattr(obj, attr):
+                        num_experts = getattr(obj, attr)
+                        break
+            if num_experts:
+                break
 
         if num_experts == 0:
             warnings.warn(
@@ -473,6 +476,12 @@ class _QuantSparseMoe(QuantModule):
             )
             return
 
+        self.register_buffer(
+            "expert_token_count",
+            torch.zeros(num_experts, dtype=torch.long, device=next(self.parameters()).device),
+            persistent=False,
+        )
+        self._count_expert_tokens = False
         if hasattr(self, "gate"):
             self.gate.register_forward_hook(self._gate_forward_hook)
 
@@ -492,17 +501,24 @@ class _QuantSparseMoe(QuantModule):
             self.expert_token_count += counts.to(self.expert_token_count.device)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if not self._moe_calib_experts_ratio and not self._moe_count_expert_calib_tokens:
+            return super().forward(hidden_states)
+
+        if self._moe_count_expert_calib_tokens and not self._token_counting_initialized:
+            self._init_token_counting()
+
         is_calib = any(getattr(m, "_if_calib", False) for m in self.experts.modules())
-        self._count_expert_tokens = is_calib
+        self._count_expert_tokens = is_calib and self._moe_count_expert_calib_tokens
+
+        # If any of the experts are in calibration mode, we will forward all tokens to
+        # self._moe_calib_experts_ratio % of the experts to improve the calibration coverage.
+        # This is used only for calibration, we need to re-calculate the actual outputs again using
+        # the original top_k
         if is_calib and self._moe_calib_experts_ratio:
             self._count_expert_tokens = True
             assert 0 < self._moe_calib_experts_ratio <= 1, (
                 "moe_calib_experts_ratio must be between 0 and 1"
             )
-            # If any of the experts are in calibration mode, we will forward all tokens to
-            # self._moe_calib_experts_ratio % of the experts to improve the calibration coverage.
-            # This is used only for calibration, we need to re-calculate the actual outputs again using
-            # the original top_k
             if TRANSFORMERS_VERSION_GE_5_0:
                 assert hasattr(self, "gate") and hasattr(self.gate, "top_k")
                 original_top_k = self.gate.top_k
@@ -513,26 +529,38 @@ class _QuantSparseMoe(QuantModule):
                 self.gate.top_k = original_top_k
             else:
                 # Path for transformers < 5.0
-                original_top_k = self.top_k
+                if hasattr(self, "gate") and hasattr(self.gate, "top_k"):
+                    top_k_owner = self.gate
+                else:
+                    top_k_owner = self
+                original_top_k = top_k_owner.top_k
                 if hasattr(self, "num_experts"):
-                    self.top_k = max(
+                    top_k_owner.top_k = max(
                         original_top_k, round(self.num_experts * self._moe_calib_experts_ratio)
                     )
                 elif hasattr(self, "experts"):
-                    self.top_k = max(
+                    num_experts = (
+                        self.experts.num_experts
+                        if hasattr(self.experts, "num_experts")
+                        else len(self.experts)
+                    )
+                    top_k_owner.top_k = max(
                         original_top_k,
-                        round(self.experts.num_experts * self._moe_calib_experts_ratio),
+                        round(num_experts * self._moe_calib_experts_ratio),
                     )
                 else:
                     raise ValueError(f"Could not find num_experts in module {self}")
                 super().forward(hidden_states)
-                self.top_k = original_top_k
+                top_k_owner.top_k = original_top_k
             self._count_expert_tokens = False
-        else:
-            self._count_expert_tokens = True
+
         output = super().forward(hidden_states)
         self._count_expert_tokens = False
         return output
+
+    def layer_sync_moe_local_experts_amax(self):
+        """Sync input_quantizer amax across experts so all share the same amax per quantizer."""
+        sync_moe_expert_amax(self.experts)
 
 
 class _QuantLlama4TextExperts(QuantModule):
@@ -1117,17 +1145,21 @@ def register_falcon_linears_on_the_fly(model):
             QuantModuleRegistry.register({linear_type: linear_type.__name__})(_QuantLinear)
 
 
+def _has_num_experts(obj):
+    # n_routed_experts: NemotronH-style MoE
+    return hasattr(obj, "num_experts") or hasattr(obj, "n_routed_experts")
+
+
 def _is_sparse_moe_block(module):
     """Check if a module is structurally a sparse MoE block compatible with _QuantSparseMoe.
 
-    All HuggingFace MoE blocks (Mixtral, Qwen3Moe, Qwen2Moe, Qwen3Next, Llama4, MiniMax, etc.)
-    share a common structural pattern: a ``gate`` (TopKRouter) sub-module with routing attributes
-    (``top_k``, some may have ``num_experts``), and an ``experts`` sub-module.
+    All HuggingFace MoE blocks (Mixtral, Qwen3Moe, Qwen2Moe, Qwen3Next, Llama4, MiniMax,
+    NemotronH, etc.) share a common structural pattern: a ``gate`` (TopKRouter) sub-module with
+    routing attributes (``top_k`` and ``num_experts`` or ``n_routed_experts``), and an ``experts``
+    sub-module.
 
     This function detects that pattern instead of relying on class names, making it forward-compatible
-    with new MoE architectures. Some MoE models (e.g. Glm4MoeMoE) have ``gate`` and ``experts`` but
-    use a different routing interface (``n_routed_experts`` instead of ``num_experts``, custom
-    ``route_tokens_to_experts``), so we require ``num_experts`` to be present to avoid false positives.
+    with new MoE architectures.
     """
     if not hasattr(module, "experts"):
         return False
@@ -1135,16 +1167,14 @@ def _is_sparse_moe_block(module):
     # Primary: gate sub-module has topk/top_k + num_experts (standard TopKRouter pattern)
     if hasattr(module, "gate"):
         gate = module.gate
-        has_topk = hasattr(gate, "top_k")
-        has_num_experts = hasattr(gate, "num_experts")
-        if has_topk and has_num_experts:
+        if hasattr(gate, "top_k") and _has_num_experts(gate):
             return True
 
     # Fallback: top_k + num_experts on the block itself (older transformers, e.g. v4.x Qwen3Next)
     if hasattr(module, "top_k"):
-        if not hasattr(module, "num_experts") and hasattr(module.experts, "__len__"):
+        if not _has_num_experts(module) and hasattr(module.experts, "__len__"):
             module.num_experts = len(module.experts)
-        return hasattr(module, "num_experts")
+        return _has_num_experts(module)
 
     return False
 

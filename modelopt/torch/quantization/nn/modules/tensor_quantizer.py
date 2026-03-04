@@ -1338,7 +1338,7 @@ class SequentialQuantizer(nn.Sequential):
 
     """
 
-    _delegated_properties = ["fake_quant", "is_enabled"]
+    _delegated_properties = ["fake_quant", "is_enabled", "amax"]
     _delegated_methods = [
         "reset_amax",
         "disable",
