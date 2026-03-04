@@ -116,7 +116,12 @@ def _fakequant_run_prolog_worker(self) -> None:
             quant_config["modelopt_state_path"], weights_only=False, map_location="cpu"
         )
         modelopt_weights = modelopt_state.pop("modelopt_state_weights", None)
-        map_fun = self.model_runner.model.hf_to_vllm_mapper.apply_dict
+        map_fun = (
+            self.model_runner.model.hf_to_vllm_mapper.apply_dict
+            if hasattr(self.model_runner.model, "hf_to_vllm_mapper")
+            else None
+        )
+        print(f"map_fun: {map_fun}")
         modelopt_state = convert_modelopt_state_to_vllm(modelopt_state, map_fun=map_fun)
         restore_from_modelopt_state_vllm(model, modelopt_state)
 
