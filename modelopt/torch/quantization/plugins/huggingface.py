@@ -1040,15 +1040,20 @@ class _QuantGptOssExperts(_QuantFunctionalMixin):
 
     @property
     def functionals_to_replace(self):
+        # Use torch.ops.aten to bypass Python dispatch and avoid RecursionError
+        # (torch.matmul / __matmul__ can dispatch to each other)
+        _aten_bmm = torch.ops.aten.bmm
+        _aten_matmul = torch.ops.aten.matmul
+
         def _quantized_bmm(batch1, batch2):
             batch1 = self.down_proj_input_quantizer(batch1) if self._down_proj_mul else batch1
             self._down_proj_mul = not self._down_proj_mul  # toggle the flag
-            return torch._bmm(batch1, batch2)
+            return _aten_bmm(batch1, batch2)
 
         def _tensor_matmul(self_t, other):
             self_t = self.down_proj_input_quantizer(self_t) if self._down_proj_mul else self_t
             self._down_proj_mul = not self._down_proj_mul
-            return torch.matmul(self_t, other)
+            return _aten_matmul(self_t, other)
 
         return [
             (torch, "bmm", _quantized_bmm),
