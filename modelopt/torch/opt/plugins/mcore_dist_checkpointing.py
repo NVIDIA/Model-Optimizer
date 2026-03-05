@@ -153,7 +153,7 @@ def save_sharded_modelopt_state(
                 try:
                     config[k] = str(v)
                 except (AttributeError, TypeError):
-                    config[k] = repr(type(v))
+                    print("Warning: TransformerConfig.{} does not have _repr_ implemented.")
 
         return config
 
