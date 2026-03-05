@@ -58,7 +58,10 @@ class TestComputeQuantizationMse:
         expected_names = {
             name
             for name, module in model.named_modules()
-            if isinstance(module, TensorQuantizer) and module._if_quant and module._fake_quant
+            if isinstance(module, TensorQuantizer)
+            and module._if_quant
+            and module._fake_quant
+            and not module._disabled
         }
         assert set(mse.keys()) == expected_names
 
