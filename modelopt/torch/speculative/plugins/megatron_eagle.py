@@ -895,10 +895,13 @@ class _DynamicEagleGPTModel(EagleModel):
             # [sq, 1, b, sk] -> [b, 1, sq, sk]
             eagle_inputs["attention_mask"] = attn_mask.transpose(0, 2).contiguous()
 
-        eagle_inputs["rotary_pos_emb"] = torch.cat(
-            [rotary_pos_emb] * (ttt_step + 1),
-            dim=0,
-        )
+        if self.eagle_mix_hidden_states:
+            eagle_inputs["rotary_pos_emb"] = rotary_pos_emb
+        else:
+            eagle_inputs["rotary_pos_emb"] = torch.cat(
+                [rotary_pos_emb] * (ttt_step + 1),
+                dim=0,
+            )
 
         return eagle_inputs
 
