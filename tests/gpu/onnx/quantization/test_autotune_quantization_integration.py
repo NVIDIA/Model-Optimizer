@@ -78,7 +78,6 @@ def test_autotune_quantization_integration(tmp_path):
         onnx_model,
         quant_type="int8",
         default_dq_dtype="float16",
-        keep_output_dir=False,
     )
 
     # Autotune path: export the Q/DQ model directly and collect quantized tensor slots.

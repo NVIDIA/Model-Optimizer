@@ -250,7 +250,7 @@ def _preprocess_onnx(
 def _find_nodes_to_quantize_autotune(
     onnx_model: onnx.ModelProto,
     quantize_mode: str,
-    trt_plugins: list[str],
+    trt_plugins: list[str] | None,
     high_precision_dtype: str = "fp16",
     output_dir: str | None = None,
     num_schemes_per_region: int = 30,

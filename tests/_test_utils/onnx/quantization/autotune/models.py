@@ -56,7 +56,7 @@ def _create_simple_conv_onnx_model():
     return helper.make_model(graph, producer_name="test")
 
 
-def _create_simple_resnet18_onnx_model():  #  -> onnx.ModelProto:
+def _create_simple_resnet18_model():
     """Build a ResNet-18 subgraph (stem + layer1) for MOQ + Autotuner integration tests.
 
     Architecture:
