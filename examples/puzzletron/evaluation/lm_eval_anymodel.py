@@ -48,6 +48,7 @@ checkpoint's config.json model_type.
 from lm_eval.__main__ import cli_evaluate
 from lm_eval.api.model import T
 from lm_eval.models.huggingface import HFLM
+from lm_eval import utils
 
 # Trigger factory registration for all model descriptors
 import modelopt.torch.puzzletron.anymodel.models  # noqa: F401
@@ -59,14 +60,14 @@ from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
 
 def create_from_arg_obj(cls: type[T], arg_dict: dict, additional_config: dict | None = None) -> T:
     """Override HFLM.create_from_arg_obj to wrap model loading with deci_x_patcher."""
-    pretrained = arg_dict.get("pretrained")
-    descriptor = resolve_descriptor_from_pretrained(
-        pretrained, trust_remote_code=arg_dict.get("trust_remote_code", False)
-    )
 
     additional_config = {} if additional_config is None else additional_config
     additional_config = {k: v for k, v in additional_config.items() if v is not None}
 
+    pretrained = arg_dict.get("pretrained")
+    descriptor = resolve_descriptor_from_pretrained(
+        pretrained, trust_remote_code=arg_dict.get("trust_remote_code", False)
+    )
     # The patcher must be active during HFLM.__init__ because that's where
     # AutoModelForCausalLM.from_pretrained() is called internally.
     with deci_x_patcher(model_descriptor=descriptor):
@@ -74,9 +75,37 @@ def create_from_arg_obj(cls: type[T], arg_dict: dict, additional_config: dict | 
 
     return model_obj
 
+def create_from_arg_string(
+    cls: type[T], arg_string: str, additional_config: dict | None = None
+) -> T:
+    """Create an LM instance from a comma-separated argument string.
+
+    Args:
+        arg_string: Arguments as ``"key1=value1,key2=value2"``.
+        additional_config: Extra configuration merged into the parsed args.
+
+    Returns:
+        An instance of this LM subclass.
+    """
+    args = utils.simple_parse_args_string(arg_string)
+    additional_config = {} if additional_config is None else additional_config
+    args2 = {k: v for k, v in additional_config.items() if v is not None}
+
+    pretrained = args.get("pretrained")
+    descriptor = resolve_descriptor_from_pretrained(
+        pretrained, trust_remote_code=args.get("trust_remote_code", False)
+    )
+
+    # The patcher must be active during HFLM.__init__ because that's where
+    # AutoModelForCausalLM.from_pretrained() is called internally.
+    with deci_x_patcher(model_descriptor=descriptor):
+        model_obj = cls(**args, **args2)
+
+    return model_obj
 
 # Monkey-patch HFLM so lm-eval uses our patched model loading
 HFLM.create_from_arg_obj = classmethod(create_from_arg_obj)
+HFLM.create_from_arg_string = classmethod(create_from_arg_string)
 
 
 if __name__ == "__main__":
