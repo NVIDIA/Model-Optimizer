@@ -170,7 +170,9 @@ def load_distributed_checkpoint(checkpoint_path, gpt_model):
     return gpt_model
 
 
-def _gpt_model_provider(tp_size: int, hidden_size=256, vocab_size=64, meta_device=False):
+def _gpt_model_provider(
+    tp_size: int, hidden_size=256, vocab_size=64, meta_device=False, num_moe_experts=None
+):
     """Build the model."""
 
     if meta_device:
@@ -185,6 +187,7 @@ def _gpt_model_provider(tp_size: int, hidden_size=256, vocab_size=64, meta_devic
                 hidden_size=hidden_size,
                 vocab_size=vocab_size,
                 use_cpu_initialization=meta_device,
+                num_moe_experts=num_moe_experts,
             )
     else:
         gpt_model = get_mcore_gpt_model(
@@ -196,6 +199,7 @@ def _gpt_model_provider(tp_size: int, hidden_size=256, vocab_size=64, meta_devic
             transformer_impl="local",
             hidden_size=hidden_size,
             vocab_size=vocab_size,
+            num_moe_experts=num_moe_experts,
         ).cuda()
     return gpt_model.eval()
 
@@ -859,14 +863,10 @@ def _test_moe_sequential_mlp_lora_structure(lora_config, rank, size):
     hidden_size = 256
     lora_rank = lora_config["adapter_cfg"]["*experts"]["rank"]
     initialize_for_megatron(tensor_model_parallel_size=size, pipeline_model_parallel_size=1)
-    model = get_mcore_gpt_model(
+    model = _gpt_model_provider(
         tp_size=size,
         hidden_size=hidden_size,
-        num_attention_heads=4,
-        ffn_hidden_size=None,
         num_moe_experts=num_experts,
-        moe_grouped_gemm=False,  # ensures SequentialMLP, not GroupedMLP
-        transformer_impl="local",
     ).cuda()
 
     prompt_tokens = torch.randint(0, model.vocab_size, (2, model.max_sequence_length)).cuda()
@@ -926,14 +926,10 @@ def _test_moe_sequential_mlp_lora_gradient_flow(lora_config, rank, size):
     num_experts = 4
     hidden_size = 256
     initialize_for_megatron(tensor_model_parallel_size=size, pipeline_model_parallel_size=1)
-    model = get_mcore_gpt_model(
+    model = _gpt_model_provider(
         tp_size=size,
         hidden_size=hidden_size,
-        num_attention_heads=4,
-        ffn_hidden_size=None,
         num_moe_experts=num_experts,
-        moe_grouped_gemm=False,
-        transformer_impl="local",
     ).cuda()
 
     mtpeft.update_model(model, lora_config)
