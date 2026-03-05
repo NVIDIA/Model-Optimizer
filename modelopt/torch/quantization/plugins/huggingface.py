@@ -1115,7 +1115,7 @@ def _is_sparse_moe_block(module):
 
     All HuggingFace MoE blocks (Mixtral, Qwen3Moe, Qwen2Moe, Qwen3Next, Llama4, MiniMax, etc.)
     share a common structural pattern: a ``gate`` (TopKRouter) sub-module with routing attributes
-    (``top_k`` and ``num_experts``), and an ``experts`` sub-module.
+    (``top_k``, some may have ``num_experts``), and an ``experts`` sub-module.
 
     This function detects that pattern instead of relying on class names, making it forward-compatible
     with new MoE architectures. Some MoE models (e.g. Glm4MoeMoE) have ``gate`` and ``experts`` but
@@ -1134,7 +1134,12 @@ def _is_sparse_moe_block(module):
             return True
 
     # Fallback: top_k + num_experts on the block itself (older transformers, e.g. v4.x Qwen3Next)
-    return hasattr(module, "top_k") and hasattr(module, "num_experts")
+    if hasattr(module, "top_k"):
+        if not hasattr(module, "num_experts") and hasattr(module.experts, "__len__"):
+            module.num_experts = len(module.experts)
+        return hasattr(module, "num_experts")
+
+    return False
 
 
 def register_sparse_moe_on_the_fly(model):

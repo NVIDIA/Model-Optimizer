@@ -5,7 +5,7 @@
 A Library to Quantize and Compress Deep Learning Models for Optimized Inference on Native Windows RTX GPUs
 
 [![Documentation](https://img.shields.io/badge/Documentation-latest-brightgreen.svg?style=flat)](https://nvidia.github.io/Model-Optimizer/)
-[![version](https://img.shields.io/badge/v0.33.0-orange?label=Release)](https://pypi.org/project/nvidia-modelopt/)
+[![version](https://img.shields.io/pypi/v/nvidia-modelopt?label=Release)](https://pypi.org/project/nvidia-modelopt/)
 [![license](https://img.shields.io/badge/License-Apache%202.0-blue)](../../LICENSE)
 
 [Examples](#examples) |

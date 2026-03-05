@@ -1,0 +1,63 @@
+name: Bump uv.lock
+
+on:
+  schedule:
+    - cron: "0 9 * * 1" # Every Monday at 9:00 UTC
+  workflow_dispatch: # On-demand
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump-uv-lock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install uv toml
+      - name: Enable torch override in pyproject.toml to avoid unnecessary nvidia-cu* dependencies in uv.lock
+        run: |
+          python -c "
+          import toml
+          t = toml.load('pyproject.toml')
+          t['tool']['uv']['override-dependencies'] = ['torch; sys_platform == \"never\"']
+          toml.dump(t, open('pyproject.toml', 'w'))
+          "
+      - run: uv lock --upgrade
+      - name: Check for changes
+        id: changes
+        run: |
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Create pull request
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BASE="${{ github.ref_name }}"
+          SAFE_BASE=$(echo "$BASE" | tr '/' '-')
+          BRANCH="auto/bump-uv-lock-${SAFE_BASE}-$(date +%Y-%m-%d)"
+          git checkout -b "$BRANCH"
+          git add uv.lock
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -m "[chore]: bump uv.lock"
+          git push origin "$BRANCH"
+          gh pr create \
+            --title "[chore]: weekly bump of uv.lock on ${BASE} ($(date +%Y-%m-%d))" \
+            --body "$(cat <<'EOF'
+          ## Summary
+          Automated weekly update of uv.lock file for nSpect Scanning:
+          - `uv.lock` — upgraded all transitive dependencies to latest compatible versions
+          EOF
+          )" \
+            --base "$BASE"

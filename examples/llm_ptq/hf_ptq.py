@@ -51,8 +51,10 @@ import modelopt.torch.quantization as mtq
 import modelopt.torch.sparsity as mts
 from modelopt.torch.export import (
     export_hf_checkpoint,
+    export_speculative_decoding,
     export_tensorrt_llm_checkpoint,
     get_model_type,
+    has_spec_opt,
     save_expert_token_count_table,
 )
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
@@ -567,6 +569,13 @@ def export_quantized(
 
         export_path = args.export_path
 
+        # Early exit for speculative decoding checkpoints
+        # No tokenizer saving needed for spec ckpts
+        if has_spec_opt(full_model):
+            export_speculative_decoding(full_model, export_dir=export_path)
+            print(f"Quantized speculative decoding checkpoint exported to: {export_path}")
+            return
+
         # Check if the model is a multimodal/VLM model
         is_vlm = is_multimodal_model(full_model)
 
@@ -690,7 +699,9 @@ def pre_quantize(
     ][0:1]
 
     # Generate preview before quantization
-    if model_type == "deepseek":
+    if args.skip_generate:
+        generated_ids_before_ptq = None
+    elif model_type == "deepseek":
         # DeepSeek generation may go OOM, so we skip it
         generated_ids_before_ptq = None
     elif is_nemotron_vl_model and tokenizer is not None:
@@ -703,7 +714,6 @@ def pre_quantize(
             allow_fallback=False,
         )
     else:
-        # Standard generation for non-Nemotron VL models
         generated_ids_before_ptq = full_model.generate(preview_input_ids, max_new_tokens=100)
     if model_type == "gptoss" and args.qformat == "nvfp4_mlp_only":
         print("Applying nvfp4 quantization (MoE only) for gpt-oss")
@@ -1083,6 +1093,16 @@ def parse_args() -> argparse.Namespace:
         help="Print verbose output (e.g. quantization summary). Disable by --no-verbose.",
         default=True,
         action=argparse.BooleanOptionalAction,
+    )
+    parser.add_argument(
+        "--skip_generate",
+        help=(
+            "Skip pre/post-quantization preview calls that invoke model.generate(). "
+            "Note: this does not skip calibration or batch-size probing. "
+            "For very large models, pair with --batch_size 1 to avoid max-batch probing."
+        ),
+        default=False,
+        action="store_true",
     )
     parser.add_argument(
         "--low_memory_mode",

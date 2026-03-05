@@ -18,10 +18,6 @@ from collections import defaultdict
 from warnings import warn
 
 import torch
-from _test_utils.import_helper import skip_if_no_megatron
-
-skip_if_no_megatron()
-
 from megatron.core import dist_checkpointing
 from megatron.core.inference.communication_utils import broadcast_from_last_pipeline_stage
 from megatron.core.inference.contexts import StaticInferenceContext

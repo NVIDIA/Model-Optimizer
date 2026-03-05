@@ -145,7 +145,7 @@ def test_export_hf_checkpoint(eagle_output_dir):
     # Check the exported checkpoints have required keys
     state_dict = safetensors.torch.load_file(eagle_output_dir / "eagle-tinyllama-export" / "model.safetensors")
     for required_key in LLAMA_EAGLE_SINGLE_LAYER["required"]:
-        assert required_key in state_dict, f"Missing key '{required_key}' in state_dict"
+        assert f"{required_key}.weight" in state_dict, f"Missing key '{required_key}.weight' in state_dict"
 
 
 def test_convert_to_vllm_ckpt(tiny_llama_path, eagle_output_dir):

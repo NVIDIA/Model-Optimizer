@@ -484,6 +484,10 @@ def load_vlm_or_llm_with_kwargs(model_name_or_path: str, **kwargs):
     else:
         model_cls = transformers.AutoModelForCausalLM
 
+    if kwargs.get("num_hidden_layers") == 0:
+        if hasattr(model_config, "layer_types"):
+            kwargs["layer_types"] = []
+
     return model_config, model_cls.from_pretrained(model_name_or_path, **kwargs)
 
 

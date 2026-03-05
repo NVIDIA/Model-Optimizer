@@ -19,7 +19,6 @@ import fnmatch
 
 import pytest
 import torch
-from _test_utils.torch.distributed.utils import get_device_counts, spawn_multiprocess_job
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
 from _test_utils.torch.quantization.quant_utils import get_model_size
 from _test_utils.torch.quantization.quantize_common import save_restore_test
@@ -264,6 +263,5 @@ def _test_mtq_compress_fsdp_module(
     model(model.get_input().to(torch.bfloat16).cuda())
 
 
-@pytest.mark.parametrize("device_count", get_device_counts())
-def test_compress_fsdp_module(device_count):
-    spawn_multiprocess_job(size=device_count, job=_test_mtq_compress_fsdp_module, backend="nccl")
+def test_compress_fsdp_module(dist_workers):
+    dist_workers.run(_test_mtq_compress_fsdp_module)

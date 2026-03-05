@@ -17,7 +17,6 @@ from functools import partial
 
 import pytest
 import torch
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import run_mcore_inference
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
@@ -143,17 +142,17 @@ def _test_gpt_search_space(
         # (8, 1, "swiglu", "RMSNorm"),  # MQA
     ],
 )
-def test_gpt_search_space(num_attention_heads, num_query_groups, activation_func, normalization):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(
+def test_gpt_search_space(
+    dist_workers, num_attention_heads, num_query_groups, activation_func, normalization
+):
+    dist_workers.run(
+        partial(
             _test_gpt_search_space,
             num_attention_heads,
             num_query_groups,
             activation_func,
             normalization,
         ),
-        backend="nccl",
     )
 
 
@@ -317,7 +316,5 @@ def _test_gpt_moe_search_space(rank, size):
     assert not any(named_dynamic_modules(model))
 
 
-def test_gpt_moe_search_space():
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(), job=_test_gpt_moe_search_space, backend="nccl"
-    )
+def test_gpt_moe_search_space(dist_workers):
+    dist_workers.run(_test_gpt_moe_search_space)

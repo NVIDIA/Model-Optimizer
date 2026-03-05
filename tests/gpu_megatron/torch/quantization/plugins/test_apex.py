@@ -18,7 +18,6 @@ from functools import partial
 import pytest
 import torch
 import torch.nn as nn
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.misc import set_seed
 from _test_utils.torch.quantization.models import RegularQuantModelForTP
 from _test_utils.torch.quantization.quantize_common import (
@@ -129,10 +128,8 @@ def _test_tensor_parallel_helper(config, rank, size):
         mtq.INT4_AWQ_CFG,
     ],
 )
-def test_tensor_parallel(need_2_gpus, config):
-    spawn_multiprocess_job(
-        size=2, job=partial(_test_tensor_parallel_helper, config), backend="nccl"
-    )
+def test_tensor_parallel(dist_workers, config):
+    dist_workers.run(partial(_test_tensor_parallel_helper, config))
 
 
 def _test_auto_quantize_helper(rank, size):
@@ -142,5 +139,5 @@ def _test_auto_quantize_helper(rank, size):
     auto_quantize_helper(model)
 
 
-def test_auto_quantize(need_2_gpus):
-    spawn_multiprocess_job(size=2, job=_test_auto_quantize_helper, backend="nccl")
+def test_auto_quantize(dist_workers):
+    dist_workers.run(_test_auto_quantize_helper)

@@ -63,6 +63,7 @@ from .model_calib import (
     local_hessian_calibrate,
     max_calibrate,
     mse_calibrate,
+    sequential_calibrate,
     smoothquant,
     svdquant,
 )
@@ -221,6 +222,7 @@ def wrapped_calib_func(
     """
     kwargs = config.model_dump()
     method = kwargs.pop("method")
+    sequential = kwargs.pop("use_sequential", False)
     if method is not None and "awq" in method:
         # For backward compatibility
         kwargs["algorithm"] = method
@@ -235,8 +237,22 @@ def wrapped_calib_func(
                 module._moe_calib_experts_ratio = moe_calib_experts_ratio
 
     if func is not None:
-        # Call the function with forward_loop as a separate argument
-        func(model, forward_loop=forward_loop, **kwargs)
+        if sequential:
+            if forward_loop is None:
+                raise ValueError("forward_loop is required for calibration but got None.")
+            assert method in ["max"], (
+                f"Sequential calibration currently only supports max calibration, got {method}"
+            )
+            # Wrap with sequential processing
+            sequential_calibrate(
+                model,
+                forward_loop=forward_loop,
+                calib_func=func,
+                **kwargs,
+            )
+        else:
+            # Direct calibration (existing behavior)
+            func(model, forward_loop=forward_loop, **kwargs)
 
     # Lets get the latest metadata for the quantizer states
     metadata = {}

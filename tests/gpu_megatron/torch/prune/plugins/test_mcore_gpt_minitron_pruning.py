@@ -17,7 +17,6 @@ from functools import partial
 
 import pytest
 import torch
-from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.megatron.models import get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import (
     run_mcore_inference,
@@ -40,6 +39,7 @@ SEED = 1234
 
 
 def _test_mcore_gpt_parameter_sorting(activation_func, rank, size):
+    set_seed(SEED)
     # Use relatively bigger model here for more accurate test for sorting
     channel_divisor = 64
 
@@ -107,13 +107,8 @@ def _test_mcore_gpt_parameter_sorting(activation_func, rank, size):
 
 
 @pytest.mark.parametrize("activation_func", ["swiglu"])
-def test_mcore_gpt_parameter_sorting(activation_func):
-    set_seed(SEED)
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_mcore_gpt_parameter_sorting, activation_func),
-        backend="nccl",
-    )
+def test_mcore_gpt_parameter_sorting(dist_workers, activation_func):
+    dist_workers.run(partial(_test_mcore_gpt_parameter_sorting, activation_func))
 
 
 def _test_mcore_gpt_pruning(
@@ -281,6 +276,7 @@ def _test_mcore_gpt_pruning(
     ],
 )
 def test_mcore_gpt_pruning(
+    dist_workers,
     tmp_path,
     num_attention_heads,
     num_query_groups,
@@ -295,9 +291,8 @@ def test_mcore_gpt_pruning(
     skip_sorting,
     test_ckpt,
 ):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(
+    dist_workers.run(
+        partial(
             _test_mcore_gpt_pruning,
             num_attention_heads,
             num_query_groups,
@@ -312,11 +307,11 @@ def test_mcore_gpt_pruning(
             skip_sorting,
             tmp_path / "minitron_scores.pth" if test_ckpt else None,
         ),
-        backend="nccl",
     )
 
 
 def _test_mcore_gpt_moe_parameter_sorting(rank, size):
+    set_seed(SEED)
     # Use relatively bigger model here for more accurate test for sorting
     channel_divisor = 64
 
@@ -392,13 +387,8 @@ def _test_mcore_gpt_moe_parameter_sorting(rank, size):
     compare_outputs(y1, y2, rtol=1e-5, atol=1e-3)
 
 
-def test_mcore_gpt_moe_parameter_sorting():
-    set_seed(SEED)
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=_test_mcore_gpt_moe_parameter_sorting,
-        backend="nccl",
-    )
+def test_mcore_gpt_moe_parameter_sorting(dist_workers):
+    dist_workers.run(_test_mcore_gpt_moe_parameter_sorting)
 
 
 def _test_mcore_gpt_pruning_moe(ckpt_path, rank, size):
@@ -495,12 +485,8 @@ def _test_mcore_gpt_pruning_moe(ckpt_path, rank, size):
     assert torch.allclose(output, output_rerun, atol=1e-5)
 
 
-def test_mcore_gpt_pruning_moe(tmp_path):
-    spawn_multiprocess_job(
-        size=torch.cuda.device_count(),
-        job=partial(_test_mcore_gpt_pruning_moe, tmp_path / "minitron_scores.pth"),
-        backend="nccl",
-    )
+def test_mcore_gpt_pruning_moe(dist_workers, tmp_path):
+    dist_workers.run(partial(_test_mcore_gpt_pruning_moe, tmp_path / "minitron_scores.pth"))
 
 
 def test_generate_search_space_combos():

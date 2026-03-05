@@ -17,7 +17,6 @@ from collections import defaultdict
 
 import pytest
 
-import modelopt.torch.opt as mto
 from modelopt.torch.opt.mode import _ModeRegistryCls
 
 
@@ -53,8 +52,3 @@ def use_channel_div_4():
         for name, kv_for_all in lookup.items():
             for regex, (k, v) in kv_for_all.items():
                 config_class.model_fields[name].default[regex][k] = v
-
-
-@pytest.fixture(scope="session", autouse=True)
-def enable_hf_checkpointing():
-    mto.enable_huggingface_checkpointing()
