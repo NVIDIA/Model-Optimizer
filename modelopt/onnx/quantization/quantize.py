@@ -36,6 +36,7 @@ import platform
 import shutil
 import tempfile
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import onnx
@@ -251,18 +252,42 @@ def _find_nodes_to_quantize_autotune(
     quantize_mode: str,
     trt_plugins: list[str],
     high_precision_dtype: str = "fp16",
+    output_dir: str | None = None,
+    num_schemes_per_region: int = 30,
+    pattern_cache_file: str | None = None,
+    state_file: str | None = None,
+    qdq_baseline_model: str | None = None,
+    node_filter_list: list[str] | None = None,
+    verbose: bool = False,
+    use_trtexec: bool = False,
+    timing_cache_file: str | None = None,
+    warmup_runs: int = 5,
+    timing_runs: int = 20,
+    trtexec_args: str | None = None,
 ) -> tuple[list[str], list[str], list[tuple[gs.Node, gs.Node, str]], list[str]]:
     logger.info("Running Auto Q/DQ with TensorRT")
 
-    # Initialize Autotuner with the Python 'tensorrt' package
-    init_benchmark_instance(use_trtexec=False, plugin_libraries=trt_plugins)
+    init_benchmark_instance(
+        use_trtexec=use_trtexec,
+        plugin_libraries=trt_plugins,
+        timing_cache_file=timing_cache_file,
+        warmup_runs=warmup_runs,
+        timing_runs=timing_runs,
+        trtexec_args=trtexec_args.split() if trtexec_args else None,
+    )
     precision_map = {"fp16": "float16", "fp32": "float32", "bf16": "bfloat16"}
 
-    # Get Autotuner Q/DQ node placements
     autotuner = region_pattern_autotuning_workflow(
         onnx_model,
+        output_dir=Path(output_dir) if output_dir else None,
+        num_schemes_per_region=num_schemes_per_region,
+        pattern_cache_file=pattern_cache_file,
+        state_file=state_file,
         quant_type=quantize_mode,
         default_dq_dtype=precision_map[high_precision_dtype],
+        qdq_baseline_model=qdq_baseline_model,
+        node_filter_list=node_filter_list,
+        verbose=verbose,
     )
     return autotuner.get_ort_quantization_config()
 
@@ -301,6 +326,18 @@ def quantize(
     direct_io_types: bool = False,
     opset: int | None = None,
     autotune: bool = False,
+    autotune_output_dir: str | None = None,
+    autotune_num_schemes_per_region: int = 30,
+    autotune_pattern_cache_file: str | None = None,
+    autotune_state_file: str | None = None,
+    autotune_qdq_baseline: str | None = None,
+    autotune_node_filter_list: list[str] | None = None,
+    autotune_verbose: bool = False,
+    autotune_use_trtexec: bool = False,
+    autotune_timing_cache: str | None = None,
+    autotune_warmup_runs: int = 5,
+    autotune_timing_runs: int = 20,
+    autotune_trtexec_args: str | None = None,
     **kwargs: Any,
 ) -> None:
     """Quantizes the provided ONNX model.
@@ -547,6 +584,18 @@ def quantize(
                 quantize_mode,
                 trt_plugins,
                 high_precision_dtype,
+                output_dir=autotune_output_dir,
+                num_schemes_per_region=autotune_num_schemes_per_region,
+                pattern_cache_file=autotune_pattern_cache_file,
+                state_file=autotune_state_file,
+                qdq_baseline_model=autotune_qdq_baseline,
+                node_filter_list=autotune_node_filter_list,
+                verbose=autotune_verbose,
+                use_trtexec=autotune_use_trtexec,
+                timing_cache_file=autotune_timing_cache,
+                warmup_runs=autotune_warmup_runs,
+                timing_runs=autotune_timing_runs,
+                trtexec_args=autotune_trtexec_args,
             )
             nodes_to_quantize.extend(nodes_to_quantize_autotune)
             kwargs["no_quantize_inputs"] = no_quantize_inputs

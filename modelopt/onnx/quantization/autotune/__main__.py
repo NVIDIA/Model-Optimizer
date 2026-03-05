@@ -116,6 +116,27 @@ def log_benchmark_config(args):
         logger.info(f"  Trtexec args: {args.trtexec_benchmark_args}")
 
 
+def get_node_filter_list(node_filter_list_path: str) -> list | None:
+    """Extract node filter list from node filters path.
+
+    Args:
+        node_filter_list_path: Path to a file containing wildcard patterns to filter ONNX nodes (one pattern per line).
+
+    Returns:
+        Node filter list
+    """
+    node_filter_list = None
+    if node_filter_list_path:
+        filter_file = validate_file_path(node_filter_list_path, "Node filter list file")
+        if filter_file:
+            with open(filter_file) as f:
+                node_filter_list = [
+                    line.strip() for line in f if line.strip() and not line.strip().startswith("#")
+                ]
+            logger.info(f"Loaded {len(node_filter_list)} filter patterns from {filter_file}")
+    return node_filter_list
+
+
 def run_autotune() -> int:
     """Execute the complete pattern-based Q/DQ autotuning workflow.
 
@@ -155,18 +176,7 @@ def run_autotune() -> int:
         return 1
 
     try:
-        node_filter_list = None
-        if args.node_filter_list:
-            filter_file = validate_file_path(args.node_filter_list, "Node filter list file")
-            if filter_file:
-                with open(filter_file) as f:
-                    node_filter_list = [
-                        line.strip()
-                        for line in f
-                        if line.strip() and not line.strip().startswith("#")
-                    ]
-                logger.info(f"Loaded {len(node_filter_list)} filter patterns from {filter_file}")
-
+        node_filter_list = get_node_filter_list(args.node_filter_list)
         region_pattern_autotuning_workflow(
             model_path=str(model_path),
             output_dir=output_dir,
