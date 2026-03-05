@@ -84,7 +84,9 @@ class TestTensorQuantizerfp4:
     def test_fp4_backward(self):
         fp4_quantizer = tensor_quantizer.TensorQuantizer(
             QuantizerAttributeConfig(
-                num_bits=(2, 1), block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)}
+                num_bits=(2, 1),
+                block_sizes={-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                pass_through_bwd=False,
             )
         ).cuda()
 
