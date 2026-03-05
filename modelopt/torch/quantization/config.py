@@ -248,6 +248,7 @@ FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG = {
         "*weight_quantizer": {
             "num_bits": (4, 3),
             "block_sizes": {-1: 128, -2: 128},
+            "enable": True,
         },
         "*input_quantizer": {"enable": False},
         **_default_disabled_quantizer_cfg,
@@ -260,6 +261,7 @@ INT4_BLOCKWISE_WEIGHT_ONLY_CFG = {
         "*weight_quantizer": {
             "num_bits": 4,
             "block_sizes": {-1: 128},
+            "enable": True,
         },
         "*input_quantizer": {"enable": False},
         **_default_disabled_quantizer_cfg,
@@ -273,6 +275,7 @@ INT4_AWQ_CFG = {
         "*weight_quantizer": {
             "num_bits": 4,
             "block_sizes": {-1: 128, "type": "static"},
+            "enable": True,
         },
         "*input_quantizer": {"enable": False},
         **_default_disabled_quantizer_cfg,
@@ -290,13 +293,16 @@ W4A8_AWQ_BETA_CFG = {
             {
                 "num_bits": 4,
                 "block_sizes": {-1: 128, "type": "static"},
+                "enable": True,
             },
             {
                 "num_bits": (4, 3),
+                "enable": True,
             },
         ],
         "*input_quantizer": {
             "num_bits": (4, 3),
+            "enable": True,
         },
         **_default_disabled_quantizer_cfg,
     },
@@ -308,10 +314,12 @@ MXFP8_DEFAULT_CFG = {
         "*weight_quantizer": {
             "num_bits": (4, 3),
             "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "enable": True,
         },
         "*input_quantizer": {
             "num_bits": (4, 3),
             "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "enable": True,
         },
         **_default_disabled_quantizer_cfg,
     },
@@ -323,10 +331,12 @@ MXFP6_DEFAULT_CFG = {
         "*weight_quantizer": {
             "num_bits": (3, 2),
             "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "enable": True,
         },
         "*input_quantizer": {
             "num_bits": (3, 2),
             "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "enable": True,
         },
         **_default_disabled_quantizer_cfg,
     },
@@ -338,10 +348,12 @@ MXFP4_DEFAULT_CFG = {
         "*weight_quantizer": {
             "num_bits": (2, 1),
             "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "enable": True,
         },
         "*input_quantizer": {
             "num_bits": (2, 1),
             "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "enable": True,
         },
         **_default_disabled_quantizer_cfg,
     },
@@ -353,6 +365,7 @@ W4A8_MXFP4_FP8_CFG = {
         "*weight_quantizer": {
             "num_bits": (2, 1),
             "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "enable": True,
         },
         "*input_quantizer": {"num_bits": (4, 3), "axis": None},
         **_default_disabled_quantizer_cfg,
@@ -365,10 +378,12 @@ MXINT8_DEFAULT_CFG = {
         "*weight_quantizer": {
             "num_bits": 8,
             "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "enable": True,
         },
         "*input_quantizer": {
             "num_bits": 8,
             "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "enable": True,
         },
         **_default_disabled_quantizer_cfg,
     },
@@ -379,6 +394,7 @@ FP8_KV_CFG = {
     "quant_cfg": {
         "*[kv]_bmm_quantizer": {
             "num_bits": (4, 3),
+            "enable": True,
         },
         "default": {"enable": False},
     },
@@ -399,6 +415,7 @@ FP8_AFFINE_KV_CFG = {
 _nvfp4_quantizer = {
     "num_bits": (2, 1),
     "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+    "enable": True,
 }
 
 NVFP4_DEFAULT_CFG = {
@@ -415,6 +432,7 @@ NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = {
         "*weight_quantizer": {
             "num_bits": (2, 1),
             "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "enable": True,
         },
         "*input_quantizer": _nvfp4_quantizer,
         **_default_disabled_quantizer_cfg,
@@ -430,6 +448,7 @@ NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG = {
         "*weight_quantizer": {
             "num_bits": (2, 1),
             "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "enable": True,
         },
         "*input_quantizer": _nvfp4_quantizer,
         **_default_disabled_quantizer_cfg,
@@ -564,9 +583,11 @@ W4A8_NVFP4_FP8_CFG = {
         "*weight_quantizer": {
             "num_bits": (2, 1),
             "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (4, 3)},
+            "enable": True,
         },
         "*input_quantizer": {
             "num_bits": (4, 3),
+            "enable": True,
         },
         **_default_disabled_quantizer_cfg,
     },
@@ -578,10 +599,12 @@ MXFP4_MLP_WEIGHT_ONLY_CFG = {
         "*mlp*weight_quantizer": {
             "num_bits": (2, 1),
             "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "enable": True,
         },
         "*block_sparse_moe*weight_quantizer": {
             "num_bits": (2, 1),
             "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "enable": True,
         },
         **_default_disabled_quantizer_cfg,
     },
@@ -597,6 +620,7 @@ NVFP4_MLP_WEIGHT_ONLY_CFG = {
                 "type": "dynamic",
                 "scale_bits": (4, 3),
             },  # Note: block_size is 32 here
+            "enable": True,
         },
         "*block_sparse_moe*weight_quantizer": {
             "num_bits": (2, 1),
@@ -605,6 +629,7 @@ NVFP4_MLP_WEIGHT_ONLY_CFG = {
                 "type": "dynamic",
                 "scale_bits": (4, 3),
             },  # Note: block_size is 32 here
+            "enable": True,
         },
         **_default_disabled_quantizer_cfg,
     },
