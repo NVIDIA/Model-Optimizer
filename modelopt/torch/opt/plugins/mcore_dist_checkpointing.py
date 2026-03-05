@@ -149,6 +149,12 @@ def save_sharded_modelopt_state(
                 config[k] = v
             else:
                 config[k] = str(v)
+                # Handle https://github.com/NVIDIA/Model-Optimizer/issues/981 where
+                # hierarchical_context_parallel_sizes: [8, 2] will raise a TypeError.
+                try:
+                    config[k] = str(v)
+                except (AttributeError, TypeError):
+                    config[k] = repr(type(v))
 
         return config
 
