@@ -633,7 +633,17 @@ def remove_partial_input_qdq(
                 for idx, inp in enumerate(target_node_in_graph.inputs)
                 if inp.name == dq_output.name
             ]
-            target_input_idx = target_input_idx_arr[0] if target_input_idx_arr else 0
+            # If no input index is found (dq_output is not actually connected to target node), skip rewiring to
+            # prevent silent corruption of the graph.
+            if not target_input_idx_arr:
+                logger.warning(
+                    "Expected DequantizeLinear output '%s' to be an input of node '%s', "
+                    "but no matching input was found. Skipping Q/DQ bypass for this edge.",
+                    dq_output.name,
+                    target_node_in_graph.name,
+                )
+                continue
+            target_input_idx = target_input_idx_arr[0]
 
             # Connect the target's input directly to source_node's output (bypass Q/DQ)
             target_node_in_graph.inputs[target_input_idx] = source_node.outputs[0]
