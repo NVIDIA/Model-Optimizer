@@ -27,6 +27,7 @@ import argparse
 import itertools
 from pathlib import Path
 
+import numpy as np
 from datasets import load_dataset
 from huggingface_hub import hf_hub_url, list_repo_files
 from tqdm import tqdm
@@ -87,8 +88,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Path to a CSV file containing one 0-based dataset row index per line, "
-            "e.g.:\n  429801\n  271023\n  432477\n"
+            "Path to a binary file containing 0-based dataset row indices stored as int32 "
+            "(produced by numpy.ndarray.tofile with dtype='int32'). "
             "Rows are loaded in the order they appear in the file. "
             "When provided, the dataset is downloaded (not streamed) to allow random access "
             "and --max-samples is ignored."
@@ -176,10 +177,7 @@ async def main(args: argparse.Namespace) -> None:
             err_msg = f"Mapping file {args.mapping_file} does not exist."
             raise FileNotFoundError(err_msg)
 
-        with args.mapping_file.open("r", encoding="utf-8") as f:
-            ordered_source_indices: list[int] = [
-                int(line.strip()) for line in f if line.strip().isdigit()
-            ]
+        ordered_source_indices: list[int] = np.fromfile(args.mapping_file, dtype="int32").tolist()
         print(f"Mapping file loaded: {len(ordered_source_indices)} entries.")
 
         ds = load_dataset(
