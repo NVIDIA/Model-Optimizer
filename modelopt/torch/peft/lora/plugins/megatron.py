@@ -262,7 +262,7 @@ class _LoRAMegatronSequentialMLP(_MegatronParallelLoRABase):
     def update_layer_lora(
         self,
         adapter_name: str,
-        attr_config: "PEFTAttributeConfig",
+        attr_config: PEFTAttributeConfig,
     ) -> None:
         """Create shared lora_down and per-expert lora_up modules and register them."""
         hidden_size = self.config.hidden_size
