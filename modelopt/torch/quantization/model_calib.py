@@ -128,10 +128,32 @@ def max_calibrate(
         forward_loop(model)
     finish_stats_collection(model)
 
-    # Sync input_quantizer amax across local experts within each rank (for SequentialMLP)
+    # Sync amax across local experts within each rank (for SequentialMLP and HuggingFace MoE)
     for name, module in model.named_modules():
         if hasattr(module, "layer_sync_moe_local_experts_amax"):
             module.layer_sync_moe_local_experts_amax()
+        elif hasattr(module, "sync_moe_local_experts_amax"):
+            module.sync_moe_local_experts_amax()
+
+    for name, module in list(model.named_modules()):
+        if isinstance(module, TensorQuantizer) and not module._disabled:
+            if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
+                # Get the initial amax from max calibration
+                initial_amax = module._amax.clone().detach()
+
+                is_nvfp4_static = (
+                    module.is_static_block_quant
+                    and module._num_bits == (2, 1)
+                    and module._block_sizes is not None
+                    and module._block_sizes.get("scale_bits") == (4, 3)
+                )
+
+                if is_nvfp4_static:
+                    # Compute and set global_amax
+                    global_amax = reduce_amax(initial_amax, axis=None)
+
+                    # Convert to NVFP4StaticQuantizer in-place
+                    NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
 
     if not distributed_sync:
         return
@@ -1844,10 +1866,20 @@ def sequential_calibrate(
     calib_func: Callable,
     **calib_kwargs,
 ):
-    """Sequential calibration - a sequential layer-by-layer calibration algorithm."""
+    """Sequential calibration - a sequential layer-by-layer calibration algorithm.
+
+    Runs the full model forward per layer but patches decoder layers with a
+    skip / run / capture strategy so that inter-layer logic in parent modules
+    (e.g. mask construction) executes naturally without model-specific hooks.
+    """
     if forward_loop is None:
         raise ValueError("forward_loop must not be None for sequential calibration.")
 
+    if not LayerActivationCollector.is_supported(model):
+        raise ValueError(
+            "Could not find transformer layers in model. "
+            "Sequential calibration requires a model with identifiable transformer layers."
+        )
     transformer_layers = LayerActivationCollector.get_decoder_layers(model)
     assert transformer_layers is not None
 
@@ -1856,16 +1888,20 @@ def sequential_calibrate(
         return
 
     input_getter = LayerActivationCollector(model)
+    input_getter._patch_all_layers()
 
-    for layer in transformer_layers:
-        layer_inputs = input_getter.get_input_activations(layer, forward_loop)
+    try:
+        for layer_idx, layer in enumerate(transformer_layers):
+            print_rank_0(f"Calibrating layer {layer_idx}")
+            layer_inputs = input_getter.get_input_activations(layer, forward_loop)
 
-        # Define a forward loop for the current layer
-        def _layer_forward_loop(m, _inputs=layer_inputs):
-            for args, kwargs_input in _inputs:
-                m(*args, **kwargs_input)
+            def _layer_forward_loop(m, _inputs=layer_inputs):
+                for args, kwargs_input in _inputs:
+                    m(*args, **kwargs_input)
 
-        # Call calibration function
-        calib_func(layer, _layer_forward_loop, **calib_kwargs)
-        del layer_inputs
-        torch.cuda.empty_cache()
+            calib_func(layer, _layer_forward_loop, **calib_kwargs)
+
+            del layer_inputs
+            torch.cuda.empty_cache()
+    finally:
+        input_getter._unpatch_all_layers()

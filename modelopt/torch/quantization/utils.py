@@ -860,20 +860,34 @@ class _EarlyStopForwardError(Exception):
 
 
 class LayerActivationCollector:
-    """Helper class for collecting layer activations during forward passes.
+    """Helper class for collecting layer activations during sequential calibration.
 
-    This class allows for sequential layer calibration by
-    patching layers to capture inputs/outputs during forward passes
+    Uses a "skip / run / capture" strategy: each decoder layer is patched once with a
+    unified forward that checks ``_seq_calib_state`` to decide its behaviour.
+
+    * **skip** -- return a lightweight dummy (no computation, no cache).
+    * **run** -- ignore the parent-provided input, use cached inputs from a prior
+      capture step, and execute the real forward.  Only the just-calibrated layer
+      is in this state, so it reflects updated weights.
+    * **capture** -- record ``(args, kwargs)`` and raise ``_EarlyStopForwardError``.
+    * **passthrough** -- call the original forward unchanged.
+
+    Because the *run* layer ignores upstream values, skip layers never need to
+    produce meaningful outputs.  Memory overhead is O(B) -- only one layer's
+    captured inputs are kept at a time.
     """
 
-    _next_layer_input_support: list[tuple[Any, Any]] = []
     _decoder_layer_support: list[tuple[Any, Any]] = []
 
     def __init__(self, model: nn.Module):
         self.model = model
-        self._previous_layer = None
-        self._previous_layer_inputs = None
-        self._next_layer_inputs_hook = None
+        self._decoder_layers: nn.ModuleList | None = None
+        self._layer_to_idx: dict[nn.Module, int] = {}
+        self._patched = False
+
+    # ------------------------------------------------------------------
+    # Decoder-layer discovery (unchanged public API)
+    # ------------------------------------------------------------------
 
     @staticmethod
     def get_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
@@ -892,93 +906,128 @@ class LayerActivationCollector:
         return LayerActivationCollector.get_decoder_layers(model) is not None
 
     @classmethod
-    def register_next_layer_input_support(
-        cls, is_supported: Any, build_next_layer_inputs_hook: Any
-    ):
-        entry = (is_supported, build_next_layer_inputs_hook)
-        if entry not in cls._next_layer_input_support:
-            cls._next_layer_input_support.append(entry)
-
-    @classmethod
     def register_decoder_layer_support(cls, is_supported: Any, discoverer: Any):
         entry = (is_supported, discoverer)
         if entry not in cls._decoder_layer_support:
             cls._decoder_layer_support.append(entry)
 
+    # ------------------------------------------------------------------
+    # Unified patched forward
+    # ------------------------------------------------------------------
+
     @staticmethod
-    def _patch_and_initialize_layer(layer: torch.nn.Module, stop_after_collection: bool = False):
-        """Patch a layer to collect inputs during forward passes."""
-
-        def _forward_w_data_collection(self, *args, **kwargs):
-            # Note: 'self' refers to the patched layer.
-            assert len(args) >= 1, (
-                f"Expected at least 1 positional arg, got {len(args)} args and {list(kwargs.keys())} kwargs"
-            )
-            # Only collect the inputs to the layer
-            self.inputs.append((args, kwargs))
-            if stop_after_collection:
-                raise _EarlyStopForwardError()  # Stop the forward pass after collection
-
+    def _patched_forward(self, *args, **kwargs):
+        """Single forward bound to every decoder layer during sequential calibration."""
+        state = self._seq_calib_state
+        if state == "skip":
+            print_rank_0(f"Skipping layer {self.name}")
+            return args[0] if args else next(iter(kwargs.values()))
+        elif state == "run":
+            print_rank_0(f"Running layer {self.name}")
+            real_args, real_kwargs = self._seq_calib_cached_inputs.pop(0)
+            return self._original_forward(*real_args, **real_kwargs)
+        elif state == "capture":
+            print_rank_0(f"Capturing layer {self.name}")
+            self._seq_calib_collected_inputs.append((args, kwargs))
+            raise _EarlyStopForwardError()
+        else:
             return self._original_forward(*args, **kwargs)
 
-        bind_forward_method(layer, _forward_w_data_collection, "_original_forward")
-        layer.inputs = []
+    # ------------------------------------------------------------------
+    # Patch / unpatch lifecycle
+    # ------------------------------------------------------------------
 
-    @staticmethod
-    def _unpatch_and_cleanup_layer(layer: torch.nn.Module):
-        if hasattr(layer, "_original_forward"):
-            unpatch_forward_method(layer, "_original_forward")
-        if hasattr(layer, "inputs"):
-            del layer.inputs
+    def _patch_all_layers(self):
+        """Bind the unified forward to every decoder layer and the model. Called once."""
+        self._decoder_layers = self.get_decoder_layers(self.model)
+        assert self._decoder_layers is not None
+        self._layer_to_idx = {layer: i for i, layer in enumerate(self._decoder_layers)}
+        module_to_name = {m: name for name, m in self.model.named_modules()}
 
-    def _resolve_next_layer_inputs_hook(self):
-        """Resolve the next-layer inputs hook from the registry.
+        for layer in self._decoder_layers:
+            layer._seq_calib_state = "passthrough"
+            layer._seq_calib_cached_inputs = []
+            layer._seq_calib_collected_inputs = []
+            layer._seq_calib_name = module_to_name.get(layer, type(layer).__name__)
+            bind_forward_method(layer, self._patched_forward, "_original_forward")
 
-        Returns (hook, handle) where handle is an optional RemovableHandle for
-        pre-collection cleanup. If the factory returns just a hook, handle is None.
-        """
-        for is_supported, build_next_layer_inputs_hook in self._next_layer_input_support:
-            if not is_supported(self.model):
-                continue
-            result = build_next_layer_inputs_hook(self.model)
-            if isinstance(result, tuple):
-                return result
-            return result, None
-        return None, None
-
-    @torch.no_grad()
-    def _collect_input_activations(self, layer: torch.nn.Module, forward_loop: ForwardLoop) -> list:
-        # Wrap model forward to catch _EarlyStopForward per-batch
         def _early_stop_forward(self, *args, **kwargs):
             try:
                 return self._original_forward(*args, **kwargs)
             except _EarlyStopForwardError:
-                return None  # Stop propagation but allow next batch
+                return None
 
-        try:
-            bind_forward_method(self.model, _early_stop_forward, "_original_forward")
-            self._patch_and_initialize_layer(layer, stop_after_collection=True)
-            forward_loop(self.model)
-            inputs = layer.inputs.copy()
-        finally:
-            self._unpatch_and_cleanup_layer(layer)
-            unpatch_forward_method(self.model, "_original_forward")
+        bind_forward_method(self.model, _early_stop_forward, "_original_forward")
+        self._patched = True
 
-        return inputs
+    def _unpatch_all_layers(self):
+        """Restore original forwards and clean up state attributes. Called once."""
+        if not self._patched:
+            return
+        assert self._decoder_layers is not None
+
+        unpatch_forward_method(self.model, "_original_forward")
+
+        for layer in self._decoder_layers:
+            if hasattr(layer, "_original_forward"):
+                unpatch_forward_method(layer, "_original_forward")
+            for attr in (
+                "_seq_calib_state",
+                "_seq_calib_cached_inputs",
+                "_seq_calib_collected_inputs",
+                "_seq_calib_name",
+            ):
+                if hasattr(layer, attr):
+                    delattr(layer, attr)
+
+        self._patched = False
+
+    # ------------------------------------------------------------------
+    # Per-iteration state management
+    # ------------------------------------------------------------------
+
+    def _set_layer_states(self, layer_idx: int):
+        """Update only the affected layer states (O(1) per call).
+
+        Layers are processed in sequential order, so only three transitions
+        can happen: the layer two back becomes ``"skip"``, the previous layer
+        becomes ``"run"``, and the current layer becomes ``"capture"``.
+        """
+        assert self._decoder_layers is not None
+        if layer_idx > 1:
+            two_back = self._decoder_layers[layer_idx - 2]
+            two_back._seq_calib_state = "skip"
+            two_back._seq_calib_cached_inputs = []
+
+        if layer_idx > 0:
+            prev = self._decoder_layers[layer_idx - 1]
+            prev._seq_calib_state = "run"
+            prev._seq_calib_cached_inputs = prev._seq_calib_collected_inputs
+            prev._seq_calib_collected_inputs = []
+
+        cur = self._decoder_layers[layer_idx]
+        cur._seq_calib_state = "capture"
+        cur._seq_calib_collected_inputs = []
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     @torch.no_grad()
     def get_input_activations(self, layer: torch.nn.Module, forward_loop: ForwardLoop) -> list:
-        is_first_layer = self._previous_layer is None or self._previous_layer_inputs is None
-        if is_first_layer:
-            self._next_layer_inputs_hook, handle = self._resolve_next_layer_inputs_hook()
-            inputs = self._collect_input_activations(layer, forward_loop)
-            if handle is not None:
-                handle.remove()
-        elif self._next_layer_inputs_hook is None:
-            inputs = self._collect_input_activations(layer, forward_loop)
-        else:
-            inputs = self._next_layer_inputs_hook(self._previous_layer, self._previous_layer_inputs)
+        """Collect input activations for *layer* by running a full model forward.
 
-        self._previous_layer = layer
-        self._previous_layer_inputs = inputs
+        Layers before the target are skipped or re-run (if just calibrated), the
+        target layer captures its inputs, and an early-stop prevents unnecessary
+        computation beyond the target.
+        """
+        layer_idx = self._layer_to_idx[layer]
+        self._set_layer_states(layer_idx)
+        print_rank_0(f"Getting input activations for layer {layer_idx}")
+        forward_loop(self.model)
+        inputs = list(layer._seq_calib_collected_inputs)
+        # After calibration this layer will be "run" (next iter) then "skip" (all
+        # subsequent).  For the interim period where calib_func calls the layer
+        # directly, passthrough lets the original forward execute normally.
+        layer._seq_calib_state = "passthrough"
         return inputs

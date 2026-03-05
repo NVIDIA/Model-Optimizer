@@ -23,15 +23,6 @@ from modelopt.torch.quantization.utils import (
 )
 
 
-def _build_next_inputs(prev_layer, cached_inputs):
-    next_inputs = []
-    for args, kwargs in cached_inputs:
-        prev_output = prev_layer(*args, **kwargs)
-        hidden_states = prev_output[0] if isinstance(prev_output, tuple) else prev_output
-        next_inputs.append(((hidden_states, *args[1:]), kwargs))
-    return next_inputs
-
-
 @pytest.mark.parametrize(
     ("block_sizes", "test_input", "expected_scales"),
     [
@@ -211,105 +202,114 @@ def test_layer_activation_collector_decoder_discoverer_dedup(monkeypatch):
     assert len(LayerActivationCollector._decoder_layer_support) == 1
 
 
-def test_layer_activation_collector_uses_first_matching_next_layer_hook(monkeypatch):
-    class _ToyLayer(torch.nn.Module):
-        def forward(self, hidden_states, attention_mask=None):
-            return hidden_states + 1.0, attention_mask
+def test_layer_activation_collector_skip_forward_captures_correct_inputs(monkeypatch):
+    """The skip/run/capture strategy produces the same inputs as a plain forward."""
 
-    class _ToyDecoder(torch.nn.Module):
-        def __init__(self):
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self, scale: float):
             super().__init__()
-            self.layers = torch.nn.ModuleList([_ToyLayer(), _ToyLayer()])
+            self.scale = scale
 
-        def forward(self, hidden_states, attention_mask=None):
-            for layer in self.layers:
-                hidden_states, _ = layer(hidden_states, attention_mask=attention_mask)
-            return hidden_states
-
-    model = _ToyDecoder()
-    collector = LayerActivationCollector(model)
-    called = {"first": 0, "second": 0}
-
-    def _unsupported(_model):
-        return False
-
-    def _supported(_model):
-        return True
-
-    def _build_first_hook(_model):
-        def _first_hook(prev_layer, cached_inputs):
-            called["first"] += 1
-            return _build_next_inputs(prev_layer, cached_inputs)
-
-        return _first_hook
-
-    def _build_second_hook(_model):
-        def _second_hook(prev_layer, cached_inputs):
-            called["second"] += 1
-            return _build_next_inputs(prev_layer, cached_inputs)
-
-        return _second_hook
-
-    monkeypatch.setattr(
-        LayerActivationCollector,
-        "_next_layer_input_support",
-        [
-            (_unsupported, _build_first_hook),
-            (_supported, _build_second_hook),
-            (_supported, _build_first_hook),
-        ],
-    )
-
-    batches = [torch.tensor([[1.0, 2.0]]), torch.tensor([[3.0, 4.0]])]
-
-    def _forward_loop(m):
-        for batch in batches:
-            m(batch)
-
-    first_inputs = collector.get_input_activations(model.layers[0], _forward_loop)
-    second_inputs = collector.get_input_activations(model.layers[1], _forward_loop)
-
-    assert called["first"] == 0
-    assert called["second"] == 1
-    assert len(second_inputs) == len(first_inputs)
-    assert isinstance(second_inputs[0][0], tuple)
-    assert isinstance(second_inputs[0][1], dict)
-
-
-def test_layer_activation_collector_falls_back_to_collection_without_matching_hook(monkeypatch):
-    class _ToyLayer(torch.nn.Module):
         def forward(self, hidden_states):
-            return hidden_states + 1.0
+            return hidden_states * self.scale
 
     class _ToyDecoder(torch.nn.Module):
         def __init__(self):
             super().__init__()
-            self.layers = torch.nn.ModuleList([_ToyLayer(), _ToyLayer()])
+            self.layers = torch.nn.ModuleList([_ToyLayer(2.0), _ToyLayer(0.5), _ToyLayer(3.0)])
 
         def forward(self, hidden_states):
             for layer in self.layers:
                 hidden_states = layer(hidden_states)
             return hidden_states
 
+    monkeypatch.setattr(
+        LayerActivationCollector,
+        "_decoder_layer_support",
+        [(lambda m: hasattr(m, "layers"), lambda m: m.layers)],
+    )
+
     model = _ToyDecoder()
-    collector = LayerActivationCollector(model)
-    collect_calls = {"count": 0}
-    original_collect = LayerActivationCollector._collect_input_activations
-
-    def _spy_collect(self, layer, forward_loop):
-        collect_calls["count"] += 1
-        return original_collect(self, layer, forward_loop)
-
-    monkeypatch.setattr(LayerActivationCollector, "_next_layer_input_support", [])
-    monkeypatch.setattr(LayerActivationCollector, "_collect_input_activations", _spy_collect)
-
-    batches = [torch.tensor([[1.0, 2.0]])]
+    batches = [torch.tensor([[1.0, 2.0]]), torch.tensor([[3.0, 4.0]])]
 
     def _forward_loop(m):
-        for batch in batches:
-            m(batch)
+        for b in batches:
+            m(b)
 
-    collector.get_input_activations(model.layers[0], _forward_loop)
-    collector.get_input_activations(model.layers[1], _forward_loop)
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers()
+    try:
+        inp0 = collector.get_input_activations(model.layers[0], _forward_loop)
+        inp1 = collector.get_input_activations(model.layers[1], _forward_loop)
+        inp2 = collector.get_input_activations(model.layers[2], _forward_loop)
+    finally:
+        collector._unpatch_all_layers()
 
-    assert collect_calls["count"] == 2
+    expected_0 = batches
+    expected_1 = [model.layers[0](b) for b in batches]
+    expected_2 = [model.layers[1](b) for b in expected_1]
+
+    for (args, _kw), exp in zip(inp0, expected_0):
+        assert torch.allclose(args[0], exp)
+    for (args, _kw), exp in zip(inp1, expected_1):
+        assert torch.allclose(args[0], exp)
+    for (args, _kw), exp in zip(inp2, expected_2):
+        assert torch.allclose(args[0], exp)
+
+
+def test_layer_activation_collector_run_uses_cached_inputs_not_parent(monkeypatch):
+    """Verify that the 'run' layer uses cached inputs, not garbage from skip layers."""
+
+    call_log = []
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self, name, bias):
+            super().__init__()
+            self.layer_name = name
+            self.bias = bias
+
+        def forward(self, hidden_states):
+            call_log.append(self.layer_name)
+            return hidden_states + self.bias
+
+    class _ToyDecoder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = torch.nn.ModuleList(
+                [_ToyLayer("L0", 1.0), _ToyLayer("L1", 2.0), _ToyLayer("L2", 3.0)]
+            )
+
+        def forward(self, hidden_states):
+            for layer in self.layers:
+                hidden_states = layer(hidden_states)
+            return hidden_states
+
+    monkeypatch.setattr(
+        LayerActivationCollector,
+        "_decoder_layer_support",
+        [(lambda m: hasattr(m, "layers"), lambda m: m.layers)],
+    )
+
+    model = _ToyDecoder()
+    batches = [torch.tensor([[10.0]])]
+
+    def _forward_loop(m):
+        for b in batches:
+            m(b)
+
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers()
+    try:
+        collector.get_input_activations(model.layers[0], _forward_loop)
+        call_log.clear()
+        collector.get_input_activations(model.layers[1], _forward_loop)
+        call_log_for_layer1 = list(call_log)
+        call_log.clear()
+        inp2 = collector.get_input_activations(model.layers[2], _forward_loop)
+    finally:
+        collector._unpatch_all_layers()
+
+    assert "L0" in call_log_for_layer1
+    assert "L1" not in call_log_for_layer1
+
+    assert torch.allclose(inp2[0][0][0], torch.tensor([[10.0 + 1.0 + 2.0]]))

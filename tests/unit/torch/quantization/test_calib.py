@@ -482,67 +482,45 @@ def test_sequential_calibrate_propagates_inputs_without_replaying_full_model(mon
         assert torch.allclose(observed, expected)
 
 
-def test_sequential_calibrate_uses_next_layer_hook_without_replaying_full_model(monkeypatch):
+def test_sequential_calibrate_handles_inter_layer_logic(monkeypatch):
+    """Verify that parent-level inter-layer logic (e.g. mask selection) works correctly."""
     from modelopt.torch.quantization.utils import LayerActivationCollector
 
     class _ToyLayer(nn.Module):
-        def __init__(self, scale: float, bias: float):
+        def __init__(self, scale: float):
             super().__init__()
             self.scale = scale
-            self.bias = bias
 
-        def forward(self, hidden_states):
-            return hidden_states * self.scale + self.bias
+        def forward(self, hidden_states, mask=None):
+            if mask is not None:
+                hidden_states = hidden_states * mask
+            return hidden_states * self.scale
 
     class _ToyDecoder(nn.Module):
         def __init__(self):
             super().__init__()
             self.layers = nn.ModuleList(
-                [
-                    _ToyLayer(scale=2.0, bias=1.0),
-                    _ToyLayer(scale=0.5, bias=3.0),
-                    _ToyLayer(scale=1.0, bias=-2.0),
-                ]
+                [_ToyLayer(scale=2.0), _ToyLayer(scale=0.5), _ToyLayer(scale=3.0)]
             )
+            self.masks = [1.0, 0.5, 2.0]
 
         def forward(self, hidden_states):
-            for layer in self.layers:
-                hidden_states = layer(hidden_states)
+            for layer, mask_val in zip(self.layers, self.masks):
+                mask = torch.full_like(hidden_states, mask_val)
+                hidden_states = layer(hidden_states, mask=mask)
             return hidden_states
 
     model = _ToyDecoder()
-    batches = [torch.tensor([[1.0, 2.0]]), torch.tensor([[3.0, 4.0]])]
-    forward_loop_calls = 0
-
-    def _forward_loop(m):
-        nonlocal forward_loop_calls
-        forward_loop_calls += 1
-        for batch in batches:
-            m(batch)
-
-    def _supported(_model):
-        return True
-
-    def _build_hook(_model):
-        def _hook(prev_layer, cached_inputs):
-            next_inputs = []
-            for args, kwargs in cached_inputs:
-                hidden_states = prev_layer(*args, **kwargs)
-                next_inputs.append(((hidden_states, *args[1:]), kwargs))
-            return next_inputs
-
-        return _hook
-
     monkeypatch.setattr(
         LayerActivationCollector,
         "_decoder_layer_support",
         [(lambda m: hasattr(m, "layers"), lambda m: m.layers)],
     )
-    monkeypatch.setattr(
-        LayerActivationCollector,
-        "_next_layer_input_support",
-        [(_supported, _build_hook)],
-    )
+    batches = [torch.tensor([[1.0, 2.0]])]
+
+    def _forward_loop(m):
+        for batch in batches:
+            m(batch)
 
     observed_layer_inputs = []
 
@@ -561,5 +539,10 @@ def test_sequential_calibrate_uses_next_layer_hook_without_replaying_full_model(
 
     sequential_calibrate(model, _forward_loop, _calib_func)
 
-    assert forward_loop_calls == 1
-    assert len(observed_layer_inputs) == len(model.layers)
+    assert len(observed_layer_inputs) == 3
+    # Layer 0 gets raw batch
+    assert torch.allclose(observed_layer_inputs[0][0], batches[0])
+    # Layer 1 gets output of layer 0 (batch * mask0 * scale0 = [1,2] * 1.0 * 2.0 = [2,4])
+    assert torch.allclose(observed_layer_inputs[1][0], torch.tensor([[2.0, 4.0]]))
+    # Layer 2 gets output of layer 1 (prev * mask1 * scale1 = [2,4] * 0.5 * 0.5 = [0.5,1.0])
+    assert torch.allclose(observed_layer_inputs[2][0], torch.tensor([[0.5, 1.0]]))
