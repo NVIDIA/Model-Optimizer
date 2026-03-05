@@ -34,8 +34,6 @@ from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_me
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-    from modelopt.torch.opt.searcher import ForwardLoop
-
 __all__ = [
     "EXPORT_MODE",
     "convert_quantization_axis_to_reduce_axis",
@@ -865,10 +863,10 @@ class _LayerCalibState:
     """Mutable per-layer state used during sequential calibration.
 
     Attached to each decoder layer as ``_seq_calib`` and accessed by the
-    patched forward to decide skip / run / capture / passthrough behaviour.
+    patched forward to decide skip / run / capture / original behaviour.
     """
 
-    mode: str = "passthrough"
+    mode: str = "original"
     name: str = ""
     cached_inputs: list = field(default_factory=list)
     collected_inputs: list = field(default_factory=list)
@@ -891,7 +889,7 @@ class LayerActivationCollector:
       uses this mode, so its output reflects updated weights.
     * **capture** — record ``(args, kwargs)`` and raise
       ``_EarlyStopForwardError`` to halt the forward pass early.
-    * **passthrough** — call the original forward unchanged.
+    * **original** — call the original forward unchanged.
 
     Because the *run* layer discards upstream values, skip-layer outputs are
     never consumed for real computation.
@@ -982,21 +980,21 @@ class LayerActivationCollector:
         info: _LayerCalibState = self._seq_calib
 
         if info.mode == "skip":
-            print_rank_0(f"Skipping layer {info.name}")
             if info.output_meta is not None:
                 return LayerActivationCollector._zeros_from_meta(info.output_meta)
-            print_rank_0(f"Warning: No output metadata found for layer {info.name}")
+            print_rank_0(f"Layer {info.name} is in 'skip' mode but has no output meta to return")
             return args[0] if args else next(iter(kwargs.values()))
 
         if info.mode == "run":
-            print_rank_0(f"Running layer {info.name}")
+            assert info.cached_inputs, (
+                f"Layer {info.name} is in 'run' mode but has no cached inputs to replay."
+            )
             real_args, real_kwargs = info.cached_inputs.pop(0)
             output = self._original_forward(*real_args, **real_kwargs)
             info.output_meta = LayerActivationCollector._extract_output_meta(output)
             return output
 
         if info.mode == "capture":
-            print_rank_0(f"Capturing layer {info.name}")
             info.collected_inputs.append((args, kwargs))
             raise _EarlyStopForwardError()
 
@@ -1074,6 +1072,18 @@ class LayerActivationCollector:
         cur.mode = "capture"
         cur.collected_inputs = []
 
+    def _log_layer_summary(self, layer_idx: int):
+        """Log a one-line summary of layer modes for the current calibration step."""
+        assert self._decoder_layers is not None
+        n = len(self._decoder_layers)
+        groups: dict[str, list[int]] = {}
+        for i, layer in enumerate(self._decoder_layers):
+            mode = layer._seq_calib.mode
+            if mode in ("skip", "run", "capture"):
+                groups.setdefault(mode, []).append(i)
+        parts = [f"{mode}: {groups[mode]}" for mode in ("skip", "run", "capture") if mode in groups]
+        print_rank_0(f"Calibrating layer {layer_idx}/{n} | {' | '.join(parts)}")
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -1088,13 +1098,13 @@ class LayerActivationCollector:
         """
         layer_idx = self._layer_to_idx[layer]
         self._set_layer_states(layer_idx)
-        print_rank_0(f"Getting input activations for layer {layer_idx}")
+        self._log_layer_summary(layer_idx)
         forward_loop(self.model)
 
         info = layer._seq_calib
         inputs = list(info.collected_inputs)
-        # After capture, set to passthrough so calib_func can call the layer's
-        # original forward directly.  The layer will transition to run → skip
+        # After capture, set to original so calib_func can call the layer's
+        # real forward directly.  The layer will transition to run → skip
         # in subsequent iterations via _set_layer_states.
-        info.mode = "passthrough"
+        info.mode = "original"
         return inputs

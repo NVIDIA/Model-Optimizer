@@ -354,3 +354,307 @@ def test_seq_calib_empty_forward_loop():
 
     for count in replay_counts:
         assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# Skip / run / capture path verification tests
+# ---------------------------------------------------------------------------
+
+
+class _TupleReturningBlock(nn.Module):
+    """Decoder layer that returns a tuple, mimicking HuggingFace decoder layers."""
+
+    def __init__(self, dim=16):
+        super().__init__()
+        self.linear = nn.Linear(dim, dim, bias=False)
+
+    def forward(self, x, **kwargs):
+        return (self.linear(x), None)
+
+
+class _TupleUnpackingModel(nn.Module):
+    """Parent model that unpacks layer outputs as tuples.
+
+    This would crash with a naive skip that returns a bare tensor.
+    """
+
+    def __init__(self, n_layers=4, dim=16):
+        super().__init__()
+        self.layers = nn.ModuleList([_TupleReturningBlock(dim) for _ in range(n_layers)])
+
+    def forward(self, x):
+        for layer in self.layers:
+            x, _ = layer(x)
+        return x
+
+
+class _InterLayerNormModel(nn.Module):
+    """Model with LayerNorm between decoder layers (not inside them)."""
+
+    def __init__(self, n_layers=4, dim=16):
+        super().__init__()
+        self.layers = nn.ModuleList([_TupleReturningBlock(dim) for _ in range(n_layers)])
+        self.norms = nn.ModuleList([nn.LayerNorm(dim) for _ in range(n_layers)])
+
+    def forward(self, x):
+        for norm, layer in zip(self.norms, self.layers):
+            x = norm(x)
+            x, _ = layer(x)
+        return x
+
+
+def _register_test_discoverer(monkeypatch):
+    """Register a simple discoverer that finds model.layers on any model."""
+    monkeypatch.setattr(
+        LayerActivationCollector,
+        "_decoder_layer_support",
+        [(lambda m: hasattr(m, "layers"), lambda m: m.layers)],
+    )
+
+
+def test_skip_output_preserves_tuple_structure(monkeypatch):
+    """Skip layers must return a tuple when the real layer returns a tuple.
+
+    Without this, the parent's ``x, _ = layer(x)`` unpacking would crash.
+    """
+    _register_test_discoverer(monkeypatch)
+    model = _TupleUnpackingModel(n_layers=5, dim=16)
+    data = [torch.randn(2, 16) for _ in range(3)]
+
+    def forward_loop(m):
+        for d in data:
+            m(d)
+
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers()
+    try:
+        for layer in model.layers:
+            inputs = collector.get_input_activations(layer, forward_loop)
+            assert len(inputs) == len(data)
+    finally:
+        collector._unpatch_all_layers()
+
+
+def test_skip_output_preserves_shape_with_inter_layer_norm(monkeypatch):
+    """Skip outputs must have correct shape for un-patched LayerNorm between layers."""
+    _register_test_discoverer(monkeypatch)
+    model = _InterLayerNormModel(n_layers=5, dim=16)
+    data = [torch.randn(2, 16) for _ in range(3)]
+
+    def forward_loop(m):
+        for d in data:
+            m(d)
+
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers()
+    try:
+        for layer in model.layers:
+            inputs = collector.get_input_activations(layer, forward_loop)
+            assert len(inputs) == len(data)
+    finally:
+        collector._unpatch_all_layers()
+
+
+def test_run_layer_populates_output_meta(monkeypatch):
+    """After a layer executes in 'run' mode, its output_meta must be set."""
+    _register_test_discoverer(monkeypatch)
+    model = _TupleUnpackingModel(n_layers=3, dim=16)
+    data = [torch.randn(2, 16)]
+
+    def forward_loop(m):
+        for d in data:
+            m(d)
+
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers()
+    try:
+        # Layer 0 starts as capture — no output_meta yet
+        collector.get_input_activations(model.layers[0], forward_loop)
+        assert model.layers[0]._seq_calib.output_meta is None
+
+        # Calibrating layer 1 puts layer 0 into run, which sets output_meta
+        collector.get_input_activations(model.layers[1], forward_loop)
+        meta = model.layers[0]._seq_calib.output_meta
+        assert meta is not None
+        assert meta[0] == "tuple", "Tuple-returning layer should produce tuple metadata"
+    finally:
+        collector._unpatch_all_layers()
+
+
+def test_run_layer_consumes_cached_inputs(monkeypatch):
+    """The run layer must pop all cached inputs during the forward loop."""
+    _register_test_discoverer(monkeypatch)
+    n_batches = 4
+    model = _TupleUnpackingModel(n_layers=3, dim=16)
+    data = [torch.randn(2, 16) for _ in range(n_batches)]
+
+    def forward_loop(m):
+        for d in data:
+            m(d)
+
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers()
+    try:
+        collector.get_input_activations(model.layers[0], forward_loop)
+        collector.get_input_activations(model.layers[1], forward_loop)
+
+        # Before calibrating layer 2, layer 1 transitions to run.
+        # Its cached_inputs should be populated from collected_inputs.
+        collector._set_layer_states(2)
+        assert len(model.layers[1]._seq_calib.cached_inputs) == n_batches
+
+        # After the forward loop, all cached inputs should be consumed
+        forward_loop(model)
+        assert len(model.layers[1]._seq_calib.cached_inputs) == 0
+    finally:
+        collector._unpatch_all_layers()
+
+
+def test_capture_layer_collects_all_batches(monkeypatch):
+    """The capture layer must record one entry per batch in the forward loop."""
+    _register_test_discoverer(monkeypatch)
+    n_batches = 5
+    model = _TupleUnpackingModel(n_layers=3, dim=16)
+    data = [torch.randn(2, 16) for _ in range(n_batches)]
+
+    def forward_loop(m):
+        for d in data:
+            m(d)
+
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers()
+    try:
+        inputs = collector.get_input_activations(model.layers[0], forward_loop)
+        assert len(inputs) == n_batches
+
+        inputs = collector.get_input_activations(model.layers[2], forward_loop)
+        assert len(inputs) == n_batches
+    finally:
+        collector._unpatch_all_layers()
+
+
+def test_mode_transitions_across_calibration_steps(monkeypatch):
+    """Verify mode transitions follow the skip/run/capture pattern at each step."""
+    _register_test_discoverer(monkeypatch)
+    model = _TupleUnpackingModel(n_layers=5, dim=16)
+
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers()
+    try:
+
+        def modes():
+            return [model.layers[i]._seq_calib.mode for i in range(5)]
+
+        collector._set_layer_states(0)
+        assert modes() == ["capture", "original", "original", "original", "original"]
+
+        collector._set_layer_states(1)
+        assert modes() == ["run", "capture", "original", "original", "original"]
+
+        collector._set_layer_states(2)
+        assert modes() == ["skip", "run", "capture", "original", "original"]
+
+        collector._set_layer_states(3)
+        assert modes() == ["skip", "skip", "run", "capture", "original"]
+
+        collector._set_layer_states(4)
+        assert modes() == ["skip", "skip", "skip", "run", "capture"]
+    finally:
+        collector._unpatch_all_layers()
+
+
+def test_run_asserts_on_empty_cached_inputs(monkeypatch):
+    """A layer in 'run' mode with no cached inputs must raise AssertionError."""
+    _register_test_discoverer(monkeypatch)
+    model = _TupleUnpackingModel(n_layers=2, dim=16)
+
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers()
+    try:
+        model.layers[0]._seq_calib.mode = "run"
+        model.layers[0]._seq_calib.cached_inputs = []
+
+        with pytest.raises(AssertionError, match="no cached inputs to replay"):
+            model(torch.randn(2, 16))
+    finally:
+        collector._unpatch_all_layers()
+
+
+def test_cleanup_removes_seq_calib_attr(monkeypatch):
+    """After unpatch, no layer should have the _seq_calib attribute."""
+    _register_test_discoverer(monkeypatch)
+    model = _TupleUnpackingModel(n_layers=3, dim=16)
+    data = [torch.randn(2, 16)]
+
+    def forward_loop(m):
+        for d in data:
+            m(d)
+
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers()
+    for layer in model.layers:
+        collector.get_input_activations(layer, forward_loop)
+    collector._unpatch_all_layers()
+
+    for i, layer in enumerate(model.layers):
+        assert not hasattr(layer, "_seq_calib"), f"Layer {i} still has _seq_calib after cleanup"
+        assert not hasattr(layer, "_original_forward"), (
+            f"Layer {i} still has _original_forward after cleanup"
+        )
+    assert not hasattr(model, "_original_forward")
+
+
+def test_skip_output_meta_not_shared_across_heterogeneous_layers(monkeypatch):
+    """Each layer stores its own output_meta, supporting heterogeneous architectures."""
+
+    class _SmallBlock(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = nn.Linear(8, 8, bias=False)
+
+        def forward(self, x):
+            return (self.linear(x), None, torch.zeros(1))
+
+    class _BigBlock(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = nn.Linear(8, 8, bias=False)
+
+        def forward(self, x):
+            return (self.linear(x),)
+
+    class _HeterogeneousModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList([_SmallBlock(), _BigBlock(), _SmallBlock()])
+
+        def forward(self, x):
+            for layer in self.layers:
+                out = layer(x)
+                x = out[0]
+            return x
+
+    _register_test_discoverer(monkeypatch)
+    model = _HeterogeneousModel()
+    data = [torch.randn(2, 8)]
+
+    def forward_loop(m):
+        for d in data:
+            m(d)
+
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers()
+    try:
+        for layer in model.layers:
+            collector.get_input_activations(layer, forward_loop)
+
+        # After full calibration, layers 0 and 1 have been through 'run' and have output_meta
+        meta_0 = model.layers[0]._seq_calib.output_meta
+        meta_1 = model.layers[1]._seq_calib.output_meta
+        assert meta_0 is not None
+        assert meta_1 is not None
+        # SmallBlock returns 3-element tuple, BigBlock returns 1-element tuple
+        assert len(meta_0[1]) == 3
+        assert len(meta_1[1]) == 1
+    finally:
+        collector._unpatch_all_layers()

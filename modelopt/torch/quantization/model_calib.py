@@ -1872,9 +1872,6 @@ def sequential_calibrate(
     skip / run / capture strategy so that inter-layer logic in parent modules
     (e.g. mask construction) executes naturally without model-specific hooks.
     """
-    if forward_loop is None:
-        raise ValueError("forward_loop must not be None for sequential calibration.")
-
     if not LayerActivationCollector.is_supported(model):
         raise ValueError(
             "Could not find transformer layers in model. "
