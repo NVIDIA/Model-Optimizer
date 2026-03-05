@@ -1888,6 +1888,7 @@ def sequential_calibrate(
         return
 
     input_getter = LayerActivationCollector(model)
+    # Patch all transformer layers with state aware module forward
     input_getter._patch_all_layers()
 
     try:

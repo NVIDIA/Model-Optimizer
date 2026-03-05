@@ -17,6 +17,7 @@
 
 from collections import namedtuple
 from contextlib import ExitStack, contextmanager, nullcontext
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -856,28 +857,48 @@ def update_quant_cfg_with_kv_cache_quant(
 
 
 class _EarlyStopForwardError(Exception):
-    """Error to stop the forward pass after collection."""
+    """Raised to halt the forward pass after capturing layer inputs."""
+
+
+@dataclass
+class _LayerCalibState:
+    """Mutable per-layer state used during sequential calibration.
+
+    Attached to each decoder layer as ``_seq_calib`` and accessed by the
+    patched forward to decide skip / run / capture / passthrough behaviour.
+    """
+
+    mode: str = "passthrough"
+    name: str = ""
+    cached_inputs: list = field(default_factory=list)
+    collected_inputs: list = field(default_factory=list)
+    output_meta: tuple | None = None
 
 
 class LayerActivationCollector:
-    """Helper class for collecting layer activations during sequential calibration.
+    """Collects layer activations for sequential (layer-by-layer) calibration.
 
-    Uses a "skip / run / capture" strategy: each decoder layer is patched once with a
-    unified forward that checks ``_seq_calib_state`` to decide its behaviour.
+    Each decoder layer is patched with a unified forward whose behaviour is
+    governed by a per-layer :class:`_LayerCalibState`:
 
-    * **skip** -- return a lightweight dummy (no computation, no cache).
-    * **run** -- ignore the parent-provided input, use cached inputs from a prior
-      capture step, and execute the real forward.  Only the just-calibrated layer
-      is in this state, so it reflects updated weights.
-    * **capture** -- record ``(args, kwargs)`` and raise ``_EarlyStopForwardError``.
-    * **passthrough** -- call the original forward unchanged.
+    * **skip** — return a zero-filled dummy whose shape and type match the
+      layer's real output (reconstructed from lightweight metadata).  No
+      computation is performed.  The correctly shaped dummy ensures un-patched
+      inter-layer operations in the parent forward (e.g. LayerNorm, tuple
+      unpacking) do not raise shape or type errors.
+    * **run** — replay previously captured inputs through the original forward,
+      ignoring whatever the parent passes in.  Only the just-calibrated layer
+      uses this mode, so its output reflects updated weights.
+    * **capture** — record ``(args, kwargs)`` and raise
+      ``_EarlyStopForwardError`` to halt the forward pass early.
+    * **passthrough** — call the original forward unchanged.
 
-    Because the *run* layer ignores upstream values, skip layers never need to
-    produce meaningful outputs.  Memory overhead is O(B) -- only one layer's
-    captured inputs are kept at a time.
+    Because the *run* layer discards upstream values, skip-layer outputs are
+    never consumed for real computation.
     """
 
     _decoder_layer_support: list[tuple[Any, Any]] = []
+    _LAYER_ATTR = "_seq_calib"
 
     def __init__(self, model: nn.Module):
         self.model = model
@@ -886,7 +907,7 @@ class LayerActivationCollector:
         self._patched = False
 
     # ------------------------------------------------------------------
-    # Decoder-layer discovery (unchanged public API)
+    # Decoder-layer discovery
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -912,26 +933,74 @@ class LayerActivationCollector:
             cls._decoder_layer_support.append(entry)
 
     # ------------------------------------------------------------------
-    # Unified patched forward
+    # Output metadata helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_output_meta(output):
+        """Extract lightweight (shape, dtype, device) metadata from a layer output.
+
+        Recursively handles tensors, tuples, lists, and non-tensor values (e.g. None).
+        The returned structure can be passed to ``_zeros_from_meta`` to reconstruct a
+        zero-filled output with identical shape and type.
+        """
+        if isinstance(output, torch.Tensor):
+            return ("tensor", output.shape, output.dtype, output.device)
+        if isinstance(output, tuple):
+            return (
+                "tuple",
+                tuple(LayerActivationCollector._extract_output_meta(o) for o in output),
+            )
+        if isinstance(output, list):
+            return ("list", [LayerActivationCollector._extract_output_meta(o) for o in output])
+        return ("other", output)
+
+    @staticmethod
+    def _zeros_from_meta(meta):
+        """Reconstruct a zero-filled output from metadata produced by ``_extract_output_meta``."""
+        tag = meta[0]
+        if tag == "tensor":
+            _, shape, dtype, device = meta
+            return torch.zeros(shape, dtype=dtype, device=device)
+        if tag == "tuple":
+            return tuple(LayerActivationCollector._zeros_from_meta(m) for m in meta[1])
+        if tag == "list":
+            return [LayerActivationCollector._zeros_from_meta(m) for m in meta[1]]
+        return meta[1]
+
+    # ------------------------------------------------------------------
+    # Patched forward
     # ------------------------------------------------------------------
 
     @staticmethod
     def _patched_forward(self, *args, **kwargs):
-        """Single forward bound to every decoder layer during sequential calibration."""
-        state = self._seq_calib_state
-        if state == "skip":
-            print_rank_0(f"Skipping layer {self.name}")
+        """Unified forward bound to every decoder layer during sequential calibration.
+
+        ``self`` here is the decoder layer module (bound via ``bind_forward_method``).
+        All per-layer state is accessed through ``self._seq_calib``.
+        """
+        info: _LayerCalibState = self._seq_calib
+
+        if info.mode == "skip":
+            print_rank_0(f"Skipping layer {info.name}")
+            if info.output_meta is not None:
+                return LayerActivationCollector._zeros_from_meta(info.output_meta)
+            print_rank_0(f"Warning: No output metadata found for layer {info.name}")
             return args[0] if args else next(iter(kwargs.values()))
-        elif state == "run":
-            print_rank_0(f"Running layer {self.name}")
-            real_args, real_kwargs = self._seq_calib_cached_inputs.pop(0)
-            return self._original_forward(*real_args, **real_kwargs)
-        elif state == "capture":
-            print_rank_0(f"Capturing layer {self.name}")
-            self._seq_calib_collected_inputs.append((args, kwargs))
+
+        if info.mode == "run":
+            print_rank_0(f"Running layer {info.name}")
+            real_args, real_kwargs = info.cached_inputs.pop(0)
+            output = self._original_forward(*real_args, **real_kwargs)
+            info.output_meta = LayerActivationCollector._extract_output_meta(output)
+            return output
+
+        if info.mode == "capture":
+            print_rank_0(f"Capturing layer {info.name}")
+            info.collected_inputs.append((args, kwargs))
             raise _EarlyStopForwardError()
-        else:
-            return self._original_forward(*args, **kwargs)
+
+        return self._original_forward(*args, **kwargs)
 
     # ------------------------------------------------------------------
     # Patch / unpatch lifecycle
@@ -945,10 +1014,9 @@ class LayerActivationCollector:
         module_to_name = {m: name for name, m in self.model.named_modules()}
 
         for layer in self._decoder_layers:
-            layer._seq_calib_state = "passthrough"
-            layer._seq_calib_cached_inputs = []
-            layer._seq_calib_collected_inputs = []
-            layer._seq_calib_name = module_to_name.get(layer, type(layer).__name__)
+            layer._seq_calib = _LayerCalibState(
+                name=module_to_name.get(layer, type(layer).__name__),
+            )
             bind_forward_method(layer, self._patched_forward, "_original_forward")
 
         def _early_stop_forward(self, *args, **kwargs):
@@ -971,14 +1039,8 @@ class LayerActivationCollector:
         for layer in self._decoder_layers:
             if hasattr(layer, "_original_forward"):
                 unpatch_forward_method(layer, "_original_forward")
-            for attr in (
-                "_seq_calib_state",
-                "_seq_calib_cached_inputs",
-                "_seq_calib_collected_inputs",
-                "_seq_calib_name",
-            ):
-                if hasattr(layer, attr):
-                    delattr(layer, attr)
+            if hasattr(layer, self._LAYER_ATTR):
+                delattr(layer, self._LAYER_ATTR)
 
         self._patched = False
 
@@ -987,27 +1049,30 @@ class LayerActivationCollector:
     # ------------------------------------------------------------------
 
     def _set_layer_states(self, layer_idx: int):
-        """Update only the affected layer states (O(1) per call).
+        """Transition layer modes for the next calibration step.
 
-        Layers are processed in sequential order, so only three transitions
-        can happen: the layer two back becomes ``"skip"``, the previous layer
-        becomes ``"run"``, and the current layer becomes ``"capture"``.
+        When calibrating layer *i*, three transitions happen:
+
+        * Layer ``i - 2`` → **skip** (fully done, free its cached inputs).
+        * Layer ``i - 1`` → **run** (replay captured inputs with calibrated weights).
+        * Layer ``i``     → **capture** (record inputs, then early-stop).
         """
         assert self._decoder_layers is not None
+
         if layer_idx > 1:
-            two_back = self._decoder_layers[layer_idx - 2]
-            two_back._seq_calib_state = "skip"
-            two_back._seq_calib_cached_inputs = []
+            done = self._decoder_layers[layer_idx - 2]._seq_calib
+            done.mode = "skip"
+            done.cached_inputs = []
 
         if layer_idx > 0:
-            prev = self._decoder_layers[layer_idx - 1]
-            prev._seq_calib_state = "run"
-            prev._seq_calib_cached_inputs = prev._seq_calib_collected_inputs
-            prev._seq_calib_collected_inputs = []
+            prev = self._decoder_layers[layer_idx - 1]._seq_calib
+            prev.mode = "run"
+            prev.cached_inputs = prev.collected_inputs
+            prev.collected_inputs = []
 
-        cur = self._decoder_layers[layer_idx]
-        cur._seq_calib_state = "capture"
-        cur._seq_calib_collected_inputs = []
+        cur = self._decoder_layers[layer_idx]._seq_calib
+        cur.mode = "capture"
+        cur.collected_inputs = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -1025,9 +1090,11 @@ class LayerActivationCollector:
         self._set_layer_states(layer_idx)
         print_rank_0(f"Getting input activations for layer {layer_idx}")
         forward_loop(self.model)
-        inputs = list(layer._seq_calib_collected_inputs)
-        # After calibration this layer will be "run" (next iter) then "skip" (all
-        # subsequent).  For the interim period where calib_func calls the layer
-        # directly, passthrough lets the original forward execute normally.
-        layer._seq_calib_state = "passthrough"
+
+        info = layer._seq_calib
+        inputs = list(info.collected_inputs)
+        # After capture, set to passthrough so calib_func can call the layer's
+        # original forward directly.  The layer will transition to run → skip
+        # in subsequent iterations via _set_layer_states.
+        info.mode = "passthrough"
         return inputs
