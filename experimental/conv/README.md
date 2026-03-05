@@ -36,16 +36,22 @@ block_size = 128
 # Without FP4 activation quantization (drop-in-style Conv3D call)
 out = conv3d_implicit_gemm_cuda(x, w, stride=(1, 1, 1), padding=(1, 1, 1))
 
-# Optional block quantization of weights for experiments
-w_q = dynamic_block_quantize_op(
-    w,
+# Optional FP4 block quantization of weights along the GEMM K dimension.
+# The kernel's A-tile (activations) is quantized along K = Cin*kD*kH*kW,
+# so weights must be flattened to [Cout, K] before quantizing to match.
+Cout, Cin = w.shape[:2]
+K = Cin * w.shape[2] * w.shape[3] * w.shape[4]
+w_flat = w.reshape(Cout, K)
+w_q_flat = dynamic_block_quantize_op(
+    w_flat,
     block_size,
-    w.abs().max().unsqueeze(0),
+    w_flat.abs().max().unsqueeze(0),
     4,  # num_bits
     2,  # exponent_bits
     8,  # scale_num_bits
     4,  # scale_exponent_bits
 )
+w_q = w_q_flat.reshape_as(w)
 
 # With FP4 activation fake quantization
 out_q = conv3d_implicit_gemm_cuda(
@@ -73,7 +79,7 @@ Function: `conv3d_implicit_gemm_cuda(...)` from `experimental/conv/implicit_gemm
 | `dilation` | Convolution dilation `(D, H, W)` |
 | `act_amax` | Activation abs-max scalar tensor (required when `quant_act=True`) |
 | `quant_act` | Enable FP4 fake quantization on activations |
-| `FP4_BLOCK_SIZE` | FP4 quantization block size (`128` or `256`) |
+| `fp4_block_size` | FP4 quantization block size (`128` or `256`) |
 
 ## Status
 
