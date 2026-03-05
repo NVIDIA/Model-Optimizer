@@ -1201,6 +1201,8 @@ class _DynamicEagleGPTModel(EagleModel):
                     dim=0,
                 )
 
+                # Clone to avoid inplace modification of view created in no_grad mode
+                eagle_module_input_hidden_states = eagle_module_input_hidden_states.clone()
                 for batch_idx in range(batch_size):
                     eagle_module_input_hidden_states[rand_indices[batch_idx], batch_idx, :] = (
                         eagle_module_output_hidden_states[rand_indices[batch_idx], batch_idx, :]
