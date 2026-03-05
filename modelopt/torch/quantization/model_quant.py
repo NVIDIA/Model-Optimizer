@@ -588,6 +588,8 @@ def compute_quantization_mse(
             continue
         if not _matches(name):
             continue
+        if not (module._if_quant and module._fake_quant):
+            continue
         accumulators[name] = {"sum": 0.0, "count": 0}
 
         def _make_hook(acc):
