@@ -164,12 +164,14 @@ def get_mcore_gpt_model(
     def squared_relu(x):
         return torch.pow(F.relu(x), 2)
 
+    # Use sequence parallel if MoE is enabled and tensor model parallel size is greater than 1
+    use_sp = num_moe_experts and num_moe_experts > 0 and tensor_model_parallel_size > 1
     config = TransformerConfig(
         tensor_model_parallel_size=tensor_model_parallel_size,
         pipeline_model_parallel_size=pipeline_model_parallel_size,
         expert_model_parallel_size=expert_model_parallel_size,
         expert_tensor_parallel_size=expert_tensor_parallel_size,
-        sequence_parallel=num_moe_experts > 0 and tensor_model_parallel_size > 1,
+        sequence_parallel=use_sp,
         num_layers=num_layers,
         num_layers_in_first_pipeline_stage=num_layers_in_first_pipeline_stage,
         num_layers_in_last_pipeline_stage=num_layers_in_last_pipeline_stage,

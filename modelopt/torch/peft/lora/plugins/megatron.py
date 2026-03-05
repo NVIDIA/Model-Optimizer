@@ -333,7 +333,7 @@ class _LoRAMegatronSequentialMLP(_MegatronParallelLoRABase):
         - ``lora_b_{adapter_name}.{i}`` (lora_up[i]): EP-sharded in the same way as
           ``local_experts.{i}``, i.e., mapped to global expert index.
         """
-        from megatron.core.transformer.utils import ensure_metadata_has_dp_cp_group
+        from megatron.core.transformer import ensure_metadata_has_dp_cp_group
 
         # Base SequentialMLP state dict (handles local_experts weights).
         sharded_state_dict = SequentialMLP.sharded_state_dict(
