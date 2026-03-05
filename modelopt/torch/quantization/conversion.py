@@ -211,6 +211,20 @@ def _replace_quant_module(model: nn.Module, version=None, registry=QuantModuleRe
         _replace_quant_module(getattr(model, name), version=version, registry=registry)
 
 
+def _auto_enable_cfg(cfg):
+    """Add ``enable=True`` to cfgs that set quantization properties without an explicit ``enable``.
+
+    When ``"default": {"enable": False}`` disables all quantizers and a specific pattern then
+    sets properties like ``num_bits`` / ``block_sizes``, the quantizer should be re-enabled
+    implicitly rather than requiring an explicit ``"enable": True`` in every config entry.
+    """
+    if isinstance(cfg, dict) and "enable" not in cfg and cfg:
+        cfg = {**cfg, "enable": True}
+    elif isinstance(cfg, list):
+        cfg = [_auto_enable_cfg(c) for c in cfg]
+    return cfg
+
+
 def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType | dict):
     """Update the quantizer attributes based on the specified `quant_cfg`.
 
@@ -240,9 +254,11 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType
                 f"Expected a dictionary for quantizer configuration for child tensor quantizers of {parent_class}."
             )
             for sub_pattern, sub_cfg in cfg.items():
-                set_quantizer_attribute(quant_model, sub_pattern, sub_cfg, parent_class)
+                set_quantizer_attribute(
+                    quant_model, sub_pattern, _auto_enable_cfg(sub_cfg), parent_class
+                )
             continue
-        set_quantizer_attribute(quant_model, pattern, cfg)
+        set_quantizer_attribute(quant_model, pattern, _auto_enable_cfg(cfg))
 
 
 def set_quantizer_attribute(

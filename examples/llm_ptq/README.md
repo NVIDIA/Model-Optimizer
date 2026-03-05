@@ -69,7 +69,7 @@ def forward_loop(model):
 model = mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, forward_loop)
 ```
 
-> *For higher NVFP4 PTQ accuracy, we recommend using `mtq.NVFP4_MLP_ONLY_CFG` or `mtq.NVFP4_OMLP_ONLY_CFG` instead of `mtq.NVFP4_DEFAULT_CFG`. `NVFP4_MLP_ONLY_CFG` applies NVFP4 quantization only to MLP (and MoE) layers, leaving attention layers unquantized. `NVFP4_OMLP_ONLY_CFG` additionally quantizes the `o_proj` layer. Both preserve accuracy in the sensitive attention QKV projections while still providing significant compression.*
+> *For higher NVFP4 PTQ accuracy, we recommend using `mtq.NVFP4_MLP_ONLY_CFG` or `mtq.NVFP4_OMLP_ONLY_CFG` instead of `mtq.NVFP4_DEFAULT_CFG`. `NVFP4_MLP_ONLY_CFG` applies NVFP4 quantization to MLP (and MoE) layers, leaving attention layers unquantized. `NVFP4_OMLP_ONLY_CFG` additionally quantizes the `o_proj` layer. Both preserve accuracy in the sensitive attention QKV projections while still providing significant compression.*
 
 ### 2. Export Quantized Model
 

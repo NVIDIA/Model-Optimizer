@@ -253,6 +253,7 @@ def auto_quantize(
             "fp8_pb_wo",
             "w4a8_mxfp4_fp8",
             "nvfp4_mlp_only",
+            "nvfp4_omlp_only",
             "mxfp8",
         ]
         for args.qformat in qformat_list
@@ -901,6 +902,7 @@ def quantize_main(
                 "fp8_pb_wo",
                 "w4a8_mxfp4_fp8",
                 "nvfp4_mlp_only",
+                "nvfp4_omlp_only",
                 "mxfp8",
             ]
             or args.kv_cache_qformat in KV_QUANT_CFG_CHOICES
