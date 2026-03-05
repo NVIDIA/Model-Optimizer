@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from unittest.mock import patch
 
 import onnx
@@ -42,7 +41,7 @@ def _quantized_tensor_indices(model: onnx.ModelProto) -> set[tuple[str, int]]:
     }
 
 
-def test_autotune_quantization_integration(tmp_path="./"):
+def test_autotune_quantization_integration(tmp_path):
     """Ensure that the quantized tensors are the same for standalone Autotune and MOQ with Autotune.
 
     Runs the autotuner once to obtain a fixed set of insertion points. The same
@@ -55,7 +54,7 @@ def test_autotune_quantization_integration(tmp_path="./"):
     - the quantize(autotune=True) output model.
     """
     model_torch, input_tensor = _create_simple_resnet18_onnx_model()
-    onnx_path = os.path.join(tmp_path, "model.onnx")
+    onnx_path = tmp_path / "model.onnx"
     output_path = onnx_path.replace(".onnx", ".quant.onnx")
 
     # Export torch model to ONNX
