@@ -328,7 +328,7 @@ def get_parser() -> argparse.ArgumentParser:
     autotune_group.add_argument(
         "--autotune_schemes_per_region",
         type=int,
-        default=30,
+        default=50,
         help="Number of Q/DQ schemes to test per region.",
         action=_StoreWithExplicitFlag,
         explicit_attr="_explicit_autotune_schemes_per_region",
@@ -380,7 +380,7 @@ def get_parser() -> argparse.ArgumentParser:
     autotune_group.add_argument(
         "--autotune_warmup_runs",
         type=int,
-        default=5,
+        default=50,
         help="Number of warmup runs before timing.",
         action=_StoreWithExplicitFlag,
         explicit_attr="_explicit_autotune_warmup_runs",
@@ -388,7 +388,7 @@ def get_parser() -> argparse.ArgumentParser:
     autotune_group.add_argument(
         "--autotune_timing_runs",
         type=int,
-        default=20,
+        default=100,
         help="Number of timed runs for latency measurement.",
         action=_StoreWithExplicitFlag,
         explicit_attr="_explicit_autotune_timing_runs",
