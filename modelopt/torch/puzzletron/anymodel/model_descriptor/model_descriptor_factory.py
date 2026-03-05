@@ -36,8 +36,21 @@ _MODEL_TYPE_TO_DESCRIPTOR = {
 }
 
 
-def resolve_descriptor_from_pretrained(pretrained: str | None, trust_remote_code: bool = True):
-    """Resolve the model descriptor by loading the checkpoint config and mapping model_type."""
+def resolve_descriptor_from_pretrained(pretrained: str | None, trust_remote_code: bool = False):
+    """Resolve the model descriptor by loading the checkpoint config and mapping model_type.
+
+    Args:
+        pretrained: Path to a pretrained model checkpoint or HuggingFace model identifier.
+        trust_remote_code: If True, allows execution of custom code from the model repository.
+            This is a security risk if the model source is untrusted. Only set to True if you
+            trust the source of the model. Defaults to False for security.
+
+    Returns:
+        The resolved ModelDescriptor class for the detected model type.
+
+    Raises:
+        ValueError: If pretrained is not provided or if the model type cannot be auto-detected.
+    """
     if not pretrained:
         raise ValueError("pretrained must be provided")
 

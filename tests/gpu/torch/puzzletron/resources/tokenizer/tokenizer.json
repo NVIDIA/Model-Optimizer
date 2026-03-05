@@ -1,0 +1,212 @@
+{
+  "version": "1.0",
+  "truncation": null,
+  "padding": null,
+  "added_tokens": [],
+  "normalizer": null,
+  "pre_tokenizer": {
+    "type": "Sequence",
+    "pretokenizers": [
+      {
+        "type": "Split",
+        "pattern": {
+          "Regex": "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+        },
+        "behavior": "Isolated",
+        "invert": false
+      },
+      {
+        "type": "ByteLevel",
+        "add_prefix_space": false,
+        "trim_offsets": true,
+        "use_regex": false
+      }
+    ]
+  },
+  "post_processor": {
+    "type": "Sequence",
+    "processors": [
+      {
+        "type": "ByteLevel",
+        "add_prefix_space": true,
+        "trim_offsets": false,
+        "use_regex": true
+      },
+      {
+        "type": "TemplateProcessing",
+        "single": [
+          {
+            "SpecialToken": {
+              "id": "<|begin_of_text|>",
+              "type_id": 0
+            }
+          },
+          {
+            "Sequence": {
+              "id": "A",
+              "type_id": 0
+            }
+          }
+        ],
+        "pair": [
+          {
+            "SpecialToken": {
+              "id": "<|begin_of_text|>",
+              "type_id": 0
+            }
+          },
+          {
+            "Sequence": {
+              "id": "A",
+              "type_id": 0
+            }
+          },
+          {
+            "SpecialToken": {
+              "id": "<|begin_of_text|>",
+              "type_id": 1
+            }
+          },
+          {
+            "Sequence": {
+              "id": "B",
+              "type_id": 1
+            }
+          }
+        ],
+        "special_tokens": {
+          "<|begin_of_text|>": {
+            "id": "<|begin_of_text|>",
+            "ids": [
+              100
+            ],
+            "tokens": [
+              "<|begin_of_text|>"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "decoder": {
+    "type": "ByteLevel",
+    "add_prefix_space": true,
+    "trim_offsets": true,
+    "use_regex": true
+  },
+  "model": {
+    "type": "BPE",
+    "dropout": null,
+    "unk_token": null,
+    "continuing_subword_prefix": null,
+    "end_of_word_suffix": null,
+    "fuse_unk": false,
+    "byte_fallback": false,
+    "ignore_merges": true,
+    "vocab": {
+      "!": 0,
+      "\"": 1,
+      "#": 2,
+      "$": 3,
+      "%": 4,
+      "&": 5,
+      "'": 6,
+      "(": 7,
+      ")": 8,
+      "*": 9,
+      "+": 10,
+      ",": 11,
+      "-": 12,
+      ".": 13,
+      "/": 14,
+      "0": 15,
+      "1": 16,
+      "2": 17,
+      "3": 18,
+      "4": 19,
+      "5": 20,
+      "6": 21,
+      "7": 22,
+      "8": 23,
+      "9": 24,
+      ":": 25,
+      ";": 26,
+      "<": 27,
+      "=": 28,
+      ">": 29,
+      "?": 30,
+      "@": 31,
+      "A": 32,
+      "B": 33,
+      "C": 34,
+      "D": 35,
+      "E": 36,
+      "F": 37,
+      "G": 38,
+      "H": 39,
+      "I": 40,
+      "J": 41,
+      "K": 42,
+      "L": 43,
+      "M": 44,
+      "N": 45,
+      "O": 46,
+      "P": 47,
+      "Q": 48,
+      "R": 49,
+      "S": 50,
+      "T": 51,
+      "U": 52,
+      "V": 53,
+      "W": 54,
+      "X": 55,
+      "Y": 56,
+      "Z": 57,
+      "[": 58,
+      "\\": 59,
+      "]": 60,
+      "^": 61,
+      "_": 62,
+      "`": 63,
+      "a": 64,
+      "b": 65,
+      "c": 66,
+      "d": 67,
+      "e": 68,
+      "f": 69,
+      "g": 70,
+      "h": 71,
+      "i": 72,
+      "j": 73,
+      "k": 74,
+      "l": 75,
+      "m": 76,
+      "n": 77,
+      "o": 78,
+      "p": 79,
+      "q": 80,
+      "r": 81,
+      "s": 82,
+      "t": 83,
+      "u": 84,
+      "v": 85,
+      "w": 86,
+      "x": 87,
+      "y": 88,
+      "z": 89,
+      "{": 90,
+      "|": 91,
+      "}": 92,
+      "~": 93,
+      "¡": 94,
+      "¢": 95,
+      "£": 96,
+      "¤": 97,
+      "¥": 98,
+      "¦": 99,
+      "<|begin_of_text|>": 100,
+      "<|eot_id|>": 101
+    },
+    "merges": []
+  }
+}

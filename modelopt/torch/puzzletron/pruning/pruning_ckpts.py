@@ -23,14 +23,22 @@ from parent checkpoints.
 import json
 import os
 import time
+from typing import Optional
 
 from omegaconf import DictConfig
 
-from modelopt.torch.puzzletron.tools.bypassed_training.child_init import (
+from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptorFactory
+from modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin import ExpertRemovalPruningMixIn
+from modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin import (
+    FFNIntermediatePruningMixIn,
+)
+from modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin import KVHeadsPruningMixIn
+from modelopt.torch.puzzletron.pruning.pruning_utils import (
     GQAInitMode,
     HiddenSizeInitMode,
     LinearInitMode,
     MlpInitMode,
+    resolve_pruning_mixin,
 )
 from modelopt.torch.puzzletron.tools.bypassed_training.init_child_from_parent import (
     init_child_from_parent,
@@ -40,7 +48,7 @@ from modelopt.torch.puzzletron.tools.logger import mprint
 
 
 def launch_ffn_intermediates_prune_ckpt(
-    cfg: DictConfig, max_save_workers: int | None = None, max_layer_workers: int | None = None
+    cfg: DictConfig, max_save_workers: Optional[int] = None, max_layer_workers: Optional[int] = None
 ):
     for intermediate_size in cfg.pruning.intermediate_size_list:
         dirname = f"ffn_{intermediate_size}_attn_no_op"
@@ -54,14 +62,16 @@ def launch_ffn_intermediates_prune_ckpt(
         model_config_overrides_json = {"ffn": [{"intermediate_size": intermediate_size}]}
         mlp_init_config_yaml = cfg.pruning.mlp_init_config_yaml
 
-        output_dir = os.path.join(cfg.pruning.pruned_ckpts_outpt_dir, dirname)
+        output_dir = os.path.join(cfg.pruning.pruned_ckpts_output_dir, dirname)
 
         # Profile the overall init_child_from_parent call with optimizations
         mprint("Starting init_child_from_parent...")
         start_time = time.time()
         init_child_from_parent(
+            descriptor=cfg.descriptor,
+            pruning_mixin=cfg.pruning.pruning_mixin,
             parent_checkpoint_dir=cfg.teacher_dir,
-            model_config_overrides_json=model_config_overrides_json,
+            model_config_overrides_dict=model_config_overrides_json,
             output_checkpoint_dir=output_dir,
             gqa_init_mode=GQAInitMode(cfg.pruning.gqa_init_mode),
             mlp_init_mode=MlpInitMode(cfg.pruning.mlp_init_mode),
@@ -83,7 +93,7 @@ def launch_ffn_intermediates_prune_ckpt(
 
 
 def launch_attn_groups_prune_ckpt(
-    cfg: DictConfig, max_save_workers: int | None = None, max_layer_workers: int | None = None
+    cfg: DictConfig, max_save_workers: Optional[int] = None, max_layer_workers: Optional[int] = None
 ):
     for n_heads_in_group in cfg.pruning.n_heads_in_group_list:
         dirname = f"n_heads_in_group{n_heads_in_group}"
@@ -98,14 +108,16 @@ def launch_attn_groups_prune_ckpt(
         model_config_overrides_json = {"attention": [{"n_heads_in_group": n_heads_in_group}]}
         mlp_init_config_yaml = cfg.pruning.mlp_init_config_yaml
 
-        output_dir = os.path.join(cfg.pruning.pruned_ckpts_outpt_dir, dirname)
+        output_dir = os.path.join(cfg.pruning.pruned_ckpts_output_dir, dirname)
 
         # Profile the overall init_child_from_parent call with optimizations
         mprint("Starting init_child_from_parent...")
         start_time = time.time()
         init_child_from_parent(
+            descriptor=cfg.descriptor,
+            pruning_mixin=cfg.pruning.pruning_mixin,
             parent_checkpoint_dir=cfg.teacher_dir,
-            model_config_overrides_json=model_config_overrides_json,
+            model_config_overrides_dict=model_config_overrides_json,
             output_checkpoint_dir=output_dir,
             gqa_init_mode=GQAInitMode(cfg.pruning.gqa_init_mode),
             mlp_init_mode=MlpInitMode(cfg.pruning.mlp_init_mode),
@@ -150,17 +162,17 @@ def launch_hidden_dim_prune_ckpt(cfg: DictConfig):
         else:
             intermediate_sizes.append(None)
 
-    mprint("Teacher config:")
+    mprint(f"Teacher config:")
     mprint(f"  - hidden_size: {parent_hidden_size}")
     mprint(f"  - intermediate_sizes: {intermediate_sizes}")
     os.makedirs(os.path.join(cfg.puzzle_dir, "ckpts"), exist_ok=True)
 
     for hidden_size in cfg.pruning.hidden_size_list:
-        mprint("\n######################################################################")
+        mprint(f"\n######################################################################")
         mprint(f"Hidden Size = {hidden_size}")
-        mprint("######################################################################\n")
+        mprint(f"######################################################################\n")
 
-        mprint("Child config:")
+        mprint(f"Child config:")
         mprint(f"  - hidden_size: {hidden_size}")
 
         # Create model config overrides with proper FFN configuration
@@ -178,14 +190,16 @@ def launch_hidden_dim_prune_ckpt(cfg: DictConfig):
 
         mlp_init_config_yaml = cfg.pruning.mlp_init_config_yaml
         dirname = f"hidden_size_{hidden_size}"
-        output_dir = os.path.join(cfg.pruning.pruned_ckpts_outpt_dir, dirname)
+        output_dir = os.path.join(cfg.pruning.pruned_ckpts_output_dir, dirname)
 
         mprint(f"Creating checkpoint with hidden_size={hidden_size}")
         mprint(f"Model config overrides: {model_config_overrides_json}")
 
         init_child_from_parent(
+            descriptor=cfg.descriptor,
+            pruning_mixin=cfg.pruning.pruning_mixin,
             parent_checkpoint_dir=cfg.pruning.model_name_or_path,
-            model_config_overrides_json=model_config_overrides_json,
+            model_config_overrides_dict=model_config_overrides_json,
             output_checkpoint_dir=output_dir,
             gqa_init_mode=GQAInitMode(cfg.pruning.gqa_init_mode),
             mlp_init_mode=MlpInitMode(cfg.pruning.mlp_init_mode),
@@ -204,9 +218,9 @@ def launch_hidden_dim_prune_ckpt(cfg: DictConfig):
 
 def launch_experts_prune_ckpt(
     cfg: DictConfig,
-    max_save_workers: int | None = None,
-    max_layer_workers: int | None = None,
-    symlink_suffix: str | None = None,
+    max_save_workers: Optional[int] = None,
+    max_layer_workers: Optional[int] = None,
+    symlink_suffix: Optional[str] = None,
 ):
     for num_experts in cfg.pruning.num_experts_to_keep_list:
         dirname = f"num_experts_{num_experts}"
@@ -223,14 +237,16 @@ def launch_experts_prune_ckpt(
 
         mlp_init_config_yaml = cfg.pruning.mlp_init_config_yaml
 
-        output_dir = os.path.join(cfg.pruning.pruned_ckpts_outpt_dir, dirname)
+        output_dir = os.path.join(cfg.pruning.pruned_ckpts_output_dir, dirname)
 
         # Profile the overall init_child_from_parent call with optimizations
         mprint("Starting init_child_from_parent...")
         start_time = time.time()
         init_child_from_parent(
+            descriptor=cfg.descriptor,
+            pruning_mixin=cfg.pruning.pruning_mixin,
             parent_checkpoint_dir=cfg.teacher_dir,
-            model_config_overrides_json=model_config_overrides_json,
+            model_config_overrides_dict=model_config_overrides_json,
             output_checkpoint_dir=output_dir,
             gqa_init_mode=GQAInitMode(cfg.pruning.gqa_init_mode),
             mlp_init_mode=MlpInitMode(cfg.pruning.mlp_init_mode),
@@ -252,7 +268,7 @@ def launch_experts_prune_ckpt(
 
 
 def launch_moe_ffn_intermediates_prune_ckpt(
-    cfg: DictConfig, max_save_workers: int | None = None, max_layer_workers: int | None = None
+    cfg: DictConfig, max_save_workers: Optional[int] = None, max_layer_workers: Optional[int] = None
 ):
     for intermediate_size in cfg.pruning.intermediate_size_list:
         dirname = f"moe_ffn_{intermediate_size}_attn_no_op"
@@ -269,14 +285,16 @@ def launch_moe_ffn_intermediates_prune_ckpt(
         }
         mlp_init_config_yaml = cfg.pruning.mlp_init_config_yaml
 
-        output_dir = os.path.join(cfg.pruning.pruned_ckpts_outpt_dir, dirname)
+        output_dir = os.path.join(cfg.pruning.pruned_ckpts_output_dir, dirname)
 
         # Profile the overall init_child_from_parent call with optimizations
         mprint("Starting init_child_from_parent...")
         start_time = time.time()
         init_child_from_parent(
+            descriptor=cfg.descriptor,
+            pruning_mixin=cfg.pruning.pruning_mixin,
             parent_checkpoint_dir=cfg.teacher_dir,
-            model_config_overrides_json=model_config_overrides_json,
+            model_config_overrides_dict=model_config_overrides_json,
             output_checkpoint_dir=output_dir,
             gqa_init_mode=GQAInitMode(cfg.pruning.gqa_init_mode),
             mlp_init_mode=MlpInitMode(cfg.pruning.mlp_init_mode),
@@ -296,7 +314,11 @@ def launch_moe_ffn_intermediates_prune_ckpt(
 
 
 def launch_prune_ckpt(cfg: DictConfig):
-    target_layer = cfg.pruning.activation_hooks_kwargs.target_layer
+    cfg.descriptor = ModelDescriptorFactory.get(cfg.descriptor)
+    # Resolve pruning_mixin from config (could be string, enum, or PruningMixIn)
+    cfg.pruning.pruning_mixin = resolve_pruning_mixin(cfg.pruning.pruning_mixin, cfg.descriptor)
+    pruning_mixin = cfg.pruning.pruning_mixin
+
     # I/O optimization settings - same as FFN pruning
     max_save_workers = None  # Will auto-calculate as min(CPU count, num files)
     if "PRUNING_SAVE_WORKERS" in os.environ:
@@ -307,29 +329,15 @@ def launch_prune_ckpt(cfg: DictConfig):
     if "PRUNING_LAYER_WORKERS" in os.environ:
         max_layer_workers = int(os.environ["PRUNING_LAYER_WORKERS"])
 
-    # Log optimization settings (extracted from individual pruning methods)
-    mprint("Optimization Settings:")
-    mprint(
-        f"  - I/O workers (max_workers): {'auto-calculate' if max_save_workers is None else max_save_workers}"
-    )
-    mprint(
-        f"  - Layer workers (max_layer_workers): {'auto-calculate' if max_layer_workers is None else max_layer_workers}"
-    )
-    mprint("  (Override with env vars: PRUNING_IO_WORKERS, PRUNING_LAYER_WORKERS)")
-
-    if target_layer == "mlp.down_proj":
+    if isinstance(pruning_mixin, FFNIntermediatePruningMixIn):
         launch_ffn_intermediates_prune_ckpt(cfg, max_save_workers, max_layer_workers)
-    elif target_layer == "self_attn.o_proj":
+    elif isinstance(pruning_mixin, KVHeadsPruningMixIn):
         launch_attn_groups_prune_ckpt(cfg, max_save_workers, max_layer_workers)
-    elif target_layer == "layernorm":
-        launch_hidden_dim_prune_ckpt(cfg)
-    elif target_layer == "router":
-        # Check if we should use symlink suffix for chained pruning
-        symlink_suffix = getattr(cfg.pruning, "symlink_suffix", None)
-        launch_experts_prune_ckpt(cfg, max_save_workers, max_layer_workers, symlink_suffix)
-    elif target_layer == r"regex:experts\.\d+\.down_proj$":
-        launch_moe_ffn_intermediates_prune_ckpt(cfg, max_save_workers, max_layer_workers)
+    elif isinstance(pruning_mixin, ExpertRemovalPruningMixIn):
+        launch_experts_prune_ckpt(cfg, max_save_workers, max_layer_workers)
+    # elif target_layer == "layernorm":
+    #     launch_hidden_dim_prune_ckpt(cfg)
     else:
         raise NotImplementedError(
-            f"checkpoint pruning is not currently supported for target layer: {target_layer}"
+            f"checkpoint pruning is not currently supported for pruning mixin: {pruning_mixin.__class__.__name__}"
         )

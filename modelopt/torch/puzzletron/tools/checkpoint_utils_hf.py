@@ -14,11 +14,13 @@
 # limitations under the License.
 # mypy: ignore-errors
 
-"""Provides utilities for loading and saving PyTorch model checkpoints in the Hugging Face format,
+"""
+Provides utilities for loading and saving PyTorch model checkpoints in the Hugging Face format,
 particularly for DeciLM models.
 """
 
 import concurrent.futures
+import dataclasses
 import fcntl
 import os
 import shutil
@@ -31,9 +33,12 @@ from typing import Any, BinaryIO
 
 import torch
 from safetensors.torch import save_file as safe_save_file
+from transformers import AutoConfig, PretrainedConfig, PreTrainedModel
+from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from modelopt.torch.puzzletron.decilm import deci_lm_hf_code
+from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import maybe_cast_block_configs
 from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.modeling_decilm import DeciLMForCausalLM
 from modelopt.torch.puzzletron.tools.common import infer_weights_dtype
@@ -69,7 +74,8 @@ def load_checkpoint(
     model_config_overrides: dict | None = None,
     ignore_unexpected_config_keys: bool = False,
 ) -> DeciLMForCausalLM:
-    """Unlike AutoModelForCausalLM.from_pretrained, the models loaded by this function use your
+    """
+    Unlike AutoModelForCausalLM.from_pretrained, the models loaded by this function use your
     local repo code, not the code inside the checkpoint.
     """
     from modelopt.torch.puzzletron.tools.checkpoint_utils import (
@@ -99,20 +105,35 @@ def load_checkpoint(
     return model
 
 
+def force_cache_dynamic_modules(config: PretrainedConfig, checkpoint_dir: Path | str):
+    has_remote_code = (
+        hasattr(config, "auto_map")
+        and isinstance(config.auto_map, dict)
+        and "AutoConfig" in config.auto_map.keys()
+    )
+    if has_remote_code:
+        for class_reference in config.auto_map.values():
+            _ = get_class_from_dynamic_module(class_reference, checkpoint_dir)
+
+
 def load_model_config(
     checkpoint_dir: Path | str,
     model_config_overrides: Mapping | None = None,
     ignore_unexpected_config_keys: bool = False,
-) -> DeciLMConfig:
+):
     if not isinstance(checkpoint_dir, Path):
         checkpoint_dir = Path(checkpoint_dir)
 
     if model_config_overrides is None:
         model_config_overrides = {}
 
-    config, unused_kwargs = DeciLMConfig.from_pretrained(
-        checkpoint_dir, return_unused_kwargs=True, **model_config_overrides
+    config, unused_kwargs = AutoConfig.from_pretrained(
+        checkpoint_dir, trust_remote_code=True, return_unused_kwargs=True, **model_config_overrides
     )
+    if hasattr(config, "block_configs"):
+        config.block_configs = maybe_cast_block_configs(config.block_configs)
+
+    force_cache_dynamic_modules(config, checkpoint_dir)
 
     if not ignore_unexpected_config_keys:
         if unused_kwargs:
@@ -121,73 +142,64 @@ def load_model_config(
     return config
 
 
-def save_checkpoint(model: DeciLMForCausalLM, checkpoint_dir: Path | str) -> None:
-    _save_checkpoint(model.config, model.state_dict(), checkpoint_dir)
+def save_checkpoint(
+    model: PreTrainedModel,
+    checkpoint_dir: Path | str,
+    descriptor: "ModelDescriptor",
+) -> None:
+    _save_checkpoint(model.config, model.state_dict(), checkpoint_dir, descriptor)
 
 
 def _save_checkpoint(
-    model_config: DeciLMConfig,
+    model_config: PretrainedConfig,
     state_dict: dict[str, torch.Tensor],
     checkpoint_dir: Path | str,
+    descriptor: "ModelDescriptor",
     max_workers: int | None = None,  # Now optional - will auto-calculate if None
 ) -> None:
-    mprint("=== Starting _save_checkpoint detailed profiling ===")
-    total_start_time = time.time()
+    from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
 
     if not isinstance(checkpoint_dir, Path):
         checkpoint_dir = Path(checkpoint_dir)
 
-    # Phase 1: Create directory and save config
-    phase1_start_time = time.time()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    model_config.save_pretrained(checkpoint_dir)
-    phase1_time = time.time() - phase1_start_time
-    mprint(f"Phase 1 - Directory creation and config save: {phase1_time:.2f}s")
 
-    # Phase 2: Save subblocks (main model weights) with auto-calculated worker count
-    phase2_start_time = time.time()
+    # Phase 1: Save config
+    save_model_config(model_config, checkpoint_dir)
+
+    # Phase 2: Build weight map using descriptor and write index
+    subblock_keys = descriptor.get_weight_groups(
+        layer_names=state_dict.keys(),
+        num_hidden_layers=model_config.num_hidden_layers,
+    )
+
+    weight_map = {}
+    for subblock, layer_keys in subblock_keys.items():
+        weight_map_entries = {
+            key: f"subblocks_safetensors/{subblock}.safetensors" for key in layer_keys
+        }
+        weight_map.update(weight_map_entries)
+
+    # Write index
+    index = {"metadata": {"format": "pt"}, "weight_map": weight_map}
+    index_path = checkpoint_dir / SAFE_WEIGHTS_INDEX_NAME
+    index_json = json_dumps(index)
+    _write_file_process_safe(index_json, index_path)
+
+    # Handle tie_word_embeddings - don't save lm_head.weight if it's tied to embed_tokens
+    if getattr(model_config, "tie_word_embeddings", False) and "lm_head.weight" in state_dict:
+        lm_head_weight_name = f"{descriptor.output_embedding_name()}.weight"
+        state_dict = {k: v for k, v in state_dict.items() if k != lm_head_weight_name}
+        weight_map = {k: v for k, v in weight_map.items() if k != lm_head_weight_name}
+
+    # Phase 3: Save subblocks
     save_subblocks(
         state_dict,
         checkpoint_dir,
+        weight_map=weight_map,
         multi_threaded=True,
-        max_workers=max_workers,  # Will auto-calculate if None
+        max_workers=max_workers,
     )
-    phase2_time = time.time() - phase2_start_time
-    mprint(f"Phase 2 - Save subblocks (model weights): {phase2_time:.2f}s")
-
-    # Phase 3: Save safetensors index
-    phase3_start_time = time.time()
-    save_safetensors_index(model_config, checkpoint_dir)
-    phase3_time = time.time() - phase3_start_time
-    mprint(f"Phase 3 - Save safetensors index: {phase3_time:.2f}s")
-
-    # Phase 4: Copy HF code
-    phase4_start_time = time.time()
-    copy_deci_lm_hf_code(checkpoint_dir)
-    phase4_time = time.time() - phase4_start_time
-    mprint(f"Phase 4 - Copy HF code: {phase4_time:.2f}s")
-
-    total_time = time.time() - total_start_time
-    mprint(f"=== _save_checkpoint completed in {total_time:.2f}s ===")
-    mprint(
-        f"Breakdown: Config {phase1_time:.1f}s + Subblocks {phase2_time:.1f}s + "
-        f"Index {phase3_time:.1f}s + HF code {phase4_time:.1f}s"
-    )
-    mprint(
-        f"Save percentage breakdown: Config {phase1_time / total_time * 100:.1f}% + "
-        f"Subblocks {phase2_time / total_time * 100:.1f}% + "
-        f"Index {phase3_time / total_time * 100:.1f}% + "
-        f"HF code {phase4_time / total_time * 100:.1f}%"
-    )
-
-    # Performance metrics
-    if phase2_time > 0:
-        subblocks_percentage = phase2_time / total_time * 100
-        actual_workers = max_workers if max_workers else "auto"
-        mprint(
-            f"I/O optimization: Subblocks were {subblocks_percentage:.1f}% of total save time "
-            f"(max_workers={actual_workers})"
-        )
 
 
 def split_checkpoint_to_subblocks(checkpoint_dir: Path | str) -> None:
@@ -210,6 +222,7 @@ def split_checkpoint_to_subblocks(checkpoint_dir: Path | str) -> None:
 def save_subblocks(
     state_dict: dict[str, torch.Tensor],
     checkpoint_dir: Path | str,
+    weight_map: dict[str, str] | None = None,
     multi_threaded: bool = True,
     max_workers: int | None = None,  # Now optional - will auto-calculate if None
 ) -> None:
@@ -219,14 +232,15 @@ def save_subblocks(
     if not isinstance(checkpoint_dir, Path):
         checkpoint_dir = Path(checkpoint_dir)
 
-    # Step 1: Build weight map
+    # Step 1: Build weight map (use provided or build from state_dict)
     weight_map_start_time = time.time()
-    weight_map = _build_safetensors_weight_map(
-        state_dict=state_dict,
-        non_layer_module_to_file_type=NON_LAYER_MODULE_TO_FILE_TYPE,
-        module_within_layer_to_file_type=MODULE_WITHIN_LAYER_TO_FILE_TYPE,
-        layers_module_name=LAYERS_MODULE_NAME,
-    )
+    if weight_map is None:
+        weight_map = _build_safetensors_weight_map(
+            state_dict=state_dict,
+            non_layer_module_to_file_type=NON_LAYER_MODULE_TO_FILE_TYPE,
+            module_within_layer_to_file_type=MODULE_WITHIN_LAYER_TO_FILE_TYPE,
+            layers_module_name=LAYERS_MODULE_NAME,
+        )
     weight_name_to_filename = {k: checkpoint_dir / v for k, v in weight_map.items()}
     weight_map_time = time.time() - weight_map_start_time
     mprint(f"  Step 1 - Build weight map: {weight_map_time:.2f}s ({len(weight_map)} mappings)")
@@ -323,6 +337,7 @@ def save_safetensors_index(
     model_config: DeciLMConfig,
     checkpoint_dir: Path | str,
 ) -> None:
+    """Save safetensors index for DeciLM models (legacy function)."""
     mprint("=== Starting save_safetensors_index profiling ===")
     index_start_time = time.time()
 
@@ -372,7 +387,8 @@ def _write_file_process_safe(
     path: Path | str,
     write_fn: Callable[[Any, BinaryIO], None] = _write_text,
 ) -> None:
-    """Write a file in a multi-process safe way.
+    """
+    Write a file in a multi-process safe way.
     If another process tries to write the same file using this method, the current process
     "gives up" and assumes that the matter is being taken care of by another process.
 
@@ -435,13 +451,19 @@ def _build_safetensors_weight_map(
     return weight_map
 
 
-# Not really needed
-def save_model_config(model_config: DeciLMConfig, checkpoint_dir: Path | str) -> None:
+def save_model_config(model_config: PretrainedConfig, checkpoint_dir: Path | str) -> None:
+    if hasattr(model_config, "block_configs"):
+        model_config.block_configs = [
+            dataclasses.asdict(conf) if dataclasses.is_dataclass(conf) else conf
+            for conf in model_config.block_configs
+        ]
     model_config.save_pretrained(checkpoint_dir)
 
 
 def copy_deci_lm_hf_code(output_dir: Path | str) -> None:
-    """Copy the deci_lm_hf_code directory to the output directory."""
+    """
+    Copy the deci_lm_hf_code directory to the output directory.
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     code_dir = Path(deci_lm_hf_code.__file__).parent
