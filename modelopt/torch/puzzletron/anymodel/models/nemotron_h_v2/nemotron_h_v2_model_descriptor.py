@@ -140,6 +140,16 @@ class NemotronHV2ModelDescriptor(ModelDescriptor):
         return f"backbone.layers.{index}"
 
     @classmethod
+    def sublayer_canonical_to_actual(cls) -> Dict[str, str]:
+        """Nemotron H v2 uses 'mixer' for the FFN subblock (not 'mlp')."""
+        return {
+            "mlp": "mixer",
+            "ffn": "mixer",
+            "self_attn": "self_attn",
+            "attention": "self_attn",
+        }
+
+    @classmethod
     def get_weight_groups(
         cls, layer_names: Iterable[str], num_hidden_layers: int
     ) -> Dict[str, List[str]]:

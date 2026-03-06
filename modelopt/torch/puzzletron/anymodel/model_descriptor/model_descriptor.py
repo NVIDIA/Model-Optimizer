@@ -179,6 +179,22 @@ class ModelDescriptor(ABC):
         return getattr(cls, method_name) is not getattr(ModelDescriptor, method_name)
 
     @classmethod
+    def sublayer_canonical_to_actual(cls) -> Dict[str, str]:
+        """Map canonical sublayer names to actual attribute names on the decoder layer.
+
+        Used by local KD to resolve paths like 'model.layers.2.mlp' to the real FQN when
+        the model uses different names (e.g. Nemotron H v2 uses 'mixer' for FFN).
+        Default: identity mapping. Override only for descriptors where the model uses
+        different attribute names (e.g. {"mlp": "mixer", "ffn": "mixer"}).
+        """
+        return {
+            "mlp": "mlp",
+            "ffn": "mlp",
+            "self_attn": "self_attn",
+            "attention": "self_attn",
+        }
+
+    @classmethod
     def get_weight_groups(
         cls, layer_names: Iterable[str], num_hidden_layers: int
     ) -> Dict[str, List[str]]:

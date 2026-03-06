@@ -68,7 +68,7 @@ class GptOss20bModelDescriptor(ModelDescriptor):
             override_kwargs["num_key_value_heads"] = block_config.attention.num_key_value_heads
 
         if block_config.ffn.moe is not None:
-            override_kwargs["moe_intermediate_size"] = block_config.ffn.moe.expert_intermediate_dim
+            override_kwargs["intermediate_size"] = block_config.ffn.moe.expert_intermediate_dim
             override_kwargs["num_local_experts"] = block_config.ffn.moe.num_local_experts
             override_kwargs["num_experts_per_tok"] = block_config.ffn.moe.num_experts_per_tok
 

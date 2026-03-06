@@ -139,7 +139,7 @@ class MoEConfig(BaseDataclass):
     num_local_experts: int = 8
     num_experts_per_tok: int = 1
     expert_intermediate_dim: int = 8192
-    shared_expert_intermediate_dim: int = 8192
+    shared_expert_intermediate_dim: Optional[int] = None
     # router_aux_loss_coef: float = 0.01
     # router_z_loss_coef: float = 0.0  # Optional z-loss coefficient
 
