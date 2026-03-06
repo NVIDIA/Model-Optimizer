@@ -417,10 +417,10 @@ Best Practices
 Choosing Scheme Count
 ---------------------
 
-The ``--schemes_per_region`` (or ``-s``) parameter controls exploration depth. Typical values align with the default (30) and common use cases:
+The ``--schemes_per_region`` (or ``-s``) parameter controls exploration depth. Typical values:
 
 * **15–30 schemes** (e.g. ``-s 30``): Quick exploration; good for trying the tool or small models
-* **50 schemes** (default, ``-s 50``): Default; recommended for most cases
+* **50 schemes** (default, ``-s 50``): Default; Recommended for most cases
 * **100–200+ schemes** (e.g. ``-s 200``): Extensive search; consider using a pattern cache to avoid re-exploring
 
 Use fewer schemes when there are many small regions or limited time; use more for large or critical regions.

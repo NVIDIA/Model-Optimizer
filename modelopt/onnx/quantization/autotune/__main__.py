@@ -157,12 +157,10 @@ def run_autotune() -> int:
 
 
 def get_parser() -> argparse.ArgumentParser:
-    """Return the autotune CLI argument parser (for Sphinx and programmatic use)."""
-    return _get_parser()
+    """Create and return the autotune CLI argument parser.
 
-
-def _get_parser() -> argparse.ArgumentParser:
-    """Create and configure the command-line argument parser."""
+    Intended for Sphinx documentation and programmatic use (e.g. subparsers).
+    """
     parser = argparse.ArgumentParser(
         prog="modelopt.onnx.quantization.autotune",
         description="ONNX Q/DQ Autotuning with TensorRT",
