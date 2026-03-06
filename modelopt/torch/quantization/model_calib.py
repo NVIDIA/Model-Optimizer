@@ -132,28 +132,6 @@ def max_calibrate(
     for name, module in model.named_modules():
         if hasattr(module, "layer_sync_moe_local_experts_amax"):
             module.layer_sync_moe_local_experts_amax()
-        elif hasattr(module, "sync_moe_local_experts_amax"):
-            module.sync_moe_local_experts_amax()
-
-    for name, module in list(model.named_modules()):
-        if isinstance(module, TensorQuantizer) and not module._disabled:
-            if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
-                # Get the initial amax from max calibration
-                initial_amax = module._amax.clone().detach()
-
-                is_nvfp4_static = (
-                    module.is_static_block_quant
-                    and module._num_bits == (2, 1)
-                    and module._block_sizes is not None
-                    and module._block_sizes.get("scale_bits") == (4, 3)
-                )
-
-                if is_nvfp4_static:
-                    # Compute and set global_amax
-                    global_amax = reduce_amax(initial_amax, axis=None)
-
-                    # Convert to NVFP4StaticQuantizer in-place
-                    NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
 
     if not distributed_sync:
         return

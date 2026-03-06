@@ -454,9 +454,6 @@ NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = {
         },
         "*input_quantizer": _nvfp4_quantizer,
         **_default_disabled_quantizer_cfg,
-        **_mamba_moe_disabled_quantizer_cfg,
-        "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
-        "*mixer.out_proj*": {"enable": False},  # Skip mamba linear
     },
     "algorithm": {
         "method": "mse",
