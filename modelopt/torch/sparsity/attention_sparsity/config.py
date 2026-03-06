@@ -103,6 +103,16 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         ),
     )
 
+    cross_attn: bool = ModeloptField(
+        default=True,
+        title="Apply sparsity to cross-attention.",
+        description=(
+            "When True, apply 2:4 sparse attention to cross-attention (seq_q != seq_k) as well. "
+            "When False, cross-attention falls back to the original dense attention. "
+            "Only used by sparse24_triton method. Defaults to True."
+        ),
+    )
+
     @field_validator("method")
     @classmethod
     def validate_method(cls, v):
