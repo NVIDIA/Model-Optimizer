@@ -24,7 +24,6 @@ from typing import Any
 import numpy as np
 import torch
 from accelerate.hooks import remove_hook_from_module
-from eval_perplexity import evaluate_perplexity
 from example_utils import (
     build_quant_cfg,
     copy_custom_model_files,
@@ -1032,10 +1031,6 @@ def quantize_main(
         first_text_speech_dataset,
     )
 
-    if args.eval_perplexity and tokenizer is not None:
-        print("Evaluating Wikitext-2 perplexity...")
-        evaluate_perplexity(language_model, tokenizer, seq_len=args.calib_seq)
-
     export_quantized(
         args,
         full_model,
@@ -1194,12 +1189,7 @@ def parse_args() -> argparse.Namespace:
         default=False,
         action="store_true",
     )
-    parser.add_argument(
-        "--eval_perplexity",
-        help="Evaluate Wikitext-2 perplexity after quantization.",
-        default=False,
-        action="store_true",
-    )
+
     parser.add_argument(
         "--low_memory_mode",
         help=(
