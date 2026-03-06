@@ -116,7 +116,9 @@ python quantize.py \
     --hf-ckpt-dir ./hf_ckpt
 ```
 
-#### [LTX-2](https://github.com/Lightricks/LTX-2) FP4 (torch checkpoint export)
+#### [LTX-2](https://github.com/Lightricks/LTX-2) FP4
+
+This example produces three outputs: a PyTorch checkpoint (`--quantized-torch-ckpt-save-path`), a Hugging Face checkpoint (`--hf-ckpt-dir`), and a ComfyUI-compatible merged safetensor (`--extra-param merged_base_safetensor_path`).
 
 ```sh
 python quantize.py \
