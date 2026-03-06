@@ -52,7 +52,7 @@ def sparsify(
 
             Sparse attention configurations is a dictionary mapping wildcards or filter functions
             to its sparse attention attributes. The wildcards or filter functions are matched
-            against the module names. The sparse attention attributes include ``"threshold"``,
+            against the module names. The sparse attention attributes include ``"thresholds"``,
             ``"enable"``, and method-specific parameters.
 
             An example ``config`` dictionary is given below:
@@ -64,7 +64,7 @@ def sparsify(
                         # Phase-aware thresholds with backend selection
                         "*attention*": {
                             "method": "flash_skip_softmax",
-                            "threshold": {"prefill": 1e-3, "decode": 1e-5},
+                            "thresholds": {"prefill": [1e-3], "decode": [1e-5]},
                             "backend": "pytorch",  # Only pytorch backend supported
                             "enable": True,
                         },
