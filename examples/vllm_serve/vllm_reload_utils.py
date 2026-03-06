@@ -14,10 +14,11 @@
 # limitations under the License.
 
 import re
+import warnings
 from collections import defaultdict
 from collections.abc import Callable
 from typing import Any
-import warnings
+
 import torch
 from vllm.distributed.parallel_state import get_tp_group
 
