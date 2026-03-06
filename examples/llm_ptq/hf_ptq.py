@@ -24,6 +24,7 @@ from typing import Any
 import numpy as np
 import torch
 from accelerate.hooks import remove_hook_from_module
+from eval_perplexity import evaluate_perplexity
 from example_utils import (
     build_quant_cfg,
     copy_custom_model_files,
@@ -695,6 +696,9 @@ def export_quantized(
                     "Unified HF export format does not specify inference tensor parallel or pipeline parallel. "
                     "They will be set at deployment time."
                 )
+
+            if getattr(args, "eval_perplexity", False) and tokenizer is not None:
+                evaluate_perplexity(full_model, tokenizer, seq_len=2048)
 
             # Load any missing weights from non-standard safetensors (handled in get_model for non-low-memory mode)
             # Store the MTP layer prefixes on the model for later exclusion from quantization
