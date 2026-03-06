@@ -65,6 +65,7 @@ class ModelDescriptor(ABC):
 
         Example for replacing an MLP layer with zeroes (zeroes since hidden_states are added to
         the residuals hidden_states so a no-op implementation will leave residual the same):
+
             >>> decoder_layer.mlp = MatchingZeros()
 
         In case the MLP layer to replace returns multiple outputs i.e `hidden_states, _ = self.mlp()`,
