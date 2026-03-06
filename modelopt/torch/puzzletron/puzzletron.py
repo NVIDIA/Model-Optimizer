@@ -57,10 +57,10 @@ def puzzletron(
     # Step 1: score_pruning_activations (distributed processing)
     score_pruning_activations.launch_score_activations(hydra_cfg)
 
-    # # Step 2: pruning_ckpts (single process)
-    # if dist.is_master():
-    #     pruning_ckpts.launch_prune_ckpt(hydra_cfg)
-    # dist.barrier()
+    # Step 2: pruning_ckpts (single process)
+    if dist.is_master():
+        pruning_ckpts.launch_prune_ckpt(hydra_cfg)
+    dist.barrier()
 
     # # Step 4: build_library_and_stats (single process)
     # if dist.is_master():
