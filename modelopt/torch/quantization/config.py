@@ -258,7 +258,11 @@ FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG = {
 
 INT4_BLOCKWISE_WEIGHT_ONLY_CFG = {
     "quant_cfg": {
-        "*weight_quantizer": {"num_bits": 4, "block_sizes": {-1: 128}, "enable": True},
+        "*weight_quantizer": {
+            "num_bits": 4,
+            "block_sizes": {-1: 128},
+            "enable": True,
+        },
         "*input_quantizer": {"enable": False},
         **_default_disabled_quantizer_cfg,
     },
@@ -286,10 +290,20 @@ INT4_AWQ_CFG = {
 W4A8_AWQ_BETA_CFG = {
     "quant_cfg": {
         "*weight_quantizer": [
-            {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}, "enable": True},
-            {"num_bits": (4, 3), "axis": None, "enable": True},
+            {
+                "num_bits": 4,
+                "block_sizes": {-1: 128, "type": "static"},
+                "enable": True,
+            },
+            {
+                "num_bits": (4, 3),
+                "enable": True,
+            },
         ],
-        "*input_quantizer": {"num_bits": (4, 3), "axis": None, "enable": True},
+        "*input_quantizer": {
+            "num_bits": (4, 3),
+            "enable": True,
+        },
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": "awq_lite",
@@ -380,7 +394,6 @@ FP8_KV_CFG = {
     "quant_cfg": {
         "*[kv]_bmm_quantizer": {
             "num_bits": (4, 3),
-            "axis": None,
             "enable": True,
         },
         "default": {"enable": False},
@@ -392,7 +405,6 @@ FP8_AFFINE_KV_CFG = {
     "quant_cfg": {
         "*[kv]_bmm_quantizer": {
             "num_bits": (4, 3),
-            "axis": None,
             "bias": {-2: None, -4: None, "type": "static"},
         },
         "default": {"enable": False},
@@ -400,20 +412,16 @@ FP8_AFFINE_KV_CFG = {
     "algorithm": "max",
 }
 
+_nvfp4_quantizer = {
+    "num_bits": (2, 1),
+    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+    "enable": True,
+}
+
 NVFP4_DEFAULT_CFG = {
     "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
+        "*weight_quantizer": _nvfp4_quantizer,
+        "*input_quantizer": _nvfp4_quantizer,
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": "max",
@@ -424,15 +432,9 @@ NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = {
         "*weight_quantizer": {
             "num_bits": (2, 1),
             "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-            "axis": None,
             "enable": True,
         },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
+        "*input_quantizer": _nvfp4_quantizer,
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": {
@@ -446,15 +448,9 @@ NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG = {
         "*weight_quantizer": {
             "num_bits": (2, 1),
             "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-            "axis": None,
             "enable": True,
         },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
+        "*input_quantizer": _nvfp4_quantizer,
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": {
@@ -465,18 +461,8 @@ NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG = {
 
 MAMBA_MOE_NVFP4_AGGRESSIVE_CFG = {
     "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
+        "*weight_quantizer": _nvfp4_quantizer,
+        "*input_quantizer": _nvfp4_quantizer,
         **_default_disabled_quantizer_cfg,
         **_mamba_moe_disabled_quantizer_cfg,
     },
@@ -484,18 +470,8 @@ MAMBA_MOE_NVFP4_AGGRESSIVE_CFG = {
 }
 MAMBA_MOE_NVFP4_CONSERVATIVE_CFG = {
     "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
+        "*weight_quantizer": _nvfp4_quantizer,
+        "*input_quantizer": _nvfp4_quantizer,
         **_default_disabled_quantizer_cfg,
         **_mamba_moe_disabled_quantizer_cfg,
         "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
@@ -507,18 +483,8 @@ MAMBA_MOE_NVFP4_CONSERVATIVE_CFG = {
 
 NVFP4_AWQ_LITE_CFG = {
     "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
+        "*weight_quantizer": _nvfp4_quantizer,
+        "*input_quantizer": _nvfp4_quantizer,
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": "awq_lite",
@@ -526,18 +492,8 @@ NVFP4_AWQ_LITE_CFG = {
 
 NVFP4_AWQ_CLIP_CFG = {
     "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
+        "*weight_quantizer": _nvfp4_quantizer,
+        "*input_quantizer": _nvfp4_quantizer,
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": {"method": "awq_clip"},
@@ -545,18 +501,8 @@ NVFP4_AWQ_CLIP_CFG = {
 
 NVFP4_AWQ_FULL_CFG = {
     "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
+        "*weight_quantizer": _nvfp4_quantizer,
+        "*input_quantizer": _nvfp4_quantizer,
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": {"method": "awq_full", "alpha_step": 0.1},
@@ -566,10 +512,7 @@ NVFP4_AWQ_FULL_CFG = {
 NVFP4_AFFINE_KV_CFG = {
     "quant_cfg": {
         "*[kv]_bmm_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
+            **_nvfp4_quantizer,
             "bias": {-2: None, -4: None, "type": "static"},
         },
         "default": {"enable": False},
@@ -579,12 +522,7 @@ NVFP4_AFFINE_KV_CFG = {
 
 NVFP4_KV_CFG = {
     "quant_cfg": {
-        "*[kv]_bmm_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
+        "*[kv]_bmm_quantizer": _nvfp4_quantizer,
         "default": {"enable": False},
     },
     "algorithm": "max",
@@ -593,38 +531,23 @@ NVFP4_KV_CFG = {
 # Moved from examples/diffusers/quantization/config.py to here
 NVFP4_FP8_MHA_CONFIG = {
     "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
+        "*weight_quantizer": _nvfp4_quantizer,
+        "*input_quantizer": _nvfp4_quantizer,
         "*output_quantizer": {"enable": False},
         "*q_bmm_quantizer": {
             "num_bits": (4, 3),
-            "axis": None,
         },
         "*k_bmm_quantizer": {
             "num_bits": (4, 3),
-            "axis": None,
         },
         "*v_bmm_quantizer": {
             "num_bits": (4, 3),
-            "axis": None,
         },
         "*softmax_quantizer": {
             "num_bits": (4, 3),
-            "axis": None,
         },
         "transformer_blocks*bmm2_output_quantizer": {
             "num_bits": (4, 3),
-            "axis": None,
         },
         "default": {"enable": False},
     },
@@ -638,36 +561,18 @@ NVFP4_KV_ROTATE_CFG = {
             "rotate": True,
         },
         "*k_bmm_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
+            **_nvfp4_quantizer,
             "rotate": True,
         },
-        "*v_bmm_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
+        "*v_bmm_quantizer": _nvfp4_quantizer,
     },
     "algorithm": "max",
 }
 
 NVFP4_SVDQUANT_DEFAULT_CFG = {
     "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
+        "*weight_quantizer": _nvfp4_quantizer,
+        "*input_quantizer": _nvfp4_quantizer,
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": {"method": "svdquant", "lowrank": 32},
@@ -678,12 +583,10 @@ W4A8_NVFP4_FP8_CFG = {
         "*weight_quantizer": {
             "num_bits": (2, 1),
             "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
             "enable": True,
         },
         "*input_quantizer": {
             "num_bits": (4, 3),
-            "axis": None,
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
@@ -697,7 +600,11 @@ MXFP4_MLP_WEIGHT_ONLY_CFG = {
             "num_bits": (2, 1),
             "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             "enable": True,
-            "pass_through_bwd": True,
+        },
+        "*block_sparse_moe*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
+            "enable": True,
         },
         **_default_disabled_quantizer_cfg,
     },
@@ -714,28 +621,39 @@ NVFP4_MLP_WEIGHT_ONLY_CFG = {
                 "scale_bits": (4, 3),
             },  # Note: block_size is 32 here
             "enable": True,
-            "pass_through_bwd": True,
+        },
+        "*block_sparse_moe*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {
+                -1: 32,
+                "type": "dynamic",
+                "scale_bits": (4, 3),
+            },  # Note: block_size is 32 here
+            "enable": True,
         },
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": "max",
 }
 
+_nvfp4_mlp_only_quant_cfg = {
+    "*mlp*weight_quantizer": _nvfp4_quantizer,
+    "*mlp*input_quantizer": _nvfp4_quantizer,
+    "*block_sparse_moe*weight_quantizer": _nvfp4_quantizer,
+    "*block_sparse_moe*input_quantizer": _nvfp4_quantizer,
+    **_default_disabled_quantizer_cfg,
+}
+
 NVFP4_MLP_ONLY_CFG = {
+    "quant_cfg": _nvfp4_mlp_only_quant_cfg,
+    "algorithm": "max",
+}
+
+NVFP4_OMLP_ONLY_CFG = {
     "quant_cfg": {
-        "*mlp*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "enable": True,
-            "pass_through_bwd": True,
-        },
-        "*mlp*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "enable": True,
-            "pass_through_bwd": True,
-        },
-        **_default_disabled_quantizer_cfg,
+        "*o_proj*weight_quantizer": _nvfp4_quantizer,
+        "*o_proj*input_quantizer": _nvfp4_quantizer,
+        **_nvfp4_mlp_only_quant_cfg,
     },
     "algorithm": "max",
 }
@@ -769,6 +687,7 @@ choices: set[str] = {
     "NVFP4_MLP_WEIGHT_ONLY_CFG",
     "MXFP4_MLP_WEIGHT_ONLY_CFG",
     "NVFP4_MLP_ONLY_CFG",
+    "NVFP4_OMLP_ONLY_CFG",
     "MAMBA_MOE_NVFP4_CONSERVATIVE_CFG",
     "MAMBA_MOE_NVFP4_AGGRESSIVE_CFG",
     "MAMBA_MOE_FP8_CONSERVATIVE_CFG",
@@ -1074,14 +993,14 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
     )
 
     pass_through_bwd: bool = ModeloptField(
-        default=False,
+        default=True,
         title="If set to true, fake quantization will be a pass through for gradient computation.",
         description="""
         Gradient computation where fake quantization is pass through is called
         'Straight-Through Estimator (STE)'. STE does not require saving of the input tensor for
         performing backward pass and hence consumes less memory.
 
-        If set to False, we will use STE with zeroed outlier gradients. This setting could
+        If set to False, we will use STE with zeroed outlier gradients. This setting may
         yield better QAT accuracy depending on the quantization format. However, this setting
         requires saving of the input tensor for computing gradients which uses more memory.
 
