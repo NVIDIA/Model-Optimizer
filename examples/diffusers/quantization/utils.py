@@ -70,7 +70,7 @@ def check_conv_and_mha(backbone, if_fp4, quantize_mha):
 def filter_func_ltx_video(name: str) -> bool:
     """Filter function specifically for LTX-Video models."""
     pattern = re.compile(
-        r".*(proj_in|time_embed|caption_projection|proj_out|patchify_proj|adaln_single).*"
+        r".*(proj_in|time_embed|caption_projection|proj_out|patchify_proj|adaln_single|transformer_blocks\.(0|1|2|46|47)\.).*"
     )
     return pattern.match(name) is not None
 
