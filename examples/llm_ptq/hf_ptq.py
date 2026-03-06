@@ -24,6 +24,7 @@ from typing import Any
 import numpy as np
 import torch
 from accelerate.hooks import remove_hook_from_module
+from eval_perplexity import evaluate_perplexity
 from example_utils import (
     build_quant_cfg,
     copy_custom_model_files,
@@ -110,6 +111,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "nvfp4_experts_only": mtq.NVFP4_EXPERTS_ONLY_CFG,
     "nvfp4_omlp_only": mtq.NVFP4_OMLP_ONLY_CFG,
     "nvfp4_svdquant": mtq.NVFP4_SVDQUANT_DEFAULT_CFG,
+    "nvfp4_gptq": mtq.NVFP4_GPTQ_CFG,
     "mxfp8": mtq.MXFP8_DEFAULT_CFG,
     "nvfp4_local_hessian": mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG,
 }
@@ -951,7 +953,7 @@ def quantize_main(
 
     else:
         # mono quantization
-
+        
         if args.recipe is not None:
             print(f"Use recipe {args.recipe} for quantization")
             recipe = load_recipe(args.recipe)
@@ -1029,6 +1031,11 @@ def quantize_main(
         is_nemotron_vl_model,
         first_text_speech_dataset,
     )
+
+    if args.eval_perplexity and tokenizer is not None:
+        print("Evaluating Wikitext-2 perplexity...")
+        evaluate_perplexity(language_model, tokenizer, seq_len=args.calib_seq)
+
     export_quantized(
         args,
         full_model,
@@ -1184,6 +1191,12 @@ def parse_args() -> argparse.Namespace:
             "Note: this does not skip calibration or batch-size probing. "
             "For very large models, pair with --batch_size 1 to avoid max-batch probing."
         ),
+        default=False,
+        action="store_true",
+    )
+    parser.add_argument(
+        "--eval_perplexity",
+        help="Evaluate Wikitext-2 perplexity after quantization.",
         default=False,
         action="store_true",
     )

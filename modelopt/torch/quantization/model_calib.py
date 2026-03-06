@@ -1899,18 +1899,61 @@ def sequential_calibrate(
     print_rank_0("Sequential calibration completed")
 
 
+def _promote_nvfp4_static_quantizers(model: nn.Module) -> int:
+    """Convert eligible TensorQuantizers to NVFP4StaticQuantizer in-place.
+
+    After max calibration sets per-block amax values, NVFP4 static quantizers
+    need to be promoted so they use the two-level scaling path (global amax +
+    per-block amax) instead of the generic E4M3 path.
+
+    Returns the number of quantizers converted.
+    """
+    converted = 0
+    for _name, module in list(model.named_modules()):
+        if isinstance(module, TensorQuantizer) and not module._disabled:
+            if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
+                is_nvfp4_static = (
+                    module.is_static_block_quant
+                    and module._num_bits == (2, 1)
+                    and module._block_sizes is not None
+                    and module._block_sizes.get("scale_bits") == (4, 3)
+                )
+                if is_nvfp4_static:
+                    initial_amax = module._amax.clone().detach()
+                    global_amax = reduce_amax(initial_amax, axis=None)
+                    NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
+                    converted += 1
+    return converted
+
+
 @torch.no_grad()
 def gptq(
     layer: nn.Module,
-    inputs: list[tuple[tuple, dict]],
     forward_loop: ForwardLoop,
     percdamp: float = 0.01,
     block_size: int = 128,
     **kwargs,
 ):
-    """GPTQ quantization - a GPTQ variant."""
-    # Set weight amax and activation amax'es for the current layer using max_calibrate
+    """GPTQ quantization - a GPTQ variant.
+
+    Args:
+        layer: A single decoder layer to quantize.
+        forward_loop: Callable that replays calibration inputs through the layer.
+            Provided by ``sequential_calibrate`` which captures per-layer activations.
+        percdamp: Percentage of avg Hessian diagonal for damping (default: 0.01).
+        block_size: Block size for GPTQ weight update.
+    """
+    import time
+
+    total_start = time.time()
+
+    # Set weight amax and activation amax for the current layer using max_calibrate
     max_calibrate(layer, forward_loop=forward_loop)
+
+    # Promote NVFP4 static quantizers so they use the two-level scaling path
+    n_promoted = _promote_nvfp4_static_quantizers(layer)
+    if n_promoted:
+        print_rank_0(f"Promoted {n_promoted} quantizer(s) to NVFP4StaticQuantizer")
 
     # Dictionary to store hessian matrices for all linear layers in this decoder
     hessian_state = {}
@@ -1955,18 +1998,20 @@ def gptq(
             bind_forward_method(module, _make_hessian_forward(name), "_forward_no_gptq_hessian")
             patched_modules.append(module)
 
-    # Run forward passes with the provided inputs to collect Hessians
-    print_rank_0(
-        f"Computing Hessians for {len(tensor_mapping)} linear layers using {len(inputs)} batches..."
-    )
-    for args, kwargs_input in inputs:
-        layer(*args, **kwargs_input)
+    # Run forward passes to collect Hessians
+    hessian_start = time.time()
+    print_rank_0(f"Computing Hessians for {len(tensor_mapping)} linear layers...")
+    forward_loop(layer)
 
     # Unpatch forwards
     for module in patched_modules:
         unpatch_forward_method(module, "_forward_no_gptq_hessian")
 
+    torch.cuda.synchronize() if torch.cuda.is_available() else None
+    hessian_time = time.time() - hessian_start
+
     # Phase 3: Update weights using computed Hessians (same as gptq_lite)
+    weight_update_start = time.time()
     print_rank_0("Updating weights using GPTQ algorithm...")
     for name, module in layer.named_modules():
         if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
@@ -1978,3 +2023,13 @@ def gptq(
             # Free memory
             del hessian_state[module.name]
             torch.cuda.empty_cache()
+
+    torch.cuda.synchronize() if torch.cuda.is_available() else None
+    weight_update_time = time.time() - weight_update_start
+
+    total_time = time.time() - total_start
+    print_rank_0(
+        f"GPTQ timing - Hessian: {hessian_time:.2f}s, "
+        f"Weight update: {weight_update_time:.2f}s, "
+        f"Total: {total_time:.2f}s"
+    )
