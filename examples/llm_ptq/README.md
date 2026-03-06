@@ -69,6 +69,8 @@ def forward_loop(model):
 model = mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, forward_loop)
 ```
 
+> *For higher NVFP4 PTQ accuracy, we recommend using `mtq.NVFP4_MLP_ONLY_CFG` or `mtq.NVFP4_OMLP_ONLY_CFG` instead of `mtq.NVFP4_DEFAULT_CFG`. `NVFP4_MLP_ONLY_CFG` applies NVFP4 quantization to MLP (and MoE) layers, leaving attention layers unquantized. `NVFP4_OMLP_ONLY_CFG` additionally quantizes the `o_proj` layer. Both preserve accuracy in the sensitive attention QKV projections while still providing significant compression.*
+
 ### 2. Export Quantized Model
 
 Once your model is quantized, you can now export that model to a checkpoint for easy deployment. \
@@ -126,7 +128,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 > *<sup>7.</sup>[PTQ for DeepSeek](../deepseek/README.md)* \
 > *<sup>8.</sup>GLM-4.7 has MTP (Multi-Token Prediction) layers that are automatically loaded and excluded from quantization.*
 
-> *The accuracy loss after PTQ may vary depending on the actual model and the quantization method. Different models may have different accuracy loss and usually the accuracy loss is more significant when the base model is small. If the accuracy after PTQ is not meeting the requirement, please try either modifying [hf_ptq.py](./hf_ptq.py) and disabling the KV cache quantization or using the [QAT](./../llm_qat/README.md) instead.*
+> *The accuracy loss after PTQ may vary depending on the actual model and the quantization method. Different models may have different accuracy loss and usually the accuracy loss is more significant when the base model is small. If the accuracy after PTQ is not meeting the requirement, please try either modifying [hf_ptq.py](./hf_ptq.py) and disabling the KV cache quantization or using the [QAT](./../llm_qat/README.md) instead. For NVFP4 quantization specifically, we recommend `nvfp4_mlp_only` or `nvfp4_omlp_only` to achieve higher accuracy by restricting quantization to the MLP layers (and optionally the `o_proj` layer) while keeping the attention QKV projections unquantized.*
 
 > You can also create your own custom config using [this](https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#custom-calibration-algorithm) guide.
 
@@ -144,7 +146,7 @@ For LLM models like [Llama-3](https://huggingface.co/meta-llama):
 # Install model specific pip dependencies if needed
 
 export HF_PATH=<the downloaded LLaMA checkpoint from the Hugging Face hub, or simply the model card>
-scripts/huggingface_example.sh --model $HF_PATH --quant [fp8|nvfp4|int8_sq|int4_awq|w4a8_awq] --tp [1|2|4|8]
+scripts/huggingface_example.sh --model $HF_PATH --quant [fp8|nvfp4|nvfp4_mlp_only|nvfp4_omlp_only|int8_sq|int4_awq|w4a8_awq] --tp [1|2|4|8]
 ```
 
 > *By default `trust_remote_code` is set to false. Please turn it on if model calibration and eval requires it using `--trust_remote_code`.*
@@ -295,7 +297,7 @@ accelerate launch --config_file fsdp2.yaml \
     --fsdp_transformer_layer_cls_to_wrap=<decoder_layer_name>
      multinode_ptq.py \
     --pyt_ckpt_path <path_to_model> \
-    --qformat <fp8/nvfp4/nvfp4_awq/int8> \
+    --qformat <fp8/nvfp4/nvfp4_mlp_only/nvfp4_omlp_only/nvfp4_awq/int8> \
     --kv_cache_qformat <fp8/nvfp4/nvfp4_affine/none> \
     --batch_size <calib_batch_size> \
     --calib_size <num_calib_samples> \
@@ -460,4 +462,4 @@ There are many quantization schemes supported in the example scripts:
 
 1. The W4A8 AWQ is an extension of the INT4 AWQ quantization that it also uses FP8 for activation for more speed up and acceleration.
 
-1. The [NVFP4](https://blogs.nvidia.com/blog/generative-ai-studio-ces-geforce-rtx-50-series/) is one of the new FP4 formats supported by NVIDIA Blackwell GPU and demonstrates good accuracy compared with other 4-bit alternatives. NVFP4 can be applied to both model weights as well as activations, providing the potential for both a significant increase in math throughput and reductions in memory footprint and memory bandwidth usage compared to the FP8 data format on Blackwell.
+1. The [NVFP4](https://blogs.nvidia.com/blog/generative-ai-studio-ces-geforce-rtx-50-series/) is one of the new FP4 formats supported by NVIDIA Blackwell GPU and demonstrates good accuracy compared with other 4-bit alternatives. NVFP4 can be applied to both model weights as well as activations, providing the potential for both a significant increase in math throughput and reductions in memory footprint and memory bandwidth usage compared to the FP8 data format on Blackwell. For higher accuracy with NVFP4 PTQ, we recommend `nvfp4_mlp_only` or `nvfp4_omlp_only`. `nvfp4_mlp_only` restricts NVFP4 quantization to MLP (and MoE) layers only, leaving attention layers in higher precision. `nvfp4_omlp_only` extends this by also quantizing the `o_proj` layer, providing a middle ground between full NVFP4 and MLP-only quantization.
