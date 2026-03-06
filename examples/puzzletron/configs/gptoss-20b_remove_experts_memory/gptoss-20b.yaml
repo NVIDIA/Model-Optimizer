@@ -42,7 +42,7 @@ scoring:
   teacher_dir: ${to_path:${teacher_dir}}
   output_dir: ${puzzle_dir}/single_sequence_replacement_solutions--validation
 
-  eval_samples: 8
+  eval_samples: 128
   micro_batch_size: 1
   seed: 42
   shuffle_seed: 444
