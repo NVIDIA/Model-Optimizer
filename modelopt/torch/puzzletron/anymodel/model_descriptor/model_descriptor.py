@@ -61,6 +61,7 @@ class ModelDescriptor(ABC):
         counterparts.
 
         Example for replacing a layernorm layer with identity:
+
             >>> decoder_layer.post_attention_layernorm = Same()
 
         Example for replacing an MLP layer with zeroes (zeroes since hidden_states are added to
@@ -70,6 +71,7 @@ class ModelDescriptor(ABC):
 
         In case the MLP layer to replace returns multiple outputs i.e `hidden_states, _ = self.mlp()`,
         use the util method `return_tuple_of_size` to return trailing None values:
+
             >>> decoder_layer.mlp = return_tuple_of_size(MatchingZeros, size=2)()
         """
         raise NotImplementedError
@@ -82,13 +84,16 @@ class ModelDescriptor(ABC):
         counterparts.
 
         Example for replacing a layernorm layer with identity:
+
             >>> decoder_layer.post_attention_layernorm = Same()
 
         Example for replacing an attention layer with zeroes:
+
             >>> decoder_layer.self_attn = MatchingZeros()
 
         In case the attention layer returns multiple outputs i.e `hidden_states, _ = self.self_attn()`,
         use the util method `return_tuple_of_size` to return trailing None values:
+
             >>> decoder_layer.self_attn = return_tuple_of_size(MatchingZeros, size=2)()
         """
         raise NotImplementedError
