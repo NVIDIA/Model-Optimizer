@@ -331,7 +331,7 @@ class TensorRTPyBenchmark(Benchmark):
                              engine building. If None, no custom plugins are loaded.
 
         Raises:
-            ImportError: If tensorrt or cuda-python (cudart) packages are not available.
+            ImportError: If tensorrt is not installed or if torch is not built with CUDA support.
             FileNotFoundError: If a specified plugin library file does not exist.
             RuntimeError: If plugin library loading fails.
         """
@@ -713,7 +713,8 @@ class TensorRTPyBenchmark(Benchmark):
             return float("inf")
         finally:
             try:
-                self._free_buffers(inputs + outputs)
+                self._free_buffers(inputs)
+                self._free_buffers(outputs)
                 del inputs, outputs, stream, context, engine, serialized_engine
             except Exception as cleanup_error:
                 self.logger.warning(f"Error during cleanup: {cleanup_error}")
