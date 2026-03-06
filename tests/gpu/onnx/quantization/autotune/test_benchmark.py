@@ -39,9 +39,6 @@ import modelopt.onnx.quantization.autotune.benchmark as bm
 from modelopt.onnx.quantization.autotune import TensorRTPyBenchmark, TrtExecBenchmark
 from modelopt.onnx.quantization.autotune.benchmark import _validate_shape_range
 
-_requires_cuda = pytest.mark.skipif(not bm.TORCH_CUDA_AVAILABLE, reason="CUDA not available")
-
-
 # --- fixtures ---
 
 
@@ -224,7 +221,6 @@ def test_trtexec_run_accepts_bytes_input(trtexec_bench):
 # --- TensorRTPyBenchmark._alloc_pinned_host ---
 
 
-@_requires_cuda
 def test_alloc_pinned_host_returns_pinned_tensor_and_numpy_view():
     size = 16
     host_tensor, arr = bm.TensorRTPyBenchmark._alloc_pinned_host(size, np.float32)
@@ -239,7 +235,6 @@ def test_alloc_pinned_host_returns_pinned_tensor_and_numpy_view():
     assert arr[0] == pytest.approx(42.0)
 
 
-@_requires_cuda
 @pytest.mark.parametrize("dtype", [np.float16, np.float32, np.int8, np.int32])
 def test_alloc_pinned_host_dtype(dtype):
     host_tensor, arr = bm.TensorRTPyBenchmark._alloc_pinned_host(8, dtype)
@@ -251,7 +246,6 @@ def test_alloc_pinned_host_dtype(dtype):
 # --- torch.cuda.Stream integration points ---
 
 
-@_requires_cuda
 def test_cuda_stream_handle_is_integer():
     """stream.cuda_stream must be an int — this is passed directly to TRT execute_async_v3."""
     stream = torch.cuda.Stream()
@@ -261,7 +255,6 @@ def test_cuda_stream_handle_is_integer():
 # --- TensorRTPyBenchmark._run_warmup ---
 
 
-@_requires_cuda
 def test_run_warmup_calls_execute_async_v3_correct_times():
     bench = _make_bench(warmup_runs=3)
     inputs, outputs = _make_buffers()
@@ -273,7 +266,6 @@ def test_run_warmup_calls_execute_async_v3_correct_times():
     assert context.execute_async_v3.call_count == 3
 
 
-@_requires_cuda
 def test_run_warmup_passes_stream_handle_to_trt():
     bench = _make_bench(warmup_runs=1)
     inputs, outputs = _make_buffers()
@@ -285,7 +277,6 @@ def test_run_warmup_passes_stream_handle_to_trt():
     context.execute_async_v3.assert_called_once_with(stream.cuda_stream)
 
 
-@_requires_cuda
 def test_run_warmup_copies_host_to_device():
     bench = _make_bench(warmup_runs=1)
     inputs, outputs = _make_buffers()
@@ -302,7 +293,6 @@ def test_run_warmup_copies_host_to_device():
 # --- TensorRTPyBenchmark._run_timing ---
 
 
-@_requires_cuda
 def test_run_timing_returns_correct_number_of_latencies():
     bench = _make_bench(timing_runs=4)
     inputs, outputs = _make_buffers()
@@ -314,7 +304,6 @@ def test_run_timing_returns_correct_number_of_latencies():
     assert len(latencies) == 4
 
 
-@_requires_cuda
 def test_run_timing_latencies_are_non_negative():
     bench = _make_bench(timing_runs=3)
     inputs, outputs = _make_buffers()
@@ -326,7 +315,6 @@ def test_run_timing_latencies_are_non_negative():
     assert all(lat >= 0.0 for lat in latencies)
 
 
-@_requires_cuda
 def test_run_timing_calls_execute_async_v3_correct_times():
     bench = _make_bench(timing_runs=3)
     inputs, outputs = _make_buffers()
@@ -338,7 +326,6 @@ def test_run_timing_calls_execute_async_v3_correct_times():
     assert context.execute_async_v3.call_count == 3
 
 
-@_requires_cuda
 def test_run_timing_passes_stream_handle_to_trt():
     bench = _make_bench(timing_runs=1)
     inputs, outputs = _make_buffers()
