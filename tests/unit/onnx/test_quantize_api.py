@@ -17,7 +17,6 @@
 
 import os
 
-import onnx
 import onnxruntime
 import pytest
 import torch
@@ -25,6 +24,7 @@ from _test_utils.onnx.lib_test_models import SimpleMLP, export_as_onnx
 from packaging import version
 
 import modelopt.onnx.quantization as moq
+import onnx
 from modelopt.onnx.utils import get_opset_version
 
 # Mapping of quantization mode to minimum required opset

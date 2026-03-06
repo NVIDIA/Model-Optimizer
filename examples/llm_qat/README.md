@@ -219,6 +219,40 @@ To perform QAT, run:
    --output_dir llama3-qat
 ```
 
+You can also pass local JSONL data via `--dataset`. Accepts comma-separated paths where each entry can be a file or a directory (all `.jsonl` files in it are used). Records should use `messages` chat format (`messages: [{role, content}, ...]`).
+
+Example using a local JSONL dataset:
+
+```sh
+# Single file or directory (loads all .jsonl files inside)
+./launch.sh --model meta-llama/Meta-Llama-3-8B \
+   --dataset /path/to/your/train.jsonl \
+   --num_epochs 2.0 \
+   --lr 1e-5 \
+   --do_train True \
+   --output_dir llama3-finetune-local
+
+# Comma-separated files or directory
+./launch.sh --model meta-llama/Meta-Llama-3-8B \
+   --dataset /path/to/sft1.jsonl,/path/to/sft2.jsonl \
+   --num_epochs 2.0 \
+   --lr 1e-5 \
+   --do_train True \
+   --output_dir llama3-finetune-local
+```
+
+To cache and reuse tokenized data, add `--dataset_cache_path`:
+
+```sh
+./launch.sh --model meta-llama/Meta-Llama-3-8B \
+   --dataset /path/to/your/dataset \
+   --dataset_cache_path /tmp/llm_qat_tokenized_cache \
+   --num_epochs 2.0 \
+   --lr 1e-5 \
+   --do_train True \
+   --output_dir llama3-finetune-local
+```
+
 You may alternatively perform QAT with any other quantization formats from **ModelOpt**. Please see more details on the supported quantization formats and how to use them as shown below:
 
 ```python

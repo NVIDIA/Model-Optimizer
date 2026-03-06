@@ -106,7 +106,16 @@ class TrainingArguments(transformers.TrainingArguments):
 class DataArguments:
     dataset: str = field(
         default="Daring-Anteater",
-        metadata={"help": "Specify the dataset.", "choices": ["Daring-Anteater"]},
+        metadata={"help": "Specify a dataset name or a local dataset path."},
+    )
+    dataset_cache_path: str = field(
+        default="",
+        metadata={
+            "help": (
+                "Optional tokenized dataset cache directory. If non-empty at startup, load from it "
+                "and skip raw dataset processing."
+            )
+        },
     )
     train_size: int = field(
         default=0,
@@ -183,6 +192,7 @@ def train():
     print_rank_0("Loading dataset...")
     data_module = make_supervised_data_module(
         dataset=data_args.dataset,
+        dataset_cache_path=data_args.dataset_cache_path,
         tokenizer=tokenizer,
         train_size=data_args.train_size,
         eval_size=data_args.eval_size,

@@ -14,6 +14,9 @@
 # limitations under the License.
 
 import gc
+import hashlib
+import os
+import tempfile
 import types
 from contextlib import contextmanager
 from functools import partial
@@ -44,52 +47,99 @@ def main_process_first():
     torch.distributed.barrier()
 
 
-def get_daring_anteater(
-    tokenizer: transformers.AutoTokenizer,
-    split="train",
-    max_length=4096,
-    train_size=0,
-    eval_size=0,
-):
-    # sample = {
-    #     'system': '{system message}',
-    #     'conversations': [
-    #         {'from': 'User', 'value': '{turn 1 user message}', 'label': None},
-    #         {'from': 'Assistant', 'value': '{turn 1 assistant message}', 'label': '{turn 1 assistant label}'},
-    #         {'from': 'User', 'value': '{turn 2 user message}', 'label': None},
-    #         {'from': 'Assistant', 'value': '{turn 2 assistant message}', 'label': '{turn 2 assistant label}'},
-    #     ],
-    #     "mask": "User",
-    #     "type": "VALUE_TO_TEXT",
-    # }
+def _normalize_to_messages(sample: dict) -> dict:
+    """Convert Daring-Anteater conversations format to standard messages format."""
+    return {
+        "messages": [
+            {"role": turn["from"].lower(), "content": turn["value"]}
+            for turn in sample.get("conversations", [])
+        ]
+    }
 
+
+def _is_dist_initialized() -> bool:
+    return torch.distributed.is_available() and torch.distributed.is_initialized()
+
+
+def _dist_rank_world() -> tuple[int, int]:
+    if not _is_dist_initialized():
+        return 0, 1
+    return torch.distributed.get_rank(), torch.distributed.get_world_size()
+
+
+def _role_to_text(role: str) -> str:
+    role_map = {"system": "System", "user": "User", "assistant": "Assistant"}
+    return role_map.get(role.lower(), role.capitalize())
+
+
+def _resolve_jsonl_files(dataset_path: str) -> list[str]:
+    """Resolve comma-separated paths (files and/or directories) to a list of JSONL files."""
+    parts = [p.strip() for p in dataset_path.split(",") if p.strip()]
+    collected = []
+    for p in parts:
+        if os.path.isfile(p):
+            collected.append(p)
+        elif os.path.isdir(p):
+            jsonl_files = sorted(
+                os.path.join(p, f) for f in os.listdir(p) if f.endswith(".jsonl")
+            )
+            if not jsonl_files:
+                import warnings
+
+                warnings.warn(f"No .jsonl files found in directory: {p}")
+            collected.extend(jsonl_files)
+        else:
+            raise ValueError(f"Dataset path does not exist: {p}")
+    if not collected:
+        raise ValueError(f"No .jsonl files resolved from: {dataset_path}")
+    return collected
+
+
+def _build_cache_path(
+    dataset: str, dataset_cache_path: str, max_length: int, train_size: int, eval_size: int
+) -> str:
+    if dataset_cache_path:
+        return dataset_cache_path
+    cache_key = hashlib.sha1(
+        f"{dataset}|{max_length}|{train_size}|{eval_size}".encode()
+    ).hexdigest()[:12]
+    return os.path.join(tempfile.gettempdir(), f"llm_qat_tokenized_{cache_key}")
+
+
+def _is_non_empty_dir(path: str) -> bool:
+    return os.path.isdir(path) and bool(os.listdir(path))
+
+
+def _make_tokenize_fn(tokenizer: transformers.PreTrainedTokenizer, max_length: int):
     def process_and_tokenize(sample):
-        conversations = sample["conversations"]
-        all_input_ids = [tokenizer.bos_token_id] if tokenizer.bos_token_id else []
-        all_labels = [IGNORE_INDEX] if tokenizer.bos_token_id else []
+        messages = sample.get("messages") or []
+        all_input_ids = [tokenizer.bos_token_id] if tokenizer.bos_token_id is not None else []
+        all_labels = [IGNORE_INDEX] if tokenizer.bos_token_id is not None else []
 
-        for conversation in conversations:
-            role = conversation["from"]
-            input_ids = tokenizer.encode(conversation["value"] + "\n", add_special_tokens=False)
+        for message in messages:
+            role = _role_to_text(str(message.get("role", "")))
+            content = str(message.get("content", ""))
+            text = f"{role}: {content}\n"
+            input_ids = tokenizer.encode(text, add_special_tokens=False)
             labels = input_ids if role == "Assistant" else [IGNORE_INDEX] * len(input_ids)
-
             all_input_ids.extend(input_ids)
             all_labels.extend(labels)
-
             if len(all_input_ids) > max_length:
                 break
 
-        all_input_ids.append(tokenizer.eos_token_id)
-        all_labels.append(IGNORE_INDEX)
+        eos_token_id = tokenizer.eos_token_id
+        if eos_token_id is not None:
+            all_input_ids.append(eos_token_id)
+            all_labels.append(IGNORE_INDEX)
         all_attention_mask = [1] * len(all_input_ids)
 
         cur_seq_length = len(all_input_ids)
         if cur_seq_length < max_length:
             pad_token = (
-                tokenizer.pad_token_id
-                if tokenizer.pad_token_id is not None
-                else tokenizer.eos_token_id
+                tokenizer.pad_token_id if tokenizer.pad_token_id is not None else eos_token_id
             )
+            if pad_token is None:
+                raise ValueError("Tokenizer must provide either pad_token_id or eos_token_id")
             all_input_ids += [pad_token] * (max_length - cur_seq_length)
             all_attention_mask += [0] * (max_length - cur_seq_length)
             all_labels += [IGNORE_INDEX] * (max_length - cur_seq_length)
@@ -100,43 +150,146 @@ def get_daring_anteater(
             "labels": all_labels[:max_length],
         }
 
-    if hasattr(get_daring_anteater, "cached_dataset"):
-        dataset = get_daring_anteater.cached_dataset
-    else:
-        with main_process_first():
-            dataset = datasets.load_dataset("nvidia/Daring-Anteater", split="train")
-            # Shuffle and subsample the dataset
-            eval_size = 2000 if eval_size == 0 else eval_size
-            train_size = len(dataset) - eval_size if train_size == 0 else train_size
-            assert train_size + eval_size <= len(dataset) and train_size > 0 and eval_size > 0, (
-                "not enough data for train-eval split"
+    return process_and_tokenize
+
+
+_dataset_cache: dict = {}
+
+
+def _load_cached_dataset(
+    dataset_id: str,
+    load_raw_fn,
+    tokenizer: transformers.PreTrainedTokenizer,
+    split: str,
+    max_length: int,
+    train_size: int = 0,
+    eval_size: int = 0,
+    dataset_cache_path: str = "",
+) -> datasets.Dataset:
+    """Load, tokenize, split and cache a dataset in messages format.
+
+    Args:
+        dataset_id: Identifier for cache key (e.g. "Daring-Anteater" or a file path).
+        load_raw_fn: Callable returning an HF Dataset with a ``messages`` column.
+        split: "train" or "test".
+    """
+    cache_path = _build_cache_path(dataset_id, dataset_cache_path, max_length, train_size, eval_size)
+
+    if cache_path in _dataset_cache:
+        return _dataset_cache[cache_path][split]
+
+    if _is_non_empty_dir(cache_path):
+        _dataset_cache[cache_path] = datasets.load_from_disk(cache_path)
+        return _dataset_cache[cache_path][split]
+
+    rank, world_size = _dist_rank_world()
+    if rank == 0:
+        os.makedirs(cache_path, exist_ok=True)
+    if _is_dist_initialized():
+        torch.distributed.barrier()
+
+    raw_dataset = load_raw_fn()
+    eval_size = min(2000, len(raw_dataset)) if eval_size == 0 else eval_size
+    if eval_size <= 0:
+        raise ValueError("eval_size must be > 0")
+    train_size = len(raw_dataset) - eval_size if train_size == 0 else train_size
+    if train_size <= 0 or train_size + eval_size > len(raw_dataset):
+        raise ValueError("not enough data for train-eval split")
+
+    selected = raw_dataset.shuffle(seed=42).select(range(train_size + eval_size))
+    split_dataset = selected.train_test_split(test_size=eval_size, shuffle=True, seed=42)
+
+    tokenize_fn = _make_tokenize_fn(tokenizer, max_length)
+    tokenized_parts = {}
+    for split_name in ["train", "test"]:
+        shard = split_dataset[split_name].shard(
+            num_shards=world_size, index=rank, contiguous=True
+        )
+        remove_columns = (
+            list(shard.features) if len(shard) > 0 else list(split_dataset[split_name].features)
+        )
+        tokenized_parts[split_name] = shard.map(
+            tokenize_fn,
+            remove_columns=remove_columns,
+            desc=f"Tokenizing {split_name} split rank {rank}/{world_size}",
+        )
+
+    rank_cache_path = os.path.join(cache_path, "rank_parts", f"rank_{rank}")
+    os.makedirs(rank_cache_path, exist_ok=True)
+    datasets.DatasetDict(tokenized_parts).save_to_disk(rank_cache_path)
+
+    if _is_dist_initialized():
+        torch.distributed.barrier()
+
+    if rank == 0:
+        merged = {}
+        for split_name in ["train", "test"]:
+            shard_list = []
+            for worker_rank in range(world_size):
+                shard_path = os.path.join(cache_path, "rank_parts", f"rank_{worker_rank}")
+                shard_ds = datasets.load_from_disk(shard_path)[split_name]
+                shard_list.append(shard_ds)
+            merged[split_name] = (
+                datasets.concatenate_datasets(shard_list)
+                if len(shard_list) > 1
+                else shard_list[0]
             )
-            dataset = dataset.shuffle(seed=42).select(range(train_size + eval_size))
-            dataset = dataset.map(process_and_tokenize, remove_columns=list(dataset.features))
-            dataset = dataset.train_test_split(test_size=eval_size, shuffle=True, seed=42)
-        get_daring_anteater.cached_dataset = dataset
-    return dataset[split]
+        datasets.DatasetDict(merged).save_to_disk(cache_path)
+
+    if _is_dist_initialized():
+        torch.distributed.barrier()
+    _dataset_cache[cache_path] = datasets.load_from_disk(cache_path)
+    return _dataset_cache[cache_path][split]
+
+
+def _load_daring_anteater_raw() -> datasets.Dataset:
+    ds = datasets.load_dataset("nvidia/Daring-Anteater", split="train")
+    return ds.map(_normalize_to_messages, remove_columns=list(ds.features))
+
+
+def get_daring_anteater(
+    tokenizer: transformers.AutoTokenizer,
+    split="train",
+    max_length=4096,
+    train_size=0,
+    eval_size=0,
+):
+    return _load_cached_dataset(
+        "Daring-Anteater", _load_daring_anteater_raw, tokenizer, split,
+        max_length, train_size, eval_size,
+    )
 
 
 def make_supervised_data_module(
     dataset="Daring-Anteater",
+    dataset_cache_path: str = "",
     tokenizer: transformers.PreTrainedTokenizer = None,
     train_size: int = 0,
     eval_size: int = 0,
 ) -> dict:
-    """Make dataset and collmtor for supervised fine-tuning."""
+    """Make dataset and collator for supervised fine-tuning."""
+    cache_ready = bool(dataset_cache_path) and _is_non_empty_dir(dataset_cache_path)
+
     if dataset == "Daring-Anteater":
-        train_dataset = get_daring_anteater(
-            tokenizer, "train", tokenizer.model_max_length, train_size, eval_size
-        )
-        val_dataset = get_daring_anteater(
-            tokenizer, "test", tokenizer.model_max_length, train_size, eval_size
-        )
+        load_raw = _load_daring_anteater_raw
+        dataset_id = "Daring-Anteater"
+    elif os.path.exists(dataset) or cache_ready:
+        data_files = _resolve_jsonl_files(dataset) if os.path.exists(dataset) else None
+
+        def load_raw():
+            return datasets.load_dataset("json", data_files=data_files, split="train")
+
+        dataset_id = dataset
     else:
         raise ValueError(f"Dataset {dataset} not supported")
+
+    kwargs = dict(
+        tokenizer=tokenizer, max_length=tokenizer.model_max_length,
+        train_size=train_size, eval_size=eval_size, dataset_cache_path=dataset_cache_path,
+    )
     return {
-        "train_dataset": train_dataset,
-        "eval_dataset": val_dataset,
+        "train_dataset": _load_cached_dataset(dataset_id, load_raw, split="train", **kwargs),
+        "eval_dataset": _load_cached_dataset(dataset_id, load_raw, split="test", **kwargs),
         "data_collator": default_data_collator,
     }
 

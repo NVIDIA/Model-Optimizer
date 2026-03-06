@@ -35,7 +35,7 @@ from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
 
 from .calib import MseCalibrator, NVFP4MSECalibrator
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
-from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, StaticBlockScaleQuantizer, TensorQuantizer
+from .nn import QuantModule, SequentialQuantizer, StaticBlockScaleQuantizer, TensorQuantizer
 from .utils import (
     disable_calib,
     enable_fake_quant,
@@ -49,7 +49,14 @@ from .utils import (
     weight_attr_names,
 )
 
-__all__ = ["awq", "local_hessian_calibrate", "max_calibrate", "smoothquant", "svdquant", "scale_after_dequant"]
+__all__ = [
+    "awq",
+    "local_hessian_calibrate",
+    "max_calibrate",
+    "scale_after_dequant",
+    "smoothquant",
+    "svdquant",
+]
 
 
 def weight_only_quantize(model: nn.Module):
@@ -608,7 +615,9 @@ def local_hessian_calibrate(
                 global_amax = reduce_amax(initial_amax, axis=None)
             else:
                 global_amax = None
-            StaticBlockScaleQuantizer.from_tensor_quantizer(weight_quantizer, global_amax=global_amax)
+            StaticBlockScaleQuantizer.from_tensor_quantizer(
+                weight_quantizer, global_amax=global_amax
+            )
 
         quant_func = partial(_mse_quant_func, quantizer=weight_quantizer)
         error_func = helper.get_error_func()

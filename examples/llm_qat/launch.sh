@@ -29,6 +29,7 @@ while [ $# -gt 0 ]; do
     --model*)                                   MODEL=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
     --output_dir*)                              OUTPUT_DIR=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
     --dataset*)                                 DATASET=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --dataset_cache_path*)                      DATASET_CACHE_PATH=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
     --train_size*)                              TRAIN_SIZE=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
     --eval_size*)                               EVAL_SIZE=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
     --num_epochs*)                              NUM_EPOCHS=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
@@ -93,6 +94,9 @@ fi
 OPTIONAL_ARGS=""
 if [ ! -z $MAX_STEPS ]; then
   OPTIONAL_ARGS="$OPTIONAL_ARGS --max_steps $MAX_STEPS"
+fi
+if [ ! -z $DATASET_CACHE_PATH ]; then
+  OPTIONAL_ARGS="$OPTIONAL_ARGS --dataset_cache_path $DATASET_CACHE_PATH"
 fi
 
 # if compress is true, set backend to ddp
