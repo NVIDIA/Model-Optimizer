@@ -35,7 +35,11 @@ DEFAULT_WARMUP_RUNS = 50
 DEFAULT_TIMING_RUNS = 100
 MODE_PRESETS = {
     "quick": {"schemes_per_region": 30, "warmup_runs": 10, "timing_runs": 50},
-    "default": {"schemes_per_region": 50, "warmup_runs": 50, "timing_runs": 100},
+    "default": {
+        "schemes_per_region": DEFAULT_NUM_SCHEMES,
+        "warmup_runs": DEFAULT_WARMUP_RUNS,
+        "timing_runs": DEFAULT_TIMING_RUNS,
+    },
     "extensive": {"schemes_per_region": 200, "warmup_runs": 50, "timing_runs": 200},
 }
 
