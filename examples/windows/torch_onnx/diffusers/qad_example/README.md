@@ -1,5 +1,7 @@
 # LTX-2 QAD Example (Quantization-Aware Distillation)
 
+**Note:** This is a **sample script for illustrating the QAD pipeline**. It has been verified to run on a **Linux RTX 5090** system, but runs into **OOM (Out of Memory)** on that configuration.
+
 This example demonstrates **Quantization-Aware Distillation (QAD)** for [LTX-2](https://github.com/Lightricks/LTX-2) using the native LTX training loop and [NVIDIA ModelOpt](https://github.com/NVIDIA/Model-Optimizer). It combines:
 
 - **LTX packages**: training loop, datasets, and strategies (masked loss, audio/video split)
