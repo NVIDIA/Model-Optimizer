@@ -105,13 +105,15 @@ def load_checkpoint(
     return model
 
 
-def force_cache_dynamic_modules(config: PretrainedConfig, checkpoint_dir: Path | str):
+def force_cache_dynamic_modules(
+    config: PretrainedConfig, checkpoint_dir: Path | str, trust_remote_code: bool = False
+):
     has_remote_code = (
         hasattr(config, "auto_map")
         and isinstance(config.auto_map, dict)
         and "AutoConfig" in config.auto_map.keys()
     )
-    if has_remote_code:
+    if has_remote_code and trust_remote_code:
         for class_reference in config.auto_map.values():
             _ = get_class_from_dynamic_module(class_reference, checkpoint_dir)
 
@@ -150,7 +152,7 @@ def load_model_config(
     if hasattr(config, "block_configs"):
         config.block_configs = maybe_cast_block_configs(config.block_configs)
 
-    force_cache_dynamic_modules(config, checkpoint_dir)
+    force_cache_dynamic_modules(config, checkpoint_dir, trust_remote_code=trust_remote_code)
 
     if not ignore_unexpected_config_keys:
         if unused_kwargs:
