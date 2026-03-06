@@ -24,7 +24,6 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.plugins.vllm import update_kv_cfg_for_mla
 
 
 def _create_new_data_cls(data_cls, **kwargs):
@@ -101,6 +100,29 @@ def calibrate_fun(calib_dataloader: DataLoader, self: Any) -> Callable[[Any], No
                     self.sample_tokens(None)
 
     return calibrate_loop
+
+
+def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: dict[str, Any]) -> dict[str, Any]:
+    """Update KV cache quantization config for MLA models.
+
+    MLA uses `kv_c_bmm_quantizer` (compressed KV) instead of separate
+    `k_bmm_quantizer` and `v_bmm_quantizer`. This function copies the
+    config from `*[kv]_bmm_quantizer` to also cover `*kv_c_bmm_quantizer`.
+    """
+    try:
+        from vllm.attention.layer import MLAAttention
+    except ImportError:
+        return kv_quant_cfg
+
+    if not any(isinstance(m, MLAAttention) for m in model.modules()):
+        return kv_quant_cfg
+
+    if kv_config := kv_quant_cfg.get("*[kv]_bmm_quantizer"):
+        kv_quant_cfg["*kv_c_bmm_quantizer"] = kv_config
+        kv_quant_cfg["*k_pe_bmm_quantizer"] = kv_config
+        print("MLA detected: added *kv_c_bmm_quantizer and k_pe_bmm_quantizer config")
+
+    return kv_quant_cfg
 
 
 def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]:
