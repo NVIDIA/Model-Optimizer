@@ -17,7 +17,7 @@ import re
 from collections import defaultdict
 from collections.abc import Callable
 from typing import Any
-
+import warnings
 import torch
 from vllm.distributed.parallel_state import get_tp_group
 
@@ -374,3 +374,53 @@ def process_state_dict_for_tp(saved_qstate_dict, current_state_dict):
         result[key] = value
 
     return result
+
+
+def load_state_dict_from_path(
+    fakequant_runner: Any, quantizer_file_path: str, model: Any
+) -> dict[str, Any]:
+    fakequant_runner.model_runner._dummy_run(1)
+    print(f"Loading quantizer values from {quantizer_file_path}")
+    # Load on CPU to avoid failures when the checkpoint was saved from a different
+    # GPU mapping
+    saved_quant_dict = torch.load(quantizer_file_path, weights_only=True, map_location="cpu")
+    # convert quant keys to vLLM format
+    if hasattr(fakequant_runner.model_runner.model, "hf_to_vllm_mapper"):
+        saved_quant_dict = fakequant_runner.model_runner.model.hf_to_vllm_mapper.apply_dict(
+            saved_quant_dict
+        )
+        saved_quant_dict = {
+            key.replace("quantizer_", "quantizer._"): value
+            for key, value in saved_quant_dict.items()
+            if "quantizer_" in key
+        }
+    saved_quant_dict = convert_dict_to_vllm(saved_quant_dict)
+
+    current_state_dict = model.state_dict()
+    # Count quant keys in checkpoint and model
+    checkpoint_quant_keys = [key for key in saved_quant_dict if "quantizer" in key]
+    model_quant_keys = [key for key in current_state_dict if "quantizer" in key]
+    for key in checkpoint_quant_keys:
+        if key not in model_quant_keys:
+            print(f"Key {key} not found in model state dict, but exists in checkpoint")
+    for key in model_quant_keys:
+        if key not in checkpoint_quant_keys:
+            raise ValueError(f"Key {key} not found in checkpoint state dict, but exists in model")
+
+    checkpoint_quant_count = len(checkpoint_quant_keys)
+    model_quant_count = len(model_quant_keys)
+
+    # Ensure counts match
+    if checkpoint_quant_count != model_quant_count:
+        warnings.warn(
+            f"Mismatch in quantizer state key counts: checkpoint has {checkpoint_quant_count} "
+            f"quant keys but model has {model_quant_count} quantizer state keys. "
+            f"This can happen if the model is using PP."
+        )
+
+    # Update quant values
+    saved_quant_dict = process_state_dict_for_tp(saved_quant_dict, current_state_dict)
+    for key, value in saved_quant_dict.items():
+        if key in current_state_dict:
+            current_state_dict[key] = value.to(current_state_dict[key].device)
+    return current_state_dict

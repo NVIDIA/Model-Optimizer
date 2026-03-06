@@ -20,11 +20,12 @@ from typing import Any
 import torch
 from transformers import AutoTokenizer
 from vllm.v1.worker.gpu_worker import Worker as BaseWorker
-from vllm_ptq_utils import calibrate_fun, get_quant_config, load_state_dict_from_path
+from vllm_ptq_utils import calibrate_fun, get_quant_config
 from vllm_reload_utils import (
     convert_dict_to_vllm,
     convert_modelopt_state_to_vllm,
     restore_from_modelopt_state_vllm,
+    load_state_dict_from_path
 )
 
 import modelopt.torch.quantization as mtq
