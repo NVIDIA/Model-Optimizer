@@ -461,13 +461,13 @@ def add_cross_kv_to_encoder(
     output_dir = os.path.dirname(output_path)
     if output_dir:
         # Save audio processor config
-        from ..utils.audio_config import save_audio_processor_config
+        from ..utils.whisper_utils import save_audio_processor_config
 
         save_audio_processor_config(output_dir, hf_model_id=hf_model_id, overwrite=False)
 
         # Generate genai_config.json with encoder pointing to this output
         if generate_genai_config:
-            from ..utils.genai_config import save_genai_config as _save_genai_config
+            from ..utils.whisper_utils import save_genai_config as _save_genai_config
 
             encoder_filename = os.path.basename(output_path)
             _save_genai_config(

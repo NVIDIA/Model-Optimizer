@@ -34,9 +34,10 @@ Example usage:
     ... )
 """
 
-from ..utils.audio_config import generate_audio_processor_config, save_audio_processor_config
-from ..utils.genai_config import (
+from ..utils.whisper_utils import (
+    generate_audio_processor_config,
     generate_genai_config,
+    save_audio_processor_config,
     save_genai_config,
     update_genai_config_decoder,
     update_genai_config_encoder,

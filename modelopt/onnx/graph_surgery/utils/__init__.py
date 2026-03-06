@@ -15,14 +15,7 @@
 
 """Utility functions for graph surgery operations."""
 
-from .audio_config import generate_audio_processor_config, save_audio_processor_config
 from .dtype_conversion import convert_fp16_to_bf16, fp16_to_bf16_array
-from .genai_config import (
-    generate_genai_config,
-    save_genai_config,
-    update_genai_config_decoder,
-    update_genai_config_encoder,
-)
 from .graph_utils import (
     add_initializer,
     array_to_initializer,
@@ -42,6 +35,14 @@ from .graph_utils import (
     uses_external_data,
 )
 from .rope_cache import get_rope_caches
+from .whisper_utils import (
+    generate_audio_processor_config,
+    generate_genai_config,
+    save_audio_processor_config,
+    save_genai_config,
+    update_genai_config_decoder,
+    update_genai_config_encoder,
+)
 
 __all__ = [
     "add_initializer",

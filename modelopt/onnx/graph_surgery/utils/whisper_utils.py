@@ -13,10 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Generate genai_config.json for ONNX Runtime GenAI Whisper models.
+"""Whisper model configuration utilities for ONNX Runtime GenAI.
 
-This utility generates the genai_config.json required by ONNX Runtime GenAI
-for running Whisper models with encoder-decoder architecture.
+This module provides utilities for generating configuration files required
+by ONNX Runtime GenAI for Whisper models:
+
+- audio_processor_config.json: Defines the audio preprocessing pipeline
+  (AudioDecoder -> STFT -> LogMelSpectrum)
+- genai_config.json: Specifies model architecture, I/O tensor names,
+  and inference settings for encoder-decoder models
 """
 
 import json
@@ -24,6 +29,115 @@ import os
 from typing import Any
 
 from ...logging_config import logger
+
+# ---------------------------------------------------------------------------
+# Audio processor config
+# ---------------------------------------------------------------------------
+
+
+def generate_audio_processor_config(
+    num_mel_bins: int = 128,
+    n_fft: int = 400,
+    hop_length: int = 160,
+    chunk_size: int = 30,
+) -> dict:
+    """Generate audio processor configuration for Whisper.
+
+    Args:
+        num_mel_bins: Number of mel frequency bins.
+            - 80 for whisper-tiny/base/small/medium/large/large-v2
+            - 128 for whisper-large-v3 and whisper-large-v3-turbo
+        n_fft: FFT size (default 400 for 16kHz audio with 25ms window).
+        hop_length: Hop length for STFT (default 160 for 10ms hop).
+        chunk_size: Audio chunk size in seconds (default 30).
+
+    Returns:
+        Audio processor configuration dictionary.
+    """
+    return {
+        "feature_extraction": {
+            "sequence": [
+                {"operation": {"name": "audio_decoder", "type": "AudioDecoder"}},
+                {
+                    "operation": {
+                        "name": "STFT",
+                        "type": "STFTNorm",
+                        "attrs": {
+                            "n_fft": n_fft,
+                            "frame_length": n_fft,
+                            "hop_length": hop_length,
+                        },
+                    }
+                },
+                {
+                    "operation": {
+                        "name": "log_mel_spectrogram",
+                        "type": "LogMelSpectrum",
+                        "attrs": {
+                            "chunk_size": chunk_size,
+                            "hop_length": hop_length,
+                            "n_fft": n_fft,
+                            "n_mel": num_mel_bins,
+                        },
+                    }
+                },
+            ]
+        }
+    }
+
+
+def save_audio_processor_config(
+    output_dir: str,
+    hf_model_id: str | None = None,
+    num_mel_bins: int | None = None,
+    overwrite: bool = False,
+) -> str:
+    """Save audio_processor_config.json to output directory.
+
+    Args:
+        output_dir: Directory to save the config file.
+        hf_model_id: HuggingFace model ID to extract num_mel_bins from config.
+            If provided, num_mel_bins is extracted from the model config.
+        num_mel_bins: Number of mel bins. Used if hf_model_id is not provided.
+            Default is 128 (for whisper-large-v3 models).
+        overwrite: Whether to overwrite existing file.
+
+    Returns:
+        Path to the saved config file.
+    """
+    output_path = os.path.join(output_dir, "audio_processor_config.json")
+
+    # Check if file already exists
+    if os.path.exists(output_path) and not overwrite:
+        logger.info(f"audio_processor_config.json already exists at {output_dir}")
+        return output_path
+
+    # Determine num_mel_bins
+    if hf_model_id is not None:
+        from transformers import WhisperConfig
+
+        config = WhisperConfig.from_pretrained(hf_model_id)
+        num_mel_bins = config.num_mel_bins
+        logger.info(f"Extracted num_mel_bins={num_mel_bins} from {hf_model_id}")
+    elif num_mel_bins is None:
+        num_mel_bins = 128  # Default for whisper-large-v3
+        logger.info(f"Using default num_mel_bins={num_mel_bins}")
+
+    # Generate config
+    audio_processor_cfg = generate_audio_processor_config(num_mel_bins=num_mel_bins)
+
+    # Save to file
+    os.makedirs(output_dir, exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(audio_processor_cfg, f, indent=4)
+
+    logger.info(f"Saved audio_processor_config.json to {output_dir}")
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# GenAI config
+# ---------------------------------------------------------------------------
 
 
 def generate_genai_config(
@@ -140,7 +254,6 @@ def generate_genai_config(
             {"NvTensorRtRtx": {"enable_cuda_graph": "1" if enable_cuda_graph else "0"}}
         ]
     else:
-        # Use provider name as-is (lowercase)
         provider_options = [{provider.lower(): {}}]
 
     # Build config
@@ -252,7 +365,7 @@ def save_genai_config(
         return output_path
 
     # Generate config
-    genai_config = generate_genai_config(
+    genai_cfg = generate_genai_config(
         encoder_filename=encoder_filename,
         decoder_filename=decoder_filename,
         hf_model_id=hf_model_id,
@@ -263,7 +376,7 @@ def save_genai_config(
     # Save to file
     os.makedirs(output_dir, exist_ok=True)
     with open(output_path, "w") as f:
-        json.dump(genai_config, f, indent=4)
+        json.dump(genai_cfg, f, indent=4)
 
     logger.info(f"Saved genai_config.json to {output_dir}")
     return output_path
