@@ -103,7 +103,7 @@ def _fakequant_run_prolog_worker(self) -> None:
         quantizer_file_path = quant_config["quant_file_path"]
         if quantizer_file_path:
             # Get amax and other quantizer state from the quantizer file
-            current_state_dict = load_state_dict_from_path(quantizer_file_path)
+            current_state_dict = load_state_dict_from_path(self, quantizer_file_path, model)
             model.load_state_dict(current_state_dict)
 
             # Only barrier if distributed is actually initialized (avoids deadlocks).
