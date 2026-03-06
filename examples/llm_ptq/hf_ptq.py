@@ -24,7 +24,6 @@ from typing import Any
 import numpy as np
 import torch
 from accelerate.hooks import remove_hook_from_module
-from eval_perplexity import evaluate_perplexity
 from example_utils import (
     build_quant_cfg,
     copy_custom_model_files,
@@ -927,7 +926,6 @@ def quantize_main(
     else:
         # mono quantization
 
-<<<<<<< HEAD
         if args.recipe is not None:
             print(f"Use recipe {args.recipe} for quantization")
             recipe = load_recipe(args.recipe)
@@ -935,26 +933,6 @@ def quantize_main(
                 f"Expected PTQ recipe, but got {type(recipe).__name__} from {args.recipe}"
             )
             quant_cfg = recipe.ptq_cfg
-=======
-        assert (
-            args.qformat
-            in [
-                "int8_wo",
-                "int4_awq",
-                "fp8",
-                "nvfp4",
-                "nvfp4_awq",
-                "nvfp4_mse",
-                "nvfp4_gptq",
-                "w4a8_awq",
-                "fp8_pb_wo",
-                "w4a8_mxfp4_fp8",
-                "nvfp4_mlp_only",
-                "mxfp8",
-            ]
-            or args.kv_cache_qformat in KV_QUANT_CFG_CHOICES
-        ), f"Plain quantization format {args.qformat} not supported for HF export path"
->>>>>>> 6b8812d6 (tested e2e on qwen)
 
         else:
             assert len(args.qformat.split(",")) == 1, (
@@ -1026,10 +1004,6 @@ def quantize_main(
         is_nemotron_vl_model,
         first_text_speech_dataset,
     )
-
-    if args.eval_perplexity and tokenizer is not None:
-        print("Evaluating Wikitext-2 perplexity...")
-        evaluate_perplexity(language_model, tokenizer, seq_len=args.calib_seq)
 
     export_quantized(
         args,
@@ -1189,12 +1163,7 @@ def parse_args() -> argparse.Namespace:
         default=False,
         action="store_true",
     )
-    parser.add_argument(
-        "--eval_perplexity",
-        help="Evaluate Wikitext-2 perplexity after quantization.",
-        default=False,
-        action="store_true",
-    )
+
     parser.add_argument(
         "--low_memory_mode",
         help=(
