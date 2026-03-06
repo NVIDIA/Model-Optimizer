@@ -17,7 +17,6 @@
 
 import importlib
 from contextlib import contextmanager
-from typing import Any
 
 import torch
 import vllm.attention as vllm_attention
@@ -331,26 +330,3 @@ if VllmMLAAttention is not None:
             kv_c = self.kv_c_bmm_quantizer(kv_c)
             k_pe = self.k_pe_bmm_quantizer(k_pe)
             return super().forward(query, kv_c, k_pe, *args, **kwargs)
-
-
-def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: dict[str, Any]) -> dict[str, Any]:
-    """Update KV cache quantization config for MLA models.
-
-    MLA uses `kv_c_bmm_quantizer` (compressed KV) instead of separate
-    `k_bmm_quantizer` and `v_bmm_quantizer`. This function copies the
-    config from `*[kv]_bmm_quantizer` to also cover `*kv_c_bmm_quantizer`.
-    """
-    try:
-        from vllm.attention.layer import MLAAttention
-    except ImportError:
-        return kv_quant_cfg
-
-    if not any(isinstance(m, MLAAttention) for m in model.modules()):
-        return kv_quant_cfg
-
-    if kv_config := kv_quant_cfg.get("*[kv]_bmm_quantizer"):
-        kv_quant_cfg["*kv_c_bmm_quantizer"] = kv_config
-        kv_quant_cfg["*k_pe_bmm_quantizer"] = kv_config
-        print("MLA detected: added *kv_c_bmm_quantizer and k_pe_bmm_quantizer config")
-
-    return kv_quant_cfg
