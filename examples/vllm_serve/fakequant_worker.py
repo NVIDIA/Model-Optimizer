@@ -104,6 +104,7 @@ def _fakequant_run_prolog_worker(self) -> None:
         quantizer_file_path = quant_config["quant_file_path"]
         if quantizer_file_path:
             # Get amax and other quantizer state from the quantizer file
+            # this can be used with Megatron-LM exported model using export_mcore_gpt_to_hf_vllm_fq
             current_state_dict = load_state_dict_from_path(self, quantizer_file_path, model)
             model.load_state_dict(current_state_dict)
 
