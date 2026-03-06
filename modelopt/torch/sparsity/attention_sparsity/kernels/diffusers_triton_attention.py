@@ -43,17 +43,21 @@ from modelopt.torch.sparsity.attention_sparsity.kernels.triton_unified_attention
 _sparse24_tls = threading.local()
 
 
-def set_sparse24_context(apply_sparse24: bool, skip_diagonal_blocks: bool = True) -> None:
+def set_sparse24_context(
+    apply_sparse24: bool, skip_diagonal_blocks: bool = True, cross_attn: bool = True
+) -> None:
     """Set the thread-local sparse24 flags (called by Sparse24Triton.get_sparse_context)."""
     _sparse24_tls.apply_sparse24 = apply_sparse24
     _sparse24_tls.skip_diagonal_blocks = skip_diagonal_blocks
+    _sparse24_tls.cross_attn = cross_attn
 
 
-def get_sparse24_context() -> tuple[bool, bool]:
+def get_sparse24_context() -> tuple[bool, bool, bool]:
     """Read the thread-local sparse24 flags."""
     return (
         getattr(_sparse24_tls, "apply_sparse24", False),
         getattr(_sparse24_tls, "skip_diagonal_blocks", True),
+        getattr(_sparse24_tls, "cross_attn", True),
     )
 
 
@@ -172,9 +176,11 @@ def register_diffusers_triton_attention() -> bool:
         enable_gqa: bool = False,
         **kwargs,
     ) -> torch.Tensor:
-        apply_sparse24, skip_diagonal_blocks = get_sparse24_context()
+        apply_sparse24, skip_diagonal_blocks, cross_attn = get_sparse24_context()
 
-        can_use_triton = apply_sparse24
+        # Skip sparse kernel for cross-attention when cross_attn is disabled
+        is_cross_attn = query.shape[1] != key.shape[1]
+        can_use_triton = apply_sparse24 and (cross_attn or not is_cross_attn)
 
         if can_use_triton:
             return _diffusers_sparse24_attention(

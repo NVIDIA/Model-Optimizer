@@ -68,6 +68,7 @@ class Sparse24Triton(SparseAttentionMethod):
         self.skip_diagonal_blocks = config.get("skip_diagonal_blocks", True)
         self.is_causal = config.get("is_causal", True)
         self.backend = config.get("backend", "triton")
+        self.cross_attn = config.get("cross_attn", True)
 
     def _infer_phase(self, attention_scores: torch.Tensor) -> str:
         """Infer phase from attention scores shape."""
@@ -153,12 +154,12 @@ class Sparse24Triton(SparseAttentionMethod):
         effective_skip = self.skip_diagonal_blocks and self.is_causal
         module._apply_sparse24 = True
         module._skip_diagonal_blocks = effective_skip
-        set_sparse24_context(True, effective_skip)
+        set_sparse24_context(True, effective_skip, self.cross_attn)
         try:
             yield
         finally:
             module._apply_sparse24 = False
-            set_sparse24_context(False, True)
+            set_sparse24_context(False, True, True)
 
     def get_threshold_info(self) -> dict[str, Any]:
         """Return fixed 2:4 pattern info."""

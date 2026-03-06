@@ -96,9 +96,7 @@ def _ltx_sparse24_attention(
 
     # Use autograd-compatible path when gradients are needed (training),
     # otherwise use faster inference-only path (mirrors hf_triton_attention.py).
-    needs_grad = torch.is_grad_enabled() and (
-        q.requires_grad or k.requires_grad or v.requires_grad
-    )
+    needs_grad = torch.is_grad_enabled() and (q.requires_grad or k.requires_grad or v.requires_grad)
     if needs_grad:
         o = context_attention(q_packed, k_packed, v_packed, **fwd_kwargs)
     else:
@@ -133,9 +131,11 @@ class _Sparse24LTXAttentionWrapper:
         heads: int,
         mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        apply_sparse24, skip_diagonal_blocks = get_sparse24_context()
+        apply_sparse24, skip_diagonal_blocks, cross_attn = get_sparse24_context()
 
-        can_use_triton = apply_sparse24
+        # Skip sparse kernel for cross-attention when cross_attn is disabled
+        is_cross_attn = q.shape[1] != k.shape[1]
+        can_use_triton = apply_sparse24 and (cross_attn or not is_cross_attn)
 
         if can_use_triton:
             return _ltx_sparse24_attention(q, k, v, heads, skip_diagonal_blocks)
