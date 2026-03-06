@@ -17,7 +17,7 @@
 #
 # Set pretrained_model_name_or_path to your checkpoint directory.
 # anymodel_descriptor must match a ModelOpt ModelDescriptorFactory name, e.g.:
-#   gpt_oss_20b, llama, qwen2, qwen3, mistral_small, nemotron_h, nemotron_h_v2, qwen3_vl
+#   gpt_oss, llama, qwen2, qwen3, mistral_small, nemotron_h, nemotron_h_v2, qwen3_vl
 # block_configs_path is optional; if omitted, block_configs are auto-detected from
 #   <pretrained_model_name_or_path>/block_configs.json when present.
 #
@@ -42,7 +42,7 @@ model:
   # Set to your AnyModel checkpoint directory (must contain config and weights; optional block_configs.json)
   pretrained_model_name_or_path: null  # e.g. /path/to/heterogeneous_checkpoint
   # ModelOpt descriptor name (see list in header comment)
-  anymodel_descriptor: null  # e.g. gpt_oss_20b or llama
+  anymodel_descriptor: null  # e.g. gpt_oss or llama
   force_hf: true
   torch_dtype: bf16
   trust_remote_code: true

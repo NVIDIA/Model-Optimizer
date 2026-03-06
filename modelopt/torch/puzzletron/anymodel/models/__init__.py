@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Import models to trigger factory registration
-from modelopt.torch.puzzletron.anymodel.models.gpt_oss_20b import *
+from modelopt.torch.puzzletron.anymodel.models.gpt_oss import *
 from modelopt.torch.puzzletron.anymodel.models.llama import *
 from modelopt.torch.puzzletron.anymodel.models.mistral_small import *
 from modelopt.torch.puzzletron.anymodel.models.nemotron_h import *

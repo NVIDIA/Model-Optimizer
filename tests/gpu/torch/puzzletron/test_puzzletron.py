@@ -62,7 +62,7 @@ from modelopt.torch.puzzletron.anymodel import convert_model
             "*E",
             True,
         ),
-        ("gpt-oss-20b", "gpt_oss_20b", "gpt-oss-20b", None, True),
+        ("gpt-oss-20b", "gpt_oss", "gpt-oss-20b", None, True),
     ],
 )
 def test_puzzletron(

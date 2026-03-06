@@ -7,7 +7,7 @@ defaults:
   - _self_
 
 puzzle_dir: ???
-descriptor: gpt_oss_20b
+descriptor: gpt_oss
 teacher_dir: ${puzzle_dir}/ckpts/teacher/
 replacement_library_path: ${puzzle_dir}/replacement_library.json
 dataset_path: ??? # path to Nemotron-Post-Training-Dataset-v2
@@ -42,7 +42,7 @@ scoring:
   teacher_dir: ${to_path:${teacher_dir}}
   output_dir: ${puzzle_dir}/single_sequence_replacement_solutions--validation
 
-  eval_samples: 128
+  eval_samples: 8
   micro_batch_size: 1
   seed: 42
   shuffle_seed: 444

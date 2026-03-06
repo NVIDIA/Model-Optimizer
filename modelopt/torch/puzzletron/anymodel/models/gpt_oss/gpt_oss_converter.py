@@ -29,11 +29,11 @@ from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
 )
 
 
-@ConverterFactory.register_decorator("gpt_oss_20b")
-class GptOss20bConverter(Converter):
-    """Converter for GPT-OSS-20B models to AnyModel format.
+@ConverterFactory.register_decorator("gpt_oss")
+class GptOssConverter(Converter):
+    """Converter for GPT-OSS models to AnyModel format.
 
-    GPT-OSS-20B is a pure MoE model with 32 experts per layer and 4 active experts.
+    GPT-OSS is a pure MoE model with 32/128 experts per layer and 4/16 active experts.
     All layers use MoE FFN (no standard dense FFN layers).
     """
 
@@ -41,11 +41,11 @@ class GptOss20bConverter(Converter):
 
     @staticmethod
     def create_block_configs_from_main_config(config: PretrainedConfig) -> List[BlockConfig]:
-        """Create block configs for GPT-OSS-20B layers.
+        """Create block configs for GPT-OSS layers.
 
-        GPT-OSS-20B uses MoE for all FFN layers with:
-        - 32 local experts (num_local_experts)
-        - 4 active experts per token (experts_per_token)
+        GPT-OSS uses MoE for all FFN layers with:
+        - 32/128 local experts (num_local_experts)
+        - 4/16 active experts per token (experts_per_token)
         - No dense/standard FFN layers
         """
         num_hidden_layers = config.num_hidden_layers

@@ -139,14 +139,14 @@ def create_and_save_small_hf_model(
         config.vocab_size = vocab_size
         config.hidden_size = 256
         config.intermediate_size = 512
-        config.num_hidden_layers = 2
+        config.num_hidden_layers = max(2, dist.size())
         config.num_attention_heads = 32
         config.num_key_value_heads = 8
         config.max_position_embeddings = 512
 
         # Fix layer_types to match num_hidden_layers (newer transformers validates this)
         if hasattr(config, "layer_types") and config.layer_types is not None:
-            config.layer_types = config.layer_types[:2]
+            config.layer_types = config.layer_types[:config.num_hidden_layers]
 
         # Fix rope_scaling to be consistent with max_position_embeddings
         if hasattr(config, "rope_scaling") and config.rope_scaling is not None:

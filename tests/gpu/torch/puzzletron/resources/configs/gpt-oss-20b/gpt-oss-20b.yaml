@@ -6,7 +6,7 @@ defaults:
   - override hydra/hydra_logging: disabled
   - _self_
 
-descriptor: gpt_oss_20b
+descriptor: gpt_oss
 
 puzzle_dir: ???
 teacher_dir: ${puzzle_dir}/ckpts/teacher/

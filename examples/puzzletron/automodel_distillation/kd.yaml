@@ -43,7 +43,7 @@ rng:
 model:
   _target_: nemo_automodel.NeMoAutoModelForCausalLM.from_pretrained
   pretrained_model_name_or_path: ./heterogeneous_ckpts/meta-llama-Llama-3.1-8B-Instruct/  # student checkpoint dir
-  anymodel_descriptor: llama  # e.g. gpt_oss_20b, llama, qwen2, qwen3
+  anymodel_descriptor: llama  # e.g. gpt_oss, llama, qwen2, qwen3
   force_hf: true
   torch_dtype: bf16
   trust_remote_code: true

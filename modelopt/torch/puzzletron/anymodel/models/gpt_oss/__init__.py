@@ -16,7 +16,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GPT-OSS-20B model support for AnyModel."""
+"""GPT-OSS model support for AnyModel."""
 
-from .gpt_oss_20b_converter import GptOss20bConverter
-from .gpt_oss_20b_model_descriptor import GptOss20bModelDescriptor
+from .gpt_oss_converter import GptOssConverter
+from .gpt_oss_model_descriptor import GptOssModelDescriptor

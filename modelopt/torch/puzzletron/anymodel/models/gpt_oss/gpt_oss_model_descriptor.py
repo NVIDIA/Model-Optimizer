@@ -14,7 +14,7 @@
 # limitations under the License.
 # mypy: ignore-errors
 
-"""GPT-OSS-20B model descriptor for AnyModel compression."""
+"""GPT-OSS model descriptor for AnyModel compression."""
 
 import re
 from dataclasses import dataclass, field
@@ -45,9 +45,9 @@ from modelopt.torch.puzzletron.pruning.pruning_mixin import PruningMixIn
 from modelopt.torch.puzzletron.utils.dummy_modules import DummyBlock
 
 
-@ModelDescriptorFactory.register_decorator("gpt_oss_20b")
-class GptOss20bModelDescriptor(ModelDescriptor):
-    """Model descriptor for GPT-OSS-20B (pure MoE model)."""
+@ModelDescriptorFactory.register_decorator("gpt_oss")
+class GptOssModelDescriptor(ModelDescriptor):
+    """Model descriptor for GPT-OSS (pure MoE model)."""
 
     _DECODER_LAYER_CLS: Type[nn.Module] = None
 
@@ -133,7 +133,7 @@ class GptOss20bModelDescriptor(ModelDescriptor):
         }
 
         def build_ffn_predicates() -> Dict[str, re.Pattern]:
-            """FFN is MoE in GPT-OSS-20B with MXFP4 quantization."""
+            """FFN is MoE in GPT-OSS with MXFP4 quantization."""
             return {
                 f"block_{layer_idx}_ffn": re.compile(
                     rf"^model\.layers\.{layer_idx}\."
@@ -172,20 +172,20 @@ class GptOss20bModelDescriptor(ModelDescriptor):
 
     @staticmethod
     def pruning_mixins() -> Dict[str, PruningMixIn]:
-        """Return available pruning mixins for GPT-OSS-20B.
+        """Return available pruning mixins for GPT-OSS.
 
         Note: Expert removal works for unquantized models (test models).
         Production models use MXFP4 quantization which is not yet supported.
         """
         return {
-            "expert_removal": ExpertRemovalPruningMixIn(GptOss20bExpertRemovalLayerDescriptor())
+            "expert_removal": ExpertRemovalPruningMixIn(GptOssExpertRemovalLayerDescriptor())
         }
 
 
 @dataclass
-class GptOss20bExpertRemovalLayerDescriptor(ExpertRemovalLayerDescriptor):
+class GptOssExpertRemovalLayerDescriptor(ExpertRemovalLayerDescriptor):
     """
-    GPT-OSS-20B MoE layer descriptor for expert removal.
+    GPT-OSS MoE layer descriptor for expert removal.
 
     Note: This only works for unquantized models (e.g., test models).
     Production GPT-OSS models use MXFP4 quantization with fused experts

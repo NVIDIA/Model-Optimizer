@@ -36,7 +36,7 @@ python -m pip install -U omegaconf fire transformers
 
 ## Configuration
 
-- **pretrain.yaml** – Pretrain/finetune on an AnyModel checkpoint. Set `model.pretrained_model_name_or_path` and `model.anymodel_descriptor` (e.g. `gpt_oss_20b`, `llama`, `qwen2`, `qwen3`). Optional: `model.block_configs_path`; if omitted, block configs are auto-detected from `<checkpoint_dir>/block_configs.json`.
+- **pretrain.yaml** – Pretrain/finetune on an AnyModel checkpoint. Set `model.pretrained_model_name_or_path` and `model.anymodel_descriptor` (e.g. `gpt_oss`, `llama`, `qwen2`, `qwen3`). Optional: `model.block_configs_path`; if omitted, block configs are auto-detected from `<checkpoint_dir>/block_configs.json`.
 - **kd.yaml** – Knowledge distillation. Set `model.pretrained_model_name_or_path` and `model.anymodel_descriptor` for the student, and `teacher_model.pretrained_model_name_or_path` and `teacher_model.anymodel_descriptor` for the teacher.
 
 Paths and descriptors can be overridden from the command line (see below).
@@ -65,9 +65,9 @@ torchrun --nproc_per_node=2 \
   --mode kd \
   -c kd.yaml \
   model.pretrained_model_name_or_path=/path/to/student \
-  model.anymodel_descriptor=gpt_oss_20b \
+  model.anymodel_descriptor=gpt_oss \
   teacher_model.pretrained_model_name_or_path=/path/to/teacher \
-  teacher_model.anymodel_descriptor=gpt_oss_20b
+  teacher_model.anymodel_descriptor=gpt_oss
 ```
 
 **Pretrain (uses AutoModel’s built-in recipe)**
