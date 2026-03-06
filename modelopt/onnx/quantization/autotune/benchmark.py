@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import torch
 
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.ort_utils import _check_for_tensorrt
@@ -47,13 +48,7 @@ TRT_AVAILABLE = importlib.util.find_spec("tensorrt") is not None
 if TRT_AVAILABLE:
     import tensorrt as trt
 
-TORCH_CUDA_AVAILABLE = False
-try:
-    import torch
-
-    TORCH_CUDA_AVAILABLE = torch.cuda.is_available()
-except ImportError:
-    pass
+TORCH_CUDA_AVAILABLE = torch.cuda.is_available()
 
 
 def _validate_shape_range(min_shape: list, opt_shape: list, max_shape: list) -> None:
