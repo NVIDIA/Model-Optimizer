@@ -688,9 +688,7 @@ def _get_block_stats(
             not (block_config.attention.no_op and block_config.ffn.no_op)
         )
         block_stats["num_kv_heads"] = (
-            subblock_stats["args"]["n_head"] // block_config.attention.n_heads_in_group
-            if block_stats["has_attention"]
-            else 0
+            block_config.attention.num_key_value_heads if block_stats["has_attention"] else 0
         )
         block_stats["num_local_experts"] = (
             block_config.ffn.moe.num_local_experts if block_stats["has_moe"] else 0
