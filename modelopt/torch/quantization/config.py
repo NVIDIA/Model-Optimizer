@@ -242,7 +242,6 @@ _mamba_moe_disabled_quantizer_cfg: list[QuantizerCfgEntry] = [
     {"quantizer_name": "*o_proj*", "enable": False},  # Skip QKV Output Projection
 ]
 
-
 INT8_DEFAULT_CFG = {
     "quant_cfg": [
         *_base_disable_all,
@@ -374,6 +373,7 @@ INT4_BLOCKWISE_WEIGHT_ONLY_CFG = {
     ],
     "algorithm": "max",
 }
+
 
 INT4_AWQ_CFG = {
     "quant_cfg": [
