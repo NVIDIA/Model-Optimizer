@@ -15,11 +15,14 @@
 
 """ModelOpt plugin to train HuggingFace models with knowledge distillation."""
 
+import torch.nn as nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 import modelopt.torch.distill as mtd
 from modelopt.torch.opt.plugins import ModelOptHFTrainer
 from modelopt.torch.utils import print_rank_0
+
+IGNORE_INDEX = nn.CrossEntropyLoss().ignore_index
 
 
 class KDTrainer(ModelOptHFTrainer):
@@ -98,18 +101,50 @@ class KDTrainer(ModelOptHFTrainer):
 
     def train(self, *args, **kwargs):
         """Train the model."""
-        self.compute_loss_func = lambda *args, **kwargs: self.model.compute_kd_loss()
+
+        def kd_loss_func(outputs, labels, **kwargs):
+            # HF tokenizers/collators set labels = IGNORE_INDEX (-100) for positions
+            # that should not contribute to loss (padding, system/user turns) and
+            # labels = input_ids for target positions (assistant generation).  We use
+            # this mask to compute KD loss only on the generation tokens -- i.e. we
+            # learn from the teacher only where the model is expected to generate.
+            # NOTE: This assumes labels are NOT pre-shifted (standard HF convention).
+            # TODO: Add detection/support for pre-shifted labels in the future.
+            mask = (labels != IGNORE_INDEX).float()
+
+            def loss_reduction_fn(loss):
+                return (loss * mask.view(-1)).sum() / mask.sum().clamp(min=1)
+
+            return self.model.compute_kd_loss(loss_reduction_fn=loss_reduction_fn)
+
+        self.compute_loss_func = kd_loss_func
         return super().train(*args, **kwargs)
 
 
 class LMLogitsLoss(mtd.LogitsDistillationLoss):
-    """Logits loss for knowledge distillation."""
+    """Per-token KL-div logits loss for causal LM knowledge distillation.
+
+    Returns unreduced per-token losses ``(B*S,)`` so that a ``loss_reduction_fn``
+    (e.g. with ignore-index masking) can be applied in ``compute_kd_loss()``.
+    """
+
+    def __init__(self, temperature: float = 1.0):
+        """Constructor.
+
+        Args:
+            temperature: Softmax temperature for softening logits.
+        """
+        super().__init__(temperature=temperature, reduction="none")
 
     def forward(self, out_student: CausalLMOutputWithPast, out_teacher: CausalLMOutputWithPast):
-        """Forward pass for logits distillation loss.
+        """Forward pass returning per-token KD losses.
 
         Args:
             out_student: The student model output.
             out_teacher: The teacher model output.
+
+        Returns:
+            Per-token KL-div losses of shape ``(B*S,)``.
         """
-        return super().forward(out_student.logits, out_teacher.logits)
+        per_element = super().forward(out_student.logits, out_teacher.logits)  # (B*S, V)
+        return per_element.sum(dim=-1)  # (B*S,)
