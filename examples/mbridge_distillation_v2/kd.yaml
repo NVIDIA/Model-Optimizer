@@ -1,0 +1,182 @@
+# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# =============================================================================
+# mbridge_distillation_v2 — Knowledge Distillation Override Config
+# =============================================================================
+#
+# This file is merged on top of the base config produced by _pretrain_common()
+# before any Hydra-style CLI overrides are applied.
+#
+# Keys use OmegaConf dotted-path notation matching ConfigContainer's structure.
+# See Megatron Bridge's ConfigContainer for all available fields.
+#
+# Usage:
+#   torchrun --nproc_per_node=4 distill.py \
+#       --student llama --teacher nemo \
+#       --config-file kd.yaml \
+#       model.tensor_model_parallel_size=4
+#
+# =============================================================================
+
+
+# ---------------------------------------------------------------------------
+# Model / parallelism settings
+# ---------------------------------------------------------------------------
+# Student and teacher MUST share the same parallelism — DistillationProvider
+# validates this at __post_init__.  Setting model.* mirrors to model.teacher.*
+# automatically via DistillationProvider.__setattr__.
+
+model:
+  # Parallelism (adjust to your GPU count)
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: false
+
+  # Sequence length — must match dataset.seq_length
+  seq_length: 4096
+
+  # Mixed precision
+  pipeline_dtype: torch.bfloat16
+
+  # Transformer implementation
+  transformer_impl: transformer_engine
+
+  # CUDA graph (disable for safety during KD; enable once validated)
+  cuda_graph_impl: none
+
+  # Logits are overwritten in-place by TE cross-entropy; distillation_provider
+  # already resets this to "native" — keep it here for visibility.
+  cross_entropy_fusion_impl: native
+
+  # ---------------------------------------------------------------------------
+  # Knowledge Distillation config
+  # ---------------------------------------------------------------------------
+  # These are the ModelOptDistillConfig fields exposed as model.kd_config.*
+  kd_config:
+    # Names of the student/teacher output-logit layers.
+    # For GPT-based models (both homogeneous and heterogeneous) this is "output_layer".
+    logit_layers:
+      - output_layer
+      - output_layer
+
+    # Intermediate-layer pairs for auxiliary cosine-similarity losses.
+    # Must be sequence-parallel layers (LayerNorm outputs) so the hidden
+    # dimension is not split across TP ranks.
+    # Set to [] to use logit-only KD (lower memory).
+    intermediate_layer_pairs:
+      - [decoder.final_layernorm, decoder.final_layernorm]
+
+    # Whether to skip the standard language-modelling (cross-entropy) loss.
+    # True: trains on KD loss only (lower memory, recommended).
+    # False: adds LM loss scaled by kd_loss_scale (extra memory for logits).
+    skip_lm_loss: true
+
+    # Scale factor for the KD loss relative to the LM loss.
+    # Only used when skip_lm_loss = false.
+    kd_loss_scale: 1.0
+
+    # Temperature for KL-Divergence over output logits.
+    # Higher values soften teacher probabilities, providing richer training signal.
+    logit_kl_temperature: 1.0
+
+
+# ---------------------------------------------------------------------------
+# Training schedule
+# ---------------------------------------------------------------------------
+train:
+  train_iters: 10000
+  global_batch_size: 64
+  micro_batch_size: 1
+  eval_iters: 32
+
+validation:
+  eval_interval: 1000
+
+
+# ---------------------------------------------------------------------------
+# Optimizer
+# ---------------------------------------------------------------------------
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-8
+
+scheduler:
+  lr_warmup_iters: 500
+  min_lr: 1.0e-5
+  lr_decay_style: cosine
+
+
+# ---------------------------------------------------------------------------
+# DDP (DistributedDataParallel)
+# ---------------------------------------------------------------------------
+ddp:
+  grad_reduce_in_fp32: true
+  overlap_grad_reduce: true
+  overlap_param_gather: true
+  use_distributed_optimizer: true
+  check_for_nan_in_grad: true
+
+
+# ---------------------------------------------------------------------------
+# Dataset
+# ---------------------------------------------------------------------------
+# For pre-tokenized binary datasets, set:
+#   blend: ["/path/to/data_text_document", 1.0]
+# For HuggingFace tokenizer + raw text, keep blend: null (mock data).
+dataset:
+  seq_length: 4096
+  blend: null          # null → mock (random) data; replace with real dataset path
+  split: "9999,8,2"
+
+# ---------------------------------------------------------------------------
+# Tokenizer
+# ---------------------------------------------------------------------------
+# Default: HuggingFaceTokenizer loaded from --student-checkpoint.
+# For pre-tokenized binary data, switch to NullTokenizer:
+#   tokenizer:
+#     tokenizer_type: NullTokenizer
+#     vocab_size: 131072   # match the student model's vocab size
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+
+
+# ---------------------------------------------------------------------------
+# Checkpointing
+# ---------------------------------------------------------------------------
+checkpoint:
+  # Directory to save student checkpoints (set to null to disable saving).
+  save: ./kd_student_checkpoint
+  save_interval: 1000
+  # Optional: load a pre-trained student checkpoint to start from.
+  # load: /path/to/pretrained_student
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logger:
+  log_interval: 10
+  log_timers_to_tensorboard: false
+
+
+# ---------------------------------------------------------------------------
+# RNG
+# ---------------------------------------------------------------------------
+rng:
+  seed: 42
