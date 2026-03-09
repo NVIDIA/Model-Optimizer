@@ -15,14 +15,13 @@
 
 """ModelOpt plugin to train HuggingFace models with knowledge distillation."""
 
+import torch.nn as nn
 from torch import Tensor
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 import modelopt.torch.distill as mtd
 from modelopt.torch.opt.plugins import ModelOptHFTrainer
 from modelopt.torch.utils import print_rank_0
-
-IGNORE_INDEX = -100
 
 
 class KDTrainer(ModelOptHFTrainer):
@@ -101,12 +100,13 @@ class KDTrainer(ModelOptHFTrainer):
 
     def train(self, *args, **kwargs):
         """Train the model."""
+        ignore_index = nn.CrossEntropyLoss().ignore_index  # equals -100
 
         def _compute_kd_loss(outputs: Tensor, labels: Tensor | None, **kwargs):
             def loss_reduction_fn(loss: Tensor):
                 if labels is None:
                     return loss.sum() / len(loss)  # batchmean reduction
-                loss_mask = (labels.view(-1) != IGNORE_INDEX).to(loss.dtype)
+                loss_mask = (labels.view(-1) != ignore_index).to(loss.dtype)
                 per_token_loss = loss.sum(dim=-1) if loss.ndim >= 2 else loss
                 return (per_token_loss * loss_mask).sum() / loss_mask.sum().clamp(min=1)
 
