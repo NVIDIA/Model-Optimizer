@@ -46,6 +46,7 @@ import onnxslim
 
 from modelopt.onnx.logging_config import configure_logging, logger
 from modelopt.onnx.op_types import is_data_dependent_shape_op
+from modelopt.onnx.quantization.autotune import MODE_PRESETS
 from modelopt.onnx.quantization.autotune.workflows import (
     init_benchmark_instance,
     region_pattern_autotuning_workflow,
@@ -267,7 +268,7 @@ def _find_nodes_to_quantize_autotune(
 ) -> tuple[list[str], list[str], list[tuple[gs.Node, gs.Node, str]], list[str]]:
     logger.info("Running Auto Q/DQ with TensorRT")
 
-    init_benchmark_instance(
+    benchmark_instance = init_benchmark_instance(
         use_trtexec=use_trtexec,
         plugin_libraries=trt_plugins,
         timing_cache_file=timing_cache_file,
@@ -275,8 +276,10 @@ def _find_nodes_to_quantize_autotune(
         timing_runs=timing_runs,
         trtexec_args=trtexec_args.split() if trtexec_args else None,
     )
-    precision_map = {"fp16": "float16", "fp32": "float32", "bf16": "bfloat16"}
+    if benchmark_instance is None:
+        raise RuntimeError("Failed to initialize TensorRT benchmark")
 
+    precision_map = {"fp16": "float16", "fp32": "float32", "bf16": "bfloat16"}
     autotuner = region_pattern_autotuning_workflow(
         onnx_model,
         output_dir=Path(output_dir) if output_dir else None,
@@ -327,7 +330,7 @@ def quantize(
     opset: int | None = None,
     autotune: bool = False,
     autotune_output_dir: str | None = None,
-    autotune_num_schemes_per_region: int = 30,
+    autotune_num_schemes_per_region: int = MODE_PRESETS["default"]["schemes_per_region"],
     autotune_pattern_cache_file: str | None = None,
     autotune_state_file: str | None = None,
     autotune_qdq_baseline: str | None = None,
@@ -335,8 +338,8 @@ def quantize(
     autotune_verbose: bool = False,
     autotune_use_trtexec: bool = False,
     autotune_timing_cache: str | None = None,
-    autotune_warmup_runs: int = 5,
-    autotune_timing_runs: int = 20,
+    autotune_warmup_runs: int = MODE_PRESETS["default"]["warmup_runs"],
+    autotune_timing_runs: int = MODE_PRESETS["default"]["timing_runs"],
     autotune_trtexec_args: str | None = None,
     **kwargs: Any,
 ) -> None:
@@ -464,6 +467,32 @@ def quantize(
         autotune:
             If True, detect optimal Q/DQ node placements according to the TensorRT version and platform available.
             If False, use the default pattern-based quantization approach.
+        autotune_output_dir:
+            Output directory for autotune results (state file, logs). Default: temp directory.
+        autotune_num_schemes_per_region:
+            Number of Q/DQ schemes to test per region.
+        autotune_pattern_cache_file:
+            Path to pattern cache YAML for warm-start.
+        autotune_qdq_baseline:
+            Path to a pre-quantized ONNX model to import Q/DQ patterns as warm-start.
+        autotune_state_file:
+            State file path for crash recovery and resume capability (default: <output_dir>/autotuner_state.yaml).
+        autotune_node_filter_list:
+            Path to a file containing wildcard patterns to filter ONNX nodes (one pattern per line). Regions without
+            any matching nodes are skipped during autotuning.
+        autotune_verbose:
+            Enable verbose logging in the autotuner.
+        autotune_use_trtexec:
+            Use trtexec for benchmarking instead of the TensorRT Python API.
+        autotune_timing_cache:
+            TensorRT timing cache file for faster engine builds.
+        autotune_warmup_runs:
+            Number of warmup runs before timing.
+        autotune_timing_runs:
+            Number of timed runs for latency measurement.
+        autotune_trtexec_args:
+            Additional trtexec arguments as a single quoted string.
+            Example: --autotune_trtexec_args '--fp16 --workspace=4096'
         kwargs:
             Additional keyword arguments for int4 quantization, including:
             - awqlite_alpha_step (float): Alpha step for lite, range [0, 1].

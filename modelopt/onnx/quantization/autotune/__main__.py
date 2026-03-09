@@ -180,7 +180,7 @@ def run_autotune() -> int:
     try:
         node_filter_list = get_node_filter_list(args.node_filter_list)
         region_pattern_autotuning_workflow(
-            model_path=str(model_path),
+            model_or_path=str(model_path),
             output_dir=output_dir,
             num_schemes_per_region=args.num_schemes,
             pattern_cache_file=args.pattern_cache_file,

@@ -20,6 +20,7 @@ optimization of ONNX models using pattern-based region analysis and TensorRT per
 """
 
 import fnmatch
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -159,7 +160,7 @@ def _region_matches_filter(region, graph, filter_patterns: list[str]) -> bool:
 
 
 def region_pattern_autotuning_workflow(
-    model_path: str | onnx.ModelProto,
+    model_or_path: str | onnx.ModelProto,
     output_dir: Path | None = None,
     num_schemes_per_region: int = 30,
     pattern_cache_file: str | None = None,
@@ -196,7 +197,7 @@ def region_pattern_autotuning_workflow(
     7. Export final optimized model with best Q/DQ scheme for each pattern
 
     Args:
-        model_path: Path to ONNX model file to optimize
+        model_or_path: Path to ONNX model file to optimize
         output_dir: Directory for output files (state, logs, models). Created if it doesn't exist.
         num_schemes_per_region: Number of Q/DQ insertion schemes to test per region pattern.
                                Higher values explore more configurations but take longer (default: 30)
@@ -217,6 +218,7 @@ def region_pattern_autotuning_workflow(
     Returns:
         QDQAutotuner instance after autotuning
     """
+    output_dir_is_temp = output_dir is None
     if not output_dir:
         output_dir = Path(tempfile.mkdtemp())
 
@@ -230,11 +232,11 @@ def region_pattern_autotuning_workflow(
         state_file = str(output_dir / "autotuner_state.yaml")
     state_path = Path(state_file)
 
-    if isinstance(model_path, str):
-        logger.info(f"Loading model: {model_path}")
-        model = onnx.load(model_path)
+    if isinstance(model_or_path, str):
+        logger.info(f"Loading model: {model_or_path}")
+        model = onnx.load(model_or_path)
     else:
-        model = model_path
+        model = model_or_path
 
     pattern_cache = None
     if pattern_cache_file:
@@ -380,5 +382,10 @@ def region_pattern_autotuning_workflow(
     logger.info(f"  State: {state_path}")
     logger.debug(f"  Logs: {logs_dir}")
     logger.debug(f"  Region models: {models_dir}")
+
+    # Remove temporary folder
+    if output_dir_is_temp and output_dir.exists():
+        shutil.rmtree(output_dir)
+        logger.info(f"Temporary directory {output_dir} was deleted!")
 
     return autotuner

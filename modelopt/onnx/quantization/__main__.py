@@ -307,11 +307,11 @@ def get_parser() -> argparse.ArgumentParser:
         default=None,
         choices=["quick", "default", "extensive"],
         help=(
-            "If set, enable Autotune to detect optimal Q/DQ node placements according to TensorRT runtimes."
+            "If set, enable Autotune to detect optimal Q/DQ node placements according to TensorRT runtimes. "
             "Available modes (presets 'schemes_per_region', 'warmup_runs', and 'timing_runs' values): "
-            "  - 'quick': fewer schemes and benchmark runs for for quick exploration;"
-            "  - 'default': balanced, recommended for most cases;"
-            "  - 'extensive': more schemes and runs for extensive search and thorough tuning."
+            "  - 'quick': fewer schemes and benchmark runs for quick exploration; "
+            "  - 'default': balanced, recommended for most cases; "
+            "  - 'extensive': more schemes and runs for extensive search and thorough tuning. "
             "Explicit --autotune_schemes_per_region/warmup_runs/timing_runs override the preset."
         ),
     )
@@ -328,7 +328,7 @@ def get_parser() -> argparse.ArgumentParser:
     autotune_group.add_argument(
         "--autotune_schemes_per_region",
         type=int,
-        default=50,
+        default=MODE_PRESETS["default"]["schemes_per_region"],
         help="Number of Q/DQ schemes to test per region.",
         action=StoreWithExplicitFlag,
         explicit_attr="_explicit_autotune_schemes_per_region",
@@ -380,7 +380,7 @@ def get_parser() -> argparse.ArgumentParser:
     autotune_group.add_argument(
         "--autotune_warmup_runs",
         type=int,
-        default=50,
+        default=MODE_PRESETS["default"]["warmup_runs"],
         help="Number of warmup runs before timing.",
         action=StoreWithExplicitFlag,
         explicit_attr="_explicit_autotune_warmup_runs",
@@ -388,7 +388,7 @@ def get_parser() -> argparse.ArgumentParser:
     autotune_group.add_argument(
         "--autotune_timing_runs",
         type=int,
-        default=100,
+        default=MODE_PRESETS["default"]["timing_runs"],
         help="Number of timed runs for latency measurement.",
         action=StoreWithExplicitFlag,
         explicit_attr="_explicit_autotune_timing_runs",
@@ -459,7 +459,9 @@ def main():
     autotune_enabled = args.autotune is not None
     if autotune_enabled:
         apply_mode_presets(args)
-    autotune_node_filter_list = get_node_filter_list(args.autotune_node_filter_list)
+    autotune_node_filter_list = (
+        get_node_filter_list(args.autotune_node_filter_list) if autotune_enabled else None
+    )
 
     quantize(
         args.onnx_path,

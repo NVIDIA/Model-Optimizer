@@ -13,13 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from unittest.mock import patch
 
 import onnx
 import onnx_graphsurgeon as gs
 from _test_utils.import_helper import skip_if_no_tensorrt
 from _test_utils.onnx.lib_test_models import export_as_onnx
-from _test_utils.onnx.quantization.autotune.models import _create_simple_resnet18_onnx_model
+from _test_utils.onnx.quantization.autotune.models import _create_simple_resnet18_model
 
 from modelopt.onnx.quantization.autotune.workflows import (
     init_benchmark_instance,
@@ -53,8 +54,8 @@ def test_autotune_quantization_integration(tmp_path):
     - the autotuner's own export (via export_onnx), and
     - the quantize(autotune=True) output model.
     """
-    model_torch, input_tensor = _create_simple_resnet18_onnx_model()
-    onnx_path = tmp_path / "model.onnx"
+    model_torch, input_tensor = _create_simple_resnet18_model()
+    onnx_path = os.path.join(tmp_path, "model.onnx")
     output_path = onnx_path.replace(".onnx", ".quant.onnx")
 
     # Export torch model to ONNX
