@@ -46,11 +46,6 @@ import onnxslim
 
 from modelopt.onnx.logging_config import configure_logging, logger
 from modelopt.onnx.op_types import is_data_dependent_shape_op
-from modelopt.onnx.quantization.autotune import MODE_PRESETS
-from modelopt.onnx.quantization.autotune.workflows import (
-    init_benchmark_instance,
-    region_pattern_autotuning_workflow,
-)
 from modelopt.onnx.quantization.calib_utils import (
     CalibrationDataProvider,
     CalibrationDataType,
@@ -254,7 +249,7 @@ def _find_nodes_to_quantize_autotune(
     trt_plugins: list[str] | None,
     high_precision_dtype: str = "fp16",
     output_dir: str | None = None,
-    num_schemes_per_region: int = 30,
+    num_schemes_per_region: int = 50,
     pattern_cache_file: str | None = None,
     state_file: str | None = None,
     qdq_baseline_model: str | None = None,
@@ -262,12 +257,17 @@ def _find_nodes_to_quantize_autotune(
     verbose: bool = False,
     use_trtexec: bool = False,
     timing_cache_file: str | None = None,
-    warmup_runs: int = 5,
-    timing_runs: int = 20,
+    warmup_runs: int = 50,
+    timing_runs: int = 100,
     trtexec_args: str | None = None,
 ) -> tuple[list[str], list[str], list[tuple[gs.Node, gs.Node, str]], list[str]]:
-    logger.info("Running Auto Q/DQ with TensorRT")
+    # Import Autotune dependencies here to avoid making 'tensorrt' and 'cuda' a module-level requirement.
+    from modelopt.onnx.quantization.autotune.workflows import (
+        init_benchmark_instance,
+        region_pattern_autotuning_workflow,
+    )
 
+    logger.info("Running Auto Q/DQ with TensorRT")
     benchmark_instance = init_benchmark_instance(
         use_trtexec=use_trtexec,
         plugin_libraries=trt_plugins,
@@ -330,7 +330,7 @@ def quantize(
     opset: int | None = None,
     autotune: bool = False,
     autotune_output_dir: str | None = None,
-    autotune_num_schemes_per_region: int = MODE_PRESETS["default"]["schemes_per_region"],
+    autotune_num_schemes_per_region: int = 50,
     autotune_pattern_cache_file: str | None = None,
     autotune_state_file: str | None = None,
     autotune_qdq_baseline: str | None = None,
@@ -338,8 +338,8 @@ def quantize(
     autotune_verbose: bool = False,
     autotune_use_trtexec: bool = False,
     autotune_timing_cache: str | None = None,
-    autotune_warmup_runs: int = MODE_PRESETS["default"]["warmup_runs"],
-    autotune_timing_runs: int = MODE_PRESETS["default"]["timing_runs"],
+    autotune_warmup_runs: int = 50,
+    autotune_timing_runs: int = 100,
     autotune_trtexec_args: str | None = None,
     **kwargs: Any,
 ) -> None:
