@@ -46,6 +46,14 @@ import onnxslim
 
 from modelopt.onnx.logging_config import configure_logging, logger
 from modelopt.onnx.op_types import is_data_dependent_shape_op
+
+try:
+    from modelopt.onnx.quantization.autotune.workflows import (
+        init_benchmark_instance,
+        region_pattern_autotuning_workflow,
+    )
+except ImportError:
+    logger.warning("Failed to import Autotune dependencies")
 from modelopt.onnx.quantization.calib_utils import (
     CalibrationDataProvider,
     CalibrationDataType,
@@ -261,13 +269,8 @@ def _find_nodes_to_quantize_autotune(
     timing_runs: int = 100,
     trtexec_args: str | None = None,
 ) -> tuple[list[str], list[str], list[tuple[gs.Node, gs.Node, str]], list[str]]:
-    # Import Autotune dependencies here to avoid making 'tensorrt' and 'cuda' a module-level requirement.
-    from modelopt.onnx.quantization.autotune.workflows import (
-        init_benchmark_instance,
-        region_pattern_autotuning_workflow,
-    )
-
     logger.info("Running Auto Q/DQ with TensorRT")
+
     benchmark_instance = init_benchmark_instance(
         use_trtexec=use_trtexec,
         plugin_libraries=trt_plugins,
