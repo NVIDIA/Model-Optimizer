@@ -464,12 +464,12 @@ class QDQAutotunerBase:
             if current_scheme is None:
                 continue
             self._exclude_overlapping_insertion_points(resolved_insertion_points, region, pattern)
-            new_ips = pattern.matches(region, self.graph, current_scheme)
-            if new_ips:
-                resolved_insertion_points.update(new_ips)
+            new_insertion_points = pattern.matches(region, self.graph, current_scheme)
+            if new_insertion_points:
+                resolved_insertion_points.update(new_insertion_points)
                 matched_regions += 1
                 if verbose:
-                    logger.debug(f"  → Added {len(new_ips)} insertion points")
+                    logger.debug(f"  → Added {len(new_insertion_points)} insertion points")
         if verbose:
             logger.debug(
                 f"Matched {matched_regions}/{len(self.regions)} regions, "
