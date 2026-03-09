@@ -269,6 +269,7 @@ def _find_nodes_to_quantize_autotune(
     timing_runs: int = 100,
     trtexec_args: str | None = None,
 ) -> tuple[list[str], list[str], list[tuple[gs.Node, gs.Node, str]], list[str]]:
+    """Extracts quantization information from Autotune to provide ORT quantization."""
     logger.info("Running Auto Q/DQ with TensorRT")
 
     benchmark_instance = init_benchmark_instance(

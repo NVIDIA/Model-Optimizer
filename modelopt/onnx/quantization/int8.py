@@ -162,6 +162,8 @@ def quantize(
         # Either of m or n in matmul is 1, this matmul cannot utilize TensorCores.
         # The perf of adding Q/DQ layers is not good in TRT. Thus, in this case,
         # do not add Q/DQ layers to this matmul.
+        # Note that this check will be skipped if Autotune is enabled as Q/DQ node placements
+        # will be decided according to TensorRT's runtime measurements.
         logger.info("Detecting GEMV patterns for TRT optimization")
         matmul_nodes_to_exclude = find_nodes_from_matmul_to_exclude(
             onnx_path,
