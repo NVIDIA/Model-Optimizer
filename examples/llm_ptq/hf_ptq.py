@@ -24,6 +24,7 @@ import torch
 from accelerate.hooks import remove_hook_from_module
 from example_utils import (
     build_quant_cfg,
+    calibrate_kv_cache_quantizers,
     copy_custom_model_files,
     create_vlm_calibration_loop,
     get_model,
@@ -300,22 +301,15 @@ def auto_quantize(
     )
 
     calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
-    # We need to explicitly calibrate for kv cache quantization
-    enable_quant_kv_cache = args.kv_cache_qformat != "none"
-    print(f"{'Enable' if enable_quant_kv_cache else 'Disable'} KV cache quantization")
-    if enable_quant_kv_cache:
-        kv_cache_quant_cfg = getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"]
-        kv_cache_quant_cfg.pop("default")  # keep other quantizers from auto_quantize
-
-        mtq.set_quantizer_by_cfg(
-            language_model,
-            quant_cfg=kv_cache_quant_cfg,
-        )
-        # Lets calibrate only the quantizers for kv cache quantization this time. Let's disable all others.
-        with mtq.set_quantizer_by_cfg_context(
-            language_model, {"*": {"enable": False}, **kv_cache_quant_cfg}
-        ):
-            mtq.calibrate(language_model, algorithm="max", forward_loop=calibrate_loop)
+    # We need to explicitly set up KV cache quantization after auto_quantize
+    calibrate_kv_cache_quantizers(
+        language_model,
+        args.kv_cache_qformat,
+        KV_QUANT_CFG_CHOICES,
+        calibrate_kv_cache=args.calibrate_kv_cache,
+        calibrate_loop=calibrate_loop,
+        set_quantizers=True,
+    )
     return language_model
 
 
@@ -543,6 +537,16 @@ def mono_quantize(
             )
         else:
             language_model = mtq.quantize(language_model, quant_cfg, forward_loop=calibrate_loop)
+
+        # If KV cache quantization is enabled but data-driven calibration is not requested,
+        # override the KV quantizer amaxes with the constant FP8 maxbound (amax=448.0 → scale=1.0).
+        if args.kv_cache_qformat != "none" and not args.calibrate_kv_cache:
+            calibrate_kv_cache_quantizers(
+                language_model,
+                args.kv_cache_qformat,
+                KV_QUANT_CFG_CHOICES,
+                calibrate_kv_cache=False,
+            )
 
         # For VL models, update full_model to use the quantized language model
         if is_nemotron_vl_model:
@@ -925,6 +929,7 @@ def quantize_main(
             QUANT_CFG_CHOICES,
             KV_QUANT_CFG_CHOICES,
             args.moe_calib_experts_ratio,
+            args.calibrate_kv_cache,
         )
 
         # Exclude MTP layers from quantization if detected (e.g., GLM-4.7's layer 92)
@@ -1056,7 +1061,25 @@ def parse_args() -> argparse.Namespace:
         required=False,
         default="fp8",
         choices=KV_QUANT_CFG_CHOICES.keys(),
-        help="Specify KV cache quantization format, default to fp8 if not provided",
+        help=(
+            "Specify KV cache quantization format. Default: fp8. "
+            "KV quantizers are always inserted to record kv_cache_quant_algo metadata in the checkpoint. "
+            "By default, KV quantizers use a constant scale=1.0 (amax=448.0) without data-driven calibration. "
+            "Use --calibrate_kv_cache to enable data-driven calibration."
+        ),
+    )
+    parser.add_argument(
+        "--calibrate_kv_cache",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable data-driven calibration for KV cache quantizers. "
+            "When set, KV quantizers are calibrated using activation statistics from the calibration dataset "
+            "and per-tensor KV scales are exported to the checkpoint. "
+            "By default (without this flag), KV quantizers use a constant amax=448.0 (scale=1.0 for FP8 E4M3), "
+            "and KV scales are omitted from the checkpoint since inference engines (TRT-LLM, vLLM) "
+            "use scale=1.0 by default."
+        ),
     )
     parser.add_argument(
         "--export_fmt",

@@ -37,6 +37,7 @@ from .config import (
     AWQFullCalibConfig,
     AWQLiteCalibConfig,
     CompressConfig,
+    ConstantCalibConfig,
     GPTQLiteConfig,
     LocalHessianCalibConfig,
     MaxCalibConfig,
@@ -59,6 +60,7 @@ from .conversion import (
 )
 from .model_calib import (
     awq,
+    constant_calibrate,
     gptq_lite,
     local_hessian_calibrate,
     max_calibrate,
@@ -397,6 +399,21 @@ class MaxCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
         return MaxCalibConfig
 
     _calib_func = max_calibrate
+
+
+@CalibrateModeRegistry.register_mode
+class ConstantCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for constant calibration algorithm.
+
+    Sets all enabled quantizer amaxes to a fixed constant value without any forward pass.
+    """
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return ConstantCalibConfig
+
+    _calib_func = constant_calibrate
 
 
 @CalibrateModeRegistry.register_mode

@@ -1087,14 +1087,14 @@ def postprocess_state_dict(
                     # Warn if scale exceeds threshold
                     if quantization == KV_CACHE_FP8 and value.item() > 0.5:
                         logger.warning(
-                            "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop. "
-                            "Setting KV cache scaling factor to at least 1."
+                            "Large KV activations detected. Quantized KV cache may lead to higher accuracy drop."
                         )
 
-                    # Ensure scale is at least 1 for KV_CACHE_FP8
-                    # We export real value for KV_CACHE_NVFP4
-                    if quantization == KV_CACHE_FP8:
-                        value.clamp_(min=1.0)
+                    # Skip exporting KV scale when it is 1.0 (default constant scale).
+                    # Inference engines (TRT-LLM, vLLM) use scale=1.0 by default when no scale
+                    # is present in the checkpoint, so exporting it is redundant.
+                    if quantization == KV_CACHE_FP8 and value.item() == 1.0:
+                        break
                 post_state_dict[prefix + new_suffix] = value
                 break
 

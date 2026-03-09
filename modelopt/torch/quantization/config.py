@@ -1077,6 +1077,29 @@ class MaxCalibConfig(QuantizeAlgorithmConfig):
     )
 
 
+class ConstantCalibConfig(QuantizeAlgorithmConfig):
+    """The config for constant calibration algorithm.
+
+    Constant calibration sets all enabled quantizer amaxes to a fixed constant value
+    without running any forward pass. This is useful when you want to insert quantizers
+    to record quantization metadata (e.g., ``kv_cache_quant_algo: FP8``) but use a
+    default scale (amax=448.0 → scale=1.0 for FP8 E4M3).
+    """
+
+    method: Literal["constant"] = ModeloptField("constant")
+
+    amax: float = ModeloptField(
+        default=448.0,
+        gt=0.0,
+        title="Constant amax value to set for all enabled quantizers.",
+        description=(
+            "The amax value to assign to all enabled quantizers. "
+            "For FP8 E4M3, the maxbound is 448.0, so amax=448.0 yields scale=1.0. "
+            "No forward pass is required."
+        ),
+    )
+
+
 class MseCalibConfig(QuantizeAlgorithmConfig):
     """Configuration for per-tensor MSE calibration.
 

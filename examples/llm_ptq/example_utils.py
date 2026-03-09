@@ -202,6 +202,7 @@ def build_quant_cfg(
     quant_cfg_choices,
     kv_quant_cfg_choices,
     moe_calib_experts_ratio: float | None = None,
+    calibrate_kv_cache: bool = False,
 ) -> dict[str, Any]:
     quant_cfg = {}
     assert qformat in quant_cfg_choices, (
@@ -259,6 +260,63 @@ def build_quant_cfg(
         quant_cfg["quant_cfg"]["*vision*"] = {"enable": False}
 
     return quant_cfg
+
+
+def calibrate_kv_cache_quantizers(
+    model,
+    kv_cache_qformat: str,
+    kv_quant_cfg_choices: dict,
+    calibrate_kv_cache: bool,
+    calibrate_loop=None,
+    set_quantizers: bool = False,
+):
+    """Set up and calibrate KV cache quantizers on an already-quantized model.
+
+    Args:
+        model: The model with quantizers already inserted.
+        kv_cache_qformat: KV cache quantization format, e.g. ``"fp8"``.
+        kv_quant_cfg_choices: Dict mapping format names to mtq config attribute names.
+        calibrate_kv_cache: If ``True``, run data-driven max calibration for KV quantizers.
+            If ``False``, assign a constant amax of 448.0 (FP8 E4M3 maxbound → scale=1.0)
+            with no forward pass. KV scales equal to 1.0 are omitted from exported checkpoints;
+            inference engines (TRT-LLM, vLLM) use scale=1.0 by default.
+        calibrate_loop: Forward loop required when ``calibrate_kv_cache=True``.
+        set_quantizers: If ``True``, first call :func:`mtq.set_quantizer_by_cfg` to enable KV
+            quantizers (needed when they were not part of the main quantization pass, e.g. after
+            :func:`mtq.auto_quantize`).
+    """
+    if kv_cache_qformat == "none":
+        return
+
+    kv_cache_quant_cfg = copy.deepcopy(
+        getattr(mtq, kv_quant_cfg_choices[kv_cache_qformat])["quant_cfg"]
+    )
+    kv_cache_quant_cfg.pop("default", None)  # keep other quantizers unchanged
+
+    if set_quantizers:
+        mtq.set_quantizer_by_cfg(model, quant_cfg=kv_cache_quant_cfg)
+
+    if calibrate_kv_cache:
+        assert calibrate_loop is not None, (
+            "calibrate_loop is required for data-driven KV cache calibration"
+        )
+        with mtq.set_quantizer_by_cfg_context(
+            model, {"*": {"enable": False}, **kv_cache_quant_cfg}
+        ):
+            mtq.calibrate(model, algorithm="max", forward_loop=calibrate_loop)
+    else:
+        # Set KV quantizer amaxes to the FP8 E4M3 maxbound so scale=1.0.
+        try:
+            model_device = next(model.parameters()).device
+        except StopIteration:
+            model_device = torch.device("cpu")
+        for name, module in model.named_modules():
+            if name.endswith(("k_bmm_quantizer", "v_bmm_quantizer")):
+                if hasattr(module, "_amax"):
+                    # Already a registered buffer on GPU — update in-place
+                    module._amax.data.copy_(torch.tensor(448.0))
+                else:
+                    module.register_buffer("_amax", torch.tensor(448.0, device=model_device))
 
 
 def is_speculative(hf_config):

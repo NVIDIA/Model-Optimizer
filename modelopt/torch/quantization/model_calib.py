@@ -56,6 +56,7 @@ from .utils import (
 
 __all__ = [
     "awq",
+    "constant_calibrate",
     "local_hessian_calibrate",
     "max_calibrate",
     "sequential_calibrate",
@@ -77,6 +78,40 @@ def weight_only_quantize(model: nn.Module):
                 )
                 weight_quantizer(getattr(module, weight_name))
         seen_modules.add(module)
+
+
+def constant_calibrate(
+    model: nn.Module,
+    forward_loop: ForwardLoop | None = None,
+    amax: float = 448.0,
+):
+    """Calibrate the model by setting all enabled quantizer amaxes to a constant value.
+
+    No forward pass is performed. This is useful for inserting quantizers to record
+    quantization metadata (e.g., ``kv_cache_quant_algo: FP8``) while using a fixed
+    scale without data-driven calibration.
+
+    For FP8 E4M3, the maxbound is 448.0, so ``amax=448.0`` yields ``scale=1.0``.
+
+    Args:
+        model: Model to be calibrated.
+        forward_loop: Ignored. Kept for API consistency with other calibration functions.
+        amax: Constant amax value to set for all enabled quantizers.
+
+    See :class:`ConstantCalibConfig <modelopt.torch.quantization.config.ConstantCalibConfig>` for
+    details on the remaining arguments.
+    """
+    try:
+        model_device = next(model.parameters()).device
+    except StopIteration:
+        model_device = torch.device("cpu")
+    for module in model.modules():
+        if isinstance(module, TensorQuantizer) and module.is_enabled:
+            if hasattr(module, "_amax"):
+                # _amax is already a registered buffer; update in-place to preserve device
+                module._amax.data.copy_(torch.tensor(amax))
+            else:
+                module.register_buffer("_amax", torch.tensor(amax, device=model_device))
 
 
 def _has_expert_parallelism(module: nn.Module) -> bool:
