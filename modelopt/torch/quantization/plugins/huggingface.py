@@ -1045,9 +1045,11 @@ class _QuantGptOssExperts(_QuantFunctionalMixin):
         _aten_bmm = torch.ops.aten.bmm
         _aten_matmul = torch.ops.aten.matmul
 
-        def _quantized_bmm(batch1, batch2):
+        def _quantized_bmm(batch1, batch2, *args, out=None, **kwargs):
             batch1 = self.down_proj_input_quantizer(batch1) if self._down_proj_mul else batch1
             self._down_proj_mul = not self._down_proj_mul  # toggle the flag
+            if out is not None:
+                return torch.ops.aten.bmm.out(batch1, batch2, out=out)
             return _aten_bmm(batch1, batch2)
 
         def _tensor_matmul(self_t, other):
