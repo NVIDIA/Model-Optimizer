@@ -54,6 +54,19 @@ def test_hadamard_transform(dim):
 
 
 @pytest.mark.parametrize(
+    ("dim", "block_size"),
+    [(1920, 128), (1536, 128), (1920, None), (64, 32)],
+)
+def test_hadamard_transform_block(dim, block_size):
+    """Block-granular RHT for non-power-of-2 dimensions (e.g. MoE expert channels)."""
+    x = torch.rand(4, dim, device="cuda")
+    xxt = x @ x.T
+    x_h = normalized_hadamard_transform(x, block_size=block_size)
+    xxt_h = x_h @ x_h.T
+    assert torch.allclose(xxt_h, xxt, atol=0.05)
+
+
+@pytest.mark.parametrize(
     "rotate_fp32",
     [True, False],
 )

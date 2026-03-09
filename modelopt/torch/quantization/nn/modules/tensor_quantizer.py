@@ -543,6 +543,13 @@ class TensorQuantizer(nn.Module):
             else False
         )
 
+    @property
+    def rotate_block_size(self):
+        """Block size for block-granular RHT, or None for full/auto."""
+        if not isinstance(self._rotate, dict) or not self.rotate_is_enabled:
+            return None
+        return self._rotate.get("block_size", None)
+
     def disable_calib(self):
         """Disable calibration."""
         self._if_calib = False
@@ -1011,7 +1018,11 @@ class TensorQuantizer(nn.Module):
 
         # Rotating the input
         if self.rotate_is_enabled:
-            inputs = normalized_hadamard_transform(inputs, rotate_fp32=self.rotate_is_fp32)
+            inputs = normalized_hadamard_transform(
+                inputs,
+                rotate_fp32=self.rotate_is_fp32,
+                block_size=self.rotate_block_size,
+            )
 
         if self._disabled:
             # if quantizer is disabled, we still need to track the input dtype for saving the model
@@ -1125,6 +1136,8 @@ class TensorQuantizer(nn.Module):
         )
         s += " rotated" if self.rotate_is_enabled else ""
         s += " (fp32)" if self.rotate_is_fp32 else ""
+        if self.rotate_block_size is not None:
+            s += f" (block={self.rotate_block_size})"
         s += (
             f" calibrator={self._calibrator.__class__.__name__}"
             if (self._calibrator is not None)

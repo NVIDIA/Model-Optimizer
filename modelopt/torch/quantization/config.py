@@ -975,12 +975,16 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
             assert v in ["max", "histogram"]
         return v
 
-    rotate: bool | dict[str, bool] = ModeloptField(
+    rotate: bool | dict[str, bool | int] = ModeloptField(
         default=False,
         title="""Configuration for rotating the input before quantization.""",
         description="""Can be a boolean or a dictionary with the following keys:
         - "enable": Boolean to enable/disable rotation (default: False)
         - "rotate_fp32": Boolean to compute rotation in float32 precision (default: False)
+        - "block_size": Optional int for block-granular RHT. When set, the last dimension is
+          split into blocks of this size (must be power of 2 and divide the dimension).
+          Enables RHT for non-power-of-2 dimensions (e.g. MoE expert channels 1920, 1536).
+          If None and dimension is not power of 2, auto-selects the largest power-of-2 divisor.
 
         If a boolean is provided, it is treated as the "enable" value with "rotate_fp32" defaulting to False.
 
