@@ -103,20 +103,24 @@ def test_batch_contents_preserved():
     assert processed_values == [0, 1, 2, 3]
 
 
-def test_get_dataset_samples_with_local_unsupported_minipile_dataset(tmp_path):
+@pytest.mark.parametrize("test_local_path", [True, False])
+def test_get_dataset_samples_with_unsupported_minipile_dataset(tmp_path, test_local_path):
     pytest.importorskip("datasets")
     pytest.importorskip("huggingface_hub")
 
     from huggingface_hub import snapshot_download
 
-    local_dir = tmp_path / "nanotron" / "minipile_100_samples"
-    snapshot_download(
-        repo_id="nanotron/minipile_100_samples",
-        repo_type="dataset",
-        local_dir=str(local_dir),
-    )
+    dataset_name = "nanotron/minipile_100_samples"
+    if test_local_path:
+        local_dir = str(tmp_path / dataset_name)
+        snapshot_download(
+            repo_id=dataset_name,
+            repo_type="dataset",
+            local_dir=local_dir,
+        )
+        dataset_name = local_dir
 
-    samples = get_dataset_samples(str(local_dir), num_samples=5)
+    samples = get_dataset_samples(dataset_name, num_samples=5)
 
     assert isinstance(samples, list)
     assert len(samples) == 5

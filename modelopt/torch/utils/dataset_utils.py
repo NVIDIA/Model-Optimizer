@@ -51,9 +51,9 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "name": "SFT",
             "split": ["code", "math", "science", "chat", "safety"],
         },
-        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["input"])
-        + "\n"
-        + sample["output"],
+        "preprocess": lambda sample: (
+            "\n".join(turn["content"] for turn in sample["input"]) + "\n" + sample["output"]
+        ),
     },
     "nemotron-post-training-dataset-v2": {
         "config": {
@@ -250,20 +250,18 @@ def get_dataset_samples(
 
     from datasets import load_dataset
 
-    if os.path.exists(dataset_name):
-        # Local path
-        dataset_path = dataset_name
-        dataset_name = os.path.basename(os.path.normpath(dataset_path))
-    else:
-        dataset_path = None
+    local_dataset_path = None
+    if os.path.exists(dataset_name):  # Local path
+        local_dataset_path = dataset_name
+        dataset_name = os.path.basename(os.path.normpath(local_dataset_path))
 
     is_registered = dataset_name in SUPPORTED_DATASET_CONFIG
 
     if is_registered:
         dataset_config = SUPPORTED_DATASET_CONFIG[dataset_name]
         config = dataset_config["config"].copy()
-        if dataset_path is not None:
-            config["path"] = dataset_path
+        if local_dataset_path:
+            config["path"] = local_dataset_path
         splits = _normalize_splits(split) if split is not None else config.pop("split", [None])
         if split is not None:
             config.pop("split", None)
@@ -289,17 +287,18 @@ def get_dataset_samples(
             return dataset_config["preprocess"](sample)
 
     else:
-        warn(
+        print(
             f"Dataset '{dataset_name}' is not in SUPPORTED_DATASET_CONFIG. "
             "Auto-detecting format from column names."
         )
-        config = {"path": dataset_path}
+        config = {"path": local_dataset_path or dataset_name}
         splits = _normalize_splits(split) if split is not None else ["train"]
 
         def _preprocess(sample: dict) -> str:
             return _auto_preprocess_sample(sample, dataset_name, tokenizer)
 
     # load_dataset does not support a list of splits while streaming, so load each separately.
+    print(f"Loading dataset with {config=} and {splits=}")
     dataset_splits = [load_dataset(streaming=True, **config, split=s) for s in splits]
 
     num_per_split = [num_samples // len(dataset_splits)] * len(dataset_splits)
