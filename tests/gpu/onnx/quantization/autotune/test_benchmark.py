@@ -344,7 +344,7 @@ class TestTensorRTPyBenchmark:
     """End-to-end tests for TensorRTPyBenchmark. Requires TensorRT and CUDA."""
 
     @pytest.fixture(autouse=True)
-    def _require_tensorrt(self):
+    def _require_tensorrt_and_torch_cuda(self):
         pytest.importorskip("tensorrt")
         if not bm.TORCH_CUDA_AVAILABLE:
             pytest.skip("CUDA not available")
