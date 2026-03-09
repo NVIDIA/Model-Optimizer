@@ -61,7 +61,7 @@ out_q = conv3d_implicit_gemm_cuda(
     padding=(1, 1, 1),
     act_amax=x.abs().max().unsqueeze(0),
     quant_act=True,
-    fp4_block_size=block_size,  # 128 or 256
+    fp4_block_size=block_size,  # 16, 32, 64, 128, or 256
 )
 ```
 
@@ -79,7 +79,7 @@ Function: `conv3d_implicit_gemm_cuda(...)` from `experimental/conv/implicit_gemm
 | `dilation` | Convolution dilation `(D, H, W)` |
 | `act_amax` | Activation abs-max scalar tensor (required when `quant_act=True`) |
 | `quant_act` | Enable FP4 fake quantization on activations |
-| `fp4_block_size` | FP4 quantization block size (`128` or `256`) |
+| `fp4_block_size` | FP4 quantization block size (`16`, `32`, `64`, `128`, or `256`) |
 
 ## Status
 

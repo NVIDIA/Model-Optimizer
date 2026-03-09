@@ -138,7 +138,7 @@ __device__ __forceinline__ float quantize_scale_fp8(float block_max, float globa
 //   Bs[BLOCK_K][BN_STRIDE]  - K-major (row_major for WMMA B-fragments)
 
 template <bool QUANT_ACT, bool HAS_BIAS, int BLOCK_M, int BLOCK_N, int BLOCK_K, int WARPS_M,
-          int WARPS_N, int L2_SWIZZLE_GROUP = 8>
+          int WARPS_N, int FP4_BLOCK_SIZE = BLOCK_K, int L2_SWIZZLE_GROUP = 8>
 __global__ void __launch_bounds__(WARPS_M * WARPS_N * 32, 2)
     conv3d_implicit_gemm_wmma(const float *__restrict__ x_pad, const float *__restrict__ w_flat,
                               const float *__restrict__ bias, float *__restrict__ y,
@@ -234,7 +234,11 @@ __global__ void __launch_bounds__(WARPS_M * WARPS_N * 32, 2)
     // =================================================================
     if constexpr (QUANT_ACT) {
       // Fused FP4 quantization: each warp handles M-rows
+      // FP4_BLOCK_SIZE can be smaller than BLOCK_K — we quantize in sub-blocks
+      static_assert(BLOCK_K % FP4_BLOCK_SIZE == 0, "BLOCK_K must be divisible by FP4_BLOCK_SIZE");
+      static_assert(FP4_BLOCK_SIZE >= 16, "FP4_BLOCK_SIZE must be >= 16");
       constexpr int ELEMS_PER_LANE = (BLOCK_K + 31) / 32;
+      constexpr int NUM_FP4_BLOCKS = BLOCK_K / FP4_BLOCK_SIZE;
 
       for (int m = warp_id; m < BLOCK_M; m += NUM_WARPS) {
         int m_idx = m_start + m;
@@ -254,7 +258,7 @@ __global__ void __launch_bounds__(WARPS_M * WARPS_N * 32, 2)
           ow_val = 0;
         }
 
-        float local_max = 0.0f;
+        // Pass 1: Load all values from global memory
         float vals[ELEMS_PER_LANE];
 
 #pragma unroll
@@ -279,23 +283,48 @@ __global__ void __launch_bounds__(WARPS_M * WARPS_N * 32, 2)
             }
           }
           vals[i] = val;
-          local_max = fmaxf(local_max, fabsf(val));
         }
 
-        float block_max = warp_reduce_max(local_max);
-        float scale = quantize_scale_fp8(block_max, global_scale);
-        if (scale < 1e-5f)
-          scale = 1.0f;
-        float inv_scale = 1.0f / scale;
+        // Pass 2: For each FP4 sub-block, find max → compute scale → quantize
+        // Pre-compute per-sub-block scales
+        float scales[NUM_FP4_BLOCKS];
+        float inv_scales[NUM_FP4_BLOCKS];
 
+#pragma unroll
+        for (int sb = 0; sb < NUM_FP4_BLOCKS; sb++) {
+          const int k_sb_start = sb * FP4_BLOCK_SIZE;
+          const int k_sb_end = k_sb_start + FP4_BLOCK_SIZE;
+
+          // Each lane accumulates max over its elements in this sub-block
+          float local_max = 0.0f;
+#pragma unroll
+          for (int i = 0; i < ELEMS_PER_LANE; i++) {
+            int k = lane_id + i * 32;
+            // Compiler resolves this at compile time for unrolled loops
+            if (k >= k_sb_start && k < k_sb_end) {
+              local_max = fmaxf(local_max, fabsf(vals[i]));
+            }
+          }
+
+          // Warp reduce — lanes outside this sub-block contribute 0, which is correct
+          float block_max = warp_reduce_max(local_max);
+          float scale = quantize_scale_fp8(block_max, global_scale);
+          if (scale < 1e-5f)
+            scale = 1.0f;
+          scales[sb] = scale;
+          inv_scales[sb] = 1.0f / scale;
+        }
+
+        // Pass 3: Quantize and store to shared memory
 #pragma unroll
         for (int i = 0; i < ELEMS_PER_LANE; i++) {
           int k = lane_id + i * 32;
           if (k < BLOCK_K) {
+            int sb = k / FP4_BLOCK_SIZE; // compile-time shift for power-of-2
             float val = vals[i];
             float sign = (val >= 0.0f) ? 1.0f : -1.0f;
-            float q = fp4_quantize_value(fabsf(val) * inv_scale);
-            float result = sign * q * scale;
+            float q = fp4_quantize_value(fabsf(val) * inv_scales[sb]);
+            float result = sign * q * scales[sb];
             // M-major: As[m * BK_STRIDE + k]
             As[m * BK_STRIDE + k] = __float2bfloat16(result);
           }
@@ -528,7 +557,8 @@ torch::Tensor conv3d_implicit_gemm_cuda(torch::Tensor x_pad, torch::Tensor w_fla
   };
 
 // Macro to dispatch kernel with all 4 template specializations
-#define LAUNCH_WMMA_KERNEL(BM, BN, BK, WM, WN)                                                     \
+// FP4_BS is the FP4 quantization block size (independent of BK)
+#define LAUNCH_WMMA_KERNEL(BM, BN, BK, WM, WN, FP4_BS)                                             \
   {                                                                                                \
     constexpr int BK_S = BK + 8;                                                                   \
     constexpr int BN_S = BN + 8;                                                                   \
@@ -547,28 +577,28 @@ torch::Tensor conv3d_implicit_gemm_cuda(torch::Tensor x_pad, torch::Tensor w_fla
     };                                                                                             \
                                                                                                    \
     if (quant_act && has_bias) {                                                                   \
-      auto kern = conv3d_implicit_gemm_wmma<true, true, BM, BN, BK, WM, WN>;                       \
+      auto kern = conv3d_implicit_gemm_wmma<true, true, BM, BN, BK, WM, WN, FP4_BS>;               \
       set_smem(kern);                                                                              \
       kern<<<grid, block, smem>>>(x_pad.data_ptr<float>(), w_flat.data_ptr<float>(),               \
                                   bias.data_ptr<float>(), y.data_ptr<float>(),                     \
                                   act_amax.data_ptr<float>(), Cin, Dp, Hp, Wp, Cout, OD, OH, OW,   \
                                   kD, kH, kW, sd, sh, sw, dd, dh, dw, M, K);                       \
     } else if (quant_act) {                                                                        \
-      auto kern = conv3d_implicit_gemm_wmma<true, false, BM, BN, BK, WM, WN>;                      \
+      auto kern = conv3d_implicit_gemm_wmma<true, false, BM, BN, BK, WM, WN, FP4_BS>;              \
       set_smem(kern);                                                                              \
       kern<<<grid, block, smem>>>(x_pad.data_ptr<float>(), w_flat.data_ptr<float>(),               \
                                   bias.data_ptr<float>(), y.data_ptr<float>(),                     \
                                   act_amax.data_ptr<float>(), Cin, Dp, Hp, Wp, Cout, OD, OH, OW,   \
                                   kD, kH, kW, sd, sh, sw, dd, dh, dw, M, K);                       \
     } else if (has_bias) {                                                                         \
-      auto kern = conv3d_implicit_gemm_wmma<false, true, BM, BN, BK, WM, WN>;                      \
+      auto kern = conv3d_implicit_gemm_wmma<false, true, BM, BN, BK, WM, WN, FP4_BS>;              \
       set_smem(kern);                                                                              \
       kern<<<grid, block, smem>>>(x_pad.data_ptr<float>(), w_flat.data_ptr<float>(),               \
                                   bias.data_ptr<float>(), y.data_ptr<float>(),                     \
                                   act_amax.data_ptr<float>(), Cin, Dp, Hp, Wp, Cout, OD, OH, OW,   \
                                   kD, kH, kW, sd, sh, sw, dd, dh, dw, M, K);                       \
     } else {                                                                                       \
-      auto kern = conv3d_implicit_gemm_wmma<false, false, BM, BN, BK, WM, WN>;                     \
+      auto kern = conv3d_implicit_gemm_wmma<false, false, BM, BN, BK, WM, WN, FP4_BS>;             \
       set_smem(kern);                                                                              \
       kern<<<grid, block, smem>>>(x_pad.data_ptr<float>(), w_flat.data_ptr<float>(),               \
                                   bias.data_ptr<float>(), y.data_ptr<float>(),                     \
@@ -577,16 +607,19 @@ torch::Tensor conv3d_implicit_gemm_cuda(torch::Tensor x_pad, torch::Tensor w_fla
     }                                                                                              \
   }
 
-  if (fp4_block_size == 128) {
-    // BLOCK_M=64, BLOCK_N=64, BLOCK_K=128, WARPS_M=2, WARPS_N=4
-    // 8 warps = 256 threads -> faster cooperative loading
-    // Shared: 64*(128+8)*2 + 128*(64+8)*2 = 17,408 + 18,432 = 35,840 bytes (~35KB)
-    LAUNCH_WMMA_KERNEL(64, 64, 128, 2, 4)
+  // BLOCK_K=256 always, FP4_BLOCK_SIZE varies
+  // BLOCK_M=64, BLOCK_N=64, WARPS_M=2, WARPS_N=4 (8 warps = 256 threads)
+  // Shared: 64*(256+8)*2 + 256*(64+8)*2 = 33,792 + 36,864 = 70,656 bytes (~69KB)
+  if (fp4_block_size == 16) {
+    LAUNCH_WMMA_KERNEL(64, 64, 256, 2, 4, 16)
+  } else if (fp4_block_size == 32) {
+    LAUNCH_WMMA_KERNEL(64, 64, 256, 2, 4, 32)
+  } else if (fp4_block_size == 64) {
+    LAUNCH_WMMA_KERNEL(64, 64, 256, 2, 4, 64)
+  } else if (fp4_block_size == 128) {
+    LAUNCH_WMMA_KERNEL(64, 64, 256, 2, 4, 128)
   } else {
-    // BLOCK_M=64, BLOCK_N=64, BLOCK_K=256, WARPS_M=2, WARPS_N=4
-    // 8 warps = 256 threads -> faster cooperative loading
-    // Shared: 64*(256+8)*2 + 256*(64+8)*2 = 33,792 + 36,864 = 70,656 bytes (~69KB)
-    LAUNCH_WMMA_KERNEL(64, 64, 256, 2, 4)
+    LAUNCH_WMMA_KERNEL(64, 64, 256, 2, 4, 256)
   }
 
 #undef LAUNCH_WMMA_KERNEL
