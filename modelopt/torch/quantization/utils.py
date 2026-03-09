@@ -487,8 +487,11 @@ def enable_weight_access_and_writeback(module, root_model, name_to_module: dict 
     Args:
         module: The module to access weights for.
         root_model: The root model containing the module.
-        name_to_module: Optional pre-computed dict mapping names to modules (for performance).
-                        If not provided, will be computed on-the-fly.
+        name_to_module: Pre-computed ``dict(root_model.named_modules())``. Without this,
+            every call iterates ``root_model.named_modules()`` internally, leading to O(N^2)
+            total cost when called in a loop. This causes significant CPU overhead on large
+            models, particularly Sparse MoE architectures where each expert is typically
+            implemented as its own module.
     """
     if _get_enclosing_fsdp_module(module, root_model, name_to_module) is not None:
         context = fsdp2_weight_access_and_writeback_context(module, root_model)
