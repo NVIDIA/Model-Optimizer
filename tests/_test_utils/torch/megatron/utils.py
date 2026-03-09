@@ -15,17 +15,13 @@
 import copy
 import re
 from collections import defaultdict
-from warnings import warn
 
 import torch
 from megatron.core import dist_checkpointing
-from megatron.core.inference.communication_utils import broadcast_from_last_pipeline_stage
-from megatron.core.inference.contexts import StaticInferenceContext
-from megatron.core.inference.model_inference_wrappers.gpt.gpt_inference_wrapper import (
-    GPTInferenceWrapper,
-)
-from megatron.core.inference.model_inference_wrappers.inference_wrapper_config import (
-    InferenceWrapperConfig,
+from megatron.core.inference.communication_utils import (
+    broadcast_from_last_pipeline_stage,
+    recv_from_prev_pipeline_rank_,
+    send_to_next_pipeline_rank,
 )
 from megatron.core.models.gpt import GPTModel
 from megatron.core.models.mamba import MambaModel
@@ -34,10 +30,11 @@ from megatron.core.parallel_state import (
     get_expert_tensor_parallel_group,
     get_expert_tensor_parallel_rank,
     initialize_model_parallel,
+    is_pipeline_first_stage,
+    is_pipeline_last_stage,
 )
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
-from megatron.core.transformer.attention import SelfAttention
-from megatron.core.transformer.mlp import MLP
+from megatron.core.utils import get_attr_wrapped_model
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
@@ -46,73 +43,58 @@ from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
 )
 from modelopt.torch.utils import to_empty_if_meta_device
 
-try:
-    from megatron.core.ssm.mamba_layer import MambaLayer
-
-    HAS_MAMBA = True
-except ImportError as e:
-    warn(f"Mamba not installed: {e}")
-    HAS_MAMBA = False
-
 
 @torch.no_grad()
 def run_mcore_inference(
-    model: GPTModel | MambaModel,
-    prompt_tokens: torch.Tensor,
-    active_hidden_size: int | None = None,
+    model: GPTModel | MambaModel, prompt_tokens: torch.Tensor, active_hidden_size: int | None = None
 ) -> torch.Tensor:
-    """Run inference on a wrapped Megatron GPT or Mamba model.
+    """Run inference on a Megatron GPT or Mamba model with pipeline parallel support.
 
     Args:
         model: Megatron GPT or Mamba model.
         prompt_tokens: Input tokens for inference.
-        active_hidden_size: Hidden size to use for inference. If not provided, infer the hidden_size
-            NOTE: `model.config.hidden_size` may not be the same as the active hidden size
-                for the model since for a NAS search space-converted model, the hidden size
-                may be different until the model is exported.
-            NOTE: If depth pruned model and some PP have 0 layers, this would not work.
+        active_hidden_size: Hidden size for PP recv buffer allocation. Must match the actual
+            model output hidden dim — required for NAS models where it differs from
+            model.config.hidden_size. Defaults to model.config.hidden_size.
     """
-    batch_size = prompt_tokens.shape[0]
-    if active_hidden_size is None:
-        if HAS_MAMBA and isinstance(model.decoder.layers[0], MambaLayer):
-            active_hidden_size = model.decoder.layers[0].mixer.d_model
-        elif isinstance(model.decoder.layers[0].self_attention, SelfAttention):
-            if hasattr(model.decoder.layers[0].self_attention.linear_qkv, "in_features"):
-                active_hidden_size = model.decoder.layers[0].self_attention.linear_qkv.in_features
-            else:
-                active_hidden_size = model.decoder.layers[0].self_attention.linear_qkv.input_size
-        elif isinstance(model.decoder.layers[0].mlp, MLP):
-            active_hidden_size = model.decoder.layers[0].mlp.linear_fc1.input_size
-        else:
-            raise ValueError(f"Cannot infer hidden size from {type(model.decoder.layers[0])=}")
+    batch_size, seq_length = prompt_tokens.shape[0], model.max_sequence_length
+    hidden_size = active_hidden_size or model.config.hidden_size
 
-    inference_wrapper_config = InferenceWrapperConfig(
-        hidden_size=active_hidden_size,
-        inference_batch_times_seqlen_threshold=batch_size * model.max_sequence_length,
-        fp32_residual_connection=False,
-        params_dtype=torch.bfloat16 if model.config.bf16 else torch.float32,
-        padded_vocab_size=model.vocab_size,
-    )
-    # Get full sequence output instead of only last token logits
-    inference_context = StaticInferenceContext.from_config(inference_wrapper_config)
-    inference_context.materialize_only_last_token_logits = False
-
-    wrapped_model = GPTInferenceWrapper(model, inference_wrapper_config, inference_context)
-    wrapped_model.prep_model_for_inference()
-
-    inference_input = wrapped_model.prep_inference_input(prompt_tokens)
-    inference_input = wrapped_model.get_batch_for_context_window(
-        inference_input, 0, model.max_sequence_length
+    pp_first, pp_last = is_pipeline_first_stage(), is_pipeline_last_stage()
+    is_pp = not (pp_first and pp_last)
+    pp_dtype = model.config.pipeline_dtype or (
+        torch.bfloat16 if model.config.bf16 else torch.float32
     )
 
-    # Note: This is returned in all TP ranks or last PP stage in PP models
-    logits = wrapped_model.run_one_forward_step(inference_input)
-    logits = broadcast_from_last_pipeline_stage(
-        [batch_size, model.max_sequence_length, model.vocab_size],
-        dtype=torch.bfloat16 if model.config.bf16 else torch.float32,
-        tensor=logits,
+    is_training = model.training
+    model.eval()
+
+    if is_pp and not pp_first:
+        recv_buffer = torch.empty(
+            (seq_length, batch_size, hidden_size),
+            dtype=pp_dtype,
+            device=torch.cuda.current_device(),
+        )
+        recv_from_prev_pipeline_rank_(recv_buffer)
+        get_attr_wrapped_model(model, "set_input_tensor")(recv_buffer)
+
+    position_ids = (
+        torch.arange(seq_length, dtype=torch.long, device=prompt_tokens.device)
+        .unsqueeze(0)
+        .expand_as(prompt_tokens)
     )
-    return logits  # shape: (batch_size, max_sequence_length, vocab_size)
+    output = model(prompt_tokens, position_ids, None, runtime_gather_output=True)
+
+    model.train(is_training)
+
+    if is_pp and not pp_last:
+        send_to_next_pipeline_rank(output.to(dtype=pp_dtype))
+
+    return broadcast_from_last_pipeline_stage(
+        [batch_size, seq_length, model.vocab_size],
+        dtype=pp_dtype,
+        tensor=output if pp_last else None,
+    )
 
 
 def run_mcore_inference_with_dummy_input(

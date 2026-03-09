@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import textwrap
 from warnings import warn
 
 import torch
@@ -27,7 +26,6 @@ from megatron.core.models.gpt.gpt_layer_specs import (
 )
 from megatron.core.models.mamba import MambaModel
 from megatron.core.parallel_state import is_pipeline_first_stage, is_pipeline_last_stage
-from megatron.core.ssm.mamba_hybrid_layer_allocation import Symbols
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -356,10 +354,7 @@ def get_mcore_mamba_hybrid_model(
         **config_kwargs,
     )
 
-    if not (skip_moe or "E" in Symbols.VALID):  # Mcore 0.16+ has MoE support
-        warn("MoE blocks are not supported in current MambaModel. Skipping MoE blocks.")
-        skip_moe = True
-
+    # TODO: hybrid_override_pattern is deprecated in MCore 0.17+, use hybrid_layer_pattern instead
     if hybrid_override_pattern is None:
         # Generate pattern by repeating base_pattern and trimming to match num_layers
         #   E.g. for num_layers=3, return "MEM" (Mamba -> MoE -> Mamba)
@@ -367,23 +362,24 @@ def get_mcore_mamba_hybrid_model(
         base_pattern = "M*M-" if skip_moe else "MEM*M-"
         hybrid_override_pattern = (base_pattern * num_layers)[:num_layers]
 
-    # Add | symbols for Pipeline parallelism (required for MCore 0.16+)
+    # TODO: enable this when MCore 0.17+ is released (has fall-back so without this is still fine for sometime)
+    # Add | symbols for Pipeline parallelism (supported from MCore 0.17+, auto-added if not provided)
     # E.g. MEM* with PP2 becomes ME|M* and MEM*M-ME with PP2 becomes MEM*|M-ME
-    if pipeline_model_parallel_size > 1 and "|" in Symbols.VALID:
-        if "|" not in hybrid_override_pattern:
-            assert (
-                num_layers_in_first_pipeline_stage is None
-                and num_layers_in_last_pipeline_stage is None
-            ), "hybrid_override_pattern with `|` must be provided for uneven PP"
-            hybrid_override_pattern = "|".join(
-                textwrap.wrap(
-                    hybrid_override_pattern,
-                    width=num_layers // pipeline_model_parallel_size,
-                    break_long_words=True,
-                    break_on_hyphens=False,
-                )
-            )
-        assert hybrid_override_pattern.count("|") == pipeline_model_parallel_size - 1
+    # if pipeline_model_parallel_size > 1:
+    #     if "|" not in hybrid_override_pattern:
+    #         assert (
+    #             num_layers_in_first_pipeline_stage is None
+    #             and num_layers_in_last_pipeline_stage is None
+    #         ), "hybrid_override_pattern with `|` must be provided for uneven PP"
+    #         hybrid_override_pattern = "|".join(
+    #             textwrap.wrap(
+    #                 hybrid_override_pattern,
+    #                 width=num_layers // pipeline_model_parallel_size,
+    #                 break_long_words=True,
+    #                 break_on_hyphens=False,
+    #             )
+    #         )
+    #     assert hybrid_override_pattern.count("|") == pipeline_model_parallel_size - 1
     assert len(hybrid_override_pattern.replace("|", "")) == num_layers
     print(f"Using `{hybrid_override_pattern=}` for building MambaModel")
 
