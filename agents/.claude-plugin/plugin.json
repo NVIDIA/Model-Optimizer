@@ -1,0 +1,9 @@
+{
+  "name": "modelopt-agent-skills",
+  "description": "Agent Skills for NVIDIA Model-Optimizer - interactive model optimization, deployment, and evaluation",
+  "version": "0.1.0",
+  "author": {
+    "name": "NVIDIA Model-Optimizer Agent Team"
+  },
+  "license": "Apache-2.0"
+}
