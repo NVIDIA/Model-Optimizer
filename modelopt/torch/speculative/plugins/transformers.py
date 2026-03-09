@@ -260,10 +260,7 @@ class EagleModule(nn.Module):
                 bias=False,
             )
 
-        if not config.use_aux_hidden_state:
-            # In Eagle-1, the FC concentrate input embeddings and hidden states
-            self.fc = nn.Linear(2 * config.hidden_size, config.hidden_size, bias=bias)
-        else:
+        if config.use_aux_hidden_state:
             # In EAGLE-3, the FC concentrate hidden states from multiple base model layers
             self.fc = nn.Linear(
                 len(config.eagle_aux_hidden_state_layer_ids) * config.hidden_size,
@@ -369,13 +366,10 @@ class EagleModule(nn.Module):
             position_ids = position_ids.view(-1, seq_length).long()
 
         inputs_embeds = inputs_embeds.to(hidden_states.dtype).to(hidden_states.device)
-        if self.config.use_aux_hidden_state:
-            # In EAGLE-3, we save input embeddings to attribute, and use it in first decoder layer by hook function
-            # Also, we normalize input embeddings and hidden states before concatenating them.
-            # The default input norm in first layer attn will be disabled.
-            self._input_embeds = self.layers[0].input_layernorm(inputs_embeds)
-        else:  # EAGLE-1
-            hidden_states = self.fc(torch.cat((inputs_embeds, hidden_states), dim=-1))
+        # In EAGLE-3, we save input embeddings to attribute, and use it in first decoder layer by hook function
+        # Also, we normalize input embeddings and hidden states before concatenating them.
+        # The default input norm in first layer attn will be disabled.
+        self._input_embeds = self.layers[0].input_layernorm(inputs_embeds)
 
         if self.config.eagle_decoder_type == "llama":
             # Lazy init rope to avoid save/load meta tensor error
@@ -555,41 +549,23 @@ class HFEagleModel(EagleModel):
 
     def modify(
         self,
-        eagle_offline,
-        eagle_hidden_state_distillation,
-        eagle_self_logit_distillation,
-        eagle_freeze_base_model,
-        eagle_report_acc,
-        eagle_reuse_base_decoder,
-        eagle_loss_decay_factor,
-        eagle_architecture_config,
-        eagle_decoder_type,
+        config,
     ):
         """Constructor.
 
         Args:
             config: The config for eagle decoder layers.
         """
-        super().modify(
-            eagle_offline=eagle_offline,
-            eagle_hidden_state_distillation=eagle_hidden_state_distillation,
-            eagle_self_logit_distillation=eagle_self_logit_distillation,
-            eagle_freeze_base_model=eagle_freeze_base_model,
-            eagle_report_acc=eagle_report_acc,
-            eagle_reuse_base_decoder=eagle_reuse_base_decoder,
-            eagle_loss_decay_factor=eagle_loss_decay_factor,
-            eagle_architecture_config=eagle_architecture_config,
-            eagle_decoder_type=eagle_decoder_type,
-        )
+        super().modify(config)
 
-        if eagle_decoder_type == "llama":
+        if self.eagle_decoder_type == "llama":
             # Use default eagle config
             decoder_cls = LlamaDecoderLayer
-        elif eagle_decoder_type == "kimik2":
+        elif self.eagle_decoder_type == "kimik2":
             decoder_cls = _setup_kimi_k2_decoder()
 
-        self.eagle_config = PretrainedConfig.from_dict(eagle_architecture_config)
-        self.eagle_config.eagle_decoder_type = eagle_decoder_type
+        self.eagle_config = PretrainedConfig.from_dict(config.eagle_architecture_config)
+        self.eagle_config.eagle_decoder_type = self.eagle_decoder_type
         # Hidden size and vocab size must match base model
         self.eagle_config.hidden_size = self._base_llm_config.hidden_size
         self.eagle_config.vocab_size = self._base_llm_config.vocab_size
@@ -628,21 +604,20 @@ class HFEagleModel(EagleModel):
         self.eagle_module.to(self._base_model.dtype).to(self._get_eagle_device())
 
         # EAGLE-3 auxiliary hidden_states
-        if (not eagle_offline) and self.eagle_config.use_aux_hidden_state:
+        if (not self.eagle_offline) and self.eagle_config.use_aux_hidden_state:
             self._aux_hidden_states = []
             for layer_idx, layer in enumerate(self._base_model.layers):
                 if layer_idx in self.eagle_config.eagle_aux_hidden_state_layer_ids:
                     layer.register_forward_hook(self._collect_aux_hidden_states_forward_hook)
 
         # delete base model layers for offline training
-        if eagle_offline:
+        if self.eagle_offline:
             self._base_model._modules.pop("layers")
 
         # NOTE: this is a temporary hack to bypass hf trainer check:
         # https://github.com/huggingface/transformers/blob/v4.56-release/src/transformers/trainer.py#L566
         self.is_quantized = False
 
-        self.num_ttt_steps = 4  # NOTE: (hg) hardcoded for now. Might add to config later.
         self._cached_attn_blk_masks = {}
 
     def _get_ttt_attention_mask(self, batch_size, seq_length, ttt_step):
@@ -704,10 +679,10 @@ class HFEagleModel(EagleModel):
 
         # Prepare eagle_input_hiddens
         if self.eagle_config.use_aux_hidden_state:
-            # Eagle3: concat base model intermediate (pre-norm) hiddens
+            # concat base model intermediate (pre-norm) hiddens
             eagle_input_hiddens = self.eagle_module.fc(base_outputs.aux_hiddens)
         else:
-            # Eagle1: use base model output (post-norm)hiddens
+            # use base model output (post-norm)hiddens
             eagle_input_hiddens = base_outputs.out_hiddens
 
         # Prepare attention_mask
@@ -931,22 +906,43 @@ class HFEagleModel(EagleModel):
         )
 
         # ====Run eagle forward with extra training-time-test steps====
-        for ttt_step in range(self.num_ttt_steps):
+        for ttt_step in range(self.eagle_ttt_steps):
             # TODO: (hg) during cp training, this mask is not used. Maybe turn it off then.
             eagle_attention_mask = (
                 eagle_attn_mask_0
-                if ttt_step == 0
+                if self.eagle_mix_hidden_states or ttt_step == 0
                 else self._get_ttt_attention_mask(b, seq_length, ttt_step)
             )
-            with enable_cp_ttt_patch() if self.training else contextlib.nullcontext():
-                _, eagle_input_hiddens, eagle_logits, eagle_cache = self._eagle_forward(
+            with (
+                enable_cp_ttt_patch()
+                if self.training and not self.eagle_mix_hidden_states
+                else contextlib.nullcontext()
+            ):
+                _, eagle_output_hiddens, eagle_logits, eagle_cache = self._eagle_forward(
                     eagle_input_hiddens,
                     eagle_input_embeds,
                     eagle_attention_mask,
                     eagle_position_ids,
-                    eagle_cache,
+                    None if self.eagle_mix_hidden_states else eagle_cache,
                 )
-            eagle_input_hiddens = eagle_input_hiddens.roll(1, 1)
+            eagle_output_hiddens = eagle_output_hiddens.roll(1, 1)
+
+            if self.eagle_mix_hidden_states:
+                batch_size, seq_len_s, _ = eagle_input_hiddens.shape
+                num_to_replace = max(1, seq_len_s // (2**ttt_step + 1))
+
+                # Randomly select positions for each batch to replace
+                rand_indices = torch.rand(
+                    batch_size, seq_len_s, device=eagle_input_hiddens.device
+                ).argsort(dim=1)[:, :num_to_replace]
+
+                batch_indices = torch.arange(batch_size)[:, None]
+                eagle_input_hiddens[batch_indices, rand_indices] = eagle_output_hiddens[
+                    batch_indices, rand_indices
+                ]
+            else:
+                eagle_input_hiddens = eagle_output_hiddens
+
             for i in range(self.eagle_config.parallel_draft_step):
                 eagle_logit = eagle_logits[i]
                 classification_loss, acc = self._eagle_loss(
@@ -1037,7 +1033,6 @@ class HFEagleModel(EagleModel):
         eagle_ids = torch.cat((input_ids[:, 1:], base_token), dim=-1)
 
         if self.eagle_config.use_aux_hidden_state:
-            # EAGLE-3
             # Only the first iteration input_hidden_states are from aux_hidden_state layers
             # Gather _aux_hidden_states from all devices before concatenation
             eagle_input_hidden_states = self.eagle_module.fc(self.pop_and_gather_aux_hiddens())

@@ -110,6 +110,10 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       HEAD_NODE_IP="${1#*=}"
       ;;
+    --mix_hidden_states*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      MIX_HIDDEN_STATES="${1#*=}"
+      ;;
     *)
       >&2 printf "Error: Invalid argument ${1#*=}\n"
       exit 1
@@ -149,6 +153,7 @@ CP_SIZE=${CP_SIZE:-1}
 DP_SHARD_SIZE=${DP_SHARD_SIZE:-$((TOTAL_GPU/CP_SIZE))}
 LOG_STEPS=${LOG_STEPS:-100}
 DRAFT_VOCAB_CACHE=${DRAFT_VOCAB_CACHE:-""}
+MIX_HIDDEN_STATES=${MIX_HIDDEN_STATES:-"False"}
 
 
 if [[ "$MODE" == "eagle3" ]]; then
@@ -234,6 +239,7 @@ CMD="accelerate launch $MULTI_NODE_ARGS --mixed_precision bf16 ${SCRIPT_DIR}/mai
     --disable_tqdm $DISABLE_TQDM \
     --estimate_ar $ESTIMATE_AR \
     --ar_validate_steps $AR_VALIDATE_STEPS \
+    --mix_hidden_states $MIX_HIDDEN_STATES \
     $DRAFT_VOCAB_CACHE_ARGS \
     $VLM_ARGS \
     $OFFLINE_TRAINING_ARGS \

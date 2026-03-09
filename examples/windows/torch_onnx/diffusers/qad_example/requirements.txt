@@ -1,0 +1,12 @@
+accelerate
+# LTX-2 packages (from Lightricks/LTX-2 monorepo)
+ltx-core @ git+https://github.com/Lightricks/LTX-2.git#subdirectory=packages/ltx-core
+ltx-pipelines @ git+https://github.com/Lightricks/LTX-2.git#subdirectory=packages/ltx-pipelines
+ltx-trainer @ git+https://github.com/Lightricks/LTX-2.git#subdirectory=packages/ltx-trainer
+
+# NVIDIA ModelOpt (quantization & distillation)
+nvidia-modelopt
+pyyaml
+safetensors
+
+torch>=2.0

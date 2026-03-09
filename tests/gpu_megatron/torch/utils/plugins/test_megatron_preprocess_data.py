@@ -17,30 +17,8 @@ import json
 import os
 from pathlib import Path
 
-from datasets import load_dataset
-
+from modelopt.torch.utils.dataset_utils import download_hf_dataset_as_jsonl
 from modelopt.torch.utils.plugins.megatron_preprocess_data import megatron_preprocess_data
-
-
-def download_and_prepare_minipile_dataset(output_dir: Path) -> Path:
-    """Download the nanotron/minipile_100_samples dataset and convert to JSONL format.
-
-    Args:
-        output_dir: Directory to save the JSONL file
-
-    Returns:
-        Path to the created JSONL file
-    """
-    dataset = load_dataset("nanotron/minipile_100_samples", split="train")
-
-    jsonl_file = output_dir / "minipile_100_samples.jsonl"
-
-    with open(jsonl_file, "w", encoding="utf-8") as f:
-        for item in dataset:
-            json_obj = {"text": item["text"]}
-            f.write(json.dumps(json_obj) + "\n")
-
-    return jsonl_file
 
 
 def test_megatron_preprocess_data_with_minipile_jsonl(tmp_path):
@@ -52,9 +30,10 @@ def test_megatron_preprocess_data_with_minipile_jsonl(tmp_path):
     3. Calls megatron_preprocess_data with jsonl_paths
     4. Verifies that output files are created
     """
-    input_jsonl = download_and_prepare_minipile_dataset(tmp_path)
+    input_jsonl = download_hf_dataset_as_jsonl("nanotron/minipile_100_samples", tmp_path / "raw")
+    assert len(input_jsonl) == 1, "Expected 1 JSONL file"
+    input_jsonl = Path(input_jsonl[0])
 
-    assert input_jsonl.exists(), "Input JSONL file should exist"
     assert input_jsonl.stat().st_size > 0, "Input JSONL file should not be empty"
 
     with open(input_jsonl, encoding="utf-8") as f:
@@ -71,7 +50,7 @@ def test_megatron_preprocess_data_with_minipile_jsonl(tmp_path):
         workers=1,
     )
 
-    output_prefix = tmp_path / "minipile_100_samples"
+    output_prefix = tmp_path / "nanotron--minipile_100_samples_default_train"
     expected_bin_file = f"{output_prefix}_text_document.bin"
     expected_idx_file = f"{output_prefix}_text_document.idx"
 

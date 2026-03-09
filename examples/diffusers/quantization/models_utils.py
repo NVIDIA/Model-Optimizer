@@ -151,7 +151,7 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
     ModelType.FLUX_SCHNELL: _FLUX_BASE_CONFIG,
     ModelType.LTX_VIDEO_DEV: {
         "backbone": "transformer",
-        "dataset": _SD_PROMPTS_DATASET,
+        "dataset": _OPENVID_DATASET,
         "inference_extra_args": {
             "height": 512,
             "width": 704,
@@ -161,7 +161,7 @@ MODEL_DEFAULTS: dict[ModelType, dict[str, Any]] = {
     },
     ModelType.LTX2: {
         "backbone": "transformer",
-        "dataset": _SD_PROMPTS_DATASET,
+        "dataset": _OPENVID_DATASET,
         "inference_extra_args": {
             "height": 768,
             "width": 1280,

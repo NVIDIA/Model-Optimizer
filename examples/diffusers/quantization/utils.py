@@ -70,7 +70,7 @@ def check_conv_and_mha(backbone, if_fp4, quantize_mha):
 def filter_func_ltx_video(name: str) -> bool:
     """Filter function specifically for LTX-Video models."""
     pattern = re.compile(
-        r".*(proj_in|time_embed|caption_projection|proj_out|patchify_proj|adaln_single).*"
+        r".*(proj_in|time_embed|caption_projection|proj_out|patchify_proj|adaln_single|transformer_blocks\.(0|1|2|45|46|47)\.).*"
     )
     return pattern.match(name) is not None
 
@@ -82,9 +82,9 @@ def filter_func_flux_dev(name: str) -> bool:
 
 
 def filter_func_wan_video(name: str) -> bool:
-    """Filter function specifically for LTX-Video models."""
+    """Filter function specifically for WAN-Video models."""
     pattern = re.compile(
-        r".*(patch_embedding|condition_embedder|proj_out|blocks.0\.|blocks.1\.|blocks.39|blocks.38).*"
+        r".*(patch_embedding|condition_embedder|proj_out|blocks\.(0|1|2|37|38|39)\.).*"
     )
     return pattern.match(name) is not None
 
