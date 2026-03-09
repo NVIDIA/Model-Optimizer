@@ -584,22 +584,21 @@ def quantize(
     # Check op types spelling in 'op_types_to_exclude' and '_to_quantize'
     validate_op_types_spelling(onnx_path, op_types_to_quantize, op_types_to_exclude)
 
-    if not autotune:
-        # (1) If disable_mha_qdq is set, don't add Q/DQ layers to MatMuls in MHA pattern.
-        # (2) else when quantize_mode == "int8", if seq_len > 512, don't add Q/DQ layers to
-        # MatMuls in MHA pattern.
-        # (3) else when quantize_mode == "fp8", if head_size > 256 or head_size <= 8
-        # or mha doesn't meet fp8 fMHA v2 pattern, don't add Q/DQ layers to MatMuls in MHA pattern.
-        nodes_to_exclude = find_nodes_from_mha_to_exclude(
-            onnx_path,
-            use_external_data_format,
-            nodes_to_exclude,
-            disable_mha_qdq,
-            quantize_mode,
-            intermediate_generated_files,
-            calibration_data_reader,
-            calibration_eps,
-        )
+    # (1) If disable_mha_qdq is set, don't add Q/DQ layers to MatMuls in MHA pattern.
+    # (2) else when quantize_mode == "int8", if seq_len > 512, don't add Q/DQ layers to
+    # MatMuls in MHA pattern.
+    # (3) else when quantize_mode == "fp8", if head_size > 256 or head_size <= 8
+    # or mha doesn't meet fp8 fMHA v2 pattern, don't add Q/DQ layers to MatMuls in MHA pattern.
+    nodes_to_exclude = find_nodes_from_mha_to_exclude(
+        onnx_path,
+        use_external_data_format,
+        nodes_to_exclude,
+        disable_mha_qdq,
+        quantize_mode,
+        intermediate_generated_files,
+        calibration_data_reader,
+        calibration_eps,
+    )
 
     if calibrate_per_node and not calibration_shapes:
         calibration_shapes = get_input_shapes(onnx_path)
@@ -608,7 +607,7 @@ def quantize(
         if autotune:
             (
                 nodes_to_quantize_autotune,
-                op_types_to_quantize,
+                op_types_to_quantize_autotune,
                 no_quantize_inputs,
                 op_types_needing_output_quant,
             ) = _find_nodes_to_quantize_autotune(
@@ -629,7 +628,8 @@ def quantize(
                 timing_runs=autotune_timing_runs,
                 trtexec_args=autotune_trtexec_args,
             )
-            nodes_to_quantize.extend(nodes_to_quantize_autotune)
+            op_types_to_quantize = op_types_to_quantize or op_types_to_quantize_autotune
+            nodes_to_quantize = nodes_to_quantize or nodes_to_quantize_autotune
             kwargs["no_quantize_inputs"] = no_quantize_inputs
             kwargs["op_types_needing_output_quant"] = op_types_needing_output_quant
 
