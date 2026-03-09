@@ -89,8 +89,10 @@ def get_args() -> argparse.Namespace:
         "--calib_dataset_name",
         type=str,
         default="nemotron-post-training-dataset-v2",
-        choices=get_supported_datasets(),
-        help="Dataset name for calibration",
+        help=(
+            f"HF Dataset name or local path for calibration (supported options: {', '.join(get_supported_datasets())}. "
+            "You can also pass any other dataset and see if auto-detection for your dataset works."
+        ),
     )
     parser.add_argument(
         "--calib_num_samples", type=int, default=1024, help="Number of samples for calibration"
