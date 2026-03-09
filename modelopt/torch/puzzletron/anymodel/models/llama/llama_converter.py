@@ -16,6 +16,7 @@
 
 """Llama converter for AnyModel compression."""
 
+import copy
 from typing import List
 
 from transformers import LlamaConfig
@@ -46,5 +47,5 @@ class LlamaConverter(Converter):
             ffn=FFNConfig(no_op=False, intermediate_size=config.intermediate_size),
         ).to_dict()
 
-        block_configs = [block_config] * num_hidden_layers
+        block_configs = [copy.deepcopy(block_config) for _ in range(num_hidden_layers)]
         return block_configs

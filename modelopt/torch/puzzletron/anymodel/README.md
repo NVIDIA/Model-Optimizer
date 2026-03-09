@@ -1,6 +1,6 @@
 # AnyModel Guide
 
-This guide explains how to add support for new models in the compress pipeline.
+This guide explains how to add support for new models in the Puzzletron pipeline.
 
 ## Convert model
 
@@ -96,7 +96,7 @@ Update pruning YAML files (`ffn_pruning.yaml`, `expert_pruning.yaml`, etc.):
 
 ## End-to-end example
 
-See [test_compress_model.py](../../../../tests/gpu/torch/puzzletron/test_compress.py) for a complete example that runs both convert and compression steps.
+See [test_puzzletron.py](../../../../tests/gpu/torch/puzzletron/test_puzzletron.py) for a complete example that runs both convert and compression steps.
 
 ---
 
