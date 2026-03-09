@@ -913,7 +913,9 @@ def quantize_main(
         # Speculative decoding offline model dost not support get_max_batch_size() because of
         # the customized dataloader, so we set batch_size to 1 to avoid OOM.
         elif args.specdec_offline_dataset is not None:
-            print("Offline speculative decoding calibration enabled. Using default batch_size=1 for calibration.")
+            print(
+                "Offline speculative decoding calibration enabled. Using default batch_size=1 for calibration."
+            )
             args.batch_size = 1
         else:
             # Calibration/sparsification will actually take much more memory than regular inference
