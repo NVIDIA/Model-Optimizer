@@ -101,6 +101,7 @@ def _add_gemma_cast_nodes(
     io_dtype: str,
     onnx_dtype: int,
     verbose: bool = True,
+    trust_remote_code: bool = False,
 ) -> int:
     """Add Cast to target dtype after layernorm Mul nodes for Gemma models.
 
@@ -110,11 +111,12 @@ def _add_gemma_cast_nodes(
         io_dtype: Target IO dtype string.
         onnx_dtype: ONNX dtype constant.
         verbose: Whether to print progress.
+        trust_remote_code: Whether to trust remote code in HuggingFace model config.
 
     Returns:
         Number of Cast nodes added.
     """
-    config = AutoConfig.from_pretrained(hf_model_id)
+    config = AutoConfig.from_pretrained(hf_model_id, trust_remote_code=trust_remote_code)
     num_layers = config.num_hidden_layers
     cast_nodes_added = 0
 
@@ -793,6 +795,7 @@ def replace_attention_with_gqa(
     ir_version: int | None = None,
     pack_qkv: bool = False,
     verbose: bool = True,
+    trust_remote_code: bool = False,
 ) -> onnx.ModelProto:
     """Replace attention subgraphs with GroupQueryAttention (GQA) in an ONNX model.
 
@@ -821,6 +824,7 @@ def replace_attention_with_gqa(
         ir_version: If specified, set the ONNX IR version to this value. Useful for
             compatibility with older ONNX Runtime versions (e.g., set to 9 for ORT 1.16).
         verbose: Whether to print progress messages.
+        trust_remote_code: Whether to trust remote code in HuggingFace model config.
 
     Returns:
         Modified ONNX model.
@@ -877,7 +881,9 @@ def replace_attention_with_gqa(
                 logger.info(
                     "\nGemma model detected - adding Cast to fp16 after layernorm Mul nodes..."
                 )
-            _add_gemma_cast_nodes(graph, hf_model_id, io_dtype, onnx_dtype, verbose)
+            _add_gemma_cast_nodes(
+                graph, hf_model_id, io_dtype, onnx_dtype, verbose, trust_remote_code
+            )
 
         # Step 0.7: BF16 lm_head cast for TensorRT compatibility
         if io_dtype == "bfloat16":
@@ -890,7 +896,9 @@ def replace_attention_with_gqa(
     # Get config and compute caches
     if verbose:
         logger.info(f"\nComputing RoPE caches from: {hf_model_id}")
-    cos_cache, sin_cache, config = get_rope_caches(hf_model_id, max_seq_len, io_dtype)
+    cos_cache, sin_cache, config = get_rope_caches(
+        hf_model_id, max_seq_len, io_dtype, trust_remote_code=trust_remote_code
+    )
 
     num_layers = config.num_hidden_layers
     num_attention_heads = config.num_attention_heads

@@ -91,6 +91,7 @@ def save_audio_processor_config(
     hf_model_id: str | None = None,
     num_mel_bins: int | None = None,
     overwrite: bool = False,
+    trust_remote_code: bool = False,
 ) -> str:
     """Save audio_processor_config.json to output directory.
 
@@ -116,7 +117,7 @@ def save_audio_processor_config(
     if hf_model_id is not None:
         from transformers import WhisperConfig
 
-        config = WhisperConfig.from_pretrained(hf_model_id)
+        config = WhisperConfig.from_pretrained(hf_model_id, trust_remote_code=trust_remote_code)
         num_mel_bins = config.num_mel_bins
         logger.info(f"Extracted num_mel_bins={num_mel_bins} from {hf_model_id}")
     elif num_mel_bins is None:
@@ -144,6 +145,7 @@ def generate_genai_config(
     encoder_filename: str,
     decoder_filename: str,
     hf_model_id: str | None = None,
+    trust_remote_code: bool = False,
     # Model config (auto-detected from HuggingFace if model_id provided)
     num_decoder_layers: int | None = None,
     num_encoder_layers: int | None = None,
@@ -215,7 +217,7 @@ def generate_genai_config(
         from transformers import WhisperConfig
 
         logger.info(f"Loading config from HuggingFace: {hf_model_id}")
-        config = WhisperConfig.from_pretrained(hf_model_id)
+        config = WhisperConfig.from_pretrained(hf_model_id, trust_remote_code=trust_remote_code)
 
         # Extract values from HF config
         if num_decoder_layers is None:
@@ -340,6 +342,7 @@ def save_genai_config(
     hf_model_id: str | None = None,
     overwrite: bool = False,
     provider: str = "cuda",
+    trust_remote_code: bool = False,
     **kwargs,
 ) -> str:
     """Save genai_config.json to output directory.
@@ -369,6 +372,7 @@ def save_genai_config(
         encoder_filename=encoder_filename,
         decoder_filename=decoder_filename,
         hf_model_id=hf_model_id,
+        trust_remote_code=trust_remote_code,
         provider=provider,
         **kwargs,
     )

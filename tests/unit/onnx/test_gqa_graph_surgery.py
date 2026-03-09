@@ -32,11 +32,11 @@ VOCAB_SIZE = 64
 SEQ_LEN = 4
 MAX_SEQ_LEN = 128
 
-np.random.seed(42)
+_RNG = np.random.RandomState(42)
 
 
 def _fp16(*shape):
-    return np.random.randn(*shape).astype(np.float16)
+    return (_RNG.randn(*shape) * 0.02).astype(np.float16)
 
 
 def _init(name, arr):
@@ -584,7 +584,7 @@ def _build_toy_model(hidden_size, num_heads, kv_heads, head_dim, inv_freq_np, nu
 def _get_config():
     from transformers import AutoConfig
 
-    cfg = AutoConfig.from_pretrained(MODEL_ID)
+    cfg = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=False)
     hidden = cfg.hidden_size
     heads = cfg.num_attention_heads
     kv = getattr(cfg, "num_key_value_heads", heads)

@@ -134,6 +134,11 @@ Examples:
         ),
     )
     gqa_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress progress messages")
+    gqa_parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Trust remote code in HuggingFace model config",
+    )
 
     # Add cross-KV subcommand
     cross_kv_parser = subparsers.add_parser(
@@ -181,6 +186,11 @@ Examples:
     )
     cross_kv_parser.add_argument(
         "-q", "--quiet", action="store_true", help="Suppress progress messages"
+    )
+    cross_kv_parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Trust remote code in HuggingFace model",
     )
 
     # Convert BF16 subcommand
@@ -254,6 +264,7 @@ Examples:
             ir_version=args.ir_version,
             pack_qkv=args.pack_qkv,
             verbose=not args.quiet,
+            trust_remote_code=args.trust_remote_code,
         )
 
     elif args.command == "add-cross-kv":
@@ -270,6 +281,7 @@ Examples:
             generate_genai_config=not args.no_genai_config,
             provider=args.provider,
             verbose=not args.quiet,
+            trust_remote_code=args.trust_remote_code,
         )
 
     elif args.command == "convert-bf16":

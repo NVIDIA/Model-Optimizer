@@ -37,11 +37,14 @@ from ...logging_config import logger
 from ..utils.graph_utils import detect_model_dtype
 
 
-def _get_cross_attn_weights_from_hf(model_id: str) -> tuple[dict, int, int, int]:
+def _get_cross_attn_weights_from_hf(
+    model_id: str, trust_remote_code: bool = False
+) -> tuple[dict, int, int, int]:
     """Extract cross-attention K and V projection weights from HuggingFace model.
 
     Args:
         model_id: HuggingFace model ID (e.g., "openai/whisper-large-v3-turbo").
+        trust_remote_code: Whether to trust remote code in HuggingFace model.
 
     Returns:
         Tuple of (weights_dict, num_heads, head_size, num_layers).
@@ -49,7 +52,9 @@ def _get_cross_attn_weights_from_hf(model_id: str) -> tuple[dict, int, int, int]
     from transformers import WhisperForConditionalGeneration
 
     logger.info(f"Loading PyTorch model: {model_id}")
-    model = WhisperForConditionalGeneration.from_pretrained(model_id)
+    model = WhisperForConditionalGeneration.from_pretrained(
+        model_id, trust_remote_code=trust_remote_code
+    )
 
     weights = {}
     num_layers = model.config.decoder_layers
@@ -326,6 +331,7 @@ def add_cross_kv_to_encoder(
     generate_genai_config: bool = True,
     provider: str = "cuda",
     verbose: bool = True,
+    trust_remote_code: bool = False,
 ) -> onnx.ModelProto:
     """Add cross-attention KV cache outputs to encoder model.
 
@@ -355,6 +361,7 @@ def add_cross_kv_to_encoder(
         generate_genai_config: Whether to generate genai_config.json.
         provider: Execution provider for genai_config.json ("cuda", "cpu", "NvTensorRtRtx").
         verbose: Whether to print progress messages.
+        trust_remote_code: Whether to trust remote code in HuggingFace model.
 
     Returns:
         Modified encoder model with cross-attention KV cache outputs.
@@ -369,7 +376,7 @@ def add_cross_kv_to_encoder(
     """
     # Load cross-attention weights from HuggingFace model
     cross_attn_weights, num_heads, head_size, num_layers = _get_cross_attn_weights_from_hf(
-        hf_model_id
+        hf_model_id, trust_remote_code=trust_remote_code
     )
 
     if verbose:
@@ -463,7 +470,12 @@ def add_cross_kv_to_encoder(
         # Save audio processor config
         from ..utils.whisper_utils import save_audio_processor_config
 
-        save_audio_processor_config(output_dir, hf_model_id=hf_model_id, overwrite=False)
+        save_audio_processor_config(
+            output_dir,
+            hf_model_id=hf_model_id,
+            overwrite=False,
+            trust_remote_code=trust_remote_code,
+        )
 
         # Generate genai_config.json with encoder pointing to this output
         if generate_genai_config:
@@ -476,6 +488,7 @@ def add_cross_kv_to_encoder(
                 decoder_filename=decoder_filename,
                 hf_model_id=hf_model_id,
                 provider=provider,
+                trust_remote_code=trust_remote_code,
                 overwrite=False,  # Don't overwrite if exists
             )
 

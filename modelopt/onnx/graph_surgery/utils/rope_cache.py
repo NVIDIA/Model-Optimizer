@@ -30,6 +30,7 @@ def get_rope_caches(
     model_id: str,
     max_seq_len: int,
     io_dtype: str = "float16",
+    trust_remote_code: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, Any]:
     """Compute cos/sin caches matching onnxruntime_genai builder.
 
@@ -41,6 +42,7 @@ def get_rope_caches(
         model_id: HuggingFace model ID or path to config.
         max_seq_len: Maximum sequence length for the caches.
         io_dtype: Data type for output ("float16", "float32", or "bfloat16").
+        trust_remote_code: Whether to trust remote code in HuggingFace model config.
 
     Returns:
         Tuple of (cos_cache, sin_cache, config) where:
@@ -56,7 +58,7 @@ def get_rope_caches(
         ... )
         >>> print(f"Cache shape: {cos_cache.shape}")
     """
-    config = AutoConfig.from_pretrained(model_id)
+    config = AutoConfig.from_pretrained(model_id, trust_remote_code=trust_remote_code)
 
     theta = getattr(config, "rope_theta", 10000.0)
     head_dim = config.hidden_size // config.num_attention_heads
