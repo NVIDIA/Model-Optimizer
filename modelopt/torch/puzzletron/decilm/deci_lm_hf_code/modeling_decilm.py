@@ -534,7 +534,7 @@ class DeciLMGatedMLP(nn.Module):
         self.gate_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
-        self.act_fn = ACT2FN[ffn_config.hidden_act]
+        self.act_fn = ACT2FN[getattr(ffn_config, "hidden_act", "silu")]
 
         if ffn_config.sparsify is not None:
             self.register_full_backward_hook(sparsity_backward_hook)
@@ -579,7 +579,7 @@ class DeciLMVanillaMLP(nn.Module):
         self.intermediate_size = ffn_config.intermediate_size
         self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
         self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
-        self.act_fn = ACT2FN[ffn_config.hidden_act]
+        self.act_fn = ACT2FN[getattr(ffn_config, "hidden_act", "silu")]
 
         if ffn_config.sparsify is not None:
             self.register_full_backward_hook(sparsity_backward_hook)
@@ -1037,7 +1037,7 @@ class DeciLMDecoderLayer(nn.Module):
                 self.self_attn = DeciLMLlama4TextAttention(config, layer_idx, self.attention_config)
 
         if not (self.ffn_config.no_op or self.attention_config.is_mamba):
-            if self.ffn_config.hidden_act is None:
+            if getattr(self.ffn_config, "hidden_act", None) is None:
                 print(f"WARNING: FFN hidden_act is None for layer {layer_idx}")
 
             self.post_attention_layernorm = DeciLMRMSNorm(
