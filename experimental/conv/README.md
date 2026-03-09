@@ -8,7 +8,7 @@ This code is kept under `experimental/` by design and is **not** part of the sta
 
 | Model/Framework | Supported | Notes |
 |-----------------|-----------|-------|
-| Video diffusion backbones using Conv3D | Partial | Intended for experimentation and microbenchmarking |
+| Video diffusion VAE Conv3D layers | Tested | Validated on VAE encoder/decoder Conv3D layers in video diffusion models |
 | Generic LLM backbones | No | Conv3D path is not relevant |
 | End-to-end ModelOpt PTQ/QAT pipeline | No | Not wired into formal quantization/export/compress flows |
 

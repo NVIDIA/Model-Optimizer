@@ -22,6 +22,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+
 
 @pytest.fixture(scope="module")
 def cuda_conv3d():
