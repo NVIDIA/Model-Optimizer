@@ -26,7 +26,6 @@ It provides comprehensive TensorRT utilities including:
 - TensorRTPyBenchmark: Uses TensorRT Python API for direct engine profiling
 """
 
-import contextlib
 import ctypes
 import importlib.util
 import os
@@ -40,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import torch
 
 from modelopt.onnx.logging_config import logger
 from modelopt.onnx.quantization.ort_utils import _check_for_tensorrt
@@ -47,14 +47,6 @@ from modelopt.onnx.quantization.ort_utils import _check_for_tensorrt
 TRT_AVAILABLE = importlib.util.find_spec("tensorrt") is not None
 if TRT_AVAILABLE:
     import tensorrt as trt
-
-CUDART_AVAILABLE = importlib.util.find_spec("cuda") is not None
-if CUDART_AVAILABLE:
-    try:
-        from cuda.bindings import runtime as cudart
-    except ImportError:
-        with contextlib.suppress(ImportError):
-            from cuda import cudart  # deprecated: prefer cuda.bindings.runtime
 
 
 def _validate_shape_range(min_shape: list, opt_shape: list, max_shape: list) -> None:
@@ -337,7 +329,7 @@ class TensorRTPyBenchmark(Benchmark):
                              engine building. If None, no custom plugins are loaded.
 
         Raises:
-            ImportError: If tensorrt or cuda-python (cudart) packages are not available.
+            ImportError: If tensorrt or PyTorch (with CUDA) packages are not available.
             FileNotFoundError: If a specified plugin library file does not exist.
             RuntimeError: If plugin library loading fails.
         """
@@ -345,9 +337,10 @@ class TensorRTPyBenchmark(Benchmark):
 
         if not TRT_AVAILABLE:
             raise ImportError("TensorRT Python API not available. Please install tensorrt package.")
-        if not CUDART_AVAILABLE or cudart is None:
+        if not torch.cuda.is_available():
             raise ImportError(
-                "CUDA Runtime (cudart) not available. Please install cuda-python package: pip install cuda-python"
+                "PyTorch with CUDA is required for TensorRTPyBenchmark. "
+                "Please install PyTorch with CUDA: pip install torch"
             )
 
         self.trt_logger = trt.Logger(trt.Logger.WARNING)
@@ -527,107 +520,64 @@ class TensorRTPyBenchmark(Benchmark):
             del parser, network, config
 
     @staticmethod
-    def _alloc_pinned_host(size: int, dtype: np.dtype) -> tuple[Any, np.ndarray, Any]:
-        """Allocate pinned host memory and return (host_ptr, array view, cuda error).
-
-        Returns:
-            (host_ptr, arr, err): On success err is cudaSuccess; on failure host_ptr/arr
-            may be None and err is the CUDA error code.
-        """
-        dtype = np.dtype(dtype)
-        nbytes = size * dtype.itemsize
-        err, host_ptr = cudart.cudaMallocHost(nbytes)
-        if err != cudart.cudaError_t.cudaSuccess:
-            return (None, None, err)
-        addr = int(host_ptr) if hasattr(host_ptr, "__int__") else host_ptr
-        try:
-            ctype = np.ctypeslib.as_ctypes_type(dtype)
-            arr = np.ctypeslib.as_array((ctype * size).from_address(addr))
-        except NotImplementedError as e:
-            # float16/bfloat16 have no ctypes equivalent; use same-size type and view
-            if dtype.itemsize == 2:
-                ctype = ctypes.c_uint16
-            else:
-                raise TypeError(
-                    f"Pinned host allocation for dtype {dtype} is not supported: "
-                    "no ctypes mapping and no fallback for this itemsize"
-                ) from e
-            arr = np.ctypeslib.as_array((ctype * size).from_address(addr)).view(dtype)
-        return (host_ptr, arr, cudart.cudaError_t.cudaSuccess)
-
-    @staticmethod
-    def _free_buffers(bufs: list[dict]) -> None:
-        """Free host and device memory for a list of buffer dicts (host_ptr, device_ptr)."""
-        for buf in bufs:
-            if "host_ptr" in buf and buf["host_ptr"] is not None:
-                cudart.cudaFreeHost(buf["host_ptr"])
-            if "device_ptr" in buf and buf["device_ptr"] is not None:
-                cudart.cudaFree(buf["device_ptr"])
+    def _numpy_dtype_to_torch(np_dtype: np.dtype) -> "torch.dtype":
+        """Map NumPy dtype to PyTorch dtype for tensor allocation."""
+        name = np.dtype(np_dtype).name
+        torch_dtype = getattr(torch, name, None)
+        if torch_dtype is None:
+            raise TypeError(f"Unsupported dtype for PyTorch allocation: {np_dtype}")
+        return torch_dtype
 
     def _allocate_buffers(
         self,
         engine: "trt.ICudaEngine",
         context: "trt.IExecutionContext",
     ) -> tuple[list[dict], list[dict], Any]:
-        """Allocate host and device buffers for engine I/O and set tensor addresses.
+        """Allocate host and device buffers for engine I/O using PyTorch and set tensor addresses.
 
         Args:
             engine: Deserialized TensorRT engine.
             context: Execution context with tensor shapes set.
 
         Returns:
-            (inputs, outputs, cuda_error): On success cuda_error is cudaSuccess;
-            on failure inputs/outputs are empty and cuda_error is the failing CUDA error code.
+            (inputs, outputs, None) on success; ([], [], error) on failure.
         """
         inputs: list[dict] = []
         outputs: list[dict] = []
 
-        for i in range(engine.num_io_tensors):
-            tensor_name = engine.get_tensor_name(i)
-            dtype = trt.nptype(engine.get_tensor_dtype(tensor_name))
-            shape = context.get_tensor_shape(tensor_name)
+        try:
+            for i in range(engine.num_io_tensors):
+                tensor_name = engine.get_tensor_name(i)
+                np_dtype = trt.nptype(engine.get_tensor_dtype(tensor_name))
+                shape = tuple(context.get_tensor_shape(tensor_name))
+                torch_dtype = self._numpy_dtype_to_torch(np_dtype)
 
-            size = trt.volume(shape)
-            nbytes = size * np.dtype(dtype).itemsize
+                device_tensor = torch.empty(shape, dtype=torch_dtype, device="cuda")
+                host_tensor = torch.empty(shape, dtype=torch_dtype, device="cpu", pin_memory=True)
 
-            err, device_ptr = cudart.cudaMalloc(nbytes)
-            if err != cudart.cudaError_t.cudaSuccess:
-                self.logger.error(f"cudaMalloc failed: {err}")
-                self._free_buffers(inputs + outputs)
-                return ([], [], err)
+                if engine.get_tensor_mode(tensor_name) == trt.TensorIOMode.INPUT:
+                    host_tensor.copy_(torch.randn_like(host_tensor))
+                    inputs.append(
+                        {
+                            "host_tensor": host_tensor,
+                            "device_tensor": device_tensor,
+                            "name": tensor_name,
+                        }
+                    )
+                else:
+                    outputs.append(
+                        {
+                            "host_tensor": host_tensor,
+                            "device_tensor": device_tensor,
+                            "name": tensor_name,
+                        }
+                    )
 
-            host_ptr, host_mem, err = self._alloc_pinned_host(size, dtype)
-            if err != cudart.cudaError_t.cudaSuccess:
-                self.logger.error(f"cudaMallocHost failed: {err}")
-                cudart.cudaFree(device_ptr)
-                self._free_buffers(inputs + outputs)
-                return ([], [], err)
-
-            if engine.get_tensor_mode(tensor_name) == trt.TensorIOMode.INPUT:
-                np.copyto(host_mem, np.random.randn(size).astype(dtype))
-                inputs.append(
-                    {
-                        "host_ptr": host_ptr,
-                        "host": host_mem,
-                        "device_ptr": device_ptr,
-                        "nbytes": nbytes,
-                        "name": tensor_name,
-                    }
-                )
-            else:
-                outputs.append(
-                    {
-                        "host_ptr": host_ptr,
-                        "host": host_mem,
-                        "device_ptr": device_ptr,
-                        "nbytes": nbytes,
-                        "name": tensor_name,
-                    }
-                )
-
-            context.set_tensor_address(tensor_name, int(device_ptr))
-
-        return (inputs, outputs, cudart.cudaError_t.cudaSuccess)
+                context.set_tensor_address(tensor_name, device_tensor.data_ptr())
+            return (inputs, outputs, None)
+        except Exception as e:
+            self.logger.error(f"Buffer allocation failed: {e}")
+            return ([], [], e)
 
     def _setup_execution_context(
         self, serialized_engine: bytes
@@ -652,56 +602,44 @@ class TensorRTPyBenchmark(Benchmark):
         context: "trt.IExecutionContext",
         inputs: list[dict],
         outputs: list[dict],
-        stream_handle: Any,
+        stream: "torch.cuda.Stream",
     ) -> None:
         """Run warmup iterations to stabilize GPU state and cache."""
-        h2d = cudart.cudaMemcpyKind.cudaMemcpyHostToDevice
-        d2h = cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost
         self.logger.debug(f"Running {self.warmup_runs} warmup iterations...")
         for _ in range(self.warmup_runs):
-            for inp in inputs:
-                cudart.cudaMemcpyAsync(
-                    inp["device_ptr"], inp["host_ptr"], inp["nbytes"], h2d, stream_handle
-                )
-            context.execute_async_v3(stream_handle)
-            for out in outputs:
-                cudart.cudaMemcpyAsync(
-                    out["host_ptr"], out["device_ptr"], out["nbytes"], d2h, stream_handle
-                )
-            cudart.cudaStreamSynchronize(stream_handle)
+            with torch.cuda.stream(stream):
+                for inp in inputs:
+                    inp["device_tensor"].copy_(inp["host_tensor"], non_blocking=True)
+            context.execute_async_v3(stream.cuda_stream)
+            with torch.cuda.stream(stream):
+                for out in outputs:
+                    out["host_tensor"].copy_(out["device_tensor"], non_blocking=True)
+            stream.synchronize()
 
     def _run_timing(
         self,
         context: "trt.IExecutionContext",
         inputs: list[dict],
         outputs: list[dict],
-        stream_handle: Any,
+        stream: "torch.cuda.Stream",
     ) -> np.ndarray:
         """Run timing iterations and return per-run latencies in milliseconds."""
-        h2d = cudart.cudaMemcpyKind.cudaMemcpyHostToDevice
-        d2h = cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost
         self.logger.debug(f"Running {self.timing_runs} timing iterations...")
         latencies = []
         for _ in range(self.timing_runs):
-            for inp in inputs:
-                cudart.cudaMemcpyAsync(
-                    inp["device_ptr"], inp["host_ptr"], inp["nbytes"], h2d, stream_handle
-                )
-
-            cudart.cudaStreamSynchronize(stream_handle)
+            with torch.cuda.stream(stream):
+                for inp in inputs:
+                    inp["device_tensor"].copy_(inp["host_tensor"], non_blocking=True)
+            stream.synchronize()
             start = time.perf_counter()
-            context.execute_async_v3(stream_handle)
-            cudart.cudaStreamSynchronize(stream_handle)
+            context.execute_async_v3(stream.cuda_stream)
+            stream.synchronize()
             end = time.perf_counter()
-
             latency_ms = (end - start) * 1000.0
             latencies.append(latency_ms)
-
-            for out in outputs:
-                cudart.cudaMemcpyAsync(
-                    out["host_ptr"], out["device_ptr"], out["nbytes"], d2h, stream_handle
-                )
-
+            with torch.cuda.stream(stream):
+                for out in outputs:
+                    out["host_tensor"].copy_(out["device_tensor"], non_blocking=True)
         return np.array(latencies)
 
     def run(
@@ -721,7 +659,7 @@ class TensorRTPyBenchmark(Benchmark):
             Measured median latency in milliseconds, or float("inf") on any error
             (e.g. build failure, deserialization failure, buffer/stream allocation failure).
         """
-        serialized_engine = engine = context = stream_handle = None
+        serialized_engine = engine = context = stream = None
         inputs, outputs = [], []
 
         try:
@@ -734,18 +672,13 @@ class TensorRTPyBenchmark(Benchmark):
                 return float("inf")
 
             inputs, outputs, alloc_err = self._allocate_buffers(engine, context)
-            if alloc_err != cudart.cudaError_t.cudaSuccess:
+            if alloc_err is not None:
                 self.logger.error(f"Buffer allocation failed: {alloc_err}")
                 return float("inf")
 
-            err, sh = cudart.cudaStreamCreate()
-            if err != cudart.cudaError_t.cudaSuccess:
-                self.logger.error(f"cudaStreamCreate failed: {err}")
-                return float("inf")
-            stream_handle = sh
-
-            self._run_warmup(context, inputs, outputs, stream_handle)
-            latencies = self._run_timing(context, inputs, outputs, stream_handle)
+            stream = torch.cuda.Stream()
+            self._run_warmup(context, inputs, outputs, stream)
+            latencies = self._run_timing(context, inputs, outputs, stream)
 
             median_latency = float(np.median(latencies))
             mean_latency = float(np.mean(latencies))
@@ -788,13 +721,10 @@ class TensorRTPyBenchmark(Benchmark):
             return float("inf")
         finally:
             try:
-                self._free_buffers(inputs + outputs)
-                if stream_handle is not None:
-                    cudart.cudaStreamDestroy(stream_handle)
                 del (
                     inputs,
                     outputs,
-                    stream_handle,
+                    stream,
                     context,
                     engine,
                     serialized_engine,

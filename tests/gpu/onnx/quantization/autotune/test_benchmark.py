@@ -42,18 +42,14 @@ def simple_conv_model_path(simple_conv_model_bytes, tmp_path):
 
 
 class TestTensorRTPyBenchmark:
-    """Tests for TensorRTPyBenchmark (TensorRT Python API + cudart)."""
+    """Tests for TensorRTPyBenchmark (TensorRT Python API + PyTorch CUDA)."""
 
     @pytest.fixture(autouse=True)
-    def _require_tensorrt_and_cudart(self):
+    def _require_tensorrt_and_torch_cuda(self):
         pytest.importorskip("tensorrt")
-        try:
-            from cuda.bindings import runtime  # noqa: F401
-        except ImportError:
-            try:
-                from cuda import cudart  # noqa: F401  # deprecated: prefer cuda.bindings.runtime
-            except ImportError:
-                pytest.skip("cuda-python (cudart) not available", allow_module_level=False)
+        torch = pytest.importorskip("torch")
+        if not torch.cuda.is_available():
+            pytest.skip("PyTorch CUDA not available", allow_module_level=False)
 
     def test_run_with_bytes(self, simple_conv_model_bytes):
         """TensorRTPyBenchmark accepts model bytes and returns finite latency."""
