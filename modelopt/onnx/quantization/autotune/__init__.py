@@ -21,7 +21,7 @@ region analysis to efficiently explore and optimize Q/DQ insertion strategies.
 """
 
 # Expose Autotune modes and args
-from .__main__ import MODE_PRESETS, _StoreWithExplicitFlag, get_node_filter_list
+from .__main__ import MODE_PRESETS, StoreWithExplicitFlag, get_node_filter_list
 
 # Core data structures
 from .autotuner import QDQAutotuner
@@ -64,8 +64,8 @@ __all__ = [
     "RegionPattern",
     "RegionType",
     "ResolvedInsertionPoint",
+    "StoreWithExplicitFlag",
     "TensorRTPyBenchmark",
     "TrtExecBenchmark",
-    "_StoreWithExplicitFlag",
     "get_node_filter_list",
 ]

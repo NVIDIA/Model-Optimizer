@@ -22,7 +22,7 @@ import numpy as np
 
 from modelopt.onnx.quantization.autotune import (
     MODE_PRESETS,
-    _StoreWithExplicitFlag,
+    StoreWithExplicitFlag,
     get_node_filter_list,
 )
 from modelopt.onnx.quantization.quantize import quantize
@@ -330,7 +330,7 @@ def get_parser() -> argparse.ArgumentParser:
         type=int,
         default=50,
         help="Number of Q/DQ schemes to test per region.",
-        action=_StoreWithExplicitFlag,
+        action=StoreWithExplicitFlag,
         explicit_attr="_explicit_autotune_schemes_per_region",
     )
     autotune_group.add_argument(
@@ -382,7 +382,7 @@ def get_parser() -> argparse.ArgumentParser:
         type=int,
         default=50,
         help="Number of warmup runs before timing.",
-        action=_StoreWithExplicitFlag,
+        action=StoreWithExplicitFlag,
         explicit_attr="_explicit_autotune_warmup_runs",
     )
     autotune_group.add_argument(
@@ -390,7 +390,7 @@ def get_parser() -> argparse.ArgumentParser:
         type=int,
         default=100,
         help="Number of timed runs for latency measurement.",
-        action=_StoreWithExplicitFlag,
+        action=StoreWithExplicitFlag,
         explicit_attr="_explicit_autotune_timing_runs",
     )
     autotune_group.add_argument(

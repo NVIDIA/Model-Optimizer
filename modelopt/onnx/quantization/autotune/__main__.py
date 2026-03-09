@@ -44,14 +44,16 @@ MODE_PRESETS = {
 }
 
 
-class _StoreWithExplicitFlag(argparse.Action):
+class StoreWithExplicitFlag(argparse.Action):
     """Store the value and set an 'explicit' flag on the namespace so mode presets do not override."""
 
     def __init__(self, explicit_attr: str, *args, **kwargs):
+        """Initialize explicit attribute flag."""
         self._explicit_attr = explicit_attr
         super().__init__(*args, **kwargs)
 
     def __call__(self, parser, namespace, values, option_string=None):
+        """Set attributes."""
         setattr(namespace, self.dest, values)
         setattr(namespace, self._explicit_attr, True)
 
@@ -275,7 +277,7 @@ Examples:
         type=int,
         default=DEFAULT_NUM_SCHEMES,
         dest="num_schemes",
-        action=_StoreWithExplicitFlag,
+        action=StoreWithExplicitFlag,
         explicit_attr="_explicit_num_schemes",
         help=f"Schemes per region (default: {DEFAULT_NUM_SCHEMES}; preset from --mode if not set)",
     )
@@ -341,7 +343,7 @@ Examples:
         "--warmup_runs",
         type=int,
         default=DEFAULT_WARMUP_RUNS,
-        action=_StoreWithExplicitFlag,
+        action=StoreWithExplicitFlag,
         explicit_attr="_explicit_warmup_runs",
         help=f"Number of warmup runs (default: {DEFAULT_WARMUP_RUNS}; preset from --mode applies if not set)",
     )
@@ -349,7 +351,7 @@ Examples:
         "--timing_runs",
         type=int,
         default=DEFAULT_TIMING_RUNS,
-        action=_StoreWithExplicitFlag,
+        action=StoreWithExplicitFlag,
         explicit_attr="_explicit_timing_runs",
         help=f"Number of timing runs (default: {DEFAULT_TIMING_RUNS}; preset from --mode applies if not set)",
     )
