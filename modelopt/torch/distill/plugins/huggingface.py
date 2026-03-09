@@ -106,9 +106,8 @@ class KDTrainer(ModelOptHFTrainer):
             def loss_reduction_fn(loss: Tensor):
                 if labels is None:
                     return loss.sum() / len(loss)  # batchmean reduction
-                loss_mask = (labels.view(-1) != ignore_index).to(loss.dtype)
-                per_token_loss = loss.sum(dim=-1) if loss.ndim >= 2 else loss
-                return (per_token_loss * loss_mask).sum() / loss_mask.sum().clamp(min=1)
+                loss_mask = (labels != ignore_index).to(loss.dtype)
+                return (loss * loss_mask).sum() / loss_mask.sum().clamp(min=1)
 
             return self.model.compute_kd_loss(loss_reduction_fn=loss_reduction_fn)
 
@@ -142,4 +141,7 @@ class LMLogitsLoss(mtd.LogitsDistillationLoss):
             out_teacher: The teacher model output.
         """
         student_logits, teacher_logits = out_student.logits.float(), out_teacher.logits.float()
-        return super().forward(student_logits, teacher_logits)
+        loss = super().forward(student_logits, teacher_logits)
+        if self._reduction == "none":
+            loss = loss.sum(dim=-1)
+        return loss
