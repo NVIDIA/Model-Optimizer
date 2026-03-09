@@ -38,7 +38,6 @@ import numpy as np
 import onnx
 from onnx import TensorProto, helper
 from onnx.external_data_helper import convert_model_to_external_data
-from transformers import AutoConfig
 
 from ..logging_config import logger
 from .utils.graph_utils import (
@@ -116,6 +115,8 @@ def _add_gemma_cast_nodes(
     Returns:
         Number of Cast nodes added.
     """
+    from transformers import AutoConfig
+
     config = AutoConfig.from_pretrained(hf_model_id, trust_remote_code=trust_remote_code)
     num_layers = config.num_hidden_layers
     cast_nodes_added = 0

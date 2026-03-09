@@ -23,7 +23,6 @@ from typing import Any
 
 import numpy as np
 import torch
-from transformers import AutoConfig
 
 
 def get_rope_caches(
@@ -58,6 +57,8 @@ def get_rope_caches(
         ... )
         >>> print(f"Cache shape: {cos_cache.shape}")
     """
+    from transformers import AutoConfig
+
     config = AutoConfig.from_pretrained(model_id, trust_remote_code=trust_remote_code)
 
     theta = getattr(config, "rope_theta", 10000.0)

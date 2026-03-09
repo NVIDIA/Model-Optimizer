@@ -25,6 +25,8 @@ import pytest
 import torch
 from onnx import TensorProto, helper, numpy_helper
 
+pytest.importorskip("transformers", reason="transformers required for GQA graph surgery tests")
+
 from modelopt.onnx.graph_surgery.gqa_replacement import replace_attention_with_gqa
 
 MODEL_ID = "Qwen/Qwen2.5-0.5B"
