@@ -33,8 +33,8 @@ import numpy as np
 import onnx
 from onnx import TensorProto, helper, numpy_helper
 
-from ...logging_config import logger
-from ..utils.graph_utils import detect_model_dtype
+from ..logging_config import logger
+from .utils.graph_utils import detect_model_dtype
 
 
 def _get_cross_attn_weights_from_hf(
@@ -468,7 +468,7 @@ def add_cross_kv_to_encoder(
     output_dir = os.path.dirname(output_path)
     if output_dir:
         # Save audio processor config
-        from ..utils.whisper_utils import save_audio_processor_config
+        from .utils.whisper_utils import save_audio_processor_config
 
         save_audio_processor_config(
             output_dir,
@@ -479,7 +479,7 @@ def add_cross_kv_to_encoder(
 
         # Generate genai_config.json with encoder pointing to this output
         if generate_genai_config:
-            from ..utils.whisper_utils import save_genai_config as _save_genai_config
+            from .utils.whisper_utils import save_genai_config as _save_genai_config
 
             encoder_filename = os.path.basename(output_path)
             _save_genai_config(

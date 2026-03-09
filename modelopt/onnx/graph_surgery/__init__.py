@@ -64,16 +64,14 @@ Example usage:
     ... )
 """
 
-from . import whisper
 from .dq_transpose import transpose_dequantize_linear_weights
+from .encoder_cross_kv import add_cross_kv_to_encoder
 from .gqa_replacement import replace_attention_with_gqa
 from .utils.dtype_conversion import convert_fp16_to_bf16
-from .whisper import add_cross_kv_to_encoder
 
 __all__ = [
     "add_cross_kv_to_encoder",
     "convert_fp16_to_bf16",
     "replace_attention_with_gqa",
     "transpose_dequantize_linear_weights",
-    "whisper",
 ]

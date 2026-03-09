@@ -268,7 +268,7 @@ Examples:
         )
 
     elif args.command == "add-cross-kv":
-        from .whisper.encoder_cross_kv import add_cross_kv_to_encoder
+        from .encoder_cross_kv import add_cross_kv_to_encoder
 
         add_cross_kv_to_encoder(
             encoder_path=args.input,
