@@ -142,7 +142,4 @@ class LMLogitsLoss(mtd.LogitsDistillationLoss):
             out_teacher: The teacher model output.
         """
         student_logits, teacher_logits = out_student.logits.float(), out_teacher.logits.float()
-        loss = super().forward(student_logits, teacher_logits)
-        if self._reduction == "none":
-            loss = loss.sum(dim=-1)
-        return loss
+        return super().forward(student_logits, teacher_logits)
