@@ -92,7 +92,12 @@ class SpeculativeDecodingExporter(ABC):
         self.model = model
 
     @abstractmethod
-    def export(self, export_dir: Path | str, dtype: torch.dtype | None = None):
+    def export(
+        self,
+        export_dir: Path | str,
+        dtype: torch.dtype | None = None,
+        offline_specdec_input: dict | None = None,
+    ):
         """Export the model to the deployment format."""
         raise NotImplementedError("Subclasses must implement this method.")
 
