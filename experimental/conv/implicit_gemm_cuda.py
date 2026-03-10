@@ -29,10 +29,22 @@ _KERNEL_DIR = os.path.dirname(os.path.abspath(__file__))
 _cuda_module = None
 
 
+_MIN_SM_MAJOR = 8  # BF16 WMMA tensor cores require SM80+ (Ampere and newer)
+
+
 def _get_cuda_module():
     """Get or compile the CUDA module."""
     global _cuda_module
     if _cuda_module is None:
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available. This kernel requires a CUDA GPU.")
+        major, minor = torch.cuda.get_device_capability()
+        if major < _MIN_SM_MAJOR:
+            raise RuntimeError(
+                f"This kernel requires SM{_MIN_SM_MAJOR}0+ (Ampere or newer) for BF16 WMMA "
+                f"tensor cores, but the current GPU has SM{major}{minor}."
+            )
+
         from torch.utils.cpp_extension import load
 
         _cuda_module = load(
