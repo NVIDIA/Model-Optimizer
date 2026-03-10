@@ -17,6 +17,7 @@
 
 import fnmatch
 import inspect
+import os
 import warnings
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -519,11 +520,7 @@ def print_quant_summary(model: nn.Module, output_dir: str | None = None):
     lines.append(f"{len(lines)} TensorQuantizers found in model")
 
     if output_dir:
-        path = (
-            output_dir.joinpath(".quant_summary.txt")
-            if hasattr(output_dir, "joinpath")
-            else f"{output_dir}/.quant_summary.txt"
-        )
+        path = os.path.join(output_dir, ".quant_summary.txt")
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
         print(f"\033[1mQuant summary saved to {path}\033[0m")

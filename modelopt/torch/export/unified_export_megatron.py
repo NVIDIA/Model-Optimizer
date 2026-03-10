@@ -285,14 +285,16 @@ class GPTModelExporter:
             self._hf_config.save_pretrained(save_directory)
             try:
                 generation_config = transformers.GenerationConfig.from_pretrained(
-                    self._hf_pretrained_model_name
+                    self._hf_pretrained_model_name,
+                    trust_remote_code=self.trust_remote_code,
                 )
                 generation_config.save_pretrained(save_directory)
             except OSError:
                 pass
             try:
                 tokenizer = transformers.AutoTokenizer.from_pretrained(
-                    self._hf_pretrained_model_name
+                    self._hf_pretrained_model_name,
+                    trust_remote_code=self.trust_remote_code,
                 )
                 tokenizer.save_pretrained(save_directory)
             except OSError:
@@ -420,6 +422,13 @@ class GPTModelExporter:
     def _get_transformer_layer_state_dict(self, layer, layer_id):
         if not isinstance(layer.input_layernorm, IdentityOp):
             self.rules["input_layernorm"](layer.input_layernorm, layer_id)
+        elif (
+            hasattr(layer.self_attention, "linear_qkv")
+            and hasattr(layer.self_attention.linear_qkv, "layer_norm_weight")
+            and layer.self_attention.linear_qkv.layer_norm_weight is not None
+            and "fused_norm" in self.rules
+        ):
+            self.rules["fused_norm"](layer.self_attention.linear_qkv.layer_norm_weight, layer_id)
 
         if not isinstance(layer.self_attention, IdentityOp):
             if "MLASelfAttention" in str(type(layer.self_attention)):
@@ -458,6 +467,15 @@ class GPTModelExporter:
 
         if not isinstance(layer.pre_mlp_layernorm, IdentityOp):
             self.rules["pre_mlp_layernorm"](layer.pre_mlp_layernorm, layer_id)
+        elif (
+            not isinstance(layer.mlp, IdentityOp)
+            and "MoE" not in str(type(layer.mlp))
+            and hasattr(layer.mlp, "linear_fc1")
+            and hasattr(layer.mlp.linear_fc1, "layer_norm_weight")
+            and layer.mlp.linear_fc1.layer_norm_weight is not None
+            and "fused_norm" in self.rules
+        ):
+            self.rules["fused_norm"](layer.mlp.linear_fc1.layer_norm_weight, layer_id)
 
         if not isinstance(layer.mlp, IdentityOp):
             if "MoE" in str(type(layer.mlp)):
@@ -473,22 +491,30 @@ class GPTModelExporter:
                     self.rules["shared_experts.linear_fc2"](
                         layer.mlp.shared_experts.linear_fc2, layer_id
                     )
-                if not self.rules.get("use_packed_local_experts", False):
-                    for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
+                if hasattr(layer.mlp.experts, "local_experts"):
+                    if not self.rules.get("use_packed_local_experts", False):
+                        for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
+                            self.rules["local_experts.linear_fc1"](
+                                expert.linear_fc1, layer_id, expert_id
+                            )
+                            self.rules["local_experts.linear_fc2"](
+                                expert.linear_fc2, layer_id, expert_id
+                            )
+                    else:
+                        # For llama 4, in hf unified checkpoint, all local experts share one scale
                         self.rules["local_experts.linear_fc1"](
-                            expert.linear_fc1, layer_id, expert_id
+                            layer.mlp.experts.local_experts, layer_id
                         )
                         self.rules["local_experts.linear_fc2"](
-                            expert.linear_fc2, layer_id, expert_id
+                            layer.mlp.experts.local_experts, layer_id
                         )
-                else:
-                    # For llama 4, in hf unified checkpoint, all local experts share one scale
-                    self.rules["local_experts.linear_fc1"](
-                        layer.mlp.experts.local_experts, layer_id
-                    )
-                    self.rules["local_experts.linear_fc2"](
-                        layer.mlp.experts.local_experts, layer_id
-                    )
+                elif "experts.linear_fc1" in self.rules:
+                    # TEGroupedMLP: experts use fused grouped GEMM with a single
+                    # linear_fc1/linear_fc2 for all experts (no local_experts attribute).
+                    # Uses "experts.linear_fc1" rule (GroupedMLPMerging) instead of
+                    # "local_experts.linear_fc1" which expects per-expert iteration.
+                    self.rules["experts.linear_fc1"](layer.mlp.experts.linear_fc1, layer_id)
+                    self.rules["experts.linear_fc2"](layer.mlp.experts.linear_fc2, layer_id)
             else:
                 self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id)
                 self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id)
@@ -529,6 +555,14 @@ class GPTModelExporter:
     def _get_mamba_layer_state_dict(self, layer, layer_id):
         if not isinstance(layer.norm, IdentityOp):
             self.rules["norm"](layer.norm, layer_id)
+        elif (
+            isinstance(layer.norm, IdentityOp)
+            and hasattr(layer.mixer.in_proj, "layer_norm_weight")
+            and layer.mixer.in_proj.layer_norm_weight is not None
+            and "fused_norm" in self.rules
+        ):
+            # TE spec: norm is fused into in_proj (QuantTELayerNormColumnParallelLinear).
+            self.rules["fused_norm"](layer.mixer.in_proj.layer_norm_weight, layer_id)
 
         self.rules["mixer_norm"](layer.mixer.norm, layer_id)
         self.rules["A_log"](layer.mixer.A_log, layer_id)
@@ -655,6 +689,7 @@ class GPTModelExporter:
                 "qkv_slicing": self._qkv_slicing,
                 "self_attention_scaling": self._self_attention_scaling,
                 "gated_mlp_slicing": self._gated_mlp_slicing,
+                "grouped_mlp_slicing": self._grouped_mlp_slicing,
                 "pack_name_remapping": self._pack_name_remapping,
                 "pack_name_remapping_gpt_oss": self._pack_name_remapping_gpt_oss,
             }
@@ -854,6 +889,67 @@ class GPTModelExporter:
             else:
                 self._state_dict[gate_proj_key] = val.detach().clone()
                 self._state_dict[up_proj_key] = val.detach().clone()
+
+    def _grouped_mlp_slicing(self, module, prefix, parallel_config=None):
+        """Export TEGroupedMLP weights by splitting per-expert weights into individual HF weights.
+
+        TEGroupedMLP (via TEGroupedLinear) stores weights as weight0, weight1, ..., weight{N-1}
+        in its state_dict, where each weight{i} corresponds to one expert. This method extracts
+        quantization state from the module, then iterates over experts and saves each expert's
+        weight (and scales if quantized) under the HF-style per-expert prefix.
+
+        This is the reverse of _grouped_mlp_merging in the importer.
+        """
+        num_experts = module.num_gemms
+
+        # TEGroupedLinear doesn't have module.weight (it has weight0, weight1, ...).
+        # Temporarily assign weight = weight0 so _get_quantized_state can extract
+        # qformat, scales, and input_scale from the module's quantizers.
+        has_weight = hasattr(module, "weight")
+        if not has_weight:
+            module.weight = module.weight0
+        try:
+            name_to_value, qformat, block_size = self._get_quantized_state(
+                module, self.dtype, prefix=prefix
+            )
+            weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
+            name_to_value.pop("weight", None)
+        finally:
+            if not has_weight and hasattr(module, "weight"):
+                delattr(module, "weight")
+
+        state_dict = module.state_dict()
+
+        for expert_id in range(num_experts):
+            expert_prefix = prefix.format(expert_id) + "."
+            weight_key = f"weight{expert_id}"
+
+            if weight_key not in state_dict:
+                raise ValueError(f"Missing expected TEGroupedMLP expert weight: {weight_key}")
+
+            weight = state_dict[weight_key].to(self.dtype).cpu()
+
+            if weight_scale is None:
+                self._state_dict[expert_prefix + "weight"] = weight
+            else:
+                self._state_dict[expert_prefix + "weight"] = to_quantized_weight(
+                    weight,
+                    weight_scale,
+                    qformat,
+                    weight_scale_2,
+                    block_size,
+                )
+                self._state_dict[expert_prefix + "weight_scale"] = weight_scale.detach().clone()
+
+            if weight_scale_2 is not None:
+                self._state_dict[expert_prefix + "weight_scale_2"] = weight_scale_2.detach().clone()
+
+        for key, val in name_to_value.items():
+            if key == "output_scale":
+                continue
+            for expert_id in range(num_experts):
+                expert_prefix = prefix.format(expert_id) + "."
+                self._state_dict[expert_prefix + key] = val.detach().clone()
 
     def _qkv_slicing(
         self,
