@@ -50,7 +50,7 @@ jobs:
           git add uv.lock
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit -m "[chore]: bump uv.lock"
+          git commit -s -m "[chore]: bump uv.lock"
           git push origin "$BRANCH"
           gh pr create \
             --title "[chore]: weekly bump of uv.lock on ${BASE} ($(date +%Y-%m-%d))" \

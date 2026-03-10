@@ -317,19 +317,28 @@ class MCoreMinitronSearcher(BaseSearcher):
         # Prune homogeneously
         self._prune(export_config, prune_depth=True)
 
-        # TODO: Rename to hybrid_layer_pattern after https://github.com/NVIDIA/Megatron-LM/pull/3377
+        # TODO: Rename to hybrid_layer_pattern after MCore 0.17 and nemo:26.04 is released (for M-LM PR #3377)
         # Update hybrid_override_pattern if pruning is done on a hybrid model
         if isinstance(self.model, MambaModel):
-            print_rank_0(f"Original hybrid_override_pattern: {self.model.hybrid_override_pattern}")
+            hybrid_key = (
+                "hybrid_override_pattern"
+                if hasattr(self.model, "hybrid_override_pattern")
+                else "hybrid_layer_pattern"
+            )
+            print_rank_0(f"Original {hybrid_key}: {getattr(self.model, hybrid_key)}")
             new_num_layers = self.model.config.num_layers
             assert self.sorted_layers is not None
             kept_layers_numbers = self.sorted_layers[:new_num_layers]
-            self.model.hybrid_override_pattern = "".join(
-                c
-                for i, c in enumerate(self.model.hybrid_override_pattern)
-                if i + 1 in kept_layers_numbers
+            setattr(
+                self.model,
+                hybrid_key,
+                "".join(
+                    c
+                    for i, c in enumerate(getattr(self.model, hybrid_key))
+                    if i + 1 in kept_layers_numbers
+                ),
             )
-            print_rank_0(f"Pruned hybrid_override_pattern: {self.model.hybrid_override_pattern}")
+            print_rank_0(f"Pruned {hybrid_key}: {getattr(self.model, hybrid_key)}")
 
     def _prune(self, export_config: dict, prune_depth: bool = True) -> None:
         """Prune the model homogeneously based on the export_config by setting active choices for configurable hparams.

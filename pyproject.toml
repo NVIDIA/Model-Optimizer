@@ -100,7 +100,7 @@ dev-test = [
     "pytest-instafail",
     "pytest-timeout",
     "timm",
-    "torchprofile>=0.0.4",     # optional dependency for modelopt.torch
+    "torchprofile==0.0.4",     # optional dependency for modelopt.torch
     "torchvision",
     "torch-geometric",
     "tox>4.18",
