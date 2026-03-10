@@ -40,7 +40,7 @@ def pytest_collection_modifyitems(config, items):
         import modelopt.torch.quantization.config  # noqa: F401
 
         return  # modelopt available, run all tests
-    except ImportError:
+    except ModuleNotFoundError:
         pass
     skip = pytest.mark.skip(reason="nvidia-modelopt not installed")
     for item in items:
