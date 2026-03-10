@@ -201,7 +201,7 @@ class EagleExporter(SpeculativeDecodingExporter):
             from ..unified_export_hf import _export_transformers_checkpoint
 
             full_sd, hf_quant_config = _export_transformers_checkpoint(
-                self.model, dtype, offline_specdec_input
+                self.model, dtype, offline_specdec_input=offline_specdec_input
             )
         else:
             full_sd, hf_quant_config = self.model.state_dict(), None
