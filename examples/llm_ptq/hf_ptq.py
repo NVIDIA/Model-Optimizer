@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import argparse
+import copy
 import random
 import time
 import warnings
@@ -24,7 +25,6 @@ import torch
 from accelerate.hooks import remove_hook_from_module
 from example_utils import (
     build_quant_cfg,
-    calibrate_kv_cache_quantizers,
     copy_custom_model_files,
     create_vlm_calibration_loop,
     get_model,
@@ -302,14 +302,25 @@ def auto_quantize(
 
     calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
     # We need to explicitly set up KV cache quantization after auto_quantize
-    calibrate_kv_cache_quantizers(
-        language_model,
-        args.kv_cache_qformat,
-        KV_QUANT_CFG_CHOICES,
-        calibrate_kv_cache=args.calibrate_kv_cache,
-        calibrate_loop=calibrate_loop,
-        set_quantizers=True,
-    )
+    enable_quant_kv_cache = args.kv_cache_qformat != "none"
+    print(f"{'Enable' if enable_quant_kv_cache else 'Disable'} KV cache quantization")
+    if enable_quant_kv_cache:
+        kv_cache_quant_cfg = copy.deepcopy(
+            getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"]
+        )
+        kv_cache_quant_cfg.pop("default")  # keep other quantizers from auto_quantize
+
+        if not args.calibrate_kv_cache:
+            # Use constant amax=448.0 (FP8 E4M3 maxbound → scale=1.0); no calibration needed.
+            kv_cache_quant_cfg["*[kv]_bmm_quantizer"]["constant_amax"] = 448.0
+
+        mtq.set_quantizer_by_cfg(language_model, quant_cfg=kv_cache_quant_cfg)
+        if args.calibrate_kv_cache:
+            # Calibrate only the KV cache quantizers; disable all others.
+            with mtq.set_quantizer_by_cfg_context(
+                language_model, {"*": {"enable": False}, **kv_cache_quant_cfg}
+            ):
+                mtq.calibrate(language_model, algorithm="max", forward_loop=calibrate_loop)
     return language_model
 
 
@@ -537,16 +548,6 @@ def mono_quantize(
             )
         else:
             language_model = mtq.quantize(language_model, quant_cfg, forward_loop=calibrate_loop)
-
-        # If KV cache quantization is enabled but data-driven calibration is not requested,
-        # override the KV quantizer amaxes with the constant FP8 maxbound (amax=448.0 → scale=1.0).
-        if args.kv_cache_qformat != "none" and not args.calibrate_kv_cache:
-            calibrate_kv_cache_quantizers(
-                language_model,
-                args.kv_cache_qformat,
-                KV_QUANT_CFG_CHOICES,
-                calibrate_kv_cache=False,
-            )
 
         # For VL models, update full_model to use the quantized language model
         if is_nemotron_vl_model:
@@ -929,21 +930,23 @@ def quantize_main(
             QUANT_CFG_CHOICES,
             KV_QUANT_CFG_CHOICES,
             args.moe_calib_experts_ratio,
-            args.calibrate_kv_cache,
         )
 
         # Exclude MTP layers from quantization if detected (e.g., GLM-4.7's layer 92)
         # These layers are typically speculative decoding layers that should be exported as-is
         mtp_layer_prefixes = getattr(full_model, "_mtp_layer_prefixes", None)
         if mtp_layer_prefixes:
-            import copy
-
             quant_cfg = copy.deepcopy(quant_cfg)
             for prefix in mtp_layer_prefixes:
                 # Add exclusion pattern for this MTP layer (e.g., "*layers.92*")
                 pattern = f"*{prefix.split('.')[-2]}.{prefix.split('.')[-1]}*"
                 quant_cfg["quant_cfg"][pattern] = {"enable": False}
                 print(f"Excluding MTP layer from quantization: {pattern}")
+
+        # Use constant amax for KV quantizers when data-driven calibration is not requested.
+        if args.kv_cache_qformat != "none" and not args.calibrate_kv_cache:
+            quant_cfg = copy.deepcopy(quant_cfg)
+            quant_cfg["quant_cfg"]["*[kv]_bmm_quantizer"]["constant_amax"] = 448.0
 
         if args.qformat in QUANT_CFG_CHOICES:
             mono_quantize(

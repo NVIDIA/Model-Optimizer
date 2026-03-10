@@ -209,6 +209,63 @@ class TensorQuantizerTester:
         tq.set_from_attribute_config({"enable": False})
         assert tq._disabled
 
+    def test_constant_amax(self):
+        """Test that constant_amax sets a fixed amax without calibration."""
+        x = torch.randn(4, 8).to(self.device)
+        amax_val = 2.0
+
+        tq = TensorQuantizer(QuantizerAttributeConfig(num_bits=8, constant_amax=amax_val))
+        tq.to(self.device)
+
+        # _constant_amax should be stored as a plain float attribute
+        assert tq._constant_amax == amax_val
+
+        # _get_amax should return a tensor with the correct value and device
+        returned_amax = tq._get_amax(x)
+        assert returned_amax.item() == amax_val
+        assert returned_amax.device == x.device
+
+        # Forward pass should use the constant amax
+        out = tq(x)
+        assert out.shape == x.shape
+
+    def test_constant_amax_skips_calibration(self):
+        """Test that constant_amax quantizers are kept enabled during calibration."""
+        import torch.nn as nn
+
+        from modelopt.torch.quantization.model_calib import (
+            enable_stats_collection,
+            finish_stats_collection,
+        )
+
+        # Build a small model with one constant-amax quantizer and one normal quantizer
+        model = nn.ModuleDict(
+            {
+                "tq_const": TensorQuantizer(
+                    QuantizerAttributeConfig(num_bits=8, constant_amax=448.0)
+                ),
+                "tq_calib": TensorQuantizer(QuantizerAttributeConfig(num_bits=8)),
+            }
+        ).to(self.device)
+
+        enable_stats_collection(model)
+
+        # constant-amax quantizer must remain enabled (not disabled, not in calib mode)
+        assert not model["tq_const"]._disabled
+        assert not model["tq_const"]._if_calib
+        assert model["tq_const"]._if_quant
+
+        # normal quantizer with a calibrator should be in calib mode (quant disabled)
+        assert not model["tq_calib"]._disabled
+        assert model["tq_calib"]._if_calib
+        assert not model["tq_calib"]._if_quant
+
+        finish_stats_collection(model)
+
+        # After finish, constant-amax quantizer is still enabled
+        assert not model["tq_const"]._disabled
+        assert model["tq_const"]._if_quant
+
     def test_modelopt_state(self):
         # Test loading of amax from ref to test
         tensor_quantizer_ref = TensorQuantizer(QuantizerAttributeConfig(num_bits=4), amax=10.0)

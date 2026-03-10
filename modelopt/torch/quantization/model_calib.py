@@ -741,7 +741,10 @@ def enable_stats_collection(model: nn.Module):
     """Enable stats collection for all quantizers in the model."""
     for name, module in model.named_modules():
         if isinstance(module, TensorQuantizer) and not module._disabled:
-            if module._calibrator is not None:
+            if getattr(module, "_constant_amax", None) is not None:
+                # Constant amax set via config; keep quantization enabled and skip calibration.
+                continue
+            elif module._calibrator is not None:
                 module.disable_quant()
                 module.enable_calib()
             else:
