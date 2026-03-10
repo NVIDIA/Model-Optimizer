@@ -21,6 +21,11 @@ import tempfile
 from pathlib import Path
 
 from modelopt.onnx.logging_config import logger
+from modelopt.onnx.quantization.autotune.utils import (
+    StoreWithExplicitFlag,
+    get_node_filter_list,
+    validate_file_path,
+)
 from modelopt.onnx.quantization.autotune.workflows import (
     init_benchmark_instance,
     region_pattern_autotuning_workflow,
@@ -44,20 +49,6 @@ MODE_PRESETS = {
 }
 
 
-class StoreWithExplicitFlag(argparse.Action):
-    """Store the value and set an 'explicit' flag on the namespace so mode presets do not override."""
-
-    def __init__(self, explicit_attr: str, *args, **kwargs):
-        """Initialize explicit attribute flag."""
-        self._explicit_attr = explicit_attr
-        super().__init__(*args, **kwargs)
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        """Set attributes."""
-        setattr(namespace, self.dest, values)
-        setattr(namespace, self._explicit_attr, True)
-
-
 def apply_mode_presets(args) -> None:
     """Apply --mode preset to schemes_per_region, warmup_runs, timing_runs.
 
@@ -73,30 +64,6 @@ def apply_mode_presets(args) -> None:
         args.warmup_runs = preset["warmup_runs"]
     if not getattr(args, "_explicit_timing_runs", False):
         args.timing_runs = preset["timing_runs"]
-
-
-def validate_file_path(path: str | None, description: str) -> Path | None:
-    """Validate that a file path exists.
-
-    Args:
-        path: Path string to validate (can be None)
-        description: Description of the file for error messages
-
-    Returns:
-        Path object if valid, None if path is None
-
-    Raises:
-        SystemExit: If path is provided but doesn't exist
-    """
-    if path is None:
-        return None
-
-    path_obj = Path(path)
-    if not path_obj.exists():
-        logger.error(f"{description} not found: {path_obj}")
-        sys.exit(1)
-
-    return path_obj
 
 
 def log_benchmark_config(args):
@@ -116,27 +83,6 @@ def log_benchmark_config(args):
         logger.info(f"  Plugin libraries: {', '.join(args.plugin_libraries)}")
     if hasattr(args, "trtexec_benchmark_args") and args.trtexec_benchmark_args:
         logger.info(f"  Trtexec args: {args.trtexec_benchmark_args}")
-
-
-def get_node_filter_list(node_filter_list_path: str) -> list | None:
-    """Extract node filter list from node filters path.
-
-    Args:
-        node_filter_list_path: Path to a file containing wildcard patterns to filter ONNX nodes (one pattern per line).
-
-    Returns:
-        Node filter list
-    """
-    node_filter_list = None
-    if node_filter_list_path:
-        filter_file = validate_file_path(node_filter_list_path, "Node filter list file")
-        if filter_file:
-            with open(filter_file) as f:
-                node_filter_list = [
-                    line.strip() for line in f if line.strip() and not line.strip().startswith("#")
-                ]
-            logger.info(f"Loaded {len(node_filter_list)} filter patterns from {filter_file}")
-    return node_filter_list
 
 
 def run_autotune() -> int:
