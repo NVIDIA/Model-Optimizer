@@ -10,7 +10,7 @@ NVIDIA Model Optimizer Changelog
 
 **New Features**
 
-- Add ``--calibrate_kv_cache`` flag in ``hf_ptq.py``. By default, FP8 KV cache quantization now uses a constant scale of 1.0 (amax=448.0) without data-driven calibration; KV scales equal to 1.0 are omitted from the exported checkpoint since inference engines (TRT-LLM, vLLM) use scale=1.0 by default. Pass ``--calibrate_kv_cache`` to opt into data-driven per-tensor KV scale calibration. A new ``"constant"`` calibration algorithm (``ConstantCalibConfig``) is added to the ModelOpt quantization system.
+- Add ``--calibrate_kv_cache`` flag in ``hf_ptq.py``. By default, FP8 KV cache quantization now uses a constant scale of 1.0 (amax=448.0) without data-driven calibration, and no KV scales are written to the exported checkpoint (inference engines use scale=1.0 when no scale is present). Pass ``--calibrate_kv_cache`` to opt into data-driven per-tensor KV scale calibration. A new ``constant_amax`` field in :class:`QuantizerAttributeConfig <modelopt.torch.quantization.config.QuantizerAttributeConfig>` enables setting a fixed amax on any quantizer without a calibration pass.
 - User does not need to manually register MOE modules to cover experts calibration coverage in PTQ workflow.
 - ``hf_ptq.py`` now saves the quantization summary and moe expert token count table to the export directory.
 - Add ``--moe_calib_experts_ratio`` flag in ``hf_ptq.py`` to specify the ratio of experts to calibrate during forward pass to improve expert coverage during calibration. Default to all the experts.
