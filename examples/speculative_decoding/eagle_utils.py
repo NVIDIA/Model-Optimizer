@@ -168,6 +168,8 @@ def make_eagle_supervised_data_module(
         if not dumped_files:
             raise ValueError(f"No .pt files found in {data_args.offline_data_path}")
 
+        if data_args.sample_size > 0:
+            dumped_files = dumped_files[: data_args.sample_size]
         train_dataset = OfflineSupervisedDataset(dumped_files)
         data_collator = EagleOfflineDataCollator(train_len=train_len)
 

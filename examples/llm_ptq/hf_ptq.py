@@ -957,6 +957,7 @@ def quantize_main(
             vlm_img_dir=None,
             offline_data_path=args.specdec_offline_dataset,
             devlazy_preprocessice=True,
+            sample_size=args.calib_size[0],
         )
         data_module = make_eagle_supervised_data_module(
             tokenizer, data_args, train_len=args.calib_seq
