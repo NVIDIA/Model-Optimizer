@@ -151,6 +151,18 @@ class _QuantTEGroupedLinear(_ParallelLinear):
         # Remove self.weight after post_restore.
         delattr(self, "weight")
 
+    def iter_weights_for_calibration(self):
+        """Yield ``(weight_i, weight_quantizer)`` for each of the ``num_gemms`` grouped weights.
+
+        Override is needed because ``self.weight`` is removed in ``_setup``, so the
+        base-class implementation (which relies on ``weight_attr_names``) would find
+        no weights.  Here we iterate over ``weight0``, ``weight1``, … directly.
+        """
+        for i in range(self.num_gemms):
+            weight_i = getattr(self, f"weight{i}", None)
+            if weight_i is not None:
+                yield weight_i, self.weight_quantizer
+
     @staticmethod
     def te_grouped_quantized_linear_fn(package, func_name, self, *args):
         _assert_te_fp8_enabled()

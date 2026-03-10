@@ -70,12 +70,18 @@ def weight_only_quantize(model: nn.Module):
     for name, module in model.named_modules():
         if module in seen_modules:
             continue
-        for weight_name in weight_attr_names(module):
+
+        if isinstance(module, QuantModule):
             with enable_weight_access_and_writeback(module, model):
-                weight_quantizer = getattr(
-                    module, quantizer_attr_names(weight_name).weight_quantizer
-                )
-                weight_quantizer(getattr(module, weight_name))
+                for weight, weight_quantizer in module.iter_weights_for_calibration():
+                    weight_quantizer(weight)
+        else:
+            for weight_name in weight_attr_names(module):
+                with enable_weight_access_and_writeback(module, model):
+                    weight_quantizer = getattr(
+                        module, quantizer_attr_names(weight_name).weight_quantizer
+                    )
+                    weight_quantizer(getattr(module, weight_name))
         seen_modules.add(module)
 
 
