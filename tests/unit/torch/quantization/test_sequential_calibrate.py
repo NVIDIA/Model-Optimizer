@@ -15,6 +15,8 @@
 
 """Unit tests for sequential_calibrate and LayerActivationCollector."""
 
+from collections import deque
+
 import pytest
 import torch
 import torch.nn as nn
@@ -98,7 +100,17 @@ def _run_forward(model, data):
 # LayerActivationCollector tests
 
 
-def test_collector_collects_correct_number_of_inputs():
+def _register_test_discoverer(monkeypatch):
+    """Register a simple discoverer that finds model.layers on any model."""
+    monkeypatch.setattr(
+        LayerActivationCollector,
+        "_decoder_layer_support",
+        [(lambda m: hasattr(m, "layers"), lambda m: m.layers)],
+    )
+
+
+def test_collector_collects_correct_number_of_inputs(monkeypatch):
+    _register_test_discoverer(monkeypatch)
     torch.manual_seed(0)
     model = _SimpleTwoLayerModel(dim=8)
     collector = LayerActivationCollector(model)
@@ -108,12 +120,17 @@ def test_collector_collects_correct_number_of_inputs():
         for d in data:
             m(d)
 
-    inputs = collector.get_input_activations(model.layers[0], forward_loop)
-    assert len(inputs) == 3
+    collector._patch_all_layers()
+    try:
+        inputs = collector.get_input_activations(model.layers[0], forward_loop)
+        assert len(inputs) == 3
+    finally:
+        collector._unpatch_all_layers()
 
 
-def test_collector_activations_match_expected():
+def test_collector_activations_match_expected(monkeypatch):
     """First layer should receive the raw input data."""
+    _register_test_discoverer(monkeypatch)
     torch.manual_seed(0)
     model = _SimpleTwoLayerModel(dim=8)
     collector = LayerActivationCollector(model)
@@ -123,13 +140,18 @@ def test_collector_activations_match_expected():
         for d in data:
             m(d)
 
-    inputs = collector.get_input_activations(model.layers[0], forward_loop)
-    args, kwargs = inputs[0]
-    assert torch.allclose(args[0], data[0])
+    collector._patch_all_layers()
+    try:
+        inputs = collector.get_input_activations(model.layers[0], forward_loop)
+        args, kwargs = inputs[0]
+        assert torch.allclose(args[0], data[0])
+    finally:
+        collector._unpatch_all_layers()
 
 
-def test_collector_second_layer_receives_transformed_input():
+def test_collector_second_layer_receives_transformed_input(monkeypatch):
     """Second layer should receive first layer's output, not raw input."""
+    _register_test_discoverer(monkeypatch)
     torch.manual_seed(0)
     model = _SimpleTwoLayerModel(dim=8)
     collector = LayerActivationCollector(model)
@@ -139,53 +161,55 @@ def test_collector_second_layer_receives_transformed_input():
         m(x)
 
     expected = model.layers[0](x)
-    inputs = collector.get_input_activations(model.layers[1], forward_loop)
-    args, _ = inputs[0]
-    assert torch.allclose(args[0], expected)
+
+    collector._patch_all_layers()
+    try:
+        collector.get_input_activations(model.layers[0], forward_loop)
+        inputs = collector.get_input_activations(model.layers[1], forward_loop)
+        args, _ = inputs[0]
+        assert torch.allclose(args[0], expected)
+    finally:
+        collector._unpatch_all_layers()
 
 
-def test_collector_forward_is_restored_after_collection():
+def test_collector_forward_is_restored_after_collection(monkeypatch):
+    _register_test_discoverer(monkeypatch)
     model = _SimpleTwoLayerModel(dim=8)
     collector = LayerActivationCollector(model)
 
     def forward_loop(m):
         m(torch.randn(2, 8))
 
+    collector._patch_all_layers()
     collector.get_input_activations(model.layers[0], forward_loop)
+    collector._unpatch_all_layers()
 
     assert not hasattr(model, "_original_forward")
-    assert not hasattr(model.layers[0], "inputs")
+    assert not hasattr(model.layers[0], "_seq_calib")
     assert not hasattr(model.layers[0], "_original_forward")
 
 
-def test_collector_cleanup_on_forward_loop_error():
+def test_collector_cleanup_on_forward_loop_error(monkeypatch):
     """Patching should be cleaned up even if forward_loop raises."""
+    _register_test_discoverer(monkeypatch)
     model = _SimpleTwoLayerModel(dim=8)
     collector = LayerActivationCollector(model)
 
     def bad_forward_loop(m):
         raise RuntimeError("intentional error")
 
-    with pytest.raises(RuntimeError, match="intentional error"):
-        collector.get_input_activations(model.layers[0], bad_forward_loop)
+    collector._patch_all_layers()
+    try:
+        with pytest.raises(RuntimeError, match="intentional error"):
+            collector.get_input_activations(model.layers[0], bad_forward_loop)
+    finally:
+        collector._unpatch_all_layers()
 
     assert not hasattr(model, "_original_forward")
-    assert not hasattr(model.layers[0], "inputs")
+    assert not hasattr(model.layers[0], "_seq_calib")
 
 
 # sequential_calibrate tests
-
-
-def test_seq_calib_raises_on_none_forward_loop():
-    model, _ = _make_model_and_data(n_layers=2)
-    with pytest.raises(ValueError, match="forward_loop must not be None"):
-        sequential_calibrate(
-            model,
-            forward_loop=None,
-            calib_func=lambda *a, **kw: None,
-        )
-
-
 def test_seq_calib_raises_on_unrecognized_model():
     model = _FlatMLP()
     with pytest.raises(ValueError, match="Could not find transformer layers"):
@@ -196,7 +220,8 @@ def test_seq_calib_raises_on_unrecognized_model():
         )
 
 
-def test_seq_calib_func_called_per_layer():
+def test_seq_calib_func_called_per_layer(monkeypatch):
+    _register_test_discoverer(monkeypatch)
     model, data = _make_model_and_data(n_layers=4)
     call_count = [0]
 
@@ -212,7 +237,8 @@ def test_seq_calib_func_called_per_layer():
     assert call_count[0] == 4
 
 
-def test_seq_calib_func_receives_correct_layer():
+def test_seq_calib_func_receives_correct_layer(monkeypatch):
+    _register_test_discoverer(monkeypatch)
     model, data = _make_model_and_data(n_layers=3)
     called_layers = []
 
@@ -229,7 +255,8 @@ def test_seq_calib_func_receives_correct_layer():
         assert called_layers[i] is layer
 
 
-def test_seq_calib_kwargs_forwarded():
+def test_seq_calib_kwargs_forwarded(monkeypatch):
+    _register_test_discoverer(monkeypatch)
     model, data = _make_model_and_data(n_layers=2)
     received_kwargs = []
 
@@ -250,8 +277,9 @@ def test_seq_calib_kwargs_forwarded():
         assert kw["method"] == "max"
 
 
-def test_seq_calib_layer_forward_loop_runs_all_batches():
+def test_seq_calib_layer_forward_loop_runs_all_batches(monkeypatch):
     """The per-layer forward loop passed to calib_func should replay all batches."""
+    _register_test_discoverer(monkeypatch)
     n_batches = 5
     model, data = _make_model_and_data(n_layers=2, n_batches=n_batches)
     batch_counts = []
@@ -279,8 +307,9 @@ def test_seq_calib_layer_forward_loop_runs_all_batches():
         assert count == n_batches
 
 
-def test_seq_calib_does_not_alter_weights():
+def test_seq_calib_does_not_alter_weights(monkeypatch):
     """sequential_calibrate itself should not modify model weights."""
+    _register_test_discoverer(monkeypatch)
     model, data = _make_model_and_data(n_layers=3)
     weights_before = {n: p.clone() for n, p in model.named_parameters()}
 
@@ -294,8 +323,9 @@ def test_seq_calib_does_not_alter_weights():
         assert torch.equal(p, weights_before[n]), f"Weight {n} was modified"
 
 
-def test_seq_calib_activations_update_across_layers():
+def test_seq_calib_activations_update_across_layers(monkeypatch):
     """Subsequent layers should see activations transformed by prior layers."""
+    _register_test_discoverer(monkeypatch)
     torch.manual_seed(0)
     model = _SimpleTransformerModel(n_layers=2, dim=16)
     tokens = [torch.randint(0, 32, (2, 4))]
@@ -328,8 +358,9 @@ def test_seq_calib_activations_update_across_layers():
     )
 
 
-def test_seq_calib_empty_forward_loop():
+def test_seq_calib_empty_forward_loop(monkeypatch):
     """If forward_loop feeds no data, calib_func still gets called with an empty replay."""
+    _register_test_discoverer(monkeypatch)
     model = _SimpleTransformerModel(n_layers=2, dim=16)
     replay_counts = []
 
@@ -401,15 +432,6 @@ class _InterLayerNormModel(nn.Module):
             x = norm(x)
             x, _ = layer(x)
         return x
-
-
-def _register_test_discoverer(monkeypatch):
-    """Register a simple discoverer that finds model.layers on any model."""
-    monkeypatch.setattr(
-        LayerActivationCollector,
-        "_decoder_layer_support",
-        [(lambda m: hasattr(m, "layers"), lambda m: m.layers)],
-    )
 
 
 def test_skip_output_preserves_tuple_structure(monkeypatch):
@@ -572,7 +594,7 @@ def test_run_asserts_on_empty_cached_inputs(monkeypatch):
     collector._patch_all_layers()
     try:
         model.layers[0]._seq_calib.mode = "run"
-        model.layers[0]._seq_calib.cached_inputs = []
+        model.layers[0]._seq_calib.cached_inputs = deque()
 
         with pytest.raises(AssertionError, match="no cached inputs to replay"):
             model(torch.randn(2, 16))

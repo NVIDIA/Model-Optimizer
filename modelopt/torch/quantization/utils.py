@@ -15,7 +15,8 @@
 
 """Quantization utilities."""
 
-from collections import namedtuple
+import copy
+from collections import deque, namedtuple
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -868,7 +869,7 @@ class _LayerCalibState:
 
     mode: str = "original"
     name: str = ""
-    cached_inputs: list = field(default_factory=list)
+    cached_inputs: deque = field(default_factory=deque)
     collected_inputs: list = field(default_factory=list)
     output_meta: tuple | None = None
 
@@ -964,7 +965,7 @@ class LayerActivationCollector:
             return tuple(LayerActivationCollector._zeros_from_meta(m) for m in meta[1])
         if tag == "list":
             return [LayerActivationCollector._zeros_from_meta(m) for m in meta[1]]
-        return meta[1]
+        return copy.deepcopy(meta[1])
 
     # ------------------------------------------------------------------
     # Patched forward
@@ -980,16 +981,19 @@ class LayerActivationCollector:
         info: _LayerCalibState = self._seq_calib
 
         if info.mode == "skip":
-            if info.output_meta is not None:
-                return LayerActivationCollector._zeros_from_meta(info.output_meta)
-            print_rank_0(f"Layer {info.name} is in 'skip' mode but has no output meta to return")
-            return args[0] if args else next(iter(kwargs.values()))
+            if info.output_meta is None:
+                raise RuntimeError(
+                    f"Layer {info.name} is in 'skip' mode but has no output_meta. "
+                    "This indicates a state-machine bug: the layer should have run "
+                    "in 'run' mode (which sets output_meta) before transitioning to 'skip'."
+                )
+            return LayerActivationCollector._zeros_from_meta(info.output_meta)
 
         if info.mode == "run":
             assert info.cached_inputs, (
                 f"Layer {info.name} is in 'run' mode but has no cached inputs to replay."
             )
-            real_args, real_kwargs = info.cached_inputs.pop(0)
+            real_args, real_kwargs = info.cached_inputs.popleft()
             output = self._original_forward(*real_args, **real_kwargs)
             info.output_meta = LayerActivationCollector._extract_output_meta(output)
             return output
@@ -1011,35 +1015,43 @@ class LayerActivationCollector:
         self._layer_to_idx = {layer: i for i, layer in enumerate(self._decoder_layers)}
         module_to_name = {m: name for name, m in self.model.named_modules()}
 
-        for layer in self._decoder_layers:
-            layer._seq_calib = _LayerCalibState(
-                name=module_to_name.get(layer, type(layer).__name__),
-            )
-            bind_forward_method(layer, self._patched_forward, "_original_forward")
+        try:
+            for layer in self._decoder_layers:
+                layer._seq_calib = _LayerCalibState(
+                    name=module_to_name.get(layer, type(layer).__name__),
+                )
+                bind_forward_method(layer, self._patched_forward, "_original_forward")
 
-        def _early_stop_forward(self, *args, **kwargs):
-            try:
-                return self._original_forward(*args, **kwargs)
-            except _EarlyStopForwardError:
-                return None
+            def _early_stop_forward(self, *args, **kwargs):
+                try:
+                    return self._original_forward(*args, **kwargs)
+                except _EarlyStopForwardError:
+                    return None
 
-        bind_forward_method(self.model, _early_stop_forward, "_original_forward")
+            bind_forward_method(self.model, _early_stop_forward, "_original_forward")
+        except Exception:
+            self._cleanup_layers()
+            raise
+
         self._patched = True
+
+    def _cleanup_layers(self):
+        """Best-effort cleanup of any patched layers and model forward."""
+        if hasattr(self.model, "_original_forward"):
+            unpatch_forward_method(self.model, "_original_forward")
+
+        if self._decoder_layers is not None:
+            for layer in self._decoder_layers:
+                if hasattr(layer, "_original_forward"):
+                    unpatch_forward_method(layer, "_original_forward")
+                if hasattr(layer, self._LAYER_ATTR):
+                    delattr(layer, self._LAYER_ATTR)
 
     def _unpatch_all_layers(self):
         """Restore original forwards and clean up state attributes. Called once."""
         if not self._patched:
             return
-        assert self._decoder_layers is not None
-
-        unpatch_forward_method(self.model, "_original_forward")
-
-        for layer in self._decoder_layers:
-            if hasattr(layer, "_original_forward"):
-                unpatch_forward_method(layer, "_original_forward")
-            if hasattr(layer, self._LAYER_ATTR):
-                delattr(layer, self._LAYER_ATTR)
-
+        self._cleanup_layers()
         self._patched = False
 
     # ------------------------------------------------------------------
@@ -1060,12 +1072,12 @@ class LayerActivationCollector:
         if layer_idx > 1:
             done = self._decoder_layers[layer_idx - 2]._seq_calib
             done.mode = "skip"
-            done.cached_inputs = []
+            done.cached_inputs = deque()
 
         if layer_idx > 0:
             prev = self._decoder_layers[layer_idx - 1]._seq_calib
             prev.mode = "run"
-            prev.cached_inputs = prev.collected_inputs
+            prev.cached_inputs = deque(prev.collected_inputs)
             prev.collected_inputs = []
 
         cur = self._decoder_layers[layer_idx]._seq_calib
@@ -1095,7 +1107,13 @@ class LayerActivationCollector:
         Layers before the target are skipped or re-run (if just calibrated), the
         target layer captures its inputs, and an early-stop prevents unnecessary
         computation beyond the target.
+
+        :meth:`_patch_all_layers` must be called before this method.
         """
+        if not self._patched:
+            raise RuntimeError(
+                "get_input_activations() requires _patch_all_layers() to be called first."
+            )
         layer_idx = self._layer_to_idx[layer]
         self._set_layer_states(layer_idx)
         self._log_layer_summary(layer_idx)
