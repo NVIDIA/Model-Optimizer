@@ -46,6 +46,7 @@ def init_process(rank, size, job=None, backend="gloo", port=None):
     torch.manual_seed(1234)
     if job is not None:
         job(rank, size)
+    dist.destroy_process_group()
 
 
 def spawn_multiprocess_job(size, job, backend="gloo"):
