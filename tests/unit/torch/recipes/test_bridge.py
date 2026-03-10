@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for recipe bridge (recipe → hf_ptq translation)."""
+"""Tests for recipe bridge (bridge.py)."""
 
 from modelopt.torch.recipes.bridge import recipe_to_hf_ptq_args, summarize_recipe
 
@@ -27,6 +27,13 @@ def test_quantize_config_mapping():
     }
     result = recipe_to_hf_ptq_args(resolved)
     assert "_resolved_quantize_config" in result
+
+
+def test_auto_quantize_bridge():
+    """Auto-quantize path in recipe_to_hf_ptq_args."""
+    resolved = {"auto_quantize_kwargs": {"quantization_formats": [], "method": "gradient"}}
+    result = recipe_to_hf_ptq_args(resolved)
+    assert "_resolved_auto_quantize_kwargs" in result
 
 
 def test_calibration_mapping():
@@ -86,3 +93,9 @@ def test_summarize_auto_quantize_recipe():
     assert summary["type"] == "auto_quantize"
     assert summary["algorithm"] == "gradient"
     assert summary["formats_count"] == 2
+
+
+def test_summarize_empty_recipe():
+    """Summarize with no quantization or auto_quantize."""
+    summary = summarize_recipe("test.yaml", {}, {})
+    assert summary["type"] == "unknown"

@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for pipeline orchestrator."""
+"""Tests for pipeline orchestrator (pipeline.py)."""
 
 import yaml
 
-from modelopt.torch.recipes.pipeline import load_and_plan, plan_pipeline
+from modelopt.torch.recipes.pipeline import _make_serializable, load_and_plan, plan_pipeline
 from modelopt.torch.recipes.schema.models import RecipeConfig
 
 
@@ -121,6 +121,95 @@ def test_three_technique_pipeline():
     assert plan.steps[2].technique == "distillation"
 
 
+def test_four_technique_pipeline():
+    """All four techniques in correct order."""
+    recipe = RecipeConfig.model_validate(
+        yaml.safe_load("""
+    version: "1.0"
+    pruning:
+      mode: gradnas
+      constraints: {}
+    sparsity:
+      method: wanda
+    quantization:
+      preset: fp8
+    distillation:
+      teacher: "meta-llama/Llama-3-70B"
+      training:
+        learning_rate: 1e-5
+    """)
+    )
+    plan = plan_pipeline(recipe)
+    assert len(plan.steps) == 4
+    assert [s.technique for s in plan.steps] == [
+        "pruning",
+        "sparsity",
+        "quantization (ptq)",
+        "distillation",
+    ]
+
+
+def test_pruning_step():
+    """Pruning recipe produces a pruning step."""
+    recipe = RecipeConfig.model_validate(
+        yaml.safe_load("""
+    version: "1.0"
+    pruning:
+      mode: gradnas
+      constraints:
+        flops: 0.5
+      calibration:
+        dataset: pile
+        num_samples: 256
+    """)
+    )
+    plan = plan_pipeline(recipe)
+    assert len(plan.steps) == 1
+    assert plan.steps[0].technique == "pruning"
+    assert "prune(" in plan.steps[0].api_call
+    assert plan.steps[0].config["mode"] == "gradnas"
+    assert plan.steps[0].calibration["dataset"] == "pile"
+
+
+def test_pruning_with_training():
+    """Pruning with training config."""
+    recipe = RecipeConfig.model_validate(
+        yaml.safe_load("""
+    version: "1.0"
+    pruning:
+      mode: gradnas
+      constraints:
+        flops: 0.5
+      training:
+        learning_rate: 1e-4
+        num_epochs: 3
+    """)
+    )
+    plan = plan_pipeline(recipe)
+    assert plan.steps[0].training["learning_rate"] == 1e-4
+
+
+def test_auto_quantize_step():
+    """Auto-quantize via plan_pipeline."""
+    recipe = RecipeConfig.model_validate(
+        yaml.safe_load("""
+    version: "1.0"
+    auto_quantize:
+      effective_bits: 4.5
+      formats:
+        - preset: fp8
+        - preset: nvfp4
+      calibration:
+        dataset: cnn_dailymail
+    """)
+    )
+    plan = plan_pipeline(recipe)
+    assert len(plan.steps) == 1
+    assert plan.steps[0].technique == "auto_quantize"
+    assert "auto_quantize(" in plan.steps[0].api_call
+    assert plan.steps[0].calibration["dataset"] == "cnn_dailymail"
+
+
 def test_per_technique_calibration():
     """Each technique gets its own calibration config."""
     recipe = RecipeConfig.model_validate(
@@ -143,6 +232,27 @@ def test_per_technique_calibration():
     assert plan.steps[0].calibration["num_samples"] == 2048
     assert plan.steps[1].calibration["dataset"] == "cnn_dailymail"
     assert plan.steps[1].calibration["num_samples"] == 512
+
+
+def test_model_and_metadata_in_plan():
+    """Model and metadata fields appear in the plan."""
+    recipe = RecipeConfig.model_validate(
+        yaml.safe_load("""
+    version: "1.0"
+    model:
+      path: meta-llama/Llama-3-8B
+      trust_remote_code: true
+    metadata:
+      name: test-recipe
+      description: A test recipe
+    quantization:
+      preset: fp8
+    """)
+    )
+    plan = plan_pipeline(recipe)
+    assert plan.model["path"] == "meta-llama/Llama-3-8B"
+    assert plan.model["trust_remote_code"] is True
+    assert plan.metadata["name"] == "test-recipe"
 
 
 def test_export_in_plan():
@@ -177,6 +287,82 @@ def test_dry_run_output():
     assert "Pipeline Plan: test.yaml" in output
     assert "quantization (ptq)" in output
     assert "Step 1" in output
+
+
+def test_dry_run_with_model_metadata_export():
+    """Dry-run output includes model, metadata, and export sections."""
+    recipe = RecipeConfig.model_validate(
+        yaml.safe_load("""
+    version: "1.0"
+    model:
+      path: meta-llama/Llama-3-8B
+      trust_remote_code: true
+      attn_implementation: flash_attention_2
+    metadata:
+      name: test-recipe
+      description: A test recipe
+    quantization:
+      preset: fp8
+      calibration:
+        dataset: pile
+        num_samples: 128
+    export:
+      format: tensorrt_llm
+      tensor_parallel: 8
+      output_dir: ./my-output
+    """)
+    )
+    plan = plan_pipeline(recipe)
+    output = plan.dry_run()
+    assert "meta-llama/Llama-3-8B" in output
+    assert "trust_remote_code: True" in output
+    assert "flash_attention_2" in output
+    assert "test-recipe" in output
+    assert "A test recipe" in output
+    assert "tensorrt_llm" in output
+    assert "Tensor parallel: 8" in output
+    assert "./my-output" in output
+    assert "dataset=pile" in output
+
+
+def test_dry_run_verbose():
+    """Verbose dry-run includes resolved config."""
+    recipe = RecipeConfig.model_validate(
+        yaml.safe_load("""
+    version: "1.0"
+    quantization:
+      preset: fp8
+    """)
+    )
+    plan = plan_pipeline(recipe)
+    output = plan.dry_run(verbose=True)
+    assert "Resolved config:" in output
+
+
+def test_dry_run_with_training():
+    """Dry-run shows training info."""
+    recipe = RecipeConfig.model_validate(
+        yaml.safe_load("""
+    version: "1.0"
+    quantization:
+      mode: qat
+      preset: fp8
+      training:
+        learning_rate: 1e-5
+        num_epochs: 2
+        max_steps: 100
+    """)
+    )
+    plan = plan_pipeline(recipe)
+    output = plan.dry_run()
+    assert "Training:" in output
+    assert "max_steps=100" in output
+
+
+def test_make_serializable():
+    """_make_serializable converts tuples and nested structures."""
+    result = _make_serializable({"a": (1, 2), "b": {"c": (3,)}, "d": [4, 5]})
+    assert result == {"a": [1, 2], "b": {"c": [3]}, "d": [4, 5]}
 
 
 def test_load_and_plan_all_examples():

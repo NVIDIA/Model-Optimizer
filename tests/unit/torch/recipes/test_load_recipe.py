@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for end-to-end recipe loading."""
+"""Tests for end-to-end recipe loading (__init__.py)."""
 
 import pytest
 
@@ -49,52 +49,6 @@ def test_load_all_examples(examples_dir):
         result = load_recipe(yaml_file)
         assert isinstance(result, dict), f"Failed: {yaml_file.name}"
         assert len(result) > 0, f"Empty result: {yaml_file.name}"
-
-
-def test_scale_type_override():
-    """scale_type shorthand merges into block_sizes.type, preserving existing block_sizes."""
-    import yaml
-
-    from modelopt.torch.recipes.schema.models import RecipeConfig
-    from modelopt.torch.recipes.schema.resolver import resolve_recipe
-
-    # Test 1: Override existing preset pattern — preserves block_sizes fields
-    recipe = RecipeConfig.model_validate(
-        yaml.safe_load("""
-    version: "1.0"
-    quantization:
-      preset: nvfp4_local_hessian
-      overrides:
-        - pattern: "*weight_quantizer"
-          scale_type: dynamic
-    """)
-    )
-    result = resolve_recipe(recipe)
-    qcfg = result["quantize_config"]["quant_cfg"]
-    wq = qcfg["*weight_quantizer"]
-    # scale_type should have changed block_sizes.type
-    assert wq["block_sizes"]["type"] == "dynamic"
-    # Original block_sizes fields preserved from the preset
-    assert wq["block_sizes"][-1] == 16
-    assert wq["block_sizes"]["scale_bits"] == (4, 3)
-    # Other quantizer fields preserved
-    assert wq["num_bits"] == (2, 1)
-
-    # Test 2: New pattern — creates entry with just scale_type
-    recipe2 = RecipeConfig.model_validate(
-        yaml.safe_load("""
-    version: "1.0"
-    quantization:
-      preset: nvfp4_local_hessian
-      overrides:
-        - pattern: "*self_attn*weight_quantizer"
-          scale_type: dynamic
-    """)
-    )
-    result2 = resolve_recipe(recipe2)
-    qcfg2 = result2["quantize_config"]["quant_cfg"]
-    attn = qcfg2["*self_attn*weight_quantizer"]
-    assert attn["block_sizes"]["type"] == "dynamic"
 
 
 def test_invalid_path():

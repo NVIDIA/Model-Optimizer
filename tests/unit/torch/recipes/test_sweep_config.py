@@ -13,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for sweep configuration."""
+"""Tests for sweep configuration (experiment/config.py)."""
 
 from modelopt.torch.recipes.experiment import SweepConfig
+from modelopt.torch.recipes.experiment.config import SweepEvalConfig
 
 
 def test_load_sweep_config(sweep_examples_dir):
@@ -37,6 +38,10 @@ def test_validate_empty_config():
     config = SweepConfig()
     errors = config.validate()
     assert len(errors) == 4  # models, recipes, launchers, tasks all missing
+    assert "No models specified" in errors
+    assert "No recipes specified" in errors
+    assert "No launchers specified" in errors
+    assert "No eval tasks specified" in errors
 
 
 def test_total_jobs():
@@ -63,8 +68,6 @@ def test_load_experiment_config(sweep_examples_dir):
 
 def test_eval_overrides_resolve():
     """Test that per-model and per-launcher overrides are applied correctly."""
-    from modelopt.torch.recipes.experiment.config import SweepEvalConfig
-
     eval_cfg = SweepEvalConfig(
         engine="vllm",
         tensor_parallel_size=8,
@@ -96,3 +99,34 @@ def test_eval_overrides_resolve():
     result = eval_cfg.resolve_for_job("code-model", "gb200")
     assert result["deployment"]["tensor_parallel_size"] == 4
     assert result["evaluation"]["tasks"][0]["name"] == "humaneval"
+
+
+def test_eval_resolve_with_engine_overrides():
+    """Model and launcher overrides can change engine and tensor_parallel_size."""
+    eval_cfg = SweepEvalConfig(
+        engine="vllm",
+        tensor_parallel_size=8,
+        tasks=["mmlu", "gsm8k"],
+        model_overrides={
+            "code-model": {"tasks": ["humaneval"], "engine": "trtllm", "tensor_parallel_size": 4}
+        },
+        launcher_overrides={"gb200": {"tensor_parallel_size": 2, "engine": "sglang"}},
+    )
+
+    # Model override changes engine and TP
+    result = eval_cfg.resolve_for_job("code-model", "h100")
+    assert result["deployment"]["engine"] == "trtllm"
+    assert result["deployment"]["tensor_parallel_size"] == 4
+    assert result["evaluation"]["tasks"] == [{"name": "humaneval"}]
+
+    # Launcher override takes precedence for TP and engine
+    result = eval_cfg.resolve_for_job("generic-model", "gb200")
+    assert result["deployment"]["tensor_parallel_size"] == 2
+    assert result["deployment"]["engine"] == "sglang"
+
+
+def test_eval_benchmark_set():
+    """Benchmark set appears in resolved config."""
+    eval_cfg = SweepEvalConfig(tasks=["mmlu"], benchmark_set="standard_v2")
+    result = eval_cfg.resolve_for_job("model", "launcher")
+    assert result["evaluation"]["benchmark_set"] == "standard_v2"
