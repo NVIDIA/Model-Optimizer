@@ -171,9 +171,10 @@ _FALLBACK_KV_FORMAT_REGISTRY: dict[str, dict[str, Any]] = {
 
 def _try_load_format_registry_from_yaml() -> dict[str, dict[str, dict[str, Any]]] | None:
     """Try to load FORMAT_REGISTRY from PR #1000's YAML fragments via load_config."""
-    try:
-        from modelopt.torch.opt.config import load_config  # type: ignore[attr-defined]
-    except (ImportError, ModuleNotFoundError):
+    from modelopt.torch.recipes.utils import try_import_load_config
+
+    load_config = try_import_load_config()
+    if load_config is None:
         return None
 
     try:
@@ -194,9 +195,10 @@ def _try_load_format_registry_from_yaml() -> dict[str, dict[str, dict[str, Any]]
 
 def _try_load_kv_format_registry_from_yaml() -> dict[str, dict[str, Any]] | None:
     """Try to load KV_FORMAT_REGISTRY from PR #1000's YAML fragments via load_config."""
-    try:
-        from modelopt.torch.opt.config import load_config  # type: ignore[attr-defined]
-    except (ImportError, ModuleNotFoundError):
+    from modelopt.torch.recipes.utils import try_import_load_config
+
+    load_config = try_import_load_config()
+    if load_config is None:
         return None
 
     try:

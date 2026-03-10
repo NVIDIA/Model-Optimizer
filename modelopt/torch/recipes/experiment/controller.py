@@ -32,6 +32,7 @@ import yaml
 
 # Bridge is now within the same package
 from modelopt.torch.recipes.bridge import recipe_to_hf_ptq_args, summarize_recipe
+from modelopt.torch.recipes.utils import make_serializable
 
 if typing.TYPE_CHECKING:
     from .config import SweepConfig
@@ -305,7 +306,7 @@ class SweepController:
                 "model": job.model,
                 "recipe": job.recipe_path,
                 "launcher": job.launcher,
-                "ptq_config": _make_serializable(job.ptq_config),
+                "ptq_config": make_serializable(job.ptq_config),
                 "eval_config": job.eval_config,
                 "recipe_summary": job.recipe_summary,
             }
@@ -327,14 +328,3 @@ def _format_dict(d: dict, lines: list[str], indent: int = 4) -> None:
             if len(s) > 100:
                 s = s[:97] + "..."
             lines.append(f"{prefix}{k}: {s}")
-
-
-def _make_serializable(obj: Any) -> Any:
-    """Convert tuples and other non-JSON types for serialization."""
-    if isinstance(obj, dict):
-        return {str(k): _make_serializable(v) for k, v in obj.items()}
-    elif isinstance(obj, (list, tuple)):
-        return [_make_serializable(item) for item in obj]
-    elif isinstance(obj, (int, float, str, bool, type(None))):
-        return obj
-    return str(obj)

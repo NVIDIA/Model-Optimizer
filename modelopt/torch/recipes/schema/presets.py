@@ -133,14 +133,20 @@ def _load_yaml_with_bases(yaml_path: Path, recipes_root: Path) -> dict[str, Any]
 
 
 def _get_load_config():  # pragma: no cover
-    """Try to import PR #1000's load_config. Returns the function or None."""
-    try:
-        from modelopt.torch.opt.config import load_config  # type: ignore[attr-defined]
+    """Try to import PR #1000's load_config and verify it works.
 
-        # Verify it actually works (PR #1000 must be merged with YAML fragments)
+    Returns the function or None. Unlike try_import_load_config() (which only
+    checks importability), this also verifies the YAML fragments are present.
+    """
+    from modelopt.torch.recipes.utils import try_import_load_config
+
+    load_config = try_import_load_config()
+    if load_config is None:
+        return None
+    try:
         load_config("configs/ptq/base")
         return load_config
-    except (ImportError, ModuleNotFoundError, ValueError, AttributeError, TypeError):
+    except (ValueError, AttributeError, TypeError):
         return None
 
 

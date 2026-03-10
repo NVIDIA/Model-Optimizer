@@ -34,6 +34,7 @@ from typing import Any
 import yaml
 
 from .schema.models import RecipeConfig
+from .utils import make_serializable
 
 # Technique execution order — earlier techniques run first.
 # This matches ModelOpt's recommended pipeline:
@@ -121,7 +122,7 @@ class PipelinePlan:
                 lines.append("")
                 lines.append("  Resolved config:")
                 config_yaml = yaml.dump(
-                    _make_serializable(step.config), default_flow_style=False, sort_keys=False
+                    make_serializable(step.config), default_flow_style=False, sort_keys=False
                 )
                 lines.extend(f"    {line}" for line in config_yaml.strip().split("\n"))
 
@@ -304,12 +305,3 @@ def load_and_plan(path: str | Path) -> PipelinePlan:
 
     recipe = RecipeConfig.model_validate(raw)
     return plan_pipeline(recipe, recipe_path=str(path))
-
-
-def _make_serializable(obj: Any) -> Any:
-    """Convert tuples and other non-YAML-safe types for display."""
-    if isinstance(obj, dict):
-        return {str(k): _make_serializable(v) for k, v in obj.items()}
-    elif isinstance(obj, (list, tuple)):
-        return [_make_serializable(x) for x in obj]
-    return obj

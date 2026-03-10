@@ -17,8 +17,9 @@
 
 import yaml
 
-from modelopt.torch.recipes.pipeline import _make_serializable, load_and_plan, plan_pipeline
+from modelopt.torch.recipes.pipeline import load_and_plan, plan_pipeline
 from modelopt.torch.recipes.schema.models import RecipeConfig
+from modelopt.torch.recipes.utils import make_serializable
 
 
 def test_ptq_single_step():
@@ -359,9 +360,9 @@ def test_dry_run_with_training():
     assert "max_steps=100" in output
 
 
-def test_make_serializable():
-    """_make_serializable converts tuples and nested structures."""
-    result = _make_serializable({"a": (1, 2), "b": {"c": (3,)}, "d": [4, 5]})
+def testmake_serializable():
+    """make_serializable converts tuples and nested structures."""
+    result = make_serializable({"a": (1, 2), "b": {"c": (3,)}, "d": [4, 5]})
     assert result == {"a": [1, 2], "b": {"c": [3]}, "d": [4, 5]}
 
 

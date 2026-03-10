@@ -58,13 +58,16 @@ _FALLBACK_DISABLED_QUANTIZER_CFG: dict[str, Any] = {
 
 def _load_disabled_quantizer_cfg() -> dict[str, Any]:
     """Load disabled quantizer config: prefer PR #1000's base.yml, fall back to inline."""
-    try:
-        from modelopt.torch.opt.config import load_config  # type: ignore[attr-defined]
+    from modelopt.torch.recipes.utils import try_import_load_config
 
-        cfg = load_config("configs/ptq/base")
-        return cfg["quant_cfg"]
-    except (ImportError, ModuleNotFoundError, ValueError, KeyError, TypeError):
-        return _FALLBACK_DISABLED_QUANTIZER_CFG
+    load_config = try_import_load_config()
+    if load_config is not None:
+        try:
+            cfg = load_config("configs/ptq/base")
+            return cfg["quant_cfg"]
+        except (ValueError, KeyError, TypeError):
+            pass
+    return _FALLBACK_DISABLED_QUANTIZER_CFG
 
 
 _DEFAULT_DISABLED_QUANTIZER_CFG: dict[str, Any] = _load_disabled_quantizer_cfg()
