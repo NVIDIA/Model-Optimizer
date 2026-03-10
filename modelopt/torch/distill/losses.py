@@ -31,7 +31,7 @@ class LogitsDistillationLoss(Loss):
     This function implements the distillation loss found in the paper: https://arxiv.org/abs/1503.02531.
     """
 
-    def __init__(self, temperature: float = 1.0, reduction: str = "batchmean"):
+    def __init__(self, temperature: float = 1.0, reduction: str = "mean"):
         """Constructor.
 
         Args:

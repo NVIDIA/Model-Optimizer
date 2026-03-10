@@ -15,13 +15,15 @@
 
 """ModelOpt plugin to train HuggingFace models with knowledge distillation."""
 
-import torch.nn as nn
 from torch import Tensor
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.trainer_pt_utils import LabelSmoother
 
 import modelopt.torch.distill as mtd
 from modelopt.torch.opt.plugins import ModelOptHFTrainer
 from modelopt.torch.utils import print_rank_0
+
+IGNORE_TOKEN_ID = LabelSmoother.ignore_index  # equals -100
 
 
 class KDTrainer(ModelOptHFTrainer):
@@ -100,13 +102,12 @@ class KDTrainer(ModelOptHFTrainer):
 
     def train(self, *args, **kwargs):
         """Train the model."""
-        ignore_index = nn.CrossEntropyLoss().ignore_index  # equals -100
 
         def _compute_kd_loss(outputs: Tensor, labels: Tensor | None, **kwargs):
             def loss_reduction_fn(loss: Tensor):
                 if labels is None:
-                    return loss.sum() / len(loss)  # batchmean reduction
-                loss_mask = (labels != ignore_index).to(loss.dtype)
+                    return loss.mean()
+                loss_mask = labels != IGNORE_TOKEN_ID
                 return (loss * loss_mask).sum() / loss_mask.sum().clamp(min=1)
 
             return self.model.compute_kd_loss(loss_reduction_fn=loss_reduction_fn)
@@ -120,7 +121,7 @@ class LMLogitsLoss(mtd.LogitsDistillationLoss):
 
     Defaults to ``reduction="none"`` to support per-token loss masking via ``loss_reduction_fn``
     in :meth:`DistillationModel.compute_kd_loss`. This allows masking out padding and non-assistant
-    tokens (marked with ``IGNORE_INDEX = -100``) before reducing the loss.
+    tokens before reducing the loss.
     """
 
     def __init__(self, temperature: float = 1.0, reduction: str = "none"):
