@@ -1322,6 +1322,11 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
         return v
 
     quant_cfg = {k: _cfg_to_dict(v) for k, v in quant_cfg.items()}
+    warnings.warn(
+        "get_auto_quantize_config: returned config uses algorithm='max'. "
+        "Per-recipe calibration algorithms (e.g. smoothquant, awq) are not preserved. "
+        "Update config['algorithm'] if a different calibration algorithm is needed (e.g. 'gptq')."
+    )
     return {"quant_cfg": quant_cfg, "algorithm": "max"}
 
 
