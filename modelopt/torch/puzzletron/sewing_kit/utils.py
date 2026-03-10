@@ -291,6 +291,7 @@ class MyFakeTensor(Tensor):
 def fake_tensor(*args, **kwargs) -> Tensor:
     dtype: Optional[torch.dtype] = kwargs.get("dtype")
     use_meta = kwargs.get("use_meta", False)
+    device = kwargs.get("device", "meta")
 
     if len(args) == 1 and isinstance(args[0], Tensor):
         if use_meta:
@@ -298,7 +299,7 @@ def fake_tensor(*args, **kwargs) -> Tensor:
         else:
             fake_tensor = MyFakeTensor.create(args[0])
     else:
-        fake_tensor = torch.empty(*args, dtype=dtype, device="meta")
+        fake_tensor = torch.empty(*args, dtype=dtype, device=device)
         if not use_meta:
             fake_tensor = MyFakeTensor.create(fake_tensor)
 
