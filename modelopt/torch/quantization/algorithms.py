@@ -337,7 +337,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     candidate_stats: dict[str, dict[str, list[float]]]
     best: dict[str, Any]
     quantizer_states: dict
-    method_name: str = None
+    method_name: str | None = None
 
     quant_grouping_rules = [
         r"^(.*?)\.(q_proj|k_proj|v_proj)$",  # q_proj, k_proj, v_proj for llama like models
@@ -1356,6 +1356,7 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
 
 
 def _match_quantizer_cfg(quant_cfg, quantizer_attr):
+    # Last-match-wins to mirror set_quantizer_by_cfg behavior
     matched = None
     for pattern, cfg in quant_cfg.items():
         if fnmatch.fnmatch(quantizer_attr, pattern):
