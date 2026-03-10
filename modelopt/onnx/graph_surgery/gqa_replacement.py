@@ -818,8 +818,8 @@ def replace_attention_with_gqa(
         hf_model_id: HuggingFace model ID for config.
         max_seq_len: Maximum sequence length for caches.
         io_dtype: Data type for I/O tensors ("float16", "float32", or "bfloat16").
-            When "bfloat16" is specified, FP16 models are automatically converted
-            to BF16 (no separate conversion step needed).
+            If the model has FP16 initializers and "bfloat16" is specified,
+            they are automatically converted to BF16.
         use_external_data: Save weights as external data file.
         external_data_name: Name for external data file (default: model.onnx_data).
         ir_version: If specified, set the ONNX IR version to this value. Useful for
@@ -1318,10 +1318,11 @@ def replace_attention_with_gqa(
                     scale_name = node.input[1]
                     for init in graph.initializer:
                         if init.name == scale_name and init.data_type == TensorProto.FLOAT:
-                            arr = np.frombuffer(init.raw_data, dtype=np.float32).copy()
-                            arr_fp16 = arr.astype(np.float16)
-                            init.raw_data = arr_fp16.tobytes()
-                            init.data_type = TensorProto.FLOAT16
+                            from onnx import numpy_helper
+
+                            arr_fp16 = numpy_helper.to_array(init).astype(np.float16)
+                            converted_init = numpy_helper.from_array(arr_fp16, name=init.name)
+                            init.CopyFrom(converted_init)
                             if verbose:
                                 logger.info(
                                     f"  Layer {layer_id}: Converted {scale_name} to float16"
@@ -1408,8 +1409,8 @@ def replace_attention_with_gqa(
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
 
-        if external_data_name is None:
-            external_data_name = os.path.basename(output_path) + "_data"
+    if external_data_name is None:
+        external_data_name = os.path.basename(output_path) + "_data"
 
     if use_external_data:
         if verbose:
