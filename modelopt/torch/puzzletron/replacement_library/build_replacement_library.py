@@ -29,10 +29,6 @@ though you can supply an explicit --teacher_checkpoint_dir.
 --add_ffn_no_ops and --add_attention_no_ops are optional (default True),
 
 
-Untrained puzzle run (with bypass):
-===================================
-The subblock that doesn't interest you in the checkpoint should be no_op.
-
 """
 # mypy: ignore-errors
 
