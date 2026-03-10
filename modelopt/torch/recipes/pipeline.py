@@ -16,7 +16,7 @@
 """Pipeline orchestrator for multi-technique recipes.
 
 Given a RecipeConfig, the pipeline planner:
-1. Determines execution order (sparsity → quantization → distillation)
+1. Determines execution order (pruning → sparsity → quantization → distillation)
 2. Resolves each technique's config to internal API format
 3. Produces a PipelinePlan — an ordered list of steps with their configs
 
@@ -175,7 +175,7 @@ def plan_pipeline(recipe: RecipeConfig, recipe_path: str = "<inline>") -> Pipeli
         plan.steps.append(_plan_distillation(recipe.distillation))
 
     if recipe.export:
-        plan.export = recipe.export.model_dump()
+        plan.export = recipe.export.model_dump(exclude_none=True)
 
     return plan
 
@@ -299,7 +299,7 @@ def load_and_plan(path: str | Path) -> PipelinePlan:
         YAML file → load → validate → resolve → plan
     """
     path = Path(path)
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 
     recipe = RecipeConfig.model_validate(raw)

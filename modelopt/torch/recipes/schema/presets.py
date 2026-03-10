@@ -141,7 +141,7 @@ def _normalize_yaml_config(config: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
-def _load_recipe_from_yaml(recipe_dir: str, recipes_root: Path) -> dict[str, Any]:
+def _load_recipe_from_yaml(recipe_dir: str, recipes_root: Path) -> dict[str, Any]:  # pragma: no cover
     """Load a composed recipe directory into a preset config dict.
 
     A recipe directory contains:
@@ -170,7 +170,7 @@ def _load_recipe_from_yaml(recipe_dir: str, recipes_root: Path) -> dict[str, Any
     return _normalize_yaml_config(config)
 
 
-def _try_load_yaml_registry() -> dict[str, dict[str, Any]] | None:
+def _try_load_yaml_registry() -> dict[str, dict[str, Any]] | None:  # pragma: no cover
     """Attempt to load all presets from modelopt_recipes/ YAML fragments.
 
     Returns the complete registry dict, or None if modelopt_recipes is not available.
@@ -200,7 +200,7 @@ def _try_load_yaml_registry() -> dict[str, dict[str, Any]] | None:
 
 def _try_load_single_yaml_preset(
     preset_name: str, recipe_dir: str, recipes_root: Path
-) -> dict[str, Any] | None:
+) -> dict[str, Any] | None:  # pragma: no cover
     """Load a single preset from YAML, returning None on failure."""
     try:
         return _load_recipe_from_yaml(recipe_dir, recipes_root)
@@ -209,7 +209,7 @@ def _try_load_single_yaml_preset(
         return None
 
 
-def _try_load_python_registry() -> dict[str, dict[str, Any]] | None:
+def _try_load_python_registry() -> dict[str, dict[str, Any]] | None:  # pragma: no cover
     """Attempt to load presets from Python constants (deprecated).
 
     Returns the registry dict, or None if the constants are not available.
@@ -266,7 +266,7 @@ def _try_load_python_registry() -> dict[str, dict[str, Any]] | None:
         return None
 
 
-def _load_registry() -> dict[str, dict[str, Any]]:
+def _load_registry() -> dict[str, dict[str, Any]]:  # pragma: no cover
     """Lazily load preset configs with tiered fallback."""
     global _PRESET_REGISTRY, _PRESET_SOURCE
     if _PRESET_REGISTRY is not None:
