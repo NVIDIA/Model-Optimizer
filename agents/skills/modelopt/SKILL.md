@@ -14,15 +14,15 @@ ModelOpt is NVIDIA's open-source library for post-training quantization (PTQ) of
 
 ## Reference Documentation
 
-Read these files on demand using absolute paths:
+Read these files on demand (paths relative to this skill directory):
 
 | File | Topic |
 |------|-------|
-| `/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/modelopt_agent/agents/skills/references/01_quantization_api.md` | Core API: `mtq.quantize()`, `print_quant_summary()`, `export_hf_checkpoint()` |
-| `/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/modelopt_agent/agents/skills/references/02_quantization_formats.md` | All formats (FP8, NVFP4, INT4, etc.) with configs, use cases, and deployment compatibility |
-| `/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/modelopt_agent/agents/skills/references/03_calibration.md` | Calibration algorithms, `--calib_size` tuning, dataset selection |
-| `/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/modelopt_agent/agents/skills/references/04_export_checkpoint.md` | HF checkpoint export format, output files, verification |
-| `/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/modelopt_agent/agents/skills/references/05_deployment.md` | vLLM serving, benchmarking, nel evaluation setup |
+| `references/01_quantization_api.md` | Core API: `mtq.quantize()`, `print_quant_summary()`, `export_hf_checkpoint()` |
+| `references/02_quantization_formats.md` | All formats (FP8, NVFP4, INT4, etc.) with configs, use cases, and deployment compatibility |
+| `references/03_calibration.md` | Calibration algorithms, `--calib_size` tuning, dataset selection |
+| `references/04_export_checkpoint.md` | HF checkpoint export format, output files, verification |
+| `references/05_deployment.md` | vLLM serving, benchmarking, nel evaluation setup |
 
 **When to consult references:**
 
@@ -35,9 +35,9 @@ Read these files on demand using absolute paths:
 
 | File | Topic |
 |------|-------|
-| `/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/modelopt_agent/agents/skills/guidelines/01_recipe_selection.md` | Decision tree for choosing quantization format based on GPU, model size, accuracy needs |
-| `/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/modelopt_agent/agents/skills/guidelines/02_error_prevention.md` | 20+ error patterns with fixes, environment setup checklist |
-| `/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/modelopt_agent/agents/skills/guidelines/03_model_compatibility.md` | Transformers version matrix, VLM handling, trust_remote_code, MoE models |
+| `guidelines/01_recipe_selection.md` | Decision tree for choosing quantization format based on GPU, model size, accuracy needs |
+| `guidelines/02_error_prevention.md` | 20+ error patterns with fixes, environment setup checklist |
+| `guidelines/03_model_compatibility.md` | Transformers version matrix, VLM handling, trust_remote_code, MoE models |
 
 ## When to Use This Skill
 
@@ -87,7 +87,7 @@ Before starting, assess what the user needs:
 - User wants to compare multiple formats automatically
 - User wants to find the optimal accuracy/throughput tradeoff
 
-When Pareto sweep is needed, **read** `/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/modelopt_agent/agents/skills/workflows/pareto-sweep.md` **and follow its instructions.** This dispatches parallel agents — one per format — and computes the Pareto frontier from all results.
+When Pareto sweep is needed, **read** `workflows/pareto-sweep.md` **and follow its instructions.** This dispatches parallel agents — one per format — and computes the Pareto frontier from all results.
 
 ---
 
@@ -124,17 +124,17 @@ Set these variables for the sub-skills:
 
 ### Step 2: Quantize
 
-**Read** the file at `/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/modelopt_agent/agents/skills/workflows/quantize.md` **and follow its instructions.**
+**Read** `workflows/quantize.md` **and follow its instructions.**
 
 Pass: `MODEL_PATH`, `QFORMAT`, `EXPORT_PATH`, `GPU_IDS`, `CALIB_SIZE=512`, `REPO_ROOT`
 
-If it fails with a model compatibility error, **read** `/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/modelopt_agent/agents/skills/tools/patch-model.md` **and follow it**, then retry quantization.
+If it fails with a model compatibility error, **read** `tools/patch-model.md` **and follow it**, then retry quantization.
 
-For error diagnosis, **read** `/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/modelopt_agent/agents/skills/guidelines/02_error_prevention.md`.
+For error diagnosis, **read** `guidelines/02_error_prevention.md`.
 
 ### Step 3: Deploy + Speed Benchmark
 
-**Read** the file at `/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/modelopt_agent/agents/skills/tools/vllm-benchmark.md` **and follow its instructions.**
+**Read** `tools/vllm-benchmark.md` **and follow its instructions.**
 
 Pass: `MODEL_PATH=$EXPORT_PATH`, `MODEL_NAME=${MODEL_NAME}_${QFORMAT}`, `GPU_IDS`, `PORT`, `KEEP_SERVER=true`
 
@@ -142,7 +142,7 @@ Tell it to **leave the server running** for the accuracy eval step.
 
 ### Step 4: Accuracy Evaluation
 
-**Read** the file at `/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/modelopt_agent/agents/skills/tools/accuracy-eval.md` **and follow its instructions.**
+**Read** `tools/accuracy-eval.md` **and follow its instructions.**
 
 Pass: `MODEL_PATH=$EXPORT_PATH`, `MODEL_NAME=${MODEL_NAME}_${QFORMAT}`, `GPU_IDS`, `PORT`, `EVAL_TASKS`, `VLLM_ALREADY_RUNNING=true`
 
@@ -173,7 +173,7 @@ Ask: **"Are you satisfied with these results? [yes/no/quit]"**
 
 - **yes** -- Done! Report final model path and summary.
 - **quit** -- Exit. Report partial results.
-- **no** -- **Read** `/home/scratch.kaix_coreai/workspace/trt_model_optimizer_dev/modelopt_agent/agents/skills/guidelines/01_recipe_selection.md` for the iteration table, propose lighter recipe, loop to Step 2.
+- **no** -- **Read** `guidelines/01_recipe_selection.md` for the iteration table, propose lighter recipe, loop to Step 2.
 
 ## Validation Workflow
 
