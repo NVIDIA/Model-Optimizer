@@ -474,6 +474,8 @@ def get_kv_cache_scaling_factor(self_attention_module: nn.Module) -> list[torch.
     # For FP8, we recommend default kv cache scaling factor to be 1.
     if get_kv_cache_dtype(self_attention_module) == KV_CACHE_FP8:
         for i, factor in enumerate(scaling_factors):
+            if factor is None:
+                continue
             if factor.item() > 0.5:
                 warn(
                     f"Warning: Large KV activation detected: {factor.item()}, "
