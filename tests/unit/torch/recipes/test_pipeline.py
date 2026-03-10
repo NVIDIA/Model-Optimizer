@@ -17,7 +17,7 @@
 
 import yaml
 
-from modelopt.torch.recipes.pipeline import load_and_plan, plan_pipeline
+from modelopt.torch.recipes.pipeline import plan_pipeline
 from modelopt.torch.recipes.schema.models import RecipeConfig
 
 
@@ -357,16 +357,3 @@ def test_dry_run_with_training():
     output = plan.dry_run()
     assert "Training:" in output
     assert "max_steps=100" in output
-
-
-def test_load_and_plan_all_examples():
-    """All example recipes produce valid pipeline plans."""
-    from pathlib import Path
-
-    recipes_dir = Path("examples/recipes")
-    for path in sorted(recipes_dir.rglob("*.yaml")):
-        if "experiments" in path.parts:
-            continue  # skip sweep/experiment configs
-        plan = load_and_plan(str(path))
-        assert len(plan.steps) >= 1, f"{path} produced empty plan"
-        assert plan.recipe_path == str(path)

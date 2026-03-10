@@ -17,7 +17,53 @@
 
 from __future__ import annotations
 
-from typing import Any
+import copy
+from typing import TYPE_CHECKING, Any
+
+import yaml
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+def deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge override into base dict (like OmegaConf.merge but lightweight)."""
+    result = copy.deepcopy(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
+
+
+def load_yaml_with_bases(yaml_path: Path, recipes_root: Path) -> dict[str, Any]:
+    """Load a YAML file resolving __base__ inheritance.
+
+    Implements the same __base__ merging as PR #1000's load_config():
+    reads __base__ list, recursively loads each base, merges in order.
+    """
+    with open(yaml_path) as f:
+        data = yaml.safe_load(f) or {}
+
+    bases = data.pop("__base__", [])
+    if not bases:
+        return data
+
+    # Resolve each base file (path without .yml extension)
+    merged: dict[str, Any] = {}
+    for base_ref in bases:
+        base_path = recipes_root / f"{base_ref}.yml"
+        if not base_path.is_file():
+            base_path = recipes_root / f"{base_ref}.yaml"
+        if not base_path.is_file():
+            raise FileNotFoundError(f"Base config not found: {base_ref} (tried .yml and .yaml)")
+        base_data = load_yaml_with_bases(base_path, recipes_root)
+        merged = deep_merge(merged, base_data)
+
+    # Current file overrides bases
+    merged = deep_merge(merged, data)
+    return merged
 
 
 def make_serializable(obj: Any) -> Any:

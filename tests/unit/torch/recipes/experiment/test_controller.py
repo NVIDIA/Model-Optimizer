@@ -55,10 +55,3 @@ def test_export_jobs(sweep_examples_dir):
 
     assert len(data) == 16
     assert data[0]["job_id"] == 1
-
-
-def test_verbose_dry_run(sweep_examples_dir):
-    config = SweepConfig.from_yaml(sweep_examples_dir / "sweep_demo.yaml")
-    controller = SweepController(config)
-    output = controller.dry_run(verbose=True)
-    assert "_resolved_quantize_config:" in output

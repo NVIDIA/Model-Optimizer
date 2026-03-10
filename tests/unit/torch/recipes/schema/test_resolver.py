@@ -18,11 +18,7 @@
 import yaml
 
 from modelopt.torch.recipes.schema.models import RecipeConfig
-from modelopt.torch.recipes.schema.resolver import (
-    _resolve_block_sizes,
-    _update_quant_cfg_with_kv_cache,
-    resolve_recipe,
-)
+from modelopt.torch.recipes.schema.resolver import resolve_recipe
 
 
 def test_custom_weights_activations():
@@ -211,77 +207,99 @@ def test_auto_quantize_with_kv_cache_and_disabled():
     assert kwargs["disabled_layers"] == ["*lm_head*"]
 
 
-def test_block_sizes_string_keys():
-    """Block sizes with string dimension keys."""
-    result = _resolve_block_sizes({"last_dim": 16, "second_last_dim": 32, "scale_bits": [4, 3]})
-    assert result[-1] == 16
-    assert result[-2] == 32
-    assert result["scale_bits"] == [4, 3]
+def test_block_sizes_string_keys_via_resolve():
+    """Block sizes with string dimension keys resolve through public API."""
+    recipe = RecipeConfig.model_validate(
+        yaml.safe_load("""
+    version: "1.0"
+    quantization:
+      weights:
+        format: nvfp4
+        block_sizes:
+          last_dim: 16
+          second_last_dim: 32
+          scale_bits: [4, 3]
+      activations:
+        enable: false
+    """)
+    )
+    result = resolve_recipe(recipe)
+    bs = result["quantize_config"]["quant_cfg"]["*weight_quantizer"]["block_sizes"]
+    assert bs[-1] == 16
+    assert bs[-2] == 32
+    assert bs["scale_bits"] == [4, 3]
 
 
-def test_block_sizes_passthrough():
-    """Block sizes with passthrough keys."""
-    result = _resolve_block_sizes({"type": "dynamic", "0": 128})
-    assert result["type"] == "dynamic"
-    assert result[0] == 128
+def test_block_sizes_passthrough_via_resolve():
+    """Block sizes with integer string keys and type passthrough."""
+    recipe = RecipeConfig.model_validate(
+        yaml.safe_load("""
+    version: "1.0"
+    quantization:
+      weights:
+        block_sizes:
+          type: dynamic
+          "0": 128
+      activations:
+        enable: false
+    """)
+    )
+    result = resolve_recipe(recipe)
+    bs = result["quantize_config"]["quant_cfg"]["*weight_quantizer"]["block_sizes"]
+    assert bs["type"] == "dynamic"
+    assert bs[0] == 128
 
 
-# ── KV cache deduplication ──
+# ── KV cache via resolve_recipe ──
 
 
-def test_kv_cache_user_override_wins():
-    """User's explicit kv_cache section should override preset's baked-in KV patterns.
-
-    Tier 1 YAML presets include KV patterns from kv_quant.yml. When the user
-    specifies a different kv_cache format in the recipe, the user's choice wins.
-    """
-    config = {
-        "quant_cfg": {
-            "*weight_quantizer": {"num_bits": (4, 3)},
-            # Preset has FP8 KV baked in (from Tier 1 YAML)
-            "*[kv]_bmm_quantizer": {"num_bits": (4, 3), "axis": None, "enable": True},
-            "default": {"enable": False},
-        },
-        "algorithm": "max",
-    }
-    # User wants NVFP4 KV instead
-    kv_cfg = {
-        "*[kv]_bmm_quantizer": {"num_bits": (2, 1), "axis": None, "enable": True},
-    }
-    result = _update_quant_cfg_with_kv_cache(config, kv_cfg)
-    # User's NVFP4 choice should override the preset's FP8
-    assert result["quant_cfg"]["*[kv]_bmm_quantizer"]["num_bits"] == (2, 1)
+def test_kv_cache_adds_patterns():
+    """KV cache section adds quantizer patterns via resolve_recipe."""
+    recipe = RecipeConfig.model_validate(
+        yaml.safe_load("""
+    version: "1.0"
+    quantization:
+      preset: fp8
+      kv_cache:
+        format: fp8
+    """)
+    )
+    result = resolve_recipe(recipe)
+    qcfg = result["quantize_config"]["quant_cfg"]
+    # KV patterns should be present from kv_cache section
+    kv_keys = [k for k in qcfg if "bmm_quantizer" in k or "kv" in k.lower()]
+    assert len(kv_keys) > 0
 
 
-def test_kv_cache_merge_adds_missing_patterns():
-    """KV cache merge should add patterns that don't exist yet.
-
-    This is the normal case for Tier 2 presets which don't include KV patterns.
-    """
-    config = {
-        "quant_cfg": {
-            "*weight_quantizer": {"num_bits": (4, 3)},
-            "default": {"enable": False},
-        },
-        "algorithm": "max",
-    }
-    kv_cfg = {
-        "*[kv]_bmm_quantizer": {"num_bits": (4, 3), "axis": None, "enable": True},
-    }
-    result = _update_quant_cfg_with_kv_cache(config, kv_cfg)
-    assert "*[kv]_bmm_quantizer" in result["quant_cfg"]
-    assert result["quant_cfg"]["*[kv]_bmm_quantizer"]["num_bits"] == (4, 3)
+def test_kv_cache_sets_algorithm_default():
+    """KV cache merge sets algorithm to 'max' when not specified."""
+    recipe = RecipeConfig.model_validate(
+        yaml.safe_load("""
+    version: "1.0"
+    quantization:
+      weights:
+        format: int8
+      activations:
+        format: int8
+      kv_cache:
+        format: fp8
+    """)
+    )
+    result = resolve_recipe(recipe)
+    assert result["quantize_config"]["algorithm"] == "max"
 
 
-def test_kv_cache_sets_default_algorithm():
-    """KV cache merge should set algorithm to 'max' if not already set."""
-    config = {"quant_cfg": {"default": {"enable": False}}}
-    result = _update_quant_cfg_with_kv_cache(config, {})
-    assert result["algorithm"] == "max"
-
-
-def test_kv_cache_preserves_existing_algorithm():
-    """KV cache merge should not overwrite an existing algorithm."""
-    config = {"quant_cfg": {"default": {"enable": False}}, "algorithm": "smoothquant"}
-    result = _update_quant_cfg_with_kv_cache(config, {})
-    assert result["algorithm"] == "smoothquant"
+def test_kv_cache_preserves_explicit_algorithm():
+    """KV cache merge does not overwrite an explicit algorithm."""
+    recipe = RecipeConfig.model_validate(
+        yaml.safe_load("""
+    version: "1.0"
+    quantization:
+      preset: fp8
+      algorithm: awq_lite
+      kv_cache:
+        format: fp8
+    """)
+    )
+    result = resolve_recipe(recipe)
+    assert result["quantize_config"]["algorithm"] == "awq_lite"

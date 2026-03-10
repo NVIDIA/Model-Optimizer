@@ -38,6 +38,8 @@ from typing import Any
 
 import yaml
 
+from modelopt.torch.recipes.utils import load_yaml_with_bases
+
 logger = logging.getLogger(__name__)
 
 _PRESET_REGISTRY: dict[str, dict[str, Any]] | None = None
@@ -47,7 +49,7 @@ _PRESET_SOURCE: str = "unknown"
 # Mapping from preset name to the composed recipe directory in modelopt_recipes/.
 # Each entry is a directory under general/ptq/ containing model_quant.yml + kv_quant.yml.
 # The model_quant.yml uses __base__ to compose atomic fragments (base + quantizer + algorithm).
-_PRESET_YAML_MAP: dict[str, str] = {
+PRESET_YAML_MAP: dict[str, str] = {
     # Core formats
     "fp8": "general/ptq/fp8_default-fp8_kv",
     "fp8_pc_pt": "general/ptq/fp8_per_channel_per_token-fp8_kv",
@@ -92,46 +94,6 @@ _PRESET_YAML_MAP: dict[str, str] = {
 _TIER2_ONLY_PRESETS: set[str] = {"mamba_moe_fp8_aggressive"}
 
 
-def _deep_merge(base: dict, override: dict) -> dict:
-    """Recursively merge override into base dict (like OmegaConf.merge but lightweight)."""
-    result = copy.deepcopy(base)
-    for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = _deep_merge(result[key], value)
-        else:
-            result[key] = copy.deepcopy(value)
-    return result
-
-
-def _load_yaml_with_bases(yaml_path: Path, recipes_root: Path) -> dict[str, Any]:
-    """Load a YAML file resolving __base__ inheritance.
-
-    Implements the same __base__ merging as PR #1000's load_config():
-    reads __base__ list, recursively loads each base, merges in order.
-    """
-    with open(yaml_path) as f:
-        data = yaml.safe_load(f) or {}
-
-    bases = data.pop("__base__", [])
-    if not bases:
-        return data
-
-    # Resolve each base file (path without .yml extension)
-    merged: dict[str, Any] = {}
-    for base_ref in bases:
-        base_path = recipes_root / f"{base_ref}.yml"
-        if not base_path.is_file():
-            base_path = recipes_root / f"{base_ref}.yaml"
-        if not base_path.is_file():
-            raise FileNotFoundError(f"Base config not found: {base_ref} (tried .yml and .yaml)")
-        base_data = _load_yaml_with_bases(base_path, recipes_root)
-        merged = _deep_merge(merged, base_data)
-
-    # Current file overrides bases
-    merged = _deep_merge(merged, data)
-    return merged
-
-
 def _get_load_config():  # pragma: no cover
     """Try to import PR #1000's load_config and verify it works.
 
@@ -150,7 +112,7 @@ def _get_load_config():  # pragma: no cover
         return None
 
 
-def _load_recipe_from_yaml(
+def load_recipe_from_yaml(
     recipe_dir: str, recipes_root: Path
 ) -> dict[str, Any]:  # pragma: no cover
     """Load a composed recipe directory into a preset config dict.
@@ -169,12 +131,12 @@ def _load_recipe_from_yaml(
     model_quant_path = recipe_path / "model_quant.yml"
     if not model_quant_path.is_file():
         raise FileNotFoundError(f"model_quant.yml not found in {recipe_path}")
-    config = _load_yaml_with_bases(model_quant_path, recipes_root)
+    config = load_yaml_with_bases(model_quant_path, recipes_root)
 
     # Load KV cache config if present and merge
     kv_quant_path = recipe_path / "kv_quant.yml"
     if kv_quant_path.is_file():
-        kv_config = _load_yaml_with_bases(kv_quant_path, recipes_root)
+        kv_config = load_yaml_with_bases(kv_quant_path, recipes_root)
         if "quant_cfg" in kv_config:
             config.setdefault("quant_cfg", {}).update(kv_config["quant_cfg"])
 
@@ -204,7 +166,7 @@ def _try_load_yaml_registry_via_load_config(
 ) -> dict[str, dict[str, Any]] | None:  # pragma: no cover
     """Tier 1a: Load presets using PR #1000's load_config (canonical OmegaConf merge)."""
     registry: dict[str, dict[str, Any]] = {}
-    for preset_name, recipe_dir in _PRESET_YAML_MAP.items():
+    for preset_name, recipe_dir in PRESET_YAML_MAP.items():
         if preset_name in _TIER2_ONLY_PRESETS:
             continue
         try:
@@ -262,7 +224,7 @@ def _try_load_yaml_registry() -> dict[str, dict[str, Any]] | None:  # pragma: no
         return None
 
     yaml_registry: dict[str, dict[str, Any]] = {}
-    for preset_name, recipe_dir in _PRESET_YAML_MAP.items():
+    for preset_name, recipe_dir in PRESET_YAML_MAP.items():
         if preset_name in _TIER2_ONLY_PRESETS:
             continue
         config = _try_load_single_yaml_preset(preset_name, recipe_dir, recipes_root)
@@ -284,7 +246,7 @@ def _try_load_single_yaml_preset(
 ) -> dict[str, Any] | None:  # pragma: no cover
     """Load a single preset from YAML, returning None on failure."""
     try:
-        return _load_recipe_from_yaml(recipe_dir, recipes_root)
+        return load_recipe_from_yaml(recipe_dir, recipes_root)
     except (FileNotFoundError, yaml.YAMLError) as exc:
         logger.debug("Failed to load YAML preset '%s': %s", preset_name, exc)
         return None

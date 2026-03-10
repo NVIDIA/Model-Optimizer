@@ -15,7 +15,7 @@
 
 """Tests for recipes/utils.py."""
 
-from modelopt.torch.recipes.utils import make_serializable
+from modelopt.torch.recipes.utils import deep_merge, make_serializable
 
 
 def test_make_serializable_tuples_to_lists():
@@ -42,3 +42,29 @@ def test_make_serializable_non_json_types():
     """Non-JSON types are converted to strings."""
     result = make_serializable({"key": {1, 2, 3}})
     assert isinstance(result["key"], str)
+
+
+def test_deep_merge_simple():
+    result = deep_merge({"a": 1, "b": 2}, {"b": 3, "c": 4})
+    assert result == {"a": 1, "b": 3, "c": 4}
+
+
+def test_deep_merge_nested():
+    base = {"quant_cfg": {"default": {"enable": False}, "*weight*": {"num_bits": 8}}}
+    override = {"quant_cfg": {"*weight*": {"axis": 0}}}
+    result = deep_merge(base, override)
+    assert result["quant_cfg"]["default"] == {"enable": False}
+    assert result["quant_cfg"]["*weight*"] == {"num_bits": 8, "axis": 0}
+
+
+def test_deep_merge_replaces_non_dict():
+    result = deep_merge({"algorithm": "max"}, {"algorithm": "awq_lite"})
+    assert result["algorithm"] == "awq_lite"
+
+
+def test_deep_merge_no_mutation():
+    base = {"a": {"b": 1}}
+    override = {"a": {"c": 2}}
+    result = deep_merge(base, override)
+    assert "c" not in base["a"]
+    assert result["a"] == {"b": 1, "c": 2}

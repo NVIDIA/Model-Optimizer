@@ -22,6 +22,8 @@ ensuring all components integrate correctly.
 import json
 import tempfile
 
+import pytest
+
 from modelopt.torch.recipes import load_recipe
 from modelopt.torch.recipes.experiment import SweepConfig, SweepController
 from modelopt.torch.recipes.pipeline import load_and_plan
@@ -201,3 +203,8 @@ def test_e2e_sweep_verbose_includes_resolved_config(sweep_examples_dir):
     controller = SweepController(config)
     output = controller.dry_run(verbose=True)
     assert "_resolved_quantize_config:" in output
+
+
+def test_invalid_recipe_path():
+    with pytest.raises(FileNotFoundError):
+        load_recipe("/nonexistent/path.yaml")

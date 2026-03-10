@@ -22,15 +22,14 @@ import pytest
 import yaml
 
 from modelopt.torch.recipes.schema.presets import (
-    _PRESET_YAML_MAP,
-    _deep_merge,
-    _load_recipe_from_yaml,
-    _load_yaml_with_bases,
+    PRESET_YAML_MAP,
     get_preset,
     get_preset_info,
     get_preset_source,
     list_presets,
+    load_recipe_from_yaml,
 )
+from modelopt.torch.recipes.utils import load_yaml_with_bases
 
 # ── Helpers ──
 
@@ -223,37 +222,6 @@ def recipes_root(tmp_path):
     return root
 
 
-# ── Unit tests: _deep_merge ──
-
-
-class TestDeepMerge:
-    def test_simple_merge(self):
-        base = {"a": 1, "b": 2}
-        override = {"b": 3, "c": 4}
-        result = _deep_merge(base, override)
-        assert result == {"a": 1, "b": 3, "c": 4}
-
-    def test_nested_merge(self):
-        base = {"quant_cfg": {"default": {"enable": False}, "*weight*": {"num_bits": 8}}}
-        override = {"quant_cfg": {"*weight*": {"axis": 0}}}
-        result = _deep_merge(base, override)
-        assert result["quant_cfg"]["default"] == {"enable": False}
-        assert result["quant_cfg"]["*weight*"] == {"num_bits": 8, "axis": 0}
-
-    def test_override_replaces_non_dict(self):
-        base = {"algorithm": "max"}
-        override = {"algorithm": "awq_lite"}
-        result = _deep_merge(base, override)
-        assert result["algorithm"] == "awq_lite"
-
-    def test_no_mutation(self):
-        base = {"a": {"b": 1}}
-        override = {"a": {"c": 2}}
-        result = _deep_merge(base, override)
-        assert "c" not in base["a"]
-        assert result["a"] == {"b": 1, "c": 2}
-
-
 # ── Unit tests: __base__ inheritance ──
 
 
@@ -284,7 +252,7 @@ class TestYamlBaseInheritance:
             yaml.dump({"__base__": ["configs/base", "configs/fp8", "configs/algo_max"]})
         )
 
-        result = _load_yaml_with_bases(recipe_yml, tmp_path)
+        result = load_yaml_with_bases(recipe_yml, tmp_path)
         assert result["algorithm"] == "max"
         assert result["quant_cfg"]["default"] == {"enable": False}
         assert result["quant_cfg"]["*weight_quantizer"]["num_bits"] == [4, 3]
@@ -294,7 +262,7 @@ class TestYamlBaseInheritance:
         _write_yaml(tmp_path / "a.yml", {"algorithm": "max", "x": 1})
         _write_yaml(tmp_path / "b.yml", {"algorithm": "awq_lite", "y": 2})
         _write_yaml(tmp_path / "c.yml", {"__base__": ["a", "b"]})
-        result = _load_yaml_with_bases(tmp_path / "c.yml", tmp_path)
+        result = load_yaml_with_bases(tmp_path / "c.yml", tmp_path)
         assert result["algorithm"] == "awq_lite"
         assert result["x"] == 1
         assert result["y"] == 2
@@ -306,7 +274,7 @@ class TestYamlBaseInheritance:
             tmp_path / "leaf.yml",
             {"__base__": ["base"], "algorithm": "awq_lite"},
         )
-        result = _load_yaml_with_bases(tmp_path / "leaf.yml", tmp_path)
+        result = load_yaml_with_bases(tmp_path / "leaf.yml", tmp_path)
         assert result["algorithm"] == "awq_lite"
         assert result["extra"] == "keep"
 
@@ -321,7 +289,7 @@ class TestYamlBaseInheritance:
             {"quant_cfg": {"*weight_quantizer": {"axis": 0}}},
         )
         _write_yaml(tmp_path / "composed.yml", {"__base__": ["base", "extra"]})
-        result = _load_yaml_with_bases(tmp_path / "composed.yml", tmp_path)
+        result = load_yaml_with_bases(tmp_path / "composed.yml", tmp_path)
         wq = result["quant_cfg"]["*weight_quantizer"]
         assert wq["num_bits"] == 8
         assert wq["axis"] == 0
@@ -330,16 +298,16 @@ class TestYamlBaseInheritance:
         recipe_yml = tmp_path / "recipe.yml"
         recipe_yml.write_text(yaml.dump({"__base__": ["nonexistent"]}))
         with pytest.raises(FileNotFoundError, match="nonexistent"):
-            _load_yaml_with_bases(recipe_yml, tmp_path)
+            load_yaml_with_bases(recipe_yml, tmp_path)
 
 
-# ── E2E tests: fake modelopt_recipes/ → _load_recipe_from_yaml ──
+# ── E2E tests: fake modelopt_recipes/ → load_recipe_from_yaml ──
 
 
 class TestYamlPresetE2E:
     def test_fp8_loads_correctly(self, recipes_root):
         """FP8 preset resolves __base__ chain and produces expected config."""
-        config = _load_recipe_from_yaml("general/ptq/fp8_default-fp8_kv", recipes_root)
+        config = load_recipe_from_yaml("general/ptq/fp8_default-fp8_kv", recipes_root)
         assert config["algorithm"] == "max"
         qcfg = config["quant_cfg"]
         assert qcfg["default"] == {"enable": False}
@@ -350,7 +318,7 @@ class TestYamlPresetE2E:
 
     def test_int8_loads_correctly(self, recipes_root):
         """INT8 preset: integer num_bits, per-axis weights."""
-        config = _load_recipe_from_yaml("general/ptq/int8_default-fp8_kv", recipes_root)
+        config = load_recipe_from_yaml("general/ptq/int8_default-fp8_kv", recipes_root)
         assert config["algorithm"] == "max"
         qcfg = config["quant_cfg"]
         assert qcfg["*weight_quantizer"]["num_bits"] == 8
@@ -359,7 +327,7 @@ class TestYamlPresetE2E:
 
     def test_int4_awq_loads_correctly(self, recipes_root):
         """INT4 AWQ: dict algorithm, weight-only, block_sizes."""
-        config = _load_recipe_from_yaml("general/ptq/int4_awq-fp8_kv", recipes_root)
+        config = load_recipe_from_yaml("general/ptq/int4_awq-fp8_kv", recipes_root)
         assert config["algorithm"]["method"] == "awq_lite"
         qcfg = config["quant_cfg"]
         assert qcfg["*weight_quantizer"]["num_bits"] == 4
@@ -367,7 +335,7 @@ class TestYamlPresetE2E:
 
     def test_nvfp4_loads_correctly(self, recipes_root):
         """NVFP4: list num_bits [2,1], block_sizes with scale_bits list."""
-        config = _load_recipe_from_yaml("general/ptq/nvfp4_default-fp8_kv", recipes_root)
+        config = load_recipe_from_yaml("general/ptq/nvfp4_default-fp8_kv", recipes_root)
         assert config["algorithm"] == "max"
         wq = config["quant_cfg"]["*weight_quantizer"]
         assert wq["num_bits"] == [2, 1]
@@ -376,20 +344,20 @@ class TestYamlPresetE2E:
 
     def test_int8_sq_loads_correctly(self, recipes_root):
         """INT8 SmoothQuant: same quantizers as INT8 but different algorithm."""
-        config = _load_recipe_from_yaml("general/ptq/int8_smoothquant-fp8_kv", recipes_root)
+        config = load_recipe_from_yaml("general/ptq/int8_smoothquant-fp8_kv", recipes_root)
         assert config["algorithm"] == "smoothquant"
         assert config["quant_cfg"]["*weight_quantizer"]["num_bits"] == 8
 
     def test_kv_cache_merging(self, recipes_root):
         """KV cache entries are merged into model config."""
-        config = _load_recipe_from_yaml("general/ptq/fp8_default-fp8_kv", recipes_root)
+        config = load_recipe_from_yaml("general/ptq/fp8_default-fp8_kv", recipes_root)
         qcfg = config["quant_cfg"]
         assert "*k_proj*input_quantizer" in qcfg
         assert "*v_proj*input_quantizer" in qcfg
 
     def test_yaml_preserves_lists(self, recipes_root):
         """YAML-loaded configs preserve lists (no tuple conversion)."""
-        config = _load_recipe_from_yaml("general/ptq/fp8_default-fp8_kv", recipes_root)
+        config = load_recipe_from_yaml("general/ptq/fp8_default-fp8_kv", recipes_root)
         nb = config["quant_cfg"]["*weight_quantizer"]["num_bits"]
         assert isinstance(nb, list), f"Expected list, got {type(nb)}"
 
@@ -401,23 +369,23 @@ class TestPresetMapConsistency:
     def test_yaml_map_covers_all_live_presets(self):
         """Every live preset should have a corresponding YAML map entry."""
         live_presets = set(list_presets())
-        yaml_presets = set(_PRESET_YAML_MAP.keys())
+        yaml_presets = set(PRESET_YAML_MAP.keys())
         missing = live_presets - yaml_presets
-        assert not missing, f"Live presets missing from _PRESET_YAML_MAP: {sorted(missing)}"
+        assert not missing, f"Live presets missing from PRESET_YAML_MAP: {sorted(missing)}"
 
     def test_yaml_map_paths_follow_convention(self):
         """All YAML map paths should follow general/ptq/<name>-fp8_kv pattern."""
-        for name, path in _PRESET_YAML_MAP.items():
+        for name, path in PRESET_YAML_MAP.items():
             assert path.startswith("general/ptq/"), f"'{name}' has non-standard path: {path}"
             assert path.endswith("-fp8_kv"), f"'{name}' path doesn't end with -fp8_kv: {path}"
 
     def test_no_duplicate_paths(self):
         """No two presets should map to the same directory (except known aliases)."""
-        counts = Counter(_PRESET_YAML_MAP.values())
+        counts = Counter(PRESET_YAML_MAP.values())
         allowed_aliases = {"general/ptq/nvfp4_awq_lite-fp8_kv": {"nvfp4_awq", "nvfp4_awq_lite"}}
         for path, count in counts.items():
             if count > 1:
-                names = {n for n, p in _PRESET_YAML_MAP.items() if p == path}
+                names = {n for n, p in PRESET_YAML_MAP.items() if p == path}
                 if path in allowed_aliases:
                     assert names == allowed_aliases[path], f"Unexpected aliases for {path}: {names}"
                 else:
@@ -432,7 +400,7 @@ class TestYamlKvCacheConsistency:
 
     def test_yaml_preset_has_kv_patterns(self, recipes_root):
         """YAML presets include KV patterns from kv_quant.yml."""
-        config = _load_recipe_from_yaml("general/ptq/fp8_default-fp8_kv", recipes_root)
+        config = load_recipe_from_yaml("general/ptq/fp8_default-fp8_kv", recipes_root)
         qcfg = config["quant_cfg"]
         # Should have KV patterns from kv_quant.yml
         kv_keys = [k for k in qcfg if "k_proj" in k or "v_proj" in k]
@@ -447,7 +415,7 @@ class TestYamlKvCacheConsistency:
             model_quant_bases=["fragments/base", "fragments/fp8_quantizer", "fragments/algo_max"],
             model_quant_override={},
         )
-        config = _load_recipe_from_yaml("general/ptq/fp8_no_kv", recipes_root)
+        config = load_recipe_from_yaml("general/ptq/fp8_no_kv", recipes_root)
         qcfg = config["quant_cfg"]
         kv_keys = [k for k in qcfg if "k_proj" in k or "v_proj" in k]
         assert len(kv_keys) == 0, "Preset without kv_quant.yml should not have KV patterns"
@@ -479,4 +447,4 @@ class TestPresetAPI:
 
     def test_nvfp4_omlp_only_in_presets(self):
         """New PR #1000 preset nvfp4_omlp_only should be in the map."""
-        assert "nvfp4_omlp_only" in _PRESET_YAML_MAP
+        assert "nvfp4_omlp_only" in PRESET_YAML_MAP
