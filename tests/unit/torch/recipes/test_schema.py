@@ -47,6 +47,12 @@ def test_preset_or_custom():
         RecipeConfig.model_validate(raw)
 
 
+def test_qat_requires_training():
+    raw = {"quantization": {"mode": "qat", "preset": "fp8"}}
+    with pytest.raises(ValueError, match="QAT mode requires"):
+        RecipeConfig.model_validate(raw)
+
+
 def test_all_example_recipes_valid(examples_dir):
     for yaml_file in sorted(examples_dir.rglob("*.yaml")):
         if "experiments" in yaml_file.parts:

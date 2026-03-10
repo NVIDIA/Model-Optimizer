@@ -106,6 +106,8 @@ class QuantizationSection(BaseModel):
                 "Cannot specify both 'preset' and 'weights'/'activations'. "
                 "Use preset with overrides, or specify weights/activations from scratch."
             )
+        if self.mode == "qat" and self.training is None:
+            raise ValueError("QAT mode requires a 'training' configuration.")
         return self
 
 
