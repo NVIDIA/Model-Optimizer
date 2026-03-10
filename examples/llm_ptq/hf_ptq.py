@@ -308,9 +308,9 @@ def auto_quantize(
         kv_cache_quant_cfg = copy.deepcopy(
             getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"]
         )
-        kv_cache_quant_cfg.pop("default")  # keep other quantizers from auto_quantize
+        kv_cache_quant_cfg.pop("default", None)  # keep other quantizers from auto_quantize
 
-        if not args.calibrate_kv_cache:
+        if not args.calibrate_kv_cache and "*[kv]_bmm_quantizer" in kv_cache_quant_cfg:
             # Use constant amax=448.0 (FP8 E4M3 maxbound → scale=1.0); no calibration needed.
             kv_cache_quant_cfg["*[kv]_bmm_quantizer"]["constant_amax"] = 448.0
 
@@ -944,7 +944,13 @@ def quantize_main(
                 print(f"Excluding MTP layer from quantization: {pattern}")
 
         # Use constant amax for KV quantizers when data-driven calibration is not requested.
-        if args.kv_cache_qformat != "none" and not args.calibrate_kv_cache:
+        # Only applies to formats that use the *[kv]_bmm_quantizer key (fp8, nvfp4).
+        # nvfp4_rotate uses per-component keys and does not support constant_amax.
+        if (
+            args.kv_cache_qformat != "none"
+            and not args.calibrate_kv_cache
+            and "*[kv]_bmm_quantizer" in quant_cfg["quant_cfg"]
+        ):
             quant_cfg = copy.deepcopy(quant_cfg)
             quant_cfg["quant_cfg"]["*[kv]_bmm_quantizer"]["constant_amax"] = 448.0
 
