@@ -56,17 +56,13 @@ If you skip --hf_split, it will download and tokenize all splits for the subset.
 import argparse
 import json
 import multiprocessing
-import os
 from pathlib import Path
-from warnings import warn
 
-import requests
-from datasets import load_dataset
-from huggingface_hub.utils import build_hf_headers
 from megatron.core.datasets import indexed_dataset
 from transformers import AutoTokenizer
 
 from modelopt.torch.utils import num2hrb
+from modelopt.torch.utils.dataset_utils import download_hf_dataset_as_jsonl
 
 __all__ = ["megatron_preprocess_data"]
 
@@ -188,82 +184,6 @@ class _Partition:
         return final_enc_len
 
 
-def _download_hf_dataset(
-    dataset: str,
-    output_dir: str | Path,
-    json_keys: list[str],
-    name: str | None = None,
-    split: str | None = "train",
-    max_samples_per_split: int | None = None,
-) -> list[str]:
-    """Download a Hugging Face dataset and save as JSONL files.
-
-    Returns:
-        List of paths to downloaded JSONL files.
-    """
-    print(f"Downloading dataset {dataset} from Hugging Face")
-    jsonl_paths: list[str] = []
-
-    try:
-        response = requests.get(
-            f"https://datasets-server.huggingface.co/splits?dataset={dataset}",
-            headers=build_hf_headers(),
-            timeout=10,
-        )
-        response.raise_for_status()
-    except requests.RequestException as e:
-        raise RuntimeError(f"Failed to fetch dataset splits for {dataset}: {e}") from e
-
-    response_json = response.json()
-    print(f"\nFound {len(response_json['splits'])} total splits for {dataset}:")
-    for entry in response_json["splits"]:
-        print(f"\t{entry}")
-
-    splits_to_process = []
-    for entry in response_json["splits"]:
-        if name is not None and name != entry.get("config", None):
-            continue
-        if split is not None and split != entry["split"]:
-            continue
-        splits_to_process.append(entry)
-
-    print(f"\nFound {len(splits_to_process)} splits to process:")
-    for entry in splits_to_process:
-        print(f"\t{entry}")
-
-    for entry in splits_to_process:
-        skip_processing = False
-        path = entry["dataset"]
-        name = entry.get("config", None)
-        split = entry["split"]
-        if max_samples_per_split is not None:
-            split = f"{split}[:{max_samples_per_split}]"
-        jsonl_file_path = f"{output_dir}/raw/{path.replace('/', '--')}_{name}_{split}.jsonl"
-
-        print(f"\nLoading HF dataset {path=}, {name=}, {split=}")
-        if os.path.exists(jsonl_file_path):
-            jsonl_paths.append(jsonl_file_path)
-            print(f"\t[SKIP] Raw dataset {jsonl_file_path} already exists")
-            continue
-        ds = load_dataset(path=path, name=name, split=split)
-
-        for key in json_keys:
-            if key not in ds.features:
-                warn(f"[SKIP] {key=} not found in {ds.features=}")
-                skip_processing = True
-                break
-
-        if skip_processing:
-            continue
-
-        print(f"Saving raw dataset to {jsonl_file_path}")
-        ds.to_json(jsonl_file_path)
-        jsonl_paths.append(jsonl_file_path)
-
-    print(f"\n\nTokenizing JSONL paths: {jsonl_paths}\n")
-    return jsonl_paths
-
-
 def megatron_preprocess_data(
     *,
     input_dir: str | Path | None = None,
@@ -309,14 +229,15 @@ def megatron_preprocess_data(
         )
 
     if hf_dataset is not None:
-        jsonl_paths = _download_hf_dataset(
+        jsonl_paths = download_hf_dataset_as_jsonl(
             hf_dataset,
-            output_dir,
+            f"{output_dir}/raw",
             json_keys,
             name=hf_name,
             split=hf_split,
             max_samples_per_split=hf_max_samples_per_split,
         )
+        print(f"\n\nTokenizing downloaded JSONL files: {jsonl_paths}\n")
 
     if input_dir is not None:
         file_names = sorted(Path(input_dir).glob("*.jsonl"))
@@ -338,7 +259,7 @@ def megatron_preprocess_data(
         num_tokens = partition.process_json_file(name, output_dir, encoder)
         final_enc_len += num_tokens
 
-    print(f"\n\n>>> Total number of tokens currently processed: {num2hrb(final_enc_len)}")
+    print(f"\n\n>>> Total number of tokens currently processed: {num2hrb(final_enc_len)}\nDone!")
 
 
 def main():

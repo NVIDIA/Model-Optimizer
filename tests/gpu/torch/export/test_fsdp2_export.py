@@ -225,6 +225,7 @@ def test_fsdp2_weight_update_context_for_export(dist_workers):
         # mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG, #TODO: Fix unit test for this case
         mtq.W4A8_MXFP4_FP8_CFG,
         mtq.NVFP4_MLP_ONLY_CFG,
+        mtq.NVFP4_OMLP_ONLY_CFG,
     ],
 )
 @pytest.mark.parametrize("bias", [True, False])
@@ -244,6 +245,7 @@ def test_fsdp2_weight_update_context_for_fuse_layers(dist_workers, quant_config,
         # mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG, #TODO: Fix unit test for this case
         mtq.W4A8_MXFP4_FP8_CFG,
         mtq.NVFP4_MLP_ONLY_CFG,
+        mtq.NVFP4_OMLP_ONLY_CFG,
     ],
 )
 @pytest.mark.parametrize("bias", [True, False])

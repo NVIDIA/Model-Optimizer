@@ -20,6 +20,9 @@ reviews:
         5. Any use of "# nosec" comments to bypass Bandit security checks is not allowed.
            If a security-sensitive pattern is genuinely necessary, the PR must be reviewed and approved
            by @NVIDIA/modelopt-setup-codeowners with an explicit justification in the PR description.
+        6. Any addition of new PIP dependencies in pyproject.toml or requirements.txt that are not
+           permissive licenses (e.g. MIT, Apache 2) must be reviewed and approved by
+           @NVIDIA/modelopt-setup-codeowners with an explicit justification in the PR description.
     - path: "examples/**/*.py"
       instructions: *security_instructions
   auto_review:

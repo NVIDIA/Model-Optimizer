@@ -25,12 +25,19 @@ from onnx import helper
 
 def _create_simple_conv_onnx_model():
     """Build ONNX model: Input -> Conv -> Relu -> Output (minimal for autotuner tests)."""
-    input_tensor = helper.make_tensor_value_info("input", onnx.TensorProto.FLOAT, [32, 3, 224, 224])
+    input_tensor = helper.make_tensor_value_info(
+        "input", onnx.TensorProto.FLOAT, [64, 32, 224, 224]
+    )
     output_tensor = helper.make_tensor_value_info(
-        "output", onnx.TensorProto.FLOAT, [32, 64, 224, 224]
+        "output", onnx.TensorProto.FLOAT, [64, 64, 224, 224]
     )
     conv_node = helper.make_node(
-        "Conv", inputs=["input", "conv_weight"], outputs=["conv_out"], name="conv"
+        "Conv",
+        inputs=["input", "conv_weight"],
+        outputs=["conv_out"],
+        name="conv",
+        kernel_shape=[3, 3],
+        pads=[1, 1, 1, 1],
     )
     relu_node = helper.make_node("Relu", inputs=["conv_out"], outputs=["output"], name="relu")
     graph = helper.make_graph(
@@ -40,7 +47,7 @@ def _create_simple_conv_onnx_model():
         [output_tensor],
         initializer=[
             helper.make_tensor(
-                "conv_weight", onnx.TensorProto.FLOAT, [64, 3, 3, 3], [0.1] * (64 * 3 * 3 * 3)
+                "conv_weight", onnx.TensorProto.FLOAT, [64, 32, 3, 3], [0.1] * (64 * 32 * 3 * 3)
             )
         ],
     )
