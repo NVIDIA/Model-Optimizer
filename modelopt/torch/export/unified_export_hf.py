@@ -1121,12 +1121,13 @@ def export_speculative_decoding(
     model: torch.nn.Module,
     dtype: torch.dtype | None = None,
     export_dir: Path | str = tempfile.gettempdir(),
+    offline_specdec_input: dict | None = None,
 ) -> None:
     """Export speculative decoding HuggingFace model checkpoint."""
     assert has_spec_opt(model), "Model is not optimized for speculative decoding."
 
     exporter: SpeculativeDecodingExporter = model.get_exporter()
-    exporter.export(export_dir, dtype)
+    exporter.export(export_dir, dtype, offline_specdec_input)
 
 
 def export_hf_checkpoint(
@@ -1137,7 +1138,6 @@ def export_hf_checkpoint(
     components: list[str] | None = None,
     extra_state_dict: dict[str, torch.Tensor] | None = None,
     max_shard_size: int | str = "10GB",
-    offline_specdec_input: dict | None = None,
     **kwargs,
 ):
     """Export quantized HuggingFace model checkpoint (transformers or diffusers).
@@ -1179,9 +1179,7 @@ def export_hf_checkpoint(
         return
 
     try:
-        post_state_dict, hf_quant_config = _export_transformers_checkpoint(
-            model, dtype, offline_specdec_input=offline_specdec_input
-        )
+        post_state_dict, hf_quant_config = _export_transformers_checkpoint(model, dtype)
 
         if hf_quant_config is not None:
             # Save hf_quant_config.json for backward compatibility
