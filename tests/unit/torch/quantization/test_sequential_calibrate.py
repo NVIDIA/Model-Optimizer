@@ -21,8 +21,8 @@ import pytest
 import torch
 import torch.nn as nn
 
+from modelopt.torch.quantization.activation_collector import LayerActivationCollector
 from modelopt.torch.quantization.model_calib import sequential_calibrate
-from modelopt.torch.quantization.utils import LayerActivationCollector
 
 
 class _DecoderBlock(nn.Module):

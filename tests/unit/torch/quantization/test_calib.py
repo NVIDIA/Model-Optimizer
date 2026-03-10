@@ -402,7 +402,7 @@ def test_sequential_calibrate_support_gate():
 
 
 def test_sequential_calibrate_propagates_inputs_without_replaying_full_model(monkeypatch):
-    from modelopt.torch.quantization.utils import LayerActivationCollector
+    from modelopt.torch.quantization.activation_collector import LayerActivationCollector
 
     class _ToyLayer(nn.Module):
         def __init__(self, scale: float, bias: float):
@@ -484,7 +484,7 @@ def test_sequential_calibrate_propagates_inputs_without_replaying_full_model(mon
 
 def test_sequential_calibrate_handles_inter_layer_logic(monkeypatch):
     """Verify that parent-level inter-layer logic (e.g. mask selection) works correctly."""
-    from modelopt.torch.quantization.utils import LayerActivationCollector
+    from modelopt.torch.quantization.activation_collector import LayerActivationCollector
 
     class _ToyLayer(nn.Module):
         def __init__(self, scale: float):

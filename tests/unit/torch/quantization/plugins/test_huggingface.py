@@ -30,12 +30,12 @@ from _test_utils.torch.transformers_models import (
 )
 
 import modelopt.torch.quantization as mtq
+from modelopt.torch.quantization.activation_collector import LayerActivationCollector
 from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry
 from modelopt.torch.quantization.plugins.huggingface import (
     get_homogeneous_hf_decoder_layers,
     is_homogenous_hf_model,
 )
-from modelopt.torch.quantization.utils import LayerActivationCollector
 
 pytest.importorskip("transformers")
 

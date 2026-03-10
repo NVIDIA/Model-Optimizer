@@ -16,8 +16,8 @@
 import pytest
 import torch
 
+from modelopt.torch.quantization.activation_collector import LayerActivationCollector
 from modelopt.torch.quantization.utils import (
-    LayerActivationCollector,
     convert_quantization_axis_to_reduce_axis,
     reduce_block_amax,
 )
