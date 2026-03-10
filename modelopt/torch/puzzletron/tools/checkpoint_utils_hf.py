@@ -199,17 +199,17 @@ def _save_checkpoint(
         }
         weight_map.update(weight_map_entries)
 
-    # Write index
+    # Handle tie_word_embeddings - remove from state_dict and weight_map BEFORE writing index
+    output_emb_weight_name = f"{descriptor.output_embedding_name()}.weight"
+    if getattr(model_config, "tie_word_embeddings", False) and output_emb_weight_name in state_dict:
+        state_dict = {k: v for k, v in state_dict.items() if k != output_emb_weight_name}
+        weight_map = {k: v for k, v in weight_map.items() if k != output_emb_weight_name}
+
+    # Write index (now without tied embedding)
     index = {"metadata": {"format": "pt"}, "weight_map": weight_map}
     index_path = checkpoint_dir / SAFE_WEIGHTS_INDEX_NAME
     index_json = json_dumps(index)
     _write_file_process_safe(index_json, index_path)
-
-    # Handle tie_word_embeddings - don't save lm_head.weight if it's tied to embed_tokens
-    if getattr(model_config, "tie_word_embeddings", False) and "lm_head.weight" in state_dict:
-        lm_head_weight_name = f"{descriptor.output_embedding_name()}.weight"
-        state_dict = {k: v for k, v in state_dict.items() if k != lm_head_weight_name}
-        weight_map = {k: v for k, v in weight_map.items() if k != lm_head_weight_name}
 
     # Phase 3: Save subblocks
     save_subblocks(

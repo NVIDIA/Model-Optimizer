@@ -39,7 +39,7 @@ def setup_test_model_and_data(
     hybrid_override_pattern: str | None = None,
 ) -> tuple[Path, Path, Path]:
     """
-    Setup the test model and data for the compress NAS search.
+    Setup the test model and data for the puzzletron NAS search.
 
     Args:
         project_root_path (Path): the root path of the project

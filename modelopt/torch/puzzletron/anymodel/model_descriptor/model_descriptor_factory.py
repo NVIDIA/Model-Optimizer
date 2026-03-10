@@ -36,7 +36,7 @@ _MODEL_TYPE_TO_DESCRIPTOR = {
 }
 
 
-def resolve_descriptor_from_pretrained(pretrained: str | None, trust_remote_code: bool = False):
+def resolve_descriptor_from_pretrained(pretrained: str, trust_remote_code: bool = False):
     """Resolve the model descriptor by loading the checkpoint config and mapping model_type.
 
     Args:
@@ -51,8 +51,6 @@ def resolve_descriptor_from_pretrained(pretrained: str | None, trust_remote_code
     Raises:
         ValueError: If pretrained is not provided or if the model type cannot be auto-detected.
     """
-    if not pretrained:
-        raise ValueError("pretrained must be provided")
 
     config = AutoConfig.from_pretrained(pretrained, trust_remote_code=trust_remote_code)
     model_type = getattr(config, "model_type", None)
