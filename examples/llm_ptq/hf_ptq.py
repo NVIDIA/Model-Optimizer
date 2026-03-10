@@ -962,7 +962,7 @@ def quantize_main(
             tokenizer, data_args, train_len=args.calib_seq
         )
         calib_dataloader = DataLoader(
-            data_module["eval_dataset"],
+            data_module["train_dataset"],
             batch_size=args.batch_size,
             shuffle=False,
             collate_fn=data_module["data_collator"],
