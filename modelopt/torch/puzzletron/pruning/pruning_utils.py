@@ -596,10 +596,15 @@ def _select_expert_indices(
 ) -> list[int]:
     expert_scores = _load_expert_scores(mlp_init_config, layer_idx)
     assert len(expert_scores) == orig_num_experts
+    higher_is_better = mlp_init_config.get("higher_is_better", True)
     selected_experts = sorted(
         range(orig_num_experts),
-        key=lambda i: expert_scores[i] if not math.isnan(expert_scores[i]) else float("inf"),
-        reverse=mlp_init_config.get("higher_is_better", True),
+        key=lambda i: (
+            expert_scores[i]
+            if not math.isnan(expert_scores[i])
+            else (float("-inf") if higher_is_better else float("inf"))
+        ),
+        reverse=higher_is_better,
     )[:new_num_experts]
     return selected_experts
 

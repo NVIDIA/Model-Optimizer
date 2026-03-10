@@ -50,7 +50,7 @@ from modelopt.torch.puzzletron.tools.logger import mprint
 
 
 class PuzzletronModel(nn.Module):
-    pass  # No model implementation is needed for the compress mode
+    pass  # No model implementation is needed for the puzzletron mode
 
 
 class PuzzletronConfig(ModeloptBaseConfig):
@@ -154,7 +154,7 @@ def convert_puzzletron_model(model: nn.Module, config: PuzzletronConfig) -> Conv
 def restore_puzzletron_model(
     model: nn.Module, config: PuzzletronConfig, metadata: MetadataDict
 ) -> nn.Module:
-    """Restore is not needed for the compress mode as we are not saving any model state"""
+    """Restore is not needed for the puzzletron mode as we are not saving any model state"""
     return model
 
 
@@ -192,7 +192,7 @@ class PuzzletronDescriptor(ModeDescriptor):
     def export_mode(self) -> str | None:
         """The mode that corresponds to the export mode.
         For now, this will be a no-op as there is no modelopt's concept of search space defined
-        for the compress algorithm.
+        for the puzzletron algorithm.
         """
         return "export_nas"
 
@@ -202,7 +202,7 @@ class PuzzletronSearcher(BaseSearcher):
 
     @property
     def default_state_dict(self) -> SearchStateDict:
-        """Not needed for the compress mode as we are not saving any model state"""
+        """Not needed for the puzzletron mode as we are not saving any model state"""
         return {}
 
     def run_search(self) -> None:

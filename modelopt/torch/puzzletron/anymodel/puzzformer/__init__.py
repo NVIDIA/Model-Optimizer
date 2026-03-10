@@ -13,6 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Utilities for patching and transforming HuggingFace models to work with AnyModel.
+
+Provides no-op modules for layer replacement and patching utilities for heterogeneous
+per-layer configurations.
+"""
+
 from modelopt.torch.puzzletron.anymodel.puzzformer.no_op import (
     MatchingZeros,
     Same,
