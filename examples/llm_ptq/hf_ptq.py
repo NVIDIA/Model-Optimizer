@@ -955,8 +955,7 @@ def quantize_main(
         data_args = argparse.Namespace(
             vlm_processor=None,
             vlm_img_dir=None,
-            data_path=args.specdec_offline_dataset,
-            offline_data_path=args.specdec_offline_feature,
+            offline_data_path=args.specdec_offline_dataset,
             devlazy_preprocessice=True,
         )
         data_module = make_eagle_supervised_data_module(
@@ -1148,19 +1147,10 @@ def parse_args() -> argparse.Namespace:
         default=None,
     )
     parser.add_argument(
-        "--specdec_offline_feature",
+        "--specdec_offline_dataset",
         help=(
             "If set, the model is a speculative decoding model,"
             "which uses offline dataset for calibration. "
-        ),
-        default=None,
-    )
-    parser.add_argument(
-        "--specdec_offline_dataset",
-        help=(
-            "Path to the offline dataset for speculative decoding model calibration. "
-            "This should be a JSON or JSONL file or a directory with JSON or JSONL files "
-            "containing the calibration samples. "
         ),
         default=None,
     )
