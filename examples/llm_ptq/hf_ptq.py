@@ -959,7 +959,7 @@ def quantize_main(
             devlazy_preprocessice=True,
         )
         data_module = make_eagle_supervised_data_module(
-            tokenizer, data_args, max_length=args.calib_seq
+            tokenizer, data_args, train_len=args.calib_seq
         )
         calib_dataloader = DataLoader(
             data_module["eval_dataset"],
