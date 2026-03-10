@@ -52,7 +52,7 @@ def init_child_from_parent(
     descriptor: ModelDescriptor,
     pruning_mixin,
     parent_checkpoint_dir: str,
-    model_config_overrides_dict: dict,
+    model_config_overrides_dict: dict | str,
     output_checkpoint_dir: str,
     gqa_init_mode: GQAInitMode,
     mlp_init_mode: MlpInitMode,
