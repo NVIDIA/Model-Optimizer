@@ -53,6 +53,7 @@ from modelopt.torch.nas.conversion import NASModeRegistry
 from modelopt.torch.nas.plugins.megatron import (
     HAS_MAMBA,
     SUPPORTED_MODELS,
+    _DynamicGroupedMLP,
     _DynamicMambaLayer,
     _DynamicMambaMixer,
     _DynamicMCoreLanguageModel,
@@ -811,6 +812,8 @@ class ImportanceEstimatorRegistry:
                 _register_mlp_importance(module, self)
             elif isinstance(module, _DynamicSequentialMLP):
                 _register_sequential_mlp_importance(module, self)
+            elif isinstance(module, _DynamicGroupedMLP):
+                _register_grouped_mlp_importance(module, self)
             elif isinstance(module, _DynamicMambaMixer):
                 _register_mamba_mixer_importance(module, self)
 
@@ -974,6 +977,8 @@ def _register_hidden_size_importance(
         return activations
 
     # Register hooks for all layers
+    # For TE spec, layernorms may be IdentityOp (fused into linear layers).
+    # Hooking on IdentityOp still works — it gives pre-layernorm activations.
     for layer in module.decoder.layers:
         if isinstance(layer, _DynamicTransformerLayer):
             if isinstance(layer.self_attention, _DynamicSelfAttention):
@@ -983,7 +988,7 @@ def _register_hidden_size_importance(
                     hook_type="forward",
                 )
 
-            if isinstance(layer.mlp, (_DynamicMLP, _DynamicSequentialMLP)):
+            if isinstance(layer.mlp, (_DynamicMLP, _DynamicSequentialMLP, _DynamicMoELayer)):
                 registry.register_hook(
                     layer.pre_mlp_layernorm,
                     partial(_emb_layernorm_forward_hook, module),
@@ -1186,6 +1191,73 @@ def _register_sequential_mlp_importance(
         module,
         "num_local_experts",
         lambda: _estimate_expert_importance(module),
+    )
+
+
+def _register_grouped_mlp_importance(
+    module: _DynamicGroupedMLP, registry: ImportanceEstimatorRegistry
+) -> None:
+    """Register importance estimators for GroupedMLP (MoE experts with grouped GEMM).
+
+    Expert importance is computed from output L2 norms (same as SequentialMLP).
+    FFN importance is computed from weight2 row magnitudes as an approximation
+    since per-expert intermediate activations are not easily accessible in grouped GEMM.
+    """
+    module._register_temp_attribute(
+        "_activations",
+        {
+            "expert_l2_scores": torch.zeros(module.num_local_experts),
+            "expert_sample_counts": torch.zeros(module.num_local_experts),
+        },
+    )
+
+    def _expert_l2_imp_forward_hook(mod, module_inner, input, output):
+        """Track expert importance based on L2 norms of expert outputs."""
+        tokens_per_expert_list = input[1].tolist()
+        output_local = output[0].to(torch.float32).detach()
+        output_local_list = torch.split(output_local, tokens_per_expert_list)
+
+        for expert_idx, expert_output in enumerate(output_local_list):
+            if expert_output.numel() == 0:
+                l2_norm = 0.0
+            else:
+                l2_norm = torch.linalg.vector_norm(expert_output, ord=2, dim=-1).sum().item()
+            mod._activations["expert_l2_scores"][expert_idx] += l2_norm
+            mod._activations["expert_sample_counts"][expert_idx] += tokens_per_expert_list[
+                expert_idx
+            ]
+
+    def _estimate_expert_importance(mod):
+        assert mod._activations["expert_sample_counts"].sum() > 0, (
+            "No activations collected for importance estimation."
+        )
+        return mod._activations["expert_l2_scores"] / (
+            mod._activations["expert_sample_counts"] + 1e-8
+        )
+
+    def _estimate_ffn_importance(mod):
+        """Approximate FFN importance from weight2 row magnitudes (averaged across experts)."""
+        weight2 = mod.weight2.data.to(torch.float32)
+        max_ffn = mod.get_hparam("moe_ffn_hidden_size").max
+        num_experts = mod.get_hparam("num_local_experts").max
+        per_expert_importance = weight2.view(num_experts, max_ffn, -1)
+        ffn_importance = torch.linalg.vector_norm(per_expert_importance, ord=2, dim=2)
+        return ffn_importance.mean(dim=0)
+
+    registry.register_hook(
+        module,
+        partial(_expert_l2_imp_forward_hook, module),
+        hook_type="forward",
+    )
+    registry.register_importance(
+        module,
+        "num_local_experts",
+        lambda: _estimate_expert_importance(module),
+    )
+    registry.register_importance(
+        module,
+        "moe_ffn_hidden_size",
+        lambda: _estimate_ffn_importance(module),
     )
 
 

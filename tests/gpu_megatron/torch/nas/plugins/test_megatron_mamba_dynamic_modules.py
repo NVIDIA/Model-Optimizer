@@ -35,7 +35,8 @@ from modelopt.torch.nas.plugins.megatron import (
     _DynamicMambaLayer,
     _DynamicMambaMixer,
     _DynamicMCoreLanguageModel,
-    _DynamicRowParallelLinear,
+    _DynamicTELayerNormColumnParallelLinear,
+    _DynamicTERowParallelLinear,
 )
 from modelopt.torch.nas.traced_hp import TracedHp
 from modelopt.torch.opt.utils import named_dynamic_modules, search_space_size
@@ -43,6 +44,7 @@ from modelopt.torch.prune.plugins.mcore_minitron import get_mcore_minitron_confi
 from modelopt.torch.utils.random import centroid
 
 SEED = 1234
+TE_SPEC = "transformer_engine"
 
 
 def _test_mamba_search_space(rank, size):
@@ -71,6 +73,8 @@ def _test_mamba_search_space(rank, size):
         mamba_num_groups=mamba_num_groups,
         max_sequence_length=max_sequence_length,
         vocab_size=vocab_size,
+        transformer_impl=TE_SPEC,
+        bf16=False,
     ).cuda()
     mamba_num_heads = model.decoder.layers[0].mixer.nheads
 
@@ -95,8 +99,8 @@ def _test_mamba_search_space(rank, size):
     for layer in model.decoder.layers:
         assert isinstance(layer, _DynamicMambaLayer)
         assert isinstance(layer.mixer, _DynamicMambaMixer)
-        assert isinstance(layer.mixer.in_proj, _DynamicColumnParallelLinear)
-        assert isinstance(layer.mixer.out_proj, _DynamicRowParallelLinear)
+        assert isinstance(layer.mixer.in_proj, _DynamicTELayerNormColumnParallelLinear)
+        assert isinstance(layer.mixer.out_proj, _DynamicTERowParallelLinear)
         assert isinstance(layer.mixer.conv1d, _DynamicConvNd)
         if layer.mixer.rmsnorm:
             assert isinstance(layer.mixer.norm, _DynamicExtendedRMSNorm)

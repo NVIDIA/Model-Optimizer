@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
 from warnings import warn
 
 import torch
@@ -24,6 +25,7 @@ from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_layer_local_spec,
     get_gpt_layer_with_transformer_engine_spec,
 )
+from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
 from megatron.core.models.mamba import MambaModel
 from megatron.core.parallel_state import is_pipeline_first_stage, is_pipeline_last_stage
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
@@ -42,8 +44,18 @@ except ImportError as e:
     HAS_TE = False
 
 try:
+    from megatron.core.models.mamba.mamba_layer_specs import (
+        mamba_stack_spec as _te_mamba_stack_spec,
+    )
     from megatron.core.post_training.modelopt.mamba.model_specs import get_mamba_stack_modelopt_spec
     from megatron.core.ssm.mamba_layer import MambaLayer  # noqa: F401
+
+    # The upstream TE mamba stack spec hardcodes TEGroupedMLP for MoE.
+    # Replace it with SequentialMLP (TE linear layers, no grouped gemm dependency).
+    te_mamba_stack_spec = copy.deepcopy(_te_mamba_stack_spec)
+    te_mamba_stack_spec.submodules.moe_layer.submodules.mlp = get_moe_module_spec(
+        use_te=True, num_experts=8, moe_grouped_gemm=False
+    )
 
     HAS_MAMBA = True
 except ImportError as e:
@@ -184,7 +196,7 @@ def get_mcore_gpt_model(
         bf16=bf16,
         # MoE-specific parameters
         moe_grouped_gemm=moe_grouped_gemm,
-        moe_router_dtype="fp32",
+        moe_router_dtype=None,
         moe_ffn_hidden_size=moe_ffn_hidden_size,
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
         moe_router_enable_expert_bias=True,
@@ -214,16 +226,17 @@ def get_mcore_gpt_model(
         )
     else:
         assert HAS_TE, "Transformer Engine not installed"
-        transformer_layer_spec = (
-            get_gpt_modelopt_spec(
+        if transformer_impl == "modelopt":
+            transformer_layer_spec = get_gpt_modelopt_spec(
                 config,
                 remap_te_layernorm=True,
-                # TODO: uncomment this when TEGroupedMLP is enabled in Megatron-LM
-                # moe_grouped_gemm=moe_grouped_gemm
             )
-            if transformer_impl == "modelopt"
-            else get_gpt_layer_with_transformer_engine_spec()
-        )
+        else:
+            transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
+                num_experts=num_moe_experts,
+                moe_grouped_gemm=moe_grouped_gemm,
+                moe_use_legacy_grouped_gemm=moe_grouped_gemm,
+            )
 
     model = GPTModel(
         config=config,
@@ -306,6 +319,7 @@ def get_mcore_mamba_hybrid_model(
     vocab_size: int = 64,
     bf16: bool = True,
     sequence_parallel: bool = False,
+    transformer_impl: str = "modelopt",
     # Mamba-specific parameters
     mamba_state_dim: int = 32,
     mamba_num_heads: int | None = None,
@@ -383,9 +397,14 @@ def get_mcore_mamba_hybrid_model(
     assert len(hybrid_override_pattern.replace("|", "")) == num_layers
     print(f"Using `{hybrid_override_pattern=}` for building MambaModel")
 
+    if transformer_impl == "transformer_engine":
+        mamba_spec = te_mamba_stack_spec
+    else:
+        mamba_spec = get_mamba_stack_modelopt_spec(remap_te_layernorm=True)
+
     model = MambaModel(
         config=config,
-        mamba_stack_spec=get_mamba_stack_modelopt_spec(remap_te_layernorm=True),
+        mamba_stack_spec=mamba_spec,
         vocab_size=vocab_size,
         max_sequence_length=max_sequence_length,
         hybrid_override_pattern=hybrid_override_pattern,
