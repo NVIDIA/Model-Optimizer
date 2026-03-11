@@ -28,7 +28,6 @@ import modelopt.torch.utils.distributed as dist
 from modelopt.torch.puzzletron.nas.plugins.puzzletron_nas_plugin import PuzzletronModel
 
 
-@pytest.mark.skip(reason="Temporarily disabled")
 def test_nas_convert_ffn_pruning(project_root_path: Path, tmp_path: Path):
     spawn_multiprocess_job(
         size=torch.cuda.device_count(),
