@@ -38,6 +38,10 @@ from modelopt.torch.prune.plugins.mcore_minitron import (
 SEED = 1234
 
 
+def _assert_approx(actual, expected, abs=1e-3):
+    assert actual == pytest.approx(expected, abs=abs), f"{actual=} != {expected=}"
+
+
 def _test_mcore_gpt_parameter_sorting(activation_func, rank, size):
     set_seed(SEED)
     # Use relatively bigger model here for more accurate test for sorting
@@ -170,10 +174,12 @@ def _test_mcore_gpt_pruning(
             transformer_impl="transformer_engine",
             num_layers_in_first_pipeline_stage=num_layers_in_first_pipeline_stage,
             num_layers_in_last_pipeline_stage=num_layers_in_last_pipeline_stage,
+            use_cpu_initialization=True,  # Ensure deterministic weight init across CUDA versions
         ).cuda()
         return model
 
     model = _get_model()
+
     sd = model.state_dict()
 
     def forward_loop(m):
@@ -209,6 +215,48 @@ def _test_mcore_gpt_pruning(
     if not skip_sorting:
         assert pruning_scores["layer_scores"]
         assert pruning_scores["local_activations"]
+
+        # TODO: Simplify it: this unit test is too long,
+        # hard to read (the same set of assertions across different test cases with if-else).
+
+        assert len(pruning_scores["activations_per_rank"]) == size
+        activations = pruning_scores["activations_per_rank"][rank]
+
+        # Test case 1: MHA - pruned ffn/4 (num_attention_heads=8, num_query_groups=8, ffn_div=4)
+        if size == 1 and pruned_ffn_div == 4:
+            # Layer scores
+            _assert_approx(pruning_scores["layer_scores"], {1: 0.028923, 2: 0.046508})
+
+            # Validate decoder.layers.0.mlp activations
+            mlp_0_acts = activations["decoder.layers.0.mlp"]
+            _assert_approx(mlp_0_acts.min().item(), 0.000026)
+            _assert_approx(mlp_0_acts.max().item(), 0.000729)
+            _assert_approx(mlp_0_acts.mean().item(), 0.000201)
+
+            # Validate decoder.layers.1.mlp activations
+            mlp_1_acts = activations["decoder.layers.1.mlp"]
+            _assert_approx(mlp_1_acts.min().item(), 0.000022)
+            _assert_approx(mlp_1_acts.max().item(), 0.000762)
+            _assert_approx(mlp_1_acts.mean().item(), 0.000162)
+
+        # Test case 2: GQA - pruned attention/2 (num_attention_heads=8, num_query_groups=4, attention_div=2)
+        elif size == 1 and pruned_num_attention_heads_div == 2 and pruned_ffn_div == 1:
+            # Layer scores
+            _assert_approx(pruning_scores["layer_scores"], {1: 0.028056, 2: 0.038353})
+
+            # Validate decoder.layers.0.self_attention activations
+            attn_0_acts = activations["decoder.layers.0.self_attention"]
+            assert attn_0_acts.shape == torch.Size([hidden_size])
+            _assert_approx(attn_0_acts.min().item(), 0.010091)
+            _assert_approx(attn_0_acts.max().item(), 0.023826)
+            _assert_approx(attn_0_acts.mean().item(), 0.014548)
+
+            # Validate decoder.layers.1.self_attention activations
+            attn_1_acts = activations["decoder.layers.1.self_attention"]
+            assert attn_1_acts.shape == torch.Size([hidden_size])
+            _assert_approx(attn_1_acts.min().item(), 0.009982)
+            _assert_approx(attn_1_acts.max().item(), 0.035644)
+            _assert_approx(attn_1_acts.mean().item(), 0.020140)
 
     # Assert weights are pruned correctly
     for layer in model.decoder.layers:
