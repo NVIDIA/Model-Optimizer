@@ -975,25 +975,41 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
             assert v in ["max", "histogram"]
         return v
 
-    rotate: bool | dict[str, bool | int] = ModeloptField(
+    rotate: bool | dict[str, bool | int | None] = ModeloptField(
         default=False,
         title="""Configuration for rotating the input before quantization.""",
         description="""Can be a boolean or a dictionary with the following keys:
         - "enable": Boolean to enable/disable rotation (default: False)
         - "rotate_fp32": Boolean to compute rotation in float32 precision (default: False)
-        - "block_size": Optional int for block-granular RHT (power of 2 dividing the dimension).
-        Enables RHT for non-power-of-2 dimensions; if None, auto-selects the largest power-of-2 divisor.
+        - "block_size": Optional positive int for block-granular RHT. When set, applies
+          Hadamard transforms to non-overlapping blocks of this size, each normalized by
+          ``sqrt(block_size)``. When None (default), applies the full-dimension transform
+          ``input @ hadamard(input.shape[-1]) / sqrt(input.shape[-1])`` for power-of-2
+          dimensions, or auto-selects the largest power-of-2 divisor otherwise.
 
         If a boolean is provided, it is treated as the "enable" value with "rotate_fp32"
         defaulting to False.
 
-        When enabled, the input of the quantizer will be rotated with a hadamard matrix
-        given by scipy.linalg.hadamard, i.e.
-        ``input = input @ scipy.linalg.hadamard(input.shape[-1]) / sqrt(input.shape[-1])``.
-
         This can be used for rotation based PTQ methods, e.g. QuaRot or SpinQuant.
         See https://arxiv.org/abs/2404.00456 for example.""",
     )
+
+    @field_validator("rotate")
+    @classmethod
+    def validate_rotate(cls, v):
+        """Validate rotate config: block_size must be a positive int, not bool."""
+        if isinstance(v, dict):
+            block_size = v.get("block_size", None)
+            if block_size is not None:
+                if (
+                    isinstance(block_size, bool)
+                    or not isinstance(block_size, int)
+                    or block_size <= 0
+                ):
+                    raise ValueError(
+                        f"rotate 'block_size' must be a positive int, got {block_size!r}"
+                    )
+        return v
 
     pass_through_bwd: bool = ModeloptField(
         default=True,
