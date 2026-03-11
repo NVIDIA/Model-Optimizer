@@ -13,14 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Puzzletron NAS plugin for the Modelopt framework (based on Puzzle algorithm: https://arxiv.org/abs/2411.19146).
+"""
+Puzzletron NAS plugin for the Modelopt framework (based on Puzzle algorithm: https://arxiv.org/abs/2411.19146).
 
-It is used by mtn.convert() to convert a model from HF format to DeciLM format + do pruning scoring
+It is used by mtn.convert() to convert a model from HF format to Puzzletron heterogeneous format + do pruning scoring
 and save pruned checkpoints, and by mtn.search() to perform the MIP-based NAS search.
 """
 
+import datetime
 from pathlib import Path
 
+import hydra
+import torch
 from torch import nn
 
 import modelopt.torch.puzzletron.mip.mip_and_realize_models as mip_and_realize_models
@@ -39,9 +43,8 @@ from modelopt.torch.opt.mode import (
 from modelopt.torch.opt.searcher import BaseSearcher, SearchStateDict
 from modelopt.torch.puzzletron import build_library_and_stats
 from modelopt.torch.puzzletron.activation_scoring import score_pruning_activations
-from modelopt.torch.puzzletron.decilm.converters.convert_llama3_to_decilm import (
-    convert_llama3_to_decilm,
-)
+from modelopt.torch.puzzletron.anymodel.converter import ConverterFactory
+from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptorFactory
 from modelopt.torch.puzzletron.tools.hydra_utils import initialize_hydra_config_for_dir
 from modelopt.torch.puzzletron.tools.logger import mprint
 
@@ -90,7 +93,7 @@ class PuzzletronConfig(ModeloptBaseConfig):
 
 
 def convert_puzzletron_model(model: nn.Module, config: PuzzletronConfig) -> ConvertReturnType:
-    """1. Convert the model from HF format to DeciLM format.
+    """1. Convert the model from HF format to AnyModel format.
     2. Score the pruning activations.
     3. Prune the model and save pruned checkpoints
 
@@ -111,14 +114,24 @@ def convert_puzzletron_model(model: nn.Module, config: PuzzletronConfig) -> Conv
             f"dataset_path={config.dataset_path}",
         ],
     )
+    # Instantiate nested Hydra configs (e.g., pruning_mixin, hook_class)
+    hydra_cfg = hydra.utils.instantiate(hydra_cfg)
 
-    # Convert Llama3 model to DeciLM model
-    # TODO: Make it generic, do not call convert_llama3_to_decilm directly.
+    # Convert HuggingFace model to Puzzletron heterogeneous format (generic, uses descriptor from config)
     if dist.is_master():
-        mprint("Puzzletron Progress 2/8: converting model from HF to DeciLM (single-gpu)")
+        mprint(
+            "Puzzletron Progress 2/8: converting model to Puzzletron heterogeneous format (single-gpu)"
+        )
         hf_ckpt_teacher_dir = "ckpts/teacher"  # TODO: make it configurable
-        convert_llama3_to_decilm(
-            input_dir=config.input_model_path,
+
+        # Get descriptor and converter from the hydra config
+        descriptor_name = hydra_cfg.descriptor
+        descriptor = ModelDescriptorFactory.get(descriptor_name)
+        converter = ConverterFactory.get(descriptor_name)
+
+        converter.convert(
+            descriptor=descriptor,
+            input_dir=Path(config.input_model_path),
             output_dir=Path(config.puzzle_dir) / hf_ckpt_teacher_dir,
         )
     dist.barrier()
@@ -162,6 +175,7 @@ class PuzzletronDescriptor(ModeDescriptor):
     @property
     def search_algorithm(self) -> type[BaseSearcher]:
         """Return the associated searcher implementation."""
+
         return PuzzletronSearcher
 
     @property
@@ -201,6 +215,8 @@ class PuzzletronSearcher(BaseSearcher):
                 f"dataset_path={self.model.dataset_path}",
             ],
         )
+        # Instantiate nested Hydra configs (e.g., pruning_mixin, hook_class)
+        hydra_cfg = hydra.utils.instantiate(hydra_cfg)
 
         # Build_library_and_stats (single process)
         if dist.is_master():
