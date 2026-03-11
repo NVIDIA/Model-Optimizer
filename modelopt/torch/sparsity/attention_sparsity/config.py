@@ -72,8 +72,8 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         title="Backend implementation.",
         description=(
             "Backend to use for sparse attention computation. "
-            "Only 'pytorch' is supported, which uses softmax patching with F.softmax. "
-            "Requires model to be loaded with attn_implementation='eager'."
+            "'pytorch' uses softmax patching with F.softmax (requires attn_implementation='eager'). "
+            "'triton' uses the fused Triton kernel (requires attn_implementation='modelopt_triton')."
         ),
     )
 
@@ -89,6 +89,7 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         description=(
             "Whether the model uses causal (autoregressive) attention. "
             "If True, sparsity statistics are calculated over the lower triangle only. "
+            "Set to False for cross-attention models. "
             "Defaults to True for decoder-only models like GPT, LLaMA, etc."
         ),
     )
@@ -104,11 +105,12 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
     @field_validator("backend")
     @classmethod
     def validate_backend(cls, v):
-        """Validate backend is pytorch."""
-        if v != "pytorch":
+        """Validate backend is pytorch or triton."""
+        if v not in ("pytorch", "triton"):
             raise ValueError(
-                f"Invalid backend: {v}. Only 'pytorch' backend is supported. "
-                f"Model must be loaded with attn_implementation='eager'."
+                f"Invalid backend: {v}. Supported backends: 'pytorch' (requires "
+                f"attn_implementation='eager'), 'triton' (requires "
+                f"attn_implementation='modelopt_triton')."
             )
         return v
 

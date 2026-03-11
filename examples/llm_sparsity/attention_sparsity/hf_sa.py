@@ -144,12 +144,10 @@ def main(args):
 
     print(f"Loading model: {args.pyt_ckpt_path}")
 
-    # Load model and tokenizer
-    # Note: attn_implementation="eager" is required for calibration to work properly
-    # (flash_attention_2 or sdpa would bypass the softmax patching needed for stats collection)
+    # No need to specify attn_implementation here — mtsa.sparsify() sets it
+    # automatically ("eager" for pytorch backend, "modelopt_triton" for triton).
     model = AutoModelForCausalLM.from_pretrained(
         args.pyt_ckpt_path,
-        attn_implementation="eager",
         torch_dtype=torch.bfloat16,
     )
     tokenizer = AutoTokenizer.from_pretrained(args.pyt_ckpt_path)
@@ -246,8 +244,8 @@ if __name__ == "__main__":
         "--backend",
         type=str,
         default="pytorch",
-        choices=["pytorch"],
-        help="Backend for sparse attention (default: pytorch). More backends coming soon.",
+        choices=["pytorch", "triton"],
+        help="Backend for sparse attention (default: pytorch). 'triton' uses the fused Triton kernel.",
     )
 
     # Sequence length arguments

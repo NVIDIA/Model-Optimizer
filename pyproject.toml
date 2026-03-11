@@ -81,6 +81,7 @@ extend-ignore = [
     "E501",
 ] # Ignore missing docstrings or line length for Jupyter notebooks
 "modelopt/torch/quantization/triton/*" = ["N803", "N806", "E731"] # triton style
+"modelopt/torch/sparsity/attention_sparsity/kernels/*" = ["N803", "N806"] # triton kernel style
 "examples/deepseek/ds_kernel.py" = ["N803", "N806", "E731"] # triton style
 
 [tool.ruff.lint.pycodestyle]

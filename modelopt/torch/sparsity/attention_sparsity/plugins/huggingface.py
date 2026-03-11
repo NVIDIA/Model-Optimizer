@@ -15,6 +15,7 @@
 
 """Dynamic sparse attention registration for HuggingFace models."""
 
+import logging
 import warnings
 
 import torch.nn as nn
@@ -24,6 +25,8 @@ from modelopt.torch.opt.dynamic import DynamicModule
 
 from ..sparse_attention import SparseAttentionModule, SparseAttentionRegistry
 from . import CUSTOM_MODEL_PLUGINS
+
+logger = logging.getLogger(__name__)
 
 
 class _GenericSparseAttention(SparseAttentionModule):
@@ -93,10 +96,12 @@ def register_sparse_attention_on_the_fly(model: nn.Module) -> bool:
                 SparseAttentionRegistry.register({module_type: type_name})(_GenericSparseAttention)
                 attention_types.add(module_type)
                 registered_count += 1
-                print(f"Registered {type_name} for sparse attention optimization")
+                logger.info("Registered %s for sparse attention optimization", type_name)
 
     if registered_count > 0:
-        print(f"Dynamically registered {registered_count} attention module types for sparsity")
+        logger.info(
+            "Dynamically registered %d attention module types for sparsity", registered_count
+        )
 
     return registered_count > 0
 
@@ -124,10 +129,12 @@ def _is_supported_model(model: nn.Module) -> bool:
 
 
 def validate_eager_attention(model: nn.Module) -> None:
-    """Validate and enforce eager attention for HuggingFace models.
+    """Validate attention implementation for HuggingFace models.
 
-    Sparse attention requires attn_implementation='eager' because it
-    patches torch.nn.functional.softmax, which is only called in eager mode.
+    For softmax-patching methods (e.g. flash_skip_softmax) the model must use
+    attn_implementation='eager'. For the Triton 2:4 kernel (sparse24_triton)
+    the model must use attn_implementation='modelopt_triton'. We only force
+    eager when the current implementation is neither eager nor modelopt_triton.
 
     Args:
         model: Model to validate
@@ -136,10 +143,10 @@ def validate_eager_attention(model: nn.Module) -> None:
         return
 
     attn_impl = getattr(model.config, "_attn_implementation", None)
-    if attn_impl and attn_impl != "eager":
+    if attn_impl and attn_impl not in ("eager", "modelopt_triton"):
         warnings.warn(
-            f"Sparse attention requires attn_implementation='eager', but model uses '{attn_impl}'. "
-            "Forcing eager attention implementation."
+            f"Sparse attention expects attn_implementation='eager' or 'modelopt_triton', "
+            f"but model uses '{attn_impl}'. Forcing eager attention implementation."
         )
         model.config._attn_implementation = "eager"
 
