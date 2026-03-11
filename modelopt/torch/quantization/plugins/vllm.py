@@ -28,6 +28,7 @@ from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_tp_g
 
 from ...utils.distributed import ParallelState
 from ..nn import QuantLinearConvBase, QuantModule, QuantModuleRegistry, TensorQuantizer
+from .custom import CUSTOM_MODEL_PLUGINS
 
 # Try multiple import paths for vLLM compatibility across versions
 vllm_shared_fused_moe_layer = None
@@ -45,6 +46,12 @@ try:
     from vllm.attention.layer import MLAAttention as VllmMLAAttention
 except ImportError:
     VllmMLAAttention = None
+
+_ATTENTION_TYPES = tuple(
+    t
+    for t in [vllm_attention.Attention, CrossAttention, EncoderOnlyAttention, VllmMLAAttention]
+    if t is not None
+)
 
 vllm_fused_moe_package = importlib.import_module("vllm.model_executor.layers.fused_moe.fused_moe")
 
@@ -289,6 +296,79 @@ if vllm_shared_fused_moe_layer is not None:
         pass
 
 
+def _get_ref(m: torch.nn.Module):
+    """First param or buffer from module or children (avoids tensor-in-boolean-context)."""
+    for mod in [m, *m.children()]:
+        p = next(mod.parameters(recurse=False), None)
+        if p is None:
+            p = next(mod.buffers(recurse=False), None)
+        if p is not None:
+            return p
+    return None
+
+
+def _resolve_dtype(dtype) -> torch.dtype:
+    """Resolve a dtype string (e.g. 'float16') or 'auto' to a torch.dtype."""
+    if isinstance(dtype, torch.dtype):
+        return dtype
+    if isinstance(dtype, str) and dtype != "auto":
+        return getattr(torch, dtype, torch.float16)
+    return torch.float16
+
+
+def _get_device_dtype(module: torch.nn.Module, fallback: tuple | None) -> tuple:
+    """(device, dtype) from module.device/dtype > kv_cache > ref > fallback."""
+    dev, dt = getattr(module, "device", None), getattr(module, "dtype", None)
+    if dev is not None and dt is not None:
+        return (dev, _resolve_dtype(dt))
+    kv = getattr(module, "kv_cache", None)
+    if kv and kv[0] is not None:
+        d = getattr(module, "kv_cache_dtype", kv[0].dtype)
+        return (kv[0].device, kv[0].dtype if d == "auto" else _resolve_dtype(d))
+    ref = _get_ref(module)
+    if ref is not None:
+        return (ref.device, ref.dtype)
+    return fallback or (None, None)
+
+
+def vllm_replace_quant_module_hook(model: torch.nn.Module) -> None:
+    """Set device/dtype on Attention modules before QuantModule replacement."""
+    fallback = (
+        (torch.device("cuda", torch.cuda.current_device()), torch.float16)
+        if torch.cuda.is_available()
+        else (torch.device("cpu"), torch.float32)
+    )
+    for _n, m in model.named_modules():
+        if isinstance(m, TensorQuantizer):
+            continue
+        p = _get_ref(m)
+        if p is not None and not getattr(p, "is_meta", False):
+            fallback = (p.device, p.dtype)
+            break
+    for _n, m in model.named_modules():
+        if isinstance(m, _ATTENTION_TYPES):
+            m.device, m.dtype = _get_device_dtype(m, fallback)
+
+
+CUSTOM_MODEL_PLUGINS.add(vllm_replace_quant_module_hook)
+
+
+def _vllm_attention_modelopt_post_restore(self, quantizers: list, **kwargs) -> None:
+    """Shared post-restore: validate scalar quantizers, resolve device/dtype, move module."""
+    for tq in quantizers:
+        if not all(v.numel() == 1 for v in tq.state_dict().values()):
+            raise NotImplementedError(
+                "Only scalar states are supported for KV Cache/BMM Quantizers"
+            )
+    device, dtype = _get_device_dtype(self, None)
+    if device is None or dtype is None:
+        raise RuntimeError(
+            "Could not determine device/dtype for vLLM Attention. "
+            "Ensure vllm_replace_quant_module_hook runs before replace_quant_module."
+        )
+    self.to(device=device, dtype=dtype)
+
+
 @QuantModuleRegistry.register({vllm_attention.Attention: "vllm_Attention"})
 class _QuantVLLMAttention(QuantModule):
     def _setup(self):
@@ -301,8 +381,12 @@ class _QuantVLLMAttention(QuantModule):
         query = self.q_bmm_quantizer(query)
         key = self.k_bmm_quantizer(key)
         value = self.v_bmm_quantizer(value)
-
         return super().forward(query, key, value, *args, **kwargs)
+
+    def modelopt_post_restore(self, prefix: str = "", *args, **kwargs) -> None:
+        _vllm_attention_modelopt_post_restore(
+            self, [self.q_bmm_quantizer, self.k_bmm_quantizer, self.v_bmm_quantizer], **kwargs
+        )
 
 
 @QuantModuleRegistry.register({CrossAttention: "vllm_CrossAttention"})
@@ -330,3 +414,10 @@ if VllmMLAAttention is not None:
             kv_c = self.kv_c_bmm_quantizer(kv_c)
             k_pe = self.k_pe_bmm_quantizer(k_pe)
             return super().forward(query, kv_c, k_pe, *args, **kwargs)
+
+        def modelopt_post_restore(self, prefix: str = "", *args, **kwargs) -> None:
+            _vllm_attention_modelopt_post_restore(
+                self,
+                [self.q_bmm_quantizer, self.kv_c_bmm_quantizer, self.k_pe_bmm_quantizer],
+                **kwargs,
+            )
