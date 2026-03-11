@@ -1,4 +1,3 @@
-# noqa: D100
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -14,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # mypy: ignore-errors
+"""Distributed logging utilities for multi-rank environments."""
+
 import inspect
 import logging
 import os
@@ -27,7 +28,9 @@ logging.getLogger("websockets.server").setLevel(logging.WARN)
 logging.getLogger("websockets.server:connection").setLevel(logging.WARN)
 
 
-class LogColors:  # noqa: D101
+class LogColors:
+    """ANSI color codes for terminal output."""
+
     BLUE = "\033[94m"
     CYAN = "\033[96m"
     GREEN = "\033[92m"
@@ -40,9 +43,12 @@ class LogColors:  # noqa: D101
 
 
 class DistributedLogger(logging.Logger):
+    """Logger for distributed multi-rank environments."""
+
     verbosity = logging.ERROR
 
-    def __init__  # noqa: D107(self, name, level=logging.DEBUG):
+    def __init__(self, name, level=logging.DEBUG):
+        """Initialize the distributed logger."""
         super().__init__(name, level)
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         self.global_rank = int(os.environ.get("RANK", 0))
@@ -88,7 +94,8 @@ class DistributedLogger(logging.Logger):
     #         self.warning(f"[rank-{self.global_rank}] " + msg)
 
     @staticmethod
-    def get_caller_location  # noqa: D102() -> str:
+    def get_caller_location() -> str:
+        """Get the caller location from the stack frame."""
         # Get the caller's stack frame
         frame = inspect.currentframe()
 
@@ -147,15 +154,15 @@ def aprint(msg: str | None):
 
 
 def lmprint(msg: str | None):
-    """All local main ranks prints (rank 0 in each node)"""
+    """All local main ranks print (rank 0 in each node)."""
     return logger.dist_log(msg=msg, ranks="local_main")
 
 
 def mprint(msg: str | None):
-    """Master prints only (rank 0 in node 0)"""
+    """Master prints only (rank 0 in node 0)."""
     return logger.dist_log(msg=msg, ranks="main")
 
 
 def lprint(msg: str | None):
-    """Last rank prints only (rank -1 in node 0)"""
+    """Last rank prints only (rank -1 in node 0)."""
     return logger.dist_log(msg=msg, ranks="last")

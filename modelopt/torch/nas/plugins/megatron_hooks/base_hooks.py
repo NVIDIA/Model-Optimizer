@@ -26,6 +26,8 @@ from omegaconf import DictConfig, OmegaConf
 from torch import nn
 
 import modelopt.torch.utils.distributed as dist
+
+# TODO: move both outside of puzzletron module
 from modelopt.torch.puzzletron.tools.logger import aprint
 from modelopt.torch.puzzletron.tools.robust_json import json_dump
 
