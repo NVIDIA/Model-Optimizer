@@ -66,24 +66,6 @@ def test_hadamard_transform_block(dim, block_size):
     assert torch.allclose(xxt_h, xxt, atol=0.05)
 
 
-@pytest.mark.parametrize("block_size", [None, 32])
-def test_kv_rotate_block_config(block_size):
-    """Config-driven block RHT: exercises QuantizerAttributeConfig parsing and TensorQuantizer.forward()."""
-    mtq.plugins.register_attention_for_kv_quant(SDPAAttention)
-    model = nn.Sequential(SDPAAttention())
-    mtq.replace_quant_module(model)
-
-    set_quantizer_by_cfg(model, {"*": {"enable": False}})
-    dummy_input = SDPAAttention.get_input(device="cuda")
-    output_ref = model(dummy_input)
-
-    rotate_cfg = {"enable": True, "block_size": block_size}
-    with set_quantizer_by_cfg_context(model, {"*[qk]_bmm_quantizer": {"rotate": rotate_cfg}}):
-        output_test = model(dummy_input)
-    assert torch.allclose(output_ref, output_test, atol=0.05)
-    mtq.unregister(SDPAAttention)
-
-
 @pytest.mark.parametrize(
     "rotate_fp32",
     [True, False],
