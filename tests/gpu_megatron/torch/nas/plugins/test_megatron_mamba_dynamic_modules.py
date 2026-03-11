@@ -31,11 +31,11 @@ from modelopt.torch.nas.plugins.megatron import (
     _DynamicColumnParallelLinear,
     _DynamicEmbedding,
     _DynamicExtendedRMSNorm,
-    _DynamicLayerNorm,
     _DynamicMambaLayer,
     _DynamicMambaMixer,
     _DynamicMCoreLanguageModel,
     _DynamicTELayerNormColumnParallelLinear,
+    _DynamicTENorm,
     _DynamicTERowParallelLinear,
 )
 from modelopt.torch.nas.traced_hp import TracedHp
@@ -104,7 +104,7 @@ def _test_mamba_search_space(rank, size):
         if layer.mixer.rmsnorm:
             assert isinstance(layer.mixer.norm, _DynamicExtendedRMSNorm)
     if is_pipeline_last_stage():
-        assert isinstance(model.decoder.final_norm, _DynamicLayerNorm)
+        assert isinstance(model.decoder.final_norm, _DynamicTENorm)
         assert isinstance(model.output_layer, _DynamicColumnParallelLinear)
 
     # NOTE: `search_space_size` does not reduce across TP/PP groups

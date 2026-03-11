@@ -24,6 +24,7 @@ NVIDIA Model Optimizer Changelog
 - Add ``get_auto_quantize_config`` API to extract a flat quantization config from ``auto_quantize`` search results, enabling re-quantization at different effective bit targets without re-running calibration.
 - Improve ``auto_quantize`` checkpoint/resume: calibration state is now saved and restored across runs, avoiding redundant calibration when resuming a search.
 - Add NemotronH MoE expert support in ``auto_quantize`` grouping and scoring rules.
+- Support full Transformer Engine spec for Minitron pruning (``mcore_minitron``). Now we no longer need to use custom ModelOpt spec. Note that from user's perspective, this is only internal implementation improvement and does not affect the usage of the pruning workflow.
 
 **Misc**
 
