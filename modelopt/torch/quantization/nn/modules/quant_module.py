@@ -88,7 +88,7 @@ class QuantModule(DynamicModule):
 
         self.parallel_state = ParallelState(data_parallel_group=None)
 
-    def modelopt_post_restore(self, prefix: str = "", **kwargs):
+    def modelopt_post_restore(self, prefix: str = ""):
         """Post-restore to correctly configure the TensorQuantizer states.
 
         TensorQuantizer states are restored to their shape before saving. Now we need to further configure them.
@@ -98,8 +98,6 @@ class QuantModule(DynamicModule):
                 parallelism such as TP might have been changed between saving and resoring. So we need to re-calculate
                 the state shapes. Hence such modules should override this and implement their own logic.
 
-        Args:
-            prefix: The module name prefix for error messages.
         """
         # Get a parameter or buffer that does not belong to a TensorQuantizer
         non_tq_param_or_buffer = None
@@ -109,9 +107,6 @@ class QuantModule(DynamicModule):
                 non_tq_param_or_buffer = param_or_buffer
                 break
 
-        # For container-only modules (e.g. vLLM/Megatron attn with only child quantizers),
-        # override modelopt_post_restore to set dtype/device via a pre-replace hook instead
-        # of traversing the model (avoids O(N^2) on large MoE models).
         if non_tq_param_or_buffer is None:
             warnings.warn(
                 f"Could not identify the device for TensorQuantizer states of {prefix}. "

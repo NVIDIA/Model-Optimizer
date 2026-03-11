@@ -353,7 +353,7 @@ def vllm_replace_quant_module_hook(model: torch.nn.Module) -> None:
 CUSTOM_MODEL_PLUGINS.add(vllm_replace_quant_module_hook)
 
 
-def _vllm_attention_modelopt_post_restore(self, quantizers: list, **kwargs) -> None:
+def _vllm_attention_modelopt_post_restore(self, quantizers: list) -> None:
     """Shared post-restore: validate scalar quantizers, resolve device/dtype, move module."""
     for tq in quantizers:
         if not all(v.numel() == 1 for v in tq.state_dict().values()):
@@ -383,9 +383,9 @@ class _QuantVLLMAttention(QuantModule):
         value = self.v_bmm_quantizer(value)
         return super().forward(query, key, value, *args, **kwargs)
 
-    def modelopt_post_restore(self, prefix: str = "", *args, **kwargs) -> None:
+    def modelopt_post_restore(self, prefix: str = "") -> None:
         _vllm_attention_modelopt_post_restore(
-            self, [self.q_bmm_quantizer, self.k_bmm_quantizer, self.v_bmm_quantizer], **kwargs
+            self, [self.q_bmm_quantizer, self.k_bmm_quantizer, self.v_bmm_quantizer]
         )
 
 
@@ -415,9 +415,8 @@ if VllmMLAAttention is not None:
             k_pe = self.k_pe_bmm_quantizer(k_pe)
             return super().forward(query, kv_c, k_pe, *args, **kwargs)
 
-        def modelopt_post_restore(self, prefix: str = "", *args, **kwargs) -> None:
+        def modelopt_post_restore(self, prefix: str = "") -> None:
             _vllm_attention_modelopt_post_restore(
                 self,
                 [self.q_bmm_quantizer, self.kv_c_bmm_quantizer, self.k_pe_bmm_quantizer],
-                **kwargs,
             )
