@@ -74,6 +74,7 @@ from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloa
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
+FP8_E4M3_MAX = 448.0  # torch.finfo(torch.float8_e4m3fn).max
 
 QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "int8": mtq.INT8_DEFAULT_CFG,
@@ -316,9 +317,9 @@ def auto_quantize(
             and "*[kv]_bmm_quantizer" in kv_cache_quant_cfg
             and "bias" not in kv_quantizer_cfg
         ):
-            # Use constant amax=448.0 (FP8 E4M3 maxbound → scale=1.0); no calibration needed.
+            # Use constant amax=FP8_E4M3_MAX (FP8 E4M3 maxbound → scale=1.0); no calibration needed.
             # Skip for affine formats (e.g. fp8_affine) which require bias calibration.
-            kv_cache_quant_cfg["*[kv]_bmm_quantizer"]["constant_amax"] = 448.0
+            kv_cache_quant_cfg["*[kv]_bmm_quantizer"]["constant_amax"] = FP8_E4M3_MAX
 
         mtq.set_quantizer_by_cfg(language_model, quant_cfg=kv_cache_quant_cfg)
         if args.calibrate_kv_cache:
@@ -363,7 +364,7 @@ def load_model(args: argparse.Namespace):
                 and "bias" not in kv_quantizer_cfg
             ):
                 quant_cfg = copy.deepcopy(quant_cfg)
-                quant_cfg["quant_cfg"]["*[kv]_bmm_quantizer"]["constant_amax"] = 448.0
+                quant_cfg["quant_cfg"]["*[kv]_bmm_quantizer"]["constant_amax"] = FP8_E4M3_MAX
 
         # Do not use real quant GEMM so the calibration can be more accurate.
         with init_quantized_weights(
@@ -972,7 +973,7 @@ def quantize_main(
             and "bias" not in kv_quantizer_cfg
         ):
             quant_cfg = copy.deepcopy(quant_cfg)
-            quant_cfg["quant_cfg"]["*[kv]_bmm_quantizer"]["constant_amax"] = 448.0
+            quant_cfg["quant_cfg"]["*[kv]_bmm_quantizer"]["constant_amax"] = FP8_E4M3_MAX
 
         if args.qformat in QUANT_CFG_CHOICES:
             mono_quantize(
@@ -1093,7 +1094,8 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Specify KV cache quantization format. Default: none. "
             "KV quantizers are always inserted to record kv_cache_quant_algo metadata in the checkpoint. "
-            "By default, KV quantizers use a constant scale=1.0 (amax=448.0) without data-driven calibration. "
+            f"By default, KV quantizers use a constant scale=1.0 (amax={FP8_E4M3_MAX}) "
+            "without data-driven calibration. "
             "Use --calibrate_kv_cache to enable data-driven calibration."
         ),
     )
@@ -1105,7 +1107,8 @@ def parse_args() -> argparse.Namespace:
             "Enable data-driven calibration for KV cache quantizers. "
             "When set, KV quantizers are calibrated using activation statistics from the calibration dataset "
             "and per-tensor KV scales are exported to the checkpoint. "
-            "By default (without this flag), KV quantizers use a constant amax=448.0 (scale=1.0 for FP8 E4M3), "
+            f"By default (without this flag), KV quantizers use a constant amax={FP8_E4M3_MAX} "
+            "(scale=1.0 for FP8 E4M3), "
             "and KV scales are omitted from the checkpoint since inference engines (TRT-LLM, vLLM) "
             "use scale=1.0 by default."
         ),
