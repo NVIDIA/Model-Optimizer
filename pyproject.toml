@@ -114,9 +114,6 @@ dev = ["nvidia-modelopt[all,dev-docs,dev-lint,dev-test]"]
 [project.urls]
 Homepage = "https://github.com/NVIDIA/Model-Optimizer"
 
-[project.scripts]
-modelopt-recipes = "modelopt.torch.recipes.cli:main"
-
 [tool.setuptools.packages.find]
 include = ["modelopt*"]
 

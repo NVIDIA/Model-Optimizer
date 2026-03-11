@@ -1,0 +1,24 @@
+# Block sizes with string dimension keys
+_test:
+  description: "Block sizes string keys (last_dim, second_last_dim) resolve to integers"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_block_sizes:
+      path: quantize_config.quant_cfg.*weight_quantizer.block_sizes
+      expected:
+        -1: 16
+        -2: 32
+
+version: "1.0"
+quantization:
+  weights:
+    format: nvfp4
+    block_sizes:
+      last_dim: 16
+      second_last_dim: 32
+      scale_bits: [4, 3]
+  activations:
+    enable: false

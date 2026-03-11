@@ -13,51 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for recipe schema validation."""
+"""Tests for recipe schema validation.
 
-import pytest
+Most schema tests are now YAML fixture-driven (see test_recipe_fixtures.py).
+This file keeps tests that don't fit the fixture pattern (e.g., file iteration).
+"""
+
+from pathlib import Path
+
 import yaml
 
 from modelopt.torch.recipes.schema.models import RecipeConfig
 
-
-def test_minimal_recipe():
-    raw = {"version": "1.0", "quantization": {"preset": "fp8"}}
-    recipe = RecipeConfig.model_validate(raw)
-    assert recipe.quantization.preset == "fp8"
+FIXTURES_DIR = Path(__file__).parents[1] / "fixtures"
 
 
-def test_exclusive_sections():
-    raw = {
-        "quantization": {"preset": "fp8"},
-        "auto_quantize": {"effective_bits": 4.5, "formats": [{"preset": "fp8"}]},
-    }
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        RecipeConfig.model_validate(raw)
-
-
-def test_preset_or_custom():
-    raw = {
-        "quantization": {
-            "preset": "fp8",
-            "weights": {"format": "int8"},
-        }
-    }
-    with pytest.raises(ValueError, match="Cannot specify both"):
-        RecipeConfig.model_validate(raw)
-
-
-def test_qat_requires_training():
-    raw = {"quantization": {"mode": "qat", "preset": "fp8"}}
-    with pytest.raises(ValueError, match="QAT mode requires"):
-        RecipeConfig.model_validate(raw)
-
-
-def test_all_example_recipes_valid(examples_dir):
-    for yaml_file in sorted(examples_dir.rglob("*.yaml")):
-        if "experiments" in yaml_file.parts:
-            continue  # skip sweep/experiment configs
+def test_all_fixture_recipes_parseable():
+    """All non-error YAML fixtures parse as valid RecipeConfig."""
+    for yaml_file in sorted(FIXTURES_DIR.glob("*.yaml")):
+        if yaml_file.stem.startswith("error_"):
+            continue
         with open(yaml_file) as f:
             raw = yaml.safe_load(f)
-        recipe = RecipeConfig.model_validate(raw)
+        recipe_dict = {k: v for k, v in raw.items() if k != "_test"}
+        recipe = RecipeConfig.model_validate(recipe_dict)
         assert recipe.version == "1.0", f"Failed: {yaml_file.name}"

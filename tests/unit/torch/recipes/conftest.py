@@ -15,20 +15,7 @@
 
 """Shared test fixtures."""
 
-from pathlib import Path
-
 import pytest
-
-
-@pytest.fixture
-def examples_dir():
-    """Root of recipe examples — use .rglob('*.yaml') to find all recipes."""
-    return Path(__file__).parents[4] / "examples" / "recipes"
-
-
-@pytest.fixture
-def sweep_examples_dir():
-    return Path(__file__).parents[4] / "examples" / "recipes" / "experiments"
 
 
 def pytest_configure(config):

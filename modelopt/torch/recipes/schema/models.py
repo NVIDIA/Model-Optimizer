@@ -180,6 +180,13 @@ class SparsitySection(BaseModel):
 
     model_config = {"extra": "allow"}
 
+    @model_validator(mode="after")
+    def validate_sparsity_range(self):
+        """Ensure sparsity is in valid range (0, 1]."""
+        if not (0.0 < self.sparsity <= 1.0):
+            raise ValueError(f"Sparsity must be in (0.0, 1.0], got {self.sparsity}")
+        return self
+
 
 class ExportConfig(BaseModel):
     """Export configuration."""

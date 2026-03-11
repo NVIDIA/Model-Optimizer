@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Recipe system and experiment controller for NVIDIA Model Optimizer.
+"""Recipe system for NVIDIA Model Optimizer.
 
 Usage:
     from modelopt.torch.recipes import load_recipe
@@ -37,9 +37,6 @@ from typing import Any
 
 import yaml
 
-from .bridge import recipe_to_hf_ptq_args, summarize_recipe
-from .experiment import SweepConfig, SweepController, SweepJob
-from .pipeline import PipelinePlan, PipelineStep, load_and_plan, plan_pipeline
 from .schema import (
     FORMAT_REGISTRY,
     KV_FORMAT_REGISTRY,
@@ -76,19 +73,11 @@ def load_recipe(path: str | Path) -> dict[str, Any]:
 __all__ = [
     "FORMAT_REGISTRY",
     "KV_FORMAT_REGISTRY",
-    "PipelinePlan",
-    "PipelineStep",
     "RecipeConfig",
-    "SweepConfig",
-    "SweepController",
-    "SweepJob",
     "get_preset",
     "get_preset_info",
     "get_preset_source",
     "list_presets",
-    "load_and_plan",
     "load_recipe",
-    "plan_pipeline",
-    "recipe_to_hf_ptq_args",
-    "summarize_recipe",
+    "resolve_recipe",
 ]

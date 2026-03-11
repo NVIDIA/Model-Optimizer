@@ -1,0 +1,17 @@
+# Verify FP8 format resolves with weight and activation quantizers
+_test:
+  description: "FP8 format has weight and activation quantizer configs"
+
+  validate:
+    expect_success: true
+
+  resolve:
+    check_has_key: quantize_config
+    check_quant_cfg_has_keys: ["*weight_quantizer", "*input_quantizer"]
+
+version: "1.0"
+quantization:
+  weights:
+    format: fp8
+  activations:
+    format: fp8
