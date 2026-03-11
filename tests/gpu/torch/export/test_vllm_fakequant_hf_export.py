@@ -12,8 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from copy import deepcopy
-
 import pytest
 import torch
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
@@ -28,13 +26,13 @@ def test_hf_vllm_export(tmp_path, quant_cfg):
     """Test HuggingFace model export for vLLM with fake quantization.
 
     This test verifies:
-    1. Model weights match before and after export
-    2. quant_amax.pth file is created, huggingface config file does not exist
-    3. Amax values are correctly extracted and saved in quant_amax.pth file
+    1. Exported model weights match the folded (fake-quantized) weights
+    2. vllm_fq_modelopt_state.pth is created; hf_quant_config.json is not
+    3. Weight quantizer states are empty after fold; input quantizer amaxes are preserved
     """
 
     # Create a tiny LLaMA model for testing
-    tiny_model_dir = create_tiny_llama_dir(tmp_path, with_tokenizer=True, num_hidden_layers=2)
+    tiny_model_dir = create_tiny_llama_dir(tmp_path, num_hidden_layers=2)
 
     # Load the model
     model = AutoModelForCausalLM.from_pretrained(tiny_model_dir)
@@ -49,16 +47,18 @@ def test_hf_vllm_export(tmp_path, quant_cfg):
 
     model = mtq.quantize(model, quant_cfg, forward_loop)
     quantizer_state_dict_before = mtq.utils.get_quantizer_state_dict(model)
-    model_state_dict = deepcopy(model.state_dict())
 
     # Export directory
     export_dir = tmp_path / "vllm_export"
     export_dir.mkdir(exist_ok=True)
 
-    # Export for vLLM
+    # Export for vLLM — folds weights in-place, disables weight quantizers
     export_hf_vllm_fq_checkpoint(model, export_dir=export_dir)
 
-    # check if quant_amax.pth file exists
+    # Capture folded weights from the (now mutated) model for comparison
+    expected_weights = {k: v for k, v in model.state_dict().items() if "quantizer" not in k}
+
+    # check if vllm_fq_modelopt_state.pth file exists
     modelopt_state_file = export_dir / "vllm_fq_modelopt_state.pth"
     assert modelopt_state_file.exists(), (
         f"vllm_fq_modelopt_state.pth file should be created in {export_dir}"
@@ -70,24 +70,32 @@ def test_hf_vllm_export(tmp_path, quant_cfg):
         f"hf_quant_config.json file should not be created in {export_dir}"
     )
 
-    # check weights match before and after export
+    # check folded weights match exported model weights
     model_after = AutoModelForCausalLM.from_pretrained(export_dir)
     model_after = model_after.cuda()
     model_after.eval()
     model_after_state_dict = model_after.state_dict()
-    for key, param in model_state_dict.items():
-        if "quantizer" not in key:
-            assert torch.allclose(param, model_after_state_dict[key], atol=1e-6), (
-                f"Weight mismatch for {key}: "
-                f"before shape={param.shape}, after shape={model_after_state_dict[key].shape}, "
-                f"max diff={torch.abs(param - model_after_state_dict[key]).max()}"
-            )
+    for key, param in expected_weights.items():
+        assert torch.allclose(param, model_after_state_dict[key], atol=1e-6), (
+            f"Weight mismatch for {key}: "
+            f"before shape={param.shape}, after shape={model_after_state_dict[key].shape}, "
+            f"max diff={torch.abs(param - model_after_state_dict[key]).max()}"
+        )
 
-    # Verify quantizer state dict values are correct
-    quantizer_state_dict = torch.load(modelopt_state_file)["modelopt_state_weights"]
+    # Verify quantizer state dict: same keys, weight quantizer amaxes cleared, input amaxes kept
+    quantizer_state_dict = torch.load(modelopt_state_file, weights_only=False)[
+        "modelopt_state_weights"
+    ]
     assert len(quantizer_state_dict) > 0, (
         f"modelopt_state_weights should not be empty in {modelopt_state_file}"
     )
     assert quantizer_state_dict.keys() == quantizer_state_dict_before.keys(), (
         "quantizer state dict keys mismatch between before and after export"
     )
+    for name, state in quantizer_state_dict.items():
+        if "weight_quantizer" in name:
+            assert state == {}, f"weight quantizer {name} should have empty state after fold"
+        elif "input_quantizer" in name and any(
+            "_amax" in k for k in quantizer_state_dict_before[name]
+        ):
+            assert any("_amax" in k for k in state), f"input quantizer {name} should preserve _amax"
