@@ -34,7 +34,7 @@ NVIDIA Model Optimizer Changelog
 - Add support for block-granular RHT for non-power-of-2 dimensions.
 - Replace modelopt FP8 QDQ nodes with native ONNX QDQ nodes.
 - Add NemotronH MoE expert support in ``auto_quantize`` grouping and scoring rules.
-- Support full Transformer Engine spec for Minitron pruning (``mcore_minitron``). Now we no longer need to use custom ModelOpt spec. Note that from user's perspective, this is only internal implementation improvement and does not affect the usage of the pruning workflow.
+- Support full Transformer Engine spec for Minitron pruning (``mcore_minitron``). Now we no longer need to use custom ModelOpt spec. Note that this does not affect the usage of the pruning workflow but makes pruning slightly faster and may result in slightly different pruned model because of different kernel and numerics.
 
 **Misc**
 

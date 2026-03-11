@@ -34,6 +34,7 @@ from warnings import warn
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from megatron.core.extensions.transformer_engine import TELayerNormColumnParallelLinear
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.models.mamba.mamba_model import MambaModel
 from megatron.core.parallel_state import (
@@ -865,6 +866,11 @@ class ImportanceEstimatorRegistry:
             handle.remove()
         self._hooks.clear()
 
+        # Unpatch return_layernorm_output on fused TELayerNormColumnParallelLinear modules
+        for m in self.model.modules():
+            if isinstance(m, TELayerNormColumnParallelLinear):
+                m.return_layernorm_output = False
+
     def get_layer_scores(self) -> dict[int, torch.Tensor]:
         """Get the layer scores (1-indexed) from the model.
 
@@ -941,25 +947,48 @@ def _register_hidden_size_importance(
     """Register importance estimators for Language Model (GPT/Mamba) modules."""
     module._register_temp_attribute("_activations", {})
 
-    def _emb_layernorm_forward_hook(mod, module_inner, input, output):
-        """Hook to collect activations for importance estimation.
+    def _collect_activations(mod, module_id, activations_tensor):
+        """Accumulate activation importance scores for a given module."""
+        activations_tensor = activations_tensor.to(torch.float32)
+        activations = activations_tensor.abs().mean(dim=0)  # [batch_size, hidden_size]
+        activations = activations.pow(2).sum(dim=0)
+        if module_id not in mod._activations:
+            mod._activations[module_id] = activations
+        else:
+            mod._activations[module_id] += (
+                activations  # aggregate sum instead of mean of scores for simplicity
+            )
 
-        Activations are computed as mean over seq_len and then squared and summed over batch_size.
-        Later we take the square root of the sum to get the L2 norm.
+    def _fused_ln_linear_forward_hook(mod, module_inner, input, output):
+        """Hook on TELayerNormColumnParallelLinear with return_layernorm_output=True.
+
+        Extracts the exact layernorm output from TE's fused kernel and restores
+        the normal return format so downstream code is not affected.
         """
+        # Output format with return_layernorm_output=True:
+        #   te_return_bias=True:  MCore returns (linear_out, bias, ln_out)
+        #   te_return_bias=False: MCore returns ((linear_out, ln_out), None)
+        if module_inner.te_return_bias:
+            linear_out, bias, ln_out = output
+            fixed_output = (linear_out, bias)
+        else:
+            (linear_out, ln_out), bias = output
+            fixed_output = (linear_out, bias)
+
+        # Gather over all TP regions
+        # NOTE: This is not used at the moment since we restrict to TP=1
+        ln_out = gather_from_tensor_model_parallel_region(ln_out).detach()
+        _collect_activations(mod, id(module_inner), ln_out)
+
+        # Return the normal output format so downstream code (e.g. SelfAttention) is not affected
+        return fixed_output
+
+    def _layernorm_forward_hook(mod, module_inner, input, output):
+        """Hook on separate layernorm modules (e.g. TENorm for MoE pre_mlp_layernorm)."""
         # Gather output [seq_len, batch_size, hidden_size] over all TP regions
         # NOTE: This is not used at the moment since we restrict to TP=1
         output = gather_from_tensor_model_parallel_region(output).detach()
-
-        output = output.to(torch.float32)  # use full precision to avoid overflow
-        activations = output.abs().mean(dim=0)  # [batch_size, hidden_size]
-        activations = activations.pow(2).sum(dim=0)
-        if id(module_inner) not in mod._activations:
-            mod._activations[id(module_inner)] = activations
-        else:
-            mod._activations[id(module_inner)] += (
-                activations  # aggregate sum instead of mean of scores for simplicity
-            )
+        _collect_activations(mod, id(module_inner), output)
 
     def _estimate_hidden_size_importance(mod):
         """Return the activation magnitude-based importance of the hidden_size."""
@@ -973,27 +1002,44 @@ def _register_hidden_size_importance(
         torch.distributed.all_reduce(activations, op=torch.distributed.ReduceOp.SUM)
         return activations
 
-    # Register hooks for all layers
-    # For TE spec, layernorms may be IdentityOp (fused into column parallel linear layers).
-    # Hooking on IdentityOp still works — it gives pre-layernorm activations.
+    # Register hooks to collect post-layernorm activations for hidden_size importance.
+    # Layernorms are fused into TELayerNormColumnParallelLinear. We temporarily
+    # patch return_layernorm_output=True so TE's fused kernel returns the layernorm output.
+    # For MoE layers, pre_mlp_layernorm is a separate TENorm — use a regular forward hook.
+    for m in module.modules():
+        if isinstance(m, TELayerNormColumnParallelLinear):
+            m.return_layernorm_output = True
+
     for layer in module.decoder.layers:
         if isinstance(layer, _DynamicTransformerLayer):
             if isinstance(layer.self_attention, _DynamicSelfAttention):
+                # input_layernorm is fused into self_attention.linear_qkv
                 registry.register_hook(
-                    layer.input_layernorm,
-                    partial(_emb_layernorm_forward_hook, module),
+                    layer.self_attention.linear_qkv,
+                    partial(_fused_ln_linear_forward_hook, module),
                     hook_type="forward",
                 )
 
-            if isinstance(layer.mlp, (_DynamicMLP, _DynamicSequentialMLP, _DynamicMoELayer)):
+            if isinstance(layer.mlp, _DynamicMoELayer):
+                # MoE layers have a separate pre_mlp_layernorm (TENorm, not IdentityOp)
                 registry.register_hook(
                     layer.pre_mlp_layernorm,
-                    partial(_emb_layernorm_forward_hook, module),
+                    partial(_layernorm_forward_hook, module),
+                    hook_type="forward",
+                )
+            elif isinstance(layer.mlp, _DynamicMLP):
+                # Dense MLP: pre_mlp_layernorm is fused into mlp.linear_fc1
+                registry.register_hook(
+                    layer.mlp.linear_fc1,
+                    partial(_fused_ln_linear_forward_hook, module),
                     hook_type="forward",
                 )
         elif isinstance(layer, _DynamicMambaLayer):
+            # Mamba norm is fused into mixer.in_proj
             registry.register_hook(
-                layer.norm, partial(_emb_layernorm_forward_hook, module), hook_type="forward"
+                layer.mixer.in_proj,
+                partial(_fused_ln_linear_forward_hook, module),
+                hook_type="forward",
             )
 
     registry.register_importance(
