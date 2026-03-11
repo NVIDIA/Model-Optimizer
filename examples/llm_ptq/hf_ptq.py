@@ -1088,10 +1088,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--kv_cache_qformat",
         required=False,
-        default="fp8",
+        default="none",
         choices=KV_QUANT_CFG_CHOICES.keys(),
         help=(
-            "Specify KV cache quantization format. Default: fp8. "
+            "Specify KV cache quantization format. Default: none. "
             "KV quantizers are always inserted to record kv_cache_quant_algo metadata in the checkpoint. "
             "By default, KV quantizers use a constant scale=1.0 (amax=448.0) without data-driven calibration. "
             "Use --calibrate_kv_cache to enable data-driven calibration."

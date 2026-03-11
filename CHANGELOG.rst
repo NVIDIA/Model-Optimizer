@@ -10,7 +10,7 @@ NVIDIA Model Optimizer Changelog
 
 **New Features**
 
-- Add ``--calibrate_kv_cache`` flag in ``hf_ptq.py``. By default, FP8 KV cache quantization now uses a constant scale of 1.0 (amax=448.0) without data-driven calibration, and no KV scales are written to the exported checkpoint (inference engines use scale=1.0 when no scale is present). Pass ``--calibrate_kv_cache`` to opt into data-driven per-tensor KV scale calibration. A new ``constant_amax`` field in :class:`QuantizerAttributeConfig <modelopt.torch.quantization.config.QuantizerAttributeConfig>` enables setting a fixed amax on any quantizer without a calibration pass.
+- Change the default ``--kv_cache_qformat`` in ``hf_ptq.py`` from ``fp8`` to ``none``. KV cache quantization is now opt-in; pass ``--kv_cache_qformat fp8`` to restore the previous behavior. Add ``--calibrate_kv_cache`` flag in ``hf_ptq.py``. By default, FP8 KV cache quantization now uses a constant scale of 1.0 (amax=448.0) without data-driven calibration, and no KV scales are written to the exported checkpoint (inference engines use scale=1.0 when no scale is present). Pass ``--calibrate_kv_cache`` to opt into data-driven per-tensor KV scale calibration. A new ``constant_amax`` field in :class:`QuantizerAttributeConfig <modelopt.torch.quantization.config.QuantizerAttributeConfig>` enables setting a fixed amax on any quantizer without a calibration pass.
 - User does not need to manually register MOE modules to cover experts calibration coverage in PTQ workflow.
 - ``hf_ptq.py`` now saves the quantization summary and moe expert token count table to the export directory.
 - Add ``--moe_calib_experts_ratio`` flag in ``hf_ptq.py`` to specify the ratio of experts to calibrate during forward pass to improve expert coverage during calibration. Default to all the experts.
@@ -44,7 +44,7 @@ NVIDIA Model Optimizer Changelog
 - Add ``--opset`` option to ONNX quantization CLI to specify the target opset version for the quantized model.
 - Add support for context parallelism in Eagle speculative decoding for huggingface and megatron core models.
 - Add unified Hugging Face export support for diffusers pipelines/components.
-- Add LTX-2 and Wan2.2 (T2V) support in the diffusers quantization workflow.
+- Add LTX-2 and Wan2.2 (T2V) support in the diffusers quantizatioline n workflow.
 - Add PTQ support for GLM-4.7, including loading MTP layer weights from a separate ``mtp.safetensors`` file and export as-is.
 - Add support for image-text data calibration in PTQ for Nemotron VL models.
 - Add support for advanced weight scale search for NVFP4 quantization and its export path.
