@@ -7,7 +7,7 @@ activations_log_dir: ${puzzle_dir}/pruning/pruning_scores/expert_removal/${pruni
 pruning_mixin:
   _target_: modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin.ExpertRemovalPruningMixIn
   layer_descriptor:
-    _target_: modelopt.torch.puzzletron.anymodel.models.gpt_oss_20b.gpt_oss_20b_model_descriptor.GptOss20bExpertRemovalLayerDescriptor
+    _target_: modelopt.torch.puzzletron.anymodel.models.gpt_oss.gpt_oss_model_descriptor.GptOssExpertRemovalLayerDescriptor
     target_name: "mlp.router"
 
 hook_class: ${get_object:modelopt.torch.nas.plugins.megatron_hooks.base_hooks.RankedChoiceVotingHook}

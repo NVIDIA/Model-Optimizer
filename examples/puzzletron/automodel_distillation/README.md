@@ -78,7 +78,7 @@ torchrun --nproc_per_node=2 \
   --mode pretrain \
   -c pretrain.yaml \
   model.pretrained_model_name_or_path=/path/to/checkpoint \
-  model.anymodel_descriptor=gpt_oss_20b
+  model.anymodel_descriptor=gpt_oss
 ```
 
 **Note:** If you run from a different layout (e.g. from the Model-Optimizer repo root or under another package name), set `PYTHONPATH` to include this directory so `run` can import `patch_automodel` and `recipe`, and ensure the config `kd_loss_fn._target_` (e.g. `loss.KDLoss`) resolves to the correct module.
