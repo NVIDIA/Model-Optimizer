@@ -253,8 +253,8 @@ export HF_PATH=<the downloaded LLaMA checkpoint from the Hugging Face hub, or si
 scripts/huggingface_example.sh --model $HF_PATH --quant nvfp4_mse,fp8 --auto_quantize_bits 4.75 --calib_batch_size 4
 ```
 
-The above example perform `AutoQuantize` where the less quantization accuracy sensitive layers are quantized with `w4a8_awq` (specified by `--quant w4a8_awq`) and the more sensitive layers
-are kept un-quantized such that the effective bits is 4.8 (specified by `--auto_quantize_bits 4.8`).
+The above example perform `AutoQuantize` where the less quantization accuracy sensitive layers are quantized with `nvfp4_mse` (specified by `--quant nvfp4_mse`) and the more sensitive layers
+are kept un-quantized such that the effective bits is 4.75 (specified by `--auto_quantize_bits 4.75`).
 
 The example scripts above also have an additional flag `--tasks`, where the actual tasks run in the script can be customized. The allowed tasks are `quant,mmlu,lm_eval,livecodebench` specified in the script [parser](./scripts/parser.sh). The tasks combo can be specified with a comma-separated task list. Some tasks like mmlu can take a long time to run. To run lm_eval tasks, please also specify the `--lm_eval_tasks` flag with comma separated lm_eval tasks [here](https://github.com/EleutherAI/lm-evaluation-harness/tree/main/lm_eval/tasks).
 
