@@ -24,7 +24,8 @@ NVIDIA Model Optimizer Changelog
 - Add ``get_auto_quantize_config`` API to extract a flat quantization config from ``auto_quantize`` search results, enabling re-quantization at different effective bit targets without re-running calibration.
 - Improve ``auto_quantize`` checkpoint/resume: calibration state is now saved and restored across runs, avoiding redundant calibration when resuming a search.
 - Add support for Nemotron-3 (NemotronHForCausalLM) model quantization and support for NemotronH MoE expert support in ``auto_quantize`` grouping and scoring rules.
-
+- Add support for block-granular RHT for non-power-of-2 dimensions.
+  
 **Misc**
 
 - Migrated project metadata from ``setup.py`` to a fully declarative ``pyproject.toml``.
