@@ -15,12 +15,14 @@
 
 """Plugin to add NAS/Pruning support for megatron-core Language models like GPT and Mamba."""
 
+import copy
 import types
 from abc import ABC
 from collections.abc import Callable, Sequence
 
 import torch
 import torch.nn as nn
+import transformer_engine as te
 from megatron.core.extensions.transformer_engine import (
     TEColumnParallelLinear,
     TEDotProductAttention,
@@ -29,6 +31,7 @@ from megatron.core.extensions.transformer_engine import (
 )
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.models.gpt import GPTModel
+from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
 from megatron.core.parallel_state import is_pipeline_first_stage, is_pipeline_last_stage
 from megatron.core.tensor_parallel.layers import (
     ColumnParallelLinear,
@@ -43,6 +46,7 @@ from megatron.core.transformer.moe.experts import SequentialMLP
 from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
+from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_layer import TransformerLayer
 
 from modelopt.torch.nas.modules import DynamicModuleList
@@ -53,7 +57,7 @@ from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import make_divisible
 
 from ..hparams.concat import build_concat_hp
-from ..modules import _DynamicLayerNorm  # noqa: F401 (re-exported for tests)
+from ..modules import _DynamicLayerNorm
 from ..modules.utils import get_sliced_tensor, get_sliced_tensor_by_slices
 from ..registry import DMRegistry
 from ..traced_hp import TracedHp
@@ -63,6 +67,9 @@ SUPPORTED_MODELS = {GPTModel: "megatron.core.models.gpt.GPTModel"}
 try:
     import mamba_ssm  # noqa: F401
     from megatron.core.models.mamba import MambaModel
+    from megatron.core.models.mamba.mamba_layer_specs import (
+        mamba_stack_spec as _te_mamba_stack_spec,
+    )
     from megatron.core.ssm.mamba_layer import MambaLayer
     from megatron.core.ssm.mamba_mixer import ExtendedRMSNorm, MambaMixer
 
@@ -72,7 +79,23 @@ try:
 except ImportError:
     HAS_MAMBA = False
 
-__all__ = []
+__all__ = ["get_te_mamba_stack_spec"]
+
+
+# TODO: Maybe upstream this to Megatron-LM
+def get_te_mamba_stack_spec(moe_grouped_gemm: bool = False) -> ModuleSpec:
+    """Return the TE Mamba stack spec."""
+    assert HAS_MAMBA
+    if moe_grouped_gemm:
+        return _te_mamba_stack_spec
+
+    # The upstream TE mamba stack spec hardcodes TEGroupedMLP for MoE.
+    # Replace it with SequentialMLP (TE linear layers, no grouped gemm dependency).
+    te_mamba_stack_spec = copy.deepcopy(_te_mamba_stack_spec)
+    te_mamba_stack_spec.submodules.moe_layer.submodules.mlp = get_moe_module_spec(
+        use_te=True, num_experts=8, moe_grouped_gemm=False
+    )
+    return te_mamba_stack_spec
 
 
 # Local Parallel Linear DynamicModules ##########################################################################
@@ -240,6 +263,22 @@ class _DynamicLanguageModelEmbedding(DynamicModule):
         if hasattr(self, "tokentype_embeddings") and self.tokentype_embeddings is not None:
             self.tokentype_embeddings.export()
         return super().export()
+
+
+# TE Normalization DynamicModule ###################################################################
+@DMRegistry.register(
+    {te.pytorch.LayerNorm: "te.pytorch.LayerNorm", te.pytorch.RMSNorm: "te.pytorch.RMSNorm"}
+)
+class _DynamicTENorm(_DynamicLayerNorm):
+    """A ``te.pytorch.{Layer/RMS}Norm`` layer with dynamic hyperparams."""
+
+    def _setup(self, *, num_features: TracedHp):
+        """Setup the TENorm dynamic module with pre-defined num_features hparam."""
+        self._register_hparam("num_features", num_features)
+        # register dynamic attributes
+        self._register_dynamic_attribute("weight", self._cut_to_active_features)
+        if hasattr(self, "bias"):  # Bias is not present in RMSNorm
+            self._register_dynamic_attribute("bias", self._cut_to_active_features)
 
 
 # MLP DynamicModule ################################################################################

@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import copy
 from warnings import warn
 
 import torch
@@ -25,7 +24,6 @@ from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_layer_local_spec,
     get_gpt_layer_with_transformer_engine_spec,
 )
-from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
 from megatron.core.models.mamba import MambaModel
 from megatron.core.parallel_state import is_pipeline_first_stage, is_pipeline_last_stage
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
@@ -33,6 +31,7 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
 
 from modelopt.torch.export.unified_export_megatron import import_mcore_gpt_from_hf
+from modelopt.torch.nas.plugins.megatron import get_te_mamba_stack_spec
 
 try:
     from megatron.core.extensions.transformer_engine import TENorm
@@ -44,18 +43,8 @@ except ImportError as e:
     HAS_TE = False
 
 try:
-    from megatron.core.models.mamba.mamba_layer_specs import (
-        mamba_stack_spec as _te_mamba_stack_spec,
-    )
     from megatron.core.post_training.modelopt.mamba.model_specs import get_mamba_stack_modelopt_spec
     from megatron.core.ssm.mamba_layer import MambaLayer  # noqa: F401
-
-    # The upstream TE mamba stack spec hardcodes TEGroupedMLP for MoE.
-    # Replace it with SequentialMLP (TE linear layers, no grouped gemm dependency).
-    te_mamba_stack_spec = copy.deepcopy(_te_mamba_stack_spec)
-    te_mamba_stack_spec.submodules.moe_layer.submodules.mlp = get_moe_module_spec(
-        use_te=True, num_experts=8, moe_grouped_gemm=False
-    )
 
     HAS_MAMBA = True
 except ImportError as e:
@@ -152,6 +141,7 @@ def get_mcore_gpt_model(
     bf16: bool = True,
     use_te: bool = False,
     # MoE-specific parameters
+    moe_grouped_gemm: bool = False,
     moe_ffn_hidden_size: int | None = None,
     moe_shared_expert_intermediate_size: int | None = None,
     num_moe_experts: int | None = None,
@@ -195,6 +185,7 @@ def get_mcore_gpt_model(
         bf16=bf16,
         # MoE-specific parameters
         moe_router_dtype=None,
+        moe_grouped_gemm=moe_grouped_gemm,
         moe_ffn_hidden_size=moe_ffn_hidden_size,
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
         moe_router_enable_expert_bias=True,
@@ -217,6 +208,7 @@ def get_mcore_gpt_model(
         assert HAS_APEX, "Apex not installed"
         transformer_layer_spec = get_gpt_layer_local_spec(
             num_experts=num_moe_experts,
+            moe_grouped_gemm=moe_grouped_gemm,
             normalization=normalization,
         )
     else:
@@ -320,6 +312,7 @@ def get_mcore_mamba_hybrid_model(
     mamba_num_groups: int = 2,
     # MoE-specific parameters
     skip_moe: bool = False,
+    moe_grouped_gemm: bool = False,
     moe_ffn_hidden_size: int | None = 64,
     moe_shared_expert_intermediate_size: int | None = 32,
     num_moe_experts: int | None = 8,
@@ -353,6 +346,7 @@ def get_mcore_mamba_hybrid_model(
         mamba_head_dim=mamba_head_dim,
         mamba_num_groups=mamba_num_groups,
         num_moe_experts=num_moe_experts,
+        moe_grouped_gemm=moe_grouped_gemm,
         moe_ffn_hidden_size=moe_ffn_hidden_size,
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
         add_bias_linear=False,
@@ -391,7 +385,7 @@ def get_mcore_mamba_hybrid_model(
     print(f"Using `{hybrid_override_pattern=}` for building MambaModel")
 
     if transformer_impl == "transformer_engine":
-        mamba_spec = te_mamba_stack_spec
+        mamba_spec = get_te_mamba_stack_spec(moe_grouped_gemm=moe_grouped_gemm)
     else:
         mamba_spec = get_mamba_stack_modelopt_spec(remap_te_layernorm=True)
 

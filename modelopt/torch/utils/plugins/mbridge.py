@@ -23,12 +23,9 @@ from megatron.bridge import AutoBridge
 from megatron.bridge.data.builders.hf_dataset import HFDatasetConfig
 from megatron.bridge.data.loaders import setup_data_iterators
 from megatron.bridge.data.utils import get_dataset_provider
-from megatron.bridge.models.gpt_provider import GPTModelProvider, modelopt_transformer_layer_spec
+from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
-from megatron.bridge.models.mamba.mamba_provider import (
-    MambaModelProvider,
-    modelopt_mamba_stack_spec,
-)
+from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
 from megatron.bridge.models.nemotronh.nemotron_h_provider import NemotronHModelProvider
 from megatron.bridge.training.config import (
     CheckpointConfig,
@@ -50,6 +47,7 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.utils import unwrap_model
 from transformers import AutoTokenizer
 
+from modelopt.torch.nas.plugins.megatron import get_te_mamba_stack_spec
 from modelopt.torch.utils import get_dataset_samples, print_rank_0, warn_rank_0
 
 __all__ = ["get_hf_mbridge_calibration_loop", "load_mbridge_model_from_hf"]
@@ -94,12 +92,9 @@ def load_mbridge_model_from_hf(
             assert hasattr(provider, key), f"{type(provider)} does not have attribute {key}"
             setattr(provider, key, value)
 
-    print_rank_0("Setting ModelOpt spec for model provider")
     if isinstance(provider, MambaModelProvider):
-        provider.mamba_stack_spec = modelopt_mamba_stack_spec
-    else:
-        provider.transformer_layer_spec = modelopt_transformer_layer_spec
-
+        # disable moe_grouped_gemm in default TE spec until its supported
+        provider.mamba_stack_spec = get_te_mamba_stack_spec(moe_grouped_gemm=False)
     provider.finalize()
     if init_model_parallel:
         provider.initialize_model_parallel(seed=0)
