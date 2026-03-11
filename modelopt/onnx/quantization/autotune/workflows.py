@@ -207,7 +207,7 @@ def region_pattern_autotuning_workflow(
                    uses <output_dir>/autotuner_state.yaml (default: None)
         quant_type: Quantization data type - "int8" for INT8 quantization (default),
                    "fp8" for FP8 quantization
-        default_dq_dtype: Dtype for DequantizeLinear output; "float32" (default) or "float16".
+        default_dq_dtype: Dtype for DequantizeLinear output; "float32" (default), "float16", or "bfloat16".
         qdq_baseline_model: Optional path to a pre-quantized ONNX model. If provided,
                            extracts Q/DQ insertion patterns and adds them to pattern cache
                            for warm-start (default: None)
