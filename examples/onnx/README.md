@@ -222,7 +222,7 @@ trtexec --onnx=/path/to/identity_neural_network.quant.onnx \
 ### Optimize Q/DQ node placement with Autotune
 
 This feature automates Q/DQ (Quantize/Dequantize) node placement optimization for ONNX models using TensorRT performance measurements.
-For more information on the standalone toolkit, please refer to [autotune](./autotune/README.md).
+For more information on the standalone toolkit, please refer to [autotune](./autotune).
 
 To access this feature in the ONNX quantization workflow, simply add `--autotune` in your CLI:
 
