@@ -42,7 +42,7 @@ from modelopt.torch.utils.distributed import DistributedProcessGroup
 
 from ... import calib
 from ... import utils as quant_utils
-from ...config import QuantizerAttributeConfig
+from ...config import QuantizerAttributeConfig, RotateConfig
 from ...qtensor import (
     BaseQuantizedTensor,
     FP8QTensor,
@@ -532,23 +532,29 @@ class TensorQuantizer(nn.Module):
     @property
     def rotate_is_enabled(self):
         """Check if rotate is enabled in quant config."""
-        return self._rotate.get("enable", False) if isinstance(self._rotate, dict) else self._rotate
+        if isinstance(self._rotate, RotateConfig):
+            return self._rotate.enable
+        if isinstance(self._rotate, dict):  # backward compat: old checkpoints stored a dict
+            return self._rotate.get("enable", False)
+        return self._rotate  # bool
 
     @property
     def rotate_is_fp32(self):
         """Check if rotation needs to be computed in float32."""
-        return (
-            self._rotate.get("rotate_fp32", False)
-            if isinstance(self._rotate, dict) and self.rotate_is_enabled
-            else False
-        )
+        if isinstance(self._rotate, RotateConfig):
+            return self._rotate.rotate_fp32 if self._rotate.enable else False
+        if isinstance(self._rotate, dict) and self.rotate_is_enabled:
+            return self._rotate.get("rotate_fp32", False)
+        return False
 
     @property
     def rotate_block_size(self):
         """Block size for block-granular RHT, or None for full/auto."""
-        if not isinstance(self._rotate, dict) or not self.rotate_is_enabled:
-            return None
-        return self._rotate.get("block_size", None)
+        if isinstance(self._rotate, RotateConfig):
+            return self._rotate.block_size if self._rotate.enable else None
+        if isinstance(self._rotate, dict) and self.rotate_is_enabled:
+            return self._rotate.get("block_size", None)
+        return None
 
     def disable_calib(self):
         """Disable calibration."""
