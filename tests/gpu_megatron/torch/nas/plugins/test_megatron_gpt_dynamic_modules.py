@@ -49,7 +49,6 @@ from modelopt.torch.prune.plugins.mcore_minitron import get_mcore_minitron_confi
 from modelopt.torch.utils.random import centroid
 
 SEED = 1234
-TE_SPEC = "transformer_engine"
 
 
 def _test_gpt_search_space(
@@ -77,7 +76,7 @@ def _test_gpt_search_space(
         vocab_size=vocab_size,
         activation_func=activation_func,
         normalization=normalization,
-        transformer_impl=TE_SPEC,
+        transformer_impl="transformer_engine",
     ).cuda()
 
     mtn.convert(
@@ -174,7 +173,7 @@ def test_gpt_self_attention_head_sorting(distributed_setup_size_1):
         num_query_groups=2,
         ffn_hidden_size=16,
         activation_func="squared_relu",
-        transformer_impl=TE_SPEC,
+        transformer_impl="transformer_engine",
     ).cuda()
 
     model = mtn.convert(model, "mcore_minitron")
@@ -199,6 +198,7 @@ def test_gpt_self_attention_head_sorting(distributed_setup_size_1):
     hp_num_attention_heads._get_importance = lambda: torch.tensor(
         [2.2, 0.1, 1.1, 2.1, 3.0, 2.0, 0.0, 1.0]
     )
+    # _estimate_head_ranking returns ranking as 1D tensor
     expected_ranking = torch.tensor([0, 3, 2, 1, 4, 5, 7, 6])
     hp_num_attention_heads.enforce_order(expected_ranking)
 
@@ -256,7 +256,7 @@ def _test_gpt_moe_search_space(rank, size):
         max_sequence_length=max_sequence_length,
         vocab_size=vocab_size,
         activation_func="squared_relu",
-        transformer_impl=TE_SPEC,
+        transformer_impl="transformer_engine",
         num_moe_experts=num_moe_experts,
         moe_ffn_hidden_size=moe_ffn_hidden_size,
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,

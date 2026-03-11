@@ -44,7 +44,6 @@ from modelopt.torch.prune.plugins.mcore_minitron import get_mcore_minitron_confi
 from modelopt.torch.utils.random import centroid
 
 SEED = 1234
-TE_SPEC = "transformer_engine"
 
 
 def _test_mamba_search_space(rank, size):
@@ -73,7 +72,7 @@ def _test_mamba_search_space(rank, size):
         mamba_num_groups=mamba_num_groups,
         max_sequence_length=max_sequence_length,
         vocab_size=vocab_size,
-        transformer_impl=TE_SPEC,
+        transformer_impl="transformer_engine",
         bf16=False,
     ).cuda()
     mamba_num_heads = model.decoder.layers[0].mixer.nheads

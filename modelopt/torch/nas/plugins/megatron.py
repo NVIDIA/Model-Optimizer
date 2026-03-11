@@ -27,7 +27,6 @@ from megatron.core.extensions.transformer_engine import (
     TELayerNormColumnParallelLinear,
     TERowParallelLinear,
 )
-from megatron.core.fusions.fused_layer_norm import FusedLayerNorm
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.models.gpt import GPTModel
 from megatron.core.parallel_state import is_pipeline_first_stage, is_pipeline_last_stage
@@ -37,11 +36,10 @@ from megatron.core.tensor_parallel.layers import (
     VocabParallelEmbedding,
 )
 from megatron.core.transformer.attention import SelfAttention
-from megatron.core.transformer.dot_product_attention import DotProductAttention
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.mlp import MLP
 from megatron.core.transformer.moe import moe_utils
-from megatron.core.transformer.moe.experts import GroupedMLP, SequentialMLP
+from megatron.core.transformer.moe.experts import SequentialMLP
 from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
@@ -55,7 +53,7 @@ from modelopt.torch.utils import distributed as dist
 from modelopt.torch.utils import make_divisible
 
 from ..hparams.concat import build_concat_hp
-from ..modules import _DynamicLayerNorm
+from ..modules import _DynamicLayerNorm  # noqa: F401 (re-exported for tests)
 from ..modules.utils import get_sliced_tensor, get_sliced_tensor_by_slices
 from ..registry import DMRegistry
 from ..traced_hp import TracedHp
@@ -77,6 +75,7 @@ except ImportError:
 __all__ = []
 
 
+# Local Parallel Linear DynamicModules ##########################################################################
 class _DynamicParallelLinear(DynamicModule):
     """A parallel linear layer with dynamic hyperparams."""
 
@@ -243,21 +242,6 @@ class _DynamicLanguageModelEmbedding(DynamicModule):
         return super().export()
 
 
-# Normalization DynamicModule ######################################################################
-@DMRegistry.register({FusedLayerNorm: "megatron.core.fusions.fused_layer_norm.FusedLayerNorm"})
-class _DynamicFusedLayerNorm(_DynamicLayerNorm):
-    """A FusedLayerNorm layer with dynamic hyperparams."""
-
-    def _setup(self, *, num_features: TracedHp):
-        """Setup the FusedLayerNorm dynamic module with pre-defined num_features hparam."""
-        self._register_hparam("num_features", num_features)
-
-        # register dynamic attributes
-        self._register_dynamic_attribute("weight", self._cut_to_active_features)
-        self._register_dynamic_attribute("bias", self._cut_to_active_features)
-        self._register_dynamic_attribute("hidden_size", self._get_normalized_shape)
-
-
 # MLP DynamicModule ################################################################################
 @DMRegistry.register(
     {
@@ -359,23 +343,24 @@ class NumAttentionHeadsHp(TracedHp):
 
 
 # NOTE: We provide a parent class since we do not register to DMRegistry.
-class _DynamicQKVColumnParallelLinear(DynamicModule, ColumnParallelLinear):
-    """An mcore ColumnParallelLinear layer for linear_qkv with dynamic attributes."""
+class _DynamicTEQKVLayerNormColumnParallelLinear(DynamicModule, TELayerNormColumnParallelLinear):
+    """TE's fused LayerNorm+ColumnParallelLinear for QKV projection with dynamic attributes."""
 
     def _setup(self, *, num_attention_heads: NumAttentionHeadsHp, hidden_size: TracedHp):
-        """Setup the _DynamicQKVColumnParallelLinear dynamic module with global hidden_size hparam."""
         self._register_hparam("input_size", hidden_size)
         self._register_hparam("num_attention_heads", num_attention_heads)
         self._register_dynamic_attribute(
-            "output_size",
+            "out_features",
             lambda mod, val: (num_attention_heads.active + 2 * mod.config.num_query_groups)
             * mod.config.kv_channels,
         )
-        self._register_dynamic_attribute(
-            "output_size_per_partition", lambda mod, val: mod.output_size
-        )
         self._register_dynamic_attribute("weight", self._get_weight)
-        self._register_dynamic_attribute("bias", self._get_bias)
+        # TE stores a zero-length tensor (not None) when bias=False; only register if non-empty
+        if hasattr(self, "bias") and self.bias is not None and self.bias.numel() > 0:
+            self._register_dynamic_attribute("bias", self._get_bias)
+        self._register_dynamic_attribute("layer_norm_weight", self._get_ln_param)
+        if hasattr(self, "layer_norm_bias") and self.layer_norm_bias is not None:
+            self._register_dynamic_attribute("layer_norm_bias", self._get_ln_param)
 
     def _get_output_size_indices(self) -> torch.LongTensor:
         """Get the indices of the output size based on sorted + pruned attention heads.
@@ -442,118 +427,11 @@ class _DynamicQKVColumnParallelLinear(DynamicModule, ColumnParallelLinear):
         return selected_indices.cpu()
 
     @staticmethod
-    def _get_weight(mod: "_DynamicQKVColumnParallelLinear", weight: torch.Tensor) -> torch.Tensor:
-        """Return the weight tensor of the linear layer."""
-        return get_sliced_tensor_by_slices(
-            weight, [mod._get_output_size_indices(), mod.get_hparam("input_size").active_slice]
-        )
-
-    @staticmethod
-    def _get_bias(
-        mod: "_DynamicQKVColumnParallelLinear", bias: torch.Tensor | None
-    ) -> torch.Tensor | None:
-        """Return the bias tensor of the linear layer."""
-        if bias is None:
-            return bias
-        return get_sliced_tensor_by_slices(bias, [mod._get_output_size_indices()])
-
-
-# NOTE: We provide a parent class since we do not register to DMRegistry.
-class _DynamicProjRowParallelLinear(DynamicModule, RowParallelLinear):
-    """An mcore RowParallelLinear layer for linear_qkv with dynamic attributes."""
-
-    def _setup(self, *, num_attention_heads: NumAttentionHeadsHp, hidden_size: TracedHp):
-        """Setup the _DynamicProjRowParallelLinear dynamic module with global hidden_size hparam."""
-        self._register_hparam("output_size", hidden_size)
-        self._register_hparam("num_attention_heads", num_attention_heads)
-        self._register_dynamic_attribute(
-            "input_size", lambda mod, val: num_attention_heads.active * mod.config.kv_channels
-        )
-        self._register_dynamic_attribute(
-            "input_size_per_partition", lambda mod, val: mod.input_size
-        )
-        self._register_dynamic_attribute("weight", self._get_weight)
-        self._register_dynamic_attribute("bias", self._get_bias)
-
-    def _get_input_size_indices(self) -> torch.LongTensor:
-        """Get the indices of the input size based on sorted + pruned heads and query groups."""
-        nheads_hp = self.get_hparam("num_attention_heads")
-        if nheads_hp._slice_order is None and nheads_hp.active == nheads_hp.max:
-            return slice(nheads_hp.max * self.config.kv_channels)
-
-        selected_attn_heads = nheads_hp.active_slice
-        assert isinstance(selected_attn_heads, torch.LongTensor)
-        selected_indices = expand_head_indices(selected_attn_heads, self.config.kv_channels)
-
-        return selected_indices.cpu()
-
-    @staticmethod
-    def _get_weight(mod: "_DynamicProjRowParallelLinear", weight: torch.Tensor) -> torch.Tensor:
-        """Return the weight tensor of the linear layer."""
-        return get_sliced_tensor_by_slices(
-            weight, [mod.get_hparam("output_size").active_slice, mod._get_input_size_indices()]
-        )
-
-    @staticmethod
-    def _get_bias(
-        mod: "_DynamicProjRowParallelLinear", bias: torch.Tensor | None
-    ) -> torch.Tensor | None:
-        """Return the bias tensor of the linear layer."""
-        return get_sliced_tensor(mod, bias, "output_size")
-
-
-# TE QKV/Proj DynamicModules (for full TE spec with fused LayerNorm+Linear) #######################
-class _DynamicTEQKVLayerNormColumnParallelLinear(DynamicModule, TELayerNormColumnParallelLinear):
-    """TE's fused LayerNorm+ColumnParallelLinear for QKV projection with dynamic attributes."""
-
-    def _setup(self, *, num_attention_heads: NumAttentionHeadsHp, hidden_size: TracedHp):
-        self._register_hparam("input_size", hidden_size)
-        self._register_hparam("num_attention_heads", num_attention_heads)
-        self._register_dynamic_attribute(
-            "out_features",
-            lambda mod, val: (num_attention_heads.active + 2 * mod.config.num_query_groups)
-            * mod.config.kv_channels,
-        )
-        self._register_dynamic_attribute("weight", self._get_weight)
-        # TE stores a zero-length tensor (not None) when bias=False; only register if non-empty
-        if hasattr(self, "bias") and self.bias is not None and self.bias.numel() > 0:
-            self._register_dynamic_attribute("bias", self._get_bias)
-        self._register_dynamic_attribute("layer_norm_weight", self._get_ln_param)
-        if hasattr(self, "layer_norm_bias") and self.layer_norm_bias is not None:
-            self._register_dynamic_attribute("layer_norm_bias", self._get_ln_param)
-
-    def _get_output_size_indices(self) -> torch.LongTensor:
-        """Reuses QKV output indexing logic from _DynamicQKVColumnParallelLinear."""
-        nheads_hp: NumAttentionHeadsHp = self.get_hparam("num_attention_heads")
-        nquery_groups = self.config.num_query_groups
-        max_nheads_per_group = nheads_hp.max // nquery_groups
-        nheads_per_group = nheads_hp.num_heads_per_group
-        qkv_heads_per_group = max_nheads_per_group + 2
-
-        if nheads_hp._slice_order is None and nheads_hp.active == nheads_hp.max:
-            return slice((max_nheads_per_group + 2) * nquery_groups * self.config.kv_channels)
-
-        q_head_indices = nheads_hp.active_slice
-        assert isinstance(q_head_indices, torch.LongTensor)
-        q_head_indices_per_group = q_head_indices.view(nquery_groups, nheads_per_group).cpu()
-        group_ids = q_head_indices_per_group // max_nheads_per_group
-        local_pos_in_attn = q_head_indices_per_group - group_ids * max_nheads_per_group
-        q_head_indices = group_ids * qkv_heads_per_group + local_pos_in_attn
-        kv_head_indices = (
-            torch.arange(nquery_groups)[:, None] * qkv_heads_per_group
-            + torch.arange(max_nheads_per_group, qkv_heads_per_group)[None, :]
-        )
-        selected_qkv_heads = torch.cat([q_head_indices, kv_head_indices], dim=1).flatten()
-        selected_indices = expand_head_indices(selected_qkv_heads, self.config.kv_channels)
-        return selected_indices.cpu()
-
-    @staticmethod
     def _get_weight(
         mod: "_DynamicTEQKVLayerNormColumnParallelLinear", weight: torch.Tensor
     ) -> torch.Tensor:
         return get_sliced_tensor_by_slices(
-            weight,
-            [mod._get_output_size_indices(), mod.get_hparam("input_size").active_slice],
+            weight, [mod._get_output_size_indices(), mod.get_hparam("input_size").active_slice]
         )
 
     @staticmethod
@@ -571,6 +449,7 @@ class _DynamicTEQKVLayerNormColumnParallelLinear(DynamicModule, TELayerNormColum
         return get_sliced_tensor(mod, val, "input_size")
 
 
+# NOTE: We provide a parent class since we do not register to DMRegistry.
 class _DynamicTEProjRowParallelLinear(DynamicModule, TERowParallelLinear):
     """TE's RowParallelLinear for output projection with dynamic attributes."""
 
@@ -578,8 +457,7 @@ class _DynamicTEProjRowParallelLinear(DynamicModule, TERowParallelLinear):
         self._register_hparam("output_size", hidden_size)
         self._register_hparam("num_attention_heads", num_attention_heads)
         self._register_dynamic_attribute(
-            "in_features",
-            lambda mod, val: num_attention_heads.active * mod.config.kv_channels,
+            "in_features", lambda mod, val: num_attention_heads.active * mod.config.kv_channels
         )
         self._register_dynamic_attribute("weight", self._get_weight)
         # TE stores a zero-length tensor (not None) when bias=False; only register if non-empty
@@ -587,20 +465,21 @@ class _DynamicTEProjRowParallelLinear(DynamicModule, TERowParallelLinear):
             self._register_dynamic_attribute("bias", self._get_bias)
 
     def _get_input_size_indices(self) -> torch.LongTensor:
-        """Reuses Proj input indexing logic from _DynamicProjRowParallelLinear."""
+        """Get the indices of the input size based on sorted + pruned heads and query groups."""
         nheads_hp = self.get_hparam("num_attention_heads")
         if nheads_hp._slice_order is None and nheads_hp.active == nheads_hp.max:
             return slice(nheads_hp.max * self.config.kv_channels)
+
         selected_attn_heads = nheads_hp.active_slice
         assert isinstance(selected_attn_heads, torch.LongTensor)
         selected_indices = expand_head_indices(selected_attn_heads, self.config.kv_channels)
+
         return selected_indices.cpu()
 
     @staticmethod
     def _get_weight(mod: "_DynamicTEProjRowParallelLinear", weight: torch.Tensor) -> torch.Tensor:
         return get_sliced_tensor_by_slices(
-            weight,
-            [mod.get_hparam("output_size").active_slice, mod._get_input_size_indices()],
+            weight, [mod.get_hparam("output_size").active_slice, mod._get_input_size_indices()]
         )
 
     @staticmethod
@@ -630,60 +509,29 @@ class _DynamicSelfAttention(DynamicModule):
             "num_attention_heads_per_partition", lambda mod, val: self.num_attention_heads
         )
 
-        # Convert the Dot Product Attention to dynamic module
-        if isinstance(self.core_attention, DotProductAttention):
-            _DynamicDotProductAttention: DynamicModule = type(  # noqa: N806
-                "_DynamicDotProductAttention",
-                (DynamicModule, DotProductAttention),
-                {"_setup": lambda self: None},
-            )
-
-            _DynamicDotProductAttention.convert(self.core_attention)
-            self.core_attention._register_dynamic_attribute(
-                "hidden_size_per_partition",
-                lambda mod, val: self.config.kv_channels * self.num_attention_heads_per_partition,
-            )
-            self.core_attention._register_dynamic_attribute(
-                "num_attention_heads_per_partition",
-                lambda mod, val: self.num_attention_heads_per_partition,
-            )
-        else:
-            assert isinstance(self.core_attention, TEDotProductAttention)
-
-            _DynamicTEDotProductAttention: DynamicModule = type(  # noqa: N806
-                "_DynamicTEDotProductAttention",
-                (DynamicModule, TEDotProductAttention),
-                {"_setup": lambda self: None},
-            )
-
-            _DynamicTEDotProductAttention.convert(self.core_attention)
-            self.core_attention._register_dynamic_attribute(
-                "num_attention_heads", lambda mod, val: self.num_attention_heads_per_partition
-            )
+        # Convert the TEDotProductAttention to dynamic module
+        assert isinstance(self.core_attention, TEDotProductAttention)
+        _DynamicTEDotProductAttention: DynamicModule = type(  # noqa: N806
+            "_DynamicTEDotProductAttention",
+            (DynamicModule, TEDotProductAttention),
+            {"_setup": lambda self: None},
+        )
+        _DynamicTEDotProductAttention.convert(self.core_attention)
+        self.core_attention._register_dynamic_attribute(
+            "num_attention_heads", lambda mod, val: self.num_attention_heads_per_partition
+        )
 
         # Convert the fused qkv and output projection linear layer to dynamic module
-        if isinstance(self.linear_qkv, TELayerNormColumnParallelLinear):
-            _DynamicTEQKVLayerNormColumnParallelLinear.convert(
-                self.linear_qkv,
-                num_attention_heads=num_attention_heads,
-                hidden_size=hidden_size,
-            )
-            _DynamicTEProjRowParallelLinear.convert(
-                self.linear_proj,
-                num_attention_heads=num_attention_heads,
-                hidden_size=hidden_size,
-            )
-        else:
-            _DynamicQKVColumnParallelLinear.convert(
-                self.linear_qkv,
-                num_attention_heads=num_attention_heads,
-                hidden_size=hidden_size,
-            )
-            _DynamicProjRowParallelLinear.convert(
-                self.linear_proj,
-                num_attention_heads=num_attention_heads,
-                hidden_size=hidden_size,
-            )
+        _DynamicTEQKVLayerNormColumnParallelLinear.convert(
+            self.linear_qkv,
+            num_attention_heads=num_attention_heads,
+            hidden_size=hidden_size,
+        )
+        _DynamicTEProjRowParallelLinear.convert(
+            self.linear_proj,
+            num_attention_heads=num_attention_heads,
+            hidden_size=hidden_size,
+        )
 
     def export(self) -> torch.nn.Module:
         """Export the dynamic module to a torch.nn.Module."""
@@ -749,85 +597,6 @@ class _DynamicSequentialMLP(DynamicModule):
         return super().export()
 
 
-class _DynamicGroupedMLP(DynamicModule):
-    """A GroupedMLP with dynamic hyperparams for pruning packed expert weights.
-
-    GroupedMLP packs all expert weights into weight1 and weight2:
-      weight1: [hidden_size, num_experts * ffn_out_per_expert] (ffn_out = ffn * gate_factor)
-      weight2: [num_experts * ffn_per_expert, hidden_size]
-    Will be registered to DMRegistry if GroupedMLP is available.
-    """
-
-    def _setup(self, *, hidden_size: TracedHp):
-        num_moe_experts = TracedHp(list(range(1, self.num_local_experts + 1)))
-        self._register_hparam("num_local_experts", num_moe_experts)
-
-        ffn = self.config.moe_ffn_hidden_size
-        moe_ffn_hidden_size = TracedHp(list(range(1, ffn + 1)))
-        self._register_hparam("moe_ffn_hidden_size", moe_ffn_hidden_size)
-        self._register_hparam("hidden_size", hidden_size)
-
-        self._register_dynamic_attribute("weight1", self._get_weight1)
-        self._register_dynamic_attribute("weight2", self._get_weight2)
-
-    def _get_expert_ffn_col_indices(self, gated: bool) -> torch.LongTensor:
-        """Build column indices for weight1 (or row indices for weight2 when gated=False)."""
-        num_experts_hp = self.get_hparam("num_local_experts")
-        ffn_hp = self.get_hparam("moe_ffn_hidden_size")
-        max_ffn = ffn_hp.max
-
-        expert_slice = num_experts_hp.active_slice
-        ffn_slice = ffn_hp.active_slice
-
-        if isinstance(expert_slice, slice):
-            active_experts = list(range(expert_slice.stop))
-        else:
-            active_experts = expert_slice.tolist()
-
-        if isinstance(ffn_slice, slice):
-            active_ffn = list(range(ffn_slice.stop))
-        else:
-            active_ffn = ffn_slice.tolist()
-
-        indices = []
-        for ei in active_experts:
-            if gated:
-                gate_base = ei * max_ffn * 2
-                up_base = gate_base + max_ffn
-                indices.extend(gate_base + fi for fi in active_ffn)
-                indices.extend(up_base + fi for fi in active_ffn)
-            else:
-                base = ei * max_ffn
-                indices.extend(base + fi for fi in active_ffn)
-
-        return torch.LongTensor(indices)
-
-    @staticmethod
-    def _get_weight1(mod: "_DynamicGroupedMLP", weight: torch.Tensor) -> torch.Tensor:
-        hidden_slice = mod.get_hparam("hidden_size").active_slice
-        col_indices = mod._get_expert_ffn_col_indices(gated=mod.config.gated_linear_unit)
-        return weight[hidden_slice][:, col_indices].contiguous()
-
-    @staticmethod
-    def _get_weight2(mod: "_DynamicGroupedMLP", weight: torch.Tensor) -> torch.Tensor:
-        hidden_slice = mod.get_hparam("hidden_size").active_slice
-        row_indices = mod._get_expert_ffn_col_indices(gated=False)
-        return weight[row_indices][:, hidden_slice].contiguous()
-
-    def modify(self, ffn_hidden_size_divisor: int = 1, **kwargs) -> None:
-        hp = self.get_hparam("moe_ffn_hidden_size")
-        choices = {int(make_divisible(c, ffn_hidden_size_divisor)) for c in hp.choices}  # type: ignore[arg-type]
-        hp.choices = list(set(hp.choices) & choices | {hp.original})
-
-    def export(self) -> torch.nn.Module:
-        return super().export()
-
-
-DMRegistry.register({GroupedMLP: "megatron.core.transformer.moe.experts.GroupedMLP"})(
-    _DynamicGroupedMLP
-)
-
-
 @DMRegistry.register({MoELayer: "megatron.core.transformer.moe.moe_layer.MoELayer"})
 class _DynamicMoELayer(DynamicModule):
     """A MoELayer with dynamic hyperparams."""
@@ -874,20 +643,14 @@ class _DynamicMoELayer(DynamicModule):
         expert_hp.choices = list(set(expert_hp.choices) & choices | {expert_hp.original})
 
         # Modify expert FFN hparam choices
-        if isinstance(self.experts, _DynamicGroupedMLP):
-            self.experts.modify(ffn_hidden_size_divisor=ffn_hidden_size_divisor)
-        else:
-            for expert in self.experts.local_experts:
-                expert.modify(ffn_hidden_size_divisor=ffn_hidden_size_divisor)
+        for expert in self.experts.local_experts:
+            expert.modify(ffn_hidden_size_divisor=ffn_hidden_size_divisor)
         if self.use_shared_expert:
             self.shared_experts.modify(ffn_hidden_size_divisor)
 
     def _export_reinit_token_dispatcher(self) -> None:
         """Reinitialize the token dispatcher after pruning."""
-        if hasattr(moe_utils, "get_default_model_comm_pgs"):
-            model_comm_pgs = moe_utils.get_default_model_comm_pgs()
-        else:
-            model_comm_pgs = moe_utils.get_default_pg_collection()
+        model_comm_pgs = moe_utils.get_default_pg_collection()
         # NOTE: Update config.num_moe_experts for correct router initialization.
         self.config.num_moe_experts = self.num_moe_experts
         self.token_dispatcher = type(self.token_dispatcher)(
@@ -904,9 +667,6 @@ class _DynamicMoELayer(DynamicModule):
         if self.use_shared_expert:
             self.shared_experts.export()
         self._export_reinit_token_dispatcher()
-        # Update num_local_experts on experts module after export
-        if hasattr(self.experts, "num_local_experts"):
-            self.experts.num_local_experts = self.num_local_experts
         return super().export()
 
 
@@ -917,23 +677,17 @@ class _DynamicMoELayer(DynamicModule):
 class _DynamicTransformerLayer(DynamicModule):
     """A TransformerLayer layer with dynamic hyperparams."""
 
-    @staticmethod
-    def _is_identity_op(module: nn.Module) -> bool:
-        """Check if the module is an IdentityOp (layernorm fused into linear in TE spec)."""
-        return isinstance(module, IdentityOp)
-
     def _setup(self, *, hidden_size: TracedHp):
         """Setup the TransformerLayer dynamic module with global hidden_size hparam."""
-        # Convert the layernorms, self-attention, and mlp/moe layers to dynamic modules
+        # Convert the self-attention and mlp/moe layers to dynamic modules
         # NOTE: Mamba stack layers have either Attention or MLP, not both unlike GPT models
-        # NOTE: In full TE spec, layernorms are IdentityOp (fused into linear layers)
         if isinstance(self.self_attention, SelfAttention):
-            if not self._is_identity_op(self.input_layernorm):
-                DMRegistry.convert(self.input_layernorm, num_features=hidden_size)
             DMRegistry.convert(self.self_attention, hidden_size=hidden_size)
 
         if isinstance(self.mlp, (MLP, MoELayer)):
-            if not self._is_identity_op(self.pre_mlp_layernorm):
+            # pre_mlp_layernorm is IdentityOp for dense MLP (fused into linear_fc1),
+            # but RMSNorm for MoETransformerLayer (separate from MoE experts)
+            if not isinstance(self.pre_mlp_layernorm, IdentityOp):
                 DMRegistry.convert(self.pre_mlp_layernorm, num_features=hidden_size)
             if isinstance(self.mlp, MoELayer):
                 setup_kwargs = {}
@@ -959,11 +713,9 @@ class _DynamicTransformerLayer(DynamicModule):
     def export(self):
         """Export the dynamic module to a torch.nn.Module."""
         if isinstance(self.self_attention, SelfAttention):
-            if not self._is_identity_op(self.input_layernorm):
-                self.input_layernorm.export()
             self.self_attention.export()
         if isinstance(self.mlp, (MLP, MoELayer)):
-            if not self._is_identity_op(self.pre_mlp_layernorm):
+            if not isinstance(self.pre_mlp_layernorm, IdentityOp):
                 self.pre_mlp_layernorm.export()
             self.mlp.export()
         return super().export()
@@ -1228,10 +980,6 @@ class _DynamicMambaLayer(DynamicModule):
         # Convert to dynamic module
         DMRegistry.convert(self.mixer, hidden_size=hidden_size)
 
-        # In TE spec, norm is IdentityOp (fused into mixer.in_proj)
-        if not _DynamicTransformerLayer._is_identity_op(self.norm):
-            DMRegistry.convert(self.norm, num_features=hidden_size)
-
     def modify(
         self,
         *,
@@ -1247,8 +995,6 @@ class _DynamicMambaLayer(DynamicModule):
     def export(self):
         """Export the dynamic module to a torch.nn.Module."""
         self.mixer.export()
-        if not _DynamicTransformerLayer._is_identity_op(self.norm):
-            self.norm.export()
         return super().export()
 
 

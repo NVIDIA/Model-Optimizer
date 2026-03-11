@@ -152,7 +152,6 @@ def get_mcore_gpt_model(
     bf16: bool = True,
     use_te: bool = False,
     # MoE-specific parameters
-    moe_grouped_gemm: bool = False,
     moe_ffn_hidden_size: int | None = None,
     moe_shared_expert_intermediate_size: int | None = None,
     num_moe_experts: int | None = None,
@@ -195,7 +194,6 @@ def get_mcore_gpt_model(
         pipeline_dtype=torch.bfloat16 if bf16 else torch.float32,
         bf16=bf16,
         # MoE-specific parameters
-        moe_grouped_gemm=moe_grouped_gemm,
         moe_router_dtype=None,
         moe_ffn_hidden_size=moe_ffn_hidden_size,
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
@@ -220,9 +218,6 @@ def get_mcore_gpt_model(
         transformer_layer_spec = get_gpt_layer_local_spec(
             num_experts=num_moe_experts,
             normalization=normalization,
-            moe_grouped_gemm=moe_grouped_gemm,
-            # TODO: uncomment this when TEGroupedMLP is enabled in Megatron-LM
-            # use_te=use_te,
         )
     else:
         assert HAS_TE, "Transformer Engine not installed"
@@ -234,8 +229,6 @@ def get_mcore_gpt_model(
         else:
             transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
                 num_experts=num_moe_experts,
-                moe_grouped_gemm=moe_grouped_gemm,
-                moe_use_legacy_grouped_gemm=moe_grouped_gemm,
             )
 
     model = GPTModel(
