@@ -108,6 +108,21 @@ Check `config.json` for `"quantization_config"` or look for `*_scale_inv*` tenso
 3. VLM structure (vision encoder + language model) → Pattern 4
 4. MoE routing (needs all-expert calibration wrapper) → Pattern 2
 
+**Step D — Check weight names against ModelOpt's config patterns:**
+
+Scan actual parameter names in the checkpoint and compare them against the wildcard patterns in the chosen quant config (`modelopt/torch/quantization/config.py`). If a module has a weight that would be quantized but uses a non-standard name (e.g., `gate_up_proj` instead of `gate_proj`/`up_proj`, or `experts.w1` instead of `experts.*.w1`), the wildcard will silently miss it.
+
+```python
+import json
+idx = json.load(open('<ckpt_path>/model.safetensors.index.json'))
+# Print all unique weight base names (strip layer index)
+import re
+names = set(re.sub(r'\.\d+\.', '.N.', k) for k in idx['weight_map'])
+for n in sorted(names): print(n)
+```
+
+Compare these against the `enable`/`disable` patterns in the config. Add custom overrides to the config dict if needed.
+
 Then read `references/unsupported-models.md` for the full patterns: `mtq.register()`, `_setup()`, TensorQuantizer injection, and calibration routing.
 
 ### 2. Choose the quantization format
@@ -139,7 +154,7 @@ For MLP-only quantization (skipping attention), use configs with `MLP_ONLY` in t
 
 ### 3. Set up the environment
 
-- **SLURM**: get the recommended container image from `examples/llm_ptq/README.md` (e.g. `nvcr.io/nvidia/tensorrt-llm/release:<version>`). Then find the corresponding `.sqsh` file — search near the working directory or common cluster container paths. If none found, read `references/environment-setup.md` for enroot import instructions.
+- **SLURM**: You MUST use a container — running without one will fail due to missing dependencies. Get the recommended container image version from `examples/llm_ptq/README.md`, then find the matching `.sqsh` file (search near the working directory, or sibling paths). Save the sqsh path — it becomes the `--container-image` value in the `srun` command. If no sqsh found, read `references/environment-setup.md` for enroot import instructions.
 - **Local GPU**: `pip install nvidia-modelopt[hf]`
 
 **GPU memory**: Estimate `num_params × 2 bytes` for BF16. Use `device_map="auto"` for multi-GPU. For models exceeding single-node memory, read `references/environment-setup.md` for FSDP2 multi-node setup.
@@ -150,7 +165,7 @@ For MLP-only quantization (skipping attention), use configs with `MLP_ONLY` in t
 
 #### Smoke test first (always)
 
-Before a full calibration run, submit a smoke-test job with `--calib_size 4`. This is fast (a few minutes) and catches errors in the script before wasting hours of GPU time on calibration.
+Before a full calibration run, submit a smoke-test job with `--calib_size 4` and `--time=00:30:00`. This catches script errors before wasting GPU quota on a full run. Only request a longer time limit after the smoke test passes.
 
 #### Supported models — command to run
 
@@ -211,11 +226,9 @@ echo $!  # save PID
 
 #### Monitor and debug
 
-Poll job status and tail logs until the job completes. Fix any errors and resubmit. Keep iterating until the export directory contains `.safetensors` shards and `config.json`.
-
-PTQ-specific errors to watch for:
-- **Quantizers not enabled** (seen in `mtq.print_quant_summary`): wildcard pattern missed modules — check `*gate*` vs `*mlp.gate*`, verify quantizer suffix naming
-- **FP8 tensors still present after dequant**: `dequantize_fp8_params()` missed a param — inspect `model.named_parameters()` for unexpected `float8_e4m3fn` dtypes and add the param name to the manual dequant list
+Tail the job log and resubmit with fixes until the export directory contains `.safetensors` shards and `config.json`. Two PTQ-specific failure modes to check via `mtq.print_quant_summary()`:
+- **Quantizers not enabled**: wildcard missed modules — check `*gate*` vs `*mlp.gate*`
+- **FP8 tensors still present after dequant**: missed a non-standard param name — inspect `model.named_parameters()` for `float8_e4m3fn` dtypes
 
 ### 5. Verify the output checkpoint
 
@@ -255,6 +268,8 @@ These are non-obvious requirements that cause hard-to-debug failures:
 - **FP8 checkpoints need the config class**: When loading an FP8-quantized checkpoint with `dequantize=True`, pass `FineGrainedFP8Config(dequantize=True)` — not a plain dict. HF validates the config type matches.
 
 - **Quantizer naming convention**: Custom `TensorQuantizer` modules must end with `_input_quantizer` or `_weight_quantizer` for ModelOpt's wildcard matching.
+
+- **Do not modify ModelOpt core source**: All custom code (monkey-patching, `mtq.register()` wrappers, dequantization helpers) must live in your own script or under `examples/`. Never edit files under `modelopt/torch/` unless there is no easy way to patch from outside — and if you must, note it explicitly so it can be upstreamed.
 
 ## Additional Resources
 
