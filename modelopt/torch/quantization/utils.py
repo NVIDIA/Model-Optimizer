@@ -487,8 +487,11 @@ def enable_weight_access_and_writeback(module, root_model, name_to_module: dict 
     Args:
         module: The module to access weights for.
         root_model: The root model containing the module.
-        name_to_module: Optional pre-computed dict mapping names to modules (for performance).
-                        If not provided, will be computed on-the-fly.
+        name_to_module: Pre-computed ``dict(root_model.named_modules())``. Without this,
+            every call iterates ``root_model.named_modules()`` internally, leading to O(N^2)
+            total cost when called in a loop. This causes significant CPU overhead on large
+            models, particularly Sparse MoE architectures where each expert is typically
+            implemented as its own module.
     """
     if _get_enclosing_fsdp_module(module, root_model, name_to_module) is not None:
         context = fsdp2_weight_access_and_writeback_context(module, root_model)
@@ -527,6 +530,46 @@ def set_quantizer_state_dict(model: nn.Module, quantizer_state_dict: dict):
         key = get_unwrapped_name(name, model)
         if isinstance(module, TensorQuantizer) and key in quantizer_state_dict:
             module.load_state_dict(quantizer_state_dict[key])
+
+
+def sync_moe_expert_amax(experts):
+    """Sync input_quantizer amax across MoE experts and fix missing weight amax.
+
+    1. Takes the element-wise max of each ``input_quantizer`` amax across all experts
+       and writes it back, so every expert shares the same input amax.
+    2. For any ``weight_quantizer`` that is enabled but has ``amax is None`` (expert
+       received no tokens during calibration), runs a weight-only ``max_calibrate``
+       to populate the missing amax.
+    """
+    from .nn import TensorQuantizer
+
+    amax_dict: dict[str, torch.Tensor] = {}
+    for expert in experts:
+        for name, module in expert.named_modules():
+            if (
+                isinstance(module, TensorQuantizer)
+                and module.amax is not None
+                and "input_quantizer" in name
+            ):
+                stored_amax = amax_dict.get(name)
+                amax_tensor = module.amax.detach().clone()
+                amax_dict[name] = (
+                    amax_tensor if stored_amax is None else torch.maximum(stored_amax, amax_tensor)
+                )
+
+    for expert in experts:
+        for name, module in expert.named_modules():
+            if isinstance(module, TensorQuantizer) and name in amax_dict:
+                module.amax = amax_dict[name].detach().clone()
+
+    from .model_calib import max_calibrate
+
+    for expert in experts:
+        for name, module in expert.named_modules():
+            if name.endswith("weight_quantizer") and module.is_enabled and module.amax is None:
+                weight = expert.state_dict().get(name.replace("weight_quantizer", "weight"))
+                if weight is not None:
+                    max_calibrate(module, lambda m, w=weight: m(w), distributed_sync=False)
 
 
 @contextmanager

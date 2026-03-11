@@ -125,7 +125,7 @@ def _test_gpt_search_space(
     prompt_tokens = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
     for sample_func in [min, max, centroid]:
         mtn.sample(model, sample_func)
-        output = run_mcore_inference(model, prompt_tokens)
+        output = run_mcore_inference(model, prompt_tokens, model.hidden_size)
         assert output.shape == (batch_size, max_sequence_length, vocab_size)
 
     # Make sure export and forward pass works on centroid model
@@ -306,7 +306,7 @@ def _test_gpt_moe_search_space(rank, size):
 
     # Make sure forward pass works on min and centroid subnets
     prompt_tokens = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
-    output = run_mcore_inference(model, prompt_tokens)
+    output = run_mcore_inference(model, prompt_tokens, model.hidden_size)
     assert output.shape == (batch_size, max_sequence_length, vocab_size)
 
     # Make sure export and forward pass works on centroid model

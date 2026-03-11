@@ -20,6 +20,8 @@ Model creation functions live here; tests import and call them directly.
 """
 
 import onnx
+import torch
+import torch.nn as nn
 from onnx import helper
 
 
@@ -52,3 +54,42 @@ def _create_simple_conv_onnx_model():
         ],
     )
     return helper.make_model(graph, producer_name="test")
+
+
+def _create_simple_resnet18_model():
+    """Build a ResNet-18 subgraph (stem + layer1) for MOQ + Autotuner integration tests.
+
+    Architecture:
+        Conv(3→64, 7×7, stride=2) → ReLU → MaxPool(3×3, stride=2)
+        → BasicBlock(64→64) → BasicBlock(64→64)
+
+    Input shape: [1, 3, 1024, 1024], output shape: [1, 64, 256, 256].
+    """
+
+    class _BasicBlock(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.conv1 = nn.Conv2d(64, 64, 3, padding=1, bias=True)
+            self.act1 = nn.ReLU()
+            self.conv2 = nn.Conv2d(64, 64, 3, padding=1, bias=True)
+            self.act2 = nn.ReLU()
+
+        def forward(self, x):
+            return self.act2(self.conv2(self.act1(self.conv1(x))) + x)
+
+    class _Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.conv1 = nn.Conv2d(3, 64, 7, stride=2, padding=3, bias=True)
+            self.act1 = nn.ReLU()
+            self.maxpool = nn.MaxPool2d(3, stride=2, padding=1)
+            self.layer1 = nn.Sequential(_BasicBlock(), _BasicBlock())
+
+        def forward(self, x):
+            return self.layer1(self.maxpool(self.act1(self.conv1(x))))
+
+    torch.manual_seed(42)
+    model = _Model().eval()
+    input_tensor = torch.zeros(1, 3, 1024, 1024)
+
+    return model, input_tensor
