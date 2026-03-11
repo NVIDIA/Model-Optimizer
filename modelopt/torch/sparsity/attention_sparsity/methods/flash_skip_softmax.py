@@ -28,6 +28,24 @@ import torch
 from . import SparseAttentionMethod, register_sparse_method
 
 
+def sparse24_mask_along_last_dim(scores: torch.Tensor) -> torch.Tensor:
+    """Compute 2:4 mask: for every 4 elements along the last dim, keep the 2 largest.
+
+    Args:
+        scores: Tensor of shape [..., N] with N divisible by 4.
+
+    Returns:
+        Boolean mask of same shape; True where the element is kept (top-2 of 4).
+    """
+    *prefix, n = scores.shape
+    assert n % 4 == 0, "2:4 sparsity requires last dim divisible by 4"
+    grouped = scores.reshape(*prefix, n // 4, 4)
+    _, top2_idx = torch.topk(grouped, k=2, dim=-1, largest=True, sorted=False)
+    mask = torch.zeros_like(grouped, dtype=torch.bool)
+    mask.scatter_(-1, top2_idx, True)
+    return mask.reshape(*prefix, n)
+
+
 @register_sparse_method("flash_skip_softmax")
 class FlashSkipSoftmax(SparseAttentionMethod):
     """Flash Attention-aware softmax skip sparse attention method.
@@ -55,6 +73,7 @@ class FlashSkipSoftmax(SparseAttentionMethod):
 
         # Optional parameters not in Pydantic config
         self.phase = config.get("phase", None)
+        self.apply_sparse24 = config.get("apply_sparse24", False)
 
         # Initialize threshold from dict config (prefill phase as default)
         self.threshold = self.threshold_config.get("prefill", 1e-3)
@@ -195,6 +214,15 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             element_mask = element_mask.reshape(batch_size, num_heads, padded_seq_q, padded_seq_k)
             element_mask = element_mask[:, :, :seq_q, :seq_k]
 
+            # Step 7b: Apply 2:4 structured sparsity on top of block mask (optional)
+            if self.apply_sparse24:
+                attn_padded = blocked_attn.reshape(
+                    batch_size, num_heads, padded_seq_q, padded_seq_k
+                )
+                sparse24_mask = sparse24_mask_along_last_dim(attn_padded)
+                sparse24_mask = sparse24_mask[:, :, :seq_q, :seq_k]
+                element_mask = element_mask & sparse24_mask
+
             # Step 8: Calculate sparsity statistics
             if self.is_causal:
                 # For causal attention, only count lower triangle blocks (including diagonal)
@@ -241,6 +269,13 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             element_mask = block_mask[..., None].expand_as(blocked_attn)
             element_mask = element_mask.reshape(batch_size, num_heads, 1, padded_seq_k)
             element_mask = element_mask[:, :, :seq_q, :seq_k]
+
+            # Step 6b: Apply 2:4 structured sparsity on top of block mask (optional)
+            if self.apply_sparse24:
+                attn_padded = blocked_attn.reshape(batch_size, num_heads, 1, padded_seq_k)
+                sparse24_mask = sparse24_mask_along_last_dim(attn_padded)
+                sparse24_mask = sparse24_mask[:, :, :seq_q, :seq_k]
+                element_mask = element_mask & sparse24_mask
 
             # Step 7: Calculate sparsity statistics
             dense_blocks = block_mask.sum()
