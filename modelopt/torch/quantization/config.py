@@ -982,10 +982,10 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         - "enable": Boolean to enable/disable rotation (default: False)
         - "rotate_fp32": Boolean to compute rotation in float32 precision (default: False)
         - "block_size": Optional positive int for block-granular RHT. When set, applies
-          Hadamard transforms to non-overlapping blocks of this size, each normalized by
-          ``sqrt(block_size)``. When None (default), applies the full-dimension transform
-          ``input @ hadamard(input.shape[-1]) / sqrt(input.shape[-1])`` for power-of-2
-          dimensions, or auto-selects the largest power-of-2 divisor otherwise.
+        Hadamard transforms to non-overlapping blocks of this size, each normalized by
+        ``sqrt(block_size)``. When None (default), applies the full-dimension transform
+        ``input @ hadamard(input.shape[-1]) / sqrt(input.shape[-1])`` for power-of-2
+        dimensions, or auto-selects the largest power-of-2 divisor otherwise.
 
         If a boolean is provided, it is treated as the "enable" value with "rotate_fp32"
         defaulting to False.
