@@ -74,6 +74,10 @@ class LayerActivationCollector:
     never consumed for real computation.
     """
 
+    # Global registry of (predicate, discoverer) pairs. Populated at import time
+    # by plugins (e.g. huggingface.py). Order matters: the first matching entry wins,
+    # so more specific predicates (e.g. Nemotron-H) must be registered before
+    # generic ones (e.g. homogeneous HF models).
     _decoder_layer_support: list[tuple[Any, Any]] = []
     _LAYER_ATTR = "_seq_calib"
 
@@ -188,10 +192,19 @@ class LayerActivationCollector:
     # Patch / unpatch lifecycle
     # ------------------------------------------------------------------
 
-    def _patch_all_layers(self):
-        """Bind the unified forward to every decoder layer and the model. Called once."""
-        self._decoder_layers = self.get_decoder_layers(self.model)
+    def _patch_all_layers(self, decoder_layers: nn.ModuleList | None = None):
+        """Bind the unified forward to every decoder layer and the model. Called once.
+
+        Args:
+            decoder_layers: Pre-resolved decoder layers. If *None*, layers are
+                discovered via :meth:`get_decoder_layers`.
+        """
+        if decoder_layers is not None:
+            self._decoder_layers = decoder_layers
+        else:
+            self._decoder_layers = self.get_decoder_layers(self.model)
         assert self._decoder_layers is not None
+
         self._layer_to_idx = {layer: i for i, layer in enumerate(self._decoder_layers)}
         module_to_name = {m: name for name, m in self.model.named_modules()}
 
@@ -202,9 +215,9 @@ class LayerActivationCollector:
                 )
                 bind_forward_method(layer, self._patched_forward, "_original_forward")
 
-            def _early_stop_forward(self, *args, **kwargs):
+            def _early_stop_forward(module_self, *args, **kwargs):
                 try:
-                    return self._original_forward(*args, **kwargs)
+                    return module_self._original_forward(*args, **kwargs)
                 except _EarlyStopForwardError:
                     return None
 
@@ -252,7 +265,9 @@ class LayerActivationCollector:
         if layer_idx > 1:
             done = self._decoder_layers[layer_idx - 2]._seq_calib
             done.mode = "skip"
-            done.cached_inputs = deque()
+            # output_meta is intentionally kept: skip mode needs it to produce
+            # correctly shaped zero-filled outputs for the parent forward.
+            done.cached_inputs.clear()
 
         if layer_idx > 0:
             prev = self._decoder_layers[layer_idx - 1]._seq_calib
@@ -289,6 +304,10 @@ class LayerActivationCollector:
         computation beyond the target.
 
         :meth:`_patch_all_layers` must be called before this method.
+
+        Note: the model forward returns ``None`` for every batch during capture
+        (because ``_EarlyStopForwardError`` short-circuits the forward pass).
+        Callers should not rely on the model's return value within *forward_loop*.
         """
         if not self._patched:
             raise RuntimeError(
@@ -297,9 +316,16 @@ class LayerActivationCollector:
         layer_idx = self._layer_to_idx[layer]
         self._set_layer_states(layer_idx)
         self._log_layer_summary(layer_idx)
-        forward_loop(self.model)
 
         info = layer._seq_calib
+        try:
+            forward_loop(self.model)
+        except Exception:
+            # Reset the current layer so subsequent calls don't see stale state.
+            info.mode = "original"
+            info.collected_inputs = []
+            raise
+
         inputs = list(info.collected_inputs)
         # After capture, set to original so calib_func can call the layer's
         # real forward directly.  The layer will transition to run → skip

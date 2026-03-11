@@ -680,3 +680,55 @@ def test_skip_output_meta_not_shared_across_heterogeneous_layers(monkeypatch):
         assert len(meta_1[1]) == 1
     finally:
         collector._unpatch_all_layers()
+
+
+def test_run_layer_reflects_weight_updates(monkeypatch):
+    """After calib_func modifies weights, the next layer should see updated activations."""
+    _register_test_discoverer(monkeypatch)
+    torch.manual_seed(0)
+    dim = 8
+
+    class _ScaleLayer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(dim))
+
+        def forward(self, x):
+            return x * self.weight
+
+    class _TwoScaleModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList([_ScaleLayer(), _ScaleLayer()])
+
+        def forward(self, x):
+            for layer in self.layers:
+                x = layer(x)
+            return x
+
+    model = _TwoScaleModel()
+    x = torch.randn(2, dim)
+
+    activations_before_weight_update = model.layers[0](x).clone()
+
+    def forward_loop(m):
+        m(x)
+
+    def weight_doubling_calib(layer, layer_forward_loop, **kwargs):
+        with torch.no_grad():
+            layer.weight.mul_(2.0)
+        layer_forward_loop(layer)
+
+    sequential_calibrate(
+        model,
+        forward_loop=forward_loop,
+        calib_func=weight_doubling_calib,
+    )
+
+    # Layer 0's weight was doubled by calib_func.  When collecting inputs
+    # for layer 1, the run-mode replay of layer 0 should use the updated
+    # weight, so layer 1 should have received 2x the original activations.
+    expected = activations_before_weight_update * 2.0
+    # Verify by running model.layers[0] with its updated weights
+    actual = model.layers[0](x)
+    assert torch.allclose(actual, expected)

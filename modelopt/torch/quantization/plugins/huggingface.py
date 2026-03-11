@@ -1385,7 +1385,7 @@ def get_nemotron_h_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
     return None
 
 
-def is_homogenous_hf_model(model: nn.Module) -> bool:
+def is_homogeneous_hf_model(model: nn.Module) -> bool:
     if is_nemotron_h_model(model):
         return False
     decoder_layers = get_homogeneous_hf_decoder_layers(model)
@@ -1458,12 +1458,15 @@ AutoQuantizeGradientSearcher.register_custom_support(
     _is_param_grad_enabled_for_auto_quantize,
 )
 
+# Order matters: more specific predicates must be registered first because
+# the first matching entry wins.  Nemotron-H must precede the generic
+# homogeneous HF discoverer (which explicitly rejects Nemotron-H).
 LayerActivationCollector.register_decoder_layer_support(
     is_nemotron_h_model, get_nemotron_h_decoder_layers
 )
 
 LayerActivationCollector.register_decoder_layer_support(
-    is_homogenous_hf_model, get_homogeneous_hf_decoder_layers
+    is_homogeneous_hf_model, get_homogeneous_hf_decoder_layers
 )
 
 CUSTOM_MODEL_PLUGINS.update(

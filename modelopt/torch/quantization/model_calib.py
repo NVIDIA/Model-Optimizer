@@ -1850,21 +1850,17 @@ def sequential_calibrate(
     skip / run / capture strategy so that inter-layer logic in parent modules
     (e.g. mask construction) executes naturally without model-specific hooks.
     """
-    if not LayerActivationCollector.is_supported(model):
+    transformer_layers = LayerActivationCollector.get_decoder_layers(model)
+    if transformer_layers is None or len(transformer_layers) == 0:
         raise ValueError(
             "Could not find transformer layers in model. "
             "Sequential calibration requires a model with identifiable transformer layers."
         )
-    transformer_layers = LayerActivationCollector.get_decoder_layers(model)
-    assert transformer_layers is not None
 
     print_rank_0(f"Sequential calibration: Found {len(transformer_layers)} transformer layers")
-    if len(transformer_layers) == 0:
-        return
 
     input_getter = LayerActivationCollector(model)
-    # Patch all transformer layers with state aware module forward
-    input_getter._patch_all_layers()
+    input_getter._patch_all_layers(decoder_layers=transformer_layers)
 
     try:
         for layer_idx, layer in enumerate(transformer_layers):

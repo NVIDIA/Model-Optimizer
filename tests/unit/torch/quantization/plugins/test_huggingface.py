@@ -34,7 +34,7 @@ from modelopt.torch.quantization.activation_collector import LayerActivationColl
 from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry
 from modelopt.torch.quantization.plugins.huggingface import (
     get_homogeneous_hf_decoder_layers,
-    is_homogenous_hf_model,
+    is_homogeneous_hf_model,
 )
 
 pytest.importorskip("transformers")
@@ -207,20 +207,20 @@ def test_quantized_transformers_save_restore(tmp_path, model_cls, quant_config):
     tf_modelopt_state_and_output_tester(model_ref, model_test)
 
 
-def test_is_homogenous_hf_model_llama():
+def test_is_homogeneous_hf_model_llama():
     model = get_tiny_llama()
-    assert is_homogenous_hf_model(model)
+    assert is_homogeneous_hf_model(model)
 
 
-def test_is_homogenous_hf_model_gpt_oss():
+def test_is_homogeneous_hf_model_gpt_oss():
     model = get_tiny_gpt_oss(num_hidden_layers=1)
-    assert is_homogenous_hf_model(model)
+    assert is_homogeneous_hf_model(model)
 
 
 def test_hf_decoder_discoverer_registration_path():
     model = get_tiny_llama()
     assert any(
-        is_supported is is_homogenous_hf_model and discoverer is get_homogeneous_hf_decoder_layers
+        is_supported is is_homogeneous_hf_model and discoverer is get_homogeneous_hf_decoder_layers
         for is_supported, discoverer in LayerActivationCollector._decoder_layer_support
     )
     assert LayerActivationCollector.get_decoder_layers(model) is get_homogeneous_hf_decoder_layers(

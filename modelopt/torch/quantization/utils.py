@@ -26,7 +26,9 @@ from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
 from torch.distributed.tensor import Replicate
 
-from modelopt.torch.quantization.activation_collector import LayerActivationCollector  # noqa: F401
+from modelopt.torch.quantization.activation_collector import (
+    LayerActivationCollector,  # noqa: F401  # re-export
+)
 from modelopt.torch.utils import get_unwrapped_name, print_rank_0
 
 if TYPE_CHECKING:
