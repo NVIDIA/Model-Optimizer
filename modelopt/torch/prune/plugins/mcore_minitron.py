@@ -385,7 +385,6 @@ class MCoreMinitronSearcher(BaseSearcher):
         for m in self.model.modules():
             if isinstance(m, _DynamicMoELayer):
                 m._export_reinit_token_dispatcher()
-                break
 
     def search_best_arch_by_params(self) -> dict:
         """Search for the best architecture based on the given parameters constraints.
