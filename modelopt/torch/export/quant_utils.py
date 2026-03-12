@@ -737,7 +737,15 @@ def _prefix_wildcard_summarize_exclude_modules(unquantized_layers, quantized_lay
                 f"Unquantized layer {layer}, prefix wildcards {wildcards} identified as a new match"
             )
             break
-        res_summary.update(candidate_wildcards)
+        # When candidate is the pair [prefix, prefix+".*"], emit only prefix+".*" for deployment.
+        if len(candidate_wildcards) == 2:
+            a, b = sorted(candidate_wildcards, key=len)
+            if b == a + ".*":
+                res_summary.add(b)
+            else:
+                res_summary.update(candidate_wildcards)
+        else:
+            res_summary.update(candidate_wildcards)
     return res_summary
 
 
