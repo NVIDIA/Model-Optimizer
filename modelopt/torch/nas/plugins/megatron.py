@@ -664,10 +664,16 @@ class _DynamicMoELayer(DynamicModule):
 
     def forward(self, *args, **kwargs):
         """Forward pass for the MoE layer."""
-        # Dont allow forward if model is sorted / trimmed unless exported (reinitializing token dispatcher correctly)
-        if isinstance(self, DynamicModule) and (
-            self.get_hparam("num_moe_experts")._slice_order is not None
-            or self.get_hparam("num_moe_experts").active != self.get_hparam("num_moe_experts").max
+        # Dont allow forward if model is sorted / trimmed unless the token dispatcher has been
+        # reinitialized (via _export_reinit_token_dispatcher in _prune or export).
+        if (
+            isinstance(self, DynamicModule)
+            and not getattr(self, "_token_dispatcher_reinitialized", False)
+            and (
+                self.get_hparam("num_moe_experts")._slice_order is not None
+                or self.get_hparam("num_moe_experts").active
+                != self.get_hparam("num_moe_experts").max
+            )
         ):
             raise RuntimeError("Only run forward after exporting the pruned model")
         return super().forward(*args, **kwargs)
@@ -698,6 +704,9 @@ class _DynamicMoELayer(DynamicModule):
 
         if self.use_shared_expert and self.shared_expert_overlap:
             self.token_dispatcher.set_shared_experts(self.shared_experts)
+
+        # Allow forward after token dispatcher reinitialization
+        self._token_dispatcher_reinitialized = True
 
     def export(self) -> torch.nn.Module:
         """Export the dynamic module to a standard MoELayer."""
