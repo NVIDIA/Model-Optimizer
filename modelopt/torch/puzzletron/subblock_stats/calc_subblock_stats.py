@@ -19,11 +19,10 @@
 import dataclasses
 import json
 import os
-from collections.abc import Iterable
 from functools import partial
 from itertools import product
 from pathlib import Path
-from typing import TypeVar
+from typing import Iterable, Optional, Type, TypeVar
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -33,6 +32,10 @@ from immutabledict import immutabledict
 from omegaconf import DictConfig, ListConfig, OmegaConf
 from tqdm import tqdm
 
+from modelopt.torch.puzzletron.anymodel.model_descriptor import (
+    ModelDescriptor,
+    ModelDescriptorFactory,
+)
 from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
     AttentionConfig,
     BlockConfig,
@@ -56,6 +59,15 @@ from modelopt.torch.puzzletron.utils.parsing import format_global_config
 # Type variable for dataclasses
 T_DataClass = TypeVar("T_DataClass")
 
+"""
+Usage:
+python -m modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats PUZZLE_DIR [ --benchmark_iterations 1000 ]
+
+--benchmark_iterations=None (the default) means that the code won't use infery to benchmark runtime,
+  only memory stats will be calculated. If you want to benchmark runtime, run inside an infery-llm docker.
+
+"""
+
 
 def calculate_subblock_stats(
     calc_subblock_stats_config: DictConfig,
@@ -69,7 +81,7 @@ def calculate_subblock_stats(
     n_embd: int,
     n_head: int,
     vocab_size: int,
-    benchmark_iterations: int | None,
+    benchmark_iterations: Optional[int],
     use_cuda_graph: bool,
     weights_dtype: torch.dtype,
     activations_dtype: torch.dtype,
@@ -181,6 +193,7 @@ def calculate_subblock_stats(
         )
 
     if is_calc_runtime:
+        pass
         # TODO: fix
         # from puzzle_tools.calc_subblock_runtime import measure_non_block_runtime_ms
         # non_block_runtime_ms, embedding_runtime_ms, lm_head_runtime_ms = \
@@ -206,17 +219,21 @@ def calculate_subblock_stats(
 
 
 def launch_calc_subblock_stats(cfg: DictConfig) -> None:
-    """Launch the calc subblock stats function with Hydra configuration."""
+    """
+    Launch the calc subblock stats function with Hydra configuration.
+    """
     mprint(f"Calculating subblock stats for puzzle directory: {cfg.puzzle_dir}")
     mprint(f"Teacher directory: {cfg.teacher_dir}")
     mprint(
         f"Calc subblock stats config: {format_global_config(cfg.calc_subblock_stats, title='Calc subblock stats')}"
     )
 
+    descriptor = ModelDescriptorFactory.get(cfg.descriptor)
     calculate_subblock_stats_for_puzzle_dir(
         cfg.calc_subblock_stats,
         master_puzzle_dir=cfg.puzzle_dir,
         teacher_dir=cfg.teacher_dir,
+        descriptor=descriptor,
         model_hidden_sizes=cfg.calc_subblock_stats.get("model_hidden_sizes", OmegaConf.create([])),
         ffn_hidden_sizes=cfg.calc_subblock_stats.get("ffn_hidden_sizes", OmegaConf.create([])),
         batch_sizes=cfg.calc_subblock_stats.batch_sizes,
@@ -224,7 +241,7 @@ def launch_calc_subblock_stats(cfg: DictConfig) -> None:
         generation_seq_len=cfg.calc_subblock_stats.generation_seq_len,
         num_active_tokens_override=cfg.calc_subblock_stats.get("num_active_tokens_override", None),
         prefill_queue_size=cfg.calc_subblock_stats.prefill_queue_size,
-        allocate_prefill_query=cfg.calc_subblock_stats.allocate_prefill_query,
+        allocate_prefill_query=cfg.calc_subblock_stats.get("allocate_prefill_query", False),
         benchmark_iterations=cfg.calc_subblock_stats.get("benchmark_iterations", None),
         merge_with_existing_stats=cfg.calc_subblock_stats.merge_with_existing_stats,
         subblock_stats_filename=cfg.calc_subblock_stats.subblock_stats_filename,
@@ -236,6 +253,7 @@ def calculate_subblock_stats_for_puzzle_dir(
     calc_subblock_stats_config: DictConfig,
     master_puzzle_dir: Path | str,
     teacher_dir: Path | str,
+    descriptor: Type[ModelDescriptor],
     model_hidden_sizes: ListConfig,
     ffn_hidden_sizes: ListConfig,
     batch_sizes: Iterable[int] = (1, 8, 16, 32, 64, 128, 256),
@@ -268,6 +286,8 @@ def calculate_subblock_stats_for_puzzle_dir(
         Path(teacher_dir) if teacher_dir is not None else master_puzzle_dir / "ckpts" / "teacher"
     )
     model_config = load_model_config(teacher_dir)
+    # Get language model config for LM-specific attributes (VL models have nested config)
+    lm_config = descriptor.get_language_model_config(model_config)
     subblock_configs = _load_subblock_configs(master_puzzle_dir, ffn_hidden_sizes, model_config)
 
     subblock_stats_file = master_puzzle_dir / subblock_stats_filename
@@ -299,7 +319,7 @@ def calculate_subblock_stats_for_puzzle_dir(
     ]
 
     model_hidden_sizes = model_hidden_sizes + [
-        model_config.hidden_size
+        lm_config.hidden_size
     ]  # add a teacher model hidden size
     for batch_size, (
         weights_dtype,
@@ -323,8 +343,8 @@ def calculate_subblock_stats_for_puzzle_dir(
             generation_seq_len=generation_seq_len,
             prefill_queue_size=prefill_queue_size,
             n_embd=model_hidden_size,
-            n_head=model_config.num_attention_heads,
-            vocab_size=model_config.vocab_size,
+            n_head=lm_config.num_attention_heads,
+            vocab_size=lm_config.vocab_size,
             benchmark_iterations=curr_benchmark_iterations,
             use_cuda_graph=True,
             weights_dtype=weights_dtype,
@@ -445,7 +465,7 @@ def _load_subblock_configs_from_replacement_library(
     return subblock_configs
 
 
-T_DataClass: TypeVar = type[dataclasses.dataclass]
+T_DataClass: TypeVar = Type[dataclasses.dataclass]
 
 
 def _dataclass_from_dict(
@@ -483,7 +503,7 @@ def add_int8_runtime_estimates(subblock_stats: list[dict]) -> None:
                     if (subblock_config := curr_subblock.get("subblock_config")) is not None:
                         if hasattr(subblock_config, "__dataclass_fields__"):
                             subblock_config = dataclasses.asdict(subblock_config)
-                        is_attention = subblock_config.get("n_heads_in_group", None) is not None
+                        is_attention = subblock_config.get("num_key_value_heads", None) is not None
                     runtime_factor = attention_factor if is_attention else ffn_factor
                     for stat_name, stat_value in bf16_subblock.items():
                         if "runtime" in stat_name:
@@ -512,7 +532,10 @@ def _find_corresponding_bf16_stats(args: dict, subblock_stats: list[dict]) -> di
         stats
         for stats in subblock_stats
         if all(
-            [stats["args"][key] == corresponding_bf16_args[key] for key in corresponding_bf16_args]
+            [
+                stats["args"][key] == corresponding_bf16_args[key]
+                for key in corresponding_bf16_args.keys()
+            ]
         )
     ]
     if len(matching_bf16_stats) == 0:

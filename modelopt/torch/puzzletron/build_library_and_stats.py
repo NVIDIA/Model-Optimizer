@@ -14,7 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unified command that runs build_replacement_library followed by calc_subblock_stats.
+"""
+Unified command that runs build_replacement_library followed by calc_subblock_stats.
 
 This script combines the functionality of both commands into a single workflow:
 1. First, it builds the replacement library for the puzzle
@@ -28,17 +29,21 @@ The script uses the same Hydra configuration as the individual commands and supp
 all the same configuration parameters for both build_replacement_library and calc_subblock_stats.
 """
 
+import hydra
 from omegaconf import DictConfig
 
 from modelopt.torch.puzzletron.replacement_library.build_replacement_library import (
     launch_build_replacement_library,
 )
 from modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats import launch_calc_subblock_stats
+from modelopt.torch.puzzletron.tools.hydra_utils import register_hydra_resolvers
 from modelopt.torch.puzzletron.tools.logger import mprint
+from modelopt.torch.puzzletron.utils.parsing import format_global_config
 
 
 def launch_build_library_and_stats(cfg: DictConfig) -> None:
-    """Launch both build_replacement_library and calc_subblock_stats in sequence.
+    """
+    Launch both build_replacement_library and calc_subblock_stats in sequence.
 
     Args:
         cfg: Hydra configuration containing settings for both commands

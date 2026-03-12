@@ -126,7 +126,6 @@ def validate_model(
 
     Returns:
         A tuple containing:
-
         - losses: Dictionary mapping loss names to loss statistics (avg, per_sample).
         - hidden_states_per_batch: Hidden states and LM head outputs if return_hidden_states is True, else None.
 

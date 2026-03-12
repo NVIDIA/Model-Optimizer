@@ -28,24 +28,21 @@ from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
 )
 
 
-def calculate_kv_dim(n_heads_in_group: int, n_head: int, n_embd: int) -> int:
+def calculate_kv_dim(num_key_value_heads: int, n_head: int, n_embd: int) -> int:
     """Calculate the key-value dimension for grouped-query attention.
 
-    TODO: Consider a better place for this function.
-
     Args:
-        n_heads_in_group: Number of attention heads per key-value group.
+        num_key_value_heads: Number of key-value heads.
         n_head: Total number of attention heads.
         n_embd: Embedding dimension.
 
     Returns:
-        Combined dimension for key and value tensors (2 * n_kv_heads * head_size).
+        Combined dimension for key and value tensors (2 * num_key_value_heads * head_size).
     """
-    if n_heads_in_group is None:
+    if num_key_value_heads is None:
         return 0
-    n_kv_heads = n_head // n_heads_in_group
     head_size = n_embd // n_head
-    kv_dim = 2 * n_kv_heads * head_size
+    kv_dim = 2 * num_key_value_heads * head_size
     return kv_dim
 
 
@@ -53,7 +50,6 @@ def raise_unknown_subblock_config_error(subblock_config: Any) -> None:
     """Raise an error for invalid subblock configuration types.
 
     TODO: Consider a better place for this function.
-
     Args:
         subblock_config: The invalid subblock configuration object.
 
@@ -69,7 +65,6 @@ def sizeof_dtype(dtype: torch.dtype) -> int | float:
     """Return the size in bytes of the given data type.
 
     TODO: Consider a better place for this function.
-
     Args:
         dtype: PyTorch data type or custom type string (e.g., 'nvfp4').
 
@@ -125,10 +120,10 @@ def solution_to_str(block_configs: list[dict[str, Any] | BlockConfig]) -> str:
 
 
 def block_config_to_str(block_config: BlockConfig | dict[str, Any] | None) -> str | None:
-    """Convert a BlockConfig to a human-readable string representation.
+    """
+    Convert a BlockConfig to a human-readable string representation.
 
     TODO: Consider a better place for this function.
-
     Args:
         block_config: BlockConfig dataclass or dict containing attention and ffn configs.
 
@@ -153,7 +148,6 @@ def subblock_config_to_str(
     """Convert a subblock config (FFN, Attention, Mamba, or MoE) to string.
 
     TODO: Consider a better place for this function.
-
     Args:
         subblock_config: FFNConfig, AttentionConfig dataclass or dict.
         subblock_name: Name of subblock ('ffn', 'attention', 'mamba', 'moe').
@@ -161,7 +155,7 @@ def subblock_config_to_str(
 
     Returns:
         Formatted string showing subblock type and key parameters (e.g., intermediate_size,
-        n_heads_in_group), or None if input is None.
+        num_key_value_heads), or None if input is None.
     """
     if subblock_config is None:
         return None
@@ -194,8 +188,8 @@ def subblock_config_to_str(
         intermediate_size = subblock_config["intermediate_size"]
         rep += f"  intermediate_{intermediate_size}".ljust(8)
     elif subblock_name == "attention":
-        n_heads_in_group = subblock_config["n_heads_in_group"]
-        rep += f"  gqa_{n_heads_in_group}".ljust(8)
+        num_key_value_heads = subblock_config["num_key_value_heads"]
+        rep += f"  kv_heads_{num_key_value_heads}".ljust(8)
     elif subblock_name == "mamba":
         mamba_num_heads = subblock_config["mamba"]["num_heads"]
         mamba_head_dim = subblock_config["mamba"]["head_dim"]
@@ -216,7 +210,8 @@ def subblock_config_to_str(
 
 class EmptyInitOnDevice(torch.overrides.TorchFunctionMode):
     def __init__(self, device=None, dtype=None):
-        """Create tensors with given device and dtype and don't run initialization
+        """
+        Create tensors with given device and dtype and don't run initialization
            (but instead use "empty tensors", i.e. uninitialized memory).
 
             device: `torch.device` to work with
@@ -225,8 +220,8 @@ class EmptyInitOnDevice(torch.overrides.TorchFunctionMode):
         Example::
             with EmptyInitOnDevice("cuda", dtype=torch.bfloat16):
                 model = LLaMA(model_config)
-            model.load_state_dict(torch.load("llama-lit/7B/lit-llama.pth"))
-        """
+            model.load_state_dict(torch.load("llama-lit/7B/lit-llama.pth"))"""
+
         self.device = device
         self.dtype = dtype
 

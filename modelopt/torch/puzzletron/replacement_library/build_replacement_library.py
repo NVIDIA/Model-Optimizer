@@ -12,17 +12,29 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""This module constructs the replacement library JSON files from a puzzle directory containing
+"""
+This module constructs the replacement library JSON files from a puzzle directory containing
 multiple trained model checkpoints. It analyzes checkpoints to extract unique block and subblock
 configurations, builds a library of available replacements, and generates solutions for layer
 replacement in compressed models. The resulting replacement library can then be used by
 ReplacementLibrary to efficiently load models with mixed teacher/student layers.
+
+Standard Puzzle Usage:
+======================
+python -m modelopt.torch.puzzletron.replacement_library.build_replacement_library PUZZLE_DIR
+
+Teacher checkpoint dir is assumed to be inside PUZZLE_DIR/ckpts/teacher (symlink is recommended)
+though you can supply an explicit --teacher_checkpoint_dir.
+
+--add_ffn_no_ops and --add_attention_no_ops are optional (default True),
+
+
 """
 # mypy: ignore-errors
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Type
 
 import pandas as pd
 from omegaconf import DictConfig
@@ -57,7 +69,8 @@ def build_replacement_library(
     add_ffn_no_ops: bool = True,
     add_attention_no_ops: bool = True,
 ) -> None:
-    """For normal puzzle runs, use default values.
+    """
+    For normal puzzle runs, use default values.
     For advanced use cases, see the Usage section.
     """
     master_puzzle_dir = Path(master_puzzle_dir)
@@ -90,7 +103,9 @@ def build_replacement_library(
 
 
 def launch_build_replacement_library(cfg: DictConfig) -> None:
-    """Launch the build replacement library function with Hydra configuration."""
+    """
+    Launch the build replacement library function with Hydra configuration.
+    """
     mprint(f"Building replacement library for puzzle directory: {cfg.puzzle_dir}")
     mprint(f"Teacher directory: {cfg.teacher_dir}")
     mprint(
@@ -113,8 +128,8 @@ def infer_teacher_dir(
         teacher_checkpoint_dir = Path(master_puzzle_dir) / CHECKPOINTS_DIR_NAME / "teacher"
         if not teacher_checkpoint_dir.exists():
             raise ValueError(
-                "You must either provide the --teacher_checkpoint_dir argument, or create a link to the "
-                "teacher dir under '{PUZZLE_DIR}/ckpts'."
+                f"You must either provide the --teacher_checkpoint_dir argument, or create a link to the "
+                f"teacher dir under '{{PUZZLE_DIR}}/ckpts'."
             )
     teacher_checkpoint_dir = Path(teacher_checkpoint_dir).resolve().absolute()
     return teacher_checkpoint_dir
@@ -362,7 +377,7 @@ def _add_no_op_subblock_rows(
 
 def _get_rows_with_no_op_subblock(
     subblocks_df: pd.DataFrame, no_op_subblock: str
-) -> tuple[pd.DataFrame, type[AttentionConfig] | type[FFNConfig]]:
+) -> tuple[pd.DataFrame, Type[AttentionConfig] | Type[FFNConfig]]:
     other_subblock = "ffn" if no_op_subblock == "attention" else "attention"
     subblock_cls = AttentionConfig if no_op_subblock == "attention" else FFNConfig
     no_op_subblock_config = subblock_cls(no_op=True)
