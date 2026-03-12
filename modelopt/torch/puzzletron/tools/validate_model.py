@@ -86,8 +86,7 @@ def validate_model(
         args: Configuration object containing the following attributes:
 
             Model Configuration:
-            - model_name_or_path (str): Path to model checkpoint or HuggingFace model name.
-                                        Required unless model is passed directly.
+            - model_name_or_path (str): Path to model checkpoint or HuggingFace model name. Required unless model is passed directly.
             - model_dtype (str or torch.dtype): Model data type (e.g., "torch.bfloat16", torch.float16).
             - autocast_dtype (str or torch.dtype): Autocast data type for mixed precision.
 
@@ -111,10 +110,8 @@ def validate_model(
             - fim_spm_rate (float): SPM-based fill-in-the-middle rate.
 
             Activation Hooks:
-            - activations_log_dir (str, optional): Directory to log activation scores. If provided,
-                                                   hooks will be registered to capture activations.
-            - activation_hooks_kwargs (str or dict, optional): Arguments for activation hooks.
-                                                               If string, comma-separated format: "arg1=val1,arg2=val2".
+            - activations_log_dir (str, optional): Directory to log activation scores. If provided, hooks will be registered to capture activations.
+            - activation_hooks_kwargs (str or dict, optional): Arguments for activation hooks. If string, comma-separated format: "arg1=val1,arg2=val2".
 
             Execution Options:
             - calc_losses_on_cpu (bool): Calculate losses on CPU to avoid OOM. Very slow, not recommended.
@@ -124,8 +121,7 @@ def validate_model(
         tokenizer: Pre-loaded tokenizer. If None, will be loaded based on args.
         target_hidden_states_per_batch: Target hidden states for pipeline parallel evaluation.
         return_hidden_states: Whether to return hidden states from the model.
-        calculate_full_score_ablations: Calculate comprehensive teacher similarity scores.
-                                         False calculates only a small suite for efficiency.
+        calculate_full_score_ablations: Calculate comprehensive teacher similarity scores. False calculates only a small suite for efficiency.
         val_dataloader: Pre-created validation dataloader. If None, will be created from args.
 
     Returns:
