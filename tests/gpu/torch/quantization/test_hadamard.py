@@ -63,7 +63,9 @@ def test_hadamard_transform_block(dim, block_size):
     xxt = x @ x.T
     x_h = normalized_hadamard_transform(x, block_size=block_size)
     xxt_h = x_h @ x_h.T
-    assert torch.allclose(xxt_h, xxt, atol=0.05)
+    # Use rtol instead of atol: float32 accumulated error scales with value magnitude,
+    # which grows with dim. 1e-3 relative tolerance is appropriate for float32 block RHT.
+    assert torch.allclose(xxt_h, xxt, rtol=1e-3, atol=0.0)
 
 
 @pytest.mark.parametrize(
