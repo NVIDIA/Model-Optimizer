@@ -26,28 +26,12 @@ from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
 from torch.distributed.tensor import Replicate
 
-from modelopt.torch.quantization.activation_collector import (
-    LayerActivationCollector,  # noqa: F401  # re-export
-)
+
 from modelopt.torch.utils import get_unwrapped_name, print_rank_0
 
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-__all__ = [
-    "EXPORT_MODE",
-    "convert_quantization_axis_to_reduce_axis",
-    "export_torch_mode",
-    "is_quantized",
-    "is_quantized_column_parallel_linear",
-    "is_quantized_linear",
-    "is_quantized_row_parallel_linear",
-    "reduce_amax",
-    "reduce_sum",
-    "replace_function",
-    "update_quant_cfg_with_kv_cache_quant",
-    "weight_attr_names",
-]
 
 
 def reduce_block_amax(input_tensor: torch.Tensor, block_sizes: dict):
@@ -225,7 +209,7 @@ def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
     - The standard weight attribute (e.g. nn.Linear).
     - The custom `weight_attr_name`. (e.g. Llama4TextExperts has weight attributes `gate_up_proj` and `down_proj`)
     """
-    from .nn import SequentialQuantizer, TensorQuantizer
+    from ..nn import SequentialQuantizer, TensorQuantizer
 
     # the standard weight and quantizer case
     weight = getattr(module, "weight", None)
@@ -274,14 +258,14 @@ def quantizer_attr_names(weight_name: str = "weight") -> QuantizerAttrNames:
 
 def is_quantized(module):
     """Check if a module is quantized."""
-    from .nn import TensorQuantizer
+    from ..nn import TensorQuantizer
 
     return any(isinstance(_module, TensorQuantizer) for _module in module.modules())
 
 
 def is_quantized_linear(module):
     """Check if a module is a quantized linear module."""
-    from .nn import QuantModule, TensorQuantizer
+    from ..nn import QuantModule, TensorQuantizer
 
     return (
         isinstance(module, QuantModule)
@@ -500,7 +484,7 @@ def enable_weight_access_and_writeback(module, root_model, name_to_module: dict 
         # HF transformers TP sharded linear layer
         context = module.enable_weight_access_and_writeback()
     elif hasattr(module, "_hf_hook"):
-        from .plugins.accelerate import weight_access_and_writeback_context
+        from ..plugins.accelerate import weight_access_and_writeback_context
 
         context = weight_access_and_writeback_context(module)
     else:
@@ -514,7 +498,7 @@ def get_quantizer_state_dict(model: nn.Module):
     """Get the state dict of the quantizers in the model."""
     # We should not call model.state_dict() here.
     # With FSDP, model.state_dict() will hang if it is not called from all processes
-    from .nn import TensorQuantizer
+    from ..nn import TensorQuantizer
 
     quantizer_state_dict = {}
     for name, module in model.named_modules():
@@ -525,7 +509,7 @@ def get_quantizer_state_dict(model: nn.Module):
 
 def set_quantizer_state_dict(model: nn.Module, quantizer_state_dict: dict):
     """Set the state dict of the quantizers in the model."""
-    from .nn import TensorQuantizer
+    from ..nn import TensorQuantizer
 
     for name, module in model.named_modules():
         key = get_unwrapped_name(name, model)

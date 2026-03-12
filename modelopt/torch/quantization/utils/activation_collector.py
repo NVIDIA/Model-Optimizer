@@ -75,9 +75,13 @@ class LayerActivationCollector:
     """
 
     # Global registry of (predicate, discoverer) pairs. Populated at import time
-    # by plugins (e.g. huggingface.py). Order matters: the first matching entry wins,
-    # so more specific predicates (e.g. Nemotron-H) must be registered before
-    # generic ones (e.g. homogeneous HF models).
+    # by plugins (e.g. huggingface.py, megatron.py). Order matters: the first
+    # matching entry wins, so more specific predicates (e.g. Nemotron-H) must be
+    # registered before generic ones (e.g. homogeneous HF models).
+    #
+    # This is intentionally a mutable class variable shared across all instances:
+    # plugins register once at import time, and the registry is read-only after
+    # that.  register_decoder_layer_support() guards against duplicate entries.
     _decoder_layer_support: list[tuple[Any, Any]] = []
     _LAYER_ATTR = "_seq_calib"
 
@@ -149,6 +153,8 @@ class LayerActivationCollector:
             return tuple(LayerActivationCollector._zeros_from_meta(m) for m in meta[1])
         if tag == "list":
             return [LayerActivationCollector._zeros_from_meta(m) for m in meta[1]]
+        # "other" values are expected to be lightweight (e.g. None, small scalars);
+        # deepcopy is used defensively to avoid aliasing the stored metadata.
         return copy.deepcopy(meta[1])
 
     # ------------------------------------------------------------------

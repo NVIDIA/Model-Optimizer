@@ -16,11 +16,11 @@
 import pytest
 import torch
 
-from modelopt.torch.quantization.activation_collector import LayerActivationCollector
 from modelopt.torch.quantization.utils import (
     convert_quantization_axis_to_reduce_axis,
     reduce_block_amax,
 )
+from modelopt.torch.quantization.utils.activation_collector import LayerActivationCollector
 
 
 @pytest.mark.parametrize(

@@ -28,7 +28,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 from modelopt.torch.opt.searcher import ForwardLoop
-from modelopt.torch.quantization.activation_collector import LayerActivationCollector
+from modelopt.torch.quantization.utils.activation_collector import LayerActivationCollector
 from modelopt.torch.utils import print_rank_0
 from modelopt.torch.utils.distributed import DistributedProcessGroup, ParallelState
 from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
@@ -1850,6 +1850,12 @@ def sequential_calibrate(
     skip / run / capture strategy so that inter-layer logic in parent modules
     (e.g. mask construction) executes naturally without model-specific hooks.
     """
+    if forward_loop is None:
+        raise ValueError(
+            "forward_loop must not be None for sequential calibration. "
+            "Please provide a valid forward_loop callable."
+        )
+
     transformer_layers = LayerActivationCollector.get_decoder_layers(model)
     if transformer_layers is None or len(transformer_layers) == 0:
         raise ValueError(

@@ -21,8 +21,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from modelopt.torch.quantization.activation_collector import LayerActivationCollector
 from modelopt.torch.quantization.model_calib import sequential_calibrate
+from modelopt.torch.quantization.utils.activation_collector import LayerActivationCollector
 
 
 class _DecoderBlock(nn.Module):
@@ -210,6 +210,17 @@ def test_collector_cleanup_on_forward_loop_error(monkeypatch):
 
 
 # sequential_calibrate tests
+def test_seq_calib_raises_on_none_forward_loop(monkeypatch):
+    _register_test_discoverer(monkeypatch)
+    model, data = _make_model_and_data(n_layers=2)
+    with pytest.raises(ValueError, match="forward_loop must not be None"):
+        sequential_calibrate(
+            model,
+            forward_loop=None,
+            calib_func=lambda *a, **kw: None,
+        )
+
+
 def test_seq_calib_raises_on_unrecognized_model():
     model = _FlatMLP()
     with pytest.raises(ValueError, match="Could not find transformer layers"):
