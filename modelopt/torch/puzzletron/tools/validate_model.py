@@ -85,13 +85,12 @@ def validate_model(
     Args:
         args: Configuration object containing the following attributes:
 
-            Model Configuration:
-            - model_name_or_path (str): Path to model checkpoint or HuggingFace model name.
-                                        Required unless model is passed directly.
+            **Model Configuration:**
+            - model_name_or_path (str): Path to model checkpoint or HuggingFace model name. Required unless model is passed directly.
             - model_dtype (str or torch.dtype): Model data type (e.g., "torch.bfloat16", torch.float16).
             - autocast_dtype (str or torch.dtype): Autocast data type for mixed precision.
 
-            Dataset Configuration:
+            **Dataset Configuration:**
             - dataset_path (str): Path to the validation dataset.
             - tokenizer_name (str, optional): Tokenizer name/path. Uses model_name_or_path if not specified.
             - data_column (str): Column name in dataset containing text data.
@@ -101,7 +100,7 @@ def validate_model(
             - source_datasets_to_discard (list[str], optional): List of source datasets to exclude.
             - load_dataset_fn (callable, optional): Custom function to load the dataset.
 
-            Data Processing:
+            **Data Processing:**
             - micro_batch_size (int): Batch size for evaluation.
             - seed (int): Random seed for reproducibility.
             - shuffle_seed (int, optional): Seed for shuffling data. Uses seed if None.
@@ -110,13 +109,11 @@ def validate_model(
             - fim_rate (float): Fill-in-the-middle rate for code completion tasks.
             - fim_spm_rate (float): SPM-based fill-in-the-middle rate.
 
-            Activation Hooks:
-            - activations_log_dir (str, optional): Directory to log activation scores. If provided,
-                                                   hooks will be registered to capture activations.
-            - activation_hooks_kwargs (str or dict, optional): Arguments for activation hooks.
-                                                               If string, comma-separated format: "arg1=val1,arg2=val2".
+            **Activation Hooks:**
+            - activations_log_dir (str, optional): Directory to log activation scores. If provided, hooks will be registered to capture activations.
+            - activation_hooks_kwargs (str or dict, optional): Arguments for activation hooks. If string, comma-separated format: "arg1=val1,arg2=val2".
 
-            Execution Options:
+            **Execution Options:**
             - calc_losses_on_cpu (bool): Calculate losses on CPU to avoid OOM. Very slow, not recommended.
             - write_results (bool): Write validation results to file.
 
@@ -124,14 +121,15 @@ def validate_model(
         tokenizer: Pre-loaded tokenizer. If None, will be loaded based on args.
         target_hidden_states_per_batch: Target hidden states for pipeline parallel evaluation.
         return_hidden_states: Whether to return hidden states from the model.
-        calculate_full_score_ablations: Calculate comprehensive teacher similarity scores.
-                                         False calculates only a small suite for efficiency.
+        calculate_full_score_ablations: Calculate comprehensive teacher similarity scores. False calculates only a small suite for efficiency.
         val_dataloader: Pre-created validation dataloader. If None, will be created from args.
 
     Returns:
         A tuple containing:
+
         - losses: Dictionary mapping loss names to loss statistics (avg, per_sample).
         - hidden_states_per_batch: Hidden states and LM head outputs if return_hidden_states is True, else None.
+
         Returns (None, None) if not on master rank.
     """
     descriptor = ModelDescriptorFactory.get(args.descriptor)
