@@ -1215,13 +1215,174 @@ def onnx_type_str_to_enum(dtype: str) -> int:
     return getattr(onnx.TensorProto, dtype)
 
 
-def remove_redundant_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
-    """Removes redundant Cast nodes from an ONNX model.
+def get_cast_to_type(cast_node: onnx.NodeProto) -> int:
+    """Get the target type from a Cast node.
 
-    Handles three patterns:
-    1. Same-type casts: Cast where input type == output type (no-op)
-    2. Sequential casts: Cast(to=high_prec) -> Cast(to=low_prec), first cast removed
-    3. Constant->Cast folding: Fold cast into preceding Constant node's data
+    Args:
+        cast_node: The Cast node to extract type from.
+
+    Returns:
+        int: The target type value from the Cast node's 'to' attribute.
+
+    Raises:
+        ValueError: If the Cast node does not have a 'to' attribute.
+    """
+    for attr in cast_node.attribute:
+        if attr.name == "to":
+            return attr.i
+    raise ValueError("Cast node does not have 'to' attribute")
+
+
+def get_consumer_nodes(model: onnx.ModelProto, tensor_name: str) -> list[onnx.NodeProto]:
+    """Get all consumer nodes for a given tensor name.
+
+    Args:
+        model: The ONNX model to search.
+        tensor_name: Name of the tensor to find consumers for.
+
+    Returns:
+        list[onnx.NodeProto]: List of nodes that consume the tensor.
+    """
+    return [n for n in model.graph.node if tensor_name in n.input]
+
+
+def get_producer_nodes(model: onnx.ModelProto, tensor_name: str) -> list[onnx.NodeProto]:
+    """Get all producer nodes for a given tensor name.
+
+    Args:
+        model: The ONNX model to search.
+        tensor_name: Name of the tensor to find producers for.
+
+    Returns:
+        list[onnx.NodeProto]: List of nodes that produce the tensor.
+    """
+    return [n for n in model.graph.node if tensor_name in n.output]
+
+
+def _get_tensor_type_by_name(model: onnx.ModelProto, tensor_name: str):
+    """Get the tensor element type. Searches value_info, initializers, inputs, and outputs."""
+    for vi in model.graph.value_info:
+        if vi.name == tensor_name:
+            return vi.type.tensor_type.elem_type
+    for init in model.graph.initializer:
+        if init.name == tensor_name:
+            return init.data_type
+    for inp in model.graph.input:
+        if inp.name == tensor_name:
+            return inp.type.tensor_type.elem_type
+    for out in model.graph.output:
+        if out.name == tensor_name:
+            return out.type.tensor_type.elem_type
+    raise Exception(f"did not find tensor {tensor_name}")
+
+
+def _replace_tensor_name(
+    consumers: list[onnx.NodeProto], original_tensor_name: str, new_tensor_name: str
+) -> None:
+    """Replace occurrences of a tensor name in the given consumers' inputs with a new tensor name."""
+    for consumer in consumers:
+        for idx, inp in enumerate(consumer.input):
+            if inp == original_tensor_name:
+                consumer.input[idx] = new_tensor_name
+
+
+def _is_same_type_cast(model: onnx.ModelProto, node: onnx.NodeProto) -> bool:
+    assert node.op_type == "Cast"
+    input_types = [_get_tensor_type_by_name(model, inp) for inp in node.input]
+    output_type = get_cast_to_type(node)
+    return all(inp_type == output_type for inp_type in input_types) and input_types is not None
+
+
+def _is_sequential_cast(model: onnx.ModelProto, node: onnx.NodeProto) -> bool:
+    assert node.op_type == "Cast"
+    output_type = get_cast_to_type(node)
+
+    # Cast to high precision -> cast to low precision, first cast has no impact and can be safely removed
+    # Cast to low precision -> cast to high precision affects precision and should not be removed
+    precision_order = [
+        onnx.TensorProto.DOUBLE,
+        onnx.TensorProto.FLOAT,
+        onnx.TensorProto.FLOAT16,
+        onnx.TensorProto.BFLOAT16,
+    ]
+    consumers = [n for n in get_consumer_nodes(model, node.output[0]) if n.op_type == "Cast"]
+
+    # If the first cast has additional consumers, we should not remove it
+    if len(consumers) != 1:
+        return False
+
+    next_node = consumers[0]
+    first_cast_type = output_type
+    second_cast_type = get_cast_to_type(next_node)
+
+    return (
+        first_cast_type in precision_order
+        and second_cast_type in precision_order
+        and precision_order.index(first_cast_type) <= precision_order.index(second_cast_type)
+    )
+
+
+def _bypass_cast_node(model: onnx.ModelProto, node: onnx.NodeProto) -> None:
+    # handling only a single input and output, as we only remove cast nodes
+    assert len(node.input) == 1
+    assert len(node.output) == 1
+
+    input_tensor = node.input[0]
+    output_tensor = node.output[0]
+
+    # Check if the cast output is also a graph output
+    is_output_producer = any(output.name == output_tensor for output in model.graph.output)
+
+    # If the removed cast node is producing a network output, update the producer of the cast input so
+    # the network output name is preserved.
+    if is_output_producer:
+        producers = get_producer_nodes(model, input_tensor)
+        for producer in producers:
+            for i, prod_out in enumerate(producer.output):
+                if prod_out == input_tensor:
+                    producer.output[i] = output_tensor
+                    consumers = get_consumer_nodes(model, prod_out)
+                    if len(consumers) > 1:
+                        _replace_tensor_name(consumers, prod_out, output_tensor)
+    else:
+        # Reconnect consumers of the cast output to use the cast input instead
+        consumers = get_consumer_nodes(model, output_tensor)
+        for consumer in consumers:
+            for i, input_name in enumerate(consumer.input):
+                if input_name == output_tensor:
+                    consumer.input[i] = input_tensor
+
+
+def _is_foldable_constant_cast_pattern(model: onnx.ModelProto, node: onnx.NodeProto) -> bool:
+    """Check if a Constant -> Cast pattern can be folded."""
+    assert node.op_type == "Cast"
+    cast_producers = get_producer_nodes(model, node.input[0])
+    if len(cast_producers) == 1 and cast_producers[0].op_type == "Constant":
+        consumers = get_consumer_nodes(model, cast_producers[0].output[0])
+        return len(consumers) == 1
+    return False
+
+
+def _convert_constant_values(constant_node: onnx.NodeProto, cast_node: onnx.NodeProto) -> None:
+    """Convert the Constant node's values to the Cast node's target type."""
+    cast_to_type = get_cast_to_type(cast_node)
+    for attr in constant_node.attribute:
+        if attr.name == "value" and attr.type == onnx.AttributeProto.TENSOR:
+            np_array = onnx.numpy_helper.to_array(attr.t)
+            target_np_type = onnx.helper.tensor_dtype_to_np_dtype(cast_to_type)
+            new_array = np_array.astype(target_np_type)
+            new_tensor = onnx.numpy_helper.from_array(new_array, attr.t.name)
+            attr.t.CopyFrom(new_tensor)
+            break
+
+
+def remove_redundant_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
+    """Removes both sequential casts and casts that don't change precision.
+
+    This method optimizes the graph by removing unnecessary cast operations that either:
+    1. Don't actually change the data type
+    2. Could be replaced by a single cast operation
+    3. Can be folded into a preceding Constant node
 
     Args:
         onnx_model: The ONNX model to optimize.
@@ -1229,94 +1390,37 @@ def remove_redundant_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
     Returns:
         onnx.ModelProto: Model with redundant casts removed.
     """
-    import ml_dtypes
-
-    graph = gs.import_onnx(onnx_model)
-    removed_count = 0
-
-    # Precision ordering: lower index = higher precision
-    precision_order = {
-        onnx.TensorProto.DOUBLE: 0,
-        onnx.TensorProto.FLOAT: 1,
-        onnx.TensorProto.FLOAT16: 2,
-        onnx.TensorProto.BFLOAT16: 3,
-    }
-
-    def _get_onnx_type(tensor):
-        """Get ONNX type enum from a GS tensor's dtype."""
-        if tensor.dtype is None:
-            return None
-        try:
-            return onnx.helper.np_dtype_to_tensor_dtype(tensor.dtype)
-        except Exception:
-            return None
-
-    def _bypass_cast(node):
-        """Reconnect consumers of cast output to use cast input, removing the cast."""
-        inp = node.inputs[0]
-        out = node.outputs[0]
-        for consumer in list(out.outputs):
-            for i, consumer_inp in enumerate(consumer.inputs):
-                if consumer_inp is out:
-                    consumer.inputs[i] = inp
-        for i, graph_out in enumerate(graph.outputs):
-            if graph_out is out:
-                graph.outputs[i] = inp
-        node.outputs.clear()
-
-    for node in list(graph.nodes):
-        if node.op != "Cast":
-            continue
-
-        cast_to = node.attrs.get("to")
-        if cast_to is None:
-            continue
-
-        input_tensor = node.inputs[0]
-        output_tensor = node.outputs[0]
-
-        # Pattern 1: Same-type cast (no-op)
-        input_type = _get_onnx_type(input_tensor)
-        if input_type is not None and input_type == cast_to:
-            _bypass_cast(node)
-            removed_count += 1
-            logger.debug(f"Removed same-type cast: {node.name}")
-            continue
-
-        # Pattern 2: Sequential casts where first can be removed
-        # Cast(to=high) -> Cast(to=low): first cast has no effect
-        cast_consumers = output_tensor.outputs
-        if len(cast_consumers) == 1 and cast_consumers[0].op == "Cast":
-            next_cast_to = cast_consumers[0].attrs.get("to")
-            if (
-                cast_to in precision_order
-                and next_cast_to in precision_order
-                and precision_order[cast_to] <= precision_order[next_cast_to]
-            ):
-                _bypass_cast(node)
-                removed_count += 1
-                logger.debug(f"Removed sequential cast: {node.name}")
+    nodes_to_remove = []
+    for node in onnx_model.graph.node:
+        if node.op_type == "Cast":
+            # Find cast nodes that don't change precision
+            if _is_same_type_cast(onnx_model, node):
+                nodes_to_remove.append(node)
+                _bypass_cast_node(onnx_model, node)
+                logger.debug(f"Found redundant same-type cast: {node.name}")
                 continue
 
-        # Pattern 3: Constant -> Cast folding (only if constant has single consumer)
-        if isinstance(input_tensor, Constant) and len(input_tensor.outputs) == 1:
-            try:
-                if cast_to == onnx.TensorProto.BFLOAT16:
-                    input_tensor.values = input_tensor.values.astype(ml_dtypes.bfloat16)
-                else:
-                    cast_dtype = onnx.helper.tensor_dtype_to_np_dtype(cast_to)
-                    input_tensor.values = input_tensor.values.astype(cast_dtype)
-                _bypass_cast(node)
-                removed_count += 1
-                logger.debug(f"Folded Constant->Cast: {node.name}")
-            except Exception as e:
-                logger.debug(f"Failed to fold Constant->Cast {node.name}: {e}")
+            # Find sequential casts that don't change precision
+            if _is_sequential_cast(onnx_model, node):
+                nodes_to_remove.append(node)
+                _bypass_cast_node(onnx_model, node)
+                logger.debug(f"Found removable double-cast: {node.name}")
 
-    if removed_count > 0:
-        graph.cleanup().toposort()
-        logger.info(f"Removed {removed_count} redundant Cast nodes")
+            # Find foldable Constant -> Cast. Initializers are handled by _convert_initializers.
+            if _is_foldable_constant_cast_pattern(onnx_model, node):
+                nodes_to_remove.append(node)
+                cast_producers = get_producer_nodes(onnx_model, node.input[0])
+                assert len(cast_producers) == 1 and cast_producers[0].op_type == "Constant"
+                constant_producer = cast_producers[0]
+                _convert_constant_values(constant_producer, node)
+                _bypass_cast_node(onnx_model, node)
+                logger.debug(f"Found foldable Constant->Cast pattern, removing {node.name}")
 
-    return gs.export_onnx(graph)
+    logger.debug(f"Removing redundant casts: {[n.name for n in nodes_to_remove]}")
+    for node in nodes_to_remove:
+        onnx_model.graph.node.remove(node)
+
+    return onnx_model
 
 
 def remove_node_training_mode(onnx_model: onnx.ModelProto, node_op_type: str) -> onnx.ModelProto:

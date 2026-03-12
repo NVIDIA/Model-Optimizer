@@ -130,7 +130,7 @@ class GraphSanitizer:
         """Remove disconnected outputs from the model."""
         tensors_to_remove = []
         for tensor in self.model.graph.output:
-            if not utils.get_producer_nodes(self.model, tensor.name):
+            if not onnx_utils.get_producer_nodes(self.model, tensor.name):
                 tensors_to_remove.append(tensor)
                 logger.debug(f"Found disconnected output: {tensor.name}")
 
@@ -279,7 +279,7 @@ class GraphSanitizer:
             # Find variance computation branch
             pow_nodes = [
                 n
-                for n in utils.get_consumer_nodes(self.model, sub_node.output[0])
+                for n in onnx_utils.get_consumer_nodes(self.model, sub_node.output[0])
                 if n.op_type == "Pow"
             ]
             if len(pow_nodes) != 1:
@@ -303,8 +303,8 @@ class GraphSanitizer:
 
             # Find Div node
             # Find the Div node that consumes both sqrt and sub outputs
-            sqrt_consumers = utils.get_consumer_nodes(self.model, sqrt_node.output[0])
-            sub_consumers = utils.get_consumer_nodes(self.model, sub_node.output[0])
+            sqrt_consumers = onnx_utils.get_consumer_nodes(self.model, sqrt_node.output[0])
+            sub_consumers = onnx_utils.get_consumer_nodes(self.model, sub_node.output[0])
 
             div_nodes = [n for n in sqrt_consumers if n in sub_consumers and n.op_type == "Div"]
             if len(div_nodes) != 1:
@@ -342,14 +342,14 @@ class GraphSanitizer:
                 div_node,
             ]
 
-            consumers = utils.get_consumer_nodes(self.model, div_node.output[0])
+            consumers = onnx_utils.get_consumer_nodes(self.model, div_node.output[0])
             if len(consumers) == 1 and consumers[0].op_type == "Mul":
                 mul_node = consumers[0]
                 scale = self._get_initializer_value(mul_node.input[1], return_array=True)
                 final_node = mul_node
                 nodes_to_remove.append(mul_node)
 
-                consumers = utils.get_consumer_nodes(self.model, mul_node.output[0])
+                consumers = onnx_utils.get_consumer_nodes(self.model, mul_node.output[0])
                 if len(consumers) == 1 and consumers[0].op_type == "Add":
                     add_node = consumers[0]
                     bias = self._get_initializer_value(add_node.input[1], return_array=True)
@@ -457,7 +457,7 @@ class GraphSanitizer:
 
     def _find_insertion_point(self, input_name: str) -> int:
         """Find the correct insertion point for the new LayerNorm node."""
-        producer_nodes = utils.get_producer_nodes(self.model, input_name)
+        producer_nodes = onnx_utils.get_producer_nodes(self.model, input_name)
         if not producer_nodes:
             return 0
 
