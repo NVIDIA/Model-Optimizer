@@ -23,7 +23,6 @@ IS_AVAILABLE = False
 context_attention_fwd = None
 context_attention = None
 register_triton_attention = None
-set_sparse24 = None
 
 if torch.cuda.is_available():
     with import_plugin(
@@ -41,16 +40,12 @@ if torch.cuda.is_available():
         IS_AVAILABLE = True
         with import_plugin("transformers"):
             from .hf_triton_attention import register_triton_attention as _register_triton_attention
-            from .hf_triton_attention import set_sparse24 as _set_sparse24
 
             register_triton_attention = _register_triton_attention
-            set_sparse24 = _set_sparse24
-            _register_triton_attention()
 
 __all__ = [
     "IS_AVAILABLE",
     "context_attention",
     "context_attention_fwd",
     "register_triton_attention",
-    "set_sparse24",
 ]

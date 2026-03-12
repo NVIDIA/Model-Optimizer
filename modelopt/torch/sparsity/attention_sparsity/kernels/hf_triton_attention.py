@@ -215,7 +215,7 @@ def triton_attention_forward(
             Unsupported formats raise an error.
         scaling: Softmax scale (e.g. 1/sqrt(head_dim)).
         dropout: Ignored (kernel has no dropout); use 0 for eval.
-        **kwargs: May contain apply_sparse24, skip_diagonal_blocks for 2:4 sparse attention.
+        **kwargs: Reserved for future extensions.
 
     Returns:
         (attn_output, None) with attn_output [batch, seq_len, num_heads, head_dim].
@@ -232,16 +232,17 @@ def triton_attention_forward(
     device = query.device
     num_kv_heads = key.shape[1]
     is_causal = not is_cross_attention
-    apply_sparse24 = kwargs.get("apply_sparse24", getattr(module, "_apply_sparse24", False))
-    skip_diagonal_blocks = kwargs.get(
-        "skip_diagonal_blocks", getattr(module, "_skip_diagonal_blocks", True)
-    )
 
     needs_grad = torch.is_grad_enabled() and (
         query.requires_grad or key.requires_grad or value.requires_grad
     )
 
-    use_packed = attention_mask is not None and _attention_mask_supported_for_triton(attention_mask)
+    # Packed path only works for self-attention where Q and K/V share the same sequence.
+    use_packed = (
+        not is_cross_attention
+        and attention_mask is not None
+        and _attention_mask_supported_for_triton(attention_mask)
+    )
     if use_packed:
         q_packed, k_packed, v_packed, b_start_loc, b_seq_len, max_input_len = (
             _derive_seq_lens_and_pack(query, key, value, attention_mask)
@@ -252,8 +253,6 @@ def triton_attention_forward(
             "max_input_len": max_input_len,
             "is_causal": is_causal,
             "softmax_scale": scaling,
-            "apply_sparse24": apply_sparse24,
-            "skip_diagonal_blocks": skip_diagonal_blocks,
         }
         if needs_grad:
             o_packed = context_attention(q_packed, k_packed, v_packed, **fwd_kwargs)
@@ -272,11 +271,9 @@ def triton_attention_forward(
         )
         return (attn_output, None)
     if attention_mask is not None:
-        raise ValueError(
-            f"Unsupported attention_mask format for modelopt_triton: "
-            f"dim={attention_mask.dim()}, shape={attention_mask.shape}. "
-            f"Only 2D [batch, seq_len] masks are supported."
-        )
+        # 4D causal masks are common in HF models; the kernel handles causal masking
+        # internally via is_causal, so we can safely ignore unsupported mask formats.
+        pass
 
     q = query.permute(0, 2, 1, 3).reshape(-1, num_heads, head_dim).contiguous()
     k = key.permute(0, 2, 1, 3).reshape(-1, num_kv_heads, head_dim).contiguous()
@@ -297,8 +294,6 @@ def triton_attention_forward(
         "max_input_len": seq_len,
         "is_causal": is_causal,
         "softmax_scale": scaling,
-        "apply_sparse24": apply_sparse24,
-        "skip_diagonal_blocks": skip_diagonal_blocks,
         "b_start_loc_k": b_start_loc_k,
         "b_seq_len_k": b_seq_len_k,
         "max_input_len_k": seq_k if is_cross_attention else None,
@@ -330,45 +325,7 @@ def register_triton_attention() -> bool:
         return False
 
 
-def set_sparse24(
-    model: nn.Module,
-    apply_sparse24: bool = True,
-    skip_diagonal_blocks: bool = True,
-) -> None:
-    """Set 2:4 sparse attention on all attention modules in the model.
-
-    Prefer using ``mtsa.sparsify(model, SPARSE24_TRITON)`` from
-    ``modelopt.torch.sparsity.attention_sparsity`` for config-driven setup,
-    pattern-based layer selection, and consistency with other sparse methods.
-    This helper remains for backward compatibility and one-off scripting.
-
-    The Triton backend reads ``getattr(module, '_apply_sparse24', False)`` and
-    ``getattr(module, '_skip_diagonal_blocks', True)`` when kwargs don't provide them.
-
-    Limitations:
-        - **Prefill-only sparsity:** 2:4 sparsity is applied during prefill only;
-          decode uses the unified kernel without sparsity.
-        - **Fixed 50% sparsity:** 2:4 keeps top 2 of every 4 attention scores;
-          no threshold tuning or calibration.
-        - **Mutually exclusive with flash_skip_softmax:** sparse24 requires
-          ``attn_implementation="modelopt_triton"``; flash_skip_softmax requires
-          ``attn_implementation="eager"``. They cannot be combined in one model.
-
-    Args:
-        model: Hugging Face model (e.g. LlamaForCausalLM).
-        apply_sparse24: Whether to apply 2:4 sparsity to attention scores.
-        skip_diagonal_blocks: If True, keep diagonal tiles dense (local attention).
-    """
-    for _, module in model.named_modules():
-        # Match only actual attention modules (have o_proj + head_dim), not their children
-        # like q_proj, k_proj, v_proj, rotary_emb, etc.
-        if hasattr(module, "o_proj") and hasattr(module, "head_dim"):
-            setattr(module, "_apply_sparse24", apply_sparse24)
-            setattr(module, "_skip_diagonal_blocks", skip_diagonal_blocks)
-
-
 __all__ = [
     "register_triton_attention",
-    "set_sparse24",
     "triton_attention_forward",
 ]

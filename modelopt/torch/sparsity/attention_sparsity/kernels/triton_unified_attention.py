@@ -28,7 +28,7 @@
 
 """Triton attention kernel for prefill and decode on flat packed tensors.
 
-Supports variable sequence lengths, causal/non-causal masking, GQA, 2:4 sparse attention,
+Supports variable sequence lengths, causal/non-causal masking, GQA,
 and autograd-compatible forward/backward.
 """
 
@@ -40,84 +40,19 @@ LOG2E: float = 1.44269504088896
 
 
 # ---------------------------------------------------------------------------
-# 2:4 structured sparsity helpers
-# ---------------------------------------------------------------------------
-@triton.jit
-def _sparse24_noabs_ops(x0, x1, x2, x3):
-    """Compute 2:4 sparsity mask: for every 4 values, determine which 2 are largest."""
-    (a1, a2, a3, a4, a5, a6) = (
-        x0 > x1,
-        x0 > x2,
-        x0 > x3,
-        x1 > x2,
-        x1 > x3,
-        x2 > x3,
-    )
-    na1 = a1 == 0
-    na2 = a2 == 0
-    na3 = a3 == 0
-    na4 = a4 == 0
-    na5 = a5 == 0
-    na6 = a6 == 0
-    m0 = a2 & a3 | a1 & a2 | a1 & a3
-    m1 = na1 & a5 | a4 & a5 | na1 & a4
-    m2 = na2 & na4 | na2 & a6 | na4 & a6
-    m3 = na3 & na5 | na3 & na6 | na5 & na6
-    return x0, x1, x2, x3, m0, m1, m2, m3
-
-
-@triton.jit
-def _apply_sparse24_to_qk_tile(
-    qk,
-    M: tl.constexpr,
-    N: tl.constexpr,
-    MASK_VAL: tl.constexpr,
-):
-    """Apply 2:4 sparsity to attention score tile [M, N]: keep top 2 of every 4 along N."""
-    reshaped = tl.reshape(qk, (M, N // 4, 4))
-    cols = tl.arange(0, 4)[None, None, :]
-    x0 = tl.sum(tl.where(cols == 0, reshaped, 0.0), axis=2)
-    x1 = tl.sum(tl.where(cols == 1, reshaped, 0.0), axis=2)
-    x2 = tl.sum(tl.where(cols == 2, reshaped, 0.0), axis=2)
-    x3 = tl.sum(tl.where(cols == 3, reshaped, 0.0), axis=2)
-    _, _, _, _, m0, m1, m2, m3 = _sparse24_noabs_ops(x0, x1, x2, x3)
-    s0 = tl.where(m0, x0, MASK_VAL)
-    s1 = tl.where(m1, x1, MASK_VAL)
-    s2 = tl.where(m2, x2, MASK_VAL)
-    s3 = tl.where(m3, x3, MASK_VAL)
-    sparse_reshaped = tl.full((M, N // 4, 4), 0.0, dtype=qk.dtype)
-    sparse_reshaped = tl.where((cols == 0), tl.expand_dims(s0, 2), sparse_reshaped)
-    sparse_reshaped = tl.where((cols == 1), tl.expand_dims(s1, 2), sparse_reshaped)
-    sparse_reshaped = tl.where((cols == 2), tl.expand_dims(s2, 2), sparse_reshaped)
-    sparse_reshaped = tl.where((cols == 3), tl.expand_dims(s3, 2), sparse_reshaped)
-    sparse_qk = tl.reshape(sparse_reshaped, (M, N))
-    return sparse_qk
-
-
-# ---------------------------------------------------------------------------
 # Shared: recompute masked S tile (used by forward inner loop and backward)
 # ---------------------------------------------------------------------------
 @triton.jit
-def _mask_and_sparsify(
+def _apply_mask(
     qk,
     offs_m,
     offs_n,
     cur_batch_seq_len,
     cur_batch_kv_len,
     start_n,
-    start_m,
     IS_CAUSAL: tl.constexpr,
-    APPLY_SPARSE24: tl.constexpr,
-    SKIP_DIAGONAL_BLOCKS: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_FWD: tl.constexpr,
 ):
-    """Apply causal mask, padding mask, and optional 2:4 sparsity to a QK tile.
-
-    BLOCK_FWD is the forward kernel's block size, used for diagonal detection so that
-    backward kernels (which may use smaller tiles) produce the same sparsity pattern.
-    """
+    """Apply causal mask and padding mask to a QK tile."""
     if IS_CAUSAL:
         qk += tl.where(
             (start_n + offs_n[None, :] < cur_batch_kv_len)
@@ -127,20 +62,6 @@ def _mask_and_sparsify(
         )
     else:
         qk += tl.where((start_n + offs_n[None, :]) < cur_batch_kv_len, 0, float("-inf"))
-
-    if APPLY_SPARSE24:
-        if IS_CAUSAL and SKIP_DIAGONAL_BLOCKS:
-            # Diagonal detection at BLOCK_FWD granularity (matches forward)
-            q_pos_min = start_m * BLOCK_M
-            fwd_q_tile_start = (q_pos_min // BLOCK_FWD) * BLOCK_FWD
-            fwd_q_tile_end = fwd_q_tile_start + BLOCK_FWD
-            fwd_k_tile_start = (start_n // BLOCK_FWD) * BLOCK_FWD
-            fwd_k_tile_end = fwd_k_tile_start + BLOCK_FWD
-            is_diagonal = (fwd_k_tile_start < fwd_q_tile_end) & (fwd_k_tile_end > fwd_q_tile_start)
-            if not is_diagonal:
-                qk = _apply_sparse24_to_qk_tile(qk, BLOCK_M, BLOCK_N, float("-inf"))
-        else:
-            qk = _apply_sparse24_to_qk_tile(qk, BLOCK_M, BLOCK_N, float("-inf"))
     return qk
 
 
@@ -148,7 +69,7 @@ def _mask_and_sparsify(
 # Forward kernel
 # ---------------------------------------------------------------------------
 @triton.jit
-def _fwd_kernel_prefill(
+def _fwd_kernel(
     Q,
     K,
     V,
@@ -175,8 +96,6 @@ def _fwd_kernel_prefill(
     BLOCK_N: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     Lk: tl.constexpr,
-    APPLY_SPARSE24: tl.constexpr,
-    SKIP_DIAGONAL_BLOCKS: tl.constexpr,
     STORE_LSE: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
@@ -224,20 +143,14 @@ def _fwd_kernel_prefill(
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk += tl.dot(q, k)
         qk *= qk_scale
-        qk = _mask_and_sparsify(
+        qk = _apply_mask(
             qk,
             offs_m,
             offs_n,
             cur_batch_seq_len,
             cur_batch_kv_len,
             start_n,
-            start_m,
             IS_CAUSAL,
-            APPLY_SPARSE24,
-            SKIP_DIAGONAL_BLOCKS,
-            BLOCK_M,
-            BLOCK_N,
-            BLOCK_M,  # BLOCK_FWD = BLOCK_M in forward
         )
 
         # deferred-normalization online softmax (exp2)
@@ -341,9 +254,6 @@ def _bwd_kernel_dq(
     BLOCK_N: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     Lk: tl.constexpr,
-    APPLY_SPARSE24: tl.constexpr,
-    SKIP_DIAGONAL_BLOCKS: tl.constexpr,
-    BLOCK_FWD: tl.constexpr,
 ):
     """Backward: compute dQ for one Q tile, looping over KV tiles."""
     cur_batch = tl.program_id(0)
@@ -406,20 +316,14 @@ def _bwd_kernel_dq(
         # Recompute S [BLOCK_M, BLOCK_N]
         s = tl.dot(q, kT)
         s *= qk_scale
-        s = _mask_and_sparsify(
+        s = _apply_mask(
             s,
             offs_m,
             offs_n,
             cur_batch_seq_len,
             cur_batch_kv_len,
             start_n,
-            start_m,
             IS_CAUSAL,
-            APPLY_SPARSE24,
-            SKIP_DIAGONAL_BLOCKS,
-            BLOCK_M,
-            BLOCK_N,
-            BLOCK_FWD,
         )
         p = tl.math.exp2(s - lse[:, None])
 
@@ -475,9 +379,6 @@ def _bwd_kernel_dkdv(
     BLOCK_N: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     Lk: tl.constexpr,
-    APPLY_SPARSE24: tl.constexpr,
-    SKIP_DIAGONAL_BLOCKS: tl.constexpr,
-    BLOCK_FWD: tl.constexpr,
 ):
     """Backward: compute dK, dV for one KV tile, looping over Q tiles and GQA heads."""
     cur_batch = tl.program_id(0)
@@ -548,20 +449,14 @@ def _bwd_kernel_dkdv(
             # Recompute S [BLOCK_M, BLOCK_N] in ORIGINAL orientation
             s = tl.dot(q_tile, kT_tile)
             s *= qk_scale
-            s = _mask_and_sparsify(
+            s = _apply_mask(
                 s,
                 offs_m,
                 offs_n,
                 cur_batch_seq_len,
                 cur_batch_kv_len,
                 start_n * BLOCK_N,
-                q_tile_idx,
                 IS_CAUSAL,
-                APPLY_SPARSE24,
-                SKIP_DIAGONAL_BLOCKS,
-                BLOCK_M,
-                BLOCK_N,
-                BLOCK_FWD,
             )
             p = tl.math.exp2(s - lse[:, None])
 
@@ -593,7 +488,6 @@ def _prepare_fwd_args(
     b_start_loc_k,
     b_seq_len_k,
     max_input_len_k,
-    apply_sparse24,
 ):
     """Validate inputs and derive common parameters."""
     if q.dim() != 3 or k.dim() != 3 or v.dim() != 3:
@@ -637,8 +531,6 @@ def _prepare_fwd_args(
     capability = torch.cuda.get_device_capability()
     BLOCK_FWD = 128 if capability[0] >= 8 else 64
     BLOCK_BWD = 64  # backward holds more tiles in SRAM; smaller block avoids shared memory overflow
-    if apply_sparse24 and BLOCK_BWD % 4 != 0:
-        raise ValueError(f"sparse24 requires BLOCK divisible by 4, got {BLOCK_BWD}")
     num_warps_fwd = 4 if Lk <= 64 else 8
     num_warps_bwd = 4  # fewer warps to reduce shared memory pressure in backward
 
@@ -675,8 +567,6 @@ class _ContextAttentionFunc(torch.autograd.Function):
         max_input_len,
         is_causal,
         softmax_scale,
-        apply_sparse24,
-        skip_diagonal_blocks,
         b_start_loc_k,
         b_seq_len_k,
         max_input_len_k,
@@ -707,15 +597,15 @@ class _ContextAttentionFunc(torch.autograd.Function):
             b_start_loc_k,
             b_seq_len_k,
             max_input_len_k,
-            apply_sparse24,
         )
 
         o = torch.empty_like(q)
+        # LSE in log2-space: lse_i = m_i + log2(l_i), consistent with exp2-based online softmax.
         lse = torch.empty(q.shape[0], num_q_heads, device=q.device, dtype=torch.float32)
         BLOCK_DMODEL = triton.next_power_of_2(Lk)
         grid = (batch, num_q_heads, triton.cdiv(max_input_len, BLOCK_FWD))
 
-        _fwd_kernel_prefill[grid](
+        _fwd_kernel[grid](
             q,
             k,
             v,
@@ -742,8 +632,6 @@ class _ContextAttentionFunc(torch.autograd.Function):
             BLOCK_N=BLOCK_FWD,
             IS_CAUSAL=is_causal,
             Lk=Lk,
-            APPLY_SPARSE24=apply_sparse24,
-            SKIP_DIAGONAL_BLOCKS=skip_diagonal_blocks,
             STORE_LSE=True,
             num_warps=num_warps_fwd,
             num_stages=1,
@@ -755,8 +643,6 @@ class _ContextAttentionFunc(torch.autograd.Function):
         ctx.sm_scale = sm_scale
         ctx.qk_scale = qk_scale
         ctx.is_causal = is_causal
-        ctx.apply_sparse24 = apply_sparse24
-        ctx.skip_diagonal_blocks = skip_diagonal_blocks
         ctx.BLOCK_FWD = BLOCK_FWD
         ctx.BLOCK_BWD = BLOCK_BWD
         ctx.num_warps_bwd = num_warps_bwd
@@ -836,9 +722,6 @@ class _ContextAttentionFunc(torch.autograd.Function):
             BLOCK_N=BLOCK,
             IS_CAUSAL=ctx.is_causal,
             Lk=Lk,
-            APPLY_SPARSE24=ctx.apply_sparse24,
-            SKIP_DIAGONAL_BLOCKS=ctx.skip_diagonal_blocks,
-            BLOCK_FWD=ctx.BLOCK_FWD,
             num_warps=num_warps,
             num_stages=1,
         )
@@ -877,14 +760,11 @@ class _ContextAttentionFunc(torch.autograd.Function):
             BLOCK_N=BLOCK,
             IS_CAUSAL=ctx.is_causal,
             Lk=Lk,
-            APPLY_SPARSE24=ctx.apply_sparse24,
-            SKIP_DIAGONAL_BLOCKS=ctx.skip_diagonal_blocks,
-            BLOCK_FWD=ctx.BLOCK_FWD,
             num_warps=num_warps,
             num_stages=1,
         )
 
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -900,8 +780,6 @@ def context_attention_fwd(
     max_input_len: int,
     is_causal: bool = True,
     softmax_scale: float | None = None,
-    apply_sparse24: bool = False,
-    skip_diagonal_blocks: bool = True,
     b_start_loc_k: torch.Tensor | None = None,
     b_seq_len_k: torch.Tensor | None = None,
     max_input_len_k: int | None = None,
@@ -936,11 +814,10 @@ def context_attention_fwd(
         b_start_loc_k,
         b_seq_len_k,
         max_input_len_k,
-        apply_sparse24,
     )
 
     grid = (batch, num_q_heads, triton.cdiv(max_input_len, BLOCK_FWD))
-    _fwd_kernel_prefill[grid](
+    _fwd_kernel[grid](
         q,
         k,
         v,
@@ -967,8 +844,6 @@ def context_attention_fwd(
         BLOCK_N=BLOCK_FWD,
         IS_CAUSAL=is_causal,
         Lk=Lk,
-        APPLY_SPARSE24=apply_sparse24,
-        SKIP_DIAGONAL_BLOCKS=skip_diagonal_blocks,
         STORE_LSE=False,
         num_warps=num_warps_fwd,
         num_stages=1,
@@ -984,8 +859,6 @@ def context_attention(
     max_input_len: int,
     is_causal: bool = True,
     softmax_scale: float | None = None,
-    apply_sparse24: bool = False,
-    skip_diagonal_blocks: bool = True,
     b_start_loc_k: torch.Tensor | None = None,
     b_seq_len_k: torch.Tensor | None = None,
     max_input_len_k: int | None = None,
@@ -1000,8 +873,6 @@ def context_attention(
         max_input_len,
         is_causal,
         softmax_scale,
-        apply_sparse24,
-        skip_diagonal_blocks,
         b_start_loc_k,
         b_seq_len_k,
         max_input_len_k,

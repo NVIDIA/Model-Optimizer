@@ -132,9 +132,8 @@ def validate_eager_attention(model: nn.Module) -> None:
     """Validate attention implementation for HuggingFace models.
 
     For softmax-patching methods (e.g. flash_skip_softmax) the model must use
-    attn_implementation='eager'. For the Triton 2:4 kernel (sparse24_triton)
-    the model must use attn_implementation='modelopt_triton'. We only force
-    eager when the current implementation is neither eager nor modelopt_triton.
+    attn_implementation='eager'. We only force eager when the current
+    implementation is neither eager nor modelopt_triton.
 
     Args:
         model: Model to validate

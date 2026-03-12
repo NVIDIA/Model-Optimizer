@@ -44,7 +44,7 @@ class SparseAttentionModule(DynamicModule):
     _enabled: bool
         Whether sparse attention is enabled
     _method: str
-        The sparse attention method to use (e.g., "flash_skip_softmax", "sparse24_triton")
+        The sparse attention method to use (e.g., "flash_skip_softmax")
     _method_config: dict
         Configuration dictionary for the sparse method (threshold, br, bc, etc.)
     _sparse_method_instance: SparseAttentionMethod

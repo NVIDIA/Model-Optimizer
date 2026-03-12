@@ -30,7 +30,13 @@ from modelopt.torch.sparsity.attention_sparsity.kernels import (
 )
 
 if TRITON_KERNEL_AVAILABLE:
-    from modelopt.torch.sparsity.attention_sparsity.kernels import context_attention_fwd
+    from modelopt.torch.sparsity.attention_sparsity.kernels import (
+        context_attention_fwd,
+        register_triton_attention,
+    )
+
+    if register_triton_attention is not None:
+        register_triton_attention()
 
 
 def _sdpa_reference(q, k, v, b_start_loc, b_seq_len):
@@ -50,49 +56,6 @@ def _sdpa_reference(q, k, v, b_start_loc, b_seq_len):
         ob = F.scaled_dot_product_attention(qb, kb, vb, is_causal=True)
         parts.append(ob.permute(0, 2, 1, 3).squeeze(0))
     return torch.cat(parts, dim=0)
-
-
-def _get_prefill_block_size():
-    """Return the BLOCK size the prefill kernel uses on the current GPU."""
-    cap = torch.cuda.get_device_capability()
-    return 128 if cap[0] >= 8 else 64
-
-
-def _sparse24_top2(x0, x1, x2, x3):
-    """Top-2-of-4 mask (same logic as Triton _sparse24_noabs_ops)."""
-    a1, a2, a3 = x0 > x1, x0 > x2, x0 > x3
-    a4, a5, a6 = x1 > x2, x1 > x3, x2 > x3
-    m0 = (a2 and a3) or (a1 and a2) or (a1 and a3)
-    m1 = (not a1 and a5) or (a4 and a5) or (not a1 and a4)
-    m2 = (not a2 and not a4) or (not a2 and a6) or (not a4 and a6)
-    m3 = (not a3 and not a5) or (not a3 and not a6) or (not a5 and not a6)
-    return m0, m1, m2, m3
-
-
-def _attention_sparse24_ref(q, k, v, scale, bq, ts, skip_diag=True):
-    """Reference attention with 2:4 sparsity + diagonal skip. [seq, dim] -> [seq, dim]."""
-    n = q.shape[0]
-    scores = scale * (q @ k.T)
-    scores.masked_fill_(
-        torch.triu(torch.ones(n, n, device=scores.device, dtype=torch.bool), 1), float("-inf")
-    )
-    nqb = (n + bq - 1) // bq
-    ntiles = (n + ts - 1) // ts
-    for qb in range(nqb):
-        qs, qe = qb * bq, min((qb + 1) * bq, n)
-        for t in range(ntiles):
-            ks, ke = t * ts, min((t + 1) * ts, n)
-            if skip_diag and ks < qe and ke > qs:
-                continue
-            for row in range(qs, qe):
-                for g in range((ke - ks) // 4):
-                    c = ks + g * 4
-                    vals = [scores[row, c + i].item() for i in range(4)]
-                    mask = _sparse24_top2(*vals)
-                    for i in range(4):
-                        if not mask[i]:
-                            scores[row, c + i] = float("-inf")
-    return F.softmax(scores.float(), dim=-1).to(q.dtype) @ v
 
 
 @pytest.fixture(scope="module")
@@ -287,86 +250,6 @@ class TestUnifiedAttentionVsSdpa:
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
-class TestSparse24Attention:
-    """2:4 sparse attention applied inside the Triton kernel."""
-
-    def test_sparse24_output_differs_from_dense(self):
-        """Sparse24 enabled produces different (but valid) output vs dense."""
-        block = _get_prefill_block_size()
-        seq_lens = [block * 2, block * 3]
-        total = sum(seq_lens)
-        num_heads, num_kv_heads, head_dim = 2, 2, 32
-        scale = 1.0 / (head_dim**0.5)
-
-        torch.manual_seed(789)
-        q = torch.randn(total, num_heads, head_dim, device="cuda", dtype=torch.float32)
-        k = torch.randn(total, num_kv_heads, head_dim, device="cuda", dtype=torch.float32)
-        v = torch.randn(total, num_kv_heads, head_dim, device="cuda", dtype=torch.float32)
-        locs = torch.tensor([0, seq_lens[0]], device="cuda", dtype=torch.int32)
-        lens = torch.tensor(seq_lens, device="cuda", dtype=torch.int32)
-
-        kw = {
-            "b_start_loc": locs,
-            "b_seq_len": lens,
-            "max_input_len": max(seq_lens),
-            "is_causal": True,
-            "softmax_scale": scale,
-        }
-
-        o_dense = torch.empty_like(q)
-        context_attention_fwd(q, k, v, o_dense, apply_sparse24=False, **kw)
-        o_sparse = torch.empty_like(q)
-        context_attention_fwd(
-            q, k, v, o_sparse, apply_sparse24=True, skip_diagonal_blocks=True, **kw
-        )
-
-        assert not torch.equal(o_dense, o_sparse), "Sparse should differ from dense"
-        assert not torch.isnan(o_sparse).any() and not torch.isinf(o_sparse).any()
-
-    def test_sparse24_matches_reference(self):
-        """Sparse24 with GQA (4 q-heads, 2 kv-heads) matches Python reference."""
-        block = _get_prefill_block_size()
-        seq_len = block * 2 + block // 2  # ensure non-trivial diagonal + off-diagonal tiles
-        num_heads, num_kv_heads, head_dim = 4, 2, 32
-        nqkv = num_heads // num_kv_heads
-        scale = 1.0 / (head_dim**0.5)
-        bq, ts = block, block
-
-        torch.manual_seed(303)
-        q = torch.randn(seq_len, num_heads, head_dim, device="cuda", dtype=torch.float32)
-        k = torch.randn(seq_len, num_kv_heads, head_dim, device="cuda", dtype=torch.float32)
-        v = torch.randn(seq_len, num_kv_heads, head_dim, device="cuda", dtype=torch.float32)
-
-        o_tri = torch.empty_like(q)
-        context_attention_fwd(
-            q,
-            k,
-            v,
-            o_tri,
-            b_start_loc=torch.tensor([0], device="cuda", dtype=torch.int32),
-            b_seq_len=torch.tensor([seq_len], device="cuda", dtype=torch.int32),
-            max_input_len=seq_len,
-            is_causal=True,
-            softmax_scale=scale,
-            apply_sparse24=True,
-            skip_diagonal_blocks=True,
-        )
-
-        o_ref = torch.empty_like(q)
-        for h in range(num_heads):
-            o_ref[:, h] = _attention_sparse24_ref(
-                q[:, h],
-                k[:, h // nqkv],
-                v[:, h // nqkv],
-                scale,
-                bq,
-                ts,
-            )
-
-        torch.testing.assert_close(o_tri, o_ref, rtol=5e-2, atol=5e-2)
-
-
-@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
 class TestSparseAttentionIntegration:
     """HF model + mtsa.sparsify integration."""
 
@@ -396,31 +279,6 @@ class TestSparseAttentionIntegration:
                 ids, max_new_tokens=5, do_sample=False, pad_token_id=tok.pad_token_id
             )
         assert out.shape[1] == ids.shape[1] + 5
-
-    def test_sparsify_sparse24_produces_valid_output(self, tiny_llama_dir):
-        """mtsa.sparsify(model, SPARSE24_TRITON) forward produces valid logits."""
-        pytest.importorskip("transformers")
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-
-        import modelopt.torch.sparsity.attention_sparsity as mtsa
-        from modelopt.torch.sparsity.attention_sparsity.config import SPARSE24_TRITON
-
-        model = AutoModelForCausalLM.from_pretrained(
-            tiny_llama_dir,
-            torch_dtype=torch.bfloat16,
-            device_map="cuda",
-        )
-        model = mtsa.sparsify(model, SPARSE24_TRITON)
-        model.eval()
-
-        tok = AutoTokenizer.from_pretrained(tiny_llama_dir)
-        if tok.pad_token_id is None:
-            tok.pad_token_id = tok.eos_token_id
-        ids = tok("Hello world", return_tensors="pt").input_ids.to("cuda")
-
-        with torch.no_grad():
-            logits = model(input_ids=ids).logits
-        assert not torch.isnan(logits).any() and not torch.isinf(logits).any()
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
@@ -525,46 +383,6 @@ class TestBackward:
         torch.testing.assert_close(q.grad, dq_ref, rtol=1e-2, atol=1e-2)
         torch.testing.assert_close(k.grad, dk_ref, rtol=1e-2, atol=1e-2)
         torch.testing.assert_close(v.grad, dv_ref, rtol=1e-2, atol=1e-2)
-
-    def test_backward_sparse24_finite(self):
-        """Backward with sparse24 produces finite, non-zero gradients."""
-        from modelopt.torch.sparsity.attention_sparsity.kernels import context_attention
-
-        block = _get_prefill_block_size()
-        seq_len = block * 2 + block // 2
-        num_heads, num_kv_heads, head_dim = 2, 2, 32
-        scale = 1.0 / (head_dim**0.5)
-
-        torch.manual_seed(44)
-        q = torch.randn(
-            seq_len, num_heads, head_dim, device="cuda", dtype=torch.float32, requires_grad=True
-        )
-        k = torch.randn(
-            seq_len, num_kv_heads, head_dim, device="cuda", dtype=torch.float32, requires_grad=True
-        )
-        v = torch.randn(
-            seq_len, num_kv_heads, head_dim, device="cuda", dtype=torch.float32, requires_grad=True
-        )
-
-        o = context_attention(
-            q,
-            k,
-            v,
-            b_start_loc=torch.tensor([0], device="cuda", dtype=torch.int32),
-            b_seq_len=torch.tensor([seq_len], device="cuda", dtype=torch.int32),
-            max_input_len=seq_len,
-            is_causal=True,
-            softmax_scale=scale,
-            apply_sparse24=True,
-            skip_diagonal_blocks=True,
-        )
-        o.sum().backward()
-
-        for name, grad in [("dQ", q.grad), ("dK", k.grad), ("dV", v.grad)]:
-            assert grad is not None, f"{name} gradient is None"
-            assert not torch.isnan(grad).any(), f"{name} has NaN"
-            assert not torch.isinf(grad).any(), f"{name} has Inf"
-            assert grad.abs().sum() > 0, f"{name} is all zeros"
 
     def test_backward_multi_batch_variable_length(self):
         """Multi-batch variable-length causal backward matches per-sample SDPA."""
@@ -674,58 +492,6 @@ class TestBackward:
         torch.testing.assert_close(
             v.grad, v_ref.grad.permute(0, 2, 1, 3).squeeze(0), rtol=1e-2, atol=1e-2
         )
-
-    def test_backward_sparse24_matches_reference(self):
-        """Sparse24 backward dQ/dK/dV match a Python reference with manual 2:4 masking."""
-        from modelopt.torch.sparsity.attention_sparsity.kernels import context_attention
-
-        block = _get_prefill_block_size()
-        seq_len = block * 2 + block // 2
-        num_heads, num_kv_heads, head_dim = 2, 2, 32
-        scale = 1.0 / (head_dim**0.5)
-        bq, ts = block, block
-
-        torch.manual_seed(47)
-        q_data = torch.randn(seq_len, num_heads, head_dim, device="cuda", dtype=torch.float32)
-        k_data = torch.randn(seq_len, num_kv_heads, head_dim, device="cuda", dtype=torch.float32)
-        v_data = torch.randn(seq_len, num_kv_heads, head_dim, device="cuda", dtype=torch.float32)
-
-        # Triton backward
-        q = q_data.clone().requires_grad_(True)
-        k = k_data.clone().requires_grad_(True)
-        v = v_data.clone().requires_grad_(True)
-        o = context_attention(
-            q,
-            k,
-            v,
-            b_start_loc=torch.tensor([0], device="cuda", dtype=torch.int32),
-            b_seq_len=torch.tensor([seq_len], device="cuda", dtype=torch.int32),
-            max_input_len=seq_len,
-            is_causal=True,
-            softmax_scale=scale,
-            apply_sparse24=True,
-            skip_diagonal_blocks=True,
-        )
-        o.sum().backward()
-
-        # Python reference backward (per head, using _attention_sparse24_ref logic)
-        dq_ref = torch.zeros_like(q_data)
-        dk_ref = torch.zeros_like(k_data)
-        dv_ref = torch.zeros_like(v_data)
-        for h in range(num_heads):
-            kv_h = h // (num_heads // num_kv_heads)
-            q_h = q_data[:, h].clone().requires_grad_(True)
-            k_h = k_data[:, kv_h].clone().requires_grad_(True)
-            v_h = v_data[:, kv_h].clone().requires_grad_(True)
-            o_h = _attention_sparse24_ref(q_h, k_h, v_h, scale, bq, ts)
-            o_h.sum().backward()
-            dq_ref[:, h] = q_h.grad
-            dk_ref[:, kv_h] += k_h.grad
-            dv_ref[:, kv_h] += v_h.grad
-
-        torch.testing.assert_close(q.grad, dq_ref, rtol=1e-2, atol=1e-2)
-        torch.testing.assert_close(k.grad, dk_ref, rtol=1e-2, atol=1e-2)
-        torch.testing.assert_close(v.grad, dv_ref, rtol=1e-2, atol=1e-2)
 
     def test_backward_matches_sdpa_all_grads(self):
         """All three gradients match SDPA across multiple configs (smoke test)."""
