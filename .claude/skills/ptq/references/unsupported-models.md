@@ -42,6 +42,7 @@ class QuantCustomModule(OriginalModule):
 ```
 
 **Rules:**
+
 - Method MUST be named `_setup` (ModelOpt's `mtq.register()` asserts this)
 - Quantizer names MUST end with `_input_quantizer` or `_weight_quantizer` for wildcard matching
 - The `__init__` must call `super().__init__()` then `self._setup()`
@@ -108,6 +109,7 @@ if is_multimodal_model(model):
 ```
 
 Also add safety overrides to the config:
+
 ```python
 quant_cfg["quant_cfg"]["*vision*"] = {"enable": False}
 quant_cfg["quant_cfg"]["*multi_modal_projector*"] = {"enable": False}

@@ -4,13 +4,14 @@
 
 The recommended container is the TensorRT-LLM release image from NVIDIA NGC, which includes ModelOpt, PyTorch, and CUDA pre-installed:
 
-```
+```text
 nvcr.io/nvidia/tensorrt-llm/release:<version>
 ```
 
 Check the [ModelOpt installation guide](https://nvidia.github.io/TensorRT-Model-Optimizer/getting_started/2_installation.html) for the compatible container version.
 
 To use a custom ModelOpt branch inside the container, install it editable:
+
 ```bash
 pip install -e /path/to/Model-Optimizer[hf] --no-deps
 ```

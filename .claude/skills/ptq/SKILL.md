@@ -14,9 +14,11 @@ Produce a quantized checkpoint from a pretrained HuggingFace model using NVIDIA 
 Do this first — the environment determines how to run the job and which formats are viable.
 
 **Step 1 — Is this a SLURM cluster?**
+
 ```bash
 which srun squeue sbatch 2>/dev/null | head -1
 ```
+
 If any of those exist, you're on SLURM. Query accounts and partitions:
 
 ```bash
@@ -32,6 +34,7 @@ sinfo -o "%P %a %l %G" 2>/dev/null | grep -v "^PARTITION"
 - For partition, use the default (marked with `*` in `sinfo` output). Report the choice.
 
 **Step 2 — If not SLURM, check for a local GPU:**
+
 ```bash
 python -c "import torch; [print(f'GPU {i}: {torch.cuda.get_device_name(i)}') for i in range(torch.cuda.device_count())] if torch.cuda.is_available() else print('no-gpu')"
 ```
@@ -47,6 +50,7 @@ The GPU model feeds directly into format recommendation in Step 2.
 ### 1. Is the model architecture supported?
 
 **Read `examples/llm_ptq/README.md` first.** It is the authoritative reference for this workflow and contains information that isn't duplicated here: the full support matrix, correct CLI flag names, accuracy guidance, and hardware requirements. Key sections to check:
+
 - Support matrix (~line 100) — which architectures and formats are supported
 - Correct flags `--pyt_ckpt_path` / `--export_path` (~line 149)
 - Accuracy note: prefer `nvfp4_mlp_only` or `nvfp4_omlp_only` for NVFP4 (~line 131)
@@ -75,6 +79,7 @@ print(type(cfg).__name__)
 ```
 
 - **Succeeds** → transformers knows the architecture. Find the source file:
+
   ```bash
   python -c "
   import inspect
@@ -85,15 +90,18 @@ print(type(cfg).__name__)
   print(inspect.getfile(mod) if mod else 'not found')
   "
   ```
+
   Read the relevant modeling file and proceed to Step B.
 
 - **Raises `ValueError` / `OSError` (unknown architecture)** → ask the user:
   > "The checkpoint uses `<ArchName>` which isn't in the installed transformers. Can you provide the model source code (a file path or the modeling `.py` file)?"
 
 - **No `config.json`** → look for docs or scripts inside the checkpoint directory:
+
   ```bash
   ls <ckpt_path>/
   ```
+
   - **README or `.py` files found** → read them to understand how to load the model.
   - **Nothing useful** → ask the user:
     > "This doesn't look like a standard HuggingFace checkpoint and has no README. Can you point me to the modeling code?"
@@ -103,6 +111,7 @@ print(type(cfg).__name__)
 Check `config.json` for `"quantization_config"` or look for `*_scale_inv*` tensors in the weight files. If found, the model must be dequantized before re-quantizing with ModelOpt. Read **Pattern 5 (FP8 Checkpoint Dequantization)** in `references/unsupported-models.md` — HuggingFace's `WeightConverter` only handles standard `weight` / `weight_scale_inv` names and will silently miss non-standard parameter names (e.g., 3D expert tensors in MoE layers).
 
 **Step C — Analyze the source for quantization targets:**
+
 1. Which linear layers need quantization (`nn.Linear`, `F.linear`, or custom weight tensors)
 2. Non-standard weight storage (e.g., 3D expert weight tensors in MoE layers) → Pattern 1
 3. VLM structure (vision encoder + language model) → Pattern 4
@@ -182,6 +191,7 @@ Run `python examples/llm_ptq/hf_ptq.py --help` to see all options.
 #### Unsupported models — custom script
 
 After Step 1b, write a custom PTQ script following `references/unsupported-models.md`. Core steps:
+
 1. Load model (handle FP8 dequantization if needed)
 2. Register monkey-patched modules via `mtq.register()`
 3. Create calibration dataloader
@@ -212,6 +222,7 @@ srun \
 ```
 
 Then submit and save the job ID:
+
 ```bash
 mkdir -p <log_dir>
 JOBID=$(sbatch <script>.sh | awk '{print $4}')
@@ -219,6 +230,7 @@ echo "Submitted job $JOBID"
 ```
 
 **Local GPU:**
+
 ```bash
 nohup python ptq_script.py ... > <log_file> 2>&1 &
 echo $!  # save PID
@@ -227,6 +239,7 @@ echo $!  # save PID
 #### Monitor and debug
 
 Tail the job log and resubmit with fixes until the export directory contains `.safetensors` shards and `config.json`. Two PTQ-specific failure modes to check via `mtq.print_quant_summary()`:
+
 - **Quantizers not enabled**: wildcard missed modules — check `*gate*` vs `*mlp.gate*`
 - **FP8 tensors still present after dequant**: missed a non-standard param name — inspect `model.named_parameters()` for `float8_e4m3fn` dtypes
 

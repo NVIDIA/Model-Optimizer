@@ -1,0 +1,26 @@
+{
+  "skills": ["nel-assistant"],
+  "query": "Help me evaluate Nemotron 3 Nano BF16 from NVIDIA",
+  "files": [],
+  "expected_behavior": [
+    "Verifies nel is installed by running 'nel --version'",
+    "Asks all 5 base config questions (execution, deployment, auto-export, model type, benchmarks) before generating the config",
+    "Runs 'nel skills build-config' with correct flags matching user answers: --execution slurm --deployment vllm --model-type reasoning --benchmarks standard code math_reasoning --export mlflow",
+    "Searches the web for the model card on HuggingFace and extracts model-specific settings",
+    "Sets correct HF handle: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "Sets reasoning sampling params from model card: temperature=1.0, top_p=1.0",
+    "Configures reasoning toggle via params_to_add with chat_template_kwargs.enable_thinking (not via system prompt)",
+    "Disables reasoning for IFEval task using enable_thinking: false with use_system_prompt: false",
+    "Adds deployment.pre_cmd using curl (not wget) to download nano_v3_reasoning_parser.py from HuggingFace",
+    "Adds vLLM extra_args including --trust-remote-code, --reasoning-parser-plugin, --reasoning-parser nano_v3, --max-num-seqs 8",
+    "Pins vLLM image to v0.12.0 or later as required by model card",
+    "Adds target.api_endpoint.api_key_name: DUMMY_API_KEY for nemo_skills tasks with self-deployment",
+    "Fills in all ??? placeholders after asking the user for SLURM hostname, account, output_dir, MLflow tracking_uri, and experiment_name",
+    "Applies user-requested SLURM customizations: partition batch_short, walltime 00:20:00, MLflow tag scenario: demo",
+    "Presents task list and waits for user confirmation before proceeding",
+    "Configures request and response logging interceptors under evaluation.nemo_evaluator_config.config.target.api_endpoint.adapter_config using correct field names (max_logged_requests/max_logged_responses, not max_saved_*)",
+    "Handles dry-run failure for missing HF_TOKEN_FOR_GPQA_DIAMOND by offering to fix the config",
+    "Successfully submits test run with limit_samples=10 after dry-run passes",
+    "Provides monitoring commands (nel status, nel info --logs) and inspects server logs via SSH when asked"
+  ]
+}
