@@ -20,10 +20,11 @@ from onnx.helper import pack_float32_to_4bit
 
 from modelopt.onnx.quantization.quant_utils import (
     compute_e8m0,
+    find_scales,
     get_amax,
     pack_float32_to_4bit_cpp_based,
     pack_float32_to_4bit_optimized,
-    pack_weights_to_int4,  # Add this import
+    pack_weights_to_int4,
 )
 
 
@@ -320,3 +321,26 @@ def test_pack_weights_to_int4_assertion_error():
             [[[1, 2]], [[3, 4]], [[5, 6]]], dtype=np.float32
         )  # Shape: (3, 1, 2) - first dim is odd
         pack_weights_to_int4(odd_weight)
+
+
+@pytest.mark.parametrize(
+    ("weights", "block_size"),
+    [
+        # Negative-only range
+        (np.array([[-2.0, -0.5]], dtype=np.float32), 2),
+        # Mixed range
+        (np.array([[-1.0, 1.0]], dtype=np.float32), 2),
+        # Positive-only range
+        (np.array([[0.5, 2.0]], dtype=np.float32), 2),
+        # Symmetric around zero
+        (np.array([[-0.5, 0.5]], dtype=np.float32), 2),
+    ],
+)
+def test_find_scales_zero_point(weights, block_size):
+    """Test find_scales zero-point calculation for asymmetric quantization."""
+    s, z = find_scales(weights, block_size, use_zero_point=True)
+
+    assert np.all(s > 0), f"Scale should be positive, got {s}"
+    assert z is not None, "Zero-point should not be None when use_zero_point=True"
+    assert z.shape == s.shape, f"Zero-point shape {z.shape} should match scale shape {s.shape}"
+    assert np.all(z >= 0) and np.all(z <= 15), f"Zero-point should be in [0, 15], got {z}"

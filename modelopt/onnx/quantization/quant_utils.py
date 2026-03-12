@@ -331,7 +331,6 @@ def find_scales(
         max_int = (2**num_bits) - 1
         min_int = 0
         s = (max_val - min_val).clip(min=CLIP_MIN) / max_int
-        # z = -np.round(temp).clip(min=min_int, max=max_int)    # gives 0 - need to check
         temp = min_val / s
         temp = np.round(temp)
         temp = -temp
