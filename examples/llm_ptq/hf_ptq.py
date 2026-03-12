@@ -76,6 +76,30 @@ from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 RAND_SEED = 1234
 FP8_E4M3_MAX = 448.0  # torch.finfo(torch.float8_e4m3fn).max
 
+
+def _kv_cache_supports_constant_amax(quant_cfg: dict) -> bool:
+    """Check if KV cache quantizers support constant amax (no calibration needed).
+
+    Returns True if quant_cfg has ``*[kv]_bmm_quantizer`` without a ``bias`` field.
+    Formats with bias (e.g. fp8_affine) require data-driven calibration.
+    """
+    bmm_quantizer_cfg = quant_cfg.get("*[kv]_bmm_quantizer", {})
+    return "*[kv]_bmm_quantizer" in quant_cfg and "bias" not in bmm_quantizer_cfg
+
+
+def _maybe_set_kv_cache_constant_amax(quant_cfg: dict) -> bool:
+    """Set constant amax on KV cache quantizers if the format supports it.
+
+    Mutates *quant_cfg* in place.  Returns ``True`` if ``constant_amax`` was set,
+    ``False`` otherwise.  Callers that share the config dict across sites should
+    ``copy.deepcopy`` before calling this function.
+    """
+    if _kv_cache_supports_constant_amax(quant_cfg):
+        quant_cfg["*[kv]_bmm_quantizer"]["constant_amax"] = FP8_E4M3_MAX
+        return True
+    return False
+
+
 QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "int8": mtq.INT8_DEFAULT_CFG,
     "int8_sq": mtq.INT8_SMOOTHQUANT_CFG,
@@ -311,15 +335,8 @@ def auto_quantize(
         )
         kv_cache_quant_cfg.pop("default", None)  # keep other quantizers from auto_quantize
 
-        bmm_quantizer_cfg = kv_cache_quant_cfg.get("*[kv]_bmm_quantizer", {})
-        if (
-            not args.calibrate_kv_cache
-            and "*[kv]_bmm_quantizer" in kv_cache_quant_cfg
-            and "bias" not in bmm_quantizer_cfg
-        ):
-            # Use constant amax=FP8_E4M3_MAX (FP8 E4M3 maxbound → scale=1.0); no calibration needed.
-            # Skip for affine formats (e.g. fp8_affine) which require bias calibration.
-            kv_cache_quant_cfg["*[kv]_bmm_quantizer"]["constant_amax"] = FP8_E4M3_MAX
+        if not args.calibrate_kv_cache:
+            _maybe_set_kv_cache_constant_amax(kv_cache_quant_cfg)
 
         mtq.set_quantizer_by_cfg(language_model, quant_cfg=kv_cache_quant_cfg)
         if args.calibrate_kv_cache:
@@ -357,14 +374,11 @@ def load_model(args: argparse.Namespace):
             # builds the KV quantizers with constant_amax already set. In calibration_only mode
             # mtq.calibrate() does not re-apply quant_cfg, so this must happen before
             # init_quantized_weights runs.
-            bmm_quantizer_cfg = quant_cfg["quant_cfg"].get("*[kv]_bmm_quantizer", {})
-            if (
-                not args.calibrate_kv_cache
-                and "*[kv]_bmm_quantizer" in quant_cfg["quant_cfg"]
-                and "bias" not in bmm_quantizer_cfg
+            if not args.calibrate_kv_cache and _kv_cache_supports_constant_amax(
+                quant_cfg["quant_cfg"]
             ):
                 quant_cfg = copy.deepcopy(quant_cfg)
-                quant_cfg["quant_cfg"]["*[kv]_bmm_quantizer"]["constant_amax"] = FP8_E4M3_MAX
+                _maybe_set_kv_cache_constant_amax(quant_cfg["quant_cfg"])
 
         # Do not use real quant GEMM so the calibration can be more accurate.
         with init_quantized_weights(
@@ -963,17 +977,13 @@ def quantize_main(
                 print(f"Excluding MTP layer from quantization: {pattern}")
 
         # Use constant amax for KV quantizers when data-driven calibration is not requested.
-        # Only applies to formats that use the *[kv]_bmm_quantizer key (fp8, nvfp4) and
-        # have no bias field (affine formats like fp8_affine require bias calibration).
-        bmm_quantizer_cfg = quant_cfg["quant_cfg"].get("*[kv]_bmm_quantizer", {})
         if (
             args.kv_cache_qformat != "none"
             and not args.calibrate_kv_cache
-            and "*[kv]_bmm_quantizer" in quant_cfg["quant_cfg"]
-            and "bias" not in bmm_quantizer_cfg
+            and _kv_cache_supports_constant_amax(quant_cfg["quant_cfg"])
         ):
             quant_cfg = copy.deepcopy(quant_cfg)
-            quant_cfg["quant_cfg"]["*[kv]_bmm_quantizer"]["constant_amax"] = FP8_E4M3_MAX
+            _maybe_set_kv_cache_constant_amax(quant_cfg["quant_cfg"])
 
         if args.qformat in QUANT_CFG_CHOICES:
             mono_quantize(
@@ -1230,8 +1240,7 @@ def parse_args() -> argparse.Namespace:
     # per-component keys) or if the quantizer has a static bias (e.g. fp8_affine).
     if args.kv_cache_qformat != "none" and not args.calibrate_kv_cache:
         kv_quant_cfg = getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"]
-        bmm_quantizer_cfg = kv_quant_cfg.get("*[kv]_bmm_quantizer", {})
-        if "*[kv]_bmm_quantizer" not in kv_quant_cfg or "bias" in bmm_quantizer_cfg:
+        if not _kv_cache_supports_constant_amax(kv_quant_cfg):
             parser.error(
                 f"--kv_cache_qformat {args.kv_cache_qformat} requires data-driven calibration. "
                 "Please add --calibrate_kv_cache."
