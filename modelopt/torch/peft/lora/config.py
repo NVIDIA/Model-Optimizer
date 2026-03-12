@@ -52,20 +52,8 @@ DENSE_LORA_CFG = {
 # ---------------------------------------------------------------------------
 # MoE model config
 # ---------------------------------------------------------------------------
-# Targets attention projections, dense MLP layers, and expert blocks.
-#
-# Expert FFN blocks in Megatron-Core are implemented as ``SequentialMLP``
-# modules (matched by ``*experts*``).  The ``_LoRAMegatronSequentialMLP``
-# plugin handles the shared-down / per-expert-up adapter layout internally,
-# so the adapter is applied to the container, not the layers inside it.
-#
-# Dense MLP layers that co-exist with expert layers (e.g. the first/last
-# layers in some architectures) use ``*mlp.linear_fc1*`` / ``*mlp.linear_fc2*``
-# rather than ``*linear_fc1*`` / ``*linear_fc2*``.  This is intentional:
-# the expert inner paths look like ``...mlp.experts.local_experts.0.linear_fc1``
-# which does NOT contain ``mlp.linear_fc1`` as a substring, so these more
-# specific patterns only match the dense MLP layers and not the individual
-# linear layers inside expert blocks.
+# Creates LoRA adapters for local_experts only
+
 MOE_LORA_CFG = {
     "adapter_type": "lora",
     "adapter_cfg": {
@@ -97,4 +85,5 @@ MOE_LORA_RANDOM_INIT_CFG = {
 LORA_CFG_CHOICES: dict[str, dict] = {
     "dense": DENSE_LORA_CFG,
     "moe": MOE_LORA_CFG,
+    "moe_random": MOE_LORA_RANDOM_INIT_CFG,
 }
