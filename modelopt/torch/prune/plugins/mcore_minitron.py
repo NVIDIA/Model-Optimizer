@@ -183,7 +183,7 @@ class MCoreMinitronSearcher(BaseSearcher):
     - `top_k`: Number of candidates to consider for score_func validation (default: 10).
     """
 
-    activations_per_rank: list[dict[str, torch.Tensor]]
+    local_activations: dict[str, torch.Tensor]
     layer_scores: dict[int, torch.Tensor]
     sorted_layers: list[int] | None  # 1-indexed sorted list of layer numbers
     # Dict from params constraint to list of tuples (ss_config, params, score)
@@ -208,7 +208,7 @@ class MCoreMinitronSearcher(BaseSearcher):
     def default_state_dict(self) -> SearchStateDict:
         """Return default state dict for importance scores and activations from forward loop."""
         return {
-            "activations_per_rank": [],
+            "local_activations": {},
             "layer_scores": {},
             "sorted_layers": None,
             "top_k_candidates_per_constraint": {},
@@ -274,8 +274,10 @@ class MCoreMinitronSearcher(BaseSearcher):
     def run_search(self) -> None:
         """Run forward loop to collect activations, sort parameters, and prune the model."""
         registry = ImportanceEstimatorRegistry(self.model)
-        if self.layer_scores and self.activations_per_rank:  # Available from checkpoint
-            registry.set_activations_and_layer_scores(self.activations_per_rank, self.layer_scores)
+        if self.local_activations and self.layer_scores:  # Available from per-rank checkpoint
+            registry.set_local_activations_and_layer_scores(
+                self.local_activations, self.layer_scores
+            )
         elif not self.config["skip_sorting"]:
             assert self.forward_loop is not None
             is_training = self.model.training
@@ -285,8 +287,8 @@ class MCoreMinitronSearcher(BaseSearcher):
             self.model.train(is_training)
 
             # Store activations and layer scores for re-pruning with different export configs
-            self.activations_per_rank, self.layer_scores = (
-                registry.get_activations_and_layer_scores()
+            self.local_activations, self.layer_scores = (
+                registry.get_local_activations_and_layer_scores()
             )
             self.save_search_checkpoint(verbose=True)
 
@@ -898,45 +900,38 @@ class ImportanceEstimatorRegistry:
 
         return layer_scores
 
-    def get_activations_and_layer_scores(
+    def get_local_activations_and_layer_scores(
         self,
-    ) -> tuple[list[dict[str, torch.Tensor]], dict[int, torch.Tensor]]:
-        """Get the per-rank activations and layer scores from the model."""
-        local_activations = {}
-        for n, m in self.model.named_modules():
-            if hasattr(m, "_activations"):
-                local_activations[n] = m._activations
-        activations_per_rank = dist.allgather(
-            local_activations, group=get_pipeline_model_parallel_group()
-        )
-        assert len(activations_per_rank) == get_pipeline_model_parallel_world_size()
+    ) -> tuple[dict[str, torch.Tensor], dict[int, torch.Tensor]]:
+        """Get this rank's local activations and global layer scores from the model.
 
+        Each rank saves its own activations to its per-rank checkpoint file (no allgather needed).
+        Layer scores are gathered across all PP ranks to produce a global ranking.
+        """
+        local_activations = {
+            n: m._activations for n, m in self.model.named_modules() if hasattr(m, "_activations")
+        }
         layer_scores = self.get_layer_scores()
 
-        return activations_per_rank, layer_scores
+        return local_activations, layer_scores
 
-    def set_activations_and_layer_scores(
+    def set_local_activations_and_layer_scores(
         self,
-        activations_per_rank: list[dict[str, torch.Tensor]],
+        local_activations: dict[str, torch.Tensor],
         layer_scores: dict[int, torch.Tensor],
     ) -> None:
-        """Set the pre-computed layer_scores and per-rank activations instead of running forward.
+        """Set the pre-computed layer_scores and local activations instead of running forward.
 
         Args:
-            activations_per_rank: List of dicts from module name to activations. Should match PP size.
-            layer_scores: Dict from layer_number (1-indexed) to score.
+            local_activations: Dict from module name to activations for this rank.
+            layer_scores: Dict from layer_number (1-indexed) to score (global across all PP ranks).
         """
-        print_rank_0("Loading activations and scores per rank from checkpoint...")
-        rank = get_pipeline_model_parallel_rank()
-        pp_size = get_pipeline_model_parallel_world_size()
-        assert len(activations_per_rank) == pp_size, (
-            f"Expected same PP size for stored pruning scores ({len(activations_per_rank)}) as current ({pp_size})!"
-        )
+        print_rank_0("Loading activations and scores from per-rank checkpoint...")
         for layer in self.model.decoder.layers:
             layer._scores = layer_scores[layer.layer_number]
         for n, m in self.model.named_modules():
             if hasattr(m, "_activations"):
-                m._activations = activations_per_rank[rank][n]
+                m._activations = local_activations[n]
 
 
 # Module-specific registration functions

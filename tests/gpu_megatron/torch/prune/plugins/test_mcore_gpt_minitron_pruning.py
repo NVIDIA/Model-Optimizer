@@ -208,7 +208,7 @@ def _test_mcore_gpt_pruning(
     model, pruning_scores = prune_minitron(model, constraints, config, channel_divisor)
     if not skip_sorting:
         assert pruning_scores["layer_scores"]
-        assert pruning_scores["activations_per_rank"]
+        assert pruning_scores["local_activations"]
 
     # Assert weights are pruned correctly
     for layer in model.decoder.layers:
