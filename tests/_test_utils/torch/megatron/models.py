@@ -221,6 +221,7 @@ def get_mcore_gpt_model(
         else:
             transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
                 num_experts=num_moe_experts,
+                moe_grouped_gemm=moe_grouped_gemm,
             )
 
     model = GPTModel(

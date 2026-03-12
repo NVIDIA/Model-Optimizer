@@ -26,7 +26,6 @@ from megatron.bridge.data.utils import get_dataset_provider
 from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
 from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
-from megatron.bridge.models.nemotronh.nemotron_h_provider import NemotronHModelProvider
 from megatron.bridge.training.config import (
     CheckpointConfig,
     ConfigContainer,
@@ -41,6 +40,7 @@ from megatron.bridge.training.gpt_step import forward_step
 from megatron.bridge.training.state import GlobalState
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.core.models.gpt import GPTModel
+from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transformer_engine_spec
 from megatron.core.models.mamba import MambaModel
 from megatron.core.parallel_state import get_data_parallel_group
 from megatron.core.transformer.module import MegatronModule
@@ -92,9 +92,15 @@ def load_mbridge_model_from_hf(
             assert hasattr(provider, key), f"{type(provider)} does not have attribute {key}"
             setattr(provider, key, value)
 
+    # disable moe_grouped_gemm in default TE spec until its supported
     if isinstance(provider, MambaModelProvider):
-        # disable moe_grouped_gemm in default TE spec until its supported
         provider.mamba_stack_spec = get_te_mamba_stack_spec(moe_grouped_gemm=False)
+    else:
+        provider.transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
+            num_experts=provider.num_moe_experts,
+            moe_grouped_gemm=False,
+            qk_layernorm=provider.qk_layernorm,
+        )
     provider.finalize()
     if init_model_parallel:
         provider.initialize_model_parallel(seed=0)
@@ -174,9 +180,6 @@ def get_hf_mbridge_calibration_loop(
         global_batch_size = micro_batch_size
     num_iters = num_samples // global_batch_size
 
-    # NOTE: Issue with NemotronH tokenizer's len() hence using use_fast=True as a WAR
-    use_fast_tokenizer = isinstance(provider, NemotronHModelProvider)
-
     cfg = ConfigContainer(
         model=provider,
         train=TrainingConfig(
@@ -198,9 +201,10 @@ def get_hf_mbridge_calibration_loop(
         tokenizer=TokenizerConfig(
             tokenizer_type="HuggingFaceTokenizer",
             tokenizer_model=hf_model_name_or_path,
+            # NOTE: Issue with Nemotron Nano v2 tokenizer returning bool hence using use_fast=True as a WAR
             hf_tokenizer_kwargs={
                 "trust_remote_code": trust_remote_code,
-                "use_fast": use_fast_tokenizer,
+                "use_fast": tokenizer.is_fast,
             },
         ),
         # Unused

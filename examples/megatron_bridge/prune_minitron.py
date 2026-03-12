@@ -241,7 +241,7 @@ def main(args: argparse.Namespace):
         },
         init_model_parallel=True,
     )
-    print_rank_0(f"\nPruning {unwrapped_model=}")
+    print_rank_0(f"\nPruning model (showing PP rank0): {unwrapped_model}")
     print_rank_0(
         f"Original model params: {num2hrb(mtp.mcore_minitron.get_mcore_param_count(unwrapped_model))}"
     )
@@ -317,7 +317,7 @@ def main(args: argparse.Namespace):
             else "hybrid_layer_pattern"
         )
         setattr(provider, hybrid_key, getattr(unwrapped_model, hybrid_key))
-    print_rank_0(f"\nPruned {unwrapped_model=}")
+    print_rank_0(f"\nPruned model (showing PP rank0): {unwrapped_model}")
     print_rank_0(
         f"Pruned model params: {num2hrb(mtp.mcore_minitron.get_mcore_param_count(unwrapped_model))}"
     )

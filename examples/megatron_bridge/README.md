@@ -16,9 +16,9 @@ This directory contains examples of using Model Optimizer with [NeMo Megatron-Br
 
 ## Pre-Requisites
 
-Running these examples requires many additional dependencies to be installed (e.g., Megatron-Bridge, Megatron-core, etc.), hence we strongly recommend directly using the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.02`) which has all the dependencies installed.
+Running these examples requires many additional dependencies to be installed (e.g., Megatron-Bridge, Megatron-core, etc.), hence we strongly recommend directly using the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.02.01`) which has all the dependencies installed.
 
-To get the latest ModelOpt features and examples scripts, mount your Model-Optimizer repo to the container.
+To get the ModelOpt examples scripts, mount your Model-Optimizer repo to the container as follows:
 
 ```bash
 export MODELOPT_DIR=${PWD}/Model-Optimizer # or set to your local Model-Optimizer repository path if you have cloned it
@@ -26,7 +26,7 @@ if [ ! -d "${MODELOPT_DIR}" ]; then
   git clone https://github.com/NVIDIA/Model-Optimizer.git ${MODELOPT_DIR}
 fi
 
-export DOCKER_IMAGE=nvcr.io/nvidia/nemo:26.02
+export DOCKER_IMAGE=nvcr.io/nvidia/nemo:26.02.01
 docker run \
   --gpus all \
   --shm-size=16GB \
