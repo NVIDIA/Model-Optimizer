@@ -404,7 +404,7 @@ class FakeTensorQuantFunction(Function):
     @staticmethod
     def backward(ctx, grad_outputs):
         """Implements straight through estimation with clipping."""
-        return _fake_quant_backward_function(ctx, grad_outputs, num_args=10)
+        return _fake_quant_backward_function(ctx, grad_outputs, num_args=11)
 
 
 class ScaledE4M3Function(Function):
