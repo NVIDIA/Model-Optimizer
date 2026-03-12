@@ -67,8 +67,8 @@ def puzzletron(
         build_library_and_stats.launch_build_library_and_stats(hydra_cfg)
     dist.barrier()
 
-    # # Step 5: calc_one_block_scores (distributed processing)
-    # scoring.launch_scoring(hydra_cfg)
+    # Step 5: calc_one_block_scores (distributed processing)
+    scoring.launch_scoring(hydra_cfg)
 
     # # Step 6: mip_and_realize_models (distributed processing)
     # mip_and_realize_models.launch_mip_and_realize_model(hydra_cfg)

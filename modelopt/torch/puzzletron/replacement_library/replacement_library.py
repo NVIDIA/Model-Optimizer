@@ -12,23 +12,29 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Replacement library for efficiently loading and managing layer-replaced DeciLM models.
+"""
+Replacement library for efficiently loading and managing layer-replaced DeciLM models.
 - Uses replacement_utils for parsing, sorting, and analyzing layer replacement configurations
 """
 # mypy: ignore-errors
 
+import copy
 import json
 import re
+import tempfile
 from pathlib import Path
+from typing import List, Optional
 
-import numpy as np
 import torch
 from immutabledict import immutabledict
 from lru import LRU
+from safetensors import safe_open
 from safetensors.torch import load_file as safe_load_file
 from torch import nn
+from transformers import PretrainedConfig, PreTrainedModel
 
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch.puzzletron.anymodel.converter.converter import Converter
 from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.modeling_decilm import (
     DeciLMDecoderLayer,
@@ -51,9 +57,11 @@ from modelopt.torch.puzzletron.tools.checkpoint_utils import (
     init_module_with_state_dict,
     load_model_config,
 )
+from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import save_model_config
 from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import (
     create_dummy_model,
     is_in_safetensors_format,
+    load_and_shard_model,
     load_sharded_state_dict,
 )
 
@@ -62,8 +70,10 @@ class ReplacementLibrary:
     def __init__(
         self,
         replacement_library_path: str | Path,
-        model_config_overrides: dict | None = None,
+        descriptor,
+        model_config_overrides: Optional[dict] = None,
     ):
+        self.descriptor = descriptor
         self.replacement_library = self._load_replacement_library(replacement_library_path)
         self._ensure_all_checkpoints_are_split()
         self.model_config_overrides = (
@@ -114,42 +124,77 @@ class ReplacementLibrary:
     def model_config(self) -> DeciLMConfig:
         if self._model_config is None:
             self._model_config = load_model_config(
-                self.get_arbitrary_checkpoint_dir(), self.model_config_overrides
+                self.get_arbitrary_checkpoint_dir(),
+                self.model_config_overrides,
+                ignore_unexpected_config_keys=True,
             )
         return self._model_config
 
     def create_model_config(self, layer_replacements: list[dict]):
         block_configs, _ = extract_block_configs_and_locations(layer_replacements)
-        model_config = self.model_config.set_block_configs(block_configs)
+        model_config = copy.deepcopy(self.model_config)
+        model_config.block_configs = block_configs
+        model_config.num_hidden_layers = len(block_configs)
         return model_config
 
-    def load_model(self, layer_replacements: list[dict]) -> DeciLMForCausalLM:
-        block_configs, block_locations = extract_block_configs_and_locations(layer_replacements)
-        model_config = self.model_config.set_block_configs(block_configs)
+    def _get_arbitrary_block_checkpoint_paths(self):
+        checkpoint_dir = Path(self.get_arbitrary_checkpoint_dir())
+        subblocks_dir = checkpoint_dir / SAFETENSORS_SUBBLOCKS_DIR_NAME
+        non_block_paths = [p for p in subblocks_dir.glob("*.safetensors") if "block_" not in p.name]
+        return non_block_paths
 
-        owned_block_indexes = _get_owned_block_indexes(model_config.get_num_hidden_layers())
-        model = create_dummy_model(model_config, self.dtype)
+    def create_index_file_from_weights(self, weight_paths: List[str]):
+        weight_map = {}
+        for weight_path in weight_paths:
+            weight_path = Path(weight_path)
+            with safe_open(str(weight_path), framework="pt", device="cpu") as f:
+                for tensor_name in f.keys():
+                    weight_map[tensor_name] = f"{SAFETENSORS_SUBBLOCKS_DIR_NAME}/{weight_path.name}"
+        index = {"metadata": {"format": "pt"}, "weight_map": weight_map}
+        return index
 
-        is_first_shard = 0 in owned_block_indexes
-        if is_first_shard and not isinstance(model.model.get_input_embeddings(), nn.Embedding):
-            model.set_input_embeddings(self.get_embedding())
+    def prepare_tmp_checkpoint_dir(
+        self,
+        tmpdir: Path,
+        model_config: PretrainedConfig,
+        layer_replacements: List[dict],
+    ):
+        arbitrary_checkpoint_dir = Path(self.get_arbitrary_checkpoint_dir())
 
-        is_last_shard = model_config.get_num_hidden_layers() - 1 in owned_block_indexes
-        if is_last_shard and not isinstance(model.model.get_output_embeddings(), nn.Linear):
-            model.model.set_final_layer_norm(self.get_ln_f())
-            model.set_output_embeddings(self.get_lm_head())
+        weight_paths = self._get_arbitrary_block_checkpoint_paths()
+        for layer_replacement in layer_replacements:
+            weight_paths += layer_replacement["weight_paths"]
 
-        active_blocks = []
-        for block_idx in owned_block_indexes:
-            layer_replacement, block_idx_in_replacement = block_locations[block_idx]
-            block = self.get_block(layer_replacement, block_idx_in_replacement)
-            model.model.layers[block_idx] = block
-            active_blocks.append(block)
+        weights_index = self.create_index_file_from_weights(weight_paths)
+        index_path = tmpdir / "model.safetensors.index.json"
+        with index_path.open("w", encoding="utf-8") as out:
+            json.dump(weights_index, out, indent=2, sort_keys=True)
 
-        self._move_inactive_blocks_to_cpu(active_blocks)
+        Converter.copy_checkpoint_files(arbitrary_checkpoint_dir, tmpdir)
+        save_model_config(model_config, tmpdir)
+
+        # create symlinks inside tmpdir
+        subblocks_dir = tmpdir / SAFETENSORS_SUBBLOCKS_DIR_NAME
+        subblocks_dir.mkdir(exist_ok=True)
+        for weight_path in weight_paths:
+            link_path = subblocks_dir / weight_path.name
+            link_path.symlink_to(weight_path)
+
+    def load_model(
+        self,
+        layer_replacements: list[dict],
+    ) -> PreTrainedModel:
+        """Load model using AnyModel approach with temporary checkpoint directory."""
+        model_config = self.create_model_config(layer_replacements)
+        with tempfile.TemporaryDirectory(prefix="replacement_solution_") as tmpdir:
+            tmpdir = Path(tmpdir)
+            self.prepare_tmp_checkpoint_dir(
+                tmpdir, model_config=model_config, layer_replacements=layer_replacements
+            )
+            model = load_and_shard_model(descriptor=self.descriptor, checkpoint_path=tmpdir)
         return model
 
-    def load_checkpoint(self, checkpoint_dir: str | Path) -> DeciLMForCausalLM:
+    def load_checkpoint(self, checkpoint_dir: str | Path) -> PreTrainedModel:
         checkpoint_dir = Path(checkpoint_dir).resolve()
         layer_replacements = self._locate_replacements_of_entire_checkpoint(checkpoint_dir)
         model = self.load_model(layer_replacements)
@@ -221,7 +266,7 @@ class ReplacementLibrary:
         if len(state_dict) > 0:
             block_indices = [
                 int(re.findall(r"^model\.layers\.(\d+)\.", param_name)[0])
-                for param_name in state_dict
+                for param_name in state_dict.keys()
             ]
             assert sorted(set(block_indices)) == list(
                 range(min(block_indices), max(block_indices) + 1)
@@ -239,7 +284,9 @@ class ReplacementLibrary:
             }
 
         dtype = infer_weights_dtype(state_dict)
-        model_config = self.model_config.set_block_configs(layer_replacement["child_block_configs"])
+        model_config = copy.deepcopy(self.model_config)
+        model_config.block_configs = layer_replacement["child_block_configs"]
+        model_config.num_hidden_layers = len(layer_replacement["child_block_configs"])
 
         module_list = nn.ModuleList(
             [
@@ -316,7 +363,7 @@ class ReplacementLibrary:
             partial_state_dict = load_sharded_state_dict(checkpoint_dir, [param_name])
             return partial_state_dict[param_name]
 
-        non_block_pth_path = checkpoint_dir / PTH_SUBBLOCKS_DIR_NAME / "non_block.pth"
+        non_block_pth_path = checkpoint_dir / PTH_SUBBLOCKS_DIR_NAME / f"non_block.pth"
         assert non_block_pth_path.exists(), _error_message_ensure_split(checkpoint_dir)
         non_block_state_dict = torch.load(non_block_pth_path)
         return non_block_state_dict[param_name]

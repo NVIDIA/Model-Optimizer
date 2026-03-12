@@ -21,7 +21,7 @@ TODO: Consider moving this a separate module dedicated for scoring.
 # mypy: ignore-errors
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
 from omegaconf import DictConfig, OmegaConf
@@ -44,8 +44,7 @@ def validate_model_and_extract_hidden_states(
     tokenizer: PreTrainedTokenizerBase,
     output_dir: str | Path,
     model_name: str,
-    extra_payload: dict[str, Any] | None = None,
-    pipeline_parallel: bool = False,
+    extra_payload: Optional[dict[str, Any]] = None,
     val_dataloader=None,
 ) -> list[torch.Tensor | LowMemorySparseTensor]:
     mprint(f"""
@@ -60,7 +59,6 @@ validate_model_and_extract_token_probs({model_name=})
         model,
         tokenizer,
         return_hidden_states=True,
-        pipeline_parallel=pipeline_parallel,
         val_dataloader=val_dataloader,
     )
     if dist.is_last_process():
@@ -77,8 +75,7 @@ def validate_model_with_teacher_similarity_metrics(
     target_hidden_states_per_batch: list[torch.Tensor],
     output_dir: str | Path,
     model_name: str,
-    extra_payload: dict[str, Any] | None = None,
-    pipeline_parallel: bool = False,
+    extra_payload: Optional[dict[str, Any]] = None,
     calculate_full_score_ablations: bool = False,
     val_dataloader=None,
 ) -> None:
@@ -95,7 +92,6 @@ validate_model_with_kl_div({model_name=}, {is_calc_kl_div=})
         model,
         tokenizer,
         target_hidden_states_per_batch=target_hidden_states_per_batch,
-        pipeline_parallel=pipeline_parallel,
         calculate_full_score_ablations=calculate_full_score_ablations,
         val_dataloader=val_dataloader,
     )
