@@ -1,0 +1,6 @@
+[submodule "launcher/modules/Megatron-LM"]
+	path = launcher/modules/Megatron-LM
+	url = https://github.com/AAnoosheh/Megatron-LM.git
+[submodule "launcher/modules/Model-Optimizer"]
+	path = launcher/modules/Model-Optimizer
+	url = https://github.com/NVIDIA/Model-Optimizer.git
