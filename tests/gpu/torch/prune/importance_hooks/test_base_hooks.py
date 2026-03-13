@@ -18,7 +18,7 @@
 import torch
 import torch.nn as nn
 
-from modelopt.torch.nas.plugins.megatron_hooks import IterativeChannelContributionHook, L2NormHook
+from modelopt.torch.prune.importance_hooks import IterativeChannelContributionHook, L2NormHook
 
 
 def _test_iterative_channel_contribution_hook_with_shape(dim1: int, dim2: int):

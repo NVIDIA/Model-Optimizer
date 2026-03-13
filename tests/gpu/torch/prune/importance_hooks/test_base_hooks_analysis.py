@@ -19,7 +19,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from modelopt.torch.nas.plugins.megatron_hooks import (
+from modelopt.torch.prune.importance_hooks import (
     IndependentChannelContributionHook,
     IterativeChannelContributionHook,
     L2NormHook,

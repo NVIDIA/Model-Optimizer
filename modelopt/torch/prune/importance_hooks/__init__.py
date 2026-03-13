@@ -20,4 +20,4 @@ from .base_hooks import *
 from .base_hooks_analysis import *
 
 with import_plugin("megatron_hooks"):
-    from .megatron_hooks import *
+    from .plugins.megatron_hooks import *

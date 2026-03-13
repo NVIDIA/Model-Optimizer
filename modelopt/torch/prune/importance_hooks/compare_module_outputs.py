@@ -24,7 +24,7 @@ Usage Example:
 
 Step 1: Capture outputs from multiple layers:
 
-    from modelopt.torch.nas.plugins.megatron_hooks.compare_module_outputs import (
+    from modelopt.torch.prune.importance_hooks.compare_module_outputs import (
         OutputSaveHook,
         save_multi_layer_outputs,
     )

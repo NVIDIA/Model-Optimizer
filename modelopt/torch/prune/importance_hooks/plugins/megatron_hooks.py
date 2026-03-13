@@ -17,7 +17,7 @@
 import torch
 from megatron.core.tensor_parallel import gather_from_tensor_model_parallel_region
 
-from .base_hooks import L2NormHook
+from ..base_hooks import L2NormHook
 
 __all__ = ["MegatronL2NormHook"]
 
