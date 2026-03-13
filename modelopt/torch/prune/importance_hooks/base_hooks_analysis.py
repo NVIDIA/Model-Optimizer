@@ -63,6 +63,10 @@ def evaluate_importance_scores(
         - "Channels" refers to INPUT features, not output features
 
     """
+    # Validate non-empty input
+    if not activations_batches:
+        raise ValueError("activations_batches must not be None or empty")
+
     num_channels = importance_scores.shape[0]
     num_to_prune = int(num_channels * prune_ratio)
 
@@ -73,28 +77,31 @@ def evaluate_importance_scores(
     rmse_values = []
     cosine_values = []
 
-    for activations in activations_batches:
-        # Get original output
-        original_output = linear_layer(activations)
+    # Wrap evaluation loop in no_grad() to avoid building autograd graphs
+    # This is an analysis-only function and doesn't need gradients
+    with torch.no_grad():
+        for activations in activations_batches:
+            # Get original output
+            original_output = linear_layer(activations)
 
-        # Prune by zeroing out identified channels
-        pruned_activations = activations.clone()
-        pruned_activations[..., channels_to_prune] = 0
+            # Prune by zeroing out identified channels
+            pruned_activations = activations.clone()
+            pruned_activations[..., channels_to_prune] = 0
 
-        # Get pruned output
-        pruned_output = linear_layer(pruned_activations)
+            # Get pruned output
+            pruned_output = linear_layer(pruned_activations)
 
-        # Compute metrics for this batch
-        rmse = torch.sqrt(F.mse_loss(pruned_output, original_output)).item()
-        rmse_values.append(rmse)
+            # Compute metrics for this batch
+            rmse = torch.sqrt(F.mse_loss(pruned_output, original_output)).item()
+            rmse_values.append(rmse)
 
-        # Cosine similarity (flatten to vectors)
-        original_flat = original_output.reshape(-1)
-        pruned_flat = pruned_output.reshape(-1)
-        cosine = F.cosine_similarity(
-            original_flat.unsqueeze(0), pruned_flat.unsqueeze(0), dim=1
-        ).item()
-        cosine_values.append(cosine)
+            # Cosine similarity (flatten to vectors)
+            original_flat = original_output.reshape(-1)
+            pruned_flat = pruned_output.reshape(-1)
+            cosine = F.cosine_similarity(
+                original_flat.unsqueeze(0), pruned_flat.unsqueeze(0), dim=1
+            ).item()
+            cosine_values.append(cosine)
 
     # Return averaged metrics
     return {
