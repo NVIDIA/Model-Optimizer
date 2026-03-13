@@ -76,27 +76,14 @@ from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 RAND_SEED = 1234
 
 
-def _kv_cache_supports_cast_to_fp8(quant_cfg: dict) -> bool:
-    """Check if KV cache quantizers support cast_to_fp8 (no calibration needed).
+def _set_kv_cache_cast_to_fp8(quant_cfg: dict) -> None:
+    """Set cast_to_fp8 on KV cache quantizers.
 
-    Returns True if quant_cfg has ``*[kv]_bmm_quantizer`` without a ``bias`` field.
-    Formats with bias (e.g. fp8_affine) require data-driven calibration.
+    Mutates *quant_cfg* in place.  Callers that share the config dict across
+    sites should ``copy.deepcopy`` before calling this function.
     """
-    bmm_quantizer_cfg = quant_cfg.get("*[kv]_bmm_quantizer", {})
-    return "*[kv]_bmm_quantizer" in quant_cfg and "bias" not in bmm_quantizer_cfg
-
-
-def _maybe_set_kv_cache_cast_to_fp8(quant_cfg: dict) -> bool:
-    """Set cast_to_fp8 on KV cache quantizers if the format supports it.
-
-    Mutates *quant_cfg* in place.  Returns ``True`` if ``cast_to_fp8`` was set,
-    ``False`` otherwise.  Callers that share the config dict across sites should
-    ``copy.deepcopy`` before calling this function.
-    """
-    if _kv_cache_supports_cast_to_fp8(quant_cfg):
+    if "*[kv]_bmm_quantizer" in quant_cfg:
         quant_cfg["*[kv]_bmm_quantizer"]["cast_to_fp8"] = True
-        return True
-    return False
 
 
 QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
@@ -121,12 +108,17 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
 
 KV_QUANT_CFG_CHOICES = {
     "none": "none",
+    "fp8_cast": "FP8_KV_CFG",
     "fp8": "FP8_KV_CFG",
     "fp8_affine": "FP8_AFFINE_KV_CFG",
+    "nvfp4_cast": "NVFP4_KV_CFG",
     "nvfp4": "NVFP4_KV_CFG",
     "nvfp4_affine": "NVFP4_AFFINE_KV_CFG",
     "nvfp4_rotate": "NVFP4_KV_ROTATE_CFG",
 }
+
+# Formats that use cast_to_fp8 (no calibration needed).
+_KV_CAST_FORMATS = {"fp8_cast", "nvfp4_cast"}
 
 mto.enable_huggingface_checkpointing()
 
@@ -334,11 +326,11 @@ def auto_quantize(
         )
         kv_cache_quant_cfg.pop("default", None)  # keep other quantizers from auto_quantize
 
-        if not args.calibrate_kv_cache:
-            _maybe_set_kv_cache_cast_to_fp8(kv_cache_quant_cfg)
+        if args.kv_cache_qformat in _KV_CAST_FORMATS:
+            _set_kv_cache_cast_to_fp8(kv_cache_quant_cfg)
 
         mtq.set_quantizer_by_cfg(language_model, quant_cfg=kv_cache_quant_cfg)
-        if args.calibrate_kv_cache:
+        if args.kv_cache_qformat not in _KV_CAST_FORMATS:
             # Calibrate only the KV cache quantizers; disable all others.
             with mtq.set_quantizer_by_cfg_context(
                 language_model, {"*": {"enable": False}, **kv_cache_quant_cfg}
@@ -373,11 +365,9 @@ def load_model(args: argparse.Namespace):
             # builds the KV quantizers with cast_to_fp8 already set. In calibration_only mode
             # mtq.calibrate() does not re-apply quant_cfg, so this must happen before
             # init_quantized_weights runs.
-            if not args.calibrate_kv_cache and _kv_cache_supports_cast_to_fp8(
-                quant_cfg["quant_cfg"]
-            ):
+            if args.kv_cache_qformat in _KV_CAST_FORMATS:
                 quant_cfg = copy.deepcopy(quant_cfg)
-                _maybe_set_kv_cache_cast_to_fp8(quant_cfg["quant_cfg"])
+                _set_kv_cache_cast_to_fp8(quant_cfg["quant_cfg"])
 
         # Do not use real quant GEMM so the calibration can be more accurate.
         with init_quantized_weights(
@@ -975,14 +965,10 @@ def quantize_main(
                 quant_cfg["quant_cfg"][pattern] = {"enable": False}
                 print(f"Excluding MTP layer from quantization: {pattern}")
 
-        # Use cast_to_fp8 for KV quantizers when data-driven calibration is not requested.
-        if (
-            args.kv_cache_qformat != "none"
-            and not args.calibrate_kv_cache
-            and _kv_cache_supports_cast_to_fp8(quant_cfg["quant_cfg"])
-        ):
+        # Use cast_to_fp8 for KV quantizers when a cast format is selected.
+        if args.kv_cache_qformat in _KV_CAST_FORMATS:
             quant_cfg = copy.deepcopy(quant_cfg)
-            _maybe_set_kv_cache_cast_to_fp8(quant_cfg["quant_cfg"])
+            _set_kv_cache_cast_to_fp8(quant_cfg["quant_cfg"])
 
         if args.qformat in QUANT_CFG_CHOICES:
             mono_quantize(
@@ -1098,26 +1084,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--kv_cache_qformat",
         required=False,
-        default="fp8",
+        default="fp8_cast",
         choices=KV_QUANT_CFG_CHOICES.keys(),
         help=(
-            "Specify KV cache quantization format. Default: fp8. "
-            "By default, FP8 KV quantizers use cast_to_fp8 (scale=1.0) "
+            "Specify KV cache quantization format. Default: fp8_cast. "
+            "Formats ending in '_cast' (fp8_cast, nvfp4_cast) set the amax to FP8 range "
             "without data-driven calibration. "
-            "Use --calibrate_kv_cache to enable data-driven calibration."
-        ),
-    )
-    parser.add_argument(
-        "--calibrate_kv_cache",
-        action="store_true",
-        default=False,
-        help=(
-            "Enable data-driven calibration for KV cache quantizers. "
-            "When set, KV quantizers are calibrated using activation statistics from the calibration dataset "
-            "and per-tensor KV scales are exported to the checkpoint. "
-            "By default (without this flag), KV quantizers use cast_to_fp8 (scale=1.0), "
-            "and KV scales are omitted from the checkpoint since inference engines (TRT-LLM, vLLM) "
-            "use scale=1.0 by default."
+            "Other formats (fp8, nvfp4, etc.) use data-driven calibration."
         ),
     )
     parser.add_argument(
@@ -1231,17 +1204,6 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
-
-    # Validate that formats requiring data-driven calibration are not used without --calibrate_kv_cache.
-    # A format requires calibration if it lacks *[kv]_bmm_quantizer (e.g. nvfp4_rotate uses
-    # per-component keys) or if the quantizer has a static bias (e.g. fp8_affine).
-    if args.kv_cache_qformat != "none" and not args.calibrate_kv_cache:
-        kv_quant_cfg = getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"]
-        if not _kv_cache_supports_cast_to_fp8(kv_quant_cfg):
-            parser.error(
-                f"--kv_cache_qformat {args.kv_cache_qformat} requires data-driven calibration. "
-                "Please add --calibrate_kv_cache."
-            )
 
     return args
 

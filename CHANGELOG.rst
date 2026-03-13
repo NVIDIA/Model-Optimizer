@@ -10,7 +10,7 @@ NVIDIA Model Optimizer Changelog
 
 **New Features**
 
-- FP8 KV cache quantization in ``hf_ptq.py`` now uses ``cast_to_fp8`` by default (amax set to FP8 range, no calibration needed). Add ``--calibrate_kv_cache`` flag to opt into data-driven per-tensor KV scale calibration. A new ``cast_to_fp8`` field in :class:`QuantizerAttributeConfig <modelopt.torch.quantization.config.QuantizerAttributeConfig>` sets the amax to FP8 range and skips calibration.
+- Add ``fp8_cast`` and ``nvfp4_cast`` modes for ``--kv_cache_qformat`` in ``hf_ptq.py``. These set the amax to FP8 range without data-driven calibration. Default changed to ``fp8_cast``. A new ``cast_to_fp8`` field in :class:`QuantizerAttributeConfig <modelopt.torch.quantization.config.QuantizerAttributeConfig>` sets the amax to FP8 range and skips calibration.
 - User does not need to manually register MOE modules to cover experts calibration coverage in PTQ workflow.
 - ``hf_ptq.py`` now saves the quantization summary and moe expert token count table to the export directory.
 - Add ``--moe_calib_experts_ratio`` flag in ``hf_ptq.py`` to specify the ratio of experts to calibrate during forward pass to improve expert coverage during calibration. Default to all the experts.
