@@ -60,105 +60,7 @@ After reading the README, check `modelopt/torch/export/model_utils.py` for `MODE
 
 **Supported** → Use the existing `examples/llm_ptq/hf_ptq.py` script directly. No custom code needed.
 
-**Unsupported** → Follow the investigation steps below before writing any custom code.
-
-### 1b. Unsupported model — investigate before writing code
-
-The goal is to get the model's source code and understand the checkpoint format before writing anything.
-
-**Step A — Is it a HuggingFace checkpoint?**
-
-Check for `config.json`. If present, get the architecture name and try loading:
-
-```bash
-python -c "
-from transformers import AutoConfig
-cfg = AutoConfig.from_pretrained('<ckpt_path>')
-print(type(cfg).__name__)
-"
-```
-
-- **Succeeds** → transformers knows the architecture. Find the source file:
-
-  ```bash
-  python -c "
-  import inspect
-  from transformers import AutoConfig, AutoModel
-  cfg = AutoConfig.from_pretrained('<ckpt_path>')
-  cls = AutoModel._model_type_to_module_name.get(cfg.model_type)
-  import transformers; mod = getattr(transformers, cls, None)
-  print(inspect.getfile(mod) if mod else 'not found')
-  "
-  ```
-
-  Read the relevant modeling file and proceed to Step B.
-
-- **Raises `ValueError` / `OSError` (unknown architecture)** → the class isn't in the installed transformers version. Determine why:
-
-  1. **Search the working directory for the class** — a local transformers fork or custom modeling file may already be present. If found, add its path to `sys.path` and use the class directly.
-
-  2. **Check if the class exists on the transformers `main` branch** (not yet released):
-
-     Clone or shallow-fetch `main` into a temp directory and grep for the class name:
-
-     ```bash
-     git clone --depth 1 https://github.com/huggingface/transformers.git /tmp/transformers-main --quiet
-     grep -r "class <ArchName>" /tmp/transformers-main/src/transformers/models/
-     ```
-
-     - **Found on `main`** → install from that clone or directly from source:
-
-       ```bash
-       pip install /tmp/transformers-main --quiet
-       ```
-
-       Then re-run `AutoConfig.from_pretrained()`.
-
-     - **Not on `main`** → private branch or completely custom. If no local source was found in step 1, ask the user:
-       > "The checkpoint uses `<ArchName>` which isn't in the released or main-branch transformers. Do you have a private transformers fork or custom modeling code I can use?"
-
-- **No `config.json`** → not a standard HuggingFace checkpoint. Search for README or `.py` files:
-
-  ```bash
-  ls <ckpt_path>/
-  ```
-
-  - **README or `.py` files found** → read them to understand how to load the model.
-  - **Nothing useful** → ask the user:
-    > "This doesn't look like a standard HuggingFace checkpoint and has no README. Can you point me to the modeling code?"
-
-**Step B — Is the checkpoint already FP8-quantized?**
-
-Check `config.json` for `"quantization_config"` or look for `*_scale_inv*` tensors in the weight files. If found, the model must be dequantized before re-quantizing with ModelOpt. Read **Pattern 5 (FP8 Checkpoint Dequantization)** in `references/unsupported-models.md` — HuggingFace's `WeightConverter` only handles standard `weight` / `weight_scale_inv` names and will silently miss non-standard parameter names (e.g., 3D expert tensors in MoE layers).
-
-**Step C — Determine what custom patches are needed:**
-
-Read the model source to identify how weights are stored. **If all linear layers are plain `nn.Linear`, no custom code is needed** — ModelOpt quantizes them automatically.
-
-**For HuggingFace models**, check `modelopt/torch/quantization/plugins/huggingface.py` first — it already registers patches for common non-standard modules (fused expert tensors, `FP8Linear`, `FalconLinear`, `Conv1D`, etc.). If your model's non-standard class is already registered there, no extra code is needed.
-
-Custom patches are required when:
-- **Fused/batched expert weights** — experts stored as a single parameter (e.g., 3D `[num_experts, in, out]`) rather than separate `nn.Linear` modules → Pattern 1 + 2 in `references/unsupported-models.md`
-- **Self-defined weight parameters** (`nn.Parameter` used directly instead of `nn.Linear`) — common in non-HF or research models → need `mtq.register()` with `TensorQuantizer` injection
-- **VLM structure** (vision encoder that should be excluded) → Pattern 4
-- **FP8 checkpoint** that needs dequantization before re-quantizing → Pattern 5
-
-**Step D — Check weight names against ModelOpt's config patterns:**
-
-Scan actual parameter names in the checkpoint and compare them against the wildcard patterns in the chosen quant config (`modelopt/torch/quantization/config.py`). If a module has a weight that would be quantized but uses a non-standard name (e.g., `gate_up_proj` instead of `gate_proj`/`up_proj`, or `experts.w1` instead of `experts.*.w1`), the wildcard will silently miss it.
-
-```python
-import json
-idx = json.load(open('<ckpt_path>/model.safetensors.index.json'))
-# Print all unique weight base names (strip layer index)
-import re
-names = set(re.sub(r'\.\d+\.', '.N.', k) for k in idx['weight_map'])
-for n in sorted(names): print(n)
-```
-
-Compare these against the `enable`/`disable` patterns in the config. Add custom overrides to the config dict if needed.
-
-Then read `references/unsupported-models.md` for the full patterns: `mtq.register()`, `_setup()`, TensorQuantizer injection, and calibration routing.
+**Unsupported** → **Read `references/unsupported-models.md` now.** It covers model source investigation, FP8 detection, patch assessment, weight name verification, and all implementation patterns.
 
 ### 2. Choose the quantization format
 
@@ -189,28 +91,30 @@ For MLP-only quantization (skipping attention), use configs with `MLP_ONLY` in t
 
 ### 3. Set up the environment
 
-- **SLURM**: You MUST use a container — running without one will fail due to missing dependencies. Get the recommended container image version from `examples/llm_ptq/README.md`, then find the matching `.sqsh` file (search near the working directory, or sibling paths). Save the sqsh path — it becomes the `--container-image` value in the `srun` command. If no sqsh found, read `references/environment-setup.md` for enroot import instructions.
-- **Local GPU**: `pip install nvidia-modelopt[hf]`
+- **SLURM**: Read `references/slurm-setup.md` — it has container setup, account/partition selection, the job script template, smoke-test strategy, and monitoring instructions.
+- **Local GPU**: Check if Docker is available first — it's the cleanest isolation:
+  - **Docker available**: use the TRT-LLM NGC container (version from `examples/llm_ptq/README.md`):
+    ```bash
+    docker run --gpus all -v <model_path>:<model_path> -v <output_path>:<output_path> \
+        nvcr.io/nvidia/tensorrt-llm/release:<version> bash -c "pip install -e <modelopt_path>[hf] --quiet && python <ptq_script.py> ..."
+    ```
+  - **No Docker**: set up a virtual environment with conda (preferred) or venv:
+    ```bash
+    # conda
+    conda create -n modelopt python=3.10 -y && conda activate modelopt
+    # or venv
+    python -m venv modelopt-env && source modelopt-env/bin/activate
 
-**GPU memory**: Estimate `num_params × 2 bytes` for BF16. Use `device_map="auto"` for multi-GPU. For models exceeding single-node memory, read `references/environment-setup.md` for FSDP2 multi-node setup.
+    pip install nvidia-modelopt[hf]
+    ```
 
-### 4. Write, submit, and monitor
+**GPU memory**: Estimate `num_params × 2 bytes` for BF16. Use `device_map="auto"` for multi-GPU. If the model exceeds single-node memory, see the FSDP2 section in `references/slurm-setup.md`.
 
-**The goal is a quantized checkpoint on disk — not a script handed to the user.** Write the script, submit it, follow the logs, fix errors, and resubmit until the export directory contains `.safetensors` shards and a `config.json`.
+### 4. Write and run
 
-#### Smoke test first (always)
+**The goal is a quantized checkpoint on disk — not a script handed to the user.** Write the script, run it (or submit it), follow the logs, fix errors, and rerun until the export directory contains `.safetensors` shards and a `config.json`.
 
-Before a full calibration run, submit a smoke-test job with `--calib_size 4` and `--time=00:30:00`. This catches script errors before wasting GPU quota on a full run. Only request a longer time limit after the smoke test passes.
-
-For SLURM smoke tests, use a comma-separated partition list so SLURM picks whichever allocates first — shorter/interactive partitions queue faster. Check available GPU partitions and their node limits:
-
-```bash
-sinfo -o "%P %a %l %D %G" 2>/dev/null | grep -v "null\|CPU\|cpu"
-```
-
-Set `--partition=interactive,batch_short,batch` (or similar) ordered by preference. Note that interactive/short partitions may cap node count — if the smoke test needs multiple nodes, include a multi-node-capable partition in the list as the fallback.
-
-#### Supported models — command to run
+#### Supported models
 
 ```bash
 python examples/llm_ptq/hf_ptq.py \
@@ -222,70 +126,22 @@ python examples/llm_ptq/hf_ptq.py \
 
 Run `python examples/llm_ptq/hf_ptq.py --help` to see all options.
 
-#### Unsupported models — custom script
+#### Unsupported models
 
-After Step 1b, write a custom PTQ script following `references/unsupported-models.md`. Core steps:
+Write a custom script following `references/unsupported-models.md`. Core steps:
 
-1. Load model (handle FP8 dequantization if needed)
+1. Load model (dequantize FP8 if needed)
 2. Register monkey-patched modules via `mtq.register()`
 3. Create calibration dataloader
 4. Call `mtq.quantize(model, config, forward_loop)`
 5. Export with `export_hf_checkpoint(model, export_dir)`
 
-#### Submit the job
-
-**SLURM** — container flags (`--container-image`, `--container-mounts`) MUST be on the `srun` line, not as `#SBATCH` directives. Use this structure every time:
-
-```bash
-#!/bin/bash
-#SBATCH --job-name=ptq
-#SBATCH --account=<account>
-#SBATCH --partition=<partition>
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=8
-#SBATCH --time=<HH:MM:SS>
-#SBATCH --output=<log_dir>/ptq_%j.log
-
-srun \
-    --container-image="<path/to/container.sqsh>" \
-    --container-mounts="<data_root>:<data_root>" \
-    --container-workdir="<workdir>" \
-    --no-container-mount-home \
-    bash -c "pip install -e <modelopt_path>[hf] --quiet && python <ptq_script.py> ..."
-```
-
-Then submit and save the job ID:
-
-```bash
-mkdir -p <log_dir>
-JOBID=$(sbatch <script>.sh | awk '{print $4}')
-echo "Submitted job $JOBID"
-```
-
-**Local GPU:**
+#### Local GPU — run and monitor
 
 ```bash
 nohup python ptq_script.py ... > <log_file> 2>&1 &
-echo $!  # save PID
+tail -f <log_file>
 ```
-
-#### Monitor until completion
-
-After submitting the final job, do not stop — the goal is a finished checkpoint, not a submitted job.
-
-Then actively poll until the job finishes:
-
-```bash
-# Poll every 60s until job is no longer in the queue
-while squeue -j $JOBID -h 2>/dev/null | grep -q .; do
-    echo "$(date): job $JOBID still running..."; sleep 60
-done
-echo "Job $JOBID finished"
-sacct -j $JOBID --format=JobID,State,ExitCode,Elapsed
-```
-
-If the session may not stay open that long, set up a cron to check (use the `CronCreate` tool if available, or instruct the user to check back). Once the job ends, tail the last 50 lines of the log and verify the export directory before reporting success.
 
 PTQ-specific failure modes to check via `mtq.print_quant_summary()`:
 
@@ -338,7 +194,7 @@ These are non-obvious requirements that cause hard-to-debug failures:
 ### Reference Files
 
 - **`references/unsupported-models.md`** — Patterns for extending ModelOpt to new architectures: MoE expert quantization, VLM language model extraction, FP8 dequantization, calibration routing
-- **`references/environment-setup.md`** — Container selection, SLURM/enroot/pyxis setup, common environment errors
+- **`references/slurm-setup.md`** — SLURM job script template, container/enroot setup, partition selection, smoke-test strategy, monitoring, multi-node FSDP2
 
 ### ModelOpt Examples
 

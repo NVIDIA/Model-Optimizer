@@ -1,18 +1,80 @@
 # Extending ModelOpt PTQ to Unsupported Models
 
-When a model architecture is not in `MODEL_NAME_TO_TYPE` (in `modelopt/torch/export/model_utils.py`), a custom PTQ script is needed. This document describes the general patterns.
+When a model architecture is not in `MODEL_NAME_TO_TYPE` (in `modelopt/torch/export/model_utils.py`), follow the investigation steps below before writing any custom code.
 
-## Identifying What Needs Customization
+## Step A — Locate the model source
 
-Inspect the model's modeling code (in its HuggingFace `modeling_*.py`) and ask:
+**Is it a HuggingFace checkpoint?** Check for `config.json`. If present, try loading:
 
-1. **Are all quantizable weights in `nn.Linear` layers?** If yes, `mtq.quantize()` auto-instruments them. If the model uses raw `nn.Parameter` tensors (common in MoE expert implementations), manual quantizer injection is needed.
+```bash
+python -c "
+from transformers import AutoConfig
+cfg = AutoConfig.from_pretrained('<ckpt_path>')
+print(type(cfg).__name__)
+"
+```
 
-2. **Is it a VLM?** If yes, extract the language model backbone and only quantize that. The vision tower and projector should be left in BF16.
+- **Succeeds** → transformers knows the architecture. Find the source file:
 
-3. **Is the checkpoint in FP8?** If yes, dequantize to BF16 before NVFP4 PTQ. Check `config.json` for `"quant_method": "fp8"`.
+  ```bash
+  python -c "
+  import inspect
+  from transformers import AutoConfig, AutoModel
+  cfg = AutoConfig.from_pretrained('<ckpt_path>')
+  cls = AutoModel._model_type_to_module_name.get(cfg.model_type)
+  import transformers; mod = getattr(transformers, cls, None)
+  print(inspect.getfile(mod) if mod else 'not found')
+  "
+  ```
 
-4. **Does it have MoE routing?** If yes, during calibration, sparse routing means some experts may never see data. A calibration wrapper that forces all-expert routing is needed.
+  Read the modeling file and proceed to Step B.
+
+- **Raises `ValueError` / `OSError` (unknown architecture)** → not in the installed transformers. Determine why:
+
+  1. **Search the working directory** for the class — a local fork or custom modeling file may already be present. If found, add its path to `sys.path`.
+
+  2. **Check the transformers `main` branch** (not yet released):
+
+     ```bash
+     git clone --depth 1 https://github.com/huggingface/transformers.git /tmp/transformers-main --quiet
+     grep -r "class <ArchName>" /tmp/transformers-main/src/transformers/models/
+     ```
+
+     - **Found** → install from that clone: `pip install /tmp/transformers-main --quiet`, then re-run `AutoConfig.from_pretrained()`.
+     - **Not found** → ask the user: *"The checkpoint uses `<ArchName>` which isn't in released or main-branch transformers. Do you have a private fork or custom modeling code?"*
+
+- **No `config.json`** → not a standard HF checkpoint. List the directory for README or `.py` files. If nothing useful, ask the user for the modeling code.
+
+## Step B — Is the checkpoint already FP8-quantized?
+
+Check `config.json` for `"quantization_config"` or scan weight files for `*_scale_inv*` tensors. If found, the model must be dequantized before re-quantizing. HuggingFace's `WeightConverter` only handles standard `weight` / `weight_scale_inv` names and will silently miss non-standard parameter names (e.g., 3D expert tensors in MoE layers). See **Pattern 5** below.
+
+## Step C — Determine what custom patches are needed
+
+Read the model source to identify how weights are stored. **If all linear layers are plain `nn.Linear`, no custom code is needed** — ModelOpt quantizes them automatically.
+
+**For HuggingFace models**, check `modelopt/torch/quantization/plugins/huggingface.py` first — it already registers patches for common non-standard modules (`Llama4TextExperts`, `FP8Linear`, `FalconLinear`, `Conv1D`, `Qwen3_5MoeExperts`, etc.). If your model's non-standard class is already registered there, no extra code is needed.
+
+Custom patches are required when:
+- **Fused/batched expert weights** — experts stored as a single parameter (e.g., 3D `[num_experts, in, out]`) rather than separate `nn.Linear` modules → Pattern 1 + 2
+- **Self-defined weight parameters** (`nn.Parameter` used directly instead of `nn.Linear`) — common in non-HF or research models → Pattern 1 + 3
+- **VLM structure** (vision encoder that should be excluded) → Pattern 4
+- **FP8 checkpoint** that needs dequantization before re-quantizing → Pattern 5
+
+## Step D — Check weight names against ModelOpt's config patterns
+
+Scan actual parameter names in the checkpoint and compare them against the wildcard patterns in the chosen quant config (`modelopt/torch/quantization/config.py`). If a module has a weight with a non-standard name (e.g., `gate_up_proj` instead of `gate_proj`/`up_proj`, or `experts.w1` instead of `experts.*.w1`), the wildcard will silently miss it.
+
+```python
+import json
+idx = json.load(open('<ckpt_path>/model.safetensors.index.json'))
+import re
+names = set(re.sub(r'\.\d+\.', '.N.', k) for k in idx['weight_map'])
+for n in sorted(names): print(n)
+```
+
+Compare against the `enable`/`disable` patterns in the config. Add custom overrides using Pattern 6 if needed. Always verify with `mtq.print_quant_summary(model)` after quantization.
+
 
 ## Pattern 1: Custom Module with TensorQuantizer
 
