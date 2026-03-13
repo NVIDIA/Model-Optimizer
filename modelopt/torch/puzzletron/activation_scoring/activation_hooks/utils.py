@@ -19,8 +19,11 @@ Activation hooks are used to compute activation scores for pruning."""
 
 from typing import Type
 
+import torch
+
 from modelopt.torch.nas.plugins.megatron_hooks.base_hooks import ForwardHook as ActivationsHook
 from modelopt.torch.puzzletron.tools.logger import aprint
+from modelopt.torch.puzzletron.utils.dummy_modules import DummyBlock, DummyModule
 
 
 def register_activation_hooks(
@@ -51,6 +54,16 @@ def register_activation_hooks(
     module_names_to_hook = pruning_mixin.get_module_names_to_hook(model)
     activation_hooks = dict()
     for block_idx, module_name in module_names_to_hook:
+        try:
+            module = model.get_submodule(module_name)
+        except AttributeError:
+            # Module doesn't exist on this rank's shard (e.g., in distributed setup)
+            continue
+
+        # Skip dummy modules - they don't have real activations to hook
+        if isinstance(module, (DummyModule, DummyBlock)):
+            continue
+
         block_config = None
         if block_idx is not None:
             block_config = model.config.block_configs[block_idx]
@@ -59,13 +72,25 @@ def register_activation_hooks(
             "block_config": block_config,
         }
 
-        module = model.get_submodule(module_name)
         hook = hook_class(module, curr_activation_hooks_kwargs)
         module.register_forward_hook(hook)
         activation_hooks[module_name] = hook
 
     if len(activation_hooks) == 0:
-        raise ValueError("couldn't find any hooks")
+        # In distributed mode, it's okay for a rank to have 0 hooks if it doesn't own
+        # the target modules (e.g., with hybrid patterns like "*-" where different
+        # ranks own different layer types). However, we still want to catch real bugs
+        # where no hooks are found at all.
+        is_distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
+        if is_distributed:
+            aprint(
+                "No hooks registered on this rank. This is expected if this rank "
+                "doesn't own any layers matching the hook pattern (e.g., in hybrid "
+                "patterns with distributed model sharding)."
+            )
+        else:
+            raise ValueError("couldn't find any hooks")
 
-    aprint(f"Found the following hooks: {activation_hooks.keys()}")
+    if len(activation_hooks) > 0:
+        aprint(f"Found the following hooks: {activation_hooks.keys()}")
     return activation_hooks
