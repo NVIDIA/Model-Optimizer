@@ -545,7 +545,7 @@ def _unpack_compressed_linear_weights(model, ckpt_path=None):
         if not os.path.exists(sf_path):
             continue
         with safe_open(sf_path, framework="pt") as f:
-            for key in f.keys():
+            for key in f:
                 if ".mlp.experts." not in key or "weight_shape" in key:
                     checkpoint_weights[key] = f.get_tensor(key)
 
