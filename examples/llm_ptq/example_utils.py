@@ -539,19 +539,33 @@ def _unpack_compressed_linear_weights(model, ckpt_path=None):
     if not ckpt_path:
         return
 
+    from huggingface_hub import hf_hub_download
     from safetensors import safe_open
+
+    is_local = os.path.isdir(ckpt_path)
+
+    def _resolve_file(filename):
+        if is_local:
+            local = os.path.join(ckpt_path, filename)
+            return local if os.path.exists(local) else None
+        try:
+            return hf_hub_download(repo_id=ckpt_path, filename=filename)
+        except Exception:
+            return None
 
     # Load non-expert weights and metadata from safetensors
     checkpoint_weights = {}
-    index_path = os.path.join(ckpt_path, "model.safetensors.index.json")
-    st_files = [os.path.join(ckpt_path, "model.safetensors")]
-    if os.path.exists(index_path):
-        with open(index_path) as f:
+    index_file = _resolve_file("model.safetensors.index.json")
+    if index_file:
+        with open(index_file) as f:
             index = json.load(f)
-        st_files = [os.path.join(ckpt_path, f) for f in set(index.get("weight_map", {}).values())]
+        st_filenames = list(set(index.get("weight_map", {}).values()))
+    else:
+        st_filenames = ["model.safetensors"]
 
-    for sf_path in st_files:
-        if not os.path.exists(sf_path):
+    for fname in st_filenames:
+        sf_path = _resolve_file(fname)
+        if sf_path is None:
             continue
         with safe_open(sf_path, framework="pt") as f:
             for key in f:
