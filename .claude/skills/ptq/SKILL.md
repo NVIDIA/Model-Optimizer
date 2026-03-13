@@ -68,7 +68,7 @@ The goal is to get the model's source code and understand the checkpoint format 
 
 **Step A — Is it a HuggingFace checkpoint?**
 
-Check for `config.json`. If present, try loading with `AutoConfig.from_pretrained()` directly:
+Check for `config.json`. If present, get the architecture name and try loading:
 
 ```bash
 python -c "
@@ -93,10 +93,31 @@ print(type(cfg).__name__)
 
   Read the relevant modeling file and proceed to Step B.
 
-- **Raises `ValueError` / `OSError` (unknown architecture)** → ask the user:
-  > "The checkpoint uses `<ArchName>` which isn't in the installed transformers. Can you provide the model source code (a file path or the modeling `.py` file)?"
+- **Raises `ValueError` / `OSError` (unknown architecture)** → the class isn't in the installed transformers version. Determine why:
 
-- **No `config.json`** → look for docs or scripts inside the checkpoint directory:
+  1. **Search the working directory for the class** — a local transformers fork or custom modeling file may already be present. If found, add its path to `sys.path` and use the class directly.
+
+  2. **Check if the class exists on the transformers `main` branch** (not yet released):
+
+     Clone or shallow-fetch `main` into a temp directory and grep for the class name:
+
+     ```bash
+     git clone --depth 1 https://github.com/huggingface/transformers.git /tmp/transformers-main --quiet
+     grep -r "class <ArchName>" /tmp/transformers-main/src/transformers/models/
+     ```
+
+     - **Found on `main`** → install from that clone or directly from source:
+
+       ```bash
+       pip install /tmp/transformers-main --quiet
+       ```
+
+       Then re-run `AutoConfig.from_pretrained()`.
+
+     - **Not on `main`** → private branch or completely custom. If no local source was found in step 1, ask the user:
+       > "The checkpoint uses `<ArchName>` which isn't in the released or main-branch transformers. Do you have a private transformers fork or custom modeling code I can use?"
+
+- **No `config.json`** → not a standard HuggingFace checkpoint. Search for README or `.py` files:
 
   ```bash
   ls <ckpt_path>/
@@ -110,12 +131,17 @@ print(type(cfg).__name__)
 
 Check `config.json` for `"quantization_config"` or look for `*_scale_inv*` tensors in the weight files. If found, the model must be dequantized before re-quantizing with ModelOpt. Read **Pattern 5 (FP8 Checkpoint Dequantization)** in `references/unsupported-models.md` — HuggingFace's `WeightConverter` only handles standard `weight` / `weight_scale_inv` names and will silently miss non-standard parameter names (e.g., 3D expert tensors in MoE layers).
 
-**Step C — Analyze the source for quantization targets:**
+**Step C — Determine what custom patches are needed:**
 
-1. Which linear layers need quantization (`nn.Linear`, `F.linear`, or custom weight tensors)
-2. Non-standard weight storage (e.g., 3D expert weight tensors in MoE layers) → Pattern 1
-3. VLM structure (vision encoder + language model) → Pattern 4
-4. MoE routing (needs all-expert calibration wrapper) → Pattern 2
+Read the model source to identify how weights are stored. **If all linear layers are plain `nn.Linear`, no custom code is needed** — ModelOpt quantizes them automatically.
+
+**For HuggingFace models**, check `modelopt/torch/quantization/plugins/huggingface.py` first — it already registers patches for common non-standard modules (fused expert tensors, `FP8Linear`, `FalconLinear`, `Conv1D`, etc.). If your model's non-standard class is already registered there, no extra code is needed.
+
+Custom patches are required when:
+- **Fused/batched expert weights** — experts stored as a single parameter (e.g., 3D `[num_experts, in, out]`) rather than separate `nn.Linear` modules → Pattern 1 + 2 in `references/unsupported-models.md`
+- **Self-defined weight parameters** (`nn.Parameter` used directly instead of `nn.Linear`) — common in non-HF or research models → need `mtq.register()` with `TensorQuantizer` injection
+- **VLM structure** (vision encoder that should be excluded) → Pattern 4
+- **FP8 checkpoint** that needs dequantization before re-quantizing → Pattern 5
 
 **Step D — Check weight names against ModelOpt's config patterns:**
 
@@ -175,6 +201,14 @@ For MLP-only quantization (skipping attention), use configs with `MLP_ONLY` in t
 #### Smoke test first (always)
 
 Before a full calibration run, submit a smoke-test job with `--calib_size 4` and `--time=00:30:00`. This catches script errors before wasting GPU quota on a full run. Only request a longer time limit after the smoke test passes.
+
+For SLURM smoke tests, use a comma-separated partition list so SLURM picks whichever allocates first — shorter/interactive partitions queue faster. Check available GPU partitions and their node limits:
+
+```bash
+sinfo -o "%P %a %l %D %G" 2>/dev/null | grep -v "null\|CPU\|cpu"
+```
+
+Set `--partition=interactive,batch_short,batch` (or similar) ordered by preference. Note that interactive/short partitions may cap node count — if the smoke test needs multiple nodes, include a multi-node-capable partition in the list as the fallback.
 
 #### Supported models — command to run
 
@@ -236,9 +270,24 @@ nohup python ptq_script.py ... > <log_file> 2>&1 &
 echo $!  # save PID
 ```
 
-#### Monitor and debug
+#### Monitor until completion
 
-Tail the job log and resubmit with fixes until the export directory contains `.safetensors` shards and `config.json`. Two PTQ-specific failure modes to check via `mtq.print_quant_summary()`:
+After submitting the final job, do not stop — the goal is a finished checkpoint, not a submitted job.
+
+Then actively poll until the job finishes:
+
+```bash
+# Poll every 60s until job is no longer in the queue
+while squeue -j $JOBID -h 2>/dev/null | grep -q .; do
+    echo "$(date): job $JOBID still running..."; sleep 60
+done
+echo "Job $JOBID finished"
+sacct -j $JOBID --format=JobID,State,ExitCode,Elapsed
+```
+
+If the session may not stay open that long, set up a cron to check (use the `CronCreate` tool if available, or instruct the user to check back). Once the job ends, tail the last 50 lines of the log and verify the export directory before reporting success.
+
+PTQ-specific failure modes to check via `mtq.print_quant_summary()`:
 
 - **Quantizers not enabled**: wildcard missed modules — check `*gate*` vs `*mlp.gate*`
 - **FP8 tensors still present after dequant**: missed a non-standard param name — inspect `model.named_parameters()` for `float8_e4m3fn` dtypes
