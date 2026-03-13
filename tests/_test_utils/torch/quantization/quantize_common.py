@@ -255,12 +255,20 @@ def auto_quantize_helper(model):
         num_score_steps=2,
         verbose=True,
     )
+    # Verify that the search outcome is consistent across all ranks.
+    # quantizer_states holds per-rank calibration tensors legitimately
+    # differ across TP shards, so it is excluded from the comparison.
+    keys_to_compare = [k for k in search_state if k != "quantizer_states"]
+
     search_state_list = [None] * torch.distributed.get_world_size()
     torch.distributed.all_gather_object(search_state_list, search_state)
 
     search_state_rank0 = search_state_list[0]
     for search_state in search_state_list[1:]:
-        assert search_state == search_state_rank0
+        for key in keys_to_compare:
+            assert search_state[key] == search_state_rank0[key], (
+                f"Mismatch in search_state['{key}'] across ranks"
+            )
 
 
 def compute_backward_grad(
