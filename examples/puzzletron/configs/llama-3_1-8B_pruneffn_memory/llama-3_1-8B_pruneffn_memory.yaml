@@ -15,6 +15,11 @@ puzzle_dir: /workspace/puzzle_dir
 mip:
   human_constraints:
     target_memory: 78_000 # 78 GiB
+  # Memory sweep configuration (optional)
+  sweep:
+    enabled: false
+    memory_compression_rates: [0.5, 0.6, 0.7, 0.8, 0.9]
+    output_csv: ${puzzle_dir}/mip_sweep_results.csv
 
 # FFN intermediate sizes to search over (heterogeneous architecture)
 pruning:

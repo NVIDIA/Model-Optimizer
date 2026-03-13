@@ -16,15 +16,19 @@
 """
 Main script for running the puzzletron algorithm on large language models (based on Puzzle paper https://arxiv.org/abs/2411.19146).
 
-This script provides two modes:
+This script provides three modes:
 1. Default mode: Runs the full puzzletron pipeline
 2. MIP-only mode: Runs only the MIP search and realize models phase
+3. MIP sweep mode: Runs MIP for multiple memory compression rates (enabled via config)
 
 Usage:
     # Full puzzletron pipeline
     torchrun main.py --config ./configs/llama_3.2_1B_pruneffn_memory.yaml
 
     # Only MIP search and realize models phase
+    torchrun main.py --config ./configs/llama_3.2_1B_pruneffn_memory.yaml --mip-only
+
+    # MIP sweep mode (set mip.sweep.enabled: true in config)
     torchrun main.py --config ./configs/llama_3.2_1B_pruneffn_memory.yaml --mip-only
 """
 
@@ -34,6 +38,7 @@ from pathlib import Path
 
 import modelopt.torch.nas as mtn
 import modelopt.torch.puzzletron.mip.mip_and_realize_models as mip_and_realize_models
+import modelopt.torch.puzzletron.mip.sweep as sweep
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.puzzletron.nas.plugins.puzzletron_nas_plugin import PuzzletronModel
 from modelopt.torch.puzzletron.tools.hydra_utils import (
@@ -143,10 +148,17 @@ def run_mip_only(hydra_config_path: str):
         overrides=[],
     )
 
-    # mip_and_realize_models (distributed processing)
-    # TODO: How to make it part of mnt.search() api, similarly to run_full_puzzletron() API
-    mprint("Puzzletron Progress 7/8: running MIP and realizing models (multi-gpu)")
-    mip_and_realize_models.launch_mip_and_realize_model(hydra_cfg)
+    # Check if sweep mode is enabled
+    if hasattr(hydra_cfg.mip, "sweep") and hydra_cfg.mip.sweep.get("enabled", False):
+        mprint(
+            "Puzzletron Progress 7/8: running MIP sweep for multiple compression rates (multi-gpu)"
+        )
+        sweep.run_mip_sweep(hydra_cfg)
+    else:
+        # mip_and_realize_models (distributed processing)
+        # TODO: How to make it part of mnt.search() api, similarly to run_full_puzzletron() API
+        mprint("Puzzletron Progress 7/8: running MIP and realizing models (multi-gpu)")
+        mip_and_realize_models.launch_mip_and_realize_model(hydra_cfg)
 
     dist.cleanup()
     mprint("Puzzletron Progress 8/8: puzzletron pipeline completed (multi-gpu)")

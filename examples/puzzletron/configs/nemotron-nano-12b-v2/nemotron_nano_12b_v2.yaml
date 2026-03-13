@@ -7,10 +7,10 @@ defaults:
   - _self_
 
 puzzle_dir: ???
-descriptor: llama
+descriptor: nemotron_h_v2
 teacher_dir: ${puzzle_dir}/ckpts/teacher/
 replacement_library_path: ${puzzle_dir}/replacement_library.json
-dataset_path: ??? # ppath to Nemotron-Post-Training-Dataset-v2
+dataset_path: ??? # path to Nemotron-Post-Training-Dataset-v2
 
 skip_realize_model: false
 
@@ -25,12 +25,12 @@ calc_subblock_stats:
   num_active_tokens_override: # Optional override for sequence lengths
   prefill_queue_size: 0
   allocate_prefill_query: false
+  runtime_stats:
+    backend: trt_torch
   benchmark_iterations: # Set to a number (e.g., 1000) to enable runtime benchmarking
   merge_with_existing_stats: false
   subblock_stats_filename: "subblock_stats.json"
   moe_stats_filename: "moe_stats.json"
-  runtime_stats:
-    backend: trt_torch
 
 scoring:
   descriptor: ${descriptor}
@@ -78,8 +78,8 @@ mip:
     - stats.attention_num_params
 
   human_constraints:
-    target_memory: 78_000
-    num_params: 7_000_000_000
+    target_memory: 90_000
+    num_params: 12_000_000_000
 
   mip_constraints:
   metric_overrides:

@@ -1,11 +1,12 @@
 defaults:
   - /validate_model_defaults
 
-descriptor: ${descriptor}
 model_name_or_path: ${teacher_dir}
 experiment_id: ${pruning.eval_samples}samples_diverse_mini
 activations_log_dir: ???
 activation_hooks_kwargs: ???
+
+descriptor: ${descriptor}
 
 # Data:
 eval_samples: 1000 # default is 10000
@@ -18,7 +19,7 @@ pruned_ckpts_output_dir: ${puzzle_dir}/pruning/${pruning.experiment_id}
 
 ## FFN pruning
 ffn_list:
-mlp_init_mode: "Truncate" # PruneByActivationsLog
+mlp_init_mode: "Truncate"
 
 ## KV-heads pruning
 n_heads_in_group_list:

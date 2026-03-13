@@ -7,10 +7,10 @@ defaults:
   - _self_
 
 puzzle_dir: ???
-descriptor: llama
+descriptor: mistral_small
 teacher_dir: ${puzzle_dir}/ckpts/teacher/
 replacement_library_path: ${puzzle_dir}/replacement_library.json
-dataset_path: ??? # ppath to Nemotron-Post-Training-Dataset-v2
+dataset_path: ??? # path to Nemotron-Post-Training-Dataset-v2
 
 skip_realize_model: false
 
@@ -79,7 +79,7 @@ mip:
 
   human_constraints:
     target_memory: 78_000
-    num_params: 7_000_000_000
+    num_params: 24_000_000_000
 
   mip_constraints:
   metric_overrides:
