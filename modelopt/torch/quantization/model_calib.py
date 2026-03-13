@@ -39,6 +39,7 @@ from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quant
 from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import (
     disable_calib,
+    disabled_weight_quantizers,
     enable_fake_quant,
     enable_quant,
     enable_weight_access_and_writeback,
@@ -563,10 +564,7 @@ def local_hessian_calibrate(
 
     def forward(self, input, *args, **kwargs):
         """Custom forward that collects activations in cache mode."""
-        # Forward without weight quantization during caching
         if LocalHessianHelper.cache_mode:
-            self.weight_quantizer.disable()
-
             out = self._forward_no_local_hessian(input, *args, **kwargs)
 
             if self.hessian_helper.is_enabled:
@@ -578,7 +576,6 @@ def local_hessian_calibrate(
                 )
                 self.hessian_helper.accumulate_hessian(hessian_input)
 
-            self.weight_quantizer.enable()
             return out
 
         return self._forward_no_local_hessian(input, *args, **kwargs)
@@ -602,10 +599,11 @@ def local_hessian_calibrate(
             if module.hessian_helper.is_enabled:
                 weight_quantizers_info.append((name, module))
 
-    # Cache activations by running forward loop
+    # Cache activations by running forward loop with weight quantizers disabled
     LocalHessianHelper.cache_mode = True
     print_rank_0("local_hessian: Caching activations and computing local Hessian...")
-    forward_loop(model)
+    with disabled_weight_quantizers(model):
+        forward_loop(model)
 
     # TODO(fridah-nv): Sync Hessian across distributed processes if needed
 
