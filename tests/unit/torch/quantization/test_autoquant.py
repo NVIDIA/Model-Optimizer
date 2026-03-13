@@ -208,6 +208,27 @@ def test_auto_quantize_disable_layers():
     assert not best_model.mlp.input_quantizer.is_enabled
 
 
+def test_auto_quantize_disabled_layers_no_poison():
+    """disabled_layers must only affect the matched layers, not all subsequent layer groups."""
+    model = TransformerBlock()
+
+    best_model, _ = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 5.0},
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        data_loader=[model.get_input() for _ in range(2)],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        disabled_layers=["*mlp*"],
+        num_calib_steps=2,
+        num_score_steps=2,
+    )
+
+    assert not best_model.mlp.input_quantizer.is_enabled
+    hparam = best_model.attn.q_proj.get_hparam("quant_recipe")
+    assert QuantRecipe(mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG) in hparam.choices
+
+
 INT4INT8_AWQ_CFG = {
     "quant_cfg": {
         "*weight_quantizer": [
@@ -260,12 +281,12 @@ def _test_data_parallel_auto_quantize(rank, size):
         lambda a: a[0],
     )
 
-    print(f"rank {rank} search_history: {search_history}")
-    if search_history != search_history_rank0:
-        print(f"rank {rank} search_history_rank0: {search_history_rank0}")
+    # quantizer_states contains tensors which can't be compared with ==
+    sh = {k: v for k, v in search_history.items() if k != "quantizer_states"}
+    sh0 = {k: v for k, v in search_history_rank0.items() if k != "quantizer_states"}
 
     # Assert that the costs, scores and searched recipes are the same across all ranks
-    assert search_history == search_history_rank0
+    assert sh == sh0
 
     assert search_history["best"]["is_satisfied"]
 
@@ -390,6 +411,12 @@ def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
         "Expected restore message when resuming from checkpoint"
     )
 
+    # Verify method is correctly persisted in checkpoint and state dicts
+    saved = torch.load(checkpoint_path, weights_only=False)
+    assert saved["method"] == method
+    assert state_dict_1["method"] == method
+    assert state_dict_2["method"] == method
+
     # Results should be identical when using same constraint
     assert state_dict_1["candidate_stats"] == state_dict_2["candidate_stats"]
     assert state_dict_1["best"]["recipe"] == state_dict_2["best"]["recipe"]
@@ -397,3 +424,73 @@ def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
         pytest.approx(state_dict_1["best"]["constraints"]["effective_bits"])
         == state_dict_2["best"]["constraints"]["effective_bits"]
     )
+
+    # Verify calibration was also restored from checkpoint
+    assert "Restored calibration for" in captured.out
+
+    # Verify quantizer_states is saved in checkpoint
+    assert "quantizer_states" in saved
+    assert len(saved["quantizer_states"]) > 0
+    for recipe_state in saved["quantizer_states"].values():
+        assert "metadata" in recipe_state
+        assert "state_dict" in recipe_state
+
+    # Verify resumed model produces identical quantizer_states
+    assert state_dict_1["quantizer_states"].keys() == state_dict_2["quantizer_states"].keys()
+    for recipe in state_dict_1["quantizer_states"]:
+        s1 = state_dict_1["quantizer_states"][recipe]
+        s2 = state_dict_2["quantizer_states"][recipe]
+        # Verify metadata (quantizer properties + tensor shape/dtype info) match per quantizer
+        assert s1["metadata"].keys() == s2["metadata"].keys()
+        for qname in s1["metadata"]:
+            assert s1["metadata"][qname] == s2["metadata"][qname], (
+                f"Metadata mismatch for {qname} in {recipe}"
+            )
+        # Verify actual tensor values match per quantizer
+        assert s1["state_dict"].keys() == s2["state_dict"].keys()
+        for qname in s1["state_dict"]:
+            for buf_name in s1["state_dict"][qname]:
+                torch.testing.assert_close(
+                    s1["state_dict"][qname][buf_name], s2["state_dict"][qname][buf_name]
+                )
+
+
+@pytest.mark.parametrize("method", ["gradient", "kl_div"])
+def test_get_auto_quantize_config(method):
+    model = TransformerBlock()
+
+    _, search_state = mtq.auto_quantize(
+        model,
+        constraints={"effective_bits": 6.0},
+        quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
+        data_loader=[model.get_input() for _ in range(4)],
+        forward_step=lambda model, batch: model(batch),
+        loss_func=lambda output, data: output.sum(),
+        num_calib_steps=2,
+        num_score_steps=2,
+        method=method,
+    )
+
+    # Verify search_state has method and module_names
+    assert search_state["method"] == method
+    for stats in search_state["candidate_stats"].values():
+        assert "module_names" in stats
+        assert len(stats["module_names"]) > 0
+
+    # Use stored best recipe
+    config = mtq.get_auto_quantize_config(search_state)
+    assert "quant_cfg" in config
+    assert config["quant_cfg"]["*"] == {"enable": False}
+    assert config["algorithm"] == "max"
+
+    # Re-solve with different constraints
+    config_resoled = mtq.get_auto_quantize_config(
+        search_state, constraints={"effective_bits": 12.0}
+    )
+    assert "quant_cfg" in config_resoled
+
+    # Apply config to a fresh model
+    fresh_model = TransformerBlock()
+    fresh_model = mtq.quantize(fresh_model, config, forward_loop=lambda m: m(model.get_input()))
+    output = fresh_model(model.get_input())
+    assert output is not None

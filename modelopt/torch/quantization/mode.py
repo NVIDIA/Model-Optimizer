@@ -236,6 +236,12 @@ def wrapped_calib_func(
             if hasattr(module, "_moe_calib_experts_ratio"):
                 module._moe_calib_experts_ratio = moe_calib_experts_ratio
 
+    moe_count_expert_calib_tokens = kwargs.pop("moe_count_expert_calib_tokens", False)
+    if moe_count_expert_calib_tokens:
+        for module in model.modules():
+            if hasattr(module, "_moe_count_expert_calib_tokens"):
+                module._moe_count_expert_calib_tokens = True
+
     if func is not None:
         if sequential:
             if forward_loop is None:

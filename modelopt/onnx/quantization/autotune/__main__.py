@@ -21,6 +21,11 @@ import tempfile
 from pathlib import Path
 
 from modelopt.onnx.logging_config import logger
+from modelopt.onnx.quantization.autotune.utils import (
+    StoreWithExplicitFlag,
+    get_node_filter_list,
+    validate_file_path,
+)
 from modelopt.onnx.quantization.autotune.workflows import (
     init_benchmark_instance,
     region_pattern_autotuning_workflow,
@@ -44,18 +49,6 @@ MODE_PRESETS = {
 }
 
 
-class _StoreWithExplicitFlag(argparse.Action):
-    """Store the value and set an 'explicit' flag on the namespace so mode presets do not override."""
-
-    def __init__(self, explicit_attr: str, *args, **kwargs):
-        self._explicit_attr = explicit_attr
-        super().__init__(*args, **kwargs)
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        setattr(namespace, self.dest, values)
-        setattr(namespace, self._explicit_attr, True)
-
-
 def apply_mode_presets(args) -> None:
     """Apply --mode preset to schemes_per_region, warmup_runs, timing_runs.
 
@@ -71,30 +64,6 @@ def apply_mode_presets(args) -> None:
         args.warmup_runs = preset["warmup_runs"]
     if not getattr(args, "_explicit_timing_runs", False):
         args.timing_runs = preset["timing_runs"]
-
-
-def validate_file_path(path: str | None, description: str) -> Path | None:
-    """Validate that a file path exists.
-
-    Args:
-        path: Path string to validate (can be None)
-        description: Description of the file for error messages
-
-    Returns:
-        Path object if valid, None if path is None
-
-    Raises:
-        SystemExit: If path is provided but doesn't exist
-    """
-    if path is None:
-        return None
-
-    path_obj = Path(path)
-    if not path_obj.exists():
-        logger.error(f"{description} not found: {path_obj}")
-        sys.exit(1)
-
-    return path_obj
 
 
 def log_benchmark_config(args):
@@ -131,7 +100,7 @@ def run_autotune() -> int:
         - 1: Autotuning failed (exception occurred)
         - 130: Interrupted by user (Ctrl+C)
     """
-    args = _get_autotune_parser().parse_args()
+    args = get_parser().parse_args()
     apply_mode_presets(args)
     model_path = validate_file_path(args.onnx_path, "Model file")
     validate_file_path(args.qdq_baseline, "QDQ baseline model")
@@ -155,20 +124,9 @@ def run_autotune() -> int:
         return 1
 
     try:
-        node_filter_list = None
-        if args.node_filter_list:
-            filter_file = validate_file_path(args.node_filter_list, "Node filter list file")
-            if filter_file:
-                with open(filter_file) as f:
-                    node_filter_list = [
-                        line.strip()
-                        for line in f
-                        if line.strip() and not line.strip().startswith("#")
-                    ]
-                logger.info(f"Loaded {len(node_filter_list)} filter patterns from {filter_file}")
-
+        node_filter_list = get_node_filter_list(args.node_filter_list)
         region_pattern_autotuning_workflow(
-            model_path=str(model_path),
+            model_or_path=str(model_path),
             output_dir=output_dir,
             num_schemes_per_region=args.num_schemes,
             pattern_cache_file=args.pattern_cache_file,
@@ -197,8 +155,11 @@ def run_autotune() -> int:
         return 1
 
 
-def _get_autotune_parser() -> argparse.ArgumentParser:
-    """Create and configure the command-line argument parser."""
+def get_parser() -> argparse.ArgumentParser:
+    """Create and return the autotune CLI argument parser.
+
+    Intended for Sphinx documentation and programmatic use (e.g. subparsers).
+    """
     parser = argparse.ArgumentParser(
         prog="modelopt.onnx.quantization.autotune",
         description="ONNX Q/DQ Autotuning with TensorRT",
@@ -262,7 +223,7 @@ Examples:
         type=int,
         default=DEFAULT_NUM_SCHEMES,
         dest="num_schemes",
-        action=_StoreWithExplicitFlag,
+        action=StoreWithExplicitFlag,
         explicit_attr="_explicit_num_schemes",
         help=f"Schemes per region (default: {DEFAULT_NUM_SCHEMES}; preset from --mode if not set)",
     )
@@ -328,7 +289,7 @@ Examples:
         "--warmup_runs",
         type=int,
         default=DEFAULT_WARMUP_RUNS,
-        action=_StoreWithExplicitFlag,
+        action=StoreWithExplicitFlag,
         explicit_attr="_explicit_warmup_runs",
         help=f"Number of warmup runs (default: {DEFAULT_WARMUP_RUNS}; preset from --mode applies if not set)",
     )
@@ -336,7 +297,7 @@ Examples:
         "--timing_runs",
         type=int,
         default=DEFAULT_TIMING_RUNS,
-        action=_StoreWithExplicitFlag,
+        action=StoreWithExplicitFlag,
         explicit_attr="_explicit_timing_runs",
         help=f"Number of timing runs (default: {DEFAULT_TIMING_RUNS}; preset from --mode applies if not set)",
     )

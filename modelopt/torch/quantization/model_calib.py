@@ -66,12 +66,13 @@ __all__ = [
 
 def weight_only_quantize(model: nn.Module):
     """Just quantize the weights of the model."""
+    name_to_module = dict(model.named_modules())
     seen_modules = set()
-    for name, module in model.named_modules():
+    for module in name_to_module.values():
         if module in seen_modules:
             continue
         for weight_name in weight_attr_names(module):
-            with enable_weight_access_and_writeback(module, model):
+            with enable_weight_access_and_writeback(module, model, name_to_module):
                 weight_quantizer = getattr(
                     module, quantizer_attr_names(weight_name).weight_quantizer
                 )
@@ -348,12 +349,6 @@ def mse_calibrate(
                     )
                     continue
 
-                if fp8_scale_sweep and not is_nvfp4_static:
-                    warnings.warn(
-                        f"fp8_scale_sweep is enabled but quantizer '{name}' is not NVFP4 static "
-                        "block quantization. fp8_scale_sweep will be ignored for this quantizer."
-                    )
-
                 # Create MSE calibrator with quant_func
                 module._calibrator = MseCalibrator(
                     amax=initial_amax,
@@ -365,7 +360,8 @@ def mse_calibrate(
                 )
 
     # Identify weight quantizers by checking if they have corresponding weight parameters
-    for name, parent_module in model.named_modules():
+    name_to_module = dict(model.named_modules())
+    for parent_module in name_to_module.values():
         if parent_module in seen_modules:
             continue
         for weight_name in weight_attr_names(parent_module):
@@ -384,7 +380,7 @@ def mse_calibrate(
         # Enable calibration mode for the weight quantizer
         weight_quantizer.disable_quant()
         weight_quantizer.enable_calib()
-        with enable_weight_access_and_writeback(parent_module, model):
+        with enable_weight_access_and_writeback(parent_module, model, name_to_module):
             weight = getattr(parent_module, weight_name)
             weight_quantizer(weight)
 
@@ -901,8 +897,9 @@ def smoothquant(model: nn.Module, forward_loop: ForwardLoop | None = None, alpha
         scale_a = scale_a.clamp(min=1e-4, max=1e4)
         apply_pre_quant_scale_and_smooth(module, scale_a)
 
+    name_to_module = dict(model.named_modules())
     smoothed_modules = 0
-    for name, module in model.named_modules():
+    for name, module in name_to_module.items():
         if is_quantized_linear(module):
             if not hasattr(module.input_quantizer, "_amax"):
                 warnings.warn(f"{name} is not calibrated, skip smoothing")
@@ -918,7 +915,7 @@ def smoothquant(model: nn.Module, forward_loop: ForwardLoop | None = None, alpha
                 f"Error: {name} has only one channel to smooth"
             )
 
-            with enable_weight_access_and_writeback(module, model):
+            with enable_weight_access_and_writeback(module, model, name_to_module):
                 postprocess(module)
 
             smoothed_modules += 1
@@ -1508,9 +1505,10 @@ def svdquant(
     create_and_replace_svdquant_linear_on_the_fly(model=model)
     awq(model, forward_loop, "awq_lite", **kwargs)
 
-    for name, module in model.named_modules():
+    name_to_module = dict(model.named_modules())
+    for name, module in name_to_module.items():
         if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
-            with enable_weight_access_and_writeback(module, model):
+            with enable_weight_access_and_writeback(module, model, name_to_module):
                 postprocess(module, name)
     max_calibrate(model, forward_loop)
 

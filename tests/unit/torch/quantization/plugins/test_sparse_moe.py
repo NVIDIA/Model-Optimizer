@@ -15,6 +15,8 @@
 
 """Tests for _is_sparse_moe_block and _QuantSparseMoe."""
 
+import copy
+
 import pytest
 import torch
 import torch.nn as nn
@@ -155,15 +157,15 @@ class TestIsSparseBlock:
         module.num_experts = 4
         assert _is_sparse_moe_block(module) is False
 
-    def test_glm4_like_block_rejected(self):
-        """A module with n_routed_experts instead of num_experts should be rejected."""
+    def test_n_routed_experts_accepted(self):
+        """A module with n_routed_experts (NemotronH-style) should be accepted."""
         module = nn.Module()
         module.experts = nn.ModuleList([nn.Linear(8, 8)])
         gate = nn.Module()
         gate.top_k = 2
-        gate.n_routed_experts = 4  # different attr name
+        gate.n_routed_experts = 4
         module.gate = gate
-        assert _is_sparse_moe_block(module) is False
+        assert _is_sparse_moe_block(module) is True
 
 
 # ---------------------------------------------------------------------------
@@ -191,54 +193,29 @@ class TestQuantSparseMoe:
         register_sparse_moe_on_the_fly(model)
         assert QuantModuleRegistry.get(moe_type) is not None
 
-    def test_setup_creates_expert_token_count(self):
+    def test_setup_config_knobs_default(self):
+        """_setup should only initialize config knobs, no buffer or hook."""
         model = get_tiny_qwen3_moe()
         moe_block = self._get_moe_block(model)
-        moe_type = type(moe_block)
-
-        if QuantModuleRegistry.get(moe_type) is None:
+        if QuantModuleRegistry.get(type(moe_block)) is None:
             register_sparse_moe_on_the_fly(model)
 
         converted = QuantModuleRegistry.convert(moe_block)
-        assert hasattr(converted, "expert_token_count")
-        if hasattr(moe_block, "gate") and hasattr(moe_block.gate, "num_experts"):
-            expected_num_experts = moe_block.gate.num_experts
-        elif hasattr(moe_block, "num_experts"):
-            expected_num_experts = moe_block.num_experts
-        elif hasattr(moe_block, "experts") and hasattr(moe_block.experts, "num_experts"):
-            expected_num_experts = moe_block.experts.num_experts
-        else:
-            expected_num_experts = 0
-        assert converted.expert_token_count.shape == (expected_num_experts,)
-        assert converted.expert_token_count.dtype == torch.long
-        assert (converted.expert_token_count == 0).all()
+        assert converted._moe_calib_experts_ratio is None
+        assert converted._moe_count_expert_calib_tokens is False
+        assert not hasattr(converted, "expert_token_count")
 
-    def test_setup_count_expert_tokens_default_false(self):
+    def test_forward_default_config_passthrough(self):
+        """With default config (both features off), forward should be a direct pass-through."""
         model = get_tiny_qwen3_moe()
         moe_block = self._get_moe_block(model)
-        moe_type = type(moe_block)
-
-        if QuantModuleRegistry.get(moe_type) is None:
-            register_sparse_moe_on_the_fly(model)
-
-        converted = QuantModuleRegistry.convert(moe_block)
-        assert converted._count_expert_tokens is False
-
-    def test_forward_no_calib_matches_original(self):
-        """When calibration is off, _QuantSparseMoe should produce the same output as the original."""
-        model = get_tiny_qwen3_moe()
-        moe_block = self._get_moe_block(model)
-        moe_type = type(moe_block)
-
-        if QuantModuleRegistry.get(moe_type) is None:
+        if QuantModuleRegistry.get(type(moe_block)) is None:
             register_sparse_moe_on_the_fly(model)
 
         ref_block = self._get_moe_block(get_tiny_qwen3_moe())
         ref_block.load_state_dict(moe_block.state_dict())
-
         converted = QuantModuleRegistry.convert(moe_block)
 
-        torch.manual_seed(42)
         x = torch.randn(1, 4, 32)
         with torch.no_grad():
             out_ref = ref_block(x)
@@ -249,31 +226,13 @@ class TestQuantSparseMoe:
         if isinstance(out_test, tuple):
             out_test = out_test[0]
         assert torch.allclose(out_ref, out_test, atol=1e-5)
-
-    def test_forward_calib_sends_all_tokens_to_all_experts(self):
-        """During calibration, all experts should see tokens (expert_token_count all > 0)."""
-        model = get_tiny_qwen3_moe()
-        register_sparse_moe_on_the_fly(model)
-
-        def calib_fn(model):
-            x = model.dummy_inputs["input_ids"]
-            model(x)
-
-        mtq.quantize(model, mtq.INT8_DEFAULT_CFG, calib_fn)
-
-        for name, module in model.named_modules():
-            if hasattr(module, "expert_token_count") and module.expert_token_count.numel() > 0:
-                assert (module.expert_token_count > 0).all(), (
-                    f"Not all experts received tokens in {name}: {module.expert_token_count}"
-                )
+        assert not hasattr(converted, "expert_token_count")
 
     def test_forward_calib_restores_top_k(self):
-        """After calibration forward, top_k should be restored to its original value."""
+        """After calibration forward with moe_calib_experts_ratio, top_k should be restored."""
         model = get_tiny_qwen3_moe()
         moe_block = self._get_moe_block(model)
-        moe_type = type(moe_block)
-
-        if QuantModuleRegistry.get(moe_type) is None:
+        if QuantModuleRegistry.get(type(moe_block)) is None:
             register_sparse_moe_on_the_fly(model)
 
         if TRANSFORMERS_VERSION_GE_5_0:
@@ -282,8 +241,9 @@ class TestQuantSparseMoe:
             original_top_k = moe_block.top_k
 
         converted = QuantModuleRegistry.convert(moe_block)
+        converted._moe_calib_experts_ratio = 1.0
 
-        # Simulate calibration mode: set _if_calib on a child TensorQuantizer
+        # Simulate calibration mode
         for m in converted.experts.modules():
             if hasattr(m, "_if_calib"):
                 m._if_calib = True
@@ -298,21 +258,28 @@ class TestQuantSparseMoe:
         else:
             assert converted.top_k == original_top_k
 
-    def test_gate_forward_hook_counts_tokens(self):
-        """Verify the gate forward hook correctly counts expert token assignments."""
+    def test_token_counting_lazy_init(self):
+        """When moe_count_expert_calib_tokens is enabled, token counting infra is lazy-inited."""
         model = get_tiny_qwen3_moe()
         moe_block = self._get_moe_block(model)
-        moe_type = type(moe_block)
-
-        if QuantModuleRegistry.get(moe_type) is None:
+        if QuantModuleRegistry.get(type(moe_block)) is None:
             register_sparse_moe_on_the_fly(model)
 
         converted = QuantModuleRegistry.convert(moe_block)
+        converted._moe_count_expert_calib_tokens = True
 
-        # Reset counts and enable counting
-        converted.expert_token_count.zero_()
+        assert not hasattr(converted, "expert_token_count")
+
+        x = torch.randn(1, 4, 32)
+        with torch.no_grad():
+            converted(x)
+
+        # Buffer and hook should now exist
+        assert hasattr(converted, "expert_token_count")
+        assert converted.expert_token_count.numel() > 0
+
+        # Manually enable counting and call gate to verify hook works
         converted._count_expert_tokens = True
-
         if TRANSFORMERS_VERSION_GE_5_0:
             hidden_size = converted.gate.weight.shape[1]
             top_k = converted.gate.top_k
@@ -320,15 +287,43 @@ class TestQuantSparseMoe:
             hidden_size = converted.gate.in_features
             top_k = converted.top_k if hasattr(converted, "top_k") else converted.gate.top_k
 
-        x = torch.randn(8, hidden_size)
+        converted.expert_token_count.zero_()
+        tokens = torch.randn(8, hidden_size)
         with torch.no_grad():
-            converted.gate(x)
-        total_assigned = converted.expert_token_count.sum().item()
-        assert total_assigned == 8 * top_k
+            converted.gate(tokens)
+        assert converted.expert_token_count.sum().item() == 8 * top_k
 
-        # Disable counting and verify counts don't change
-        converted._count_expert_tokens = False
-        prev_counts = converted.expert_token_count.clone()
-        with torch.no_grad():
-            converted.gate(x)
-        assert torch.equal(converted.expert_token_count, prev_counts)
+
+def test_qwen3_moe_quantize_with_token_forcing_and_counting():
+    """End-to-end: mtq.quantize a Qwen3MoE with INT8 + moe_calib_experts_ratio + token counting."""
+    model = get_tiny_qwen3_moe()
+
+    # Verify detection
+    moe_found = any(_is_sparse_moe_block(m) for m in model.modules())
+    assert moe_found, "Qwen3MoE should be detected as a sparse MoE block"
+
+    quant_cfg = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
+    quant_cfg["algorithm"] = {
+        "method": "max",
+        "moe_calib_experts_ratio": 1.0,
+        "moe_count_expert_calib_tokens": True,
+    }
+
+    def calib_fn(model):
+        x = model.dummy_inputs["input_ids"]
+        for _ in range(2):
+            model(x)
+
+    mtq.quantize(model, quant_cfg, calib_fn)
+
+    # Verify token counting worked
+    for name, module in model.named_modules():
+        if hasattr(module, "expert_token_count") and module.expert_token_count.numel() > 0:
+            assert (module.expert_token_count > 0).all(), (
+                f"Not all experts received tokens in {name}: {module.expert_token_count}"
+            )
+
+    # Verify model still runs
+    with torch.no_grad():
+        out = model(model.dummy_inputs["input_ids"])
+    assert out.logits is not None

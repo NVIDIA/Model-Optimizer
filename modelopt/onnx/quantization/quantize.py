@@ -36,6 +36,7 @@ import platform
 import shutil
 import tempfile
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import onnx
@@ -45,6 +46,14 @@ import onnxslim
 
 from modelopt.onnx.logging_config import configure_logging, logger
 from modelopt.onnx.op_types import is_data_dependent_shape_op
+
+try:
+    from modelopt.onnx.quantization.autotune.workflows import (
+        init_benchmark_instance,
+        region_pattern_autotuning_workflow,
+    )
+except ImportError:
+    logger.warning("Failed to import Autotune dependencies")
 from modelopt.onnx.quantization.calib_utils import (
     CalibrationDataProvider,
     CalibrationDataType,
@@ -242,6 +251,54 @@ def _preprocess_onnx(
     )
 
 
+def _find_nodes_to_quantize_autotune(
+    onnx_model: onnx.ModelProto,
+    quantize_mode: str,
+    trt_plugins: list[str] | None,
+    high_precision_dtype: str = "fp16",
+    output_dir: str | None = None,
+    num_schemes_per_region: int = 50,
+    pattern_cache_file: str | None = None,
+    state_file: str | None = None,
+    qdq_baseline_model: str | None = None,
+    node_filter_list: list[str] | None = None,
+    verbose: bool = False,
+    use_trtexec: bool = False,
+    timing_cache_file: str | None = None,
+    warmup_runs: int = 50,
+    timing_runs: int = 100,
+    trtexec_args: str | None = None,
+) -> tuple[list[str], list[str], list[tuple[gs.Node, gs.Node, str]], list[str]]:
+    """Extracts quantization information from Autotune to provide ORT quantization."""
+    logger.info("Running Auto Q/DQ with TensorRT")
+
+    benchmark_instance = init_benchmark_instance(
+        use_trtexec=use_trtexec,
+        plugin_libraries=trt_plugins,
+        timing_cache_file=timing_cache_file,
+        warmup_runs=warmup_runs,
+        timing_runs=timing_runs,
+        trtexec_args=trtexec_args.split() if trtexec_args else None,
+    )
+    if benchmark_instance is None:
+        raise RuntimeError("Failed to initialize TensorRT benchmark")
+
+    precision_map = {"fp16": "float16", "fp32": "float32", "bf16": "bfloat16"}
+    autotuner = region_pattern_autotuning_workflow(
+        onnx_model,
+        output_dir=Path(output_dir) if output_dir else None,
+        num_schemes_per_region=num_schemes_per_region,
+        pattern_cache_file=pattern_cache_file,
+        state_file=state_file,
+        quant_type=quantize_mode,
+        default_dq_dtype=precision_map[high_precision_dtype],
+        qdq_baseline_model=qdq_baseline_model,
+        node_filter_list=node_filter_list,
+        verbose=verbose,
+    )
+    return autotuner.get_ort_quantization_config()
+
+
 def quantize(
     onnx_path: str,
     quantize_mode: str = "int8",
@@ -275,6 +332,19 @@ def quantize(
     input_shapes_profile: Sequence[dict[str, str]] | None = None,
     direct_io_types: bool = False,
     opset: int | None = None,
+    autotune: bool = False,
+    autotune_output_dir: str | None = None,
+    autotune_num_schemes_per_region: int = 50,
+    autotune_pattern_cache_file: str | None = None,
+    autotune_state_file: str | None = None,
+    autotune_qdq_baseline: str | None = None,
+    autotune_node_filter_list: list[str] | None = None,
+    autotune_verbose: bool = False,
+    autotune_use_trtexec: bool = False,
+    autotune_timing_cache: str | None = None,
+    autotune_warmup_runs: int = 50,
+    autotune_timing_runs: int = 100,
+    autotune_trtexec_args: str | None = None,
     **kwargs: Any,
 ) -> None:
     """Quantizes the provided ONNX model.
@@ -398,6 +468,35 @@ def quantize(
             Target ONNX opset version for the quantized model. If None, uses required minimum opset
             (19 for int8/fp8, 21 for int4, 23 for nvfp4). If the specified opset is lower than the required minimum,
             a warning will be issued and the opset will be upgraded to the required minimum.
+        autotune:
+            If True, detect optimal Q/DQ node placements according to the TensorRT version and platform available.
+            If False, use the default pattern-based quantization approach.
+        autotune_output_dir:
+            Output directory for autotune results (state file, logs). Default: temp directory.
+        autotune_num_schemes_per_region:
+            Number of Q/DQ schemes to test per region.
+        autotune_pattern_cache_file:
+            Path to pattern cache YAML for warm-start.
+        autotune_qdq_baseline:
+            Path to a pre-quantized ONNX model to import Q/DQ patterns as warm-start.
+        autotune_state_file:
+            State file path for crash recovery and resume capability (default: <output_dir>/autotuner_state.yaml).
+        autotune_node_filter_list:
+            Path to a file containing wildcard patterns to filter ONNX nodes (one pattern per line). Regions without
+            any matching nodes are skipped during autotuning.
+        autotune_verbose:
+            Enable verbose logging in the autotuner.
+        autotune_use_trtexec:
+            Use trtexec for benchmarking instead of the TensorRT Python API.
+        autotune_timing_cache:
+            TensorRT timing cache file for faster engine builds.
+        autotune_warmup_runs:
+            Number of warmup runs before timing.
+        autotune_timing_runs:
+            Number of timed runs for latency measurement.
+        autotune_trtexec_args:
+            Additional trtexec arguments as a single quoted string.
+            Example: --autotune_trtexec_args '--fp16 --workspace=4096'
         kwargs:
             Additional keyword arguments for int4 quantization, including:
             - awqlite_alpha_step (float): Alpha step for lite, range [0, 1].
@@ -506,6 +605,35 @@ def quantize(
         calibration_shapes = get_input_shapes(onnx_path)
 
     if quantize_mode in ["fp8", "int8"]:
+        if autotune:
+            (
+                nodes_to_quantize_autotune,
+                op_types_to_quantize_autotune,
+                no_quantize_inputs,
+                op_types_needing_output_quant,
+            ) = _find_nodes_to_quantize_autotune(
+                onnx_model,
+                quantize_mode,
+                trt_plugins,
+                high_precision_dtype,
+                output_dir=autotune_output_dir,
+                num_schemes_per_region=autotune_num_schemes_per_region,
+                pattern_cache_file=autotune_pattern_cache_file,
+                state_file=autotune_state_file,
+                qdq_baseline_model=autotune_qdq_baseline,
+                node_filter_list=autotune_node_filter_list,
+                verbose=autotune_verbose,
+                use_trtexec=autotune_use_trtexec,
+                timing_cache_file=autotune_timing_cache,
+                warmup_runs=autotune_warmup_runs,
+                timing_runs=autotune_timing_runs,
+                trtexec_args=autotune_trtexec_args,
+            )
+            op_types_to_quantize = op_types_to_quantize or op_types_to_quantize_autotune
+            nodes_to_quantize = nodes_to_quantize or nodes_to_quantize_autotune
+            kwargs["no_quantize_inputs"] = no_quantize_inputs
+            kwargs["op_types_needing_output_quant"] = op_types_needing_output_quant
+
         quantize_func = quantize_int8 if quantize_mode == "int8" else quantize_fp8
         onnx_model = quantize_func(
             onnx_path=onnx_path,
@@ -531,8 +659,10 @@ def quantize(
             custom_ops_to_quantize=list(custom_ops_to_quantize.keys()),
             direct_io_types=direct_io_types,
             opset=opset,
+            autotune=autotune,
             **kwargs,
         )
+
     elif "int4" in quantize_mode:
         onnx_model = quantize_int4(
             onnx_path=onnx_path,
