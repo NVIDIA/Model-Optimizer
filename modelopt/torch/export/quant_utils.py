@@ -1154,6 +1154,35 @@ def postprocess_state_dict(
     return post_state_dict
 
 
+def max_gate_up_scales(tensors: dict[str, torch.Tensor]) -> int:
+    """Replace gate_proj and up_proj weight_scale_2 with their element-wise max.
+
+    For MOE models where gate_proj and up_proj are quantized independently,
+    serving engines typically fuse them into a single gate_up_proj and need
+    a single shared scale. Using max is conservative (avoids overflow at the
+    cost of slightly reduced dynamic range).
+    """
+    suffix_pairs = {
+        ".gate_proj.weight_scale_2": ".up_proj.weight_scale_2",
+        ".w1.weight_scale_2": ".w3.weight_scale_2",
+    }
+    tied = 0
+    for key in tensors:
+        for gate_suffix, up_suffix in suffix_pairs.items():
+            if not key.endswith(gate_suffix):
+                continue
+            partner_key = key[: -len(gate_suffix)] + up_suffix
+            if partner_key not in tensors:
+                continue
+            if not torch.equal(tensors[key], tensors[partner_key]):
+                shared = torch.max(tensors[key], tensors[partner_key])
+                tensors[key] = shared
+                tensors[partner_key] = shared.clone()
+                tied += 1
+            break
+    return tied
+
+
 def all_items_same(item_list):
     """Checks if all elements in the provided list are the same."""
     return all(x == item_list[0] for x in item_list)

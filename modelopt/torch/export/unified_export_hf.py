@@ -89,6 +89,7 @@ from .model_config import (
 from .model_utils import get_language_model_from_vl, is_multimodal_model
 from .plugins import SpeculativeDecodingExporter, has_spec_opt
 from .quant_utils import (
+    max_gate_up_scales,
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
     get_activation_scaling_factor,
@@ -790,6 +791,10 @@ def _export_transformers_checkpoint(
     quantized_state_dict = postprocess_state_dict(
         quantized_state_dict, kv_cache_max_bound, kv_cache_format, is_modelopt_qlora
     )
+
+    tied = max_gate_up_scales(quantized_state_dict)
+    if tied:
+        print(f"Tied weight_scale_2 for {tied} gate/up projection pair(s) in MoE experts.")
 
     return quantized_state_dict, quant_config
 
