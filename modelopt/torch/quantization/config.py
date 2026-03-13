@@ -504,29 +504,6 @@ MAMBA_MOE_NVFP4_CONSERVATIVE_CFG = {
     },
     "algorithm": "max",
 }
-_mamba_moe_shared_expert_disabled_quantizer_cfg = copy.deepcopy(_mamba_moe_disabled_quantizer_cfg)
-_mamba_moe_shared_expert_disabled_quantizer_cfg.update({
-    "*shared_experts*": {"enable": False},  # Skip Shared Expert
-})
-MAMBA_MOE_NVFP4_AGGRESSIVE_EXCLUDE_SHARED_EXPERT_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        **_default_disabled_quantizer_cfg,
-        **_mamba_moe_shared_expert_disabled_quantizer_cfg,
-    },
-    "algorithm": "max",
-}
 
 NVFP4_AWQ_LITE_CFG = {
     "quant_cfg": {
