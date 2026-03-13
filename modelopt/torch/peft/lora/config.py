@@ -116,4 +116,6 @@ LORA_CFG_CHOICES: dict[str, dict] = {
     "dense": DENSE_LORA_CFG,
     "moe": MOE_LORA_CFG,
     "moe_random": MOE_LORA_RANDOM_INIT_CFG,
+    "moe_per_expert": MOE_PER_EXPERT_LORA_CFG,
+    "moe_per_expert_random": MOE_PER_EXPERT_LORA_RANDOM_INIT_CFG,
 }
