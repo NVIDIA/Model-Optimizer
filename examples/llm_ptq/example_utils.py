@@ -17,6 +17,7 @@ import copy
 import glob
 import inspect
 import json
+import logging
 import os
 import shutil
 import sys
@@ -46,6 +47,8 @@ except ImportError:
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.utils.image_processor import BaseImageProcessor, MllamaImageProcessor
+
+logger = logging.getLogger(__name__)
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
@@ -453,68 +456,65 @@ def _patch_compressed_linear_init():
     try:
         from compressed_tensors.linear.compressed_linear import CompressedLinear
     except ImportError:
-        return  # compressed_tensors not installed
+        return
 
     if hasattr(CompressedLinear, "_modelopt_init_patched"):
-        return  # Already patched
+        return
 
-    # Patch __getattr__ to return dummy for weight access
     if not hasattr(CompressedLinear, "_modelopt_original_getattr"):
         CompressedLinear._modelopt_original_getattr = getattr(CompressedLinear, "__getattr__", None)
     original_getattr = CompressedLinear._modelopt_original_getattr
 
-    class DummyWeightData:
+    class _DummyWeightData:
         """Dummy tensor data that accepts initialization calls like .normal_(), .zero_()."""
 
         def __getattr__(self, name):
-            # Return self for any method call to allow chaining
             return lambda *args, **kwargs: self
 
-    class DummyWeight:
+    class _DummyWeight:
         """Dummy weight with .data that accepts any initialization."""
 
         def __init__(self):
-            self.data = DummyWeightData()
+            self.data = _DummyWeightData()
 
         def __getattr__(self, name):
             return lambda *args, **kwargs: self
 
     def patched_getattr(self, name):
         if name == "weight":
-            # Check if real weight exists
             if "_parameters" in self.__dict__ and "weight" in self._parameters:
                 return self._parameters["weight"]
             if "weight" in self.__dict__:
                 return self.__dict__["weight"]
-            # Return dummy weight for initialization purposes (don't store it)
-            return DummyWeight()
+            return _DummyWeight()
         if original_getattr is not None:
             return original_getattr(self, name)
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     CompressedLinear.__getattr__ = patched_getattr
     CompressedLinear._modelopt_init_patched = True
-    print("Patched CompressedLinear for transformers compatibility")
+    logger.info("Patched CompressedLinear for transformers compatibility")
+
+
 def _restore_compressed_linear():
     """Restore original CompressedLinear behavior after loading."""
     try:
         from compressed_tensors.linear.compressed_linear import CompressedLinear
+
         if hasattr(CompressedLinear, "_modelopt_original_getattr"):
             CompressedLinear.__getattr__ = CompressedLinear._modelopt_original_getattr
             delattr(CompressedLinear, "_modelopt_original_getattr")
         elif hasattr(CompressedLinear, "__getattr__"):
-            # If it didn't have one before, delete the patched one
             del CompressedLinear.__getattr__
         CompressedLinear._modelopt_init_patched = False
-        print("Restored CompressedLinear original state")
+        logger.info("Restored CompressedLinear original state")
     except Exception:
         pass
 
 
-
 def _unpack_compressed_linear_weights(model, ckpt_path=None):
     """Hybrid restoration: restores BF16 layers and fixes expert metadata.
-    
+
     1. BF16 layers (vision, lm_head) are restored from checkpoint and marked non-compressed.
     2. INT4 experts stay compressed in HBM to save memory (decompressed on-the-fly).
     3. Metadata (weight_shape) is fixed to avoid decompression errors.
@@ -527,66 +527,65 @@ def _unpack_compressed_linear_weights(model, ckpt_path=None):
 
     if ckpt_path is None:
         ckpt_path = getattr(model.config, "_name_or_path", None)
-    if not ckpt_path: return
+    if not ckpt_path:
+        return
 
-    import os, json, torch
     from safetensors import safe_open
-    
-    # 1. Load weights from safetensors
+
+    # Load non-expert weights and metadata from safetensors
     checkpoint_weights = {}
     index_path = os.path.join(ckpt_path, "model.safetensors.index.json")
     st_files = [os.path.join(ckpt_path, "model.safetensors")]
     if os.path.exists(index_path):
         with open(index_path) as f:
             index = json.load(f)
-        st_files = [os.path.join(ckpt_path, f) for f in set(index.get("weight_map", {}).values())]
-    
-    # We only need to load non-expert weights or metadata
+        st_files = [
+            os.path.join(ckpt_path, f) for f in set(index.get("weight_map", {}).values())
+        ]
+
     for sf_path in st_files:
-        if not os.path.exists(sf_path): continue
+        if not os.path.exists(sf_path):
+            continue
         with safe_open(sf_path, framework="pt") as f:
             for key in f.keys():
-                # Load everything except the massive packed expert weights
                 if ".mlp.experts." not in key or "weight_shape" in key:
                     checkpoint_weights[key] = f.get_tensor(key)
-    
-    # 2. Hybrid Restoration
+
+    # Hybrid restoration
     for name, module in model.named_modules():
-        if not isinstance(module, CompressedLinear): continue
-            
+        if not isinstance(module, CompressedLinear):
+            continue
+
         with torch.no_grad():
             target_device = next(module.parameters()).device
-            
+
             # CASE A: Real BF16 weight exists (vision, lm_head)
             if f"{name}.weight" in checkpoint_weights:
                 w = checkpoint_weights[f"{name}.weight"].to(target_device)
                 module._parameters.pop("weight", None)
                 module._buffers.pop("weight", None)
-                if "weight" in module.__dict__:
-                    del module.__dict__["weight"]
+                module.__dict__.pop("weight", None)
                 param = torch.nn.Parameter(w, requires_grad=False)
                 module._parameters["weight"] = param
                 module.__dict__["weight"] = param
-                module.quantization_status = QuantizationStatus.FROZEN # Mark non-compressed
-                print(f"  Restored BF16 layer: {name}")
-            
+                module.quantization_status = QuantizationStatus.FROZEN
+                logger.debug("Restored BF16 layer: %s", name)
+
             # CASE B: Expert (stay compressed, fix metadata)
             elif f"{name}.weight_shape" in checkpoint_weights:
                 ws = checkpoint_weights[f"{name}.weight_shape"]
-                # Restore int32 packed weights if present
                 if f"{name}.weight_packed" in checkpoint_weights:
-                    module.weight_packed = checkpoint_weights[f"{name}.weight_packed"].to(torch.int32)
-                # Ensure no stale BF16 weight is registered for compressed experts
+                    module.weight_packed = checkpoint_weights[f"{name}.weight_packed"].to(
+                        torch.int32
+                    )
                 module._parameters.pop("weight", None)
                 module._buffers.pop("weight", None)
                 module.__dict__.pop("weight", None)
-                # Register weight_shape as int32 parameter for compressed_tensors forward
                 shape_param = torch.nn.Parameter(ws.to(torch.int32), requires_grad=False)
                 module._parameters.pop("weight_shape", None)
                 module.__dict__.pop("weight_shape", None)
                 module._parameters["weight_shape"] = shape_param
                 module.__dict__["weight_shape"] = shape_param
-                # Keep status as COMPRESSED for on-the-fly decompression
 
     # Ensure compressed experts do not carry a stale weight attribute
     for name, module in model.named_modules():
@@ -598,6 +597,7 @@ def _unpack_compressed_linear_weights(model, ckpt_path=None):
         module._buffers.pop("weight", None)
         module.__dict__.pop("weight", None)
 
+
 def get_model(
     ckpt_path,
     device="cuda",
@@ -607,8 +607,6 @@ def get_model(
     attn_implementation=None,
 ):
     print(f"Initializing model from {ckpt_path}")
-
-    # Note: CompressedLinear weights will be unpacked after model loading
 
     device_map = "auto"
     if device == "cpu":
@@ -757,9 +755,6 @@ def get_model(
             )
     model.eval()
     _unpack_compressed_linear_weights(model, ckpt_path)
-
-
-    # Experts will be decompressed on-the-fly during calibration to save memory
 
     # If device_map was disabled (None), manually move model to target device
     if device_map is None and device != "cpu":
