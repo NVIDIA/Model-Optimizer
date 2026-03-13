@@ -183,6 +183,7 @@ def quantize(
     custom_ops_to_quantize: list[str] = [],
     direct_io_types: bool = False,
     opset: int | None = None,
+    autotune: bool = False,
     **kwargs,
 ) -> onnx.ModelProto:
     """Applies FP8 GEMM only quantization to an ONNX file.
@@ -215,10 +216,12 @@ def quantize(
     op_types_to_quantize.extend(list(custom_ops_to_quantize))
 
     enable_gemv_detection_for_trt = kwargs.get("enable_gemv_detection_for_trt", True)
-    if enable_gemv_detection_for_trt:
+    if enable_gemv_detection_for_trt and not autotune:
         # Either of m or n in matmul is 1, this matmul cannot utilize TensorCores.
         # The perf of adding Q/DQ layers is not good in TRT. Thus, in this case,
         # do not add Q/DQ layers to this matmul.
+        # Note that this check will be skipped if Autotune is enabled as Q/DQ node placements
+        # will be decided according to TensorRT's runtime measurements.
         logger.info("Detecting GEMV patterns for TRT optimization")
         matmul_nodes_to_exclude = find_nodes_from_matmul_to_exclude(
             onnx_path,
@@ -233,7 +236,8 @@ def quantize(
 
     # Collect node names to exclude from quantization
     nodes_to_exclude = find_nodes_to_exclude(graph, nodes_to_exclude, op_types_to_exclude)  # type: ignore[arg-type]
-    nodes_to_exclude.extend(find_nodes_from_convs_to_exclude(graph, quantize_mode="fp8"))
+    if not autotune:
+        nodes_to_exclude.extend(find_nodes_from_convs_to_exclude(graph, quantize_mode="fp8"))
 
     # Change the default configuration of ORT quantization
     op_types = {node.op for node in graph.nodes}
@@ -244,19 +248,22 @@ def quantize(
         calibration_eps,
         calibrate_per_node,
         custom_ops_to_quantize,
+        kwargs.get("op_types_needing_output_quant"),
     )
     logger.info(
         f"Quantizable op types in the model: {[t for t in op_types_to_quantize if t in op_types]}"
     )
 
     # Collect node names to include in quantization
-    no_quantize_inputs = []
-    nodes_to_quantize = expand_node_names_from_patterns(graph, nodes_to_quantize)
-    if not nodes_to_quantize:
-        quantizable_nodes, no_quantize_inputs = _find_nodes_to_quantize(
-            graph, quantizable_op_types, nodes_to_exclude
-        )
-        nodes_to_quantize = [node.name for node in quantizable_nodes]
+    nodes_to_quantize = nodes_to_quantize or []
+    no_quantize_inputs = kwargs.get("no_quantize_inputs", [])
+    if not autotune:
+        nodes_to_quantize = expand_node_names_from_patterns(graph, nodes_to_quantize)
+        if not nodes_to_quantize:
+            quantizable_nodes, no_quantize_inputs = _find_nodes_to_quantize(
+                graph, quantizable_op_types, nodes_to_exclude
+            )
+            nodes_to_quantize = [node.name for node in quantizable_nodes]
 
     # Update the list of nodes to quantize
     nodes_to_quantize = [

@@ -22,8 +22,8 @@ selection and explicit-flag precedence.
 
 from modelopt.onnx.quantization.autotune.__main__ import (
     MODE_PRESETS,
-    _get_autotune_parser,
     apply_mode_presets,
+    get_parser,
 )
 from modelopt.onnx.quantization.autotune.common import Config
 
@@ -109,7 +109,7 @@ class TestModePresets:
     @staticmethod
     def _parse_cli(argv):
         """Parse argv with the autotune CLI parser and apply mode presets."""
-        parser = _get_autotune_parser()
+        parser = get_parser()
         args = parser.parse_args(argv)
         apply_mode_presets(args)
         return args

@@ -311,7 +311,12 @@ def main(args: argparse.Namespace):
     if mto.ModeloptStateManager.has_state_for_mode_type("prune", model=unwrapped_model):
         mto.ModeloptStateManager.remove_state(unwrapped_model)
     if isinstance(provider, MambaModelProvider):
-        provider.hybrid_override_pattern = unwrapped_model.hybrid_override_pattern
+        hybrid_key = (
+            "hybrid_override_pattern"
+            if hasattr(unwrapped_model, "hybrid_override_pattern")
+            else "hybrid_layer_pattern"
+        )
+        setattr(provider, hybrid_key, getattr(unwrapped_model, hybrid_key))
     print_rank_0(f"\nPruned {unwrapped_model=}")
     print_rank_0(
         f"Pruned model params: {num2hrb(mtp.mcore_minitron.get_mcore_param_count(unwrapped_model))}"
@@ -374,8 +379,8 @@ def main(args: argparse.Namespace):
             hf_cfg.layer_types = [
                 lt for i, lt in enumerate(hf_cfg.layer_types) if i + 1 in kept_layer_nums
             ]
-        if hasattr(hf_cfg, "hybrid_override_pattern"):
-            hf_cfg.hybrid_override_pattern = unwrapped_model.hybrid_override_pattern
+        if isinstance(provider, MambaModelProvider) and hasattr(hf_cfg, "hybrid_override_pattern"):
+            hf_cfg.hybrid_override_pattern = getattr(unwrapped_model, hybrid_key)
         hf_cfg.num_hidden_layers = mcore_cfg.num_layers
 
         # Save dummy pruned HF model to get the correct bridge for saving pruned weights
