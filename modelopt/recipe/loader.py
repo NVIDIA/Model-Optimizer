@@ -15,7 +15,10 @@
 
 """Recipe loading utilities."""
 
-from importlib.resources.abc import Traversable
+try:
+    from importlib.resources.abc import Traversable
+except ImportError:  # Python < 3.11
+    from importlib.abc import Traversable
 from pathlib import Path
 from typing import Any
 
