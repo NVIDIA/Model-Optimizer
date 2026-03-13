@@ -1030,15 +1030,11 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         """,
     )
 
-    constant_amax: float | None = ModeloptField(
-        default=None,
-        title="Constant amax value for the quantizer.",
-        description="""If set, the quantizer uses this constant amax instead of collecting
-        statistics during calibration. The scale is computed as ``constant_amax / maxbound``. For
-        example, setting ``constant_amax=448.0`` for FP8 E4M3 (maxbound=448.0) gives scale=1.0.
-
-        Quantizers with a constant amax are skipped during calibration (no forward pass statistics
-        are collected for them), which avoids an unnecessary calibration pass.
+    cast_to_fp8: bool = ModeloptField(
+        default=False,
+        title="Cast to FP8 flag for the quantizer.",
+        description="""If True, set the amax to FP8 range. Calibration is skipped for
+        quantizers with this flag enabled.
         """,
     )
 

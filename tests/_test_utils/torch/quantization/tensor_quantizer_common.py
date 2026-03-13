@@ -209,28 +209,28 @@ class TensorQuantizerTester:
         tq.set_from_attribute_config({"enable": False})
         assert tq._disabled
 
-    def test_constant_amax(self):
-        """Test that constant_amax sets a fixed amax without calibration."""
+    def test_cast_to_fp8(self):
+        """Test that cast_to_fp8 sets a fixed amax (FP8 E4M3 max) without calibration."""
         x = torch.randn(4, 8).to(self.device)
-        amax_val = 2.0
+        fp8_max = torch.finfo(torch.float8_e4m3fn).max  # 448.0
 
-        tq = TensorQuantizer(QuantizerAttributeConfig(num_bits=8, constant_amax=amax_val))
+        tq = TensorQuantizer(QuantizerAttributeConfig(num_bits=8, cast_to_fp8=True))
         tq.to(self.device)
 
-        # _constant_amax should be stored as a plain float attribute
-        assert tq._constant_amax == amax_val
+        # _cast_to_fp8 should be stored as a boolean attribute
+        assert tq._cast_to_fp8 is True
 
-        # _get_amax should return a tensor with the correct value and device
+        # _get_amax should return a tensor with FP8 E4M3 max and correct device
         returned_amax = tq._get_amax(x)
-        assert returned_amax.item() == amax_val
+        assert returned_amax.item() == fp8_max
         assert returned_amax.device == x.device
 
         # Forward pass should use the constant amax
         out = tq(x)
         assert out.shape == x.shape
 
-    def test_constant_amax_skips_calibration(self):
-        """Test that constant_amax quantizers are kept enabled during calibration."""
+    def test_cast_to_fp8_skips_calibration(self):
+        """Test that cast_to_fp8 quantizers are kept enabled during calibration."""
         import torch.nn as nn
 
         from modelopt.torch.quantization.model_calib import (
@@ -238,19 +238,17 @@ class TensorQuantizerTester:
             finish_stats_collection,
         )
 
-        # Build a small model with one constant-amax quantizer and one normal quantizer
+        # Build a small model with one cast_to_fp8 quantizer and one normal quantizer
         model = nn.ModuleDict(
             {
-                "tq_const": TensorQuantizer(
-                    QuantizerAttributeConfig(num_bits=8, constant_amax=448.0)
-                ),
+                "tq_const": TensorQuantizer(QuantizerAttributeConfig(num_bits=8, cast_to_fp8=True)),
                 "tq_calib": TensorQuantizer(QuantizerAttributeConfig(num_bits=8)),
             }
         ).to(self.device)
 
         enable_stats_collection(model)
 
-        # constant-amax quantizer must remain enabled (not disabled, not in calib mode)
+        # cast_to_fp8 quantizer must remain enabled (not disabled, not in calib mode)
         assert not model["tq_const"]._disabled
         assert not model["tq_const"]._if_calib
         assert model["tq_const"]._if_quant
@@ -262,7 +260,7 @@ class TensorQuantizerTester:
 
         finish_stats_collection(model)
 
-        # After finish, constant-amax quantizer is still enabled
+        # After finish, cast_to_fp8 quantizer is still enabled
         assert not model["tq_const"]._disabled
         assert model["tq_const"]._if_quant
 

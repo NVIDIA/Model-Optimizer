@@ -74,11 +74,10 @@ from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloa
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
-FP8_E4M3_MAX = 448.0  # torch.finfo(torch.float8_e4m3fn).max
 
 
-def _kv_cache_supports_constant_amax(quant_cfg: dict) -> bool:
-    """Check if KV cache quantizers support constant amax (no calibration needed).
+def _kv_cache_supports_cast_to_fp8(quant_cfg: dict) -> bool:
+    """Check if KV cache quantizers support cast_to_fp8 (no calibration needed).
 
     Returns True if quant_cfg has ``*[kv]_bmm_quantizer`` without a ``bias`` field.
     Formats with bias (e.g. fp8_affine) require data-driven calibration.
@@ -87,15 +86,15 @@ def _kv_cache_supports_constant_amax(quant_cfg: dict) -> bool:
     return "*[kv]_bmm_quantizer" in quant_cfg and "bias" not in bmm_quantizer_cfg
 
 
-def _maybe_set_kv_cache_constant_amax(quant_cfg: dict) -> bool:
-    """Set constant amax on KV cache quantizers if the format supports it.
+def _maybe_set_kv_cache_cast_to_fp8(quant_cfg: dict) -> bool:
+    """Set cast_to_fp8 on KV cache quantizers if the format supports it.
 
-    Mutates *quant_cfg* in place.  Returns ``True`` if ``constant_amax`` was set,
+    Mutates *quant_cfg* in place.  Returns ``True`` if ``cast_to_fp8`` was set,
     ``False`` otherwise.  Callers that share the config dict across sites should
     ``copy.deepcopy`` before calling this function.
     """
-    if _kv_cache_supports_constant_amax(quant_cfg):
-        quant_cfg["*[kv]_bmm_quantizer"]["constant_amax"] = FP8_E4M3_MAX
+    if _kv_cache_supports_cast_to_fp8(quant_cfg):
+        quant_cfg["*[kv]_bmm_quantizer"]["cast_to_fp8"] = True
         return True
     return False
 
@@ -336,7 +335,7 @@ def auto_quantize(
         kv_cache_quant_cfg.pop("default", None)  # keep other quantizers from auto_quantize
 
         if not args.calibrate_kv_cache:
-            _maybe_set_kv_cache_constant_amax(kv_cache_quant_cfg)
+            _maybe_set_kv_cache_cast_to_fp8(kv_cache_quant_cfg)
 
         mtq.set_quantizer_by_cfg(language_model, quant_cfg=kv_cache_quant_cfg)
         if args.calibrate_kv_cache:
@@ -370,15 +369,15 @@ def load_model(args: argparse.Namespace):
                 quant_cfg,
                 getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"],
             )
-            # Mirror the constant_amax logic from quantize_main so that init_quantized_weights
-            # builds the KV quantizers with constant_amax already set. In calibration_only mode
+            # Mirror the cast_to_fp8 logic from quantize_main so that init_quantized_weights
+            # builds the KV quantizers with cast_to_fp8 already set. In calibration_only mode
             # mtq.calibrate() does not re-apply quant_cfg, so this must happen before
             # init_quantized_weights runs.
-            if not args.calibrate_kv_cache and _kv_cache_supports_constant_amax(
+            if not args.calibrate_kv_cache and _kv_cache_supports_cast_to_fp8(
                 quant_cfg["quant_cfg"]
             ):
                 quant_cfg = copy.deepcopy(quant_cfg)
-                _maybe_set_kv_cache_constant_amax(quant_cfg["quant_cfg"])
+                _maybe_set_kv_cache_cast_to_fp8(quant_cfg["quant_cfg"])
 
         # Do not use real quant GEMM so the calibration can be more accurate.
         with init_quantized_weights(
@@ -976,14 +975,14 @@ def quantize_main(
                 quant_cfg["quant_cfg"][pattern] = {"enable": False}
                 print(f"Excluding MTP layer from quantization: {pattern}")
 
-        # Use constant amax for KV quantizers when data-driven calibration is not requested.
+        # Use cast_to_fp8 for KV quantizers when data-driven calibration is not requested.
         if (
             args.kv_cache_qformat != "none"
             and not args.calibrate_kv_cache
-            and _kv_cache_supports_constant_amax(quant_cfg["quant_cfg"])
+            and _kv_cache_supports_cast_to_fp8(quant_cfg["quant_cfg"])
         ):
             quant_cfg = copy.deepcopy(quant_cfg)
-            _maybe_set_kv_cache_constant_amax(quant_cfg["quant_cfg"])
+            _maybe_set_kv_cache_cast_to_fp8(quant_cfg["quant_cfg"])
 
         if args.qformat in QUANT_CFG_CHOICES:
             mono_quantize(
@@ -1099,12 +1098,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--kv_cache_qformat",
         required=False,
-        default="none",
+        default="fp8",
         choices=KV_QUANT_CFG_CHOICES.keys(),
         help=(
-            "Specify KV cache quantization format. Default: none. "
-            "KV quantizers are always inserted to record kv_cache_quant_algo metadata in the checkpoint. "
-            f"By default, KV quantizers use a constant scale=1.0 (amax={FP8_E4M3_MAX}) "
+            "Specify KV cache quantization format. Default: fp8. "
+            "By default, FP8 KV quantizers use cast_to_fp8 (scale=1.0) "
             "without data-driven calibration. "
             "Use --calibrate_kv_cache to enable data-driven calibration."
         ),
@@ -1117,8 +1115,7 @@ def parse_args() -> argparse.Namespace:
             "Enable data-driven calibration for KV cache quantizers. "
             "When set, KV quantizers are calibrated using activation statistics from the calibration dataset "
             "and per-tensor KV scales are exported to the checkpoint. "
-            f"By default (without this flag), KV quantizers use a constant amax={FP8_E4M3_MAX} "
-            "(scale=1.0 for FP8 E4M3), "
+            "By default (without this flag), KV quantizers use cast_to_fp8 (scale=1.0), "
             "and KV scales are omitted from the checkpoint since inference engines (TRT-LLM, vLLM) "
             "use scale=1.0 by default."
         ),
@@ -1240,7 +1237,7 @@ def parse_args() -> argparse.Namespace:
     # per-component keys) or if the quantizer has a static bias (e.g. fp8_affine).
     if args.kv_cache_qformat != "none" and not args.calibrate_kv_cache:
         kv_quant_cfg = getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"]
-        if not _kv_cache_supports_constant_amax(kv_quant_cfg):
+        if not _kv_cache_supports_cast_to_fp8(kv_quant_cfg):
             parser.error(
                 f"--kv_cache_qformat {args.kv_cache_qformat} requires data-driven calibration. "
                 "Please add --calibrate_kv_cache."
