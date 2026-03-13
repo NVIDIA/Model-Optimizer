@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-from enum import StrEnum
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, field_validator
@@ -34,7 +34,7 @@ def _default_quantize_config() -> QuantizeConfig:
     return QuantizeConfig()
 
 
-class RecipeType(StrEnum):
+class RecipeType(str, Enum):
     """List of recipe types."""
 
     PTQ = "ptq"
