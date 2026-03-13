@@ -1634,19 +1634,17 @@ def update_hessian(input, hessian, n_samples):
     """Update hessian matrix with new input samples using incremental formula.
 
     Args:
-        input: Input tensor (batch_size, ..., features)
+        input: Input tensor (..., features)
         hessian: Current Hessian matrix to update in-place
-        n_samples: Number of samples already processed
+        n_samples: Number of samples (tokens) already processed
     Returns:
         Tuple of (updated_hessian, new_sample_count)
     """
-    batch_size = input.shape[0]
+    h_batch, num_tokens = compute_input_hessian(input, input.shape[-1])
 
-    # Incremental averaging: scale down old hessian
-    hessian *= n_samples / (n_samples + batch_size)
-    n_samples += batch_size
+    hessian *= n_samples / (n_samples + num_tokens)
+    n_samples += num_tokens
 
-    h_batch, _ = compute_input_hessian(input, input.shape[-1])
     hessian.add_((2.0 / n_samples * h_batch).to(hessian.device))
 
     return hessian, n_samples
