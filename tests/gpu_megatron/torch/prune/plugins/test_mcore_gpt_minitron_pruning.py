@@ -340,6 +340,7 @@ def _test_mcore_gpt_moe_parameter_sorting(rank, size):
         vocab_size=vocab_size,
         activation_func="squared_relu",
         transformer_impl="transformer_engine",
+        moe_grouped_gemm=True,
         num_moe_experts=num_moe_experts,
         moe_ffn_hidden_size=moe_ffn_hidden_size,
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
@@ -378,9 +379,9 @@ def _test_mcore_gpt_moe_parameter_sorting(rank, size):
     sortable_per_pp = [
         n for n, hp in dynamic_space.named_hparams(configurable=True) if hp.importance is not None
     ]
-    # (num_moe_experts + 3) hps per layer + 1 for hidden_size (num_layers is not sorted!)
-    # Per layer: num_attention_heads, num_moe_experts, moe_ffn (per expert), moe_shared_ffn
-    assert len(sortable_per_pp) == (num_moe_experts + 3) * num_layers // size + 1
+    # 4 hps per layer + 1 for hidden_size (num_layers is not sorted!)
+    # Per layer: num_attention_heads, num_moe_experts, moe_ffn (shared), moe_shared_ffn
+    assert len(sortable_per_pp) == 4 * num_layers // size + 1
 
     # sanity check if the model functionality is preserved after sorting
     export_searchspace(model, mtn.get_subnet_config(model))
@@ -417,6 +418,7 @@ def _test_mcore_gpt_pruning_moe(ckpt_path, rank, size):
             vocab_size=vocab_size,
             activation_func="squared_relu",
             transformer_impl="transformer_engine",
+            moe_grouped_gemm=True,
             num_moe_experts=num_moe_experts,
             moe_ffn_hidden_size=moe_ffn_hidden_size,
             moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
@@ -450,17 +452,24 @@ def _test_mcore_gpt_pruning_moe(ckpt_path, rank, size):
         channel_divisor,
     )
 
-    # Assert weights are pruned correctly
+    # Assert weights are pruned correctly (TEGroupedMLP: per-expert weights in GroupedLinear)
     for layer in model.decoder.layers:
         moe = layer.mlp
         assert moe.router.num_experts == pruned_num_moe_experts
         assert moe.router.expert_bias.shape == (pruned_num_moe_experts,)
         assert moe.router.weight.shape == (pruned_num_moe_experts, pruned_hidden_size)
         assert moe.experts.num_local_experts == pruned_num_moe_experts
-        assert len(moe.experts.local_experts) == pruned_num_moe_experts
-        for expert in moe.experts.local_experts:
-            assert expert.linear_fc1.weight.shape == (pruned_moe_ffn, pruned_hidden_size)
-            assert expert.linear_fc2.weight.shape == (pruned_hidden_size, pruned_moe_ffn)
+        assert moe.experts.linear_fc1.num_gemms == pruned_num_moe_experts
+        assert moe.experts.linear_fc2.num_gemms == pruned_num_moe_experts
+        for i in range(pruned_num_moe_experts):
+            assert getattr(moe.experts.linear_fc1, f"weight{i}").shape == (
+                pruned_moe_ffn,
+                pruned_hidden_size,
+            )
+            assert getattr(moe.experts.linear_fc2, f"weight{i}").shape == (
+                pruned_hidden_size,
+                pruned_moe_ffn,
+            )
         assert moe.shared_experts.linear_fc1.weight.shape == (
             pruned_moe_shared_ffn,
             pruned_hidden_size,
