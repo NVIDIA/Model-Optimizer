@@ -20,6 +20,7 @@ from .activation_collector import LayerActivationCollector  # noqa: F401
 
 __all__ = [
     "EXPORT_MODE",
+    "LayerActivationCollector",
     "convert_quantization_axis_to_reduce_axis",
     "export_torch_mode",
     "is_quantized",

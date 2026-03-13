@@ -526,7 +526,7 @@ def sync_moe_expert_amax(experts):
        received no tokens during calibration), runs a weight-only ``max_calibrate``
        to populate the missing amax.
     """
-    from .nn import TensorQuantizer
+    from ..nn import TensorQuantizer
 
     amax_dict: dict[str, torch.Tensor] = {}
     for expert in experts:
@@ -547,7 +547,7 @@ def sync_moe_expert_amax(experts):
             if isinstance(module, TensorQuantizer) and name in amax_dict:
                 module.amax = amax_dict[name].detach().clone()
 
-    from .model_calib import max_calibrate
+    from ..model_calib import max_calibrate
 
     for expert in experts:
         for name, module in expert.named_modules():
