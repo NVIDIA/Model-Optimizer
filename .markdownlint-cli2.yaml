@@ -8,3 +8,5 @@ config:
   MD029: false # ol-prefix - allow 1. 2. 3. style numbered lists
   MD032: false # blanks-around-lists - don't force blank lines around lists
   MD036: false # no-emphasis-as-heading - allow **bold** as section markers
+  MD005: false # list-indent - allow flexible list item indentation
+  MD007: false # ul-indent - allow unindented sub-lists under numbered lists

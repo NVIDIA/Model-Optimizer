@@ -10,7 +10,7 @@ You're an expert in NeMo Evaluator Launcher! Guide the user through creating pro
 
 ### Workflow
 
-```
+```text
 Config Generation Progress:
 - [ ] Step 1: Check if nel is installed
 - [ ] Step 2: Build the base config file
@@ -122,6 +122,7 @@ Show tasks in the current config. Loop until the user confirms the task list is 
 1. Tell the user: "Run `nel ls tasks` to see all available tasks".
 2. Ask if they want to add/remove tasks or add/remove/modify task-specific parameter overrides.
    To add per-task `nemo_evaluator_config` as specified by the user, e.g.:
+
    ```yaml
    tasks:
      - name: <task>
@@ -132,17 +133,20 @@ Show tasks in the current config. Loop until the user confirms the task list is 
              max_new_tokens: <value>
              ...
    ```
+
 3. Apply changes.
 4. Show updated list and ask: "Is the task list final, or do you want to make more changes?"
 
 **Known Issues**
 
 - NeMo-Skills workaround (self-deployment only): If using `nemo_skills.*` tasks with self-deployment (vLLM/SGLang/NIM), add at top level:
+
   ```yaml
   target:
     api_endpoint:
       api_key_name: DUMMY_API_KEY
   ```
+
   For the None (External) deployment the `api_key_name` should be already defined. The `DUMMY_API_KEY` export is handled in Step 8.
 
 **Step 6: Advanced - Multi-node**
@@ -201,7 +205,7 @@ deployment:
 
 **Step 7: Advanced - Interceptors**
 
-- Tell the user they should see: https://docs.nvidia.com/nemo/evaluator/latest/libraries/nemo-evaluator/interceptors/index.html .
+- Tell the user they should see: <https://docs.nvidia.com/nemo/evaluator/latest/libraries/nemo-evaluator/interceptors/index.html> .
 - DON'T provide any general information about what interceptors typically do in API frameworks without reading the docs. If the user asks about interceptors, only then read the webpage to provide precise information.
 - If the user asks you to configure some interceptor, then read the webpage of this interceptor and configure it according to the `--overrides` syntax but put the values in the YAML config under `evaluation.nemo_evaluator_config.config.target.api_endpoint.adapter_config` (NOT under `target.api_endpoint.adapter_config`) instead of using CLI overrides.
   By defining `interceptors` list you'd override the full chain of interceptors which can have unintended consequences like disabling default interceptors. That's why use the fields specified in the `CLI Configuration` section after the `--overrides` keyword to configure interceptors in the YAML config.
@@ -225,23 +229,28 @@ export DUMMY_API_KEY=dummy
 ```
 
 1. **Dry-run** (validates config without running):
-   ```
+
+   ```bash
    nel run --config <config_path> --dry-run
    ```
 
 2. **Test with limited samples** (quick validation run):
-   ```
+
+   ```bash
    nel run --config <config_path> -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=10
    ```
 
 3. **Re-run a single task** (useful for debugging or re-testing after config changes):
-   ```
+
+   ```bash
    nel run --config <config_path> -t <task_name>
    ```
+
    Combine with `-o` for limited samples: `nel run --config <config_path> -t <task_name> -o ++evaluation.nemo_evaluator_config.config.params.limit_samples=10`
 
 4. **Full evaluation** (production run):
-   ```
+
+   ```bash
    nel run --config <config_path>
    ```
 
@@ -252,15 +261,18 @@ After the dry-run, check the output from `nel` for any problems with the config.
 After job submission, you can monitor progress using:
 
 1. **Check job status:**
+
    ```bash
    nel status <invocation_id>
    nel info <invocation_id>
    ```
 
 2. **Stream logs** (Local execution only):
+
    ```bash
    nel logs <invocation_id>
    ```
+
    Note: `nel logs` is not supported for SLURM execution.
 
 3. **Inspect logs via SSH** (SLURM workaround):
@@ -268,6 +280,7 @@ After job submission, you can monitor progress using:
    When `nel logs` is unavailable (SLURM), use SSH to inspect logs directly:
 
    First, get log locations:
+
    ```bash
    nel info <invocation_id> --logs
    ```
@@ -275,24 +288,31 @@ After job submission, you can monitor progress using:
    Then, use SSH to view logs:
 
    **Check server deployment logs:**
+
    ```bash
    ssh <username>@<hostname> "tail -100 <log path from `nel info <invocation_id> --logs`>/server-<slurm_job_id>-*.log"
    ```
+
    Shows vLLM server startup, model loading, and deployment errors (e.g., missing wget/curl).
 
    **Check evaluation client logs:**
+
    ```bash
    ssh <username>@<hostname> "tail -100 <log path from `nel info <invocation_id> --logs`>/client-<slurm_job_id>.log"
    ```
+
    Shows evaluation progress, task execution, and results.
 
    **Check SLURM scheduler logs:**
+
    ```bash
    ssh <username>@<hostname> "tail -100 <log path from `nel info <invocation_id> --logs`>/slurm-<slurm_job_id>.log"
    ```
+
    Shows job scheduling, health checks, and overall execution flow.
 
    **Search for errors:**
+
    ```bash
    ssh <username>@<hostname> "grep -i 'error\|warning\|failed' <log path from `nel info <invocation_id> --logs`>/*.log"
    ```
@@ -301,12 +321,12 @@ After job submission, you can monitor progress using:
 
 Direct users with issues to:
 
-- **GitHub Issues:** https://github.com/NVIDIA-NeMo/Evaluator/issues
-- **GitHub Discussions:** https://github.com/NVIDIA-NeMo/Evaluator/discussions
+- **GitHub Issues:** <https://github.com/NVIDIA-NeMo/Evaluator/issues>
+- **GitHub Discussions:** <https://github.com/NVIDIA-NeMo/Evaluator/discussions>
 
 Now, copy this checklist and track your progress:
 
-```
+```text
 Config Generation Progress:
 - [ ] Step 1: Check if nel is installed
 - [ ] Step 2: Build the base config file
