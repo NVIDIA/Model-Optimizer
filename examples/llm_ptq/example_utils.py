@@ -539,9 +539,7 @@ def _unpack_compressed_linear_weights(model, ckpt_path=None):
     if os.path.exists(index_path):
         with open(index_path) as f:
             index = json.load(f)
-        st_files = [
-            os.path.join(ckpt_path, f) for f in set(index.get("weight_map", {}).values())
-        ]
+        st_files = [os.path.join(ckpt_path, f) for f in set(index.get("weight_map", {}).values())]
 
     for sf_path in st_files:
         if not os.path.exists(sf_path):
