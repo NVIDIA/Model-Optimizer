@@ -57,6 +57,7 @@ from pathlib import Path
 import uvloop
 import vllm
 from packaging import version
+from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 
@@ -80,6 +81,7 @@ additional_env_vars = {
     "CALIB_BATCH_SIZE",
     "KV_SKIP_FIRST_M",
     "KV_SKIP_LAST_N",
+    "VLLM_FAKEQUANT_ALLOW_CUDAGRAPH",
 }
 
 RayDistributedExecutor.ADDITIONAL_ENV_VARS.update(additional_env_vars)
@@ -101,6 +103,22 @@ def main():
 
     # Parse arguments
     args = parser.parse_args()
+
+    # Disable CUDA graph capture by default when using FakeQuantWorker, so the
+    # KV cache fake-quant path (skip first M / last N) can run. That path uses
+    # data-dependent shapes and Python lists during forward, which invalidates
+    # CUDA graph capture. Set VLLM_FAKEQUANT_ALLOW_CUDAGRAPH=1 to allow graphs.
+    if os.environ.get("VLLM_FAKEQUANT_ALLOW_CUDAGRAPH", "0") != "1":
+        cc = getattr(args, "compilation_config", None)
+        if cc is None:
+            args.compilation_config = CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE)
+        elif isinstance(cc, dict):
+            args.compilation_config = {**cc, "cudagraph_mode": "NONE"}
+        else:
+            args.compilation_config = cc.model_copy(
+                update={"cudagraph_mode": CUDAGraphMode.NONE}
+            )
+
     # Run the server
     uvloop.run(run_server(args))
 
