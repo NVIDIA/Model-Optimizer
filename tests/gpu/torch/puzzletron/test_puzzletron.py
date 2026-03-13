@@ -35,28 +35,34 @@ from modelopt.torch.puzzletron.anymodel import convert_model
 
 @pytest.mark.parametrize(
     (
-        "hf_config_name",
+        "hf_model_name",
         "converter",
         "hydra_config_subdir",
         "hybrid_override_pattern",
         "has_moe_layers",
     ),
     [
-        ("llama_3_1_8b_instruct", "llama", "llama_3_1_8b_instruct", None, False),
-        ("llama_3_2_3b_instruct", "llama", "llama_3_1_8b_instruct", None, False),
-        ("qwen2_5_7b_instruct", "qwen2", "qwen2_5_7b_instruct", None, False),
+        ("meta-llama/Llama-3.1-8B-Instruct", "llama", "llama_3_1_8b_instruct", None, False),
+        ("meta-llama/Llama-3.2-3B-Instruct", "llama", "llama_3_1_8b_instruct", None, False),
+        ("Qwen/Qwen2.5-7B-Instruct", "qwen2", "qwen2_5_7b_instruct", None, False),
         (
-            "mistral-small-24b-instruct-2501",
+            "mistralai/Mistral-Small-24B-Instruct-2501",
             "mistral_small",
             "mistral-small-24b-instruct-2501",
             None,
             False,
         ),
-        ("qwen3-8b", "qwen3", "qwen3-8b", None, False),
-        ("qwen3-vl-30b-a3b-instruct", "qwen3_vl", "qwen3-vl-30b-a3b-instruct", None, True),
-        ("nemotron-nano-12b-v2", "nemotron_h_v2", "nemotron-nano-12b-v2", "*-", False),
+        ("Qwen/Qwen3-8B", "qwen3", "qwen3-8b", None, False),
+        ("Qwen/Qwen3-VL-30B-A3B-Instruct", "qwen3_vl", "qwen3-vl-30b-a3b-instruct", None, True),
         (
-            "nemotron-3-nano-30b-a3b-base-bf16",
+            "nvidia/NVIDIA-Nemotron-Nano-12B-v2",
+            "nemotron_h_v2",
+            "nemotron-nano-12b-v2",
+            "*-",
+            False,
+        ),
+        (
+            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16",
             "nemotron_h",
             "nemotron-3-nano-30b-a3b-base-bf16",
             "*E",
@@ -68,7 +74,7 @@ from modelopt.torch.puzzletron.anymodel import convert_model
 def test_puzzletron(
     project_root_path: Path,
     tmp_path: Path,
-    hf_config_name: str,
+    hf_model_name: str,
     converter: str,
     hydra_config_subdir: str,
     hybrid_override_pattern: str,
@@ -80,7 +86,7 @@ def test_puzzletron(
             _test_puzzletron_multiprocess_job,
             project_root_path,
             tmp_path,
-            hf_config_name,
+            hf_model_name,
             converter,
             hydra_config_subdir,
             hybrid_override_pattern,
@@ -93,7 +99,7 @@ def test_puzzletron(
 def _test_puzzletron_multiprocess_job(
     project_root_path: Path,
     tmp_path: Path,
-    hf_config_name: str,
+    hf_model_name: str,
     converter: str,
     hydra_config_subdir: str,
     hybrid_override_pattern: str,
@@ -105,7 +111,7 @@ def _test_puzzletron_multiprocess_job(
 
     # Setup the test model and data.
     puzzle_dir, hf_checkpoint_path, dataset_path = setup_test_model_and_data(
-        project_root_path, tmp_path, rank, hf_config_name, hybrid_override_pattern
+        project_root_path, tmp_path, rank, hf_model_name, hybrid_override_pattern
     )
     hydra_config_dir = (
         project_root_path / f"tests/gpu/torch/puzzletron/resources/configs/{hydra_config_subdir}"
@@ -160,16 +166,16 @@ def _test_puzzletron_multiprocess_job(
             assert (solution_dir / "solutions.json").exists()
 
             # Validate lm_loss
-            _assert_lm_loss(puzzle_dir, hf_config_name)
+            _assert_lm_loss(puzzle_dir, hf_model_name)
         else:
             # assertions for the score_pruning_activations step 1 (FFN pruning)
-            _assert_score_pruning_activations(puzzle_dir, hf_config_name)
+            _assert_score_pruning_activations(puzzle_dir, hf_model_name)
 
             # assertions for the pruning_ckpts step 2
             assert (puzzle_dir / "ckpts/ffn_256_attn_no_op").exists()
 
             # assertions for the mip_and_realize_models step 6
-            _assert_mip_solutions(puzzle_dir, hf_config_name)
+            _assert_mip_solutions(puzzle_dir, hf_model_name)
 
         # assertions for the build_library_and_stats step 4
         assert (puzzle_dir / "replacement_library.json").is_file()
@@ -184,7 +190,7 @@ def _test_puzzletron_multiprocess_job(
     dist.cleanup()
 
     print(
-        f"PYTEST SUMMARY: test_puzzletron({hf_config_name}) test has finished successfully. "
+        f"PYTEST SUMMARY: test_puzzletron({hf_model_name}) test has finished successfully. "
         f"Puzzle directory: {puzzle_dir}"
     )
 
@@ -192,52 +198,50 @@ def _test_puzzletron_multiprocess_job(
 # Expected pruning activation values per model
 # Each model has a list of (score, channels) tuples for each FFN layer
 EXPECTED_PRUNING_VALUES = {
-    "llama_3_1_8b_instruct": [
+    "meta-llama/Llama-3.1-8B-Instruct": [
         {"score": 73, "channels": 95},
         {"score": 440, "channels": 174},
     ],
-    "llama_3_2_3b_instruct": [
+    "meta-llama/Llama-3.2-3B-Instruct": [
         {"score": 79, "channels": 95},
         {"score": 428, "channels": 174},
     ],
-    "qwen2_5_7b_instruct": [
+    "Qwen/Qwen2.5-7B-Instruct": [
         {"score": 96, "channels": 433},
         {"score": 485, "channels": 105},
     ],
-    # Mistral Small 24B
-    "mistral-small-24b-instruct-2501": [
+    "mistralai/Mistral-Small-24B-Instruct-2501": [
         {"score": 73, "channels": 95},
         {"score": 431, "channels": 174},
     ],
-    # Qwen3 8B
-    "qwen3-8b": [
+    "Qwen/Qwen3-8B": [
         {"score": 208, "channels": 51},
         {"score": 475, "channels": 266},
     ],
     # NemotronH with pattern "*-" has only 1 FFN layer (the "-" layer)
-    "nemotron-nano-12b-v2": [
+    "nvidia/NVIDIA-Nemotron-Nano-12B-v2": [
         {"score": 70, "channels": 509},
     ],
-    # Note: nemotron-3-nano-30b-a3b-base-bf16 uses MoE expert pruning, not FFN pruning
+    # Note: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16 uses MoE expert pruning, not FFN pruning
     # so it doesn't have EXPECTED_PRUNING_VALUES
 }
 
 
 # Expected lm_loss values per model
 EXPECTED_LM_LOSS = {
-    "llama_3_1_8b_instruct": 4.706878662109375,
-    "llama_3_2_3b_instruct": 4.816886901855469,
-    "qwen2_5_7b_instruct": 4.778186798095703,
-    "nemotron-nano-12b-v2": 4.79390811920166,
-    "mistral-small-24b-instruct-2501": 4.709150314331055,
-    "qwen3-8b": 4.733874320983887,
+    "meta-llama/Llama-3.1-8B-Instruct": 4.706878662109375,
+    "meta-llama/Llama-3.2-3B-Instruct": 4.816886901855469,
+    "Qwen/Qwen2.5-7B-Instruct": 4.778186798095703,
+    "nvidia/NVIDIA-Nemotron-Nano-12B-v2": 4.79390811920166,
+    "mistralai/Mistral-Small-24B-Instruct-2501": 4.709150314331055,
+    "Qwen/Qwen3-8B": 4.733874320983887,
     "gpt-oss-20b": 4.689250946044922,
-    "nemotron-3-nano-30b-a3b-base-bf16": 4.741103172302246,
-    "qwen3-vl-30b-a3b-instruct": 4.65625,
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": 4.719451904296875,
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": 4.65625,
 }
 
 
-def _assert_score_pruning_activations(puzzle_dir: Path, hf_config_name: str):
+def _assert_score_pruning_activations(puzzle_dir: Path, hf_model_name: str):
     """Assertions for the score_pruning_activations step 1."""
     rank = dist.rank()
     rank_filepath = f"pruning/pruning_scores/ffn_iterative/100samples_diverse_mini/rank_{rank}.pth"
@@ -246,7 +250,7 @@ def _assert_score_pruning_activations(puzzle_dir: Path, hf_config_name: str):
     pruning_scores = torch.load(puzzle_dir / rank_filepath)
 
     layer_names = list(pruning_scores.keys())
-    expected = EXPECTED_PRUNING_VALUES[hf_config_name]
+    expected = EXPECTED_PRUNING_VALUES[hf_model_name]
     size = dist.size()
 
     if expected is not None:
@@ -268,8 +272,8 @@ def _assert_score_pruning_activations(puzzle_dir: Path, hf_config_name: str):
             )
     else:
         # Print values for new models - update EXPECTED_PRUNING_VALUES with these
-        print(f"\n=== PRUNING VALUES for {hf_config_name} (num_layers={len(layer_names)}) ===")
-        print(f'"{hf_config_name}": [')
+        print(f"\n=== PRUNING VALUES for {hf_model_name} (num_layers={len(layer_names)}) ===")
+        print(f'"{hf_model_name}": [')
         for layer_name in layer_names:
             layer_data = pruning_scores[layer_name]
             score = layer_data["score"][0].item()
@@ -279,7 +283,7 @@ def _assert_score_pruning_activations(puzzle_dir: Path, hf_config_name: str):
         print("===")
 
 
-def _assert_lm_loss(puzzle_dir: Path, hf_config_name: str):
+def _assert_lm_loss(puzzle_dir: Path, hf_model_name: str):
     """Validate lm_loss for a model solution."""
     solution_0_path = (
         puzzle_dir / "single_sequence_replacement_solutions--validation/solution_0.json"
@@ -288,19 +292,19 @@ def _assert_lm_loss(puzzle_dir: Path, hf_config_name: str):
         validation = json.load(f)
 
     actual_lm_loss = validation["lm_loss"]["avg"]
-    expected_lm_loss = EXPECTED_LM_LOSS.get(hf_config_name)
+    expected_lm_loss = EXPECTED_LM_LOSS.get(hf_model_name)
     if expected_lm_loss is not None:
         assert abs(actual_lm_loss - expected_lm_loss) < 0.01, (
             f"lm_loss mismatch: expected {expected_lm_loss}, got {actual_lm_loss}"
         )
     else:
         # Print value for new models - update EXPECTED_LM_LOSS with this
-        print(f"\n=== LM_LOSS for {hf_config_name} ===")
-        print(f'"{hf_config_name}": {actual_lm_loss},')
+        print(f"\n=== LM_LOSS for {hf_model_name} ===")
+        print(f'"{hf_model_name}": {actual_lm_loss},')
         print("===")
 
 
-def _assert_mip_solutions(puzzle_dir: Path, hf_config_name: str):
+def _assert_mip_solutions(puzzle_dir: Path, hf_model_name: str):
     """Assertions for the mip_and_realize_models step."""
     mip_dir = puzzle_dir / "mip/puzzle_solutions/target_memory_780000MiB"
 
@@ -308,4 +312,4 @@ def _assert_mip_solutions(puzzle_dir: Path, hf_config_name: str):
     assert (mip_dir / "solutions--checkpoints/solution_0/config.json").exists()
 
     # Validate lm_loss
-    _assert_lm_loss(puzzle_dir, hf_config_name)
+    _assert_lm_loss(puzzle_dir, hf_model_name)

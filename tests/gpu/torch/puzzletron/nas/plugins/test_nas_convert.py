@@ -43,7 +43,7 @@ def _test_nas_convert_ffn_pruning_multiprocess_job(
     dist.setup(timeout=timedelta(10))
     # Setup the test model and data.
     puzzle_dir, llama_checkpoint_path, dataset_path = setup_test_model_and_data(
-        project_root_path, tmp_path, rank, "llama_3_1_8b_instruct"
+        project_root_path, tmp_path, rank, "meta-llama/Llama-3.1-8B-Instruct"
     )
     hydra_config_dir = (
         project_root_path / "tests/gpu/torch/puzzletron/resources/configs/llama_3_1_8b_instruct"
@@ -102,7 +102,7 @@ def _test_nas_convert_attn_pruning_multiprocess_job(
     dist.setup(timeout=timedelta(10))
     # Setup the test model and data.
     puzzle_dir, llama_checkpoint_path, dataset_path = setup_test_model_and_data(
-        project_root_path, tmp_path, rank, "llama_3_1_8b_instruct"
+        project_root_path, tmp_path, rank, "meta-llama/Llama-3.1-8B-Instruct"
     )
     hydra_config_dir = (
         project_root_path / "tests/gpu/torch/puzzletron/resources/configs/llama_3_1_8b_instruct"
