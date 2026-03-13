@@ -75,8 +75,7 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
             Puzzle Configuration (Required):
             - replacement_library_path (Path): Path to the replacement library JSON file.
             - solutions_path (Path): Path to puzzle solutions JSON file or directory containing solution files.
-            - solutions_to_validate (list[int], optional): Indices of specific solutions to validate.
-                                                           Validates all solutions if None.
+            - solutions_to_validate (list[int], optional): Indices of specific solutions to validate. Validates all solutions if None.
             - sort_solutions_by (str, optional): JSON field path to sort solutions by before validation.
             - bigger_is_better (bool): If True, sort solutions in descending order. Used with sort_solutions_by.
             - skip_validation (bool): If True, skip model validation and only save models if requested.
@@ -109,8 +108,7 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
             - fim_spm_rate (float): SPM-based fill-in-the-middle rate.
 
             Output Configuration:
-            - output_dir (Path, optional): Directory to save validation results.
-                                           Auto-generated from solutions_path if not provided.
+            - output_dir (Path, optional): Directory to save validation results. Auto-generated from solutions_path if not provided.
 
             Execution Options (Optional if skip_validation=False):
             - calc_losses_on_cpu (bool): Calculate losses on CPU to avoid OOM.
