@@ -879,6 +879,15 @@ class _QuantDbrxFFN(_QuantSparseMoe):
 
 
 class _QuantCompressedLinear(QuantModule):
+    """Quantization wrapper for ``compressed_tensors`` CompressedLinear modules.
+
+    Handles on-the-fly decompression of pack-quantized INT4 weights during
+    calibration.  This avoids fully decompressing all experts into GPU memory
+    at once (which would OOM for large MoE models), and also correctly handles
+    the ``weight_shape`` metadata that ``compressed_tensors`` stores as a
+    tensor rather than a plain list.
+    """
+
     def _setup(self):
         self.input_quantizer = TensorQuantizer()
         self.weight_quantizer = TensorQuantizer()

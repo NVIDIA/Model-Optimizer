@@ -447,11 +447,20 @@ def get_dtype(dtype):
 
 
 def _patch_compressed_linear_init():
-    """Patch CompressedLinear to prevent transformers weight initialization errors.
+    """Patch CompressedLinear.__getattr__ to return a dummy weight during model loading.
 
-    When loading pack-quantized models, CompressedLinear modules don't have a 'weight'
-    attribute (they have weight_packed instead). Transformers tries to initialize
-    missing weights which fails. This patch adds a dummy weight property.
+    When loading pack-quantized models with ``trust_remote_code=True``,
+    ``compressed_tensors`` converts Linear modules to CompressedLinear and
+    deletes the ``.weight`` attribute (replacing it with ``.weight_packed``).
+    Because ``.weight`` is now absent, transformers treats it as a *missing
+    key* and calls ``_initialize_missing_keys`` → ``_init_weights(module)``.
+    Custom model code (e.g. ``modeling_deepseek.py``) typically does
+    ``module.weight.data.normal_(...)`` inside ``_init_weights``, which
+    crashes with ``AttributeError`` on CompressedLinear.
+
+    This patch intercepts the ``.weight`` access and returns a no-op dummy
+    so that the initialization code completes harmlessly.  The patch is
+    reversed by :func:`_restore_compressed_linear` immediately after loading.
     """
     try:
         from compressed_tensors.linear.compressed_linear import CompressedLinear
@@ -682,17 +691,16 @@ def get_model(
                 **model_kwargs,
             )
         elif has_pack_quantized_config(hf_config):
-            # Patch CompressedLinear before loading to handle missing weight attribute
+            # Workaround: custom _init_weights (e.g. modeling_deepseek.py) accesses
+            # module.weight, which doesn't exist on CompressedLinear modules.
+            # See _patch_compressed_linear_init docstring for details.
             _patch_compressed_linear_init()
-            # Pass torch_dtype="auto" to preserve original dtypes from safetensors
-            # This prevents int32 packed weights from being converted to float
             model = AutoModelForCausalLM.from_pretrained(
                 ckpt_path,
                 device_map="auto",
                 trust_remote_code=trust_remote_code,
                 torch_dtype="auto",
             )
-            # Restore original CompressedLinear behavior after loading
             _restore_compressed_linear()
         else:
             architecture = hf_config.architectures[0]
