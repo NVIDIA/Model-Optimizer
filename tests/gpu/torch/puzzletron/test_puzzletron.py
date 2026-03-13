@@ -120,7 +120,6 @@ def _test_puzzletron_multiprocess_job(
         )
     dist.barrier()
 
-    # TODO commented for the duration of merging process  from dkorzekwa/any_model to feature/puzzletron
     # Compress the model using a one-click approach
     puzzletron.puzzletron(
         str(hydra_config_dir), hydra_config_subdir, str(puzzle_dir), str(dataset_path)
