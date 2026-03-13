@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 import torch
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
+from _test_utils.torch.misc import set_seed
 from _test_utils.torch.puzzletron.utils import setup_test_model_and_data
 
 import modelopt.torch.utils.distributed as dist
@@ -37,38 +38,19 @@ from modelopt.torch.puzzletron.anymodel import convert_model
     (
         "hf_model_name",
         "converter",
-        "hydra_config_subdir",
         "hybrid_override_pattern",
         "has_moe_layers",
     ),
     [
-        ("meta-llama/Llama-3.1-8B-Instruct", "llama", "llama_3_1_8b_instruct", None, False),
-        ("meta-llama/Llama-3.2-3B-Instruct", "llama", "llama_3_1_8b_instruct", None, False),
-        ("Qwen/Qwen2.5-7B-Instruct", "qwen2", "qwen2_5_7b_instruct", None, False),
-        (
-            "mistralai/Mistral-Small-24B-Instruct-2501",
-            "mistral_small",
-            "mistral-small-24b-instruct-2501",
-            None,
-            False,
-        ),
-        ("Qwen/Qwen3-8B", "qwen3", "qwen3-8b", None, False),
-        ("Qwen/Qwen3-VL-30B-A3B-Instruct", "qwen3_vl", "qwen3-vl-30b-a3b-instruct", None, True),
-        (
-            "nvidia/NVIDIA-Nemotron-Nano-12B-v2",
-            "nemotron_h_v2",
-            "nemotron-nano-12b-v2",
-            "*-",
-            False,
-        ),
-        (
-            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16",
-            "nemotron_h",
-            "nemotron-3-nano-30b-a3b-base-bf16",
-            "*E",
-            True,
-        ),
-        # ("gpt-oss-20b", "gpt_oss_20b", "gpt-oss-20b", None, True),
+        ("meta-llama/Llama-3.1-8B-Instruct", "llama", None, False),
+        ("meta-llama/Llama-3.2-3B-Instruct", "llama", None, False),
+        ("Qwen/Qwen2.5-7B-Instruct", "qwen2", None, False),
+        ("mistralai/Mistral-Small-24B-Instruct-2501", "mistral_small", None, False),
+        ("Qwen/Qwen3-8B", "qwen3", None, False),
+        ("Qwen/Qwen3-VL-30B-A3B-Instruct", "qwen3_vl", None, True),
+        ("nvidia/NVIDIA-Nemotron-Nano-12B-v2", "nemotron_h_v2", "*-", False),
+        ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16", "nemotron_h", "*E", True),
+        # ("gpt-oss-20b", "gpt_oss_20b", None, True),
     ],
 )
 def test_puzzletron(
@@ -76,7 +58,6 @@ def test_puzzletron(
     tmp_path: Path,
     hf_model_name: str,
     converter: str,
-    hydra_config_subdir: str,
     hybrid_override_pattern: str,
     has_moe_layers: bool,
 ):
@@ -88,7 +69,6 @@ def test_puzzletron(
             tmp_path,
             hf_model_name,
             converter,
-            hydra_config_subdir,
             hybrid_override_pattern,
             has_moe_layers,
         ),
@@ -101,21 +81,21 @@ def _test_puzzletron_multiprocess_job(
     tmp_path: Path,
     hf_model_name: str,
     converter: str,
-    hydra_config_subdir: str,
     hybrid_override_pattern: str,
     has_moe_layers: bool,
     rank: int,
     size: int,
 ):
+    set_seed(1234)
     dist.setup(timeout=timedelta(10))
 
     # Setup the test model and data.
     puzzle_dir, hf_checkpoint_path, dataset_path = setup_test_model_and_data(
         project_root_path, tmp_path, rank, hf_model_name, hybrid_override_pattern
     )
-    hydra_config_dir = (
-        project_root_path / f"tests/gpu/torch/puzzletron/resources/configs/{hydra_config_subdir}"
-    )
+    hydra_config_dir = project_root_path / "tests/gpu/torch/puzzletron/resources/configs"
+    model_basename = hf_model_name.split("/")[1]
+    hydra_config_name = f"{hf_model_name}/{model_basename}"
 
     # Convert the model using AnyModel converter.
     if rank == 0:
@@ -129,7 +109,7 @@ def _test_puzzletron_multiprocess_job(
     # TODO commented for the duration of merging process  from dkorzekwa/any_model to feature/puzzletron
     # Compress the model using a one-click approach
     puzzletron.puzzletron(
-        str(hydra_config_dir), hydra_config_subdir, str(puzzle_dir), str(dataset_path)
+        str(hydra_config_dir), hydra_config_name, str(puzzle_dir), str(dataset_path)
     )
 
     #
@@ -236,7 +216,7 @@ EXPECTED_LM_LOSS = {
     "mistralai/Mistral-Small-24B-Instruct-2501": 4.709150314331055,
     "Qwen/Qwen3-8B": 4.733874320983887,
     "gpt-oss-20b": 4.689250946044922,
-    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": 4.719451904296875,
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": 4.741168022155762,
     "Qwen/Qwen3-VL-30B-A3B-Instruct": 4.65625,
 }
 
