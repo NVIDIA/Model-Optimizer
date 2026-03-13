@@ -26,7 +26,6 @@ from megatron.core.transformer.mlp import MLP
 from megatron.core.transformer.transformer_layer import TransformerLayer
 
 import modelopt.torch.nas as mtn
-from modelopt.torch.nas.modules import DynamicModuleList
 from modelopt.torch.nas.plugins.megatron import (
     NumAttentionHeadsHp,
     _DynamicEmbedding,
@@ -35,7 +34,7 @@ from modelopt.torch.nas.plugins.megatron import (
     _DynamicMLP,
     _DynamicMoELayer,
     _DynamicSelfAttention,
-    _DynamicSequentialMLP,
+    _DynamicTEGroupedMLP,
     _DynamicTELayerNormColumnParallelLinear,
     _DynamicTEProjRowParallelLinear,
     _DynamicTEQKVLayerNormColumnParallelLinear,
@@ -257,6 +256,7 @@ def _test_gpt_moe_search_space(rank, size):
         vocab_size=vocab_size,
         activation_func="squared_relu",
         transformer_impl="transformer_engine",
+        moe_grouped_gemm=True,
         num_moe_experts=num_moe_experts,
         moe_ffn_hidden_size=moe_ffn_hidden_size,
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
@@ -280,10 +280,7 @@ def _test_gpt_moe_search_space(rank, size):
     moe = model.decoder.layers[0].mlp
     assert isinstance(moe, _DynamicMoELayer)
     assert isinstance(moe.router, _DynamicTopKRouter)
-    assert isinstance(moe.experts, _DynamicSequentialMLP)
-    assert isinstance(moe.experts.local_experts, DynamicModuleList)
-    for expert in moe.experts.local_experts:
-        assert isinstance(expert, _DynamicMLP)
+    assert isinstance(moe.experts, _DynamicTEGroupedMLP)
     assert isinstance(moe.shared_experts, _DynamicMLP)
 
     # NOTE: `search_space_size` does not reduce across TP/PP groups
@@ -293,15 +290,10 @@ def _test_gpt_moe_search_space(rank, size):
     moe_shared_ffn_choices = moe_shared_expert_intermediate_size // channel_divisor
     hidden_size_choices = hidden_size // channel_divisor
     num_layers_per_pp = num_layers // size
-    # SequentialMLP has per-expert moe_ffn_hidden_size hparams
+    # TEGroupedMLP has a single shared moe_ffn_hidden_size hparam
     assert (
         ss_size_per_pp
-        == (
-            num_heads_choices
-            * num_moe_experts
-            * moe_ffn_choices**num_moe_experts
-            * moe_shared_ffn_choices
-        )
+        == (num_heads_choices * num_moe_experts * moe_ffn_choices * moe_shared_ffn_choices)
         ** num_layers_per_pp
         * num_layers
         * hidden_size_choices

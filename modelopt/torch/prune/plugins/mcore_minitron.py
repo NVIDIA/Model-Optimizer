@@ -61,6 +61,7 @@ from modelopt.torch.nas.plugins.megatron import (
     _DynamicMoELayer,
     _DynamicSelfAttention,
     _DynamicSequentialMLP,
+    _DynamicTEGroupedMLP,
     _DynamicTransformerLayer,
 )
 from modelopt.torch.nas.registry import DMRegistry
@@ -618,26 +619,56 @@ def _param_num_dynamic(
         layer_numbers_to_count: If specified, only count the parameters of the given layer numbers (1-indexed).
             Only needed when input is a DynamicModule to correctly count the parameters of the active layers.
     """
-
     # NOTE: model.parameters() doesnt consider active_slice so we dont get sorted or trimmed parameters!
+    # Collect TEGroupedMLP module name prefixes to skip their linear_fc params
+    # (they are counted separately via get_active_param_count for correct subnet counting)
+    te_grouped_mlp_prefixes = {
+        n for n, m in model.named_modules() if isinstance(m, _DynamicTEGroupedMLP)
+    }
+
     def get_param_count(mod, name) -> int:
         """Use getattr to access parameters correctly."""
         module_path, _, param_name = name.rpartition(".")
         submodule = mod.get_submodule(module_path) if module_path else mod
         return getattr(submodule, param_name).numel()
 
+    def is_te_grouped_mlp_param(full_param_name: str) -> bool:
+        """Check if a parameter belongs to a TEGroupedMLP's linear_fc1/linear_fc2."""
+        return any(
+            full_param_name.startswith(prefix + ".linear_fc") for prefix in te_grouped_mlp_prefixes
+        )
+
+    def should_count_param(full_param_name: str) -> bool:
+        """Determine if a parameter should be counted in the standard param loop."""
+        if model.share_embeddings_and_output_weights and "output_layer.weight" in full_param_name:
+            return False
+        return not is_te_grouped_mlp_param(full_param_name)
+
     # Account for depth pruning with uneven PP and hybrid models!
-    # Dont double count output_layer parameters if model.share_embeddings_and_output_weights is True
     params = sum(
         get_param_count(model, name)
         for name, _ in model.named_parameters()
         if ("decoder.layers." not in name or layer_numbers_to_count is None)
-        and not (model.share_embeddings_and_output_weights and "output_layer.weight" in name)
+        and should_count_param(name)
     )
     if layer_numbers_to_count is not None:
         for layer in model.decoder.layers:
             if layer.layer_number in layer_numbers_to_count:
                 params += sum(get_param_count(layer, name) for name, _ in layer.named_parameters())
+                # Subtract TEGroupedMLP full params that were just added, add active count instead
+                for m in layer.modules():
+                    if isinstance(m, _DynamicTEGroupedMLP):
+                        # Subtract full-size linear_fc params that named_parameters included
+                        for pname, p in m.linear_fc1.named_parameters():
+                            params -= p.numel()
+                        for pname, p in m.linear_fc2.named_parameters():
+                            params -= p.numel()
+                        params += m.get_active_param_count()
+    else:
+        # Add TEGroupedMLP active param counts for all layers (full params already excluded above)
+        for m in model.modules():
+            if isinstance(m, _DynamicTEGroupedMLP):
+                params += m.get_active_param_count()
 
     reduced_params = torch.Tensor([params]).to(device=next(model.parameters()).device)
     torch.distributed.all_reduce(reduced_params, group=get_pipeline_model_parallel_group())
@@ -813,6 +844,8 @@ class ImportanceEstimatorRegistry:
                 _register_mlp_importance(module, self)
             elif isinstance(module, _DynamicSequentialMLP):
                 _register_sequential_mlp_importance(module, self)
+            elif isinstance(module, _DynamicTEGroupedMLP):
+                _register_te_grouped_mlp_importance(module, self)
             elif isinstance(module, _DynamicMambaMixer):
                 _register_mamba_mixer_importance(module, self)
 
@@ -1228,6 +1261,74 @@ def _register_sequential_mlp_importance(
         module,
         "num_local_experts",
         lambda: _estimate_expert_importance(module),
+    )
+
+
+def _register_te_grouped_mlp_importance(
+    module: _DynamicTEGroupedMLP, registry: ImportanceEstimatorRegistry
+) -> None:
+    """Register importance estimators for TEGroupedMLP (MoE experts with TE grouped GEMM).
+
+    Expert importance is computed from output L2 norms (same interface as SequentialMLP).
+    FFN importance is computed from linear_fc2 per-expert weight magnitudes.
+    """
+    module._register_temp_attribute(
+        "_activations",
+        {
+            "expert_l2_scores": torch.zeros(module.num_local_experts),
+            "expert_sample_counts": torch.zeros(module.num_local_experts),
+        },
+    )
+
+    def _expert_l2_imp_forward_hook(mod, module_inner, input, output):
+        """Track expert importance based on L2 norms of expert outputs."""
+        tokens_per_expert_list = input[1].tolist()
+        output_local = output[0].to(torch.float32).detach()
+        output_local_list = torch.split(output_local, tokens_per_expert_list)
+
+        for expert_idx, expert_output in enumerate(output_local_list):
+            if expert_output.numel() == 0:
+                l2_norm = 0.0
+            else:
+                l2_norm = torch.linalg.vector_norm(expert_output, ord=2, dim=-1).sum().item()
+            mod._activations["expert_l2_scores"][expert_idx] += l2_norm
+            mod._activations["expert_sample_counts"][expert_idx] += tokens_per_expert_list[
+                expert_idx
+            ]
+
+    def _estimate_expert_importance(mod):
+        assert mod._activations["expert_sample_counts"].sum() > 0, (
+            "No activations collected for importance estimation."
+        )
+        return mod._activations["expert_l2_scores"] / (
+            mod._activations["expert_sample_counts"] + 1e-8
+        )
+
+    def _estimate_ffn_importance(mod):
+        """Approximate FFN importance from linear_fc2 per-expert weight magnitudes."""
+        # linear_fc2.weight{i} shape: [hidden_size, ffn / tp]
+        # Compute L2 norm along hidden_size dim for each FFN neuron, averaged across experts
+        num_experts = mod.get_hparam("num_local_experts").max
+        per_expert = []
+        for i in range(num_experts):
+            w = getattr(mod.linear_fc2, f"weight{i}").data.to(torch.float32)
+            per_expert.append(torch.linalg.vector_norm(w, ord=2, dim=0))  # [ffn / tp]
+        return torch.stack(per_expert).mean(dim=0)
+
+    registry.register_hook(
+        module,
+        partial(_expert_l2_imp_forward_hook, module),
+        hook_type="forward",
+    )
+    registry.register_importance(
+        module,
+        "num_local_experts",
+        lambda: _estimate_expert_importance(module),
+    )
+    registry.register_importance(
+        module,
+        "moe_ffn_hidden_size",
+        lambda: _estimate_ffn_importance(module),
     )
 
 

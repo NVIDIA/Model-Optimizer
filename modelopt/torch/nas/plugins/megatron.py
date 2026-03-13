@@ -42,7 +42,7 @@ from megatron.core.transformer.attention import SelfAttention
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.mlp import MLP
 from megatron.core.transformer.moe import moe_utils
-from megatron.core.transformer.moe.experts import SequentialMLP
+from megatron.core.transformer.moe.experts import SequentialMLP, TEGroupedMLP
 from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
@@ -636,6 +636,157 @@ class _DynamicSequentialMLP(DynamicModule):
         return super().export()
 
 
+@DMRegistry.register({TEGroupedMLP: "megatron.core.transformer.moe.experts.TEGroupedMLP"})
+class _DynamicTEGroupedMLP(DynamicModule):
+    """A TEGroupedMLP with dynamic hyperparams for pruning.
+
+    TEGroupedMLP stores per-expert weights inside TEColumnParallelGroupedLinear (linear_fc1)
+    and TERowParallelGroupedLinear (linear_fc2). Each has weight0, weight1, ..., weight{N-1}.
+
+    During NAS forward, we temporarily swap in sliced weights and patch num_gemms so the
+    TE grouped GEMM kernel operates on the active subnet. Original weights are restored after.
+    """
+
+    def _setup(self, *, hidden_size: TracedHp):
+        num_moe_experts = TracedHp(list(range(1, self.num_local_experts + 1)))
+        self._register_hparam("num_local_experts", num_moe_experts)
+
+        ffn = self.config.moe_ffn_hidden_size
+        moe_ffn_hidden_size = TracedHp(list(range(1, ffn + 1)))
+        self._register_hparam("moe_ffn_hidden_size", moe_ffn_hidden_size)
+        self._register_hparam("hidden_size", hidden_size)
+
+    def get_active_param_count(self) -> int:
+        """Return the parameter count for the active subnet (respects pruned experts/ffn/hidden)."""
+        num_experts = len(self._get_active_experts())
+        ffn = self.get_hparam("moe_ffn_hidden_size").active
+        hidden = self.get_hparam("hidden_size").active
+        gate_factor = 2 if self.config.gated_linear_unit else 1
+        # fc1: [ffn * gate_factor, hidden] per expert
+        # fc2: [hidden, ffn] per expert
+        return num_experts * (ffn * gate_factor * hidden + hidden * ffn)  # type: ignore[return-value]
+
+    def _get_active_experts(self) -> list[int]:
+        """Return active expert indices based on the num_local_experts hparam."""
+        expert_slice = self.get_hparam("num_local_experts").active_slice
+        if isinstance(expert_slice, slice):
+            return list(range(expert_slice.stop))
+        return expert_slice.tolist()
+
+    def _get_active_ffn_indices(self) -> torch.LongTensor:
+        """Return active FFN neuron indices based on the moe_ffn_hidden_size hparam."""
+        ffn_slice = self.get_hparam("moe_ffn_hidden_size").active_slice
+        if isinstance(ffn_slice, slice):
+            return torch.arange(ffn_slice.stop)
+        return ffn_slice
+
+    def _slice_expert_weight_fc1(self, expert_idx: int) -> torch.Tensor:
+        """Slice a single expert's fc1 weight by active ffn and hidden_size."""
+        w = getattr(self.linear_fc1, f"weight{expert_idx}").data
+        hidden_slice = self.get_hparam("hidden_size").active_slice
+        active_ffn = self._get_active_ffn_indices()
+        if self.config.gated_linear_unit:
+            ffn_orig = w.shape[0] // 2
+            fc1_indices = torch.cat([active_ffn, active_ffn + ffn_orig])
+        else:
+            fc1_indices = active_ffn
+        return w[fc1_indices][:, hidden_slice].contiguous()
+
+    def _slice_expert_weight_fc2(self, expert_idx: int) -> torch.Tensor:
+        """Slice a single expert's fc2 weight by active hidden_size and ffn."""
+        w = getattr(self.linear_fc2, f"weight{expert_idx}").data
+        hidden_slice = self.get_hparam("hidden_size").active_slice
+        active_ffn = self._get_active_ffn_indices()
+        return w[hidden_slice][:, active_ffn].contiguous()
+
+    def forward(self, *args, **kwargs):
+        """Forward with dynamically sliced weights for NAS subnet evaluation.
+
+        Temporarily patches the GroupedLinear modules with sliced per-expert weights
+        and adjusted num_gemms, then restores originals after the forward pass.
+        """
+        num_experts_hp = self.get_hparam("num_local_experts")
+        ffn_hp = self.get_hparam("moe_ffn_hidden_size")
+        hidden_hp = self.get_hparam("hidden_size")
+
+        # If no pruning active, skip the patching overhead
+        is_pruned = (
+            num_experts_hp.active != num_experts_hp.max
+            or ffn_hp.active != ffn_hp.max
+            or hidden_hp.active != hidden_hp.max
+        )
+        if not is_pruned:
+            return super().forward(*args, **kwargs)
+
+        active_experts = self._get_active_experts()
+        pruned_num = len(active_experts)
+        orig_num_gemms_fc1 = self.linear_fc1.num_gemms
+        orig_num_gemms_fc2 = self.linear_fc2.num_gemms
+
+        # Slice all weights first (before any setattr overwrites originals)
+        sliced_fc1 = [self._slice_expert_weight_fc1(idx) for idx in active_experts]
+        sliced_fc2 = [self._slice_expert_weight_fc2(idx) for idx in active_experts]
+
+        # Save original weights and patch with sliced versions at consecutive indices
+        orig_fc1_weights = {
+            i: getattr(self.linear_fc1, f"weight{i}") for i in range(orig_num_gemms_fc1)
+        }
+        orig_fc2_weights = {
+            i: getattr(self.linear_fc2, f"weight{i}") for i in range(orig_num_gemms_fc2)
+        }
+        for new_idx in range(pruned_num):
+            setattr(self.linear_fc1, f"weight{new_idx}", nn.Parameter(sliced_fc1[new_idx]))
+            setattr(self.linear_fc2, f"weight{new_idx}", nn.Parameter(sliced_fc2[new_idx]))
+
+        self.linear_fc1.num_gemms = pruned_num
+        self.linear_fc2.num_gemms = pruned_num
+
+        try:
+            output = super().forward(*args, **kwargs)
+        finally:
+            # Restore original weights and num_gemms
+            self.linear_fc1.num_gemms = orig_num_gemms_fc1
+            self.linear_fc2.num_gemms = orig_num_gemms_fc2
+            for old_idx, orig_w in orig_fc1_weights.items():
+                setattr(self.linear_fc1, f"weight{old_idx}", orig_w)
+            for old_idx, orig_w in orig_fc2_weights.items():
+                setattr(self.linear_fc2, f"weight{old_idx}", orig_w)
+
+        return output
+
+    def modify(self, ffn_hidden_size_divisor: int = 1, **kwargs) -> None:
+        """Modify the moe_ffn_hidden_size hparam choices based on search space config."""
+        hp = self.get_hparam("moe_ffn_hidden_size")
+        choices = {int(make_divisible(c, ffn_hidden_size_divisor)) for c in hp.choices}  # type: ignore[arg-type]
+        hp.choices = list(set(hp.choices) & choices | {hp.original})
+
+    def export(self) -> torch.nn.Module:
+        """Export by rebuilding the GroupedLinear modules with pruned expert/FFN/hidden dims."""
+        active_experts = self._get_active_experts()
+
+        # Slice all weights first (before any setattr overwrites originals)
+        sliced_fc1 = [self._slice_expert_weight_fc1(idx) for idx in active_experts]
+        sliced_fc2 = [self._slice_expert_weight_fc2(idx) for idx in active_experts]
+
+        # Write sliced weights at consecutive indices
+        for new_idx in range(len(active_experts)):
+            setattr(self.linear_fc1, f"weight{new_idx}", nn.Parameter(sliced_fc1[new_idx]))
+            setattr(self.linear_fc2, f"weight{new_idx}", nn.Parameter(sliced_fc2[new_idx]))
+
+        # Remove pruned expert weights and update num_gemms
+        pruned_num = len(active_experts)
+        for i in range(pruned_num, self.get_hparam("num_local_experts").max):  # type: ignore[arg-type]
+            if hasattr(self.linear_fc1, f"weight{i}"):
+                delattr(self.linear_fc1, f"weight{i}")
+            if hasattr(self.linear_fc2, f"weight{i}"):
+                delattr(self.linear_fc2, f"weight{i}")
+        self.linear_fc1.num_gemms = pruned_num
+        self.linear_fc2.num_gemms = pruned_num
+        self.num_local_experts = pruned_num
+
+        return super().export()
+
+
 @DMRegistry.register({MoELayer: "megatron.core.transformer.moe.moe_layer.MoELayer"})
 class _DynamicMoELayer(DynamicModule):
     """A MoELayer with dynamic hyperparams."""
@@ -688,8 +839,11 @@ class _DynamicMoELayer(DynamicModule):
         expert_hp.choices = list(set(expert_hp.choices) & choices | {expert_hp.original})
 
         # Modify expert FFN hparam choices
-        for expert in self.experts.local_experts:
-            expert.modify(ffn_hidden_size_divisor=ffn_hidden_size_divisor)
+        if isinstance(self.experts, _DynamicTEGroupedMLP):
+            self.experts.modify(ffn_hidden_size_divisor=ffn_hidden_size_divisor)
+        else:  # SequentialMLP
+            for expert in self.experts.local_experts:
+                expert.modify(ffn_hidden_size_divisor=ffn_hidden_size_divisor)
         if self.use_shared_expert:
             self.shared_experts.modify(ffn_hidden_size_divisor)
 

@@ -151,6 +151,7 @@ def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
             moe_ffn_hidden_size=ffn_hidden_size,
             moe_shared_expert_intermediate_size=ffn_hidden_size,
             num_moe_experts=num_moe_experts,
+            moe_grouped_gemm=True,
             vocab_size=vocab_size,
             transformer_impl="transformer_engine",
             bf16=False,
@@ -270,6 +271,7 @@ def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
         moe_ffn_hidden_size=moe_ffn_hidden_size,
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
         num_moe_experts=num_moe_experts,
+        moe_grouped_gemm=True,
         vocab_size=vocab_size,
         transformer_impl="transformer_engine",
         bf16=False,
@@ -350,14 +352,14 @@ def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
         raise RuntimeError(f"FIXME: Non deterministic test, assertions may fail: {sorted_layers=}")
     # fmt: on
 
-    assert get_mcore_param_count(model) == 10268.0
-
     top_k = searcher_state["top_k_candidates_per_constraint"][constraints["params"]]
     assert len(top_k) == 10
     for actual, (ss_config, params, score) in zip(top_k, expected_top_k):
         assert actual.ss_config == ss_config, (actual.ss_config, ss_config)
         assert actual.params == params, (actual.params, params)
         assert actual.score == score, (actual.score, score)
+
+    assert get_mcore_param_count(model) == 10268.0
 
 
 @pytest.mark.skipif(
