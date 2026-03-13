@@ -98,6 +98,9 @@ class TestWhisper(WithRequirements):
         ),
         # kv_cache
         PTQCommand(quant="nvfp4_awq", kv_cache_quant="nvfp4"),
+        PTQCommand(quant="fp8", kv_cache_quant="fp8_cast", min_sm=89),
+        PTQCommand(quant="fp8", kv_cache_quant="fp8", min_sm=89),
+        PTQCommand(quant="nvfp4", kv_cache_quant="nvfp4_cast"),
         # autoquant_kv_cache
         PTQCommand(
             quant="nvfp4,fp8",

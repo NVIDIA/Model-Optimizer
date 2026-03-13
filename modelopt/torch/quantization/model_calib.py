@@ -707,7 +707,9 @@ def enable_stats_collection(model: nn.Module):
     for name, module in model.named_modules():
         if isinstance(module, TensorQuantizer) and not module._disabled:
             if getattr(module, "_cast_to_fp8", False):
-                # cast_to_fp8 set via config; keep quantization enabled and skip calibration.
+                # cast_to_fp8 quantizers use a fixed amax and don't need calibration.
+                # Disable quantization during calibration so it doesn't affect other quantizers.
+                module.disable_quant()
                 continue
             elif module._calibrator is not None:
                 module.disable_quant()
@@ -720,6 +722,11 @@ def finish_stats_collection(model: nn.Module, method: str | None = None, **kwarg
     """Finish stats collection for all quantizers in the model."""
     for _, module in model.named_modules():
         if not isinstance(module, TensorQuantizer) or module._disabled:
+            continue
+
+        if getattr(module, "_cast_to_fp8", False):
+            # Re-enable quantization for cast_to_fp8 quantizers disabled in enable_stats_collection.
+            module.enable_quant()
             continue
 
         cal = getattr(module, "_calibrator", None)

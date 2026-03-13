@@ -230,7 +230,7 @@ class TensorQuantizerTester:
         assert out.shape == x.shape
 
     def test_cast_to_fp8_skips_calibration(self):
-        """Test that cast_to_fp8 quantizers are kept enabled during calibration."""
+        """Test that cast_to_fp8 quantizers are disabled during calibration and re-enabled after."""
         import torch.nn as nn
 
         from modelopt.torch.quantization.model_calib import (
@@ -248,10 +248,10 @@ class TensorQuantizerTester:
 
         enable_stats_collection(model)
 
-        # cast_to_fp8 quantizer must remain enabled (not disabled, not in calib mode)
+        # cast_to_fp8 quantizer: quant disabled during calibration, not in calib mode
         assert not model["tq_const"]._disabled
         assert not model["tq_const"]._if_calib
-        assert model["tq_const"]._if_quant
+        assert not model["tq_const"]._if_quant
 
         # normal quantizer with a calibrator should be in calib mode (quant disabled)
         assert not model["tq_calib"]._disabled
@@ -260,7 +260,7 @@ class TensorQuantizerTester:
 
         finish_stats_collection(model)
 
-        # After finish, cast_to_fp8 quantizer is still enabled
+        # After finish, cast_to_fp8 quantizer is re-enabled
         assert not model["tq_const"]._disabled
         assert model["tq_const"]._if_quant
 

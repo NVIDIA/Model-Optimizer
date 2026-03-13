@@ -514,23 +514,24 @@ def get_kv_cache_dtype(modules: list[nn.Module] | nn.Module) -> str | None:
                 num_bits_list.append(quantizer_attr.num_bits)
                 is_affine &= hasattr(quantizer_attr, "_bias_value")
 
-    return _compute_kv_cache_dtype(num_bits_list)
+    return _compute_kv_cache_dtype(num_bits_list, is_affine)
 
 
-def _compute_kv_cache_dtype(num_bits_list: list[int | tuple[int, int]]) -> str | None:
+def _compute_kv_cache_dtype(
+    num_bits_list: list[int | tuple[int, int]], is_affine: bool = False
+) -> str | None:
     """Returns the kv_cache dtype.
 
     If num_bits of output_quantizer is (4, 3) then returns FP8; if it is 8, returns int8,
     otherwise returns None.
 
     Args:
-        modules: The module or list of modules to inspect.
+        num_bits_list: The list of num_bits from quantizers.
+        is_affine: Whether the quantizers have bias (affine mode).
 
     Returns:
         The kv_cache dtype.
     """
-    is_affine = True
-
     if (4, 3) in num_bits_list:
         return KV_CACHE_FP8
     elif 8 in num_bits_list:

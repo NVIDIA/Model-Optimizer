@@ -79,11 +79,10 @@ RAND_SEED = 1234
 def _set_kv_cache_cast_to_fp8(quant_cfg: dict) -> None:
     """Set cast_to_fp8 on KV cache quantizers.
 
-    Mutates *quant_cfg* in place.  Callers that share the config dict across
-    sites should ``copy.deepcopy`` before calling this function.
+    Creates a new dict for the KV bmm quantizer config to avoid mutating shared references.
     """
     if "*[kv]_bmm_quantizer" in quant_cfg:
-        quant_cfg["*[kv]_bmm_quantizer"]["cast_to_fp8"] = True
+        quant_cfg["*[kv]_bmm_quantizer"] = {**quant_cfg["*[kv]_bmm_quantizer"], "cast_to_fp8": True}
 
 
 QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
