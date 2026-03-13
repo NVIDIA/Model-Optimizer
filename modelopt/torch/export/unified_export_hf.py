@@ -89,7 +89,6 @@ from .model_config import (
 from .model_utils import get_language_model_from_vl, is_multimodal_model
 from .plugins import SpeculativeDecodingExporter, has_spec_opt
 from .quant_utils import (
-    max_gate_up_scales,
     fuse_prequant_layernorm,
     fuse_prequant_to_linear,
     get_activation_scaling_factor,
@@ -99,6 +98,7 @@ from .quant_utils import (
     get_weight_scaling_factor,
     get_weight_scaling_factor_2,
     has_quantized_modules,
+    max_gate_up_scales,
     maybe_transpose_expert_weight_dimensions,
     postprocess_state_dict,
     preprocess_linear_fusion,
