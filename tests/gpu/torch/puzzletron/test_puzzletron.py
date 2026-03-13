@@ -120,66 +120,65 @@ def _test_puzzletron_multiprocess_job(
         )
     dist.barrier()
 
-    # TODO commented for the duration of merging process  from dkorzekwa/any_model to feature/puzzletron
     # Compress the model using a one-click approach
     puzzletron.puzzletron(
         str(hydra_config_dir), hydra_config_subdir, str(puzzle_dir), str(dataset_path)
     )
 
-    # #
-    # # Check assertions
-    # #
-    # if rank == 0:
-    #     if has_moe_layers:
-    #         # assertions for the score_pruning_activations step 1 (MoE models only)
-    #         rank_filepath = (
-    #             f"pruning/pruning_scores/expert_removal/10samples_diverse_mini/rank_{rank}.pth"
-    #         )
-    #         assert (puzzle_dir / rank_filepath).is_file(), f"Expected {rank_filepath} to exist"
+    #
+    # Check assertions
+    #
+    if rank == 0:
+        if has_moe_layers:
+            # assertions for the score_pruning_activations step 1 (MoE models only)
+            rank_filepath = (
+                f"pruning/pruning_scores/expert_removal/10samples_diverse_mini/rank_{rank}.pth"
+            )
+            assert (puzzle_dir / rank_filepath).is_file(), f"Expected {rank_filepath} to exist"
 
-    #         # assertions for the pruning_ckpts step 2
-    #         assert (puzzle_dir / "ckpts/num_experts_8").exists()
+            # assertions for the pruning_ckpts step 2
+            assert (puzzle_dir / "ckpts/num_experts_8").exists()
 
-    #         # assertions for the mip_and_realize_models step 6
-    #         # Find the MIP solution directory dynamically (e.g., stats_num_local_experts_*)
-    #         mip_solutions_dir = puzzle_dir / "mip/puzzle_solutions"
-    #         solution_dirs = [
-    #             d
-    #             for d in mip_solutions_dir.iterdir()
-    #             if d.is_dir() and d.name.startswith("stats_num_local_experts_")
-    #         ]
-    #         assert len(solution_dirs) == 1, (
-    #             f"Expected exactly one stats_num_local_experts_* directory, found: {[d.name for d in solution_dirs]}"
-    #         )
-    #         solution_dir = solution_dirs[0]
+            # assertions for the mip_and_realize_models step 6
+            # Find the MIP solution directory dynamically (e.g., stats_num_local_experts_*)
+            mip_solutions_dir = puzzle_dir / "mip/puzzle_solutions"
+            solution_dirs = [
+                d
+                for d in mip_solutions_dir.iterdir()
+                if d.is_dir() and d.name.startswith("stats_num_local_experts_")
+            ]
+            assert len(solution_dirs) == 1, (
+                f"Expected exactly one stats_num_local_experts_* directory, found: {[d.name for d in solution_dirs]}"
+            )
+            solution_dir = solution_dirs[0]
 
-    #         solution_0_ckpt_config_path = (
-    #             solution_dir / "solutions--checkpoints/solution_0/config.json"
-    #         )
-    #         assert solution_0_ckpt_config_path.exists()
-    #         assert (solution_dir / "solutions.json").exists()
+            solution_0_ckpt_config_path = (
+                solution_dir / "solutions--checkpoints/solution_0/config.json"
+            )
+            assert solution_0_ckpt_config_path.exists()
+            assert (solution_dir / "solutions.json").exists()
 
-    #         # Validate lm_loss
-    #         _assert_lm_loss(puzzle_dir, hf_config_name)
-    #     else:
-    #         # assertions for the score_pruning_activations step 1 (FFN pruning)
-    #         _assert_score_pruning_activations(puzzle_dir, hf_config_name)
+            # Validate lm_loss
+            _assert_lm_loss(puzzle_dir, hf_config_name)
+        else:
+            # assertions for the score_pruning_activations step 1 (FFN pruning)
+            _assert_score_pruning_activations(puzzle_dir, hf_config_name)
 
-    #         # assertions for the pruning_ckpts step 2
-    #         assert (puzzle_dir / "ckpts/ffn_256_attn_no_op").exists()
+            # assertions for the pruning_ckpts step 2
+            assert (puzzle_dir / "ckpts/ffn_256_attn_no_op").exists()
 
-    #         # assertions for the mip_and_realize_models step 6
-    #         _assert_mip_solutions(puzzle_dir, hf_config_name)
+            # assertions for the mip_and_realize_models step 6
+            _assert_mip_solutions(puzzle_dir, hf_config_name)
 
-    #     # assertions for the build_library_and_stats step 4
-    #     assert (puzzle_dir / "replacement_library.json").is_file()
-    #     assert (puzzle_dir / "subblock_stats.json").is_file()
+        # assertions for the build_library_and_stats step 4
+        assert (puzzle_dir / "replacement_library.json").is_file()
+        assert (puzzle_dir / "subblock_stats.json").is_file()
 
-    #     # assertions for the scoring step 5
-    #     solution_0_filepath = (
-    #         puzzle_dir / "single_sequence_replacement_solutions--validation/solution_0.json"
-    #     )
-    #     assert solution_0_filepath.exists()
+        # assertions for the scoring step 5
+        solution_0_filepath = (
+            puzzle_dir / "single_sequence_replacement_solutions--validation/solution_0.json"
+        )
+        assert solution_0_filepath.exists()
 
     dist.cleanup()
 
