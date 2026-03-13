@@ -93,6 +93,23 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         ),
     )
 
+    skip_diagonal_blocks: bool = ModeloptField(
+        default=True,
+        title="Skip diagonal blocks.",
+        description=(
+            "When True, keep diagonal tiles dense for 2:4 sparse attention. Defaults to True."
+        ),
+    )
+
+    apply_sparse24: bool = ModeloptField(
+        default=False,
+        title="Apply 2:4 structured sparsity.",
+        description=(
+            "If True, additionally apply 2:4 structured sparsity (top-2 of every 4 elements "
+            "along seq_k) on top of the skip-softmax block mask. Only used by flash_skip_softmax."
+        ),
+    )
+
     @field_validator("method")
     @classmethod
     def validate_method(cls, v):
@@ -416,10 +433,51 @@ SKIP_SOFTMAX_CALIB = {
     },
 }
 
+# Combined 2:4 structured sparsity + skip-softmax block mask (pytorch backend)
+SPARSE24_SKIP_SOFTMAX = {
+    "sparse_cfg": {
+        "*attn*": {
+            "method": "flash_skip_softmax",
+            "threshold": {"prefill": 1e-3, "decode": 1e-4},
+            "br": 128,
+            "bc": 128,
+            "backend": "pytorch",
+            "collect_stats": True,
+            "apply_sparse24": True,
+            "enable": True,
+        },
+        "default": {"enable": False},
+    },
+}
+
+# Combined 2:4 + skip-softmax with RULER calibration
+SPARSE24_SKIP_SOFTMAX_CALIB = {
+    "sparse_cfg": {
+        "calibration": {
+            "target_sparse_ratio": {"prefill": 0.9, "decode": 0.9},
+            "samples": 64,
+            "max_seqlen": 65536,
+            "chunk_size": 4096,
+        },
+        "*attn*": {
+            "method": "flash_skip_softmax",
+            "br": 128,
+            "bc": 128,
+            "backend": "pytorch",
+            "collect_stats": True,
+            "apply_sparse24": True,
+            "enable": True,
+        },
+        "default": {"enable": False},
+    },
+}
+
 
 __all__ = [
     "SKIP_SOFTMAX_CALIB",
     "SKIP_SOFTMAX_DEFAULT",
+    "SPARSE24_SKIP_SOFTMAX",
+    "SPARSE24_SKIP_SOFTMAX_CALIB",
     "CalibrationConfig",
     "FlashSkipSoftmaxConfig",
     "SparseAttentionAttributeConfig",

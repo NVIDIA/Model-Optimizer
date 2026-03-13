@@ -31,6 +31,8 @@ from modelopt.torch.export import export_hf_checkpoint
 from modelopt.torch.sparsity.attention_sparsity.config import (
     SKIP_SOFTMAX_CALIB,
     SKIP_SOFTMAX_DEFAULT,
+    SPARSE24_SKIP_SOFTMAX,
+    SPARSE24_SKIP_SOFTMAX_CALIB,
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 
@@ -43,6 +45,8 @@ mto.enable_huggingface_checkpointing()
 SPARSE_ATTN_CFG_CHOICES = {
     "skip_softmax": SKIP_SOFTMAX_DEFAULT,
     "skip_softmax_calib": SKIP_SOFTMAX_CALIB,
+    "sparse24_skip_softmax": SPARSE24_SKIP_SOFTMAX,
+    "sparse24_skip_softmax_calib": SPARSE24_SKIP_SOFTMAX_CALIB,
 }
 
 
