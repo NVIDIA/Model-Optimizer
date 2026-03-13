@@ -52,6 +52,7 @@
 
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import uvloop
@@ -115,8 +116,8 @@ def main():
         elif isinstance(cc, dict):
             args.compilation_config = {**cc, "cudagraph_mode": "NONE"}
         else:
-            args.compilation_config = cc.model_copy(
-                update={"cudagraph_mode": CUDAGraphMode.NONE}
+            args.compilation_config = replace(
+                cc, cudagraph_mode=CUDAGraphMode.NONE
             )
 
     # Run the server
