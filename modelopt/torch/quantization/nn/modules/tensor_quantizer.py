@@ -188,6 +188,7 @@ class TensorQuantizer(nn.Module):
         if amax is not None:
             self.amax = amax
 
+        self._use_constant_amax = False
         self.set_from_attribute_config(quant_attribute_cfg)
 
         self._if_quant = if_quant
@@ -225,7 +226,7 @@ class TensorQuantizer(nn.Module):
             "calibrator": ("_calibrator", _calibrator_setter),
             "backend": ("backend", lambda val: val),
             "backend_extra_args": ("backend_extra_args", lambda val: val or {}),
-            "cast_to_fp8": ("_cast_to_fp8", lambda val: val),
+            "use_constant_amax": ("_use_constant_amax", lambda val: val),
         }
 
         for attribute, val in attribute_cfg.items():
@@ -614,7 +615,7 @@ class TensorQuantizer(nn.Module):
 
     def _get_amax(self, inputs):
         """Get amax from buffer or compute it dynamically."""
-        if getattr(self, "_cast_to_fp8", False):
+        if self._use_constant_amax:
             return torch.tensor(torch.finfo(torch.float8_e4m3fn).max, device=inputs.device)
         if hasattr(self, "_amax"):
             amax = self._amax

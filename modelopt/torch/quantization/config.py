@@ -1030,11 +1030,12 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         """,
     )
 
-    cast_to_fp8: bool = ModeloptField(
+    use_constant_amax: bool = ModeloptField(
         default=False,
-        title="Cast to FP8 flag for the quantizer.",
-        description="""If True, set the amax to FP8 range. Calibration is skipped for
-        quantizers with this flag enabled.
+        title="Use constant amax for the quantizer.",
+        description="""If True, set the amax to FP8 E4M3 max (448.0) and skip calibration.
+        This is used for KV cache quantization where the downstream engine uses FP8 attention
+        math for both FP8 and NVFP4 quantization, so the amax is hardcoded to the FP8 range.
         """,
     )
 

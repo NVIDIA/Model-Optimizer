@@ -76,13 +76,16 @@ from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 RAND_SEED = 1234
 
 
-def _set_kv_cache_cast_to_fp8(quant_cfg: dict) -> None:
-    """Set cast_to_fp8 on KV cache quantizers.
+def _set_kv_cache_constant_amax(quant_cfg: dict) -> None:
+    """Set use_constant_amax on KV cache quantizers.
 
     Creates a new dict for the KV bmm quantizer config to avoid mutating shared references.
     """
     if "*[kv]_bmm_quantizer" in quant_cfg:
-        quant_cfg["*[kv]_bmm_quantizer"] = {**quant_cfg["*[kv]_bmm_quantizer"], "cast_to_fp8": True}
+        quant_cfg["*[kv]_bmm_quantizer"] = {
+            **quant_cfg["*[kv]_bmm_quantizer"],
+            "use_constant_amax": True,
+        }
 
 
 QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
@@ -116,7 +119,7 @@ KV_QUANT_CFG_CHOICES = {
     "nvfp4_rotate": "NVFP4_KV_ROTATE_CFG",
 }
 
-# Formats that use cast_to_fp8 (no calibration needed).
+# Formats that use use_constant_amax (no calibration needed).
 _KV_CAST_FORMATS = {"fp8_cast", "nvfp4_cast"}
 
 mto.enable_huggingface_checkpointing()
@@ -326,7 +329,7 @@ def auto_quantize(
         kv_cache_quant_cfg.pop("default", None)  # keep other quantizers from auto_quantize
 
         if args.kv_cache_qformat in _KV_CAST_FORMATS:
-            _set_kv_cache_cast_to_fp8(kv_cache_quant_cfg)
+            _set_kv_cache_constant_amax(kv_cache_quant_cfg)
 
         mtq.set_quantizer_by_cfg(language_model, quant_cfg=kv_cache_quant_cfg)
         if args.kv_cache_qformat not in _KV_CAST_FORMATS:
@@ -360,13 +363,13 @@ def load_model(args: argparse.Namespace):
                 quant_cfg,
                 getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"],
             )
-            # Mirror the cast_to_fp8 logic from quantize_main so that init_quantized_weights
-            # builds the KV quantizers with cast_to_fp8 already set. In calibration_only mode
+            # Mirror the use_constant_amax logic from quantize_main so that init_quantized_weights
+            # builds the KV quantizers with use_constant_amax already set. In calibration_only mode
             # mtq.calibrate() does not re-apply quant_cfg, so this must happen before
             # init_quantized_weights runs.
             if args.kv_cache_qformat in _KV_CAST_FORMATS:
                 quant_cfg = copy.deepcopy(quant_cfg)
-                _set_kv_cache_cast_to_fp8(quant_cfg["quant_cfg"])
+                _set_kv_cache_constant_amax(quant_cfg["quant_cfg"])
 
         # Do not use real quant GEMM so the calibration can be more accurate.
         with init_quantized_weights(
@@ -964,10 +967,10 @@ def quantize_main(
                 quant_cfg["quant_cfg"][pattern] = {"enable": False}
                 print(f"Excluding MTP layer from quantization: {pattern}")
 
-        # Use cast_to_fp8 for KV quantizers when a cast format is selected.
+        # Use constant amax for KV quantizers when a cast format is selected.
         if args.kv_cache_qformat in _KV_CAST_FORMATS:
             quant_cfg = copy.deepcopy(quant_cfg)
-            _set_kv_cache_cast_to_fp8(quant_cfg["quant_cfg"])
+            _set_kv_cache_constant_amax(quant_cfg["quant_cfg"])
 
         if args.qformat in QUANT_CFG_CHOICES:
             mono_quantize(
