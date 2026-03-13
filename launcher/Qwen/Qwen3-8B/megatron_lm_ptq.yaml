@@ -1,0 +1,13 @@
+script: services/megatron-lm/quantize/quantize.sh
+args:
+  - --calib-dataset-path-or-name /hf-local/abisee/cnn_dailymail
+  - --calib-size 32
+environment:
+  - MLM_MODEL_CFG: Qwen/Qwen3-8B
+  - QUANT_CFG: NVFP4_DEFAULT_CFG
+  - TP: 1
+slurm_config:
+  _factory_: "slurm_factory"
+  nodes: 1
+  ntasks_per_node: 4
+  gpus_per_node: 4
