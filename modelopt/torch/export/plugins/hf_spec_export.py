@@ -187,10 +187,10 @@ class EagleExporter(SpeculativeDecodingExporter):
         # and set yarn during export for inference.
         template_config["rope_scaling"] = {
             "rope_type": "yarn",
-            "rope_theta": 10000,
             "factor": 32.0,
-            "original_max_position_embeddings": getattr(self.model,"eagle_train_length", 4096),
+            "original_max_position_embeddings": getattr(self.model, "eagle_train_length", 4096),
         }
+        template_config["rope_theta"] = 10000
 
         return template_config
 
