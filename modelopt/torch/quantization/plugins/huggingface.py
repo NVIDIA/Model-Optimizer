@@ -878,6 +878,78 @@ class _QuantDbrxFFN(_QuantSparseMoe):
         self.router.moe_top_k = value
 
 
+@contextmanager
+def patch_compressed_linear_loading():
+    """Context manager that patches CompressedLinear to survive custom ``_init_weights`` calls.
+
+    When loading pack-quantized models with ``trust_remote_code=True``,
+    ``compressed_tensors`` replaces ``.weight`` with ``.weight_packed`` on
+    CompressedLinear modules.  Custom model code (e.g. ``modeling_deepseek.py``)
+    often does ``module.weight.data.normal_(...)`` inside ``_init_weights``,
+    which crashes because ``.weight`` no longer exists.
+
+    This context manager monkey-patches ``CompressedLinear.__getattr__`` to
+    return a harmless dummy for ``.weight`` accesses, and restores the original
+    behaviour on exit (even if an exception is raised).
+
+    Usage::
+
+        from modelopt.torch.quantization.plugins.huggingface import patch_compressed_linear_loading
+
+        with patch_compressed_linear_loading():
+            model = AutoModelForCausalLM.from_pretrained(
+                ckpt_path, device_map="auto", trust_remote_code=True, torch_dtype="auto",
+            )
+    """
+    try:
+        from compressed_tensors.linear.compressed_linear import CompressedLinear
+    except ImportError:
+        yield
+        return
+
+    if hasattr(CompressedLinear, "_modelopt_init_patched"):
+        yield
+        return
+
+    original_getattr = getattr(CompressedLinear, "__getattr__", None)
+
+    class _DummyWeightData:
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: self
+
+    class _DummyWeight:
+        def __init__(self):
+            self.data = _DummyWeightData()
+
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: self
+
+    def patched_getattr(self, name):
+        if name == "weight":
+            if "_parameters" in self.__dict__ and "weight" in self._parameters:
+                return self._parameters["weight"]
+            if "weight" in self.__dict__:
+                return self.__dict__["weight"]
+            return _DummyWeight()
+        if original_getattr is not None:
+            return original_getattr(self, name)
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    CompressedLinear.__getattr__ = patched_getattr
+    CompressedLinear._modelopt_init_patched = True
+    logger.info("Patched CompressedLinear for transformers compatibility")
+
+    try:
+        yield
+    finally:
+        if original_getattr is not None:
+            CompressedLinear.__getattr__ = original_getattr
+        elif hasattr(CompressedLinear, "__getattr__"):
+            del CompressedLinear.__getattr__
+        CompressedLinear._modelopt_init_patched = False
+        logger.info("Restored CompressedLinear original state")
+
+
 class _QuantCompressedLinear(QuantModule):
     """Quantization wrapper for ``compressed_tensors`` CompressedLinear modules.
 

@@ -446,81 +446,6 @@ def get_dtype(dtype):
     return dtype
 
 
-def _patch_compressed_linear_init():
-    """Patch CompressedLinear.__getattr__ to return a dummy weight during model loading.
-
-    When loading pack-quantized models with ``trust_remote_code=True``,
-    ``compressed_tensors`` converts Linear modules to CompressedLinear and
-    deletes the ``.weight`` attribute (replacing it with ``.weight_packed``).
-    Because ``.weight`` is now absent, transformers treats it as a *missing
-    key* and calls ``_initialize_missing_keys`` → ``_init_weights(module)``.
-    Custom model code (e.g. ``modeling_deepseek.py``) typically does
-    ``module.weight.data.normal_(...)`` inside ``_init_weights``, which
-    crashes with ``AttributeError`` on CompressedLinear.
-
-    This patch intercepts the ``.weight`` access and returns a no-op dummy
-    so that the initialization code completes harmlessly.  The patch is
-    reversed by :func:`_restore_compressed_linear` immediately after loading.
-    """
-    try:
-        from compressed_tensors.linear.compressed_linear import CompressedLinear
-    except ImportError:
-        return
-
-    if hasattr(CompressedLinear, "_modelopt_init_patched"):
-        return
-
-    if not hasattr(CompressedLinear, "_modelopt_original_getattr"):
-        CompressedLinear._modelopt_original_getattr = getattr(CompressedLinear, "__getattr__", None)
-    original_getattr = CompressedLinear._modelopt_original_getattr
-
-    class _DummyWeightData:
-        """Dummy tensor data that accepts initialization calls like .normal_(), .zero_()."""
-
-        def __getattr__(self, name):
-            return lambda *args, **kwargs: self
-
-    class _DummyWeight:
-        """Dummy weight with .data that accepts any initialization."""
-
-        def __init__(self):
-            self.data = _DummyWeightData()
-
-        def __getattr__(self, name):
-            return lambda *args, **kwargs: self
-
-    def patched_getattr(self, name):
-        if name == "weight":
-            if "_parameters" in self.__dict__ and "weight" in self._parameters:
-                return self._parameters["weight"]
-            if "weight" in self.__dict__:
-                return self.__dict__["weight"]
-            return _DummyWeight()
-        if original_getattr is not None:
-            return original_getattr(self, name)
-        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
-
-    CompressedLinear.__getattr__ = patched_getattr
-    CompressedLinear._modelopt_init_patched = True
-    logger.info("Patched CompressedLinear for transformers compatibility")
-
-
-def _restore_compressed_linear():
-    """Restore original CompressedLinear behavior after loading."""
-    try:
-        from compressed_tensors.linear.compressed_linear import CompressedLinear
-
-        if hasattr(CompressedLinear, "_modelopt_original_getattr"):
-            CompressedLinear.__getattr__ = CompressedLinear._modelopt_original_getattr
-            delattr(CompressedLinear, "_modelopt_original_getattr")
-        elif hasattr(CompressedLinear, "__getattr__"):
-            del CompressedLinear.__getattr__
-        CompressedLinear._modelopt_init_patched = False
-        logger.info("Restored CompressedLinear original state")
-    except Exception:
-        pass
-
-
 def _unpack_compressed_linear_weights(model, ckpt_path=None):
     """Hybrid restoration: restores BF16 layers and fixes expert metadata.
 
@@ -705,17 +630,17 @@ def get_model(
                 **model_kwargs,
             )
         elif has_pack_quantized_config(hf_config):
-            # Workaround: custom _init_weights (e.g. modeling_deepseek.py) accesses
-            # module.weight, which doesn't exist on CompressedLinear modules.
-            # See _patch_compressed_linear_init docstring for details.
-            _patch_compressed_linear_init()
-            model = AutoModelForCausalLM.from_pretrained(
-                ckpt_path,
-                device_map="auto",
-                trust_remote_code=trust_remote_code,
-                torch_dtype="auto",
+            from modelopt.torch.quantization.plugins.huggingface import (
+                patch_compressed_linear_loading,
             )
-            _restore_compressed_linear()
+
+            with patch_compressed_linear_loading():
+                model = AutoModelForCausalLM.from_pretrained(
+                    ckpt_path,
+                    device_map="auto",
+                    trust_remote_code=trust_remote_code,
+                    torch_dtype="auto",
+                )
         else:
             architecture = hf_config.architectures[0]
 
