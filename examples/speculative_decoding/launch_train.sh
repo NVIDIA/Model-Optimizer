@@ -226,6 +226,7 @@ CMD="accelerate launch $MULTI_NODE_ARGS --mixed_precision bf16 ${SCRIPT_DIR}/mai
     --mode $MODE \
     --eagle_decoder_type $EAGLE_DECODER_TYPE \
     --model_name_or_path $MODEL \
+    --trust_remote_code True \
     --training_seq_len $TRAINING_SEQ_LEN \
     --dataloader_drop_last True \
     --bf16 True \

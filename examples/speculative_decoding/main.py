@@ -60,6 +60,7 @@ mto.enable_huggingface_checkpointing()
 @dataclass
 class ModelArguments:
     model_name_or_path: str | None = field(default="TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+    trust_remote_code: bool = field(default=False)
 
 
 @dataclass
@@ -170,9 +171,11 @@ def train():
     if checkpoint:
         with patch_transformers5_params_loading():
             _, model = load_vlm_or_llm_with_kwargs(
-                checkpoint, torch_dtype="auto", trust_remote_code=True
+                checkpoint, torch_dtype="auto", trust_remote_code=model_args.trust_remote_code
             )
-        tokenizer = transformers.AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
+        tokenizer = transformers.AutoTokenizer.from_pretrained(
+            checkpoint, trust_remote_code=model_args.trust_remote_code
+        )
     else:
         # To avoid OOM for large models, we load and convert model on CPU first.
         # Model will be moved to GPU during HF trainer.init().
@@ -181,7 +184,7 @@ def train():
             model_args.model_name_or_path,
             torch_dtype="auto",
             device_map="cpu",
-            trust_remote_code=True,
+            trust_remote_code=model_args.trust_remote_code,
             **offline_kwargs,
         )
         if use_offline_training:
@@ -191,7 +194,7 @@ def train():
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_args.model_name_or_path,
             model_max_length=training_args.training_seq_len,
-            trust_remote_code=True,
+            trust_remote_code=model_args.trust_remote_code,
         )
         if training_args.mode == "medusa":
             config = {

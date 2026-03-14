@@ -192,8 +192,8 @@ class EagleExporter(SpeculativeDecodingExporter):
                 "original_max_position_embeddings": getattr(self.model, "eagle_train_length", 4096),
             }
 
-        # In transformer 5.x, rope_thea is under rope_parameters, rather than main config
-        if not template_config["rope_theta"]:
+        # In transformer 5.x, rope_theta is under rope_parameters, rather than main config
+        if not template_config.get("rope_theta"):
             template_config["rope_theta"] = self.model.eagle_config.rope_parameters.get(
                 "rope_theta"
             )
