@@ -5,7 +5,7 @@ activations_log_dir: ${puzzle_dir}/pruning/pruning_scores/attn/${pruning.experim
 pruning_mixin:
   _target_: modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin.KVHeadsPruningMixIn
   layer_descriptor:
-    _target_: modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor.LlamaKVHeadsLayerDescriptor
+    _target_: modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralKVHeadsLayerDescriptor
 
 hook_class: ${get_object:modelopt.torch.nas.plugins.megatron_hooks.base_hooks.IndependentKvHeadContributionHook}
 activation_hooks_kwargs:    # Additional kwargs to pass to the hook init

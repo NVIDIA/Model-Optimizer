@@ -1,6 +1,6 @@
 # @package _global_
 defaults:
-  - /nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16/pruning@pruning: nemotron6_expert_pruning
+  - /nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16/pruning@pruning: expert_pruning
   - /validate_solutions_defaults@scoring
   - /validate_solutions_defaults@realize_model
   - _self_
@@ -84,7 +84,7 @@ mip:
 
   human_constraints:
   mip_constraints:
-    - stats.num_local_experts: 1472   # teacher has: 23 moe-blocks * 128 experts = 2944 total experts
+    - stats.num_local_experts: 8   # test model has: 1 moe-block * 16 experts; constrain to pick pruned (8)
   use_greedy_search: false
   is_multi_layer_puzzle: true
   metric_overrides:
