@@ -116,6 +116,7 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 | MiniMax M2.1 | - | - | - | - | ✅ |
 | T5 | ✅ | ✅ | ✅ | ✅ | - |
 | Whisper | ✅ | ❌ | ❌ | ❌ | - |
+| Nemotron-3 | ✅ | ❌ | ❌ | ❌ | ✅ |
 
 > *This is a subset of the models supported. For the full list please check the [TensorRT-LLM support matrix](https://nvidia.github.io/TensorRT-LLM/reference/precision.html#support-matrix)*
 
@@ -240,7 +241,7 @@ Here is an example usage for `AutoQuantize` algorithm (Please see [auto_quantize
 
 ### AutoQuantize for Hugging Face models
 
-`AutoQuantize` can be performed for Huggingface LLM models like [Llama-3](https://huggingface.co/meta-llama) as shown below:
+`AutoQuantize` can be performed for Huggingface LLM models like [Qwen](https://huggingface.co/Qwen/Qwen3-8B) / [Nemotron](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16) as shown below:
 
 [Script](./scripts/huggingface_example.sh)
 
@@ -249,11 +250,11 @@ export HF_PATH=<the downloaded LLaMA checkpoint from the Hugging Face hub, or si
 # --auto_quantize_bits specifies the constraint for `AutoQuantize`
 # --quant specifies the formats to be searched for `AutoQuantize`
 # NOTE: auto_quantize_bits cannot be lower than the number of bits for the smallest quantization format in --quant
-scripts/huggingface_example.sh --model $HF_PATH --quant w4a8_awq,fp8 --auto_quantize_bits 4.8 --calib_batch_size 4
+scripts/huggingface_example.sh --model $HF_PATH --quant nvfp4_mse,fp8 --auto_quantize_bits 4.75 --calib_batch_size 4
 ```
 
-The above example perform `AutoQuantize` where the less quantization accuracy sensitive layers are quantized with `w4a8_awq` (specified by `--quant w4a8_awq`) and the more sensitive layers
-are kept un-quantized such that the effective bits is 4.8 (specified by `--auto_quantize_bits 4.8`).
+The above example perform `AutoQuantize` where the less quantization accuracy sensitive layers are quantized with `nvfp4_mse` (specified by `--quant nvfp4_mse`) and the more sensitive layers
+are kept un-quantized such that the effective bits is 4.75 (specified by `--auto_quantize_bits 4.75`).
 
 The example scripts above also have an additional flag `--tasks`, where the actual tasks run in the script can be customized. The allowed tasks are `quant,mmlu,lm_eval,livecodebench` specified in the script [parser](./scripts/parser.sh). The tasks combo can be specified with a comma-separated task list. Some tasks like mmlu can take a long time to run. To run lm_eval tasks, please also specify the `--lm_eval_tasks` flag with comma separated lm_eval tasks [here](https://github.com/EleutherAI/lm-evaluation-harness/tree/main/lm_eval/tasks).
 

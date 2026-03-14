@@ -43,6 +43,7 @@ from modelopt.torch.utils.distributed import ParallelState
 from ..nn import QuantModule, QuantModuleRegistry, TensorQuantizer
 from ..nn.modules.quant_linear import RealQuantLinear
 from ..qtensor import QTensorWrapper
+from ..utils import sync_moe_expert_amax
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear
 
 try:
@@ -577,7 +578,7 @@ class _MegatronSequentialMLP(DynamicModule):
     def layer_sync_moe_local_experts_amax(self):
         """Sync input quantizer amax across local experts in a SequentialMLP.
 
-        Ensures all experts have the same input quantizer amax.This function operates
+        Ensures all experts have the same input quantizer amax. This function operates
         on a single rank and does not require distributed sync.
 
         Distributed amax sync across EP and ETP (for RowParallel) happens in model_calib.max_calibrate().
@@ -586,32 +587,11 @@ class _MegatronSequentialMLP(DynamicModule):
 
         Note:
             Because there are logic which calls collective communication based on whether amax is not None,
-            We need to guarantee that all experts must have amax. Otherwise, there will be deadlock
+            we need to guarantee that all experts must have amax. Otherwise, there will be deadlock
             when synchronizing over EP since some ranks may have amax None and not calling the collective
             communication.
         """
-        # Collect amax from all local experts
-        amax_dict = {}
-        for expert in self.local_experts:
-            for name, module in expert.named_modules():
-                if (
-                    isinstance(module, TensorQuantizer)
-                    and module.amax is not None
-                    and "input_quantizer" in name
-                ):
-                    stored_amax = amax_dict.get(name)
-                    amax_tensor = module.amax.detach().clone()
-                    amax_dict[name] = (
-                        amax_tensor
-                        if stored_amax is None
-                        else torch.maximum(stored_amax, amax_tensor)
-                    )
-
-        # Apply synchronized amax values back to all local experts
-        for expert in self.local_experts:
-            for name, module in expert.named_modules():
-                if isinstance(module, TensorQuantizer) and name in amax_dict:
-                    module.amax = amax_dict[name].detach().clone()
+        sync_moe_expert_amax(self.local_experts)
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         """Override the default to enable singleton_local_shards.

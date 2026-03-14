@@ -30,13 +30,13 @@ class TestSparseAttentionAttributeConfig:
         """Test creating valid config."""
         config = SparseAttentionAttributeConfig(
             method="flash_skip_softmax",
-            threshold={"prefill": 1e-4, "decode": 1e-4},
+            thresholds={"prefill": [1e-4], "decode": [1e-4]},
             br=128,
             bc=128,
             enable=True,
         )
         assert config.method == "flash_skip_softmax"
-        assert config.threshold == {"prefill": 1e-4, "decode": 1e-4}
+        assert config.thresholds == {"prefill": [1e-4], "decode": [1e-4]}
         assert config.br == 128
         assert config.bc == 128
 
@@ -63,44 +63,44 @@ class TestSparseAttentionAttributeConfig:
         """Test threshold dict values must be in range (0, 1)."""
         # Zero value
         with pytest.raises(ValidationError, match="must be in range"):
-            SparseAttentionAttributeConfig(threshold={"prefill": 0, "decode": 1e-4})
+            SparseAttentionAttributeConfig(thresholds={"prefill": [0], "decode": [1e-4]})
 
         # Negative value
         with pytest.raises(ValidationError, match="must be in range"):
-            SparseAttentionAttributeConfig(threshold={"prefill": -0.1, "decode": 1e-4})
+            SparseAttentionAttributeConfig(thresholds={"prefill": [-0.1], "decode": [1e-4]})
 
         # Value equals 1.0
         with pytest.raises(ValidationError, match="must be in range"):
-            SparseAttentionAttributeConfig(threshold={"prefill": 1.0, "decode": 1e-4})
+            SparseAttentionAttributeConfig(thresholds={"prefill": [1.0], "decode": [1e-4]})
 
         # Value greater than 1.0
         with pytest.raises(ValidationError, match="must be in range"):
-            SparseAttentionAttributeConfig(threshold={"prefill": 1.5, "decode": 1e-4})
+            SparseAttentionAttributeConfig(thresholds={"prefill": [1.5], "decode": [1e-4]})
 
     def test_threshold_validation_dict(self):
         """Test threshold dict validation."""
         # Valid phase-aware threshold
-        config = SparseAttentionAttributeConfig(threshold={"prefill": 1e-3, "decode": 1e-5})
-        assert config.threshold == {"prefill": 1e-3, "decode": 1e-5}
+        config = SparseAttentionAttributeConfig(thresholds={"prefill": [1e-3], "decode": [1e-5]})
+        assert config.thresholds == {"prefill": [1e-3], "decode": [1e-5]}
 
         # Invalid phase key
         with pytest.raises(ValidationError, match="Invalid threshold phases"):
-            SparseAttentionAttributeConfig(threshold={"invalid_phase": 1e-3})
+            SparseAttentionAttributeConfig(thresholds={"invalid_phase": [1e-3]})
 
         # Invalid threshold value in dict (negative)
         with pytest.raises(ValidationError, match="must be in range"):
-            SparseAttentionAttributeConfig(threshold={"prefill": -1e-3})
+            SparseAttentionAttributeConfig(thresholds={"prefill": [-1e-3]})
 
         # Invalid threshold value in dict (>= 1.0)
         with pytest.raises(ValidationError, match="must be in range"):
-            SparseAttentionAttributeConfig(threshold={"prefill": 1.0})
+            SparseAttentionAttributeConfig(thresholds={"prefill": [1.0]})
 
     def test_threshold_validation_type(self):
-        """Test threshold must be a dict (not single value or string)."""
+        """Test thresholds must be a dict (not single value or string)."""
         # Single float value not allowed
         with pytest.raises(ValidationError, match="Input should be a valid dictionary"):
-            SparseAttentionAttributeConfig(threshold=1e-4)
+            SparseAttentionAttributeConfig(thresholds=1e-4)
 
         # String not allowed
         with pytest.raises(ValidationError, match="Input should be a valid dictionary"):
-            SparseAttentionAttributeConfig(threshold="invalid")
+            SparseAttentionAttributeConfig(thresholds="invalid")

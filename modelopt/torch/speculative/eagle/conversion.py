@@ -48,17 +48,7 @@ def convert_to_eagle_model(model: nn.Module, config: EagleConfig) -> ConvertRetu
     config.eagle_architecture_config = {**default_arch_config, **custom_config}
 
     eagle_model = EagleDMRegistry.convert(model)
-    eagle_model.modify(
-        eagle_offline=config.eagle_offline,
-        eagle_hidden_state_distillation=config.eagle_hidden_state_distillation,
-        eagle_self_logit_distillation=config.eagle_self_logit_distillation,
-        eagle_freeze_base_model=config.eagle_freeze_base_model,
-        eagle_report_acc=config.eagle_report_acc,
-        eagle_reuse_base_decoder=config.eagle_reuse_base_decoder,
-        eagle_loss_decay_factor=config.eagle_loss_decay_factor,
-        eagle_architecture_config=config.eagle_architecture_config,
-        eagle_decoder_type=config.eagle_decoder_type,
-    )
+    eagle_model.modify(config)
 
     # no metadata, all specified via config.
     metadata = {}
