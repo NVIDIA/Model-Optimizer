@@ -126,7 +126,12 @@ onnx_dtype_map = {
 }
 mha_valid_precisions = {"Half", "BFloat16"}
 
-torch_dtype_map = {"Float": torch.float32, "Half": torch.float16, "BFloat16": torch.bfloat16}
+torch_dtype_map = {
+    "Float": torch.float32,
+    "Half": torch.float16,
+    "BFloat16": torch.bfloat16,
+    "Float8": torch.float8_e4m3fn,
+}
 
 
 def export_int8(
@@ -221,8 +226,7 @@ def _fp8_quantize(
     """Helper Function for Quantization."""
     output_shape = sym_help._get_tensor_sizes(inputs)
 
-    # TRT StronglyType only supports FP16 QDQs
-    # custom ops, so cast the input if needed.
+    # Cast the input to the high-precision dtype if needed.
     input_type = inputs.type().scalarType()
     assert trt_high_precision_dtype in (input_type, "Float"), (
         "TRT StronglyType requires both weights and amax to be in the BF16/FP16, or the QDQ in Float."
@@ -234,9 +238,12 @@ def _fp8_quantize(
         "Constant",
         value_t=torch.tensor(scale_inv).to(torch_dtype_map[trt_high_precision_dtype]),
     )
-    q_op = g.op("trt::TRT_FP8QuantizeLinear", inputs, scale).setType(
-        inputs.type().with_dtype(torch.uint8).with_sizes(output_shape)
-    )
+    # Use standard ONNX QuantizeLinear with FLOAT8E4M3FN zero_point (opset 19).
+    # The zero_point dtype determines the output dtype per the ONNX spec.
+    zero_point = g.op("Constant", value_t=torch.tensor(0.0))
+    zero_point = g.op("Cast", zero_point, to_i=onnx_dtype_map["Float8"])
+    q_op = g.op("QuantizeLinear", inputs, scale, zero_point, saturate_i=1)
+    q_op.setType(inputs.type().with_dtype(torch.float8_e4m3fn).with_sizes(output_shape))
     return q_op
 
 
@@ -249,21 +256,22 @@ def _fp8_dequantize(
 ):
     """Helper Function for Dequantization."""
     output_shape = sym_help._get_tensor_sizes(inputs)
-    assert trt_high_precision_dtype in (otype, "Float"), (
-        "TRT StronglyType requires both weights and amax to be in the BF16/FP16, or the QDQ in Float."
-    )
     scale = g.op(
         "Constant",
         value_t=torch.tensor(scale_inv, dtype=torch_dtype_map[otype]),  # type: ignore[index]
     )
-    out = g.op("trt::TRT_FP8DequantizeLinear", inputs, scale).setType(
+    # Use standard ONNX DequantizeLinear with FLOAT8E4M3FN zero_point (opset 19).
+    # Per the ONNX spec, DequantizeLinear with FLOAT8E4M3FN input outputs float32.
+    zero_point = g.op("Constant", value_t=torch.tensor(0.0))
+    zero_point = g.op("Cast", zero_point, to_i=onnx_dtype_map["Float8"])
+    out = g.op("DequantizeLinear", inputs, scale, zero_point)
+    out.setType(
         inputs.type().with_dtype(torch_dtype_map[trt_high_precision_dtype]).with_sizes(output_shape)
     )
 
-    # DQ outputs are currently constrained to FP32 due to a similar limitation in ORT
-    # custom ops, so cast the output if needed.
-    if trt_high_precision_dtype != otype:
-        out = g.op("Cast", out, to_i=onnx_dtype_map[otype])  # type: ignore[index]
+    # DequantizeLinear outputs float32 in opset 19; cast back to original type if needed.
+    if otype in torch_dtype_map and otype != "Float":
+        out = g.op("Cast", out, to_i=onnx_dtype_map[otype])
     return out
 
 

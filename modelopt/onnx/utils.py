@@ -28,11 +28,25 @@ import onnx
 import onnx_graphsurgeon as gs
 from onnx.helper import get_attribute_value
 from onnx_graphsurgeon import Constant, Node, Variable
+from onnx_graphsurgeon.ir.tensor import LazyValues
 
 from modelopt.onnx.logging_config import logger
 
 # Base minimum opset for quantization (opset 19 is the first to support fp16 scales)
 BASE_MIN_OPSET = 19
+
+
+def is_fp8_constant(const: Constant) -> bool:
+    """Return True if a gs.Constant holds a FLOAT8E4M3FN tensor.
+
+    Uses getattr to guard against future changes to the LazyValues internal API.
+    """
+    if not isinstance(const.values, LazyValues):
+        return False
+    tensor_proto = getattr(const.values, "_tensor", None)
+    if tensor_proto is None:
+        return False
+    return tensor_proto.data_type == onnx.TensorProto.FLOAT8E4M3FN
 
 
 def get_input_names_from_bytes(model_bytes: bytes, external_inputs_only: bool = True) -> list[str]:
