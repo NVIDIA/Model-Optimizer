@@ -128,6 +128,7 @@ def validate_model(
         A tuple containing:
         - losses: Dictionary mapping loss names to loss statistics (avg, per_sample).
         - hidden_states_per_batch: Hidden states and LM head outputs if return_hidden_states is True, else None.
+
         Returns (None, None) if not on master rank.
     """
     descriptor = ModelDescriptorFactory.get(args.descriptor)
