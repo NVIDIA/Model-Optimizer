@@ -34,7 +34,7 @@ class TestStatsManagerInitialization:
         assert manager.calibration_mode is False
         assert manager.aggregated_stats["total_calls"] == 0
         assert manager.aggregated_stats["total_blocks"] == 0
-        assert manager.aggregated_stats["sparse_blocks"] == 0
+        assert "sparse_blocks" not in manager.aggregated_stats
         assert manager.per_sample_stats == []
 
     def test_initialization_disabled(self):
@@ -56,7 +56,7 @@ class TestStatsCollection:
             "sparsity": 0.5,
             "phase": "prefill",
             "total_blocks": 100,
-            "sparse_blocks": 50,
+            "sparse_blocks": [50],
             "sample_length": 1024,
         }
 
@@ -64,7 +64,7 @@ class TestStatsCollection:
 
         assert manager.aggregated_stats["total_calls"] == 1
         assert manager.aggregated_stats["total_blocks"] == 100
-        assert manager.aggregated_stats["sparse_blocks"] == 50
+        assert manager.aggregated_stats["sparse_blocks"] == [50]
         assert manager.aggregated_stats["phase_counts"]["prefill"] == 1
         assert manager.aggregated_stats["phase_counts"]["decode"] == 0
 
@@ -76,7 +76,7 @@ class TestStatsCollection:
             "sparsity": 0.5,
             "phase": "prefill",
             "total_blocks": 100,
-            "sparse_blocks": 50,
+            "sparse_blocks": [50],
         }
 
         manager.collect(stats)
@@ -84,7 +84,7 @@ class TestStatsCollection:
         # Should remain at initial values
         assert manager.aggregated_stats["total_calls"] == 0
         assert manager.aggregated_stats["total_blocks"] == 0
-        assert manager.aggregated_stats["sparse_blocks"] == 0
+        assert "sparse_blocks" not in manager.aggregated_stats
 
     def test_collect_multiple_calls(self):
         """Test accumulation over multiple collect calls."""
@@ -96,13 +96,13 @@ class TestStatsCollection:
                 "sparsity": 0.5,
                 "phase": "prefill",
                 "total_blocks": 100,
-                "sparse_blocks": 50,
+                "sparse_blocks": [50],
             }
             manager.collect(stats)
 
         assert manager.aggregated_stats["total_calls"] == 5
         assert manager.aggregated_stats["total_blocks"] == 500
-        assert manager.aggregated_stats["sparse_blocks"] == 250
+        assert manager.aggregated_stats["sparse_blocks"] == [250]
         assert manager.aggregated_stats["phase_counts"]["prefill"] == 5
 
     def test_collect_different_phases(self):
@@ -110,11 +110,11 @@ class TestStatsCollection:
         manager = SparseAttentionStatsManager(module_name="test", enabled=True)
 
         # Collect prefill stats
-        manager.collect({"phase": "prefill", "total_blocks": 100, "sparse_blocks": 50})
-        manager.collect({"phase": "prefill", "total_blocks": 100, "sparse_blocks": 50})
+        manager.collect({"phase": "prefill", "total_blocks": 100, "sparse_blocks": [50]})
+        manager.collect({"phase": "prefill", "total_blocks": 100, "sparse_blocks": [50]})
 
         # Collect decode stats
-        manager.collect({"phase": "decode", "total_blocks": 10, "sparse_blocks": 5})
+        manager.collect({"phase": "decode", "total_blocks": 10, "sparse_blocks": [5]})
 
         assert manager.aggregated_stats["phase_counts"]["prefill"] == 2
         assert manager.aggregated_stats["phase_counts"]["decode"] == 1
@@ -135,7 +135,7 @@ class TestCalibrationMode:
             "sparsity": 0.5,
             "phase": "prefill",
             "total_blocks": 100,
-            "sparse_blocks": 50,
+            "sparse_blocks": [50],
             "sample_length": 1024,
         }
 
@@ -153,7 +153,7 @@ class TestCalibrationMode:
         manager = SparseAttentionStatsManager(module_name="test", enabled=True)
         # Calibration mode is off by default
 
-        stats = {"sparsity": 0.5, "phase": "prefill", "total_blocks": 100, "sparse_blocks": 50}
+        stats = {"sparsity": 0.5, "phase": "prefill", "total_blocks": 100, "sparse_blocks": [50]}
 
         manager.collect(stats)
 
@@ -174,7 +174,7 @@ class TestCalibrationMode:
                 "sparsity": 0.5,
                 "phase": "prefill",
                 "total_blocks": 100,
-                "sparse_blocks": 50,
+                "sparse_blocks": [50],
                 "sample_length": 1024,
             }
         )
@@ -195,7 +195,7 @@ class TestCalibrationMode:
                 "sparsity": 0.5,
                 "phase": "prefill",
                 "total_blocks": 100,
-                "sparse_blocks": 50,
+                "sparse_blocks": [50],
                 "sample_length": 1024,
             }
         )
@@ -214,15 +214,15 @@ class TestGetSummary:
         manager = SparseAttentionStatsManager(module_name="test_module", enabled=True)
 
         # Collect stats
-        manager.collect({"phase": "prefill", "total_blocks": 100, "sparse_blocks": 30})
-        manager.collect({"phase": "prefill", "total_blocks": 100, "sparse_blocks": 50})
+        manager.collect({"phase": "prefill", "total_blocks": 100, "sparse_blocks": [30]})
+        manager.collect({"phase": "prefill", "total_blocks": 100, "sparse_blocks": [50]})
 
         summary = manager.get_summary()
 
         assert summary["module"] == "test_module"
         assert summary["total_calls"] == 2
         # Average sparsity: (30+50) / (100+100) = 80/200 = 0.4
-        assert summary["average_sparsity"] == 0.4
+        assert summary["average_sparsity"] == [0.4]
         assert summary["phase_distribution"]["prefill"] == 2
 
     def test_get_summary_zero_blocks(self):
@@ -230,11 +230,11 @@ class TestGetSummary:
         manager = SparseAttentionStatsManager(module_name="test", enabled=True)
 
         # Collect stats with zero blocks
-        manager.collect({"phase": "prefill", "total_blocks": 0, "sparse_blocks": 0})
+        manager.collect({"phase": "prefill", "total_blocks": 0, "sparse_blocks": [0]})
 
         summary = manager.get_summary()
 
-        assert summary["average_sparsity"] == 0.0  # Should handle division by zero
+        assert summary["average_sparsity"] == [0.0]  # Should handle division by zero
 
 
 class TestGetCalibrationStats:
@@ -252,7 +252,7 @@ class TestGetCalibrationStats:
                     "sparsity": 0.3 + i * 0.1,
                     "phase": "prefill",
                     "total_blocks": 100,
-                    "sparse_blocks": 30,
+                    "sparse_blocks": [30],
                     "sample_length": 1024 + i * 512,
                 }
             )
@@ -287,7 +287,7 @@ class TestReset:
                 "sparsity": 0.5,
                 "phase": "prefill",
                 "total_blocks": 100,
-                "sparse_blocks": 50,
+                "sparse_blocks": [50],
                 "sample_length": 1024,
             }
         )
@@ -296,7 +296,7 @@ class TestReset:
                 "sparsity": 0.3,
                 "phase": "decode",
                 "total_blocks": 10,
-                "sparse_blocks": 3,
+                "sparse_blocks": [3],
                 "sample_length": 128,
             }
         )
@@ -311,7 +311,7 @@ class TestReset:
         # All stats should be cleared
         assert manager.aggregated_stats["total_calls"] == 0
         assert manager.aggregated_stats["total_blocks"] == 0
-        assert manager.aggregated_stats["sparse_blocks"] == 0
+        assert "sparse_blocks" not in manager.aggregated_stats
         assert manager.per_sample_stats == []
         assert manager.aggregated_stats["phase_counts"]["prefill"] == 0
         assert manager.aggregated_stats["phase_counts"]["decode"] == 0

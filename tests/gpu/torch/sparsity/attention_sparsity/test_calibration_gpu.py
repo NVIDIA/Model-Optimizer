@@ -115,7 +115,7 @@ class TestCalibrationGPU:
             "sparse_cfg": {
                 "*attn*": {
                     "method": "flash_skip_softmax",
-                    "threshold": {"prefill": 1e-3, "decode": 1e-4},
+                    "thresholds": {"prefill": [1e-3], "decode": [1e-4]},
                     "br": 64,
                     "bc": 64,
                     "backend": "pytorch",
@@ -157,7 +157,7 @@ class TestCalibrationGPU:
             "sparse_cfg": {
                 "*attn*": {
                     "method": "flash_skip_softmax",
-                    "threshold": {"prefill": 1e-3, "decode": 1e-4},
+                    "thresholds": {"prefill": [1e-3], "decode": [1e-4]},
                     "backend": "pytorch",
                     "enable": True,
                     "calibration": {
@@ -189,7 +189,7 @@ class TestCalibrationGPU:
             "sparse_cfg": {
                 "*attn*": {
                     "method": "flash_skip_softmax",
-                    "threshold": {"prefill": 1e-3, "decode": 1e-4},
+                    "thresholds": {"prefill": [1e-3], "decode": [1e-4]},
                     "enable": True,
                     "calibration": {
                         "target_sparse_ratio": {"prefill": 0.5, "decode": 0.0},
@@ -216,7 +216,7 @@ class TestCalibrationGPU:
             "sparse_cfg": {
                 "*attn*": {
                     "method": "flash_skip_softmax",
-                    "threshold": {"prefill": 1e-3, "decode": 1e-4},
+                    "thresholds": {"prefill": [1e-3], "decode": [1e-4]},
                     "enable": True,
                     "calibration": {
                         "target_sparse_ratio": {"prefill": 0.5, "decode": 0.0},
@@ -263,7 +263,7 @@ class TestCalibrationEndToEnd:
             "sparse_cfg": {
                 "*attn*": {
                     "method": "flash_skip_softmax",
-                    "threshold": {"prefill": 1e-3, "decode": 1e-4},
+                    "thresholds": {"prefill": [1e-3], "decode": [1e-4]},
                     "backend": "pytorch",
                     "enable": True,
                     "calibration": {
@@ -299,7 +299,7 @@ class TestCalibrationEndToEnd:
             "sparse_cfg": {
                 "*attn*": {
                     "method": "flash_skip_softmax",
-                    "threshold": {"prefill": 1e-3, "decode": 1e-4},
+                    "thresholds": {"prefill": [1e-3], "decode": [1e-4]},
                     "enable": True,
                     "calibration": {
                         "target_sparse_ratio": {"prefill": 0.5, "decode": 0.0},
@@ -315,7 +315,7 @@ class TestCalibrationEndToEnd:
             "sparse_cfg": {
                 "*attn*": {
                     "method": "flash_skip_softmax",
-                    "threshold": {"prefill": 1e-3, "decode": 1e-4},
+                    "thresholds": {"prefill": [1e-3], "decode": [1e-4]},
                     "enable": True,
                 }
             },
@@ -358,7 +358,7 @@ class TestCalibrationEndToEnd:
             "sparse_cfg": {
                 "*attn*": {
                     "method": "flash_skip_softmax",
-                    "threshold": {"prefill": 1e-3, "decode": 1e-4},
+                    "thresholds": {"prefill": [1e-3], "decode": [1e-4]},
                     "enable": True,
                     "calibration": {
                         "target_sparse_ratio": {"prefill": 0.5, "decode": 0.0},

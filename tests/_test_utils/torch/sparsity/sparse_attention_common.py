@@ -95,7 +95,7 @@ FLASH_SKIP_SOFTMAX_DEFAULT_CFG = {
     "sparse_cfg": {
         "*attention*": {
             "method": "flash_skip_softmax",
-            "threshold": {"prefill": 1e-4, "decode": 1e-4},
+            "thresholds": {"prefill": [1e-4], "decode": [1e-4]},
             "br": 128,
             "bc": 128,
             "enable": True,
@@ -107,7 +107,7 @@ FLASH_SKIP_SOFTMAX_PHASE_AWARE_CFG = {
     "sparse_cfg": {
         "*attention*": {
             "method": "flash_skip_softmax",
-            "threshold": {"prefill": 1e-3, "decode": 1e-5},
+            "thresholds": {"prefill": [1e-3], "decode": [1e-5]},
             "br": 128,
             "bc": 128,
             "enable": True,
