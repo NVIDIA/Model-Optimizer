@@ -73,6 +73,7 @@ from .layer_utils import (
     is_moe,
     is_quantlinear,
     set_expert_quantizer_amax,
+    sync_moe_gate_up_amax,
 )
 from .model_config import (
     QUANTIZATION_FP8,
@@ -98,7 +99,6 @@ from .quant_utils import (
     get_weight_scaling_factor,
     get_weight_scaling_factor_2,
     has_quantized_modules,
-    max_gate_up_scales,
     maybe_transpose_expert_weight_dimensions,
     postprocess_state_dict,
     preprocess_linear_fusion,
@@ -776,6 +776,12 @@ def _export_transformers_checkpoint(
                 exclude_modules.append(pattern)
                 print(f"Adding MTP layer to quantization_config ignore: {pattern}")
 
+    # Sync gate/up weight quantizer amaxes so they share a single weight_scale_2
+    # after fusion in serving engines.
+    synced = sync_moe_gate_up_amax(model)
+    if synced:
+        print(f"Synced weight_scale_2 amax for {synced} gate/up projection pair(s) in MoE experts.")
+
     # Process all quantized modules and export weights
     _process_quantized_modules(model, dtype, is_modelopt_qlora)
 
@@ -791,10 +797,6 @@ def _export_transformers_checkpoint(
     quantized_state_dict = postprocess_state_dict(
         quantized_state_dict, kv_cache_max_bound, kv_cache_format, is_modelopt_qlora
     )
-
-    tied = max_gate_up_scales(quantized_state_dict)
-    if tied:
-        print(f"Tied weight_scale_2 for {tied} gate/up projection pair(s) in MoE experts.")
 
     return quantized_state_dict, quant_config
 
