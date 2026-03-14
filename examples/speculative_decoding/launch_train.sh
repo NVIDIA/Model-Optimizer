@@ -26,6 +26,10 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       MODEL="${1#*=}"
       ;;
+    --trust_remote_code*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      TRUST_REMOTE_CODE="${1#*=}"
+      ;;
     --data*)
       if [[ "$1" != *=* ]]; then shift; fi
       DATA="${1#*=}"
@@ -140,6 +144,7 @@ fi
 DEFAULT_SAVE_STEPS=$((8192 / TOTAL_GPU))
 
 MODEL=${MODEL:-"TinyLlama/TinyLlama-1.1B-Chat-v1.0"}
+TRUST_REMOTE_CODE=${TRUST_REMOTE_CODE:-True}
 MODE=${MODE:-"eagle3"}
 EAGLE_DECODER_TYPE=${EAGLE_DECODER_TYPE:-"llama"}
 # Set default OUTPUT_DIR to ckpts/{modelname}, where {modelname} is the last part of the model path
@@ -226,7 +231,7 @@ CMD="accelerate launch $MULTI_NODE_ARGS --mixed_precision bf16 ${SCRIPT_DIR}/mai
     --mode $MODE \
     --eagle_decoder_type $EAGLE_DECODER_TYPE \
     --model_name_or_path $MODEL \
-    --trust_remote_code True \
+    --trust_remote_code $TRUST_REMOTE_CODE \
     --training_seq_len $TRAINING_SEQ_LEN \
     --dataloader_drop_last True \
     --bf16 True \
