@@ -81,7 +81,9 @@ def filter_func_ltx_video(name: str) -> bool:
 
 def filter_func_flux_dev(name: str) -> bool:
     """Filter function specifically for Flux-dev models."""
-    pattern = re.compile(r"(proj_out.*|.*(time_text_embed|context_embedder|x_embedder|norm_out).*)")
+    pattern = re.compile(
+        r"(proj_out.*|.*(time_text_embed|context_embedder|x_embedder|norm_out|time_guidance_embed|stream_modulation).*)"
+    )
     return pattern.match(name) is not None
 
 

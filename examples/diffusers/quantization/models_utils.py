@@ -20,12 +20,16 @@ from typing import Any
 
 from diffusers import (
     DiffusionPipeline,
-    Flux2Pipeline,
     FluxPipeline,
     LTXConditionPipeline,
     StableDiffusion3Pipeline,
     WanPipeline,
 )
+
+try:
+    from diffusers import Flux2Pipeline
+except ImportError:
+    Flux2Pipeline = None
 from utils import (
     filter_func_default,
     filter_func_flux_dev,
