@@ -493,7 +493,7 @@ def _unpack_compressed_linear_weights(model, ckpt_path=None):
         if sf_path is None:
             continue
         with safe_open(sf_path, framework="pt") as f:
-            for key in f:
+            for key in f.keys():  # noqa: SIM118 - safe_open is not iterable
                 if ".mlp.experts." not in key or "weight_shape" in key:
                     checkpoint_weights[key] = f.get_tensor(key)
 
@@ -699,7 +699,8 @@ def get_model(
                 **model_kwargs,
             )
     model.eval()
-    _unpack_compressed_linear_weights(model, ckpt_path)
+    if has_pack_quantized_config(hf_config):
+        _unpack_compressed_linear_weights(model, ckpt_path)
 
     # If device_map was disabled (None), manually move model to target device
     if device_map is None and device != "cpu":

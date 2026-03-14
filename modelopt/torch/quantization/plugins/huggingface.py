@@ -910,7 +910,7 @@ def patch_compressed_linear_loading():
         yield
         return
 
-    if hasattr(CompressedLinear, "_modelopt_init_patched"):
+    if getattr(CompressedLinear, "_modelopt_init_patched", False):
         yield
         return
 
