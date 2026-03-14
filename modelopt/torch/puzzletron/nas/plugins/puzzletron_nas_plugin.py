@@ -112,7 +112,6 @@ def convert_puzzletron_model(model: nn.Module, config: PuzzletronConfig) -> Conv
         overrides=[
             f"puzzle_dir={config.puzzle_dir}",
             f"dataset_path={config.dataset_path}",
-            "hydra/hydra_logging=disabled",
         ],
     )
     # Instantiate nested Hydra configs (e.g., pruning_mixin, hook_class)
@@ -214,7 +213,6 @@ class PuzzletronSearcher(BaseSearcher):
             overrides=[
                 f"puzzle_dir={self.model.puzzle_dir}",
                 f"dataset_path={self.model.dataset_path}",
-                "hydra/hydra_logging=disabled",
             ],
         )
         # Instantiate nested Hydra configs (e.g., pruning_mixin, hook_class)

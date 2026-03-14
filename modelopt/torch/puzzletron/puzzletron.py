@@ -50,7 +50,6 @@ def puzzletron(
         overrides=[
             f"puzzle_dir={puzzle_dir}",
             f"dataset_path={dataset_path}",
-            "hydra/hydra_logging=disabled",
         ],
     )
     hydra_cfg = hydra.utils.instantiate(hydra_cfg)

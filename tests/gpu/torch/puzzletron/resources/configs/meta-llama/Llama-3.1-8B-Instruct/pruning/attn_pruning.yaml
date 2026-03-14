@@ -4,4 +4,4 @@ defaults:
 
 pruning_mixin:
   layer_descriptor:
-    _target_: modelopt.torch.puzzletron.anymodel.models.mistral_small.mistral_small_model_descriptor.MistralKVHeadsLayerDescriptor
+    _target_: modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor.LlamaKVHeadsLayerDescriptor
