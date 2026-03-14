@@ -42,10 +42,10 @@ from modelopt.torch.puzzletron.anymodel import convert_model
         ("mistralai/Mistral-Small-24B-Instruct-2501", "mistral_small", None, False),
         ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16", "nemotron_h", "*E", True),
         ("nvidia/NVIDIA-Nemotron-Nano-12B-v2", "nemotron_h_v2", "*-", False),
+        # ("openai/gpt-oss-20b", "gpt_oss", None, True),
         ("Qwen/Qwen2.5-7B-Instruct", "qwen2", None, False),
         ("Qwen/Qwen3-8B", "qwen3", None, False),
         ("Qwen/Qwen3-VL-30B-A3B-Instruct", "qwen3_vl", None, True),
-        # ("gpt-oss-20b", "gpt_oss_20b", None, True),
     ],
 )
 def test_puzzletron(
@@ -208,10 +208,10 @@ EXPECTED_LM_LOSS = {
     "mistralai/Mistral-Small-24B-Instruct-2501": 4.709150314331055,
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": 4.7737884521484375,
     "nvidia/NVIDIA-Nemotron-Nano-12B-v2": 4.79390811920166,
+    # "openai/gpt-oss-20b": 4.689250946044922,
     "Qwen/Qwen2.5-7B-Instruct": 4.778186798095703,
     "Qwen/Qwen3-8B": 4.733874320983887,
     "Qwen/Qwen3-VL-30B-A3B-Instruct": 4.65625,
-    # "gpt-oss-20b": 4.689250946044922,
 }
 
 

@@ -146,10 +146,6 @@ def create_and_save_small_hf_model(
         if hasattr(config, "hybrid_override_pattern") and hybrid_override_pattern is not None:
             config.hybrid_override_pattern = hybrid_override_pattern
 
-        # Reduce MoE experts for faster, more deterministic testing (matches Qwen3-VL approach)
-        if hasattr(config, "n_routed_experts") and config.n_routed_experts is not None:
-            config.n_routed_experts = 16
-
     # Set seed for reproducible weight initialization
     torch.manual_seed(42)
 

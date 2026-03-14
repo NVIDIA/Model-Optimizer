@@ -84,8 +84,7 @@ mip:
 
   human_constraints:
   mip_constraints:
-    - stats.num_local_experts: 8   # test model has: 1 moe-block * 16 experts; constrain to pick pruned (8)
-  use_greedy_search: false
+    - stats.num_local_experts: 1472   # teacher has: 23 moe-blocks * 128 experts = 2944 total experts  use_greedy_search: false
   is_multi_layer_puzzle: true
   metric_overrides:
   constrain_search_func:
