@@ -33,10 +33,18 @@ import os
 import warnings
 
 import nemo_run as run
-from core import SandboxPipeline, SandboxTask, get_default_env, run_jobs, set_slurm_config_type
-from slurm_config import SlurmConfig, slurm_factory  # noqa: F401
+from core import (
+    SandboxPipeline,
+    SandboxTask,
+    get_default_env,
+    register_factory,
+    run_jobs,
+    set_slurm_config_type,
+)
+from slurm_config import SlurmConfig, slurm_factory
 
 set_slurm_config_type(SlurmConfig)
+register_factory("slurm_factory", slurm_factory)
 
 # ---------------------------------------------------------------------------
 # Launcher-specific configuration

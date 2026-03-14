@@ -60,6 +60,7 @@ def get_default_env(experiment_title=None):
 # SlurmConfig type — set by the caller via set_slurm_config_type() before use.
 # This allows both slurm.py and launch.py to use their own SlurmConfig class.
 _SLURM_CONFIG_TYPE = None
+_FACTORY_REGISTRY = {}
 
 
 def set_slurm_config_type(cls):
@@ -69,6 +70,11 @@ def set_slurm_config_type(cls):
     # Patch SandboxTask's type annotation so nemo-run's CLI parser can resolve factories
     SandboxTask.__dataclass_fields__["slurm_config"].type = cls
     SandboxTask.__annotations__["slurm_config"] = cls
+
+
+def register_factory(name, fn):
+    """Register a factory function by name for task_configs YAML resolution."""
+    _FACTORY_REGISTRY[name] = fn
 
 
 # ---------------------------------------------------------------------------
@@ -170,11 +176,13 @@ class SandboxPipeline:
                 task = getattr(self, f"task_{i}", None)
                 if task is not None:
                     self.tasks += [task]
-        if self.task_configs is not None and self._factory_lookup is not None:
-            self.tasks += [
-                create_task_from_yaml(yaml_file=yf, factory_lookup=self._factory_lookup)
-                for yf in self.task_configs
-            ]
+        if self.task_configs is not None:
+            lookup = self._factory_lookup or _FACTORY_REGISTRY
+            if lookup:
+                self.tasks += [
+                    create_task_from_yaml(yaml_file=yf, factory_lookup=lookup)
+                    for yf in self.task_configs
+                ]
 
         if self.global_vars is not None:
             global_vars_dict = {
