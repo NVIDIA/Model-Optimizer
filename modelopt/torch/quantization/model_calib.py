@@ -1995,7 +1995,7 @@ def adaround(
         for weight_name in weight_attr_names(module):
             wq_name = quantizer_attr_names(weight_name).weight_quantizer
             quantizer = getattr(module, wq_name, None)
-            if not isinstance(quantizer, NVFP4StaticQuantizer):
+            if not isinstance(quantizer, StaticBlockScaleQuantizer):
                 continue
             if not quantizer._scale_after_dequant:
                 continue

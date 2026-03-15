@@ -1376,25 +1376,23 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         self._scale_after_dequant = True
         self._quantize_scales = quantize_scales
 
-    def _fp4_cast(self, inputs):
-        """Cast inputs to FP4 representable values (no scaling)."""
-        return fp4_cast_ste(inputs)
+    def _cast_ste(self, inputs):
+        """Cast inputs to quantized representable values (no scaling)."""
+        if isinstance(self._num_bits, tuple):
+            return fp4_cast_ste(inputs)
+        return int_cast_ste(inputs, self._num_bits, self._unsigned, self._narrow_range)
 
     def _fake_quantize(self, inputs):
         """Fake quantization using two-level scaling with _amax and _global_amax."""
         if self._scale_after_dequant:
             scale_raw = self._per_block_scale.clamp(min=0)
 
-<<<<<<< HEAD
             if self._quantize_scales:
                 scale = scaled_e4m3(scale_raw, self._per_tensor_scale, None, 4, 3)
             else:
                 scale = scale_raw
 
-            if isinstance(self._num_bits, tuple):
-                w_cast = fp4_cast_ste(inputs)
-            else:
-                w_cast = int_cast_ste(inputs, self._num_bits, self._unsigned, self._narrow_range)
+            w_cast = self._cast_ste(inputs)
 
             scale = scale.to(dtype=inputs.dtype)
 
@@ -1534,7 +1532,7 @@ class NVFP4StaticAdaRoundQuantizer(StaticBlockScaleQuantizer):
         round_prob = self.get_round_prob()
         return (1.0 - torch.pow((2.0 * round_prob - 1.0).abs(), beta)).mean()
 
-    def _fp4_cast(self, inputs):
+    def _cast_ste(self, inputs):
         """AdaRound FP4 cast: floor + learned rounding offset."""
         assert self._adaround_enabled, (
             "AdaRound not initialized. Call enable_adaround(weight_scaled) first."

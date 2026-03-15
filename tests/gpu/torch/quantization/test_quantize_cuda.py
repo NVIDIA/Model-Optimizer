@@ -82,7 +82,10 @@ NVFP4_WEIGHT_SCALE_LEARN_CFG = {
         },
         "*input_quantizer": {"enable": False},
     },
-    "algorithm": {"method": "scale_after_dequant"},
+    "algorithm": {
+        "method": "scale_after_dequant",
+        "scale_algorithm": {"method": "mse", "fp8_scale_sweep": True},
+    },
 }
 
 NVFP4_ADAROUND_CFG = {
