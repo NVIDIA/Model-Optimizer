@@ -171,6 +171,7 @@ class SandboxPipeline:
     _factory_lookup: dict = None
 
     def __post_init__(self):
+        """Collect tasks from slots/configs and resolve <<global_vars.X>> references."""
         if self.tasks is None:
             self.tasks = []
             for i in range(5):
@@ -191,6 +192,7 @@ class SandboxPipeline:
             }
 
             def _resolve(s):
+                """Replace <<global_vars.X>> with the corresponding value."""
                 if not isinstance(s, str):
                     return s
                 return re.sub(

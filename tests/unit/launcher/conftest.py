@@ -15,10 +15,12 @@
 
 """Fixtures for launcher unit tests.
 
-These tests can be run standalone without installing modelopt:
+These tests require nemo_run and are skipped when it's not installed.
+
+Standalone run (from launcher/ directory):
     cd Model-Optimizer/launcher
     uv pip install pytest
-    uv run python3 -m pytest ../tests/unit/launcher/ -v -o "addopts=" --rootdir=.
+    uv run python3 -m pytest ../tests/unit/launcher/ -v -o "addopts=" --confcutdir=../tests/unit/launcher
 """
 
 import os
@@ -26,8 +28,11 @@ import sys
 
 import pytest
 
-# Prevent pytest from loading the root conftest.py (which imports torch/modelopt)
-collect_ignore_glob = ["../../conftest.py"]
+# Skip all tests in this directory if nemo_run is not installed
+try:
+    import nemo_run  # noqa: F401
+except ImportError:
+    pytest.skip("nemo_run not installed, skipping launcher tests", allow_module_level=True)
 
 
 @pytest.fixture(autouse=True)
