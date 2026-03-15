@@ -14,7 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from datasets import load_dataset
+try:
+    from datasets import load_dataset
+
+    not_installed = False
+except ImportError:
+    not_installed = True
 
 from .base import Dataset, Request
 
@@ -23,6 +28,10 @@ def format_prompt(prompt: str) -> str:
 
 class HumanEval(Dataset):
     def __init__(self, path, num_samples=164, **kwargs):
+        if not_installed:
+            raise ImportError(
+                "Please install datasets to use the HumanEval dataset."
+            )
         self.data: list[Request] = []  # list of list of questions.
         self.num_samples = num_samples
         self._preprocess(path)
