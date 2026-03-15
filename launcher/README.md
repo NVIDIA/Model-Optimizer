@@ -31,6 +31,41 @@ uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
 | `HF_TOKEN` | HuggingFace API token | No |
 | `NEMORUN_HOME` | NeMo Run home directory (default: cwd) | No |
 
+## Model and Dataset Storage (`hf_local`)
+
+Pipeline YAMLs use a `global_vars.hf_local` path prefix for model weights and datasets. This should be a **self-managed directory that mirrors the HuggingFace Hub hierarchy**:
+
+```text
+/hf-local/
+├── Qwen/Qwen3-8B/              # model weights
+├── meta-llama/Llama-3.1-8B/    # model weights
+├── abisee/cnn_dailymail/        # calibration dataset
+└── cais/mmlu/                   # evaluation dataset
+```
+
+Using a dedicated folder is preferred over the HuggingFace cache (`~/.cache/huggingface`) to avoid cache corruption from concurrent jobs writing to the same cache directory.
+
+You can populate it by copying or symlinking from an existing HuggingFace download:
+
+```bash
+# Example: download a model and copy to hf_local
+huggingface-cli download Qwen/Qwen3-8B --local-dir /hf-local/Qwen/Qwen3-8B
+```
+
+Override `hf_local` in any YAML via CLI:
+
+```bash
+# Use a different local path
+uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml \
+    pipeline.global_vars.hf_local=/mnt/my-models/ --yes
+
+# Download from HuggingFace Hub directly (no local cache)
+uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml \
+    pipeline.global_vars.hf_local="" --yes
+```
+
+For Slurm clusters, `SLURM_HF_LOCAL` sets the container mount path (e.g., `/lustre/.../hf-local:/hf-local`).
+
 ## Directory Structure
 
 ```text
@@ -39,17 +74,26 @@ launcher/
 ├── core.py                      # Shared logic (also used by nmm-sandbox's slurm.py)
 ├── slurm_config.py              # SlurmConfig dataclass and factory
 ├── pyproject.toml               # Dependencies (nemo-run, pyyaml)
-├── services/                    # Shell scripts executed on the cluster
+├── common/                      # Shared scripts executed on the cluster
 │   ├── service_utils.sh         # Error handling, MPI rank utilities
-│   └── megatron-lm/quantize/
-│       ├── quantize.sh          # PTQ quantization + MMLU evaluation
-│       └── Qwen3-8B.yaml        # Task config for Qwen3-8B
-├── Qwen/Qwen3-8B/              # Example pipeline config
-│   └── megatron_lm_ptq.yaml
-└── modules/                     # Git submodules
-    ├── Megatron-LM/             # NVIDIA Megatron-LM training framework
-    └── Model-Optimizer/         # NVIDIA ModelOpt library
+│   ├── query.py                 # OpenAI-compatible query client
+│   ├── megatron-lm/quantize/
+│   │   └── quantize.sh          # PTQ quantization + MMLU evaluation
+│   ├── tensorrt-llm/query.sh    # TRT-LLM server launch + query
+│   ├── vllm/query.sh            # vLLM server launch + query
+│   ├── eagle3/                  # EAGLE3 speculative decoding scripts
+│   └── specdec_bench/           # Speculative decoding benchmark
+├── Qwen/Qwen3-8B/              # Example configs
+│   ├── megatron_lm_ptq.yaml     # PTQ quantization pipeline
+│   └── hf_offline_eagle3.yaml   # EAGLE3 offline pipeline
+└── modules/                     # Dependencies
+    ├── Megatron-LM/             # Git submodule: NVIDIA Megatron-LM
+    └── Model-Optimizer -> ../.. # Symlink to parent (auto-created if missing)
 ```
+
+> **Note:** `modules/Model-Optimizer` is a symlink to the parent directory (`../..`),
+> not a submodule. This avoids recursive nesting. `launch.py` auto-creates
+> the symlink on first run if it's missing.
 
 ## YAML Config Format
 
@@ -63,14 +107,14 @@ pipeline:
   note:
 
   task_0:
-    script: services/megatron-lm/quantize/quantize.sh
+    script: common/megatron-lm/quantize/quantize.sh
     args:
       - --calib-dataset-path-or-name /hf-local/abisee/cnn_dailymail
       - --calib-size 32
     environment:
       - MLM_MODEL_CFG: Qwen/Qwen3-8B
       - QUANT_CFG: NVFP4_DEFAULT_CFG
-      - TP: 1
+      - TP: 4
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
@@ -80,7 +124,8 @@ pipeline:
 
 ### Multi-task Pipeline
 
-Tasks run sequentially — `task_1` starts only after `task_0` completes:
+Tasks run sequentially — `task_1` starts only after `task_0` completes.
+Example (illustrative — export script may not exist yet):
 
 ```yaml
 job_name: Qwen3-8B_quantize_export
@@ -89,7 +134,7 @@ pipeline:
     hf_model: /hf-local/Qwen/Qwen3-8B
 
   task_0:
-    script: services/megatron-lm/quantize/quantize.sh
+    script: common/megatron-lm/quantize/quantize.sh
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
     slurm_config:
@@ -97,7 +142,7 @@ pipeline:
       nodes: 1
 
   task_1:
-    script: services/megatron-lm/export/export.sh
+    script: common/megatron-lm/export/export.sh
     environment:
       - HF_MODEL_CKPT: <<global_vars.hf_model>>
     slurm_config:
@@ -119,7 +164,7 @@ The file contains both `job_name` and `pipeline`:
 job_name: Qwen3-8B_NVFP4
 pipeline:
   task_0:
-    script: services/megatron-lm/quantize/quantize.sh
+    script: common/megatron-lm/quantize/quantize.sh
     slurm_config:
       _factory_: "slurm_factory"
 ```
@@ -130,7 +175,7 @@ This is useful for reusing pipeline configs across different job names:
 ```yaml
 # bare_pipeline.yaml — used with: uv run launch.py pipeline=@bare_pipeline.yaml --yes
 task_0:
-  script: services/megatron-lm/quantize/quantize.sh
+  script: common/megatron-lm/quantize/quantize.sh
   slurm_config:
     _factory_: "slurm_factory"
 ```
@@ -186,7 +231,7 @@ uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml detach=true --yes
 ## How It Works
 
 1. `launch.py` parses the YAML and creates a `SandboxPipeline` with tasks and `SlurmConfig`
-2. Code is packaged via `PatternPackager` — only `modules/Megatron-LM/`, `modules/Model-Optimizer/`, and `services/` are synced
+2. Code is packaged via `PatternPackager` — `modules/Megatron-LM/`, `modules/Model-Optimizer/` (via symlink), and `common/` are synced
 3. For remote jobs: code is rsynced to the cluster, an sbatch script is generated and submitted via SSH
 4. For local jobs: a Docker container is launched with the same container image and mounts
 5. The `code/` directory on the cluster mirrors the launcher structure:
@@ -196,8 +241,19 @@ code/
 ├── modules/
 │   ├── Megatron-LM/megatron/...
 │   └── Model-Optimizer/modelopt/...
-└── services/...
+└── common/...
 ```
+
+## Running Tests
+
+```bash
+cd launcher
+uv pip install pytest
+uv run python3 -m pytest ../tests/unit/launcher/ -v -o "addopts=" \
+    --confcutdir=../tests/unit/launcher
+```
+
+64 unit tests cover core dataclasses, factory registry, YAML parsing, Docker/Slurm executor construction, environment merging, and end-to-end Docker launch.
 
 ## Reporting Bugs
 
@@ -236,3 +292,7 @@ uv run slurm.py --yaml modules/Model-Optimizer/launcher/Qwen/Qwen3-8B/megatron_l
 # From Model-Optimizer/launcher (public)
 uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
 ```
+
+Verified: identical MMLU results (0.719 local, 0.730 OCI-HSG) from both launchers.
+
+For architecture details, factory system, and Claude Code workflows, see [ADVANCED.md](ADVANCED.md).

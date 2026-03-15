@@ -35,12 +35,24 @@ code/
 ├── modules/
 │   ├── Megatron-LM/megatron/...      # Training framework
 │   └── Model-Optimizer/modelopt/...   # ModelOpt library (mounted over container install)
-└── services/
-    └── megatron-lm/quantize/
-        └── quantize.sh               # Job script
+└── common/
+    ├── megatron-lm/quantize/
+    │   └── quantize.sh               # PTQ quantization + MMLU
+    ├── tensorrt-llm/query.sh          # TRT-LLM server + query
+    ├── vllm/query.sh                  # vLLM server + query
+    ├── eagle3/                        # EAGLE3 pipeline scripts
+    └── query.py                       # OpenAI-compatible query client
 ```
 
 The `modelopt/` directory is bind-mounted over the container's installed ModelOpt, so your local changes take effect without rebuilding the container.
+
+### Model-Optimizer Symlink
+
+`launcher/modules/Model-Optimizer` is a **symlink** to `../..` (the Model-Optimizer root), not a git submodule. This avoids recursive nesting — the launcher lives inside Model-Optimizer and references its own parent.
+
+- Git tracks the symlink natively (`git clone` preserves it)
+- `launch.py` auto-creates the symlink on first run if it's missing
+- The packager's `find` follows symlinks, so `modules/Model-Optimizer/modelopt/*` resolves correctly
 
 ### Factory System
 
@@ -70,7 +82,7 @@ SLURM_CLUSTER=cw_dfw uv run slurm.py --yaml config.yaml --yes
 job_name: Qwen3-8B_NVFP4
 pipeline:
   task_0:
-    script: services/megatron-lm/quantize/quantize.sh
+    script: common/megatron-lm/quantize/quantize.sh
     slurm_config:
       _factory_: "slurm_factory"
 ```
@@ -79,12 +91,12 @@ pipeline:
 
 ```yaml
 task_0:
-  script: services/megatron-lm/quantize/quantize.sh
+  script: common/megatron-lm/quantize/quantize.sh
   slurm_config:
     _factory_: "slurm_factory"
 ```
 
-**Test YAML format** — list of jobs with `_target_` and overrides, used by `tools/run_test_yaml.sh`:
+**Test YAML format** — list of jobs with `_target_` and overrides, used by nmm-sandbox's `tools/run_test_yaml.sh` for CI:
 
 ```yaml
 - _target_: Qwen/Qwen3-8B/megatron_lm_ptq.yaml

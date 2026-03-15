@@ -4,18 +4,32 @@ pipeline:
   allow_to_fail: false
   note:
 
+  # hf_local: path prefix for model weights and datasets.
+  #
+  # This should be a self-managed directory that mirrors the HuggingFace Hub
+  # hierarchy (e.g., /hf-local/Qwen/Qwen3-8B/, /hf-local/cais/mmlu/). Using
+  # a dedicated folder is preferred over the HuggingFace cache (~/.cache/huggingface)
+  # to avoid cache corruption issues with concurrent jobs.
+  #
+  # Override on CLI:
+  #   pipeline.global_vars.hf_local=/mnt/my-models/   # use a different path
+  #   pipeline.global_vars.hf_local=""                 # download from HuggingFace Hub
+  global_vars:
+    hf_local: /hf-local/
+
   task_0:
     script: common/megatron-lm/quantize/quantize.sh
     args:
-      - --calib-dataset-path-or-name /hf-local/abisee/cnn_dailymail
+      - --calib-dataset-path-or-name <<global_vars.hf_local>>abisee/cnn_dailymail
       - --calib-size 32
     environment:
       - MLM_MODEL_CFG: Qwen/Qwen3-8B
       - QUANT_CFG: NVFP4_DEFAULT_CFG
+      - HF_MODEL_CKPT: <<global_vars.hf_local>>Qwen/Qwen3-8B
+      - MMLU_DATASET: <<global_vars.hf_local>>cais/mmlu
       - TP: 4
     slurm_config:
-      _factory_: "slurm_factory" # oci_hsg_slurm_factory
+      _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 4
       gpus_per_node: 4
-

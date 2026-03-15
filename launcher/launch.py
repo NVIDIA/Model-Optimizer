@@ -46,6 +46,12 @@ register_factory("slurm_factory", slurm_factory)
 LAUNCHER_DIR = os.path.dirname(os.path.abspath(__file__))
 MODELOPT_ROOT = os.path.dirname(LAUNCHER_DIR)
 
+# Ensure modules/Model-Optimizer symlink exists (points to parent Model-Optimizer root)
+_mo_symlink = os.path.join(LAUNCHER_DIR, "modules", "Model-Optimizer")
+if not os.path.exists(_mo_symlink):
+    os.makedirs(os.path.join(LAUNCHER_DIR, "modules"), exist_ok=True)
+    os.symlink(os.path.relpath(MODELOPT_ROOT, os.path.join(LAUNCHER_DIR, "modules")), _mo_symlink)
+
 EXPERIMENT_TITLE = "cicd"
 DEFAULT_SLURM_ENV, DEFAULT_LOCAL_ENV = get_default_env(EXPERIMENT_TITLE)
 
@@ -56,10 +62,9 @@ packager = run.PatternPackager(
         "modules/Megatron-LM/*.py",
         "modules/Model-Optimizer/modelopt/*",
         "modules/Model-Optimizer/examples/*",
-        "services/*",
         "common/*",
     ],
-    relative_path=[LAUNCHER_DIR] * 7,
+    relative_path=[LAUNCHER_DIR] * 6,
 )
 
 MODELOPT_SRC_PATH = os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/modelopt")
