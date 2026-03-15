@@ -5,7 +5,7 @@ pipeline:
   note:
 
   task_0:
-    script: services/megatron-lm/quantize/quantize.sh
+    script: common/megatron-lm/quantize/quantize.sh
     args:
       - --calib-dataset-path-or-name /hf-local/abisee/cnn_dailymail
       - --calib-size 32
