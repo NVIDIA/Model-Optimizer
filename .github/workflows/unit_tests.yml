@@ -112,6 +112,8 @@ jobs:
         working-directory: launcher
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          uv venv .venv
           uv pip install pytest
           uv run python3 -m pytest -v
   partial-install:
