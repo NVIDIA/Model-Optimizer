@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 import torch
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
+from _test_utils.torch.misc import set_seed
 from _test_utils.torch.puzzletron.utils import setup_test_model_and_data
 
 import modelopt.torch.utils.distributed as dist
@@ -31,6 +32,8 @@ from modelopt.torch.puzzletron.anymodel import convert_model
 # using a one-click command.
 #
 # Note: Bypass is disabled now in the test.
+
+SEED = 1234
 
 
 @pytest.mark.parametrize(
@@ -102,6 +105,7 @@ def _test_puzzletron_multiprocess_job(
     size: int,
 ):
     dist.setup(timeout=timedelta(10))
+    set_seed(SEED)
 
     # Setup the test model and data.
     puzzle_dir, hf_checkpoint_path, dataset_path = setup_test_model_and_data(
@@ -232,7 +236,7 @@ EXPECTED_LM_LOSS = {
     "mistral-small-24b-instruct-2501": 4.709150314331055,
     "qwen3-8b": 4.733874320983887,
     "gpt-oss-20b": 4.689250946044922,
-    "nemotron-3-nano-30b-a3b-base-bf16": 4.770087242126465,
+    "nemotron-3-nano-30b-a3b-base-bf16": 4.741103172302246,
     "qwen3-vl-30b-a3b-instruct": 4.65625,
 }
 
