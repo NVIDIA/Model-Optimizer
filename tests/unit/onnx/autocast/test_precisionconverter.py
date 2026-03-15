@@ -32,6 +32,15 @@ def low_precision_onnx_type(low_precision_type_str):
     return TensorProto.FLOAT16 if low_precision_type_str == "fp16" else TensorProto.BFLOAT16
 
 
+def setup_mappings(
+    model: onnx.ModelProto, use_standalone_type_inference: bool = False
+) -> tuple[onnx.ModelProto, dict, dict, dict]:
+    # Setup internal mappings
+    model = onnx_utils.infer_types(model, use_standalone_type_inference)
+    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+    return model, value_info_map, initializer_map, node_to_init_map
+
+
 ####################################################################################################
 # Testing with a basic GEMM->Add->Relu graph
 ####################################################################################################
@@ -56,16 +65,21 @@ def simple_model():
     model.ir_version = 10
     onnx.checker.check_model(model)
 
-    model = onnx_utils.infer_shapes(model)
-    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
 
     return model, value_info_map, initializer_map, node_to_init_map
 
 
-def test_graph_converter_init(simple_model):
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_graph_converter_init(simple_model, use_standalone_type_inference):
     model, value_info_map, initializer_map, node_to_init_map = simple_model
     converter = PrecisionConverter(
-        model, value_info_map, initializer_map, node_to_init_map, keep_io_types=True
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=True,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
     assert converter.model == model
     assert converter.value_info_map == value_info_map
@@ -75,7 +89,10 @@ def test_graph_converter_init(simple_model):
 
 @pytest.mark.parametrize("keep_io_types", [True, False])
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
-def test_simple_convert(simple_model, keep_io_types, low_precision_type):
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_simple_convert(
+    simple_model, keep_io_types, low_precision_type, use_standalone_type_inference
+):
     model, value_info_map, initializer_map, node_to_init_map = simple_model
     converter = PrecisionConverter(
         model,
@@ -84,6 +101,7 @@ def test_simple_convert(simple_model, keep_io_types, low_precision_type):
         node_to_init_map,
         keep_io_types=keep_io_types,
         low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
 
     # Convert add node to fp16, keep mul in fp32
@@ -133,7 +151,10 @@ def test_unsupported_precision_type(simple_model, low_precision_type):
 
 @pytest.mark.parametrize("keep_io_types", [True, False])
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
-def test_convert_no_disabled_nodes(simple_model, keep_io_types, low_precision_type):
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_convert_no_disabled_nodes(
+    simple_model, keep_io_types, low_precision_type, use_standalone_type_inference
+):
     model, value_info_map, initializer_map, node_to_init_map = simple_model
     converter = PrecisionConverter(
         model,
@@ -142,6 +163,7 @@ def test_convert_no_disabled_nodes(simple_model, keep_io_types, low_precision_ty
         node_to_init_map,
         keep_io_types=keep_io_types,
         low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
 
     # Convert all nodes to fp16
@@ -167,7 +189,10 @@ def test_convert_no_disabled_nodes(simple_model, keep_io_types, low_precision_ty
 
 @pytest.mark.parametrize("keep_io_types", [True, False])
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
-def test_get_tensors_to_cast(simple_model, keep_io_types, low_precision_type):
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_get_tensors_to_cast(
+    simple_model, keep_io_types, low_precision_type, use_standalone_type_inference
+):
     model, value_info_map, initializer_map, node_to_init_map = simple_model
     converter = PrecisionConverter(
         model,
@@ -176,6 +201,7 @@ def test_get_tensors_to_cast(simple_model, keep_io_types, low_precision_type):
         node_to_init_map,
         keep_io_types=keep_io_types,
         low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
 
     # Test when relu node is in low precision
@@ -196,7 +222,10 @@ def test_get_tensors_to_cast(simple_model, keep_io_types, low_precision_type):
 
 @pytest.mark.parametrize("keep_io_types", [True, False])
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
-def test_keep_io_names(simple_model, keep_io_types, low_precision_type):
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_keep_io_names(
+    simple_model, keep_io_types, low_precision_type, use_standalone_type_inference
+):
     model, value_info_map, initializer_map, node_to_init_map = simple_model
     converter = PrecisionConverter(
         model,
@@ -205,6 +234,7 @@ def test_keep_io_names(simple_model, keep_io_types, low_precision_type):
         node_to_init_map,
         keep_io_types=keep_io_types,
         low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
 
     # Convert all nodes to low precision
@@ -258,16 +288,16 @@ def model_with_multiple_consumers():
     model.ir_version = 10
     onnx.checker.check_model(model)
 
-    model = onnx_utils.infer_shapes(model)
-    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
 
     return model, value_info_map, initializer_map, node_to_init_map
 
 
 @pytest.mark.parametrize("keep_io_types", [True, False])
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
 def test_convert_with_multiple_consumers(
-    model_with_multiple_consumers, keep_io_types, low_precision_type
+    model_with_multiple_consumers, keep_io_types, low_precision_type, use_standalone_type_inference
 ):
     model, value_info_map, initializer_map, node_to_init_map = model_with_multiple_consumers
     converter = PrecisionConverter(
@@ -277,6 +307,7 @@ def test_convert_with_multiple_consumers(
         node_to_init_map,
         keep_io_types=keep_io_types,
         low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
 
     # Only gemm1 and add1 are converted to fp32, gemm2 and add2 are fp16
@@ -300,8 +331,9 @@ def test_convert_with_multiple_consumers(
 
 @pytest.mark.parametrize("keep_io_types", [True, False])
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
 def test_get_tensors_to_cast_multiple_consumers(
-    model_with_multiple_consumers, keep_io_types, low_precision_type
+    model_with_multiple_consumers, keep_io_types, low_precision_type, use_standalone_type_inference
 ):
     model, value_info_map, initializer_map, node_to_init_map = model_with_multiple_consumers
     converter = PrecisionConverter(
@@ -311,6 +343,7 @@ def test_get_tensors_to_cast_multiple_consumers(
         node_to_init_map,
         keep_io_types=keep_io_types,
         low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
 
     # Test when gemm2 and add1 nodes are in low precision
@@ -327,7 +360,10 @@ def test_get_tensors_to_cast_multiple_consumers(
 
 
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
-def test_convert_initializers(model_with_multiple_consumers, low_precision_type):
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_convert_initializers(
+    model_with_multiple_consumers, low_precision_type, use_standalone_type_inference
+):
     model, value_info_map, initializer_map, node_to_init_map = model_with_multiple_consumers
     converter = PrecisionConverter(
         model,
@@ -335,6 +371,7 @@ def test_convert_initializers(model_with_multiple_consumers, low_precision_type)
         initializer_map,
         node_to_init_map,
         low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
 
     # Test successful cast, add1 and add2 share add_init and operate in different precisions
@@ -361,6 +398,7 @@ def test_convert_initializers(model_with_multiple_consumers, low_precision_type)
         initializer_map,
         node_to_init_map,
         low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
     add1_node = next(n for n in converter2.model.graph.node if n.name == "add1")
     add2_node = next(n for n in converter2.model.graph.node if n.name == "add2")
@@ -384,6 +422,7 @@ def test_convert_initializers(model_with_multiple_consumers, low_precision_type)
         initializer_map,
         node_to_init_map,
         low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
     add1_node = next(n for n in converter3.model.graph.node if n.name == "add1")
     add2_node = next(n for n in converter3.model.graph.node if n.name == "add2")
@@ -404,7 +443,10 @@ def test_convert_initializers(model_with_multiple_consumers, low_precision_type)
     assert f"add_init_{low_precision_type}" in init_names
 
 
-def test_clamping_fp16_initializers_out_of_range(model_with_multiple_consumers):
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_clamping_fp16_initializers_out_of_range(
+    model_with_multiple_consumers, use_standalone_type_inference
+):
     model, value_info_map, initializer_map, node_to_init_map = model_with_multiple_consumers
 
     # Initializer is out of FP16 range, node is converted to FP16
@@ -412,7 +454,13 @@ def test_clamping_fp16_initializers_out_of_range(model_with_multiple_consumers):
     add_init = numpy_helper.from_array(add_init_out_of_range, name="add_init")
     model.graph.initializer[1].CopyFrom(add_init)
 
-    converter = PrecisionConverter(model, value_info_map, initializer_map, node_to_init_map)
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        use_standalone_type_inference=use_standalone_type_inference,
+    )
     converter._convert_initializers(low_precision_nodes=["add1", "add2"], high_precision_nodes=[])
 
     # Verify initializer is clamped
@@ -427,7 +475,13 @@ def test_clamping_fp16_initializers_out_of_range(model_with_multiple_consumers):
     assert add_init_converted_array[0, 1] == np.finfo(np.float16).max
 
     # Initializer is out of FP16 range, node is kept in FP32
-    converter2 = PrecisionConverter(model, value_info_map, initializer_map, node_to_init_map)
+    converter2 = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        use_standalone_type_inference=use_standalone_type_inference,
+    )
     converter2._convert_initializers(low_precision_nodes=[], high_precision_nodes=["add1", "add2"])
 
     # Verify initializer is not clamped
@@ -441,7 +495,13 @@ def test_clamping_fp16_initializers_out_of_range(model_with_multiple_consumers):
     assert np.all(add_init_converted_array == add_init_out_of_range)
 
     # Initializer is out of FP16 range, one consumer is converted to FP16, the other is kept in FP32
-    converter3 = PrecisionConverter(model, value_info_map, initializer_map, node_to_init_map)
+    converter3 = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        use_standalone_type_inference=use_standalone_type_inference,
+    )
     converter3._convert_initializers(low_precision_nodes=["add1"], high_precision_nodes=["add2"])
 
     # Verify initializer is duplicated, and the FP16 copy is clamped
@@ -462,7 +522,10 @@ def test_clamping_fp16_initializers_out_of_range(model_with_multiple_consumers):
     assert np.all(add_init_fp32_array == add_init_out_of_range)
 
 
-def test_bf16_no_clamping_initializers_out_of_range(model_with_multiple_consumers):
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_bf16_no_clamping_initializers_out_of_range(
+    model_with_multiple_consumers, use_standalone_type_inference
+):
     model, value_info_map, initializer_map, node_to_init_map = model_with_multiple_consumers
 
     # Initializer is out of FP16 range, but that does not affect BF16 conversion
@@ -476,6 +539,7 @@ def test_bf16_no_clamping_initializers_out_of_range(model_with_multiple_consumer
         initializer_map,
         node_to_init_map,
         low_precision_type="bf16",
+        use_standalone_type_inference=use_standalone_type_inference,
     )
     converter._convert_initializers(low_precision_nodes=["add1", "add2"], high_precision_nodes=[])
 
@@ -511,13 +575,13 @@ def model_with_dynamic_shapes():
     matmul_node = helper.make_node("MatMul", ["X", "weight"], ["matmul_out"], name="matmul")
     transpose_node = helper.make_node("Transpose", ["Y"], ["transpose_out"], name="transpose")
     concat_node = helper.make_node(
-        "Concat", ["matmul_out", "transpose_out"], ["concat_out"], name="concat", axis=0
+        "Concat", ["matmul_out", "transpose_out"], ["concat_out"], name="concat1", axis=0
     )
     size_y = helper.make_node("Size", ["concat_out"], ["total_size"], name="size")
     const_4 = numpy_helper.from_array(np.array([4], dtype=np.int64), name="const_4")
     first_dim = helper.make_node("Div", ["total_size", "const_4"], ["first_dim"], name="div")
     concat_dims_node = helper.make_node(
-        "Concat", ["first_dim", "const_4"], ["final_shape"], name="concat", axis=0
+        "Concat", ["first_dim", "const_4"], ["final_shape"], name="concat2", axis=0
     )
     reshape_node = helper.make_node("Reshape", ["concat_out", "final_shape"], ["Z"], name="reshape")
 
@@ -540,20 +604,25 @@ def model_with_dynamic_shapes():
     model = helper.make_model(graph, producer_name="model_dynamic")
     model.opset_import[0].version = 20
     model.ir_version = 10
-    model = onnx_utils.infer_shapes(model)
-
-    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
 
     return model, value_info_map, initializer_map, node_to_init_map
 
 
-def test_dynamic_model_conversion(model_with_dynamic_shapes):
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_dynamic_model_conversion(model_with_dynamic_shapes, use_standalone_type_inference):
     model, value_info_map, initializer_map, node_to_init_map = model_with_dynamic_shapes
 
     # Test mixed precision conversion
-    converter2 = PrecisionConverter(model, value_info_map, initializer_map, node_to_init_map)
+    converter2 = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        use_standalone_type_inference=use_standalone_type_inference,
+    )
     high_precision_nodes = ["matmul"]
-    low_precision_nodes = ["transpose", "concat", "size", "div", "concat_dims", "reshape"]
+    low_precision_nodes = ["transpose", "concat1", "size", "div", "concat2", "reshape"]
 
     converted_model = converter2.convert(high_precision_nodes, low_precision_nodes)
     # Verify model is valid
@@ -563,7 +632,8 @@ def test_dynamic_model_conversion(model_with_dynamic_shapes):
 ####################################################################################################
 # Cast cleanup logic
 ####################################################################################################
-def test_cast_output_pattern():
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_cast_output_pattern(use_standalone_type_inference):
     x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [3, 4])
     y1 = helper.make_tensor_value_info("Y1", TensorProto.FLOAT, [3, 4])
     y2 = helper.make_tensor_value_info("Y2", TensorProto.FLOAT, [3, 4])
@@ -583,10 +653,14 @@ def test_cast_output_pattern():
     model = helper.make_model(graph, producer_name="model_double_cast")
     model.opset_import[0].version = 20
     model.ir_version = 10
-    model = onnx_utils.infer_shapes(model)
-
-    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
-    converter = PrecisionConverter(model, value_info_map, initializer_map, node_to_init_map)
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        use_standalone_type_inference=use_standalone_type_inference,
+    )
 
     # Setting all nodes to FP16 means that the final graph should have no cast nodes
     converted_model = converter.convert(
@@ -602,7 +676,8 @@ def test_cast_output_pattern():
         assert converted_model.graph.output[i].name == model.graph.output[i].name
 
 
-def test_cast_output_pattern_mixed_precision():
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_cast_output_pattern_mixed_precision(use_standalone_type_inference):
     x1 = helper.make_tensor_value_info("X1", TensorProto.FLOAT, [3, 4])
     x2 = helper.make_tensor_value_info("X2", TensorProto.FLOAT, [3, 4])
     y0 = helper.make_tensor_value_info("Y0", TensorProto.FLOAT, [3, 4])
@@ -625,10 +700,14 @@ def test_cast_output_pattern_mixed_precision():
     model = helper.make_model(graph, producer_name="model_double_cast")
     model.opset_import[0].version = 20
     model.ir_version = 10
-    model = onnx_utils.infer_shapes(model)
-
-    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
-    converter = PrecisionConverter(model, value_info_map, initializer_map, node_to_init_map)
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        use_standalone_type_inference=use_standalone_type_inference,
+    )
 
     # Network output Y0 has two consumers, one is FP16 and the other is FP32
     converted_model = converter.convert(
@@ -641,7 +720,8 @@ def test_cast_output_pattern_mixed_precision():
 
 
 @pytest.mark.parametrize("keep_io_types", [True, False])
-def test_chain_of_casts_pattern(keep_io_types):
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_chain_of_casts_pattern(keep_io_types, use_standalone_type_inference):
     x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [3, 4])
     y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [3, 4])
 
@@ -690,11 +770,14 @@ def test_chain_of_casts_pattern(keep_io_types):
     model = helper.make_model(graph, producer_name="model_cast_chain")
     model.opset_import[0].version = 20
     model.ir_version = 10
-    model = onnx_utils.infer_shapes(model)
-
-    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
     converter = PrecisionConverter(
-        model, value_info_map, initializer_map, node_to_init_map, keep_io_types=keep_io_types
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=keep_io_types,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
     converter.convert(high_precision_nodes=["add"], low_precision_nodes=[])
 
@@ -705,7 +788,8 @@ def test_chain_of_casts_pattern(keep_io_types):
 
 
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
-def test_existing_low_precision_output(low_precision_type):
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_existing_low_precision_output(low_precision_type, use_standalone_type_inference):
     # Create a simple model with FP16 output
     x = helper.make_tensor_value_info("X", low_precision_onnx_type(low_precision_type), [3, 4])
     y = helper.make_tensor_value_info("Y", low_precision_onnx_type(low_precision_type), [3, 4])
@@ -715,8 +799,7 @@ def test_existing_low_precision_output(low_precision_type):
     model.opset_import[0].version = 20
     model.ir_version = 10
 
-    model = onnx_utils.infer_shapes(model)
-    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
 
     converter = PrecisionConverter(
         model,
@@ -725,6 +808,7 @@ def test_existing_low_precision_output(low_precision_type):
         node_to_init_map,
         keep_io_types=True,
         low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
     converter.convert(high_precision_nodes=["add"], low_precision_nodes=[])
 
@@ -743,7 +827,8 @@ def test_existing_low_precision_output(low_precision_type):
 
 
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
-def test_output_cast_output_pattern(low_precision_type):
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_output_cast_output_pattern(low_precision_type, use_standalone_type_inference):
     x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [3, 4])
     y1 = helper.make_tensor_value_info("Y1", TensorProto.FLOAT, [3, 4])
     y2 = helper.make_tensor_value_info("Y2", low_precision_onnx_type(low_precision_type), [3, 4])
@@ -764,9 +849,8 @@ def test_output_cast_output_pattern(low_precision_type):
     model = helper.make_model(graph, producer_name="model_output_cast_output")
     model.opset_import[0].version = 20
     model.ir_version = 10
-    model = onnx_utils.infer_shapes(model)
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
 
-    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
     converter = PrecisionConverter(
         model,
         value_info_map,
@@ -774,6 +858,7 @@ def test_output_cast_output_pattern(low_precision_type):
         node_to_init_map,
         keep_io_types=True,
         low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
 
     # Setting nodes precision to match I/O type means that the final graph should have no cast nodes
@@ -790,7 +875,8 @@ def test_output_cast_output_pattern(low_precision_type):
 
 
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
-def test_cast_output_keep_io_types_pattern(low_precision_type):
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_cast_output_keep_io_types_pattern(low_precision_type, use_standalone_type_inference):
     x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [3, 4])
     y1 = helper.make_tensor_value_info("Y1", TensorProto.FLOAT, [3, 4])
     y2 = helper.make_tensor_value_info("Y2", TensorProto.FLOAT, [3, 4])
@@ -809,9 +895,7 @@ def test_cast_output_keep_io_types_pattern(low_precision_type):
     model = helper.make_model(graph, producer_name="model_cast_output_keep_io_types")
     model.opset_import[0].version = 20
     model.ir_version = 10
-    model = onnx_utils.infer_shapes(model)
-
-    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
     converter = PrecisionConverter(
         model,
         value_info_map,
@@ -819,6 +903,7 @@ def test_cast_output_keep_io_types_pattern(low_precision_type):
         node_to_init_map,
         keep_io_types=True,
         low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
     converter.convert(high_precision_nodes=[], low_precision_nodes=["add1", "add2"])
 
@@ -827,7 +912,8 @@ def test_cast_output_keep_io_types_pattern(low_precision_type):
     assert converter.model.graph.output[1].type.tensor_type.elem_type == TensorProto.FLOAT
 
 
-def test_unsupported_op_types_model():
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_unsupported_op_types_model(use_standalone_type_inference):
     x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [3, 4])
     roi = helper.make_tensor_value_info("roi", TensorProto.FLOAT, [3, 4])
     scales = helper.make_tensor_value_info("scales", TensorProto.FLOAT, [4])
@@ -848,17 +934,24 @@ def test_unsupported_op_types_model():
         [],
     )
     model = helper.make_model(graph, producer_name="model_celu")
-    model = onnx.shape_inference.infer_shapes(model)
-
-    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
-    converter = PrecisionConverter(model, value_info_map, initializer_map, node_to_init_map)
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        use_standalone_type_inference=use_standalone_type_inference,
+    )
     converter.convert(high_precision_nodes=[], low_precision_nodes=["celu", "resize", "nms"])
     onnx.checker.check_model(converter.model)
 
 
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
 @pytest.mark.parametrize("empty_tensor_target", ["low_precision", "high_precision"])
-def test_empty_tensor_handling(low_precision_type, empty_tensor_target):
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_empty_tensor_handling(
+    low_precision_type, empty_tensor_target, use_standalone_type_inference
+):
     """Test empty tensor handling for both low and high precision node targets."""
     # Create model with empty float tensor from Constant layer
     x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2])
@@ -888,8 +981,7 @@ def test_empty_tensor_handling(low_precision_type, empty_tensor_target):
     model.ir_version = 10
     onnx.checker.check_model(model)
 
-    model = onnx_utils.infer_shapes(model)
-    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
     converter = PrecisionConverter(
         model,
         value_info_map,
@@ -897,6 +989,7 @@ def test_empty_tensor_handling(low_precision_type, empty_tensor_target):
         node_to_init_map,
         keep_io_types=True,
         low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
 
     # Test empty tensor detection
@@ -979,14 +1072,16 @@ def model_with_constant_cast_patterns():
     model.ir_version = 10
     onnx.checker.check_model(model)
 
-    model = onnx_utils.infer_shapes(model)
-    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
 
     return model, value_info_map, initializer_map, node_to_init_map
 
 
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
-def test_constant_cast_folding(model_with_constant_cast_patterns, low_precision_type):
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_constant_cast_folding(
+    model_with_constant_cast_patterns, low_precision_type, use_standalone_type_inference
+):
     """Test constant->cast folding as part of the full conversion process."""
     model, value_info_map, initializer_map, node_to_init_map = model_with_constant_cast_patterns
 
@@ -997,6 +1092,7 @@ def test_constant_cast_folding(model_with_constant_cast_patterns, low_precision_
         node_to_init_map,
         keep_io_types=True,
         low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
 
     # Convert with some nodes in low precision to trigger cast insertion
@@ -1077,15 +1173,17 @@ def model_with_multiple_output_node_casted_to_output():
     model.ir_version = 10
     onnx.checker.check_model(model)
 
-    model = onnx_utils.infer_shapes(model)
-    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
 
     return model, value_info_map, initializer_map, node_to_init_map
 
 
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
 def test_multiple_output_node_casted_to_output(
-    model_with_multiple_output_node_casted_to_output, low_precision_type
+    model_with_multiple_output_node_casted_to_output,
+    low_precision_type,
+    use_standalone_type_inference,
 ):
     model, value_info_map, initializer_map, node_to_init_map = (
         model_with_multiple_output_node_casted_to_output
@@ -1098,6 +1196,7 @@ def test_multiple_output_node_casted_to_output(
         node_to_init_map,
         keep_io_types=True,
         low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
     converted_model = converter.convert(
         high_precision_nodes=[], low_precision_nodes=["concat_1", "concat_2"]
@@ -1145,16 +1244,19 @@ def model_with_casted_input_to_output():
     model.ir_version = 10
     onnx.checker.check_model(model)
 
-    model = onnx_utils.infer_shapes(model)
-    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
 
     return model, value_info_map, initializer_map, node_to_init_map
 
 
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
 @pytest.mark.parametrize("keep_io_types", [True, False])
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
 def test_casted_input_to_output_model(
-    model_with_casted_input_to_output, low_precision_type, keep_io_types
+    model_with_casted_input_to_output,
+    low_precision_type,
+    keep_io_types,
+    use_standalone_type_inference,
 ):
     model, value_info_map, initializer_map, node_to_init_map = model_with_casted_input_to_output
 
@@ -1168,6 +1270,7 @@ def test_casted_input_to_output_model(
         min_opset=22 if low_precision_type == "bf16" else 13,
         max_ir_version=LATEST_IR_VERSION_SUPPORTED_BY_ORT,
         trt_plugins=[],
+        use_standalone_type_inference=use_standalone_type_inference,
     )
     converted_model = converter.convert(
         high_precision_nodes=["cast_input"], low_precision_nodes=["add1", "add2"]
@@ -1218,8 +1321,7 @@ def create_model_with_resize_op():
     model.ir_version = 10
     onnx.checker.check_model(model)
 
-    model = onnx_utils.infer_shapes(model)
-    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
 
     return model, value_info_map, initializer_map, node_to_init_map
 
@@ -1276,16 +1378,16 @@ def create_model_with_resize_op_tensor_scales():
     model.ir_version = 10
     onnx.checker.check_model(model)
 
-    model = onnx_utils.infer_shapes(model)
-    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
 
     return model, value_info_map, initializer_map, node_to_init_map
 
 
 @pytest.mark.parametrize("keep_io_types", [True, False])
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
 def test_resize_op_initializer_conversion(
-    create_model_with_resize_op, keep_io_types, low_precision_type
+    create_model_with_resize_op, keep_io_types, low_precision_type, use_standalone_type_inference
 ):
     model, value_info_map, initializer_map, node_to_init_map = create_model_with_resize_op
 
@@ -1296,6 +1398,7 @@ def test_resize_op_initializer_conversion(
         node_to_init_map,
         keep_io_types=keep_io_types,
         low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
     converted_model = converter.convert(
         high_precision_nodes=[], low_precision_nodes=[node.name for node in model.graph.node]
@@ -1305,8 +1408,12 @@ def test_resize_op_initializer_conversion(
 
 @pytest.mark.parametrize("keep_io_types", [True, False])
 @pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
 def test_resize_op_tensor_scales_conversion(
-    create_model_with_resize_op_tensor_scales, keep_io_types, low_precision_type
+    create_model_with_resize_op_tensor_scales,
+    keep_io_types,
+    low_precision_type,
+    use_standalone_type_inference,
 ):
     model, value_info_map, initializer_map, node_to_init_map = (
         create_model_with_resize_op_tensor_scales
@@ -1319,8 +1426,286 @@ def test_resize_op_tensor_scales_conversion(
         node_to_init_map,
         keep_io_types=keep_io_types,
         low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
     )
     converted_model = converter.convert(
         high_precision_nodes=[], low_precision_nodes=[node.name for node in model.graph.node]
     )
     onnx.checker.check_model(converted_model)
+
+
+####################################################################################################
+# Testing subgraph support, using If - Then Else subgraphs with initializers
+####################################################################################################
+@pytest.fixture
+def model_with_if_subgraph():
+    """Create a model with an If operation containing subgraphs with initializers.
+
+    The model has a preprocessing Add on X, then If branches use initializers.
+    This tests both external inputs (X flows through Add) and subgraph initializers.
+    """
+    # Main graph inputs/outputs
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 3])
+    condition = helper.make_tensor_value_info("condition", TensorProto.BOOL, [])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 4])
+
+    # Add a preprocessing node in main graph to use external input X
+    preprocess_weight = numpy_helper.from_array(
+        np.ones((2, 3), dtype=np.float32), name="preprocess_weight"
+    )
+    preprocess_node = helper.make_node(
+        "Add", ["X", "preprocess_weight"], ["X_processed"], name="preprocess"
+    )
+
+    # Create "then" branch subgraph with initializers
+    then_y = helper.make_tensor_value_info("then_y", TensorProto.FLOAT, [2, 4])
+
+    w_true = np.random.randn(2, 4).astype(np.float32)
+    b_true = np.random.randn(2, 4).astype(np.float32)
+    w_true_init = numpy_helper.from_array(w_true, name="W_true")
+    b_true_init = numpy_helper.from_array(b_true, name="b_true")
+
+    then_add = helper.make_node("Add", ["W_true", "b_true"], ["then_y"], name="then_add")
+
+    then_graph = helper.make_graph(
+        [then_add],
+        "then_branch",
+        [],
+        [then_y],
+        [w_true_init, b_true_init],
+    )
+
+    # Create "else" branch subgraph with different initializers
+    else_y = helper.make_tensor_value_info("else_y", TensorProto.FLOAT, [2, 4])
+
+    w_false = np.random.randn(2, 4).astype(np.float32) * 2  # Different values
+    b_false = np.random.randn(2, 4).astype(np.float32) * 2
+    w_false_init = numpy_helper.from_array(w_false, name="W_false")
+    b_false_init = numpy_helper.from_array(b_false, name="b_false")
+
+    else_add = helper.make_node("Add", ["W_false", "b_false"], ["else_y"], name="else_add")
+
+    else_graph = helper.make_graph(
+        [else_add],
+        "else_branch",
+        [],
+        [else_y],
+        [w_false_init, b_false_init],
+    )
+
+    # Create If node
+    if_node = helper.make_node(
+        "If",
+        inputs=["condition"],
+        outputs=["Y"],
+        name="if_node",
+        then_branch=then_graph,
+        else_branch=else_graph,
+    )
+
+    # Create main graph with preprocessing using external input
+    main_graph = helper.make_graph(
+        [preprocess_node, if_node],
+        "model_with_if",
+        [x, condition],
+        [y],
+        [preprocess_weight],
+    )
+
+    model = helper.make_model(main_graph, producer_name="model_with_if")
+    model.opset_import[0].version = 20
+    model.ir_version = 10
+    onnx.checker.check_model(model)
+
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
+    return model, value_info_map, initializer_map, node_to_init_map
+
+
+@pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+@pytest.mark.parametrize("if_precision", ["low", "high"])
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_if_subgraph_initializer_conversion(
+    model_with_if_subgraph, low_precision_type, if_precision, use_standalone_type_inference
+):
+    """Test that initializers in If subgraphs are converted based on parent node precision."""
+    model, value_info_map, initializer_map, node_to_init_map = model_with_if_subgraph
+
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=True,
+        low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
+    )
+
+    # Classify the If node based on test parameter
+    if if_precision == "low":
+        high_precision_nodes = []
+        low_precision_nodes = ["if_node"]
+        expected_init_type = low_precision_onnx_type(low_precision_type)
+    else:
+        high_precision_nodes = ["if_node"]
+        low_precision_nodes = []
+        expected_init_type = TensorProto.FLOAT
+
+    converted_model = converter.convert(high_precision_nodes, low_precision_nodes)
+
+    # Verify the model is valid
+    onnx.checker.check_model(converted_model)
+
+    # Find the If node and check its subgraph initializers
+    if_node = next(n for n in converted_model.graph.node if n.op_type == "If")
+
+    then_branch = None
+    else_branch = None
+    for attr in if_node.attribute:
+        if attr.name == "then_branch":
+            then_branch = attr.g
+        elif attr.name == "else_branch":
+            else_branch = attr.g
+
+    assert then_branch is not None, "If node should have a then_branch attribute"
+    assert else_branch is not None, "If node should have an else_branch attribute"
+
+    # Check that subgraph initializers in both branches were converted
+    assert len(then_branch.initializer) == 2, (
+        "Then branch should have 2 initializers (W_true, b_true)"
+    )
+    assert len(else_branch.initializer) == 2, (
+        "Else branch should have 2 initializers (W_false, b_false)"
+    )
+
+    for init in then_branch.initializer:
+        assert init.data_type == expected_init_type, (
+            f"Then branch initializer '{init.name}' should be {expected_init_type}, "
+            f"but is {init.data_type}"
+        )
+
+    for init in else_branch.initializer:
+        assert init.data_type == expected_init_type, (
+            f"Else branch initializer '{init.name}' should be {expected_init_type}, "
+            f"but is {init.data_type}"
+        )
+
+
+@pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+@pytest.mark.parametrize("use_standalone_type_inference", [True, False])
+def test_if_subgraph_mixed_precision_boundary(
+    model_with_if_subgraph, low_precision_type, use_standalone_type_inference
+):
+    """Test that types are correctly handled at If subgraph boundaries in mixed precision."""
+    model, value_info_map, initializer_map, node_to_init_map = model_with_if_subgraph
+
+    # Add another node after the If to create a mixed precision scenario
+    add_weight = numpy_helper.from_array(np.ones((2, 4), dtype=np.float32), name="add_weight")
+    model.graph.initializer.append(add_weight)
+
+    add_node = helper.make_node("Add", ["Y", "add_weight"], ["output"], name="add_after_if")
+    model.graph.node.append(add_node)
+
+    # Update output
+    output_tensor = helper.make_tensor_value_info("output", TensorProto.FLOAT, [2, 4])
+    model.graph.output.append(output_tensor)
+
+    # Refresh mappings
+    model, value_info_map, initializer_map, node_to_init_map = setup_mappings(model)
+
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=True,
+        low_precision_type=low_precision_type,
+        use_standalone_type_inference=use_standalone_type_inference,
+    )
+
+    # If in low precision, Add in high precision
+    converted_model = converter.convert(
+        high_precision_nodes=["add_after_if"], low_precision_nodes=["if_node"]
+    )
+
+    # Verify the model is valid (this tests type inference through subgraph boundaries)
+    onnx.checker.check_model(converted_model)
+
+    # Verify a cast was inserted between If output and Add input
+    cast_nodes = [n for n in converted_model.graph.node if n.op_type == "Cast"]
+    assert len(cast_nodes) > 0, "Should have cast nodes for mixed precision"
+
+
+@pytest.fixture
+def model_with_if_outer_scope_reference():
+    """Create a minimal model where If subgraphs reference outer scope variables.
+
+    This tests that subgraph value_info for outer scope variables is preserved during type clearing.
+    """
+    # Main graph inputs/outputs
+    x = helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 4])
+    condition = helper.make_tensor_value_info("condition", TensorProto.BOOL, [])
+    y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [2, 4])
+
+    # Create "then" branch: Identity on X from outer scope
+    then_y = helper.make_tensor_value_info("then_y", TensorProto.FLOAT, [2, 4])
+    then_identity = helper.make_node("Identity", ["X"], ["then_y"], name="then_identity")
+    then_graph = helper.make_graph([then_identity], "then_branch", [], [then_y])
+    # Add X to value_info - this is what needs to be preserved
+    then_graph.value_info.extend([helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 4])])
+
+    # Create "else" branch: Identity on X from outer scope
+    else_y = helper.make_tensor_value_info("else_y", TensorProto.FLOAT, [2, 4])
+    else_identity = helper.make_node("Identity", ["X"], ["else_y"], name="else_identity")
+    else_graph = helper.make_graph([else_identity], "else_branch", [], [else_y])
+    else_graph.value_info.extend([helper.make_tensor_value_info("X", TensorProto.FLOAT, [2, 4])])
+
+    # Create If node and main graph
+    if_node = helper.make_node(
+        "If", ["condition"], ["Y"], name="if_node", then_branch=then_graph, else_branch=else_graph
+    )
+    main_graph = helper.make_graph([if_node], "model_with_outer_scope", [x, condition], [y])
+
+    model = helper.make_model(main_graph, producer_name="model_with_outer_scope")
+    model.opset_import[0].version = 20
+    onnx.checker.check_model(model)
+
+    model = onnx_utils.infer_shapes(model)
+    value_info_map, initializer_map, node_to_init_map = utils.setup_mappings(model)
+    return model, value_info_map, initializer_map, node_to_init_map
+
+
+@pytest.mark.parametrize("low_precision_type", ["fp16", "bf16"])
+def test_if_subgraph_outer_scope_type_preservation(
+    model_with_if_outer_scope_reference, low_precision_type
+):
+    """Test that outer scope variable types are preserved in If subgraphs during conversion.
+
+    Without preserving X's value_info in subgraphs, shape inference fails with
+    "Element type of input 0 unknown".
+    """
+    model, value_info_map, initializer_map, node_to_init_map = model_with_if_outer_scope_reference
+
+    converter = PrecisionConverter(
+        model,
+        value_info_map,
+        initializer_map,
+        node_to_init_map,
+        keep_io_types=True,
+        low_precision_type=low_precision_type,
+    )
+
+    converted_model = converter.convert(high_precision_nodes=["if_node"], low_precision_nodes=[])
+    onnx.checker.check_model(converted_model)
+
+    # Verify X's value_info is preserved in both subgraphs
+    if_node = next(n for n in converted_model.graph.node if n.op_type == "If")
+    then_branch = next(attr.g for attr in if_node.attribute if attr.name == "then_branch")
+    else_branch = next(attr.g for attr in if_node.attribute if attr.name == "else_branch")
+
+    then_x_info = [vi for vi in then_branch.value_info if vi.name == "X"]
+    else_x_info = [vi for vi in else_branch.value_info if vi.name == "X"]
+
+    assert len(then_x_info) > 0, "X value_info should be preserved in then branch"
+    assert len(else_x_info) > 0, "X value_info should be preserved in else branch"
+    assert then_x_info[0].type.tensor_type.elem_type != onnx.TensorProto.UNDEFINED
+    assert else_x_info[0].type.tensor_type.elem_type != onnx.TensorProto.UNDEFINED

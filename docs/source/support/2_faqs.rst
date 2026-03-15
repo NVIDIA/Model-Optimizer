@@ -15,7 +15,7 @@ ModelOpt-Windows
 
 Awq-scale search should complete in minutes with NVIDIA GPU acceleration. If stalled:
 
-- **GPU acceleration may be disabled.** If CUDA 12.x is not available, quantization will fall back to slower ``numpy`` implementation instead of ``cupy-cuda12x``.
+- **GPU acceleration may be disabled.** If CUDA 12.x is not available, quantization will fall back to slower ``numpy`` implementation instead of ``cupy-cuda12x``. Make sure that ``cupy`` package is compatible with installed CUDA toolkit.
 - **Low GPU memory.** Quantization needs 20-24GB VRAM; low memory forces slower shared memory usage.
 - **Using CPU for quantization.** Install ORT-GPU (supports CUDA EP) or ORT-DML (supports DML EP) for better speed.
 
@@ -45,21 +45,21 @@ Make sure that the output directory is clean before each quantization run otherw
 
     `Error Unrecognized attribute: block_size for operator DequantizeLinear`
 
-ModelOpt-Windows uses ONNX's `DequantizeLinear <https://onnx.ai/onnx/operators/onnx__DequantizeLinear.html>`_ (DQ) nodes. The int4 data-type support in DeQuantizeLinear node came in opset-21. And, *block_size* attribute was added in DeQuantizeLinear node in Opset-21. Make sure that quantized model's opset version is 21 or higher. Refer :ref:`Apply_ONNX_PTQ` for details.
+ModelOpt-Windows uses ONNX's `DequantizeLinear <https://onnx.ai/onnx/operators/onnx__DequantizeLinear.html>`_ (DQ) nodes. The int4 data-type support in DeQuantizeLinear node came in opset-21. And, *block_size* attribute was added in DequantizeLinear node in Opset-21. Make sure that quantized model's opset version is 21 or higher. Refer :ref:`Apply_ONNX_PTQ` for details.
 
 6. Running INT4 quantized ONNX model on DirectML backend gives following kind of error. What can be the issue?
 --------------------------------------------------------------------------------------------------------------
 
     `Error: Type 'tensor(int4)' of input parameter (onnx::MatMul_6508_i4) of operator (DequantizeLinear) in node (onnx::MatMul_6508_DequantizeLinear) is invalid.`
 
-One possible reason for above error is that INT4 quantized ONNX model's opset version (default or onnx domain) is less than 21. Ensure the INT4 quantized model's opset version is 21 or higher since INT4 data-type support in DeQuantizeLinear ONNX node came in opset-21.
+One possible reason for above error is that INT4 quantized ONNX model's opset version (default or onnx domain) is less than 21. Ensure the INT4 quantized model's opset version is 21 or higher since INT4 data-type support in DequantizeLinear ONNX node came in opset-21.
 
 7. Running 8-bit quantized ONNX model with ORT-DML gives onnxruntime error about using 8-bit data-type (e.g. INT8/FP8). What can be the issue?
 -----------------------------------------------------------------------------------------------------------------------------------------------
 
 Currently, DirectML backend (ORT-DML) doesn't support 8-bit precision. So, it expectedly complains about 8-bit data-type. Try using ORT-CUDA or other 8-bit compatible backend.
 
-8. How to resolve onnxruntime error about invalid use of FP8 type in QuantizeLinear / DeQuantizeLinear node?
+8. How to resolve onnxruntime error about invalid use of FP8 type in QuantizeLinear / DequantizeLinear node?
 -------------------------------------------------------------------------------------------------------------
 
 The FP8 type support in QuantizeLinear / DeQuantizeLinear node came with Opset-19. So, ensure that opset of ONNX model is 19+.

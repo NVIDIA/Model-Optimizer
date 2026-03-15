@@ -248,6 +248,10 @@ else
 
     # Add teacher model specific FSDP args if needed
     if [[ "${HAS_TEACHER_MODEL,,}" == "true" ]]; then
+        if [[ "${USE_FSDP2,,}" != "true" ]]; then
+            echo "Error: Quantization aware distillation is only supported with FSDP2."
+            exit 1
+        fi
         FSDP_ARGS="$FSDP_ARGS --fsdp_cpu_ram_efficient_loading False"
     fi
 

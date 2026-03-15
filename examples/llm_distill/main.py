@@ -26,7 +26,6 @@ from accelerate.logging import get_logger
 from transformers import AutoTokenizer
 from trl import SFTTrainer
 
-import modelopt.torch.distill as mtd
 import modelopt.torch.opt as mto
 from modelopt.torch.distill.plugins.huggingface import KDTrainer, LMLogitsLoss
 
@@ -64,7 +63,7 @@ def _format_smoltalk_chat_template(sample, tokenizer):
     return tokenizer.apply_chat_template(messages, tokenize=False)
 
 
-class KDSFTTrainer(SFTTrainer, KDTrainer):
+class KDSFTTrainer(KDTrainer, SFTTrainer):
     pass
 
 
@@ -105,23 +104,22 @@ def train():
     tokenizer.padding_side = "right"
     logger.info("Tokenizer loaded.")
 
-    # Model
+    # Model(s)
     logger.info("Loading student model...")
     model = transformers.AutoModelForCausalLM.from_pretrained(
         model_args.student_name_or_path, dtype=torch.bfloat16 if training_args.bf16 else None
     )
     logger.info("Student loaded.")
-    # Load checkpoint
-    logger.info("Loading teacher model and converting to Distillation model...")
+    logger.info("Loading teacher model...")
     teacher_model = transformers.AutoModelForCausalLM.from_pretrained(
         model_args.teacher_name_or_path, dtype=torch.bfloat16 if training_args.bf16 else None
     )
+
+    # Distillation configuration
     kd_config = {
         "teacher_model": teacher_model,
         "criterion": LMLogitsLoss(),
     }
-    model = mtd.convert(model, mode=[("kd_loss", kd_config)])
-    logger.info("Models converted.")
 
     # Fix problematic settings that logger.info excessive warnings
     model.generation_config.temperature = None
@@ -131,6 +129,7 @@ def train():
     trainer = KDSFTTrainer(
         model,
         training_args,
+        distill_config=kd_config,
         train_dataset=dset_train,
         eval_dataset=dset_eval,
         formatting_func=lambda sample: _format_smoltalk_chat_template(sample, tokenizer),
@@ -153,7 +152,7 @@ def train():
     # Save checkpoint
     logger.info("Saving checkpoint...")
     trainer.save_state()
-    trainer.save_model(trainer.args.output_dir, export_student=True)
+    trainer.save_model(trainer.args.output_dir)
     logger.info("Checkpoint saved.")
 
 

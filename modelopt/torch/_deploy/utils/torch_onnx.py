@@ -42,6 +42,7 @@ from modelopt.onnx.export import (
 )
 from modelopt.onnx.quantization.qdq_utils import qdq_to_dq, replace_zero_scale_with_smallest_nonzero
 from modelopt.onnx.utils import (
+    check_model_uses_external_data,
     get_input_names,
     get_input_shapes,
     get_node_names,
@@ -55,7 +56,6 @@ from modelopt.torch.utils import flatten_tree, standardize_named_model_args
 from modelopt.torch.utils._pytree import TreeSpec
 
 from ..utils.onnx_optimizer import Optimizer
-from .onnx_utils import check_model_uses_external_data
 
 ModelMetadata = dict[str, Any]
 ModelType = Any
@@ -345,6 +345,8 @@ def is_int8_quantized(model: nn.Module) -> bool:
         if (
             hasattr(module, "weight_quantizer")
             and hasattr(module, "input_quantizer")
+            and module.weight_quantizer.is_enabled
+            and module.input_quantizer.is_enabled
             and module.weight_quantizer._num_bits == 8
             and module.input_quantizer._num_bits == 8
         ):
@@ -358,6 +360,8 @@ def is_fp8_quantized(model: nn.Module) -> bool:
         if (
             hasattr(module, "weight_quantizer")
             and hasattr(module, "input_quantizer")
+            and module.weight_quantizer.is_enabled
+            and module.input_quantizer.is_enabled
             and module.weight_quantizer._num_bits == (4, 3)
             and module.input_quantizer._num_bits == (4, 3)
             # Exclude MXFP8 which also uses (4,3) but has block_sizes with scale_bits

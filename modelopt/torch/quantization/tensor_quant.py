@@ -45,9 +45,13 @@ DISABLE_TRITON_KERNEL = False
 def _fp8_eager(x, amax=None):
     dtype = x.dtype
     if amax is not None:
-        scale = 448.0 / (amax.to(torch.float32))
+        amax = amax.to(torch.float32)
+        epsilon = 1.0 / (1 << 24)
+        zero_amax_mask = amax <= epsilon
+        safe_amax = torch.where(zero_amax_mask, torch.ones_like(amax), amax)
+        scale = 448.0 / safe_amax
         scale_inv = 1 / scale
-        x = x.to(torch.float32) * scale
+        x = (x.to(torch.float32) * scale).clamp(min=-448.0, max=448.0)
     x = x.to(torch.float8_e4m3fn)
     if amax is not None:
         x = x.to(torch.float32) * scale_inv
@@ -79,14 +83,11 @@ def scaled_e4m3_impl(
     if cuda_ext_fp8 is None:
         return fp8_eager(inputs, amax)
 
-    with torch.cuda.device(
-        None if inputs.device.index == torch.cuda.current_device() else inputs.device.index
-    ):
-        if amax.numel() == 1:
-            outputs = cuda_ext_fp8.fake_e4m3fy(inputs, amax)
-        elif amax.squeeze().ndim == 1:
-            axis = amax.shape.index(amax.numel())
-            outputs = cuda_ext_fp8.fake_e4m3fy_with_axis(inputs, amax.squeeze(), axis)
+    if amax.numel() == 1:
+        outputs = cuda_ext_fp8.fake_e4m3fy(inputs, amax)
+    elif amax.squeeze().ndim == 1:
+        axis = amax.shape.index(amax.numel())
+        outputs = cuda_ext_fp8.fake_e4m3fy_with_axis(inputs, amax.squeeze(), axis)
     return outputs
 
 
@@ -100,17 +101,14 @@ def fake_quant_impl(
     """Implementation of fake quantizing input according to number of bits."""
     cuda_ext = get_cuda_ext()
 
-    with torch.cuda.device(
-        None if inputs.device.index == torch.cuda.current_device() else inputs.device.index
-    ):
-        if amax.numel() == 1:
-            outputs = cuda_ext.fake_tensor_quant(inputs, amax, num_bits, unsigned, narrow_range)
-        else:
-            axis = amax.shape.index(amax.numel())
-            outputs = cuda_ext.fake_tensor_quant_with_axis(
-                inputs, amax.squeeze(), axis, num_bits, unsigned, narrow_range
-            )
-        return outputs
+    if amax.numel() == 1:
+        outputs = cuda_ext.fake_tensor_quant(inputs, amax, num_bits, unsigned, narrow_range)
+    else:
+        axis = amax.shape.index(amax.numel())
+        outputs = cuda_ext.fake_tensor_quant_with_axis(
+            inputs, amax.squeeze(), axis, num_bits, unsigned, narrow_range
+        )
+    return outputs
 
 
 def _quantize_impl(
@@ -173,25 +171,23 @@ def _dynamic_block_quantize_impl(
             assert amax.is_cuda, "amax must be a CUDA tensor for dynamic block quantization."
             if amax.numel() != 1:
                 amax = amax.amax()
-        with torch.cuda.device(
-            None if inputs.device.index == torch.cuda.current_device() else inputs.device.index
+        if (
+            num_bits == (2, 1)  # type: ignore[comparison-overlap]
+            and scale_bits == (4, 3)
+            and triton_kernel.IS_AVAILABLE
+            and hasattr(triton_kernel, "fp4_fake_quant_block")  # requires compute >= 8.9
+            and not DISABLE_TRITON_KERNEL
+            and amax is not None
         ):
-            if (
-                num_bits == (2, 1)  # type: ignore[comparison-overlap]
-                and scale_bits == (4, 3)
-                and triton_kernel.IS_AVAILABLE
-                and not DISABLE_TRITON_KERNEL
-                and amax is not None
-            ):
-                return triton_kernel.fp4_fake_quant_block(inputs, amax)
-            cuda_ext_mx = get_cuda_ext_mx(raise_if_failed=True)
-            return cuda_ext_mx.fused_amax_convert(
-                inputs,
-                block_size,
-                getattr(cuda_ext_mx.Types, mx_format_map[num_bits]),
-                getattr(cuda_ext_mx.Types, mx_format_map[scale_bits]),
-                amax,
-            )
+            return triton_kernel.fp4_fake_quant_block(inputs, amax)
+        cuda_ext_mx = get_cuda_ext_mx(raise_if_failed=True)
+        return cuda_ext_mx.fused_amax_convert(
+            inputs,
+            block_size,
+            getattr(cuda_ext_mx.Types, mx_format_map[num_bits]),
+            getattr(cuda_ext_mx.Types, mx_format_map[scale_bits]),
+            amax,
+        )
     else:
         raise NotImplementedError(
             f"Unsupported num_bits: {num_bits}, scale_bits: {scale_bits} for dynamic block quantization."
@@ -571,6 +567,40 @@ class DynamicBlockQuantizationFunction(Function):
         return _fake_quant_backward_function(ctx, grad_outputs, num_args=9)
 
 
+class StaticBlockwiseFP4FakeQuantFunction(Function):
+    """Static blockwise FP4 fake quantization functional."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        x,
+        amax,
+        global_amax=None,
+        quantize_block_scales=True,
+        out_dtype=None,
+        pass_through_bwd=False,
+    ):
+        """Forward method."""
+        if not triton_kernel.IS_AVAILABLE:
+            raise RuntimeError(
+                "static_blockwise_fp4_fake_quant requires triton. "
+                "Install with `pip install triton`."
+            )
+        _save_for_backward_if_needed(ctx, pass_through_bwd, x, amax)
+        return triton_kernel.static_blockwise_fp4_fake_quant(
+            x,
+            amax,
+            global_amax,
+            quantize_block_scales,
+            out_dtype,
+        )
+
+    @staticmethod
+    def backward(ctx, grad_outputs):
+        """Implements straight through estimation with clipping."""
+        return _fake_quant_backward_function(ctx, grad_outputs, num_args=6)
+
+
 def _tensor_quant(inputs, amax, num_bits=8, unsigned=False, narrow_range=True):
     """Shared function body between TensorQuantFunction and FakeTensorQuantFunction."""
     # Fine scale, per channel scale will be handled by broadcasting, which could be tricky. Pop a warning.
@@ -615,3 +645,4 @@ def _tensor_quant(inputs, amax, num_bits=8, unsigned=False, narrow_range=True):
 fake_tensor_quant = FakeTensorQuantFunction.apply
 scaled_e4m3 = ScaledE4M3Function.apply
 dynamic_block_quant = DynamicBlockQuantizationFunction.apply
+static_blockwise_fp4_fake_quant = StaticBlockwiseFP4FakeQuantFunction.apply

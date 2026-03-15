@@ -15,9 +15,10 @@
 
 """Plugin to add EAGLE support for Megatron-Core GPT model."""
 
+import contextlib
 import copy
 import warnings
-from collections import deque
+from contextlib import contextmanager
 
 import megatron.core
 import torch
@@ -25,13 +26,15 @@ import torch.nn.functional as F
 from megatron.core import InferenceParams, tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
-from megatron.core.extensions.transformer_engine import TENorm
+from megatron.core.extensions.transformer_engine import TELinear, TENorm
 from megatron.core.inference.contexts import StaticInferenceContext
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEmbedding
 from megatron.core.models.gpt import GPTModel
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.parallel_state import (
+    get_context_parallel_group,
+    get_context_parallel_world_size,
     get_data_parallel_rank,
     get_expert_tensor_parallel_world_size,
     get_pipeline_model_parallel_world_size,
@@ -55,17 +58,11 @@ from packaging.version import Version
 
 from ..eagle.conversion import EagleDMRegistry
 from ..eagle.eagle_model import EagleModel
-from ..utils import (
-    AcceptanceRateValidation,
-    Tree,
-    TreeNode,
-    get_default_attention_mask_and_position_ids,
-)
-from .megatron_medusa import MedusaHead
+from ..utils import AcceptanceRateValidation, get_default_attention_mask_and_position_ids
+from .megatron_medusa import MedusaLayer
 
 try:
     from megatron.core.post_training.modelopt.gpt.model_specs import get_gpt_modelopt_spec
-    from megatron.core.post_training.modelopt.layers import Linear
 except ImportError:
     warnings.warn("Fail to import megatron.core.post_training! EAGLE feature will be disable!")
 
@@ -94,14 +91,9 @@ def dict_to_config(
         params_dtype=getattr(torch, architecture_config["torch_dtype"]),
         pipeline_dtype=getattr(torch, architecture_config["torch_dtype"]),
         num_layers=architecture_config.get("num_hidden_layers"),
-        hidden_size=architecture_config.get("hidden_size"),
         ffn_hidden_size=architecture_config.get("intermediate_size"),
         num_attention_heads=architecture_config.get("num_attention_heads"),
-        kv_channels=architecture_config.get(
-            "head_dim",
-            architecture_config.get("hidden_size")
-            // architecture_config.get("num_attention_heads"),
-        ),
+        kv_channels=architecture_config.get("head_dim"),
         num_query_groups=architecture_config.get("num_key_value_heads"),
         init_method_std=architecture_config.get("initializer_range"),
         layernorm_epsilon=architecture_config.get("rms_norm_eps"),
@@ -112,8 +104,6 @@ def dict_to_config(
     config.transformer_layer_spec = None
     config.seq_length = 8192
     config.gradient_accumulation_fusion = False
-    config.vocab_size = architecture_config.get("vocab_size")
-    config.max_sequence_length = architecture_config.get("max_position_embeddings")
     config.position_embedding_type = architecture_config.get("position_embedding_type")
     config.rotary_percent = 1.0
     config.rotary_base = architecture_config.get("rope_theta")
@@ -248,6 +238,83 @@ def set_multi_step_attention_mask(attn_mask, step):
     return attn_mask
 
 
+class ParallelDraft(MegatronModule):
+    """ParallelDraft module with multiple Medusa heads and a shared lm head."""
+
+    def __init__(
+        self,
+        config,
+        vocab_size: int,
+        num_heads: int = 1,
+        num_layers: int = 1,
+        parallel_output: bool = True,
+    ):
+        """Constructor.
+
+        Args:
+            config: MCore transformer config
+            vocab_size: vocabulary size
+            num_heads: number of draft heads
+            num_layers: number of Medusa layers
+            parallel_output: if False, then all_gather the logits
+        """
+        super().__init__(config=config)
+
+        self.medusa_heads = torch.nn.ModuleList(
+            [
+                torch.nn.ModuleList([MedusaLayer(config) for _ in range(num_layers)])
+                for _ in range(num_heads)
+            ]
+        )
+
+        self.lm_head = tensor_parallel.ColumnParallelLinear(
+            config.hidden_size,
+            vocab_size,
+            config=config,
+            init_method=config.init_method,
+            bias=False,
+            skip_bias_add=False,
+            gather_output=not parallel_output,
+            skip_weight_param_allocation=False,
+        )
+
+        def load_state_dict_post_hook(module, incompatible_keys):
+            incompatible_keys.missing_keys.clear()
+            incompatible_keys.unexpected_keys.clear()
+
+        self.register_load_state_dict_post_hook(load_state_dict_post_hook)
+
+    def forward(self, x):
+        """Forward function."""
+        output = []
+        for head in self.medusa_heads:
+            x_head = x
+            for layer in head:
+                x_head, _ = layer(x_head)
+            output.append(self.lm_head(x_head)[0])
+        return output
+
+    def sharded_state_dict(
+        self, prefix: str = "", sharded_offsets: tuple = (), metadata: dict | None = None
+    ) -> ShardedStateDict:
+        """Return MCore sharded_state_dict."""
+        assert not sharded_offsets, "Unexpected sharded offsets"
+        sharded_state_dict = {}
+        layer_prefix = f"{prefix}medusa_heads."
+        for i, head in enumerate(self.medusa_heads):
+            for j, layer in enumerate(head):
+                state_dict_prefix = f"{layer_prefix}{i}.{j}."
+                sharded_pp_offset = []
+                layer_sharded_state_dict = layer.sharded_state_dict(
+                    state_dict_prefix, sharded_pp_offset, metadata
+                )
+                sharded_state_dict.update(layer_sharded_state_dict)
+        sharded_state_dict.update(
+            self.lm_head.sharded_state_dict(f"{prefix}lm_head.", sharded_offsets, metadata)
+        )
+        return sharded_state_dict
+
+
 class EagleLanguageModelEmbedding(LanguageModelEmbedding):
     """Allow last pp stage to also load the embedding."""
 
@@ -324,7 +391,11 @@ class EagleTransformerBlock(TransformerBlock):
             if module is not self.layers:
                 sharded_state_dict.update(
                     sharded_state_dict_default(
-                        module, f"{prefix}{name}.", sharded_offsets, metadata
+                        module,
+                        f"{prefix}{name}.",
+                        sharded_offsets,
+                        metadata,
+                        tp_group=self.tp_group,
                     )
                 )
 
@@ -378,17 +449,21 @@ class EagleModule(MegatronModule):
             self._num_aux_hidden_states if self._num_aux_hidden_states > 0 else 2
         )
 
-        # This linear was previously a ColumnParallelLinear. We changed it to a normal linear
-        # since ColumnParallelLinear will have try to gather the input sequence when sequence
-        # parallel is used and does not allow gathering the outputs.
-        with torch.device(device):
-            self.fc = Linear(
-                config.hidden_size * fc_input_size_multiplier,
-                config.hidden_size,
-                config=config,
-                init_method=(lambda w: None),  # not used
-                bias=bias,
-            )
+        if config.use_aux_hidden_state:
+            # This linear was previously a ColumnParallelLinear. We changed it to a TELinear
+            # since ColumnParallelLinear will have try to gather the input sequence when sequence
+            # parallel is used and does not allow gathering the outputs.
+            with torch.device(device):
+                self.fc = TELinear(
+                    config.hidden_size * fc_input_size_multiplier,
+                    config.hidden_size,
+                    parallel_mode="duplicated",
+                    config=config,
+                    init_method=(lambda w: None),  # not used
+                    bias=bias,
+                    skip_bias_add=False,
+                    skip_weight_param_allocation=False,
+                )
 
         self.rotary_pos_emb = rotary_pos_emb
 
@@ -452,13 +527,11 @@ class EagleModule(MegatronModule):
             )
 
         if self.config.parallel_draft_step > 1:
-            self.parallel_draft_heads = torch.nn.ModuleList(
-                MedusaHead(
-                    self.config,
-                    self.config.draft_vocab_size,
-                    num_layers=self.config.parallel_draft_heads_num_layers,
-                )
-                for _ in range(self.config.parallel_draft_step - 1)
+            self.parallel_draft_heads = ParallelDraft(
+                config=self.config,
+                vocab_size=self.config.draft_vocab_size,
+                num_heads=self.config.parallel_draft_step - 1,
+                num_layers=self.config.parallel_draft_heads_num_layers,
             )
 
     def _get_eagle_transformer_layer_spec(self, config):
@@ -467,11 +540,13 @@ class EagleModule(MegatronModule):
         IMPORTANT: EagleModule must use arbitrary_attention_mask since we need to
                    manipulate the mask to compute the correct loss. The default
                    causal mask will result in leaking.
+                   However, if context parallel is used, we need to switch to causal
+                   mask and inject attention_mask as attention_bias instead.
         """
         transformer_layer_spec = get_gpt_modelopt_spec(
             config,
             remap_te_layernorm=True,
-            use_arbitrary_attention_mask=True,
+            use_arbitrary_attention_mask=get_context_parallel_world_size() == 1,
         )
         # If heterogenous layers (e.g. DeepSeek), transformer_layer_spec is a
         # TransformerBlockSubmodules instead. We use the last layer_specs.
@@ -521,21 +596,21 @@ class EagleModule(MegatronModule):
         # NOTE: Even if sequence_parallel is used, the rotary_seq_len must be in the original
         #       length. Since we get the seq_len from hidden_states.shape[0], we need to
         #       multiply the the tp back.
+        #       Similarly, if context parallel is used, the rotary_seq_len must also be
+        #       multiplied by context parallel size.
         rotary_seq_len = hidden_states.shape[0]
         if self.config.sequence_parallel:
             rotary_seq_len *= self.config.tensor_model_parallel_size
+        if get_context_parallel_world_size() > 1:
+            rotary_seq_len *= get_context_parallel_world_size()
 
         if self.config.use_mtp_layernorm:
             embeddings = self.enorm(embeddings)
             hidden_states = self.hnorm(hidden_states)
 
-        # EAGLE-1 uses [s, b, h] input but EAGLE-3 uses [s, b, 2h] input
         if self._num_aux_hidden_states == 0:
-            # [s, b, 2h]
-            decoder_input = torch.cat((embeddings, hidden_states), dim=-1)
-            decoder_input = self.fc(decoder_input)[0]
+            decoder_input = hidden_states
         else:
-            # EAGLE-3 forward
             # EAGLE-3 uses self.fc outside eagle_module forward to convert hidden_states from [s, b, 3h]
             self._embeddings = self.enorm(embeddings)
             decoder_input = hidden_states
@@ -566,39 +641,6 @@ class EagleModule(MegatronModule):
             self._next_hidden_states_input = None
 
         return hidden_states, next_hidden_states_input
-
-    def sharded_state_dict(
-        self, prefix: str = "", sharded_offsets: tuple = (), metadata: dict | None = None
-    ) -> ShardedStateDict:
-        """Override the shared_state_dict to take care parallel_draft_heads."""
-        assert not sharded_offsets, "Unexpected sharded offsets"
-
-        sharded_state_dict = MegatronModule.sharded_state_dict(
-            self, prefix, sharded_offsets, metadata
-        )
-
-        if not hasattr(self, "parallel_draft_heads") or self.parallel_draft_heads is None:
-            return sharded_state_dict
-
-        # This is a remedy for nn.ModuleList.
-        # MegatronModule.sharded_state_dict() requires all children to implement
-        # sharded_state_dict(). parallel_draft_heads is an nn.ModuleList which only has state_dict()
-        # implemented. As a result, all the submodules will not be sharded.
-        #
-        # The remedy is to pop all parallel_draft_heads* out and call the MedusaHead sharded_state_dict()
-        # again to populate the correct sharded_staet_dict.
-        extra_keys = []
-        for key in sharded_state_dict:
-            if "parallel_draft_heads" in key:
-                extra_keys += [key]
-        for key in extra_keys:
-            sharded_state_dict.pop(key, None)
-
-        head_prefix = f"{prefix}parallel_draft_heads."
-        for i, head in enumerate(self.parallel_draft_heads):
-            head_sharded_state_dict = head.sharded_state_dict(f"{head_prefix}{i}.", [], metadata)
-            sharded_state_dict.update(head_sharded_state_dict)
-        return sharded_state_dict
 
 
 @EagleDMRegistry.register({GPTModel: "megatron.core.models.gpt.GPTModel"})
@@ -640,14 +682,7 @@ class _DynamicEagleGPTModel(EagleModel):
 
     def modify(
         self,
-        eagle_offline,
-        eagle_hidden_state_distillation,
-        eagle_self_logit_distillation,
-        eagle_freeze_base_model,
-        eagle_report_acc,
-        eagle_reuse_base_decoder,
-        eagle_loss_decay_factor,
-        eagle_architecture_config,
+        config,
     ):
         if self.config.pipeline_model_parallel_size > 1:
             warnings.warn(
@@ -660,31 +695,30 @@ class _DynamicEagleGPTModel(EagleModel):
         if hasattr(self.config, "hetereogenous_dist_checkpoint"):
             self.config.hetereogenous_dist_checkpoint = True
 
-        super().modify(
-            eagle_offline=eagle_offline,
-            eagle_hidden_state_distillation=eagle_hidden_state_distillation,
-            eagle_self_logit_distillation=eagle_self_logit_distillation,
-            eagle_freeze_base_model=eagle_freeze_base_model,
-            eagle_report_acc=eagle_report_acc,
-            eagle_reuse_base_decoder=eagle_reuse_base_decoder,
-            eagle_loss_decay_factor=eagle_loss_decay_factor,
-            eagle_architecture_config=eagle_architecture_config,
-        )
+        super().modify(config)
 
         # sequence_parallel is not used in offline eagle
         if self.eagle_offline:
             self.config.sequence_parallel = False
 
         self.eagle_config = dict_to_config(
-            eagle_architecture_config,
+            config.eagle_architecture_config,
             self.config.use_cpu_initialization,
             self.config.fp16,
             self.config.bf16,
             self.config.sequence_parallel,
         )
+        self.eagle_config.hidden_size = self.config.hidden_size
+        self.eagle_config.vocab_size = self.vocab_size
+        self.eagle_config.max_sequence_length = self.max_sequence_length
+        self.eagle_config.draft_vocab_size = (
+            self.vocab_size
+            if self.eagle_config.draft_vocab_size is None
+            else self.eagle_config.draft_vocab_size
+        )
 
         if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size:
-            assert eagle_self_logit_distillation, (
+            assert self.eagle_self_logit_distillation, (
                 "Only logit distillation is supported when draft_vocab_size != vocab_size!"
             )
 
@@ -770,7 +804,7 @@ class _DynamicEagleGPTModel(EagleModel):
             self.kld = logits_kld_loss
 
     def _get_eagle_input_hidden_states(self, hidden_states: torch.Tensor, apply_fc: bool = True):
-        """When _aux_hidden_states is not empty for online, then this is EAGLE-3.
+        """Get input hidden_states for EAGLE.
 
         Args:
             hidden_states: last hidden_states
@@ -799,18 +833,31 @@ class _DynamicEagleGPTModel(EagleModel):
         ttt_step: int = 0,
     ):
         """Getting EAGLE module inputs."""
-        # [b, 1]
+        # gather_from_sequence_parallel_region gathers from the first dimention
+        # so we need to transpose input_ids first
+        # [b,s] -> [s,b]
+        input_ids = input_ids.clone().transpose(0, 1).contiguous()
+        input_ids = gather_from_sequence_parallel_region(
+            input_ids, group=get_context_parallel_group()
+        )
+        # [s,b] -> [b,s]
+        input_ids = input_ids.transpose(0, 1).contiguous()
         id_padding = torch.zeros(
             (input_ids.shape[0], 1), dtype=input_ids.dtype, device=input_ids.device
         )
         padded_input_ids = torch.cat((input_ids[:, 1:], id_padding), dim=-1)
 
+        # RotaryEmbedding's output is already scattered to context parallel region
+        # No need to scatter again.
         rotary_pos_emb = self.eagle_module.rotary_pos_emb(padded_input_ids.shape[-1])
 
-        attn_mask = attention_mask.clone().detach()
-        attn_mask[:, :, :-1, :-1] = attention_mask[:, :, 1:, 1:]
-        attn_mask[:, :, -1, :] = True
-        attn_mask[:, :, :, -1] = True
+        # [b,s] -> [s,b]
+        padded_input_ids = padded_input_ids.transpose(0, 1).contiguous()
+        padded_input_ids = scatter_to_sequence_parallel_region(
+            padded_input_ids, group=get_context_parallel_group()
+        )
+        # [s,b] -> [b,s]
+        padded_input_ids = padded_input_ids.transpose(0, 1).contiguous()
 
         eagle_inputs = {}
 
@@ -821,14 +868,37 @@ class _DynamicEagleGPTModel(EagleModel):
             input_ids=eagle_inputs["input_ids"],
             position_ids=eagle_inputs["position_ids"],
         )
+
         eagle_inputs["hidden_states"] = hidden_states
 
-        eagle_inputs["attention_mask"] = set_multi_step_attention_mask(attn_mask, ttt_step)
+        if self.eagle_mix_hidden_states:
+            eagle_inputs["attention_mask"] = attention_mask
+            eagle_inputs["rotary_pos_emb"] = rotary_pos_emb
+        else:
+            attn_mask = attention_mask.clone().detach()
+            # [b, 1, sq, sk] -> [sq, 1, b, sk]
+            attn_mask = attn_mask.transpose(0, 2).contiguous()
+            attn_mask = gather_from_sequence_parallel_region(
+                attn_mask, group=get_context_parallel_group()
+            )
+            # [sq, 1, b, sk] -> [b, 1, sq, sk]
+            attn_mask = attn_mask.transpose(0, 2).contiguous()
+            attn_mask[:, :, :-1, :-1] = attn_mask[:, :, 1:, 1:]
+            attn_mask[:, :, -1, :] = True
+            attn_mask[:, :, :, -1] = True
 
-        eagle_inputs["rotary_pos_emb"] = torch.cat(
-            [rotary_pos_emb] * (ttt_step + 1),
-            dim=0,
-        )
+            attn_mask = set_multi_step_attention_mask(attn_mask, ttt_step)
+            # [b, 1, sq, sk] -> [sq, 1, b, sk]
+            attn_mask = attn_mask.transpose(0, 2).contiguous()
+            attn_mask = scatter_to_sequence_parallel_region(
+                attn_mask, group=get_context_parallel_group()
+            )
+            # [sq, 1, b, sk] -> [b, 1, sq, sk]
+            eagle_inputs["attention_mask"] = attn_mask.transpose(0, 2).contiguous()
+            eagle_inputs["rotary_pos_emb"] = torch.cat(
+                [rotary_pos_emb] * (ttt_step + 1),
+                dim=0,
+            )
 
         return eagle_inputs
 
@@ -945,17 +1015,15 @@ class _DynamicEagleGPTModel(EagleModel):
         else:
             eagle_logits, _ = self.output_layer(eagle_hidden_states, weight=output_weight)
 
+        draft_logits_list = [eagle_logits]
         if self.eagle_config.parallel_draft_step > 1:
             # Get additional draft logits from parallel draft heads
-            draft_logits_list = [eagle_logits]
-            for draft_head in self.eagle_module.parallel_draft_heads:
-                draft_logits, _ = draft_head(eagle_hidden_states)
-                draft_logits_list.append(draft_logits)
-            eagle_logits = torch.cat(draft_logits_list, dim=0)
+            draft_logits = self.eagle_module.parallel_draft_heads(eagle_hidden_states)
+            draft_logits_list += draft_logits
 
         return (
             eagle_hidden_states,
-            eagle_logits,
+            draft_logits_list,
             eagle_hidden_states_pre_final_layernorm,
         )
 
@@ -970,7 +1038,6 @@ class _DynamicEagleGPTModel(EagleModel):
         packed_seq_params: PackedSeqParams = None,
         extra_block_kwargs: dict | None = None,
         return_eagle_inputs: bool = False,
-        ttt_steps=4,
         **kwargs,
     ) -> torch.Tensor:
         if position_ids is None or attention_mask is None:
@@ -983,11 +1050,6 @@ class _DynamicEagleGPTModel(EagleModel):
                 raise ValueError("return_eagle_inputs is unsupported in EAGLE offline mode.")
             aux_hidden_states = kwargs.get("aux_hidden_states")
             hidden_states = kwargs.get("hidden_states")
-            if aux_hidden_states is None or hidden_states is None:
-                raise ValueError(
-                    "EAGLE offline mode requires kwargs: aux_hidden_states=[s,b,k*h], "
-                    "hidden_states=[s,b,h]."
-                )
         else:
             # When return_eagle_inputs is True, return decoder_input_for_eagle.
             # For LLM, decoder_input_for_eagle is just the text embeddings. However, for VLM
@@ -1012,15 +1074,17 @@ class _DynamicEagleGPTModel(EagleModel):
             output_weight = self.shared_embedding_or_output_weight()
         logits_sbh, _ = self.output_layer(hidden_states, weight=output_weight)
 
-        # EAGLE kv cache
-        eagle_inference_context = StaticInferenceContext(
-            input_ids.shape[0],
-            input_ids.shape[1] * ttt_steps,
-        )
+        if not self.eagle_mix_hidden_states:
+            # EAGLE kv cache
+            eagle_inference_context = StaticInferenceContext(
+                input_ids.shape[0],
+                input_ids.shape[1] * self.eagle_ttt_steps,
+            )
 
         if self.eagle_offline:
             eagle_module_input_hidden_states = self._get_eagle_input_hidden_states(
-                aux_hidden_states, apply_fc=self.eagle_config.use_aux_hidden_state
+                aux_hidden_states if self.eagle_config.use_aux_hidden_state else hidden_states,
+                apply_fc=self.eagle_config.use_aux_hidden_state,
             )
         # If EAGLE-3, aux_hidden_states are gathered by the forward_hook
         elif return_eagle_inputs:
@@ -1035,14 +1099,22 @@ class _DynamicEagleGPTModel(EagleModel):
                 hidden_states = gather_from_sequence_parallel_region(hidden_states)
             logits_sbh = gather_from_tensor_model_parallel_region(logits_sbh)
             # In case of VLM, there will be other fields for pixels.
+            aux_hidden = None
+            if self.eagle_config.use_aux_hidden_state:
+                aux_hidden = eagle_module_input_hidden_states.squeeze(1).cpu()
+
+            hidden_states_cpu = None
+            if hidden_states is not None:
+                hidden_states_cpu = hidden_states.squeeze(1).cpu()
+
             return {
                 "input_ids": input_ids.squeeze(0).cpu(),
-                "aux_hidden_states": eagle_module_input_hidden_states.squeeze(1).cpu(),
-                "hidden_states": hidden_states.squeeze(1).cpu(),
+                "aux_hidden_states": aux_hidden,
+                "hidden_states": hidden_states_cpu,
             }
         else:
             eagle_module_input_hidden_states = self._get_eagle_input_hidden_states(
-                hidden_states, apply_fc=True
+                hidden_states, apply_fc=self.eagle_config.use_aux_hidden_state
             )
 
         if labels is not None:
@@ -1065,7 +1137,7 @@ class _DynamicEagleGPTModel(EagleModel):
                 loss = 0.0 * loss
 
         acc = []
-        for ttt_step in range(ttt_steps):
+        for ttt_step in range(self.eagle_ttt_steps):
             eagle_inputs = self._get_eagle_module_inputs(
                 input_ids=input_ids,
                 hidden_states=eagle_module_input_hidden_states,
@@ -1074,33 +1146,67 @@ class _DynamicEagleGPTModel(EagleModel):
                 ttt_step=ttt_step,
             )
 
-            _, eagle_logits, eagle_module_input_hidden_states = self._eagle_forward(
-                eagle_inputs,
-                output_weight,
-                inference_params=inference_params,
-                packed_seq_params=packed_seq_params,
-                inference_context=eagle_inference_context,
-                **(extra_block_kwargs or {}),
-            )
+            with (
+                te_dot_product_attention_with_cp(
+                    eagle_inputs["attention_mask"], self.eagle_config.num_attention_heads
+                )
+                if not self.eagle_mix_hidden_states
+                else contextlib.nullcontext()
+            ):
+                _, eagle_logits, eagle_module_output_hidden_states = self._eagle_forward(
+                    eagle_inputs,
+                    output_weight,
+                    inference_params=inference_params,
+                    packed_seq_params=packed_seq_params,
+                    inference_context=None
+                    if self.eagle_mix_hidden_states
+                    else eagle_inference_context,
+                    **(extra_block_kwargs or {}),
+                )
 
             if self.config.sequence_parallel:
-                eagle_module_input_hidden_states = gather_from_sequence_parallel_region(
-                    eagle_module_input_hidden_states
+                eagle_module_output_hidden_states = gather_from_sequence_parallel_region(
+                    eagle_module_output_hidden_states
                 )
-            eagle_module_input_hidden_states = torch.cat(
+            eagle_module_output_hidden_states = torch.cat(
                 (
                     torch.zeros(
                         (
                             1,
-                            eagle_module_input_hidden_states.shape[1],
-                            eagle_module_input_hidden_states.shape[2],
+                            eagle_module_output_hidden_states.shape[1],
+                            eagle_module_output_hidden_states.shape[2],
                         ),
-                        dtype=eagle_module_input_hidden_states.dtype,
-                        device=eagle_module_input_hidden_states.device,
+                        dtype=eagle_module_output_hidden_states.dtype,
+                        device=eagle_module_output_hidden_states.device,
                     ),
-                    eagle_module_input_hidden_states[:-1, :, :],
+                    eagle_module_output_hidden_states[:-1, :, :],
                 )
             )
+
+            if self.eagle_mix_hidden_states:
+                seq_len_s, batch_size, _ = eagle_module_output_hidden_states.shape
+                num_to_replace = max(1, seq_len_s // (2**ttt_step + 1))
+
+                # Randomly select positions for each batch to replace
+                rand_indices = torch.stack(
+                    [
+                        torch.randperm(seq_len_s, device=eagle_module_output_hidden_states.device)[
+                            :num_to_replace
+                        ]
+                        for _ in range(batch_size)
+                    ],
+                    dim=0,
+                )
+
+                # Clone to avoid inplace modification of view created in no_grad mode
+                eagle_module_input_hidden_states = eagle_module_input_hidden_states.clone()
+                for batch_idx in range(batch_size):
+                    eagle_module_input_hidden_states[rand_indices[batch_idx], batch_idx, :] = (
+                        eagle_module_output_hidden_states[rand_indices[batch_idx], batch_idx, :]
+                    )
+            else:
+                eagle_module_input_hidden_states = eagle_module_output_hidden_states
+
             if self.config.sequence_parallel:
                 eagle_module_input_hidden_states = scatter_to_sequence_parallel_region(
                     eagle_module_input_hidden_states
@@ -1112,7 +1218,7 @@ class _DynamicEagleGPTModel(EagleModel):
                 return logits_sbh.transpose(0, 1).contiguous()
 
             for i in range(self.eagle_config.parallel_draft_step):
-                eagle_logit = eagle_logits[i * input_ids.shape[1] : (i + 1) * input_ids.shape[1]]
+                eagle_logit = eagle_logits[i]
                 if i > 0:
                     loss_ = self._compute_eagle_loss(
                         logits_sbh[i:], labels[:, i:], eagle_logit[:-i]
@@ -1129,9 +1235,7 @@ class _DynamicEagleGPTModel(EagleModel):
                     gathered_base_logits = gather_from_tensor_model_parallel_region(logits_sbh)
                     base_top1 = gathered_base_logits.transpose(0, 1).argmax(dim=-1)
                     for i in range(self.eagle_config.parallel_draft_step):
-                        gathered_logits = gather_from_tensor_model_parallel_region(
-                            eagle_logits[i * input_ids.shape[1] : (i + 1) * input_ids.shape[1]]
-                        )
+                        gathered_logits = gather_from_tensor_model_parallel_region(eagle_logits[i])
                         gathered_logits = gathered_logits[ttt_step : -(1 + i)]
                         eagle_top1 = gathered_logits.transpose(0, 1).argmax(dim=-1)
                         if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size:
@@ -1150,177 +1254,6 @@ class _DynamicEagleGPTModel(EagleModel):
             )
 
         return loss
-
-    def tree_decode(self, input_ids: torch.Tensor, tree: Tree):
-        """Tree-based decoding for EAGLE model using a mask-based approach.
-
-        This function implements a tree-based decoding strategy where each path of the tree
-        represents potential token sequences. The function uses attention masks to control
-        token dependencies and generate multiple candidate sequences in parallel.
-
-        Args:
-            input_ids (torch.Tensor): Input token IDs of shape [batch_size, seq_len]
-            treepaths (list[list[int]]): List of treepaths to decode
-
-        Returns:
-            tuple: (base_token, base_draft_node, draft_tokens)
-                - base_token: The next token predicted by the base model
-                - base_draft_node: A TreeNode containing the base token prediction with a
-                                   hierarchical structure of child nodes, where each child node
-                                   represents a draft token generated by EAGLE
-                - draft_tokens: all the draft tokens generated by EAGLE
-        """
-        # Initial setup and base model forward pass
-        padded_input_ids, seq_len = right_padding(input_ids)
-        attention_mask, position_ids = get_default_attention_mask_and_position_ids(padded_input_ids)
-
-        # Get base model hidden states
-        hidden_states, _ = self._base_model_forward(
-            padded_input_ids,
-            position_ids,
-            attention_mask,
-        )
-
-        if not self.post_process:
-            return hidden_states
-
-        # Generate base token prediction
-        output_weight = (
-            self.shared_embedding_or_output_weight()
-            if self.share_embeddings_and_output_weights
-            else None
-        )
-        logits_sbh, _ = self.output_layer(hidden_states, weight=output_weight)
-        logits_sbh = logits_sbh[:seq_len, :, :]
-
-        base_token = (
-            gather_from_tensor_model_parallel_region(logits_sbh)[-1:, :, :]
-            .argmax(dim=-1)
-            .transpose(0, 1)
-        )
-
-        # Early return if no steps needed
-        if not tree.root.children:
-            self._aux_hidden_states.clear()
-            return base_token, None, None
-
-        # Prepare for tree decoding
-        eagle_ids = torch.cat((input_ids[:, 1:], base_token), dim=-1)
-        # EAGLE-3
-        # Only the first iteration input_hidden_states are from aux_hidden_state layers
-        hidden_states = self._get_eagle_input_hidden_states(hidden_states)
-
-        if self.config.sequence_parallel:
-            hidden_states = gather_from_sequence_parallel_region(hidden_states)
-        hidden_states = hidden_states[:seq_len, :, :]
-
-        # relative id from [seq_len-1, seq_len] contains draft token position
-        # [seq_len, seq_len + num_child_level_1] contains the number of children for level 1 and so on
-        relative_ids = torch.tensor(
-            [seq_len - 1, *list(tree.num_children.values())],
-            device=input_ids.device,
-        ).cumsum(dim=0)
-
-        draft_position_ids = torch.arange(relative_ids[-1], device=input_ids.device)
-        cur_pos = seq_len - 1
-        for idx in range(len(relative_ids) - 1):
-            draft_position_ids[relative_ids[idx] : relative_ids[idx + 1]] = cur_pos
-            cur_pos += 1
-
-        draft_attention_mask = torch.full(
-            (1, 1, relative_ids[-1], relative_ids[-1]), True, device=input_ids.device
-        ).triu_(1)
-        draft_attention_mask[:, :, :, seq_len:] = True
-        draft_attention_mask[:, :, seq_len - 1 :, seq_len - 1 :] = tree.attention_mask
-
-        draft_rotary_pos_emb = self.eagle_module.rotary_pos_emb(seq_len + tree.max_depth)
-        draft_rotary_pos_emb = torch.cat(
-            [draft_rotary_pos_emb[index : index + 1] for index in draft_position_ids], dim=0
-        )
-
-        base_draft_node = TreeNode(base_token)
-        queue = deque([(base_draft_node, tree.root)])
-        draft_tokens = []
-        # Tree decoding loop
-        for step in range(tree.max_depth):
-            # Prepare inputs for EAGLE forward pass
-            padded_eagle_ids, seq_len, padded_hidden_states = right_padding(
-                eagle_ids, hidden_states
-            )
-
-            if self.config.sequence_parallel:
-                padded_hidden_states = scatter_to_sequence_parallel_region(padded_hidden_states)
-
-            eagle_attention_mask, eagle_position_ids = get_default_attention_mask_and_position_ids(
-                padded_eagle_ids
-            )
-            length = eagle_ids.shape[-1]
-            eagle_attention_mask[:, :, :length, :length] = draft_attention_mask[
-                :, :, :length, :length
-            ]
-            eagle_attention_mask[:, :, length:, length:] = True
-            eagle_position_ids[:length] = draft_position_ids[:length]
-            padded_rotary_pos_emb = self.eagle_module.rotary_pos_emb(padded_eagle_ids.shape[-1])
-            padded_rotary_pos_emb[:length] = draft_rotary_pos_emb[:length]
-
-            eagle_inputs = {
-                "input_ids": padded_eagle_ids,
-                "embedding": self.embedding(
-                    input_ids=padded_eagle_ids,
-                    position_ids=eagle_position_ids,
-                ),
-                "hidden_states": padded_hidden_states,
-                "attention_mask": eagle_attention_mask,
-                "rotary_pos_emb": padded_rotary_pos_emb,
-            }
-
-            # Forward pass through EAGLE
-            _, eagle_logits, eagle_next_hidden_states_input = self._eagle_forward(
-                eagle_inputs,
-                output_weight,
-            )
-            # Process EAGLE outputs
-            eagle_logits = eagle_logits[:seq_len, :, :]
-            if self.config.sequence_parallel:
-                eagle_next_hidden_states_input = gather_from_sequence_parallel_region(
-                    eagle_next_hidden_states_input
-                )
-            eagle_next_hidden_states_input = eagle_next_hidden_states_input[:seq_len, :, :]
-            # Generate and store top-k tokens for each tree node
-            for rel_idx in range(relative_ids[step], relative_ids[step + 1]):
-                draft_node, tree_node = queue.popleft()
-                n_topk = max(tree_node.children.keys()) + 1 if tree_node.children else 0
-                # Get top-k tokens for current position
-                new_ids = (
-                    gather_from_tensor_model_parallel_region(eagle_logits)[
-                        rel_idx : rel_idx + 1, :, :
-                    ]
-                    .topk(n_topk, dim=-1)[1]
-                    .squeeze(0)
-                )
-
-                for child_idx, child_node in tree_node.children.items():
-                    eagle_ids = torch.cat(
-                        (eagle_ids, new_ids[:, child_idx : child_idx + 1]), dim=-1
-                    )
-                    # value of the node is token id
-                    new_draft_node = TreeNode(new_ids[:, child_idx])
-                    draft_tokens.append(new_ids[:, child_idx])
-                    draft_node.children[child_idx] = new_draft_node
-                    queue.append((new_draft_node, child_node))
-
-                # Update hidden states for each branch
-                hidden_states = torch.cat(
-                    (
-                        hidden_states,
-                        eagle_next_hidden_states_input[rel_idx : rel_idx + 1].repeat(
-                            len(tree_node.children), 1, 1
-                        ),
-                    ),
-                    dim=0,
-                )
-        draft_tokens = torch.cat(draft_tokens, dim=-1)
-        return base_token, base_draft_node, draft_tokens
 
     def pseudo_speculative_generate(
         self,
@@ -1378,7 +1311,7 @@ class _DynamicEagleGPTModel(EagleModel):
         hidden_states = hidden_states[:seq_len, :, :]
 
         draft_tokens = []
-        for _ in range(steps):
+        for step in range(steps):
             padded_eagle_ids, seq_len, padded_hidden_states = right_padding(
                 eagle_ids, hidden_states
             )
@@ -1407,16 +1340,13 @@ class _DynamicEagleGPTModel(EagleModel):
                 output_weight,
             )
 
-            if self.eagle_config.parallel_draft_step > 1:
+            # parallel_logits are only used after the last step
+            if step == steps - 1 and self.eagle_config.parallel_draft_step > 1:
                 parallel_logits = [
-                    eagle_logits[
-                        padded_eagle_ids.shape[-1] * i + seq_len - 1 : padded_eagle_ids.shape[-1]
-                        * i
-                        + seq_len
-                    ]
+                    eagle_logits[i][seq_len - 1 : seq_len]
                     for i in range(1, self.eagle_config.parallel_draft_step)
                 ]
-            eagle_logits = eagle_logits[:seq_len, :, :]
+            eagle_logits = eagle_logits[0][:seq_len, :, :]
             if self.config.sequence_parallel:
                 eagle_next_hidden_states_input = gather_from_sequence_parallel_region(
                     eagle_next_hidden_states_input
@@ -1469,3 +1399,80 @@ class MegatronARValidation(AcceptanceRateValidation):
             if input_id[0, 0] == self.end_token:
                 break
         return input_ids
+
+
+@contextmanager
+def te_dot_product_attention_with_cp(attention_mask: torch.Tensor, num_attention_heads: int):
+    """Context manager for TEDotProductAttention with context parallelism.
+
+    Context manager that temporarily replace `attention_bias`
+    with `attention_mask` for `TEDotProductAttention.forward` calls across the process
+    if context parallel is used.
+
+    Any call to `TEDotProductAttention.forward` (including calls originating
+    from other modules) inside the context will receive `attention_bias=attention_mask`
+    if context parallelism is used.
+
+    Example:
+        with te_dot_product_attention_with_cp(attention_mask_tensor, num_attention_heads):
+            outputs = model(...)
+
+    Note: This monkey-patches the class method and restores it on exit.
+    """
+    from megatron.core.extensions.transformer_engine import TEDotProductAttention
+
+    orig_forward = TEDotProductAttention.forward
+
+    def _wrapped_forward(self, *args, **kwargs):
+        # Build attention_bias from the boolean attention_mask and ensure
+        # it's a fresh, detached tensor on the query's device/dtype to
+        # avoid shared-storage in-place modifications that break autograd.
+        query = args[0] if len(args) > 0 else None
+        if isinstance(query, torch.Tensor):
+            q_device = query.device
+            q_dtype = query.dtype
+        else:
+            q_device = None
+            q_dtype = None
+
+        mask_fill = -1e9
+        if q_dtype in (torch.float16, torch.bfloat16):
+            mask_fill = -40.0
+        mask_val = torch.tensor(mask_fill, device=attention_mask.device)
+        zero_val = torch.tensor(0.0, device=attention_mask.device)
+        attention_bias = torch.where(attention_mask, mask_val, zero_val)
+
+        if q_device is not None and q_dtype is not None:
+            attention_bias = attention_bias.to(device=q_device, dtype=q_dtype)
+
+        attention_bias = attention_bias.clone().detach().contiguous()
+        kwargs["attention_bias"] = attention_bias
+
+        # Defensive clone of query/key/value positional tensors to avoid
+        # passing views into the fused attention kernel that might be
+        # modified in-place during backward.
+        if len(args) >= 1:
+            original_args = args
+            new_args = list(original_args)
+            try:
+                for i in range(min(3, len(new_args))):
+                    if isinstance(new_args[i], torch.Tensor):
+                        if not new_args[i].is_contiguous():
+                            new_args[i] = new_args[i].contiguous()
+                        new_args[i] = new_args[i].clone()
+
+                if any(x is None for x in new_args):
+                    args = original_args
+                else:
+                    args = tuple(new_args)
+            except Exception:
+                args = original_args
+
+        return orig_forward(self, *args, **kwargs)
+
+    if get_context_parallel_world_size() > 1:
+        TEDotProductAttention.forward = _wrapped_forward
+    try:
+        yield
+    finally:
+        TEDotProductAttention.forward = orig_forward

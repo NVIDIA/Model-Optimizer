@@ -17,10 +17,10 @@
 
 import argparse
 import asyncio
-import json
 from pathlib import Path
 
 import torch
+from datasets import load_dataset
 from tqdm import tqdm as tqdm
 from transformers import AutoModel, AutoTokenizer
 
@@ -54,12 +54,10 @@ def parse_args() -> argparse.Namespace:
 
     ## I/O Parameters ##
     parser.add_argument(
-        "--input-file",
+        "--input-data",
         type=Path,
         required=True,
-        help="""Path to the input `jsonl` file containing conversations.
-        Each entry must have a unique `conversation_id` field and a `conversations` field
-        containing a list of messages.""",
+        help="""Path to the `jsonl` file or directory containing `jsonl` files.""",
     )
     parser.add_argument(
         "--output-dir",
@@ -75,21 +73,68 @@ def parse_args() -> argparse.Namespace:
         help="""For debugging purposes, limit the number of conversations processed.
         Default is None, meaning no limit.""",
     )
+    parser.add_argument(
+        "--dp-rank",
+        type=int,
+        default=0,
+        help="""Data parallel rank. TASK_ID on SLURM.""",
+    )
+    parser.add_argument(
+        "--dp-world-size",
+        type=int,
+        default=1,
+        help="""Data parallel world size. Number of tasks on SLURM.""",
+    )
 
     return parser.parse_args()
 
 
-async def main(args: argparse.Namespace) -> None:
-    all_conversations = []
-    with args.input_file.open("r", encoding="utf-8") as f:
-        all_conversations.extend([json.loads(line) for line in f if line.strip()])
+def main(args: argparse.Namespace) -> None:
+    # Load conversations
+    if args.input_data.is_file() and str(args.input_data).endswith(".jsonl"):
+        dataset = load_dataset("json", data_files=str(args.input_data), split="train")
+    elif args.input_data.is_dir():
+        dataset = load_dataset(
+            "json", data_files={"train": f"{args.input_data}/*.jsonl"}, split="train"
+        )
+    else:
+        raise ValueError(
+            f"input_data must be a .jsonl file or directory containing .jsonl files, got: {args.input_data}"
+        )
+    print(f"Loaded {len(dataset)} conversations from {args.input_data}")
 
-    print("Loaded", len(all_conversations), "conversations from", args.input_file)
+    # Shard data
+    if args.dp_world_size > 1:
+        dataset = dataset.shard(num_shards=args.dp_world_size, index=args.dp_rank)
+    print(
+        f"Sharded dataset to {len(dataset)} conversations for DP#{args.dp_rank}/{args.dp_world_size}"
+    )
 
-    model = AutoModel.from_pretrained(args.model, torch_dtype="auto", device_map="auto")
+    # Remove already dumped conversations
+    def keep_conversation(entry):
+        conversation_id = entry.get("conversation_id", entry.get("uuid", None))
+        assert conversation_id is not None, "conversation_id is required"
+        output_file = args.output_dir / f"{conversation_id}.pt"
+        return not output_file.exists()
+
+    original_num = len(dataset)
+    dataset = dataset.filter(keep_conversation)
+    print(
+        "Removed",
+        original_num - len(dataset),
+        "conversations due to existing output files",
+    )
+
+    # For debugging
+    if args.debug_max_num_conversations is not None:
+        dataset = dataset.select(range(args.debug_max_num_conversations))
+
+    model = AutoModel.from_pretrained(
+        args.model, torch_dtype="auto", device_map="auto", trust_remote_code=True
+    )
     num_hidden_layers = getattr(model.config, "num_hidden_layers", None)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.chat_template = tokenizer.chat_template.replace(REMOVE_THINK_CHAT_TEMPLATE, "")
@@ -99,30 +144,11 @@ async def main(args: argparse.Namespace) -> None:
     num_skipped_too_long = 0
     num_invalid = 0
     num_success = 0
-    num_total_conversations = min(
-        len(all_conversations), args.debug_max_num_conversations or len(all_conversations)
-    )
-    for idx, entry in enumerate(
-        tqdm(
-            all_conversations[: args.debug_max_num_conversations],
-            desc="Processing conversations",
-            total=num_total_conversations,
-        )
-    ):
-        conversation_id = entry.get("conversation_id", "{:08d}".format(idx))
-        conversations = entry["conversations"]
-        if not conversations or not isinstance(conversations, list):
-            num_invalid += 1
-            continue
+    pbar = tqdm(total=len(dataset), desc=f"DP#{args.dp_rank} Processing conversations")
 
-        # Tokenize and check length
-        input_ids = tokenizer.apply_chat_template(
-            conversations, return_tensors="pt", add_generation_template=False
-        )
-        num_input_tokens = input_ids.shape[1]
-        if num_input_tokens <= 10 or num_input_tokens > args.max_seq_len:
-            num_skipped_too_long += 1
-            continue
+    async def dump_hidden_states(idx: int, conversation_id: int, input_ids: torch.Tensor):
+        nonlocal num_success
+        nonlocal num_hidden_layers
 
         # Get hidden states
         with torch.inference_mode():
@@ -144,9 +170,9 @@ async def main(args: argparse.Namespace) -> None:
             aux_hidden_states = torch.cat(
                 [hidden_states[i].squeeze(0).cpu() for i in selected_layer_indices], dim=-1
             )
-            output_hidden_states = outputs.last_hidden_state.squeeze(0).cpu()
+            output_hidden_states = hidden_states[-1].squeeze(0).cpu()
         output_file = output_dir / f"{conversation_id}.pt"
-        num_success += 1
+
         with open(output_file, "wb") as f:
             torch.save(
                 {
@@ -158,19 +184,49 @@ async def main(args: argparse.Namespace) -> None:
                 f,
             )
 
+        num_success += 1
+        pbar.update(1)
+
+    async def submit_generates():
+        nonlocal num_skipped_too_long
+        nonlocal num_invalid
+        tasks = []
+        idx = 0
+        for entry in dataset:
+            conversation_id = entry.get("conversation_id", entry.get("uuid"))
+
+            conversations = entry["conversations"]
+            if not conversations or not isinstance(conversations, list):
+                num_invalid += 1
+                continue
+
+            # Tokenize and check length
+            input_ids = tokenizer.apply_chat_template(
+                conversations, return_tensors="pt", add_generation_template=False
+            )["input_ids"]
+            num_input_tokens = input_ids.shape[1]
+            if num_input_tokens <= 10 or num_input_tokens > args.max_seq_len:
+                num_skipped_too_long += 1
+                continue
+
+            tasks.append(dump_hidden_states(idx, conversation_id, input_ids))
+            # Increment only for valid conversations to match dump file index
+            idx += 1
+        await asyncio.gather(*tasks)
+
+    asyncio.run(submit_generates())
+
     if num_skipped_too_long > 0:
         print(f"Skipped {num_skipped_too_long} conversations due to length constraints.")
     if num_invalid > 0:
         print(f"Skipped {num_invalid} invalid conversations without proper fields.")
 
-    if num_success == num_total_conversations:
+    if num_success == len(dataset):
         print(f"Successfully processed all {num_success} conversations.")
     else:
-        print(
-            f"Successfully processed {num_success} out of {num_total_conversations} conversations."
-        )
+        print(f"Successfully processed {num_success} out of {len(dataset)} conversations.")
 
 
 if __name__ == "__main__":
     cli_args = parse_args()
-    asyncio.run(main(cli_args))
+    main(cli_args)

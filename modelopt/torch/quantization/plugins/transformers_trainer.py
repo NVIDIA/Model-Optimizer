@@ -15,6 +15,7 @@
 
 """ModelOpt plugin for transformers Trainer."""
 
+import contextlib
 import gc
 import json
 import os
@@ -26,10 +27,7 @@ from tqdm import tqdm
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
-from modelopt.torch.distill import KDLossConfig
-from modelopt.torch.distill.mode import _convert_for_kd
 from modelopt.torch.distill.plugins.huggingface import KDTrainer
-from modelopt.torch.opt.conversion import restore_from_modelopt_state
 from modelopt.torch.opt.plugins import ModelOptHFTrainer
 from modelopt.torch.utils import print_rank_0
 
@@ -100,6 +98,52 @@ class QuantizationArgumentsWithConfig(QuantizationArguments):
             ),
         },
     )
+
+
+def _patch_fsdp2_post_backward():
+    """Patch FSDP2 ``post_backward`` to handle mixed-precision gradient dtypes.
+
+    FSDP2 with bf16 mixed precision upcasts bf16 parameters to fp32 for optimizer
+    precision, while gradients are reduced in bf16. In PyTorch >= 2.6, assigning a
+    bf16 gradient to a fp32 parameter raises a ``RuntimeError`` due to the
+    ``grad_dtype`` check, and the fused Adam optimizer also rejects mixed dtypes.
+
+    This patch wraps ``FSDPParamGroup.post_backward`` to:
+    1. Set ``grad_dtype=None`` on sharded params before reduction (allowing bf16 assignment).
+    2. Cast gradients to match parameter dtype after reduction (so the optimizer sees matching dtypes).
+
+    .. note::
+        This is a workaround. The proper fix should come from PyTorch's FSDP2
+        ``foreach_reduce`` (which should cast gradients to match the parameter dtype)
+        or from accelerate (which should set ``grad_dtype`` when it upcasts params).
+        Remove this once the upstream fix is available.
+    """
+    try:
+        from torch.distributed.fsdp._fully_shard._fsdp_param_group import FSDPParamGroup
+    except ImportError:
+        return
+
+    if hasattr(FSDPParamGroup, "_modelopt_original_post_backward"):
+        return  # Already patched
+
+    FSDPParamGroup._modelopt_original_post_backward = FSDPParamGroup.post_backward
+
+    @torch.no_grad()
+    def _patched_post_backward(self):
+        # Allow bf16 gradients to be assigned to fp32 parameters
+        for fsdp_param in self.fsdp_params:
+            with contextlib.suppress(AttributeError):
+                fsdp_param.sharded_param.grad_dtype = None
+
+        self._modelopt_original_post_backward()
+
+        # Cast gradients to parameter dtype so the optimizer sees matching dtypes
+        for fsdp_param in self.fsdp_params:
+            sp = fsdp_param.sharded_param
+            if sp.grad is not None and sp.grad.dtype != sp.dtype:
+                sp.grad = sp.grad.to(sp.dtype)
+
+    FSDPParamGroup.post_backward = _patched_post_backward
 
 
 def check_awq_smoothquant(quant_cfg):
@@ -188,9 +232,9 @@ class QATTrainer(ModelOptHFTrainer):
         print_rank_0(f"Saved modelopt state to {self._modelopt_state_path}")
 
     def _restore_modelopt_state_with_weights(self):
-        modelopt_state = torch.load(self._modelopt_state_path, weights_only=False)
+        modelopt_state = mto.load_modelopt_state(self._modelopt_state_path)
         modelopt_weights = modelopt_state.pop("modelopt_state_weights", None)
-        restore_from_modelopt_state(self.model, modelopt_state)
+        mto.restore_from_modelopt_state(self.model, modelopt_state)
         if modelopt_weights is not None:
             set_quantizer_state_dict(self.model, modelopt_weights)
         print_rank_0("Restored modelopt state with weights.")
@@ -255,8 +299,7 @@ class QATTrainer(ModelOptHFTrainer):
         """Train the model."""
         outputs = super().train(*args, **kwargs)
         print_rank_0(
-            "Training completed. Please save the final model using `Trainer.save_model()` "
-            "to preserve ModelOpt states."
+            "Training completed. Please save the final model using `Trainer.save_model()` to preserve ModelOpt states."
         )
         return outputs
 
@@ -271,8 +314,7 @@ class QATTrainer(ModelOptHFTrainer):
             original_type = self.accelerator.state.fsdp_plugin.state_dict_type
             self.accelerator.state.fsdp_plugin.set_state_dict_type("FULL_STATE_DICT")
             outputs = super().save_model(*args, **kwargs)
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
+            self.accelerator.wait_for_everyone()
             if mto.ModeloptStateManager.is_converted(self.accelerator.unwrap_model(self.model)):
                 print_rank_0(
                     "Model saved. To restore, call mto.enable_huggingface_checkpointing() first before loading the "
@@ -340,6 +382,7 @@ class QATTrainer(ModelOptHFTrainer):
         is causing issues with quantized models since quantization modules adds buffers which are not sharded.
         This patch hides the buffers added by quantization modules from the original accelerate prepare.
         """
+        _patch_fsdp2_post_backward()
 
         def _modelopt_prepare(self, *args, **kwargs):
             if not self.is_fsdp2:
@@ -370,67 +413,15 @@ class QATTrainer(ModelOptHFTrainer):
 class QADTrainer(QATTrainer, KDTrainer):
     """A drop-in replacement of HuggingFace's Trainer for quantization aware distillation with ModelOpt.
 
-    This class takes additional optional argument `distill_config` to specify the distillation
-    arguments in addition to the `quant_args` argument.
-    For details on `quant_args` see
-    :class:`QATTrainer <QATTrainer>`.
+    This class takes additional arguments for both distillation and quantization configuration.
+    For details, see
+    :class:`QATTrainer <QATTrainer>`
+    and
+    :class:`KDTrainer <modelopt.torch.distill.plugins.huggingface.KDTrainer>`.
     """
 
-    def __init__(
-        self,
-        *args,
-        distill_config=None,
-        **kwargs,
-    ):
-        """Initialize the trainer with modelopt states."""
-        assert distill_config is not None, "`distill_config` is required for QAD."
-        self.distill_config = distill_config
-
-        super().__init__(*args, **kwargs)
-
-        # Note: QAD doesn't work with FSDP wrapped model. We quantize model before the wrapper.
-        # The drawback is that we can't train a model that is bigger than a single GPU memory.
-        # And memory efficient loading doesn't work.
-        self.model.cuda()
-        if self.quant_cfg is not None and not is_quantized(self.model):
-            self._quantize_model()
-        if getattr(self.args, "lora_config", None) is not None:
-            self.model.add_adapter(self.args.lora_config)
-            print_rank_0("Lora adapter added.")
-        self._convert_to_distillation_model()
-
-    def _convert_to_distillation_model(self):
-        """Convert the model to a distillation model."""
-        # We don't need any save/restore feature of the distallation mode, so we skip it here.
-        _convert_for_kd(self.model, KDLossConfig(**self.distill_config))
-        print_rank_0("Distillation model created.")
-
-    def train(self, *args, **kwargs):
-        """Train the model with QAD."""
-        self.compute_loss_func = lambda *args, **kwargs: self.model.compute_kd_loss()
-        return super().train(*args, **kwargs)
-
-    def save_model(
-        self,
-        output_dir: str | None = None,
-        _internal_call: bool = False,
-        export_student: bool = False,
-        *args,
-        **kwargs,
-    ):
-        """Dumps model to disk without teacher model and loss modules.
-
-        Args:
-            output_dir: The directory to save the model and ModelOpt states.
-            export_student: Whether to export the student model.
-        """
-        if self.accelerator.is_fsdp2 and "SHARDED_STATE_DICT" in str(
-            self.accelerator.state.fsdp_plugin.state_dict_type
-        ):
-            if export_student:
-                model = self.accelerator.unwrap_model(self.model)
-                model = model.export()
-            return QATTrainer.save_model(self, output_dir, _internal_call, *args, **kwargs)
-        return KDTrainer.save_model(
-            self, output_dir, _internal_call, export_student, *args, **kwargs
-        )
+    def _quantize_model(self):
+        """Quantize the model."""
+        model = self.accelerator.unwrap_model(self.model)
+        with model.hide_teacher_model(), model.only_student_forward():
+            return super()._quantize_model()

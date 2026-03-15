@@ -18,7 +18,8 @@
 import contextlib
 import math
 import warnings
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
+from typing import Any, Protocol
 
 import torch
 import torch.distributed as dist
@@ -36,30 +37,90 @@ else:  # torch >= 2.9
 import torch.nn.functional as F
 from torch import nn
 
-from modelopt.torch.utils import standardize_constructor_args
+from modelopt.torch.utils import same_device_as, standardize_constructor_args
 from modelopt.torch.utils.distributed import DistributedProcessGroup
 
 from ... import calib
 from ... import utils as quant_utils
-from ...config import QuantizerAttributeConfig
+from ...config import QuantizerAttributeConfig, RotateConfig
 from ...qtensor import (
     BaseQuantizedTensor,
     FP8QTensor,
     INT4QTensor,
     INT8QTensor,
     MXFP4QTensor,
+    MXFP8QTensor,
     NF4QTensor,
     NVFP4QTensor,
     QTensorWrapper,
 )
-from ...tensor_quant import dynamic_block_quant, fake_tensor_quant, scaled_e4m3
+from ...tensor_quant import (
+    dynamic_block_quant,
+    fake_tensor_quant,
+    scaled_e4m3,
+    static_blockwise_fp4_fake_quant,
+)
 from ...utils import is_torch_export_mode
 from ..functional import normalized_hadamard_transform
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
+__all__ = [
+    "NVFP4StaticQuantizer",
+    "SequentialQuantizer",
+    "TensorQuantizer",
+    "TensorQuantizerCache",
+    "is_registered_quant_backend",
+    "register_quant_backend",
+    "unregister_quant_backend",
+]
 
-__all__ = ["SequentialQuantizer", "TensorQuantizer"]
+
+QuantBackendEntrypoint = Callable[[torch.Tensor, "TensorQuantizer"], torch.Tensor]
+
+_QUANT_FUNCTIONAL_BACKENDS: dict[str, QuantBackendEntrypoint] = {}
+
+
+def register_quant_backend(name: str, entrypoint: QuantBackendEntrypoint) -> None:
+    """Register a custom quantization backend.
+
+    Args:
+        name: The name of the backend.
+        entrypoint: The entrypoint of the backend. The entrypoint should be a callable that takes in
+            the inputs and the tensor quantizer as arguments and returns the quantized tensor.
+            See :class:`modelopt.torch.quantization.config.QuantizerAttributeConfig`
+            for details on choosing from the registered backends via the ``backend`` and
+            ``backend_extra_args`` fields.
+    """
+    if not isinstance(name, str) or not name:
+        raise ValueError("Backend name must be a non-empty string.")
+    if not callable(entrypoint):
+        raise TypeError("Entrypoint must be callable.")
+    if name in _QUANT_FUNCTIONAL_BACKENDS:
+        warnings.warn(f"Overwriting existing backend: {name}")
+    _QUANT_FUNCTIONAL_BACKENDS[name] = entrypoint
+
+
+def unregister_quant_backend(name: str) -> None:
+    """Unregister a custom quantization backend.
+
+    Args:
+        name: The name of the backend to unregister.
+    """
+    if not isinstance(name, str) or not name:
+        raise ValueError("Backend name must be a non-empty string.")
+    _QUANT_FUNCTIONAL_BACKENDS.pop(name, None)
+
+
+def is_registered_quant_backend(name: str) -> bool:
+    """Check if a custom quantization backend is registered.
+
+    Args:
+        name: The name of the backend to check.
+    """
+    return name in _QUANT_FUNCTIONAL_BACKENDS
+
+
+class TensorQuantizerCache(Protocol):
+    """A protocol for a cache interface for TensorQuantizer."""
 
 
 class TensorQuantizer(nn.Module):
@@ -95,6 +156,10 @@ class TensorQuantizer(nn.Module):
         "_padding",
         # Extra flags added by huggingface
         "_is_hf_initialized",
+        # Extra flags added by accelerate
+        "_hf_hook",
+        "_old_forward",
+        "forward",
         # Extra flags added by deepspeed
         "ds_external_parameters",
         "all_parameters",
@@ -104,6 +169,8 @@ class TensorQuantizer(nn.Module):
         "ds_grads_remaining",
         "ds_id",
         "pre_bwd_fn",
+        # quantizer cache for custom backends, like luts
+        "_quantizer_cache",
     }
 
     def __init__(
@@ -121,6 +188,7 @@ class TensorQuantizer(nn.Module):
         if amax is not None:
             self.amax = amax
 
+        self._use_constant_amax = False
         self.set_from_attribute_config(quant_attribute_cfg)
 
         self._if_quant = if_quant
@@ -131,6 +199,9 @@ class TensorQuantizer(nn.Module):
 
         # Lazy initialize the bias calibrator for KV cache quantization
         self._bias_calibrator = None
+
+        # Optional quantizer cache for caching quantizer related encoding or tensors.
+        self._quantizer_cache = None
 
     def set_from_attribute_config(self, attribute_cfg: QuantizerAttributeConfig | dict):
         """Set quantizer attributes from attribute_dict.
@@ -153,6 +224,9 @@ class TensorQuantizer(nn.Module):
             "enable": ("_disabled", lambda val: val is False),
             "type": ("_dynamic", lambda val: val == "dynamic"),
             "calibrator": ("_calibrator", _calibrator_setter),
+            "backend": ("backend", lambda val: val),
+            "backend_extra_args": ("backend_extra_args", lambda val: val or {}),
+            "use_constant_amax": ("_use_constant_amax", lambda val: val),
         }
 
         for attribute, val in attribute_cfg.items():
@@ -425,6 +499,29 @@ class TensorQuantizer(nn.Module):
             and self.block_sizes.get("scale_bits", None) == (8, 0)
         )
 
+    def is_mxfp(self, bits):
+        """Check if is MXFP4/MXFP6/MXFP8."""
+        if bits == 4:
+            return (
+                self.is_mx_format
+                and self.num_bits == (2, 1)
+                and self.block_sizes.get(-1, None) == 32
+            )
+        elif bits == 6:
+            return (
+                self.is_mx_format
+                and self.num_bits == (3, 2)
+                and self.block_sizes.get(-1, None) == 32
+            )
+        elif bits == 8:
+            return (
+                self.is_mx_format
+                and self.num_bits == (4, 3)
+                and self.block_sizes.get(-1, None) == 32
+            )
+        else:
+            raise NotImplementedError()
+
     @property
     def is_static_block_quant(self):
         """Check if is static block quantization."""
@@ -433,6 +530,33 @@ class TensorQuantizer(nn.Module):
             and self.block_sizes.get("type", None) != "dynamic"
             and self._fake_quant
         )
+
+    @property
+    def rotate_is_enabled(self):
+        """Check if rotate is enabled in quant config."""
+        if isinstance(self._rotate, RotateConfig):
+            return self._rotate.enable
+        if isinstance(self._rotate, dict):  # backward compat: old checkpoints stored a dict
+            return self._rotate.get("enable", False)
+        return self._rotate  # bool
+
+    @property
+    def rotate_is_fp32(self):
+        """Check if rotation needs to be computed in float32."""
+        if isinstance(self._rotate, RotateConfig):
+            return self._rotate.rotate_fp32 if self._rotate.enable else False
+        if isinstance(self._rotate, dict) and self.rotate_is_enabled:
+            return self._rotate.get("rotate_fp32", False)
+        return False
+
+    @property
+    def rotate_block_size(self):
+        """Block size for block-granular RHT, or None for full/auto."""
+        if isinstance(self._rotate, RotateConfig):
+            return self._rotate.block_size if self._rotate.enable else None
+        if isinstance(self._rotate, dict) and self.rotate_is_enabled:
+            return self._rotate.get("block_size", None)
+        return None
 
     def disable_calib(self):
         """Disable calibration."""
@@ -504,6 +628,8 @@ class TensorQuantizer(nn.Module):
 
     def _get_amax(self, inputs):
         """Get amax from buffer or compute it dynamically."""
+        if self._use_constant_amax:
+            return torch.tensor(torch.finfo(torch.float8_e4m3fn).max, device=inputs.device)
         if hasattr(self, "_amax"):
             amax = self._amax
         else:
@@ -560,8 +686,32 @@ class TensorQuantizer(nn.Module):
         assert self._is_real_quantize_support(), "Real quantization not supported for this format."
 
         buffer_to_register = {}
-        if self._num_bits == (4, 3):
-            # FP8 quantization
+        # Check MX formats first (before FP8) since MXFP8 also has num_bits=(4,3)
+        if (
+            self._block_sizes
+            and self._block_sizes.get("scale_bits") == (8, 0)
+            and self._block_sizes.get("type") == "dynamic"
+        ):
+            # MX quantization (MXFP4/MXFP8)
+            if self._num_bits == (2, 1):
+                # MXFP4
+                outputs, scales = MXFP4QTensor.quantize(inputs, self._block_sizes[-1])
+                buffer_to_register["_scale"] = scales
+            elif self._num_bits == (4, 3):
+                # MXFP8
+                assert self._block_sizes[-1] == MXFP8QTensor.BLOCK_SIZE, (
+                    f"MXFP8 requires block size {MXFP8QTensor.BLOCK_SIZE}, "
+                    f"got {self._block_sizes[-1]}"
+                )
+                outputs, scales = MXFP8QTensor.quantize(inputs)
+                buffer_to_register["_scale"] = scales
+            else:
+                raise ValueError(
+                    f"Unsupported MX format: num_bits={self._num_bits}. "
+                    f"Expected (2, 1) for MXFP4 or (4, 3) for MXFP8."
+                )
+        elif self._num_bits == (4, 3):
+            # FP8 quantization (non-MX)
             # For per-tensor/per-channel quantization, we might need amax which is synced across all ranks
             # For blockwise quantization, amax will be recomputed in the kernel
             use_amax = self.amax is not None and not (self._block_sizes and self.amax.numel() == 1)
@@ -594,18 +744,6 @@ class TensorQuantizer(nn.Module):
             buffer_to_register["_scale"] = _scale
             buffer_to_register["_double_scale"] = _double_scale
             buffer_to_register["_scale_zeros"] = _scale_zeros
-        elif (
-            self._block_sizes.get("scale_bits") == (8, 0)
-            and self._block_sizes.get("type") == "dynamic"
-        ):
-            # MX quantization
-            if self._num_bits == (2, 1):
-                outputs, scales = MXFP4QTensor.quantize(inputs, self._block_sizes[-1])
-                buffer_to_register["_scale"] = scales
-            else:
-                raise ValueError(
-                    f"Real quantization for MX {self._num_bits} format is not supported."
-                )
         elif self._block_sizes.get("scale_bits") == (4, 3):
             # NVFP4 default quantization
             # Return real quantized tensor and store scales inside TensorQuantizer
@@ -632,6 +770,12 @@ class TensorQuantizer(nn.Module):
 
     def _fake_quantize(self, inputs):
         """Fake quantization."""
+        if self.backend is not None:
+            if self.backend not in _QUANT_FUNCTIONAL_BACKENDS:
+                raise KeyError(f"Quant backend '{self.backend}' is not registered.")
+            entrypoint = _QUANT_FUNCTIONAL_BACKENDS[self.backend]
+            return entrypoint(inputs, self)
+
         amax = None
         if not self.is_mx_format:
             amax = self._get_amax(inputs)
@@ -883,8 +1027,12 @@ class TensorQuantizer(nn.Module):
             inputs = inputs * self.pre_quant_scale
 
         # Rotating the input
-        if self._rotate:
-            inputs = normalized_hadamard_transform(inputs)
+        if self.rotate_is_enabled:
+            inputs = normalized_hadamard_transform(
+                inputs,
+                rotate_fp32=self.rotate_is_fp32,
+                block_size=self.rotate_block_size,
+            )
 
         if self._disabled:
             # if quantizer is disabled, we still need to track the input dtype for saving the model
@@ -932,9 +1080,10 @@ class TensorQuantizer(nn.Module):
             # Check if the input tensor is contiguous
             # Non-contiguous tensors will generate incorrect FP4 quantization results
             if hasattr(inputs, "is_contiguous") and not inputs.is_contiguous():
-                inputs.data = inputs.data.contiguous()
+                inputs = inputs.contiguous()
             if self.fake_quant:
-                outputs = self._fake_quantize(inputs)
+                with same_device_as(inputs):
+                    outputs = self._fake_quantize(inputs)
             elif not self._dequantize:
                 outputs = self._real_quantize(inputs)
             else:
@@ -964,16 +1113,23 @@ class TensorQuantizer(nn.Module):
             return "None"
         if self._amax.is_meta:
             return "meta"
-        if self._amax.numel() == 1:
-            return f"{self._amax.item():{fmt}}"
-        return (
-            f"[{self._amax.min().item():{fmt}},"
-            f" {self._amax.max().item():{fmt}}]({self._amax.numel()})"
-        )
+        return self._short_tensor(self._amax, fmt)
+
+    def _short_tensor(self, tensor: torch.Tensor, fmt=".4f"):
+        """Short description of tensor."""
+        if tensor.numel() == 1:
+            return f"{tensor.item():{fmt}}"
+        return f"[{tensor.min().item():{fmt}}, {tensor.max().item():{fmt}}]({tensor.numel()})"
 
     def extra_repr(self):
         """Set the extra information about this module."""
         if self._disabled:
+            s = "disabled"
+            s += (
+                f" pre_quant_scale={self._short_tensor(self.pre_quant_scale)}"
+                if self.pre_quant_scale is not None
+                else ""
+            )
             return "disabled"
         s = f"{'unsigned ' if self._unsigned else ''}{self._num_bits} bit"
         s += " narrow" if (self._narrow_range) else ""
@@ -983,8 +1139,15 @@ class TensorQuantizer(nn.Module):
         else:
             s += f" axis={self._axis}" if self._axis is not None else " per-tensor"
         s += f" amax={self._short_amax()}"
-        s += " pre_quant_scale" if self.pre_quant_scale is not None else ""
-        s += " rotated" if self._rotate else ""
+        s += (
+            f" pre_quant_scale={self._short_tensor(self.pre_quant_scale)}"
+            if self.pre_quant_scale is not None
+            else ""
+        )
+        s += " rotated" if self.rotate_is_enabled else ""
+        s += " (fp32)" if self.rotate_is_fp32 else ""
+        if self.rotate_block_size is not None:
+            s += f" (block={self.rotate_block_size})"
         s += (
             f" calibrator={self._calibrator.__class__.__name__}"
             if (self._calibrator is not None)
@@ -995,6 +1158,11 @@ class TensorQuantizer(nn.Module):
 
         s += " quant" if (self._if_quant) else ""
         s += " calib" if (self._if_calib) else ""
+        s += (
+            f" backend={self.backend}, extra_args={self.backend_extra_args}"
+            if self.backend is not None
+            else ""
+        )
         return s
 
     def _get_properties_for_modelopt_state(self):
@@ -1114,6 +1282,66 @@ class TensorQuantizer(nn.Module):
             self.register_buffer(key, value)
 
 
+class NVFP4StaticQuantizer(TensorQuantizer):
+    """TensorQuantizer for NVFP4 static block quantization with two-level scaling.
+
+    Uses _global_amax and inherited _amax for per-block amax values.
+    """
+
+    @classmethod
+    def from_tensor_quantizer(
+        cls, tq: TensorQuantizer, global_amax: torch.Tensor | None = None
+    ) -> "NVFP4StaticQuantizer":
+        """Convert a TensorQuantizer to NVFP4StaticQuantizer in-place.
+
+        Args:
+            tq: The TensorQuantizer to convert.
+            global_amax: Optional global amax value to set on the quantizer.
+        """
+        if isinstance(tq, cls):
+            if global_amax is not None:
+                tq.global_amax = global_amax
+            return tq
+        tq.__class__ = cls
+        tq._is_nvfp4_static_quantizer = True
+        if global_amax is not None:
+            tq.global_amax = global_amax
+        return tq
+
+    @property
+    def global_amax(self):
+        """Return global_amax for quantization."""
+        if not hasattr(self, "_global_amax"):
+            return None
+        return self._global_amax
+
+    @global_amax.setter
+    def global_amax(self, value):
+        if value is None:
+            if hasattr(self, "_global_amax"):
+                self._global_amax = None
+            return
+        if not isinstance(value, torch.Tensor):
+            value = torch.tensor(value)
+        if not hasattr(self, "_global_amax") or self._global_amax is None:
+            self.register_buffer("_global_amax", value.clone().detach())
+        else:
+            self._global_amax.data.copy_(value.clone().detach().to(self._global_amax.device))
+
+    def _fake_quantize(self, inputs):
+        """Fake quantization using two-level scaling with _amax and _global_amax."""
+        if self.amax is not None:
+            return static_blockwise_fp4_fake_quant(
+                inputs,
+                self.amax,
+                self.global_amax,  # Can be None, will be computed internally
+                True,  # quantize_block_scales
+                inputs.dtype,
+                self._pass_through_bwd,
+            )
+        return super()._fake_quantize(inputs)
+
+
 class SequentialQuantizer(nn.Sequential):
     """A sequential container for  :class:`TensorQuantizer` modules.
 
@@ -1133,7 +1361,7 @@ class SequentialQuantizer(nn.Sequential):
 
     """
 
-    _delegated_properties = ["fake_quant", "is_enabled"]
+    _delegated_properties = ["fake_quant", "is_enabled", "amax"]
     _delegated_methods = [
         "reset_amax",
         "disable",

@@ -302,6 +302,28 @@ def get_tensor_consumer_nodes(
     return tensor_consumers
 
 
+def get_tensor_consumer_node_indices(graph: onnx.GraphProto | gs.Graph) -> dict[str, list[int]]:
+    """Build a mapping from tensor names to the indices of nodes that use them.
+
+    Args:
+        graph: ONNX GraphSurgeon graph to analyze
+    Returns:
+        Dictionary mapping tensor names to lists of node indices that consume them
+    """
+    tensor_consumer_map: dict[str, list[int]] = defaultdict(list)
+    nodes = graph.nodes if isinstance(graph, gs.Graph) else graph.node
+    for node_idx, node in enumerate(nodes):
+        inputs = node.inputs if isinstance(node, gs.Node) else node.input
+        for tensor in inputs:
+            tensor_name = tensor
+            if isinstance(tensor, str):
+                tensor_name = tensor
+            elif hasattr(tensor, "name") and isinstance(tensor.name, str):
+                tensor_name = tensor.name
+            tensor_consumer_map[tensor_name].append(node_idx)
+    return tensor_consumer_map
+
+
 def filter_quantizable_kgen_heads(
     cask_fusible_partitions: list[list[Node]],
     kgen_partitions: list[list[Node]],
@@ -594,16 +616,37 @@ def remove_partial_input_qdq(
             # Reached end of the graph
             continue
         if dq_node.op == "DequantizeLinear":
-            dq_node = dq_node.outputs[0]  # source_node->Q->DQ->target_node0
+            dq_output = dq_node.outputs[0]  # source_node->Q->DQ->target_node
 
-            # Find the input index in the target connecting with source_node
+            # Look up the specific target node in the quantized graph.
+            # With DedicatedQDQPair=False, a shared Q/DQ pair may feed multiple consumers
+            # (e.g. Conv activation AND Add residual). Always patch the intended target
+            # rather than the first consumer of the DQ output to avoid removing Q/DQ from
+            # the wrong branch.
+            target_node_in_graph = graph_nodes.get(target.name)
+            if target_node_in_graph is None:
+                continue
+
+            # Find the input index in the target that is connected to the DQ output
             target_input_idx_arr = [
-                idx for idx, inp in enumerate(dq_node.outputs[0].inputs) if inp.name == dq_node.name
+                idx
+                for idx, inp in enumerate(target_node_in_graph.inputs)
+                if inp.name == dq_output.name
             ]
-            target_input_idx = target_input_idx_arr[0] if target_input_idx_arr else 0
+            # If no input index is found (dq_output is not actually connected to target node), skip rewiring to
+            # prevent silent corruption of the graph.
+            if not target_input_idx_arr:
+                logger.warning(
+                    "Expected DequantizeLinear output '%s' to be an input of node '%s', "
+                    "but no matching input was found. Skipping Q/DQ bypass for this edge.",
+                    dq_output.name,
+                    target_node_in_graph.name,
+                )
+                continue
+            target_input_idx = target_input_idx_arr[0]
 
-            # Connect the output of source_node with the output of DQ
-            dq_node.outputs[0].inputs[target_input_idx] = source_node.outputs[0]
+            # Connect the target's input directly to source_node's output (bypass Q/DQ)
+            target_node_in_graph.inputs[target_input_idx] = source_node.outputs[0]
 
     # Check for quantized residual Adds where the parallel branch is not being quantized
     for source, target, non_qdq_input_name in no_quantize_inputs:

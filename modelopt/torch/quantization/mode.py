@@ -37,6 +37,8 @@ from .config import (
     AWQFullCalibConfig,
     AWQLiteCalibConfig,
     CompressConfig,
+    GPTQLiteConfig,
+    LocalHessianCalibConfig,
     MaxCalibConfig,
     MseCalibConfig,
     QuantizeAlgoCfgType,
@@ -55,7 +57,16 @@ from .conversion import (
     restore_svdquant_model,
     update_quantize_metadata,
 )
-from .model_calib import awq, max_calibrate, mse_calibrate, smoothquant, svdquant
+from .model_calib import (
+    awq,
+    gptq_lite,
+    local_hessian_calibrate,
+    max_calibrate,
+    mse_calibrate,
+    sequential_calibrate,
+    smoothquant,
+    svdquant,
+)
 
 __all__ = ["BaseCalibrateModeDescriptor"]
 
@@ -211,13 +222,43 @@ def wrapped_calib_func(
     """
     kwargs = config.model_dump()
     method = kwargs.pop("method")
+    sequential = kwargs.pop("use_sequential", False)
     if method is not None and "awq" in method:
         # For backward compatibility
         kwargs["algorithm"] = method
 
+    moe_calib_experts_ratio = kwargs.pop("moe_calib_experts_ratio", None)
+    if moe_calib_experts_ratio is not None:
+        assert (
+            isinstance(moe_calib_experts_ratio, (int, float)) and 0 < moe_calib_experts_ratio <= 1
+        ), f"Invalid moe_calib_experts_ratio {moe_calib_experts_ratio!r}"
+        for module in model.modules():
+            if hasattr(module, "_moe_calib_experts_ratio"):
+                module._moe_calib_experts_ratio = moe_calib_experts_ratio
+
+    moe_count_expert_calib_tokens = kwargs.pop("moe_count_expert_calib_tokens", False)
+    if moe_count_expert_calib_tokens:
+        for module in model.modules():
+            if hasattr(module, "_moe_count_expert_calib_tokens"):
+                module._moe_count_expert_calib_tokens = True
+
     if func is not None:
-        # Call the function with forward_loop as a separate argument
-        func(model, forward_loop=forward_loop, **kwargs)
+        if sequential:
+            if forward_loop is None:
+                raise ValueError("forward_loop is required for calibration but got None.")
+            assert method in ["max"], (
+                f"Sequential calibration currently only supports max calibration, got {method}"
+            )
+            # Wrap with sequential processing
+            sequential_calibrate(
+                model,
+                forward_loop=forward_loop,
+                calib_func=func,
+                **kwargs,
+            )
+        else:
+            # Direct calibration (existing behavior)
+            func(model, forward_loop=forward_loop, **kwargs)
 
     # Lets get the latest metadata for the quantizer states
     metadata = {}
@@ -377,6 +418,22 @@ class MseCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
 
 
 @CalibrateModeRegistry.register_mode
+class LocalHessianModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for local Hessian-weighted MSE calibration algorithm.
+
+    This algorithm uses activation information to optimize per-block scales for weight
+    quantization by minimizing output reconstruction error instead of weight reconstruction error.
+    """
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return LocalHessianCalibConfig
+
+    _calib_func = local_hessian_calibrate
+
+
+@CalibrateModeRegistry.register_mode
 class SmoothQuantModeDescriptor(BaseCalibrateModeDescriptor):
     """Mode for smoothquant calibration algorithm."""
 
@@ -439,3 +496,15 @@ class SVDQuantModeDescriptor(BaseCalibrateModeDescriptor):
     def restore(self) -> RestoreEntrypoint:
         """The mode's entrypoint for restoring a model."""
         return restore_svdquant_model
+
+
+@CalibrateModeRegistry.register_mode
+class GPTQLiteModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for GPTQ calibration algorithm."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return GPTQLiteConfig
+
+    _calib_func = gptq_lite

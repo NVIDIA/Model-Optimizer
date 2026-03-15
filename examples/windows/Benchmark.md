@@ -24,6 +24,8 @@ Memory savings and inference speedup are compared to the ONNX FP16 baseline.
 
 ### 1.2 Accuracy Comparison
 
+#### 1.2.1 MMLU
+
 For accuracy evaluation, the [Massive Multitask Language Understanding (MMLU)](https://arxiv.org/abs/2009.03300) benchmark has been utilized. Please refer to the [detailed instructions](./accuracy_benchmark/README.md) for running the MMLU accuracy benchmark.
 
 The table below shows the MMLU 5-shot score for some models.
@@ -39,3 +41,56 @@ The table below shows the MMLU 5-shot score for some models.
 | [Mistral-7B-Instruct-v0.3](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3) | 61.76 | 60.73 |
 | [Llama3.2-3B-Instruct](https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct) | 60.8 | 57.71 |
 | [Gemma-2b-it](https://huggingface.co/google/gemma-2b-it) | 37.01 | 37.2 |
+
+#### 1.2.2 Perplexity (PPL)
+
+Perplexity measures how well a probability model predicts a sample. Lower perplexity values indicate better model quality. The following table shows perplexity values at input sequence length 1024 with chunk size of 512.
+
+**Learn more about Perplexity:** [Perplexity - Wikipedia](https://en.wikipedia.org/wiki/Perplexity) | [Hugging Face - Perplexity of Fixed-Length Models](https://huggingface.co/docs/transformers/en/perplexity)
+
+- **FP16-MB**: Baseline FP16 genai model (Model Builder)
+- **Mixed AWQ-MO**: Important linear layers in INT8, rest in INT4 (AWQ), with ModelOpt.
+- **Mixed RTN-MO**: Important linear layers in INT8, rest in INT4 (RTN), with ModelOpt.
+- **Pure INT4 AWQ-MO**: All linear layers INT4 (AWQ) with ModelOpt.
+- **Pure INT4 RTN-MO**: All linear layers INT4 (RTN) with ModelOpt.
+- **Pure INT8 RTN-MO**: All linear layers INT8 (RTN) with ModelOpt.
+- **Pure INT8 AWQ-MO**: All linear layers INT8 (AWQ) with ModelOpt.
+- **Configuration**: Windows OS, GPU RTX 5090, nvidia-modelopt v0.39.0, onnxruntime-genai-cuda 0.9.2, onnxruntime-gpu 1.23.0, torch 2.8.0+cu128, transformers 4.49.0
+
+| Model | FP16-MB | Mixed AWQ-MO | Mixed RTN-MO | Pure INT4 AWQ-MO | Pure INT4 RTN-MO | Pure INT8 RTN-MO | Pure INT8 AWQ-MO |
+|:------|:--------|:-------------|:-------------|:-----------------|:-----------------|:-----------------|:-----------------|
+| DeepSeek R1 Distill Qwen 1.5B | 39.447 | 41.699 | 44.332 | 44.213 | 46.304 | 39.802 | 39.713 |
+| Llama 3.2 1B Instruct | 12.631 | 13.852 | 14.176 | 14.549 | 16.900 | 12.664 | 12.637 |
+| Phi-3.5 Mini Instruct | 6.046 | 6.500 | 6.599 | 6.711 | 7.070 | - | - |
+| Phi-4 Mini Instruct | 9.039 | 9.673 | 9.712 | 10.015 | 10.911 | - | - |
+| Qwen 2.5 1.5B Instruct | 9.216 | 10.084 | 10.338 | 10.495 | 10.933 | 9.227 | 9.232 |
+
+For detailed instructions on evaluating perplexity, please refer to the [Perplexity Evaluation Guide](./accuracy_benchmark/perplexity_metrics/README.md).
+
+#### 1.2.3 KL-divergence
+
+KL-divergence (Kullback-Leibler divergence) quantifies the distributional difference between the quantized model and the baseline model. Lower KL-divergence values indicate that the quantized model's output distribution is closer to the original model.
+
+**Learn more about KL-divergence:** [KL Divergence - Wikipedia](https://en.wikipedia.org/wiki/Kullback%E2%80%93Leibler_divergence) | [Understanding KL Divergence](https://www.countbayesie.com/blog/2017/5/9/kullback-leibler-divergence-explained)
+
+**Supported backends:** PyTorch and Onnxruntim-cuda, onnxruntime-trt-rtx-ep  are both supported for evaluation.
+
+- **Baseline model**: Hugging Face FP16 model
+- **Quantized models**: Models where quantization is simulated (a.k.a. fake quantization), typically using the PyTorch-CUDA backend for evaluation. Fake quantization means quantized weights and dequantized simultaneously to simulate quantization. The inference backend column in the table below indicates whether the reported results are from PyTorch simulation or  ONNX-runtime-based inference.
+- **Configuration**: Windows OS, GPU RTX 5090, nvidia-modelopt v0.39.0, onnxruntime-genai-cuda 0.9.2, onnxruntime-gpu 1.23.0, torch 2.8.0+cu128, transformers 4.49.0
+
+| Model                  | Quantization Method                              | Quantization Granularity                                            | KL-divergence | Inference Backend             |
+|:-----------------------|:-------------------------------------------------|:--------------------------------------------------------------------|:--------------|:------------------------------|
+| Qwen2.5-1.5B-Instruct  | Base FP16 (Baseline)                             | -                                                                  | 0.000         | PyTorch (FP16)                |
+| Qwen2.5-1.5B-Instruct  | int4+int8 Blockwise-max_algo-mixed_quant (simulated)        | INT4: per-block (block-size=128), INT8: per-channel (row-wise)      | 0.336         | PyTorch (fake quantization)   |
+| Qwen2.5-1.5B-Instruct  | int4+int8 max_algo-mixed_quant (simulated, per-channel)     | INT4: per-block (block-size=128), INT8: per-channel (row-wise)      | 0.337         | PyTorch (fake quantization)   |
+| Llama-3.2-3B-Instruct  | Base FP16 (Baseline)                             | -                                                                  | 0.000         | PyTorch (FP16)                |
+| Llama-3.2-3B-Instruct  | int4+int8 Blockwise-awq-lite_algo-mixed_quant (simulated)   | INT4: per-block (block-size=128), INT8: per-channel (row-wise)      | 0.228         | PyTorch (fake quantization)   |
+| Llama-3.2-3B-Instruct  | int4+int8 per-channel-awq-lite_algo-mixed_quant (simulated) | INT4: per-block (block-size=128), INT8: per-channel (row-wise)      | 0.230         | PyTorch (fake quantization)   |
+| Llama-3.2-3B-Instruct  | int4+int8 Blockwise-max_algo-mixed_quant (simulated)        | INT4: per-block (block-size=128), INT8: per-channel (row-wise)      | 0.238         | PyTorch (fake quantization)   |
+| Llama-3.2-3B-Instruct  | int4+int8 per-channel-max_algo-mixed_quant (simulated)      | INT4: per-block (block-size=128), INT8: per-channel (row-wise)      | 0.238         | PyTorch (fake quantization)   |
+| Llama-3.2-3B-Instruct  | int4 Blockwise-max_algo only (simulated)              | INT4: per-block (block-size=128)                                    | 0.334         | PyTorch (fake quantization)   |
+
+*All KL-divergence results above are obtained via PyTorch fake quantization simulation unless otherwise noted. Inference with ONNX-runtime can also be evaluated .*
+
+For detailed instructions on computing KL-divergence, please refer to the [KL-divergence Evaluation Guide](./accuracy_benchmark/kl_divergence_metrics/README.md).

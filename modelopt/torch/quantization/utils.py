@@ -15,8 +15,6 @@
 
 """Quantization utilities."""
 
-from __future__ import annotations
-
 from collections import namedtuple
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any
@@ -28,7 +26,9 @@ from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
 from torch.distributed.tensor import Replicate
 
+from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.utils import get_unwrapped_name, print_rank_0
+from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -217,7 +217,7 @@ def reduce_sum(input, axis=None, keepdims=True):
     return output
 
 
-def weight_attr_names(module: nn.Module) -> Generator[str, None, None]:
+def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
     """Get the weight param attribute names in a converted module, non-recursive.
 
     We consider the following two cases for each weight param attribute:
@@ -229,9 +229,7 @@ def weight_attr_names(module: nn.Module) -> Generator[str, None, None]:
     # the standard weight and quantizer case
     weight = getattr(module, "weight", None)
     weight_quantizer = getattr(module, "weight_quantizer", None)
-    if isinstance(weight, nn.Parameter) and isinstance(
-        weight_quantizer, (TensorQuantizer, SequentialQuantizer)
-    ):
+    if isinstance(weight_quantizer, (TensorQuantizer, SequentialQuantizer)):
         yield "weight"
 
     # other weight and quantizer case
@@ -337,14 +335,16 @@ def disable_lora_quantizers_in_config(config, layers):
 
 
 @contextmanager
-def replace_function(package, name, new_func):
+def replace_function(package, name, new_func, og_func_cache_name=None):
     """Replace a function with a new one within a context."""
+    if og_func_cache_name is None:
+        og_func_cache_name = "_" + name
     old_func = getattr(package, name)
     setattr(package, name, new_func)
-    setattr(package, "_" + name, old_func)
+    setattr(package, og_func_cache_name, old_func)
     yield
     setattr(package, name, old_func)
-    delattr(package, "_" + name)
+    delattr(package, og_func_cache_name)
 
 
 @contextmanager
@@ -394,19 +394,30 @@ def _get_fsdp2_mesh(module: nn.Module):
         return fsdp_state._fsdp_param_group.post_forward_mesh_info.mesh
 
 
-def _get_module_name(module: nn.Module, root_model: nn.Module):
-    name_to_module = dict(root_model.named_modules())
+def _get_module_name(module: nn.Module, root_model: nn.Module, name_to_module: dict | None = None):
+    if name_to_module is None:
+        name_to_module = dict(root_model.named_modules())
     target_module_name = next((name for name, m in name_to_module.items() if m is module), None)
     return target_module_name
 
 
-def _get_enclosing_fsdp_module(module: nn.Module, root_model: nn.Module):
-    """Get the enclosing FSDP module for a given module."""
+def _get_enclosing_fsdp_module(
+    module: nn.Module, root_model: nn.Module, name_to_module: dict | None = None
+):
+    """Get the enclosing FSDP module for a given module.
+
+    Args:
+        module: The module to find the enclosing FSDP for.
+        root_model: The root model containing the module.
+        name_to_module: Optional pre-computed dict mapping names to modules (for performance).
+    """
     if isinstance(module, FSDPModule):
         return module
 
-    name_to_module = dict(root_model.named_modules())
-    target_module_name = _get_module_name(module, root_model)
+    if name_to_module is None:
+        name_to_module = dict(root_model.named_modules())
+
+    target_module_name = _get_module_name(module, root_model, name_to_module)
 
     if target_module_name is None:
         raise ValueError(f"Module {module} not found in the root model {root_model}.")
@@ -467,13 +478,22 @@ def fsdp2_weight_access_and_writeback_context(module: nn.Module, root_model: nn.
 
 
 @contextmanager
-def enable_weight_access_and_writeback(module, root_model):
+def enable_weight_access_and_writeback(module, root_model, name_to_module: dict | None = None):
     """Enable weight access and writeback for a module.
 
     Useful for modules with weight not intact such as Linear layer in FSDP wrapped model or
     HF accelerate CPU off-loaded models.
+
+    Args:
+        module: The module to access weights for.
+        root_model: The root model containing the module.
+        name_to_module: Pre-computed ``dict(root_model.named_modules())``. Without this,
+            every call iterates ``root_model.named_modules()`` internally, leading to O(N^2)
+            total cost when called in a loop. This causes significant CPU overhead on large
+            models, particularly Sparse MoE architectures where each expert is typically
+            implemented as its own module.
     """
-    if _get_enclosing_fsdp_module(module, root_model) is not None:
+    if _get_enclosing_fsdp_module(module, root_model, name_to_module) is not None:
         context = fsdp2_weight_access_and_writeback_context(module, root_model)
     elif is_quantized_parallel_linear(module) and hasattr(module, "_hf_tp_plan"):
         # HF transformers TP sharded linear layer
@@ -510,6 +530,46 @@ def set_quantizer_state_dict(model: nn.Module, quantizer_state_dict: dict):
         key = get_unwrapped_name(name, model)
         if isinstance(module, TensorQuantizer) and key in quantizer_state_dict:
             module.load_state_dict(quantizer_state_dict[key])
+
+
+def sync_moe_expert_amax(experts):
+    """Sync input_quantizer amax across MoE experts and fix missing weight amax.
+
+    1. Takes the element-wise max of each ``input_quantizer`` amax across all experts
+       and writes it back, so every expert shares the same input amax.
+    2. For any ``weight_quantizer`` that is enabled but has ``amax is None`` (expert
+       received no tokens during calibration), runs a weight-only ``max_calibrate``
+       to populate the missing amax.
+    """
+    from .nn import TensorQuantizer
+
+    amax_dict: dict[str, torch.Tensor] = {}
+    for expert in experts:
+        for name, module in expert.named_modules():
+            if (
+                isinstance(module, TensorQuantizer)
+                and module.amax is not None
+                and "input_quantizer" in name
+            ):
+                stored_amax = amax_dict.get(name)
+                amax_tensor = module.amax.detach().clone()
+                amax_dict[name] = (
+                    amax_tensor if stored_amax is None else torch.maximum(stored_amax, amax_tensor)
+                )
+
+    for expert in experts:
+        for name, module in expert.named_modules():
+            if isinstance(module, TensorQuantizer) and name in amax_dict:
+                module.amax = amax_dict[name].detach().clone()
+
+    from .model_calib import max_calibrate
+
+    for expert in experts:
+        for name, module in expert.named_modules():
+            if name.endswith("weight_quantizer") and module.is_enabled and module.amax is None:
+                weight = expert.state_dict().get(name.replace("weight_quantizer", "weight"))
+                if weight is not None:
+                    max_calibrate(module, lambda m, w=weight: m(w), distributed_sync=False)
 
 
 @contextmanager
@@ -791,3 +851,64 @@ def update_quant_cfg_with_kv_cache_quant(
         quant_cfg["algorithm"] = "max"
     print_rank_0(f"Updated quant_cfg with KV cache quantization: {quant_cfg}")
     return quant_cfg
+
+
+class _EarlyStopForwardError(Exception):
+    """Error to stop the forward pass after collection."""
+
+
+class LayerActivationCollector:
+    """Helper class for collecting layer activations during forward passes.
+
+    This class allows for sequential layer calibration by
+    patching layers to capture inputs/outputs during forward passes
+    """
+
+    def __init__(self, model: nn.Module):
+        self.model = model
+
+    @staticmethod
+    def _patch_and_initialize_layer(layer: torch.nn.Module, stop_after_collection: bool = False):
+        """Patch a layer to collect inputs during forward passes."""
+
+        def _forward_w_data_collection(self, *args, **kwargs):
+            # Note: 'self' refers to the patched layer.
+            assert len(args) >= 1, (
+                f"Expected at least 1 positional arg, got {len(args)} args and {list(kwargs.keys())} kwargs"
+            )
+            # Only collect the inputs to the layer
+            self.inputs.append((args, kwargs))
+            if stop_after_collection:
+                raise _EarlyStopForwardError()  # Stop the forward pass after collection
+
+            return self._original_forward(*args, **kwargs)
+
+        bind_forward_method(layer, _forward_w_data_collection, "_original_forward")
+        layer.inputs = []
+
+    @staticmethod
+    def _unpatch_and_cleanup_layer(layer: torch.nn.Module):
+        if hasattr(layer, "_original_forward"):
+            unpatch_forward_method(layer, "_original_forward")
+        if hasattr(layer, "inputs"):
+            del layer.inputs
+
+    @torch.no_grad()
+    def get_input_activations(self, layer: torch.nn.Module, forward_loop: ForwardLoop) -> list:
+        # Wrap model forward to catch _EarlyStopForward per-batch
+        def _early_stop_forward(self, *args, **kwargs):
+            try:
+                return self._original_forward(*args, **kwargs)
+            except _EarlyStopForwardError:
+                return None  # Stop propagation but allow next batch
+
+        try:
+            bind_forward_method(self.model, _early_stop_forward, "_original_forward")
+            self._patch_and_initialize_layer(layer, stop_after_collection=True)
+            forward_loop(self.model)
+            inputs = layer.inputs.copy()
+        finally:
+            self._unpatch_and_cleanup_layer(layer)
+            unpatch_forward_method(self.model, "_original_forward")
+
+        return inputs

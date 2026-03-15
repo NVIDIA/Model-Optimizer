@@ -22,7 +22,7 @@ import torch
 class BaseImageProcessor:
     """Base class for image processors."""
 
-    def __init__(self, tokenizer, device="auto"):
+    def __init__(self, tokenizer, device="cuda"):
         """Constructor."""
         self.tokenizer = tokenizer
         self.device = device

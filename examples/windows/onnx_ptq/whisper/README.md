@@ -7,6 +7,7 @@ This repository contains an example to demontrate 8-bit quantization of Whisper 
 - [ONNX export](#onnx-export)
 - [Inference script](#inference-script)
 - [Quantization script](#quantization-script)
+- [Support Matrix](#support-matrix)
 - [Validated Settings](#validated-settings)
 - [Troubleshoot](#troubleshoot)
 
@@ -40,6 +41,37 @@ optimum-cli export onnx --model openai/whisper-medium E:\model_store\optimum\whi
 pip install -r requirements.txt
 
 ```
+
+### Optional: Installing latest PyTorch and TorchAudio versions (2.8+)
+
+For users who need the latest versions of PyTorch and TorchAudio (version >=2.8), follow these additional steps:
+
+1. **Install PyTorch and TorchAudio with CUDA support:**
+
+```bash
+
+pip install --upgrade torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+
+```
+
+1. **Install torchcodec:**
+
+```bash
+
+pip install torchcodec
+
+```
+
+1. **Set up FFMPEG dependencies:**
+   - Download FFMPEG from: <https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-7.1.1-full_build-shared.7z>
+   - Extract the archive
+   - Copy all DLL files from the `bin` folder of the extracted FFMPEG directory and paste them into the torchcodec package folder (typically located at `<Python_Root_Folder>/Lib/site-packages/torchcodec`)
+
+1. **Copy PyTorch DLL files:**
+   - Navigate to the `lib` folder in the torch package directory
+   - Copy all DLL files from this folder and paste them into the torchcodec package folder
+
+After completing these steps, torchaudio will be ready for use.
 
 ## Inference script
 
@@ -117,6 +149,14 @@ python .\whisper_onnx_quantization.py --model_name=openai/whisper-large --base_m
 - The Whisper quantization script supports quantization of following Whisper ONNX files: `encoder_model.onnx`, `decoder_model.onnx`, `decoder_with_past_model.onnx`.
 
 - In case, ONNX installation unexpectedly throws error, then one can try with other ONNX versions.
+
+## Support Matrix
+
+| Model | ONNX INT8 Max (W8A8) | ONNX FP8 Max (W8A8) |
+| :---: | :---: | :---: |
+| whisper-large | ✅ | ✅ |
+
+> *`ONNX INT8 Max` means INT8 (W8A8) quantization of ONNX model using Max calibration. Similar holds true for the term `ONNX FP8 Max`.*
 
 ## Validated Settings
 

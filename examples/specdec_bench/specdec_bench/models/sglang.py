@@ -27,7 +27,12 @@ except ImportError:
 
 class SGLANGModel(Model):
     def __init__(
-        self, model_dir, max_concurrent_requests, sampling_kwargs, use_draft_logits=False, **kwargs
+        self,
+        model_dir,
+        max_concurrent_requests,
+        sampling_kwargs,
+        use_draft_logits=False,
+        **kwargs,
     ):
         speculative_algorithm = kwargs.get("speculative_algorithm")
         if speculative_algorithm == "MTP":
@@ -43,35 +48,44 @@ class SGLANGModel(Model):
             self.model = sgl.Engine(
                 model_path=model_dir,
                 skip_tokenizer_init=True,
-                mem_fraction_static=0.7,
-                disable_overlap_schedule=kwargs.get("disable_overlap_schedule", True),
+                trust_remote_code=kwargs.get("trust_remote_code", False),
+                mem_fraction_static=0.8,
+                disable_overlap_schedule=kwargs.get("disable_overlap_schedule", False),
                 tp_size=kwargs.get("tensor_parallel_size", 1),
+                ep_size=kwargs.get("moe_expert_parallel_size", 1),
                 speculative_algorithm=speculative_algorithm,
                 speculative_num_steps=kwargs.get("speculative_num_steps", 3),
                 speculative_eagle_topk=kwargs.get("speculative_eagle_topk", 1),
                 speculative_num_draft_tokens=kwargs.get("speculative_num_draft_tokens", 4),
                 speculative_draft_model_path=kwargs.get("draft_model_dir"),
                 torch_compile_max_bs=max_concurrent_requests,
+                max_running_requests=max_concurrent_requests,
                 attention_backend=kwargs.get("attention_backend"),
                 enable_torch_compile=kwargs.get("enable_torch_compile", False),
                 cuda_graph_max_bs=max_concurrent_requests,
+                disable_cuda_graph=False,
             )
         else:
             self.model = sgl.Engine(
                 model_path=model_dir,
                 skip_tokenizer_init=True,
-                mem_fraction_static=0.7,
-                disable_overlap_schedule=kwargs.get("disable_overlap_schedule", True),
+                trust_remote_code=kwargs.get("trust_remote_code", False),
+                mem_fraction_static=0.8,
+                disable_overlap_schedule=kwargs.get("disable_overlap_schedule", False),
                 tp_size=kwargs.get("tensor_parallel_size", 1),
+                ep_size=kwargs.get("moe_expert_parallel_size", 1),
                 torch_compile_max_bs=max_concurrent_requests,
+                max_running_requests=max_concurrent_requests,
                 attention_backend=kwargs.get("attention_backend"),
                 enable_torch_compile=kwargs.get("enable_torch_compile", False),
                 cuda_graph_max_bs=max_concurrent_requests,
+                disable_cuda_graph=False,
             )
 
         self.sampling_config = sampling_kwargs
 
     async def run(self, prompt_ids, max_length, end_id, request_id, turn_id):
+        """Synchronous version of run for use with asyncio.to_thread"""
         timing = []
         output_dict = {}
         self.sampling_config["max_new_tokens"] = max_length
@@ -79,7 +93,7 @@ class SGLANGModel(Model):
         timing.append(time.perf_counter())
         assert self.sampling_config.get("beam_width", 1) == 1
         beam_lens = [[] for _ in range(self.sampling_config.get("beam_width", 1))]
-        outputs = []
+        outputs = [None]
         result = await self.model.async_generate(
             sampling_params=self.sampling_config, input_ids=prompt_ids, stream=True
         )

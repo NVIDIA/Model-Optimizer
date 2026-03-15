@@ -149,9 +149,33 @@ def disable_compilation(model):
 quant_config: dict[str, Any] = {
     "dataset": os.environ.get("QUANT_DATASET", "cnn_dailymail"),
     "calib_size": int(os.environ.get("QUANT_CALIB_SIZE", 512)),
-    "quant_cfg": os.environ.get("QUANT_CFG", "NVFP4_DEFAULT_CFG"),
+    "quant_cfg": os.environ.get("QUANT_CFG", None),
+    "kv_quant_cfg": os.environ.get("KV_QUANT_CFG", None),
     "amax_file_path": os.environ.get("AMAX_FILE_PATH", None),
 }
+
+
+def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: dict[str, Any]) -> dict[str, Any]:
+    """Update KV cache quantization config for MLA models.
+
+    MLA uses `kv_c_bmm_quantizer` (compressed KV) instead of separate
+    `k_bmm_quantizer` and `v_bmm_quantizer`. This function copies the
+    config from `*[kv]_bmm_quantizer` to also cover `*kv_c_bmm_quantizer`.
+    """
+    try:
+        from vllm.attention.layer import MLAAttention
+    except ImportError:
+        return kv_quant_cfg
+
+    if not any(isinstance(m, MLAAttention) for m in model.modules()):
+        return kv_quant_cfg
+
+    if kv_config := kv_quant_cfg.get("*[kv]_bmm_quantizer"):
+        kv_quant_cfg["*kv_c_bmm_quantizer"] = kv_config
+        kv_quant_cfg["*k_pe_bmm_quantizer"] = kv_config
+        print("MLA detected: added *kv_c_bmm_quantizer and k_pe_bmm_quantizer config")
+
+    return kv_quant_cfg
 
 
 def _create_new_data_cls(data_cls, **kwargs):
@@ -235,11 +259,23 @@ def _fakequant_run_prolog_worker(self) -> None:
                 if output is None:  # TODO: make this default when vllm <= 0.11 is outdated
                     self.sample_tokens(None)
 
-    quant_cfg = getattr(mtq, quant_config["quant_cfg"])
+    quant_cfg = {} if quant_config["quant_cfg"] is None else getattr(mtq, quant_config["quant_cfg"])
+    quant_kv_cfg = (
+        {} if quant_config["kv_quant_cfg"] is None else getattr(mtq, quant_config["kv_quant_cfg"])
+    )
 
     model = self.model_runner.model
     if hasattr(model, "unwrap"):
         model = model.unwrap()
+
+    # Check if model has MLA and update KV config accordingly
+    if quant_kv_cfg:
+        quant_kv_cfg["quant_cfg"] = update_kv_cfg_for_mla(model, quant_kv_cfg["quant_cfg"])
+
+    if quant_kv_cfg:
+        quant_cfg = mtq.utils.update_quant_cfg_with_kv_cache_quant(
+            quant_cfg, quant_kv_cfg["quant_cfg"]
+        )
 
     with disable_compilation(model):
         print("quantizing model...")
@@ -290,17 +326,6 @@ def _fakequant_run_prolog_worker(self) -> None:
         model.load_state_dict(current_state_dict)
         torch.distributed.barrier()
 
-    if amax_file_path is None:
-        # Sync amax across TP can be done here if needed
-        pass
-        # for name, buffer in model.named_buffers():
-        #     if name.endswith("_amax"):
-        #         print("syncing amax across TP for", name)
-        #         torch.distributed.all_reduce(
-        #             buffer, op=torch.distributed.ReduceOp.MAX, group=get_tp_group().device_group
-        #         )
-        # torch.distributed.barrier()
-
     if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
         mtq.print_quant_summary(model)
 
@@ -320,6 +345,6 @@ class FakeQuantWorker(BaseWorker):
             return super().determine_available_memory()
 
     def compile_or_warm_up_model(self) -> None:
-        if quant_config["quant_cfg"]:
+        if quant_config["quant_cfg"] or quant_config["kv_quant_cfg"]:
             _fakequant_run_prolog_worker(self)
         super().compile_or_warm_up_model()

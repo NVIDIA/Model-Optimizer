@@ -26,6 +26,10 @@ from typing import Any, Union
 import torch
 import torch.distributed.fsdp
 import torch.nn as nn
+from torch.nn.modules.batchnorm import _BatchNorm
+from tqdm import tqdm
+
+from .tensor import torch_to
 
 try:
     from torch.distributed.fsdp._state_dict_utils import _convert_to_wrapped_module_name
@@ -37,11 +41,6 @@ except ImportError:
     def _convert_to_wrapped_module_name(name: str) -> str:
         return name
 
-
-from torch.nn.modules.batchnorm import _BatchNorm
-from tqdm import tqdm
-
-from .tensor import torch_to
 
 __all__ = [
     "ModelLike",
@@ -56,7 +55,6 @@ __all__ = [
     "is_parallel",
     "make_divisible",
     "model_to",
-    "param_num",
     "param_num_from_forward",
     "remove_bn",
     "run_forward_loop",
@@ -101,28 +99,6 @@ def get_module_device(module: nn.Module) -> torch.device:
         return torch.device("cpu")
 
 
-def param_num(network: nn.Module, trainable_only: bool = False, unit=1e6) -> float:
-    """Get the number of parameters of a PyTorch model.
-
-    Args:
-        network: The PyTorch model.
-        trainable_only: Whether to only count trainable parameters. Default is False.
-        unit: The unit to return the number of parameters in. Default is 1e6 (million).
-
-    Returns:
-        The number of parameters in the model in the given unit.
-    """
-    return (
-        sum(
-            p.numel() if not trainable_only or p.requires_grad else 0
-            for mod in network.modules()
-            for p in mod.parameters(recurse=False)
-            if not isinstance(mod, _BatchNorm)
-        )
-        / unit
-    )
-
-
 # TODO: we could also use the same approach as in inference_flops to get the number of params,
 # which might be more accurate. Another approach could be to run a backwards pass and use a hook
 # on the tensor directly.
@@ -142,7 +118,7 @@ def param_num_from_forward(
     Returns:
         The number of parameters from the model's forward pass in the given unit.
 
-    This can helpful for dynamic modules, where the state dict might contain extra parameters that
+    This can helpful for MoE or dynamic modules, where the state dict might contain extra parameters that
     is not actively used in the model, e.g., because of a DynamicModule that is deactivated for the
     forward pass. We circumvent this issue by just counting parameters of modules that appear in a
     forward pass.
@@ -658,3 +634,36 @@ def unpatch_forward_method(module: nn.Module, orig_forward_cache_name: str):
     with temporarily_remove_accelerate_hook(module):
         setattr(module, "forward", getattr(module, orig_forward_cache_name))
         delattr(module, orig_forward_cache_name)
+
+
+def get_decoder_layers(model: nn.Module, granularity: str = "decoder") -> nn.ModuleList | None:
+    """Detect the decoder layers from a model for sequential calibration.
+
+    This temporary decoder-layer detection heuristic will be replaced with a more robust solution
+    that also supports FSDP/DDP models.
+    """
+    if granularity != "decoder":
+        raise ValueError(f"Unsupported granularity: {granularity}. Only 'decoder' is supported.")
+
+    # HuggingFace transformers pattern: model.model.layers
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        return model.model.layers
+
+    # Megatron/MCore pattern: model.decoder.layers
+    if hasattr(model, "decoder") and hasattr(model.decoder, "layers"):
+        return model.decoder.layers
+
+    # Direct layers attribute (some models)
+    if hasattr(model, "layers") and isinstance(model.layers, nn.ModuleList):
+        return model.layers
+
+    # GPT-style: model.transformer.h
+    if hasattr(model, "transformer") and hasattr(model.transformer, "h"):
+        return model.transformer.h
+
+    # Nemotron Super/Nano
+    if hasattr(model, "backbone") and hasattr(model.backbone, "layers"):
+        return model.backbone.layers
+
+    print("No decoder layers found for model, returning None")
+    return None

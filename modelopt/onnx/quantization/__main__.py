@@ -16,12 +16,43 @@
 """Command-line entrypoint for ONNX PTQ."""
 
 import argparse
+import os
 
 import numpy as np
 
+from modelopt.onnx.quantization.autotune import (
+    MODE_PRESETS,
+    StoreWithExplicitFlag,
+    get_node_filter_list,
+)
 from modelopt.onnx.quantization.quantize import quantize
 
 __all__ = ["main"]
+
+
+def validate_file_size(file_path: str, max_size_bytes: int) -> None:
+    """Validate that a file exists and does not exceed the maximum allowed size.
+
+    Args:
+        file_path: Path to the file to validate
+        max_size_bytes: Maximum allowed file size in bytes
+
+    Raises:
+        FileNotFoundError: If the file does not exist
+        ValueError: If the file exceeds the maximum allowed size
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    file_size = os.path.getsize(file_path)
+    if file_size > max_size_bytes:
+        max_size_gb = max_size_bytes / (1024 * 1024 * 1024)
+        actual_size_gb = file_size / (1024 * 1024 * 1024)
+        raise ValueError(
+            f"File size validation failed: {file_path} ({actual_size_gb:.2f}GB) exceeds "
+            f"maximum allowed size of {max_size_gb:.2f}GB. This limit helps prevent potential "
+            f"denial-of-service attacks."
+        )
 
 
 def get_parser() -> argparse.ArgumentParser:
@@ -51,6 +82,11 @@ def get_parser() -> argparse.ArgumentParser:
         "--calibration_data_path",
         type=str,
         help="Calibration data in npz/npy format. If None, random data for calibration will be used.",
+    )
+    group.add_argument(
+        "--trust_calibration_data",
+        action="store_true",
+        help="If True, trust the calibration data and allow pickle deserialization.",
     )
     group.add_argument(
         "--calibration_cache_path",
@@ -255,18 +291,177 @@ def get_parser() -> argparse.ArgumentParser:
             "The currently supported precisions are {fp16, int8, fp8}."
         ),
     )
+    argparser.add_argument(
+        "--opset",
+        type=int,
+        help=(
+            "Target ONNX opset version for the quantized model. If not specified, uses default minimum opset "
+            "(19 for fp16 scales support, 21 for int4, 23 for nvfp4). The opset may be automatically increased "
+            "if certain operations require a higher version."
+        ),
+    )
+    argparser.add_argument(
+        "--autotune",
+        nargs="?",
+        const="default",
+        default=None,
+        choices=["quick", "default", "extensive"],
+        help=(
+            "If set, enable Autotune to detect optimal Q/DQ node placements according to TensorRT runtimes. "
+            "Available modes (presets 'schemes_per_region', 'warmup_runs', and 'timing_runs' values): "
+            "  - 'quick': fewer schemes and benchmark runs for quick exploration; "
+            "  - 'default': balanced, recommended for most cases; "
+            "  - 'extensive': more schemes and runs for extensive search and thorough tuning. "
+            "Explicit --autotune_schemes_per_region/warmup_runs/timing_runs override the preset."
+        ),
+    )
+
+    autotune_group = argparser.add_argument_group(
+        "Autotune (only applicable when --autotune is set)"
+    )
+    autotune_group.add_argument(
+        "--autotune_output_dir",
+        type=str,
+        default=None,
+        help="Output directory for autotune results (state file, logs). Default: temp directory.",
+    )
+    autotune_group.add_argument(
+        "--autotune_schemes_per_region",
+        type=int,
+        default=MODE_PRESETS["default"]["schemes_per_region"],
+        help="Number of Q/DQ schemes to test per region.",
+        action=StoreWithExplicitFlag,
+        explicit_attr="_explicit_autotune_schemes_per_region",
+    )
+    autotune_group.add_argument(
+        "--autotune_pattern_cache",
+        type=str,
+        default=None,
+        dest="autotune_pattern_cache_file",
+        help="Path to pattern cache YAML for warm-start.",
+    )
+    autotune_group.add_argument(
+        "--autotune_qdq_baseline",
+        type=str,
+        default=None,
+        help="Path to a pre-quantized ONNX model to import Q/DQ patterns as warm-start.",
+    )
+    autotune_group.add_argument(
+        "--autotune_state_file",
+        type=str,
+        default=None,
+        help="State file path for crash recovery and resume capability (default: <output_dir>/autotuner_state.yaml).",
+    )
+    autotune_group.add_argument(
+        "--autotune_node_filter_list",
+        type=str,
+        default=None,
+        help=(
+            "Path to a file containing wildcard patterns to filter ONNX nodes (one pattern per line). "
+            "Regions without any matching nodes are skipped during autotuning."
+        ),
+    )
+    autotune_group.add_argument(
+        "--autotune_verbose",
+        action="store_true",
+        help="Enable verbose logging in the autotuner.",
+    )
+    autotune_group.add_argument(
+        "--autotune_use_trtexec",
+        action="store_true",
+        help="Use trtexec for benchmarking instead of the TensorRT Python API.",
+    )
+    autotune_group.add_argument(
+        "--autotune_timing_cache",
+        type=str,
+        default=None,
+        help="TensorRT timing cache file for faster engine builds.",
+    )
+    autotune_group.add_argument(
+        "--autotune_warmup_runs",
+        type=int,
+        default=MODE_PRESETS["default"]["warmup_runs"],
+        help="Number of warmup runs before timing.",
+        action=StoreWithExplicitFlag,
+        explicit_attr="_explicit_autotune_warmup_runs",
+    )
+    autotune_group.add_argument(
+        "--autotune_timing_runs",
+        type=int,
+        default=MODE_PRESETS["default"]["timing_runs"],
+        help="Number of timed runs for latency measurement.",
+        action=StoreWithExplicitFlag,
+        explicit_attr="_explicit_autotune_timing_runs",
+    )
+    autotune_group.add_argument(
+        "--autotune_trtexec_args",
+        type=str,
+        default=None,
+        help=(
+            "Additional trtexec arguments as a single quoted string. "
+            "Example: --autotune_trtexec_args '--fp16 --workspace=4096'"
+        ),
+    )
     return argparser
+
+
+def apply_mode_presets(args) -> None:
+    """Apply --autotune=mode preset to schemes_per_region, warmup_runs, timing_runs.
+
+    Only applies preset for an option when that option was not explicitly set on the
+    command line (explicit flags override the preset).
+    """
+    if args.autotune not in MODE_PRESETS:
+        return
+    preset = MODE_PRESETS[args.autotune]
+    if not getattr(args, "_explicit_autotune_schemes_per_region", False):
+        args.autotune_schemes_per_region = preset["schemes_per_region"]
+    if not getattr(args, "_explicit_autotune_warmup_runs", False):
+        args.autotune_warmup_runs = preset["warmup_runs"]
+    if not getattr(args, "_explicit_autotune_timing_runs", False):
+        args.autotune_timing_runs = preset["timing_runs"]
 
 
 def main():
     """Command-line entrypoint for ONNX PTQ."""
     args = get_parser().parse_args()
+
+    # Security: Validate onnx model size is under 2GB by default
+    if not args.use_external_data_format:
+        try:
+            validate_file_size(args.onnx_path, 2 * (1024**3))
+        except ValueError as e:
+            raise ValueError(
+                "Onnx model size larger than 2GB. Please set --use_external_data_format flag to bypass this validation."
+            ) from e
+
     calibration_data = None
     if args.calibration_data_path:
-        calibration_data = np.load(args.calibration_data_path, allow_pickle=True)
-        if args.calibration_data_path.endswith(".npz"):
-            # Convert the NpzFile object to a Python dictionary
-            calibration_data = {key: calibration_data[key] for key in calibration_data.files}
+        # Security: Disable pickle deserialization for untrusted sources to prevent RCE attacks
+        try:
+            calibration_data = np.load(
+                args.calibration_data_path, allow_pickle=args.trust_calibration_data
+            )
+            if args.calibration_data_path.endswith(".npz"):
+                # Convert the NpzFile object to a Python dictionary
+                calibration_data = {key: calibration_data[key] for key in calibration_data.files}
+        except ValueError as e:
+            if "allow_pickle" in str(e) and not args.trust_calibration_data:
+                raise ValueError(
+                    "Calibration data file contains pickled objects which pose a security risk. "
+                    "For trusted sources, you may enable pickle deserialization by setting the "
+                    "--trust_calibration_data flag."
+                ) from e
+            else:
+                raise
+
+    # Autotune configs
+    autotune_enabled = args.autotune is not None
+    if autotune_enabled:
+        apply_mode_presets(args)
+    autotune_node_filter_list = (
+        get_node_filter_list(args.autotune_node_filter_list) if autotune_enabled else None
+    )
 
     quantize(
         args.onnx_path,
@@ -298,6 +493,20 @@ def main():
         simplify=args.simplify,
         calibrate_per_node=args.calibrate_per_node,
         direct_io_types=args.direct_io_types,
+        opset=args.opset,
+        autotune=autotune_enabled,
+        autotune_output_dir=args.autotune_output_dir,
+        autotune_num_schemes_per_region=args.autotune_schemes_per_region,
+        autotune_pattern_cache_file=args.autotune_pattern_cache_file,
+        autotune_state_file=args.autotune_state_file,
+        autotune_qdq_baseline=args.autotune_qdq_baseline,
+        autotune_node_filter_list=autotune_node_filter_list,
+        autotune_verbose=args.autotune_verbose,
+        autotune_use_trtexec=args.autotune_use_trtexec,
+        autotune_timing_cache=args.autotune_timing_cache,
+        autotune_warmup_runs=args.autotune_warmup_runs,
+        autotune_timing_runs=args.autotune_timing_runs,
+        autotune_trtexec_args=args.autotune_trtexec_args,
     )
 
 

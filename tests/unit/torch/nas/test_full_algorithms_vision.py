@@ -21,6 +21,8 @@ import pytest
 import torch.nn as nn
 from _test_utils.torch.vision_models import get_tiny_mobilenet_and_input, get_tiny_resnet_and_input
 
+pytest.importorskip("torchprofile")
+
 import modelopt.torch.nas as mtn
 from modelopt.torch.nas.algorithms import ConstraintsFunc
 from modelopt.torch.opt.utils import named_hparams

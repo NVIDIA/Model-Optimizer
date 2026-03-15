@@ -79,12 +79,12 @@ def get_supported_speech_datasets() -> list[str]:
 
 def get_speech_dataset_dataloader(
     dataset_name: str = "peoples_speech",
-    processor: WhisperProcessor = None,
+    processor: WhisperProcessor | None = None,
     batch_size: int = 1,
     num_samples: int = 512,
-    device: str | None = None,
+    device: torch.device | None = None,
     dtype: torch.dtype | None = None,
-) -> DataLoader:
+) -> tuple[DataLoader, str]:
     """Get a dataloader with the dataset name and processor of the target model.
 
     Args:

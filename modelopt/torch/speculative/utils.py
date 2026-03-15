@@ -17,12 +17,23 @@
 
 import contextlib
 import copy
+import importlib.util
+import os
+import sys
 import warnings
 from collections import Counter, defaultdict, deque
 
 import torch
 import torch.distributed
+import transformers
+from huggingface_hub import snapshot_download
 from torch import nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
+from transformers.cache_utils import DynamicCache
+
+KIMI_K2_REPO_ID = "moonshotai/Kimi-K2-Thinking"
+KIMI_K2_PACKAGE_NAME = "kimi_k2_temp"
+
 
 REMOVE_THINK_CHAT_TEMPLATE = (
     "{% if '</think>' in content %}{% set content = content.split('</think>')[-1] %}{% endif %}"
@@ -32,6 +43,9 @@ REMOVE_THINK_CHAT_TEMPLATE = (
 def calibrate_frequent_vocab(tokenizer, text, target_vocab_size, output_file=None):
     """Given a calibration text, find the most common vocabs and return the mapping."""
     conversations = tokenizer.apply_chat_template(text)
+    # Transformers5.x returns a BatchEncoding from apply_chat_template
+    if hasattr(conversations, "input_ids"):
+        conversations = conversations.input_ids
     counter = Counter(conversations)
     vocab = counter.most_common(target_vocab_size)
     mapping = torch.zeros(target_vocab_size, dtype=torch.int64)
@@ -374,3 +388,147 @@ def temporary_set_config_value(config, field, value):
         yield
     finally:
         setattr(config, field, original_value)
+
+
+def _patch_dynamic_cache_compatibility() -> None:
+    """Monkey-patch DynamicCache for Kimi-K2 compatibility."""
+    if not hasattr(DynamicCache, "get_usable_length"):
+        DynamicCache.get_usable_length = (
+            lambda self, seq_len, layer_idx=0: DynamicCache.get_seq_length(self, layer_idx)
+        )
+
+
+def _import_module_from_path(module_path: str, module_name: str, package_name: str):
+    """Dynamically import a module from file path."""
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Failed to load module {module_name} from {module_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    module.__package__ = package_name
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _setup_kimi_k2_decoder():
+    """Setup Kimi-K2 decoder with proper imports and patches."""
+    # Download repository files
+    kimi_k2_path = snapshot_download(repo_id=KIMI_K2_REPO_ID, allow_patterns="*.py")
+
+    # Patch deprecated usage in Kimi implementation
+    _patch_dynamic_cache_compatibility()
+
+    # Import required modules
+    config_module_path = os.path.join(kimi_k2_path, "configuration_deepseek.py")
+    model_module_path = os.path.join(kimi_k2_path, "modeling_deepseek.py")
+
+    _import_module_from_path(
+        config_module_path, f"{KIMI_K2_PACKAGE_NAME}.configuration_deepseek", KIMI_K2_PACKAGE_NAME
+    )
+
+    kimi_k2_module = _import_module_from_path(
+        model_module_path, f"{KIMI_K2_PACKAGE_NAME}.modeling_deepseek", KIMI_K2_PACKAGE_NAME
+    )
+
+    # Patch Kimi Attention to init rope lazily to avoid save/load meta tensor error
+    original_init_rope = kimi_k2_module.DeepseekV3Attention._init_rope
+    original_forward = kimi_k2_module.DeepseekV3Attention.forward
+
+    def patched_fwd_with_lazy_rope_init(self, *args, **kwargs):
+        if not hasattr(self, "rotary_emb"):
+            original_init_rope(self)
+        return original_forward(self, *args, **kwargs)
+
+    kimi_k2_module.DeepseekV3Attention._init_rope = lambda self: None
+    kimi_k2_module.DeepseekV3Attention.forward = patched_fwd_with_lazy_rope_init
+
+    return getattr(kimi_k2_module, "DeepseekV3DecoderLayer")
+
+
+def get_ttt_msk_func(seq_length, ttt_step):
+    """Return mask function for Eagle3 Training Time Test."""
+
+    def ttt_msk_func(b, h, q_idx, kv_idx):
+        mask = kv_idx <= (q_idx - ttt_step)
+        for i in range(1, ttt_step + 1):
+            mask_block_i = (kv_idx == q_idx + i * seq_length - (ttt_step - i)) & (
+                kv_idx >= seq_length * i
+            )
+            mask = mask | mask_block_i
+        return mask
+
+    return ttt_msk_func
+
+
+@contextlib.contextmanager
+def enable_cp_ttt_patch():
+    """Context manager to enable CP TTT patch."""
+    import modelopt.torch.speculative.plugins.transformers
+
+    modelopt.torch.speculative.plugins.transformers.ENABLE_CP_TTT_PATCH = True
+    with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
+        try:
+            yield
+        finally:
+            modelopt.torch.speculative.plugins.transformers.ENABLE_CP_TTT_PATCH = False
+
+
+def load_vlm_or_llm_with_kwargs(model_name_or_path: str, **kwargs):
+    """Load a VLM or LLM with kwargs. Returns the model and model config."""
+    model_config = transformers.AutoConfig.from_pretrained(
+        model_name_or_path, trust_remote_code=True
+    )
+    if "vl" in model_config.model_type.lower():
+        model_cls = transformers.AutoModelForVision2Seq
+    else:
+        model_cls = transformers.AutoModelForCausalLM
+
+    if kwargs.get("num_hidden_layers") == 0:
+        if hasattr(model_config, "layer_types"):
+            kwargs["layer_types"] = []
+
+    return model_config, model_cls.from_pretrained(model_name_or_path, **kwargs)
+
+
+@contextlib.contextmanager
+def patch_transformers5_params_loading():
+    """Patch transformers 5.x parameter loading to preserve original `requires_grad` settings.
+
+    In transformers v5.x, loading a checkpoint forcibly sets parameters' requires_grad,
+    which may unintentionally unfreeze frozen parameters. This monkey-patch restores the original
+    `requires_grad` after loading parameters.
+
+    Reference:
+        https://github.com/huggingface/transformers/blob/v5.0.0.rc1-release/src/transformers/core_model_loading.py#L640
+    """
+    # Skip patching for non-applicable transformers version
+    if importlib.util.find_spec("transformers.core_model_loading") is None:
+        return
+    from transformers import core_model_loading
+
+    if not hasattr(core_model_loading, "set_param_for_module"):
+        return
+
+    orig_set_param_for_module = core_model_loading.set_param_for_module
+
+    def patched_set_param_for_module(*args, **kwargs):
+        """Monkey-patch set_param_for_module to restore original requires_grad."""
+        model, target_name = args[:2]
+        module_path, _, param_name = target_name.rpartition(".")
+        module_obj = model.get_submodule(module_path) if module_path else model
+
+        # Get original requires_grad value
+        orig_requires_grad = getattr(module_obj, param_name).requires_grad
+
+        # Call set_param_for_module
+        orig_set_param_for_module(*args, **kwargs)
+
+        # Restore original requires_grad value
+        getattr(module_obj, param_name).requires_grad = orig_requires_grad
+
+    try:
+        core_model_loading.set_param_for_module = patched_set_param_for_module
+        yield
+    finally:
+        core_model_loading.set_param_for_module = orig_set_param_for_module

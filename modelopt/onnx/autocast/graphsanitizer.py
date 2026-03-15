@@ -67,6 +67,7 @@ class GraphSanitizer:
         self.convert_opset()
         self.replace_layernorm_pattern()
         self.ensure_graph_name_exists()
+        self.duplicate_shared_constants()
         onnx_utils.name_onnx_nodes(self.model.graph)
         self.replace_custom_domain_nodes()
         self.sanitize_io_casts()
@@ -161,8 +162,8 @@ class GraphSanitizer:
             )
             self.min_opset = 19
 
-        # Convert if any default domain opset is below minimum
-        if any(op.version < self.min_opset for op in default_opsets):
+        # Convert if the default domain opset is below minimum
+        if onnx_utils.get_opset_version(self.model) < self.min_opset:
             invalid_opsets = [op.version for op in default_opsets if op.version < self.min_opset]
             try:
                 logger.info(
@@ -253,6 +254,12 @@ class GraphSanitizer:
         """Ensures that the model's name exists."""
         if not self.model.graph.name:
             self.model.graph.name = "model"
+
+    def duplicate_shared_constants(self) -> None:
+        """Duplicate constant tensors if they are shared."""
+        self.model, is_duplicated_constant = onnx_utils.duplicate_shared_constants(self.model)
+        if is_duplicated_constant:
+            logger.warning("Shared constants were detected and duplicated accordingly.")
 
     def _match_layernorm_pattern(self, mean_node: onnx.NodeProto) -> dict | None:
         """Match the sequence of operations that constitute a LayerNorm.

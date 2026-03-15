@@ -1,4 +1,4 @@
-# NOTE: Make sure to update version in dev requirements (setup.py) as well!
+# NOTE: Make sure to update version in dev requirements (pyproject.toml) as well!
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
@@ -7,6 +7,7 @@ repos:
         args: [--maxkb=500, --enforce-all]
         exclude: >
           (?x)^(
+              uv.lock|
               examples/diffusers/quantization/assets/.*.png|
               examples/diffusers/cache_diffusion/assets/.*.png|
           )$
@@ -24,7 +25,9 @@ repos:
     hooks:
       - id: ruff-check
         args: [--fix, --exit-non-zero-on-fix]
+        exclude: ^examples/specdec_bench/specdec_bench/datasets/speed\.py$
       - id: ruff-format
+        exclude: ^examples/specdec_bench/specdec_bench/datasets/speed\.py$
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.17.1
@@ -92,10 +95,13 @@ repos:
               examples/llm_eval/mmlu.py|
               examples/llm_eval/modeling.py|
               examples/llm_qat/main.py|
-              examples/llm_sparsity/finetune.py|
+              examples/llm_sparsity/weight_sparsity/finetune.py|
+              examples/specdec_bench/specdec_bench/models/specbench_medusa.py|
               examples/speculative_decoding/main.py|
               examples/speculative_decoding/medusa_utils.py|
               examples/speculative_decoding/server_generate.py|
+              experimental/dms/models/qwen3/configuration_qwen3_dms.py|
+              experimental/dms/models/qwen3/modeling_qwen3_dms.py|
           )$
 
       # Default hook for Apache 2.0 in c/c++/cuda files

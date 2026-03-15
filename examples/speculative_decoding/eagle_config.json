@@ -1,11 +1,2 @@
 {
-    "rope_scaling": {
-        "factor": 32.0,
-        "low_freq_factor": 1.0,
-        "high_freq_factor": 4.0,
-        "original_max_position_embeddings": 8192,
-        "rope_type": "llama3"
-    },
-    "initializer_range": 0.02,
-    "_attn_implementation": "sdpa"
 }

@@ -8,8 +8,6 @@ default:
 
 stages: # List of stages for jobs, and their order of execution
   - tests
-  - release
 
 include:
   - .gitlab/tests.yml
-  - .gitlab/release.yml

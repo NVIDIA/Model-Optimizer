@@ -31,7 +31,7 @@ class LogitsDistillationLoss(Loss):
     This function implements the distillation loss found in the paper: https://arxiv.org/abs/1503.02531.
     """
 
-    def __init__(self, temperature: float = 1.0, reduction: str = "batchmean"):
+    def __init__(self, temperature: float = 1.0, reduction: str = "mean"):
         """Constructor.
 
         Args:
@@ -57,10 +57,11 @@ class LogitsDistillationLoss(Loss):
         soft_log_probs = F.log_softmax(logits_s / self._temperature, dim=-1)
         soft_targets = F.softmax(logits_t / self._temperature, dim=-1)
 
-        soft_log_probs = soft_log_probs.view(-1, soft_log_probs.size(-1))
-        soft_targets = soft_targets.view(-1, soft_targets.size(-1))
-
         kd_loss = F.kl_div(soft_log_probs, soft_targets.detach(), reduction=self._reduction)
+
+        if self._reduction == "none":
+            # Remove vocab dimension
+            kd_loss = kd_loss.sum(dim=-1)
 
         # Since the magnitudes of the gradients produced by the soft logits scale as 1/(T^2),
         # multiplying them by T^2 ensures that the relative contributions of the logits

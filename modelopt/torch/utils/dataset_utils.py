@@ -16,10 +16,14 @@
 """Utility functions for getting samples and forward loop function for different datasets."""
 
 import copy
+import json
+import os
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from warnings import warn
 
+import requests
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -47,9 +51,9 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "name": "SFT",
             "split": ["code", "math", "science", "chat", "safety"],
         },
-        "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["input"])
-        + "\n"
-        + sample["output"],
+        "preprocess": lambda sample: (
+            "\n".join(turn["content"] for turn in sample["input"]) + "\n" + sample["output"]
+        ),
     },
     "nemotron-post-training-dataset-v2": {
         "config": {
@@ -57,6 +61,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "split": ["stem", "chat", "math", "code"],
         },
         "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "chat_key": "messages",
     },
     "nemotron-post-training-dataset-v1": {
         "config": {
@@ -64,6 +69,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "split": ["stem", "chat", "math", "code", "tool_calling"],
         },
         "preprocess": lambda sample: "\n".join(turn["content"] for turn in sample["messages"]),
+        "chat_key": "messages",
     },
     "magpie": {
         "config": {
@@ -71,9 +77,10 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
             "split": ["train"],
         },
         "preprocess": lambda sample: "\n".join(turn["value"] for turn in sample["conversations"]),
+        "chat_key": "conversations",
     },
     "cnn_dailymail": {
-        "config": {"path": "cnn_dailymail", "name": "3.0.0", "split": ["train"]},
+        "config": {"path": "abisee/cnn_dailymail", "name": "3.0.0", "split": ["train"]},
         "preprocess": lambda sample: sample["article"],
     },
     "pile": {
@@ -92,62 +99,219 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
         "config": {"path": "c4", "name": "en", "split": ["train"]},
         "preprocess": lambda sample: sample["text"],
     },
+    "wikitext": {
+        "config": {"path": "wikitext", "name": "wikitext-103-v1", "split": ["train"]},
+        "preprocess": lambda sample: sample["text"],
+    },
 }
 
 __all__ = [
     "create_forward_loop",
+    "download_hf_dataset_as_jsonl",
     "get_dataset_dataloader",
+    "get_dataset_samples",
+    "get_jsonl_text_samples",
     "get_max_batch_size",
     "get_supported_datasets",
 ]
 
 
-def _get_dataset_samples(dataset_name: str, num_samples: int) -> list[str]:
-    """Load a portion of train dataset with the dataset name and a given size.
+def get_jsonl_text_samples(jsonl_path: str, num_samples: int, key: str = "text") -> list[str]:
+    """Load up to ``num_samples`` entries from a JSONL file using the ``text`` field.
+
+    Each non-empty line must be a JSON object containing a ``text`` field.
+    """
+    if num_samples <= 0:
+        return []
+
+    samples: list[str] = []
+
+    with open(jsonl_path, encoding="utf-8") as f:
+        for line_idx, line in enumerate(f, start=1):
+            if len(samples) >= num_samples:
+                break
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"Invalid JSON in JSONL file {jsonl_path} at line {line_idx}: {e}"
+                ) from e
+
+            if not isinstance(obj, dict):
+                raise ValueError(
+                    f"Expected a JSON object in JSONL file {jsonl_path} at line {line_idx}, "
+                    f"got {type(obj)}."
+                )
+
+            if key not in obj:
+                raise ValueError(
+                    f"Missing required field '{key}' in JSONL file {jsonl_path} at line {line_idx}."
+                )
+
+            samples.append(str(obj[key]))
+
+    return samples
+
+
+def _normalize_splits(split: str | list[str]) -> list[str]:
+    """Ensure split is always a list."""
+    return [split] if isinstance(split, str) else list(split)
+
+
+def _auto_preprocess_sample(
+    sample: dict, dataset_name: str, tokenizer: "PreTrainedTokenizerBase | None" = None
+) -> str:
+    """Auto-detect dataset format and preprocess a single sample based on column conventions.
+
+    Column detection order (first match wins):
+        1. ``messages`` / ``conversations`` -> ``tokenizer.apply_chat_template`` (with ``tools`` if present)
+        2. ``prompt`` (+ optional ``completion`` / ``response`` / ``output``) -> concatenate
+        3. ``text`` -> use as-is
+        4. ``input`` (+ optional ``output``) -> concatenate
+
+    Raises:
+        ValueError: If the tokenizer is missing/incompatible for chat-format datasets,
+            or if no recognized column is found.
+    """
+    chat_key = next((k for k in ("messages", "conversations") if sample.get(k)), None)
+    if chat_key is not None:
+        if tokenizer is None or not hasattr(tokenizer, "apply_chat_template"):
+            raise ValueError(
+                f"Dataset '{dataset_name}' has a '{chat_key}' column but no tokenizer with "
+                "apply_chat_template was provided."
+            )
+        kwargs: dict[str, Any] = {}
+        tools = sample.get("tools")
+        if tools:
+            kwargs["tools"] = tools
+        return tokenizer.apply_chat_template(sample[chat_key], tokenize=False, **kwargs)
+
+    if "prompt" in sample:
+        parts = [sample["prompt"]]
+        parts.extend(sample[k] for k in ("completion", "response", "output") if sample.get(k))
+        return "\n".join(parts)
+
+    if "text" in sample:
+        return sample["text"]
+
+    if "input" in sample:
+        parts = [sample["input"]]
+        if sample.get("output"):
+            parts.append(sample["output"])
+        return "\n".join(parts)
+
+    raise ValueError(
+        f"Cannot auto-detect format for dataset '{dataset_name}'. "
+        f"Found columns: {list(sample.keys())}. "
+        "Expected one of: 'messages', 'conversations', 'prompt', 'text', or 'input'."
+    )
+
+
+def get_dataset_samples(
+    dataset_name: str,
+    num_samples: int,
+    *,
+    apply_chat_template: bool = False,
+    tokenizer: "PreTrainedTokenizerBase | None" = None,
+    split: str | list[str] | None = None,
+) -> list[str]:
+    """Load a portion of a dataset with the dataset name and a given size.
+
+    Supports both registered datasets (in ``SUPPORTED_DATASET_CONFIG``) and arbitrary
+    HuggingFace datasets.  Unregistered datasets are auto-detected by column names:
+    ``messages``/``conversations`` (chat), ``prompt``, ``text``, or ``input``.
 
     Args:
-        dataset_name: Name of the dataset to load.
+        dataset_name: Name or HuggingFace path of the dataset to load, a local directory path,
+            or a path to a ``.jsonl`` file.  For local directory paths, the
+            predefined config from ``SUPPORTED_DATASET_CONFIG`` is matched if the base folder name
+            matches a registered key (e.g. ``/hf-local/abisee/cnn_dailymail`` matches ``cnn_dailymail`` key).
         num_samples: Number of samples to load from the dataset.
+        apply_chat_template: Whether to apply the chat template to the samples
+            (if supported by the dataset).  For unregistered datasets with a
+            ``messages`` column, chat template is always applied regardless of
+            this flag.
+        tokenizer: Tokenizer to use for applying the chat template to the samples.
+            No tokenization is done and plain text is still returned.
+        split: Override the split(s) to load.  Accepts a single split name or a list.
+            If ``None``, uses the splits defined in ``SUPPORTED_DATASET_CONFIG`` for
+            registered datasets, or ``["train"]`` for unregistered datasets.
 
     Returns:
         Samples: The list of samples.
     """
-    # Load the dataset
-    if dataset_name not in SUPPORTED_DATASET_CONFIG:
-        raise NotImplementedError(
-            f"dataset {dataset_name} is not supported. Please use one of the following:"
-            f" {get_supported_datasets()}."
-        )
+    # Local JSONL file path support (each line is a JSON object with a `text` field).
+    if dataset_name.endswith(".jsonl"):
+        return get_jsonl_text_samples(dataset_name, num_samples, key="text")
 
     from datasets import load_dataset
 
-    dataset_config = SUPPORTED_DATASET_CONFIG[dataset_name]
-    # It's unfortunate that the load_dataset function does not support split a list while streaming.
-    # So we need to load the dataset for each split.
-    config = dataset_config["config"].copy()
-    splits = config.pop("split", [None])
-    dataset_splits = [
-        load_dataset(
-            streaming=True,
-            **config,
-            split=split,
+    local_dataset_path = None
+    if os.path.exists(dataset_name):  # Local path
+        local_dataset_path = dataset_name
+        dataset_name = os.path.basename(os.path.normpath(local_dataset_path))
+
+    is_registered = dataset_name in SUPPORTED_DATASET_CONFIG
+
+    if is_registered:
+        dataset_config = SUPPORTED_DATASET_CONFIG[dataset_name]
+        config = dataset_config["config"].copy()
+        if local_dataset_path:
+            config["path"] = local_dataset_path
+        splits = _normalize_splits(split) if split is not None else config.pop("split", [None])
+        if split is not None:
+            config.pop("split", None)
+
+        if apply_chat_template:
+            if "chat_key" not in dataset_config:
+                warn(
+                    f"Dataset {dataset_name} does not support chat template."
+                    " Chat template will not be applied."
+                )
+            elif tokenizer is None:
+                raise ValueError("Tokenizer is required when applying chat template.")
+
+        def _preprocess(sample: dict) -> str:
+            if apply_chat_template and "chat_key" in dataset_config:
+                kwargs: dict[str, Any] = {}
+                tools = sample.get("tools")
+                if tools:
+                    kwargs["tools"] = tools
+                return tokenizer.apply_chat_template(  # type: ignore[union-attr]
+                    sample[dataset_config["chat_key"]], tokenize=False, **kwargs
+                )
+            return dataset_config["preprocess"](sample)
+
+    else:
+        print(
+            f"Dataset '{dataset_name}' is not in SUPPORTED_DATASET_CONFIG. "
+            "Auto-detecting format from column names."
         )
-        for split in splits
-    ]
+        config = {"path": local_dataset_path or dataset_name}
+        splits = _normalize_splits(split) if split is not None else ["train"]
 
-    # Split the samples evenly across the splits
-    # For streaming datasets, there is no reliable way to get the number of samples in each split
-    # other than loading the entire dataset. So, we just use the same number of samples for each split.
-    num_samples_splits = [num_samples // len(dataset_splits) for _ in dataset_splits]
-    num_samples_splits[-1] += num_samples - sum(num_samples_splits)
-    samples = []
-    for dataset, num_samples_split in zip(dataset_splits, num_samples_splits):
+        def _preprocess(sample: dict) -> str:
+            return _auto_preprocess_sample(sample, dataset_name, tokenizer)
+
+    # load_dataset does not support a list of splits while streaming, so load each separately.
+    print(f"Loading dataset with {config=} and {splits=}")
+    dataset_splits = [load_dataset(streaming=True, **config, split=s) for s in splits]
+
+    num_per_split = [num_samples // len(dataset_splits)] * len(dataset_splits)
+    num_per_split[-1] += num_samples - sum(num_per_split)
+
+    samples: list[str] = []
+    for dataset, n in zip(dataset_splits, num_per_split):
         for i, sample in enumerate(dataset):
-            if i >= num_samples_split:
+            if i >= n:
                 break
-
-            # Apply preprocess function to the sample
-            samples.append(dataset_config["preprocess"](sample))
+            text = _preprocess(sample)
+            if text:
+                samples.append(text)
 
     return samples
 
@@ -173,25 +337,29 @@ def get_dataset_dataloader(
     batch_size: int = 1,
     num_samples: int | list[int] = 512,
     max_sample_length: int = 512,
-    device: str | None = None,
+    device: torch.device | None = None,
     include_labels: bool = False,
+    apply_chat_template: bool = False,
 ) -> DataLoader:
-    """Get a dataloader with the dataset name and toknizer of the target model.
+    """Get a dataloader with the dataset name and tokenizer of the target model.
 
     Args:
-        dataset_name: Name of the dataset to load.
-        tokenizer: Instancne of Hugginface tokenizer.
+        dataset_name: Name of the dataset to load, or a path to a ``.jsonl`` file.
+            If a ``.jsonl`` file is provided, each line must be a JSON object with a ``text`` field.
+        tokenizer: Instance of HuggingFace tokenizer.
         batch_size: Batch size of the returned dataloader.
         num_samples: Number of samples from the dataset.
         max_sample_length: Maximum length of a sample.
         device: Target device for the returned dataloader.
         include_labels: Whether to include labels in the dataloader.
+        apply_chat_template: Whether to apply the chat template to the samples
+            (if supported by the dataset).
 
     Returns:
-        A instance of dataloader.
+        An instance of dataloader.
     """
     assert tokenizer is not None, "Please provide a tokenizer."
-    # batch_encode_plus will modify the tokenizer in place, so we need to clone it.
+    # Tokenizer encoding may modify the tokenizer in place, so we need to clone it.
     tokenizer = copy.deepcopy(tokenizer)
 
     if tokenizer.padding_side != "left":
@@ -211,10 +379,12 @@ def get_dataset_dataloader(
 
     all_samples = []
     for ds_name, num_sample in zip(dataset_name, num_samples):
-        samples = _get_dataset_samples(ds_name, num_sample)
+        samples = get_dataset_samples(
+            ds_name, num_sample, apply_chat_template=apply_chat_template, tokenizer=tokenizer
+        )
         all_samples.extend(samples)
 
-    batch_encoded = tokenizer.batch_encode_plus(
+    batch_encoded = tokenizer(
         all_samples,
         return_tensors="pt",
         padding=True,
@@ -264,7 +434,7 @@ def get_max_batch_size(
     model: torch.nn.Module,
     max_sample_length: int = 512,
     sample_memory_usage_ratio: float = 1.0,
-    sample_input_single_batch: torch.Tensor = None,
+    sample_input_single_batch: torch.Tensor | None = None,
     enable_grad: bool = False,
 ):
     """Get the maximum batch size that can be used for the model."""
@@ -493,3 +663,89 @@ def create_forward_loop(
 def model_type_is_enc_dec(model):
     enc_dec_model_list = ["t5", "bart", "whisper"]
     return any(model_name in model.__class__.__name__.lower() for model_name in enc_dec_model_list)
+
+
+def download_hf_dataset_as_jsonl(
+    dataset_name: str,
+    output_dir: str | Path,
+    json_keys: list[str] = ["text"],
+    name: str | None = None,
+    split: str | None = "train",
+    max_samples_per_split: int | None = None,
+) -> list[str]:
+    """Download a Hugging Face dataset and save as JSONL files.
+
+    Args:
+        dataset_name: Name or HuggingFace path of the dataset to download
+        output_dir: Directory to save the JSONL files
+        json_keys: List of keys to extract from the dataset. Defaults to ["text"].
+        name: Name of the subset to download
+        split: Split of the dataset to download. Defaults to "train".
+        max_samples_per_split: Maximum number of samples to download per split. Defaults to None.
+
+    Returns:
+        List of paths to downloaded JSONL files.
+    """
+    from datasets import load_dataset
+    from huggingface_hub.utils import build_hf_headers
+
+    print(f"Downloading dataset {dataset_name} from Hugging Face")
+    jsonl_paths: list[str] = []
+
+    try:
+        response = requests.get(
+            f"https://datasets-server.huggingface.co/splits?dataset={dataset_name}",
+            headers=build_hf_headers(),
+            timeout=10,
+        )
+        response.raise_for_status()
+    except requests.RequestException as e:
+        raise RuntimeError(f"Failed to fetch dataset splits for {dataset_name}: {e}") from e
+
+    response_json = response.json()
+    print(f"\nFound {len(response_json['splits'])} total splits for {dataset_name}:")
+    for entry in response_json["splits"]:
+        print(f"\t{entry}")
+
+    splits_to_process = []
+    for entry in response_json["splits"]:
+        if name is not None and name != entry.get("config", None):
+            continue
+        if split is not None and split != entry["split"]:
+            continue
+        splits_to_process.append(entry)
+
+    print(f"\nFound {len(splits_to_process)} splits to process:")
+    for entry in splits_to_process:
+        print(f"\t{entry}")
+
+    for entry in splits_to_process:
+        skip_processing = False
+        path = entry["dataset"]
+        name = entry.get("config", None)
+        split = entry["split"]
+        if max_samples_per_split is not None:
+            split = f"{split}[:{max_samples_per_split}]"
+        jsonl_file_path = f"{output_dir}/{path.replace('/', '--')}_{name}_{split}.jsonl"
+
+        print(f"\nLoading HF dataset {path=}, {name=}, {split=}")
+        if os.path.exists(jsonl_file_path):
+            jsonl_paths.append(jsonl_file_path)
+            print(f"\t[SKIP] Raw dataset {jsonl_file_path} already exists")
+            continue
+        ds = load_dataset(path=path, name=name, split=split)
+
+        for key in json_keys:
+            if key not in ds.features:
+                warn(f"[SKIP] {key=} not found in {ds.features=}")
+                skip_processing = True
+                break
+
+        if skip_processing:
+            continue
+
+        print(f"Saving raw dataset to {jsonl_file_path}")
+        ds.to_json(jsonl_file_path)
+        jsonl_paths.append(jsonl_file_path)
+
+    return jsonl_paths

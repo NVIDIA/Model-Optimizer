@@ -30,14 +30,6 @@ from modelopt.torch.quantization.tensor_quant import mx_format_map
 class TestFakeTensorQuantCuda(FakeTensorQuantTester):
     device = "cuda"
 
-    def test_non_current_gpu(self, need_2_gpus):
-        device = torch.cuda.device_count() - 1
-        assert torch.cuda.current_device() != device
-        x = torch.randn(3, 4).cuda(device)
-        quant_x = tensor_quant.fake_tensor_quant(x, torch.max(torch.abs(x)), None)
-        quant_x_ref = quant(x, torch.max(torch.abs(x)), fake=True)
-        assert torch.allclose(quant_x, quant_x_ref)
-
 
 class TestCudaExt:
     @pytest.mark.parametrize("num_bits", [3, 4, 5, 7, 8, 11])
@@ -145,15 +137,6 @@ class TestScaledE4M3:
         loss.backward()
         assert torch.allclose(quant_x.grad, x.grad)
 
-    def test_non_current_gpu(self, need_2_gpus):
-        torch.cuda.set_device(0)
-        device = torch.cuda.device_count() - 1
-        x = torch.randn(3, 4).cuda()
-        quant_x_ref = tensor_quant.fp8_eager(x, torch.tensor(448.0, device=x.device))
-        x = x.cuda(device)
-        quant_x = tensor_quant.scaled_e4m3(x, None, None, 4, 3)
-        assert torch.allclose(quant_x.cuda(), quant_x_ref)
-
     @pytest.mark.parametrize("axis", [0, 1, 2])
     def test_e4m3_per_channel(self, axis):
         x = torch.randn(4, 4, 4, dtype=torch.float32).cuda()
@@ -161,6 +144,19 @@ class TestScaledE4M3:
         xq_ref = tensor_quant.fp8_eager(x, amax)
         xq_test = tensor_quant.scaled_e4m3(x, amax, None, 4, 3)
         assert torch.allclose(xq_test, xq_ref)
+
+    @pytest.mark.parametrize("device", ["cuda", "cpu"])
+    def test_zero_amax_is_finite(self, device):
+        x = torch.randn(4, 4, device=device, dtype=torch.float32)
+        amax = torch.zeros((1,), device=device)
+        xq = tensor_quant.scaled_e4m3(x, amax, None, 4, 3)
+        assert torch.isfinite(xq).all()
+
+    def test_zero_amax_per_channel_is_finite(self):
+        x = torch.randn(2, 3, 4, device="cuda", dtype=torch.float32)
+        amax = torch.tensor([1.0, 0.0, 1.0], device="cuda").view(1, 3, 1)
+        xq = tensor_quant.scaled_e4m3(x, amax, None, 4, 3)
+        assert torch.isfinite(xq).all()
 
 
 class Testfp4:
@@ -189,7 +185,7 @@ class Testfp4:
                 inputs.abs().amax(),
             )
             assert torch.allclose(quantized_outputs, expected_outputs)
-            if triton_kernel.IS_AVAILABLE and not skip_triton:
+            if hasattr(triton_kernel, "fp4_fake_quant_block") and not skip_triton:
                 quantized_outputs_triton = triton_kernel.fp4_fake_quant_block(
                     inputs, inputs.abs().amax()
                 )
@@ -221,3 +217,98 @@ class Testfp4:
         test_in *= sign
         test_out = torch.tensor([[0.5, 1, 1.5, 2, 3, 4, 6, 6]]).cuda() * sign
         _test_fp4_kernel(test_in, test_out)
+
+    @pytest.mark.skipif(not triton_kernel.IS_AVAILABLE, reason="triton kernel is not available")
+    @pytest.mark.parametrize(
+        "set_torch_dtype", [torch.float, torch.float16, torch.bfloat16], indirect=True
+    )
+    @pytest.mark.parametrize("block_size", [8, 16, 32])
+    @pytest.mark.parametrize("skip_scale_quant", [True, False])
+    def test_static_blockwise_fp4(self, set_torch_dtype, block_size, skip_scale_quant):
+        # Test with e2m1 table values
+        sign = torch.randint(0, 2, (1, 8)).cuda() * 2 - 1
+
+        def _get_test_inputs_outputs(test_in, test_out, num_blocks=4):
+            return torch.concat((test_in,) * (block_size // 8), dim=-1).repeat(
+                num_blocks, 1
+            ), torch.concat((test_out,) * (block_size // 8), dim=-1).repeat(num_blocks, 1)
+
+        def _test_static_fp4_kernel(test_in, test_out, amax_value=6.0):
+            inputs, expected_outputs = _get_test_inputs_outputs(test_in, test_out)
+            num_blocks = inputs.shape[0]
+            amax = torch.full((num_blocks,), amax_value, device=inputs.device)
+
+            quantized_outputs_triton = triton_kernel.static_blockwise_fp4_fake_quant(
+                inputs, amax=amax, quantize_block_scales=not skip_scale_quant
+            )
+
+            # Only check exact values when skip_scale_quant=True
+            # When scale quantization is enabled, the scale changes slightly, affecting outputs
+            if skip_scale_quant:
+                assert torch.allclose(quantized_outputs_triton, expected_outputs, atol=1e-6)
+            else:
+                assert quantized_outputs_triton.shape == expected_outputs.shape
+
+        test_in = torch.tensor([[0, 0.5, 1, 1.5, 2, 3, 4, 6]]).cuda() * sign
+        test_out = torch.tensor([[0, 0.5, 1, 1.5, 2, 3, 4, 6]]).cuda() * sign
+        _test_static_fp4_kernel(test_in, test_out)
+
+        if skip_scale_quant:
+            # Test slightly below the e2m1 boundary values.
+            # Numbers should be quantized down to the corresponding e2m1 value.
+            test_in = torch.tensor([[0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5, 6]]).cuda()
+            test_in[:, :-1] -= 0.1
+            test_in *= sign
+            test_out = torch.tensor([[0.0, 0.5, 1, 1.5, 2, 3, 4, 6]]).cuda() * sign
+            _test_static_fp4_kernel(test_in, test_out)
+
+            # Test slightly above the e2m1 boundary values.
+            # Numbers should be quantized up to the corresponding e2m1 value.
+            test_in = torch.tensor([[0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5, 6]]).cuda()
+            test_in[:, :-1] += 0.1
+            test_in *= sign
+            test_out = torch.tensor([[0.5, 1, 1.5, 2, 3, 4, 6, 6]]).cuda() * sign
+            _test_static_fp4_kernel(test_in, test_out)
+
+    @pytest.mark.skipif(
+        not hasattr(triton_kernel, "fp4_fake_quant_block"),
+        reason="fp4_fake_quant_block requires compute >= 8.9",
+    )
+    @pytest.mark.parametrize(
+        "set_torch_dtype", [torch.float, torch.float16, torch.bfloat16], indirect=True
+    )
+    @pytest.mark.parametrize("block_size", [16, 32, 64])
+    @pytest.mark.parametrize("num_blocks", [4, 8, 16])
+    def test_static_vs_dynamic_fp4_kernels(self, set_torch_dtype, block_size, num_blocks):
+        """Test that static kernel with computed scales matches dynamic kernel behavior.
+
+        The dynamic kernel computes scales dynamically from block-wise max values with FP8 quantization.
+        This test verifies that the static kernel with pre-computed amax (matching dynamic kernel's logic)
+        produces the same results as the dynamic kernel.
+        """
+        torch.manual_seed(42)
+
+        x = torch.randn(num_blocks, block_size, dtype=torch.float32).cuda() * 10
+        block_amax = x.abs().max(dim=1, keepdim=False)[0]
+        global_amax = block_amax.max()
+        output_static = triton_kernel.static_blockwise_fp4_fake_quant(
+            x,
+            amax=block_amax,
+            global_amax=global_amax,
+            quantize_block_scales=True,
+        )
+        output_dynamic = triton_kernel.fp4_fake_quant_block(
+            x,
+            global_amax=global_amax,
+            block_size=block_size,
+            tile_rows=num_blocks,
+            tile_cols=block_size,
+        )
+
+        assert torch.allclose(output_static, output_dynamic, rtol=1e-3, atol=1e-5), (
+            f"Static and dynamic kernels produced different outputs "
+            f"(param=amax).\n"
+            f"Max abs diff: {(output_static - output_dynamic).abs().max()}\n"
+            f"Mean abs diff: {(output_static - output_dynamic).abs().mean()}\n"
+            f"Max relative diff: {((output_static - output_dynamic).abs() / (output_dynamic.abs() + 1e-8)).max()}"
+        )

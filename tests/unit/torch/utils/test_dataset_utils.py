@@ -18,7 +18,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from modelopt.torch.utils.dataset_utils import _process_batch
+from modelopt.torch.utils.dataset_utils import _process_batch, get_dataset_samples
 
 
 def setup_test_data():
@@ -101,3 +101,27 @@ def test_batch_contents_preserved():
 
     # Verify all values were processed in the correct order
     assert processed_values == [0, 1, 2, 3]
+
+
+@pytest.mark.parametrize("test_local_path", [True, False])
+def test_get_dataset_samples_with_unsupported_minipile_dataset(tmp_path, test_local_path):
+    pytest.importorskip("datasets")
+    pytest.importorskip("huggingface_hub")
+
+    from huggingface_hub import snapshot_download
+
+    dataset_name = "nanotron/minipile_100_samples"
+    if test_local_path:
+        local_dir = str(tmp_path / dataset_name)
+        snapshot_download(
+            repo_id=dataset_name,
+            repo_type="dataset",
+            local_dir=local_dir,
+        )
+        dataset_name = local_dir
+
+    samples = get_dataset_samples(dataset_name, num_samples=5)
+
+    assert isinstance(samples, list)
+    assert len(samples) == 5
+    assert all(isinstance(s, str) and len(s) > 0 for s in samples)

@@ -25,3 +25,8 @@ with import_plugin("megatron_mmlu"):
 
 with import_plugin("megatron_preprocess_data"):
     from .megatron_preprocess_data import *
+
+# NOTE: Dont pre-import megatron bridge plugin here to avoid circular dependency issues.
+#   We dont register anything so this isnt a problem.
+# with import_plugin("megatron bridge"):
+#     from .mbridge import *

@@ -152,10 +152,10 @@ def save_sharded_modelopt_state(
 
         return config
 
-    if dist.is_master():
+    # Save own version of run config, if not already saved by the framework.
+    if dist.is_master() and not os.path.exists(f"{checkpoint_name}/run_config.yaml"):
         run_config_name = f"{checkpoint_name}/modelopt_run_config.yaml"
-        # We avoid deepcopy here since some attributes in Megatron-Bridge config cannot be
-        # deepcopy.
+        # We avoid deepcopy since some attributes in Megatron-Bridge config cannot be deepcopied.
         config_dict = _parse_transformer_config(model[0].config.__dict__)
         config_dict["nvidia_modelopt_version"] = modelopt.__version__
         with open(run_config_name, "w") as f:
@@ -242,6 +242,7 @@ def restore_sharded_modelopt_state(
         return
 
     # Loading the common modelopt_state (replicated on all ranks)
+    # Security NOTE: weights_only=False is used here on NVIDIA-generated file, not on untrusted user input
     common_modelopt_state = torch.load(
         modelopt_checkpoint_name + "/" + COMMON_STATE_FNAME, weights_only=False
     )

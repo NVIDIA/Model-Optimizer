@@ -48,7 +48,6 @@ while [ $# -gt 0 ]; do
     --fsdp_transformer_layer_cls_to_wrap*)      FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
     --max_seq_length*)                          MAX_SEQ_LENGTH=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
     --backend*)                                 BACKEND=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
-    --use_fsdp2*)                               USE_FSDP2=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
     *)
       >&2 printf "Error: Invalid argument ${1#*=}\n"
       exit 1
@@ -83,7 +82,7 @@ COMPRESS=${COMPRESS:-"False"}
 DISTILL=${DISTILL:-"False"}
 TEACHER_MODEL=${TEACHER_MODEL:-$MODEL}
 FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP=${FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP:-"LlamaDecoderLayer"}
-BACKEND=${BACKEND:-"fsdp1"}
+BACKEND=${BACKEND:-"fsdp2"}
 
 if [ -z $QUANT_CFG ]; then
   QUANT_ARGS=""
@@ -94,12 +93,6 @@ fi
 OPTIONAL_ARGS=""
 if [ ! -z $MAX_STEPS ]; then
   OPTIONAL_ARGS="$OPTIONAL_ARGS --max_steps $MAX_STEPS"
-fi
-
-# Set backend based on --backend parameter, with backward compatibility for --use_fsdp2
-if [[ "${USE_FSDP2,,}" == "true" ]]; then
-  echo "Warning: --use_fsdp2 is deprecated. Use --backend=fsdp2 instead."
-  BACKEND="fsdp2"
 fi
 
 # if compress is true, set backend to ddp
@@ -115,7 +108,7 @@ case "${BACKEND,,}" in
     FSDP_ARGS="--fsdp_transformer_layer_cls_to_wrap $FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP"
     ;;
   "fsdp2")
-    echo "Using FSDP2 instead of FSDP1. FSDP2 is not mature yet! Please use it with latest torch and transformers."
+    echo "Using FSDP2 instead of FSDP1."
     CONFIG_FILE="fsdp2.yaml"
     FSDP_ARGS="--fsdp_transformer_layer_cls_to_wrap $FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP"
     ;;
@@ -139,8 +132,11 @@ esac
 DISTILLATION_ARGS=""
 if [[ "${DISTILL,,}" == "true" ]]; then
   DISTILLATION_ARGS="--distill $DISTILL --teacher_model $TEACHER_MODEL"
-  # Distillation does not work with memory efficient loading for FSDP
-  if [[ "${BACKEND,,}" == "fsdp1" || "${BACKEND,,}" == "fsdp2" ]]; then
+  if [[ "${BACKEND,,}" == "fsdp1" ]]; then
+    echo "Error: Distillation does not support FSDP1. Use FSDP2 instead."
+    exit 1
+  elif [[ "${BACKEND,,}" == "fsdp2" ]]; then
+    # Distillation does not work with memory efficient loading for FSDP
     FSDP_ARGS="$FSDP_ARGS --fsdp_cpu_ram_efficient_loading False"
   fi
 fi

@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+from modelopt.torch.utils.dataset_utils import download_hf_dataset_as_jsonl
+from modelopt.torch.utils.plugins.megatron_preprocess_data import megatron_preprocess_data
+
+
+def test_megatron_preprocess_data_with_minipile_jsonl(tmp_path):
+    """Test megatron_preprocess_data with nanotron/minipile_100_samples dataset.
+
+    This test:
+    1. Downloads the HuggingFace dataset "nanotron/minipile_100_samples"
+    2. Converts it to JSONL format
+    3. Calls megatron_preprocess_data with jsonl_paths
+    4. Verifies that output files are created
+    """
+    input_jsonl = download_hf_dataset_as_jsonl("nanotron/minipile_100_samples", tmp_path / "raw")
+    assert len(input_jsonl) == 1, "Expected 1 JSONL file"
+    input_jsonl = Path(input_jsonl[0])
+
+    assert input_jsonl.stat().st_size > 0, "Input JSONL file should not be empty"
+
+    with open(input_jsonl, encoding="utf-8") as f:
+        first_line = f.readline().strip()
+        first_item = json.loads(first_line)
+        assert "text" in first_item, "Each JSONL item should have a 'text' field"
+        assert isinstance(first_item["text"], str), "Text field should be a string"
+
+    megatron_preprocess_data(
+        jsonl_paths=input_jsonl,
+        output_dir=tmp_path,
+        tokenizer_name_or_path="gpt2",
+        json_keys=["text"],
+        workers=1,
+    )
+
+    output_prefix = tmp_path / "nanotron--minipile_100_samples_default_train"
+    expected_bin_file = f"{output_prefix}_text_document.bin"
+    expected_idx_file = f"{output_prefix}_text_document.idx"
+
+    assert os.path.exists(expected_bin_file), (
+        f"Expected binary file {expected_bin_file} should exist"
+    )
+    assert os.path.exists(expected_idx_file), (
+        f"Expected index file {expected_idx_file} should exist"
+    )
+
+    assert os.path.getsize(expected_bin_file) > 0, "Binary file should not be empty"
+    assert os.path.getsize(expected_idx_file) > 0, "Index file should not be empty"
+
+
+@pytest.mark.parametrize(
+    ("hf_dataset", "hf_split", "json_keys"),
+    [
+        ("nanotron/minipile_100_samples", "train", ["text"]),
+        ("HuggingFaceTB/everyday-conversations-llama3.1-2k", "test_sft", ["messages"]),
+    ],
+)
+def test_megatron_preprocess_data_with_hf_dataset(tmp_path, hf_dataset, hf_split, json_keys):
+    """Test megatron_preprocess_data with dataset download, --append_eod and --max_sequence_length.
+
+    Downloads nanotron/minipile_100_samples train split from Hugging Face and tokenizes it.
+    """
+    megatron_preprocess_data(
+        hf_dataset=hf_dataset,
+        hf_split=hf_split,
+        hf_max_samples_per_split=10,
+        output_dir=tmp_path,
+        tokenizer_name_or_path="Qwen/Qwen3-0.6B",
+        json_keys=json_keys,
+        append_eod=True,
+        max_sequence_length=32,
+        workers=4,
+    )
+
+    bin_files = sorted(tmp_path.glob("*.bin"))
+    idx_files = sorted(tmp_path.glob("*.idx"))
+
+    assert len(bin_files) > 0, f"Expected .bin files in {tmp_path}, found none"
+    assert len(idx_files) > 0, f"Expected .idx files in {tmp_path}, found none"
+
+    for f in bin_files + idx_files:
+        assert f.stat().st_size > 0, f"{f.name} should not be empty"

@@ -98,6 +98,7 @@ class TestWhisper(WithRequirements):
         ),
         # kv_cache
         PTQCommand(quant="nvfp4_awq", kv_cache_quant="nvfp4"),
+        PTQCommand(quant="fp8", kv_cache_quant="fp8_cast", min_sm=89),
         # autoquant_kv_cache
         PTQCommand(
             quant="nvfp4,fp8",
@@ -114,6 +115,7 @@ class TestWhisper(WithRequirements):
         # sm89
         PTQCommand(quant="fp8", min_sm=89),
         PTQCommand(quant="fp8", kv_cache_quant="none", min_sm=89),  # sm100
+        PTQCommand(quant="mxfp8", min_sm=100),
         PTQCommand(quant="nvfp4", min_sm=100),
         #
         # multi_gpu

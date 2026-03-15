@@ -15,8 +15,6 @@
 
 """Eagle model to support eagle decoding."""
 
-import torch
-
 from modelopt.torch.opt.dynamic import DynamicModule
 
 
@@ -28,24 +26,16 @@ class EagleModel(DynamicModule):
 
     def modify(
         self,
-        eagle_offline,
-        eagle_hidden_state_distillation,
-        eagle_self_logit_distillation,
-        eagle_freeze_base_model,
-        eagle_report_acc,
-        eagle_reuse_base_decoder,
-        eagle_loss_decay_factor,
-        eagle_architecture_config,
+        config,
     ):
         """Base Eagle Model modify function. Child class should implement the details."""
-        self.eagle_offline = eagle_offline
-        self.eagle_hidden_state_distillation = eagle_hidden_state_distillation
-        self.eagle_self_logit_distillation = eagle_self_logit_distillation
-        self.eagle_freeze_base_model = eagle_freeze_base_model
-        self.eagle_report_acc = eagle_report_acc
-        self.eagle_reuse_base_decoder = eagle_reuse_base_decoder
-        self.eagle_loss_decay_factor = eagle_loss_decay_factor
-
-        if eagle_architecture_config.get("parallel_draft_step", 1) > 1:
-            for i in range(eagle_architecture_config.get("parallel_draft_step") - 1):
-                self.register_buffer(f"mask_token_{i}", torch.tensor(-1))
+        self.eagle_offline = config.eagle_offline
+        self.eagle_hidden_state_distillation = config.eagle_hidden_state_distillation
+        self.eagle_self_logit_distillation = config.eagle_self_logit_distillation
+        self.eagle_freeze_base_model = config.eagle_freeze_base_model
+        self.eagle_report_acc = config.eagle_report_acc
+        self.eagle_reuse_base_decoder = config.eagle_reuse_base_decoder
+        self.eagle_loss_decay_factor = config.eagle_loss_decay_factor
+        self.eagle_decoder_type = config.eagle_decoder_type
+        self.eagle_ttt_steps = config.eagle_ttt_steps
+        self.eagle_mix_hidden_states = config.eagle_mix_hidden_states

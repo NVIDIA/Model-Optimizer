@@ -15,6 +15,7 @@
 
 """Utility functions related to onnx."""
 
+import copy
 import io
 import os
 import tempfile
@@ -29,6 +30,9 @@ from onnx.helper import get_attribute_value
 from onnx_graphsurgeon import Constant, Node, Variable
 
 from modelopt.onnx.logging_config import logger
+
+# Base minimum opset for quantization (opset 19 is the first to support fp16 scales)
+BASE_MIN_OPSET = 19
 
 
 def get_input_names_from_bytes(model_bytes: bytes, external_inputs_only: bool = True) -> list[str]:
@@ -552,7 +556,7 @@ def duplicate_shared_constants(onnx_model: onnx.ModelProto) -> tuple[onnx.ModelP
     return onnx_model, is_modified
 
 
-def check_model(model: onnx.ModelProto) -> onnx.ModelProto:
+def check_model(model: onnx.ModelProto) -> None:
     """Checks if the given model is valid."""
     if model.ByteSize() > (2 * (1024**3)):  # 2GB limit
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -561,10 +565,8 @@ def check_model(model: onnx.ModelProto) -> onnx.ModelProto:
             onnx_tmp_path = os.path.join(temp_dir, f"model_{unique_id}.onnx")
             save_onnx(model, onnx_tmp_path, save_as_external_data=True)
             onnx.checker.check_model(onnx_tmp_path)
-            return onnx.load(onnx_tmp_path)
     else:
         onnx.checker.check_model(model)
-        return model
 
 
 def find_lowest_common_ancestor(node1: Node, node2: Node) -> tuple[str | None, int, int]:
@@ -658,15 +660,16 @@ def save_onnx(model: onnx.ModelProto, onnx_path: str, save_as_external_data: boo
 
     # Set ir_version to 10, remove it once ORT supports ir_version 11
     model.ir_version = 10
-
     if save_as_external_data:
         external_data_path = os.path.basename(onnx_path) + "_data"
         if os.path.exists(external_data_path):
             logger.warning(f"Removing existing external data file: {external_data_path}")
             os.remove(external_data_path)
 
+        # Copy so the onnx.ModelProto object will not be modified
+        model_copy = copy.deepcopy(model)
         onnx.save_model(
-            model,
+            model_copy,
             onnx_path,
             save_as_external_data=True,
             all_tensors_to_one_file=True,
@@ -694,6 +697,75 @@ def get_opset_version(model: onnx.ModelProto) -> int:
         if not opset.domain or opset.domain in ["ai.onnx", "ai.onnx.contrib", "trt.plugins"]
     ]
     return ai_onnx_domain[0].version
+
+
+def check_model_uses_external_data(model: onnx.ModelProto) -> bool:
+    """Checks if the model uses external data. True if any initializer tensor has data_location set to EXTERNAL."""
+    return any(
+        init.HasField("data_location") and init.data_location == onnx.TensorProto.EXTERNAL
+        for init in model.graph.initializer
+    )
+
+
+def get_qdq_precisions(model: onnx.ModelProto) -> set:
+    """Gets the Q/DQ precision types present in the model.
+
+    Args:
+        model: Loaded in-memory onnx ModelProto.
+
+    Returns:
+        set: Set of Q/DQ precision types present in the model (e.g., 'float8_e4m3fn', 'int8',
+             'int4', 'float4_e2m1fn').
+    """
+    graph = gs.import_onnx(model)
+    precisions = set()
+
+    # Check for custom 'NVFP4' nodes
+    custom_fp4_q_nodes = [node for node in graph.nodes if node.op == "TRT_FP4DynamicQuantize"]
+    if custom_fp4_q_nodes:
+        precisions.add("float4_e2m1fn")
+
+    # Check for precision in DQ nodes
+    dq_nodes = [node for node in graph.nodes if node.op == "DequantizeLinear"]
+    for dq_node in dq_nodes:
+        if len(dq_node.inputs) >= 3 and dq_node.inputs[2] is not None:
+            # If zero-point is set, return that as the quantization mode
+            if isinstance(dq_node.inputs[2], Constant) and dq_node.inputs[2].values is not None:
+                precisions.add(dq_node.inputs[2].values.dtype.name)
+        elif isinstance(dq_node.inputs[0], Constant) and dq_node.inputs[0].values is not None:
+            # Else, return the node's input precision (ex: 'NVFP4' weight quantization)
+            precisions.add(dq_node.inputs[0].values.dtype.name)
+
+    return precisions
+
+
+# Minimum opset requirements by quantization mode/precision
+# Base minimum is 19 (first opset that allows fp16 scales in Q/DQ nodes)
+# Supports both quantize modes (e.g., "fp8") and dtype prefixes (e.g., "float8" for "float8_e4m3fn")
+QDQ_PRECISION_MIN_OPSET = {
+    "int8": BASE_MIN_OPSET,
+    "float8_e4m3fn": BASE_MIN_OPSET,
+    "int4": 21,
+    "uint4": 21,
+    "float4_e2m1fn": 23,
+}
+
+
+def get_min_opset_for_precisions(precisions: set) -> int:
+    """Gets the minimum required opset version for a set of Q/DQ precision types.
+
+    Args:
+        precisions: Set of precision type strings (e.g., 'float8_e4m3fn', 'int4').
+
+    Returns:
+        int: Minimum required opset version for the given precisions.
+    """
+    min_opset = BASE_MIN_OPSET  # Base minimum for fp16 scales support
+    for precision in precisions:
+        # Direct lookup first
+        if precision in QDQ_PRECISION_MIN_OPSET:
+            min_opset = max(min_opset, QDQ_PRECISION_MIN_OPSET[precision])
+    return min_opset
 
 
 def bfloat16_to_float32(bf16_array):
@@ -728,6 +800,366 @@ def get_attribute(node: onnx.NodeProto, attr_name: str) -> Any:
     raise ValueError(f"Attribute {attr_name} not found in node {node.name}")
 
 
+def _infer_types_only(model: onnx.ModelProto) -> onnx.ModelProto:
+    """Infers types (but not shapes) of the onnx graph using local implementation.
+
+    This is an internal function. Use infer_types() as the public API.
+
+    This is a workaround for cases when ONNX's shape inference fails.
+    ONNX's infer_shapes performs both shape and type inference together, but for AutoCast, we only
+    need type inference.
+
+    Args:
+        model: ONNX model to infer types for.
+
+    Returns:
+        onnx.ModelProto: Model with inferred types updated in value_info and outputs.
+    """
+    from modelopt.onnx.autocast import utils as autocast_utils
+
+    # Get opset version
+    opset = get_opset_version(model)
+
+    # Process each graph (main graph and all subgraphs) recursively
+    def infer_types_for_graph(
+        graph: onnx.GraphProto, parent_node: onnx.NodeProto = None, is_subgraph: bool = False
+    ) -> None:
+        """Infer types for a single graph (main or subgraph).
+
+        Args:
+            graph: The graph to infer types for.
+            parent_node: The parent node containing this subgraph (None for main graph).
+            is_subgraph: Whether this is a subgraph (True) or the main graph (False).
+        """
+        # Use graphsurgeon to topologically sort nodes for efficient single-pass traversal
+        # Create a temporary model with just this graph for graphsurgeon
+        temp_model = onnx.ModelProto()
+        temp_model.graph.CopyFrom(graph)
+        temp_model.opset_import.add().version = opset
+        temp_model.ir_version = model.ir_version
+
+        try:
+            gs_graph = gs.import_onnx(temp_model)
+            gs_graph.toposort()
+            # Convert back to ONNX to get topologically sorted nodes
+            sorted_model = gs.export_onnx(gs_graph)
+            sorted_graph = sorted_model.graph
+        except Exception as e:
+            logger.debug(
+                f"Graphsurgeon toposort failed for {'subgraph' if is_subgraph else 'main graph'},"
+                f"using original order: {e!s}"
+            )
+            # Fallback: process nodes in original order
+            sorted_graph = graph
+
+        # Create mappings for quick lookup for this graph
+        initializer_map = {init.name: init for init in graph.initializer}
+        value_info_map = {vi.name: vi for vi in graph.value_info}
+        output_names = {out.name for out in graph.output}
+
+        # Map tensor names to their inferred types (scoped to this graph)
+        tensor_types = {}
+
+        # Initialize types from inputs and initializers
+        for inp in graph.input:
+            if inp.type.HasField("tensor_type"):
+                tensor_types[inp.name] = inp.type.tensor_type.elem_type
+
+        for init_name, init in initializer_map.items():
+            tensor_types[init_name] = init.data_type
+
+        # Helper function to get tensor type
+        def get_tensor_type_from_name(tensor_name: str) -> int | None:
+            if tensor_name in tensor_types:
+                return tensor_types[tensor_name]
+            if tensor_name in value_info_map:
+                vi = value_info_map[tensor_name]
+                return _get_tensor_type(vi)
+            return None
+
+        # Process nodes in topological order (single pass)
+        for node in sorted_graph.node:
+            # Get input types for this node
+            input_types = []
+            for inp_name in node.input:
+                # an empty tensor name is typically a sign of an optional input, skip it
+                if not inp_name:
+                    continue
+                inp_type = get_tensor_type_from_name(inp_name)
+                if inp_type is None:
+                    raise ValueError(f"Input {inp_name} of node {node.name} has unknown type")
+                input_types.append(inp_type)
+
+            # Infer output types for this node
+            output_types = []
+
+            if node.op_type == "Cast":
+                # Cast node: output type is the 'to' attribute
+                cast_to_type = None
+                for attr in node.attribute:
+                    if attr.name == "to":
+                        cast_to_type = attr.i
+                        break
+                if cast_to_type is None:
+                    raise ValueError(f"Cast node {node.name} has unknown target type")
+                output_types = [cast_to_type]
+            elif node.op_type == "DequantizeLinear":
+                # DequantizeLinear: output type is determined by output_dtype attribute if present,
+                # otherwise use the scale type (input[1])
+                # inputs: [data, scale, zero_point (optional)]
+                output_dtype = None
+                for attr in node.attribute:
+                    if attr.name == "output_dtype":
+                        output_dtype = attr.i
+                        break
+
+                if output_dtype is not None:
+                    output_types = [output_dtype]
+                elif len(node.input) >= 2 and node.input[1]:
+                    scale_type = get_tensor_type_from_name(node.input[1])
+                    if scale_type is not None:
+                        output_types = [scale_type]
+                    else:
+                        # Fallback: use first input type or FLOAT
+                        output_types = [input_types[0] if input_types else onnx.TensorProto.FLOAT]
+                else:
+                    # Fallback: use first input type or FLOAT
+                    output_types = [input_types[0] if input_types else onnx.TensorProto.FLOAT]
+            elif node.op_type == "QuantizeLinear":
+                # QuantizeLinear: output type is determined by output_dtype attribute if present,
+                # otherwise use the zero_point type (input[2])
+                # inputs: [data, scale, zero_point]
+                output_dtype = None
+                for attr in node.attribute:
+                    if attr.name == "output_dtype":
+                        output_dtype = attr.i
+                        break
+
+                if output_dtype is not None:
+                    output_types = [output_dtype] * len(node.output)
+                elif len(node.input) >= 3 and node.input[2]:
+                    zero_point_type = get_tensor_type_from_name(node.input[2])
+                    if zero_point_type is not None:
+                        output_types = [zero_point_type]
+                    else:
+                        # Fallback: use INT8 as fallback, since TRT doesn't support UINT8
+                        output_types = [onnx.TensorProto.INT8]
+                else:
+                    # Fallback: use INT8 as fallback, since TRT doesn't support UINT8
+                    output_types = [onnx.TensorProto.INT8]
+            elif node.op_type == "Constant":
+                # Constant: output type is from the value attribute's tensor data_type
+                const_type = None
+                for attr in node.attribute:
+                    if attr.name == "value" and attr.type == onnx.AttributeProto.TENSOR:
+                        if attr.t.HasField("data_type"):
+                            const_type = attr.t.data_type
+                            break
+                assert const_type is not None
+                output_types = [const_type]
+            elif node.op_type == "ConstantOfShape":
+                # ConstantOfShape: output type is from the value attribute's tensor data_type
+                # If no value attribute, defaults to FLOAT
+                # Note: Schema allows multiple types, so we need to check the value attribute
+                const_type = None
+                for attr in node.attribute:
+                    if attr.name == "value" and attr.type == onnx.AttributeProto.TENSOR:
+                        if attr.t.HasField("data_type"):
+                            const_type = attr.t.data_type
+                            break
+                assert const_type is not None
+                output_types = [const_type]
+            elif node.op_type == "Split":
+                # Split schema allows multiple outputs, but the schema only specifies one output type
+                output_types = [input_types[0]] * len(node.output)
+            else:
+                # Check if this node has subgraphs (GRAPH or GRAPHS attributes)
+                # Common nodes with subgraphs: If, Loop, Scan
+                subgraphs = []
+                for attr in node.attribute:
+                    if attr.type == onnx.AttributeProto.GRAPH:
+                        subgraphs.append(attr.g)
+                    elif attr.type == onnx.AttributeProto.GRAPHS:
+                        subgraphs.extend(attr.graphs)
+
+                # If node has subgraphs, infer types for them first
+                if subgraphs:
+                    for subgraph in subgraphs:
+                        infer_types_for_graph(subgraph, parent_node=node, is_subgraph=True)
+
+                    # For nodes with subgraphs, try to infer output types from subgraph outputs
+                    # This avoids incorrectly matching to control inputs (e.g., condition for If, trip_count for Loop)
+                    output_types = []
+                    if len(node.output) > 0:
+                        # Use the first subgraph as reference (works for If, Loop, Scan)
+                        first_subgraph = subgraphs[0]
+                        for out_idx, out_name in enumerate(node.output):
+                            if out_idx < len(first_subgraph.output):
+                                subgraph_out = first_subgraph.output[out_idx]
+                                # Typically we only have one subgraph, but If nodes have two subgraphs
+                                # (then_branch and else_branch). In any case, the output types of the
+                                # subgraphs must be identical, so we check just the first one
+                                if (
+                                    subgraph_out.type.HasField("tensor_type")
+                                    and subgraph_out.type.tensor_type.elem_type
+                                    != onnx.TensorProto.UNDEFINED
+                                ):
+                                    output_types.append(subgraph_out.type.tensor_type.elem_type)
+                            else:
+                                output_types.append(onnx.TensorProto.FLOAT)
+                    else:
+                        # Fallback if we can't infer from subgraphs
+                        output_types = None
+
+                    # If we couldn't infer from subgraphs, fall through to schema-based inference
+                    if output_types is None or len(output_types) != len(node.output):
+                        output_types = None
+                else:
+                    # No subgraphs, proceed with normal inference
+                    output_types = None
+
+                # If output_types not set yet, use schema-based inference
+                if output_types is None:
+                    default_type = input_types[0] if input_types else onnx.TensorProto.FLOAT
+                    # Use ONNX operator schema to determine output types
+                    try:
+                        schema = onnx.defs.get_schema(node.op_type, opset, domain=node.domain or "")
+                        assert schema.outputs and len(schema.outputs) >= len(node.output)
+                    except Exception as e:
+                        # Fallback: if schema lookup fails, propagate first input type
+                        logger.debug(
+                            f"Node {node.name}: Failed to get schema for {node.op_type}: {e}, "
+                            "propagate first input type"
+                        )
+                        default_type = input_types[0] if input_types else onnx.TensorProto.FLOAT
+                        output_types = [default_type] * len(node.output)
+                    else:
+                        # Try to infer from schema
+                        input_schemas = [
+                            schema.inputs[i].type_str for i in range(len(schema.inputs))
+                        ]
+                        output_schemas = [
+                            schema.outputs[i].type_str for i in range(len(schema.outputs))
+                        ]
+                        output_types = [None] * len(node.output)
+
+                        for output_idx in range(len(node.output)):
+                            # explicit type is set in schema, use it
+                            if "tensor" in output_schemas[output_idx]:
+                                found_type = onnx_type_str_to_enum(output_schemas[output_idx])
+                                output_types[output_idx] = found_type
+                                continue
+                            # sometimes output type is set with a placeholder name despite supporting a single type
+                            # e.g. Shape operator is constrained to int64, but the type_str is "T1"
+                            for constraint in schema.type_constraints:
+                                # If output type constraint has only one allowed type, use it directly
+                                if constraint.type_param_str == output_schemas[output_idx]:
+                                    if len(constraint.allowed_type_strs) == 1:
+                                        found_type = onnx_type_str_to_enum(
+                                            constraint.allowed_type_strs[0]
+                                        )
+                                        output_types[output_idx] = found_type
+                                        break
+                            else:
+                                # We have a placeholder name "T", "T1", "T2", etc that should
+                                # match one of the input types
+                                try:
+                                    input_match_idx = input_schemas.index(
+                                        output_schemas[output_idx]
+                                    )
+                                except ValueError:
+                                    input_match_idx = None
+                                if input_match_idx is not None:
+                                    found_type = input_types[input_match_idx]
+                                else:
+                                    found_type = default_type
+                                    logger.debug(
+                                        f"Node {node.name}: Failed to infer type for output "
+                                        f"#{output_idx}, propagate first input type"
+                                    )
+                                output_types[output_idx] = found_type
+
+            # Update output tensor types
+            for out_idx, out_name in enumerate(node.output):
+                if not out_name or out_idx >= len(output_types):
+                    continue
+
+                output_type = output_types[out_idx]
+                tensor_types[out_name] = output_type
+
+                # Update value_info if it exists
+                if out_name in value_info_map:
+                    value_info_map[out_name].type.tensor_type.elem_type = output_type
+                elif out_name not in output_names:
+                    # Create new value_info for intermediate tensor
+                    new_vi = graph.value_info.add()
+                    new_vi.name = out_name
+                    new_vi.type.tensor_type.elem_type = output_type
+                    value_info_map[out_name] = new_vi
+
+        # Update output types for this graph
+        for out in graph.output:
+            if out.name in tensor_types:
+                out.type.tensor_type.elem_type = tensor_types[out.name]
+
+    # Process main graph and all subgraphs recursively
+    autocast_utils.walk_subgraphs_recursive(model.graph, infer_types_for_graph, is_subgraph=False)
+    infer_types_verification(model)
+    return model
+
+
+def infer_types_verification(model: onnx.ModelProto) -> onnx.ModelProto:
+    """Verify that all reachable tensors have a defined type.
+
+    This is necessary because some nodes may be removed during the inference process,
+    leaving unreachable value_info entries.
+    """
+    reachable_tensors = set()
+
+    # Add graph inputs as reachable
+    for inp in model.graph.input:
+        reachable_tensors.add(inp.name)
+
+    # Add initializers as reachable
+    for init in model.graph.initializer:
+        reachable_tensors.add(init.name)
+
+    # Traverse nodes to find all reachable tensor outputs
+    for node in model.graph.node:
+        # A node is reachable if any of its inputs are reachable
+        # (or if it has no inputs - rare but possible)
+        node_is_reachable = not node.input or any(
+            inp in reachable_tensors for inp in node.input if inp
+        )
+
+        if node_is_reachable:
+            # All outputs of a reachable node are reachable
+            for out in node.output:
+                if out:  # Skip empty output names
+                    reachable_tensors.add(out)
+
+    is_undefined = False
+    # Check value_info for reachable tensors
+    for vi in model.graph.value_info:
+        if vi.name in reachable_tensors:
+            if vi.type.tensor_type.elem_type == onnx.TensorProto.UNDEFINED:
+                logger.error(
+                    f"Infer types verification failed. Value info {vi.name} has undefined type"
+                )
+                is_undefined = True
+
+    # Graph outputs should always be reachable
+    for out in model.graph.output:
+        if out.type.tensor_type.elem_type == onnx.TensorProto.UNDEFINED:
+            logger.error(f"Infer types verification failed. Output {out.name} has undefined type")
+            is_undefined = True
+    if is_undefined:
+        raise ValueError(
+            "Infer types verification failed. Undefined types found in the model - see logs for details."
+        )
+    return model
+
+
 def infer_shapes(model: onnx.ModelProto, **kwargs):
     """Infers shapes of the onnx graph, handles large models."""
     if model.ByteSize() > (2 * (1024**3)):  # 2GB limit
@@ -742,6 +1174,29 @@ def infer_shapes(model: onnx.ModelProto, **kwargs):
         return model
     else:
         return onnx.shape_inference.infer_shapes(model, **kwargs)
+
+
+def infer_types(
+    model: onnx.ModelProto, use_standalone_type_inference: bool = False, **kwargs
+) -> onnx.ModelProto:
+    """Infers types (and optionally shapes) based on the use_standalone_type_inference flag.
+
+    When use_standalone_type_inference is True, uses a standalone type inference implementation
+    that only infers types. Otherwise, uses ONNX's infer_shapes which infers both types and shapes.
+
+    Args:
+        model: ONNX model to infer types/shapes for.
+        use_standalone_type_inference: If True, use standalone type inference (_infer_types_only).
+                                       If False, use ONNX's shape inference (infer_shapes).
+        **kwargs: Additional arguments passed to infer_shapes when not using standalone type inference.
+
+    Returns:
+        onnx.ModelProto: Model with inferred types (and shapes if not using standalone type inference).
+    """
+    if use_standalone_type_inference:
+        return _infer_types_only(model)
+    else:
+        return infer_shapes(model, **kwargs)
 
 
 def onnx_type_str_to_enum(dtype: str) -> int:

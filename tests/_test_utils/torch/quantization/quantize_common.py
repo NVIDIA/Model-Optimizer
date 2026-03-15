@@ -75,7 +75,14 @@ def quantize_model_and_forward(model, config, calib_data, compress=False):
     forward_loop(model, run_backward=True)
 
 
-def save_restore_test(model_cls, device, quant_config, compress=False, version=None):
+def save_restore_test(
+    model_cls,
+    device,
+    quant_config,
+    compress=False,
+    version=None,
+    test_cpu_restore: bool = False,
+):
     # test restoring to an unquantized model
     model_quant = model_cls().to(device)
     model_ref = model_cls().to(device)
@@ -89,11 +96,20 @@ def save_restore_test(model_cls, device, quant_config, compress=False, version=N
     model_ref.load_state_dict(model_quant.state_dict())
     assert torch.allclose(model_quant(calib_data[0]), model_ref(calib_data[0]))
 
+    # Verify that TensorQuantizer subclass types are preserved after restore
+    for name_q, mod_q in model_quant.named_modules():
+        if name_q.endswith("quantizer"):
+            mod_r = dict(model_ref.named_modules())[name_q]
+            assert type(mod_q) is type(mod_r), (
+                f"Quantizer class mismatch for '{name_q}': "
+                f"expected {type(mod_q).__name__}, got {type(mod_r).__name__}"
+            )
+
     if version is not None and Version(version) < Version("0.29"):
         # Rest of the tests are not needed for version < 0.29
         return
 
-    if not compress:
+    if test_cpu_restore:
         # gpu: test restoring to a model on cpu. If the quantizer states are not initialized correctly,
         # the buffers will be created on cuda and this test will fail
         model_ref = model_cls().to("cpu")
@@ -125,6 +141,23 @@ def _distributed_attr_check(quantizer, attr: str, op=dist.ReduceOp.MAX, groups=[
         if group is not None:
             dist.all_reduce(quantizer_attr, op=op, group=group)
     assert torch.allclose(quantizer_attr, getattr(quantizer, attr))
+
+
+def verify_kv_cache_amax_sync(model, group=None):
+    kv_quantizers_found = False
+    for name, module in model.named_modules():
+        if hasattr(module, "k_bmm_quantizer") and hasattr(module, "v_bmm_quantizer"):
+            kv_quantizers_found = True
+
+            for quantizer in [module.k_bmm_quantizer, module.v_bmm_quantizer]:
+                if quantizer.amax is not None:
+                    quantizer_amax = quantizer.amax.clone()
+                    dist.all_reduce(quantizer_amax, op=dist.ReduceOp.MAX, group=group)
+                    assert torch.allclose(quantizer_amax, quantizer.amax), (
+                        f"KV cache quantizer amax not synced across distributed group for {name}"
+                    )
+
+    return kv_quantizers_found
 
 
 original_awq_lite = model_calib_module.awq_lite
@@ -222,12 +255,20 @@ def auto_quantize_helper(model):
         num_score_steps=2,
         verbose=True,
     )
+    # Verify that the search outcome is consistent across all ranks.
+    # quantizer_states holds per-rank calibration tensors legitimately
+    # differ across TP shards, so it is excluded from the comparison.
+    keys_to_compare = [k for k in search_state if k != "quantizer_states"]
+
     search_state_list = [None] * torch.distributed.get_world_size()
     torch.distributed.all_gather_object(search_state_list, search_state)
 
     search_state_rank0 = search_state_list[0]
     for search_state in search_state_list[1:]:
-        assert search_state == search_state_rank0
+        for key in keys_to_compare:
+            assert search_state[key] == search_state_rank0[key], (
+                f"Mismatch in search_state['{key}'] across ranks"
+            )
 
 
 def compute_backward_grad(

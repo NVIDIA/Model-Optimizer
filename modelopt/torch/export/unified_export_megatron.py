@@ -20,23 +20,20 @@
 
 import json
 import os
-import shutil
 import tempfile
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
-from warnings import warn
 
 import torch
 import torch.distributed
-import torch.nn as nn
-from huggingface_hub import hf_hub_download, snapshot_download
-from safetensors.torch import safe_open, save_file
-from tqdm import tqdm
+from huggingface_hub import hf_hub_download
+from safetensors.torch import save_file
 
 from modelopt import __version__
 from modelopt.torch.utils import import_plugin
 
+from .convert_hf_config import convert_hf_quant_config_format
 from .model_config import (
     KV_CACHE_FP8,
     KV_CACHE_NVFP4,
@@ -46,14 +43,19 @@ from .model_config import (
     QUANTIZATION_NONE,
     QUANTIZATION_NVFP4,
 )
+from .plugins.hf_checkpoint_utils import copy_remote_code, load_multimodal_components
 from .plugins.mcore_common import all_mcore_hf_export_mapping
-from .plugins.mcore_custom import CustomModuleMapping, save_safetensors
+from .plugins.mcore_custom import (
+    CustomModuleMapping,
+    get_safetensor,
+    save_safetensors_by_layer_index,
+)
 from .plugins.megatron_importer import GPTModelImporter
 from .quant_utils import (
     get_activation_scaling_factor,
     get_kv_cache_dtype,
+    get_kv_cache_scaling_factor,
     get_quantization_format,
-    get_scaling_factor,
     get_weight_block_size,
     get_weight_scaling_factor,
     get_weight_scaling_factor_2,
@@ -86,33 +88,6 @@ __all__ = [
 ]
 
 
-# This path uses output_quantizer for KV cache quantization.
-# The function below is the old version of get_kv_cache_scaling_factor which is now refactored to handle bmm_quantizer.
-def get_kv_cache_scaling_factor(kv_module: nn.Module) -> torch.Tensor:
-    """Returns the kv_cache scaling factor if output quantizer is set. Else returns None by default."""
-    scaling_factor = (
-        get_scaling_factor(kv_module.output_quantizer)
-        if hasattr(kv_module, "output_quantizer")
-        else None
-    )
-
-    if not scaling_factor:
-        return None
-
-    # For FP8, we recommend default kv cache scaling factor to be 1.
-    if get_kv_cache_dtype(kv_module) == KV_CACHE_FP8:
-        if scaling_factor.item() > 0.5:
-            warn(
-                f"!!!!Large KV activations detected: {scaling_factor.item()}, "
-                "Quantized KV cache may lead to higher accuracy drop.\n!!!!"
-            )
-        scaling_factor = torch.max(
-            scaling_factor,
-            torch.tensor([1.0], dtype=torch.float, device=scaling_factor.device),
-        )
-    return scaling_factor
-
-
 class GPTModelExporter:
     """Megatron Core GPTModel Exporter.
 
@@ -129,6 +104,8 @@ class GPTModelExporter:
         export_extra_modules: If True, export extra modules like medusa_heads or
             eagle_module. Otherwise, only export the base model.
         dtype: The weights data type to export the unquantized layers.
+        trust_remote_code: Whether to trust remote code in the HuggingFace pretrained model.
+        moe_router_dtype: The data type of the MoE router. Can be "fp32", "fp64", or None (default to the model dtype).
     """
 
     def __init__(
@@ -137,14 +114,15 @@ class GPTModelExporter:
         pretrained_model_name_or_path: str | os.PathLike | None = None,
         export_extra_modules: bool = False,
         dtype=torch.bfloat16,
-        trust_remote_code: bool = True,
-        moe_router_dtype: torch.dtype | None = None,
+        trust_remote_code: bool = False,
+        moe_router_dtype: str | None = None,
     ):
         """Create a GPTModel exporter instance."""
         if not isinstance(model, (GPTModel, MambaModel, LLaVAModel)):
             raise ValueError("Input to GPTModelExport must be a megatron.core.models.GPTModel!")
 
         self._state_dict = OrderedDict()
+        self._layer_state_dicts = OrderedDict()
         self._hf_pretrained_model_name = pretrained_model_name_or_path
         self._hf_config = transformers.AutoConfig.from_pretrained(
             pretrained_model_name_or_path, trust_remote_code=trust_remote_code
@@ -154,6 +132,7 @@ class GPTModelExporter:
             self.moe_router_dtype = torch.float32
         elif moe_router_dtype == "fp64":
             self.moe_router_dtype = torch.float64
+        print(f"Exporting model with moe_router_dtype: {self.moe_router_dtype}")
 
         # If multimodal, extra the text_config
         self._hf_text_config = getattr(self._hf_config, "text_config", self._hf_config)
@@ -167,7 +146,7 @@ class GPTModelExporter:
         self.is_multimodal = isinstance(model, LLaVAModel)
         if not self.is_multimodal:
             self._hf_text_config.intermediate_size = model.config.ffn_hidden_size
-        self._hf_quant_config = None
+        self._hf_quant_config: dict = {}
         self._hf_extra_config = None
         self.export_extra_modules = export_extra_modules
         self.is_multimodal = isinstance(model, LLaVAModel)
@@ -181,6 +160,7 @@ class GPTModelExporter:
                 del self._hf_config.quantization_config
         self.all_rules = self._populate_rule_book()
         self.rules = self.all_rules[self.arch]
+        self.exclude_modules = []
 
         if not hasattr(model, "_modelopt_state"):
             return
@@ -212,26 +192,14 @@ class GPTModelExporter:
                     )
 
                     eagle_config = {
-                        "use_input_layernorm_in_first_layer": mode_cfg["config"][
-                            "eagle_architecture_config"
-                        ]["use_input_layernorm_in_first_layer"],
-                        "use_last_layernorm": mode_cfg["config"]["eagle_architecture_config"][
-                            "use_last_layernorm"
-                        ],
-                        "use_mtp_layernorm": mode_cfg["config"]["eagle_architecture_config"][
-                            "use_mtp_layernorm"
-                        ],
-                        "use_aux_hidden_state": mode_cfg["config"]["eagle_architecture_config"][
-                            "use_aux_hidden_state"
-                        ],
+                        "use_input_layernorm_in_first_layer": model.eagle_config.use_input_layernorm_in_first_layer,
+                        "use_last_layernorm": model.eagle_config.use_last_layernorm,
+                        "use_mtp_layernorm": model.eagle_config.use_mtp_layernorm,
+                        "use_aux_hidden_state": model.eagle_config.use_aux_hidden_state,
                         "eagle_aux_hidden_state_layer_ids": model.eagle_config.eagle_aux_hidden_state_layer_ids,
                         "next_layer_regular": True,
-                        "parallel_draft_step": mode_cfg["config"]["eagle_architecture_config"][
-                            "parallel_draft_step"
-                        ],
-                        "parallel_draft_heads_num_layers": mode_cfg["config"][
-                            "eagle_architecture_config"
-                        ]["parallel_draft_heads_num_layers"],
+                        "parallel_draft_step": model.eagle_config.parallel_draft_step,
+                        "parallel_draft_heads_num_layers": model.eagle_config.parallel_draft_heads_num_layers,
                     }
 
                     eagle_config_update = {
@@ -243,9 +211,7 @@ class GPTModelExporter:
                         "max_position_embeddings": self._hf_text_config.max_position_embeddings,
                         "num_attention_heads": model.eagle_module.config.num_attention_heads,
                         "num_key_value_heads": model.eagle_module.config.num_query_groups,
-                        "num_hidden_layers": mode_cfg["config"]["eagle_architecture_config"][
-                            "num_hidden_layers"
-                        ],
+                        "num_hidden_layers": model.eagle_config.num_layers,
                         "vocab_size": self._hf_text_config.vocab_size,
                         # Unset any special token ids given that the tokenizer can change here.
                         "bos_token_id": None,
@@ -254,17 +220,34 @@ class GPTModelExporter:
                         "sep_token_id": None,
                         # The following attributes are EAGLE specific
                         "eagle_config": eagle_config,
-                        "draft_vocab_size": mode_cfg["config"]["eagle_architecture_config"][
-                            "draft_vocab_size"
-                        ],
+                        "draft_vocab_size": model.eagle_config.draft_vocab_size,
                     }
 
                     self._hf_extra_config.update(eagle_config_update)
 
+    def save_pretrained_extra_modules(
+        self,
+        save_directory: str | os.PathLike,
+    ):
+        """Save a EAGLE or Medusa checkpoints which can be deployed by vLLM and TensorRT-LLM."""
+        # We use the last PP rank to write the config because
+        # medusa_heads and eagle_module only exist in the last stage.
+        pp_rank = get_pipeline_model_parallel_rank()
+        pp_size = get_pipeline_model_parallel_world_size()
+        is_last_stage_main_rank = pp_rank == pp_size - 1
+
+        state_dict = self.extra_state_dict
+
+        if is_last_stage_main_rank and self._hf_extra_config is not None:
+            self._hf_extra_config.save_pretrained(save_directory)
+            save_file(state_dict, save_directory + "/model.safetensors", metadata={"format": "pt"})
+
+        torch.distributed.barrier()
+
     def save_pretrained(
         self,
         save_directory: str | os.PathLike,
-        pretrained_model_name_or_path: str | os.PathLike | None = None,
+        pretrained_model_name_or_path: str | os.PathLike,
     ):
         """Save a unified checkpoint which can be deployed by vLLM and TensorRT-LLM.
 
@@ -282,11 +265,10 @@ class GPTModelExporter:
         is_last_stage_main_rank = pp_rank == pp_size - 1
 
         # Main export process
-        state_dict = self.extra_state_dict if self.export_extra_modules else self.state_dict
+        layer_state_dicts = self.layer_state_dicts
+
         quantization_format = self._get_quantization_format(self.model)
-
         quantization = None
-
         if quantization_format in (
             QUANTIZATION_FP8_PB_REAL,
             QUANTIZATION_FP8_PB_WO,
@@ -297,176 +279,93 @@ class GPTModelExporter:
         elif quantization_format == QUANTIZATION_NVFP4:
             quantization = "NVFP4"
 
-        kv_cache_quantization = None
-        kv_cache_dtype = get_kv_cache_dtype(self.model)
-        if kv_cache_dtype in (KV_CACHE_FP8, KV_CACHE_NVFP4):
-            # FP8 KV Cache is supported in VLLM; NVFP4 supported in TRTLLM
-            kv_cache_quantization = kv_cache_dtype
         # We use the last PP rank and the 1st EP rank to write the config because
         # medusa_heads and eagle_module only exist in the last stage.
         if is_last_stage_main_rank:
-            if self.export_extra_modules and self._hf_extra_config is not None:
-                self._hf_extra_config.save_pretrained(save_directory)
-            else:
-                self._hf_config.save_pretrained(save_directory)
-                try:
-                    generation_config = transformers.GenerationConfig.from_pretrained(
-                        self._hf_pretrained_model_name
-                    )
-                    generation_config.save_pretrained(save_directory)
-                except OSError:
-                    pass
-                try:
-                    tokenizer = transformers.AutoTokenizer.from_pretrained(
-                        self._hf_pretrained_model_name
-                    )
-                    tokenizer.save_pretrained(save_directory)
-                except OSError:
-                    pass
-                except TypeError:
-                    pass
-                try:
-                    # Load and save preprocessor config from the original model
-                    processor = AutoProcessor.from_pretrained(
-                        self._hf_pretrained_model_name, trust_remote_code=self.trust_remote_code
-                    )
-                    if hasattr(processor, "image_processor"):
-                        processor.image_processor.save_pretrained(save_directory)
-                except (OSError, ValueError, ImportError):
-                    pass
+            self._hf_config.save_pretrained(save_directory)
+            try:
+                generation_config = transformers.GenerationConfig.from_pretrained(
+                    self._hf_pretrained_model_name,
+                    trust_remote_code=self.trust_remote_code,
+                )
+                generation_config.save_pretrained(save_directory)
+            except OSError:
+                pass
+            try:
+                tokenizer = transformers.AutoTokenizer.from_pretrained(
+                    self._hf_pretrained_model_name,
+                    trust_remote_code=self.trust_remote_code,
+                )
+                tokenizer.save_pretrained(save_directory)
+            except OSError:
+                pass
+            except TypeError:
+                pass
+            try:
+                # Load and save preprocessor config from the original model
+                processor = AutoProcessor.from_pretrained(
+                    self._hf_pretrained_model_name, trust_remote_code=self.trust_remote_code
+                )
+                if hasattr(processor, "image_processor"):
+                    processor.image_processor.save_pretrained(save_directory)
+            except (OSError, ValueError, ImportError):
+                pass
+
+            mtp_state_dict = self._get_mtp_state_dict()
+            if len(mtp_state_dict) > 0:
+                layer_state_dicts[self.model.config.num_layers].update(mtp_state_dict)
+                print(f"Successfully loaded {len(mtp_state_dict)} MTP tensors")
+
+        combined_exclude_modules = self._gather_exclude_modules()
 
         if is_last_stage_main_rank and quantization is not None:
-            hf_quant_config = {
+            self._hf_quant_config = {
                 "producer": {
                     "name": "modelopt",
                     "version": __version__,
                 },
                 "quantization": {
                     "quant_algo": quantization,
-                    "kv_cache_quant_algo": kv_cache_quantization,
-                    "exclude_modules": ["lm_head"],
+                    "exclude_modules": combined_exclude_modules,
                 },
             }
+            if quantization == "NVFP4":  # update block size
+                self._hf_quant_config["quantization"]["group_size"] = 16
+            if hasattr(self, "kv_cache_dtype"):
+                self._hf_quant_config["quantization"]["kv_cache_quant_algo"] = self.kv_cache_dtype
             with open(save_directory + "/hf_quant_config.json", "w") as f:
-                json.dump(hf_quant_config, f, indent=4)
+                json.dump(self._hf_quant_config, f, indent=4)
 
-        if (
-            is_first_stage_main_rank
-            and self.is_multimodal
-            and pretrained_model_name_or_path is not None
-        ):
-            hf_checkpoint_path = Path(pretrained_model_name_or_path)
-            if not hf_checkpoint_path.is_dir():
-                hf_checkpoint_path = tempfile.gettempdir() + "/" + pretrained_model_name_or_path
-                if not Path(hf_checkpoint_path).exists():
-                    snapshot_download(
-                        repo_id=pretrained_model_name_or_path,
-                        local_dir=hf_checkpoint_path,
-                    )
-
-            safetensors_file = Path(hf_checkpoint_path) / "model.safetensors"
-            safetensors_index_file = Path(hf_checkpoint_path) / "model.safetensors.index.json"
-
-            multimodal_state_dict = {}
-
-            if safetensors_file.is_file():
-                print(f"Loading multimodal components from single file: {safetensors_file}")
-                with safe_open(safetensors_file, framework="pt") as f:
-                    multimodal_keys = [
-                        key
-                        for key in f.keys()  # noqa: SIM118
-                        if key.startswith(("multi_modal_projector", "vision_model"))
-                    ]
-                    for key in tqdm(multimodal_keys, desc="Loading multimodal tensors"):
-                        multimodal_state_dict[key] = f.get_tensor(key)
-
-            elif safetensors_index_file.is_file():
-                print(f"Loading multimodal components from sharded model: {hf_checkpoint_path}")
-                with open(safetensors_index_file) as f:
-                    safetensors_index = json.load(f)
-
-                # For multimodal models, vision_model and multi_modal_projector are in the first shard
-                all_shard_files = sorted(set(safetensors_index["weight_map"].values()))
-                first_shard_file = all_shard_files[0]  # e.g., "model-00001-of-00050.safetensors"
-
-                # Load multimodal components from the first shard file
-                safetensors_filepath = Path(hf_checkpoint_path) / first_shard_file
-                print(f"Loading multimodal components from {first_shard_file}")
-
-                with safe_open(safetensors_filepath, framework="pt") as f:
-                    shard_keys = list(f.keys())
-                    multimodal_keys_in_shard = [
-                        k
-                        for k in shard_keys
-                        if k.startswith(("multi_modal_projector", "vision_model"))
-                    ]
-
-                    if multimodal_keys_in_shard:
-                        print(
-                            f"Found {len(multimodal_keys_in_shard)} multimodal tensors in {first_shard_file}"
-                        )
-                        for key in tqdm(
-                            multimodal_keys_in_shard, desc="Loading multimodal tensors"
-                        ):
-                            multimodal_state_dict[key] = f.get_tensor(key)
-                    else:
-                        print(f"No multimodal components found in {first_shard_file}")
-
-            else:
-                print(f"Warning: No safetensors files found in {hf_checkpoint_path}")
-
-            print(f"Successfully loaded {len(multimodal_state_dict)} multimodal tensors")
-            # Add multimodal components to state_dict
-            state_dict.update(multimodal_state_dict)
+        # Add multimodal components to state_dict. Since only support decoder model quantization,
+        # no changes will be made to the multimodal components. We copy the multimodal components
+        # from the pretrained model directly to the state_dict to avoid implementing the export logic.
+        if is_first_stage_main_rank and self.is_multimodal:
+            multimodal_state_dict = load_multimodal_components(pretrained_model_name_or_path)
+            layer_state_dicts[0].update(multimodal_state_dict)
 
         # Barrier to ensure the export_dir has been created.
         torch.distributed.barrier()
 
-        if self.export_extra_modules:
-            if is_last_stage_main_rank:
-                save_file(
-                    state_dict, save_directory + "/model.safetensors", metadata={"format": "pt"}
-                )
-            torch.distributed.barrier()
-            return
+        if is_last_stage_main_rank and self._hf_config is not None:
+            copy_remote_code(pretrained_model_name_or_path, save_directory)
 
-        if (
-            is_last_stage_main_rank
-            and self._hf_config is not None
-            and pretrained_model_name_or_path is not None
-        ):
-            # For models that keep configuration and modeling files as part of the checkpoint,
-            # we need to copy them to the export directory for seamless integration with inference
-            # frameworks.
-            hf_checkpoint_path = Path(pretrained_model_name_or_path)
-            model_type = getattr(self._hf_config, "model_type", None)
+        # Newer versions of VLLM expect config.json with hf_quant_config
+        config_json_file = save_directory + "/config.json"
+        if self._hf_quant_config and os.path.exists(config_json_file):
+            converted_quant_config = convert_hf_quant_config_format(self._hf_quant_config)
+            with open(config_json_file) as f:
+                config_dict = json.load(f)
+            config_dict["quantization_config"] = converted_quant_config
+            with open(config_json_file, "w") as f:
+                json.dump(config_dict, f, indent=4)
 
-            if hf_checkpoint_path.is_dir():
-                # Local directory - files should be there
-                config_file = hf_checkpoint_path / f"configuration_{model_type}.py"
-                modeling_file = hf_checkpoint_path / f"modeling_{model_type}.py"
-            else:
-                # Remote model ID - download from HuggingFace Hub (cached automatically)
-                try:
-                    config_file = hf_hub_download(
-                        repo_id=pretrained_model_name_or_path,
-                        filename=f"configuration_{model_type}.py",
-                    )
-                except Exception:
-                    config_file = ""
-                try:
-                    modeling_file = hf_hub_download(
-                        repo_id=pretrained_model_name_or_path, filename=f"modeling_{model_type}.py"
-                    )
-                except Exception:
-                    modeling_file = ""
-
-            if config_file and os.path.exists(config_file):
-                shutil.copy(config_file, f"{save_directory}/configuration_{model_type}.py")
-            if modeling_file and os.path.exists(modeling_file):
-                shutil.copy(modeling_file, f"{save_directory}/modeling_{model_type}.py")
-
-        save_safetensors(state_dict, save_directory)
+        # save_safetensors(state_dict, save_directory)
+        save_safetensors_by_layer_index(
+            layer_state_dicts=layer_state_dicts,
+            total_layers=self.model.config.num_layers,
+            save_directory=save_directory,
+            name_template="model-{:05d}-of-{:05d}",
+        )
 
     @property
     def state_dict(self):
@@ -476,11 +375,310 @@ class GPTModelExporter:
         return self._state_dict
 
     @property
+    def layer_state_dicts(self):
+        if len(self._layer_state_dicts) == 0:
+            self._get_state_dict()
+        return self._layer_state_dicts
+
+    @property
     def extra_state_dict(self):
         if len(self._state_dict) == 0:
             self._get_medusa_heads_state_dict()
             self._get_eagle_module_state_dict()
         return self._state_dict
+
+    def _get_state_dict(self):
+        model = self.model
+
+        # Embedding
+        if hasattr(model, "embedding"):
+            self.rules["word_embeddings"](model.embedding.word_embeddings)
+
+        # Decoder layers
+        for layer in model.decoder.layers:
+            layer_id = layer.layer_number - 1
+            if isinstance(layer, MambaLayer):
+                self._get_mamba_layer_state_dict(layer, layer_id)
+            elif isinstance(layer, TransformerLayer):
+                self._get_transformer_layer_state_dict(layer, layer_id)
+            else:
+                raise ValueError("Only TransformerLayer or MambaLayer are supported.")
+
+            self._layer_state_dicts[layer.layer_number] = self._state_dict
+            if layer.layer_number != self.model.config.num_layers:
+                self._state_dict = OrderedDict()
+
+        # Final layernorm
+        if hasattr(model.decoder, "final_layernorm") and model.decoder.final_layernorm:
+            self.rules["final_layernorm"](model.decoder.final_layernorm)
+
+        if hasattr(model.decoder, "final_norm") and model.decoder.final_norm:
+            self.rules["final_norm"](model.decoder.final_norm)
+
+        # Output layer
+        if hasattr(model, "output_layer") and not model.share_embeddings_and_output_weights:
+            self.rules["output_layer"](model.output_layer)
+
+    def _get_transformer_layer_state_dict(self, layer, layer_id):
+        if not isinstance(layer.input_layernorm, IdentityOp):
+            self.rules["input_layernorm"](layer.input_layernorm, layer_id)
+        elif (
+            hasattr(layer.self_attention, "linear_qkv")
+            and hasattr(layer.self_attention.linear_qkv, "layer_norm_weight")
+            and layer.self_attention.linear_qkv.layer_norm_weight is not None
+            and "fused_norm" in self.rules
+        ):
+            self.rules["fused_norm"](layer.self_attention.linear_qkv.layer_norm_weight, layer_id)
+
+        if not isinstance(layer.self_attention, IdentityOp):
+            if "MLASelfAttention" in str(type(layer.self_attention)):
+                if hasattr(layer.self_attention, "linear_q_proj"):
+                    self.rules["linear_q_proj"](layer.self_attention.linear_q_proj, layer_id)
+                else:
+                    self.rules["linear_q_down_proj"](
+                        layer.self_attention.linear_q_down_proj, layer_id
+                    )
+                    self.rules["linear_q_layernorm"](layer.self_attention.q_layernorm, layer_id)
+                    self.rules["linear_q_up_proj"](layer.self_attention.linear_q_up_proj, layer_id)
+
+                self.rules["linear_kv_down_proj"](
+                    layer.self_attention.linear_kv_down_proj, layer_id
+                )
+                self.rules["linear_kv_layernorm"](layer.self_attention.kv_layernorm, layer_id)
+                self.rules["linear_kv_up_proj"](layer.self_attention.linear_kv_up_proj, layer_id)
+                self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
+            else:
+                if layer.self_attention.q_layernorm is not None and not isinstance(
+                    layer.self_attention.q_layernorm, (IdentityOp, L2Norm)
+                ):
+                    self.rules["q_layernorm"](layer.self_attention.q_layernorm, layer_id)
+                    self.rules["k_layernorm"](layer.self_attention.k_layernorm, layer_id)
+                self.rules["linear_qkv"](layer.self_attention.linear_qkv, layer_id)
+                if (
+                    hasattr(layer.self_attention, "core_attention")
+                    and "core_attention" in self.rules
+                ):  # KV cache quant export
+                    self.rules["core_attention"](layer.self_attention.core_attention, layer_id)
+                self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
+                if getattr(layer.self_attention.core_attention, "softmax_offset", None) is not None:
+                    self.rules["softmax_offset"](
+                        layer.self_attention.core_attention.softmax_offset, layer_id
+                    )
+
+        if not isinstance(layer.pre_mlp_layernorm, IdentityOp):
+            self.rules["pre_mlp_layernorm"](layer.pre_mlp_layernorm, layer_id)
+        elif (
+            not isinstance(layer.mlp, IdentityOp)
+            and "MoE" not in str(type(layer.mlp))
+            and hasattr(layer.mlp, "linear_fc1")
+            and hasattr(layer.mlp.linear_fc1, "layer_norm_weight")
+            and layer.mlp.linear_fc1.layer_norm_weight is not None
+            and "fused_norm" in self.rules
+        ):
+            self.rules["fused_norm"](layer.mlp.linear_fc1.layer_norm_weight, layer_id)
+
+        if not isinstance(layer.mlp, IdentityOp):
+            if "MoE" in str(type(layer.mlp)):
+                self.rules["router"](layer.mlp.router, layer_id, dtype=self.moe_router_dtype)
+                if hasattr(layer.mlp, "fc1_latent_proj") and layer.mlp.fc1_latent_proj is not None:
+                    self.rules["fc1_latent_proj"](layer.mlp.fc1_latent_proj, layer_id)
+                if hasattr(layer.mlp, "fc2_latent_proj") and layer.mlp.fc2_latent_proj is not None:
+                    self.rules["fc2_latent_proj"](layer.mlp.fc2_latent_proj, layer_id)
+                if hasattr(layer.mlp, "shared_experts") and layer.mlp.shared_experts is not None:
+                    self.rules["shared_experts.linear_fc1"](
+                        layer.mlp.shared_experts.linear_fc1, layer_id
+                    )
+                    self.rules["shared_experts.linear_fc2"](
+                        layer.mlp.shared_experts.linear_fc2, layer_id
+                    )
+                if hasattr(layer.mlp.experts, "local_experts"):
+                    if not self.rules.get("use_packed_local_experts", False):
+                        for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
+                            self.rules["local_experts.linear_fc1"](
+                                expert.linear_fc1, layer_id, expert_id
+                            )
+                            self.rules["local_experts.linear_fc2"](
+                                expert.linear_fc2, layer_id, expert_id
+                            )
+                    else:
+                        # For llama 4, in hf unified checkpoint, all local experts share one scale
+                        self.rules["local_experts.linear_fc1"](
+                            layer.mlp.experts.local_experts, layer_id
+                        )
+                        self.rules["local_experts.linear_fc2"](
+                            layer.mlp.experts.local_experts, layer_id
+                        )
+                elif "experts.linear_fc1" in self.rules:
+                    # TEGroupedMLP: experts use fused grouped GEMM with a single
+                    # linear_fc1/linear_fc2 for all experts (no local_experts attribute).
+                    # Uses "experts.linear_fc1" rule (GroupedMLPMerging) instead of
+                    # "local_experts.linear_fc1" which expects per-expert iteration.
+                    self.rules["experts.linear_fc1"](layer.mlp.experts.linear_fc1, layer_id)
+                    self.rules["experts.linear_fc2"](layer.mlp.experts.linear_fc2, layer_id)
+            else:
+                self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id)
+                self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id)
+
+    def _get_mtp_state_dict(self) -> dict[str, torch.Tensor]:
+        """Export the MTP module.
+
+        Currently, we copy the BF16 MTP weights from the pretrained model if the pretrained model has MTP layers.
+        """
+        # TODO Implement MTP export for quantized MTP
+        # Hacky version for now: copy MTP weights from pretrained model
+        mtp_state_dict = {}
+        if self._hf_pretrained_model_name:
+            if os.path.isdir(self._hf_pretrained_model_name):
+                safetensors_index_file = (
+                    Path(self._hf_pretrained_model_name) / "model.safetensors.index.json"
+                )
+            else:
+                safetensors_index_file = hf_hub_download(
+                    repo_id=self._hf_pretrained_model_name, filename="model.safetensors.index.json"
+                )
+
+            print(f"Exporting MTP: using safetensors_index_file: {safetensors_index_file}")
+            mtp_exists = False
+            if safetensors_index_file and os.path.exists(safetensors_index_file):
+                with open(safetensors_index_file) as f:
+                    safetensors_index = json.load(f)
+                model_dir = Path(safetensors_index_file).parent
+                for key in safetensors_index["weight_map"]:
+                    if key.startswith("mtp.") and key not in self._state_dict:
+                        mtp_state_dict[key] = get_safetensor(model_dir, key)
+                        mtp_exists = True
+
+            if mtp_exists:
+                self.exclude_modules.append("mtp*")
+        return mtp_state_dict
+
+    def _get_mamba_layer_state_dict(self, layer, layer_id):
+        if not isinstance(layer.norm, IdentityOp):
+            self.rules["norm"](layer.norm, layer_id)
+        elif (
+            isinstance(layer.norm, IdentityOp)
+            and hasattr(layer.mixer.in_proj, "layer_norm_weight")
+            and layer.mixer.in_proj.layer_norm_weight is not None
+            and "fused_norm" in self.rules
+        ):
+            # TE spec: norm is fused into in_proj (QuantTELayerNormColumnParallelLinear).
+            self.rules["fused_norm"](layer.mixer.in_proj.layer_norm_weight, layer_id)
+
+        self.rules["mixer_norm"](layer.mixer.norm, layer_id)
+        self.rules["A_log"](layer.mixer.A_log, layer_id)
+        self.rules["D"](layer.mixer.D, layer_id)
+        self.rules["dt_bias"](layer.mixer.dt_bias, layer_id)
+
+        self.rules["conv1d"](layer.mixer.conv1d, layer_id)
+        self.rules["in_proj"](layer.mixer.in_proj, layer_id)
+        self.rules["out_proj"](layer.mixer.out_proj, layer_id)
+
+    def _get_medusa_heads_state_dict(self):
+        medusa_heads = getattr(self.model, "medusa_heads", None)
+        if medusa_heads is None:
+            return
+
+        for head_id, head in enumerate(medusa_heads):
+            self.rules["medusa_heads.lm_head"](head.lm_head, head_id)
+            for layer_id, layer in enumerate(head.medusa_layers):
+                self.rules["medusa_heads.medusa_layers.linear"](layer.linear, head_id, layer_id)
+
+    def _get_eagle_module_state_dict(self):
+        eagle_module = getattr(self.model, "eagle_module", None)
+
+        if eagle_module is None:
+            return
+
+        # if hasattr(self.model, "embedding"):
+        #    self.rules["word_embeddings"](self.model.embedding.word_embeddings)
+
+        self.rules["fc"](eagle_module.fc)
+        if self.model.eagle_config.use_aux_hidden_state:
+            self.rules["enorm"](eagle_module.enorm)
+        elif self.model.eagle_config.use_mtp_layernorm:
+            self.rules["enorm"](eagle_module.enorm)
+            self.rules["hnorm"](eagle_module.hnorm)
+
+        if self.model.eagle_config.use_last_layernorm:
+            self.rules["final_layernorm"](eagle_module.decoder.final_layernorm)
+
+        if hasattr(self.model.eagle_module, "eagle_output_layer"):
+            self.rules["output_layer"](eagle_module.eagle_output_layer)
+        if hasattr(self.model.eagle_module, "dt2"):
+            self.rules["d2t"](eagle_module.d2t)
+
+        for layer in eagle_module.decoder.layers:
+            layer_id = layer.layer_number - 1
+
+            # The first layernorm needs special handling here. We have a dedicated mapping
+            # for the first layernorm since in EAGLE3 it will be mapped to hidden_norm
+            # instead of input_layernorm (due to the specialized transformer layer).
+            # The remaining EAGLE3 layers (if more than 1) are normal transformer layers
+            # where input_layernorm is mapped to input_layernorm.
+            if layer_id == 0 and self.model.eagle_config.use_input_layernorm_in_first_layer:
+                self.rules["first_input_layernorm"](layer.input_layernorm, layer_id)
+            elif layer_id > 0:
+                self.rules["input_layernorm"](layer.input_layernorm, layer_id)
+
+            if "MLASelfAttention" in str(type(layer.self_attention)):
+                if hasattr(layer.self_attention, "linear_q_proj"):
+                    self.rules["eagle_module.linear_q_proj"](
+                        layer.self_attention.linear_q_proj, layer_id
+                    )
+                else:
+                    self.rules["eagle_module.linear_q_down_proj"](
+                        layer.self_attention.linear_q_down_proj, layer_id
+                    )
+                    self.rules["eagle_module.linear_q_layernorm"](
+                        layer.self_attention.q_layernorm, layer_id
+                    )
+                    self.rules["eagle_module.linear_q_up_proj"](
+                        layer.self_attention.linear_q_up_proj, layer_id
+                    )
+
+                self.rules["eagle_module.linear_kv_down_proj"](
+                    layer.self_attention.linear_kv_down_proj, layer_id
+                )
+                self.rules["eagle_module.linear_kv_layernorm"](
+                    layer.self_attention.kv_layernorm, layer_id
+                )
+                self.rules["eagle_module.linear_kv_up_proj"](
+                    layer.self_attention.linear_kv_up_proj, layer_id
+                )
+            else:
+                self.rules["linear_qkv"](layer.self_attention.linear_qkv, layer_id)
+
+            self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
+            self.rules["pre_mlp_layernorm"](layer.pre_mlp_layernorm, layer_id)
+
+            if "MoE" in str(type(layer.mlp)):
+                self.rules["eagle_module.router"](layer.mlp.router, layer_id)
+                if hasattr(layer.mlp, "shared_experts") and layer.mlp.shared_experts is not None:
+                    self.rules["eagle_module.shared_experts.linear_fc1"](
+                        layer.mlp.shared_experts.linear_fc1, layer_id
+                    )
+                    self.rules["eagle_module.shared_experts.linear_fc2"](
+                        layer.mlp.shared_experts.linear_fc2, layer_id
+                    )
+                for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
+                    self.rules["eagle_module.local_experts.linear_fc1"](
+                        expert.linear_fc1, layer_id, expert_id
+                    )
+                    self.rules["eagle_module.local_experts.linear_fc2"](
+                        expert.linear_fc2, layer_id, expert_id
+                    )
+            else:
+                self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id)
+                self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id)
+
+        parallel_draft_heads = getattr(eagle_module, "parallel_draft_heads", None)
+        if parallel_draft_heads is not None:
+            for head_id, head in enumerate(parallel_draft_heads.medusa_heads):
+                for layer_id, layer in enumerate(head):
+                    self.rules["parallel_draft_heads.medusa_layers"](
+                        layer.linear, head_id, layer_id
+                    )
+            self.rules["parallel_draft_heads.lm_head"](parallel_draft_heads.lm_head)
 
     def _populate_rule_book(self):
         all_rules = {}
@@ -489,7 +687,9 @@ class GPTModelExporter:
             method_map = {
                 "name_remapping": self._name_remapping,
                 "qkv_slicing": self._qkv_slicing,
+                "self_attention_scaling": self._self_attention_scaling,
                 "gated_mlp_slicing": self._gated_mlp_slicing,
+                "grouped_mlp_slicing": self._grouped_mlp_slicing,
                 "pack_name_remapping": self._pack_name_remapping,
                 "pack_name_remapping_gpt_oss": self._pack_name_remapping_gpt_oss,
             }
@@ -513,30 +713,40 @@ class GPTModelExporter:
         self,
         module: torch.nn.Module,
         dtype: torch.dtype = torch.float16,
+        prefix: str = "",
     ) -> tuple[dict[str, torch.Tensor], str, int]:
         """Return a state_dict, quantization format, and block_size of the module.
 
         Args:
             module: The target module to perform real quantization.
             dtype: The default data type.
+            prefix: The prefix of the layer.
 
         Returns:
             Tuple: state_dict, quantization format, and block_size of the module.
         """
         name_to_value = {}
         qformat: str = self._get_quantization_format(module)
+        if qformat is None and "norm" not in prefix:
+            # Add exclude layers for hf_quant_config. Note that if the prefix is not an empty
+            # string then it usually ends with "." which needs to be removed.
+            self.exclude_modules.append(prefix.removesuffix("."))
         block_size = get_weight_block_size(module)
 
-        if hasattr(module, "weight") and module.weight is not None:
+        if hasattr(module, "weight") and module.weight is not None and module.weight.numel() > 0:
             weight = module.weight.to(dtype).cpu()
             name_to_value["weight"] = weight
         else:
             return name_to_value, qformat, block_size
 
-        if hasattr(module, "bias") and module.bias is not None:
+        if hasattr(module, "bias") and module.bias is not None and module.bias.numel() > 0:
             name_to_value["bias"] = module.bias.to(dtype).cpu()
 
-        if hasattr(module, "expert_bias") and module.expert_bias is not None:
+        if (
+            hasattr(module, "expert_bias")
+            and module.expert_bias is not None
+            and module.expert_bias.numel() > 0
+        ):
             name_to_value["expert_bias"] = module.expert_bias.to(dtype).cpu()
 
         if qformat == QUANTIZATION_NONE:
@@ -557,11 +767,6 @@ class GPTModelExporter:
             # TODO (chenhany): support AWQ with pre_quant_scale
             if hasattr(module.input_quantizer, "_pre_quant_scale"):
                 raise ValueError("Detect pre_quant_scale! SmoothQuant/AWQ are not yet supported!")
-
-        if hasattr(module, "output_quantizer"):
-            output_scale = get_kv_cache_scaling_factor(module)
-            if output_scale is not None:
-                name_to_value["output_scale"] = output_scale
 
         return name_to_value, qformat, block_size
 
@@ -596,7 +801,7 @@ class GPTModelExporter:
             self._state_dict[prefix] = module
             return
 
-        name_to_value, qformat, block_size = self._get_quantized_state(module, dtype)
+        name_to_value, qformat, block_size = self._get_quantized_state(module, dtype, prefix=prefix)
 
         weight = name_to_value.pop("weight")
         weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
@@ -628,7 +833,9 @@ class GPTModelExporter:
     def _gated_mlp_slicing(
         self, module, prefix, gate_proj_name="gate_proj", up_proj_name="up_proj"
     ):
-        name_to_value, qformat, block_size = self._get_quantized_state(module, self.dtype)
+        name_to_value, qformat, block_size = self._get_quantized_state(
+            module, self.dtype, prefix=prefix
+        )
 
         weight = name_to_value.pop("weight")
         weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
@@ -683,6 +890,67 @@ class GPTModelExporter:
                 self._state_dict[gate_proj_key] = val.detach().clone()
                 self._state_dict[up_proj_key] = val.detach().clone()
 
+    def _grouped_mlp_slicing(self, module, prefix, parallel_config=None):
+        """Export TEGroupedMLP weights by splitting per-expert weights into individual HF weights.
+
+        TEGroupedMLP (via TEGroupedLinear) stores weights as weight0, weight1, ..., weight{N-1}
+        in its state_dict, where each weight{i} corresponds to one expert. This method extracts
+        quantization state from the module, then iterates over experts and saves each expert's
+        weight (and scales if quantized) under the HF-style per-expert prefix.
+
+        This is the reverse of _grouped_mlp_merging in the importer.
+        """
+        num_experts = module.num_gemms
+
+        # TEGroupedLinear doesn't have module.weight (it has weight0, weight1, ...).
+        # Temporarily assign weight = weight0 so _get_quantized_state can extract
+        # qformat, scales, and input_scale from the module's quantizers.
+        has_weight = hasattr(module, "weight")
+        if not has_weight:
+            module.weight = module.weight0
+        try:
+            name_to_value, qformat, block_size = self._get_quantized_state(
+                module, self.dtype, prefix=prefix
+            )
+            weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
+            name_to_value.pop("weight", None)
+        finally:
+            if not has_weight and hasattr(module, "weight"):
+                delattr(module, "weight")
+
+        state_dict = module.state_dict()
+
+        for expert_id in range(num_experts):
+            expert_prefix = prefix.format(expert_id) + "."
+            weight_key = f"weight{expert_id}"
+
+            if weight_key not in state_dict:
+                raise ValueError(f"Missing expected TEGroupedMLP expert weight: {weight_key}")
+
+            weight = state_dict[weight_key].to(self.dtype).cpu()
+
+            if weight_scale is None:
+                self._state_dict[expert_prefix + "weight"] = weight
+            else:
+                self._state_dict[expert_prefix + "weight"] = to_quantized_weight(
+                    weight,
+                    weight_scale,
+                    qformat,
+                    weight_scale_2,
+                    block_size,
+                )
+                self._state_dict[expert_prefix + "weight_scale"] = weight_scale.detach().clone()
+
+            if weight_scale_2 is not None:
+                self._state_dict[expert_prefix + "weight_scale_2"] = weight_scale_2.detach().clone()
+
+        for key, val in name_to_value.items():
+            if key == "output_scale":
+                continue
+            for expert_id in range(num_experts):
+                expert_prefix = prefix.format(expert_id) + "."
+                self._state_dict[expert_prefix + key] = val.detach().clone()
+
     def _qkv_slicing(
         self,
         module,
@@ -690,10 +958,10 @@ class GPTModelExporter:
         q_proj_name="q_proj",
         k_proj_name="k_proj",
         v_proj_name="v_proj",
-        k_scale_name="k_scale",
-        v_scale_name="v_scale",
     ):
-        name_to_value, qformat, block_size = self._get_quantized_state(module, self.dtype)
+        name_to_value, qformat, block_size = self._get_quantized_state(
+            module, self.dtype, prefix=prefix
+        )
 
         q_proj_prefix = prefix + q_proj_name + "."
         k_proj_prefix = prefix + k_proj_name + "."
@@ -790,10 +1058,7 @@ class GPTModelExporter:
             q_proj_key = q_proj_prefix + key
             k_proj_key = k_proj_prefix + key
             v_proj_key = v_proj_prefix + key
-            if key == "output_scale":
-                self._state_dict[prefix + k_scale_name] = val.detach().clone()
-                self._state_dict[prefix + v_scale_name] = val.detach().clone()
-            elif key == "bias":
+            if key == "bias":
                 # Slice bias similar to weight
                 bias = val.detach().clone()
                 bias = bias.reshape([qkv_total_dim, head_size])
@@ -806,6 +1071,23 @@ class GPTModelExporter:
                 self._state_dict[k_proj_key] = val.detach().clone()
                 self._state_dict[v_proj_key] = val.detach().clone()
 
+    def _self_attention_scaling(
+        self, module, prefix, k_scale_name="k_scale", v_scale_name="v_scale"
+    ):
+        """KV cache scaling for CoreAttention module."""
+        k_scale_key = prefix + k_scale_name
+        v_scale_key = prefix + v_scale_name
+        if hasattr(module, "k_bmm_quantizer") and hasattr(module, "v_bmm_quantizer"):
+            kv_scales = get_kv_cache_scaling_factor(module)
+            if all(s is not None for s in kv_scales):
+                self._state_dict[k_scale_key] = kv_scales[0]
+                self._state_dict[v_scale_key] = kv_scales[1]
+
+            kv_cache_dtype = get_kv_cache_dtype(module)
+            if kv_cache_dtype in (KV_CACHE_FP8, KV_CACHE_NVFP4):
+                # FP8 KV Cache is supported in VLLM; NVFP4 supported in TRTLLM
+                self.kv_cache_dtype = kv_cache_dtype
+
     def _pack_name_remapping(self, module, prefix, layer_type=None):
         """Pack name remapping into one tensor."""
         weight_list = []
@@ -816,7 +1098,7 @@ class GPTModelExporter:
         for expert in module:
             assert layer_type is not None, "layer_type is required for pack_name_remapping"
             name_to_value, qformat, block_size = self._get_quantized_state(
-                getattr(expert, layer_type), self.dtype
+                getattr(expert, layer_type), self.dtype, prefix=prefix
             )
             weight = name_to_value.pop("weight")
             weight_scale, weight_scale_2 = self._get_weight_scales(name_to_value, qformat)
@@ -882,7 +1164,7 @@ class GPTModelExporter:
         for expert in module:
             assert layer_type is not None, "layer_type is required for pack_name_remapping"
             name_to_value, qformat, block_size = self._get_quantized_state(
-                getattr(expert, layer_type), self.dtype
+                getattr(expert, layer_type), self.dtype, prefix=prefix
             )
             weight = name_to_value.pop("weight")
             bias = name_to_value.pop("bias", None)
@@ -985,242 +1267,27 @@ class GPTModelExporter:
             # TODO: May need to modify the key name later.
             self._state_dict[prefix + "_bias"] = merged_bias
 
-    def _get_medusa_heads_state_dict(self):
-        medusa_heads = getattr(self.model, "medusa_heads", None)
-        if medusa_heads is None:
-            return
+    def _gather_exclude_modules(self):
+        """Get exclude_modules from all ranks to ensure hf_quant_config is complete."""
+        if not torch.distributed.is_initialized():
+            return sorted(self.exclude_modules)
 
-        for head_id, head in enumerate(medusa_heads):
-            self.rules["medusa_heads.lm_head"](head.lm_head, head_id)
-            for layer_id, layer in enumerate(head.medusa_layers):
-                self.rules["medusa_heads.medusa_layers.linear"](layer.linear, head_id, layer_id)
-
-    def _get_eagle_module_state_dict(self):
-        eagle_module = getattr(self.model, "eagle_module", None)
-
-        if eagle_module is None:
-            return
-
-        # if hasattr(self.model, "embedding"):
-        #    self.rules["word_embeddings"](self.model.embedding.word_embeddings)
-
-        self.rules["fc"](eagle_module.fc)
-        if self.model.eagle_config.use_aux_hidden_state:
-            self.rules["enorm"](eagle_module.enorm)
-        elif self.model.eagle_config.use_mtp_layernorm:
-            self.rules["enorm"](eagle_module.enorm)
-            self.rules["hnorm"](eagle_module.hnorm)
-
-        if self.model.eagle_config.use_last_layernorm:
-            self.rules["final_layernorm"](eagle_module.decoder.final_layernorm)
-
-        if hasattr(self.model.eagle_module, "eagle_output_layer"):
-            self.rules["output_layer"](eagle_module.eagle_output_layer)
-        if hasattr(self.model.eagle_module, "dt2"):
-            self.rules["d2t"](eagle_module.d2t)
-
-        for layer in eagle_module.decoder.layers:
-            layer_id = layer.layer_number - 1
-
-            # The first layernorm needs special handling here. We have a dedicated mapping
-            # for the first layernorm since in EAGLE3 it will be mapped to hidden_norm
-            # instead of input_layernorm (due to the specialized transformer layer).
-            # The remaining EAGLE3 layers (if more than 1) are normal transformer layers
-            # where input_layernorm is mapped to input_layernorm.
-            if layer_id == 0 and self.model.eagle_config.use_input_layernorm_in_first_layer:
-                self.rules["first_input_layernorm"](layer.input_layernorm, layer_id)
-            elif layer_id > 0:
-                self.rules["input_layernorm"](layer.input_layernorm, layer_id)
-
-            if "MLASelfAttention" in str(type(layer.self_attention)):
-                if hasattr(layer.self_attention, "linear_q_proj"):
-                    self.rules["eagle_module.linear_q_proj"](
-                        layer.self_attention.linear_q_proj, layer_id
-                    )
-                else:
-                    self.rules["eagle_module.linear_q_down_proj"](
-                        layer.self_attention.linear_q_down_proj, layer_id
-                    )
-                    self.rules["eagle_module.linear_q_layernorm"](
-                        layer.self_attention.q_layernorm, layer_id
-                    )
-                    self.rules["eagle_module.linear_q_up_proj"](
-                        layer.self_attention.linear_q_up_proj, layer_id
-                    )
-
-                self.rules["eagle_module.linear_kv_down_proj"](
-                    layer.self_attention.linear_kv_down_proj, layer_id
-                )
-                self.rules["eagle_module.linear_kv_layernorm"](
-                    layer.self_attention.kv_layernorm, layer_id
-                )
-                self.rules["eagle_module.linear_kv_up_proj"](
-                    layer.self_attention.linear_kv_up_proj, layer_id
-                )
-            else:
-                self.rules["linear_qkv"](layer.self_attention.linear_qkv, layer_id)
-
-            self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
-            self.rules["pre_mlp_layernorm"](layer.pre_mlp_layernorm, layer_id)
-
-            if "MoE" in str(type(layer.mlp)):
-                self.rules["eagle_module.router"](layer.mlp.router, layer_id)
-                if hasattr(layer.mlp, "shared_experts") and layer.mlp.shared_experts is not None:
-                    self.rules["eagle_module.shared_experts.linear_fc1"](
-                        layer.mlp.shared_experts.linear_fc1, layer_id
-                    )
-                    self.rules["eagle_module.shared_experts.linear_fc2"](
-                        layer.mlp.shared_experts.linear_fc2, layer_id
-                    )
-                for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
-                    self.rules["eagle_module.local_experts.linear_fc1"](
-                        expert.linear_fc1, layer_id, expert_id
-                    )
-                    self.rules["eagle_module.local_experts.linear_fc2"](
-                        expert.linear_fc2, layer_id, expert_id
-                    )
-            else:
-                self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id)
-                self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id)
-
-        parallel_draft_heads = getattr(eagle_module, "parallel_draft_heads", None)
-        if parallel_draft_heads is not None:
-            for head_id, head in enumerate(parallel_draft_heads):
-                self.rules["parallel_draft_heads.lm_head"](head.lm_head, head_id)
-                for layer_id, layer in enumerate(head.medusa_layers):
-                    self.rules["parallel_draft_heads.medusa_layers"](
-                        layer.linear, head_id, layer_id
-                    )
-
-    def _get_state_dict(self):
-        model = self.model
-
-        # Embedding
-        if hasattr(model, "embedding"):
-            self.rules["word_embeddings"](model.embedding.word_embeddings)
-
-        # Final layernorm
-        if hasattr(model.decoder, "final_layernorm") and model.decoder.final_layernorm:
-            self.rules["final_layernorm"](model.decoder.final_layernorm)
-
-        if hasattr(model.decoder, "final_norm") and model.decoder.final_norm:
-            self.rules["final_norm"](model.decoder.final_norm)
-
-        # Output layer
-        if hasattr(model, "output_layer") and not model.share_embeddings_and_output_weights:
-            self.rules["output_layer"](model.output_layer)
-
-        # Decoder layers
-        for layer in model.decoder.layers:
-            layer_id = layer.layer_number - 1
-
-            if isinstance(layer, MambaLayer):
-                if not isinstance(layer.norm, IdentityOp):
-                    self.rules["norm"](layer.norm, layer_id)
-
-                self.rules["mixer_norm"](layer.mixer.norm, layer_id)
-                self.rules["A_log"](layer.mixer.A_log, layer_id)
-                self.rules["D"](layer.mixer.D, layer_id)
-                self.rules["dt_bias"](layer.mixer.dt_bias, layer_id)
-
-                self.rules["conv1d"](layer.mixer.conv1d, layer_id)
-                self.rules["in_proj"](layer.mixer.in_proj, layer_id)
-                self.rules["out_proj"](layer.mixer.out_proj, layer_id)
-
-            elif isinstance(layer, TransformerLayer):
-                if not isinstance(layer.input_layernorm, IdentityOp):
-                    self.rules["input_layernorm"](layer.input_layernorm, layer_id)
-
-                if not isinstance(layer.self_attention, IdentityOp):
-                    if "MLASelfAttention" in str(type(layer.self_attention)):
-                        if hasattr(layer.self_attention, "linear_q_proj"):
-                            self.rules["linear_q_proj"](
-                                layer.self_attention.linear_q_proj, layer_id
-                            )
-                        else:
-                            self.rules["linear_q_down_proj"](
-                                layer.self_attention.linear_q_down_proj, layer_id
-                            )
-                            self.rules["linear_q_layernorm"](
-                                layer.self_attention.q_layernorm, layer_id
-                            )
-                            self.rules["linear_q_up_proj"](
-                                layer.self_attention.linear_q_up_proj, layer_id
-                            )
-
-                        self.rules["linear_kv_down_proj"](
-                            layer.self_attention.linear_kv_down_proj, layer_id
-                        )
-                        self.rules["linear_kv_layernorm"](
-                            layer.self_attention.kv_layernorm, layer_id
-                        )
-                        self.rules["linear_kv_up_proj"](
-                            layer.self_attention.linear_kv_up_proj, layer_id
-                        )
-                        self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
-                    else:
-                        if layer.self_attention.q_layernorm is not None and not isinstance(
-                            layer.self_attention.q_layernorm, (IdentityOp, L2Norm)
-                        ):
-                            self.rules["q_layernorm"](layer.self_attention.q_layernorm, layer_id)
-                            self.rules["k_layernorm"](layer.self_attention.k_layernorm, layer_id)
-                        self.rules["linear_qkv"](layer.self_attention.linear_qkv, layer_id)
-                        self.rules["linear_proj"](layer.self_attention.linear_proj, layer_id)
-                        if (
-                            getattr(layer.self_attention.core_attention, "softmax_offset", None)
-                            is not None
-                        ):
-                            self.rules["softmax_offset"](
-                                layer.self_attention.core_attention.softmax_offset, layer_id
-                            )
-
-                if not isinstance(layer.pre_mlp_layernorm, IdentityOp):
-                    self.rules["pre_mlp_layernorm"](layer.pre_mlp_layernorm, layer_id)
-
-                if not isinstance(layer.mlp, IdentityOp):
-                    if "MoE" in str(type(layer.mlp)):
-                        self.rules["router"](
-                            layer.mlp.router, layer_id, dtype=self.moe_router_dtype
-                        )
-                        if (
-                            hasattr(layer.mlp, "shared_experts")
-                            and layer.mlp.shared_experts is not None
-                        ):
-                            self.rules["shared_experts.linear_fc1"](
-                                layer.mlp.shared_experts.linear_fc1, layer_id
-                            )
-                            self.rules["shared_experts.linear_fc2"](
-                                layer.mlp.shared_experts.linear_fc2, layer_id
-                            )
-                        if not self.rules.get("use_packed_local_experts", False):
-                            for expert_id, expert in enumerate(layer.mlp.experts.local_experts):
-                                self.rules["local_experts.linear_fc1"](
-                                    expert.linear_fc1, layer_id, expert_id
-                                )
-                                self.rules["local_experts.linear_fc2"](
-                                    expert.linear_fc2, layer_id, expert_id
-                                )
-                        else:
-                            # For llama 4, in hf unified checkpoint, all local experts share one scale
-                            self.rules["local_experts.linear_fc1"](
-                                layer.mlp.experts.local_experts, layer_id
-                            )
-                            self.rules["local_experts.linear_fc2"](
-                                layer.mlp.experts.local_experts, layer_id
-                            )
-                    else:
-                        self.rules["linear_fc1"](layer.mlp.linear_fc1, layer_id)
-                        self.rules["linear_fc2"](layer.mlp.linear_fc2, layer_id)
-            else:
-                raise ValueError("Only TransformerLayer or MambaLayer are supported.")
+        all_exclude_modules = [None] * torch.distributed.get_world_size()
+        torch.distributed.all_gather_object(all_exclude_modules, self.exclude_modules)
+        combined_exclude_modules = set()
+        for modules in all_exclude_modules:
+            if modules:
+                combined_exclude_modules.update(modules)
+        return sorted(combined_exclude_modules)
 
 
 def export_mcore_gpt_to_hf(
     model: torch.nn.Module,
-    pretrained_model_name_or_path: str | os.PathLike | None = None,
+    pretrained_model_name_or_path: str | os.PathLike,
     export_extra_modules: bool = False,
     dtype: torch.dtype = torch.bfloat16,
     export_dir: Path | str = tempfile.gettempdir(),
+    trust_remote_code: bool = False,
     moe_router_dtype: torch.dtype | None = None,
 ):
     """Export Megatron Core GPTModel to unified checkpoint and save to export_dir.
@@ -1241,9 +1308,13 @@ def export_mcore_gpt_to_hf(
         pretrained_model_name_or_path,
         export_extra_modules=export_extra_modules,
         dtype=dtype,
+        trust_remote_code=trust_remote_code,
         moe_router_dtype=moe_router_dtype,
     )
-    exporter.save_pretrained(export_dir, pretrained_model_name_or_path)
+    if exporter.export_extra_modules:
+        exporter.save_pretrained_extra_modules(export_dir)
+    else:
+        exporter.save_pretrained(export_dir, pretrained_model_name_or_path)
 
 
 def import_mcore_gpt_from_hf(
@@ -1251,6 +1322,7 @@ def import_mcore_gpt_from_hf(
     pretrained_model_path: str,
     workspace_dir: str | None = None,
     dtype: torch.dtype = torch.bfloat16,
+    trust_remote_code: bool = False,
     moe_router_dtype: torch.dtype | None = None,
 ):
     """Import GPTModel state_dict from supported HuggingFace pretrained model path.
@@ -1259,13 +1331,17 @@ def import_mcore_gpt_from_hf(
         model: The Megatron Core GPTModel instance.
         pretrained_model_path: A path to a *directory* containing model weights saved using
             [`~PreTrainedModel.save_pretrained`], e.g., `./my_model_directory/`.
+        workspace_dir: The directory to save the workspace.
         dtype: The weights data type to import.
+        trust_remote_code: If True, this allows importing from a wider range of sources.
+        moe_router_dtype: The data type to import the moe router weights.
     """
     importer = GPTModelImporter(
         model,
         pretrained_model_path,
         workspace_dir=workspace_dir,
         dtype=dtype,
+        trust_remote_code=trust_remote_code,
         moe_router_dtype=moe_router_dtype,
     )
     importer._import_state_dict()

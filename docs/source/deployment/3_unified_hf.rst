@@ -2,7 +2,7 @@
 Unified HuggingFace Checkpoint
 =================================================================
 
-We support exporting modelopt-optimized Huggingface models and Megatron Core models to a unified checkpoint format that can be deployed in various inference frameworks such as TensorRT-LLM, vLLM, and SGLang.
+We support exporting modelopt-optimized Hugging Face models (transformers and diffusers pipelines/components) and Megatron Core models to a unified checkpoint format that can be deployed in various inference frameworks such as TensorRT-LLM, vLLM, and SGLang.
 
 The workflow is as follows:
 
@@ -31,6 +31,10 @@ The export API (:meth:`export_hf_checkpoint <modelopt.torch.export.unified_expor
             model,  # The quantized model.
             export_dir,  # The directory where the exported files will be stored.
         )
+
+.. note::
+   ``export_hf_checkpoint`` also supports diffusers pipelines and components (e.g., UNet/transformer). See the
+   diffusers quantization examples for end-to-end workflows and CLI usage.
 
 Deployment Support Matrix
 ==============================================

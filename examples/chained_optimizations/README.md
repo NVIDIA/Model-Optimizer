@@ -25,6 +25,7 @@ Install Model Optimizer with optional torch and huggingface dependencies:
 
 ```bash
 pip install "nvidia-modelopt[hf]"
+pip install -r requirements.txt
 ```
 
 ### Running the example

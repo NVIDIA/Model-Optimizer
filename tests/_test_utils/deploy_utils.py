@@ -14,10 +14,169 @@
 # limitations under the License.
 
 import itertools
+import os
 import subprocess
+import sys
 
 import pytest
 import torch
+
+# Cache for available backends detection (computed once at import time)
+_AVAILABLE_BACKENDS = None
+
+
+def get_available_backends():
+    """Detect which backends are available in the current environment.
+
+    Returns:
+        set: A set of available backend names ('trtllm', 'vllm', 'sglang')
+    """
+    global _AVAILABLE_BACKENDS
+    if _AVAILABLE_BACKENDS is not None:
+        return _AVAILABLE_BACKENDS
+
+    available = set()
+
+    try:
+        import tensorrt_llm  # noqa: F401
+
+        available.add("trtllm")
+    except ImportError:
+        pass
+
+    try:
+        import vllm  # noqa: F401
+
+        available.add("vllm")
+    except ImportError:
+        pass
+
+    try:
+        import sglang  # noqa: F401
+
+        available.add("sglang")
+    except ImportError:
+        pass
+
+    _AVAILABLE_BACKENDS = available
+    print(f"[deploy_utils] Detected available backends: {available}")
+    return _AVAILABLE_BACKENDS
+
+
+def _run_trtllm_deploy(
+    model_id: str,
+    tensor_parallel_size: int,
+    mini_sm: int,
+    attn_backend: str,
+    base_model: str,
+    eagle3_one_model: bool,
+) -> None:
+    """Top-level entry for subprocess: run TensorRT-LLM deploy in a child process."""
+    try:
+        deployer = ModelDeployer(
+            backend="trtllm",
+            model_id=model_id,
+            tensor_parallel_size=tensor_parallel_size,
+            mini_sm=mini_sm,
+            attn_backend=attn_backend,
+            base_model=base_model,
+            eagle3_one_model=eagle3_one_model,
+        )
+        deployer._deploy_trtllm_impl()
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+        pytest.fail(traceback.format_exc())
+
+
+def _run_vllm_deploy(
+    model_id: str,
+    tensor_parallel_size: int,
+    mini_sm: int,
+    attn_backend: str,
+    base_model: str,
+    eagle3_one_model: bool,
+) -> None:
+    """Top-level entry for subprocess: run vLLM deploy in a child process."""
+    try:
+        deployer = ModelDeployer(
+            backend="vllm",
+            model_id=model_id,
+            tensor_parallel_size=tensor_parallel_size,
+            mini_sm=mini_sm,
+            attn_backend=attn_backend,
+            base_model=base_model,
+            eagle3_one_model=eagle3_one_model,
+        )
+        deployer._deploy_vllm_impl()
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+        pytest.fail(traceback.format_exc())
+
+
+def _run_sglang_deploy(
+    model_id: str,
+    tensor_parallel_size: int,
+    mini_sm: int,
+    attn_backend: str,
+    base_model: str,
+    eagle3_one_model: bool,
+) -> None:
+    """Top-level entry for subprocess: run SGLang deploy in a child process."""
+    try:
+        deployer = ModelDeployer(
+            backend="sglang",
+            model_id=model_id,
+            tensor_parallel_size=tensor_parallel_size,
+            mini_sm=mini_sm,
+            attn_backend=attn_backend,
+            base_model=base_model,
+            eagle3_one_model=eagle3_one_model,
+        )
+        deployer._deploy_sglang_impl()
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+        pytest.fail(traceback.format_exc())
+
+
+def _run_deploy_via_subprocess(
+    backend: str,
+    model_id: str,
+    tensor_parallel_size: int,
+    mini_sm: int,
+    attn_backend: str,
+    base_model: str,
+    eagle3_one_model: bool,
+) -> None:
+    """Run deploy in a subprocess and print its stdout/stderr so pytest capture=tee-sys captures to DB."""
+    tests_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    project_root = os.path.dirname(tests_dir)
+    env = {
+        **os.environ,
+        "PYTHONPATH": project_root + os.pathsep + os.environ.get("PYTHONPATH", ""),
+    }
+    code = f"""from _test_utils.deploy_utils import _run_{backend}_deploy
+_run_{backend}_deploy(
+    {model_id!r}, {tensor_parallel_size}, {mini_sm}, {attn_backend!r}, {base_model!r}, {eagle3_one_model}
+)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=tests_dir,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if result.stdout:
+        print(result.stdout, end="", flush=True)
+    result.check_returncode()
+
 
 # Common test prompts for all backends
 COMMON_PROMPTS = [
@@ -72,62 +231,70 @@ class ModelDeployer:
         if torch.cuda.device_count() < self.tensor_parallel_size:
             pytest.skip(reason=f"Requires at least {self.tensor_parallel_size} GPUs")
             return
-        if self.backend == "vllm":
-            self._deploy_vllm()
-        elif self.backend == "trtllm":
-            self._deploy_trtllm()
-        elif self.backend == "sglang":
-            self._deploy_sglang()
+
+        print(f"Deploying model: {self.model_id} with backend: {self.backend}")
+        print(f"Tensor parallel size: {self.tensor_parallel_size}")
+        # Use subprocess + capture so pytest capture=tee-sys (and DB plugins) see deploy output.
+        if self.backend in ("vllm", "trtllm", "sglang"):
+            _run_deploy_via_subprocess(
+                backend=self.backend,
+                model_id=self.model_id,
+                tensor_parallel_size=self.tensor_parallel_size,
+                mini_sm=self.mini_sm,
+                attn_backend=self.attn_backend,
+                base_model=self.base_model,
+                eagle3_one_model=self.eagle3_one_model,
+            )
         else:
             raise ValueError(f"Unknown backend: {self.backend}")
-        # check gpu status
-        gpu_status = subprocess.run(
-            "nvidia-smi || true", shell=True, capture_output=True, text=True, check=True
-        )
-        print("\n=== GPU Status Before Test ===")
-        print(gpu_status.stdout)
-        print("=============================\n")
 
-    def _deploy_trtllm(self):
-        """Deploy a model using TensorRT-LLM."""
-        try:
-            from tensorrt_llm import LLM, SamplingParams
-            from tensorrt_llm.llmapi import CudaGraphConfig, EagleDecodingConfig, KvCacheConfig
-        except ImportError:
-            pytest.skip("tensorrt_llm package not available")
+    def _deploy_trtllm_impl(self):
+        """Run TensorRT-LLM deploy (used by subprocess in run())."""
+        from tensorrt_llm import LLM, SamplingParams
+        from tensorrt_llm.llmapi import CudaGraphConfig, EagleDecodingConfig, KvCacheConfig
 
         sampling_params = SamplingParams(max_tokens=32)
-        spec_config = None
-        llm = None
-        kv_cache_config = KvCacheConfig(enable_block_reuse=True, free_gpu_memory_fraction=0.8)
+        qwen3_models = (
+            "nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4",
+            "nvidia/Qwen3-Next-80B-A3B-Thinking-NVFP4",
+        )
+        nemotron_models = (
+            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
+            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
+        )
+        kv_cache_config = KvCacheConfig(
+            enable_block_reuse=self.model_id not in qwen3_models,
+            free_gpu_memory_fraction=0.8,
+            mamba_ssm_cache_dtype="float32" if self.model_id not in nemotron_models else "auto",
+        )
+        base_kw = {
+            "tensor_parallel_size": self.tensor_parallel_size,
+            "enable_attention_dp": False,
+            "attn_backend": self.attn_backend,
+            "trust_remote_code": True,
+            "max_batch_size": 8,
+        }
+
         if "eagle" in self.model_id.lower():
             spec_config = EagleDecodingConfig(
                 max_draft_len=3,
                 speculative_model_dir=self.model_id,
                 eagle3_one_model=self.eagle3_one_model,
             )
-            cuda_graph = CudaGraphConfig(
-                max_batch_size=1,
-            )
             llm = LLM(
                 model=self.base_model,
-                tensor_parallel_size=self.tensor_parallel_size,
-                enable_attention_dp=False,
                 disable_overlap_scheduler=True,
                 enable_autotuner=False,
                 speculative_config=spec_config,
-                cuda_graph_config=cuda_graph,
+                cuda_graph_config=CudaGraphConfig(max_batch_size=1),
                 kv_cache_config=kv_cache_config,
+                **base_kw,
             )
         else:
             llm = LLM(
                 model=self.model_id,
-                tensor_parallel_size=self.tensor_parallel_size,
-                enable_attention_dp=False,
-                attn_backend=self.attn_backend,
-                trust_remote_code=True,
-                max_batch_size=8,
                 kv_cache_config=kv_cache_config,
+                **base_kw,
             )
 
         outputs = llm.generate(COMMON_PROMPTS, sampling_params)
@@ -138,15 +305,12 @@ class ModelDeployer:
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
         del llm
 
-    def _deploy_vllm(self):
-        """Deploy a model using vLLM."""
-        try:
-            from vllm import LLM, SamplingParams
-        except ImportError:
-            pytest.skip("vllm package not available")
+    def _deploy_vllm_impl(self):
+        """Run vLLM deploy (used by subprocess in run())."""
+        from vllm import LLM, SamplingParams
 
         quantization_method = "modelopt"
-        if "FP4" in self.model_id:
+        if "fp4" in self.model_id.lower():
             quantization_method = "modelopt_fp4"
         llm = LLM(
             model=self.model_id,
@@ -175,14 +339,12 @@ class ModelDeployer:
             print("-" * 50)
         del llm
 
-    def _deploy_sglang(self):
-        """Deploy a model using SGLang."""
-        try:
-            import sglang as sgl
-        except ImportError:
-            pytest.skip("sglang package not available")
+    def _deploy_sglang_impl(self):
+        """Run SGLang deploy (used by subprocess in run())."""
+        import sglang as sgl
+
         quantization_method = "modelopt"
-        if "FP4" in self.model_id:
+        if "fp4" in self.model_id.lower():
             quantization_method = "modelopt_fp4"
         if "eagle" in self.model_id.lower():
             llm = sgl.Engine(
@@ -196,6 +358,17 @@ class ModelDeployer:
                 trust_remote_code=True,
                 mem_fraction_static=0.7,
                 context_length=1024,
+            )
+        elif self.model_id in (
+            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
+            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
+        ):
+            llm = sgl.Engine(
+                model_path=self.model_id,
+                quantization=quantization_method,
+                tp_size=self.tensor_parallel_size,
+                trust_remote_code=True,
+                attention_backend="flashinfer",
             )
         else:
             llm = sgl.Engine(
@@ -218,10 +391,20 @@ class ModelDeployerList:
             else:
                 self.params[key] = [value]
 
+        # Filter backends to only include available ones
+        if "backend" in self.params:
+            available = get_available_backends()
+            original_backends = self.params["backend"]
+            self.params["backend"] = [b for b in original_backends if b in available]
+
         # Pre-generate all deployers for pytest compatibility
         self._deployers = list(self._generate_deployers())
 
     def _generate_deployers(self):
+        # If no backends available after filtering, yield nothing
+        if "backend" in self.params and not self.params["backend"]:
+            return
+
         for values in itertools.product(*self.params.values()):
             deployer = ModelDeployer(**dict(zip(self.params.keys(), values)))
             # Set test case ID in format "model_id_backend"

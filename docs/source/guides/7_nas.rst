@@ -363,7 +363,7 @@ can be converted into searchable units:
 
     # We convert Megatron-core / NeMo GPT or MoE or Mamba Hybrid style models (e.g. Llama3, Nemotron-H, Qwen3-30B-A3B)
     # to automatically search over the
-    # MLP hidden size, number of attention heads, number of GQA groups,
+    # MLP hidden size, number of attention heads
     # number of mamba heads, mamba head dimension,
     # number of moe experts, moe ffn hidden size, moe shared expert intermediate size,
     # and depth of the model.

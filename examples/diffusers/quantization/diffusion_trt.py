@@ -32,7 +32,7 @@ if __name__ == "__main__":
 
 from onnx_utils.export import (
     _create_trt_dynamic_shapes,
-    generate_dummy_inputs_and_dynamic_axes_and_shapes,
+    generate_dummy_kwargs_and_dynamic_axes_and_shapes,
     get_io_shapes,
     remove_nesting,
     update_dynamic_axes,
@@ -92,18 +92,18 @@ def benchmark_backbone_standalone(
     backbone = pipe.transformer if hasattr(pipe, "transformer") else pipe.unet
 
     # Generate dummy inputs for the backbone
-    dummy_inputs, _, _ = generate_dummy_inputs_and_dynamic_axes_and_shapes(model_name, backbone)
+    dummy_kwargs, _, _ = generate_dummy_kwargs_and_dynamic_axes_and_shapes(model_name, backbone)
 
     # Extract the dict from the tuple and move to cuda
-    dummy_inputs_dict = {
-        k: v.cuda() if isinstance(v, torch.Tensor) else v for k, v in dummy_inputs[0].items()
+    dummy_kwargs_cuda = {
+        k: v.cuda() if isinstance(v, torch.Tensor) else v for k, v in dummy_kwargs.items()
     }
 
     # Warmup
     print(f"Warming up: {num_warmup} iterations")
     for _ in tqdm(range(num_warmup), desc="Warmup"):
         with context:
-            _ = backbone(**dummy_inputs_dict)
+            _ = backbone(**dummy_kwargs_cuda)
 
     # Benchmark
     torch.cuda.synchronize()
@@ -116,7 +116,7 @@ def benchmark_backbone_standalone(
         with context:
             torch.cuda.profiler.cudart().cudaProfilerStart()
             start_event.record()
-            _ = backbone(**dummy_inputs_dict)
+            _ = backbone(**dummy_kwargs_cuda)
             end_event.record()
             torch.cuda.synchronize()
             torch.cuda.profiler.cudart().cudaProfilerStop()
@@ -241,7 +241,7 @@ def main():
     backbone.to("cuda")
 
     # Generate dummy inputs for the backbone
-    dummy_inputs, dynamic_axes, dynamic_shapes = generate_dummy_inputs_and_dynamic_axes_and_shapes(
+    dummy_inputs, dynamic_axes, dynamic_shapes = generate_dummy_kwargs_and_dynamic_axes_and_shapes(
         args.model, backbone
     )
 

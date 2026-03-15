@@ -19,14 +19,19 @@ import pytest
 from _test_utils.examples.run_command import run_example_command
 from _test_utils.torch.misc import minimum_gpu
 
-imagenet_path = os.getenv("IMAGENET_PATH")
-skip_no_imagenet = pytest.mark.skipif(
-    not imagenet_path or not os.path.isdir(imagenet_path),
-    reason="IMAGENET_PATH environment variable is not set or does not point to a valid directory",
-)
+
+@pytest.fixture
+def imagenet_path():
+    """Fixture to get IMAGENET_PATH from environment and skip if not valid."""
+    path = os.getenv("IMAGENET_PATH")
+    if not path or not os.path.isdir(path):
+        pytest.skip(
+            "IMAGENET_PATH environment variable is not set or does not point to a valid directory"
+        )
+    return path
 
 
-def _build_common_command():
+def _build_common_command(imagenet_path):
     """Build common command arguments for CNN QAT training."""
     train_data_path = os.path.join(imagenet_path, "train")
     val_data_path = os.path.join(imagenet_path, "val")
@@ -58,21 +63,19 @@ def _run_qat_command(base_cmd, common_args, output_dir, example_dir="cnn_qat"):
     run_example_command(full_command, example_dir)
 
 
-@skip_no_imagenet
 @minimum_gpu(1)
-def test_cnn_qat_single_gpu(tmp_path):
+def test_cnn_qat_single_gpu(tmp_path, imagenet_path):
     """Test CNN QAT on single GPU."""
-    common_args = _build_common_command()
+    common_args = _build_common_command(imagenet_path)
     base_command = ["python", "torchvision_qat.py", "--gpu", "0"]
 
     _run_qat_command(base_command, common_args, tmp_path)
 
 
-@skip_no_imagenet
 @minimum_gpu(2)
-def test_cnn_qat_multi_gpu(tmp_path):
+def test_cnn_qat_multi_gpu(tmp_path, imagenet_path):
     """Test CNN QAT on multiple GPUs."""
-    common_args = _build_common_command()
+    common_args = _build_common_command(imagenet_path)
     base_command = ["torchrun", "--nproc_per_node=2", "torchvision_qat.py"]
 
     _run_qat_command(base_command, common_args, tmp_path)

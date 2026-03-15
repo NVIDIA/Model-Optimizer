@@ -15,6 +15,8 @@
 
 from .aa_timing import AATiming
 from .acceptance_rate import AcceptanceRate
-from .base import Metric
 from .mtbench import MTBench
+from .specbench import SpecBench
 from .timing import Timing
+
+__all__ = ["AATiming", "AcceptanceRate", "MTBench", "SpecBench", "Timing"]

@@ -62,7 +62,6 @@ class Hparam:
         self._active = self.original
         self._is_configurable = True  # in case we want to manually overwrite configurability.
         # Additional attributes for hacking megatron dynamic modules to simplify implementation.
-        self._strict_len = True  # whether the importance must be of length equal to max choice
         self._importance_is_order = (
             False  # whether the importance is overwritten to be active slice order
         )
@@ -205,9 +204,7 @@ class Hparam:
         for estimator in self._importance_estimators or []:
             imp = estimator()
             if imp is not None:
-                assert not self._strict_len or len(imp) == self.max, (
-                    "Length of importance must be equal to max choice!"
-                )
+                assert len(imp) == self.max, "Length of importance must be equal to max choice!"
                 imps_all.append(imp)
 
         if self._importance_is_order:
@@ -237,9 +234,9 @@ class Hparam:
             order = order.long()
 
             # check if the order is valid
-            assert not self._strict_len or torch.equal(
-                torch.arange(self.max, device=order.device), torch.sort(order)[0]
-            ), "order must be a permutation of range(self.max) to be valid!"
+            assert torch.equal(torch.arange(self.max, device=order.device), torch.sort(order)[0]), (
+                "order must be a permutation of range(self.max) to be valid!"
+            )
 
         self._enforce_order(order)
 

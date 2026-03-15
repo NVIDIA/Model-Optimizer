@@ -39,3 +39,9 @@ try:
         )
 except ImportError:
     pass
+
+# Initialize modelopt_internal if available
+with utils.import_plugin(
+    "modelopt_internal", success_msg="modelopt_internal successfully initialized", verbose=True
+):
+    import modelopt_internal

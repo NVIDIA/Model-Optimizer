@@ -12,18 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import textwrap
 from warnings import warn
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from _test_utils.import_helper import skip_if_no_megatron
-from huggingface_hub import constants as hf_constants
-
-skip_if_no_megatron()
-
 from _test_utils.torch.megatron.utils import initialize_for_megatron
+from huggingface_hub import constants as hf_constants
 from megatron.core.models.gpt import GPTModel
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_layer_local_spec,
@@ -31,7 +26,6 @@ from megatron.core.models.gpt.gpt_layer_specs import (
 )
 from megatron.core.models.mamba import MambaModel
 from megatron.core.parallel_state import is_pipeline_first_stage, is_pipeline_last_stage
-from megatron.core.ssm.mamba_hybrid_layer_allocation import Symbols
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -87,7 +81,7 @@ class MegatronModel(MegatronModule):
             init_method=torch.nn.init.xavier_uniform_,
             bias=True,
             gather_output=False,
-            skip_bias_add=True,
+            skip_bias_add=False,
             is_expert=False,
             tp_group=tp_group,
         )
@@ -101,7 +95,7 @@ class MegatronModel(MegatronModule):
             config=config,
             init_method=torch.nn.init.xavier_uniform_,
             bias=True,
-            skip_bias_add=True,
+            skip_bias_add=False,
             input_is_parallel=True,
             is_expert=False,
             tp_group=tp_group,
@@ -311,8 +305,10 @@ def get_mcore_mamba_hybrid_model(
     max_sequence_length: int = 4,
     vocab_size: int = 64,
     bf16: bool = True,
+    sequence_parallel: bool = False,
     # Mamba-specific parameters
     mamba_state_dim: int = 32,
+    mamba_num_heads: int | None = None,
     mamba_head_dim: int = 16,
     mamba_num_groups: int = 2,
     # MoE-specific parameters
@@ -337,7 +333,7 @@ def get_mcore_mamba_hybrid_model(
     config = TransformerConfig(
         tensor_model_parallel_size=tensor_model_parallel_size,
         pipeline_model_parallel_size=pipeline_model_parallel_size,
-        sequence_parallel=False,
+        sequence_parallel=sequence_parallel,
         num_layers=num_layers,
         num_layers_in_first_pipeline_stage=num_layers_in_first_pipeline_stage,
         num_layers_in_last_pipeline_stage=num_layers_in_last_pipeline_stage,
@@ -346,6 +342,7 @@ def get_mcore_mamba_hybrid_model(
         num_query_groups=num_query_groups,
         ffn_hidden_size=ffn_hidden_size,
         mamba_state_dim=mamba_state_dim,
+        mamba_num_heads=mamba_num_heads,
         mamba_head_dim=mamba_head_dim,
         mamba_num_groups=mamba_num_groups,
         num_moe_experts=num_moe_experts,
@@ -357,10 +354,7 @@ def get_mcore_mamba_hybrid_model(
         **config_kwargs,
     )
 
-    if not (skip_moe or "E" in Symbols.VALID):
-        warn("MoE blocks are not supported in current MambaModel. Skipping MoE blocks.")
-        skip_moe = True
-
+    # TODO: hybrid_override_pattern is deprecated in MCore 0.17+, use hybrid_layer_pattern instead
     if hybrid_override_pattern is None:
         # Generate pattern by repeating base_pattern and trimming to match num_layers
         #   E.g. for num_layers=3, return "MEM" (Mamba -> MoE -> Mamba)
@@ -368,23 +362,24 @@ def get_mcore_mamba_hybrid_model(
         base_pattern = "M*M-" if skip_moe else "MEM*M-"
         hybrid_override_pattern = (base_pattern * num_layers)[:num_layers]
 
-    # Add | symbols for Pipeline parallelism (required for MCore 0.16+)
+    # TODO: enable this when MCore 0.17+ is released (has fall-back so without this is still fine for sometime)
+    # Add | symbols for Pipeline parallelism (supported from MCore 0.17+, auto-added if not provided)
     # E.g. MEM* with PP2 becomes ME|M* and MEM*M-ME with PP2 becomes MEM*|M-ME
-    if pipeline_model_parallel_size > 1 and "|" in Symbols.VALID:
-        if "|" not in hybrid_override_pattern:
-            assert (
-                num_layers_in_first_pipeline_stage is None
-                and num_layers_in_last_pipeline_stage is None
-            ), "hybrid_override_pattern with `|` must be provided for uneven PP"
-            hybrid_override_pattern = "|".join(
-                textwrap.wrap(
-                    hybrid_override_pattern,
-                    width=num_layers // pipeline_model_parallel_size,
-                    break_long_words=True,
-                    break_on_hyphens=False,
-                )
-            )
-        assert hybrid_override_pattern.count("|") == pipeline_model_parallel_size - 1
+    # if pipeline_model_parallel_size > 1:
+    #     if "|" not in hybrid_override_pattern:
+    #         assert (
+    #             num_layers_in_first_pipeline_stage is None
+    #             and num_layers_in_last_pipeline_stage is None
+    #         ), "hybrid_override_pattern with `|` must be provided for uneven PP"
+    #         hybrid_override_pattern = "|".join(
+    #             textwrap.wrap(
+    #                 hybrid_override_pattern,
+    #                 width=num_layers // pipeline_model_parallel_size,
+    #                 break_long_words=True,
+    #                 break_on_hyphens=False,
+    #             )
+    #         )
+    #     assert hybrid_override_pattern.count("|") == pipeline_model_parallel_size - 1
     assert len(hybrid_override_pattern.replace("|", "")) == num_layers
     print(f"Using `{hybrid_override_pattern=}` for building MambaModel")
 

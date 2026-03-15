@@ -78,7 +78,7 @@ def prune(
                     constraints = {"params": "60%"}
 
                     # Specify export_config with pruned hyperparameters
-                    # This is supported and required if the model is converted via ``mcore_minitron`` mode.
+                    # This is supported only if the model is converted via ``mcore_minitron`` mode.
                     constraints = {
                         "export_config": {
                             "ffn_hidden_size": 128,

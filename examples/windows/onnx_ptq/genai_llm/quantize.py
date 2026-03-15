@@ -230,7 +230,7 @@ def get_calib_inputs(
     )
 
     if "cnn" in dataset_name:
-        dataset2 = load_dataset("cnn_dailymail", name="3.0.0", split="train").select(
+        dataset2 = load_dataset("abisee/cnn_dailymail", name="3.0.0", split="train").select(
             range(max_calib_rows_to_load)
         )
         column = "article"
@@ -369,7 +369,7 @@ def main(args):
         f"batch_size={args.batch_size}, block_size={args.block_size}, add-position-ids={args.add_position_ids}, "
         f"past-kv={args.add_past_kv_inputs}, rcalib={args.use_random_calib}, device={args.device}, "
         f"use_zero_point={args.use_zero_point}, use_fp32={args.use_fp32} enable_mixed_quant={args.enable_mixed_quant}, "
-        f"layers_8bit={args.layers_8bit}\n"
+        f"layers_8bit={args.layers_8bit}, use_column_major={args.use_column_major}\n"
     )
 
     print(
@@ -443,6 +443,7 @@ def main(args):
         layers_8bit=args.layers_8bit,
         gather_block_size=args.gather_block_size,
         gather_quantize_axis=args.gather_quantize_axis,
+        use_column_major=args.use_column_major,
     )
     logging.info(f"\nQuantization process took {time.time() - t} seconds")
 
@@ -589,10 +590,10 @@ if __name__ == "__main__":
         help="True when --use_gqa was passed during export.",
     )
     parser.add_argument(
-        "--no_position_ids",
+        "--add_position_ids",
         dest="add_position_ids",
-        action="store_false",
-        default=True,
+        action="store_true",
+        default=False,
         help="True when we want to also pass position_ids input to model",
     )
     parser.add_argument(
@@ -605,7 +606,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--calibration_eps",
         type=parse_calibration_eps,  # Use the custom parser
-        default=["dml", "cpu"],  # Default as a list
+        default=["cuda", "cpu"],  # Default as a list
         help="Comma-separated list of calibration endpoints. Choose from 'cuda', 'cpu', 'dml', 'NvTensorRtRtx'.",
     )
     parser.add_argument(
@@ -628,6 +629,15 @@ if __name__ == "__main__":
         type=str,
         default="",
         help=("Overrides default mixed quant strategy. Example: 'layers.0,lm_head'"),
+    )
+    parser.add_argument(
+        "--use_column_major",
+        default=False,
+        action="store_true",
+        help=(
+            "Apply column-major storage optimization for execution providers that need it. "
+            "Only applicable for DQ-only quantization (e.g., rtn_dq, awq_lite, awq_clip)."
+        ),
     )
     args = parser.parse_args()
     main(args)
