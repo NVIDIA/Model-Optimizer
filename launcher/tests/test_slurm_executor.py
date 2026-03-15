@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# ruff: noqa: D102
 """Tests for build_slurm_executor — container mounts, scratch paths, executor params.
 
 Note: actual SSH tunnel and sbatch submission are not tested (require live infra).

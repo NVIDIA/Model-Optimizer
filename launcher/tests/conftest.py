@@ -15,12 +15,13 @@
 
 """Fixtures for launcher unit tests.
 
-These tests require nemo_run and are skipped when it's not installed.
-
-Standalone run (from launcher/ directory):
+Run from the launcher directory:
     cd Model-Optimizer/launcher
     uv pip install pytest
-    uv run python3 -m pytest ../tests/unit/launcher/ -v -o "addopts=" --confcutdir=../tests/unit/launcher
+    uv run python3 -m pytest tests/ -v
+
+Or via tox from Model-Optimizer root:
+    tox -e py312-launcher
 """
 
 import os
@@ -28,18 +29,11 @@ import sys
 
 import pytest
 
-# Skip all tests in this directory if nemo_run is not installed
-try:
-    import nemo_run  # noqa: F401
-except ImportError:
-    pytest.skip("nemo_run not installed, skipping launcher tests", allow_module_level=True)
-
 
 @pytest.fixture(autouse=True)
 def add_launcher_to_path():
     """Add the launcher directory to sys.path so core.py and slurm_config.py can be imported."""
-    launcher_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "launcher")
-    launcher_dir = os.path.abspath(launcher_dir)
+    launcher_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if launcher_dir not in sys.path:
         sys.path.insert(0, launcher_dir)
     yield

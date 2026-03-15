@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# ruff: noqa: D102
 """Tests for Docker execution path — verifies build_docker_executor and run_jobs with mocked Docker.
 
 Coverage:

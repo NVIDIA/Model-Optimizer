@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# ruff: noqa: D102
 """Tests for launcher/core.py — shared dataclasses, factory registry, and utilities.
 
 Coverage:

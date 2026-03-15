@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# ruff: noqa: D102
 """Extended tests for launcher/core.py — edge cases and remaining coverage gaps.
 
 Coverage:

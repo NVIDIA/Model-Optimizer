@@ -96,6 +96,8 @@ launch.py → imports core.py + slurm_config.py
 
 64 unit tests in `tests/unit/launcher/`. Run standalone without installing `modelopt`:
 
+From the launcher directory:
+
 ```shell
 uv run python3 -m pytest ../tests/unit/launcher/ -v -o "addopts=" --confcutdir=../tests/unit/launcher
 ```

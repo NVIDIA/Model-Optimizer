@@ -57,7 +57,7 @@ pipeline:
         yaml_path.write_text(yaml_content)
 
         # Run launch.py as a subprocess (avoids pytest stdin capture issues)
-        launcher_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "launcher")
+        launcher_dir = os.path.join(os.path.dirname(__file__), "..")
         launcher_dir = os.path.abspath(launcher_dir)
 
         result = subprocess.run(
@@ -100,7 +100,7 @@ pipeline:
         yaml_path = tmp_path / "fail_test.yaml"
         yaml_path.write_text(yaml_content)
 
-        launcher_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "launcher")
+        launcher_dir = os.path.join(os.path.dirname(__file__), "..")
         launcher_dir = os.path.abspath(launcher_dir)
 
         result = subprocess.run(

@@ -58,7 +58,6 @@ pipeline:
 
     def test_bare_pipeline_format(self, tmp_yaml):
         """The pipeline=@ format is a bare SandboxPipeline without wrapper."""
-
         content = """
 task_0:
   script: a.sh
