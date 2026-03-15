@@ -4,9 +4,12 @@ version = "0.1.0"
 description = "ModelOpt Launcher — submit quantization, training, and evaluation jobs to Slurm clusters"
 requires-python = ">=3.10"
 dependencies = [
-    "nemo-run@git+https://github.com/NVIDIA-NeMo/Run@2ccf1c9e68acd157da451721b24635bcc83be87e",
+    "nemo-run>=0.8.0",
     "pyyaml",
 ]
+
+[tool.setuptools]
+py-modules = []
 
 [dependency-groups]
 dev = []

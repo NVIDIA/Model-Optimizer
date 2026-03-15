@@ -114,7 +114,7 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           export PATH="$HOME/.local/bin:$PATH"
           uv venv .venv
-          uv pip install pytest
+          uv pip install -e . pytest
           uv run python3 -m pytest -v
   partial-install:
     if: github.event_name == 'pull_request'

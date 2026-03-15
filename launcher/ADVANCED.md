@@ -44,7 +44,34 @@ code/
     └── query.py                       # OpenAI-compatible query client
 ```
 
-The `modelopt/` directory is bind-mounted over the container's installed ModelOpt, so your local changes take effect without rebuilding the container.
+### ModelOpt Mount Mechanism
+
+The container image (e.g., `nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc5`) ships with a pre-installed version of ModelOpt at a fixed path like `/usr/local/lib/python3.12/dist-packages/modelopt`. The launcher **bind-mounts your local `modelopt/` over this path**, so your local changes take effect without rebuilding the container.
+
+The mount is configured via `modelopt_install_path` in `SlurmConfig`:
+
+```yaml
+slurm_config:
+  modelopt_install_path: /usr/local/lib/python3.12/dist-packages/modelopt
+```
+
+At runtime, the executor constructs the mount:
+
+- **Slurm**: `{job_dir}/{experiment_title}/{exp_id}/{task}/code/modules/Model-Optimizer/modelopt` → `{modelopt_install_path}`
+- **Docker**: `{LAUNCHER_DIR}/modules/Model-Optimizer/modelopt` → `{modelopt_install_path}` (follows the symlink to the parent's `modelopt/`)
+
+This means:
+
+1. You can edit `modelopt/` source code locally
+2. Submit a job — the packager tars your changes and ships them to the cluster
+3. On the cluster, the container sees your modified `modelopt/` instead of the pre-installed one
+4. No container rebuild needed for iterating on ModelOpt changes
+
+The `modelopt_install_path` varies by container image. Check with:
+
+```bash
+docker run --rm <image> python3 -c "import modelopt; print(modelopt.__file__)"
+```
 
 ### Model-Optimizer Symlink
 
