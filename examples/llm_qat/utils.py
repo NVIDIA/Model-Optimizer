@@ -80,9 +80,7 @@ def _resolve_jsonl_files(dataset_path: str) -> list[str]:
         if os.path.isfile(p):
             collected.append(p)
         elif os.path.isdir(p):
-            jsonl_files = sorted(
-                os.path.join(p, f) for f in os.listdir(p) if f.endswith(".jsonl")
-            )
+            jsonl_files = sorted(os.path.join(p, f) for f in os.listdir(p) if f.endswith(".jsonl"))
             if not jsonl_files:
                 import warnings
 
@@ -165,6 +163,7 @@ def _load_cached_dataset(
     train_size: int = 0,
     eval_size: int = 0,
     dataset_cache_path: str = "",
+    tokenize_fn_factory=None,
 ) -> datasets.Dataset:
     """Load, tokenize, split and cache a dataset in messages format.
 
@@ -172,8 +171,12 @@ def _load_cached_dataset(
         dataset_id: Identifier for cache key (e.g. "Daring-Anteater" or a file path).
         load_raw_fn: Callable returning an HF Dataset with a ``messages`` column.
         split: "train" or "test".
+        tokenize_fn_factory: Optional callable(tokenizer, max_length) -> tokenize_fn.
+            Defaults to ``_make_tokenize_fn`` (chat/messages format).
     """
-    cache_path = _build_cache_path(dataset_id, dataset_cache_path, max_length, train_size, eval_size)
+    cache_path = _build_cache_path(
+        dataset_id, dataset_cache_path, max_length, train_size, eval_size
+    )
 
     if cache_path in _dataset_cache:
         return _dataset_cache[cache_path][split]
@@ -199,12 +202,12 @@ def _load_cached_dataset(
     selected = raw_dataset.shuffle(seed=42).select(range(train_size + eval_size))
     split_dataset = selected.train_test_split(test_size=eval_size, shuffle=True, seed=42)
 
-    tokenize_fn = _make_tokenize_fn(tokenizer, max_length)
+    if tokenize_fn_factory is None:
+        tokenize_fn_factory = _make_tokenize_fn
+    tokenize_fn = tokenize_fn_factory(tokenizer, max_length)
     tokenized_parts = {}
     for split_name in ["train", "test"]:
-        shard = split_dataset[split_name].shard(
-            num_shards=world_size, index=rank, contiguous=True
-        )
+        shard = split_dataset[split_name].shard(num_shards=world_size, index=rank, contiguous=True)
         remove_columns = (
             list(shard.features) if len(shard) > 0 else list(split_dataset[split_name].features)
         )
@@ -230,9 +233,7 @@ def _load_cached_dataset(
                 shard_ds = datasets.load_from_disk(shard_path)[split_name]
                 shard_list.append(shard_ds)
             merged[split_name] = (
-                datasets.concatenate_datasets(shard_list)
-                if len(shard_list) > 1
-                else shard_list[0]
+                datasets.concatenate_datasets(shard_list) if len(shard_list) > 1 else shard_list[0]
             )
         datasets.DatasetDict(merged).save_to_disk(cache_path)
 
@@ -240,6 +241,43 @@ def _load_cached_dataset(
         torch.distributed.barrier()
     _dataset_cache[cache_path] = datasets.load_from_disk(cache_path)
     return _dataset_cache[cache_path][split]
+
+
+def _make_pretrain_tokenize_fn(tokenizer: transformers.PreTrainedTokenizer, max_length: int):
+    """Tokenize plain text for causal LM pretraining (all tokens are predicted)."""
+
+    def process_and_tokenize(sample):
+        text = sample.get("text", "")
+        input_ids = tokenizer.encode(text, add_special_tokens=True)[:max_length]
+
+        cur_len = len(input_ids)
+        pad_token = tokenizer.pad_token_id or tokenizer.eos_token_id
+        if pad_token is None:
+            raise ValueError("Tokenizer must provide either pad_token_id or eos_token_id")
+        attention_mask = [1] * cur_len + [0] * (max_length - cur_len)
+        labels = input_ids + [IGNORE_INDEX] * (max_length - cur_len)
+        input_ids = input_ids + [pad_token] * (max_length - cur_len)
+
+        return {
+            "input_ids": input_ids[:max_length],
+            "attention_mask": attention_mask[:max_length],
+            "labels": labels[:max_length],
+        }
+
+    return process_and_tokenize
+
+
+def _load_fineweb_edu_raw(num_samples: int) -> datasets.Dataset:
+    """Stream fineweb_edu_100BT and materialize num_samples into an in-memory Dataset."""
+    ds_iter = datasets.load_dataset(
+        "HuggingFaceFW/fineweb_edu_100BT", split="train", streaming=True
+    )
+    rows = []
+    for i, sample in enumerate(ds_iter):
+        if i >= num_samples:
+            break
+        rows.append({"text": sample["text"]})
+    return datasets.Dataset.from_list(rows)
 
 
 def _load_daring_anteater_raw() -> datasets.Dataset:
@@ -255,8 +293,13 @@ def get_daring_anteater(
     eval_size=0,
 ):
     return _load_cached_dataset(
-        "Daring-Anteater", _load_daring_anteater_raw, tokenizer, split,
-        max_length, train_size, eval_size,
+        "Daring-Anteater",
+        _load_daring_anteater_raw,
+        tokenizer,
+        split,
+        max_length,
+        train_size,
+        eval_size,
     )
 
 
@@ -270,9 +313,16 @@ def make_supervised_data_module(
     """Make dataset and collator for supervised fine-tuning."""
     cache_ready = bool(dataset_cache_path) and _is_non_empty_dir(dataset_cache_path)
 
+    tokenize_fn_factory = None  # default: chat/messages format
+
     if dataset == "Daring-Anteater":
         load_raw = _load_daring_anteater_raw
         dataset_id = "Daring-Anteater"
+    elif dataset == "fineweb_edu":
+        total = (train_size or 10000) + (eval_size or 2000)
+        load_raw = partial(_load_fineweb_edu_raw, num_samples=total)
+        dataset_id = "fineweb_edu"
+        tokenize_fn_factory = _make_pretrain_tokenize_fn
     elif os.path.exists(dataset) or cache_ready:
         data_files = _resolve_jsonl_files(dataset) if os.path.exists(dataset) else None
 
@@ -283,10 +333,14 @@ def make_supervised_data_module(
     else:
         raise ValueError(f"Dataset {dataset} not supported")
 
-    kwargs = dict(
-        tokenizer=tokenizer, max_length=tokenizer.model_max_length,
-        train_size=train_size, eval_size=eval_size, dataset_cache_path=dataset_cache_path,
-    )
+    kwargs = {
+        "tokenizer": tokenizer,
+        "max_length": tokenizer.model_max_length,
+        "train_size": train_size,
+        "eval_size": eval_size,
+        "dataset_cache_path": dataset_cache_path,
+        "tokenize_fn_factory": tokenize_fn_factory,
+    }
     return {
         "train_dataset": _load_cached_dataset(dataset_id, load_raw, split="train", **kwargs),
         "eval_dataset": _load_cached_dataset(dataset_id, load_raw, split="test", **kwargs),

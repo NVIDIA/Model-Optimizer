@@ -72,6 +72,12 @@ class ModelArguments:
         default=None,
         metadata={"help": ("The name or path of the teacher model to use for distillation.")},
     )
+    attn_implementation: str | None = field(
+        default=None,
+        metadata={
+            "help": "Attention implementation: 'flash_attention_2', 'flash_attention_3', 'sdpa', or 'eager'."
+        },
+    )
 
 
 @dataclass
@@ -174,16 +180,21 @@ def train():
         last_checkpoint = get_last_checkpoint(training_args.output_dir)
         print_rank_0(f"Last checkpoint detected: {last_checkpoint}")
 
+    model_kwargs = {}
+    if model_args.attn_implementation:
+        model_kwargs["attn_implementation"] = model_args.attn_implementation
     model = transformers.AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
         cache_dir=training_args.cache_dir,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch.float32,  # Mixed precision should cast the params to bf16 during training
+        **model_kwargs,
     )
     model.generation_config.do_sample = True
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         model_args.model_name_or_path, model_max_length=training_args.model_max_length
     )
-    tokenizer.pad_token_id = tokenizer.eos_token_id
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
 
     # We set model.config.use_cache to False for training when gradient_checkpointing=False.
     # Currently useful for FSDP2 to allow for setting activation_checkpointing=True in the config file.
@@ -234,6 +245,7 @@ def train():
             model_args.teacher_model,
             cache_dir=training_args.cache_dir,
             torch_dtype=torch.bfloat16,
+            **model_kwargs,
         )
         distill_config = {
             "teacher_model": teacher_model,

@@ -210,7 +210,7 @@ class QATTrainer(ModelOptHFTrainer):
         self._patch_accelerate_for_fsdp2_fix()
 
         self._modelopt_state_path = os.path.join(self.args.output_dir, "modelopt_state_train.pth")
-        if os.path.exists(self._modelopt_state_path):
+        if os.path.exists(self._modelopt_state_path) and not is_quantized(self.model):
             self._restore_modelopt_state_with_weights()
         elif is_quantized(self.model):
             self._save_modelopt_state_with_weights()
@@ -396,7 +396,7 @@ class QATTrainer(ModelOptHFTrainer):
 
             tq_og_non_prsist_buffers = {}
             for tq in (m for m in model.modules() if isinstance(m, TensorQuantizer)):
-                tq.to_empty(device=self.device)
+                tq.to(device=self.device)
                 tq_og_non_prsist_buffers[tq] = tq._non_persistent_buffers_set.copy()
                 tq._non_persistent_buffers_set.update(tq._buffers.keys())
 
@@ -412,7 +412,7 @@ class QATTrainer(ModelOptHFTrainer):
         self.accelerator.prepare = types.MethodType(_modelopt_prepare, self.accelerator)
 
 
-class QADTrainer(QATTrainer, KDTrainer):
+class QADTrainer(KDTrainer, QATTrainer):
     """A drop-in replacement of HuggingFace's Trainer for quantization aware distillation with ModelOpt.
 
     This class takes additional arguments for both distillation and quantization configuration.

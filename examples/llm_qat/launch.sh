@@ -28,7 +28,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --model*)                                   MODEL=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
     --output_dir*)                              OUTPUT_DIR=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
-    --dataset*)                                 DATASET=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --dataset|--dataset=*)                       DATASET=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
     --dataset_cache_path*)                      DATASET_CACHE_PATH=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
     --train_size*)                              TRAIN_SIZE=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
     --eval_size*)                               EVAL_SIZE=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
@@ -49,6 +49,7 @@ while [ $# -gt 0 ]; do
     --fsdp_transformer_layer_cls_to_wrap*)      FSDP_TRANSFORMER_LAYER_CLS_TO_WRAP=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
     --max_seq_length*)                          MAX_SEQ_LENGTH=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
     --backend*)                                 BACKEND=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
+    --attn_implementation*)                     ATTN_IMPLEMENTATION=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
     *)
       >&2 printf "Error: Invalid argument ${1#*=}\n"
       exit 1
@@ -98,6 +99,9 @@ fi
 if [ ! -z $DATASET_CACHE_PATH ]; then
   OPTIONAL_ARGS="$OPTIONAL_ARGS --dataset_cache_path $DATASET_CACHE_PATH"
 fi
+if [ ! -z "${ATTN_IMPLEMENTATION:-}" ]; then
+  OPTIONAL_ARGS="$OPTIONAL_ARGS --attn_implementation $ATTN_IMPLEMENTATION"
+fi
 
 # if compress is true, set backend to ddp
 if [[ "${COMPRESS,,}" == "true" ]]; then
@@ -145,7 +149,7 @@ if [[ "${DISTILL,,}" == "true" ]]; then
   fi
 fi
 
-CMD="accelerate launch --config-file accelerate_config/$CONFIG_FILE $FSDP_ARGS \
+CMD="accelerate launch --config-file accelerate_config/$CONFIG_FILE --main_process_port ${MASTER_PORT:-29500} $FSDP_ARGS \
     main.py \
     --model_name_or_path $MODEL \
     --model_max_length $MAX_SEQ_LENGTH \

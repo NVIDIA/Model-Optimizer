@@ -1377,14 +1377,9 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
     def _fake_quantize(self, inputs):
         """Fake quantization using two-level scaling with _amax and _global_amax."""
         if self._scale_after_dequant:
-            if self._per_block_scale.dtype != torch.float32:
-                self._per_block_scale = self._per_block_scale.to(dtype=torch.float32)
-
             scale_raw = self._per_block_scale.clamp(min=0)
 
             if self._quantize_scales:
-                if self._per_tensor_scale.dtype != torch.float32:
-                    self._per_tensor_scale = self._per_tensor_scale.to(dtype=torch.float32)
                 scale = scaled_e4m3(scale_raw, self._per_tensor_scale, None, 4, 3)
             else:
                 scale = scale_raw

@@ -83,7 +83,6 @@ def _patch_model_init_for_modelopt(cls, model_path, extra_context=None):
             modelopt_state = torch.load(modelopt_state_path, map_location="cpu", weights_only=False)
             with extra_context() if extra_context else nullcontext():
                 restore_from_modelopt_state(self, modelopt_state)
-
             print_rank_0(f"Restored ModelOpt state from {modelopt_state_path}")
 
     cls.__init__ = new_init_fn
