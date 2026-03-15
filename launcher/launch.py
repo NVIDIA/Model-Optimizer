@@ -16,8 +16,8 @@
 """ModelOpt Launcher — submit quantization, training, and evaluation jobs to Slurm clusters.
 
 Usage:
-    uv run launch.py task=@Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
-    uv run launch.py task=@Qwen/Qwen3-8B/megatron_lm_ptq.yaml hf_local=/mnt/hf-local --yes
+    uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
+    uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml hf_local=/mnt/hf-local --yes
 
 Environment variables:
     SLURM_HOST          Slurm login node hostname (required for remote jobs)
@@ -33,14 +33,7 @@ import os
 import warnings
 
 import nemo_run as run
-from core import (
-    SandboxPipeline,
-    SandboxTask,
-    get_default_env,
-    register_factory,
-    run_jobs,
-    set_slurm_config_type,
-)
+from core import SandboxPipeline, get_default_env, register_factory, run_jobs, set_slurm_config_type
 from slurm_config import SlurmConfig, slurm_factory
 
 set_slurm_config_type(SlurmConfig)
@@ -80,7 +73,6 @@ MODELOPT_SRC_PATH = os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/modelopt
 def launch(
     job_name: str = "01_job",
     job_dir: str = os.environ.get("SLURM_JOB_DIR", os.path.expanduser("~/experiments")),
-    task: SandboxTask = None,
     pipeline: SandboxPipeline = None,
     hf_local: str = None,  # noqa: RUF013
     user: str = getpass.getuser(),
@@ -96,12 +88,10 @@ def launch(
         job_dir = os.path.join(os.getcwd(), "local_experiments")
 
     job_table = {}
-    if task is not None:
-        job_table[job_name] = SandboxPipeline(tasks=[task])
-    elif pipeline is not None:
+    if pipeline is not None:
         job_table[job_name] = pipeline
     else:
-        print("No task or pipeline provided. Use task=@<yaml> or pipeline=@<yaml>.")
+        print("No pipeline provided. Use pipeline=@<yaml> or --yaml <yaml>.")
         return
 
     run_jobs(
