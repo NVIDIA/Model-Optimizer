@@ -77,10 +77,6 @@ ENABLE_CP_TTT_PATCH = False
 # module variable to cache attention mask for cp ttt
 CACHED_SHARD_TTT_MASKS = {}
 
-# ALL_ATTENTION_FUNCTIONS["flex_attention"] = partial(
-#     ALL_ATTENTION_FUNCTIONS["flex_attention"], kernel_options={"BACKEND": "FLASH"}
-# )
-
 
 def _get_empty_cache(config):
     """Return an empty cache. Handle different versions of transformers for unit tests."""
