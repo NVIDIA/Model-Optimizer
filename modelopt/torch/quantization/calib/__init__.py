@@ -21,6 +21,7 @@ collect data statistics and determine modelopt.torch.quantization parameters.
 
 from .bias import *
 from .calibrator import *
+from .fouroversix import nvfp4_4o6_fake_quant
 from .histogram import *
 from .max import *
 from .mse import *

@@ -42,6 +42,7 @@ from modelopt.torch.utils.distributed import DistributedProcessGroup
 
 from ... import calib
 from ... import utils as quant_utils
+from ...calib.fouroversix import nvfp4_4o6_fake_quant
 from ...config import QuantizerAttributeConfig, RotateConfig
 from ...qtensor import (
     BaseQuantizedTensor,
@@ -117,6 +118,17 @@ def is_registered_quant_backend(name: str) -> bool:
         name: The name of the backend to check.
     """
     return name in _QUANT_FUNCTIONAL_BACKENDS
+
+
+def _nvfp4_4o6_backend(inputs: torch.Tensor, tq: "TensorQuantizer") -> torch.Tensor:
+    """NVFP4 four-over-six fake quantization backend."""
+    x_amax = inputs.abs().max().float()
+    scale_rule = (tq.backend_extra_args or {}).get("scale_rule", "mse")
+    block_size = (tq.block_sizes or {}).get(-1, 16)
+    return nvfp4_4o6_fake_quant(inputs, x_amax, scale_rule=scale_rule, block_size=block_size)
+
+
+register_quant_backend("nvfp4_4o6", _nvfp4_4o6_backend)
 
 
 class TensorQuantizerCache(Protocol):

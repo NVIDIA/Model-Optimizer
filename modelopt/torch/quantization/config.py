@@ -418,10 +418,27 @@ _nvfp4_quantizer = {
     "enable": True,
 }
 
+_nvfp4_4o6_input_quantizer = {
+    "num_bits": (2, 1),
+    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+    "enable": True,
+    "backend": "nvfp4_4o6",
+    "backend_extra_args": {"scale_rule": "mse"},
+}
+
 NVFP4_DEFAULT_CFG = {
     "quant_cfg": {
         "*weight_quantizer": _nvfp4_quantizer,
         "*input_quantizer": _nvfp4_quantizer,
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": "max",
+}
+
+NVFP4_4O6_W4A4_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": _nvfp4_quantizer,
+        "*input_quantizer": _nvfp4_4o6_input_quantizer,
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": "max",
@@ -676,6 +693,7 @@ choices: set[str] = {
     "NVFP4_AWQ_CLIP_CFG",
     "NVFP4_AWQ_FULL_CFG",
     "NVFP4_AWQ_LITE_CFG",
+    "NVFP4_4O6_W4A4_CFG",
     "NVFP4_DEFAULT_CFG",
     "NVFP4_FP8_MHA_CONFIG",
     "NVFP4_KV_CFG",
