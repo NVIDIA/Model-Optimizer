@@ -177,8 +177,7 @@ _mamba_moe_disabled_quantizer_cfg_deprecated = {
 }
 assert _mamba_moe_disabled_quantizer_cfg_deprecated == _mamba_moe_disabled_quantizer_cfg
 
-INT8_DEFAULT_CFG = load_config("general/ptq/int8_default-fp8_kv.yml")["model_quant"]
-INT8_DEFAULT_CFG_DEPRECATED = {
+INT8_DEFAULT_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {"num_bits": 8, "axis": 0},
         "*input_quantizer": {"num_bits": 8, "axis": None},
@@ -186,12 +185,7 @@ INT8_DEFAULT_CFG_DEPRECATED = {
     },
     "algorithm": "max",
 }
-assert INT8_DEFAULT_CFG_DEPRECATED == INT8_DEFAULT_CFG, "Expected {}, but got {}".format(
-    INT8_DEFAULT_CFG_DEPRECATED, INT8_DEFAULT_CFG
-)
-
-INT8_SMOOTHQUANT_CFG = load_config("general/ptq/int8_smoothquant-fp8_kv.yml")["model_quant"]
-INT8_SMOOTHQUANT_CFG_DEPRECATED = {
+INT8_SMOOTHQUANT_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {"num_bits": 8, "axis": 0},
         "*input_quantizer": {"num_bits": 8, "axis": None},
@@ -199,10 +193,7 @@ INT8_SMOOTHQUANT_CFG_DEPRECATED = {
     },
     "algorithm": "smoothquant",
 }
-assert INT8_SMOOTHQUANT_CFG_DEPRECATED == INT8_SMOOTHQUANT_CFG
-
-INT8_WEIGHT_ONLY_CFG = load_config("general/ptq/int8_weight_only-fp8_kv.yml")["model_quant"]
-INT8_WEIGHT_ONLY_CFG_DEPRECATED = {
+INT8_WEIGHT_ONLY_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {"num_bits": 8, "axis": 0},
         "*input_quantizer": {"enable": False},
@@ -210,10 +201,7 @@ INT8_WEIGHT_ONLY_CFG_DEPRECATED = {
     },
     "algorithm": "max",
 }
-assert INT8_WEIGHT_ONLY_CFG_DEPRECATED == INT8_WEIGHT_ONLY_CFG
-
-FP8_DEFAULT_CFG = load_config("general/ptq/fp8_default-fp8_kv.yml")["model_quant"]
-FP8_DEFAULT_CFG_DEPRECATED = {
+FP8_DEFAULT_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {"num_bits": (4, 3), "axis": None},
         "*input_quantizer": {"num_bits": (4, 3), "axis": None},
@@ -221,12 +209,7 @@ FP8_DEFAULT_CFG_DEPRECATED = {
     },
     "algorithm": "max",
 }
-assert FP8_DEFAULT_CFG_DEPRECATED == FP8_DEFAULT_CFG
-
-MAMBA_MOE_FP8_AGGRESSIVE_CFG = load_config("general/ptq/mamba_moe_fp8_aggressive-fp8_kv.yml")[
-    "model_quant"
-]
-MAMBA_MOE_FP8_AGGRESSIVE_CFG_DEPRECATED = {
+MAMBA_MOE_FP8_AGGRESSIVE_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {"num_bits": (4, 3), "axis": None},
         "*input_quantizer": {"num_bits": (4, 3), "axis": None},
@@ -235,12 +218,9 @@ MAMBA_MOE_FP8_AGGRESSIVE_CFG_DEPRECATED = {
     },
     "algorithm": "max",
 }
-assert MAMBA_MOE_FP8_AGGRESSIVE_CFG_DEPRECATED == MAMBA_MOE_FP8_AGGRESSIVE_CFG
 
-MAMBA_MOE_FP8_CONSERVATIVE_CFG = load_config("general/ptq/mamba_moe_fp8_conservative-fp8_kv.yml")[
-    "model_quant"
-]
-MAMBA_MOE_FP8_CONSERVATIVE_CFG_DEPRECATED = {
+
+MAMBA_MOE_FP8_CONSERVATIVE_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {"num_bits": (4, 3), "axis": None},
         "*input_quantizer": {"num_bits": (4, 3), "axis": None},
@@ -251,12 +231,9 @@ MAMBA_MOE_FP8_CONSERVATIVE_CFG_DEPRECATED = {
     },
     "algorithm": "max",
 }
-assert MAMBA_MOE_FP8_CONSERVATIVE_CFG_DEPRECATED == MAMBA_MOE_FP8_CONSERVATIVE_CFG
 
-FP8_PER_CHANNEL_PER_TOKEN_CFG = load_config("general/ptq/fp8_per_channel_per_token-fp8_kv.yml")[
-    "model_quant"
-]
-FP8_PER_CHANNEL_PER_TOKEN_CFG_DEPRECATED = {
+
+FP8_PER_CHANNEL_PER_TOKEN_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {"num_bits": (4, 3), "axis": 0},
         "*input_quantizer": {
@@ -268,13 +245,9 @@ FP8_PER_CHANNEL_PER_TOKEN_CFG_DEPRECATED = {
     },
     "algorithm": "max",
 }
-assert FP8_PER_CHANNEL_PER_TOKEN_CFG_DEPRECATED == FP8_PER_CHANNEL_PER_TOKEN_CFG
 
 # FP8 2D blockwise fake quantization config for deepseek models
-FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG = load_config(
-    "general/ptq/fp8_2d_blockwise_weight_only-fp8_kv.yml"
-)["model_quant"]
-FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG_DEPRECATED = {
+FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": (4, 3),
@@ -286,12 +259,7 @@ FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG_DEPRECATED = {
     },
     "algorithm": "max",
 }
-assert FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG_DEPRECATED == FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG
-
-INT4_BLOCKWISE_WEIGHT_ONLY_CFG = load_config("general/ptq/int4_blockwise_weight_only-fp8_kv.yml")[
-    "model_quant"
-]
-INT4_BLOCKWISE_WEIGHT_ONLY_CFG_DEPRECATED = {
+INT4_BLOCKWISE_WEIGHT_ONLY_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": 4,
@@ -303,10 +271,8 @@ INT4_BLOCKWISE_WEIGHT_ONLY_CFG_DEPRECATED = {
     },
     "algorithm": "max",
 }
-assert INT4_BLOCKWISE_WEIGHT_ONLY_CFG_DEPRECATED == INT4_BLOCKWISE_WEIGHT_ONLY_CFG
 
-INT4_AWQ_CFG = load_config("general/ptq/int4_awq-fp8_kv.yml")["model_quant"]
-INT4_AWQ_CFG_DEPRECATED = {
+INT4_AWQ_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": 4,
@@ -320,13 +286,10 @@ INT4_AWQ_CFG_DEPRECATED = {
     # "algorithm": {"method": "awq_full", "max_co_batch_size": 1024},
     # "algorithm": {"method": "awq_clip", "max_co_batch_size": 2048},
 }
-assert INT4_AWQ_CFG_DEPRECATED == INT4_AWQ_CFG
-
 
 # W4A8 currently uses INT4 blockwise quantization (block size = 128) followed by FP8 quantization
 # for weights. This could change in the future
-W4A8_AWQ_BETA_CFG = load_config("general/ptq/w4a8_awq_beta-fp8_kv.yml")["model_quant"]
-W4A8_AWQ_BETA_CFG_DEPRECATED = {
+W4A8_AWQ_BETA_CFG = {
     "quant_cfg": {
         "*weight_quantizer": [
             {
@@ -347,10 +310,7 @@ W4A8_AWQ_BETA_CFG_DEPRECATED = {
     },
     "algorithm": "awq_lite",
 }
-assert W4A8_AWQ_BETA_CFG_DEPRECATED == W4A8_AWQ_BETA_CFG
-
-MXFP8_DEFAULT_CFG = load_config("general/ptq/mxfp8_default-fp8_kv.yml")["model_quant"]
-MXFP8_DEFAULT_CFG_DEPRECATED = {
+MXFP8_DEFAULT_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": (4, 3),
@@ -366,11 +326,8 @@ MXFP8_DEFAULT_CFG_DEPRECATED = {
     },
     "algorithm": None,
 }
-assert MXFP8_DEFAULT_CFG_DEPRECATED == MXFP8_DEFAULT_CFG
 
-
-MXFP6_DEFAULT_CFG = load_config("general/ptq/mxfp6_default-fp8_kv.yml")["model_quant"]
-MXFP6_DEFAULT_CFG_DEPRECATED = {
+MXFP6_DEFAULT_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": (3, 2),
@@ -386,11 +343,8 @@ MXFP6_DEFAULT_CFG_DEPRECATED = {
     },
     "algorithm": None,
 }
-assert MXFP6_DEFAULT_CFG_DEPRECATED == MXFP6_DEFAULT_CFG
 
-
-MXFP4_DEFAULT_CFG = load_config("general/ptq/mxfp4_default-fp8_kv.yml")["model_quant"]
-MXFP4_DEFAULT_CFG_DEPRECATED = {
+MXFP4_DEFAULT_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": (2, 1),
@@ -406,10 +360,7 @@ MXFP4_DEFAULT_CFG_DEPRECATED = {
     },
     "algorithm": None,
 }
-assert MXFP4_DEFAULT_CFG_DEPRECATED == MXFP4_DEFAULT_CFG
-
-W4A8_MXFP4_FP8_CFG = load_config("general/ptq/w4a8_mxfp4_fp8-fp8_kv.yml")["model_quant"]
-W4A8_MXFP4_FP8_CFG_DEPRECATED = {
+W4A8_MXFP4_FP8_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": (2, 1),
@@ -421,11 +372,8 @@ W4A8_MXFP4_FP8_CFG_DEPRECATED = {
     },
     "algorithm": None,
 }
-assert W4A8_MXFP4_FP8_CFG_DEPRECATED == W4A8_MXFP4_FP8_CFG
 
-
-MXINT8_DEFAULT_CFG = load_config("general/ptq/mxint8_default-fp8_kv.yml")["model_quant"]
-MXINT8_DEFAULT_CFG_DEPRECATED = {
+MXINT8_DEFAULT_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": 8,
@@ -441,7 +389,6 @@ MXINT8_DEFAULT_CFG_DEPRECATED = {
     },
     "algorithm": None,
 }
-assert MXINT8_DEFAULT_CFG_DEPRECATED == MXINT8_DEFAULT_CFG
 
 FP8_KV_CFG = load_config("configs/ptq/kv_fp8.yml")
 FP8_KV_CFG_DEPRECATED = {
@@ -472,8 +419,7 @@ _nvfp4_quantizer = {
     "enable": True,
 }
 
-NVFP4_DEFAULT_CFG = load_config("general/ptq/nvfp4_default-fp8_kv.yml")["model_quant"]
-NVFP4_DEFAULT_CFG_DEPRECATED = {
+NVFP4_DEFAULT_CFG = {
     "quant_cfg": {
         "*weight_quantizer": _nvfp4_quantizer,
         "*input_quantizer": _nvfp4_quantizer,
@@ -481,12 +427,7 @@ NVFP4_DEFAULT_CFG_DEPRECATED = {
     },
     "algorithm": "max",
 }
-assert NVFP4_DEFAULT_CFG_DEPRECATED == NVFP4_DEFAULT_CFG
-
-NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = load_config(
-    "general/ptq/nvfp4_w4a4_weight_mse_fp8_sweep-fp8_kv.yml"
-)["model_quant"]
-NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG_DEPRECATED = {
+NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": (2, 1),
@@ -501,16 +442,7 @@ NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG_DEPRECATED = {
         "fp8_scale_sweep": True,
     },
 }
-assert NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG_DEPRECATED == NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG, (
-    "Expected {}, but got {}".format(
-        NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG_DEPRECATED, NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG
-    )
-)
-
-NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG = load_config(
-    "general/ptq/nvfp4_w4a4_weight_local_hessian-fp8_kv.yml"
-)["model_quant"]
-NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG_DEPRECATED = {
+NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": (2, 1),
@@ -525,12 +457,7 @@ NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG_DEPRECATED = {
         "fp8_scale_sweep": True,
     },
 }
-assert NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG_DEPRECATED == NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG
-
-MAMBA_MOE_NVFP4_AGGRESSIVE_CFG = load_config("general/ptq/mamba_moe_nvfp4_aggressive-fp8_kv.yml")[
-    "model_quant"
-]
-MAMBA_MOE_NVFP4_AGGRESSIVE_CFG_DEPRECATED = {
+MAMBA_MOE_NVFP4_AGGRESSIVE_CFG = {
     "quant_cfg": {
         "*weight_quantizer": _nvfp4_quantizer,
         "*input_quantizer": _nvfp4_quantizer,
@@ -539,12 +466,9 @@ MAMBA_MOE_NVFP4_AGGRESSIVE_CFG_DEPRECATED = {
     },
     "algorithm": "max",
 }
-assert MAMBA_MOE_NVFP4_AGGRESSIVE_CFG_DEPRECATED == MAMBA_MOE_NVFP4_AGGRESSIVE_CFG
 
-MAMBA_MOE_NVFP4_CONSERVATIVE_CFG = load_config(
-    "general/ptq/mamba_moe_nvfp4_conservative-fp8_kv.yml"
-)["model_quant"]
-MAMBA_MOE_NVFP4_CONSERVATIVE_CFG_DEPRECATED = {
+
+MAMBA_MOE_NVFP4_CONSERVATIVE_CFG = {
     "quant_cfg": {
         "*weight_quantizer": _nvfp4_quantizer,
         "*input_quantizer": _nvfp4_quantizer,
@@ -555,11 +479,8 @@ MAMBA_MOE_NVFP4_CONSERVATIVE_CFG_DEPRECATED = {
     },
     "algorithm": "max",
 }
-assert MAMBA_MOE_NVFP4_CONSERVATIVE_CFG_DEPRECATED == MAMBA_MOE_NVFP4_CONSERVATIVE_CFG
 
-
-NVFP4_AWQ_LITE_CFG = load_config("general/ptq/nvfp4_awq_lite-fp8_kv.yml")["model_quant"]
-NVFP4_AWQ_LITE_CFG_DEPRECATED = {
+NVFP4_AWQ_LITE_CFG = {
     "quant_cfg": {
         "*weight_quantizer": _nvfp4_quantizer,
         "*input_quantizer": _nvfp4_quantizer,
@@ -567,10 +488,7 @@ NVFP4_AWQ_LITE_CFG_DEPRECATED = {
     },
     "algorithm": "awq_lite",
 }
-assert NVFP4_AWQ_LITE_CFG_DEPRECATED == NVFP4_AWQ_LITE_CFG
-
-NVFP4_AWQ_CLIP_CFG = load_config("general/ptq/nvfp4_awq_clip-fp8_kv.yml")["model_quant"]
-NVFP4_AWQ_CLIP_CFG_DEPRECATED = {
+NVFP4_AWQ_CLIP_CFG = {
     "quant_cfg": {
         "*weight_quantizer": _nvfp4_quantizer,
         "*input_quantizer": _nvfp4_quantizer,
@@ -578,10 +496,7 @@ NVFP4_AWQ_CLIP_CFG_DEPRECATED = {
     },
     "algorithm": {"method": "awq_clip"},
 }
-assert NVFP4_AWQ_CLIP_CFG_DEPRECATED == NVFP4_AWQ_CLIP_CFG
-
-NVFP4_AWQ_FULL_CFG = load_config("general/ptq/nvfp4_awq_full-fp8_kv.yml")["model_quant"]
-NVFP4_AWQ_FULL_CFG_DEPRECATED = {
+NVFP4_AWQ_FULL_CFG = {
     "quant_cfg": {
         "*weight_quantizer": _nvfp4_quantizer,
         "*input_quantizer": _nvfp4_quantizer,
@@ -589,8 +504,6 @@ NVFP4_AWQ_FULL_CFG_DEPRECATED = {
     },
     "algorithm": {"method": "awq_full", "alpha_step": 0.1},
 }
-assert NVFP4_AWQ_FULL_CFG_DEPRECATED == NVFP4_AWQ_FULL_CFG
-
 NVFP4_AFFINE_KV_CFG = load_config("configs/ptq/kv_nvfp4_affine.yml")
 NVFP4_AFFINE_KV_CFG_DEPRECATED = {
     "quant_cfg": {
@@ -612,8 +525,7 @@ assert NVFP4_KV_CFG_DEPRECATED == NVFP4_KV_CFG
 
 
 # Moved from examples/diffusers/quantization/config.py to here
-NVFP4_FP8_MHA_CONFIG = load_config("general/ptq/nvfp4_fp8_mha-fp8_kv.yml")["model_quant"]
-NVFP4_FP8_MHA_CONFIG_DEPRECATED = {
+NVFP4_FP8_MHA_CONFIG = {
     "quant_cfg": {
         "*weight_quantizer": _nvfp4_quantizer,
         "*input_quantizer": _nvfp4_quantizer,
@@ -637,8 +549,6 @@ NVFP4_FP8_MHA_CONFIG_DEPRECATED = {
     },
     "algorithm": "max",
 }
-assert NVFP4_FP8_MHA_CONFIG_DEPRECATED == NVFP4_FP8_MHA_CONFIG
-
 NVFP4_KV_ROTATE_CFG = load_config("configs/ptq/kv_nvfp4_rotate.yml")
 NVFP4_KV_ROTATE_CFG_DEPRECATED = {
     "quant_cfg": {
@@ -655,10 +565,7 @@ NVFP4_KV_ROTATE_CFG_DEPRECATED = {
 }
 assert NVFP4_KV_ROTATE_CFG_DEPRECATED == NVFP4_KV_ROTATE_CFG
 
-NVFP4_SVDQUANT_DEFAULT_CFG = load_config("general/ptq/nvfp4_svdquant_default-fp8_kv.yml")[
-    "model_quant"
-]
-NVFP4_SVDQUANT_DEFAULT_CFG_DEPRECATED = {
+NVFP4_SVDQUANT_DEFAULT_CFG = {
     "quant_cfg": {
         "*weight_quantizer": _nvfp4_quantizer,
         "*input_quantizer": _nvfp4_quantizer,
@@ -666,11 +573,9 @@ NVFP4_SVDQUANT_DEFAULT_CFG_DEPRECATED = {
     },
     "algorithm": {"method": "svdquant", "lowrank": 32},
 }
-assert NVFP4_SVDQUANT_DEFAULT_CFG_DEPRECATED == NVFP4_SVDQUANT_DEFAULT_CFG
 
 
-W4A8_NVFP4_FP8_CFG = load_config("general/ptq/w4a8_nvfp4_fp8-fp8_kv.yml")["model_quant"]
-W4A8_NVFP4_FP8_CFG_DEPRECATED = {
+W4A8_NVFP4_FP8_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": (2, 1),
@@ -685,13 +590,8 @@ W4A8_NVFP4_FP8_CFG_DEPRECATED = {
     },
     "algorithm": "max",
 }
-assert W4A8_NVFP4_FP8_CFG_DEPRECATED == W4A8_NVFP4_FP8_CFG
 
-
-MXFP4_MLP_WEIGHT_ONLY_CFG = load_config("general/ptq/mxfp4_mlp_weight_only-fp8_kv.yml")[
-    "model_quant"
-]
-MXFP4_MLP_WEIGHT_ONLY_CFG_DEPRECATED = {
+MXFP4_MLP_WEIGHT_ONLY_CFG = {
     "quant_cfg": {
         "*mlp*weight_quantizer": {
             "num_bits": (2, 1),
@@ -707,13 +607,9 @@ MXFP4_MLP_WEIGHT_ONLY_CFG_DEPRECATED = {
     },
     "algorithm": None,
 }
-assert MXFP4_MLP_WEIGHT_ONLY_CFG_DEPRECATED == MXFP4_MLP_WEIGHT_ONLY_CFG
 
 
-NVFP4_MLP_WEIGHT_ONLY_CFG = load_config("general/ptq/nvfp4_mlp_weight_only-fp8_kv.yml")[
-    "model_quant"
-]
-NVFP4_MLP_WEIGHT_ONLY_CFG_DEPRECATED = {
+NVFP4_MLP_WEIGHT_ONLY_CFG = {
     "quant_cfg": {
         "*mlp*weight_quantizer": {
             "num_bits": (2, 1),
@@ -737,7 +633,6 @@ NVFP4_MLP_WEIGHT_ONLY_CFG_DEPRECATED = {
     },
     "algorithm": "max",
 }
-assert NVFP4_MLP_WEIGHT_ONLY_CFG_DEPRECATED == NVFP4_MLP_WEIGHT_ONLY_CFG
 
 _nvfp4_mlp_only_quant_cfg = {
     "*mlp*weight_quantizer": _nvfp4_quantizer,
@@ -747,15 +642,11 @@ _nvfp4_mlp_only_quant_cfg = {
     **_default_disabled_quantizer_cfg,
 }
 
-NVFP4_MLP_ONLY_CFG = load_config("general/ptq/nvfp4_mlp_only-fp8_kv.yml")["model_quant"]
-NVFP4_MLP_ONLY_CFG_DEPRECATED = {
+NVFP4_MLP_ONLY_CFG = {
     "quant_cfg": _nvfp4_mlp_only_quant_cfg,
     "algorithm": "max",
 }
-assert NVFP4_MLP_ONLY_CFG_DEPRECATED == NVFP4_MLP_ONLY_CFG
-
-NVFP4_OMLP_ONLY_CFG = load_config("general/ptq/nvfp4_omlp_only-fp8_kv.yml")["model_quant"]
-NVFP4_OMLP_ONLY_CFG_DEPRECATED = {
+NVFP4_OMLP_ONLY_CFG = {
     "quant_cfg": {
         "*o_proj*weight_quantizer": _nvfp4_quantizer,
         "*o_proj*input_quantizer": _nvfp4_quantizer,
@@ -763,8 +654,6 @@ NVFP4_OMLP_ONLY_CFG_DEPRECATED = {
     },
     "algorithm": "max",
 }
-assert NVFP4_OMLP_ONLY_CFG_DEPRECATED == NVFP4_OMLP_ONLY_CFG
-
 choices: set[str] = {
     "FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG",
     "FP8_AFFINE_KV_CFG",
