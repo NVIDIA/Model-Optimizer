@@ -626,6 +626,20 @@ NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG = {
     },
 }
 
+NVFP4_WEIGHT_ONLY_GPTQ_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {"enable": False},
+        **_default_disabled_quantizer_cfg,
+    },
+    "algorithm": {"method": "gptq", "use_sequential": True},
+}
+
 NVFP4_GPTQ_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
@@ -836,6 +850,8 @@ choices: set[str] = {
     "NVFP4_AWQ_LITE_CFG",
     "NVFP4_DEFAULT_CFG",
     "NVFP4_GPTQ_CFG",
+    "NVFP4_WEIGHT_ONLY_CFG",
+    "NVFP4_WEIGHT_ONLY_GPTQ_CFG",
     "NVFP4_FP8_MHA_CONFIG",
     "NVFP4_KV_CFG",
     "NVFP4_KV_ROTATE_CFG",
