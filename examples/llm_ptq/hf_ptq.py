@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import argparse
+import copy
 import random
 import time
 import warnings
@@ -75,6 +76,19 @@ from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
 RAND_SEED = 1234
 
+
+def _set_kv_cache_constant_amax(quant_cfg: dict) -> None:
+    """Set use_constant_amax on KV cache quantizers.
+
+    Creates a new dict for the KV bmm quantizer config to avoid mutating shared references.
+    """
+    if "*[kv]_bmm_quantizer" in quant_cfg:
+        quant_cfg["*[kv]_bmm_quantizer"] = {
+            **quant_cfg["*[kv]_bmm_quantizer"],
+            "use_constant_amax": True,
+        }
+
+
 QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "int8": mtq.INT8_DEFAULT_CFG,
     "int8_sq": mtq.INT8_SMOOTHQUANT_CFG,
@@ -97,12 +111,17 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
 
 KV_QUANT_CFG_CHOICES = {
     "none": "none",
+    "fp8_cast": "FP8_KV_CFG",
     "fp8": "FP8_KV_CFG",
     "fp8_affine": "FP8_AFFINE_KV_CFG",
+    "nvfp4_cast": "NVFP4_KV_CFG",
     "nvfp4": "NVFP4_KV_CFG",
     "nvfp4_affine": "NVFP4_AFFINE_KV_CFG",
     "nvfp4_rotate": "NVFP4_KV_ROTATE_CFG",
 }
+
+# Formats that use use_constant_amax (no calibration needed).
+_KV_CAST_FORMATS = {"fp8_cast", "nvfp4_cast"}
 
 mto.enable_huggingface_checkpointing()
 
@@ -301,22 +320,25 @@ def auto_quantize(
     )
 
     calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
-    # We need to explicitly calibrate for kv cache quantization
+    # We need to explicitly set up KV cache quantization after auto_quantize
     enable_quant_kv_cache = args.kv_cache_qformat != "none"
     print(f"{'Enable' if enable_quant_kv_cache else 'Disable'} KV cache quantization")
     if enable_quant_kv_cache:
-        kv_cache_quant_cfg = getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"]
-        kv_cache_quant_cfg.pop("default")  # keep other quantizers from auto_quantize
-
-        mtq.set_quantizer_by_cfg(
-            language_model,
-            quant_cfg=kv_cache_quant_cfg,
+        kv_cache_quant_cfg = copy.deepcopy(
+            getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"]
         )
-        # Lets calibrate only the quantizers for kv cache quantization this time. Let's disable all others.
-        with mtq.set_quantizer_by_cfg_context(
-            language_model, {"*": {"enable": False}, **kv_cache_quant_cfg}
-        ):
-            mtq.calibrate(language_model, algorithm="max", forward_loop=calibrate_loop)
+        kv_cache_quant_cfg.pop("default", None)  # keep other quantizers from auto_quantize
+
+        if args.kv_cache_qformat in _KV_CAST_FORMATS:
+            _set_kv_cache_constant_amax(kv_cache_quant_cfg)
+
+        mtq.set_quantizer_by_cfg(language_model, quant_cfg=kv_cache_quant_cfg)
+        if args.kv_cache_qformat not in _KV_CAST_FORMATS:
+            # Calibrate only the KV cache quantizers; disable all others.
+            with mtq.set_quantizer_by_cfg_context(
+                language_model, {"*": {"enable": False}, **kv_cache_quant_cfg}
+            ):
+                mtq.calibrate(language_model, algorithm="max", forward_loop=calibrate_loop)
     return language_model
 
 
@@ -342,6 +364,13 @@ def load_model(args: argparse.Namespace):
                 quant_cfg,
                 getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"],
             )
+            # Mirror the use_constant_amax logic from quantize_main so that init_quantized_weights
+            # builds the KV quantizers with use_constant_amax already set. In calibration_only mode
+            # mtq.calibrate() does not re-apply quant_cfg, so this must happen before
+            # init_quantized_weights runs.
+            if args.kv_cache_qformat in _KV_CAST_FORMATS:
+                quant_cfg = copy.deepcopy(quant_cfg)
+                _set_kv_cache_constant_amax(quant_cfg["quant_cfg"])
 
         # Do not use real quant GEMM so the calibration can be more accurate.
         with init_quantized_weights(
@@ -942,14 +971,17 @@ def quantize_main(
         # These layers are typically speculative decoding layers that should be exported as-is
         mtp_layer_prefixes = getattr(full_model, "_mtp_layer_prefixes", None)
         if mtp_layer_prefixes:
-            import copy
-
             quant_cfg = copy.deepcopy(quant_cfg)
             for prefix in mtp_layer_prefixes:
                 # Add exclusion pattern for this MTP layer (e.g., "*layers.92*")
                 pattern = f"*{prefix.split('.')[-2]}.{prefix.split('.')[-1]}*"
                 quant_cfg["quant_cfg"][pattern] = {"enable": False}
                 print(f"Excluding MTP layer from quantization: {pattern}")
+
+        # Use constant amax for KV quantizers when a cast format is selected.
+        if args.kv_cache_qformat in _KV_CAST_FORMATS:
+            quant_cfg = copy.deepcopy(quant_cfg)
+            _set_kv_cache_constant_amax(quant_cfg["quant_cfg"])
 
         if args.qformat in QUANT_CFG_CHOICES:
             mono_quantize(
@@ -1077,9 +1109,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--kv_cache_qformat",
         required=False,
-        default="fp8",
+        default="fp8_cast",
         choices=KV_QUANT_CFG_CHOICES.keys(),
-        help="Specify KV cache quantization format, default to fp8 if not provided",
+        help=(
+            "Specify KV cache quantization format. Default: fp8_cast. "
+            "Formats ending in '_cast' (fp8_cast, nvfp4_cast) set the amax to FP8 range "
+            "without data-driven calibration. "
+            "Other formats (fp8, nvfp4, etc.) use data-driven calibration."
+        ),
     )
     parser.add_argument(
         "--export_fmt",
@@ -1192,6 +1229,7 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
+
     return args
 
 

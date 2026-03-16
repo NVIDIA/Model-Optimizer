@@ -150,18 +150,14 @@ def main(args):
     model = AutoModelForCausalLM.from_pretrained(
         args.pyt_ckpt_path,
         attn_implementation="eager",
-        torch_dtype=torch.bfloat16,
+        torch_dtype="auto",
+        device_map="auto",
     )
     tokenizer = AutoTokenizer.from_pretrained(args.pyt_ckpt_path)
 
     # Set pad token if not set
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-
-    # Move model to GPU if available
-    if torch.cuda.is_available():
-        model = model.cuda()
-        print("Model moved to CUDA")
 
     # Generate sample output BEFORE sparse attention
     print("\nGenerating sample output before sparse attention...")

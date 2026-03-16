@@ -66,7 +66,7 @@ class TestTinyLlama:
             sparse_cfg={
                 "*attn*": {
                     "method": "flash_skip_softmax",
-                    "threshold": {"prefill": 1e-3, "decode": 1e-4},
+                    "thresholds": {"prefill": [1e-3], "decode": [1e-4]},
                     "br": 128,
                     "bc": 128,
                     "backend": "pytorch",
@@ -94,7 +94,7 @@ class TestTinyLlama:
         config = SparseAttentionConfig(
             sparse_cfg={
                 "*attn*": {
-                    "threshold": {"prefill": 1e-3, "decode": 1e-4},
+                    "thresholds": {"prefill": [1e-3], "decode": [1e-4]},
                     "backend": "pytorch",
                     "enable": True,
                 }
@@ -124,7 +124,10 @@ class TestTinyLlama:
         config = SparseAttentionConfig(
             sparse_cfg={
                 "*attn*": {
-                    "threshold": {"prefill": 1e-3, "decode": 1e-5},  # More conservative for decode
+                    "thresholds": {
+                        "prefill": [1e-3],
+                        "decode": [1e-5],
+                    },  # More conservative for decode
                     "backend": "pytorch",
                     "enable": True,
                 }
@@ -163,7 +166,7 @@ class TestTinyLlama:
         sparse_config = SparseAttentionConfig(
             sparse_cfg={
                 "*attn*": {
-                    "threshold": {"prefill": 1e-3, "decode": 1e-4},
+                    "thresholds": {"prefill": [1e-3], "decode": [1e-4]},
                     "backend": "pytorch",
                     "enable": True,
                 }

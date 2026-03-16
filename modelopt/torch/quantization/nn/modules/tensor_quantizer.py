@@ -42,7 +42,7 @@ from modelopt.torch.utils.distributed import DistributedProcessGroup
 
 from ... import calib
 from ... import utils as quant_utils
-from ...config import QuantizerAttributeConfig
+from ...config import QuantizerAttributeConfig, RotateConfig
 from ...qtensor import (
     BaseQuantizedTensor,
     FP8QTensor,
@@ -188,6 +188,7 @@ class TensorQuantizer(nn.Module):
         if amax is not None:
             self.amax = amax
 
+        self._use_constant_amax = False
         self.set_from_attribute_config(quant_attribute_cfg)
 
         self._if_quant = if_quant
@@ -225,6 +226,7 @@ class TensorQuantizer(nn.Module):
             "calibrator": ("_calibrator", _calibrator_setter),
             "backend": ("backend", lambda val: val),
             "backend_extra_args": ("backend_extra_args", lambda val: val or {}),
+            "use_constant_amax": ("_use_constant_amax", lambda val: val),
         }
 
         for attribute, val in attribute_cfg.items():
@@ -532,16 +534,29 @@ class TensorQuantizer(nn.Module):
     @property
     def rotate_is_enabled(self):
         """Check if rotate is enabled in quant config."""
-        return self._rotate.get("enable", False) if isinstance(self._rotate, dict) else self._rotate
+        if isinstance(self._rotate, RotateConfig):
+            return self._rotate.enable
+        if isinstance(self._rotate, dict):  # backward compat: old checkpoints stored a dict
+            return self._rotate.get("enable", False)
+        return self._rotate  # bool
 
     @property
     def rotate_is_fp32(self):
         """Check if rotation needs to be computed in float32."""
-        return (
-            self._rotate.get("rotate_fp32", False)
-            if isinstance(self._rotate, dict) and self.rotate_is_enabled
-            else False
-        )
+        if isinstance(self._rotate, RotateConfig):
+            return self._rotate.rotate_fp32 if self._rotate.enable else False
+        if isinstance(self._rotate, dict) and self.rotate_is_enabled:
+            return self._rotate.get("rotate_fp32", False)
+        return False
+
+    @property
+    def rotate_block_size(self):
+        """Block size for block-granular RHT, or None for full/auto."""
+        if isinstance(self._rotate, RotateConfig):
+            return self._rotate.block_size if self._rotate.enable else None
+        if isinstance(self._rotate, dict) and self.rotate_is_enabled:
+            return self._rotate.get("block_size", None)
+        return None
 
     def disable_calib(self):
         """Disable calibration."""
@@ -613,6 +628,8 @@ class TensorQuantizer(nn.Module):
 
     def _get_amax(self, inputs):
         """Get amax from buffer or compute it dynamically."""
+        if self._use_constant_amax:
+            return torch.tensor(torch.finfo(torch.float8_e4m3fn).max, device=inputs.device)
         if hasattr(self, "_amax"):
             amax = self._amax
         else:
@@ -1011,7 +1028,11 @@ class TensorQuantizer(nn.Module):
 
         # Rotating the input
         if self.rotate_is_enabled:
-            inputs = normalized_hadamard_transform(inputs, rotate_fp32=self.rotate_is_fp32)
+            inputs = normalized_hadamard_transform(
+                inputs,
+                rotate_fp32=self.rotate_is_fp32,
+                block_size=self.rotate_block_size,
+            )
 
         if self._disabled:
             # if quantizer is disabled, we still need to track the input dtype for saving the model
@@ -1125,6 +1146,8 @@ class TensorQuantizer(nn.Module):
         )
         s += " rotated" if self.rotate_is_enabled else ""
         s += " (fp32)" if self.rotate_is_fp32 else ""
+        if self.rotate_block_size is not None:
+            s += f" (block={self.rotate_block_size})"
         s += (
             f" calibrator={self._calibrator.__class__.__name__}"
             if (self._calibrator is not None)

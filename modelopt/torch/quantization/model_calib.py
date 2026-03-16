@@ -702,7 +702,12 @@ def enable_stats_collection(model: nn.Module):
     """Enable stats collection for all quantizers in the model."""
     for name, module in model.named_modules():
         if isinstance(module, TensorQuantizer) and not module._disabled:
-            if module._calibrator is not None:
+            if module._use_constant_amax:
+                # use_constant_amax quantizers use a fixed amax and don't need calibration.
+                # Disable quantization during calibration so it doesn't affect other quantizers.
+                module.disable_quant()
+                continue
+            elif module._calibrator is not None:
                 module.disable_quant()
                 module.enable_calib()
             else:
@@ -713,6 +718,11 @@ def finish_stats_collection(model: nn.Module, method: str | None = None, **kwarg
     """Finish stats collection for all quantizers in the model."""
     for _, module in model.named_modules():
         if not isinstance(module, TensorQuantizer) or module._disabled:
+            continue
+
+        if module._use_constant_amax:
+            # Re-enable quantization for use_constant_amax quantizers disabled in enable_stats_collection.
+            module.enable_quant()
             continue
 
         cal = getattr(module, "_calibrator", None)

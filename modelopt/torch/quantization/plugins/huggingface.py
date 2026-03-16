@@ -16,16 +16,33 @@
 """Support quantization for huggingface layers."""
 
 import inspect
+import logging
 import warnings
 from contextlib import contextmanager
 from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
+import torch.nn as nn
 import transformers
 from packaging import version
 from torch import Tensor
 from torch.nn.functional import linear
+from transformers.models.t5.modeling_t5 import T5Attention
+
+from modelopt.torch.opt.dynamic import DynamicModule
+from modelopt.torch.utils.distributed import ParallelState
+
+from ..algorithms import AutoQuantizeGradientSearcher
+from ..conversion import register
+from ..nn import QuantInputBase, QuantModule, QuantModuleRegistry, TensorQuantizer
+from ..nn.modules.quant_linear import _QuantLinear
+from ..triton import IS_AVAILABLE as IS_TRITON_AVAILABLE
+from ..utils import replace_function, sync_moe_expert_amax
+from .attention import register_attention_for_kv_quant
+from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear, _QuantFunctionalMixin
+
+logger = logging.getLogger(__name__)
 
 try:
     from torch.distributed.tensor import Shard
@@ -39,26 +56,10 @@ try:
 except ImportError:
     kitchen = None
 
-import torch.nn as nn
-from transformers.models.t5.modeling_t5 import T5Attention
-
-from modelopt.torch.opt.dynamic import DynamicModule
-from modelopt.torch.utils.distributed import ParallelState
-
-from ..algorithms import AutoQuantizeGradientSearcher
-from ..conversion import register
-from ..nn import QuantInputBase, QuantModule, QuantModuleRegistry, TensorQuantizer
-from ..nn.modules.quant_linear import _QuantLinear
-from ..triton import IS_AVAILABLE as IS_TRITON_AVAILABLE
-
 if IS_TRITON_AVAILABLE:
     from ..triton import weight_dequant
 else:
     weight_dequant = None
-
-from ..utils import replace_function, sync_moe_expert_amax
-from .attention import register_attention_for_kv_quant
-from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear, _QuantFunctionalMixin
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -877,16 +878,140 @@ class _QuantDbrxFFN(_QuantSparseMoe):
         self.router.moe_top_k = value
 
 
+@contextmanager
+def patch_compressed_linear_loading():
+    """Context manager that patches CompressedLinear to survive custom ``_init_weights`` calls.
+
+    When loading pack-quantized models with ``trust_remote_code=True``,
+    ``compressed_tensors`` replaces ``.weight`` with ``.weight_packed`` on
+    CompressedLinear modules.  Custom model code (e.g. ``modeling_deepseek.py``)
+    often does ``module.weight.data.normal_(...)`` inside ``_init_weights``,
+    which crashes because ``.weight`` no longer exists.
+
+    This context manager monkey-patches ``CompressedLinear.__getattr__`` to
+    return a harmless dummy for ``.weight`` accesses, and restores the original
+    behaviour on exit (even if an exception is raised).
+
+    Usage::
+
+        from modelopt.torch.quantization.plugins.huggingface import patch_compressed_linear_loading
+
+        with patch_compressed_linear_loading():
+            model = AutoModelForCausalLM.from_pretrained(
+                ckpt_path,
+                device_map="auto",
+                trust_remote_code=True,
+                torch_dtype="auto",
+            )
+    """
+    try:
+        from compressed_tensors.linear.compressed_linear import CompressedLinear
+    except ImportError:
+        yield
+        return
+
+    if getattr(CompressedLinear, "_modelopt_init_patched", False):
+        yield
+        return
+
+    original_getattr = getattr(CompressedLinear, "__getattr__", None)
+
+    class _DummyWeightData:
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: self
+
+    class _DummyWeight:
+        def __init__(self):
+            self.data = _DummyWeightData()
+
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: self
+
+    def patched_getattr(self, name):
+        if name == "weight":
+            if "_parameters" in self.__dict__ and "weight" in self._parameters:
+                return self._parameters["weight"]
+            if "weight" in self.__dict__:
+                return self.__dict__["weight"]
+            return _DummyWeight()
+        if original_getattr is not None:
+            return original_getattr(self, name)
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    CompressedLinear.__getattr__ = patched_getattr
+    CompressedLinear._modelopt_init_patched = True
+    logger.info("Patched CompressedLinear for transformers compatibility")
+
+    try:
+        yield
+    finally:
+        if original_getattr is not None:
+            CompressedLinear.__getattr__ = original_getattr
+        elif hasattr(CompressedLinear, "__getattr__"):
+            del CompressedLinear.__getattr__
+        CompressedLinear._modelopt_init_patched = False
+        logger.info("Restored CompressedLinear original state")
+
+
 class _QuantCompressedLinear(QuantModule):
+    """Quantization wrapper for ``compressed_tensors`` CompressedLinear modules.
+
+    Handles on-the-fly decompression of pack-quantized INT4 weights during
+    calibration.  This avoids fully decompressing all experts into GPU memory
+    at once (which would OOM for large MoE models), and also correctly handles
+    the ``weight_shape`` metadata that ``compressed_tensors`` stores as a
+    tensor rather than a plain list.
+    """
+
     def _setup(self):
         self.input_quantizer = TensorQuantizer()
         self.weight_quantizer = TensorQuantizer()
+
+    def _build_compressed_data(self):
+        """Build compressed_data dict and quantization_args from module attributes.
+
+        Returns a (compressed_data, quant_args) tuple suitable for
+        ``self.compressor.decompress_weight()``.  ``weight_shape`` is
+        normalised to a plain ``list[int]`` so that ``compressed_tensors``
+        does not choke on a ``torch.Tensor`` value.
+        """
+        compressed_data = {"weight_packed": self.weight_packed}
+        if hasattr(self, "weight_scale"):
+            compressed_data["weight_scale"] = self.weight_scale
+        if hasattr(self, "weight_shape"):
+            ws = self.weight_shape
+            if isinstance(ws, torch.Tensor):
+                compressed_data["weight_shape"] = [int(x) for x in ws.tolist()]
+            elif isinstance(ws, (list, tuple)):
+                compressed_data["weight_shape"] = [int(x) for x in ws]
+            else:
+                compressed_data["weight_shape"] = ws
+        if hasattr(self, "weight_zero_point"):
+            compressed_data["weight_zero_point"] = self.weight_zero_point
+
+        quant_args = None
+        if hasattr(self, "quantization_scheme") and self.quantization_scheme:
+            if hasattr(self.quantization_scheme, "weights"):
+                quant_args = self.quantization_scheme.weights
+
+        return compressed_data, quant_args
 
     def forward(self, input: Tensor) -> Tensor:
         from compressed_tensors.quantization import QuantizationStatus
 
         if self.quantization_status == QuantizationStatus.COMPRESSED:
-            weight_data = self.compressor.decompress_module(self)
+            # Real packed weights are int32. If it's float, it's not actually compressed.
+            if self.weight_packed.dtype == torch.int32:
+                compressed_data, quant_args = self._build_compressed_data()
+                if not hasattr(self, "_logged_on_the_fly"):
+                    logger.debug("On-the-fly decompression for %s", self.__class__.__name__)
+                    self._logged_on_the_fly = True
+                weight_data = self.compressor.decompress_weight(
+                    compressed_data=compressed_data,
+                    quantization_args=quant_args,
+                )
+            else:
+                weight_data = self.weight_packed
         else:
             weight_data = self.weight
 
@@ -896,11 +1021,37 @@ class _QuantCompressedLinear(QuantModule):
         from compressed_tensors.quantization import QuantizationStatus
 
         if self.quantization_status == QuantizationStatus.COMPRESSED:
-            self.weight = nn.Parameter(self.compressor.decompress_module(self), requires_grad=False)
+            compressed_data, quant_args = self._build_compressed_data()
+
+            # Skip non-pack-quantized weights (e.g., vision modules stored as BF16)
+            if isinstance(compressed_data["weight_packed"], torch.Tensor):
+                if compressed_data["weight_packed"].dtype != torch.int32:
+                    return
+
+            decompressed = self.compressor.decompress_weight(
+                compressed_data=compressed_data,
+                quantization_args=quant_args,
+            )
+            # Clear any placeholder before registering the real parameter
+            self._parameters.pop("weight", None)
+            self._buffers.pop("weight", None)
+            if "weight" in self.__dict__:
+                del self.__dict__["weight"]
+            param = nn.Parameter(decompressed, requires_grad=False)
+            self._parameters["weight"] = param
+            self.__dict__["weight"] = param
+
         if hasattr(self, "weight_packed"):
             del self.weight_packed
         if hasattr(self, "weight_scale"):
             del self.weight_scale
+        if hasattr(self, "weight_shape"):
+            if "weight_shape" in self._parameters:
+                del self._parameters["weight_shape"]
+            else:
+                delattr(self, "weight_shape")
+        if self.quantization_status == QuantizationStatus.COMPRESSED:
+            self.quantization_status = QuantizationStatus.FROZEN
 
 
 class _QuantFP8Linear(QuantModule):

@@ -27,6 +27,11 @@ except Exception:  # pragma: no cover - optional diffusers models
     DiTTransformer2DModel = None
     FluxTransformer2DModel = None
 
+try:
+    from diffusers.models.transformers import Flux2Transformer2DModel
+except Exception:  # pragma: no cover - optional diffusers models
+    Flux2Transformer2DModel = None
+
 import modelopt.torch.opt as mto
 
 
@@ -91,6 +96,27 @@ def get_tiny_flux(**config_kwargs):
     }
     kwargs.update(**config_kwargs)
     return FluxTransformer2DModel(**kwargs)
+
+
+def get_tiny_flux2(**config_kwargs):
+    """Create a tiny Flux2Transformer2DModel for testing."""
+    if Flux2Transformer2DModel is None:
+        pytest.skip("Flux2Transformer2DModel is not available in this diffusers version.")
+
+    kwargs = {
+        "patch_size": 1,
+        "in_channels": 16,
+        "num_layers": 1,
+        "num_single_layers": 1,
+        "attention_head_dim": 16,
+        "num_attention_heads": 2,
+        "joint_attention_dim": 32,
+        "timestep_guidance_channels": 16,
+        "mlp_ratio": 3.0,
+        "axes_dims_rope": (4, 4, 4, 4),
+    }
+    kwargs.update(**config_kwargs)
+    return Flux2Transformer2DModel(**kwargs)
 
 
 def create_tiny_unet_dir(tmp_path: Path, **config_kwargs) -> Path:

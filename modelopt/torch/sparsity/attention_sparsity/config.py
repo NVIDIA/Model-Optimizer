@@ -46,12 +46,14 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         description="If True, enables sparse attention. If False, bypasses sparsity.",
     )
 
-    threshold: dict[str, float] = ModeloptField(
-        default={"prefill": 1e-3, "decode": 1e-4},
-        title="Sparsity threshold.",
+    thresholds: dict[str, list[float]] = ModeloptField(
+        default={"prefill": [1e-3], "decode": [1e-4]},
+        title="Sparsity thresholds.",
         description=(
-            "Threshold for determining which attention values to skip. "
-            "Must be a dict with 'prefill' and 'decode' keys."
+            "Thresholds for determining which attention values to skip. "
+            "Must be a dict with 'prefill' and/or 'decode' keys, each mapping to a list of floats. "
+            "Prefill and decode lists must have the same length. "
+            "Sparsity is computed per threshold; the first threshold's mask is applied."
         ),
     )
 
@@ -120,10 +122,10 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
             raise ValueError(f"Block size must be positive, got {v}")
         return v
 
-    @field_validator("threshold")
+    @field_validator("thresholds")
     @classmethod
-    def validate_threshold(cls, v):
-        """Validate threshold is a dict with valid phases and values in range (0, 1)."""
+    def validate_thresholds(cls, v):
+        """Validate thresholds is a dict of lists with valid phases and values in range (0, 1)."""
         if not isinstance(v, dict):
             raise ValueError(
                 f"Threshold must be a dict with 'prefill' and/or 'decode' keys, got {type(v).__name__}"
@@ -135,12 +137,25 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
             raise ValueError(
                 f"Invalid threshold phases: {invalid_keys}. Valid phases: {valid_phases}"
             )
-        # Validate all values are in range (0, 1)
-        for phase, threshold in v.items():
-            if not isinstance(threshold, (int, float)) or threshold <= 0 or threshold >= 1:
+        # Validate all values are lists of floats in range (0, 1)
+        lengths = {}
+        for phase, threshold_list in v.items():
+            if not isinstance(threshold_list, list) or len(threshold_list) == 0:
                 raise ValueError(
-                    f"Threshold for phase '{phase}' must be in range (0, 1), got {threshold}"
+                    f"Thresholds for phase '{phase}' must be a non-empty list, got {threshold_list}"
                 )
+            for threshold in threshold_list:
+                if not isinstance(threshold, (int, float)) or threshold <= 0 or threshold >= 1:
+                    raise ValueError(
+                        f"Each threshold for phase '{phase}' must be in range (0, 1), got {threshold}"
+                    )
+            lengths[phase] = len(threshold_list)
+        # Validate prefill and decode lists have the same length
+        if len(lengths) == 2 and len(set(lengths.values())) != 1:
+            raise ValueError(
+                f"Prefill and decode threshold lists must have the same length, "
+                f"got prefill={lengths['prefill']}, decode={lengths['decode']}"
+            )
         return v
 
 
@@ -356,7 +371,7 @@ class FlashSkipSoftmaxConfig(SparseAttentionConfig):
         default={
             "*attention*": {
                 "method": "flash_skip_softmax",
-                "threshold": {"prefill": 1e-3, "decode": 1e-5},
+                "thresholds": {"prefill": [1e-3], "decode": [1e-5]},
                 "br": 128,  # Flash Attention block rows
                 "bc": 128,  # Flash Attention block columns
                 "backend": "pytorch",  # Only pytorch backend supported
@@ -378,9 +393,9 @@ SKIP_SOFTMAX_DEFAULT = {
     "sparse_cfg": {
         "*attn*": {
             "method": "flash_skip_softmax",
-            "threshold": {
-                "prefill": 1e-3,  # More aggressive during prefill
-                "decode": 1e-4,  # Conservative during decode
+            "thresholds": {
+                "prefill": [1e-3],  # More aggressive during prefill
+                "decode": [1e-4],  # Conservative during decode
             },
             "br": 128,  # Flash Attention block rows
             "bc": 128,  # Flash Attention block columns
