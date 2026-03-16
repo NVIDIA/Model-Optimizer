@@ -18,10 +18,11 @@
 import base64
 import inspect
 import json
+import logging
 import os
 import shutil
 import tempfile
-from contextlib import nullcontext, suppress
+from contextlib import nullcontext
 from typing import Any
 
 import onnx
@@ -60,13 +61,26 @@ from modelopt.torch.utils._pytree import TreeSpec
 
 from ..utils.onnx_optimizer import Optimizer
 
-# Monkey-patch to fix onnxconverter_common bug where downstream_node is a list
+# Monkey-patch for onnxconverter_common bug in remove_unnecessary_cast_node():
+# cast_node_downstream_dict stores either a single node or a list of nodes, but the
+# downstream-node handling at lines ~770/787 always does `downstream_node.input`,
+# which raises AttributeError("'list' object has no attribute 'input'") when the
+# value is a list (i.e. a Cast output feeds multiple consumers).
+# TODO: Remove this patch once onnxconverter-common ships a fix.
+#   Upstream issue: https://github.com/microsoft/onnxconverter-common/issues/261
 _original_remove_unnecessary_cast_node = _f16_module.remove_unnecessary_cast_node
+
+_logger = logging.getLogger(__name__)
 
 
 def _patched_remove_unnecessary_cast_node(graph):
-    with suppress(AttributeError):
+    try:
         _original_remove_unnecessary_cast_node(graph)
+    except AttributeError as e:
+        if "'list' object has no attribute 'input'" in str(e):
+            _logger.debug("Skipping remove_unnecessary_cast_node due to known upstream bug: %s", e)
+        else:
+            raise
 
 
 _f16_module.remove_unnecessary_cast_node = _patched_remove_unnecessary_cast_node
