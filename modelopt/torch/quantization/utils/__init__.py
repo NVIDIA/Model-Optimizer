@@ -13,14 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# ruff: noqa: F405
 """Quantization utilities."""
 
-from .core_utils import *  # noqa: F401,F403
-from .activation_collector import LayerActivationCollector  # noqa: F401
+from .activation_collector import LayerActivationCollector
+from .core_utils import *
 
 __all__ = [
     "EXPORT_MODE",
-    "LayerActivationCollector",
     "convert_quantization_axis_to_reduce_axis",
     "export_torch_mode",
     "is_quantized",

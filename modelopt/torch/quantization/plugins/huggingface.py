@@ -39,6 +39,7 @@ from ..nn import QuantInputBase, QuantModule, QuantModuleRegistry, TensorQuantiz
 from ..nn.modules.quant_linear import _QuantLinear
 from ..triton import IS_AVAILABLE as IS_TRITON_AVAILABLE
 from ..utils import replace_function, sync_moe_expert_amax
+from ..utils.activation_collector import LayerActivationCollector
 from .attention import register_attention_for_kv_quant
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear, _QuantFunctionalMixin
 
@@ -60,8 +61,6 @@ if IS_TRITON_AVAILABLE:
     from ..triton import weight_dequant
 else:
     weight_dequant = None
-
-from ..utils import LayerActivationCollector
 
 if TYPE_CHECKING:
     from types import ModuleType

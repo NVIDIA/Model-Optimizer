@@ -26,12 +26,10 @@ from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
 from torch.distributed.tensor import Replicate
 
-
 from modelopt.torch.utils import get_unwrapped_name, print_rank_0
 
 if TYPE_CHECKING:
     from collections.abc import Generator
-
 
 
 def reduce_block_amax(input_tensor: torch.Tensor, block_sizes: dict):
