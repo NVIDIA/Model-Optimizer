@@ -35,10 +35,10 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-from torch.cuda import nvtx
 import transformers
 from packaging.version import Version
 from torch import nn
+from torch.cuda import nvtx
 from torch.nn import CrossEntropyLoss
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 from transformers import Cache, DynamicCache, PretrainedConfig, PreTrainedModel
@@ -722,8 +722,14 @@ class HFEagleModel(EagleModel):
         base_output_predict_tok = base_model_logits.argmax(dim=-1).detach()
         base_output_softmax_logits = torch.softmax(base_model_logits, dim=2).detach()
 
-        return eagle_input_embeds, eagle_input_hiddens, eagle_attention_mask, eagle_position_ids, \
-            base_output_predict_tok, base_output_softmax_logits
+        return (
+            eagle_input_embeds,
+            eagle_input_hiddens,
+            eagle_attention_mask,
+            eagle_position_ids,
+            base_output_predict_tok,
+            base_output_softmax_logits,
+        )
 
     def _compute_ttt_attention_mask(
         self, batch_size, seq_length, ttt_step
@@ -909,7 +915,7 @@ class HFEagleModel(EagleModel):
             eagle_attn_mask_0,
             eagle_position_ids,
             base_output_predict_tok,
-            base_output_softmax_logits
+            base_output_softmax_logits,
         ) = self._prepare_eagle_inputs(
             input_ids,
             attention_mask,
@@ -1005,9 +1011,9 @@ class HFEagleModel(EagleModel):
         """Function for EAGLE loss computing."""
         loss_mask = loss_mask[:, : eagle_logits.shape[1], None]
         eagle_logsoft = torch.log_softmax(eagle_logits, dim=2)
-        classification_loss = -torch.sum(torch.sum(loss_mask * base_output_softmax_logits * eagle_logsoft, 2)) / (
-            loss_mask.sum() + 1e-5
-        )
+        classification_loss = -torch.sum(
+            torch.sum(loss_mask * base_output_softmax_logits * eagle_logsoft, 2)
+        ) / (loss_mask.sum() + 1e-5)
         # Compute accuracy (returned as tensor to avoid sync; .item() called after TTT loop)
         eagle_predict_tok = eagle_logits.detach().argmax(dim=-1)
         valid = loss_mask[:, :, 0].bool()
