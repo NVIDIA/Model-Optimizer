@@ -1062,6 +1062,7 @@ class HFEagleModel(EagleModel):
         else:
             eagle_input_hidden_states = base_model_hidden_states
 
+        self.eagle_module._maybe_init_rope()
         draft_tokens = []
         for step in range(steps):
             b, seq_length = eagle_ids.shape
