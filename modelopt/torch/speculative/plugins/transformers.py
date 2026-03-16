@@ -716,7 +716,14 @@ class HFEagleModel(EagleModel):
         else:
             eagle_position_ids = position_ids.view(-1, seq_length).long()
 
-        return eagle_input_embeds, eagle_input_hiddens, eagle_attention_mask, eagle_position_ids
+        base_model_logits = base_outputs.logits
+        if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size:
+            base_model_logits = self._map_logits_to_draft_vocab(base_model_logits)
+        base_output_predict_tok = base_model_logits.argmax(dim=-1).detach()
+        base_output_softmax_logits = torch.softmax(base_model_logits, dim=2).detach()
+
+        return eagle_input_embeds, eagle_input_hiddens, eagle_attention_mask, eagle_position_ids, \
+            base_output_predict_tok, base_output_softmax_logits
 
     def _compute_ttt_attention_mask(
         self, batch_size, seq_length, ttt_step
@@ -892,13 +899,17 @@ class HFEagleModel(EagleModel):
 
         # ====Prepare inputs for the first eagle forward pass====
         eagle_loss = None
-        train_accs = [[] for _ in range(self.eagle_config.parallel_draft_step)]
+        num_parallel = self.eagle_config.parallel_draft_step
+        num_ttt = self.eagle_ttt_steps
+        train_accs = torch.zeros(num_parallel, num_ttt, device=input_ids.device)
         b, seq_length, _ = base_outputs.out_hiddens.shape
         (
             eagle_input_embeds,
             eagle_input_hiddens,
             eagle_attn_mask_0,
             eagle_position_ids,
+            base_output_predict_tok,
+            base_output_softmax_logits
         ) = self._prepare_eagle_inputs(
             input_ids,
             attention_mask,
@@ -951,7 +962,8 @@ class HFEagleModel(EagleModel):
                     # base model predict +1 tok, while eagle predict +2
                     # so we shift base model outputs compared to eagle outputs
                     # additionally, we mask the first n tok of eagle outputs at nth TTT step
-                    base_outputs.logits[:, 1 + i + ttt_step :],
+                    base_output_softmax_logits[:, 1 + i + ttt_step :],
+                    base_output_predict_tok[:, 1 + i + ttt_step :],
                     eagle_logit[:, ttt_step : -(1 + i)],
                     loss_mask[:, 1 + ttt_step :] if i == 0 else loss_mask[:, 1 + ttt_step : -i],
                 )
@@ -960,9 +972,12 @@ class HFEagleModel(EagleModel):
                 eagle_loss = (
                     classification_loss if eagle_loss is None else eagle_loss + classification_loss
                 )
-                train_accs[i].append(acc)
+                train_accs[i, ttt_step] = acc
             if not self.training:
                 break
+
+        # Slice by actual number of steps taken, in case of early return
+        train_accs = train_accs[:, : ttt_step + 1].tolist()
 
         # Merge base model loss and eagle loss
         if base_outputs.loss is None and eagle_loss is None:
@@ -982,27 +997,23 @@ class HFEagleModel(EagleModel):
     @nvtx.range("eagle_loss")
     def _eagle_loss(
         self,
-        base_model_logits,
+        base_output_softmax_logits,
+        base_output_predict_tok,
         eagle_logits,
         loss_mask,
     ):
         """Function for EAGLE loss computing."""
-        if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size:
-            base_model_logits = self._map_logits_to_draft_vocab(base_model_logits)
         loss_mask = loss_mask[:, : eagle_logits.shape[1], None]
-        classification_loss = nn.Softmax(dim=2)(base_model_logits) * nn.LogSoftmax(dim=2)(
-            eagle_logits
-        )
-        classification_loss = -torch.sum(torch.sum(loss_mask * classification_loss, 2)) / (
+        eagle_logsoft = torch.log_softmax(eagle_logits, dim=2)
+        classification_loss = -torch.sum(torch.sum(loss_mask * base_output_softmax_logits * eagle_logsoft, 2)) / (
             loss_mask.sum() + 1e-5
         )
-        # Compute accuracy
-        base_predict_tok = base_model_logits.clone().detach().argmax(dim=-1)
-        eagle_predict_tok = eagle_logits.clone().detach().argmax(dim=-1)
+        # Compute accuracy (returned as tensor to avoid sync; .item() called after TTT loop)
+        eagle_predict_tok = eagle_logits.detach().argmax(dim=-1)
         valid = loss_mask[:, :, 0].bool()
-        correct = (base_predict_tok == eagle_predict_tok) & valid
+        correct = (base_output_predict_tok == eagle_predict_tok) & valid
         denom = valid.sum().clamp_min(1).float()
-        accuracy = round(correct.sum().float().div(denom).item(), 3)
+        accuracy = correct.sum().float() / denom
 
         return classification_loss, accuracy
 
