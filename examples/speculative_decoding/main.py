@@ -145,9 +145,10 @@ def train():
     model_args, data_args, training_args, medusa_args, eagle_args = (
         parser.parse_args_into_dataclasses()
     )
-    training_args.parallelism_config = ParallelismConfig(
-        cp_size=training_args.cp_size, dp_shard_size=training_args.dp_shard_size
-    )
+    if training_args.cp_size > 1 or training_args.dp_shard_size > 1:
+        training_args.parallelism_config = ParallelismConfig(
+            cp_size=training_args.cp_size, dp_shard_size=training_args.dp_shard_size
+        )
     if training_args.cp_size > 1:
         patch_ring_attention_for_ttt()
         # Specific patch to accelerate 1.12.0. Removable after move to 1.13.0
