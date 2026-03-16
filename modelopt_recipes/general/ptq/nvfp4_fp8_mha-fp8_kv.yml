@@ -15,15 +15,72 @@
 
 metadata:
   recipe_type: ptq
-  description: >-
-    NVFP4 MLP/MoE weight with FP8 multi-head attention (W4A16), FP8 KV cache, max calibration.
-
-__base__:
-  model_quant:
-    - configs/ptq/base
-    - configs/ptq/w4a4_nvfp4_nvfp4
-    - configs/ptq/mha_fp8
-    - configs/ptq/calib_algo_max
-
-  kv_quant:
-    - configs/ptq/kv_fp8
+  description: NVFP4 MLP/MoE weight with FP8 multi-head attention (W4A16), FP8 KV cache, max calibration.
+model_quant:
+  quant_cfg:
+    '*weight_quantizer':
+      block_sizes:
+        -1: 16
+        type: dynamic
+        scale_bits: [4, 3]
+      num_bits: [2, 1]
+      enable: true
+    '*input_quantizer':
+      block_sizes:
+        -1: 16
+        type: dynamic
+        scale_bits: [4, 3]
+      num_bits: [2, 1]
+      enable: true
+    '*q_bmm_quantizer':
+      num_bits: [4, 3]
+    '*k_bmm_quantizer':
+      num_bits: [4, 3]
+    '*v_bmm_quantizer':
+      num_bits: [4, 3]
+    '*softmax_quantizer':
+      num_bits: [4, 3]
+    transformer_blocks*bmm2_output_quantizer:
+      num_bits: [4, 3]
+    default:
+      enable: false
+    '*block_sparse_moe.gate*':
+      enable: false
+    '*linear_attn.conv1d*':
+      enable: false
+    '*lm_head*':
+      enable: false
+    '*mixer.conv1d*':
+      enable: false
+    '*mlp.gate.*':
+      enable: false
+    '*mlp.shared_expert_gate.*':
+      enable: false
+    '*output_layer*':
+      enable: false
+    '*proj_out.*':
+      enable: false
+    '*router*':
+      enable: false
+    output.*:
+      enable: false
+    nn.BatchNorm1d:
+      '*':
+        enable: false
+    nn.BatchNorm2d:
+      '*':
+        enable: false
+    nn.BatchNorm3d:
+      '*':
+        enable: false
+    nn.LeakyReLU:
+      '*':
+        enable: false
+    '*output_quantizer':
+      enable: false
+  algorithm: max
+kv_quant:
+  quant_cfg:
+    '*[kv]_bmm_quantizer':
+      num_bits: [4, 3]
+      enable: true

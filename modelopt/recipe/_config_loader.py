@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""YAML config loading with ``__base__`` inheritance.
+"""YAML config loading utilities.
 
 This module is intentionally free of ``modelopt.torch`` imports so that
 ``modelopt.torch.quantization.config`` can import :func:`load_config` without
@@ -27,91 +27,18 @@ try:
 except ImportError:  # Python < 3.11
     from importlib.abc import Traversable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import yaml
-from omegaconf import OmegaConf
 
 # Root to all built-in recipes. Users can create own recipes.
 BUILTIN_RECIPES_LIB = files("modelopt_recipes")
-
-
-def _merge_base_list(base_list: list, override: dict[str, Any] | None) -> dict[str, Any]:
-    """Load and merge a list of base config paths, then overlay ``override``."""
-    sub_bases: list[dict[str, Any]] = [load_config(b) for b in base_list]
-    if override:
-        sub_bases.append(override)
-    if not sub_bases:
-        return {}
-    if len(sub_bases) == 1:
-        return sub_bases[0]
-    return cast(
-        "dict[str, Any]",
-        OmegaConf.to_container(OmegaConf.merge(*sub_bases), resolve=True),
-    )
-
-
-def _apply_base_dict(base: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
-    """Apply dict-style ``__base__`` to ``current`` recursively.
-
-    Each key in ``base`` identifies a section of ``current`` to populate:
-
-    - If the value is a **list**, it is treated as a list of config paths that are loaded
-      and merged into ``current[key]``, with any existing ``current[key]`` as the final
-      override (highest priority).
-    - If the value is a **dict**, the same logic is applied one level deeper, allowing
-      arbitrarily nested ``__base__`` path specifications.
-    """
-    for section, section_base in base.items():
-        if isinstance(section_base, list):
-            override = current.get(section)
-            current[section] = _merge_base_list(
-                section_base, override if isinstance(override, dict) else None
-            )
-        elif isinstance(section_base, dict):
-            sub_current = current.get(section)
-            current[section] = _apply_base_dict(
-                section_base, dict(sub_current) if isinstance(sub_current, dict) else {}
-            )
-        else:
-            raise ValueError(
-                f"__base__ dict values must be lists of config paths or nested dicts, "
-                f"but '{section}' has type {type(section_base).__name__!r}."
-            )
-    return current
-
-
-def _resolve_bases(data: dict[str, Any]) -> dict[str, Any]:
-    """Resolve ``__base__`` inheritance at this dict level and recursively in nested dicts."""
-    current: dict[str, Any] = {}
-    for key, value in data.items():
-        current[key] = _resolve_bases(value) if isinstance(value, dict) else value
-
-    base = current.pop("__base__", None)
-    if base is None:
-        return current
-
-    if isinstance(base, list):
-        base_configs = [load_config(b) for b in base]
-        base_configs.append(current)
-        if len(base_configs) == 1:
-            return base_configs[0]
-        return cast(
-            "dict[str, Any]",
-            OmegaConf.to_container(OmegaConf.merge(*base_configs), resolve=True),
-        )
-
-    return _apply_base_dict(base, current)
 
 
 def load_config(config_file: str | Path | Traversable) -> dict[str, Any]:
     """Load a config yaml.
 
     config_file: Path to a config yaml file. The path suffix can be omitted.
-
-    ``__base__`` inheritance is resolved at every nesting level, not just the top level.  This
-    means a sub-section such as ``model_quant`` or ``kv_quant`` can declare its own ``__base__``
-    list and the referenced configs will be merged into that sub-section.
     """
     paths_to_check: list[Path | Traversable] = []
     if isinstance(config_file, str):
@@ -151,12 +78,9 @@ def load_config(config_file: str | Path | Traversable) -> dict[str, Any]:
 
     _raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     if _raw is None:
-        config_data: dict[str, Any] = {}
-    elif not isinstance(_raw, dict):
+        return {}
+    if not isinstance(_raw, dict):
         raise ValueError(
             f"Config file {config_path} must contain a YAML mapping, got {type(_raw).__name__}"
         )
-    else:
-        config_data = _raw
-
-    return _resolve_bases(config_data)
+    return _raw
