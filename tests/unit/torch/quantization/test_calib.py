@@ -637,10 +637,12 @@ def test_filter_no_op_when_none():
     for name in ["net.0", "net.2", "net.4"]:
         assert dict(model.named_modules())[name].weight_quantizer._amax is not None
 
-    # Amaxes should be consistent with standard max calibration (not None)
-    for name in amaxes_before:
+    # Amaxes should be identical to those computed without filter_calib_modules
+    for name, amax_before in amaxes_before.items():
         amax_after = _get_weight_amax(model, name)
-        assert amax_after is not None, f"{name} should have a valid amax after calibration"
+        assert torch.allclose(amax_before, amax_after), (
+            f"{name} amax changed unexpectedly when filter_calib_modules args are None"
+        )
 
 
 def test_smoothquant_include_modules():

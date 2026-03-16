@@ -82,6 +82,11 @@ def filter_calib_modules(
         exclude_modules: If provided, modules whose names match at least one fnmatch pattern are
             skipped.
 
+    Note:
+        Only quantized linear modules (as identified by :func:`is_quantized_linear`) are filtered.
+        ``TensorQuantizer`` instances inside non-linear quantized modules (e.g. layer norms,
+        embeddings) are not disabled even if their module name matches a pattern.
+
     Example::
 
         with filter_calib_modules(model, exclude_modules=["*lm_head*"]):

@@ -1299,12 +1299,12 @@ if __name__ == "__main__":
     args.dataset = args.dataset.split(",") if isinstance(args.dataset, str) else args.dataset
     args.calib_size = [int(num_sample) for num_sample in args.calib_size.split(",")]
     args.calib_exclude_modules = (
-        [p.strip() for p in args.calib_exclude_modules.split(",")]
+        [p.strip() for p in args.calib_exclude_modules.split(",") if p.strip()]
         if args.calib_exclude_modules
         else None
     )
     args.calib_include_modules = (
-        [p.strip() for p in args.calib_include_modules.split(",")]
+        [p.strip() for p in args.calib_include_modules.split(",") if p.strip()]
         if args.calib_include_modules
         else None
     )

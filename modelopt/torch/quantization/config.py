@@ -1049,7 +1049,9 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         description=(
             "If provided, only modules whose names match at least one of the fnmatch patterns are "
             "calibrated. Modules that do not match any pattern are skipped and retain their "
-            "pre-existing calibration state."
+            "pre-existing calibration state. "
+            "Note: filtering applies only to quantized linear modules; TensorQuantizers in "
+            "non-linear modules (e.g. layer norms, embeddings) are unaffected."
         ),
     )
 
@@ -1058,7 +1060,9 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         title="Patterns of modules to exclude from calibration.",
         description=(
             "If provided, modules whose names match at least one of the fnmatch patterns are "
-            "skipped during calibration and retain their pre-existing calibration state."
+            "skipped during calibration and retain their pre-existing calibration state. "
+            "Note: filtering applies only to quantized linear modules; TensorQuantizers in "
+            "non-linear modules (e.g. layer norms, embeddings) are unaffected."
         ),
     )
 
