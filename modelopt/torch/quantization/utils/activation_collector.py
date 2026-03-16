@@ -270,16 +270,26 @@ class LayerActivationCollector:
 
         if layer_idx > 1:
             done = self._decoder_layers[layer_idx - 2]._seq_calib
-            done.mode = "skip"
-            # output_meta is intentionally kept: skip mode needs it to produce
-            # correctly shaped zero-filled outputs for the parent forward.
-            done.cached_inputs.clear()
+            if done.output_meta is not None:
+                # output_meta is intentionally kept: skip mode needs it to produce
+                # correctly shaped zero-filled outputs for the parent forward.
+                done.mode = "skip"
+                done.cached_inputs.clear()
+            else:
+                # Layer was never run in 'run' mode (e.g. non-sequential calibration),
+                # so output_meta is unavailable.  Fall back to original forward.
+                done.mode = "original"
 
         if layer_idx > 0:
             prev = self._decoder_layers[layer_idx - 1]._seq_calib
-            prev.mode = "run"
-            prev.cached_inputs = deque(prev.collected_inputs)
-            prev.collected_inputs = []
+            if prev.collected_inputs:
+                prev.mode = "run"
+                prev.cached_inputs = deque(prev.collected_inputs)
+                prev.collected_inputs = []
+            else:
+                # Layer was never in capture mode (e.g. non-sequential calibration),
+                # so there are no inputs to replay.  Fall back to original forward.
+                prev.mode = "original"
 
         cur = self._decoder_layers[layer_idx]._seq_calib
         cur.mode = "capture"

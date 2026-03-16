@@ -567,9 +567,22 @@ def test_capture_layer_collects_all_batches(monkeypatch):
 
 
 def test_mode_transitions_across_calibration_steps(monkeypatch):
-    """Verify mode transitions follow the skip/run/capture pattern at each step."""
+    """Verify mode transitions follow the skip/run/capture pattern at each step.
+
+    State transitions in ``_set_layer_states`` are conditional: the previous
+    layer only moves to 'run' if it has collected inputs, and the layer two
+    steps back only moves to 'skip' if it has output_meta.  This test
+    simulates the side-effects of a real forward loop (populated
+    ``collected_inputs`` and ``output_meta``) between each step so that the
+    expected skip/run/capture pattern is exercised.
+    """
     _register_test_discoverer(monkeypatch)
     model = _TupleUnpackingModel(n_layers=5, dim=16)
+
+    # Fake data that mimics what a forward loop would produce for a
+    # _TupleReturningBlock layer (returns (tensor, None)).
+    fake_inp = ((torch.zeros(1, 16),), {})
+    fake_meta = LayerActivationCollector._extract_output_meta((torch.zeros(1, 16), None))
 
     collector = LayerActivationCollector(model)
     collector._patch_all_layers()
@@ -581,15 +594,27 @@ def test_mode_transitions_across_calibration_steps(monkeypatch):
         collector._set_layer_states(0)
         assert modes() == ["capture", "original", "original", "original", "original"]
 
+        # Simulate layer 0 having captured inputs during the forward loop.
+        model.layers[0]._seq_calib.collected_inputs = [fake_inp]
         collector._set_layer_states(1)
         assert modes() == ["run", "capture", "original", "original", "original"]
 
+        # Simulate layer 0 having executed in run mode (output_meta set)
+        # and layer 1 having captured inputs.
+        model.layers[0]._seq_calib.output_meta = fake_meta
+        model.layers[1]._seq_calib.collected_inputs = [fake_inp]
         collector._set_layer_states(2)
         assert modes() == ["skip", "run", "capture", "original", "original"]
 
+        # Simulate layer 1 run + layer 2 capture.
+        model.layers[1]._seq_calib.output_meta = fake_meta
+        model.layers[2]._seq_calib.collected_inputs = [fake_inp]
         collector._set_layer_states(3)
         assert modes() == ["skip", "skip", "run", "capture", "original"]
 
+        # Simulate layer 2 run + layer 3 capture.
+        model.layers[2]._seq_calib.output_meta = fake_meta
+        model.layers[3]._seq_calib.collected_inputs = [fake_inp]
         collector._set_layer_states(4)
         assert modes() == ["skip", "skip", "skip", "run", "capture"]
     finally:
