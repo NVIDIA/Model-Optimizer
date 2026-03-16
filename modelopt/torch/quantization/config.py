@@ -137,7 +137,7 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 """
 
 from collections.abc import Callable
-from typing import Literal, cast
+from typing import Literal
 
 from pydantic import ValidationInfo, field_validator, model_validator
 
@@ -215,8 +215,8 @@ assert INT8_WEIGHT_ONLY_CFG_DEPRECATED == INT8_WEIGHT_ONLY_CFG
 FP8_DEFAULT_CFG = load_config("general/ptq/fp8_default-fp8_kv.yml")["model_quant"]
 FP8_DEFAULT_CFG_DEPRECATED = {
     "quant_cfg": {
-        "*weight_quantizer": {"num_bits": [4, 3], "axis": None},
-        "*input_quantizer": {"num_bits": [4, 3], "axis": None},
+        "*weight_quantizer": {"num_bits": (4, 3), "axis": None},
+        "*input_quantizer": {"num_bits": (4, 3), "axis": None},
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": "max",
@@ -228,8 +228,8 @@ MAMBA_MOE_FP8_AGGRESSIVE_CFG = load_config("general/ptq/mamba_moe_fp8_aggressive
 ]
 MAMBA_MOE_FP8_AGGRESSIVE_CFG_DEPRECATED = {
     "quant_cfg": {
-        "*weight_quantizer": {"num_bits": [4, 3], "axis": None},
-        "*input_quantizer": {"num_bits": [4, 3], "axis": None},
+        "*weight_quantizer": {"num_bits": (4, 3), "axis": None},
+        "*input_quantizer": {"num_bits": (4, 3), "axis": None},
         **_default_disabled_quantizer_cfg,
         **_mamba_moe_disabled_quantizer_cfg,
     },
@@ -242,8 +242,8 @@ MAMBA_MOE_FP8_CONSERVATIVE_CFG = load_config("general/ptq/mamba_moe_fp8_conserva
 ]
 MAMBA_MOE_FP8_CONSERVATIVE_CFG_DEPRECATED = {
     "quant_cfg": {
-        "*weight_quantizer": {"num_bits": [4, 3], "axis": None},
-        "*input_quantizer": {"num_bits": [4, 3], "axis": None},
+        "*weight_quantizer": {"num_bits": (4, 3), "axis": None},
+        "*input_quantizer": {"num_bits": (4, 3), "axis": None},
         **_default_disabled_quantizer_cfg,
         **_mamba_moe_disabled_quantizer_cfg,
         "*mixer.in_proj*": {"enable": False},  # Skip mamba linear
@@ -258,9 +258,9 @@ FP8_PER_CHANNEL_PER_TOKEN_CFG = load_config("general/ptq/fp8_per_channel_per_tok
 ]
 FP8_PER_CHANNEL_PER_TOKEN_CFG_DEPRECATED = {
     "quant_cfg": {
-        "*weight_quantizer": {"num_bits": [4, 3], "axis": 0},
+        "*weight_quantizer": {"num_bits": (4, 3), "axis": 0},
         "*input_quantizer": {
-            "num_bits": [4, 3],
+            "num_bits": (4, 3),
             "type": "dynamic",
             "block_sizes": {-1: None},
         },
@@ -277,7 +277,7 @@ FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG = load_config(
 FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {
-            "num_bits": [4, 3],
+            "num_bits": (4, 3),
             "block_sizes": {-1: 128, -2: 128},
             "enable": True,
         },
@@ -335,12 +335,12 @@ W4A8_AWQ_BETA_CFG_DEPRECATED = {
                 "enable": True,
             },
             {
-                "num_bits": [4, 3],
+                "num_bits": (4, 3),
                 "enable": True,
             },
         ],
         "*input_quantizer": {
-            "num_bits": [4, 3],
+            "num_bits": (4, 3),
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
@@ -353,13 +353,13 @@ MXFP8_DEFAULT_CFG = load_config("general/ptq/mxfp8_default-fp8_kv.yml")["model_q
 MXFP8_DEFAULT_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {
-            "num_bits": [4, 3],
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
+            "num_bits": (4, 3),
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             "enable": True,
         },
         "*input_quantizer": {
-            "num_bits": [4, 3],
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
+            "num_bits": (4, 3),
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
@@ -373,13 +373,13 @@ MXFP6_DEFAULT_CFG = load_config("general/ptq/mxfp6_default-fp8_kv.yml")["model_q
 MXFP6_DEFAULT_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {
-            "num_bits": [3, 2],
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
+            "num_bits": (3, 2),
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             "enable": True,
         },
         "*input_quantizer": {
-            "num_bits": [3, 2],
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
+            "num_bits": (3, 2),
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
@@ -393,13 +393,13 @@ MXFP4_DEFAULT_CFG = load_config("general/ptq/mxfp4_default-fp8_kv.yml")["model_q
 MXFP4_DEFAULT_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {
-            "num_bits": [2, 1],
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             "enable": True,
         },
         "*input_quantizer": {
-            "num_bits": [2, 1],
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
@@ -412,11 +412,11 @@ W4A8_MXFP4_FP8_CFG = load_config("general/ptq/w4a8_mxfp4_fp8-fp8_kv.yml")["model
 W4A8_MXFP4_FP8_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {
-            "num_bits": [2, 1],
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             "enable": True,
         },
-        "*input_quantizer": {"num_bits": [4, 3], "axis": None},
+        "*input_quantizer": {"num_bits": (4, 3), "axis": None},
         **_default_disabled_quantizer_cfg,
     },
     "algorithm": None,
@@ -429,12 +429,12 @@ MXINT8_DEFAULT_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {
             "num_bits": 8,
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             "enable": True,
         },
         "*input_quantizer": {
             "num_bits": 8,
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
@@ -447,7 +447,7 @@ FP8_KV_CFG = load_config("configs/ptq/kv_fp8.yml")
 FP8_KV_CFG_DEPRECATED = {
     "quant_cfg": {
         "*[kv]_bmm_quantizer": {
-            "num_bits": [4, 3],
+            "num_bits": (4, 3),
             "enable": True,
         },
     },
@@ -458,7 +458,7 @@ FP8_AFFINE_KV_CFG = load_config("configs/ptq/kv_fp8_affine.yml")
 FP8_AFFINE_KV_CFG_DEPRECATED = {
     "quant_cfg": {
         "*[kv]_bmm_quantizer": {
-            "num_bits": [4, 3],
+            "num_bits": (4, 3),
             "bias": {-2: None, -4: None, "type": "static"},
         },
     }
@@ -467,8 +467,8 @@ assert FP8_AFFINE_KV_CFG_DEPRECATED == FP8_AFFINE_KV_CFG
 
 
 _nvfp4_quantizer = {
-    "num_bits": [2, 1],
-    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": [4, 3]},
+    "num_bits": (2, 1),
+    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
     "enable": True,
 }
 
@@ -489,8 +489,8 @@ NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = load_config(
 NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {
-            "num_bits": [2, 1],
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": [4, 3]},
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
             "enable": True,
         },
         "*input_quantizer": _nvfp4_quantizer,
@@ -513,8 +513,8 @@ NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG = load_config(
 NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {
-            "num_bits": [2, 1],
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": [4, 3]},
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
             "enable": True,
         },
         "*input_quantizer": _nvfp4_quantizer,
@@ -619,19 +619,19 @@ NVFP4_FP8_MHA_CONFIG_DEPRECATED = {
         "*input_quantizer": _nvfp4_quantizer,
         "*output_quantizer": {"enable": False},
         "*q_bmm_quantizer": {
-            "num_bits": [4, 3],
+            "num_bits": (4, 3),
         },
         "*k_bmm_quantizer": {
-            "num_bits": [4, 3],
+            "num_bits": (4, 3),
         },
         "*v_bmm_quantizer": {
-            "num_bits": [4, 3],
+            "num_bits": (4, 3),
         },
         "*softmax_quantizer": {
-            "num_bits": [4, 3],
+            "num_bits": (4, 3),
         },
         "transformer_blocks*bmm2_output_quantizer": {
-            "num_bits": [4, 3],
+            "num_bits": (4, 3),
         },
         **_default_disabled_quantizer_cfg,
     },
@@ -673,12 +673,12 @@ W4A8_NVFP4_FP8_CFG = load_config("general/ptq/w4a8_nvfp4_fp8-fp8_kv.yml")["model
 W4A8_NVFP4_FP8_CFG_DEPRECATED = {
     "quant_cfg": {
         "*weight_quantizer": {
-            "num_bits": [2, 1],
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [4, 3]},
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (4, 3)},
             "enable": True,
         },
         "*input_quantizer": {
-            "num_bits": [4, 3],
+            "num_bits": (4, 3),
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
@@ -694,13 +694,13 @@ MXFP4_MLP_WEIGHT_ONLY_CFG = load_config("general/ptq/mxfp4_mlp_weight_only-fp8_k
 MXFP4_MLP_WEIGHT_ONLY_CFG_DEPRECATED = {
     "quant_cfg": {
         "*mlp*weight_quantizer": {
-            "num_bits": [2, 1],
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             "enable": True,
         },
         "*block_sparse_moe*weight_quantizer": {
-            "num_bits": [2, 1],
-            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": [8, 0]},
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             "enable": True,
         },
         **_default_disabled_quantizer_cfg,
@@ -716,20 +716,20 @@ NVFP4_MLP_WEIGHT_ONLY_CFG = load_config("general/ptq/nvfp4_mlp_weight_only-fp8_k
 NVFP4_MLP_WEIGHT_ONLY_CFG_DEPRECATED = {
     "quant_cfg": {
         "*mlp*weight_quantizer": {
-            "num_bits": [2, 1],
+            "num_bits": (2, 1),
             "block_sizes": {
                 -1: 32,
                 "type": "dynamic",
-                "scale_bits": [4, 3],
+                "scale_bits": (4, 3),
             },  # Note: block_size is 32 here
             "enable": True,
         },
         "*block_sparse_moe*weight_quantizer": {
-            "num_bits": [2, 1],
+            "num_bits": (2, 1),
             "block_sizes": {
                 -1: 32,
                 "type": "dynamic",
-                "scale_bits": [4, 3],
+                "scale_bits": (4, 3),
             },  # Note: block_size is 32 here
             "enable": True,
         },
@@ -837,7 +837,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         description="""If True, enables the quantizer. If False, by-pass the quantizer and returns the input tensor.""",
     )
 
-    num_bits: int | tuple[int, int] | list[int] | str = ModeloptField(
+    num_bits: int | tuple[int, int] | str = ModeloptField(
         default=8,
         title="An integer or a tuple of two integers specifying the number of quantization bits.",
         description="""`num_bits` can be:
@@ -877,19 +877,6 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
 
         _validate_recursive(values)
         return values
-
-    @field_validator("num_bits", mode="before")
-    @classmethod
-    def tuple_num_bits(cls, num_bits: int | list[int] | tuple[int, int]) -> int | tuple[int, int]:
-        """Convert num_bits to tuple if list."""
-        if isinstance(num_bits, list):
-            if len(num_bits) != 2:
-                raise ValueError(
-                    f"num_bits list must have exactly 2 elements [exponent_bits, mantissa_bits], got {len(num_bits)}"
-                )
-            return cast("tuple[int, int]", tuple(num_bits))
-
-        return num_bits
 
     @model_validator(mode="after")
     def validate_num_bits(self):
@@ -1051,16 +1038,6 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
             for k, v in block_sizes.items()
             if k not in ["type", "scale_bits", "scale_block_sizes"]
         }
-
-    @field_validator("block_sizes", mode="before")
-    @classmethod
-    def tuple_block_sizes_scale_bits(cls, v) -> dict | None:
-        """Convert block_sizes.scale_bits to tuple if list."""
-        if isinstance(v, dict) and v.get("scale_bits"):
-            scale_bits = v.get("scale_bits")
-            if isinstance(scale_bits, list):
-                v["scale_bits"] = tuple(scale_bits)
-        return v
 
     @field_validator("block_sizes")
     @classmethod
