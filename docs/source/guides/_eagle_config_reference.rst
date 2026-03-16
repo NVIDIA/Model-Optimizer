@@ -40,7 +40,7 @@ EagleConfig fields
 ``eagle_offline`` (*bool*, default: ``False``)
     Use pre-computed hidden states from disk instead of running the base model forward pass at
     each training step. Required for large models (70B+) that cannot be co-located with the
-    draft module in GPU memory. See :ref:`Offline Training <speculative_decoding_workflow:Offline Training>`.
+    draft module in GPU memory. See :ref:`Offline Training <eagle-workflow-offline-training>`.
 
 ``eagle_loss_decay_factor`` (*float*, default: ``0.9``)
     Exponential decay applied to losses at successive draft steps, weighting earlier steps more
@@ -62,7 +62,7 @@ change; unspecified fields fall back to the defaults listed below (for ``eagle_d
     Number of transformer layers in the draft decoder. Increasing this improves acceptance rates
     at the cost of higher draft latency.
 
-``intermediate_size`` (*int*, default: inferred from base model)
+``intermediate_size`` (*int*, default: ``14336``)
     Feed-forward intermediate dimension of the draft decoder MLP.
 
 ``num_attention_heads`` (*int*, default: ``32``)

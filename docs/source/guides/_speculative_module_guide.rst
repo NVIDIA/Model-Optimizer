@@ -18,7 +18,7 @@ Public API
     Configuration dataclasses for each algorithm.
     See the respective algorithm's configuration reference for field details.
 
-``mtsp.EAGLE1_DEFAULT_CFG``, ``mtsp.EAGLE3_DEFAULT_CFG``, ``mtsp.EAGLE_MTP_DEFAULT_CFG``
+``mtsp.EAGLE3_DEFAULT_CFG``, ``mtsp.EAGLE_MTP_DEFAULT_CFG``
     Built-in preset dicts for common EAGLE variants, ready to pass directly to ``mtsp.convert()``.
 
 

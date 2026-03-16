@@ -96,7 +96,7 @@ We support two backends for generating base model hidden states. For better effc
 ```bash
 python collect_hidden_states/compute_hidden_states_trtllm.py \
             --model $BASE_MODEL \
-            --input-file input_conversations/daring-anteater.jsonl \
+            --input-data input_conversations/daring-anteater.jsonl \
             --output-dir $HIDDEN_STATES_DIR
 ```
 
@@ -107,7 +107,7 @@ Alternatively, you can generate the same hidden states with HF:
 ```bash
 python collect_hidden_states/compute_hidden_states_hf.py \
             --model $BASE_MODEL \
-            --input-file input_conversations/daring-anteater.jsonl  \
+            --input-data input_conversations/daring-anteater.jsonl  \
             --output-dir $HIDDEN_STATES_DIR
 ```
 

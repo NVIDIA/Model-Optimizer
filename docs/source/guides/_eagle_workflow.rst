@@ -43,7 +43,7 @@ Example usage:
         "eagle_decoder_type": "llama",          # decoder architecture; use "kimik2" for Kimi-K2 models
         "eagle_architecture_config": {
             "num_hidden_layers": 1,             # depth of the draft decoder (default: 1)
-            # "intermediate_size": 8192,        # MLP hidden size (default: inferred from base model)
+            # "intermediate_size": 8192,        # MLP hidden size (default: 14336)
         },
     }
     mtsp.convert(model, [("eagle", config)])
@@ -95,6 +95,8 @@ This is recommended for smaller base models (e.g., 1B–8B parameters).
     acceptance rates, since the draft module learns to mimic the target distribution more closely.
     See the ``scripts/server_generate.py`` script in the example directory for data synthesis.
 
+.. _eagle-workflow-offline-training:
+
 Offline Training
 ^^^^^^^^^^^^^^^^
 
@@ -117,13 +119,13 @@ Two backends are supported:
     # Recommended: TRT-LLM backend (higher throughput)
     python collect_hidden_states/compute_hidden_states_trtllm.py \
         --model $BASE_MODEL \
-        --input-file input_conversations/daring-anteater.jsonl \
+        --input-data input_conversations/daring-anteater.jsonl \
         --output-dir $HIDDEN_STATES_DIR
 
     # Alternative: HuggingFace backend
     python collect_hidden_states/compute_hidden_states_hf.py \
         --model $BASE_MODEL \
-        --input-file input_conversations/daring-anteater.jsonl \
+        --input-data input_conversations/daring-anteater.jsonl \
         --output-dir $HIDDEN_STATES_DIR
 
 Each output ``.pt`` file contains the tokenized input and the corresponding hidden states from
@@ -185,6 +187,8 @@ served by TRT-LLM, vLLM, or SGLang:
     from modelopt.torch.export import export_speculative_decoding
 
     export_speculative_decoding(model, export_dir="<export_path>")
+    # Optional: specify dtype to control export precision, e.g. torch.float16
+    # export_speculative_decoding(model, export_dir="<export_path>", dtype=torch.float16)
 
 Alternatively, use the provided export script from the example directory:
 

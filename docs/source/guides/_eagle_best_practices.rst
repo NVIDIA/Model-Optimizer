@@ -88,7 +88,8 @@ Find the most frequently used tokens in your training set and save a ``d2t.pt`` 
         --draft_vocab_size 32000 \
         --save_dir draft_vocab_cache
 
-The ``d2t.pt`` file maps each compressed draft token index to its offset in the target vocabulary.
+The script saves the mapping to ``{save_dir}/{model_name}/d2t.pt``. The ``d2t.pt`` file maps
+each compressed draft token index to its offset in the target vocabulary.
 During inference the target token is recovered as:
 
 .. code-block:: text
@@ -103,5 +104,5 @@ Add the following to your ``eagle_config.json``:
 
     {"draft_vocab_size": 32000}
 
-Then pass ``--draft_vocab_cache <path_to_d2t.pt>`` when running ``./launch_train.sh``. The draft
+Then pass ``--draft_vocab_cache <save_dir>/<model_name>/d2t.pt`` when running ``./launch_train.sh``. The draft
 model will use the compressed vocabulary table during both training and export.
