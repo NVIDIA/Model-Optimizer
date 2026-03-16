@@ -80,6 +80,14 @@ def load_recipe(recipe_path: str | Path | Traversable) -> ModelOptRecipeBase:
     else:
         resolved = recipe_path
 
+    _builtin_prefix = str(BUILTIN_RECIPES_LIB)
+    _resolved_str = str(resolved)
+    if _resolved_str.startswith(_builtin_prefix):
+        _display = "<builtin>/" + _resolved_str[len(_builtin_prefix) :].lstrip("/\\")
+    else:
+        _display = _resolved_str
+    print(f"[load_recipe] loading: {_display}")
+
     if resolved.is_file():
         return _load_recipe_from_file(resolved)
 
