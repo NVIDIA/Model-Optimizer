@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unittests for AWQ and SVDQuant"""
+"""Unittests for AWQ, SVDQuant, and calibration module filtering"""
 
 from functools import partial
 
@@ -27,6 +27,8 @@ from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.model_calib import (
     apply_pre_quant_scale_and_smooth,
     disable_pre_quant_scale_and_resmooth,
+    filter_calib_modules,
+    max_calibrate,
     sequential_calibrate,
 )
 from modelopt.torch.quantization.nn import TensorQuantizer
@@ -546,3 +548,168 @@ def test_sequential_calibrate_handles_inter_layer_logic(monkeypatch):
     assert torch.allclose(observed_layer_inputs[1][0], torch.tensor([[2.0, 4.0]]))
     # Layer 2 gets output of layer 1 (prev * mask1 * scale1 = [2,4] * 0.5 * 0.5 = [0.5,1.0])
     assert torch.allclose(observed_layer_inputs[2][0], torch.tensor([[0.5, 1.0]]))
+
+
+# ---------------------------------------------------------------------------
+# Tests for filter_calib_modules / include_modules / exclude_modules
+# ---------------------------------------------------------------------------
+
+INT8_CFG = mtq.INT8_DEFAULT_CFG
+
+
+def _make_quantized_mlp():
+    """Return a freshly-created quantized _SimpleMLP with max calibration applied."""
+    torch.manual_seed(42)
+    model = _SimpleMLP()
+    data = [torch.randn(4, 16)]
+    model = mtq.quantize(model, INT8_CFG, partial(forward_loop, dataloader=data))
+    return model, data
+
+
+def _get_weight_amax(model, layer_name: str) -> torch.Tensor:
+    """Return a copy of the weight_quantizer amax for the named linear layer."""
+    module = dict(model.named_modules())[layer_name]
+    return module.weight_quantizer._amax.clone()
+
+
+def test_mse_calibrate_exclude_modules():
+    """MSE calibration with exclude_modules leaves excluded layer amax unchanged."""
+    model, data = _make_quantized_mlp()
+
+    # Record the amax of the excluded layer (net.4) before re-calibrating
+    amax_net4_before = _get_weight_amax(model, "net.4")
+
+    mtq.calibrate(
+        model,
+        algorithm={"method": "mse", "calib_exclude_modules": ["*net.4*"]},
+        forward_loop=partial(forward_loop, dataloader=data),
+    )
+
+    # net.4 should be untouched
+    assert torch.allclose(amax_net4_before, _get_weight_amax(model, "net.4")), (
+        "Excluded module net.4 should have unchanged amax"
+    )
+
+    # net.0 and net.2 should still have valid amaxes (were re-calibrated)
+    assert dict(model.named_modules())["net.0"].weight_quantizer._amax is not None
+    assert dict(model.named_modules())["net.2"].weight_quantizer._amax is not None
+
+
+def test_mse_calibrate_include_modules():
+    """MSE calibration with calib_include_modules leaves non-included layer amaxes unchanged."""
+    model, data = _make_quantized_mlp()
+
+    # Record amaxes of non-included layers
+    amax_net2_before = _get_weight_amax(model, "net.2")
+    amax_net4_before = _get_weight_amax(model, "net.4")
+
+    mtq.calibrate(
+        model,
+        algorithm={"method": "mse", "calib_include_modules": ["net.0"]},
+        forward_loop=partial(forward_loop, dataloader=data),
+    )
+
+    # Non-included layers should be untouched
+    assert torch.allclose(amax_net2_before, _get_weight_amax(model, "net.2")), (
+        "Non-included module net.2 should have unchanged amax"
+    )
+    assert torch.allclose(amax_net4_before, _get_weight_amax(model, "net.4")), (
+        "Non-included module net.4 should have unchanged amax"
+    )
+
+    # net.0 should have a valid amax (was calibrated)
+    assert dict(model.named_modules())["net.0"].weight_quantizer._amax is not None
+
+
+def test_filter_no_op_when_none():
+    """filter_calib_modules with both args None is a no-op context manager."""
+    model, data = _make_quantized_mlp()
+
+    # Record all amaxes
+    amaxes_before = {name: _get_weight_amax(model, name) for name in ["net.0", "net.2", "net.4"]}
+
+    # Calling filter_calib_modules with None args and then re-running max_calibrate
+    # should behave identically to running max_calibrate directly.
+    with filter_calib_modules(model, include_modules=None, exclude_modules=None):
+        max_calibrate(model, partial(forward_loop, dataloader=data))
+
+    # All quantizers should still have valid amaxes
+    for name in ["net.0", "net.2", "net.4"]:
+        assert dict(model.named_modules())[name].weight_quantizer._amax is not None
+
+    # Amaxes should be consistent with standard max calibration (not None)
+    for name in amaxes_before:
+        amax_after = _get_weight_amax(model, name)
+        assert amax_after is not None, f"{name} should have a valid amax after calibration"
+
+
+def test_smoothquant_include_modules():
+    """smoothquant with include_modules only applies to matching layers."""
+    torch.manual_seed(42)
+    model = _SimpleMLP()
+    data = [torch.randn(4, 16)]
+
+    # Use algorithm=None so quantizers are inserted but no calibration is run.
+    # This avoids stale calibrator state when smoothquant later changes axis to -1.
+    no_calib_cfg = {**INT8_CFG, "algorithm": None}
+    model = mtq.quantize(model, no_calib_cfg, forward_loop=None)
+
+    mtq.calibrate(
+        model,
+        algorithm={"method": "smoothquant", "calib_include_modules": ["*net.0*"]},
+        forward_loop=partial(forward_loop, dataloader=data),
+    )
+
+    # net.0 should have _pre_quant_scale (was smoothed)
+    net0 = dict(model.named_modules())["net.0"]
+    assert hasattr(net0.input_quantizer, "_pre_quant_scale"), "net.0 should have been smoothed"
+
+    # net.2 and net.4 should NOT have _pre_quant_scale (were excluded by filter)
+    for name in ["net.2", "net.4"]:
+        mod = dict(model.named_modules())[name]
+        assert not hasattr(mod.input_quantizer, "_pre_quant_scale"), (
+            f"{name} should not have been smoothed"
+        )
+
+
+def test_filter_via_config_api():
+    """exclude_modules passed through the calibrate() config dict API works correctly."""
+    model, data = _make_quantized_mlp()
+
+    # Record amax of excluded layer
+    amax_net4_before = _get_weight_amax(model, "net.4")
+
+    mtq.calibrate(
+        model,
+        algorithm={"method": "mse", "calib_exclude_modules": ["*net.4*"]},
+        forward_loop=partial(forward_loop, dataloader=data),
+    )
+
+    # net.4 should be untouched
+    assert torch.allclose(amax_net4_before, _get_weight_amax(model, "net.4")), (
+        "Excluded module net.4 should have unchanged amax via config API"
+    )
+
+
+def test_wildcard_pattern_matching():
+    """fnmatch bracket patterns correctly include/exclude specific layers."""
+    model, data = _make_quantized_mlp()
+
+    # Record amax of non-matched layer
+    amax_net4_before = _get_weight_amax(model, "net.4")
+
+    # "net.[02]" matches net.0 and net.2 but NOT net.4
+    mtq.calibrate(
+        model,
+        algorithm={"method": "mse", "calib_include_modules": ["net.[02]"]},
+        forward_loop=partial(forward_loop, dataloader=data),
+    )
+
+    # net.4 should be untouched
+    assert torch.allclose(amax_net4_before, _get_weight_amax(model, "net.4")), (
+        "net.4 should not be affected by include_modules=['net.[02]']"
+    )
+
+    # net.0 and net.2 should have valid amaxes
+    assert dict(model.named_modules())["net.0"].weight_quantizer._amax is not None
+    assert dict(model.named_modules())["net.2"].weight_quantizer._amax is not None

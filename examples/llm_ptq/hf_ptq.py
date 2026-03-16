@@ -1218,6 +1218,26 @@ def parse_args() -> argparse.Namespace:
             "Does not impact non-MOE models."
         ),
     )
+    parser.add_argument(
+        "--calib_exclude_modules",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated list of fnmatch patterns for modules to exclude from calibration. "
+            "Matching modules retain their pre-existing calibration state. "
+            "Example: --calib_exclude_modules '*lm_head*,*vision*'"
+        ),
+    )
+    parser.add_argument(
+        "--calib_include_modules",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated list of fnmatch patterns for modules to include in calibration. "
+            "Only matching modules are calibrated; all others are skipped. "
+            "Example: --calib_include_modules '*layers.0*,*layers.1*'"
+        ),
+    )
 
     args = parser.parse_args()
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
@@ -1278,4 +1298,14 @@ if __name__ == "__main__":
 
     args.dataset = args.dataset.split(",") if isinstance(args.dataset, str) else args.dataset
     args.calib_size = [int(num_sample) for num_sample in args.calib_size.split(",")]
+    args.calib_exclude_modules = (
+        [p.strip() for p in args.calib_exclude_modules.split(",")]
+        if args.calib_exclude_modules
+        else None
+    )
+    args.calib_include_modules = (
+        [p.strip() for p in args.calib_include_modules.split(",")]
+        if args.calib_include_modules
+        else None
+    )
     main(args)

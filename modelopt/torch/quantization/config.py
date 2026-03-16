@@ -1043,6 +1043,25 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         ),
     )
 
+    calib_include_modules: list[str] | None = ModeloptField(
+        default=None,
+        title="Patterns of modules to include in calibration.",
+        description=(
+            "If provided, only modules whose names match at least one of the fnmatch patterns are "
+            "calibrated. Modules that do not match any pattern are skipped and retain their "
+            "pre-existing calibration state."
+        ),
+    )
+
+    calib_exclude_modules: list[str] | None = ModeloptField(
+        default=None,
+        title="Patterns of modules to exclude from calibration.",
+        description=(
+            "If provided, modules whose names match at least one of the fnmatch patterns are "
+            "skipped during calibration and retain their pre-existing calibration state."
+        ),
+    )
+
 
 class MaxCalibConfig(QuantizeAlgorithmConfig):
     """The config for max calibration algorithm.

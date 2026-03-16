@@ -202,6 +202,8 @@ def build_quant_cfg(
     awq_block_size,
     model_type,
     moe_calib_experts_ratio: float | None = None,
+    calib_exclude_modules: list[str] | None = None,
+    calib_include_modules: list[str] | None = None,
 ) -> dict[str, Any]:
     quant_cfg = copy.deepcopy(quant_cfg)
     if "awq" in str(quant_cfg.get("algorithm")):
@@ -229,6 +231,21 @@ def build_quant_cfg(
             warnings.warn(
                 f"Quantization algorithm: {quant_cfg['algorithm']} does not support setting moe_calib_experts_ratio"
             )
+
+    if calib_exclude_modules or calib_include_modules:
+        if isinstance(quant_cfg["algorithm"], str):
+            quant_cfg["algorithm"] = {"method": quant_cfg["algorithm"]}
+        elif isinstance(quant_cfg["algorithm"], dict):
+            pass
+        else:
+            warnings.warn(
+                f"Quantization algorithm: {quant_cfg['algorithm']} does not support calib_exclude/include_modules"
+            )
+        if isinstance(quant_cfg["algorithm"], dict):
+            if calib_exclude_modules:
+                quant_cfg["algorithm"]["calib_exclude_modules"] = calib_exclude_modules
+            if calib_include_modules:
+                quant_cfg["algorithm"]["calib_include_modules"] = calib_include_modules
 
     # Gemma 7B has accuracy regression using alpha 1. We set 0.5 instead.
     if model_type == "gemma" and "int8_sq" in qformat:
