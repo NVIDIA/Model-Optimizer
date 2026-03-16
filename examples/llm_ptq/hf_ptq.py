@@ -24,7 +24,6 @@ from typing import Any
 import numpy as np
 import torch
 from accelerate.hooks import remove_hook_from_module
-from eval_perplexity import evaluate_perplexity
 from example_utils import (
     build_quant_cfg,
     copy_custom_model_files,
@@ -63,6 +62,11 @@ from modelopt.torch.export import (
 )
 from modelopt.torch.export.model_utils import get_language_model_from_vl, is_multimodal_model
 from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg, need_calibration
+from modelopt.torch.quantization.metrics import (
+    ActivationMSELogger,
+    compute_perplexity,
+    get_wikitext2,
+)
 from modelopt.torch.quantization.plugins.accelerate import init_quantized_weights
 from modelopt.torch.quantization.utils import is_quantized
 from modelopt.torch.utils.dataset_utils import (
@@ -99,6 +103,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "int4_awq": mtq.INT4_AWQ_CFG,
     "w4a8_awq": mtq.W4A8_AWQ_BETA_CFG,
     "nvfp4": mtq.NVFP4_DEFAULT_CFG,
+    "nvfp4_wo": mtq.NVFP4_WEIGHT_ONLY_CFG,
     "nvfp4_awq": mtq.NVFP4_AWQ_LITE_CFG,
     "nvfp4_mse": mtq.NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG,
     "fp8_pb_wo": mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
@@ -109,6 +114,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "nvfp4_experts_only": mtq.NVFP4_EXPERTS_ONLY_CFG,
     "nvfp4_omlp_only": mtq.NVFP4_OMLP_ONLY_CFG,
     "nvfp4_svdquant": mtq.NVFP4_SVDQUANT_DEFAULT_CFG,
+    "nvfp4_wo_gptq": mtq.NVFP4_WEIGHT_ONLY_GPTQ_CFG,
     "nvfp4_gptq": mtq.NVFP4_GPTQ_CFG,
     "mxfp8": mtq.MXFP8_DEFAULT_CFG,
     "nvfp4_local_hessian": mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG,
@@ -683,7 +689,10 @@ def export_quantized(
                 )
 
             if getattr(args, "eval_perplexity", False) and tokenizer is not None:
-                evaluate_perplexity(full_model, tokenizer, seq_len=2048)
+                seq_len = getattr(args, "eval_perplexity_seq_len", 2048)
+                eval_data = get_wikitext2(tokenizer, seq_len)
+                ppl = compute_perplexity(full_model, eval_data)
+                print(f"Wikitext-2 perplexity: {round(ppl, 2):.2f}")
 
             # Load any missing weights from non-standard safetensors (handled in get_model for non-low-memory mode)
             # Store the MTP layer prefixes on the model for later exclusion from quantization
@@ -916,6 +925,64 @@ def quantize_main(
         args, full_model, model_type, tokenizer, calib_dataloader, is_nemotron_vl_model
     )
 
+    # Collect original (unquantized) activations before quantization modifies the model
+    mse_logger = None
+    if getattr(args, "measure_activation_mse", False):
+        n_mse = getattr(args, "activation_mse_max_samples", 16)
+        mse_save_dir = getattr(args, "activation_mse_save_dir", None)
+        mse_input_path = getattr(args, "activation_mse_input_path", None)
+
+        # Resolve MSE input data: frozen file (raw text or tokenized) or live dataloader
+        mse_data = None
+        if mse_input_path is not None:
+            if mse_input_path.endswith(".json"):
+                if os.path.isfile(mse_input_path):
+                    print(f"Loading MSE input data from existing .json file: {mse_input_path}")
+                    texts = ActivationMSELogger.load_raw_text(mse_input_path)
+                    mse_data = ActivationMSELogger.tokenize_raw_text(
+                        texts,
+                        tokenizer,
+                        max_length=args.calib_seq,
+                    )
+                else:
+                    assert tokenizer is not None, (
+                        "--activation_mse_input_path with .json requires a tokenizer to decode"
+                    )
+                    print(f"Creating MSE input data .json file: {mse_input_path}")
+                    texts = ActivationMSELogger.materialize_raw_text(
+                        calib_dataloader,
+                        mse_input_path,
+                        tokenizer=tokenizer,
+                        max_samples=n_mse,
+                    )
+                    mse_data = ActivationMSELogger.tokenize_raw_text(
+                        texts,
+                        tokenizer,
+                        max_length=args.calib_seq,
+                    )
+            elif mse_input_path.endswith(".pt"):
+                if os.path.isfile(mse_input_path):
+                    print(f"Loading MSE input data from existing .pt file: {mse_input_path}")
+                    mse_data = ActivationMSELogger.load_data(mse_input_path)
+                else:
+                    print(f"Creating MSE input data .pt file: {mse_input_path}")
+                    mse_data = ActivationMSELogger.materialize_data(
+                        calib_dataloader,
+                        mse_input_path,
+                        max_samples=n_mse,
+                    )
+            else:
+                raise ValueError(
+                    f"--activation_mse_input_path must end with .json or .pt, got: {mse_input_path}"
+                )
+
+        if mse_data is None:
+            mse_data = calib_dataloader
+
+        mse_logger = ActivationMSELogger(max_samples=n_mse, save_dir=mse_save_dir)
+        print(f"Collecting original (unquantized) activations for MSE over {n_mse} samples...")
+        mse_logger.collect(language_model, mse_data, phase="original")
+
     if args.auto_quantize_bits:
         assert len(args.qformat.split(",")) > 1, (
             "Auto quantization needs multiple quantization format."
@@ -1008,6 +1075,22 @@ def quantize_main(
         is_nemotron_vl_model,
         first_text_speech_dataset,
     )
+
+    if mse_logger is not None:
+        import gc
+
+        print("Collecting quantized activations for MSE...")
+        mse_logger.collect(language_model, mse_data, phase="quantized")
+
+        mse_logger.compute_mse()
+        print(mse_logger.summary())
+
+        if getattr(args, "activation_mse_save_dir", None):
+            mse_logger.save()
+
+        del mse_logger, mse_data
+        gc.collect()
+        torch.cuda.empty_cache()
 
     export_quantized(
         args,
@@ -1231,6 +1314,42 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Evaluate Wikitext-2 perplexity after quantization (before export).",
+    )
+    parser.add_argument(
+        "--eval_perplexity_seq_len",
+        type=int,
+        default=2048,
+        help="Sequence length for perplexity evaluation (default: 2048).",
+    )
+    parser.add_argument(
+        "--measure_activation_mse",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Measure per-layer activation MSE (original vs quantized) after quantization.",
+    )
+    parser.add_argument(
+        "--activation_mse_max_samples",
+        type=int,
+        default=16,
+        help="Max calibration samples for activation MSE (default: 16).",
+    )
+    parser.add_argument(
+        "--activation_mse_save_dir",
+        type=str,
+        default=None,
+        help="Directory to save activation MSE results. If not set, results are only printed.",
+    )
+    parser.add_argument(
+        "--activation_mse_input_path",
+        type=str,
+        default=None,
+        help=(
+            "Path to frozen MSE input data. Supports two formats:\n"
+            "  .json — raw text (cross-model reuse): if file exists, loads and re-tokenizes "
+            "with the current model's tokenizer; if not, decodes calibration data to text and saves.\n"
+            "  .pt — tokenized tensors (same-tokenizer reuse): if file exists, loads directly; "
+            "if not, materializes from calibration data and saves."
+        ),
     )
 
     args = parser.parse_args()

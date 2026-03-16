@@ -16,12 +16,18 @@
 """Quantization package."""
 
 # Initialize mode and plugins
-from . import mode, plugins, utils
+from . import metrics, mode, plugins, utils
 
 # Add methods to mtq namespace
 from .compress import *
 from .config import *
 from .conversion import *
+from .metrics import (
+    ActivationMSELogger,
+    compute_perplexity,
+    get_wikitext2,
+    measure_per_layer_activation_mse,
+)
 from .model_quant import *
 from .nn.modules.quant_module import QuantModuleRegistry
 from .utils import update_quant_cfg_with_kv_cache_quant
