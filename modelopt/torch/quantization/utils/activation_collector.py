@@ -91,10 +91,6 @@ class LayerActivationCollector:
         self._layer_to_idx: dict[nn.Module, int] = {}
         self._patched = False
 
-    # ------------------------------------------------------------------
-    # Decoder-layer discovery
-    # ------------------------------------------------------------------
-
     @staticmethod
     def get_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
         """Return decoder layers supported by sequential calibration."""
@@ -117,10 +113,6 @@ class LayerActivationCollector:
         entry = (is_supported, discoverer)
         if entry not in cls._decoder_layer_support:
             cls._decoder_layer_support.append(entry)
-
-    # ------------------------------------------------------------------
-    # Output metadata helpers
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _extract_output_meta(output):
@@ -157,10 +149,6 @@ class LayerActivationCollector:
         # In practice this is safe because skip-mode outputs are immediately discarded by the
         # downstream run-mode layer, which replays from its own cached inputs instead.
         return meta[1]
-
-    # ------------------------------------------------------------------
-    # Patch / unpatch lifecycle
-    # ------------------------------------------------------------------
 
     def _patch_all_layers(self, decoder_layers: nn.ModuleList | None = None):
         """Bind the unified forward to every decoder layer and the model. Called once.
@@ -249,10 +237,6 @@ class LayerActivationCollector:
             return
         self._cleanup_layers()
         self._patched = False
-
-    # ------------------------------------------------------------------
-    # Per-iteration state management
-    # ------------------------------------------------------------------
 
     def _set_layer_states(self, layer_idx: int):
         """Transition layer modes for the next calibration step.
