@@ -285,9 +285,6 @@ class EagleModule(nn.Module):
             )
             self.layers[0].hidden_norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        if config.eagle_decoder_type == "llama":
-            self.rotary_emb = LlamaRotaryEmbedding(config=config)
-
         if self.config.parallel_draft_step > 1:
             self.parallel_draft_heads = ParallelDraft(
                 config.hidden_size,
@@ -295,6 +292,10 @@ class EagleModule(nn.Module):
                 num_heads=self.config.parallel_draft_step - 1,
                 num_layers=self.config.parallel_draft_heads_num_layers,
             )
+
+    def _maybe_init_rope(self):
+        if self.config.eagle_decoder_type == "llama" and not hasattr(self, "rotary_emb"):
+            self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
 
     def _expand_first_attn_in_dim(self, first_layer_attn):
         """Modify qkv projection in first layer to accept 2h hidden size."""
@@ -923,6 +924,8 @@ class HFEagleModel(EagleModel):
             eagle_cache,
             base_outputs,
         )
+
+        self.eagle_module._maybe_init_rope()
 
         # ====Run eagle forward with extra training-time-test steps====
         for ttt_step in range(self.eagle_ttt_steps):
