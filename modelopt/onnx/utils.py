@@ -1368,10 +1368,27 @@ def _convert_constant_values(constant_node: onnx.NodeProto, cast_node: onnx.Node
     cast_to_type = get_cast_to_type(cast_node)
     for attr in constant_node.attribute:
         if attr.name == "value" and attr.type == onnx.AttributeProto.TENSOR:
-            np_array = onnx.numpy_helper.to_array(attr.t)
-            target_np_type = onnx.helper.tensor_dtype_to_np_dtype(cast_to_type)
-            new_array = np_array.astype(target_np_type)
-            new_tensor = onnx.numpy_helper.from_array(new_array, attr.t.name)
+            # Read input tensor — bfloat16 tensors use raw_data and need special handling
+            if attr.t.data_type == onnx.TensorProto.BFLOAT16:
+                np_array = read_f16_tensor_as_fp32(attr.t)
+            else:
+                np_array = onnx.numpy_helper.to_array(attr.t)
+
+            # Write output tensor — bfloat16 cannot use numpy_helper.from_array
+            if cast_to_type == onnx.TensorProto.BFLOAT16:
+                import ml_dtypes
+
+                new_tensor = onnx.TensorProto()
+                new_tensor.dims.extend(np_array.shape)
+                new_tensor.name = attr.t.name
+                new_tensor.data_type = onnx.TensorProto.BFLOAT16
+                bf16_bytes = np_array.astype(np.float32).astype(ml_dtypes.bfloat16)
+                new_tensor.raw_data = bf16_bytes.view(np.uint16).tobytes()
+            else:
+                target_np_type = onnx.helper.tensor_dtype_to_np_dtype(cast_to_type)
+                new_array = np_array.astype(target_np_type)
+                new_tensor = onnx.numpy_helper.from_array(new_array, attr.t.name)
+
             attr.t.CopyFrom(new_tensor)
             break
 
