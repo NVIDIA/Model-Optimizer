@@ -168,6 +168,11 @@ def create_and_save_small_hf_model(
     else:
         model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
 
+    # Initialize weights to ensure all parameters are properly initialized
+    # This prevents NaN values in uninitialized parameters (e.g., backbone.layers.1.mixer.gate.weight
+    # in nemotron-3-nano-30b-a3b-base-bf16) that can occur with from_config on RTX GPU cards (not on H100)
+    model.initialize_weights()
+
     model.to(dtype=torch.bfloat16).save_pretrained(output_path)
 
     # Save tokenizer
