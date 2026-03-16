@@ -101,7 +101,7 @@ class EagleConfig(ModeloptBaseConfig):
     )
 
     eagle_ttt_steps: int = ModeloptField(
-        default=4, description=("The number of train-time-test steps in training.")
+        default=3, description=("The number of train-time-test steps in training.")
     )
 
     eagle_mix_hidden_states: bool = ModeloptField(
