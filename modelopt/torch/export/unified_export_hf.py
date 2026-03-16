@@ -776,11 +776,17 @@ def _export_transformers_checkpoint(
                 exclude_modules.append(pattern)
                 print(f"Adding MTP layer to quantization_config ignore: {pattern}")
 
-    # Sync gate/up weight quantizer amaxes so they share a single weight_scale_2
-    # after fusion in serving engines.
+    # Safety net: sync any gate/up weight quantizer amaxes that
+    # requantize_resmooth_fused_llm_layers did not reach (e.g. experts not
+    # activated during the dummy forward, or non-standard expert naming).
     synced = sync_moe_gate_up_amax(model)
     if synced:
-        print(f"Synced weight_scale_2 amax for {synced} gate/up projection pair(s) in MoE experts.")
+        warnings.warn(
+            f"Found {synced} MoE expert gate/up projection pair(s) with mismatched "
+            f"weight_scale_2 after requantize_resmooth_fused_llm_layers. "
+            f"This typically means the dummy forward did not activate these experts. "
+            f"Taking element-wise max of amaxes for serving-engine fusion."
+        )
 
     # Process all quantized modules and export weights
     _process_quantized_modules(model, dtype, is_modelopt_qlora)
