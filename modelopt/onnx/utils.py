@@ -1270,6 +1270,13 @@ def _build_tensor_type_map(model: onnx.ModelProto) -> dict[str, int]:
         type_map[inp.name] = inp.type.tensor_type.elem_type
     for out in model.graph.output:
         type_map[out.name] = out.type.tensor_type.elem_type
+    # Constant node outputs are often not in value_info — extract type from the attribute.
+    for node in model.graph.node:
+        if node.op_type == "Constant" and node.output[0] not in type_map:
+            for attr in node.attribute:
+                if attr.name == "value" and attr.type == onnx.AttributeProto.TENSOR:
+                    type_map[node.output[0]] = attr.t.data_type
+                    break
     return type_map
 
 
@@ -1300,6 +1307,11 @@ def _get_tensor_type_by_name(
     for out in model.graph.output:
         if out.name == tensor_name:
             return out.type.tensor_type.elem_type
+    for node in model.graph.node:
+        if node.op_type == "Constant" and node.output[0] == tensor_name:
+            for attr in node.attribute:
+                if attr.name == "value" and attr.type == onnx.AttributeProto.TENSOR:
+                    return attr.t.data_type
     raise Exception(f"did not find tensor {tensor_name}")
 
 
@@ -1452,6 +1464,7 @@ def remove_redundant_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
                 nodes_to_remove.append(node)
                 _bypass_cast_node(onnx_model, node)
                 logger.debug(f"Found removable double-cast: {node.name}")
+                continue
 
             # Find foldable Constant -> Cast. Initializers are handled by _convert_initializers.
             if _is_foldable_constant_cast_pattern(onnx_model, node):
@@ -1521,16 +1534,18 @@ def remove_node_training_mode(onnx_model: onnx.ModelProto, node_op_type: str) ->
 
 
 def change_casts_to_fp16(model: onnx.ModelProto, target_op_types: list[str]) -> onnx.ModelProto:
-    """Change Cast nodes that cast to FP32 and feed into specified nodes to cast to FP16 instead.
+    """Change FP16-to-FP32 Cast nodes whose entire fanout feeds target ops to cast to FP16 instead.
 
     Args:
         model: The ONNX model to modify.
-        target_op_types: List of op types to check for. Cast nodes feeding into these will be
-            changed from FP32 to FP16.
+        target_op_types: List of op types to check for. Cast nodes feeding exclusively into
+            these will be changed from FP32 to FP16.
 
     Returns:
         The modified ONNX model with Cast nodes updated.
     """
+    type_map = _build_tensor_type_map(model)
+
     # Build a map of tensor name -> consumer nodes
     tensor_to_consumers: dict[str, list[onnx.NodeProto]] = {}
     for node in model.graph.node:
@@ -1538,22 +1553,26 @@ def change_casts_to_fp16(model: onnx.ModelProto, target_op_types: list[str]) -> 
             if inp:
                 tensor_to_consumers.setdefault(inp, []).append(node)
 
-    # Find Cast nodes that feed into target ops and change FP32 -> FP16
+    # Find Cast nodes that feed into target ops and change FP16->FP32 to FP16->FP16
     for node in model.graph.node:
         if node.op_type != "Cast":
             continue
 
-        # Check if this Cast outputs to a target op type
-        cast_output = node.output[0]
-        consumers = tensor_to_consumers.get(cast_output, [])
-        feeds_target = any(c.op_type in target_op_types for c in consumers)
-
-        if not feeds_target:
+        # Only retarget FP16->FP32 casts; leave other casts (e.g. FP64->FP32) alone
+        cast_to = get_cast_to_type(node)
+        if cast_to != onnx.TensorProto.FLOAT:
+            continue
+        source_type = type_map.get(node.input[0])
+        if source_type != onnx.TensorProto.FLOAT16:
             continue
 
-        # Check if Cast is to FP32, and change to FP16
+        # Only change when ALL consumers are target ops to avoid breaking non-target branches
+        consumers = tensor_to_consumers.get(node.output[0], [])
+        if not consumers or not all(c.op_type in target_op_types for c in consumers):
+            continue
+
         for attr in node.attribute:
-            if attr.name == "to" and attr.i == onnx.TensorProto.FLOAT:
+            if attr.name == "to":
                 attr.i = onnx.TensorProto.FLOAT16
                 break
 

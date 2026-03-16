@@ -442,6 +442,10 @@ def quantize_weights(model: nn.Module, onnx_model: onnx.ModelProto) -> onnx.Mode
     if is_int8_quantized(model):
         onnx_exporters.append(INT8QuantExporter)
 
+    if len(onnx_exporters) == 0:
+        print("No quantization exporters found for the model.")
+        return onnx_model
+
     for onnx_exporter in onnx_exporters:
         onnx_model = onnx_exporter.process_model(onnx_model)
 
