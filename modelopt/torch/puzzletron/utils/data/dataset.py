@@ -287,7 +287,7 @@ def permute(
 
 
 # this is expensive so we cache it
-@functools.cache
+@functools.lru_cache(maxsize=None)
 def get_fim_token_ids(tokenizer):
     # ugly fix for Salesforce/codegen25-7b-multi tokenizer
     if hasattr(tokenizer, "encoder"):

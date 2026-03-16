@@ -38,7 +38,7 @@ def launch_realize_model(cfg: DictConfig):
     validate_puzzle_solutions(args=cfg.realize_model)
 
 
-def launch_mip_and_realize_model(cfg: DictConfig):
+def launch_mip_and_realize_model(cfg: DictConfig) -> list[str]:
     # Determine device for distributed operations (NCCL requires CUDA tensors)
     device = "cpu"
     if dist.size() > 1:
@@ -69,3 +69,5 @@ def launch_mip_and_realize_model(cfg: DictConfig):
             cfg.realize_model.solutions_path = Path(solution_path)
             launch_realize_model(cfg)
             dist.barrier()
+
+    return solution_paths

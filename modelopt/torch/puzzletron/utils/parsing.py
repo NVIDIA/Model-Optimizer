@@ -150,9 +150,9 @@ def _format_attention_config(attention_config) -> str:
     if attention_config.no_op:
         return "❌ no_op"
 
-    n_heads = attention_config.n_heads_in_group
-    if n_heads is not None:
-        return f"{n_heads} heads in group"
+    num_kv_heads = attention_config.num_key_value_heads
+    if num_kv_heads is not None:
+        return f"{num_kv_heads} kv heads"
 
     if attention_config.replace_with_linear:
         return "linear replacement"
