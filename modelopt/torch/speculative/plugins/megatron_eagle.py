@@ -717,11 +717,6 @@ class _DynamicEagleGPTModel(EagleModel):
             else self.eagle_config.draft_vocab_size
         )
 
-        if self.eagle_config.draft_vocab_size != self.eagle_config.vocab_size:
-            assert self.eagle_self_logit_distillation, (
-                "Only logit distillation is supported when draft_vocab_size != vocab_size!"
-            )
-
         # Use default aux_hidden_state layers if use_aux_hidden_state is True
         # but no layer id is given
         # layer ids are not used in offline eagle, but we need to set this to have correct fc_input_size_multiplier
@@ -909,12 +904,9 @@ class _DynamicEagleGPTModel(EagleModel):
         labels: [b, s]
         eagle_logits: [s, b, vocab // TP]
         """
-        # Compute lm loss (classification loss) or KLDivergence
-        if self.eagle_self_logit_distillation:
-            mapping = self.eagle_module.d2t if hasattr(self.eagle_module, "d2t") else None
-            token_loss = self.kld(eagle_logits[:-1, :, :], logits[1:, :, :], mapping)
-        else:
-            token_loss = self.compute_language_model_loss(labels[:, 1:], eagle_logits[:-1, :, :])
+        # Compute KL-divergence loss against base model logits
+        mapping = self.eagle_module.d2t if hasattr(self.eagle_module, "d2t") else None
+        token_loss = self.kld(eagle_logits[:-1, :, :], logits[1:, :, :], mapping)
 
         # [b, s - 1]
         return token_loss

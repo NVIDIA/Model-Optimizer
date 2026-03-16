@@ -14,7 +14,6 @@ fields of :class:`EagleConfig <modelopt.torch.speculative.config.EagleConfig>`, 
         # --- EagleConfig top-level fields ---
         "eagle_decoder_type": "llama",
         "eagle_freeze_base_model": True,
-        "eagle_self_logit_distillation": True,
         "eagle_offline": False,
         "eagle_loss_decay_factor": 0.9,
 
@@ -37,10 +36,6 @@ EagleConfig fields
 ``eagle_freeze_base_model`` (*bool*, default: ``True``)
     Keep the base model weights frozen during training. Disabling this allows joint fine-tuning
     but significantly increases memory usage.
-
-``eagle_self_logit_distillation`` (*bool*, default: ``True``)
-    Apply logit-level distillation loss in addition to hidden-state regression. Improves token
-    acceptance rates without extra inference cost.
 
 ``eagle_offline`` (*bool*, default: ``False``)
     Use pre-computed hidden states from disk instead of running the base model forward pass at
