@@ -285,6 +285,9 @@ class EagleModule(nn.Module):
             )
             self.layers[0].hidden_norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+        if config.eagle_decoder_type == "llama":
+            self.rotary_emb = LlamaRotaryEmbedding(config=config)
+
         if self.config.parallel_draft_step > 1:
             self.parallel_draft_heads = ParallelDraft(
                 config.hidden_size,
@@ -373,11 +376,6 @@ class EagleModule(nn.Module):
         self._input_embeds = self.layers[0].input_layernorm(inputs_embeds)
 
         if self.config.eagle_decoder_type == "llama":
-            # Lazy init rope to avoid save/load meta tensor error
-            if not hasattr(self, "rotary_emb"):
-                self.rotary_emb = LlamaRotaryEmbedding(
-                    config=self.config, device=hidden_states.device
-                )
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
         else:
             position_embeddings = None
