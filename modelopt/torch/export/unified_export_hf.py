@@ -73,7 +73,6 @@ from .layer_utils import (
     is_moe,
     is_quantlinear,
     set_expert_quantizer_amax,
-    sync_moe_gate_up_amax,
 )
 from .model_config import (
     QUANTIZATION_FP8,
@@ -778,14 +777,37 @@ def _export_transformers_checkpoint(
 
     # Safety net: sync any gate/up weight quantizer amaxes that
     # requantize_resmooth_fused_llm_layers did not reach (e.g. experts not
-    # activated during the dummy forward, or non-standard expert naming).
-    synced = sync_moe_gate_up_amax(model)
+    # activated during the dummy forward).
+    # Serving engines fuse gate+up into one projection and need a shared weight_scale_2.
+    synced = 0
+    for _, sub_module in model.named_modules():
+        if not (is_moe(sub_module) and hasattr(sub_module, "experts")):
+            continue
+        if not isinstance(sub_module.experts, collections.abc.Iterable):
+            continue
+        linear_names = get_expert_linear_names(sub_module)
+        # Only unfused 3-linear experts (e.g. gate_proj/down_proj/up_proj or w1/w2/w3)
+        if len(linear_names) != 3:
+            continue
+        gate_name, up_name = linear_names[0], linear_names[2]
+        for expert in sub_module.experts:
+            gate_wq = getattr(getattr(expert, gate_name, None), "weight_quantizer", None)
+            up_wq = getattr(getattr(expert, up_name, None), "weight_quantizer", None)
+            if gate_wq is None or up_wq is None:
+                continue
+            gate_amax = getattr(gate_wq, "amax", None)
+            up_amax = getattr(up_wq, "amax", None)
+            if gate_amax is None or up_amax is None:
+                continue
+            if not torch.equal(gate_amax, up_amax):
+                shared = torch.max(gate_amax, up_amax)
+                gate_wq.amax = shared
+                up_wq.amax = shared.clone()
+                synced += 1
     if synced:
         warnings.warn(
-            f"Found {synced} MoE expert gate/up projection pair(s) with mismatched "
-            f"weight_scale_2 after requantize_resmooth_fused_llm_layers. "
-            f"This typically means the dummy forward did not activate these experts. "
-            f"Taking element-wise max of amaxes for serving-engine fusion."
+            f"Synced {synced} MoE expert gate/up weight quantizer amax pair(s) "
+            f"by taking element-wise max for serving-engine fusion."
         )
 
     # Process all quantized modules and export weights
