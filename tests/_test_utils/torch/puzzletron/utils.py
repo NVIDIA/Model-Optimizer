@@ -183,7 +183,10 @@ def create_and_save_small_hf_model(
             param.data = torch.where(nan_inf_mask, torch.zeros_like(param), param)
 
     # Restore CUDA_VISIBLE_DEVICES after model creation and initialization
-    os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
+    if original_cuda_visible is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
+    else:
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
 
     model.to(dtype=torch.bfloat16).save_pretrained(output_path)
 

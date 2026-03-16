@@ -313,7 +313,8 @@ def create_sharded_model(
         model_class = _get_model_class_from_config(model_config)
         # AutoModelForCausalLM uses from_config(); concrete model classes use _from_config()
         if model_class is AutoModelForCausalLM:
-            model = model_class.from_config(model_config, trust_remote_code=True)
+            trust_remote_code = descriptor.requires_trust_remote_code()
+            model = model_class.from_config(model_config, trust_remote_code=trust_remote_code)
         else:
             model = model_class._from_config(model_config)
         create_local_shard_(
