@@ -1171,6 +1171,55 @@ def set_expert_quantizer_amax(
     return uncalibrated_modules
 
 
+# Gate/up naming pairs for standard (unfused) MoE architectures.
+# Fused variants (gate_up_proj, linear_fc1) already share a single quantizer and need no sync.
+_GATE_UP_PAIRS = [("gate_proj", "up_proj"), ("w1", "w3")]
+
+
+def sync_moe_gate_up_amax(model: nn.Module) -> int:
+    """Take element-wise max of gate and up weight quantizer amaxes per expert.
+
+    Serving engines fuse gate_proj and up_proj into a single gate_up_proj and
+    require a single weight_scale_2. Since weight_scale_2 = amax / (6 * 448),
+    syncing amaxes before quantization ensures the per-block weight_scale values
+    are computed against a consistent global scale.
+
+    Only affects standard MoE models with separate gate/up linear layers
+    (e.g. Qwen MoE, DeepSeek). Models with already-fused gate_up_proj
+    (e.g. Llama4, GptOss) are unaffected.
+
+    Returns:
+        Number of expert gate/up pairs whose amaxes were synced.
+    """
+    synced = 0
+    for _, sub_module in model.named_modules():
+        if not (is_moe(sub_module) and hasattr(sub_module, "experts")):
+            continue
+        if not hasattr(sub_module.experts, "__iter__"):
+            continue
+        for expert in sub_module.experts:
+            for gate_name, up_name in _GATE_UP_PAIRS:
+                gate_linear = getattr(expert, gate_name, None)
+                up_linear = getattr(expert, up_name, None)
+                if gate_linear is None or up_linear is None:
+                    continue
+                gate_wq = getattr(gate_linear, "weight_quantizer", None)
+                up_wq = getattr(up_linear, "weight_quantizer", None)
+                if gate_wq is None or up_wq is None:
+                    break
+                gate_amax = getattr(gate_wq, "amax", None)
+                up_amax = getattr(up_wq, "amax", None)
+                if gate_amax is None or up_amax is None:
+                    break
+                if not torch.equal(gate_amax, up_amax):
+                    shared_amax = torch.max(gate_amax, up_amax)
+                    gate_wq.amax = shared_amax
+                    up_wq.amax = shared_amax.clone()
+                    synced += 1
+                break
+    return synced
+
+
 def build_stacked_experts(
     experts: nn.Module,
     linear_names: list[str],
