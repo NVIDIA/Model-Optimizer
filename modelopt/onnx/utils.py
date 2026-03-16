@@ -1259,8 +1259,35 @@ def get_producer_nodes(model: onnx.ModelProto, tensor_name: str) -> list[onnx.No
     return [n for n in model.graph.node if tensor_name in n.output]
 
 
-def _get_tensor_type_by_name(model: onnx.ModelProto, tensor_name: str):
-    """Get the tensor element type. Searches value_info, initializers, inputs, and outputs."""
+def _build_tensor_type_map(model: onnx.ModelProto) -> dict[str, int]:
+    """Build an O(1) name-to-element-type lookup from all graph tensors."""
+    type_map: dict[str, int] = {}
+    for vi in model.graph.value_info:
+        type_map[vi.name] = vi.type.tensor_type.elem_type
+    for init in model.graph.initializer:
+        type_map[init.name] = init.data_type
+    for inp in model.graph.input:
+        type_map[inp.name] = inp.type.tensor_type.elem_type
+    for out in model.graph.output:
+        type_map[out.name] = out.type.tensor_type.elem_type
+    return type_map
+
+
+def _get_tensor_type_by_name(
+    model: onnx.ModelProto, tensor_name: str, type_map: dict[str, int] | None = None
+):
+    """Get the tensor element type. Searches value_info, initializers, inputs, and outputs.
+
+    Args:
+        model: The ONNX model (used as fallback when type_map is not provided).
+        tensor_name: Name of the tensor to look up.
+        type_map: Pre-built lookup from _build_tensor_type_map for O(1) access.
+            When called in a loop, pass this to avoid repeated linear scans.
+    """
+    if type_map is not None:
+        if tensor_name in type_map:
+            return type_map[tensor_name]
+        raise Exception(f"did not find tensor {tensor_name}")
     for vi in model.graph.value_info:
         if vi.name == tensor_name:
             return vi.type.tensor_type.elem_type
@@ -1286,11 +1313,13 @@ def _replace_tensor_name(
                 consumer.input[idx] = new_tensor_name
 
 
-def _is_same_type_cast(model: onnx.ModelProto, node: onnx.NodeProto) -> bool:
+def _is_same_type_cast(
+    model: onnx.ModelProto, node: onnx.NodeProto, type_map: dict[str, int] | None = None
+) -> bool:
     assert node.op_type == "Cast"
-    input_types = [_get_tensor_type_by_name(model, inp) for inp in node.input]
+    input_types = [_get_tensor_type_by_name(model, inp, type_map) for inp in node.input]
     output_type = get_cast_to_type(node)
-    return all(inp_type == output_type for inp_type in input_types) and input_types is not None
+    return bool(input_types) and all(inp_type == output_type for inp_type in input_types)
 
 
 def _is_sequential_cast(model: onnx.ModelProto, node: onnx.NodeProto) -> bool:
@@ -1407,11 +1436,12 @@ def remove_redundant_casts(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
     Returns:
         onnx.ModelProto: Model with redundant casts removed.
     """
+    type_map = _build_tensor_type_map(onnx_model)
     nodes_to_remove = []
     for node in onnx_model.graph.node:
         if node.op_type == "Cast":
             # Find cast nodes that don't change precision
-            if _is_same_type_cast(onnx_model, node):
+            if _is_same_type_cast(onnx_model, node, type_map):
                 nodes_to_remove.append(node)
                 _bypass_cast_node(onnx_model, node)
                 logger.debug(f"Found redundant same-type cast: {node.name}")
