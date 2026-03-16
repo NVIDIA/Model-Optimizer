@@ -22,29 +22,29 @@ model_quant:
       block_sizes:
         -1: 16
         type: dynamic
-        scale_bits: [4, 3]
-      num_bits: [2, 1]
+        scale_bits: e4m3
+      num_bits: e2m1
       enable: true
     '*mlp*input_quantizer':
       block_sizes:
         -1: 16
         type: dynamic
-        scale_bits: [4, 3]
-      num_bits: [2, 1]
+        scale_bits: e4m3
+      num_bits: e2m1
       enable: true
     '*block_sparse_moe*weight_quantizer':
       block_sizes:
         -1: 16
         type: dynamic
-        scale_bits: [4, 3]
-      num_bits: [2, 1]
+        scale_bits: e4m3
+      num_bits: e2m1
       enable: true
     '*block_sparse_moe*input_quantizer':
       block_sizes:
         -1: 16
         type: dynamic
-        scale_bits: [4, 3]
-      num_bits: [2, 1]
+        scale_bits: e4m3
+      num_bits: e2m1
       enable: true
 
     default:
@@ -85,5 +85,5 @@ model_quant:
 kv_quant:
   quant_cfg:
     '*[kv]_bmm_quantizer':
-      num_bits: [4, 3]
+      num_bits: e4m3
       enable: true

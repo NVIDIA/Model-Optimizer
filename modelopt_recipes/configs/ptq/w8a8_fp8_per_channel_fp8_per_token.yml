@@ -15,10 +15,10 @@
 
 quant_cfg:
   '*weight_quantizer':
-    num_bits: [4, 3]  # FP8 E4M3: [exponent_bits, mantissa_bits] (float8_e4m3fn)
+    num_bits: e4m3  # FP8 e4m3: [exponent_bits, mantissa_bits] (float8_e4m3fn)
     axis: 0  # per-channel: one scale per output channel (dim 0)
   '*input_quantizer':
-    num_bits: [4, 3]  # FP8 E4M3
+    num_bits: e4m3  # FP8 e4m3
     type: dynamic  # Block scales recomputed at each inference step (per-token)
     block_sizes:
       -1:  # null size → each token is its own block (per-token dynamic quantisation)

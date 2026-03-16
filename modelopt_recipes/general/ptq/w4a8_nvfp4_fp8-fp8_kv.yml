@@ -19,14 +19,14 @@ metadata:
 model_quant:
   quant_cfg:
     '*weight_quantizer':
-      num_bits: [2, 1]
+      num_bits: e2m1
       block_sizes:
         -1: 32
         type: dynamic
-        scale_bits: [4, 3]
+        scale_bits: e4m3
       enable: true
     '*input_quantizer':
-      num_bits: [4, 3]
+      num_bits: e4m3
       enable: true
 
     default:
@@ -67,5 +67,5 @@ model_quant:
 kv_quant:
   quant_cfg:
     '*[kv]_bmm_quantizer':
-      num_bits: [4, 3]
+      num_bits: e4m3
       enable: true

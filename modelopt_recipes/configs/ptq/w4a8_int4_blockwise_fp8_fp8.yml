@@ -21,9 +21,9 @@ quant_cfg:
         type: static     # Block scales computed once at calibration, fixed at inference
       enable: true
 
-    - num_bits: [4, 3]  # FP8 E4M3: [exponent_bits, mantissa_bits] (float8_e4m3fn) — compute format
+    - num_bits: e4m3  # FP8 e4m3: [exponent_bits, mantissa_bits] (float8_e4m3fn) — compute format
       enable: true
 
   '*input_quantizer':
-    num_bits: [4, 3]  # FP8 E4M3 per-tensor activation quantisation
+    num_bits: e4m3  # FP8 e4m3 per-tensor activation quantisation
     enable: true

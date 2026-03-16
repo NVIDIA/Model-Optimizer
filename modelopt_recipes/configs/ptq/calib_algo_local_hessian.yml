@@ -15,4 +15,4 @@
 
 algorithm:
   method: "local_hessian"  # Uses local Hessian second-order information to find optimal weight scales
-  fp8_scale_sweep: true    # Sweeps all 128 representable FP8 E4M3 scale values to minimise Hessian-weighted error
+  fp8_scale_sweep: true    # Sweeps all 128 representable FP8 e4m3 scale values to minimise Hessian-weighted error

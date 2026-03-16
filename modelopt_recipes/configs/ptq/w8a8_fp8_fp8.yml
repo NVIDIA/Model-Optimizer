@@ -15,8 +15,8 @@
 
 quant_cfg:
   '*input_quantizer':
-    num_bits: [4, 3]  # FP8 E4M3: [exponent_bits, mantissa_bits] (float8_e4m3fn)
+    num_bits: e4m3  # FP8 e4m3: [exponent_bits, mantissa_bits] (float8_e4m3fn)
     axis:  # null → per-tensor: single shared scale for the entire activation tensor
   '*weight_quantizer':
-    num_bits: [4, 3]  # FP8 E4M3
+    num_bits: e4m3  # FP8 e4m3
     axis:  # null → per-tensor

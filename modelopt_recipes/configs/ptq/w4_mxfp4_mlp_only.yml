@@ -15,16 +15,16 @@
 
 quant_cfg:
   "*mlp*weight_quantizer":
-    num_bits: [2, 1]  # MXFP4 E2M1: [exponent_bits, mantissa_bits]
+    num_bits: e2m1  # MXFP4 e2m1: [exponent_bits, mantissa_bits]
     block_sizes:
       -1: 32        # 32-element groups along the last dimension (MXFP4 standard tile)
       type: dynamic  # Block scales recomputed at each inference step
-      scale_bits: [8, 0]  # E8M0 per-block scale factors (MX standard: 8-bit exponent, no mantissa)
+      scale_bits: e8m0  # e8m0 per-block scale factors (MX standard: 8-bit exponent, no mantissa)
     enable: true
   "*block_sparse_moe*weight_quantizer":
-    num_bits: [2, 1]  # MXFP4 E2M1
+    num_bits: e2m1  # MXFP4 e2m1
     block_sizes:
       -1: 32
       type: dynamic
-      scale_bits: [8, 0]  # E8M0 per-block scale factors (MX standard)
+      scale_bits: e8m0  # e8m0 per-block scale factors (MX standard)
     enable: true

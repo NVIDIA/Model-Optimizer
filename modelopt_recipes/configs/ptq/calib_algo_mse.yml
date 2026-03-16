@@ -15,4 +15,4 @@
 
 algorithm:
   method: "mse"          # Minimises mean-squared quantisation error over the calibration dataset
-  fp8_scale_sweep: true  # Sweeps all 128 representable FP8 E4M3 scale values to find the MSE-minimising scale
+  fp8_scale_sweep: true  # Sweeps all 128 representable FP8 e4m3 scale values to find the MSE-minimising scale

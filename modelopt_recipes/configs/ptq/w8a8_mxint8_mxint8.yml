@@ -19,12 +19,12 @@ quant_cfg:
     block_sizes:
       -1: 32        # 32-element groups along the last dimension (MXINT8 tile size)
       type: dynamic  # Block scales recomputed at each inference step
-      scale_bits: [8, 0]  # E8M0 per-block scale factors (MX standard: 8-bit exponent, no mantissa)
+      scale_bits: e8m0  # e8m0 per-block scale factors (MX standard: 8-bit exponent, no mantissa)
     enable: true
   "*input_quantizer":
     num_bits: 8   # MXINT8
     block_sizes:
       -1: 32
       type: dynamic
-      scale_bits: [8, 0]  # E8M0 per-block scale factors (MX standard)
+      scale_bits: e8m0  # e8m0 per-block scale factors (MX standard)
     enable: true

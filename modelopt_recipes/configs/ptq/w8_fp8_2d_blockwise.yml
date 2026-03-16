@@ -15,7 +15,7 @@
 
 quant_cfg:
   '*weight_quantizer':
-    num_bits: [4, 3]  # FP8 E4M3: [exponent_bits, mantissa_bits] (float8_e4m3fn)
+    num_bits: e4m3  # FP8 e4m3: [exponent_bits, mantissa_bits] (float8_e4m3fn)
     block_sizes:
       -1: 128  # 128-element groups along the last dimension
       -2: 128  # 128-element groups along the second-to-last dimension (2D blockwise)

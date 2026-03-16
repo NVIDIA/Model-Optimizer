@@ -15,16 +15,16 @@
 
 quant_cfg:
   "*weight_quantizer":
-    num_bits: [4, 3]  # MXFP8 E4M3: [exponent_bits, mantissa_bits] (float8_e4m3fn with MX block scales)
+    num_bits: e4m3  # MXFP8 e4m3: [exponent_bits, mantissa_bits] (float8_e4m3fn with MX block scales)
     block_sizes:
       -1: 32        # 32-element groups along the last dimension (MXFP8 standard tile)
       type: dynamic  # Block scales recomputed at each inference step
-      scale_bits: [8, 0]  # E8M0 per-block scale factors (MX standard: 8-bit exponent, no mantissa)
+      scale_bits: e8m0  # e8m0 per-block scale factors (MX standard: 8-bit exponent, no mantissa)
     enable: true
   "*input_quantizer":
-    num_bits: [4, 3]  # MXFP8 E4M3
+    num_bits: e4m3  # MXFP8 e4m3
     block_sizes:
       -1: 32
       type: dynamic
-      scale_bits: [8, 0]  # E8M0 per-block scale factors (MX standard)
+      scale_bits: e8m0  # e8m0 per-block scale factors (MX standard)
     enable: true

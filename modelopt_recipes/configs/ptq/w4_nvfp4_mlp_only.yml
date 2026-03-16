@@ -15,16 +15,16 @@
 
 quant_cfg:
   '*mlp*weight_quantizer':
-    num_bits: [2, 1]  # NVFP4 E2M1: [exponent_bits, mantissa_bits] (float4_e2m1fn)
+    num_bits: e2m1  # NVFP4 e2m1: [exponent_bits, mantissa_bits] (float4_e2m1fn)
     block_sizes:
       -1: 32        # 32-element groups along the last dimension
       type: dynamic  # Block scales recomputed at each inference step
-      scale_bits: [4, 3]  # FP8 E4M3 per-block scale factors (NVFP4)
+      scale_bits: e4m3  # FP8 e4m3 per-block scale factors (NVFP4)
     enable: true
   "*block_sparse_moe*weight_quantizer":
-    num_bits: [2, 1]  # NVFP4 E2M1
+    num_bits: e2m1  # NVFP4 e2m1
     block_sizes:
       -1: 32
       type: dynamic
-      scale_bits: [4, 3]  # FP8 E4M3 per-block scale factors (NVFP4)
+      scale_bits: e4m3  # FP8 e4m3 per-block scale factors (NVFP4)
     enable: true

@@ -19,7 +19,7 @@ metadata:
 model_quant:
   quant_cfg:
     '*weight_quantizer':
-      num_bits: [4, 3]
+      num_bits: e4m3
       block_sizes:
         -1: 128
         -2: 128
@@ -65,5 +65,5 @@ model_quant:
 kv_quant:
   quant_cfg:
     '*[kv]_bmm_quantizer':
-      num_bits: [4, 3]
+      num_bits: e4m3
       enable: true

@@ -26,6 +26,7 @@ try:
     from importlib.resources.abc import Traversable
 except ImportError:  # Python < 3.11
     from importlib.abc import Traversable
+import re
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,32 @@ import yaml
 
 # Root to all built-in recipes. Users can create own recipes.
 BUILTIN_RECIPES_LIB = files("modelopt_recipes")
+
+_EXMY_RE = re.compile(r"^[Ee](\d+)[Mm](\d+)$")
+_EXMY_KEYS = frozenset({"num_bits", "scale_bits"})
+
+
+def _parse_exmy_num_bits(obj: Any) -> Any:
+    """Recursively convert ``ExMy`` strings in ``num_bits`` / ``scale_bits`` to ``(x, y)`` tuples."""
+    if isinstance(obj, dict):
+        return {
+            k: (
+                _parse_exmy(v)
+                if k in _EXMY_KEYS and isinstance(v, str)
+                else _parse_exmy_num_bits(v)
+            )
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_parse_exmy_num_bits(item) for item in obj]
+    return obj
+
+
+def _parse_exmy(s: str) -> tuple[int, int] | str:
+    m = _EXMY_RE.match(s)
+    if m:
+        return (int(m.group(1)), int(m.group(2)))
+    return s
 
 
 def load_config(config_file: str | Path | Traversable) -> dict[str, Any]:
@@ -83,4 +110,4 @@ def load_config(config_file: str | Path | Traversable) -> dict[str, Any]:
         raise ValueError(
             f"Config file {config_path} must contain a YAML mapping, got {type(_raw).__name__}"
         )
-    return _raw
+    return _parse_exmy_num_bits(_raw)

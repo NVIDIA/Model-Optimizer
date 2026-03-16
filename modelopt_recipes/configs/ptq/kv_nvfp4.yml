@@ -15,9 +15,9 @@
 
 quant_cfg:
   '*[kv]_bmm_quantizer':
-    num_bits: [2, 1]  # NVFP4 E2M1: [exponent_bits, mantissa_bits] (float4_e2m1fn)
+    num_bits: e2m1  # NVFP4 e2m1: [exponent_bits, mantissa_bits] (float4_e2m1fn)
     block_sizes:
       -1: 16        # 16-element groups along the last dimension (NVFP4 tile size)
       type: dynamic  # Block scales recomputed at each inference step
-      scale_bits: [4, 3]  # FP8 E4M3 per-block scale factors: [exponent_bits, mantissa_bits]
+      scale_bits: e4m3  # FP8 e4m3 per-block scale factors: [exponent_bits, mantissa_bits]
     enable: true

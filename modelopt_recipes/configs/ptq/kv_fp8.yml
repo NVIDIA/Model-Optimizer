@@ -15,5 +15,5 @@
 
 quant_cfg:
   '*[kv]_bmm_quantizer':
-    num_bits: [4, 3]  # FP8 E4M3 format: [exponent_bits, mantissa_bits] → E4M3 (float8_e4m3fn)
+    num_bits: e4m3  # FP8 e4m3 format: [exponent_bits, mantissa_bits] → e4m3 (float8_e4m3fn)
     enable: true

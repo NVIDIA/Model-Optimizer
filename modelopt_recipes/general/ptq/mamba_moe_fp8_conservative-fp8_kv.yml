@@ -19,10 +19,10 @@ metadata:
 model_quant:
   quant_cfg:
     '*input_quantizer':
-      num_bits: [4, 3]
+      num_bits: e4m3
       axis:
     '*weight_quantizer':
-      num_bits: [4, 3]
+      num_bits: e4m3
       axis:
 
     default:
@@ -79,5 +79,5 @@ model_quant:
 kv_quant:
   quant_cfg:
     '*[kv]_bmm_quantizer':
-      num_bits: [4, 3]
+      num_bits: e4m3
       enable: true

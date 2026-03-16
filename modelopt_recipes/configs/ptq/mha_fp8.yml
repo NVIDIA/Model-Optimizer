@@ -17,12 +17,12 @@ quant_cfg:
   '*output_quantizer':
     enable: false  # Output of each attention projection is not quantised
   '*q_bmm_quantizer':
-    num_bits: [4, 3]  # FP8 E4M3: [exponent_bits, mantissa_bits] (float8_e4m3fn)
+    num_bits: e4m3  # FP8 e4m3: [exponent_bits, mantissa_bits] (float8_e4m3fn)
   '*k_bmm_quantizer':
-    num_bits: [4, 3]  # FP8 E4M3
+    num_bits: e4m3  # FP8 e4m3
   '*v_bmm_quantizer':
-    num_bits: [4, 3]  # FP8 E4M3
+    num_bits: e4m3  # FP8 e4m3
   '*softmax_quantizer':
-    num_bits: [4, 3]  # FP8 E4M3
+    num_bits: e4m3  # FP8 e4m3
   'transformer_blocks*bmm2_output_quantizer':
-    num_bits: [4, 3]  # FP8 E4M3
+    num_bits: e4m3  # FP8 e4m3

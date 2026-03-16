@@ -22,28 +22,28 @@ model_quant:
       block_sizes:
         -1: 16
         type: dynamic
-        scale_bits: [4, 3]
-      num_bits: [2, 1]
+        scale_bits: e4m3
+      num_bits: e2m1
       enable: true
     '*input_quantizer':
       block_sizes:
         -1: 16
         type: dynamic
-        scale_bits: [4, 3]
-      num_bits: [2, 1]
+        scale_bits: e4m3
+      num_bits: e2m1
       enable: true
     '*output_quantizer':
       enable: false
     '*q_bmm_quantizer':
-      num_bits: [4, 3]
+      num_bits: e4m3
     '*k_bmm_quantizer':
-      num_bits: [4, 3]
+      num_bits: e4m3
     '*v_bmm_quantizer':
-      num_bits: [4, 3]
+      num_bits: e4m3
     '*softmax_quantizer':
-      num_bits: [4, 3]
+      num_bits: e4m3
     transformer_blocks*bmm2_output_quantizer:
-      num_bits: [4, 3]
+      num_bits: e4m3
 
     default:
       enable: false
@@ -83,5 +83,5 @@ model_quant:
 kv_quant:
   quant_cfg:
     '*[kv]_bmm_quantizer':
-      num_bits: [4, 3]
+      num_bits: e4m3
       enable: true
