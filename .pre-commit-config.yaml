@@ -97,6 +97,8 @@ repos:
               modelopt/torch/speculative/eagle/utils.py|
               modelopt/torch/speculative/plugins/transformers.py|
               modelopt/torch/utils/plugins/megatron_mmlu.py|
+              modelopt/torch/puzzletron/anymodel/models/gpt_oss/gpt_oss_pruned_to_mxfp4.py|
+              modelopt/torch/puzzletron/decilm/deci_lm_hf_code/transformers_.*\.py|
               examples/chained_optimizations/bert_prune_distill_quantize.py|
               examples/deepseek/quantize_to_nvfp4.py|
               examples/deepseek/ptq.py|
@@ -115,7 +117,6 @@ repos:
               examples/speculative_decoding/server_generate.py|
               experimental/dms/models/qwen3/configuration_qwen3_dms.py|
               experimental/dms/models/qwen3/modeling_qwen3_dms.py|
-              modelopt/torch/puzzletron/decilm/deci_lm_hf_code/transformers_.*\.py|
           )$
 
       # Default hook for Apache 2.0 in c/c++/cuda files
