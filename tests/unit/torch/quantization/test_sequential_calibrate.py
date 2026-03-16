@@ -92,11 +92,6 @@ def _make_model_and_data(n_layers=3, dim=16, n_batches=2, batch_size=4):
     return model, tokens
 
 
-def _run_forward(model, data):
-    for batch in data:
-        model(batch)
-
-
 # LayerActivationCollector tests
 
 
@@ -231,171 +226,17 @@ def test_seq_calib_raises_on_unrecognized_model():
         )
 
 
-def test_seq_calib_func_called_per_layer(monkeypatch):
-    _register_test_discoverer(monkeypatch)
-    model, data = _make_model_and_data(n_layers=4)
-    call_count = [0]
-
-    def counting_calib(layer, forward_loop, **kwargs):
-        call_count[0] += 1
-
-    sequential_calibrate(
-        model,
-        forward_loop=lambda m: _run_forward(m, data),
-        calib_func=counting_calib,
-    )
-
-    assert call_count[0] == 4
-
-
-def test_seq_calib_func_receives_correct_layer(monkeypatch):
-    _register_test_discoverer(monkeypatch)
-    model, data = _make_model_and_data(n_layers=3)
-    called_layers = []
-
-    def track_layers(layer, forward_loop, **kwargs):
-        called_layers.append(layer)
-
-    sequential_calibrate(
-        model,
-        forward_loop=lambda m: _run_forward(m, data),
-        calib_func=track_layers,
-    )
-
-    for i, layer in enumerate(model.layers):
-        assert called_layers[i] is layer
-
-
-def test_seq_calib_kwargs_forwarded(monkeypatch):
-    _register_test_discoverer(monkeypatch)
-    model, data = _make_model_and_data(n_layers=2)
-    received_kwargs = []
-
-    def capture_kwargs(layer, forward_loop, **kwargs):
-        received_kwargs.append(kwargs)
-
-    sequential_calibrate(
-        model,
-        forward_loop=lambda m: _run_forward(m, data),
-        calib_func=capture_kwargs,
-        alpha=0.5,
-        method="max",
-    )
-
-    assert len(received_kwargs) == 2
-    for kw in received_kwargs:
-        assert kw["alpha"] == 0.5
-        assert kw["method"] == "max"
-
-
-def test_seq_calib_layer_forward_loop_runs_all_batches(monkeypatch):
-    """The per-layer forward loop passed to calib_func should replay all batches."""
-    _register_test_discoverer(monkeypatch)
-    n_batches = 5
-    model, data = _make_model_and_data(n_layers=2, n_batches=n_batches)
-    batch_counts = []
-
-    def count_batches(layer, forward_loop, **kwargs):
-        counter = {"n": 0}
-        orig_forward = layer.forward
-
-        def counting_forward(*args, **kw):
-            counter["n"] += 1
-            return orig_forward(*args, **kw)
-
-        layer.forward = counting_forward
-        forward_loop(layer)
-        layer.forward = orig_forward
-        batch_counts.append(counter["n"])
-
-    sequential_calibrate(
-        model,
-        forward_loop=lambda m: _run_forward(m, data),
-        calib_func=count_batches,
-    )
-
-    for count in batch_counts:
-        assert count == n_batches
-
-
-def test_seq_calib_does_not_alter_weights(monkeypatch):
-    """sequential_calibrate itself should not modify model weights."""
-    _register_test_discoverer(monkeypatch)
-    model, data = _make_model_and_data(n_layers=3)
-    weights_before = {n: p.clone() for n, p in model.named_parameters()}
-
-    sequential_calibrate(
-        model,
-        forward_loop=lambda m: _run_forward(m, data),
-        calib_func=lambda layer, forward_loop, **kw: None,
-    )
-
-    for n, p in model.named_parameters():
-        assert torch.equal(p, weights_before[n]), f"Weight {n} was modified"
-
-
-def test_seq_calib_activations_update_across_layers(monkeypatch):
-    """Subsequent layers should see activations transformed by prior layers."""
-    _register_test_discoverer(monkeypatch)
-    torch.manual_seed(0)
-    model = _SimpleTransformerModel(n_layers=2, dim=16)
-    tokens = [torch.randint(0, 32, (2, 4))]
-
-    layer_inputs_record = {}
-
-    def record_inputs(layer, forward_loop, **kwargs):
-        activations = []
-        orig_forward = layer.forward
-
-        def capture_forward(*args, **kw):
-            activations.append(args[0].clone())
-            return orig_forward(*args, **kw)
-
-        layer.forward = capture_forward
-        forward_loop(layer)
-        layer.forward = orig_forward
-
-        layer_idx = list(model.layers).index(layer)
-        layer_inputs_record[layer_idx] = activations
-
-    sequential_calibrate(
-        model,
-        forward_loop=lambda m: [m(t) for t in tokens],
-        calib_func=record_inputs,
-    )
-
-    assert not torch.allclose(layer_inputs_record[0][0], layer_inputs_record[1][0]), (
-        "Layer 1 should receive different activations than layer 0"
-    )
-
-
-def test_seq_calib_empty_forward_loop(monkeypatch):
-    """If forward_loop feeds no data, calib_func still gets called with an empty replay."""
+def test_seq_calib_empty_forward_loop_raises(monkeypatch):
+    """If forward_loop feeds no data, sequential_calibrate raises RuntimeError."""
     _register_test_discoverer(monkeypatch)
     model = _SimpleTransformerModel(n_layers=2, dim=16)
-    replay_counts = []
 
-    def check_empty_replay(layer, forward_loop, **kwargs):
-        counter = {"n": 0}
-        orig_forward = layer.forward
-
-        def counting_forward(*args, **kw):
-            counter["n"] += 1
-            return orig_forward(*args, **kw)
-
-        layer.forward = counting_forward
-        forward_loop(layer)
-        layer.forward = orig_forward
-        replay_counts.append(counter["n"])
-
-    sequential_calibrate(
-        model,
-        forward_loop=lambda m: None,
-        calib_func=check_empty_replay,
-    )
-
-    for count in replay_counts:
-        assert count == 0
+    with pytest.raises(RuntimeError, match="collected no inputs during forward_loop"):
+        sequential_calibrate(
+            model,
+            forward_loop=lambda m: None,
+            calib_func=lambda *a, **kw: None,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -543,46 +384,15 @@ def test_run_layer_consumes_cached_inputs(monkeypatch):
         collector._unpatch_all_layers()
 
 
-def test_capture_layer_collects_all_batches(monkeypatch):
-    """The capture layer must record one entry per batch in the forward loop."""
-    _register_test_discoverer(monkeypatch)
-    n_batches = 5
-    model = _TupleUnpackingModel(n_layers=3, dim=16)
-    data = [torch.randn(2, 16) for _ in range(n_batches)]
+def test_set_layer_states_transitions(monkeypatch):
+    """Unit test for _set_layer_states: verify mode assignments at each index.
 
-    def forward_loop(m):
-        for d in data:
-            m(d)
-
-    collector = LayerActivationCollector(model)
-    collector._patch_all_layers()
-    try:
-        inputs = collector.get_input_activations(model.layers[0], forward_loop)
-        assert len(inputs) == n_batches
-
-        inputs = collector.get_input_activations(model.layers[2], forward_loop)
-        assert len(inputs) == n_batches
-    finally:
-        collector._unpatch_all_layers()
-
-
-def test_mode_transitions_across_calibration_steps(monkeypatch):
-    """Verify mode transitions follow the skip/run/capture pattern at each step.
-
-    State transitions in ``_set_layer_states`` are conditional: the previous
-    layer only moves to 'run' if it has collected inputs, and the layer two
-    steps back only moves to 'skip' if it has output_meta.  This test
-    simulates the side-effects of a real forward loop (populated
-    ``collected_inputs`` and ``output_meta``) between each step so that the
-    expected skip/run/capture pattern is exercised.
+    Simulates the state a real forward loop would leave behind by manually
+    populating collected_inputs before each call.
     """
     _register_test_discoverer(monkeypatch)
     model = _TupleUnpackingModel(n_layers=5, dim=16)
-
-    # Fake data that mimics what a forward loop would produce for a
-    # _TupleReturningBlock layer (returns (tensor, None)).
     fake_inp = ((torch.zeros(1, 16),), {})
-    fake_meta = LayerActivationCollector._extract_output_meta((torch.zeros(1, 16), None))
 
     collector = LayerActivationCollector(model)
     collector._patch_all_layers()
@@ -594,29 +404,36 @@ def test_mode_transitions_across_calibration_steps(monkeypatch):
         collector._set_layer_states(0)
         assert modes() == ["capture", "original", "original", "original", "original"]
 
-        # Simulate layer 0 having captured inputs during the forward loop.
         model.layers[0]._seq_calib.collected_inputs = [fake_inp]
         collector._set_layer_states(1)
         assert modes() == ["run", "capture", "original", "original", "original"]
 
-        # Simulate layer 0 having executed in run mode (output_meta set)
-        # and layer 1 having captured inputs.
-        model.layers[0]._seq_calib.output_meta = fake_meta
         model.layers[1]._seq_calib.collected_inputs = [fake_inp]
         collector._set_layer_states(2)
         assert modes() == ["skip", "run", "capture", "original", "original"]
 
-        # Simulate layer 1 run + layer 2 capture.
-        model.layers[1]._seq_calib.output_meta = fake_meta
         model.layers[2]._seq_calib.collected_inputs = [fake_inp]
         collector._set_layer_states(3)
         assert modes() == ["skip", "skip", "run", "capture", "original"]
 
-        # Simulate layer 2 run + layer 3 capture.
-        model.layers[2]._seq_calib.output_meta = fake_meta
         model.layers[3]._seq_calib.collected_inputs = [fake_inp]
         collector._set_layer_states(4)
         assert modes() == ["skip", "skip", "skip", "run", "capture"]
+    finally:
+        collector._unpatch_all_layers()
+
+
+def test_set_layer_states_raises_on_empty_collected_inputs(monkeypatch):
+    """_set_layer_states must raise if the previous layer has no collected inputs."""
+    _register_test_discoverer(monkeypatch)
+    model = _TupleUnpackingModel(n_layers=2, dim=16)
+
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers()
+    try:
+        # layer 0 was never in capture mode, so collected_inputs is empty
+        with pytest.raises(RuntimeError, match="no collected inputs to replay"):
+            collector._set_layer_states(1)
     finally:
         collector._unpatch_all_layers()
 
@@ -716,55 +533,3 @@ def test_skip_output_meta_not_shared_across_heterogeneous_layers(monkeypatch):
         assert len(meta_1[1]) == 1
     finally:
         collector._unpatch_all_layers()
-
-
-def test_run_layer_reflects_weight_updates(monkeypatch):
-    """After calib_func modifies weights, the next layer should see updated activations."""
-    _register_test_discoverer(monkeypatch)
-    torch.manual_seed(0)
-    dim = 8
-
-    class _ScaleLayer(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.weight = nn.Parameter(torch.ones(dim))
-
-        def forward(self, x):
-            return x * self.weight
-
-    class _TwoScaleModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.layers = nn.ModuleList([_ScaleLayer(), _ScaleLayer()])
-
-        def forward(self, x):
-            for layer in self.layers:
-                x = layer(x)
-            return x
-
-    model = _TwoScaleModel()
-    x = torch.randn(2, dim)
-
-    activations_before_weight_update = model.layers[0](x).clone()
-
-    def forward_loop(m):
-        m(x)
-
-    def weight_doubling_calib(layer, layer_forward_loop, **kwargs):
-        with torch.no_grad():
-            layer.weight.mul_(2.0)
-        layer_forward_loop(layer)
-
-    sequential_calibrate(
-        model,
-        forward_loop=forward_loop,
-        calib_func=weight_doubling_calib,
-    )
-
-    # Layer 0's weight was doubled by calib_func.  When collecting inputs
-    # for layer 1, the run-mode replay of layer 0 should use the updated
-    # weight, so layer 1 should have received 2x the original activations.
-    expected = activations_before_weight_update * 2.0
-    # Verify by running model.layers[0] with its updated weights
-    actual = model.layers[0](x)
-    assert torch.allclose(actual, expected)

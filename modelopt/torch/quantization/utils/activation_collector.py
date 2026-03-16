@@ -20,7 +20,6 @@ patches decoder layers with a skip / run / capture strategy for efficient
 layer-by-layer calibration.
 """
 
-import copy
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
@@ -153,46 +152,11 @@ class LayerActivationCollector:
             return tuple(LayerActivationCollector._zeros_from_meta(m) for m in meta[1])
         if tag == "list":
             return [LayerActivationCollector._zeros_from_meta(m) for m in meta[1]]
-        # "other" values are expected to be lightweight (e.g. None, small scalars);
-        # deepcopy is used defensively to avoid aliasing the stored metadata.
-        return copy.deepcopy(meta[1])
-
-    # ------------------------------------------------------------------
-    # Patched forward
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _patched_forward(self, *args, **kwargs):
-        """Unified forward bound to every decoder layer during sequential calibration.
-
-        ``self`` here is the decoder layer module (bound via ``bind_forward_method``).
-        All per-layer state is accessed through ``self._seq_calib``.
-        """
-        info: _LayerCalibState = self._seq_calib
-
-        if info.mode == "skip":
-            if info.output_meta is None:
-                raise RuntimeError(
-                    f"Layer {info.name} is in 'skip' mode but has no output_meta. "
-                    "This indicates a state-machine bug: the layer should have run "
-                    "in 'run' mode (which sets output_meta) before transitioning to 'skip'."
-                )
-            return LayerActivationCollector._zeros_from_meta(info.output_meta)
-
-        if info.mode == "run":
-            assert info.cached_inputs, (
-                f"Layer {info.name} is in 'run' mode but has no cached inputs to replay."
-            )
-            real_args, real_kwargs = info.cached_inputs.popleft()
-            output = self._original_forward(*real_args, **real_kwargs)
-            info.output_meta = LayerActivationCollector._extract_output_meta(output)
-            return output
-
-        if info.mode == "capture":
-            info.collected_inputs.append((args, kwargs))
-            raise _EarlyStopForwardError()
-
-        return self._original_forward(*args, **kwargs)
+        # "other" values are expected to be lightweight non-tensors (e.g. None, small scalars).
+        # The value is returned directly (not copied); callers must not mutate it.
+        # In practice this is safe because skip-mode outputs are immediately discarded by the
+        # downstream run-mode layer, which replays from its own cached inputs instead.
+        return meta[1]
 
     # ------------------------------------------------------------------
     # Patch / unpatch lifecycle
@@ -205,6 +169,39 @@ class LayerActivationCollector:
             decoder_layers: Pre-resolved decoder layers. If *None*, layers are
                 discovered via :meth:`get_decoder_layers`.
         """
+
+        def _patched_forward(self, *args, **kwargs):
+            """Unified forward bound to every decoder layer during sequential calibration.
+
+            ``self`` here is the decoder layer module (bound via ``bind_forward_method``).
+            All per-layer state is accessed through ``self._seq_calib``.
+            """
+            info: _LayerCalibState = self._seq_calib
+
+            if info.mode == "skip":
+                if info.output_meta is None:
+                    raise RuntimeError(
+                        f"Layer {info.name} is in 'skip' mode but has no output_meta. "
+                        "This indicates a state-machine bug: the layer should have run "
+                        "in 'run' mode (which sets output_meta) before transitioning to 'skip'."
+                    )
+                return LayerActivationCollector._zeros_from_meta(info.output_meta)
+
+            if info.mode == "run":
+                assert info.cached_inputs, (
+                    f"Layer {info.name} is in 'run' mode but has no cached inputs to replay."
+                )
+                real_args, real_kwargs = info.cached_inputs.popleft()
+                output = self._original_forward(*real_args, **real_kwargs)
+                info.output_meta = LayerActivationCollector._extract_output_meta(output)
+                return output
+
+            if info.mode == "capture":
+                info.collected_inputs.append((args, kwargs))
+                raise _EarlyStopForwardError()
+
+            return self._original_forward(*args, **kwargs)
+
         if decoder_layers is not None:
             self._decoder_layers = decoder_layers
         else:
@@ -219,7 +216,7 @@ class LayerActivationCollector:
                 layer._seq_calib = _LayerCalibState(
                     name=module_to_name.get(layer, type(layer).__name__),
                 )
-                bind_forward_method(layer, self._patched_forward, "_original_forward")
+                bind_forward_method(layer, _patched_forward, "_original_forward")
 
             def _early_stop_forward(module_self, *args, **kwargs):
                 try:
@@ -270,26 +267,22 @@ class LayerActivationCollector:
 
         if layer_idx > 1:
             done = self._decoder_layers[layer_idx - 2]._seq_calib
-            if done.output_meta is not None:
-                # output_meta is intentionally kept: skip mode needs it to produce
-                # correctly shaped zero-filled outputs for the parent forward.
-                done.mode = "skip"
-                done.cached_inputs.clear()
-            else:
-                # Layer was never run in 'run' mode (e.g. non-sequential calibration),
-                # so output_meta is unavailable.  Fall back to original forward.
-                done.mode = "original"
+            # output_meta is intentionally kept: skip mode needs it to produce
+            # correctly shaped zero-filled outputs for the parent forward.
+            done.mode = "skip"
+            done.cached_inputs.clear()
 
         if layer_idx > 0:
             prev = self._decoder_layers[layer_idx - 1]._seq_calib
-            if prev.collected_inputs:
-                prev.mode = "run"
-                prev.cached_inputs = deque(prev.collected_inputs)
-                prev.collected_inputs = []
-            else:
-                # Layer was never in capture mode (e.g. non-sequential calibration),
-                # so there are no inputs to replay.  Fall back to original forward.
-                prev.mode = "original"
+            if not prev.collected_inputs:
+                raise RuntimeError(
+                    f"Layer {layer_idx - 1} ({prev.name!r}) has no collected inputs to replay. "
+                    "Layers must be calibrated sequentially — ensure get_input_activations() "
+                    "was called for every preceding layer in order."
+                )
+            prev.mode = "run"
+            prev.cached_inputs = deque(prev.collected_inputs)
+            prev.collected_inputs = []
 
         cur = self._decoder_layers[layer_idx]._seq_calib
         cur.mode = "capture"
@@ -303,9 +296,9 @@ class LayerActivationCollector:
         for i, layer in enumerate(self._decoder_layers):
             mode = layer._seq_calib.mode
             if mode in ("skip", "run", "capture"):
-                groups.setdefault(mode, []).append(i)
+                groups.setdefault(mode, []).append(i + 1)
         parts = [f"{mode}: {groups[mode]}" for mode in ("skip", "run", "capture") if mode in groups]
-        print_rank_0(f"Calibrating layer {layer_idx}/{n} | {' | '.join(parts)}")
+        print_rank_0(f"Calibrating layer {layer_idx + 1}/{n} | {' | '.join(parts)}")
 
     # ------------------------------------------------------------------
     # Public API
@@ -341,6 +334,14 @@ class LayerActivationCollector:
             info.mode = "original"
             info.collected_inputs = []
             raise
+
+        if not info.collected_inputs:
+            info.mode = "original"
+            raise RuntimeError(
+                f"Layer {info.name!r} collected no inputs during forward_loop. "
+                "The forward loop did not reach this layer — check that forward_loop() "
+                "actually calls the model and that the layer is in the forward path."
+            )
 
         inputs = list(info.collected_inputs)
         # After capture, set to original so calib_func can call the layer's
