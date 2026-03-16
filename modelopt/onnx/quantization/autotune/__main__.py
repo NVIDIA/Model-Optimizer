@@ -26,6 +26,9 @@ from modelopt.onnx.quantization.autotune.utils import (
     get_node_filter_list,
     validate_file_path,
 )
+from modelopt.onnx.quantization.autotune.subgraph_workflow import (
+    subgraph_autotuning_workflow,
+)
 from modelopt.onnx.quantization.autotune.workflows import (
     init_benchmark_instance,
     region_pattern_autotuning_workflow,
@@ -123,20 +126,39 @@ def run_autotune() -> int:
         logger.error("Failed to initialize TensorRT benchmark")
         return 1
 
+    workflow = getattr(args, "workflow", "region")
+    logger.info(f"Autotuning workflow: {workflow}")
+
     try:
-        node_filter_list = get_node_filter_list(args.node_filter_list)
-        region_pattern_autotuning_workflow(
-            model_or_path=str(model_path),
-            output_dir=output_dir,
-            num_schemes_per_region=args.num_schemes,
-            pattern_cache_file=args.pattern_cache_file,
-            state_file=args.state_file,
-            quant_type=args.quant_type,
-            default_dq_dtype=args.default_dq_dtype,
-            qdq_baseline_model=args.qdq_baseline,
-            node_filter_list=node_filter_list,
-            verbose=args.verbose,
-        )
+        if workflow == "subgraph":
+            graph_json = getattr(args, "graph_json", None)
+            if graph_json:
+                validate_file_path(graph_json, "graph.json file")
+
+            subgraph_autotuning_workflow(
+                model_path=str(model_path),
+                output_dir=output_dir,
+                graph_json_path=graph_json,
+                quant_type=args.quant_type,
+                plugin_libraries=args.plugin_libraries,
+                schemes_per_group=args.num_schemes,
+                extra_trtexec_args=trtexec_args,
+                incremental_validation=getattr(args, "incremental_validation", True),
+            )
+        else:
+            node_filter_list = get_node_filter_list(args.node_filter_list)
+            region_pattern_autotuning_workflow(
+                model_or_path=str(model_path),
+                output_dir=output_dir,
+                num_schemes_per_region=args.num_schemes,
+                pattern_cache_file=args.pattern_cache_file,
+                state_file=args.state_file,
+                quant_type=args.quant_type,
+                default_dq_dtype=args.default_dq_dtype,
+                qdq_baseline_model=args.qdq_baseline,
+                node_filter_list=node_filter_list,
+                verbose=args.verbose,
+            )
 
         logger.info("\n" + "=" * 70)
         logger.info("✓ Autotuning completed successfully!")
@@ -182,11 +204,19 @@ Examples:
   # Use pattern cache for warm-start
   python -m modelopt.onnx.quantization.autotune --onnx_path model.onnx --pattern_cache cache.yaml
 
-  # Full example with all options
+  # Full example with all options (region workflow)
   python -m modelopt.onnx.quantization.autotune \\
       --onnx_path model.onnx --schemes_per_region 50 \\
       --pattern_cache cache.yaml --qdq_baseline baseline.onnx \\
       --quant_type int8 --verbose
+
+  # Subgraph workflow (faster, fusion-aware)
+  python -m modelopt.onnx.quantization.autotune \\
+      --onnx_path model.onnx --workflow subgraph
+
+  # Subgraph workflow with pre-generated graph.json
+  python -m modelopt.onnx.quantization.autotune \\
+      --onnx_path model.onnx --workflow subgraph --graph_json model.fp16.graph.json
         """,
     )
 
@@ -202,6 +232,30 @@ Examples:
         default=DEFAULT_OUTPUT_DIR,
         dest="output_dir",
         help=f"Output directory for results (default: {DEFAULT_OUTPUT_DIR})",
+    )
+
+    # Workflow Selection
+    workflow_group = parser.add_argument_group("Workflow Selection")
+    workflow_group.add_argument(
+        "--workflow",
+        type=str,
+        default="region",
+        choices=["region", "subgraph"],
+        help="Autotuning workflow: 'region' (pattern-based, default) or 'subgraph' (fusion-aware, faster)",
+    )
+    workflow_group.add_argument(
+        "--graph_json",
+        type=str,
+        default=None,
+        help="Path to TRT graph.json for subgraph workflow. If omitted, one is generated via trtexec FP16.",
+    )
+    workflow_group.add_argument(
+        "--incremental_validation",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        dest="incremental_validation",
+        help="Enable/disable per-group incremental validation in subgraph workflow "
+        "(default: enabled). Use --no-incremental_validation to disable.",
     )
 
     # Autotuning Strategy

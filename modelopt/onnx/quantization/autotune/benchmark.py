@@ -31,7 +31,7 @@ import importlib.util
 import os
 import re
 import shutil
-import subprocess  # nosec B404
+import subprocess  # noqa: S404 -- subprocess used with list args only, no shell=True
 import tempfile
 import time
 from abc import ABC, abstractmethod
@@ -227,6 +227,7 @@ class TrtExecBenchmark(Benchmark):
         self._base_cmd.extend(trtexec_args)
 
         self.logger.debug(f"Base command template: {' '.join(self._base_cmd)}")
+        self._profile_unsupported = False
 
     def __del__(self):
         """Cleanup temporary directory."""
@@ -237,17 +238,49 @@ class TrtExecBenchmark(Benchmark):
             except Exception as e:
                 self.logger.warning(f"Failed to cleanup temporary directory: {e}")
 
+    def _exec_and_log(self, cmd: list[str], log_file: str | None = None):
+        """Execute trtexec command and write logs."""
+        self.logger.debug(f"Running: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True)  # nosec B603
+        self._write_log_file(
+            log_file,
+            "\n".join(
+                [
+                    f"Command: {' '.join(cmd)}",
+                    f"Return code: {result.returncode}",
+                    "=" * 80,
+                    "STDOUT:",
+                    "=" * 80,
+                    result.stdout,
+                    "\n" + "=" * 80,
+                    "STDERR:",
+                    "=" * 80,
+                    result.stderr,
+                    "\n" + "=" * 80,
+                ]
+            ),
+        )
+        return result
+
     def run(
         self,
         path_or_bytes: str | bytes,
         log_file: str | None = None,
         flush_timing_cache: bool = False,
+        strip_shape_args: bool = False,
+        extra_run_args: list[str] | None = None,
+        export_profile_path: str | None = None,
     ) -> float:
         """Run benchmark using trtexec.
 
         Args:
             path_or_bytes: Path to the ONNX model (str) or raw model data (bytes)
             log_file: Optional path to save trtexec logs
+            flush_timing_cache: If True, save the timing cache to disk after engine build.
+            strip_shape_args: If True, remove shape-related args (--optShapes, --minShapes,
+                             --maxShapes) from the command. Useful for subgraph profiling.
+            extra_run_args: Additional trtexec args specific to this run.
+            export_profile_path: Path to export per-layer profiling data (JSON).
 
         Returns:
             Measured median latency in milliseconds
@@ -263,27 +296,40 @@ class TrtExecBenchmark(Benchmark):
                 model_path = self.temp_model_path
                 self.logger.debug(f"Wrote model bytes to temporary file: {model_path}")
 
-            cmd = [*self._base_cmd, f"--onnx={model_path}"]
-            self.logger.debug(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True)  # nosec B603
-            self._write_log_file(
-                log_file,
-                "\n".join(
-                    [
-                        f"Command: {' '.join(cmd)}",
-                        f"Return code: {result.returncode}",
-                        "=" * 80,
-                        "STDOUT:",
-                        "=" * 80,
-                        result.stdout,
-                        "\n" + "=" * 80,
-                        "STDERR:",
-                        "=" * 80,
-                        result.stderr,
-                        "\n" + "=" * 80,
+            cmd = list(self._base_cmd)
+
+            if strip_shape_args:
+                cmd = [
+                    c for c in cmd
+                    if not any(c.startswith(p) for p in ("--optShapes", "--minShapes", "--maxShapes"))
+                ]
+
+            cmd.append(f"--onnx={model_path}")
+
+            if extra_run_args:
+                cmd.extend(extra_run_args)
+
+            if export_profile_path and not self._profile_unsupported:
+                if not any("--separateProfileRun" in c for c in cmd):
+                    cmd.append("--separateProfileRun")
+                cmd.append("--profilingVerbosity=detailed")
+                cmd.append(f"--exportProfile={export_profile_path}")
+
+            result = self._exec_and_log(cmd, log_file)
+
+            if result.returncode != 0:
+                if "Unknown option" in (result.stderr or ""):
+                    self.logger.warning("Profiling flags unsupported, retrying without them")
+                    self._profile_unsupported = True
+                    cmd = [
+                        c for c in cmd
+                        if not any(
+                            c.startswith(p)
+                            for p in ("--separateProfileRun", "--profilingVerbosity", "--exportProfile")
+                        )
                     ]
-                ),
-            )
+                    result = self._exec_and_log(cmd, log_file)
+
             if result.returncode != 0:
                 self.logger.error(f"trtexec failed with return code {result.returncode}")
                 self.logger.error(f"stderr: {result.stderr}")
