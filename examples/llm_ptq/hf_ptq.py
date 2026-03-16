@@ -1218,6 +1218,7 @@ def parse_args() -> argparse.Namespace:
             "Does not impact non-MOE models."
         ),
     )
+
     args = parser.parse_args()
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
