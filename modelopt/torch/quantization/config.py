@@ -1444,6 +1444,30 @@ class AdaRoundConfig(QuantizeAlgorithmConfig):
         description="Controls the sharpness of the soft rounding probabilities during training.",
     )
 
+    dist_loss_weight: float = ModeloptField(
+        default=0.01,
+        title="Lambda multiplier for dist_loss regularization.",
+        description="Weight for the dist_loss regularization term during training.",
+    )
+
+    beta_start: float = ModeloptField(
+        default=20.0,
+        title="Initial beta for dist_loss annealing.",
+        description="High beta early = permissive penalty (free adaptation).",
+    )
+
+    beta_end: float = ModeloptField(
+        default=2.0,
+        title="Final beta for dist_loss annealing.",
+        description="Low beta late = sharp penalty (forces binary convergence).",
+    )
+
+    freeze_weight: bool = ModeloptField(
+        default=True,
+        title="Freeze weight gradients in adaround.",
+        description="When True, detach the floor cast so only round_logits receive gradients.",
+    )
+
     scale_after_dequant_args: dict | None = ModeloptField(
         default=None,
         title="Arguments for scale_after_dequant conversion.",

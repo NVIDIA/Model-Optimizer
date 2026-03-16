@@ -98,7 +98,11 @@ NVFP4_ADAROUND_CFG = {
         },
         "*input_quantizer": {"enable": False},
     },
-    "algorithm": {"method": "adaround", "temperature": 1.0},
+    "algorithm": {
+        "method": "adaround",
+        "temperature": 1.0,
+        "scale_after_dequant_args": {"scale_algorithm": {"method": "mse", "fp8_scale_sweep": True}},
+    },
 }
 
 
@@ -169,9 +173,17 @@ def test_quantize(model_cls, config):
         (SimpleConvLinear, mtq.INT8_DEFAULT_CFG),
         (SimpleLinear, NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG),
         (SimpleLinear, NVFP4_WEIGHT_ACT_MSE_CFG),
+        (SimpleLinear, NVFP4_ADAROUND_CFG),
     ],
 )
 def test_save_restore(model_cls, quant_config):
+    if quant_config in (
+        NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG,
+        NVFP4_WEIGHT_ACT_MSE_CFG,
+        NVFP4_ADAROUND_CFG,
+    ):
+        if get_cuda_ext_mx() is None:
+            pytest.skip("cuda_ext_mx is not available")
     test_cpu_restore = quant_config == mtq.INT8_SMOOTHQUANT_CFG
     save_restore_test(model_cls, "cuda", quant_config, test_cpu_restore=test_cpu_restore)
 
@@ -245,9 +257,7 @@ def test_adaround_grad():
     # Reference: scale_after_dequant only (no adaround)
     mtq.quantize(model_ref, NVFP4_WEIGHT_SCALE_LEARN_CFG, forward_loop)
 
-    # Step 1: quantize with scale_after_dequant
-    mtq.quantize(model, NVFP4_WEIGHT_SCALE_LEARN_CFG, forward_loop)
-    # Step 2: quantize again with adaround (skips re-quantization, only calibrates)
+    # Single call: adaround with embedded scale_after_dequant_args
     mtq.quantize(model, NVFP4_ADAROUND_CFG, forward_loop)
 
     # -- 1. Verify quantizers are upgraded to NVFP4StaticAdaRoundQuantizer --

@@ -34,6 +34,7 @@ from modelopt.torch.utils import print_rank_0
 
 from ..config import QuantizeConfig
 from ..nn import TensorQuantizer
+from ..nn.modules.tensor_quantizer import NVFP4StaticAdaRoundQuantizer
 from ..utils import (
     calibrate_with_adapters,
     disable_lora_quantizers_in_config,
@@ -280,7 +281,48 @@ class QATTrainer(ModelOptHFTrainer):
         """Training step."""
         if self.quant_cfg is not None and not is_quantized(self.model):
             self._quantize_model()
+        if not hasattr(self, "_adaround_quantizers"):
+            self._discover_adaround_quantizers()
         return super().training_step(*args, **kwargs)
+
+    def _discover_adaround_quantizers(self):
+        """One-time scan for enabled adaround quantizers."""
+        model = self.accelerator.unwrap_model(self.model)
+        self._adaround_quantizers = [
+            m
+            for m in model.modules()
+            if isinstance(m, NVFP4StaticAdaRoundQuantizer) and m._adaround_enabled
+        ]
+
+    def _get_adaround_dist_loss(self):
+        """Compute annealed AdaRound dist_loss. Returns None if no adaround quantizers."""
+        if not getattr(self, "_adaround_quantizers", None):
+            return None
+        progress = self.state.global_step / max(self.state.max_steps, 1)
+        q0 = self._adaround_quantizers[0]
+        beta = q0.beta_start + (q0.beta_end - q0.beta_start) * progress
+        self._last_adaround_beta = beta
+        reg = sum(q.dist_loss(beta=beta) for q in self._adaround_quantizers)
+        return q0.dist_loss_weight * reg
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        """Add adaround dist_loss to the base loss if adaround quantizers exist."""
+        result = super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
+        dist_loss = self._get_adaround_dist_loss()
+        if dist_loss is None:
+            return result
+        base_loss = result[0] if return_outputs else result
+        self.log(
+            {
+                "base_loss": base_loss.detach().mean().item(),
+                "adaround/dist_loss": dist_loss.detach().item(),
+                "adaround/beta": self._last_adaround_beta,
+            }
+        )
+        total_loss = base_loss + dist_loss
+        if return_outputs:
+            return (total_loss, *result[1:])
+        return total_loss
 
     def prediction_step(self, *args, **kwargs):
         """Prediction step."""

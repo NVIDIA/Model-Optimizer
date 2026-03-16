@@ -1444,6 +1444,10 @@ class NVFP4StaticAdaRoundQuantizer(StaticBlockScaleQuantizer):
         super().__init__(*args, **kwargs)
         self._adaround_enabled = False
         self.temperature = 1.0
+        self.dist_loss_weight = 0.01
+        self.beta_start = 20.0
+        self.beta_end = 2.0
+        self.freeze_weight = True
 
     @classmethod
     def from_nvfp4_quantizer(
@@ -1451,6 +1455,10 @@ class NVFP4StaticAdaRoundQuantizer(StaticBlockScaleQuantizer):
         tq: StaticBlockScaleQuantizer,
         weight_scaled: torch.Tensor | None = None,
         temperature: float = 1.0,
+        dist_loss_weight: float = 0.01,
+        beta_start: float = 20.0,
+        beta_end: float = 2.0,
+        freeze_weight: bool = True,
     ) -> "NVFP4StaticAdaRoundQuantizer":
         """Convert an NVFP4StaticQuantizer to NVFP4StaticAdaRoundQuantizer in-place.
 
@@ -1464,14 +1472,23 @@ class NVFP4StaticAdaRoundQuantizer(StaticBlockScaleQuantizer):
             f"Expected StaticBlockScaleQuantizer, got {type(tq)}"
         )
         assert tq._scale_after_dequant, "AdaRound only supported with _scale_after_dequant mode."
+
+        def _set_dist_loss_params(q):
+            q.dist_loss_weight = dist_loss_weight
+            q.beta_start = beta_start
+            q.beta_end = beta_end
+            q.freeze_weight = freeze_weight
+
         if isinstance(tq, cls):
             if weight_scaled is not None:
                 tq.enable_adaround(weight_scaled, temperature)
+            _set_dist_loss_params(tq)
             return tq
         tq.__class__ = cls
         tq._is_nvfp4_static_adaround_quantizer = True
         tq._adaround_enabled = False
         tq.temperature = temperature
+        _set_dist_loss_params(tq)
         if weight_scaled is not None:
             tq.enable_adaround(weight_scaled, temperature)
         return tq
@@ -1542,7 +1559,12 @@ class NVFP4StaticAdaRoundQuantizer(StaticBlockScaleQuantizer):
         step = fp4_step_size(w_down)
         sign = _safe_sign(inputs)
 
-        return w_down + self.get_round_prob() * step * sign
+        if self.freeze_weight:
+            w_down = w_down.detach()
+            step = step.detach()
+            sign = sign.detach()
+
+        return w_down + self.get_round_prob().to(inputs.dtype) * step * sign
 
 
 class SequentialQuantizer(nn.Sequential):
