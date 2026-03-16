@@ -21,6 +21,9 @@ model_quant:
     '*weight_quantizer':
       num_bits: 8
       axis: 0
+    '*input_quantizer':
+      enable: false
+
     default:
       enable: false
     '*block_sparse_moe.gate*':
@@ -55,8 +58,6 @@ model_quant:
     nn.LeakyReLU:
       '*':
         enable: false
-    '*input_quantizer':
-      enable: false
   algorithm: max
 kv_quant:
   quant_cfg:

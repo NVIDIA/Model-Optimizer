@@ -32,6 +32,8 @@ model_quant:
         scale_bits: [4, 3]
       num_bits: [2, 1]
       enable: true
+    '*output_quantizer':
+      enable: false
     '*q_bmm_quantizer':
       num_bits: [4, 3]
     '*k_bmm_quantizer':
@@ -42,6 +44,7 @@ model_quant:
       num_bits: [4, 3]
     transformer_blocks*bmm2_output_quantizer:
       num_bits: [4, 3]
+
     default:
       enable: false
     '*block_sparse_moe.gate*':
@@ -76,8 +79,6 @@ model_quant:
     nn.LeakyReLU:
       '*':
         enable: false
-    '*output_quantizer':
-      enable: false
   algorithm: max
 kv_quant:
   quant_cfg:

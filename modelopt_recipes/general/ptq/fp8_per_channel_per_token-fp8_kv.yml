@@ -26,6 +26,7 @@ model_quant:
       type: dynamic
       block_sizes:
         -1:
+
     default:
       enable: false
     '*block_sparse_moe.gate*':

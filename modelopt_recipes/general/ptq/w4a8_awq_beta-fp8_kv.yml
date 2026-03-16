@@ -29,6 +29,7 @@ model_quant:
     '*input_quantizer':
       num_bits: [4, 3]
       enable: true
+
     default:
       enable: false
     '*block_sparse_moe.gate*':

@@ -32,6 +32,7 @@ model_quant:
         type: dynamic
         scale_bits: [8, 0]
       enable: true
+
     default:
       enable: false
     '*block_sparse_moe.gate*':

@@ -94,7 +94,6 @@ def _load_recipe_from_file(recipe_file: Path | Traversable) -> ModelOptRecipeBas
 
     The file must contain a ``metadata`` section with at least ``recipe_type``,
     plus the type-specific sections (``model_quant`` and ``kv_quant`` for PTQ).
-    ``__base__`` inheritance inside any section is resolved by :func:`load_config`.
     """
     data = load_config(recipe_file)
 

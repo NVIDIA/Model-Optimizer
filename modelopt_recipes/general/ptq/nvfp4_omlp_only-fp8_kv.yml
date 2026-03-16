@@ -60,6 +60,7 @@ model_quant:
         scale_bits: [4, 3]
       num_bits: [2, 1]
       enable: true
+
     default:
       enable: false
     '*block_sparse_moe.gate*':

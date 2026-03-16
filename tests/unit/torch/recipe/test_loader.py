@@ -29,63 +29,8 @@ a: 1
 b: 2
 """
 
-CFG_XY = """\
-x: 1
-y: 2
-"""
-
-CFG_YZ = """\
-y: 20
-z: 30
-"""
-
 CFG_KEY_VAL = """\
 key: val
-"""
-
-CFG_ALGO_MAX = """\
-algorithm: max
-"""
-
-CFG_ALGO_MAX_EXTRA = """\
-algorithm: max
-extra: original
-"""
-
-CFG_QUANT_CFG_EMPTY = """\
-quant_cfg: {}
-"""
-
-CFG_B1 = """\
-a: 1
-b: 2
-"""
-
-CFG_B2 = """\
-b: 20
-c: 30
-"""
-
-CFG_LEAF_FROM_BASE = """\
-val: from_base
-"""
-
-CFG_LEAF_AB = """\
-a: 1
-b: 2
-"""
-
-CFG_LEAF_DEEP = """\
-val: deep
-"""
-
-# ---------------------------------------------------------------------------
-# Error-case YAML fixtures
-# ---------------------------------------------------------------------------
-
-CFG_INVALID_BASE_SCALAR = """\
-__base__:
-  model_quant: not_a_list
 """
 
 CFG_RECIPE_MISSING_TYPE = """\
@@ -131,160 +76,14 @@ quant_cfg: {}
 """
 
 # ---------------------------------------------------------------------------
-# load_config — __base__ inheritance
+# load_config — basic behaviour
 # ---------------------------------------------------------------------------
 
 
-def test_load_config_no_base(tmp_path):
-    """A config without __base__ is returned as-is."""
+def test_load_config_plain(tmp_path):
+    """A plain config is returned as-is."""
     (tmp_path / "cfg.yml").write_text(CFG_AB)
     assert load_config(tmp_path / "cfg.yml") == {"a": 1, "b": 2}
-
-
-def test_load_config_flat_base_list(tmp_path):
-    """Flat-list __base__ merges base configs into current level."""
-    base = tmp_path / "base.yml"
-    base.write_text(CFG_AB)
-    child = tmp_path / "child.yml"
-    child.write_text(f"""\
-__base__:
-  - {base}
-b: 99
-""")
-    assert load_config(child) == {"a": 1, "b": 99}
-
-
-def test_load_config_flat_base_multiple(tmp_path):
-    """Multiple flat-list bases are merged left-to-right; later entries win."""
-    b1 = tmp_path / "b1.yml"
-    b1.write_text(CFG_XY)
-    b2 = tmp_path / "b2.yml"
-    b2.write_text(CFG_YZ)
-    child = tmp_path / "child.yml"
-    child.write_text(f"""\
-__base__:
-  - {b1}
-  - {b2}
-""")
-    assert load_config(child) == {"x": 1, "y": 20, "z": 30}
-
-
-def test_load_config_flat_base_chained(tmp_path):
-    """Transitive flat-list inheritance: child → middle → grandparent."""
-    grandparent = tmp_path / "grandparent.yml"
-    grandparent.write_text(CFG_XY)
-    middle = tmp_path / "middle.yml"
-    middle.write_text(f"""\
-__base__:
-  - {grandparent}
-y: 20
-z: 30
-""")
-    child = tmp_path / "child.yml"
-    child.write_text(f"""\
-__base__:
-  - {middle}
-z: 300
-""")
-    assert load_config(child) == {"x": 1, "y": 20, "z": 300}
-
-
-def test_load_config_dict_base(tmp_path):
-    """Dict-style __base__ merges bases into each named section."""
-    mq_base = tmp_path / "mq_base.yml"
-    mq_base.write_text(CFG_ALGO_MAX)
-    kv_base = tmp_path / "kv_base.yml"
-    kv_base.write_text(CFG_QUANT_CFG_EMPTY)
-    recipe = tmp_path / "recipe.yml"
-    recipe.write_text(f"""\
-__base__:
-  model_quant:
-    - {mq_base}
-  kv_quant:
-    - {kv_base}
-""")
-    result = load_config(recipe)
-    assert result["model_quant"] == {"algorithm": "max"}
-    assert result["kv_quant"] == {"quant_cfg": {}}
-
-
-def test_load_config_dict_base_with_override(tmp_path):
-    """Inline overrides are merged on top of dict-style __base__ bases."""
-    mq_base = tmp_path / "mq_base.yml"
-    mq_base.write_text(CFG_ALGO_MAX_EXTRA)
-    recipe = tmp_path / "recipe.yml"
-    recipe.write_text(f"""\
-__base__:
-  model_quant:
-    - {mq_base}
-model_quant:
-  extra: overridden
-""")
-    result = load_config(recipe)
-    assert result["model_quant"]["algorithm"] == "max"
-    assert result["model_quant"]["extra"] == "overridden"
-
-
-def test_load_config_dict_base_multiple_per_section(tmp_path):
-    """Dict-style __base__ with multiple bases per section; later entries win."""
-    b1 = tmp_path / "b1.yml"
-    b1.write_text(CFG_B1)
-    b2 = tmp_path / "b2.yml"
-    b2.write_text(CFG_B2)
-    recipe = tmp_path / "recipe.yml"
-    recipe.write_text(f"""\
-__base__:
-  section:
-    - {b1}
-    - {b2}
-""")
-    assert load_config(recipe)["section"] == {"a": 1, "b": 20, "c": 30}
-
-
-def test_load_config_dict_base_nested(tmp_path):
-    """Dict-style __base__ supports arbitrary nesting depth."""
-    leaf = tmp_path / "leaf.yml"
-    leaf.write_text(CFG_LEAF_FROM_BASE)
-    recipe = tmp_path / "recipe.yml"
-    recipe.write_text(f"""\
-__base__:
-  section:
-    subsection:
-      - {leaf}
-""")
-    assert load_config(recipe)["section"]["subsection"] == {"val": "from_base"}
-
-
-def test_load_config_dict_base_nested_with_override(tmp_path):
-    """Nested dict-style __base__ applies inline overrides at the leaf level."""
-    leaf = tmp_path / "leaf.yml"
-    leaf.write_text(CFG_LEAF_AB)
-    recipe = tmp_path / "recipe.yml"
-    recipe.write_text(f"""\
-__base__:
-  section:
-    subsection:
-      - {leaf}
-section:
-  subsection:
-    b: 99
-""")
-    assert load_config(recipe)["section"]["subsection"] == {"a": 1, "b": 99}
-
-
-def test_load_config_dict_base_three_levels(tmp_path):
-    """Dict-style __base__ resolves correctly at three levels of nesting."""
-    leaf = tmp_path / "leaf.yml"
-    leaf.write_text(CFG_LEAF_DEEP)
-    recipe = tmp_path / "recipe.yml"
-    recipe.write_text(f"""\
-__base__:
-  a:
-    b:
-      c:
-        - {leaf}
-""")
-    assert load_config(recipe)["a"]["b"]["c"] == {"val": "deep"}
 
 
 def test_load_config_suffix_probe(tmp_path):
@@ -297,14 +96,6 @@ def test_load_config_missing_file_raises(tmp_path):
     """load_config raises ValueError for a path that does not exist."""
     with pytest.raises(ValueError, match="Cannot find config file"):
         load_config(str(tmp_path / "nonexistent"))
-
-
-def test_load_config_dict_base_non_list_raises(tmp_path):
-    """Dict-style __base__ with a scalar (non-list, non-dict) value raises ValueError."""
-    recipe = tmp_path / "recipe.yml"
-    recipe.write_text(CFG_INVALID_BASE_SCALAR)
-    with pytest.raises(ValueError, match="must be lists"):
-        load_config(recipe)
 
 
 # ---------------------------------------------------------------------------

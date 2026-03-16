@@ -24,6 +24,9 @@ model_quant:
         -1: 128
         type: static
       enable: true
+    '*input_quantizer':
+      enable: false
+
     default:
       enable: false
     '*block_sparse_moe.gate*':
@@ -58,8 +61,6 @@ model_quant:
     nn.LeakyReLU:
       '*':
         enable: false
-    '*input_quantizer':
-      enable: false
   algorithm: awq_lite
 kv_quant:
   quant_cfg:
