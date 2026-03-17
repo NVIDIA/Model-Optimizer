@@ -144,8 +144,8 @@ def _test_puzzletron_multiprocess_job(
             assert solution_0_ckpt_config_path.exists()
             assert (solution_dir / "solutions.json").exists()
 
-            # Validate lm_loss (wider tolerance for MoE: bf16 routing is slightly non-deterministic)
-            _assert_lm_loss(puzzle_dir, hf_model_name, tolerance=0.05)
+            # Validate lm_loss
+            _assert_lm_loss(puzzle_dir, hf_model_name, tolerance=0.01)
         else:
             # assertions for the score_pruning_activations step 1 (FFN pruning)
             _assert_score_pruning_activations(puzzle_dir, hf_model_name)
