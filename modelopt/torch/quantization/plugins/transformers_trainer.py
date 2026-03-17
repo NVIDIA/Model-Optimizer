@@ -283,7 +283,18 @@ class QATTrainer(ModelOptHFTrainer):
             self._quantize_model()
         if not hasattr(self, "_adaround_quantizers"):
             self._discover_adaround_quantizers()
-        return super().training_step(*args, **kwargs)
+        loss = super().training_step(*args, **kwargs)
+        # Separate backward for adaround dist_loss; loss returned above is already base_loss
+        dist_loss = self._get_adaround_dist_loss()
+        if dist_loss is not None:
+            self.accelerator.backward(dist_loss / self.current_gradient_accumulation_steps)
+            self.log(
+                {
+                    "adaround/dist_loss": dist_loss.detach().item(),
+                    "adaround/beta": self._last_adaround_beta,
+                }
+            )
+        return loss
 
     def _discover_adaround_quantizers(self):
         """One-time scan for enabled adaround quantizers."""
@@ -304,25 +315,6 @@ class QATTrainer(ModelOptHFTrainer):
         self._last_adaround_beta = beta
         reg = sum(q.dist_loss(beta=beta) for q in self._adaround_quantizers)
         return q0.dist_loss_weight * reg
-
-    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-        """Add adaround dist_loss to the base loss if adaround quantizers exist."""
-        result = super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
-        dist_loss = self._get_adaround_dist_loss()
-        if dist_loss is None:
-            return result
-        base_loss = result[0] if return_outputs else result
-        self.log(
-            {
-                "base_loss": base_loss.detach().mean().item(),
-                "adaround/dist_loss": dist_loss.detach().item(),
-                "adaround/beta": self._last_adaround_beta,
-            }
-        )
-        total_loss = base_loss + dist_loss
-        if return_outputs:
-            return (total_loss, *result[1:])
-        return total_loss
 
     def prediction_step(self, *args, **kwargs):
         """Prediction step."""
