@@ -465,12 +465,15 @@ class HFEagleModel(EagleModel):
         """Find model parts from different models and set base_{part}_path attributes."""
         base_model_parts_mapping = {
             "base_model_path": [
+                "language_model.model",
                 "model.language_model",
                 "model",
                 "backbone",
                 "language_model.backbone",
             ],
             "base_model_embeddings_path": [
+                "embed_tokens",
+                "language_model.model.embed_tokens",
                 "model.embed_tokens",
                 "backbone.embeddings",
                 "language_model.backbone.embeddings",
@@ -580,7 +583,7 @@ class HFEagleModel(EagleModel):
         # Patch for Kimi-K2-Thinking, avoid quantizing drafter
         quant_config = getattr(self.config, "quantization_config", None)
         if isinstance(quant_config, CompressedTensorsConfig):
-            quant_config.ignore.append("re:.*eagle_module.*")
+            quant_config.quantization_config.ignore.append("re:.*eagle_module.*")
 
         # Set default aux_hidden_state layers
         if (
@@ -869,7 +872,7 @@ class HFEagleModel(EagleModel):
             assert "base_model_outputs" in kwargs
             base_outputs = EagleBaseModelOutput.from_offline_dict(kwargs["base_model_outputs"])
             if base_outputs.logits is None:
-                base_outputs.logits = self.lm_head(base_outputs.out_hiddens)
+                base_outputs.logits = self._base_model_lm_head(base_outputs.out_hiddens)
             past_key_values = None
         else:
             base_outputs, past_key_values = self._base_model_forward(

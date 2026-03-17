@@ -126,9 +126,16 @@ set -x
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 NUM_NODES=${NUM_NODES:-1}
-GPU_PER_NODE=${GPU_PER_NODE:-$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)}
-TOTAL_GPU=$((NUM_NODES * GPU_PER_NODE))
-echo "Total GPUs: $TOTAL_GPU (NUM_NODES: $NUM_NODES, GPU_PER_NODE: $GPU_PER_NODE)"
+if [[ "$NUM_NODES" != 1 ]]; then
+  #Multi Node Training
+  GPU_PER_NODE=${GPU_PER_NODE:-$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)}
+  TOTAL_GPU=$((NUM_NODES * GPU_PER_NODE))
+  echo "Total GPUs: $TOTAL_GPU (NUM_NODES: $NUM_NODES, GPU_PER_NODE: $GPU_PER_NODE)"
+else
+  #Single Node Training, GPU can be specified by $CUDA_VISIBLE_DEVICES
+  TOTAL_GPU=$(python -c "import torch; print(torch.cuda.device_count())")
+  echo "Total GPUs: $TOTAL_GPU (Single Node Training)"
+fi
 # Calculate save_steps
 DEFAULT_SAVE_STEPS=$((8192 / TOTAL_GPU))
 
