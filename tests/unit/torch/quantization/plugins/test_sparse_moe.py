@@ -269,6 +269,11 @@ class TestQuantSparseMoe:
 
         assert not hasattr(converted, "expert_token_count")
 
+        # Simulate calibration mode so lazy-init triggers during forward
+        # Set _if_calib on an expert sub-module (not set by default since only the MoE
+        # block was converted, not the full model).
+        next(converted.experts.modules())._if_calib = True
+
         x = torch.randn(1, 4, 32)
         with torch.no_grad():
             converted(x)

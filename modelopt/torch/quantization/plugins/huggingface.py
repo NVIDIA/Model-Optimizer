@@ -503,14 +503,13 @@ class _QuantSparseMoe(QuantModule):
         if self._moe_calib_experts_ratio is None:
             return super().forward(hidden_states)
 
-        if not self._token_counting_initialized:
-            self._init_token_counting()
-
         is_calib = any(getattr(m, "_if_calib", False) for m in self.experts.modules())
 
         # During calibration, forward all tokens to a larger fraction of experts to improve
         # calibration coverage, then re-run with the original top_k for actual outputs.
         if is_calib:
+            if not self._token_counting_initialized:
+                self._init_token_counting()
             self._count_expert_tokens = True
             if TRANSFORMERS_VERSION_GE_5_0:
                 assert hasattr(self, "gate") and hasattr(self.gate, "top_k")
