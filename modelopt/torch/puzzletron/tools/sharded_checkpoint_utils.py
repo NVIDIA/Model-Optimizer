@@ -40,15 +40,8 @@ from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME
 from transformers.utils.hub import cached_file, get_checkpoint_shard_files
-from typing_extensions import override
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.modeling_decilm import (
-    DeciLMDecoderLayer,
-    DeciLMForCausalLM,
-    rope_type_to_class,
-)
 from modelopt.torch.puzzletron.tools.checkpoint_utils import load_model_config, load_state_dict
 from modelopt.torch.puzzletron.tools.logger import mprint
 from modelopt.torch.puzzletron.utils.dummy_modules import (
@@ -58,51 +51,6 @@ from modelopt.torch.puzzletron.utils.dummy_modules import (
     DummyWTE,
 )
 from modelopt.torch.puzzletron.utils.utils import EmptyInitOnDevice
-
-
-class DeciLMDummyBlock(DummyModule):
-    """Dummy block for DeciLM models (used by replacement_library)."""
-
-    def __init__(self, config: DeciLMConfig, block_index: int):
-        super().__init__()
-        self.config = config
-        self.block_index = block_index
-
-    @override
-    def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor | tuple[torch.Tensor, None]:
-        if self.config.block_return_only_hidden_states:
-            return x
-        else:
-            return x, None
-
-
-class DeciLMDummyWTE(DummyModule):
-    """Dummy word token embedding for DeciLM models (used by replacement_library)."""
-
-    def __init__(self, config: DeciLMConfig, dtype: torch.dtype | None = None):
-        super().__init__()
-        self.n_embd = config.get_hidden_size()
-        self.dtype = dtype
-
-    @override
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        B, T = input_ids.shape  # noqa: N806
-        result = torch.ones((B, T, self.n_embd), dtype=self.dtype, device=input_ids.device)
-        return result
-
-
-class DeciLMDummyLMHead(DummyModule):
-    """Dummy LM head for DeciLM models (used by replacement_library)."""
-
-    def __init__(self, config: DeciLMConfig):
-        super().__init__()
-        self.vocab_size = config.vocab_size
-
-    @override
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, C = x.shape  # noqa: N806
-        result = torch.ones((B, T, self.vocab_size), dtype=x.dtype, device=x.device)
-        return result
 
 
 def set_submodule(model: nn.Module, module_name: str, new_submodule: nn.Module) -> None:
@@ -145,26 +93,6 @@ def create_local_shard_(model, owned_block_indexes: set[int], descriptor, runtim
         set_submodule(model, descriptor.final_norm_name(), nn.Identity())
         if not (model.config.tie_word_embeddings and has_first_block):
             set_submodule(model, descriptor.output_embedding_name(), DummyLMHead(lm_config))
-
-    return model
-
-
-def create_dummy_model(
-    model_config: DeciLMConfig,
-    dtype: torch.dtype,
-) -> DeciLMForCausalLM:
-    with torch.device("meta"):
-        model = DeciLMForCausalLM(model_config)
-
-    rope_cls = rope_type_to_class[model_config.position_embedding_type]
-    model.model.rotary_emb = rope_cls(config=model.config)
-
-    model.model.set_input_embeddings(DeciLMDummyWTE(model.config, dtype))
-    model.model.set_final_layer_norm(nn.Identity())
-    model.set_output_embeddings(DeciLMDummyLMHead(model.config))
-
-    for block_index in range(model_config.get_num_hidden_layers()):
-        model.model.layers[block_index] = DeciLMDummyBlock(model.config, block_index)
 
     return model
 

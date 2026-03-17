@@ -59,7 +59,6 @@ from modelopt.torch.puzzletron.tools.checkpoint_utils import (
 )
 from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import save_model_config
 from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import (
-    create_dummy_model,
     is_in_safetensors_format,
     load_and_shard_model,
     load_sharded_state_dict,
