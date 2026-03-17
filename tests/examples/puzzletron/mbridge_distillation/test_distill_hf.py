@@ -16,6 +16,7 @@
 
 from pathlib import Path
 
+import torch
 from _test_utils.examples.run_command import run_example_command
 from _test_utils.torch.distributed.utils import get_free_port
 from _test_utils.torch.puzzletron.utils import create_and_save_small_hf_model, create_tokenizer
@@ -40,9 +41,8 @@ def test_distill_hf(project_root_path: Path, tmp_path: Path):
     hf_export_dir = tmp_path / "hf_export"
 
     # Build command-line arguments for distill_hf.py
-    # Use torchrun for distributed execution (single GPU for testing)
-    nproc_per_node = 1
-    tp_size = 1
+    nproc_per_node = torch.cuda.device_count()
+    tp_size = nproc_per_node
     train_iters = 5
 
     cmd_parts = [
