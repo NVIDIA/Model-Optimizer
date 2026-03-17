@@ -36,6 +36,7 @@ NVIDIA Model Optimizer Changelog
 **Misc**
 
 - Migrated project metadata from ``setup.py`` to a fully declarative ``pyproject.toml``.
+- Enable Python 3.13 wheel support and unit tests in CI/CD
 
 0.42 (2026-02-xx)
 ^^^^^^^^^^^^^^^^^
