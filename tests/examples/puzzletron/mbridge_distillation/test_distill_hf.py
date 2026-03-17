@@ -36,13 +36,8 @@ def test_distill_hf(project_root_path: Path, tmp_path: Path):
         project_root_path, tmp_path
     )
 
-    # Prepare output directory
     output_dir = tmp_path / "distill_output"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Prepare HF export directory
     hf_export_dir = tmp_path / "hf_export"
-    hf_export_dir.mkdir(parents=True, exist_ok=True)
 
     # Build command-line arguments for distill_hf.py
     # Use torchrun for distributed execution (single GPU for testing)
