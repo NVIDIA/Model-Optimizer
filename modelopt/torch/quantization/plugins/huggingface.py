@@ -500,7 +500,7 @@ class _QuantSparseMoe(QuantModule):
             self.expert_token_count += counts.to(self.expert_token_count.device)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if not self._moe_calib_experts_ratio:
+        if self._moe_calib_experts_ratio is None:
             return super().forward(hidden_states)
 
         if not self._token_counting_initialized:
@@ -556,7 +556,7 @@ class _QuantSparseMoe(QuantModule):
 
         Skipped when _moe_calib_experts_ratio is set, as each expert is calibrated independently.
         """
-        if self._moe_calib_experts_ratio:
+        if self._moe_calib_experts_ratio is not None:
             return
         sync_moe_expert_amax(self.experts)
 

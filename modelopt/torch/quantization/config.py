@@ -1055,6 +1055,8 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
 
     moe_calib_experts_ratio: float | None = ModeloptField(
         default=None,
+        gt=0.0,
+        le=1.0,
         title="% of experts to calibrate during forward pass.",
         description=(
             "If specified, we force forward tokens to % of experts during the calibration"
