@@ -1385,7 +1385,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
     def _fake_quantize(self, inputs):
         """Fake quantization using two-level scaling with _amax and _global_amax."""
         if self._scale_after_dequant:
-            scale_raw = self._per_block_scale.clamp(min=0)
+            scale_raw = _to_local(self._per_block_scale).clamp(min=0)
 
             if self._quantize_scales:
                 scale = scaled_e4m3(scale_raw, self._per_tensor_scale, None, 4, 3)
@@ -1414,6 +1414,18 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
 
 
 NVFP4StaticQuantizer = StaticBlockScaleQuantizer
+
+
+def _to_local(t: torch.Tensor) -> torch.Tensor:
+    """Convert DTensor to local tensor (no-op for regular tensors).
+
+    Under FSDP2, learnable parameters are DTensors but the quantizer forward
+    operates on local tensors (see TensorQuantizer.forward DTensor handling).
+    to_local() preserves autograd so gradients flow back to the DTensor parameter.
+    """
+    if DTensor is not None and isinstance(t, DTensor):
+        return t.to_local()
+    return t
 
 
 def _safe_sign(x: torch.Tensor) -> torch.Tensor:
@@ -1534,7 +1546,8 @@ class NVFP4StaticAdaRoundQuantizer(StaticBlockScaleQuantizer):
         In eval mode, returns hard rounding decisions (0 or 1).
         In train mode, returns soft (continuous) probabilities.
         """
-        round_prob = (torch.sigmoid(self.round_logits / self.temperature) * 1.2 - 0.1).clamp(0, 1)
+        round_logits = _to_local(self.round_logits)
+        round_prob = (torch.sigmoid(round_logits / self.temperature) * 1.2 - 0.1).clamp(0, 1)
         if not self.training:
             round_prob = (round_prob > 0.5).to(round_prob.dtype)
         return round_prob

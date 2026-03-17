@@ -497,13 +497,13 @@ def static_blockwise_fp4_step_size(
         x: [NUM_BLOCKS, BLOCK_SIZE] on CUDA. Should contain floor-rounded FP4 values.
 
     Returns:
-        Step size tensor of the same shape, in float32.
+        Step size tensor of the same shape and dtype as input.
     """
     assert x.ndim == 2
     NUM_BLOCKS, BLOCK_SIZE = x.shape
 
     x_flat = x.contiguous().view(-1)
-    y_flat = torch.empty(x_flat.shape, dtype=torch.float32, device=x.device)
+    y_flat = torch.empty(x_flat.shape, dtype=x.dtype, device=x.device)
 
     grid = (NUM_BLOCKS,)
 
