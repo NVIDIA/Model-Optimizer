@@ -1142,61 +1142,39 @@ class RankedChoiceVotingHookNemotronH(RankedChoiceVotingHook):
 
 
 class Qwen3VLRemoveExpertsIndependentHook(RemoveExpertsIndependentHook):
-    """Expert removal importance hook for Qwen3-VL models.
-
-    TODO: Implement get_router_logits_and_routed_experts based on Qwen3-VL MoE forward pass.
-    """
+    """Expert removal importance hook for Qwen3-VL models."""
 
     def get_router_logits_and_routed_experts(
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Extract router logits and expert outputs for Qwen3-VL MoE.
 
-        Note: This is a placeholder implementation. Implement based on Qwen3VLMoeSparseMoe forward.
+        Based on Qwen3VLMoeSparseMoe forward pass.
         """
-        batch_size = (
-            hidden_states.shape[0] * hidden_states.shape[1]
-            if hidden_states.ndim > 2
-            else hidden_states.shape[0]
+        orig_shape = hidden_states.shape
+
+        # Flatten to (num_tokens, hidden_size) for processing
+        hidden_states_flat = hidden_states.reshape(-1, self.moe.hidden_size)
+
+        if router_logits is None:
+            router_logits = self.moe.gate(hidden_states_flat)
+
+        routing_weights = torch.nn.functional.softmax(router_logits, dim=-1, dtype=torch.float)
+        routing_weights, router_indices = torch.topk(routing_weights, self.moe.top_k, dim=-1)
+        routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
+        routing_weights = routing_weights.to(hidden_states_flat.dtype)
+        router_weights = torch.zeros_like(router_logits).scatter_(
+            1, router_indices, routing_weights
         )
-        router_logits_out = torch.zeros(
-            batch_size, self.num_local_experts, device=hidden_states.device
-        )
-        routed_experts = hidden_states.view(-1, hidden_states.shape[-1])
-        return router_logits_out, routed_experts
 
+        # Reshape hidden_states for moe.experts (expects 3D: batch, seq, hidden)
+        # router_weights and router_indices remain 2D (num_tokens, num_experts)
+        batch_size = orig_shape[0] if hidden_states.ndim == 3 else 1
+        hidden_states_3d = hidden_states_flat.reshape(batch_size, -1, self.moe.hidden_size)
 
-class GptOssRemoveExpertsIndependentHook(RemoveExpertsIndependentHook):
-    """Expert removal importance hook for GPT-OSS models.
+        routed_out = self.moe.experts(hidden_states_3d, router_weights, router_indices)
 
-    TODO: Implement get_router_logits_and_routed_experts based on GPT-OSS MoE forward pass.
-    This is a placeholder implementation that allows the framework to run.
-    """
+        # Return in same shape as input
+        routed_out = routed_out.reshape(*orig_shape)
 
-    def get_router_logits_and_routed_experts(
-        self, hidden_states: torch.Tensor, router_logits: torch.Tensor | None = None
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Extract router logits and expert outputs for GPT-OSS MoE.
-
-        Note: This is a placeholder implementation. For proper expert scoring,
-        implement based on GptOssSparseMoeBlock forward pass.
-
-        Args:
-            hidden_states: Input tensor of shape (batch, seq_len, hidden_dim)
-            router_logits: Optional pre-computed router logits
-
-        Returns:
-            tuple of (router_logits, routed_experts):
-                - router_logits: Shape (num_tokens, num_local_experts) - zeros as placeholder
-                - routed_experts: Original hidden states (no-op)
-        """
-        batch_size = (
-            hidden_states.shape[0] * hidden_states.shape[1]
-            if hidden_states.ndim > 2
-            else hidden_states.shape[0]
-        )
-        router_logits_out = torch.zeros(
-            batch_size, self.num_local_experts, device=hidden_states.device
-        )
-        routed_experts = hidden_states.view(-1, hidden_states.shape[-1])
-        return router_logits_out, routed_experts
+        return router_logits, routed_out

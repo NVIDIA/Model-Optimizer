@@ -138,6 +138,12 @@ class NemotronHModelDescriptor(ModelDescriptor):
         dummy_block = super().create_dummy_block(original_layer, block_index)
         # Required by `NemotronHModel.forward`.
         dummy_block.block_type = original_layer.block_type
+        # Preserve layer_idx if it exists (used by _block_no_op_post_init)
+        if hasattr(original_layer, "layer_idx"):
+            dummy_block.layer_idx = original_layer.layer_idx
+        # Preserve config if it exists (used by _block_no_op_post_init to access block_configs)
+        if hasattr(original_layer, "config"):
+            dummy_block.config = original_layer.config
         return dummy_block
 
     @staticmethod
