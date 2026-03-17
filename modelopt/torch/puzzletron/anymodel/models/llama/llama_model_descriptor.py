@@ -39,6 +39,7 @@ from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import BlockC
 from modelopt.torch.puzzletron.pruning.ffn_intermediate_pruning_mixin import (
     FFNIntermediateLayerDescriptor,
 )
+from modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin import KVHeadsLayerDescriptor
 
 
 @ModelDescriptorFactory.register_decorator("llama")
@@ -128,4 +129,13 @@ class LlamaFFNIntermediateLayerDescriptor(FFNIntermediateLayerDescriptor):
     ffn_prefix_name: str = "model.layers.{layer_idx}.mlp"
     linear_weight_names: List[str] = field(
         default_factory=lambda: ["down_proj", "gate_proj", "up_proj"]
+    )
+
+
+@dataclass
+class LlamaKVHeadsLayerDescriptor(KVHeadsLayerDescriptor):
+    o_proj_name: str = "self_attn.o_proj"
+    attn_prefix_name: str = "model.layers.{layer_idx}.self_attn"
+    qkvo_weight_names: List[str] = field(
+        default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"]
     )
