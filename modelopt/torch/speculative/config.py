@@ -71,10 +71,6 @@ class EagleConfig(ModeloptBaseConfig):
         default=False, description=("Whether to use feature hidden states distillation.")
     )
 
-    eagle_self_logit_distillation: bool = ModeloptField(
-        default=True, description=("Whether to use logit distillation.")
-    )
-
     eagle_freeze_base_model: bool = ModeloptField(
         default=True, description=("Whether to freeze base model during eagle module training.")
     )

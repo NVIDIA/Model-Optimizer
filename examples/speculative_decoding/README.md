@@ -8,6 +8,9 @@ This folder contains an end-to-end runnable speculative decoding fine‑tuning p
 
 This example focuses on training with Hugging Face. To train with Megatron‑LM, see the [Megatron‑LM example](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt).
 
+For full documentation on the EAGLE3 algorithm, configuration options, and best practices, see the
+[Speculative Decoding documentation](https://nvidia.github.io/Model-Optimizer/guides/5_speculative_decoding.html).
+
 ## Contents
 
 <div align="center">
@@ -19,8 +22,9 @@ This example focuses on training with Hugging Face. To train with Megatron‑LM,
 | Online Training | Train draft model alongside base model in GPU memory | \[[Link](#training-draft-model-with-online-base-model)\] |
 | Offline Training | Train draft model using pre-computed hidden states | \[[Link](#training-draft-model-with-offline-base-model)\] |
 | After Training | Evaluation, export and deployment | \[[Link](#model-validation)\] |
-| Advanced Usage | Data synthesis, vocab compression, and configuration | \[[Link](#advanced-usage)\] |
+| Custom Datasets | Other dataset options and custom data format | \[[Link](#custom-datasets)\] |
 | Support Matrix | Supported models for speculative decoding training | \[[Link](#support-matrix)\] |
+| Model-Specific Guides | Step-by-step notebooks for individual models | \[[Link](#model-specific-guides)\] |
 | Speculation Module Checkpoints | View pre-trained speculation modules ready to deploy! | \[[Link](#speculation-module-checkpoints)\] |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] |
 
@@ -51,7 +55,9 @@ We use [Daring-Anteater](https://huggingface.co/datasets/nvidia/Daring-Anteater)
 python prepare_input_conversations/add_daring_anteater.py
 ```
 
-See [other-datasets](#other-datasets) section for other dataset options and instruction for user-provided data.
+See the [Custom Datasets](#custom-datasets) section for other dataset options and instructions for user-provided data.
+
+For higher acceptance rates, consider training on **model-generated conversations** — see [Best Practices: Data Synthesis](https://nvidia.github.io/Model-Optimizer/guides/5_speculative_decoding.html#data-synthesis) for step-by-step instructions.
 
 ## Getting Started: Simplified Workflow
 
@@ -81,33 +87,34 @@ For small base models that fit in GPU memory, we can collocate them with draft m
 FSDP2 is used by default. To enable context parallelism for long-context training, specify `--cp_size n`.
 The saved modelopt checkpoint is similar in architecture to HF models. It can be further optimized through **ModelOpt**, e.g., PTQ and QAT.
 
+To customize the draft model architecture (number of layers, MLP size, etc.) or enable draft vocabulary compression, see [Best Practices: Configuring the Draft Model](https://nvidia.github.io/Model-Optimizer/guides/5_speculative_decoding.html#configuring-the-draft-model) and [Draft Vocabulary Compression](https://nvidia.github.io/Model-Optimizer/guides/5_speculative_decoding.html#draft-vocabulary-compression).
+
 ## Training Draft Model with Offline Base Model
 
 For large models, you can export intermediate hidden states to disk and train only the draft model. This significantly reduces GPU memory requirements, but requires several to tens of terabytes of disk storage depending on dataset size.
 
-### Dumpping Hidden States to Disk
+### Dumping Hidden States to Disk
 
-We support two backends for generating base model hidden states. For better effciency, it is recommended to use TRT-LLM:
+Two backends are supported. TRT-LLM is recommended for higher throughput (requires TRT-LLM installation):
 
 ```bash
 python collect_hidden_states/compute_hidden_states_trtllm.py \
             --model $BASE_MODEL \
-            --input-file input_conversations/daring-anteater.jsonl \
+            --input-data input_conversations/daring-anteater.jsonl \
             --output-dir $HIDDEN_STATES_DIR
 ```
 
-**NOTE**: TRT-LLM installation needed for the above command.
-
-Alternatively, you can generate the same hidden states with HF:
+HuggingFace backend (no extra dependencies):
 
 ```bash
 python collect_hidden_states/compute_hidden_states_hf.py \
             --model $BASE_MODEL \
-            --input-file input_conversations/daring-anteater.jsonl  \
+            --input-data input_conversations/daring-anteater.jsonl \
             --output-dir $HIDDEN_STATES_DIR
 ```
 
-**NOTE**: See [`run_hf_compute_hiddens_dp.sh`](./collect_hidden_states/run_hf_compute_hiddens_dp.sh) and [`run_trtllm_compute_hiddens_dp.sh`](./collect_hidden_states/run_trtllm_compute_hiddens_dp.sh) for a simple example using data parallelism (DP) to accelerate hidden state generation.
+See [`run_hf_compute_hiddens_dp.sh`](./collect_hidden_states/run_hf_compute_hiddens_dp.sh) and [`run_trtllm_compute_hiddens_dp.sh`](./collect_hidden_states/run_trtllm_compute_hiddens_dp.sh) for data-parallel hidden state generation.
+For a detailed explanation of offline training, see the [Workflow documentation](https://nvidia.github.io/Model-Optimizer/guides/5_speculative_decoding.html#offline-training).
 
 ### Train Draft Model with Dumped Hidden States
 
@@ -142,50 +149,15 @@ This exports the model from a ModelOpt checkpoint to a deployment-compatible for
 
 ## Deployment
 
-The exported checkpoint can be deployed on TRT-LLM or SGLang.
+The exported checkpoint can be deployed on TRT-LLM, vLLM, or SGLang. For full deployment
+instructions including server configuration, see the
+[Deployment section in the documentation](https://nvidia.github.io/Model-Optimizer/guides/5_speculative_decoding.html#deployment).
 
-### TRT-LLM
-
-To serve the checkpoint with TRT-LLM, run trtllm-serve with:
-
-```bash
-trtllm-serve <base_model_checkpoint> --host 0.0.0.0 --port 8000 --backend pytorch --max_batch_size 32 --max_num_tokens 8192 --max_seq_len 8192 --extra_llm_api_options extra-llm-api-config.yml
-```
-
-, with `extra-llm-api-config.yml` being
-
-```yaml
-enable_attention_dp: false
-disable_overlap_scheduler: true
-enable_autotuner: false
-
-cuda_graph_config:
-    max_batch_size: 1
-
-speculative_config:
-    decoding_type: Eagle
-    max_draft_len: 3
-    speculative_model_dir: <draft_model_checkpoint>
-
-kv_cache_config:
-    enable_block_reuse: false
-```
-
-Please refer to [TRT-LLM Doc: Speculative Decoding](https://nvidia.github.io/TensorRT-LLM/examples/llm_speculative_decoding.html) for detailed usage.
-
-### vLLM
-
-Please refer to [VLLM Doc: Speculative Decoding](https://docs.vllm.ai/en/latest/features/spec_decode/) for detailed usage.
-
-Optionally, you can convert the exported checkpoint to contain target model information, which is accepted by vLLM to simplify depployment:
+For vLLM, you can optionally convert the exported checkpoint to include target model metadata:
 
 ```bash
 python scripts/convert_to_vllm_ckpt.py --input <exported_ckpt> --verifier <target_model> --output <output_dir>
 ```
-
-### SGLang
-
-Please refer to [SGLang Doc: Speculative Decoding](https://docs.sglang.ai/advanced_features/speculative_decoding.html#EAGLE-3-Decoding) for detailed usage.
 
 ### SpecDec Bench
 
@@ -195,9 +167,7 @@ One can also use [examples/specdec_bench](../specdec_bench) to validate the trai
 
 See more details on deployment of quantized model to TRTLLM [here](../llm_ptq/README.md).
 
-## Advanced Usage
-
-### Other Datasets
+## Custom Datasets
 
 In addition to `daring-anteater`, we provide scripts for adding several other commonly used datasets in `prepare_input_conversations`:
 
@@ -219,106 +189,6 @@ To use your own datasets, please preprocess your data into a `.jsonl` file with 
 }
 ```
 
-### Data Synthesis
-
-To achieve higher acceptance rates during speculative decoding, it is beneficial to use conversations generated by the base model as training data. This ensures that the draft model's output distribution closely aligns with that of the base model.
-
-To prepare such data, we launch an inference server with the base model:
-
-```bash
-pip install vllm
-vllm serve meta-llama/Llama-3.2-1B-Instruct --api-key token-abc123 --port 8000  --tensor-parallel-size 1
-```
-
-Note: Add `--quantization=modelopt` flag for quantized models.
-
-Then, we generate conversations with the base model using prompts from Daring-Anteater:
-
-```bash
-python scripts/server_generate.py --data_path input_conversations/daring-anteater.jsonl --output_path synthetic/train.jsonl
-```
-
-To add a system prompt, use the `--system_prompt <system_prompt_text>` argument.
-
-For large scale data generation, please see [SLURM prepare data](SLURM_prepare_data.md) for SLURM support.
-
-### Configuring Draft Model
-
-For EAGLE‑1 and EAGLE‑3 we provide a [default model architecture config](https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt/torch/speculative/config.py#L37) in ModelOpt. You can override default settings by providing an additional JSON dict. E.g. To use 2-layer eagle with 8192 intermediate size for MLP, set `eagle_config.json` to:
-
-```json
-{
-    "num_hidden_layers": 2,
-    "intermediate_size":8192
-}
-```
-
-### Draft Vocabulary Compression
-
-We can optionally use smaller vocab size for the draft model for faster training and inference. E.g. Llama3.2-1B has a vocab size of 128256. In this example, we construct a draft vocab mapping of size 32k by finding the most commonly appeared vocabs in our training set:
-
-```bash
-python scripts/calibrate_draft_vocab.py --model meta-llama/Llama-3.2-1B-Instruct --data input_conversations/daring-anteater.jsonl --draft_vocab_size 32000 --save_dir draft_vocab_cache
-```
-
-This will produce a `d2t.pt` file in `save_dir`, which is the mapping from draft token to target token. During inference, draft tokens can be mapped back to target tokens by `target_token = draft_token + d2t[draft_token]`.
-
-Then, simply set `{"draft_vocab_size":32000}` in `eagle_config.json` and include `--draft_vocab_cache <path_to_d2t.pt>` when running `./launch_train.sh`. The draft model will use this provided vocab table during training and export.
-
-### Interact with `modelopt.torch.speculative`
-
-`main.py` provides an example for converting a HF base model for speculative decoding and training it. It consists of a few simple steps:
-First, load the base model and tokenizer from Hugging Face:
-
-```python
-model = transformers.AutoModelForCausalLM.from_pretrained(
-    "<path to your pretrained model>"
-)
-```
-
-Then, load default eagle config and make necessary overwrites:
-
-```python
-# Load default config
-config = {
-    "eagle1": EAGLE1_DEFAULT_CFG,
-    "eagle3": EAGLE3_DEFAULT_CFG,
-}[training_args.mode]["config"]
-
-# overwrite config with custom config
-config["eagle_architecture_config"].update({"<overwrite_keys>": "<overwrite_values>"})
-
-# Mandatory: hidden size, vocab size and max position embeddings must match base model
-config["eagle_architecture_config"].update(
-    {
-        "hidden_size": model.config.hidden_size,
-        "vocab_size": model.config.vocab_size,
-        "max_position_embeddings": model.config.max_position_embeddings,
-    }
-)
-```
-
-Then, we convert model to a speculative decoding model:
-
-```python
-mtsp.convert(model, [("eagle", config)])
-```
-
-This will modify the model in-place with eagle training forward, making it compatible with HF trainer:
-
-```python
-# Create a trainer
-trainer = transformers.Trainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
-trainer._move_model_to_device(model, trainer.args.device)
-
-# Enable HF checkpointing so that the saved model will contain the speculative decoding module
-mto.enable_huggingface_checkpointing()
-
-trainer.train(resume_from_checkpoint=checkpoint)
-trainer.save_state()
-trainer.save_model("<path to the output directory>")
-```
-
 ## Support Matrix
 
 | Model | Medusa | EAGLE1/2 | EAGLE3 |
@@ -328,6 +198,14 @@ trainer.save_model("<path to the output directory>")
 | Mistral | ✅ | ✅ | ✅ |
 | Phi 3 | ✅ | ✅ | ✅ |
 | QWen 1.5,2,2.5,3 | ✅ | ✅ | ✅ |
+
+## Model-Specific Guides
+
+The following step-by-step notebooks cover EAGLE3 training for specific models:
+
+| Model | Guide |
+| :---: | :---: |
+| Cosmos Reason 2 | [Notebook](guides/train_eagle_head_cosmos_reason2.ipynb) |
 
 ## Speculation Module Checkpoints
 

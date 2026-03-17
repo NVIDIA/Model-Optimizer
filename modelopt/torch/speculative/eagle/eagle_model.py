@@ -31,7 +31,6 @@ class EagleModel(DynamicModule):
         """Base Eagle Model modify function. Child class should implement the details."""
         self.eagle_offline = config.eagle_offline
         self.eagle_hidden_state_distillation = config.eagle_hidden_state_distillation
-        self.eagle_self_logit_distillation = config.eagle_self_logit_distillation
         self.eagle_freeze_base_model = config.eagle_freeze_base_model
         self.eagle_report_acc = config.eagle_report_acc
         self.eagle_reuse_base_decoder = config.eagle_reuse_base_decoder
