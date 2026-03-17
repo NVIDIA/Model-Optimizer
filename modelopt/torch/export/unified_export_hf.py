@@ -670,6 +670,42 @@ def _process_quantized_modules(
                         _export_quantized_weight(sub_module, dtype, weight_name)
 
 
+def _reconstruct_step3p5_moe_linear(model: nn.Module) -> None:
+    """Reconstruct _QuantMoELinear per-expert weights back to original 3D MoELinear format.
+
+    After _process_quantized_modules, each expert's nn.Linear inside _QuantMoELinear has:
+      - weight: fp4-quantized tensor [out_features, in_features]
+      - weight_scale, weight_scale_2: per-block / global scales
+      - input_scale: activation scale (if calibrated)
+
+    This stacks them back into the original MoELinear layout so the exported state_dict
+    uses the original key names (e.g. moe.up_proj.weight with shape [N, out, in]).
+    """
+    for _, module in model.named_modules():
+        if type(module).__name__ != "_QuantMoELinear":
+            continue
+
+        n = module.num_experts
+        experts = module.experts
+
+        # Reconstruct 3D weight: [num_experts, out_features, in_features]
+        module.weight = nn.Parameter(
+            torch.stack([experts[i].weight.data for i in range(n)]),
+            requires_grad=False,
+        )
+
+        # Stack per-expert scales back under the original attribute names
+        for attr in ("weight_scale", "weight_scale_2", "input_scale"):
+            if hasattr(experts[0], attr):
+                module.register_buffer(
+                    attr,
+                    torch.stack([getattr(experts[i], attr) for i in range(n)]),
+                )
+
+        # Remove expanded experts — the reconstructed 3D tensors replace them
+        del module.experts
+
+
 def _export_transformers_checkpoint(
     model: nn.Module, dtype: torch.dtype | None = None, is_modelopt_qlora: bool = False, **kwargs
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -790,6 +826,9 @@ def _export_transformers_checkpoint(
 
     # Process all quantized modules and export weights
     _process_quantized_modules(model, dtype, is_modelopt_qlora)
+
+    # Reconstruct Step3p5 MoELinear: per-expert _QuantLinear weights → original 3D format
+    _reconstruct_step3p5_moe_linear(model)
 
     if accelerator is not None:
         # Gather state_dict from all ranks

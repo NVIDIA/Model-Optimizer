@@ -1470,28 +1470,43 @@ LayerActivationCollector.register_decoder_layer_support(
 
 
 class _QuantMoELinear(QuantModule):
-    """Quantization wrapper for MoELinear modules (fused expert weights).
+    """Quantization wrapper for Step3p5 MoELinear modules (fused expert weights).
 
-    MoELinear has weight shape [num_experts, out_features, in_features].
-    During forward, it selects weight[expert_id] and performs F.linear.
-    This wrapper adds input and weight quantizers while preserving the original forward logic.
+    MoELinear has weight shape [num_experts, out_features, in_features] with
+    forward(x, expert_id). We expand it into per-expert nn.Linear modules so
+    each expert gets its own weight_quantizer and input_quantizer, calibrated
+    only on tokens actually routed to that expert.
+
+    On export, _reconstruct_step3p5_moe_linear() stacks the per-expert quantized
+    weights and scales back into the original 3D format.
     """
 
     def _setup(self):
-        self.input_quantizer = TensorQuantizer()
-        self.weight_quantizer = TensorQuantizer()
-        self.output_quantizer = TensorQuantizer()
-        self.output_quantizer.disable()
+        from accelerate import init_empty_weights
+
+        dtype, device = self.weight.dtype, self.weight.device
+
+        with init_empty_weights():
+            experts = nn.ModuleList(
+                [
+                    nn.Linear(self.in_features, self.out_features, bias=False)
+                    for _ in range(self.num_experts)
+                ]
+            )
+
+        for i in range(self.num_experts):
+            experts[i].to_empty(device=device)
+            with torch.no_grad():
+                experts[i].weight.data = self.weight[i].detach().to(dtype=dtype, device=device)
+
+        delattr(self, "weight")
+        self.experts = experts
 
     def forward(self, x, expert_id):
-        # Quantize input
-        x = self.input_quantizer(x)
-        # Select expert weight and quantize it
-        expert_weight = self.weight[expert_id]
-        expert_weight = self.weight_quantizer(expert_weight)
-        # Perform linear operation (matching original dtype handling)
-        x = linear(x.float(), expert_weight.float())
-        return x
+        # experts[expert_id] is a _QuantLinear after quantization wrapping,
+        # providing per-expert input_quantizer and weight_quantizer.
+        # Cast to float32 to match original MoELinear forward behavior.
+        return self.experts[expert_id](x).float()
 
 
 def register_step3p5_moe_on_the_fly(model):
