@@ -202,7 +202,6 @@ class TestQuantSparseMoe:
 
         converted = QuantModuleRegistry.convert(moe_block)
         assert converted._moe_calib_experts_ratio is None
-        assert converted._moe_count_expert_calib_tokens is False
         assert not hasattr(converted, "expert_token_count")
 
     def test_forward_default_config_passthrough(self):
@@ -259,14 +258,14 @@ class TestQuantSparseMoe:
             assert converted.top_k == original_top_k
 
     def test_token_counting_lazy_init(self):
-        """When moe_count_expert_calib_tokens is enabled, token counting infra is lazy-inited."""
+        """When moe_calib_experts_ratio > 0, token counting infra is lazy-inited."""
         model = get_tiny_qwen3_moe()
         moe_block = self._get_moe_block(model)
         if QuantModuleRegistry.get(type(moe_block)) is None:
             register_sparse_moe_on_the_fly(model)
 
         converted = QuantModuleRegistry.convert(moe_block)
-        converted._moe_count_expert_calib_tokens = True
+        converted._moe_calib_experts_ratio = 1.0
 
         assert not hasattr(converted, "expert_token_count")
 
@@ -306,7 +305,6 @@ def test_qwen3_moe_quantize_with_token_forcing_and_counting():
     quant_cfg["algorithm"] = {
         "method": "max",
         "moe_calib_experts_ratio": 1.0,
-        "moe_count_expert_calib_tokens": True,
     }
 
     def calib_fn(model):
