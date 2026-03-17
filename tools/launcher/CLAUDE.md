@@ -45,7 +45,7 @@ pipeline:
   global_vars:
     hf_local: /hf-local/
   task_0:
-    script: common/megatron-lm/quantize/quantize.sh
+    script: common/megatron_lm/quantize/quantize.sh
     args:
       - --calib-dataset-path-or-name <<global_vars.hf_local>>abisee/cnn_dailymail
     environment:
@@ -110,10 +110,18 @@ The same YAML works with both launchers:
 
 ```shell
 # nmm-sandbox (internal)
-uv run slurm.py --yaml modules/Model-Optimizer/launcher/Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
+uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
 
-# Model-Optimizer/launcher (public)
+# Model-Optimizer/tools/launcher (public)
 uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
 ```
 
 Differences: `slurm.py` has internal cluster factories, `job_yaml` batch mode (via `tools/run_job_yaml.sh`), CI review integration, and `SLURM_CLUSTER` env var for factory selection.
+
+## Further Reading
+
+- [docs/configuration.md](docs/configuration.md) — YAML formats, overrides, hf_local
+- [docs/architecture.md](docs/architecture.md) — Shared core, factory system, typed tasks, mount mechanism
+- [docs/testing.md](docs/testing.md) — Running tests locally and in CI
+- [docs/claude_code.md](docs/claude_code.md) — Claude Code workflows
+- [docs/contributing.md](docs/contributing.md) — Adding models, typed tasks, bug reporting

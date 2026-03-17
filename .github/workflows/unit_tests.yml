@@ -12,7 +12,7 @@ on:
       - "tests/unit/**"
       - "pyproject.toml"
       - "tox.ini"
-      - "launcher/**"
+      - "tools/launcher/**"
   schedule:
     - cron: "0 0 * * *" # Nightly
   workflow_dispatch: # On-demand
@@ -109,7 +109,7 @@ jobs:
         with:
           submodules: recursive
       - name: Run launcher tests
-        working-directory: launcher
+        working-directory: tools/launcher
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
           export PATH="$HOME/.local/bin:$PATH"

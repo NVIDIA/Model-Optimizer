@@ -16,7 +16,7 @@
 """Fixtures for launcher unit tests.
 
 Run from the launcher directory:
-    cd Model-Optimizer/launcher
+    cd Model-Optimizer/tools/launcher
     uv pip install pytest
     uv run python3 -m pytest tests/ -v
 

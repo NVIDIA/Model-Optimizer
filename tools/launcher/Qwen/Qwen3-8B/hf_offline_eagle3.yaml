@@ -10,7 +10,7 @@
 #
 # Usage:
 #   uv run launch.py --yaml Qwen/Qwen3-8B/hf_offline_eagle3.yaml --yes
-#   uv run slurm.py --yaml modules/Model-Optimizer/launcher/Qwen/Qwen3-8B/hf_offline_eagle3.yaml --yes
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/Qwen/Qwen3-8B/hf_offline_eagle3.yaml --yes
 
 job_name: Qwen3-8B_EAGLE3_offline
 pipeline:
@@ -24,7 +24,7 @@ pipeline:
   # Step 1: Data synthesis via TRT-LLM server
   # Args before "--" go to trtllm-serve; args after "--" go to tools/query.py.
   task_0:
-    script: common/tensorrt-llm/query.sh
+    script: common/tensorrt_llm/query.sh
     args:
       - --model <<global_vars.hf_model>>
       - --tp_size 4
