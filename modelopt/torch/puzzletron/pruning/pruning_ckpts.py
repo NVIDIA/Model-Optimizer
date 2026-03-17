@@ -95,6 +95,12 @@ def launch_ffn_intermediates_prune_ckpt(
 def launch_attn_groups_prune_ckpt(
     cfg: DictConfig, max_save_workers: Optional[int] = None, max_layer_workers: Optional[int] = None
 ):
+    descriptor = cfg.descriptor
+    parent_model_config = load_model_config(
+        cfg.teacher_dir, trust_remote_code=descriptor.requires_trust_remote_code()
+    )
+    num_attention_heads = parent_model_config.num_attention_heads
+
     for n_heads_in_group in cfg.pruning.n_heads_in_group_list:
         dirname = f"n_heads_in_group{n_heads_in_group}"
 
@@ -105,7 +111,8 @@ def launch_attn_groups_prune_ckpt(
         mprint("Process n_heads_in_group {}".format(n_heads_in_group))
         mprint(f"=== STARTING ATTENTION PRUNING FOR n_heads_in_group={n_heads_in_group} ===")
 
-        model_config_overrides_json = {"attention": [{"n_heads_in_group": n_heads_in_group}]}
+        num_key_value_heads = num_attention_heads // n_heads_in_group
+        model_config_overrides_json = {"attention": [{"num_key_value_heads": num_key_value_heads}]}
         mlp_init_config_yaml = cfg.pruning.mlp_init_config_yaml
 
         output_dir = os.path.join(cfg.pruning.pruned_ckpts_output_dir, dirname)
