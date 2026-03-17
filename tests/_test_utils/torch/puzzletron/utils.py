@@ -150,6 +150,9 @@ def create_and_save_small_hf_model(
     torch.manual_seed(42)
 
     # Create and save the model
+    # Force CPU initialization for deterministic behavior (prevents NaN on RTX GPUs)
+    original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
     # TODO: Consider using AutoModel.from_config instead.
     if hasattr(config, "text_config") and hasattr(config, "vision_config"):
         from transformers import Qwen3VLMoeForConditionalGeneration
@@ -157,6 +160,23 @@ def create_and_save_small_hf_model(
         model = Qwen3VLMoeForConditionalGeneration._from_config(config)
     else:
         model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+
+    # Initialize weights to ensure all parameters are properly initialized
+    # This prevents NaN values in uninitialized parameters (e.g., backbone.layers.1.mixer.gate.weight
+    # in nemotron-3-nano-30b-a3b-base-bf16) that can occur with from_config on RTX GPU cards (not on H100)
+    model.initialize_weights()
+
+    # Fix any remaining NaN/Inf values that initialize_weights() might have missed
+    for name, param in model.named_parameters():
+        if torch.isnan(param).any() or torch.isinf(param).any():
+            nan_inf_mask = torch.isnan(param) | torch.isinf(param)
+            param.data = torch.where(nan_inf_mask, torch.zeros_like(param), param)
+
+    # Restore CUDA_VISIBLE_DEVICES after model creation and initialization
+    if original_cuda_visible is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
+    else:
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
 
     model.to(dtype=torch.bfloat16).save_pretrained(output_path)
 
