@@ -508,9 +508,10 @@ class _QuantSparseMoe(QuantModule):
         # During calibration, forward all tokens to a larger fraction of experts to improve
         # calibration coverage, then re-run with the original top_k for actual outputs.
         if is_calib:
-            if not self._token_counting_initialized:
+            # Skip counting when all experts are calibrated (ratio == 1.0).
+            self._count_expert_tokens = self._moe_calib_experts_ratio < 1.0
+            if self._count_expert_tokens and not self._token_counting_initialized:
                 self._init_token_counting()
-            self._count_expert_tokens = True
             if TRANSFORMERS_VERSION_GE_5_0:
                 assert hasattr(self, "gate") and hasattr(self.gate, "top_k")
                 original_top_k = self.gate.top_k

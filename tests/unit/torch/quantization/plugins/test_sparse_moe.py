@@ -265,7 +265,7 @@ class TestQuantSparseMoe:
             register_sparse_moe_on_the_fly(model)
 
         converted = QuantModuleRegistry.convert(moe_block)
-        converted._moe_calib_experts_ratio = 1.0
+        converted._moe_calib_experts_ratio = 0.5
 
         assert not hasattr(converted, "expert_token_count")
 
@@ -309,7 +309,7 @@ def test_qwen3_moe_quantize_with_token_forcing_and_counting():
     quant_cfg = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
     quant_cfg["algorithm"] = {
         "method": "max",
-        "moe_calib_experts_ratio": 1.0,
+        "moe_calib_experts_ratio": 0.5,
     }
 
     def calib_fn(model):
