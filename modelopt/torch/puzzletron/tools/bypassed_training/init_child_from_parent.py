@@ -129,7 +129,10 @@ def init_child_from_parent(
             model_class = _get_model_class_from_config(child_model_config)
             # AutoModelForCausalLM uses from_config(); concrete model classes use _from_config()
             if model_class is AutoModelForCausalLM:
-                child_model = model_class.from_config(child_model_config, trust_remote_code=True)
+                trust_remote_code = descriptor.requires_trust_remote_code()
+                child_model = model_class.from_config(
+                    child_model_config, trust_remote_code=trust_remote_code
+                )
             else:
                 child_model = model_class._from_config(child_model_config)
 
