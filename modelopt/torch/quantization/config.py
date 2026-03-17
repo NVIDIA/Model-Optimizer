@@ -641,6 +641,11 @@ _nvfp4_mlp_only_quant_cfg = {
     "*mlp*input_quantizer": _nvfp4_quantizer,
     "*block_sparse_moe*weight_quantizer": _nvfp4_quantizer,
     "*block_sparse_moe*input_quantizer": _nvfp4_quantizer,
+    # Step3p5 MoE experts: MoELinear lives at *.moe.{up,gate,down}_proj
+    "*moe*weight_quantizer": _nvfp4_quantizer,
+    "*moe*input_quantizer": _nvfp4_quantizer,
+    # Disable share_expert (dense MLP alongside MoE, not in MLP-only quant scope)
+    "*share_expert*": {"enable": False},
     **_default_disabled_quantizer_cfg,
 }
 

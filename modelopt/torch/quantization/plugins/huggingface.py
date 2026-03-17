@@ -1468,10 +1468,56 @@ LayerActivationCollector.register_decoder_layer_support(
     is_homogeneous_hf_model, get_homogeneous_hf_decoder_layers
 )
 
+
+class _QuantMoELinear(QuantModule):
+    """Quantization wrapper for MoELinear modules (fused expert weights).
+
+    MoELinear has weight shape [num_experts, out_features, in_features].
+    During forward, it selects weight[expert_id] and performs F.linear.
+    This wrapper adds input and weight quantizers while preserving the original forward logic.
+    """
+
+    def _setup(self):
+        self.input_quantizer = TensorQuantizer()
+        self.weight_quantizer = TensorQuantizer()
+        self.output_quantizer = TensorQuantizer()
+        self.output_quantizer.disable()
+
+    def forward(self, x, expert_id):
+        # Quantize input
+        x = self.input_quantizer(x)
+        # Select expert weight and quantize it
+        expert_weight = self.weight[expert_id]
+        expert_weight = self.weight_quantizer(expert_weight)
+        # Perform linear operation (matching original dtype handling)
+        x = linear(x.float(), expert_weight.float())
+        return x
+
+
+def register_step3p5_moe_on_the_fly(model):
+    """Register Step3p5 MoELinear for quantization.
+
+    Step3p5 uses a custom MoELinear class (loaded via trust_remote_code) with
+    weight shape [num_experts, out_features, in_features] and forward(x, expert_id).
+    We detect it by model class name, then grab the type from the first MoE layer.
+    """
+    if type(model).__name__ not in ("Step3p5ForCausalLM", "Step3p5Model"):
+        return
+    for module in model.modules():
+        if type(module).__name__ == "Step3p5MoEMLP":
+            moe_linear_type = type(module.up_proj)
+            if QuantModuleRegistry.get(moe_linear_type) is None:
+                QuantModuleRegistry.register({moe_linear_type: f"hf.{moe_linear_type.__name__}"})(
+                    _QuantMoELinear
+                )
+            break
+
+
 CUSTOM_MODEL_PLUGINS.update(
     [
         register_falcon_linears_on_the_fly,
         register_dbrx_moe_on_the_fly,
+        register_step3p5_moe_on_the_fly,
         register_sparse_moe_on_the_fly,
         register_hf_attentions_on_the_fly,
         convert_hf_parallel_linears_on_the_fly,
