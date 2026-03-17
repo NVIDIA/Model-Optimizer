@@ -1505,8 +1505,11 @@ class _QuantMoELinear(QuantModule):
     def forward(self, x, expert_id):
         # experts[expert_id] is a _QuantLinear after quantization wrapping,
         # providing per-expert input_quantizer and weight_quantizer.
-        # Cast to float32 to match original MoELinear forward behavior.
-        return self.experts[expert_id](x).float()
+        # Cast input to match expert weight dtype before linear operation,
+        # then cast output to float32 to match original MoELinear forward behavior.
+        expert = self.experts[expert_id]
+        x = x.to(expert.weight.dtype)
+        return expert(x).float()
 
 
 def register_step3p5_moe_on_the_fly(model):
