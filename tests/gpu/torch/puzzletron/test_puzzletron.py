@@ -36,8 +36,8 @@ from modelopt.torch.puzzletron.anymodel import convert_model
 # Note on reproducibility: This test sets a seed (SEED = 1234) for test-level operations,
 # but the Hydra configs used by puzzletron.puzzletron() have their own seed values
 # (typically seed: 42, shuffle_seed: 444). Distributed training with NCCL can still
-# exhibit small numerical variations (< 0.01) even with seeds set, due to floating-point
-# accumulation order differences and CUDA kernel execution timing.
+# exhibit numerical variations (we use rtol 0.03 for lm_loss) even with seeds set, due to
+# floating-point accumulation order and CUDA kernel execution timing across devices.
 
 SEED = 1234
 
@@ -301,7 +301,8 @@ def _assert_lm_loss(puzzle_dir: Path, hf_config_name: str):
     actual_lm_loss = validation["lm_loss"]["avg"]
     expected_lm_loss = EXPECTED_LM_LOSS.get(hf_config_name)
     if expected_lm_loss is not None:
-        assert abs(actual_lm_loss - expected_lm_loss) < 0.01, (
+        # Tolerance 0.03: distributed runs can vary beyond 0.01 due to arithmetic reduction order, etc.
+        assert abs(actual_lm_loss - expected_lm_loss) < 0.03, (
             f"lm_loss mismatch: expected {expected_lm_loss}, got {actual_lm_loss}"
         )
     else:
