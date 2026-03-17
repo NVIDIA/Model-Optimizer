@@ -43,7 +43,7 @@ def return_tuple_of_size(cls: type[nn.Module], size: int) -> type[nn.Module]:
         def forward(self, *args, **kwargs):
             result = super().forward(*args, **kwargs)
             outputs = [None] * size
-            outputs[0] = result[0]
+            outputs[0] = result if isinstance(result, torch.Tensor) else result[0]
             return tuple(outputs)
 
         def extra_repr(self) -> str:
