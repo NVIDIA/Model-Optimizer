@@ -141,12 +141,10 @@ from typing import Literal
 
 from pydantic import ValidationInfo, field_validator, model_validator
 
-from modelopt.recipe._config_loader import load_config
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.utils.network import ConstructorLike
 
-_default_disabled_quantizer_cfg = load_config("configs/ptq/base")["quant_cfg"]
-_default_disabled_quantizer_cfg_deprecated = {
+_default_disabled_quantizer_cfg = {
     "nn.BatchNorm1d": {"*": {"enable": False}},
     "nn.BatchNorm2d": {"*": {"enable": False}},
     "nn.BatchNorm3d": {"*": {"enable": False}},
@@ -163,10 +161,9 @@ _default_disabled_quantizer_cfg_deprecated = {
     "output.*": {"enable": False},
     "default": {"enable": False},
 }
-assert _default_disabled_quantizer_cfg_deprecated == _default_disabled_quantizer_cfg
 
-_mamba_moe_disabled_quantizer_cfg = load_config("configs/ptq/base_mamba")["quant_cfg"]
-_mamba_moe_disabled_quantizer_cfg_deprecated = {
+
+_mamba_moe_disabled_quantizer_cfg = {
     "*fc1_latent_proj*": {"enable": False},  # Skip Latent MOE
     "*fc2_latent_proj*": {"enable": False},  # Skip Latent MOE
     "*q_proj*": {"enable": False},  # Skip QKV Linear
@@ -175,7 +172,7 @@ _mamba_moe_disabled_quantizer_cfg_deprecated = {
     "*o_proj*": {"enable": False},  # Skip QKV Output Projection
     "default": {"enable": False},
 }
-assert _mamba_moe_disabled_quantizer_cfg_deprecated == _mamba_moe_disabled_quantizer_cfg
+
 
 INT8_DEFAULT_CFG = {
     "quant_cfg": {
@@ -390,8 +387,7 @@ MXINT8_DEFAULT_CFG = {
     "algorithm": None,
 }
 
-FP8_KV_CFG = load_config("configs/ptq/kv_fp8.yml")
-FP8_KV_CFG_DEPRECATED = {
+FP8_KV_CFG = {
     "quant_cfg": {
         "*[kv]_bmm_quantizer": {
             "num_bits": (4, 3),
@@ -399,10 +395,9 @@ FP8_KV_CFG_DEPRECATED = {
         },
     },
 }
-assert FP8_KV_CFG_DEPRECATED == FP8_KV_CFG
 
-FP8_AFFINE_KV_CFG = load_config("configs/ptq/kv_fp8_affine.yml")
-FP8_AFFINE_KV_CFG_DEPRECATED = {
+
+FP8_AFFINE_KV_CFG = {
     "quant_cfg": {
         "*[kv]_bmm_quantizer": {
             "num_bits": (4, 3),
@@ -410,7 +405,6 @@ FP8_AFFINE_KV_CFG_DEPRECATED = {
         },
     }
 }
-assert FP8_AFFINE_KV_CFG_DEPRECATED == FP8_AFFINE_KV_CFG
 
 
 _nvfp4_quantizer = {
@@ -504,8 +498,7 @@ NVFP4_AWQ_FULL_CFG = {
     },
     "algorithm": {"method": "awq_full", "alpha_step": 0.1},
 }
-NVFP4_AFFINE_KV_CFG = load_config("configs/ptq/kv_nvfp4_affine.yml")
-NVFP4_AFFINE_KV_CFG_DEPRECATED = {
+NVFP4_AFFINE_KV_CFG = {
     "quant_cfg": {
         "*[kv]_bmm_quantizer": {
             **_nvfp4_quantizer,
@@ -513,15 +506,13 @@ NVFP4_AFFINE_KV_CFG_DEPRECATED = {
         },
     }
 }
-assert NVFP4_AFFINE_KV_CFG_DEPRECATED == NVFP4_AFFINE_KV_CFG
 
-NVFP4_KV_CFG = load_config("configs/ptq/kv_nvfp4.yml")
-NVFP4_KV_CFG_DEPRECATED = {
+
+NVFP4_KV_CFG = {
     "quant_cfg": {
         "*[kv]_bmm_quantizer": _nvfp4_quantizer,
     },
 }
-assert NVFP4_KV_CFG_DEPRECATED == NVFP4_KV_CFG
 
 
 # Moved from examples/diffusers/quantization/config.py to here
@@ -549,8 +540,7 @@ NVFP4_FP8_MHA_CONFIG = {
     },
     "algorithm": "max",
 }
-NVFP4_KV_ROTATE_CFG = load_config("configs/ptq/kv_nvfp4_rotate.yml")
-NVFP4_KV_ROTATE_CFG_DEPRECATED = {
+NVFP4_KV_ROTATE_CFG = {
     "quant_cfg": {
         "*q_bmm_quantizer": {
             "enable": False,
@@ -563,7 +553,7 @@ NVFP4_KV_ROTATE_CFG_DEPRECATED = {
         "*v_bmm_quantizer": _nvfp4_quantizer,
     },
 }
-assert NVFP4_KV_ROTATE_CFG_DEPRECATED == NVFP4_KV_ROTATE_CFG
+
 
 NVFP4_SVDQUANT_DEFAULT_CFG = {
     "quant_cfg": {
