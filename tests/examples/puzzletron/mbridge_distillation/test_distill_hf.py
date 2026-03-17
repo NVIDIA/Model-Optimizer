@@ -41,7 +41,7 @@ def test_distill_hf(project_root_path: Path, tmp_path: Path):
     hf_export_dir = tmp_path / "hf_export"
 
     # Build command-line arguments for distill_hf.py
-    nproc_per_node = max(1, torch.cuda.device_count())
+    nproc_per_node = torch.cuda.device_count()
     tp_size = nproc_per_node
     train_iters = 5
 
