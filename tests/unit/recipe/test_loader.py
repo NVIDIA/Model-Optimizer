@@ -36,10 +36,10 @@ key: val
 CFG_RECIPE_MISSING_TYPE = """\
 metadata:
   description: Missing recipe_type.
-quant_cfg: {}
+ptq_cfg: {}
 """
 
-CFG_RECIPE_MISSING_QUANT_CFG = """\
+CFG_RECIPE_MISSING_PTQ_CFG = """\
 metadata:
   recipe_type: ptq
 """
@@ -86,7 +86,7 @@ def test_load_recipe_builtin_with_suffix():
     recipe = load_recipe("general/ptq/fp8_default-fp8_kv.yml")
     assert recipe.recipe_type == RecipeType.PTQ
     assert isinstance(recipe, ModelOptPTQRecipe)
-    assert recipe.quant_cfg
+    assert recipe.ptq_cfg
 
 
 def test_load_recipe_builtin_without_suffix():
@@ -112,11 +112,11 @@ _BUILTIN_PTQ_RECIPES = [
 
 @pytest.mark.parametrize("recipe_path", _BUILTIN_PTQ_RECIPES)
 def test_load_recipe_all_builtins(recipe_path):
-    """Smoke-test: every built-in PTQ recipe loads without error and has quant_cfg."""
+    """Smoke-test: every built-in PTQ recipe loads without error and has ptq_cfg."""
     recipe = load_recipe(recipe_path)
     assert recipe.recipe_type == RecipeType.PTQ
     assert isinstance(recipe, ModelOptPTQRecipe)
-    assert recipe.quant_cfg
+    assert recipe.ptq_cfg
 
 
 # ---------------------------------------------------------------------------
@@ -138,11 +138,11 @@ def test_load_recipe_missing_recipe_type_raises(tmp_path):
         load_recipe(bad)
 
 
-def test_load_recipe_missing_quant_cfg_raises(tmp_path):
-    """load_recipe raises ValueError when quant_cfg is absent for a PTQ recipe."""
+def test_load_recipe_missing_ptq_cfg_raises(tmp_path):
+    """load_recipe raises ValueError when ptq_cfg is absent for a PTQ recipe."""
     bad = tmp_path / "bad.yml"
-    bad.write_text(CFG_RECIPE_MISSING_QUANT_CFG)
-    with pytest.raises(ValueError, match="quant_cfg"):
+    bad.write_text(CFG_RECIPE_MISSING_PTQ_CFG)
+    with pytest.raises(ValueError, match="ptq_cfg"):
         load_recipe(bad)
 
 
@@ -176,5 +176,6 @@ def test_general_ptq_yaml_matches_config_dicts(yaml_path, model_cfg_name, kv_cfg
     kv_cfg = getattr(qcfg, kv_cfg_name)
     yaml_data = load_config(yaml_path)
 
-    assert {**model_cfg["quant_cfg"], **kv_cfg["quant_cfg"]} == yaml_data["quant_cfg"]
-    assert model_cfg["algorithm"] == yaml_data["algorithm"]
+    ptq = yaml_data["ptq_cfg"]
+    assert {**model_cfg["quant_cfg"], **kv_cfg["quant_cfg"]} == ptq["quant_cfg"]
+    assert model_cfg["algorithm"] == ptq["algorithm"]

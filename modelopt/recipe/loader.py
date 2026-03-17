@@ -96,12 +96,11 @@ def _load_recipe_from_file(recipe_file: Path | Traversable) -> ModelOptRecipeBas
         raise ValueError(f"Recipe file {recipe_file} must contain a 'metadata.recipe_type' field.")
 
     if recipe_type == RecipeType.PTQ:
-        if "quant_cfg" not in data:
-            raise ValueError(f"PTQ recipe file {recipe_file} must contain 'quant_cfg'.")
+        if "ptq_cfg" not in data:
+            raise ValueError(f"PTQ recipe file {recipe_file} must contain 'ptq_cfg'.")
         return ModelOptPTQRecipe(
             recipe_type=RecipeType.PTQ,
             description=metadata.get("description", "PTQ recipe."),
-            quant_cfg=data["quant_cfg"],
-            algorithm=data.get("algorithm"),
+            ptq_cfg=data["ptq_cfg"],
         )
     raise ValueError(f"Unsupported recipe type: {recipe_type!r}")

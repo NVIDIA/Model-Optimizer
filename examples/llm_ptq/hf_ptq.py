@@ -926,18 +926,7 @@ def quantize_main(
             assert isinstance(recipe, ModelOptPTQRecipe), (
                 f"Expected PTQ recipe, but got {type(recipe).__name__} from {args.recipe}"
             )
-            quant_cfg = build_quant_cfg(
-                args.recipe,  # just pass in the whole recipe path, this qformat is not used in this case
-                recipe.model_quant,
-                args.awq_block_size,
-                model_type,
-                args.moe_calib_experts_ratio,
-            )
-
-            quant_cfg = mtq.update_quant_cfg_with_kv_cache_quant(
-                quant_cfg,
-                recipe.kv_quant,
-            )
+            quant_cfg = recipe.ptq_cfg
 
         else:
             assert len(args.qformat.split(",")) == 1, (

@@ -66,16 +66,9 @@ class ModelOptRecipeBase(ModeloptBaseConfig):
 class ModelOptPTQRecipe(ModelOptRecipeBase):
     """Our config class for PTQ recipes."""
 
-    quant_cfg: dict[str, Any] = ModeloptField(
+    ptq_cfg: dict[str, Any] = ModeloptField(
         default={},
-        title="Quantization config",
-        description="Merged quantizer patterns for model weights, activations, and KV cache.",
+        title="PTQ config",
+        description="PTQ config containing quant_cfg and algorithm.",
         validate_default=True,
-    )
-
-    algorithm: Any = ModeloptField(
-        default=None,
-        title="Calibration algorithm",
-        description="Calibration algorithm passed to mtq.quantize().",
-        validate_default=False,
     )
