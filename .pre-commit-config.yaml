@@ -97,7 +97,6 @@ repos:
               modelopt/torch/speculative/eagle/utils.py|
               modelopt/torch/speculative/plugins/transformers.py|
               modelopt/torch/utils/plugins/megatron_mmlu.py|
-              modelopt/torch/puzzletron/anymodel/models/gpt_oss/gpt_oss_pruned_to_mxfp4.py|
               modelopt/torch/puzzletron/decilm/deci_lm_hf_code/transformers_.*\.py|
               examples/chained_optimizations/bert_prune_distill_quantize.py|
               examples/deepseek/quantize_to_nvfp4.py|
