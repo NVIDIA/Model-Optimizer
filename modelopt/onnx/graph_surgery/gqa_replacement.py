@@ -707,7 +707,7 @@ def _fuse_qkv_and_create_gqa(
                 outputs=[qkv_add_output],
                 name=qkv_add_name,
             )
-            graph.node.append(qkv_add_node)
+            qkv_matmul_nodes.append(qkv_add_node)
 
             # Add value_info
             qkv_add_info = helper.make_tensor_value_info(
