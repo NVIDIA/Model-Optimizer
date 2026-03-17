@@ -15,6 +15,7 @@
 
 """Conversion and restoration utilities for sparse attention."""
 
+import contextlib
 import fnmatch
 from collections.abc import Callable
 from typing import Any
@@ -46,6 +47,32 @@ def is_attn_sparsified(model: nn.Module) -> bool:
     return any(isinstance(module, SparseAttentionModule) for module in model.modules())
 
 
+def _register_eager_backend_if_needed(model: nn.Module) -> None:
+    """Register diffusers/LTX eager attention backends if the model needs them.
+
+    Called before plugin registration so that the eager backend is available
+    when ``SparseAttentionModule.forward()`` activates the skip-softmax context.
+    """
+    # Register the diffusers eager backend if the model is a diffusers ModelMixin
+    try:
+        from diffusers.models.modeling_utils import ModelMixin
+
+        if isinstance(model, ModelMixin):
+            from .kernels import register_diffusers_eager_attention
+
+            if register_diffusers_eager_attention is not None:
+                register_diffusers_eager_attention()
+    except ImportError:
+        pass
+
+    # Patch ltx_core Attention modules if present (independent of diffusers)
+    from .kernels import register_ltx_eager_attention
+
+    if register_ltx_eager_attention is not None:
+        with contextlib.suppress(Exception):
+            register_ltx_eager_attention(model)
+
+
 def convert_to_sparse_attention_model(
     model: ModelLikeModule, config: SparseAttentionConfig
 ) -> ConvertReturnType:
@@ -60,6 +87,9 @@ def convert_to_sparse_attention_model(
     """
     # Initialize the true module if necessary
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
+
+    # Register eager backends for diffusers/LTX models before plugin registration
+    _register_eager_backend_if_needed(model)
 
     # Apply custom model plugins
     register_custom_model_plugins_on_the_fly(model)

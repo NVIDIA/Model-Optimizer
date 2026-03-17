@@ -17,11 +17,7 @@
 
 from typing import Any
 
-import torch
-import torch.nn.functional as F
-
 from modelopt.torch.opt.dynamic import DynamicModule, _DMRegistryCls
-from modelopt.torch.quantization.utils import replace_function
 
 from .config import SparseAttentionAttributeConfig
 from .methods import get_sparse_method
@@ -190,32 +186,12 @@ class SparseAttentionModule(DynamicModule):
         return result
 
     def _get_sparse_context(self):
-        """Get the softmax patch context for applying sparse attention."""
-        return self._create_softmax_patch_context()
+        """Get the context manager for applying sparse attention.
 
-    def _create_softmax_patch_context(self):
-        """Create context manager for patching softmax function."""
-        return replace_function(torch.nn.functional, "softmax", self._create_sparse_softmax())
-
-    def _create_sparse_softmax(self):
-        """Create sparse softmax function for current method."""
-        original_softmax = F.softmax
-
-        def sparse_softmax(input, dim=-1, *args, **kwargs):
-            # Calculate sparsity mask and collect statistics
-            sparse_mask, stats = self._sparse_method_instance.calculate_sparsity(input)
-
-            # Store stats for collection
-            self._last_stats = stats
-
-            # Only apply sparsity mask after calibration (not during calibration)
-            # During calibration, we measure sparsity without modifying the output
-            if not self._sparse_method_instance._calibration_mode:
-                input = self._sparse_method_instance.apply_sparsity(input, sparse_mask)
-
-            return original_softmax(input, dim, *args, **kwargs)
-
-        return sparse_softmax
+        Delegates to the method instance's ``get_sparse_context()`` which
+        handles softmax patching and, for diffusers models, backend switching.
+        """
+        return self._sparse_method_instance.get_sparse_context(self)
 
 
 # Create registry for sparse attention modules

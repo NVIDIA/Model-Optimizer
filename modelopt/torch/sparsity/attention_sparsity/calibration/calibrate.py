@@ -255,21 +255,29 @@ def calibrate_sparse_attention(
 
     print(f"Calibrating {len(sparse_modules)} sparse attention modules together...")
 
-    # Extract tokenizer and build calibration data if needed
-    tokenizer = _extract_tokenizer_from_model(model)
+    # When a user-provided forward_loop is given, skip tokenizer extraction and
+    # RULER dataset generation entirely.  This is the path used by diffusers and
+    # other non-HF models.
+    use_user_forward_loop = forward_loop is not None
+
+    tokenizer = None
     calibration_data = None
 
-    if calibrate_prefill or calibrate_decode:
-        builder = RulerDatasetBuilder(
-            samples=calib_config.samples,
-            max_seqlen=calib_config.max_seqlen,
-            tokenizer_name_or_path=tokenizer,
-            num_length_bins=calib_config.num_length_bins,
-            max_length_filter=int(calib_config.max_seqlen * 1.5),
-            cache_dir=calib_config.cache_dir,
-            data_dir=calib_config.data_dir,
-        )
-        calibration_data = builder.build_calibration_dataset()
+    if not use_user_forward_loop:
+        # Extract tokenizer and build calibration data
+        tokenizer = _extract_tokenizer_from_model(model)
+
+        if calibrate_prefill or calibrate_decode:
+            builder = RulerDatasetBuilder(
+                samples=calib_config.samples,
+                max_seqlen=calib_config.max_seqlen,
+                tokenizer_name_or_path=tokenizer,
+                num_length_bins=calib_config.num_length_bins,
+                max_length_filter=int(calib_config.max_seqlen * 1.5),
+                cache_dir=calib_config.cache_dir,
+                data_dir=calib_config.data_dir,
+            )
+            calibration_data = builder.build_calibration_dataset()
 
     # Initialize results
     calibration_results: dict[str, Any] = {}
@@ -280,15 +288,20 @@ def calibrate_sparse_attention(
         print("PREFILL PHASE CALIBRATION")
         print("=" * 60)
 
-        if calibration_data is None:
-            raise RuntimeError("calibration_data must be built before prefill")
-        prefill_forward_loop = forward_loop or create_calibration_forward_loop(
-            calibration_data, tokenizer, chunk_size=calib_config.chunk_size
-        )
+        if use_user_forward_loop:
+            prefill_forward_loop = forward_loop
+        else:
+            if calibration_data is None:
+                raise RuntimeError("calibration_data must be built before prefill")
+            assert tokenizer is not None
+            prefill_forward_loop = create_calibration_forward_loop(
+                calibration_data, tokenizer, chunk_size=calib_config.chunk_size
+            )
 
         prefill_calibrator = DynamicThresholdCalibrator(
             threshold_trials=calib_config.threshold_trials,
         )
+        assert prefill_forward_loop is not None
         prefill_result = prefill_calibrator.calibrate(model, prefill_forward_loop, phase="prefill")
 
         if "a" in prefill_result and "b" in prefill_result:
@@ -302,15 +315,21 @@ def calibrate_sparse_attention(
         print("DECODE PHASE CALIBRATION")
         print("=" * 60)
 
-        if calibration_data is None:
-            raise RuntimeError("calibration_data must be built before decode")
-        decode_forward_loop = create_decode_calibration_forward_loop(
-            calibration_data, tokenizer, num_decode_tokens=calib_config.num_decode_tokens
-        )
+        if use_user_forward_loop:
+            # User-provided forward_loop is used for decode as well
+            decode_forward_loop = forward_loop
+        else:
+            if calibration_data is None:
+                raise RuntimeError("calibration_data must be built before decode")
+            assert tokenizer is not None
+            decode_forward_loop = create_decode_calibration_forward_loop(
+                calibration_data, tokenizer, num_decode_tokens=calib_config.num_decode_tokens
+            )
 
         decode_calibrator = DynamicThresholdCalibrator(
             threshold_trials=calib_config.threshold_trials,
         )
+        assert decode_forward_loop is not None
         decode_result = decode_calibrator.calibrate(model, decode_forward_loop, phase="decode")
 
         if "a" in decode_result and "b" in decode_result:

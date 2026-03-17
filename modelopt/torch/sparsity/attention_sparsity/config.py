@@ -432,9 +432,31 @@ SKIP_SOFTMAX_CALIB = {
 }
 
 
+# Pre-defined configuration for diffusers transformer models (LTX-2, etc.)
+# Key differences from SKIP_SOFTMAX_DEFAULT:
+#   - is_causal=False (diffusion models use bidirectional attention)
+#   - Only prefill thresholds (diffusers have no decode phase)
+SKIP_SOFTMAX_DIFFUSERS = {
+    "sparse_cfg": {
+        "*attn*": {
+            "method": "flash_skip_softmax",
+            "thresholds": {"prefill": [1e-3]},
+            "br": 128,
+            "bc": 128,
+            "backend": "pytorch",
+            "is_causal": False,
+            "collect_stats": True,
+            "enable": True,
+        },
+        "default": {"enable": False},
+    },
+}
+
+
 __all__ = [
     "SKIP_SOFTMAX_CALIB",
     "SKIP_SOFTMAX_DEFAULT",
+    "SKIP_SOFTMAX_DIFFUSERS",
     "CalibrationConfig",
     "FlashSkipSoftmaxConfig",
     "SparseAttentionAttributeConfig",

@@ -20,12 +20,16 @@ processing pattern for optimal performance.
 """
 
 import math
-from typing import Any
+from contextlib import ExitStack, contextmanager
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 
 from . import SparseAttentionMethod, register_sparse_method
+
+if TYPE_CHECKING:
+    from ..sparse_attention import SparseAttentionModule
 
 
 @register_sparse_method("flash_skip_softmax")
@@ -271,6 +275,49 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         }
 
         return element_mask, stats
+
+    @contextmanager
+    def get_sparse_context(self, module: "SparseAttentionModule"):
+        """Return context that activates skip-softmax sparse attention.
+
+        For diffusers models this additionally:
+        1. Sets the thread-local flag so the eager backend is activated.
+        2. Switches the diffusers attention backend to ``modelopt_skip_softmax``.
+
+        The ``F.softmax`` patch is always applied (works for both HF LLMs and
+        diffusers models).
+        """
+        import torch.nn.functional as F_module
+
+        from modelopt.torch.quantization.utils import replace_function
+
+        original_softmax = F_module.softmax
+
+        def sparse_softmax(input, dim=-1, *args, **kwargs):
+            sparse_mask, stats = self.calculate_sparsity(input)
+            module._last_stats = stats
+            if not self._calibration_mode:
+                input = self.apply_sparsity(input, sparse_mask)
+            return original_softmax(input, dim, *args, **kwargs)
+
+        with ExitStack() as stack:
+            # Set thread-local flag (used by LTX and diffusers eager wrappers)
+            from ..kernels import set_skip_softmax_context
+
+            set_skip_softmax_context(True)
+            stack.callback(set_skip_softmax_context, False)
+
+            # Activate diffusers eager backend if registered
+            try:
+                from ..kernels.diffusers_eager_attention import get_skip_softmax_attention_backend
+
+                stack.enter_context(get_skip_softmax_attention_backend())
+            except (ImportError, RuntimeError):
+                pass
+
+            # Patch F.softmax
+            stack.enter_context(replace_function(torch.nn.functional, "softmax", sparse_softmax))
+            yield
 
     def calculate_sparsity(
         self,

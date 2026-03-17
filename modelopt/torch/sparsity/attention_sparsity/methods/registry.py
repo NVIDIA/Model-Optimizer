@@ -18,9 +18,13 @@
 import re
 import warnings
 from abc import ABC, abstractmethod
-from typing import Any
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any
 
 import torch
+
+if TYPE_CHECKING:
+    from ..sparse_attention import SparseAttentionModule
 
 
 class SparseAttentionMethod(ABC):
@@ -37,6 +41,36 @@ class SparseAttentionMethod(ABC):
         self.calibration_params: dict[str, dict[str, float]] | None = None
         # Target sparsity ratio per phase: {"prefill": 0.5, "decode": 0.5}
         self.target_sparse_ratio: dict[str, float] | None = None
+
+    @contextmanager
+    def get_sparse_context(self, module: "SparseAttentionModule"):
+        """Return a context manager that activates sparse attention for this method.
+
+        The default implementation patches ``F.softmax`` with a sparse wrapper.
+        Subclasses may override to add additional context (e.g., diffusers backend
+        switching, thread-local flags).
+
+        Args:
+            module: The ``SparseAttentionModule`` that owns this method instance.
+
+        Yields:
+            None
+        """
+        import torch.nn.functional as F_module
+
+        from modelopt.torch.quantization.utils import replace_function
+
+        original_softmax = F_module.softmax
+
+        def sparse_softmax(input, dim=-1, *args, **kwargs):
+            sparse_mask, stats = self.calculate_sparsity(input)
+            module._last_stats = stats
+            if not self._calibration_mode:
+                input = self.apply_sparsity(input, sparse_mask)
+            return original_softmax(input, dim, *args, **kwargs)
+
+        with replace_function(torch.nn.functional, "softmax", sparse_softmax):
+            yield
 
     @abstractmethod
     def calculate_sparsity(
