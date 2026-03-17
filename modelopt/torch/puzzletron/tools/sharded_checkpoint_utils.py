@@ -115,7 +115,9 @@ def set_submodule(model: nn.Module, module_name: str, new_submodule: nn.Module) 
 
 
 def create_local_shard_(model, owned_block_indexes: set[int], descriptor, runtime):
-    all_block_indexes = set(range(model.config.num_hidden_layers))
+    # Get language model config (handles nested configs like Qwen3-VL's text_config)
+    lm_config = descriptor.get_language_model_config(model.config)
+    all_block_indexes = set(range(lm_config.num_hidden_layers))
     has_first_block = 0 in owned_block_indexes
     has_last_block = max(all_block_indexes) in owned_block_indexes
 
@@ -136,13 +138,13 @@ def create_local_shard_(model, owned_block_indexes: set[int], descriptor, runtim
         set_submodule(
             model,
             descriptor.input_embedding_name(),
-            DummyWTE(model.config.hidden_size, dtype=runtime.dtype),
+            DummyWTE(lm_config.hidden_size, dtype=runtime.dtype),
         )
 
     if not has_last_block:
         set_submodule(model, descriptor.final_norm_name(), nn.Identity())
         if not (model.config.tie_word_embeddings and has_first_block):
-            set_submodule(model, descriptor.output_embedding_name(), DummyLMHead(model.config))
+            set_submodule(model, descriptor.output_embedding_name(), DummyLMHead(lm_config))
 
     return model
 
@@ -205,9 +207,10 @@ def load_and_shard_model(
             trust_remote_code = descriptor.requires_trust_remote_code()
             model_config = load_model_config(checkpoint_path, trust_remote_code=trust_remote_code)
 
+        num_hidden_layers = descriptor.get_language_model_config(model_config).num_hidden_layers
         if owned_block_indexes == "auto":
             owned_block_indexes = set(
-                np.array_split(np.arange(model_config.num_hidden_layers), runtime.world_size)[
+                np.array_split(np.arange(num_hidden_layers), runtime.world_size)[
                     runtime.global_rank
                 ]
             )
@@ -251,7 +254,7 @@ def load_and_shard_model(
             # Re-tie weights after load_state_dict with assign=True, which severs the tie.
             # Needed on first rank (owns embed_tokens) and last rank (owns lm_head).
             has_first_block = 0 in owned_block_indexes
-            has_last_block = (model_config.num_hidden_layers - 1) in owned_block_indexes
+            has_last_block = (num_hidden_layers - 1) in owned_block_indexes
             if model_config.tie_word_embeddings and (has_first_block or has_last_block):
                 model_shard.tie_weights()
 
@@ -310,7 +313,8 @@ def create_sharded_model(
         model_class = _get_model_class_from_config(model_config)
         # AutoModelForCausalLM uses from_config(); concrete model classes use _from_config()
         if model_class is AutoModelForCausalLM:
-            model = model_class.from_config(model_config, trust_remote_code=True)
+            trust_remote_code = descriptor.requires_trust_remote_code()
+            model = model_class.from_config(model_config, trust_remote_code=trust_remote_code)
         else:
             model = model_class._from_config(model_config)
         create_local_shard_(
