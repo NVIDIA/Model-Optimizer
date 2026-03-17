@@ -645,7 +645,7 @@ _nvfp4_mlp_only_quant_cfg = {
     "*moe*weight_quantizer": _nvfp4_quantizer,
     "*moe*input_quantizer": _nvfp4_quantizer,
     # disable *mode.gate.* for router
-    "*moe.gate*": {"enable": False},
+    "*moe.gate.*": {"enable": False},
     # Disable share_expert (dense MLP alongside MoE, not in MLP-only quant scope)
     "*share_expert*": {"enable": False},
     **_default_disabled_quantizer_cfg,
