@@ -827,11 +827,36 @@ def post_quantize(
     first_text_speech_dataset,
     calib_batch: dict | None = None,
 ):
-    """
-    Processing after the quantization.
+    """Processing after the quantization.
 
-    Currently we run one round of generation using the quantized model for a sample prompt,
-    and compare it with pre-quantize generation.
+    Runs one round of generation using the quantized model for a sample prompt and
+    compares it with the pre-quantize generation from ``pre_quantize()``.
+
+    Args:
+        args: Parsed CLI arguments. Used for ``verbose``, ``quant_summary_path``,
+            ``export_path``, ``pyt_ckpt_path``, and ``skip_generate`` flags.
+        full_model: The quantized model to run post-quantization generation on.
+        model_type: Model architecture identifier (e.g. ``"qwen3omni"``, ``"whisper"``,
+            ``"llama4"``, ``"deepseek"``). Controls model-specific generation and
+            decoding paths. ``None`` for generic models.
+        tokenizer: HF tokenizer for decoding generated token ids. May be ``None`` when
+            a ``processor`` is used instead (e.g. vision-language or speech models).
+        processor: HF image/audio processor for multimodal models. Used for decoding
+            outputs from vision-language (Mllama, Qwen3Omni) and speech (Whisper)
+            models. ``None`` for text-only models.
+        preview_input_ids: Input token ids (single sample) produced by ``pre_quantize()``
+            for the preview generation comparison.
+        generated_ids_before_ptq: Generation output from ``pre_quantize()`` to compare
+            against post-quantization output. ``None`` if generation was skipped.
+        is_nemotron_vl_model: Whether the model is a Nemotron VL model, which uses
+            ``model.chat()`` and returns text strings instead of token tensors.
+        first_text_speech_dataset: Text transcript of the first speech sample, used as
+            the display input for Whisper models since their ``input_ids`` are
+            mel-spectrogram features rather than decodable tokens.
+        calib_batch: Full calibration batch dict from ``pre_quantize``. Required for
+            multimodal models (e.g. Qwen3Omni) whose ``generate()`` needs the complete
+            input dict (audio features, attention masks, etc.) rather than just
+            ``input_ids``. For text-only models this is unused and may be ``None``.
 
     """
 
