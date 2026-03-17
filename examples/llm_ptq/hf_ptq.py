@@ -77,16 +77,17 @@ from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 RAND_SEED = 1234
 
 
-def _set_kv_cache_constant_amax(quant_cfg: dict) -> None:
+def _set_kv_cache_constant_amax(quant_cfg: list) -> None:
     """Set use_constant_amax on KV cache quantizers.
 
     Creates a new dict for the KV bmm quantizer config to avoid mutating shared references.
     """
-    if "*[kv]_bmm_quantizer" in quant_cfg:
-        quant_cfg["*[kv]_bmm_quantizer"] = {
-            **quant_cfg["*[kv]_bmm_quantizer"],
-            "use_constant_amax": True,
-        }
+    for i, entry in enumerate(quant_cfg):
+        if "*[kv]_bmm_quantizer" in entry:
+            quant_cfg[i] = {
+                "*[kv]_bmm_quantizer": {**entry["*[kv]_bmm_quantizer"], "use_constant_amax": True}
+            }
+            break
 
 
 QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
@@ -318,7 +319,7 @@ def auto_quantize(
         ),
         verbose=True,
         # Disable all default disabled layers such as lm_head, mlp.gate, router etc.
-        disabled_layers=list(_default_disabled_quantizer_cfg.keys()),
+        disabled_layers=[next(iter(entry)) for entry in _default_disabled_quantizer_cfg],
         method=auto_quantize_method,
         checkpoint=auto_quantize_checkpoint,
     )
@@ -331,7 +332,9 @@ def auto_quantize(
         kv_cache_quant_cfg = copy.deepcopy(
             getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"]
         )
-        kv_cache_quant_cfg.pop("default", None)  # keep other quantizers from auto_quantize
+        kv_cache_quant_cfg = [
+            e for e in kv_cache_quant_cfg if "default" not in e
+        ]  # keep other quantizers from auto_quantize
 
         if args.kv_cache_qformat in _KV_CAST_FORMATS:
             _set_kv_cache_constant_amax(kv_cache_quant_cfg)
@@ -340,7 +343,7 @@ def auto_quantize(
         if args.kv_cache_qformat not in _KV_CAST_FORMATS:
             # Calibrate only the KV cache quantizers; disable all others.
             with mtq.set_quantizer_by_cfg_context(
-                language_model, {"*": {"enable": False}, **kv_cache_quant_cfg}
+                language_model, [{"*": {"enable": False}}, *kv_cache_quant_cfg]
             ):
                 mtq.calibrate(language_model, algorithm="max", forward_loop=calibrate_loop)
     return language_model
@@ -968,7 +971,7 @@ def quantize_main(
             for prefix in mtp_layer_prefixes:
                 # Add exclusion pattern for this MTP layer (e.g., "*layers.92*")
                 pattern = f"*{prefix.split('.')[-2]}.{prefix.split('.')[-1]}*"
-                quant_cfg["quant_cfg"][pattern] = {"enable": False}
+                quant_cfg["quant_cfg"].append({pattern: {"enable": False}})
                 print(f"Excluding MTP layer from quantization: {pattern}")
 
         # Use constant amax for KV quantizers when a cast format is selected.

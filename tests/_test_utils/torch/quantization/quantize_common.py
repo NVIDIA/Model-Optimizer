@@ -47,7 +47,10 @@ FP4_SVDQUANT_CFG["algorithm"] = {"method": "svdquant", "lowrank": 8}
 
 def get_awq_config(algorithm="awq_lite", block_size=8):
     config = copy.deepcopy(mtq.INT4_AWQ_CFG)
-    config["quant_cfg"]["*weight_quantizer"]["block_sizes"] = {-1: block_size}
+    for entry in config["quant_cfg"]:
+        if "*weight_quantizer" in entry:
+            entry["*weight_quantizer"]["block_sizes"] = {-1: block_size}
+            break
     if "algorithm" not in config or not isinstance(config["algorithm"], dict):
         config["algorithm"] = {}
 

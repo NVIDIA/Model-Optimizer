@@ -33,12 +33,12 @@ MAX_OUTPUT_LEN = 512
 # Modify your custom config for debugging or research purposes.
 CUSTOM_CONFIG = {
     "MY_QUANT_CONFIG": {
-        "quant_cfg": {
-            "*weight_quantizer": {"num_bits": 4, "block_sizes": {-1: 128}, "enable": True},
-            "*input_quantizer": {"num_bits": 8, "type": "dynamic", "block_sizes": {-1: None}},
+        "quant_cfg": [
+            {"*weight_quantizer": {"num_bits": 4, "block_sizes": {-1: 128}, "enable": True}},
+            {"*input_quantizer": {"num_bits": 8, "type": "dynamic", "block_sizes": {-1: None}}},
             # Disable sensitive layers such as `lm_head`, gate layers in MoE etc.
-            **mtq.config._default_disabled_quantizer_cfg,
-        },
+            *mtq.config._default_disabled_quantizer_cfg,
+        ],
         "algorithm": "max",
     },
 }

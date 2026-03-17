@@ -100,11 +100,11 @@ def auto_quantize(
     if enable_kv_cache_quantization:
         mtq.set_quantizer_by_cfg(
             model,
-            quant_cfg={"*output_quantizer": {"num_bits": (4, 3), "axis": None, "enable": True}},
+            quant_cfg=[{"*output_quantizer": {"num_bits": (4, 3), "axis": None, "enable": True}}],
         )
         # Lets calibrate only the output quantizer this time. Let's disable all other quantizers.
         with mtq.set_quantizer_by_cfg_context(
-            model, {"*": {"enable": False}, "*output_quantizer": {"enable": True}}
+            model, [{"*": {"enable": False}}, {"*output_quantizer": {"enable": True}}]
         ):
             mtq.calibrate(model, algorithm="max", forward_loop=calibrate_loop)
     return model

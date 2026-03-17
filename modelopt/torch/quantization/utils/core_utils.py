@@ -828,8 +828,8 @@ def update_quant_cfg_with_kv_cache_quant(
     """Update the quant_cfg with the kv cache quant_cfg."""
     # If quant_cfg["quant_cfg"] is None, it corresponds to only kv cache quantization case
     quant_cfg = copy.deepcopy(quant_cfg)
-    quant_cfg["quant_cfg"] = quant_cfg.get("quant_cfg") or {"default": {"enable": False}}
-    quant_cfg["quant_cfg"].update(kv_cache_quant_cfg)
+    inner: list = quant_cfg.get("quant_cfg") or [{"default": {"enable": False}}]
+    quant_cfg["quant_cfg"] = inner + [{k: v} for k, v in kv_cache_quant_cfg.items()]
 
     # Set default algorithm for kv cache quantization if not provided.
     if not quant_cfg.get("algorithm"):

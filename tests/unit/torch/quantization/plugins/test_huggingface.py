@@ -193,7 +193,13 @@ def test_quantized_transformers_save_restore(tmp_path, model_cls, quant_config):
     tiny_llama_dir = create_tiny_llama_dir(tmp_path)
     # update config to fit test cases
     if quant_config == mtq.INT4_AWQ_CFG:
-        quant_config["quant_cfg"]["*weight_quantizer"]["block_sizes"] = {-1: 16}
+        import copy
+
+        quant_config = copy.deepcopy(quant_config)
+        for entry in quant_config["quant_cfg"]:
+            if "*weight_quantizer" in entry:
+                entry["*weight_quantizer"]["block_sizes"] = {-1: 16}
+                break
     else:
         raise ValueError(f"Unsupported quant_config: {quant_config}")
 

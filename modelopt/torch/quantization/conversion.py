@@ -211,10 +211,10 @@ def _replace_quant_module(model: nn.Module, version=None, registry=QuantModuleRe
         _replace_quant_module(getattr(model, name), version=version, registry=registry)
 
 
-def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType | dict):
+def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType):
     """Update the quantizer attributes based on the specified `quant_cfg`.
 
-    `quant_cfg` is a dictionary mapping wildcards or filter functions
+    `quant_cfg` is a list of single-key dicts mapping wildcards or filter functions
     to its quantizer attributes which are defined in
     :class:`QuantizerAttributeConfig <.config.QuantizerAttributeConfig>`.
     The wildcards or filter functions  are matched against the quantizer module names.
@@ -228,12 +228,15 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType
     See :meth:`set_quantizer_attribute <modelopt.torch.quantization.conversion.set_quantizer_attribute>`
     for more details.
     """
-    quant_cfg = quant_cfg.copy()
-    if "default" in quant_cfg:
-        set_quantizer_attribute(quant_model, "*", quant_cfg["default"])
-        quant_cfg.pop("default")
+    items = [(k, v) for entry in quant_cfg for k, v in entry.items()]
+    for pattern, cfg in items:
+        if str(pattern) == "default":
+            set_quantizer_attribute(quant_model, "*", cfg)
+            break
 
-    for pattern, cfg in quant_cfg.items():
+    for pattern, cfg in items:
+        if str(pattern) == "default":
+            continue
         if str(pattern) in QuantModuleRegistry:
             parent_class = QuantModuleRegistry[str(pattern)]
             assert isinstance(cfg, dict), (
@@ -309,7 +312,7 @@ def set_quantizer_attribute(
 
 
 @contextmanager
-def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType | dict):
+def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType):
     """Context manager for setting quantizer attributes using `quant_cfg`.
 
     The set attributes will be reset to the original attributes after exiting the context manager.
@@ -318,9 +321,9 @@ def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: QuantizeQuan
     Use this context manager with caution. Changing certain attributes of the quantizer such as
     `calibrator` can lead to unexpected behavior.
     """
-    assert not any(cfg for cfg in quant_cfg.values() if isinstance(cfg, (list, tuple))), (
-        "list of config not support."
-    )
+    assert not any(
+        cfg for entry in quant_cfg for cfg in entry.values() if isinstance(cfg, (list, tuple))
+    ), "list of config not support."
 
     original_attributes = {}
     for name, module in quant_model.named_modules():

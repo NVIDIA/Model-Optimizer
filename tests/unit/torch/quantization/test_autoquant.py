@@ -110,11 +110,11 @@ def test_quant_recipe_hparam():
 
 # use this config to test custom quantization config
 INT8_CUSTOM_QUANT_TEST_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {"num_bits": 8, "axis": 0},
-        "*input_quantizer": {"num_bits": 8, "axis": None},
-        **_default_disabled_quantizer_cfg,
-    },
+    "quant_cfg": [
+        {"*weight_quantizer": {"num_bits": 8, "axis": 0}},
+        {"*input_quantizer": {"num_bits": 8, "axis": None}},
+        *_default_disabled_quantizer_cfg,
+    ],
     "algorithm": "smoothquant",
 }
 
@@ -230,14 +230,16 @@ def test_auto_quantize_disabled_layers_no_poison():
 
 
 INT4INT8_AWQ_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": [
-            {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}, "enable": True},
-            {"num_bits": 8, "axis": None, "enable": True},
-        ],
-        "*input_quantizer": {"num_bits": 8, "axis": None, "enable": True},
-        "default": {"enable": False},
-    },
+    "quant_cfg": [
+        {
+            "*weight_quantizer": [
+                {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}, "enable": True},
+                {"num_bits": 8, "axis": None, "enable": True},
+            ]
+        },
+        {"*input_quantizer": {"num_bits": 8, "axis": None, "enable": True}},
+        {"default": {"enable": False}},
+    ],
     "algorithm": "awq_lite",
 }
 
@@ -480,7 +482,8 @@ def test_get_auto_quantize_config(method):
     # Use stored best recipe
     config = mtq.get_auto_quantize_config(search_state)
     assert "quant_cfg" in config
-    assert config["quant_cfg"]["*"] == {"enable": False}
+    assert isinstance(config["quant_cfg"], list)
+    assert any("*" in entry and entry["*"] == {"enable": False} for entry in config["quant_cfg"])
     assert config["algorithm"] == "max"
 
     # Re-solve with different constraints

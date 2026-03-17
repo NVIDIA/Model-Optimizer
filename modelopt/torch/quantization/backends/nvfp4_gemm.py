@@ -15,8 +15,6 @@
 
 """This module provides a GEMM function for nvfp4 quantization."""
 
-from typing import Any
-
 import torch
 from torch.autograd import Function
 
@@ -213,10 +211,14 @@ def _nvfp4_availability_check(module, input, args, kwargs):
     if not hasattr(module, "input_quantizer") or not hasattr(module, "weight_quantizer"):
         return False
 
-    quant_cfg: dict[str, Any] = mtq.NVFP4_DEFAULT_CFG["quant_cfg"]
+    quant_cfg_list: list[dict] = mtq.NVFP4_DEFAULT_CFG["quant_cfg"]
     # Quantizer configs
-    input_cfg = quant_cfg["*input_quantizer"]
-    weight_cfg = quant_cfg["*weight_quantizer"]
+    input_cfg = next(
+        v for entry in quant_cfg_list for k, v in entry.items() if k == "*input_quantizer"
+    )
+    weight_cfg = next(
+        v for entry in quant_cfg_list for k, v in entry.items() if k == "*weight_quantizer"
+    )
 
     # Check input quantizer config
     for key, value in input_cfg.items():

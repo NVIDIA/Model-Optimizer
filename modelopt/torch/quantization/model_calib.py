@@ -35,6 +35,7 @@ from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_me
 from modelopt.torch.utils.perf import get_used_gpu_mem_fraction
 
 from .calib import MseCalibrator, NVFP4MSECalibrator
+from .config import QuantizerAttributeConfig
 from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quantizer_by_cfg_context
 from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import (
@@ -1101,7 +1102,9 @@ def awq_lite(
             self.awq_lite.num_cache_steps += 1
             self.awq_lite.num_tokens += input.numel() / input.shape[-1]
             if self.awq_lite.is_input_quantized:
-                with set_quantizer_by_cfg_context(self.input_quantizer, {"*": {"enable": True}}):
+                with set_quantizer_by_cfg_context(
+                    self.input_quantizer, [{"*": QuantizerAttributeConfig(enable=True)}]
+                ):
                     max_calibrate(self.input_quantizer, lambda quantizer: quantizer(input), False)
             return out_actual
 
