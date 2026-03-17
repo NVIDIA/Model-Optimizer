@@ -23,6 +23,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+from peft import LoraConfig
 from safetensors.torch import save_file
 
 from .hf_spec_configs import kimik2_eagle_template_config, llama_eagle_template_config
@@ -185,6 +186,20 @@ class EagleExporter(SpeculativeDecodingExporter):
 
         return template_config
 
+    def _export_lora(self, export_dir: Path, full_sd: dict):
+        """Export base model LoRA adapter weights alongside the eagle module artifacts."""
+        lora_sd = {k: v for k, v in full_sd.items() if "lora_A" in k or "lora_B" in k}
+        save_file(lora_sd, export_dir / "lora_adapter_model.safetensors")
+
+        lora_config = LoraConfig(
+            r=self.model.eagle_base_lora_rank,
+            lora_alpha=self.model.eagle_base_lora_alpha,
+            target_modules=self.model.eagle_base_lora_target_modules or None,
+            bias="none",
+        )
+        with open(export_dir / "lora_adapter_config.json", "w") as f:
+            json.dump(lora_config.to_dict(), f, indent=4)
+
     def export(self, export_dir: Path | str, dtype: torch.dtype | None = None):
         """Export the model to the deployment format."""
         # Make export dir
@@ -214,6 +229,10 @@ class EagleExporter(SpeculativeDecodingExporter):
         if hf_quant_config is not None:
             with open(f"{export_dir}/hf_quant_config.json", "w") as file:
                 json.dump(hf_quant_config, file, indent=4)
+
+        # Export LoRA adapter weights separately
+        if getattr(self.model, "eagle_base_lora", False):
+            self._export_lora(export_dir, full_sd)
 
 
 class EagleMedusaExporter(EagleExporter):

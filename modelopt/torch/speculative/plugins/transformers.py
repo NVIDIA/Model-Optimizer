@@ -37,6 +37,9 @@ from typing import Any
 import torch
 import transformers
 from packaging.version import Version
+from peft import LoraConfig
+from peft.mapping import inject_adapter_in_model
+from peft.tuners.lora import LoraLayer
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
@@ -547,6 +550,37 @@ class HFEagleModel(EagleModel):
             base_model_last_layer = self._base_model.layers[-1]
             return next(base_model_last_layer.parameters()).device
 
+    def _inject_base_lora(self):
+        """Inject HF PEFT LoRA adapters into the base model in-place and unfreeze them."""
+        target_modules = self.eagle_base_lora_target_modules or None
+        lora_config = LoraConfig(
+            r=self.eagle_base_lora_rank,
+            lora_alpha=self.eagle_base_lora_alpha,
+            target_modules=target_modules,
+            bias="none",
+        )
+        inject_adapter_in_model(lora_config, self._base_model, adapter_name="default")
+        # Unfreeze only the LoRA parameters
+        for name, param in self._base_model.named_parameters():
+            if "lora_" in name:
+                param.requires_grad = True
+
+    def _set_base_lora_enabled(self, enabled: bool) -> None:
+        """Enable or disable LoRA adapters in the base model."""
+        for module in self._base_model.modules():
+            if isinstance(module, LoraLayer):
+                module.enable_adapters(enabled)
+
+    def _preservation_loss(
+        self, ref_logits: torch.Tensor, lora_logits: torch.Tensor
+    ) -> torch.Tensor:
+        """KL divergence encouraging LoRA output to stay close to the original base model.
+
+        KL(softmax(ref) || log_softmax(lora)) weighted by eagle_base_lora_preservation_loss_weight.
+        """
+        loss = nn.Softmax(dim=-1)(ref_logits.detach()) * nn.LogSoftmax(dim=-1)(lora_logits)
+        return -loss.sum(dim=-1).mean() * self.eagle_base_lora_preservation_loss_weight
+
     def modify(
         self,
         config,
@@ -609,6 +643,11 @@ class HFEagleModel(EagleModel):
             for layer_idx, layer in enumerate(self._base_model.layers):
                 if layer_idx in self.eagle_config.eagle_aux_hidden_state_layer_ids:
                     layer.register_forward_hook(self._collect_aux_hidden_states_forward_hook)
+
+        # Inject HF PEFT LoRA adapters into the base model for co-training
+        if self.eagle_base_lora:
+            assert not self.eagle_offline, "eagle_base_lora is incompatible with eagle_offline=True"
+            self._inject_base_lora()
 
         # delete base model layers for offline training
         if self.eagle_offline:
@@ -756,32 +795,46 @@ class HFEagleModel(EagleModel):
         labels,
         **kwargs,
     ):
-        with torch.no_grad() if freeze_base_model else contextlib.nullcontext():
-            outputs = super().forward(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                output_hidden_states=True,
-                **kwargs,
-            )
-            past_key_values = getattr(outputs, "past_key_values", None)
-            base_input_embeds = outputs.hidden_states[0]
-            base_model_hidden_states = outputs.hidden_states[-1]
-            base_model_logits = outputs.logits
+        def _run_forward(no_grad):
+            with torch.no_grad() if no_grad else contextlib.nullcontext():
+                return super(HFEagleModel, self).forward(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    output_hidden_states=True,
+                    **kwargs,
+                )
 
-            # Optionally, compute base model loss when we want to tune the base model.
+        # When using LoRA, run a reference forward with LoRA disabled to get the original
+        # model distribution for the preservation loss.
+        ref_logits = None
+        if self.eagle_base_lora:
+            self._set_base_lora_enabled(False)
+            ref_logits = _run_forward(no_grad=True).logits
+            if hasattr(self, "_aux_hidden_states"):
+                self._aux_hidden_states.clear()
+            self._set_base_lora_enabled(True)
+
+        # Main forward — LoRA params receive gradients when eagle_base_lora is True.
+        outputs = _run_forward(no_grad=freeze_base_model and not self.eagle_base_lora)
+        past_key_values = getattr(outputs, "past_key_values", None)
+        base_model_logits = outputs.logits
+
+        if ref_logits is not None:
+            base_model_loss = self._preservation_loss(ref_logits, base_model_logits)
+        elif not freeze_base_model and labels is not None:
+            loss_fct = CrossEntropyLoss()
+            base_model_loss = loss_fct(
+                base_model_logits.view(-1, base_model_logits.shape[-1]), labels.view(-1)
+            )
+        else:
             base_model_loss = None
-            if not freeze_base_model and labels is not None:  # Base model loss
-                loss_fct = CrossEntropyLoss()
-                loss_logits = base_model_logits.view(-1, base_model_logits.shape[-1])
-                labels = labels.view(-1)
-                base_model_loss = loss_fct(loss_logits, labels)
 
         return EagleBaseModelOutput(
-            input_embeds=base_input_embeds,
+            input_embeds=outputs.hidden_states[0],
             aux_hiddens=self.pop_and_gather_aux_hiddens(),
-            out_hiddens=base_model_hidden_states,
+            out_hiddens=outputs.hidden_states[-1],
             logits=base_model_logits,
             loss=base_model_loss,
         ), past_key_values

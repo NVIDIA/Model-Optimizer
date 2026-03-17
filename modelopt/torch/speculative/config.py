@@ -110,3 +110,37 @@ class EagleConfig(ModeloptBaseConfig):
             "Whether to mix hidden states of multiple TTT steps. It is a technique to reduce training cost."
         ),
     )
+
+    eagle_base_lora: bool = ModeloptField(
+        default=False,
+        description=(
+            "Whether to add LoRA adapters to the base model for co-training with the EAGLE module. "
+            "Requires the `peft` library. Incompatible with eagle_offline=True."
+        ),
+    )
+
+    eagle_base_lora_rank: int = ModeloptField(
+        default=64,
+        description="LoRA rank for the base model adapters.",
+    )
+
+    eagle_base_lora_alpha: float = ModeloptField(
+        default=16.0,
+        description="LoRA alpha (scaling) for the base model adapters.",
+    )
+
+    eagle_base_lora_target_modules: list = ModeloptField(
+        default=[],
+        description=(
+            "List of module name patterns to apply LoRA to in the base model "
+            "(e.g. ['q_proj', 'v_proj']). Empty list uses peft defaults."
+        ),
+    )
+
+    eagle_base_lora_preservation_loss_weight: float = ModeloptField(
+        default=0.1,
+        description=(
+            "Weight for the preservation loss that minimizes the KL divergence between "
+            "the LoRA-adapted base model output and the original base model output."
+        ),
+    )
