@@ -141,14 +141,13 @@ def _prepare_student_and_teacher_models(project_root_path: Path, tmp_path: Path)
     # Create tokenizer (uses local tokenizer from test resources)
     tokenizer = create_tokenizer(project_root_path)
 
-    # Create student model using utility function
-    # This uses local config files and preserves model-specific settings
+    # Create student model using utility function (loads config from Hub).
     # TODO: Make the student model using different ffn sizes across layers.
     create_and_save_small_hf_model(
         output_path=str(student_hf_dir),
         vocab_size=tokenizer.vocab_size,
         tokenizer=tokenizer,
-        hf_config_name="llama_3_1_8b_instruct",
+        hf_model_name="meta-llama/Llama-3.1-8B-Instruct",
         hybrid_override_pattern=None,
     )
 
@@ -157,7 +156,7 @@ def _prepare_student_and_teacher_models(project_root_path: Path, tmp_path: Path)
         output_path=str(teacher_hf_dir),
         vocab_size=tokenizer.vocab_size,
         tokenizer=tokenizer,
-        hf_config_name="llama_3_1_8b_instruct",
+        hf_model_name="meta-llama/Llama-3.1-8B-Instruct",
         hybrid_override_pattern=None,
     )
 
