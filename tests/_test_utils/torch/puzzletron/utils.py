@@ -24,18 +24,12 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PreTra
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.puzzletron.tools.hydra_utils import register_hydra_resolvers
 
-# Path to HF configs relative to this file
-# HF configs are in tests/gpu/torch/puzzletron/resources/hf_configs
-HF_CONFIGS_DIR = (
-    Path(__file__).parent.parent.parent.parent / "gpu/torch/puzzletron/resources/hf_configs"
-)
-
 
 def setup_test_model_and_data(
     project_root_path: Path,
     tmp_path: Path,
     rank: int,
-    hf_config_name: str,
+    hf_model_name: str,
     hybrid_override_pattern: str | None = None,
 ) -> tuple[Path, Path, Path]:
     """
@@ -45,7 +39,7 @@ def setup_test_model_and_data(
         project_root_path (Path): the root path of the project
         tmp_path (Path): the temporary path to use for the test
         rank (int): the rank of the process
-        hf_config_name (str): Name of the HF config directory (e.g., "llama_3_1_8b_instruct")
+        hf_model_name (str): HuggingFace model card name (e.g., "meta-llama/Llama-3.1-8B-Instruct")
         hybrid_override_pattern (str): For NemotronH models, the layer type pattern
 
     Returns:
@@ -56,10 +50,8 @@ def setup_test_model_and_data(
     # Register Hydra custom resolvers (needed for config resolution)
     register_hydra_resolvers()
 
-    # The inputs for the nas.convert() step.
-    #
-    puzzle_dir = tmp_path / hf_config_name
-    hf_checkpoint_path = puzzle_dir / f"hf_models/{hf_config_name}"
+    puzzle_dir = tmp_path / hf_model_name
+    hf_checkpoint_path = puzzle_dir / f"hf_models/{hf_model_name}"
     dataset_path = puzzle_dir / "dummy_dataset"
 
     if rank == 0:
@@ -73,7 +65,7 @@ def setup_test_model_and_data(
             output_path=str(hf_checkpoint_path),
             vocab_size=tokenizer.vocab_size,
             tokenizer=tokenizer,
-            hf_config_name=hf_config_name,
+            hf_model_name=hf_model_name,
             hybrid_override_pattern=hybrid_override_pattern,
         )
     dist.barrier()
@@ -89,7 +81,7 @@ def create_and_save_small_hf_model(
     output_path: str,
     vocab_size: int,
     tokenizer: PreTrainedTokenizerBase,
-    hf_config_name: str,
+    hf_model_name: str,
     hybrid_override_pattern: str | None = None,
 ):
     """
@@ -101,23 +93,21 @@ def create_and_save_small_hf_model(
         output_path: Where to save the model
         vocab_size: Vocabulary size (should match tokenizer)
         tokenizer: Tokenizer to save alongside the model
-        hf_config_name: Name of the config directory under resources/hf_configs/
-                        e.g., "llama_3_1_8b_instruct", "llama_3_2_3b_instruct", or "qwen2_5_7b_instruct"
+        hf_model_name: HuggingFace model card name (e.g., "meta-llama/Llama-3.1-8B-Instruct")
         hybrid_override_pattern: For NemotronH models, the layer type pattern (e.g., "*-" for Attention+MLP,
                                  "M-" for Mamba+MLP). Must match num_hidden_layers. None for non-NemotronH models.
     """
     os.makedirs(output_path, exist_ok=True)
 
     # Load real HuggingFace config (preserves tie_word_embeddings, rope_scaling, etc.)
-    config_path = HF_CONFIGS_DIR / hf_config_name
-    config = AutoConfig.from_pretrained(config_path, local_files_only=True, trust_remote_code=True)
+    config = AutoConfig.from_pretrained(hf_model_name, trust_remote_code=True)
 
     # Override size-related params to make it small for testing
     # Note: intermediate_size must be divisible by 256 per DeciLM config requirements
     # Note: hidden_size must give head_dim >= 8 for Flash Attention 2 compatibility
 
     # VL models have nested configs (text_config, vision_config)
-    if hf_config_name == "qwen3-vl-30b-a3b-instruct":
+    if hasattr(config, "text_config") and hasattr(config, "vision_config"):
         config.text_config.vocab_size = vocab_size
         config.text_config.hidden_size = 256
         config.text_config.intermediate_size = 512
@@ -164,7 +154,7 @@ def create_and_save_small_hf_model(
     original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     # TODO: Consider using AutoModel.from_config instead.
-    if hf_config_name == "qwen3-vl-30b-a3b-instruct":
+    if hasattr(config, "text_config") and hasattr(config, "vision_config"):
         from transformers import Qwen3VLMoeForConditionalGeneration
 
         model = Qwen3VLMoeForConditionalGeneration._from_config(config)

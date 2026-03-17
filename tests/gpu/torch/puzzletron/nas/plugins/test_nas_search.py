@@ -17,7 +17,6 @@ from datetime import timedelta
 from functools import partial
 from pathlib import Path
 
-import pytest
 import torch
 from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from _test_utils.torch.puzzletron.utils import setup_test_model_and_data
@@ -27,7 +26,6 @@ import modelopt.torch.utils.distributed as dist
 from modelopt.torch.puzzletron.nas.plugins.puzzletron_nas_plugin import PuzzletronModel
 
 
-@pytest.mark.skip(reason="Temporarily disabled")
 def test_nas_search(project_root_path: Path, tmp_path: Path):
     spawn_multiprocess_job(
         size=torch.cuda.device_count(),
@@ -42,12 +40,10 @@ def _test_nas_search_multiprocess_job(
     dist.setup(timeout=timedelta(10))
     # Setup the test model and data.
     puzzle_dir, llama_checkpoint_path, dataset_path = setup_test_model_and_data(
-        project_root_path, tmp_path, rank, "llama_3_1_8b_instruct"
+        project_root_path, tmp_path, rank, "meta-llama/Llama-3.1-8B-Instruct"
     )
-    hydra_config_dir = (
-        project_root_path / "tests/gpu/torch/puzzletron/resources/configs/llama_3_1_8b_instruct"
-    )
-    hydra_config_name = "llama_3_1_8b_instruct"
+    hydra_config_dir = project_root_path / "tests/gpu/torch/puzzletron/resources/configs"
+    hydra_config_name = "meta-llama/Llama-3.1-8B-Instruct/Llama-3.1-8B-Instruct"
 
     #
     # Run the mnt.convert() step
