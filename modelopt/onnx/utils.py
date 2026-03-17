@@ -23,6 +23,7 @@ import uuid
 from collections import defaultdict
 from typing import Any
 
+import google.protobuf.message
 import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
@@ -650,13 +651,11 @@ def save_onnx(model: onnx.ModelProto, onnx_path: str, save_as_external_data: boo
             f"Model size: {model_size} bytes, using external data: {save_as_external_data}"
         )
 
-    except ValueError as e:
-        if "Message onnx.ModelProto exceeds maximum protobuf size of 2GB" in str(e):
-            logger.warning("Model exceeds 2GB limit, switching to external data storage")
-            save_as_external_data = True
-        else:
-            logger.error(f"Failed to serialize model: {e!s}")
-            raise
+    except (ValueError, google.protobuf.message.EncodeError) as e:
+        logger.warning(
+            "Model exceeds 2GB limit, switching to external data storage. Error message: [%s]", e
+        )
+        save_as_external_data = True
 
     # Set ir_version to 10, remove it once ORT supports ir_version 11
     model.ir_version = 10
