@@ -152,3 +152,29 @@ def test_load_recipe_unsupported_type_raises(tmp_path):
     bad.write_text(CFG_RECIPE_UNSUPPORTED_TYPE)
     with pytest.raises(ValueError, match="Unsupported recipe type"):
         load_recipe(bad)
+
+
+# ---------------------------------------------------------------------------
+# YAML recipe consistency — built-in general/ptq files match config.py dicts
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("yaml_path", "model_cfg_name", "kv_cfg_name"),
+    [
+        ("general/ptq/fp8_default-fp8_kv.yml", "FP8_DEFAULT_CFG", "FP8_KV_CFG"),
+        ("general/ptq/nvfp4_default-fp8_kv.yml", "NVFP4_DEFAULT_CFG", "FP8_KV_CFG"),
+        ("general/ptq/nvfp4_mlp_only-fp8_kv.yml", "NVFP4_MLP_ONLY_CFG", "FP8_KV_CFG"),
+        ("general/ptq/nvfp4_omlp_only-fp8_kv.yml", "NVFP4_OMLP_ONLY_CFG", "FP8_KV_CFG"),
+    ],
+)
+def test_general_ptq_yaml_matches_config_dicts(yaml_path, model_cfg_name, kv_cfg_name):
+    """Each general/ptq YAML's merged quant_cfg matches the corresponding config.py dicts."""
+    import modelopt.torch.quantization.config as qcfg
+
+    model_cfg = getattr(qcfg, model_cfg_name)
+    kv_cfg = getattr(qcfg, kv_cfg_name)
+    yaml_data = load_config(yaml_path)
+
+    assert {**model_cfg["quant_cfg"], **kv_cfg["quant_cfg"]} == yaml_data["quant_cfg"]
+    assert model_cfg["algorithm"] == yaml_data["algorithm"]

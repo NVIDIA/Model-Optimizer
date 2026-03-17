@@ -644,6 +644,7 @@ NVFP4_OMLP_ONLY_CFG = {
     },
     "algorithm": "max",
 }
+
 choices: set[str] = {
     "FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG",
     "FP8_AFFINE_KV_CFG",
@@ -681,6 +682,8 @@ choices: set[str] = {
     "MAMBA_MOE_FP8_CONSERVATIVE_CFG",
     "MAMBA_MOE_FP8_AGGRESSIVE_CFG",
     "NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG",
+    # DO NOT ADD NEW CONFIGS HERE. If you want to add a new general recipe, add it to
+    # modelopt_recipes/general/ptq/ as a yaml file
 }
 
 BiasType = Literal["static", "dynamic"]
