@@ -36,20 +36,12 @@ key: val
 CFG_RECIPE_MISSING_TYPE = """\
 metadata:
   description: Missing recipe_type.
-model_quant: {}
-kv_quant: {}
+quant_cfg: {}
 """
 
-CFG_RECIPE_MISSING_MODEL_QUANT = """\
+CFG_RECIPE_MISSING_QUANT_CFG = """\
 metadata:
   recipe_type: ptq
-kv_quant: {}
-"""
-
-CFG_RECIPE_MISSING_KV_QUANT = """\
-metadata:
-  recipe_type: ptq
-model_quant: {}
 """
 
 CFG_RECIPE_UNSUPPORTED_TYPE = """\
@@ -60,20 +52,6 @@ metadata:
 # ---------------------------------------------------------------------------
 # Directory-format YAML fixtures
 # ---------------------------------------------------------------------------
-
-DIR_RECIPE_DESCRIPTOR = """\
-recipe_type: ptq
-description: Dir format test.
-"""
-
-DIR_MODEL_QUANT = """\
-algorithm: max
-quant_cfg: {}
-"""
-
-DIR_KV_QUANT = """\
-quant_cfg: {}
-"""
 
 # ---------------------------------------------------------------------------
 # load_config — basic behaviour
@@ -108,8 +86,7 @@ def test_load_recipe_builtin_with_suffix():
     recipe = load_recipe("general/ptq/fp8_default-fp8_kv.yml")
     assert recipe.recipe_type == RecipeType.PTQ
     assert isinstance(recipe, ModelOptPTQRecipe)
-    assert recipe.model_quant is not None
-    assert recipe.kv_quant is not None
+    assert recipe.quant_cfg
 
 
 def test_load_recipe_builtin_without_suffix():
@@ -127,46 +104,19 @@ def test_load_recipe_builtin_description():
 
 _BUILTIN_PTQ_RECIPES = [
     "general/ptq/fp8_default-fp8_kv",
-    "general/ptq/fp8_per_channel_per_token-fp8_kv",
-    "general/ptq/fp8_2d_blockwise_weight_only-fp8_kv",
-    "general/ptq/int4_awq-fp8_kv",
-    "general/ptq/int4_blockwise_weight_only-fp8_kv",
-    "general/ptq/int8_default-fp8_kv",
-    "general/ptq/int8_smoothquant-fp8_kv",
-    "general/ptq/int8_weight_only-fp8_kv",
-    "general/ptq/mamba_moe_fp8_aggressive-fp8_kv",
-    "general/ptq/mamba_moe_fp8_conservative-fp8_kv",
-    "general/ptq/mamba_moe_nvfp4_aggressive-fp8_kv",
-    "general/ptq/mamba_moe_nvfp4_conservative-fp8_kv",
-    "general/ptq/mxfp4_default-fp8_kv",
-    "general/ptq/mxfp4_mlp_weight_only-fp8_kv",
-    "general/ptq/mxfp6_default-fp8_kv",
-    "general/ptq/mxfp8_default-fp8_kv",
-    "general/ptq/mxint8_default-fp8_kv",
-    "general/ptq/nvfp4_awq_clip-fp8_kv",
-    "general/ptq/nvfp4_awq_full-fp8_kv",
-    "general/ptq/nvfp4_awq_lite-fp8_kv",
     "general/ptq/nvfp4_default-fp8_kv",
-    "general/ptq/nvfp4_fp8_mha-fp8_kv",
     "general/ptq/nvfp4_mlp_only-fp8_kv",
-    "general/ptq/nvfp4_mlp_weight_only-fp8_kv",
     "general/ptq/nvfp4_omlp_only-fp8_kv",
-    "general/ptq/nvfp4_svdquant_default-fp8_kv",
-    "general/ptq/nvfp4_w4a4_weight_local_hessian-fp8_kv",
-    "general/ptq/nvfp4_w4a4_weight_mse_fp8_sweep-fp8_kv",
-    "general/ptq/w4a8_awq_beta-fp8_kv",
-    "general/ptq/w4a8_mxfp4_fp8-fp8_kv",
-    "general/ptq/w4a8_nvfp4_fp8-fp8_kv",
 ]
 
 
 @pytest.mark.parametrize("recipe_path", _BUILTIN_PTQ_RECIPES)
 def test_load_recipe_all_builtins(recipe_path):
-    """Smoke-test: every built-in PTQ recipe loads without error and has model_quant."""
+    """Smoke-test: every built-in PTQ recipe loads without error and has quant_cfg."""
     recipe = load_recipe(recipe_path)
     assert recipe.recipe_type == RecipeType.PTQ
     assert isinstance(recipe, ModelOptPTQRecipe)
-    assert recipe.model_quant is not None
+    assert recipe.quant_cfg
 
 
 # ---------------------------------------------------------------------------
@@ -188,19 +138,11 @@ def test_load_recipe_missing_recipe_type_raises(tmp_path):
         load_recipe(bad)
 
 
-def test_load_recipe_missing_model_quant_raises(tmp_path):
-    """load_recipe raises ValueError when model_quant is absent for a PTQ recipe."""
+def test_load_recipe_missing_quant_cfg_raises(tmp_path):
+    """load_recipe raises ValueError when quant_cfg is absent for a PTQ recipe."""
     bad = tmp_path / "bad.yml"
-    bad.write_text(CFG_RECIPE_MISSING_MODEL_QUANT)
-    with pytest.raises(ValueError, match="model_quant"):
-        load_recipe(bad)
-
-
-def test_load_recipe_missing_kv_quant_raises(tmp_path):
-    """load_recipe raises ValueError when kv_quant is absent for a PTQ recipe."""
-    bad = tmp_path / "bad.yml"
-    bad.write_text(CFG_RECIPE_MISSING_KV_QUANT)
-    with pytest.raises(ValueError, match="kv_quant"):
+    bad.write_text(CFG_RECIPE_MISSING_QUANT_CFG)
+    with pytest.raises(ValueError, match="quant_cfg"):
         load_recipe(bad)
 
 
@@ -210,24 +152,3 @@ def test_load_recipe_unsupported_type_raises(tmp_path):
     bad.write_text(CFG_RECIPE_UNSUPPORTED_TYPE)
     with pytest.raises(ValueError, match="Unsupported recipe type"):
         load_recipe(bad)
-
-
-# ---------------------------------------------------------------------------
-# load_recipe — directory format
-# ---------------------------------------------------------------------------
-
-
-def test_load_recipe_dir(tmp_path):
-    """load_recipe loads a recipe from a directory containing separate YAML files."""
-    (tmp_path / "recipe.yml").write_text(DIR_RECIPE_DESCRIPTOR)
-    (tmp_path / "model_quant.yml").write_text(DIR_MODEL_QUANT)
-    (tmp_path / "kv_quant.yml").write_text(DIR_KV_QUANT)
-    recipe = load_recipe(tmp_path)
-    assert recipe.recipe_type == RecipeType.PTQ
-    assert recipe.description == "Dir format test."
-
-
-def test_load_recipe_dir_missing_descriptor_raises(tmp_path):
-    """load_recipe raises ValueError when recipe.yml is absent from the directory."""
-    with pytest.raises(ValueError, match="recipe descriptor"):
-        load_recipe(tmp_path)

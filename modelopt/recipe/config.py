@@ -18,20 +18,11 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from pydantic import Field, field_validator
+from pydantic import field_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
-
-if TYPE_CHECKING:
-    from modelopt.torch.quantization.config import QuantizeConfig
-
-
-def _default_quantize_config() -> QuantizeConfig:
-    from modelopt.torch.quantization.config import QuantizeConfig
-
-    return QuantizeConfig()
 
 
 class RecipeType(str, Enum):
@@ -73,21 +64,18 @@ class ModelOptRecipeBase(ModeloptBaseConfig):
 
 
 class ModelOptPTQRecipe(ModelOptRecipeBase):
-    """Our config class for PTQ recipes.
+    """Our config class for PTQ recipes."""
 
-    Rules are what governs the configuration for modifying dynamic module classes.
-    """
-
-    model_quant: QuantizeConfig = Field(
-        default_factory=_default_quantize_config,
-        title="Model weights and activations quantization config",
-        description="The quantization config for the model.",
+    quant_cfg: dict[str, Any] = ModeloptField(
+        default={},
+        title="Quantization config",
+        description="Merged quantizer patterns for model weights, activations, and KV cache.",
         validate_default=True,
     )
 
-    kv_quant: dict[str, Any] = ModeloptField(
-        default={},
-        title="KV quantization config",
-        description="The quantization config for the KV cache.",
-        validate_default=True,
+    algorithm: Any = ModeloptField(
+        default=None,
+        title="Calibration algorithm",
+        description="Calibration algorithm passed to mtq.quantize().",
+        validate_default=False,
     )
