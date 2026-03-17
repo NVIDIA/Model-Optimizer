@@ -155,6 +155,37 @@ def test_load_recipe_unsupported_type_raises(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# load_recipe — directory format
+# ---------------------------------------------------------------------------
+
+
+def test_load_recipe_dir(tmp_path):
+    """load_recipe loads a recipe from a directory with recipe.yml + ptq_cfg.yml."""
+    (tmp_path / "recipe.yml").write_text(
+        "metadata:\n  recipe_type: ptq\n  description: Dir test.\n"
+    )
+    (tmp_path / "ptq_cfg.yml").write_text("algorithm: max\nquant_cfg: {}\n")
+    recipe = load_recipe(tmp_path)
+    assert recipe.recipe_type == RecipeType.PTQ
+    assert recipe.description == "Dir test."
+    assert recipe.ptq_cfg == {"algorithm": "max", "quant_cfg": {}}
+
+
+def test_load_recipe_dir_missing_recipe_raises(tmp_path):
+    """load_recipe raises ValueError when recipe.yml is absent from the directory."""
+    (tmp_path / "ptq_cfg.yml").write_text("algorithm: max\nquant_cfg: {}\n")
+    with pytest.raises(ValueError, match="recipe descriptor"):
+        load_recipe(tmp_path)
+
+
+def test_load_recipe_dir_missing_ptq_cfg_raises(tmp_path):
+    """load_recipe raises ValueError when ptq_cfg.yml is absent from the directory."""
+    (tmp_path / "recipe.yml").write_text("metadata:\n  recipe_type: ptq\n")
+    with pytest.raises(ValueError, match="ptq_cfg"):
+        load_recipe(tmp_path)
+
+
+# ---------------------------------------------------------------------------
 # YAML recipe consistency — built-in general/ptq files match config.py dicts
 # ---------------------------------------------------------------------------
 
