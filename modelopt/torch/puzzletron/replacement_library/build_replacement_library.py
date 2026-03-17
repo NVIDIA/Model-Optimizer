@@ -203,7 +203,9 @@ def _build_subblocks_df(
     trust_remote_code: bool = False,
 ) -> pd.DataFrame:
     teacher_checkpoint_dir = Path(teacher_checkpoint_dir)
-    checkpoint_dirs = _get_last_checkpoint_from_each_experiment(master_puzzle_dir)
+    checkpoint_dirs = _get_last_checkpoint_from_each_experiment(
+        master_puzzle_dir, trust_remote_code=trust_remote_code
+    )
     checkpoint_dirs = [teacher_checkpoint_dir] + list(checkpoint_dirs - {teacher_checkpoint_dir})
     checkpoints_to_split = [teacher_checkpoint_dir]
 
@@ -398,7 +400,9 @@ def _get_rows_with_no_op_subblock(
     return rows_with_no_op_subblock, subblock_cls
 
 
-def _get_last_checkpoint_from_each_experiment(master_puzzle_dir: Path | str) -> set[Path]:
+def _get_last_checkpoint_from_each_experiment(
+    master_puzzle_dir: Path | str, trust_remote_code: bool = False
+) -> set[Path]:
     master_puzzle_dir = Path(master_puzzle_dir)
     master_checkpoints_dir = master_puzzle_dir / CHECKPOINTS_DIR_NAME
     subdirs_of_master_checkpoints_dir = [
@@ -419,7 +423,11 @@ def _get_last_checkpoint_from_each_experiment(master_puzzle_dir: Path | str) -> 
             )
 
     # Filter out non-DeciLM checkpoints (e.g., unconverted Llama checkpoints)
-    valid_checkpoint_dirs = [cp for cp in checkpoint_dirs if is_valid_decilm_checkpoint(cp)]
+    valid_checkpoint_dirs = [
+        cp
+        for cp in checkpoint_dirs
+        if is_valid_decilm_checkpoint(cp, trust_remote_code=trust_remote_code)
+    ]
 
     experiment_dirs = [
         p if (p in subdirs_of_master_checkpoints_dir) else p.parent for p in valid_checkpoint_dirs
@@ -479,7 +487,7 @@ def _build_layer_replacements(
 ) -> list[dict]:
     layer_replacements_from_blocks = _build_layer_replacements_from_block_library(block_library_df)
     layer_replacements_from_checkpoints = _gather_layer_replacements_from_checkpoints(
-        master_puzzle_dir
+        master_puzzle_dir, trust_remote_code=trust_remote_code
     )
     layer_replacements = layer_replacements_from_blocks + layer_replacements_from_checkpoints
     layer_replacements = _filter_duplicate_teacher_replacements(
@@ -513,9 +521,13 @@ def _build_layer_replacements_from_block_library(block_library_df: pd.DataFrame)
     return layer_replacements
 
 
-def _gather_layer_replacements_from_checkpoints(master_puzzle_dir: str | Path) -> list[dict]:
+def _gather_layer_replacements_from_checkpoints(
+    master_puzzle_dir: str | Path, trust_remote_code: bool = False
+) -> list[dict]:
     gathered_layer_replacements = []
-    checkpoint_dirs = _get_last_checkpoint_from_each_experiment(master_puzzle_dir)
+    checkpoint_dirs = _get_last_checkpoint_from_each_experiment(
+        master_puzzle_dir, trust_remote_code=trust_remote_code
+    )
     for checkpoint_dir in checkpoint_dirs:
         if (layer_replacements_path := checkpoint_dir / "replacement_library.json").exists():
             layer_replacements = json.loads(layer_replacements_path.read_text())
