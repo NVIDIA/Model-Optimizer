@@ -13,12 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Import models to trigger factory registration
-from modelopt.torch.puzzletron.anymodel.models.gpt_oss import *
-from modelopt.torch.puzzletron.anymodel.models.llama import *
-from modelopt.torch.puzzletron.anymodel.models.mistral_small import *
-from modelopt.torch.puzzletron.anymodel.models.nemotron_h import *
-from modelopt.torch.puzzletron.anymodel.models.nemotron_h_v2 import *
-from modelopt.torch.puzzletron.anymodel.models.qwen2 import *
-from modelopt.torch.puzzletron.anymodel.models.qwen3_8b import *
-from modelopt.torch.puzzletron.anymodel.models.qwen3_vl_30b_a3b_instruct import *
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""GPT-OSS model support for AnyModel."""
+
+from .gpt_oss_converter import GptOssConverter
+from .gpt_oss_model_descriptor import GptOssModelDescriptor

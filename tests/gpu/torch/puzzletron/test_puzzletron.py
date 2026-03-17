@@ -45,7 +45,7 @@ SEED = 1234
         ("mistralai/Mistral-Small-24B-Instruct-2501", "mistral_small", None, False),
         ("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16", "nemotron_h", "*E", True),
         ("nvidia/NVIDIA-Nemotron-Nano-12B-v2", "nemotron_h_v2", "*-", False),
-        # ("openai/gpt-oss-20b", "gpt_oss", None, True),
+        ("openai/gpt-oss-20b", "gpt_oss", None, True),
         ("Qwen/Qwen2.5-7B-Instruct", "qwen2", None, False),
         ("Qwen/Qwen3-8B", "qwen3", None, False),
         ("Qwen/Qwen3-VL-30B-A3B-Instruct", "qwen3_vl", None, True),
@@ -86,7 +86,6 @@ def _test_puzzletron_multiprocess_job(
 ):
     # Set seed BEFORE dist.setup() to ensure reproducibility across all processes
     set_seed(SEED)
-
     dist.setup(timeout=timedelta(10))
 
     # Setup the test model and data.

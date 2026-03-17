@@ -146,6 +146,10 @@ def create_and_save_small_hf_model(
         if hasattr(config, "hybrid_override_pattern") and hybrid_override_pattern is not None:
             config.hybrid_override_pattern = hybrid_override_pattern
 
+        # Ensure pad_token_id is within vocab_size (nn.Embedding requires padding_idx < num_embeddings)
+        if getattr(config, "pad_token_id", None) is not None and config.pad_token_id >= vocab_size:
+            config.pad_token_id = 0
+
     # Set seed for reproducible weight initialization
     torch.manual_seed(42)
 
