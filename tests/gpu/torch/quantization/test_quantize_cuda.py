@@ -100,7 +100,6 @@ NVFP4_ADAROUND_CFG = {
     },
     "algorithm": {
         "method": "adaround",
-        "temperature": 1.0,
         "scale_after_dequant_args": {"scale_algorithm": {"method": "mse", "fp8_scale_sweep": True}},
     },
 }

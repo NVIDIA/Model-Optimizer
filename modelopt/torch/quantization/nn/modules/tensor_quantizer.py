@@ -1456,22 +1456,12 @@ class NVFP4StaticAdaRoundQuantizer(StaticBlockScaleQuantizer):
         super().__init__(*args, **kwargs)
         self._adaround_enabled = False
         self.temperature = 1.0
-        self.dist_loss_weight = 0.01
-        self.beta_start = 20.0
-        self.beta_end = 2.0
-        self.freeze_weight = True
 
     @classmethod
     def from_nvfp4_quantizer(
         cls,
         tq: StaticBlockScaleQuantizer,
         weight_scaled: torch.Tensor | None = None,
-        temperature: float = 1.0,
-        dist_loss_weight: float = 0.01,
-        beta_start: float = 20.0,
-        beta_end: float = 2.0,
-        freeze_weight: bool = True,
-        parent_weight: torch.Tensor | None = None,
     ) -> "NVFP4StaticAdaRoundQuantizer":
         """Convert an NVFP4StaticQuantizer to NVFP4StaticAdaRoundQuantizer in-place.
 
@@ -1479,55 +1469,39 @@ class NVFP4StaticAdaRoundQuantizer(StaticBlockScaleQuantizer):
             tq: The NVFP4StaticQuantizer to convert.
             weight_scaled: Pre-scaled weight tensor of shape ``[num_blocks, block_size]``.
                 If provided, :meth:`enable_adaround` is called immediately.
-            temperature: Sigmoid temperature for the rounding logits.
         """
         assert isinstance(tq, StaticBlockScaleQuantizer), (
             f"Expected StaticBlockScaleQuantizer, got {type(tq)}"
         )
         assert tq._scale_after_dequant, "AdaRound only supported with _scale_after_dequant mode."
 
-        def _set_dist_loss_params(q):
-            q.dist_loss_weight = dist_loss_weight
-            q.beta_start = beta_start
-            q.beta_end = beta_end
-            q.freeze_weight = freeze_weight
-
         if isinstance(tq, cls):
             if weight_scaled is not None:
-                tq.enable_adaround(weight_scaled, temperature)
-            _set_dist_loss_params(tq)
-            if freeze_weight and parent_weight is not None:
-                parent_weight.requires_grad_(False)
+                tq.enable_adaround(weight_scaled)
             return tq
         tq.__class__ = cls
         tq._is_nvfp4_static_adaround_quantizer = True
         tq._adaround_enabled = False
-        tq.temperature = temperature
-        _set_dist_loss_params(tq)
+        tq.temperature = 1.0
         if weight_scaled is not None:
-            tq.enable_adaround(weight_scaled, temperature)
-        if freeze_weight and parent_weight is not None:
-            parent_weight.requires_grad_(False)
+            tq.enable_adaround(weight_scaled)
         return tq
 
     @torch.no_grad()
-    def enable_adaround(self, weight_scaled: torch.Tensor, temperature: float = 1.0):
+    def enable_adaround(self, weight_scaled: torch.Tensor):
         """Initialize AdaRound parameters from the pre-scaled weight tensor.
 
         Args:
             weight_scaled: Pre-scaled weight tensor of shape ``[num_blocks, block_size]``,
                 already divided by per-block scale so values lie in ``[-6, 6]``.
-            temperature: Sigmoid temperature for the rounding logits.
         """
         assert weight_scaled.ndim == 2, (
             f"weight_scaled must be 2D [num_blocks, block_size], got shape {weight_scaled.shape}"
         )
-        self.temperature = temperature
 
         w_down = fp4_cast_ste(weight_scaled, None, "down")
         step = fp4_step_size(w_down)
 
-        # Normalized residual: how far between floor and ceil (in [0, 1])
         eps = 1e-6
         round_normalized = torch.where(
             step > 0,
@@ -1535,8 +1509,8 @@ class NVFP4StaticAdaRoundQuantizer(StaticBlockScaleQuantizer):
             torch.zeros_like(step),
         ).clamp(eps, 1.0 - eps)
 
-        # Inverse sigmoid to get initial logits
-        round_logits_init = temperature * torch.log(round_normalized / (1.0 - round_normalized))
+        t = self.temperature
+        round_logits_init = t * torch.log(round_normalized / (1.0 - round_normalized))
         round_logits_init = round_logits_init.clamp(-1e6, 1e6)
 
         self.round_logits = nn.Parameter(round_logits_init.float(), requires_grad=True)
@@ -1576,11 +1550,6 @@ class NVFP4StaticAdaRoundQuantizer(StaticBlockScaleQuantizer):
         w_down = fp4_cast_ste(inputs, None, "down")
         step = fp4_step_size(w_down)
         sign = _safe_sign(inputs)
-
-        if self.freeze_weight:
-            w_down = w_down.detach()
-            step = step.detach()
-            sign = sign.detach()
 
         return w_down + self.get_round_prob().to(inputs.dtype) * step * sign
 

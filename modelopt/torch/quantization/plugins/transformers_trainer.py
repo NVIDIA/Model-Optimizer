@@ -16,6 +16,7 @@
 """ModelOpt plugin for transformers Trainer."""
 
 import contextlib
+import fnmatch
 import gc
 import json
 import os
@@ -83,6 +84,52 @@ class QuantizationArguments:
                 "This is useful for reducing the model size."
             )
         },
+    )
+    trainable_params: list[str] | None = field(
+        default=None,
+        metadata={
+            "nargs": "+",
+            "help": (
+                "Glob patterns (fnmatch) for parameters that should be trainable. "
+                "All other parameters will be frozen. Mutually exclusive with frozen_params."
+            ),
+        },
+    )
+    frozen_params: list[str] | None = field(
+        default=None,
+        metadata={
+            "nargs": "+",
+            "help": (
+                "Glob patterns (fnmatch) for parameters that should be frozen. "
+                "Mutually exclusive with trainable_params."
+            ),
+        },
+    )
+
+
+@dataclass
+class AdaRoundTrainingArguments:
+    """Training-time arguments for AdaRound dist_loss annealing.
+
+    These are separated from :class:`QuantizationArguments` because they are
+    specific to the AdaRound training procedure and not general QAT knobs.
+    """
+
+    beta_start: float = field(
+        default=20.0,
+        metadata={"help": "Initial beta for dist_loss annealing (high = permissive)."},
+    )
+    beta_end: float = field(
+        default=2.0,
+        metadata={"help": "Final beta for dist_loss annealing (low = forces binary)."},
+    )
+    dist_loss_weight: float = field(
+        default=0.01,
+        metadata={"help": "Lambda multiplier for dist_loss regularization."},
+    )
+    temperature: float = field(
+        default=1.0,
+        metadata={"help": "Sigmoid temperature for rounding logits."},
     )
 
 
@@ -197,6 +244,9 @@ class _AdaRoundAuxCallback(TrainerCallback):
         self._aux_optimizer = torch.optim.SGD(param_groups, lr=0, momentum=0)
 
     def on_optimizer_step(self, args, state, control, **kwargs):
+        ada_args = self._trainer.adaround_args
+        if ada_args is None:
+            return control
         if self._adaround_quantizers is None:
             self._lazy_init()
         if not self._adaround_quantizers or self._aux_optimizer is None:
@@ -208,42 +258,38 @@ class _AdaRoundAuxCallback(TrainerCallback):
         # Zero round_logits grads (task-loss grads already consumed by main optimizer)
         self._aux_optimizer.zero_grad()
         # Compute annealed dist_loss
-        q0 = self._adaround_quantizers[0]
         progress = state.global_step / max(state.max_steps, 1)
-        beta = q0.beta_start + (q0.beta_end - q0.beta_start) * progress
+        beta = ada_args.beta_start + (ada_args.beta_end - ada_args.beta_start) * progress
         reg = sum(q.dist_loss(beta=beta) for q in self._adaround_quantizers)
-        dist_loss = q0.dist_loss_weight * reg
+        dist_loss = ada_args.dist_loss_weight * reg
         # Backward + step
         self._trainer.accelerator.backward(dist_loss)
         self._aux_optimizer.step()
-        # Log
-        self._trainer.log(
-            {
-                "adaround/dist_loss": dist_loss.detach().item(),
-                "adaround/beta": beta,
-            }
-        )
+        self._trainer.log({"adaround/dist_loss": dist_loss.detach().item(), "adaround/beta": beta})
         return control
 
 
 class QATTrainer(ModelOptHFTrainer):
     """A drop-in replacement of HuggingFace's Trainer for quantization aware training with ModelOpt.
 
-    This class takes an additional optional argument `quant_args` of type
-    :class:`QuantizationArgumentsWithConfig <QuantizationArgumentsWithConfig>`
-    to specify the quantization arguments.
+    Args:
+        quant_args: General quantization arguments (quant_cfg, calib_size, trainable/frozen params).
+        adaround_args: AdaRound-specific training arguments (beta annealing, dist_loss_weight).
+            When ``None``, the AdaRound auxiliary callback is a no-op.
     """
 
     def __init__(
         self,
         *args,
         quant_args: QuantizationArgumentsWithConfig | QuantizationArguments | None = None,
+        adaround_args: AdaRoundTrainingArguments | None = None,
         **kwargs,
     ):
         """Initialize the trainer with modelopt states."""
         super().__init__(*args, **kwargs)
 
         self.quant_args = quant_args
+        self.adaround_args = adaround_args
         quant_cfg = None
         if quant_args is not None and getattr(quant_args, "quant_cfg", None):
             quant_cfg = (
@@ -302,6 +348,41 @@ class QATTrainer(ModelOptHFTrainer):
         self._original_dtype = getattr(
             getattr(self.model, "config", None), "dtype", None
         ) or getattr(getattr(self.model, "config", None), "torch_dtype", None)
+
+        self._configure_trainable_params()
+
+    def _configure_trainable_params(self):
+        """Freeze/unfreeze parameters based on quant_args.trainable_params or frozen_params.
+
+        Must be called before optimizer creation (i.e. from ``__init__``).
+        """
+        if self.quant_args is None:
+            return
+        trainable = getattr(self.quant_args, "trainable_params", None)
+        frozen = getattr(self.quant_args, "frozen_params", None)
+        if not trainable and not frozen:
+            return
+        if trainable and frozen:
+            raise ValueError("trainable_params and frozen_params are mutually exclusive.")
+
+        def _matches(name, patterns):
+            return any(fnmatch.fnmatch(name, p) for p in patterns)
+
+        model = self.model
+        if trainable:
+            for name, param in model.named_parameters():
+                param.requires_grad_(_matches(name, trainable))
+        else:
+            for name, param in model.named_parameters():
+                if _matches(name, frozen):
+                    param.requires_grad_(False)
+
+        trainable_count = sum(p.requires_grad for p in model.parameters())
+        total_count = sum(1 for _ in model.parameters())
+        print_rank_0(
+            f"Trainable params: {trainable_count}/{total_count} "
+            f"({100 * trainable_count / max(total_count, 1):.1f}%)"
+        )
 
     def _save_modelopt_state_with_weights(self):
         """Save the modelopt weights for fsdp2 models."""

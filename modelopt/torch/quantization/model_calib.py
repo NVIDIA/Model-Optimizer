@@ -1965,11 +1965,6 @@ def scale_after_dequant(
 def adaround(
     model: nn.Module,
     forward_loop: ForwardLoop | None = None,
-    temperature: float = 1.0,
-    dist_loss_weight: float = 0.01,
-    beta_start: float = 20.0,
-    beta_end: float = 2.0,
-    freeze_weight: bool = True,
     scale_after_dequant_args: dict | None = None,
     **kwargs,
 ):
@@ -1979,15 +1974,13 @@ def adaround(
     ``scale_after_dequant_args`` can be provided to run
     :func:`scale_after_dequant` first (calibration + weight pre-scaling).
 
+    Training-time knobs (beta annealing, dist_loss_weight, temperature, param
+    freezing) are configured via ``AdaRoundTrainingArguments`` on the trainer.
+
     Args:
         model: Quantized model.
         forward_loop: Calibration data forward loop. Required when
             ``scale_after_dequant_args`` is provided.
-        temperature: Sigmoid temperature for the rounding logits.
-        dist_loss_weight: Lambda multiplier for dist_loss regularization.
-        beta_start: Initial beta for dist_loss annealing (high = permissive).
-        beta_end: Final beta for dist_loss annealing (low = forces binary).
-        freeze_weight: When True, detach the floor cast so only round_logits receive gradients.
         scale_after_dequant_args: If provided, call :func:`scale_after_dequant`
             first with these keyword arguments.  Example::
 
@@ -2017,16 +2010,8 @@ def adaround(
                 w = getattr(module, weight_name)
                 weight_scaled = w.data.float().reshape(-1, block_size)
 
-                # In-place: changes quantizer.__class__ and initializes round_logits
                 NVFP4StaticAdaRoundQuantizer.from_nvfp4_quantizer(
-                    quantizer,
-                    weight_scaled=weight_scaled,
-                    temperature=temperature,
-                    dist_loss_weight=dist_loss_weight,
-                    beta_start=beta_start,
-                    beta_end=beta_end,
-                    freeze_weight=freeze_weight,
-                    parent_weight=getattr(module, weight_name),
+                    quantizer, weight_scaled=weight_scaled
                 )
 
         seen_modules.add(module)

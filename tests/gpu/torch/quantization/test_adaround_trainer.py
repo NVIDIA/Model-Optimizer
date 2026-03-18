@@ -26,6 +26,7 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.distill.plugins.huggingface import LMLogitsLoss
 from modelopt.torch.quantization.nn.modules.tensor_quantizer import NVFP4StaticAdaRoundQuantizer
 from modelopt.torch.quantization.plugins.transformers_trainer import (
+    AdaRoundTrainingArguments,
     QADTrainer,
     QATTrainer,
     QuantizationArguments,
@@ -54,7 +55,6 @@ NVFP4_ADAROUND_CFG = {
     },
     "algorithm": {
         "method": "adaround",
-        "temperature": 1.0,
         "scale_after_dequant_args": {"scale_algorithm": {"method": "mse", "fp8_scale_sweep": True}},
     },
 }
@@ -121,6 +121,7 @@ class TestQATTrainer:
             args=_make_training_args(tmp_path, max_steps=4),
             train_dataset=dataset,
             quant_args=QuantizationArguments(quant_cfg=None),
+            adaround_args=AdaRoundTrainingArguments(),
         )
         trainer.train()
 
@@ -155,6 +156,7 @@ class TestQADTrainer:
             args=_make_training_args(tmp_path, max_steps=4),
             train_dataset=dataset,
             quant_args=QuantizationArguments(quant_cfg=None),
+            adaround_args=AdaRoundTrainingArguments(),
             distill_config=distill_config,
         )
         trainer.train()
