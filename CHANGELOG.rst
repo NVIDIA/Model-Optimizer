@@ -12,6 +12,7 @@ NVIDIA Model Optimizer Changelog
 **New Features**
 
 - Support full Transformer Engine spec for Minitron pruning (``mcore_minitron``). Now we no longer need to use custom ModelOpt spec. Note that this does not affect the usage of the pruning workflow but makes pruning slightly faster and may result in slightly different pruned model because of different kernel and numerics.
+- Add skip-softmax tile skipping to the Triton flash attention kernel (``modelopt.torch.kernels.triton_fa``). KV tiles with negligible attention scores are skipped entirely during prefill, saving V loads and computation on long sequences with strong attention locality. Integrates with ``mtsa.sparsify()`` via the ``triton_skip_softmax`` method.
 
 **Bug Fixes**
 

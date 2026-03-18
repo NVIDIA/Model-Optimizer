@@ -437,3 +437,119 @@ class TestBackward:
         torch.testing.assert_close(q.grad, dq_ref, rtol=5e-3, atol=5e-3)
         torch.testing.assert_close(k.grad, dk_ref, rtol=5e-3, atol=5e-3)
         torch.testing.assert_close(v.grad, dv_ref, rtol=5e-3, atol=5e-3)
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
+class TestSkipSoftmax:
+    """Skip-softmax tile-skipping approximation tests."""
+
+    def _make_inputs(self, batch=2, seq_len=256, num_heads=4, num_kv_heads=2, head_dim=64):
+        total = batch * seq_len
+        torch.manual_seed(77)
+        q = torch.randn(total, num_heads, head_dim, device="cuda", dtype=torch.float16)
+        k = torch.randn(total, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+        v = torch.randn(total, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+        b_seq_len = torch.full((batch,), seq_len, device="cuda", dtype=torch.int32)
+        b_start_loc = torch.zeros(batch, device="cuda", dtype=torch.int32)
+        b_start_loc[1:] = torch.cumsum(b_seq_len[:-1], dim=0)
+        return q, k, v, b_start_loc, b_seq_len
+
+    def test_disabled_matches_dense(self):
+        """skip_softmax_threshold=None/0.0 produces bit-identical output to dense."""
+        q, k, v, locs, lens = self._make_inputs()
+        scale = 1.0 / (64**0.5)
+        out_none = attention(q, k, v, locs, lens, 256, softmax_scale=scale)
+        out_zero = attention(
+            q, k, v, locs, lens, 256, softmax_scale=scale, skip_softmax_threshold=0.0
+        )
+        assert torch.equal(out_none, out_zero)
+
+    def test_small_threshold_close_to_dense(self):
+        """A small threshold (1e-3) should produce output very close to dense."""
+        q, k, v, locs, lens = self._make_inputs()
+        scale = 1.0 / (64**0.5)
+        out_dense = attention(q, k, v, locs, lens, 256, softmax_scale=scale)
+        out_skip = attention(
+            q, k, v, locs, lens, 256, softmax_scale=scale, skip_softmax_threshold=1e-3
+        )
+        torch.testing.assert_close(out_skip, out_dense, rtol=5e-2, atol=5e-2)
+
+    def test_large_threshold_differs_from_dense(self):
+        """A large threshold (0.5) should produce noticeably different output."""
+        q, k, v, locs, lens = self._make_inputs(seq_len=512)
+        scale = 1.0 / (64**0.5)
+        out_dense = attention(q, k, v, locs, lens, 512, softmax_scale=scale)
+        out_skip = attention(
+            q, k, v, locs, lens, 512, softmax_scale=scale, skip_softmax_threshold=0.5
+        )
+        assert not torch.allclose(out_skip, out_dense, atol=1e-3)
+
+    def test_output_shape_unchanged(self):
+        """Skip-softmax does not change output shape."""
+        q, k, v, locs, lens = self._make_inputs()
+        scale = 1.0 / (64**0.5)
+        out = attention(q, k, v, locs, lens, 256, softmax_scale=scale, skip_softmax_threshold=1e-2)
+        assert out.shape == q.shape
+
+    def test_monotonic_approximation_error(self):
+        """Larger threshold -> larger error vs dense (monotonic degradation)."""
+        q, k, v, locs, lens = self._make_inputs(seq_len=512)
+        scale = 1.0 / (64**0.5)
+        out_dense = attention(q, k, v, locs, lens, 512, softmax_scale=scale)
+        errors = []
+        for threshold in [1e-4, 1e-2, 1e-1]:
+            out_skip = attention(
+                q, k, v, locs, lens, 512, softmax_scale=scale, skip_softmax_threshold=threshold
+            )
+            errors.append((out_skip - out_dense).abs().mean().item())
+        assert errors[0] <= errors[1] <= errors[2], f"Errors not monotonic: {errors}"
+
+    def test_decode_single_token(self):
+        """Skip-softmax works for decode (single Q token per sequence)."""
+        batch = 2
+        seq_lens_k = [64, 128]
+        num_heads, num_kv_heads, head_dim = 4, 2, 64
+        scale = 1.0 / (head_dim**0.5)
+
+        torch.manual_seed(42)
+        q_flat = torch.randn(batch, num_heads, head_dim, device="cuda", dtype=torch.float16)
+        total_kv = sum(seq_lens_k)
+        k_flat = torch.randn(total_kv, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+        v_flat = torch.randn(total_kv, num_kv_heads, head_dim, device="cuda", dtype=torch.float16)
+
+        b_start_loc_q = torch.arange(batch, device="cuda", dtype=torch.int32)
+        b_seq_len_q = torch.ones(batch, device="cuda", dtype=torch.int32)
+        cumsum = [0]
+        for sl in seq_lens_k:
+            cumsum.append(cumsum[-1] + sl)
+        b_start_loc_k = torch.tensor(cumsum[:-1], device="cuda", dtype=torch.int32)
+        b_seq_len_k = torch.tensor(seq_lens_k, device="cuda", dtype=torch.int32)
+
+        out_dense = attention(
+            q_flat,
+            k_flat,
+            v_flat,
+            b_start_loc_q,
+            b_seq_len_q,
+            1,
+            is_causal=False,
+            softmax_scale=scale,
+            b_start_loc_k=b_start_loc_k,
+            b_seq_len_k=b_seq_len_k,
+            max_input_len_k=max(seq_lens_k),
+        )
+        out_skip = attention(
+            q_flat,
+            k_flat,
+            v_flat,
+            b_start_loc_q,
+            b_seq_len_q,
+            1,
+            is_causal=False,
+            softmax_scale=scale,
+            b_start_loc_k=b_start_loc_k,
+            b_seq_len_k=b_seq_len_k,
+            max_input_len_k=max(seq_lens_k),
+            skip_softmax_threshold=1e-3,
+        )
+        torch.testing.assert_close(out_skip, out_dense, rtol=5e-2, atol=5e-2)

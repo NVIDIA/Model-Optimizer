@@ -105,6 +105,8 @@ def _attn_fwd(
     IS_CAUSAL: tl.constexpr,  # Whether to apply causal mask
     HEAD_DIM: tl.constexpr,  # Actual head dimension (for d_mask)
     STORE_LSE: tl.constexpr,  # Whether to save LSE for backward pass
+    APPLY_SKIP_SOFTMAX: tl.constexpr = False,  # Skip KV tiles with negligible scores
+    SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(threshold) for skip decision
 ):
     # --- Grid: (batch, num_q_heads, num_q_tiles) ---
     # Example: batch=2, num_q_heads=32, seq_len=256, BLOCK_M=128
@@ -162,26 +164,54 @@ def _attn_fwd(
         scores = tl.dot(q, k) * qk_scale
         scores = _apply_mask(scores, q_pos, kv_pos, seq_len_q, seq_len_kv, kv_start, IS_CAUSAL)
 
-        # --- Online softmax update ---
-        # 1. Update running max
-        m_new = tl.maximum(row_max, tl.max(scores, 1))
-        # 2. Compute unnormalized attention weights
-        p = tl.math.exp2(scores - m_new[:, None])
-        l_new = tl.sum(p, 1)
-        # 3. Correction factor: rescale previous tiles when max changes
-        correction = tl.math.exp2(row_max - m_new)
-        row_sum = row_sum * correction + l_new
-        acc = acc * correction[:, None]
+        if APPLY_SKIP_SOFTMAX:
+            # --- Skip-softmax path: check tile, skip V load if all rows negligible ---
+            # Compute tile row max once — reused for both skip check and softmax update
+            tile_row_max = tl.max(scores, 1)  # [BLOCK_M]
+            can_skip = tile_row_max < (row_max + SKIP_THRESHOLD_LOG2)
+            all_skip = tl.min(can_skip.to(tl.int32)) == 1
 
-        # Load V [BLOCK_N, BLOCK_D] and accumulate: acc += attn_weights @ V
-        v_offs = (kv_offset + kv_start + kv_pos[:, None]) * stride_vbs + dim_pos[None, :]
-        v = tl.load(
-            v_base + v_offs,
-            mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
-            other=0.0,
-        )
-        acc = tl.dot(p.to(v.dtype), v, acc)
-        row_max = m_new
+            if not all_skip:
+                # Online softmax update (reuses tile_row_max — no second tl.max)
+                # For skipped rows: tile_row_max < row_max, so m_new = row_max (no change)
+                m_new = tl.maximum(row_max, tile_row_max)
+                p = tl.math.exp2(scores - m_new[:, None])
+                # Zero out skipped rows (instead of masking scores and recomputing max)
+                p = tl.where(can_skip[:, None], 0.0, p)
+                l_new = tl.sum(p, 1)
+                correction = tl.math.exp2(row_max - m_new)
+                row_sum = row_sum * correction + l_new
+                acc = acc * correction[:, None]
+
+                # Load V and accumulate
+                v_offs = (kv_offset + kv_start + kv_pos[:, None]) * stride_vbs + dim_pos[None, :]
+                v = tl.load(
+                    v_base + v_offs,
+                    mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
+                    other=0.0,
+                )
+                acc = tl.dot(p.to(v.dtype), v, acc)
+                row_max = m_new
+            # else: all rows negligible — skip V load, softmax update, accumulation
+        else:
+            # --- Standard path: no skip check ---
+            # Online softmax update
+            m_new = tl.maximum(row_max, tl.max(scores, 1))
+            p = tl.math.exp2(scores - m_new[:, None])
+            l_new = tl.sum(p, 1)
+            correction = tl.math.exp2(row_max - m_new)
+            row_sum = row_sum * correction + l_new
+            acc = acc * correction[:, None]
+
+            # Load V and accumulate
+            v_offs = (kv_offset + kv_start + kv_pos[:, None]) * stride_vbs + dim_pos[None, :]
+            v = tl.load(
+                v_base + v_offs,
+                mask=((kv_start + kv_pos[:, None]) < seq_len_kv) & d_mask[None, :],
+                other=0.0,
+            )
+            acc = tl.dot(p.to(v.dtype), v, acc)
+            row_max = m_new
 
     # --- Final normalization: output = acc / row_sum ---
     acc = acc / row_sum[:, None]
@@ -278,6 +308,8 @@ def _attn_bwd_dq(
     BLOCK_N: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     HEAD_DIM: tl.constexpr,
+    APPLY_SKIP_SOFTMAX: tl.constexpr = False,
+    SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,
 ):
     """Phase 3 of backward: compute dQ for one Q tile, looping over KV tiles.
 
@@ -345,6 +377,12 @@ def _attn_bwd_dq(
         scores = _apply_mask(scores, q_pos, kv_pos, seq_len_q, seq_len_kv, kv_start, IS_CAUSAL)
         p = tl.math.exp2(scores - lse[:, None])
 
+        # Re-apply skip-softmax: zero out rows that were skipped in forward
+        if APPLY_SKIP_SOFTMAX:
+            tile_row_max = tl.max(scores, 1)
+            can_skip = tile_row_max < (lse + SKIP_THRESHOLD_LOG2)
+            p = tl.where(can_skip[:, None], 0.0, p)
+
         # dP = dO @ V^T, dS = P * (dP - delta), dQ += dS @ K
         dp = tl.dot(do, tl.trans(v))
         ds = p * (dp - row_delta[:, None])
@@ -392,6 +430,8 @@ def _attn_bwd_dkdv(
     BLOCK_N: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     HEAD_DIM: tl.constexpr,
+    APPLY_SKIP_SOFTMAX: tl.constexpr = False,
+    SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,
 ):
     """Phase 2 of backward: compute dK, dV for one KV tile.
 
@@ -467,6 +507,12 @@ def _attn_bwd_dkdv(
             scores = _apply_mask(scores, q_pos, kv_pos, seq_len_q, seq_len_kv, kv_start, IS_CAUSAL)
             p = tl.math.exp2(scores - lse[:, None])
 
+            # Re-apply skip-softmax: zero out rows that were skipped in forward
+            if APPLY_SKIP_SOFTMAX:
+                tile_row_max = tl.max(scores, 1)
+                can_skip = tile_row_max < (lse + SKIP_THRESHOLD_LOG2)
+                p = tl.where(can_skip[:, None], 0.0, p)
+
             # dV += P^T @ dO
             dv += tl.dot(tl.trans(p.to(do_tile.dtype)), do_tile)
             # dS = P * (dO @ V^T - delta), dK += dS^T @ Q
@@ -498,6 +544,7 @@ class _Attention(torch.autograd.Function):
         b_start_loc_k,
         b_seq_len_k,
         max_input_len_k,
+        skip_softmax_threshold,
     ):
         HEAD_DIM = q.shape[2]
         num_q_heads = q.shape[1]
@@ -517,6 +564,15 @@ class _Attention(torch.autograd.Function):
         qk_scale = sm_scale * LOG2E
         # Triton tiles must be powers of 2; pad head dim
         BLOCK_D = triton.next_power_of_2(HEAD_DIM)
+
+        # Skip-softmax: convert threshold to log2 space for the kernel
+        apply_skip = skip_softmax_threshold is not None and skip_softmax_threshold > 0.0
+        if apply_skip:
+            import math
+
+            skip_threshold_log2 = math.log2(skip_softmax_threshold)
+        else:
+            skip_threshold_log2 = 0.0
 
         o = torch.empty_like(q)
         lse = torch.empty(q.shape[0], num_q_heads, device=q.device, dtype=torch.float32)
@@ -552,6 +608,8 @@ class _Attention(torch.autograd.Function):
             IS_CAUSAL=is_causal,
             HEAD_DIM=HEAD_DIM,
             STORE_LSE=True,
+            APPLY_SKIP_SOFTMAX=apply_skip,
+            SKIP_THRESHOLD_LOG2=skip_threshold_log2,
             # BLOCK_M, BLOCK_N, num_warps, num_stages chosen by autotune
         )
 
@@ -566,6 +624,8 @@ class _Attention(torch.autograd.Function):
         ctx.num_q_heads = num_q_heads
         ctx.num_kv_heads = num_kv_heads
         ctx.batch = batch
+        ctx.apply_skip = apply_skip
+        ctx.skip_threshold_log2 = skip_threshold_log2
         return o
 
     @staticmethod
@@ -640,6 +700,8 @@ class _Attention(torch.autograd.Function):
             BLOCK_N=BLOCK,
             IS_CAUSAL=ctx.is_causal,
             HEAD_DIM=HEAD_DIM,
+            APPLY_SKIP_SOFTMAX=ctx.apply_skip,
+            SKIP_THRESHOLD_LOG2=ctx.skip_threshold_log2,
             num_warps=num_warps,
             num_stages=1,
         )
@@ -659,11 +721,13 @@ class _Attention(torch.autograd.Function):
             BLOCK_N=BLOCK,
             IS_CAUSAL=ctx.is_causal,
             HEAD_DIM=HEAD_DIM,
+            APPLY_SKIP_SOFTMAX=ctx.apply_skip,
+            SKIP_THRESHOLD_LOG2=ctx.skip_threshold_log2,
             num_warps=num_warps,
             num_stages=1,
         )
 
-        return dq, dk, dv, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None
 
 
 def attention(
@@ -678,8 +742,10 @@ def attention(
     b_start_loc_k: torch.Tensor | None = None,
     b_seq_len_k: torch.Tensor | None = None,
     max_input_len_k: int | None = None,
+    *,
+    skip_softmax_threshold: float | None = None,
 ) -> torch.Tensor:
-    """Variable-length flash attention with GQA and autograd support.
+    """Variable-length flash attention with GQA, autograd, and optional skip-softmax.
 
     Args:
         q: [total_q_tokens, num_q_heads, head_dim]
@@ -693,6 +759,13 @@ def attention(
         b_start_loc_k: [batch] start offset for K/V (None = same as Q).
         b_seq_len_k: [batch] length for K/V (None = same as Q).
         max_input_len_k: Maximum K/V sequence length (None = same as Q).
+        skip_softmax_threshold: Skip KV tiles whose max attention score is
+            below ``running_max * threshold`` for all Q rows. This is an
+            approximation that trades accuracy for speed — tiles with
+            negligible softmax contributions are skipped entirely (no V
+            load or accumulation). Set to ``None`` or ``0`` to disable.
+            Typical values: 1e-3 to 1e-1. The backward pass re-applies
+            the same skip decision using the saved LSE for consistency.
 
     Returns:
         Output tensor [total_q_tokens, num_q_heads, head_dim].
@@ -710,6 +783,7 @@ def attention(
         b_start_loc_k,
         b_seq_len_k,
         max_input_len_k,
+        skip_softmax_threshold,
     )
 
 
