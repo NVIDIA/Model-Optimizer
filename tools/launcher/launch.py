@@ -44,7 +44,7 @@ register_factory("slurm_factory", slurm_factory)
 # ---------------------------------------------------------------------------
 
 LAUNCHER_DIR = os.path.dirname(os.path.abspath(__file__))
-MODELOPT_ROOT = os.path.dirname(LAUNCHER_DIR)
+MODELOPT_ROOT = os.path.dirname(os.path.dirname(LAUNCHER_DIR))
 
 # Ensure modules/Model-Optimizer symlink exists (points to parent Model-Optimizer root)
 _mo_symlink = os.path.join(LAUNCHER_DIR, "modules", "Model-Optimizer")
