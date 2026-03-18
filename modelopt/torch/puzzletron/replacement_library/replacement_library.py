@@ -38,7 +38,6 @@ from modelopt.torch.puzzletron.anymodel.converter.converter import Converter
 from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.modeling_decilm import (
     DeciLMDecoderLayer,
-    DeciLMForCausalLM,
     DeciLMMultiDecoderLayer,
     DeciLMRMSNorm,
     LMHead,
