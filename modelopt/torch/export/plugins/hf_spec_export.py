@@ -185,6 +185,9 @@ class EagleExporter(SpeculativeDecodingExporter):
 
         # For long context quality, we disable rope scaling for training
         # and set yarn during export for inference.
+        eagle_train_length = getattr(self.model, "eagle_train_length", None)
+        if eagle_train_length is None:
+            raise ValueError("eagle_train_length is needed for rope scaling but not set.")
         if self.model.eagle_config.rope_parameters["rope_type"] == "default":
             template_config["rope_scaling"] = {
                 "rope_type": "yarn",

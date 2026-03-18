@@ -118,6 +118,10 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       MIX_HIDDEN_STATES="${1#*=}"
       ;;
+    --fsdp*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      FSDP="${1#*=}"
+      ;;
     *)
       >&2 printf "Error: Invalid argument ${1#*=}\n"
       exit 1
@@ -166,7 +170,7 @@ DP_SHARD_SIZE=${DP_SHARD_SIZE:-$((TOTAL_GPU/CP_SIZE))}
 LOG_STEPS=${LOG_STEPS:-100}
 DRAFT_VOCAB_CACHE=${DRAFT_VOCAB_CACHE:-""}
 MIX_HIDDEN_STATES=${MIX_HIDDEN_STATES:-"False"}
-
+FSDP=${FSDP:-"False"}
 
 if [[ "$MODE" == "eagle3" ]]; then
   if [[ -n "$EAGLE_CONFIG" ]]; then
@@ -198,7 +202,7 @@ else
 fi
 
 FSDP_ARGS=""
-if [[ "$TOTAL_GPU" -gt 1 ]]; then
+if [[ "$TOTAL_GPU" -gt 1 && "$FSDP" == "True" ]]; then
   # Use FSDP when multi GPU available, default to FSDP1
   FSDP_ARGS="$FSDP_ARGS --fsdp 'full_shard'"
   TRANSFORMERS_5=$(python -c "from packaging.version import Version; import transformers; print(Version(transformers.__version__) >= Version('5.0'))" 2>/dev/null)
