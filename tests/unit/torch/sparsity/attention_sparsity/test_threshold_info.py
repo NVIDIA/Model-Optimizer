@@ -33,7 +33,7 @@ class TestFlashSkipSoftmaxThresholdInfo:
         """Test threshold info for phase-specific static thresholds."""
         method = FlashSkipSoftmax(
             method_config={
-                "threshold": {"prefill": 0.001, "decode": 0.0001},
+                "thresholds": {"prefill": [0.001], "decode": [0.0001]},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
@@ -43,17 +43,17 @@ class TestFlashSkipSoftmaxThresholdInfo:
 
         info = method.get_threshold_info()
 
-        # Static phased thresholds are reported as type "static" with dict value
+        # Static phased thresholds are reported as type "static" with dict of lists
         assert info["type"] == "static"
         assert isinstance(info["value"], dict)
-        assert info["value"]["prefill"] == 0.001
-        assert info["value"]["decode"] == 0.0001
+        assert info["value"]["prefill"] == [0.001]
+        assert info["value"]["decode"] == [0.0001]
 
     def test_dynamic_calibrated_threshold(self):
         """Test threshold info for calibrated dynamic threshold."""
         method = FlashSkipSoftmax(
             method_config={
-                "threshold": {"prefill": 0.001, "decode": 0.0001},
+                "thresholds": {"prefill": [0.001], "decode": [0.0001]},
                 "br": 128,
                 "bc": 128,
                 "backend": "pytorch",
@@ -94,7 +94,7 @@ class TestSparseAttentionModuleThresholdInfo:
             "sparse_cfg": {
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": {"prefill": 0.005, "decode": 0.001},
+                    "thresholds": {"prefill": [0.005], "decode": [0.001]},
                     "br": 64,
                     "bc": 64,
                     "enable": True,
@@ -117,8 +117,8 @@ class TestSparseAttentionModuleThresholdInfo:
         info = sparse_module.get_threshold_info()
 
         assert info["type"] == "static"
-        assert info["value"]["prefill"] == 0.005
-        assert info["value"]["decode"] == 0.001
+        assert info["value"]["prefill"] == [0.005]
+        assert info["value"]["decode"] == [0.001]
 
     def test_module_with_calibrated_threshold(self):
         """Test module reports calibrated threshold correctly."""
@@ -128,7 +128,7 @@ class TestSparseAttentionModuleThresholdInfo:
             "sparse_cfg": {
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": {"prefill": 0.001, "decode": 0.0001},
+                    "thresholds": {"prefill": [0.001], "decode": [0.0001]},
                     "br": 64,
                     "bc": 64,
                     "enable": True,
@@ -167,7 +167,7 @@ class TestSparseAttentionModuleThresholdInfo:
             "sparse_cfg": {
                 "*attention*": {
                     "method": "flash_skip_softmax",
-                    "threshold": {"prefill": 0.001, "decode": 0.0001},
+                    "thresholds": {"prefill": [0.001], "decode": [0.0001]},
                     "br": 64,
                     "bc": 64,
                     "enable": True,

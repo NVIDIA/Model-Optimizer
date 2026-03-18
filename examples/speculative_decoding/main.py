@@ -130,6 +130,10 @@ class EagleArguments:
         default=False,
         metadata={"help": "Whether to mix hidden states from previous TTT step."},
     )
+    num_ttt_steps: int = field(
+        default=3,
+        metadata={"help": "Number of train-time-test steps to use during training."},
+    )
 
 
 def train():
@@ -208,6 +212,7 @@ def train():
                 "eagle_decoder_type": eagle_args.eagle_decoder_type,
                 "eagle_offline": use_offline_training,
                 "eagle_mix_hidden_states": eagle_args.mix_hidden_states,
+                "eagle_ttt_steps": eagle_args.num_ttt_steps,
                 "eagle_architecture_config": custom_config,
             }
 

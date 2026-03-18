@@ -19,10 +19,14 @@ description = "Nvidia Model Optimizer: a unified model optimization and deployme
 readme = { text = "Checkout https://github.com/nvidia/Model-Optimizer for more information.", content-type = "text/markdown" }
 license = "Apache-2.0"
 license-files = ["LICENSE_HEADER"]
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.10,<3.14"
 authors = [{ name = "NVIDIA Corporation" }]
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
@@ -43,6 +47,8 @@ dependencies = [
     "rich",
     "safetensors",
     "scipy",
+    "PyYAML>=6.0",
+    "omegaconf>=2.3.0"
 ]
 
 [project.optional-dependencies]
@@ -118,6 +124,7 @@ include = ["modelopt*"]
 
 [tool.setuptools.package-data]
 modelopt = ["**/*.h", "**/*.cpp", "**/*.cu"]
+modelopt_recipes = ["**/*.yml", "**/*.yaml"]
 
 [tool.uv]
 managed = true
@@ -197,6 +204,7 @@ extend-ignore = [
     "E501",
 ] # Ignore missing docstrings or line length for Jupyter notebooks
 "modelopt/torch/quantization/triton/*" = ["N803", "N806", "E731"] # triton style
+"modelopt/torch/sparsity/attention_sparsity/kernels/*" = ["N803", "N806"] # triton kernel style
 "examples/deepseek/ds_kernel.py" = ["N803", "N806", "E731"] # triton style
 
 [tool.ruff.lint.pycodestyle]

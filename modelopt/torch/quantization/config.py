@@ -669,6 +669,8 @@ NVFP4_OMLP_ONLY_CFG = {
     "algorithm": "max",
 }
 
+# DO NOT ADD NEW CONFIGS HERE. If you want to add a new general recipe, add it to
+# modelopt_recipes/general/ptq/ as a yaml file
 choices: set[str] = {
     "FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG",
     "FP8_AFFINE_KV_CFG",
@@ -709,6 +711,26 @@ choices: set[str] = {
 
 BiasType = Literal["static", "dynamic"]
 BiasMethod = Literal["mean", "max_min"]
+
+
+class RotateConfig(ModeloptBaseConfig):
+    """Configuration for rotating quantizer input via Hadamard transform (RHT/QuaRot/SpinQuant).
+
+    See :func:`normalized_hadamard_transform <modelopt.torch.quantization.nn.functional.normalized_hadamard_transform>`
+    for transform details.
+    """
+
+    enable: bool = False
+    rotate_fp32: bool = False
+    block_size: int | None = None
+
+    @field_validator("block_size", mode="before")
+    @classmethod
+    def validate_block_size(cls, v):
+        """Validate block_size is a positive int (mode=before to catch bool before int coercion)."""
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int) or v <= 0):
+            raise ValueError(f"block_size must be a positive int, got {v!r}")
+        return v
 
 
 class QuantizerAttributeConfig(ModeloptBaseConfig):
@@ -987,18 +1009,12 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
             assert v in ["max", "histogram"]
         return v
 
-    rotate: bool | dict[str, bool] = ModeloptField(
+    rotate: bool | RotateConfig = ModeloptField(
         default=False,
         title="""Configuration for rotating the input before quantization.""",
-        description="""Can be a boolean or a dictionary with the following keys:
-        - "enable": Boolean to enable/disable rotation (default: False)
-        - "rotate_fp32": Boolean to compute rotation in float32 precision (default: False)
+        description="""Can be a boolean or a :class:`RotateConfig` instance (or equivalent dict).
 
-        If a boolean is provided, it is treated as the "enable" value with "rotate_fp32" defaulting to False.
-
-        When enabled, the input of the quantizer will be rotated with a hadamard matrix
-        given by scipy.linalg.hadamard, i.e.
-        ``input = input @ scipy.linalg.hadamard(input.shape[-1]) / sqrt(input.shape[-1])``.
+        If a boolean, it is treated as :attr:`RotateConfig.enable` with all other fields defaulting.
 
         This can be used for rotation based PTQ methods, e.g. QuaRot or SpinQuant.
         See https://arxiv.org/abs/2404.00456 for example.""",
@@ -1042,6 +1058,15 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
         """,
     )
 
+    use_constant_amax: bool = ModeloptField(
+        default=False,
+        title="Use constant amax for the quantizer.",
+        description="""If True, set the amax to FP8 E4M3 max (448.0) and skip calibration.
+        This is used for KV cache quantization where the downstream engine uses FP8 attention
+        math for both FP8 and NVFP4 quantization, so the amax is hardcoded to the FP8 range.
+        """,
+    )
+
 
 class QuantizeAlgorithmConfig(ModeloptBaseConfig):
     """Calibration algorithm config base."""
@@ -1053,21 +1078,15 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
 
     moe_calib_experts_ratio: float | None = ModeloptField(
         default=None,
+        gt=0.0,
+        le=1.0,
         title="% of experts to calibrate during forward pass.",
         description=(
             "If specified, we force forward tokens to % of experts during the calibration"
             " pass. This forward is for calibration purpose only and will not affect the"
-            " actual inference. Not supported for all MoE architectures; currently works"
-            " with a few HuggingFace models such as Mixtral, Qwen3Moe, MiniMax."
-        ),
-    )
-
-    moe_count_expert_calib_tokens: bool = ModeloptField(
-        default=False,
-        title="Enable expert token counting during MoE calibration.",
-        description=(
-            "If True, counts how many tokens are routed to each expert during calibration."
-            " Not supported for all MoE architectures; currently works with a few HuggingFace"
+            " actual inference. NOTE: when set, ``layer_sync_moe_local_experts_amax`` is"
+            " disabled so each expert maintains its own calibration statistics. Not"
+            " supported for all MoE architectures; currently works with a few HuggingFace"
             " models such as Mixtral, Qwen3Moe, MiniMax."
         ),
     )

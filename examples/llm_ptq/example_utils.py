@@ -17,6 +17,7 @@ import copy
 import glob
 import inspect
 import json
+import logging
 import os
 import shutil
 import sys
@@ -44,8 +45,9 @@ try:
 except ImportError:
     snapshot_download = None
 
-import modelopt.torch.quantization as mtq
 from modelopt.torch.utils.image_processor import BaseImageProcessor, MllamaImageProcessor
+
+logger = logging.getLogger(__name__)
 
 SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
@@ -196,22 +198,13 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
 
 def build_quant_cfg(
     qformat,
-    kv_cache_qformat,
+    quant_cfg,
     awq_block_size,
     model_type,
-    quant_cfg_choices,
-    kv_quant_cfg_choices,
     moe_calib_experts_ratio: float | None = None,
 ) -> dict[str, Any]:
-    quant_cfg = {}
-    assert qformat in quant_cfg_choices, (
-        f"Unsupported quantization format: {qformat} with {kv_cache_qformat} KV cache"
-    )
-
-    quant_cfg = quant_cfg_choices[qformat]
-
-    if "awq" in qformat:
-        quant_cfg = copy.deepcopy(quant_cfg_choices[qformat])
+    quant_cfg = copy.deepcopy(quant_cfg)
+    if "awq" in str(quant_cfg.get("algorithm")):
         weight_quantizer = quant_cfg["quant_cfg"]["*weight_quantizer"]
         if isinstance(weight_quantizer, list):
             weight_quantizer = weight_quantizer[0]
@@ -222,16 +215,6 @@ def build_quant_cfg(
         # Coarser optimal scale search seems to resolve the overflow in TRT-LLM for some models
         if qformat == "w4a8_awq" and model_type in ["gemma", "mpt"]:
             quant_cfg["algorithm"] = {"method": "awq_lite", "alpha_step": 1}
-
-    enable_quant_kv_cache = kv_cache_qformat != "none"
-    print(f"{'Enable' if enable_quant_kv_cache else 'Disable'} KV cache quantization")
-
-    # Check if any bmm_quantizer is in the quant_cfg. If so, we need to enable the bmm_quantizer.
-    if enable_quant_kv_cache:
-        quant_cfg = mtq.update_quant_cfg_with_kv_cache_quant(
-            quant_cfg,
-            getattr(mtq, kv_quant_cfg_choices[kv_cache_qformat])["quant_cfg"],
-        )
 
     if moe_calib_experts_ratio:
         assert 0 < moe_calib_experts_ratio <= 1, "moe_calib_experts_ratio must be between 0 and 1"
@@ -443,6 +426,104 @@ def get_dtype(dtype):
     return dtype
 
 
+def _unpack_compressed_linear_weights(model, ckpt_path=None):
+    """Hybrid restoration: restores BF16 layers and fixes expert metadata.
+
+    1. BF16 layers (vision, lm_head) are restored from checkpoint and marked non-compressed.
+    2. INT4 experts stay compressed in HBM to save memory (decompressed on-the-fly).
+    3. Metadata (weight_shape) is fixed to avoid decompression errors.
+    """
+    try:
+        from compressed_tensors.linear.compressed_linear import CompressedLinear
+        from compressed_tensors.quantization import QuantizationStatus
+    except ImportError:
+        return
+
+    if ckpt_path is None:
+        ckpt_path = getattr(model.config, "_name_or_path", None)
+    if not ckpt_path:
+        return
+
+    from huggingface_hub import hf_hub_download
+    from safetensors import safe_open
+
+    is_local = os.path.isdir(ckpt_path)
+
+    def _resolve_file(filename):
+        if is_local:
+            local = os.path.join(ckpt_path, filename)
+            return local if os.path.exists(local) else None
+        try:
+            return hf_hub_download(repo_id=ckpt_path, filename=filename)
+        except Exception:
+            return None
+
+    # Load non-expert weights and metadata from safetensors
+    checkpoint_weights = {}
+    index_file = _resolve_file("model.safetensors.index.json")
+    if index_file:
+        with open(index_file) as f:
+            index = json.load(f)
+        st_filenames = list(set(index.get("weight_map", {}).values()))
+    else:
+        st_filenames = ["model.safetensors"]
+
+    for fname in st_filenames:
+        sf_path = _resolve_file(fname)
+        if sf_path is None:
+            continue
+        with safe_open(sf_path, framework="pt") as f:
+            for key in f.keys():  # noqa: SIM118 - safe_open is not iterable
+                if ".mlp.experts." not in key or "weight_shape" in key:
+                    checkpoint_weights[key] = f.get_tensor(key)
+
+    # Hybrid restoration
+    for name, module in model.named_modules():
+        if not isinstance(module, CompressedLinear):
+            continue
+
+        with torch.no_grad():
+            target_device = next(module.parameters()).device
+
+            # CASE A: Real BF16 weight exists (vision, lm_head)
+            if f"{name}.weight" in checkpoint_weights:
+                w = checkpoint_weights[f"{name}.weight"].to(target_device)
+                module._parameters.pop("weight", None)
+                module._buffers.pop("weight", None)
+                module.__dict__.pop("weight", None)
+                param = torch.nn.Parameter(w, requires_grad=False)
+                module._parameters["weight"] = param
+                module.__dict__["weight"] = param
+                module.quantization_status = QuantizationStatus.FROZEN
+                logger.debug("Restored BF16 layer: %s", name)
+
+            # CASE B: Expert (stay compressed, fix metadata)
+            elif f"{name}.weight_shape" in checkpoint_weights:
+                ws = checkpoint_weights[f"{name}.weight_shape"]
+                if f"{name}.weight_packed" in checkpoint_weights:
+                    module.weight_packed = checkpoint_weights[f"{name}.weight_packed"].to(
+                        torch.int32
+                    )
+                module._parameters.pop("weight", None)
+                module._buffers.pop("weight", None)
+                module.__dict__.pop("weight", None)
+                shape_param = torch.nn.Parameter(ws.to(torch.int32), requires_grad=False)
+                module._parameters.pop("weight_shape", None)
+                module.__dict__.pop("weight_shape", None)
+                module._parameters["weight_shape"] = shape_param
+                module.__dict__["weight_shape"] = shape_param
+
+    # Ensure compressed experts do not carry a stale weight attribute
+    for name, module in model.named_modules():
+        if not isinstance(module, CompressedLinear):
+            continue
+        if getattr(module, "quantization_status", None) != QuantizationStatus.COMPRESSED:
+            continue
+        module._parameters.pop("weight", None)
+        module._buffers.pop("weight", None)
+        module.__dict__.pop("weight", None)
+
+
 def get_model(
     ckpt_path,
     device="cuda",
@@ -508,23 +589,38 @@ def get_model(
             # device_map "auto" and "cuda" triggers error regarding meta tensor from safetensors
             device_map = None
 
+        # Helper function to check if model has pack-quantized config
+        def has_pack_quantized_config(config):
+            # Check top-level quantization_config
+            if hasattr(config, "quantization_config"):
+                if config.quantization_config.get("format", None) == "pack-quantized":
+                    return True
+            # Check nested text_config.quantization_config (for multi-modal models like kimi k2.5)
+            if hasattr(config, "text_config") and hasattr(
+                config.text_config, "quantization_config"
+            ):
+                if config.text_config.quantization_config.get("format", None) == "pack-quantized":
+                    return True
+            return False
+
         if is_speculative(hf_config):
             model = AutoModelForCausalLM.from_pretrained(
                 ckpt_path,
                 device_map=device_map,
                 **model_kwargs,
             )
-        elif (
-            hasattr(hf_config, "quantization_config")
-            and hf_config.quantization_config.get("format", None) == "pack-quantized"
-        ):
-            torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)
-            model = AutoModelForCausalLM.from_pretrained(
-                ckpt_path,
-                device_map="auto",
-                trust_remote_code=trust_remote_code,
-                torch_dtype=torch_dtype,
+        elif has_pack_quantized_config(hf_config):
+            from modelopt.torch.quantization.plugins.huggingface import (
+                patch_compressed_linear_loading,
             )
+
+            with patch_compressed_linear_loading():
+                model = AutoModelForCausalLM.from_pretrained(
+                    ckpt_path,
+                    device_map="auto",
+                    trust_remote_code=trust_remote_code,
+                    torch_dtype="auto",
+                )
         else:
             architecture = hf_config.architectures[0]
 
@@ -583,6 +679,8 @@ def get_model(
                 **model_kwargs,
             )
     model.eval()
+    if has_pack_quantized_config(hf_config):
+        _unpack_compressed_linear_weights(model, ckpt_path)
 
     # If device_map was disabled (None), manually move model to target device
     if device_map is None and device != "cpu":

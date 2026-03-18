@@ -93,8 +93,29 @@ class FastHadamardTransform(Function):
         return fast_hadamard_transform.hadamard_transform(grad_outputs)  # type: ignore[name-defined]
 
 
-def normalized_hadamard_transform(inputs, rotate_fp32=False):
-    """Normalized fast hadamard transform."""
+def _largest_pow2_divisor(n: int) -> int:
+    """Return the largest power of 2 that divides n."""
+    return n & (-n)
+
+
+def normalized_hadamard_transform(inputs, rotate_fp32=False, block_size=None):
+    """Normalized fast hadamard transform.
+
+    Supports block-granular RHT for dimensions that are not a power of 2.
+    When block_size is used, the last dimension is split into blocks of size block_size
+    (must be power of 2), and Hadamard is applied per block. This enables RHT for
+    MoE expert channel dimensions (e.g. 1920, 1536, 896) that are not powers of 2.
+
+    Args:
+        inputs: Input tensor, Hadamard is applied along the last dimension.
+        rotate_fp32: If True, compute rotation in float32.
+        block_size: Block size for block-granular RHT. Must be power of 2 and divide
+            inputs.shape[-1]. If None: use full-dimension FHT when dim is power of 2;
+            otherwise auto-select the largest power-of-2 divisor of the dimension.
+
+    Returns:
+        Rotated tensor with same shape as inputs.
+    """
     global fast_hadamard_transform
     try:
         import fast_hadamard_transform
@@ -104,10 +125,40 @@ def normalized_hadamard_transform(inputs, rotate_fp32=False):
             "`pip install git+https://github.com/Dao-AILab/fast-hadamard-transform.git`"
         )
 
+    dim = inputs.shape[-1]
     dtype = inputs.dtype
     if rotate_fp32:
         inputs = inputs.to(torch.float32)
-    outputs = FastHadamardTransform.apply(inputs) / torch.sqrt(
-        torch.tensor(inputs.shape[-1], dtype=torch.float32)
-    )
+
+    if block_size is None and utils.is_pow2(dim):
+        # Full-dimension FHT (original behavior)
+        outputs = FastHadamardTransform.apply(inputs) / torch.sqrt(
+            torch.tensor(dim, dtype=torch.float32)
+        )
+    else:
+        # Block-granular RHT
+        if block_size is None:
+            block_size = _largest_pow2_divisor(dim)
+            if block_size < 2:
+                raise RuntimeError(
+                    f"Block RHT: dimension {dim} has no power-of-2 divisor >= 2. "
+                    "Set rotate.block_size explicitly (e.g. 128) or use a dimension divisible by a power of 2."
+                )
+        if not utils.is_pow2(block_size):
+            raise ValueError(f"Block RHT: block_size must be power of 2, got {block_size}.")
+        if dim % block_size != 0:
+            raise RuntimeError(
+                f"Block RHT: inputs.shape[-1]={dim} is not divisible by block_size={block_size}. "
+                f"Use a block_size that divides {dim} (e.g. {_largest_pow2_divisor(dim)})."
+            )
+        n_blocks = dim // block_size
+        # Reshape to (..., n_blocks, block_size)
+        flat = inputs.reshape(-1, dim)
+        blocks = flat.reshape(-1, n_blocks, block_size)
+        # Apply FHT per block (last dim)
+        rotated = FastHadamardTransform.apply(blocks) / torch.sqrt(
+            torch.tensor(block_size, dtype=torch.float32)
+        )
+        outputs = rotated.reshape(inputs.shape)
+
     return outputs.to(dtype) if rotate_fp32 else outputs

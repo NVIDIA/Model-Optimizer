@@ -1,5 +1,5 @@
 ===============================================
-Automated Q/DQ Placement Optimization (ONNX)
+Autotune (ONNX)
 ===============================================
 
 .. contents:: Table of Contents
@@ -9,7 +9,7 @@ Automated Q/DQ Placement Optimization (ONNX)
 Overview
 ========
 
-The ``modelopt.onnx.quantization.autotune`` module automates Q/DQ (Quantize/Dequantize) placement in ONNX models. It explores placement strategies and uses TensorRT latency measurements to choose a configuration that minimizes inference time.
+The ``modelopt.onnx.quantization.autotune`` module automates Q/DQ (Quantize/Dequantize) placement optimization in ONNX models. It explores placement strategies and uses TensorRT latency measurements to choose a configuration that minimizes inference time.
 
 **Key Features:**
 
