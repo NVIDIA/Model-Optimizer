@@ -43,10 +43,7 @@ from modelopt.torch.puzzletron.tools.checkpoint_utils import (
     SAFETENSORS_SUBBLOCKS_DIR_NAME,
     copy_tokenizer,
 )
-from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import (
-    save_checkpoint,
-    save_safetensors_index,
-)
+from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import save_checkpoint
 from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import load_and_shard_model
 from modelopt.torch.puzzletron.tools.validation_utils import (
     validate_model_and_extract_hidden_states,

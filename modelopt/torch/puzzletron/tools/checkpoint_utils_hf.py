@@ -185,33 +185,6 @@ def _save_checkpoint(
     )
 
 
-def split_checkpoint_to_subblocks(
-    checkpoint_dir: Path | str, trust_remote_code: bool = False
-) -> None:
-    """Split a checkpoint into subblocks.
-
-    Args:
-        checkpoint_dir: Path to checkpoint directory
-        trust_remote_code: If True, allows execution of custom code from the model repository.
-            This is a security risk if the model source is untrusted. Only set to True if you
-            trust the source of the model. Defaults to False for security.
-    """
-    from modelopt.torch.puzzletron.tools.checkpoint_utils import (
-        load_state_dict,  # prevent circular import
-    )
-
-    if not isinstance(checkpoint_dir, Path):
-        checkpoint_dir = Path(checkpoint_dir)
-
-    model_config = load_model_config(checkpoint_dir, trust_remote_code=trust_remote_code)
-    state_dict = load_state_dict(checkpoint_dir)
-    save_subblocks(state_dict, checkpoint_dir)
-
-    if (index_path := checkpoint_dir / SAFE_WEIGHTS_INDEX_NAME).exists():
-        index_path.rename(checkpoint_dir / f"before_splitting.{SAFE_WEIGHTS_INDEX_NAME}")
-    save_safetensors_index(model_config, checkpoint_dir)
-
-
 def save_subblocks(
     state_dict: dict[str, torch.Tensor],
     checkpoint_dir: Path | str,
@@ -324,51 +297,6 @@ def save_subblocks(
     io_speed_gbps = (total_tensor_size / (1024**3)) / save_time if save_time > 0 else 0
     mprint(f"  Effective I/O speed: {io_speed_gbps:.2f} GB/s ({max_workers} workers)")
     mprint(f"  Save operation was {save_time / subblocks_total_time * 100:.1f}% of total time")
-
-
-def save_safetensors_index(
-    model_config: DeciLMConfig,
-    checkpoint_dir: Path | str,
-) -> None:
-    """Save safetensors index for DeciLM models (legacy function)."""
-    mprint("=== Starting save_safetensors_index profiling ===")
-    index_start_time = time.time()
-
-    if not isinstance(checkpoint_dir, Path):
-        checkpoint_dir = Path(checkpoint_dir)
-
-    # Step 1: Create fake model on meta device
-    fake_model_start_time = time.time()
-    with torch.device("meta"):
-        fake_model = DeciLMForCausalLM(model_config)
-    fake_model_time = time.time() - fake_model_start_time
-    mprint(f"  Step 1 - Create fake model: {fake_model_time:.2f}s")
-
-    # Step 2: Build weight map
-    weight_map_start_time = time.time()
-    weight_map = _build_safetensors_weight_map(
-        state_dict=fake_model.state_dict(),
-        non_layer_module_to_file_type=NON_LAYER_MODULE_TO_FILE_TYPE,
-        module_within_layer_to_file_type=MODULE_WITHIN_LAYER_TO_FILE_TYPE,
-        layers_module_name=LAYERS_MODULE_NAME,
-    )
-    weight_map_time = time.time() - weight_map_start_time
-    mprint(f"  Step 2 - Build weight map: {weight_map_time:.2f}s ({len(weight_map)} mappings)")
-
-    # Step 3: Create and write index
-    write_start_time = time.time()
-    index = {"metadata": {"format": "pt"}, "weight_map": weight_map}
-    index_path = checkpoint_dir / SAFE_WEIGHTS_INDEX_NAME
-    index_json = json_dumps(index)
-    _write_file_process_safe(index_json, index_path)
-    write_time = time.time() - write_start_time
-    mprint(f"  Step 3 - Write index file: {write_time:.2f}s ({len(index_json)} chars)")
-
-    index_total_time = time.time() - index_start_time
-    mprint(f"=== save_safetensors_index completed in {index_total_time:.2f}s ===")
-    mprint(
-        f"  Breakdown: FakeModel {fake_model_time:.1f}s + WeightMap {weight_map_time:.1f}s + Write {write_time:.1f}s"
-    )
 
 
 def _write_text(content: str, f: BinaryIO) -> None:
