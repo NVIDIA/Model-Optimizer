@@ -29,20 +29,26 @@ import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.extensions import get_cuda_ext_mx
 
 NVFP4_WEIGHT_ACT_MSE_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-    },
+    "quant_cfg": [
+        (
+            "*weight_quantizer",
+            {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+                "axis": None,
+                "enable": True,
+            },
+        ),
+        (
+            "*input_quantizer",
+            {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                "axis": None,
+                "enable": True,
+            },
+        ),
+    ],
     "algorithm": {
         "method": "mse",
         "step_size": 0.25,
@@ -52,17 +58,18 @@ NVFP4_WEIGHT_ACT_MSE_CFG = {
 }
 
 NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "enable": False,
-        },
-    },
+    "quant_cfg": [
+        (
+            "*weight_quantizer",
+            {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+                "axis": None,
+                "enable": True,
+            },
+        ),
+        ("*input_quantizer", {"enable": False}),
+    ],
     "algorithm": {
         "method": "mse",
         "fp8_scale_sweep": True,

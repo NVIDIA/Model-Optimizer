@@ -255,16 +255,16 @@ For exploring new quantization recipes, you can compose a completely new configu
 
     # Custom configuration for INT4 block-wise weights and INT8 dynamic activations
     MY_CUSTOM_CONFIG = {
-        "quant_cfg": {
+        "quant_cfg": [
             # Configure weight quantizers with 4-bit precision and 128-element blocks
-            "*weight_quantizer": {"num_bits": 4, "block_sizes": {-1: 128}, "enable": True},
+            ("*weight_quantizer", {"num_bits": 4, "block_sizes": {-1: 128}, "enable": True}),
 
             # Configure input quantizers with 8-bit dynamic quantization
-            "*input_quantizer": {"num_bits": 8, "type": "dynamic", "block_sizes": {-1: None}},
+            ("*input_quantizer", {"num_bits": 8, "type": "dynamic", "block_sizes": {-1: None}}),
 
             # Include default disabled quantizer configurations
-            **_default_disabled_quantizer_cfg,
-        },
+            *_default_disabled_quantizer_cfg,
+        ],
         "algorithm": "max",
     }
 

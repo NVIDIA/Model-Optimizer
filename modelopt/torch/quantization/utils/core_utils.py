@@ -310,11 +310,11 @@ def calibrate_with_adapters(model, args):
 
 def disable_lora_quantizers_in_config(config, layers):
     """Turns off input, weight, and output quantizers for LoRA weights and LoRALinear layers in config."""
-    config["quant_cfg"]["*lora*"] = ("enable", False)
+    config["quant_cfg"].append(("*lora*", {"enable": False}))
     for layer in layers:
-        config["quant_cfg"][f"*{layer}.input_quantizer"] = ("enable", False)
-        config["quant_cfg"][f"*{layer}.weight_quantizer"] = ("enable", False)
-        config["quant_cfg"][f"*{layer}.output_quantizer"] = ("enable", False)
+        config["quant_cfg"].append((f"*{layer}.input_quantizer", {"enable": False}))
+        config["quant_cfg"].append((f"*{layer}.weight_quantizer", {"enable": False}))
+        config["quant_cfg"].append((f"*{layer}.output_quantizer", {"enable": False}))
     return config
 
 

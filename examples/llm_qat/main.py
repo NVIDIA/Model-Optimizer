@@ -54,12 +54,12 @@ mto.enable_huggingface_checkpointing()
 
 CUSTOM_QUANT_CFG = {
     "INT4_WEIGHT_INT8_ACTIVATIONS": {
-        "quant_cfg": {
-            "*weight_quantizer": {"num_bits": 4, "block_sizes": {-1: 128}, "enable": True},
-            "*input_quantizer": {"num_bits": 8, "axis": None, "enable": True},
-            "*lm_head*": {"enable": False},
-            "default": {"enable": False},
-        },
+        "quant_cfg": [
+            ("*weight_quantizer", {"num_bits": 4, "block_sizes": {-1: 128}, "enable": True}),
+            ("*input_quantizer", {"num_bits": 8, "axis": None, "enable": True}),
+            ("*lm_head*", {"enable": False}),
+            ("default", {"enable": False}),
+        ],
         "algorithm": "max",
     }
 }

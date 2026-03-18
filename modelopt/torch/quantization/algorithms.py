@@ -1299,17 +1299,6 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
     else:
         best_recipe = search_state["best"]["recipe"]
 
-    quant_cfg_dict: dict[str, Any] = {"*": {"enable": False}}
-    for hparam_name, recipe in best_recipe.items():
-        if recipe == QuantRecipe(quant_cfg=None):
-            continue
-        module_names = search_state["candidate_stats"][hparam_name]["module_names"]
-        for module_name in module_names:
-            for quantizer_attr in ("input_quantizer", "weight_quantizer"):
-                matched_cfg = _match_quantizer_cfg(recipe.config.quant_cfg, quantizer_attr)
-                if matched_cfg is not None:
-                    quant_cfg_dict[f"{module_name}.{quantizer_attr}"] = matched_cfg
-
     def _cfg_to_dict(v):
         if isinstance(v, mtq_config.QuantizerAttributeConfig):
             return {
@@ -1321,7 +1310,16 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
             return [_cfg_to_dict(c) for c in v]
         return v
 
-    quant_cfg = [(k, _cfg_to_dict(v)) for k, v in quant_cfg_dict.items()]
+    quant_cfg: list[tuple] = [("*", {"enable": False})]
+    for hparam_name, recipe in best_recipe.items():
+        if recipe == QuantRecipe(quant_cfg=None):
+            continue
+        module_names = search_state["candidate_stats"][hparam_name]["module_names"]
+        for module_name in module_names:
+            for quantizer_attr in ("input_quantizer", "weight_quantizer"):
+                matched_cfg = _match_quantizer_cfg(recipe.config.quant_cfg, quantizer_attr)
+                if matched_cfg is not None:
+                    quant_cfg.append((f"{module_name}.{quantizer_attr}", _cfg_to_dict(matched_cfg)))
     warnings.warn(
         "get_auto_quantize_config: returned config uses algorithm='max'. "
         "Per-recipe calibration algorithms (e.g. smoothquant, awq) are not preserved. "

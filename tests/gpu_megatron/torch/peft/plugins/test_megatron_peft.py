@@ -33,23 +33,29 @@ from modelopt.torch.peft.lora.layer import LoRAModule
 from modelopt.torch.utils.plugins import megatron_prefill
 
 NVFP4_DEFAULT_CONFIG = {
-    "quant_cfg": {
-        "*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*input_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-            "axis": None,
-            "enable": True,
-        },
-        "*output_quantizer": {"enable": False},
-        "*output_layer*": {"enable": False},  # Note: only output_layer is disabled.
-        "default": {"enable": False},
-    },
+    "quant_cfg": [
+        (
+            "*weight_quantizer",
+            {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                "axis": None,
+                "enable": True,
+            },
+        ),
+        (
+            "*input_quantizer",
+            {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                "axis": None,
+                "enable": True,
+            },
+        ),
+        ("*output_quantizer", {"enable": False}),
+        ("*output_layer*", {"enable": False}),  # Note: only output_layer is disabled.
+        ("default", {"enable": False}),
+    ],
     "algorithm": "max",
 }
 

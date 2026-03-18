@@ -205,7 +205,9 @@ def build_quant_cfg(
 ) -> dict[str, Any]:
     quant_cfg = copy.deepcopy(quant_cfg)
     if "awq" in str(quant_cfg.get("algorithm")):
-        weight_quantizer = quant_cfg["quant_cfg"]["*weight_quantizer"]
+        weight_quantizer = next(
+            cfg for pat, cfg in quant_cfg["quant_cfg"] if pat == "*weight_quantizer"
+        )
         if isinstance(weight_quantizer, list):
             weight_quantizer = weight_quantizer[0]
         # If awq_block_size argument is provided, update weight_quantizer
@@ -236,10 +238,10 @@ def build_quant_cfg(
 
     if model_type == "phi4mm":
         # Only quantize the language model
-        quant_cfg["quant_cfg"]["*speech*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["*audio*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["*image*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["*vision*"] = {"enable": False}
+        quant_cfg["quant_cfg"].append(("*speech*", {"enable": False}))
+        quant_cfg["quant_cfg"].append(("*audio*", {"enable": False}))
+        quant_cfg["quant_cfg"].append(("*image*", {"enable": False}))
+        quant_cfg["quant_cfg"].append(("*vision*", {"enable": False}))
 
     return quant_cfg
 

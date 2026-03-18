@@ -155,7 +155,7 @@ quant_config: dict[str, Any] = {
 }
 
 
-def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: dict[str, Any]) -> dict[str, Any]:
+def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: list) -> list:
     """Update KV cache quantization config for MLA models.
 
     MLA uses `kv_c_bmm_quantizer` (compressed KV) instead of separate
@@ -170,9 +170,10 @@ def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: dict[str, Any]) 
     if not any(isinstance(m, MLAAttention) for m in model.modules()):
         return kv_quant_cfg
 
-    if kv_config := kv_quant_cfg.get("*[kv]_bmm_quantizer"):
-        kv_quant_cfg["*kv_c_bmm_quantizer"] = kv_config
-        kv_quant_cfg["*k_pe_bmm_quantizer"] = kv_config
+    kv_config = next((cfg for pat, cfg in kv_quant_cfg if pat == "*[kv]_bmm_quantizer"), None)
+    if kv_config is not None:
+        kv_quant_cfg.append(("*kv_c_bmm_quantizer", kv_config))
+        kv_quant_cfg.append(("*k_pe_bmm_quantizer", kv_config))
         print("MLA detected: added *kv_c_bmm_quantizer and k_pe_bmm_quantizer config")
 
     return kv_quant_cfg

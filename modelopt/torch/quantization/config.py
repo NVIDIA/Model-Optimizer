@@ -99,11 +99,11 @@ Here is an example of a quantization config:
     MY_QUANT_CFG = {
         "quant_cfg": [
             # Quantizer wildcard strings mapping to quantizer attributes
-            {"*weight_quantizer": {"num_bits": 8, "axis": 0}},
-            {"*input_quantizer": {"num_bits": 8, "axis": None}},
+            ("*weight_quantizer", {"num_bits": 8, "axis": 0}),
+            ("*input_quantizer", {"num_bits": 8, "axis": None}),
 
             # Module class names mapping to quantizer configurations
-            {"nn.LeakyReLU": {"*input_quantizer": {"enable": False}}},
+            ("nn.LeakyReLU", {"*input_quantizer": {"enable": False}}),
         ]
     }
 
@@ -128,7 +128,7 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 
     # Create custom config
     CUSTOM_INT4_AWQ_CFG = copy.deepcopy(mtq.INT4_AWQ_CFG)
-    CUSTOM_INT4_AWQ_CFG["quant_cfg"]["*lm_head*"] = {"enable": False}
+    CUSTOM_INT4_AWQ_CFG["quant_cfg"].append(("*lm_head*", {"enable": False}))
 
     # quantize model
     model = mtq.quantize(model, CUSTOM_INT4_AWQ_CFG, forward_loop)

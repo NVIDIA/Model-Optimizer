@@ -179,15 +179,15 @@ def quantize(
 
                 config = {
 
-                    "quant_cfg": {
+                    "quant_cfg": [
                         # "num_bits" specifies the number of bits for quantization
                         # "axis" specifies the axis for quantization
-                        "*weight_quantizer": {"num_bits": 8, "axis": 0},
-                        "*input_quantizer": {"num_bits": 8, "axis": -1},
+                        ("*weight_quantizer", {"num_bits": 8, "axis": 0}),
+                        ("*input_quantizer", {"num_bits": 8, "axis": -1}),
 
                         # Default quantization settings
-                        "default": {"num_bits": 8, "axis": None},
-                    }
+                        ("default", {"num_bits": 8, "axis": None}),
+                    ]
                     "algorithm": "max"
                 }
 
@@ -323,10 +323,10 @@ def auto_quantize(
             .. code-block:: python
 
                 INT8_CUSTOM_QUANT_CFG = {
-                    "quant_cfg": {
-                        "*weight_quantizer": {"num_bits": 8, "axis": 0},
-                        "*input_quantizer": {"num_bits": 8, "axis": None},
-                    },
+                    "quant_cfg": [
+                        ("*weight_quantizer", {"num_bits": 8, "axis": 0}),
+                        ("*input_quantizer", {"num_bits": 8, "axis": None}),
+                    ],
                     "algorithm": "smoothquant",
                 }
 
