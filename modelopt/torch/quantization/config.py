@@ -1471,17 +1471,36 @@ class QuantizeConfig(ModeloptBaseConfig):
     @field_validator("quant_cfg", mode="before")
     @classmethod
     def normalize_quant_cfg(cls, v):
-        """Normalize quant_cfg entries: convert single-key dicts to (key, value) tuples.
+        """Normalize quant_cfg entries: convert dict forms to (key, value) tuples.
 
-        This allows loading from YAML/JSON (which produces dicts) while the internal
-        representation is always a list of tuples.
+        Supports these dict forms for YAML/JSON compatibility:
+
+        - ``{"pattern": ..., "enable": ..., "format": ...}`` — explicit object with top-level enable
+        - ``{"pattern": ..., "enable": ...}`` — enable-only (no format fields)
+        - ``{"pattern": ..., "format": ...}`` — explicit pattern/format object (legacy)
+        - ``{"<pattern>": ...}`` — single-key dict (legacy)
+
+        The internal representation is always a list of ``(pattern, cfg)`` tuples where
+        ``enable`` (if present at the top level) is merged into ``cfg``.
         """
         if not isinstance(v, list):
             return v
         result = []
         for entry in v:
-            if isinstance(entry, dict) and len(entry) == 1:
-                result.append(next(iter(entry.items())))
+            if isinstance(entry, dict):
+                if "pattern" in entry:
+                    pattern = entry["pattern"]
+                    fmt = dict(entry.get("format") or {})
+                    if "enable" in entry:
+                        fmt["enable"] = entry["enable"]
+                    result.append((pattern, fmt))
+                elif len(entry) == 1:
+                    result.append(next(iter(entry.items())))
+                else:
+                    raise ValueError(
+                        f"Invalid quant_cfg entry: {entry!r}. "
+                        "Expected a single-key dict or an object with a 'pattern' key."
+                    )
             else:
                 result.append(entry)
         return result
