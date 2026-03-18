@@ -551,9 +551,6 @@ def mono_quantize(
         print("Quantization will only be applied to the decoder (text generation) component")
 
     if not model_is_already_quantized or calibration_only:
-        if model_type == "gptoss" and args.qformat in ("nvfp4_mlp_only", "nvfp4_experts_only"):
-            print("Applying nvfp4 quantization (MoE only) for gpt-oss")
-
         # quantize the model
 
         use_calibration = need_calibration(quant_cfg)
@@ -749,8 +746,6 @@ def pre_quantize(
         )
     else:
         generated_ids_before_ptq = full_model.generate(preview_input_ids, max_new_tokens=100)
-    if model_type == "gptoss" and args.qformat in ("nvfp4_mlp_only", "nvfp4_experts_only"):
-        print("Applying nvfp4 quantization (MoE only) for gpt-oss")
 
     return preview_input_ids, generated_ids_before_ptq
 
