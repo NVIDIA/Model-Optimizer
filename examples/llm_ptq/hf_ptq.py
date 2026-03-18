@@ -89,6 +89,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "w4a8_nvfp4_fp8": mtq.W4A8_NVFP4_FP8_CFG,
     "w4a8_mxfp4_fp8": mtq.W4A8_MXFP4_FP8_CFG,
     "nvfp4_mlp_only": mtq.NVFP4_MLP_ONLY_CFG,
+    "nvfp4_experts_only": mtq.NVFP4_EXPERTS_ONLY_CFG,
     "nvfp4_omlp_only": mtq.NVFP4_OMLP_ONLY_CFG,
     "nvfp4_svdquant": mtq.NVFP4_SVDQUANT_DEFAULT_CFG,
     "mxfp8": mtq.MXFP8_DEFAULT_CFG,
@@ -255,6 +256,7 @@ def auto_quantize(
             "fp8_pb_wo",
             "w4a8_mxfp4_fp8",
             "nvfp4_mlp_only",
+            "nvfp4_experts_only",
             "nvfp4_omlp_only",
             "mxfp8",
         ]
@@ -519,7 +521,7 @@ def mono_quantize(
         print("Quantization will only be applied to the decoder (text generation) component")
 
     if not model_is_already_quantized or calibration_only:
-        if model_type == "gptoss" and args.qformat == "nvfp4_mlp_only":
+        if model_type == "gptoss" and args.qformat in ("nvfp4_mlp_only", "nvfp4_experts_only"):
             print("Applying nvfp4 quantization (MoE only) for gpt-oss")
 
         # quantize the model
@@ -717,7 +719,7 @@ def pre_quantize(
         )
     else:
         generated_ids_before_ptq = full_model.generate(preview_input_ids, max_new_tokens=100)
-    if model_type == "gptoss" and args.qformat == "nvfp4_mlp_only":
+    if model_type == "gptoss" and args.qformat in ("nvfp4_mlp_only", "nvfp4_experts_only"):
         print("Applying nvfp4 quantization (MoE only) for gpt-oss")
 
     return preview_input_ids, generated_ids_before_ptq
@@ -911,6 +913,7 @@ def quantize_main(
                 "fp8_pb_wo",
                 "w4a8_mxfp4_fp8",
                 "nvfp4_mlp_only",
+                "nvfp4_experts_only",
                 "nvfp4_omlp_only",
                 "mxfp8",
             ]
