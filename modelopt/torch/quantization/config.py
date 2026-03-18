@@ -1071,6 +1071,10 @@ class CalibrationConfig(ModeloptBaseConfig):
     )
 
 
+# Backward-compatible alias — deprecated, will be removed in a future release.
+QuantizeAlgorithmConfig = CalibrationConfig
+
+
 class MaxCalibConfig(CalibrationConfig):
     """The config for max calibration algorithm.
 
