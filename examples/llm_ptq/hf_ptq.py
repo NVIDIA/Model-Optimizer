@@ -107,6 +107,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "nvfp4_omlp_only": mtq.NVFP4_OMLP_ONLY_CFG,
     "nvfp4_svdquant": mtq.NVFP4_SVDQUANT_DEFAULT_CFG,
     "mxfp8": mtq.MXFP8_DEFAULT_CFG,
+    "nvfp4_local_hessian": mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG,
 }
 
 KV_QUANT_CFG_CHOICES = {
