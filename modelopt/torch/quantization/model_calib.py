@@ -1660,6 +1660,103 @@ def prepare_hessian_inverse(h, weight, percdamp):
     return h_inv
 
 
+def _build_column_qdq(quantizer, weight_shape):
+    """Build a fast column-wise quantize-dequantize function for integer quantizers.
+
+    Instead of calling the full TensorQuantizer on the entire weight matrix (which
+    quantizes all elements) and extracting one column, this returns a closure that
+    quantizes only a single column using the quantizer's pre-computed amax/scales.
+
+    Since max_calibrate fixes the amax before GPTQ weight updates, quantizing a
+    single column with the same fixed scale gives bit-identical results to
+    quantizing the full matrix and extracting that column.
+
+    Args:
+        quantizer: The weight TensorQuantizer (already calibrated).
+        weight_shape: Shape of the weight tensor (out_features, in_features).
+
+    Returns:
+        Tuple of (column_qdq_fn, supported) where:
+        - column_qdq_fn(column, col_idx) -> qdq_column  (if supported)
+        - supported: True if column-wise qdq is available, False to fall back.
+    """
+    # Unsupported: NVFP4 (two-level FP4 scaling), FP quantization (num_bits is a tuple)
+    if isinstance(quantizer, NVFP4StaticQuantizer):
+        return None, False
+    if isinstance(quantizer._num_bits, tuple):
+        return None, False
+
+    # Unsupported: pre_quant_scale (SmoothQuant) or rotation transforms mix columns
+    if getattr(quantizer, "pre_quant_scale", None) is not None:
+        return None, False
+    if getattr(quantizer, "rotate_is_enabled", False):
+        return None, False
+
+    # Need calibrated amax
+    if not hasattr(quantizer, "_amax") or quantizer._amax is None:
+        return None, False
+
+    num_bits = quantizer._num_bits
+    unsigned = getattr(quantizer, "_unsigned", False)
+    narrow_range = getattr(quantizer, "_narrow_range", False)
+    max_bound = (2 ** (num_bits - 1 + int(unsigned))) - 1
+    min_bound = -max_bound + int(narrow_range)
+
+    amax = quantizer._amax.float()
+    out_features, in_features = weight_shape
+
+    # Determine quantization geometry from block_sizes
+    block_sizes = quantizer.block_sizes
+    group_size = None
+    if block_sizes is not None:
+        # Skip dynamic block quantization
+        if block_sizes.get("type", "static") == "dynamic":
+            return None, False
+        group_size = block_sizes.get(-1, None) or block_sizes.get(len(weight_shape) - 1, None)
+
+    if group_size is not None and group_size > 0:
+        # Per-group block quantization along last dim.
+        # After _setup_for_blockquant, weight is reshaped to (-1, group_size) with axis=(0,).
+        # amax shape: (out_features * n_groups, 1) where n_groups = in_features // group_size.
+        if in_features % group_size != 0:
+            return None, False  # Padding case — fall back
+
+        n_groups = in_features // group_size
+
+        try:
+            # Reshape amax to (out_features, n_groups) for O(1) group lookup
+            amax_2d = amax.reshape(out_features, n_groups)
+        except RuntimeError:
+            return None, False
+
+        def _column_qdq_group(
+            col, col_idx, _a=amax_2d, _mx=max_bound, _mn=min_bound, _gs=group_size
+        ):
+            col_scale = _mx / _a[:, col_idx // _gs].clamp(min=1e-12)
+            return torch.clamp(torch.round(col * col_scale), _mn, _mx) / col_scale
+
+        return _column_qdq_group, True
+
+    # Per-channel (axis != None) or per-tensor (axis == None)
+    axis = quantizer.axis
+    if axis is not None:
+        # Per-channel: amax has shape (out_features, 1) or similar
+        col_scale = max_bound / amax.reshape(-1).clamp(min=1e-12)
+
+        def _column_qdq_channel(col, col_idx, _s=col_scale, _mx=max_bound, _mn=min_bound):
+            return torch.clamp(torch.round(col * _s), _mn, _mx) / _s
+
+        return _column_qdq_channel, True
+
+    # Per-tensor: single scalar scale
+    scalar_scale = max_bound / amax.clamp(min=1e-12).item()
+
+    def _column_qdq_tensor(col, col_idx, _s=scalar_scale, _mx=max_bound, _mn=min_bound):
+        return torch.clamp(torch.round(col * _s), _mn, _mx) / _s
+
+    return _column_qdq_tensor, True
+
+
 def blockwise_weight_update(module, h, block_size, percdamp, n_samples=None):
     """Update module weights using GPTQ-style blockwise quantization.
 
@@ -1676,22 +1773,41 @@ def blockwise_weight_update(module, h, block_size, percdamp, n_samples=None):
     # Preprocess Hessian: handle dead neurons and add damping
     h_inv = prepare_hessian_inverse(h, weight, percdamp)
 
+    # Try to build fast column-wise qdq (avoids quantizing the full matrix per column)
+    col_qdq_fn, col_qdq_supported = _build_column_qdq(module.weight_quantizer, weight.shape)
+
     # Process weights in blocks
     for block_start in range(0, num_cols, block_size):
         block_end = min(block_start + block_size, num_cols)
         n_cols = block_end - block_start
-        wblk = weight.clone()
-        errs = torch.zeros_like(wblk[:, block_start:block_end])
         h_inv_cho_blk = h_inv[block_start:block_end, block_start:block_end]
 
-        for i in range(n_cols):
-            w_ci = wblk[:, block_start + i]
-            d = h_inv_cho_blk[i, i]
-            qdq = module.weight_quantizer(wblk)
-            weight[:, block_start + i] = qdq[:, block_start + i]
-            err = (w_ci - qdq[:, block_start + i]) / d
-            wblk[:, block_start + i : block_end].addr_(err, h_inv_cho_blk[i, i:], alpha=-1)
-            errs[:, i] = err
+        if col_qdq_supported:
+            # Fast path: clone only the block columns, quantize only per-column
+            wblk = weight[:, block_start:block_end].clone()
+            errs = torch.zeros_like(wblk)
+
+            for i in range(n_cols):
+                w_ci = wblk[:, i]
+                d = h_inv_cho_blk[i, i]
+                qdq_col = col_qdq_fn(w_ci, block_start + i)
+                weight[:, block_start + i] = qdq_col
+                err = (w_ci - qdq_col) / d
+                wblk[:, i:].addr_(err, h_inv_cho_blk[i, i:], alpha=-1)
+                errs[:, i] = err
+        else:
+            # Fallback: original full-matrix quantization path
+            wblk = weight.clone()
+            errs = torch.zeros_like(wblk[:, block_start:block_end])
+
+            for i in range(n_cols):
+                w_ci = wblk[:, block_start + i]
+                d = h_inv_cho_blk[i, i]
+                qdq = module.weight_quantizer(wblk)
+                weight[:, block_start + i] = qdq[:, block_start + i]
+                err = (w_ci - qdq[:, block_start + i]) / d
+                wblk[:, block_start + i : block_end].addr_(err, h_inv_cho_blk[i, i:], alpha=-1)
+                errs[:, i] = err
 
         # Propagate errors to remaining weights
         weight[:, block_end:].addmm_(errs, h_inv[block_start:block_end, block_end:], alpha=-1)
@@ -1895,7 +2011,7 @@ def sequential_calibrate(
             torch.cuda.empty_cache()
     finally:
         input_getter._unpatch_all_layers()
-    
+
     print_rank_0("Sequential calibration completed")
 
 
@@ -2020,9 +2136,9 @@ def gptq(
             blockwise_weight_update(
                 module, hessian, block_size, percdamp, n_samples=state["n_samples"]
             )
-            # Free memory
             del hessian_state[module.name]
-            torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     torch.cuda.synchronize() if torch.cuda.is_available() else None
     weight_update_time = time.time() - weight_update_start
