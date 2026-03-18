@@ -19,7 +19,7 @@ set -eo pipefail
 
 # Set default values for BASE_MODEL and DATA
 BASE_MODEL=meta-llama/Llama-3.2-1B-Instruct
-DATA=input_conversations/daring-anteater.jsonl
+DATA=input_conversations/train.jsonl
 
 # Parse input arguments --base_model and --data
 while [[ $# -gt 0 ]]; do
