@@ -175,9 +175,10 @@ class Qwen3OmniTextProcessor(BaseImageProcessor):
 class Qwen3OmniImageProcessor(BaseImageProcessor):
     """Image processor for Qwen3-Omni multimodal model."""
 
-    def __init__(self, tokenizer, device="auto", use_audio_in_video=False):
+    def __init__(self, tokenizer, device="auto", dtype=None, use_audio_in_video=False):
         """Constructor."""
         super().__init__(tokenizer, device)
+        self.dtype = dtype
         self.use_audio_in_video = use_audio_in_video
         # Try to import qwen_omni_utils for multimodal processing
         try:
@@ -251,7 +252,8 @@ class Qwen3OmniImageProcessor(BaseImageProcessor):
         """Collate function to process inputs during data loading."""
         result = {}
 
-        # Take first item from batch (batch_size handling)
+        # Take first item only — multimodal inputs have variable-length sequences
+        # (images, audio) that cannot be stacked, so batch_size=1 is expected.
         first = batch[0]
 
         # Convert lists to tensors and move to device
@@ -262,7 +264,10 @@ class Qwen3OmniImageProcessor(BaseImageProcessor):
 
         # Handle pixel values for images
         if first.get("pixel_values") is not None:
-            result["pixel_values"] = torch.tensor(first["pixel_values"]).to(self.device)
+            pv = torch.tensor(first["pixel_values"])
+            if self.dtype is not None:
+                pv = pv.to(self.dtype)
+            result["pixel_values"] = pv.to(self.device)
 
         # Handle image grid thw (tile height width info)
         if first.get("image_grid_thw") is not None:
@@ -274,7 +279,10 @@ class Qwen3OmniImageProcessor(BaseImageProcessor):
                 self.device
             )
         if first.get("audio_features") is not None:
-            result["audio_features"] = torch.tensor(first["audio_features"]).to(self.device)
+            af = torch.tensor(first["audio_features"])
+            if self.dtype is not None:
+                af = af.to(self.dtype)
+            result["audio_features"] = af.to(self.device)
 
         # Handle video features if present
         if first.get("video_grid_thw") is not None:

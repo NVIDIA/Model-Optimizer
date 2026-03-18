@@ -121,6 +121,7 @@ def get_video_dataset_dataloader(
             try:
                 from datasets import Dataset
 
+                # weights_only=False is safe here: the cache file is self-generated at line 151
                 processed_samples = torch.load(cache_path, weights_only=False)
                 processed_dataset = Dataset.from_list(processed_samples)
                 print(f"Loaded processed dataset from cache: {cache_path}")
@@ -282,7 +283,8 @@ class Qwen3OmniVideoProcessor(BaseImageProcessor):
         """Collate function to process inputs during data loading."""
         result = {}
 
-        # Take first item from batch (batch_size handling)
+        # Take first item only — multimodal inputs have variable-length sequences
+        # (video frames, audio) that cannot be stacked, so batch_size=1 is expected.
         first = batch[0]
 
         # Convert lists to tensors and move to device

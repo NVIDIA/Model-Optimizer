@@ -45,7 +45,6 @@ try:
 except ImportError:
     snapshot_download = None
 
-import modelopt.torch.quantization as mtq
 from modelopt.torch.export.model_utils import MODEL_NAME_TO_TYPE
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 from modelopt.torch.utils.image_processor import (
@@ -1074,6 +1073,9 @@ def get_qwen3omni_dataloader(
         num_samples = [512, 512]
 
     if processor is not None:
+        # Normalize single-element list to str for supported-dataset lookups
+        if isinstance(dataset_name, list) and len(dataset_name) == 1:
+            dataset_name = dataset_name[0]
         if dataset_name in get_supported_video_datasets():
             assert isinstance(dataset_name, str)
             video_processor = Qwen3OmniVideoProcessor(
@@ -1093,7 +1095,8 @@ def get_qwen3omni_dataloader(
             assert isinstance(processor, Qwen3OmniImageProcessor), (
                 "The Qwen3OmniImageProcessor must be set."
             )
-            # Set the dtype for proper tensor conversion in collate_function
+            # Set dtype for proper tensor conversion in collate_function.
+            # Processor is created before model_dtype is known, so we set it here.
             processor.dtype = model_dtype
             calib_dataloader = get_vlm_dataset_dataloader(
                 dataset_name=dataset_name,

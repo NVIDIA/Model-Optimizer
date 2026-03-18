@@ -52,6 +52,12 @@ def main():
     parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling")
     parser.add_argument("--top-k", type=int, default=-1, help="Top-k sampling (-1 to disable)")
     parser.add_argument("--max-tokens", type=int, default=512, help="Max tokens to generate")
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        default=False,
+        help="Trust remote code from HuggingFace model repos",
+    )
 
     args = parser.parse_args()
 
@@ -65,7 +71,7 @@ def main():
 
     # Get max_model_len from config if not specified
     if args.max_model_len is None:
-        config = AutoConfig.from_pretrained(args.model, trust_remote_code=True)
+        config = AutoConfig.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
         args.max_model_len = getattr(config, "max_position_embeddings", 4096)
         print(f"Using max_model_len from config: {args.max_model_len}")
 
@@ -73,7 +79,9 @@ def main():
     tokenizer_id = args.tokenizer or args.model
 
     # Load processor for chat template
-    processor = AutoProcessor.from_pretrained(tokenizer_id, trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained(
+        tokenizer_id, trust_remote_code=args.trust_remote_code
+    )
 
     # Text-only conversations
     conversations = [
@@ -106,7 +114,7 @@ def main():
         tokenizer=tokenizer_id,
         tensor_parallel_size=args.tp,
         max_model_len=args.max_model_len,
-        trust_remote_code=True,
+        trust_remote_code=args.trust_remote_code,
         quantization=quantization,
     )
 

@@ -606,8 +606,8 @@ def _process_batch(batch_data, infer_method, generation_kwargs={}, max_working_b
     assert all(torch.is_tensor(data) or data is None for data in tensor_data.values()), (
         "tensor_data values must be tensors"
     )
-    # Get the batch size of current data
-    batch_size = tensor_data[next(iter(batch_data.keys()))].shape[0]
+    # Get the batch size from the first non-None tensor value
+    batch_size = next(v for v in tensor_data.values() if v is not None).shape[0]
 
     # If we know a smaller batch size works, preemptively split
     if max_working_batch_size is not None and batch_size > max_working_batch_size:

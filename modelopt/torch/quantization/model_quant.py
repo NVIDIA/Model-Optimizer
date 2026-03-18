@@ -17,7 +17,6 @@
 
 import fnmatch
 import inspect
-import os
 import warnings
 from collections.abc import Callable, Iterable
 from typing import Any
