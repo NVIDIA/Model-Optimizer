@@ -73,15 +73,8 @@ def test_distill_hf(project_root_path: Path, tmp_path: Path):
         eval_interval=100,
         eval_iters=0,
         log_interval=5,
-    )
-    # Script uses hyphens in these names; extend_cmd_parts only produces --underscore_key
-    cmd_parts.extend(
-        [
-            "--hf-export-path",
-            str(hf_export_dir),
-            "--hf-model",
-            "meta-llama/Llama-3.1-8B-Instruct",
-        ]
+        hf_export_path=str(hf_export_dir),
+        hf_model="meta-llama/Llama-3.1-8B-Instruct",
     )
 
     run_example_command(cmd_parts, example_path="puzzletron/mbridge_distillation")

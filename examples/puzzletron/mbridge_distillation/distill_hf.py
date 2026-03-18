@@ -143,7 +143,7 @@ def get_args():
     parser.add_argument("--wandb_exp_name", type=str, help="Wandb experiment name (optional)")
     # Export arguments
     parser.add_argument(
-        "--hf-export-path",
+        "--hf_export_path",
         type=str,
         default=None,
         help=(
@@ -152,7 +152,7 @@ def get_args():
         ),
     )
     parser.add_argument(
-        "--hf-model",
+        "--hf_model",
         type=str,
         required=True,
         help="HuggingFace model ID to use as template for export (e.g., meta-llama/Llama-3.1-8B-Instruct). "
