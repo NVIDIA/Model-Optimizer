@@ -446,16 +446,15 @@ class _QuantSparseMoe(QuantModule):
 
     Supports ``layer_sync_moe_local_experts_amax`` to sync input quantizer amax across experts.
 
-    Optionally supports two config-driven features (disabled by default):
+    Optionally supports config-driven features (disabled by default):
     - ``_moe_calib_experts_ratio``: force-forward tokens to more experts during calibration.
-    - ``_moe_count_expert_calib_tokens``: count tokens routed to each expert during calibration.
+      When set to a value > 0, also enables token counting per expert.
 
-    When both are disabled, forward is a direct pass-through with zero overhead.
+    When disabled, forward is a direct pass-through with zero overhead.
     """
 
     def _setup(self):
         self._moe_calib_experts_ratio = None
-        self._moe_count_expert_calib_tokens = False
         self._token_counting_initialized = False
 
     def _init_token_counting(self):
@@ -503,24 +502,18 @@ class _QuantSparseMoe(QuantModule):
             self.expert_token_count += counts.to(self.expert_token_count.device)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if not self._moe_calib_experts_ratio and not self._moe_count_expert_calib_tokens:
+        if self._moe_calib_experts_ratio is None:
             return super().forward(hidden_states)
 
-        if self._moe_count_expert_calib_tokens and not self._token_counting_initialized:
-            self._init_token_counting()
-
         is_calib = any(getattr(m, "_if_calib", False) for m in self.experts.modules())
-        self._count_expert_tokens = is_calib and self._moe_count_expert_calib_tokens
 
-        # If any of the experts are in calibration mode, we will forward all tokens to
-        # self._moe_calib_experts_ratio % of the experts to improve the calibration coverage.
-        # This is used only for calibration, we need to re-calculate the actual outputs again using
-        # the original top_k
-        if is_calib and self._moe_calib_experts_ratio:
-            self._count_expert_tokens = True
-            assert 0 < self._moe_calib_experts_ratio <= 1, (
-                "moe_calib_experts_ratio must be between 0 and 1"
-            )
+        # During calibration, forward all tokens to a larger fraction of experts to improve
+        # calibration coverage, then re-run with the original top_k for actual outputs.
+        if is_calib:
+            # Skip counting when all experts are calibrated (ratio == 1.0).
+            self._count_expert_tokens = self._moe_calib_experts_ratio < 1.0
+            if self._count_expert_tokens and not self._token_counting_initialized:
+                self._init_token_counting()
             if TRANSFORMERS_VERSION_GE_5_0:
                 assert hasattr(self, "gate") and hasattr(self.gate, "top_k")
                 original_top_k = self.gate.top_k
@@ -561,7 +554,12 @@ class _QuantSparseMoe(QuantModule):
         return output
 
     def layer_sync_moe_local_experts_amax(self):
-        """Sync input_quantizer amax across experts so all share the same amax per quantizer."""
+        """Sync input_quantizer amax across experts so all share the same amax per quantizer.
+
+        Skipped when _moe_calib_experts_ratio is set, as each expert is calibrated independently.
+        """
+        if self._moe_calib_experts_ratio is not None:
+            return
         sync_moe_expert_amax(self.experts)
 
 
