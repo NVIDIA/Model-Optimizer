@@ -22,7 +22,7 @@ git clone https://github.com/NVIDIA/Model-Optimizer.git ${MODELOPT_DIR}
 
 **Start Docker container:**
 
-Use the [NeMo 26.02 container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo?version=26.02):
+Use the [NeMo 26.02.01 container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo?version=26.02.01):
 
 ```bash
 # Recommended to mount a workspace directory for storing datasets and distilled models
