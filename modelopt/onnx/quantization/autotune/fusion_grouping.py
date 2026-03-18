@@ -238,20 +238,38 @@ def generate_graph_json(
     graph_json_path = str(output_dir / f"{model_name}.fp16.graph.json")
     log_path = str(output_dir / f"{model_name}.fp16.build.log")
 
-    cmd = [
-        "trtexec",
-        f"--onnx={onnx_path}",
-        "--maxTactics=1",
-        f"--exportLayerInfo={graph_json_path}",
-        "--profilingVerbosity=detailed",
-    ]
+    defaults = {
+        "onnx": onnx_path,
+        "maxTactics": "1",
+        "exportLayerInfo": graph_json_path,
+        "profilingVerbosity": "detailed",
+    }
     if strongly_typed:
-        cmd.append("--stronglyTyped")
+        defaults["stronglyTyped"] = None
+
     if plugin_libraries:
         for lib in plugin_libraries:
-            cmd.append(f"--staticPlugins={lib}")
+            defaults.setdefault("staticPlugins", [])
+            if isinstance(defaults["staticPlugins"], list):
+                defaults["staticPlugins"].append(lib)
+            else:
+                defaults["staticPlugins"] = [lib]
+
     if extra_trtexec_args:
-        cmd.extend(extra_trtexec_args)
+        for arg in extra_trtexec_args:
+            key = arg.lstrip("-").split("=", 1)[0]
+            val = arg.split("=", 1)[1] if "=" in arg else None
+            defaults[key] = val
+
+    cmd = ["trtexec"]
+    for key, val in defaults.items():
+        if isinstance(val, list):
+            for v in val:
+                cmd.append(f"--{key}={v}")
+        elif val is None:
+            cmd.append(f"--{key}")
+        else:
+            cmd.append(f"--{key}={val}")
 
     logger.info(f"Running trtexec FP16 build to generate graph.json ...")
     logger.debug(f"Command: {' '.join(cmd)}")

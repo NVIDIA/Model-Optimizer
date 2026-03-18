@@ -145,6 +145,29 @@ class Benchmark(ABC):
             self.logger.warning(f"Failed to save logs to {file}: {e}")
 
 
+def _dedup_trtexec_args(
+    base_args: list[tuple[str, str | None]], user_args: list[str]
+) -> list[str]:
+    """Merge base trtexec arguments with user-provided arguments, deduplicating by flag name.
+
+    User-provided arguments override base defaults when flag names collide.
+    Args with key=None (e.g. the trtexec binary path, --staticPlugins) are never deduped.
+    """
+    user_keys: dict[str, str] = {}
+    for arg in user_args:
+        key = arg.lstrip("-").split("=", 1)[0]
+        user_keys[key] = arg
+
+    cmd: list[str] = []
+    for arg_str, key in base_args:
+        if key is not None and key in user_keys:
+            continue
+        cmd.append(arg_str)
+
+    cmd.extend(user_keys.values())
+    return cmd
+
+
 class TrtExecBenchmark(Benchmark):
     """TensorRT benchmark using trtexec command-line tool.
 
@@ -185,14 +208,14 @@ class TrtExecBenchmark(Benchmark):
         self.logger.debug(f"Temporary model path: {self.temp_model_path}")
         self.latency_pattern = r"\[I\]\s+Latency:.*?median\s*=\s*([\d.]+)\s*ms"
 
-        self._base_cmd = [
-            self.trtexec_path,
-            f"--avgRuns={self.timing_runs}",
-            f"--iterations={self.timing_runs}",
-            f"--warmUp={self.warmup_runs}",
-            "--stronglyTyped",
-            f"--saveEngine={self.engine_path}",
-            f"--timingCacheFile={self.timing_cache_file}",
+        base_args = [
+            (self.trtexec_path, None),
+            (f"--avgRuns={self.timing_runs}", "avgRuns"),
+            (f"--iterations={self.timing_runs}", "iterations"),
+            (f"--warmUp={self.warmup_runs}", "warmUp"),
+            ("--stronglyTyped", "stronglyTyped"),
+            (f"--saveEngine={self.engine_path}", "saveEngine"),
+            (f"--timingCacheFile={self.timing_cache_file}", "timingCacheFile"),
         ]
 
         for plugin_lib in self.plugin_libraries:
@@ -200,7 +223,7 @@ class TrtExecBenchmark(Benchmark):
             if not plugin_path.exists():
                 self.logger.warning(f"Plugin library not found: {plugin_path}")
                 continue
-            self._base_cmd.append(f"--staticPlugins={plugin_path}")
+            base_args.append((f"--staticPlugins={plugin_path}", None))
             self.logger.debug(f"Added plugin library: {plugin_path}")
 
         trtexec_args = self.trtexec_args or []
@@ -224,7 +247,8 @@ class TrtExecBenchmark(Benchmark):
                 trtexec_args = [
                     arg for arg in trtexec_args if "--remoteAutoTuningConfig" not in arg
                 ]
-        self._base_cmd.extend(trtexec_args)
+
+        self._base_cmd = _dedup_trtexec_args(base_args, trtexec_args)
 
         self.logger.debug(f"Base command template: {' '.join(self._base_cmd)}")
         self._profile_unsupported = False
