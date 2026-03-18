@@ -13,7 +13,48 @@ Produce a quantized checkpoint from a pretrained HuggingFace model using NVIDIA 
 
 Do this first — the environment determines how to run the job and which formats are viable.
 
-**Step 1 — Is this a SLURM cluster?**
+**Is this a remote execution?**
+
+Check if a remote cluster config exists or the user mentioned running on a remote machine:
+
+```bash
+cat ~/.config/modelopt/clusters.yaml 2>/dev/null || cat .claude/clusters.yaml 2>/dev/null
+```
+
+**Case A — config found, or user says "run on [cluster]" / "run remotely" / "use SSH":**
+Switch to remote execution mode — read `references/remote-execution.md` now. All subsequent steps apply whether local or remote.
+
+**Case B — no config, user hasn't mentioned a cluster:**
+Skip remote mode and proceed with local execution below.
+
+**Case C — no config, but user clearly wants remote (e.g. "run on the cluster", "use SSH", mentions a hostname):**
+Ask the user for the following info, then create `~/.config/modelopt/clusters.yaml` before proceeding:
+
+```
+I need a few details to set up the remote cluster. Please provide:
+1. Login node hostname (e.g. cluster-login.example.com)
+2. SSH username
+3. SSH key path (default: ~/.ssh/id_rsa) — press Enter to use default
+4. Remote working directory (e.g. /lustre/fs1/username/modelopt or ~/modelopt)
+5. Cluster name/alias for future reference (e.g. "selene", "cw-dfw")
+```
+
+Once you have the answers, write `~/.config/modelopt/clusters.yaml`:
+
+```yaml
+clusters:
+  <alias>:
+    login_node: <hostname>
+    user: <username>
+    ssh_key: <ssh_key_path>
+    workspace: <remote_workdir>
+
+default_cluster: <alias>
+```
+
+Then read `references/remote-execution.md` and continue.
+
+**Is this a SLURM cluster?**
 
 ```bash
 which srun squeue sbatch 2>/dev/null | head -1
@@ -33,7 +74,7 @@ sinfo -o "%P %a %l %G" 2>/dev/null | grep -v "^PARTITION"
 - If the user has **multiple accounts**: show them and ask which to use. Default to the account whose name most closely matches the project or working directory.
 - For partition, use the default (marked with `*` in `sinfo` output). Report the choice.
 
-**Step 2 — If not SLURM, check for a local GPU:**
+**If not SLURM, check for a local GPU:**
 
 ```bash
 python -c "import torch; [print(f'GPU {i}: {torch.cuda.get_device_name(i)}') for i in range(torch.cuda.device_count())] if torch.cuda.is_available() else print('no-gpu')"
@@ -45,7 +86,7 @@ python -c "import torch; [print(f'GPU {i}: {torch.cuda.get_device_name(i)}') for
 | Local GPU found | Proceed — report the GPU model(s) to the user. |
 | Neither found | **Stop and report**: "No GPU found and this doesn't appear to be a SLURM cluster. PTQ calibration requires a CUDA GPU. Please confirm the target environment." |
 
-The GPU model feeds directly into format recommendation in Step 2.
+The GPU model feeds directly into format recommendation in the next step.
 
 ### 1. Is the model architecture supported?
 
@@ -64,7 +105,7 @@ After reading the README, check `modelopt/torch/export/model_utils.py` for `MODE
 
 ### 2. Choose the quantization format
 
-If the user has not specified a format, **recommend one based on the GPU detected in Step 0**:
+If the user has not specified a format, **recommend one based on the GPU detected above**:
 
 | GPU generation | Memory priority | Accuracy priority |
 |----------------|-----------------|-------------------|
@@ -72,6 +113,8 @@ If the user has not specified a format, **recommend one based on the GPU detecte
 | **Hopper** (H100, H200) or older | `int4_awq` | `fp8` |
 
 Tell the user which GPU was detected and which format you are recommending, and why.
+
+> **If the user explicitly requests `nvfp4` on a Hopper GPU**: proceed — H100/H200 can *calibrate* NVFP4 checkpoints fine. Just note: "NVFP4 inference requires Blackwell GPUs; this checkpoint will be calibrated on H100 but must be deployed on Blackwell."
 
 For reference, all available configs are in `modelopt/torch/quantization/config.py`:
 
@@ -120,9 +163,12 @@ For MLP-only quantization (skipping attention), use configs with `MLP_ONLY` in t
 python examples/llm_ptq/hf_ptq.py \
     --pyt_ckpt_path <model_path> \
     --qformat <format_name> \
+    --export_fmt hf \
     --calib_size 512 \
     --export_path <output_path>
 ```
+
+Always pass `--export_fmt hf` explicitly — older versions of the script default to `tensorrt_llm` which produces TRT-LLM format instead of a HuggingFace checkpoint.
 
 Run `python examples/llm_ptq/hf_ptq.py --help` to see all options.
 
@@ -195,6 +241,7 @@ These are non-obvious requirements that cause hard-to-debug failures:
 
 - **`references/unsupported-models.md`** — Patterns for extending ModelOpt to new architectures: MoE expert quantization, VLM language model extraction, FP8 dequantization, calibration routing
 - **`references/slurm-setup.md`** — SLURM job script template, container/enroot setup, partition selection, smoke-test strategy, monitoring, multi-node FSDP2
+- **`references/remote-execution.md`** — **Read this when running PTQ on a remote machine/cluster via SSH.** Covers cluster config, persistent SSH sessions, SLURM container jobs, the two-script pattern, and troubleshooting.
 
 ### ModelOpt Examples
 

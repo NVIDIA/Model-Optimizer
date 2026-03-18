@@ -6,7 +6,18 @@ Read this file when running on a SLURM cluster. It covers container setup, job s
 
 ## 1. Container
 
-Get the recommended image version from `examples/llm_ptq/README.md`, then find the matching `.sqsh` file in the working directory or nearby paths.
+Get the recommended image version from `examples/llm_ptq/README.md`, then look for a `.sqsh` file in the workspace and common sibling directories:
+
+```bash
+ls *.sqsh ../*.sqsh ~/containers/*.sqsh 2>/dev/null
+```
+
+If you find a `.sqsh` but aren't sure of its version, check it:
+
+```bash
+srun --container-image=<path/to/container.sqsh> --ntasks=1 bash -c \
+    "pip show tensorrt-llm 2>/dev/null | grep Version || cat /VERSION 2>/dev/null || echo unknown"
+```
 
 If no `.sqsh` exists, import it with enroot. Set writable cache paths first — the default `/raid/containers` is often not writable:
 
@@ -42,6 +53,8 @@ sinfo -o "%P %a %l %D %G" 2>/dev/null | grep -v "null\|CPU\|cpu"
 
 **Critical**: container flags (`--container-image`, `--container-mounts`) MUST be on the `srun` line — they do NOT work as `#SBATCH` directives.
 
+**GPU count**: estimate based on model size. Rough guide: 1 GPU per ~20B params in BF16 (e.g., 0.6B → 1 GPU, 70B → 4 GPUs, 405B → 8 GPUs). `hf_ptq.py` uses `device_map="auto"` so it fills GPUs automatically — request only as many as needed.
+
 ```bash
 #!/bin/bash
 #SBATCH --job-name=ptq
@@ -49,7 +62,7 @@ sinfo -o "%P %a %l %D %G" 2>/dev/null | grep -v "null\|CPU\|cpu"
 #SBATCH --partition=<partition>
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=8
+#SBATCH --gpus-per-node=<N>   # 1 for small models (<20B), 4-8 for large models
 #SBATCH --time=<HH:MM:SS>
 #SBATCH --output=<log_dir>/ptq_%j.log
 
@@ -109,6 +122,7 @@ If the session may not stay open that long, use the `CronCreate` tool to set up 
 For models too large for a single node (rough guide: 200B+ params), use `examples/llm_ptq/multinode_ptq.py` with FSDP2.
 
 Edit `examples/llm_ptq/fsdp2.yaml`:
+
 - `num_machines` and `num_processes` → match SLURM allocation
 - `fsdp_transformer_layer_cls_to_wrap` → model's decoder layer class name
 
