@@ -641,6 +641,9 @@ def _process_quantized_modules(
         ):
             sub_module.unpack_weight()
         if get_quantization_format(sub_module) != QUANTIZATION_NONE:
+            # Skip QuantMoELinear - it's handled separately in _reconstruct_step3p5_moe_linear
+            if type(sub_module).__name__ == "QuantMoELinear":
+                continue
             if is_quantlinear(sub_module):
                 try:
                     with fsdp2_aware_weight_update(model, sub_module, reshard=False):
@@ -671,18 +674,22 @@ def _process_quantized_modules(
 
 
 def _reconstruct_step3p5_moe_linear(model: nn.Module) -> None:
-    """Reconstruct _QuantMoELinear per-expert weights back to original 3D MoELinear format.
+    """Reconstruct QuantMoELinear per-expert weights back to original 3D MoELinear format.
 
-    After _process_quantized_modules, each expert's nn.Linear inside _QuantMoELinear has:
+    After _process_quantized_modules, each expert's nn.Linear inside QuantMoELinear has:
       - weight: fp4-quantized tensor [out_features, in_features]
       - weight_scale, weight_scale_2: per-block / global scales
       - input_scale: activation scale (if calibrated)
 
     This stacks them back into the original MoELinear layout so the exported state_dict
     uses the original key names (e.g. moe.up_proj.weight with shape [N, out, in]).
+
+    Note: QuantMoELinear is the dynamically generated class name (Quant + MoELinear),
+    not _QuantMoELinear which is the implementation class.
     """
-    for _, module in model.named_modules():
-        if type(module).__name__ != "_QuantMoELinear":
+    for name, module in model.named_modules():
+        # Match QuantMoELinear (dynamically generated name) not _QuantMoELinear (implementation class)
+        if type(module).__name__ != "QuantMoELinear":
             continue
 
         n = module.num_experts
