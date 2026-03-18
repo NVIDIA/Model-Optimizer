@@ -19,7 +19,7 @@ import pytest
 
 from modelopt.torch.opt.config import ModeloptField
 from modelopt.torch.opt.mode import _ModeRegistryCls
-from modelopt.torch.quantization.config import QuantizeAlgorithmConfig
+from modelopt.torch.quantization.config import CalibrationConfig
 from modelopt.torch.quantization.mode import (
     BaseCalibrateModeDescriptor,
     CalibrateModeRegistry,
@@ -37,13 +37,13 @@ def test_modes():
 
 
 def test_calibrate_mode_registry_with_custom_mode():
-    class TestConfig(QuantizeAlgorithmConfig):
+    class TestConfig(CalibrationConfig):
         method: Literal["test"] = ModeloptField("test")
 
     @CalibrateModeRegistry.register_mode
     class TestCalibrateModeDescriptor(BaseCalibrateModeDescriptor):
         @property
-        def config_class(self) -> QuantizeAlgorithmConfig:
+        def config_class(self) -> CalibrationConfig:
             return TestConfig
 
         _calib_func = None

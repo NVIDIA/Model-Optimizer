@@ -1010,7 +1010,7 @@ class QuantizerAttributeConfig(ModeloptBaseConfig):
     )
 
 
-class QuantizeAlgorithmConfig(ModeloptBaseConfig):
+class CalibrationConfig(ModeloptBaseConfig):
     """Calibration algorithm config base."""
 
     method: Literal[None] = ModeloptField(
@@ -1043,35 +1043,35 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
         ),
     )
 
-    calib_include_modules: list[str] | None = ModeloptField(
+    include_modules: list[str] | None = ModeloptField(
         default=None,
         title="Patterns of modules to include in calibration.",
         description=(
             "If provided, only modules whose names match at least one of the fnmatch patterns are "
             "calibrated. Modules that do not match any pattern are skipped and retain their "
             "pre-existing calibration state. "
-            "If a module name matches both ``calib_include_modules`` and "
-            "``calib_exclude_modules``, exclusion takes precedence and the module is skipped. "
+            "If a module name matches both ``include_modules`` and ``exclude_modules``, "
+            "exclusion takes precedence and the module is skipped. "
             "Note: filtering applies only to quantized linear modules; TensorQuantizers in "
             "non-linear modules (e.g. layer norms, embeddings) are unaffected."
         ),
     )
 
-    calib_exclude_modules: list[str] | None = ModeloptField(
+    exclude_modules: list[str] | None = ModeloptField(
         default=None,
         title="Patterns of modules to exclude from calibration.",
         description=(
             "If provided, modules whose names match at least one of the fnmatch patterns are "
             "skipped during calibration and retain their pre-existing calibration state. "
-            "If a module name matches both ``calib_include_modules`` and "
-            "``calib_exclude_modules``, exclusion takes precedence. "
+            "If a module name matches both ``include_modules`` and ``exclude_modules``, "
+            "exclusion takes precedence. "
             "Note: filtering applies only to quantized linear modules; TensorQuantizers in "
             "non-linear modules (e.g. layer norms, embeddings) are unaffected."
         ),
     )
 
 
-class MaxCalibConfig(QuantizeAlgorithmConfig):
+class MaxCalibConfig(CalibrationConfig):
     """The config for max calibration algorithm.
 
     Max calibration estimates max values of activations or weights and use this max values
@@ -1088,7 +1088,7 @@ class MaxCalibConfig(QuantizeAlgorithmConfig):
     )
 
 
-class MseCalibConfig(QuantizeAlgorithmConfig):
+class MseCalibConfig(CalibrationConfig):
     """Configuration for per-tensor MSE calibration.
 
     Finds a scale s (via amax a, with s = a / q_max) that minimizes the
@@ -1138,7 +1138,7 @@ class MseCalibConfig(QuantizeAlgorithmConfig):
     )
 
 
-class LocalHessianCalibConfig(QuantizeAlgorithmConfig):
+class LocalHessianCalibConfig(CalibrationConfig):
     """Configuration for local Hessian-weighted MSE calibration.
 
     This algorithm uses activation information to optimize per-block scales for weight
@@ -1205,7 +1205,7 @@ class LocalHessianCalibConfig(QuantizeAlgorithmConfig):
     )
 
 
-class SmoothQuantCalibConfig(QuantizeAlgorithmConfig):
+class SmoothQuantCalibConfig(CalibrationConfig):
     """The config for ``smoothquant`` algorithm (SmoothQuant).
 
     SmoothQuant applies a smoothing factor which balances the scale of outliers in weights and activations.
@@ -1227,7 +1227,7 @@ class SmoothQuantCalibConfig(QuantizeAlgorithmConfig):
     )
 
 
-class AWQLiteCalibConfig(QuantizeAlgorithmConfig):
+class AWQLiteCalibConfig(CalibrationConfig):
     """The config for ``awq_lite`` (AWQ lite) algorithm.
 
     AWQ lite applies a channel-wise scaling factor which minimizes the output difference after quantization.
@@ -1251,7 +1251,7 @@ class AWQLiteCalibConfig(QuantizeAlgorithmConfig):
     )
 
 
-class AWQClipCalibConfig(QuantizeAlgorithmConfig):
+class AWQClipCalibConfig(CalibrationConfig):
     """The config for ``awq_clip`` (AWQ clip) algorithm.
 
     AWQ clip searches clipped amax for per-group quantization, This search requires much more compute
@@ -1317,7 +1317,7 @@ class AWQFullCalibConfig(AWQLiteCalibConfig, AWQClipCalibConfig):
     )
 
 
-class SVDQuantConfig(QuantizeAlgorithmConfig):
+class SVDQuantConfig(CalibrationConfig):
     """The config for SVDQuant.
 
     Refer to the `SVDQuant paper <https://arxiv.org/pdf/2411.05007>`_ for more details.
@@ -1335,7 +1335,7 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
     )
 
 
-class GPTQLiteConfig(QuantizeAlgorithmConfig):
+class GPTQLiteConfig(CalibrationConfig):
     """The config for GPTQ lite.
 
     GPTQ lite is a variant of GPTQ that does not exactly follow the official GPTQ implementation.
@@ -1380,7 +1380,7 @@ QuantizeQuantCfgType = dict[
     | dict[str | Callable, QuantizerAttributeConfig | list[QuantizerAttributeConfig]],
 ]
 
-_QuantizeAlgoCfgType = str | dict | QuantizeAlgorithmConfig | None
+_QuantizeAlgoCfgType = str | dict | CalibrationConfig | None
 
 QuantizeAlgoCfgType = _QuantizeAlgoCfgType | list[_QuantizeAlgoCfgType] | None
 

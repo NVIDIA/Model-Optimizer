@@ -582,7 +582,7 @@ def test_mse_calibrate_exclude_modules():
 
     mtq.calibrate(
         model,
-        algorithm={"method": "mse", "calib_exclude_modules": ["*net.4*"]},
+        algorithm={"method": "mse", "exclude_modules": ["*net.4*"]},
         forward_loop=partial(forward_loop, dataloader=data),
     )
 
@@ -597,7 +597,7 @@ def test_mse_calibrate_exclude_modules():
 
 
 def test_mse_calibrate_include_modules():
-    """MSE calibration with calib_include_modules leaves non-included layer amaxes unchanged."""
+    """MSE calibration with include_modules leaves non-included layer amaxes unchanged."""
     model, data = _make_quantized_mlp()
 
     # Record amaxes of non-included layers
@@ -606,7 +606,7 @@ def test_mse_calibrate_include_modules():
 
     mtq.calibrate(
         model,
-        algorithm={"method": "mse", "calib_include_modules": ["net.0"]},
+        algorithm={"method": "mse", "include_modules": ["net.0"]},
         forward_loop=partial(forward_loop, dataloader=data),
     )
 
@@ -659,7 +659,7 @@ def test_smoothquant_include_modules():
 
     mtq.calibrate(
         model,
-        algorithm={"method": "smoothquant", "calib_include_modules": ["*net.0*"]},
+        algorithm={"method": "smoothquant", "include_modules": ["*net.0*"]},
         forward_loop=partial(forward_loop, dataloader=data),
     )
 
@@ -685,9 +685,9 @@ def test_filter_via_config_api():
     model = _SimpleMLP()
     data = [torch.randn(4, 16)]
 
-    # Intended usage: embed calib_exclude_modules in the algorithm dict of the quant config.
+    # Intended usage: embed exclude_modules in the algorithm dict of the quant config.
     quant_cfg = copy.deepcopy(INT8_CFG)
-    quant_cfg["algorithm"] = {"method": "max", "calib_exclude_modules": ["*net.4*"]}
+    quant_cfg["algorithm"] = {"method": "max", "exclude_modules": ["*net.4*"]}
     model = mtq.quantize(model, quant_cfg, partial(forward_loop, dataloader=data))
 
     modules = dict(model.named_modules())
@@ -703,7 +703,7 @@ def test_filter_via_config_api():
     torch.manual_seed(42)
     model2 = _SimpleMLP()
     quant_cfg2 = copy.deepcopy(INT8_CFG)
-    quant_cfg2["algorithm"] = {"method": "max", "calib_include_modules": ["net.0"]}
+    quant_cfg2["algorithm"] = {"method": "max", "include_modules": ["net.0"]}
     model2 = mtq.quantize(model2, quant_cfg2, partial(forward_loop, dataloader=data))
 
     modules2 = dict(model2.named_modules())
@@ -726,7 +726,7 @@ def test_wildcard_pattern_matching():
     # "net.[02]" matches net.0 and net.2 but NOT net.4
     mtq.calibrate(
         model,
-        algorithm={"method": "mse", "calib_include_modules": ["net.[02]"]},
+        algorithm={"method": "mse", "include_modules": ["net.[02]"]},
         forward_loop=partial(forward_loop, dataloader=data),
     )
 
