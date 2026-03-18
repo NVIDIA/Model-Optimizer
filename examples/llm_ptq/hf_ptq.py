@@ -77,8 +77,6 @@ from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
 from modelopt.torch.utils.vlm_dataset_utils import get_vlm_dataset_dataloader
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "../speculative_decoding"))
-from eagle_utils import make_eagle_supervised_data_module
 
 RAND_SEED = 1234
 
@@ -953,6 +951,8 @@ def quantize_main(
     print(f"Use calib batch_size {args.batch_size}")
 
     if args.specdec_offline_dataset is not None:
+        sys.path.append(os.path.join(os.path.dirname(__file__), "../speculative_decoding"))
+        from eagle_utils import make_eagle_supervised_data_module
         data_args = argparse.Namespace(
             vlm_processor=None,
             vlm_img_dir=None,
