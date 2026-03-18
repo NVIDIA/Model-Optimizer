@@ -17,8 +17,6 @@ import torch
 from torch import nn
 from torch.nn.utils.prune import custom_from_mask
 
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.modeling_decilm import DeciLMForCausalLM
-
 """
 Converts a state dictionary from PyTorch's pruning format (with _orig and _mask suffixes)
 into a standard format with sparsified weights.
@@ -61,7 +59,7 @@ class SparsityMethod:
                 print(name)
                 print(torch.sum(mask_dict[name]) / mask_dict[name].numel())
 
-    def do_sparsity(self, model: DeciLMForCausalLM, mask_dict=None):
+    def do_sparsity(self, model: nn.Module, mask_dict=None):
         full_name_layers = []
         for block_idx, block_config in enumerate(model.config.block_configs):
             ffn_names = block_config.ffn.sparsify  # layers_to_sparsify_pattern[block_idx]
