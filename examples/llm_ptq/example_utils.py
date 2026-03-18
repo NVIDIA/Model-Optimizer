@@ -45,7 +45,6 @@ try:
 except ImportError:
     snapshot_download = None
 
-import modelopt.torch.quantization as mtq
 from modelopt.torch.utils.image_processor import BaseImageProcessor, MllamaImageProcessor
 
 logger = logging.getLogger(__name__)
@@ -199,22 +198,13 @@ def create_vlm_calibration_loop(full_model, calib_dataloader):
 
 def build_quant_cfg(
     qformat,
-    kv_cache_qformat,
+    quant_cfg,
     awq_block_size,
     model_type,
-    quant_cfg_choices,
-    kv_quant_cfg_choices,
     moe_calib_experts_ratio: float | None = None,
 ) -> dict[str, Any]:
-    quant_cfg = {}
-    assert qformat in quant_cfg_choices, (
-        f"Unsupported quantization format: {qformat} with {kv_cache_qformat} KV cache"
-    )
-
-    quant_cfg = quant_cfg_choices[qformat]
-
-    if "awq" in qformat:
-        quant_cfg = copy.deepcopy(quant_cfg_choices[qformat])
+    quant_cfg = copy.deepcopy(quant_cfg)
+    if "awq" in str(quant_cfg.get("algorithm")):
         weight_quantizer = quant_cfg["quant_cfg"]["*weight_quantizer"]
         if isinstance(weight_quantizer, list):
             weight_quantizer = weight_quantizer[0]
@@ -225,16 +215,6 @@ def build_quant_cfg(
         # Coarser optimal scale search seems to resolve the overflow in TRT-LLM for some models
         if qformat == "w4a8_awq" and model_type in ["gemma", "mpt"]:
             quant_cfg["algorithm"] = {"method": "awq_lite", "alpha_step": 1}
-
-    enable_quant_kv_cache = kv_cache_qformat != "none"
-    print(f"{'Enable' if enable_quant_kv_cache else 'Disable'} KV cache quantization")
-
-    # Check if any bmm_quantizer is in the quant_cfg. If so, we need to enable the bmm_quantizer.
-    if enable_quant_kv_cache:
-        quant_cfg = mtq.update_quant_cfg_with_kv_cache_quant(
-            quant_cfg,
-            getattr(mtq, kv_quant_cfg_choices[kv_cache_qformat])["quant_cfg"],
-        )
 
     if moe_calib_experts_ratio:
         assert 0 < moe_calib_experts_ratio <= 1, "moe_calib_experts_ratio must be between 0 and 1"

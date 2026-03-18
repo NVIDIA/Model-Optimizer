@@ -39,6 +39,7 @@ from ..nn import QuantInputBase, QuantModule, QuantModuleRegistry, TensorQuantiz
 from ..nn.modules.quant_linear import _QuantLinear
 from ..triton import IS_AVAILABLE as IS_TRITON_AVAILABLE
 from ..utils import replace_function, sync_moe_expert_amax
+from ..utils.activation_collector import LayerActivationCollector
 from .attention import register_attention_for_kv_quant
 from .custom import CUSTOM_MODEL_PLUGINS, _ParallelLinear, _QuantFunctionalMixin
 
@@ -1367,6 +1368,42 @@ def _is_supported_hf_model(model):
     return isinstance(model, tuple(supported_models))
 
 
+def is_nemotron_h_model(model: nn.Module) -> bool:
+    return get_nemotron_h_decoder_layers(model) is not None
+
+
+def get_nemotron_h_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
+    if not _is_supported_hf_model(model):
+        return None
+
+    if hasattr(model, "backbone") and hasattr(model.backbone, "layers"):
+        layers = model.backbone.layers
+        if len(layers) > 0 and hasattr(layers[0], "block_type"):
+            return layers
+
+    return None
+
+
+def is_homogeneous_hf_model(model: nn.Module) -> bool:
+    if is_nemotron_h_model(model):
+        return False
+    decoder_layers = get_homogeneous_hf_decoder_layers(model)
+    if decoder_layers is None or len(decoder_layers) == 0:
+        return False
+    layer_classes = {type(layer) for layer in decoder_layers}
+    return len(layer_classes) == 1
+
+
+def get_homogeneous_hf_decoder_layers(model: nn.Module) -> nn.ModuleList | None:
+    if not _is_supported_hf_model(model):
+        return None
+
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        return model.model.layers
+
+    return None
+
+
 @contextmanager
 def setup_model_for_gradient_checkpointing(model: nn.Module):
     use_cache = None
@@ -1418,6 +1455,17 @@ AutoQuantizeGradientSearcher.register_custom_support(
     _is_supported_hf_model,
     setup_model_for_gradient_checkpointing,
     _is_param_grad_enabled_for_auto_quantize,
+)
+
+# Order matters: more specific predicates must be registered first because
+# the first matching entry wins.  Nemotron-H must precede the generic
+# homogeneous HF discoverer (which explicitly rejects Nemotron-H).
+LayerActivationCollector.register_decoder_layer_support(
+    is_nemotron_h_model, get_nemotron_h_decoder_layers
+)
+
+LayerActivationCollector.register_decoder_layer_support(
+    is_homogeneous_hf_model, get_homogeneous_hf_decoder_layers
 )
 
 CUSTOM_MODEL_PLUGINS.update(

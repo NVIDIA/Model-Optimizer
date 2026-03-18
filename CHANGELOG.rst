@@ -32,10 +32,12 @@ NVIDIA Model Optimizer Changelog
 - Improve ``auto_quantize`` checkpoint/resume: calibration state is now saved and restored across runs, avoiding redundant calibration when resuming a search.
 - Add support for Nemotron-3 (NemotronHForCausalLM) model quantization and support for NemotronH MoE expert support in ``auto_quantize`` grouping and scoring rules.
 - Add support for block-granular RHT for non-power-of-2 dimensions.
-  
+- Replace modelopt FP8 QDQ nodes with native ONNX QDQ nodes.
+
 **Misc**
 
 - Migrated project metadata from ``setup.py`` to a fully declarative ``pyproject.toml``.
+- Enable experimental Python 3.13 wheel support and unit tests in CI/CD.
 
 0.42 (2026-02-xx)
 ^^^^^^^^^^^^^^^^^

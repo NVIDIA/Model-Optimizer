@@ -64,7 +64,7 @@ jobs:
     timeout-minutes: 30
     strategy:
       matrix:
-        py: [10, 11]
+        py: [10, 11, 13]
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/ubuntu-setup

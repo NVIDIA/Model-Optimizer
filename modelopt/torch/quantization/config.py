@@ -658,6 +658,8 @@ NVFP4_OMLP_ONLY_CFG = {
     "algorithm": "max",
 }
 
+# DO NOT ADD NEW CONFIGS HERE. If you want to add a new general recipe, add it to
+# modelopt_recipes/general/ptq/ as a yaml file
 choices: set[str] = {
     "FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG",
     "FP8_AFFINE_KV_CFG",

@@ -134,6 +134,10 @@ class EagleArguments:
         default=False,
         metadata={"help": "Disable torch.compile on eagle forward/loss methods."},
     )
+    num_ttt_steps: int = field(
+        default=3,
+        metadata={"help": "Number of train-time-test steps to use during training."},
+    )
 
 
 def train():
@@ -214,6 +218,7 @@ def train():
                 "eagle_offline": use_offline_training,
                 "eagle_mix_hidden_states": eagle_args.mix_hidden_states,
                 "eagle_use_torch_compile": not eagle_args.disable_torch_compile,
+                "eagle_ttt_steps": eagle_args.num_ttt_steps,
                 "eagle_architecture_config": custom_config,
             }
 

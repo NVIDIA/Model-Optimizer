@@ -86,6 +86,10 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       AR_VALIDATE_STEPS="${1#*=}"
       ;;
+    --num_ttt_steps*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      NUM_TTT_STEPS="${1#*=}"
+      ;;
     --cp_size*)
       if [[ "$1" != *=* ]]; then shift; fi
       CP_SIZE="${1#*=}"
@@ -159,6 +163,7 @@ LOG_STEPS=${LOG_STEPS:-100}
 DRAFT_VOCAB_CACHE=${DRAFT_VOCAB_CACHE:-""}
 MIX_HIDDEN_STATES=${MIX_HIDDEN_STATES:-"False"}
 DISABLE_TORCH_COMPILE=${DISABLE_TORCH_COMPILE:-"False"}
+NUM_TTT_STEPS=${NUM_TTT_STEPS:-3}
 
 
 if [[ "$MODE" == "eagle3" ]]; then
@@ -253,6 +258,7 @@ CMD="accelerate launch $MULTI_NODE_ARGS --mixed_precision bf16 ${SCRIPT_DIR}/mai
     $FSDP_ARGS \
     --cp_size $CP_SIZE \
     --dp_shard_size $DP_SHARD_SIZE \
+    --num_ttt_steps $NUM_TTT_STEPS \
 "
 
 start_time=$(date +%s)

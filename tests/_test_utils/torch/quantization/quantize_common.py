@@ -48,9 +48,12 @@ FP4_SVDQUANT_CFG["algorithm"] = {"method": "svdquant", "lowrank": 8}
 def get_awq_config(algorithm="awq_lite", block_size=8):
     config = copy.deepcopy(mtq.INT4_AWQ_CFG)
     config["quant_cfg"]["*weight_quantizer"]["block_sizes"] = {-1: block_size}
+    if "algorithm" not in config or not isinstance(config["algorithm"], dict):
+        config["algorithm"] = {}
+
     config["algorithm"]["method"] = algorithm
     config["algorithm"]["debug"] = True
-    if algorithm == "awq_clip":
+    if algorithm == "awq_clip" and "alpha_step" in config["algorithm"]:
         config["algorithm"].pop("alpha_step")
     return config
 

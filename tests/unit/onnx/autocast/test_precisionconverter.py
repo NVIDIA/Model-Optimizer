@@ -1117,10 +1117,10 @@ def test_constant_cast_folding(
     assert const_array.attribute[0].t.data_type == low_precision_onnx_type(low_precision_type)
 
     # Check that the constant nodes are consumed directly by the Add nodes
-    assert len(utils.get_consumer_nodes(converted_model, "const_scalar")) == 1
-    assert utils.get_consumer_nodes(converted_model, "const_scalar")[0].op_type == "Add"
-    assert len(utils.get_consumer_nodes(converted_model, "const_array")) == 1
-    assert utils.get_consumer_nodes(converted_model, "const_array")[0].op_type == "Add"
+    assert len(onnx_utils.get_consumer_nodes(converted_model, "const_scalar")) == 1
+    assert onnx_utils.get_consumer_nodes(converted_model, "const_scalar")[0].op_type == "Add"
+    assert len(onnx_utils.get_consumer_nodes(converted_model, "const_array")) == 1
+    assert onnx_utils.get_consumer_nodes(converted_model, "const_array")[0].op_type == "Add"
 
 
 @pytest.fixture
