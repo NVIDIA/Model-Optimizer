@@ -20,6 +20,9 @@ in ONNX computation graphs to minimize TensorRT inference latency. It uses patte
 region analysis to efficiently explore and optimize Q/DQ insertion strategies.
 """
 
+# Expose Autotune modes
+from .__main__ import MODE_PRESETS
+
 # Core data structures
 from .autotuner import QDQAutotuner
 from .benchmark import TensorRTPyBenchmark, TrtExecBenchmark
@@ -42,8 +45,10 @@ from .insertion_points import (
 )
 from .region_pattern import RegionPattern
 from .region_search import CombinedRegionSearch
+from .utils import StoreWithExplicitFlag, get_node_filter_list
 
 __all__ = [
+    "MODE_PRESETS",
     "AutotunerError",
     "AutotunerNotInitializedError",
     "ChildRegionInputInsertionPoint",
@@ -60,6 +65,8 @@ __all__ = [
     "RegionPattern",
     "RegionType",
     "ResolvedInsertionPoint",
+    "StoreWithExplicitFlag",
     "TensorRTPyBenchmark",
     "TrtExecBenchmark",
+    "get_node_filter_list",
 ]

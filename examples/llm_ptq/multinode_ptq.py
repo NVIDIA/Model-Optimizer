@@ -327,15 +327,24 @@ def main(args):
         trust_remote_code=args.trust_remote_code,
     )
 
-    # Build quantization config
+    quant_cfg = QUANT_CFG_CHOICES[args.qformat]
+
     quant_cfg = build_quant_cfg(
         args.qformat,
-        args.kv_cache_qformat,
+        quant_cfg,
         args.awq_block_size,
         model_type,
-        QUANT_CFG_CHOICES,
-        KV_QUANT_CFG_CHOICES,
     )
+
+    enable_quant_kv_cache = args.kv_cache_qformat != "none"
+    print(f"{'Enable' if enable_quant_kv_cache else 'Disable'} KV cache quantization")
+
+    # Check if any bmm_quantizer is in the quant_cfg. If so, we need to enable the bmm_quantizer.
+    if enable_quant_kv_cache:
+        quant_cfg = mtq.update_quant_cfg_with_kv_cache_quant(
+            quant_cfg,
+            getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"],
+        )
 
     # Quantize the model
     if accelerator.is_main_process:

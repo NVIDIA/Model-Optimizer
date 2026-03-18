@@ -10,6 +10,7 @@ LICENSE_HEADER @NVIDIA/modelopt-setup-codeowners
 pyproject.toml @NVIDIA/modelopt-setup-codeowners
 SECURITY.md @NVIDIA/modelopt-setup-codeowners
 tox.ini @NVIDIA/modelopt-setup-codeowners
+uv.lock @NVIDIA/modelopt-setup-codeowners
 
 # Library
 modelopt/deploy @NVIDIA/modelopt-deploy-codeowners

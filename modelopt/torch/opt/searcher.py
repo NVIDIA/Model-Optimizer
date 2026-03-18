@@ -236,33 +236,54 @@ class BaseSearcher(ABC):
         """The state dictionary that can be stored/loaded."""
         return {key: getattr(self, key) for key in self.default_state_dict}
 
-    def load_search_checkpoint(self) -> bool:
+    def _get_checkpoint_path(self) -> str | None:
+        """Get per-rank checkpoint path when distributed, otherwise the original path."""
+        checkpoint = self.config["checkpoint"]
+        if checkpoint is None:
+            return None
+        if dist.is_initialized():
+            dirname, basename = os.path.split(checkpoint)
+            name, ext = os.path.splitext(basename)
+            return os.path.join(dirname, f"{name}{dist.rank()}{ext}")
+        return checkpoint
+
+    def load_search_checkpoint(self, strict=True) -> bool:
         """Load function for search checkpoint returning indicator whether checkpoint was loaded."""
-        # check if checkpoint exists
-        checkpoint: str | None = self.config["checkpoint"]
+        checkpoint = self._get_checkpoint_path()
         if checkpoint is None:
             return False
+        # Backward compat: fall back to the original single-file path
+        if not os.path.exists(checkpoint):
+            warn_rank_0(
+                f"Per-rank checkpoint {checkpoint} not found, falling back to "
+                f"{self.config['checkpoint']}. Ensure world size matches the original run."
+            )
+            checkpoint = self.config["checkpoint"]
         if not os.path.exists(checkpoint):
             warn_rank_0(f"Checkpoint {checkpoint} does not exist! Initializing from scratch.")
             return False
 
-        # iterate through state dict and load keys
         print_rank_0(f"Loading searcher state from {checkpoint}...")
         # Security NOTE: weights_only=False is used here on ModelOpt-generated ckpt, not on untrusted user input
         state_dict = torch.load(checkpoint, weights_only=False)
-        assert state_dict.keys() == self.state_dict().keys(), "Keys in checkpoint don't match!"
-        for key, state in state_dict.items():
-            setattr(self, key, state)
+        if strict:
+            assert state_dict.keys() == self.state_dict().keys(), "Keys in checkpoint don't match!"
+        for key, default_val in self.default_state_dict.items():
+            setattr(self, key, state_dict.get(key, default_val))
         return True
 
     def save_search_checkpoint(self, verbose=False) -> None:
         """Save function for search checkpoint."""
-        # check if save requirements are satisfied
-        checkpoint: str | None = self.config["checkpoint"]
-        if checkpoint is None or not dist.is_master():
+        checkpoint = self._get_checkpoint_path()
+        if checkpoint is None:
             return
 
-        # save state dict
+        if dist.is_initialized():
+            warn_rank_0(
+                "torch.distributed is initialized. Please maintain the same parallelism "
+                "configuration (world size, TP, EP, etc.) across search save and restore sessions."
+            )
+
         if verbose:
             print(f"Saving searcher state to {checkpoint}...")
         save_dirname, _ = os.path.split(checkpoint)

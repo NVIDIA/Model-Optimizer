@@ -15,6 +15,7 @@
 
 """Quantization utilities."""
 
+import copy
 from collections import namedtuple
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import TYPE_CHECKING, Any
@@ -26,27 +27,10 @@ from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
 from torch.distributed.tensor import Replicate
 
-from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.utils import get_unwrapped_name, print_rank_0
-from modelopt.torch.utils.network import bind_forward_method, unpatch_forward_method
 
 if TYPE_CHECKING:
     from collections.abc import Generator
-
-__all__ = [
-    "EXPORT_MODE",
-    "convert_quantization_axis_to_reduce_axis",
-    "export_torch_mode",
-    "is_quantized",
-    "is_quantized_column_parallel_linear",
-    "is_quantized_linear",
-    "is_quantized_row_parallel_linear",
-    "reduce_amax",
-    "reduce_sum",
-    "replace_function",
-    "update_quant_cfg_with_kv_cache_quant",
-    "weight_attr_names",
-]
 
 
 def reduce_block_amax(input_tensor: torch.Tensor, block_sizes: dict):
@@ -224,7 +208,7 @@ def weight_attr_names(module: nn.Module) -> "Generator[str, None, None]":
     - The standard weight attribute (e.g. nn.Linear).
     - The custom `weight_attr_name`. (e.g. Llama4TextExperts has weight attributes `gate_up_proj` and `down_proj`)
     """
-    from .nn import SequentialQuantizer, TensorQuantizer
+    from ..nn import SequentialQuantizer, TensorQuantizer
 
     # the standard weight and quantizer case
     weight = getattr(module, "weight", None)
@@ -273,14 +257,14 @@ def quantizer_attr_names(weight_name: str = "weight") -> QuantizerAttrNames:
 
 def is_quantized(module):
     """Check if a module is quantized."""
-    from .nn import TensorQuantizer
+    from ..nn import TensorQuantizer
 
     return any(isinstance(_module, TensorQuantizer) for _module in module.modules())
 
 
 def is_quantized_linear(module):
     """Check if a module is a quantized linear module."""
-    from .nn import QuantModule, TensorQuantizer
+    from ..nn import QuantModule, TensorQuantizer
 
     return (
         isinstance(module, QuantModule)
@@ -487,8 +471,11 @@ def enable_weight_access_and_writeback(module, root_model, name_to_module: dict 
     Args:
         module: The module to access weights for.
         root_model: The root model containing the module.
-        name_to_module: Optional pre-computed dict mapping names to modules (for performance).
-                        If not provided, will be computed on-the-fly.
+        name_to_module: Pre-computed ``dict(root_model.named_modules())``. Without this,
+            every call iterates ``root_model.named_modules()`` internally, leading to O(N^2)
+            total cost when called in a loop. This causes significant CPU overhead on large
+            models, particularly Sparse MoE architectures where each expert is typically
+            implemented as its own module.
     """
     if _get_enclosing_fsdp_module(module, root_model, name_to_module) is not None:
         context = fsdp2_weight_access_and_writeback_context(module, root_model)
@@ -496,7 +483,7 @@ def enable_weight_access_and_writeback(module, root_model, name_to_module: dict 
         # HF transformers TP sharded linear layer
         context = module.enable_weight_access_and_writeback()
     elif hasattr(module, "_hf_hook"):
-        from .plugins.accelerate import weight_access_and_writeback_context
+        from ..plugins.accelerate import weight_access_and_writeback_context
 
         context = weight_access_and_writeback_context(module)
     else:
@@ -510,7 +497,7 @@ def get_quantizer_state_dict(model: nn.Module):
     """Get the state dict of the quantizers in the model."""
     # We should not call model.state_dict() here.
     # With FSDP, model.state_dict() will hang if it is not called from all processes
-    from .nn import TensorQuantizer
+    from ..nn import TensorQuantizer
 
     quantizer_state_dict = {}
     for name, module in model.named_modules():
@@ -521,12 +508,52 @@ def get_quantizer_state_dict(model: nn.Module):
 
 def set_quantizer_state_dict(model: nn.Module, quantizer_state_dict: dict):
     """Set the state dict of the quantizers in the model."""
-    from .nn import TensorQuantizer
+    from ..nn import TensorQuantizer
 
     for name, module in model.named_modules():
         key = get_unwrapped_name(name, model)
         if isinstance(module, TensorQuantizer) and key in quantizer_state_dict:
             module.load_state_dict(quantizer_state_dict[key])
+
+
+def sync_moe_expert_amax(experts):
+    """Sync input_quantizer amax across MoE experts and fix missing weight amax.
+
+    1. Takes the element-wise max of each ``input_quantizer`` amax across all experts
+       and writes it back, so every expert shares the same input amax.
+    2. For any ``weight_quantizer`` that is enabled but has ``amax is None`` (expert
+       received no tokens during calibration), runs a weight-only ``max_calibrate``
+       to populate the missing amax.
+    """
+    from ..nn import TensorQuantizer
+
+    amax_dict: dict[str, torch.Tensor] = {}
+    for expert in experts:
+        for name, module in expert.named_modules():
+            if (
+                isinstance(module, TensorQuantizer)
+                and module.amax is not None
+                and "input_quantizer" in name
+            ):
+                stored_amax = amax_dict.get(name)
+                amax_tensor = module.amax.detach().clone()
+                amax_dict[name] = (
+                    amax_tensor if stored_amax is None else torch.maximum(stored_amax, amax_tensor)
+                )
+
+    for expert in experts:
+        for name, module in expert.named_modules():
+            if isinstance(module, TensorQuantizer) and name in amax_dict:
+                module.amax = amax_dict[name].detach().clone()
+
+    from ..model_calib import max_calibrate
+
+    for expert in experts:
+        for name, module in expert.named_modules():
+            if name.endswith("weight_quantizer") and module.is_enabled and module.amax is None:
+                weight = expert.state_dict().get(name.replace("weight_quantizer", "weight"))
+                if weight is not None:
+                    max_calibrate(module, lambda m, w=weight: m(w), distributed_sync=False)
 
 
 @contextmanager
@@ -800,7 +827,8 @@ def update_quant_cfg_with_kv_cache_quant(
 ) -> dict[str, Any]:
     """Update the quant_cfg with the kv cache quant_cfg."""
     # If quant_cfg["quant_cfg"] is None, it corresponds to only kv cache quantization case
-    quant_cfg["quant_cfg"] = quant_cfg.get("quant_cfg", {"default": {"enable": False}})
+    quant_cfg = copy.deepcopy(quant_cfg)
+    quant_cfg["quant_cfg"] = quant_cfg.get("quant_cfg") or {"default": {"enable": False}}
     quant_cfg["quant_cfg"].update(kv_cache_quant_cfg)
 
     # Set default algorithm for kv cache quantization if not provided.
@@ -808,64 +836,3 @@ def update_quant_cfg_with_kv_cache_quant(
         quant_cfg["algorithm"] = "max"
     print_rank_0(f"Updated quant_cfg with KV cache quantization: {quant_cfg}")
     return quant_cfg
-
-
-class _EarlyStopForwardError(Exception):
-    """Error to stop the forward pass after collection."""
-
-
-class LayerActivationCollector:
-    """Helper class for collecting layer activations during forward passes.
-
-    This class allows for sequential layer calibration by
-    patching layers to capture inputs/outputs during forward passes
-    """
-
-    def __init__(self, model: nn.Module):
-        self.model = model
-
-    @staticmethod
-    def _patch_and_initialize_layer(layer: torch.nn.Module, stop_after_collection: bool = False):
-        """Patch a layer to collect inputs during forward passes."""
-
-        def _forward_w_data_collection(self, *args, **kwargs):
-            # Note: 'self' refers to the patched layer.
-            assert len(args) >= 1, (
-                f"Expected at least 1 positional arg, got {len(args)} args and {list(kwargs.keys())} kwargs"
-            )
-            # Only collect the inputs to the layer
-            self.inputs.append((args, kwargs))
-            if stop_after_collection:
-                raise _EarlyStopForwardError()  # Stop the forward pass after collection
-
-            return self._original_forward(*args, **kwargs)
-
-        bind_forward_method(layer, _forward_w_data_collection, "_original_forward")
-        layer.inputs = []
-
-    @staticmethod
-    def _unpatch_and_cleanup_layer(layer: torch.nn.Module):
-        if hasattr(layer, "_original_forward"):
-            unpatch_forward_method(layer, "_original_forward")
-        if hasattr(layer, "inputs"):
-            del layer.inputs
-
-    @torch.no_grad()
-    def get_input_activations(self, layer: torch.nn.Module, forward_loop: ForwardLoop) -> list:
-        # Wrap model forward to catch _EarlyStopForward per-batch
-        def _early_stop_forward(self, *args, **kwargs):
-            try:
-                return self._original_forward(*args, **kwargs)
-            except _EarlyStopForwardError:
-                return None  # Stop propagation but allow next batch
-
-        try:
-            bind_forward_method(self.model, _early_stop_forward, "_original_forward")
-            self._patch_and_initialize_layer(layer, stop_after_collection=True)
-            forward_loop(self.model)
-            inputs = layer.inputs.copy()
-        finally:
-            self._unpatch_and_cleanup_layer(layer)
-            unpatch_forward_method(self.model, "_original_forward")
-
-        return inputs
