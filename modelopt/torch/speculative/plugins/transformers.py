@@ -618,13 +618,32 @@ class HFEagleModel(EagleModel):
         self.is_quantized = False
 
         if self.eagle_use_torch_compile:
+            self._activate_torch_compile()
+
+        self._cached_attn_blk_masks = {}
+
+    def _activate_torch_compile(self):
+        import torch._dynamo
+
+        torch._dynamo.config.suppress_errors = True  # Allow fallback to eager mode
+
+        # Individual try-catch for each function to maximize torch.compile usage
+        try:
             self._prepare_eagle_inputs = torch.compile(self._prepare_eagle_inputs, dynamic=False)
+        except Exception:
+            print("Disabling torch.compile for _prepare_eagle_inputs due to compilation error.")
+
+        try:
             self._eagle_forward = torch.compile(
                 self._eagle_forward, dynamic=False, mode="max-autotune"
             )
-            self._eagle_loss = torch.compile(self._eagle_loss, dynamic=False, fullgraph=True)
+        except Exception:
+            print("Disabling torch.compile for _eagle_forward due to compilation error.")
 
-        self._cached_attn_blk_masks = {}
+        try:
+            self._eagle_loss = torch.compile(self._eagle_loss, dynamic=False, fullgraph=True)
+        except Exception:
+            print("Disabling torch.compile for _eagle_loss due to compilation error.")
 
     def _get_ttt_attention_mask(self, batch_size, seq_length, ttt_step):
         # compile and cached flex attention masks in first call
