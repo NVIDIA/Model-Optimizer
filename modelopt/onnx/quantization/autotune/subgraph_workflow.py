@@ -34,7 +34,7 @@ import onnx
 import onnx_graphsurgeon as gs
 
 from modelopt.onnx.quantization.autotune.fusion_grouping import (
-    QUANTIZABLE_OPS,
+    DEFAULT_QUANTIZABLE_OPS,
     FusionGroup,
     create_fusion_groups,
     generate_graph_json,
@@ -355,6 +355,121 @@ def _make_scale_dtype(tensor_dtype: np.dtype) -> type:
     return np.float32
 
 
+def derive_nodes_to_quantize(
+    graph: gs.Graph,
+    target_tensor_names: List[str],
+) -> Tuple[List[str], List[Tuple]]:
+    """Convert target tensor names into (nodes_to_quantize, no_quantize_inputs).
+
+    Maps the autotune output (which tensors to quantize) into the format
+    expected by modelopt's standard quantize() API. This ensures the final
+    model uses ORT's QDQQuantizer with per-channel weights, bias exclusion, etc.
+
+    Returns:
+        nodes_to_quantize: Node names whose inputs include target tensors.
+        no_quantize_inputs: (producer_node, consumer_node, tensor_name) tuples
+            for inputs of quantized nodes that should NOT get Q/DQ.
+    """
+    target_set = set(target_tensor_names)
+    nodes_to_quantize: List[str] = []
+    no_quantize_inputs: List[Tuple] = []
+    seen_nodes: set = set()
+
+    for node in graph.nodes:
+        covered_inputs = set()
+        for inp_idx, inp in enumerate(node.inputs):
+            tname = getattr(inp, "name", None)
+            if tname and tname in target_set:
+                covered_inputs.add(inp_idx)
+
+        if not covered_inputs:
+            continue
+
+        if node.name not in seen_nodes:
+            nodes_to_quantize.append(node.name)
+            seen_nodes.add(node.name)
+
+            for inp in node.inputs:
+                if inp.inputs:
+                    producer = inp.inputs[0]
+                    if hasattr(producer, "name") and producer.name not in seen_nodes:
+                        nodes_to_quantize.append(producer.name)
+                        seen_nodes.add(producer.name)
+
+        for inp_idx, inp in enumerate(node.inputs):
+            tname = getattr(inp, "name", None)
+            if tname and inp_idx not in covered_inputs and inp.inputs:
+                no_quantize_inputs.append((inp.inputs[0], node, tname))
+
+    return nodes_to_quantize, no_quantize_inputs
+
+
+def finalize_with_quantize(
+    model_path: str,
+    output_path: str,
+    target_tensor_names: List[str],
+    quant_type: str = "int8",
+    calibration_data=None,
+    calibration_method: str = "entropy",
+    calibration_shapes: Optional[str] = None,
+    calibration_eps: Optional[List[str]] = None,
+    high_precision_dtype: str = "fp16",
+    use_external_data_format: bool = False,
+) -> str:
+    """Produce the final calibrated model using modelopt's standard quantize().
+
+    Instead of inserting placeholder Q/DQ (scale=0.1), this calls modelopt's
+    ORT-based quantization with real calibration, per-channel weights, bias
+    exclusion, and all standard TRT-guided options.
+
+    Args:
+        model_path: Path to the original (unquantized) ONNX model.
+        output_path: Where to save the final calibrated model.
+        target_tensor_names: Tensor names to quantize (from autotune).
+        quant_type: "int8" or "fp8".
+        calibration_data: Calibration data (numpy array or dict).
+        calibration_method: ORT calibration method ("entropy", "minmax", etc).
+        calibration_shapes: Shape specification string for calibration.
+        calibration_eps: Execution providers for calibration.
+        high_precision_dtype: Non-quantized precision ("fp16" or "fp32").
+        use_external_data_format: Whether to use external data format for large models.
+
+    Returns:
+        Path to the final calibrated model.
+    """
+    model = onnx.load(model_path)
+    graph = gs.import_onnx(model)
+
+    nodes_to_quantize, no_quantize_inputs = derive_nodes_to_quantize(
+        graph, target_tensor_names,
+    )
+
+    logger.info(
+        f"Finalizing with modelopt quantize(): "
+        f"{len(nodes_to_quantize)} nodes, "
+        f"{len(no_quantize_inputs)} excluded inputs"
+    )
+
+    from modelopt.onnx.quantization.quantize import quantize
+
+    quantize(
+        onnx_path=model_path,
+        quantize_mode=quant_type,
+        calibration_data=calibration_data,
+        calibration_method=calibration_method,
+        calibration_shapes=calibration_shapes,
+        calibration_eps=calibration_eps or ["cpu", "cuda:0", "trt"],
+        nodes_to_quantize=nodes_to_quantize,
+        output_path=output_path,
+        high_precision_dtype=high_precision_dtype,
+        use_external_data_format=use_external_data_format,
+        no_quantize_inputs=no_quantize_inputs,
+    )
+
+    logger.info(f"Calibrated model saved: {output_path}")
+    return output_path
+
+
 def insert_qdq_on_graph(
     graph: gs.Graph,
     target_tensor_names: List[str],
@@ -481,22 +596,43 @@ def insert_qdq_on_graph(
 
 # ── Heuristic scheme generation ─────────────────────────────────────────────
 
-def _find_weight_tensors(graph: gs.Graph, node_names: List[str]) -> List[str]:
-    """Find weight (Constant) input tensor names for given quantizable nodes."""
+_BIAS_INPUT_INDEX = {
+    "Conv": 2,
+    "ConvTranspose": 2,
+    "Gemm": 2,
+}
+
+
+def _find_weight_tensors(
+    graph: gs.Graph, node_names: List[str],
+    quantizable_ops: Set[str] = DEFAULT_QUANTIZABLE_OPS,
+) -> List[str]:
+    """Find weight (Constant) input tensor names for given quantizable nodes.
+
+    Bias inputs are excluded to match modelopt's default behavior
+    (QuantizeBias=False).  For Conv/ConvTranspose/Gemm, input index 2
+    is the bias; for other ops all Constant inputs are treated as weights.
+    """
     node_set = set(node_names)
     result = []
     for node in graph.nodes:
         if node.name not in node_set:
             continue
-        if node.op not in QUANTIZABLE_OPS:
+        if node.op not in quantizable_ops:
             continue
-        for inp in node.inputs:
+        bias_idx = _BIAS_INPUT_INDEX.get(node.op)
+        for inp_idx, inp in enumerate(node.inputs):
             if isinstance(inp, gs.Constant):
+                if bias_idx is not None and inp_idx == bias_idx:
+                    continue
                 result.append(inp.name)
     return result
 
 
-def _find_activation_tensors(graph: gs.Graph, node_names: List[str]) -> List[str]:
+def _find_activation_tensors(
+    graph: gs.Graph, node_names: List[str],
+    quantizable_ops: Set[str] = DEFAULT_QUANTIZABLE_OPS,
+) -> List[str]:
     """Find activation (Variable) input tensor names for given quantizable nodes."""
     node_set = set(node_names)
     result = []
@@ -504,7 +640,7 @@ def _find_activation_tensors(graph: gs.Graph, node_names: List[str]) -> List[str
     for node in graph.nodes:
         if node.name not in node_set:
             continue
-        if node.op not in QUANTIZABLE_OPS:
+        if node.op not in quantizable_ops:
             continue
         for inp in node.inputs:
             if isinstance(inp, gs.Variable) and inp.name not in seen:
@@ -525,12 +661,15 @@ def _find_activation_tensors(graph: gs.Graph, node_names: List[str]) -> List[str
     return result
 
 
-def _find_small_channel_nodes(graph: gs.Graph, node_names: List[str]) -> Set[str]:
+def _find_small_channel_nodes(
+    graph: gs.Graph, node_names: List[str],
+    quantizable_ops: Set[str] = DEFAULT_QUANTIZABLE_OPS,
+) -> Set[str]:
     """Find quantizable nodes with channel count < MIN_CHANNELS_FOR_QUANT."""
     node_set = set(node_names)
     small = set()
     for node in graph.nodes:
-        if node.name not in node_set or node.op not in QUANTIZABLE_OPS:
+        if node.name not in node_set or node.op not in quantizable_ops:
             continue
         for inp in node.inputs:
             if isinstance(inp, gs.Constant) and inp.values.ndim >= 2:
@@ -610,6 +749,14 @@ def subgraph_autotuning_workflow(
     strongly_typed: bool = True,
     extra_trtexec_args: Optional[List[str]] = None,
     incremental_validation: bool = True,
+    quantizable_ops: Optional[Set[str]] = None,
+    calibration_data=None,
+    calibration_method: str = "entropy",
+    calibration_shapes: Optional[str] = None,
+    calibration_eps: Optional[List[str]] = None,
+    high_precision_dtype: str = "fp16",
+    use_external_data_format: bool = False,
+    skip_calibration: bool = False,
 ) -> str:
     """Run subgraph-based QDQ autotune workflow.
 
@@ -620,11 +767,15 @@ def subgraph_autotuning_workflow(
              *incremental_validation* is enabled (default), each group is
              validated one-by-one against the full model; groups that cause
              a regression are rejected.
+    Phase 4: Produce the final calibrated model using modelopt's standard
+             quantize() with proper per-channel weights, bias exclusion, and
+             real calibration data (unless *skip_calibration* is True).
 
     Outputs:
-        optimized_raw.onnx   – all qualifying QDQ groups applied (always saved).
-        optimized_final.onnx – incrementally validated model (only when
-                               *incremental_validation* is True).
+        optimized_raw.onnx       – all qualifying QDQ groups applied (placeholder Q/DQ).
+        optimized_final.onnx     – incrementally validated model (placeholder Q/DQ).
+        optimized_calibrated.onnx – calibrated model via modelopt quantize()
+                                    (only when calibration_data is provided).
 
     Caching: intermediate results are persisted to ``autotune_cache.json``
     inside *output_dir*.  If the process is interrupted, re-running with the
@@ -642,9 +793,19 @@ def subgraph_autotuning_workflow(
         extra_trtexec_args: Optional extra arguments to pass to trtexec.
         incremental_validation: If True (default), Phase 3 validates groups
             one-by-one against the full model, rejecting regressions.
+        quantizable_ops: Custom set of ONNX op types to consider quantizable.
+        calibration_data: Numpy array or dict of numpy arrays for calibration.
+            If None and skip_calibration is False, random calibration is used.
+        calibration_method: ORT calibration method ("entropy", "minmax", etc).
+        calibration_shapes: Shape specification, e.g. "input:1x3x224x224".
+        calibration_eps: Execution providers for calibration.
+        high_precision_dtype: Non-quantized precision ("fp16" or "fp32").
+        use_external_data_format: Use external data format for large models.
+        skip_calibration: If True, skip Phase 4 calibration and only output
+            the placeholder Q/DQ model (for latency-only analysis).
 
     Returns:
-        Path to the final optimized ONNX model.
+        Path to the final optimized ONNX model (calibrated if available).
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -693,7 +854,7 @@ def subgraph_autotuning_workflow(
         )
 
     trt_layers = parse_graph_json(graph_json_path)
-    all_groups = create_fusion_groups(trt_layers, graph)
+    all_groups = create_fusion_groups(trt_layers, graph, quantizable_ops=quantizable_ops)
     quant_groups = [g for g in all_groups if g.has_quantizable_op]
 
     logger.info(f"Phase 1 complete: {len(quant_groups)} quantizable groups "
@@ -1092,6 +1253,54 @@ def subgraph_autotuning_workflow(
         cache.setdefault("phase3", {})["completed"] = True
         _save_cache(cache_path, cache)
 
+    # ── Phase 4: Calibrated export via modelopt quantize() ──────────────
+
+    calibrated_model_path = None
+    if not skip_calibration and applied_groups > 0:
+        logger.info("=" * 60)
+        logger.info("Phase 4: Calibrated Export (modelopt quantize)")
+        logger.info("=" * 60)
+
+        all_target_tensors: List[str] = []
+        if incremental_validation:
+            for gr in candidates:
+                if gr.group.id in p3_kept_ids:
+                    all_target_tensors.extend(gr.best_scheme.target_tensors)
+        else:
+            for gr in candidates:
+                all_target_tensors.extend(gr.best_scheme.target_tensors)
+
+        all_target_tensors = list(dict.fromkeys(all_target_tensors))
+
+        if all_target_tensors:
+            calibrated_model_path = str(
+                output_dir / "optimized_calibrated.onnx"
+            )
+            try:
+                finalize_with_quantize(
+                    model_path=model_path,
+                    output_path=calibrated_model_path,
+                    target_tensor_names=all_target_tensors,
+                    quant_type=quant_type,
+                    calibration_data=calibration_data,
+                    calibration_method=calibration_method,
+                    calibration_shapes=calibration_shapes,
+                    calibration_eps=calibration_eps,
+                    high_precision_dtype=high_precision_dtype,
+                    use_external_data_format=use_external_data_format,
+                )
+                logger.info(
+                    f"Calibrated model saved: {calibrated_model_path}"
+                )
+            except Exception as e:
+                logger.error(f"Phase 4 calibration failed: {e}")
+                calibrated_model_path = None
+    elif skip_calibration:
+        logger.info(
+            "Phase 4 skipped (skip_calibration=True): "
+            "final model uses placeholder Q/DQ (scale=0.1)"
+        )
+
     elapsed = time.time() - t_start
 
     # ─── Summary ─────────────────────────────────────────────────────────
@@ -1113,15 +1322,21 @@ def subgraph_autotuning_workflow(
     if final_latency != float("inf") and full_baseline > 0:
         speedup = full_baseline / final_latency
         logger.info(
-            f"Final: {final_latency:.3f}ms "
+            f"Final (placeholder QDQ): {final_latency:.3f}ms "
             f"(speedup {speedup:.3f}x) -> {final_model_path}"
         )
     else:
         logger.warning("Final TRT build failed")
 
+    if calibrated_model_path:
+        logger.info(
+            f"Calibrated: {calibrated_model_path} "
+            "(per-channel weights, bias excluded, real scale/zp)"
+        )
+
     _log_per_group_report(group_results)
 
-    return final_model_path
+    return calibrated_model_path or final_model_path
 
 
 def _save_p3_cache(

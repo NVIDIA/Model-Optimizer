@@ -32,7 +32,8 @@ import onnx_graphsurgeon as gs
 
 logger = logging.getLogger(__name__)
 
-QUANTIZABLE_OPS = {"Conv", "ConvTranspose", "MatMul", "Gemm"}
+DEFAULT_QUANTIZABLE_OPS = {"Conv", "ConvTranspose", "MatMul", "Gemm", "Einsum"}
+QUANTIZABLE_OPS = DEFAULT_QUANTIZABLE_OPS
 FUSIBLE_OPS = {
     "Relu", "Sigmoid", "Tanh", "LeakyRelu", "Clip", "Add", "Abs", "Mul",
     "Sub", "Div", "Sqrt", "Pow", "BatchNormalization", "Softmax",
@@ -129,13 +130,22 @@ def _get_op_type_from_node_name(name: str, graph: gs.Graph) -> Optional[str]:
 def create_fusion_groups(
     trt_layers: List[TRTLayer],
     graph: gs.Graph,
+    quantizable_ops: Optional[Set[str]] = None,
 ) -> List[FusionGroup]:
     """Map TRT layers to FusionGroups with ONNX node resolution.
 
     For each TRT layer that has ONNX Metadata, creates a FusionGroup
     containing the referenced ONNX node names. Identifies which groups
     contain quantizable operations and resolves boundary tensors.
+
+    Args:
+        trt_layers: Parsed TRT layer information.
+        graph: ONNX graph (graphsurgeon).
+        quantizable_ops: Set of ONNX op types to treat as quantizable.
+            If None, uses DEFAULT_QUANTIZABLE_OPS.
     """
+    if quantizable_ops is None:
+        quantizable_ops = QUANTIZABLE_OPS
     node_name_to_node = {n.name: n for n in graph.nodes}
     groups = []
 
@@ -152,7 +162,7 @@ def create_fusion_groups(
             if node is None:
                 continue
             resolved_names.append(onnx_name)
-            if node.op in QUANTIZABLE_OPS:
+            if node.op in quantizable_ops:
                 has_quant = True
                 quantizable_names.append(onnx_name)
 
