@@ -113,7 +113,7 @@ uv run launch.py --yaml config.yaml pipeline.task_0.slurm_config.nodes=2 --yes
 
 # Change container
 uv run launch.py --yaml config.yaml \
-    pipeline.task_0.slurm_config.container=nvcr.io/nvidia/tensorrt-llm/release:1.3.0 --yes
+    pipeline.task_0.slurm_config.container=nvcr.io/nvidia/tensorrt-llm/release:1.2.0 --yes
 
 # Change typed config field
 uv run launch.py --yaml config.yaml pipeline.task_0.config.tp=1 --yes
