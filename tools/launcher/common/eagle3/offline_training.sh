@@ -16,7 +16,7 @@
 # limitations under the License.
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source ${SCRIPT_DIR}/service_utils.sh
+source ${SCRIPT_DIR}/../service_utils.sh
 
 pip install -r modules/Model-Optimizer/examples/speculative_decoding/requirements.txt
 pip install huggingface-hub>=1.2.1
