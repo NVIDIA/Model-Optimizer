@@ -20,6 +20,7 @@ import torch
 from _test_utils.torch.transformers_models import get_tiny_llama
 from datasets import Dataset
 from transformers import TrainingArguments
+from transformers.training_args import ParallelMode
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.distill.plugins.huggingface import LMLogitsLoss
@@ -34,8 +35,11 @@ from modelopt.torch.quantization.plugins.transformers_trainer import (
 
 @pytest.fixture(autouse=True)
 def _single_gpu(monkeypatch):
-    """Restrict to a single GPU to avoid DataParallel issues with quantizers."""
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    """Force single-GPU mode to prevent DataParallel wrapping."""
+    monkeypatch.setattr(
+        TrainingArguments, "parallel_mode", property(lambda self: ParallelMode.NOT_PARALLEL)
+    )
+    monkeypatch.setattr(TrainingArguments, "n_gpu", property(lambda self: 1))
 
 
 NVFP4_ADAROUND_CFG = {
@@ -103,7 +107,7 @@ class TestQATTrainer:
         )
         trainer.train()
 
-        assert getattr(trainer, "_adaround_quantizers", []) == []
+        assert not trainer._adaround_aux_callback._adaround_quantizers
 
     def test_adaround(self, tmp_path):
         """QATTrainer with adaround: dist_loss added, round_logits get gradients."""
@@ -120,10 +124,11 @@ class TestQATTrainer:
         )
         trainer.train()
 
-        assert hasattr(trainer, "_adaround_quantizers")
-        assert len(trainer._adaround_quantizers) > 0
+        adaround_quantizers = trainer._adaround_aux_callback._adaround_quantizers
+        assert adaround_quantizers and len(adaround_quantizers) > 0
+        assert trainer._adaround_aux_callback._aux_optimizer is not None
         # Verify round_logits got gradients during training
-        for q in trainer._adaround_quantizers:
+        for q in adaround_quantizers:
             assert isinstance(q, NVFP4StaticAdaRoundQuantizer)
             assert q.round_logits.requires_grad
 
@@ -154,4 +159,4 @@ class TestQADTrainer:
         )
         trainer.train()
 
-        assert len(trainer._adaround_quantizers) > 0
+        assert len(trainer._adaround_aux_callback._adaround_quantizers) > 0

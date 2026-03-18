@@ -43,7 +43,7 @@ from .nn import (
     SVDQuantLinear,
     TensorQuantizer,
 )
-from .utils import is_quantized, is_quantized_linear
+from .utils import is_quantized, is_quantized_linear, quantizer_attr_names, weight_attr_names
 
 __all__ = [
     "register",
@@ -124,6 +124,15 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
     if extra_keys:
         raise ApplyModeError(f"Extra keys in quantizer state_dict: {extra_keys}")
 
+    # Build quantizer -> (parent_module, weight_name) map for freezing weights
+    quantizer_to_parent = {}
+    for module in model.modules():
+        for wname in weight_attr_names(module):
+            wq_name = quantizer_attr_names(wname).weight_quantizer
+            quantizer = getattr(module, wq_name, None)
+            if quantizer is not None:
+                quantizer_to_parent[quantizer] = (module, wname)
+
     for name, module in model.named_modules():
         if isinstance(module, TensorQuantizer):
             name = get_unwrapped_name(name, model)
@@ -137,7 +146,11 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
                 module, NVFP4StaticAdaRoundQuantizer
             ):
                 module._scale_after_dequant = state.get("_scale_after_dequant", False)
-                NVFP4StaticAdaRoundQuantizer.from_nvfp4_quantizer(module)
+                parent_mod, wname = quantizer_to_parent.get(module, (None, None))
+                parent_weight = getattr(parent_mod, wname) if parent_mod else None
+                NVFP4StaticAdaRoundQuantizer.from_nvfp4_quantizer(
+                    module, parent_weight=parent_weight
+                )
             module.set_from_modelopt_state(quantizer_state_dict[name])
 
     for name, module in model.named_modules():

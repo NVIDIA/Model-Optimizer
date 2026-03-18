@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 
 import torch
 from tqdm import tqdm
+from transformers import TrainerCallback
+from transformers.training_args import ParallelMode
 
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
@@ -148,18 +150,80 @@ def _patch_fsdp2_post_backward():
     FSDPParamGroup.post_backward = _patched_post_backward
 
 
-def check_awq_smoothquant(quant_cfg):
-    # TODO: Remove this once deepspeed for AWQ and SmoothQuant is added
-    """Get the quantization type from the configuration."""
-    if quant_cfg is None:
-        return False
-    algorithm = quant_cfg.get("algorithm", {})
-    is_awq_smoothquant = False
-    # Check SmoothQuant and AWQ
-    if algorithm and ("smoothquant" in algorithm or "awq" in algorithm):
-        is_awq_smoothquant = True
+class _AdaRoundAuxCallback(TrainerCallback):
+    """Callback that steps an auxiliary SGD optimizer for AdaRound dist_loss."""
 
-    return is_awq_smoothquant
+    def __init__(self, trainer):
+        self._trainer = trainer
+        self._adaround_quantizers = None  # lazy init
+        self._aux_optimizer = None
+        self._group_map = []  # aux group idx -> main optimizer group idx
+
+    def _lazy_init(self):
+        model = self._trainer.accelerator.unwrap_model(self._trainer.model)
+        self._adaround_quantizers = [
+            m
+            for m in model.modules()
+            if isinstance(m, NVFP4StaticAdaRoundQuantizer) and m._adaround_enabled
+        ]
+        if not self._adaround_quantizers:
+            return
+
+        # Build a map from param id -> main optimizer group index
+        main_optimizer = self._trainer.optimizer
+        pid_to_group = {}
+        for group_idx, group in enumerate(main_optimizer.param_groups):
+            for p in group["params"]:
+                pid_to_group[id(p)] = group_idx
+
+        # Collect adaround params grouped by their main optimizer group
+        seen = set()
+        groups_dict = {}  # main group idx -> list of adaround params
+        for q in self._adaround_quantizers:
+            for p in q.parameters():
+                if p.requires_grad and id(p) not in seen:
+                    seen.add(id(p))
+                    main_idx = pid_to_group.get(id(p), 0)
+                    groups_dict.setdefault(main_idx, []).append(p)
+
+        # Create aux optimizer with separate param_groups mirroring main groups
+        param_groups = []
+        self._group_map = []
+        for main_idx in sorted(groups_dict):
+            lr = main_optimizer.param_groups[main_idx]["lr"]
+            param_groups.append({"params": groups_dict[main_idx], "lr": lr})
+            self._group_map.append(main_idx)
+
+        self._aux_optimizer = torch.optim.SGD(param_groups, lr=0, momentum=0)
+
+    def on_optimizer_step(self, args, state, control, **kwargs):
+        if self._adaround_quantizers is None:
+            self._lazy_init()
+        if not self._adaround_quantizers or self._aux_optimizer is None:
+            return control
+        # Sync LR from main optimizer's scheduled LR
+        main_groups = self._trainer.optimizer.param_groups
+        for aux_idx, main_idx in enumerate(self._group_map):
+            self._aux_optimizer.param_groups[aux_idx]["lr"] = main_groups[main_idx]["lr"]
+        # Zero round_logits grads (task-loss grads already consumed by main optimizer)
+        self._aux_optimizer.zero_grad()
+        # Compute annealed dist_loss
+        q0 = self._adaround_quantizers[0]
+        progress = state.global_step / max(state.max_steps, 1)
+        beta = q0.beta_start + (q0.beta_end - q0.beta_start) * progress
+        reg = sum(q.dist_loss(beta=beta) for q in self._adaround_quantizers)
+        dist_loss = q0.dist_loss_weight * reg
+        # Backward + step
+        self._trainer.accelerator.backward(dist_loss)
+        self._aux_optimizer.step()
+        # Log
+        self._trainer.log(
+            {
+                "adaround/dist_loss": dist_loss.detach().item(),
+                "adaround/beta": beta,
+            }
+        )
+        return control
 
 
 class QATTrainer(ModelOptHFTrainer):
@@ -203,18 +267,37 @@ class QATTrainer(ModelOptHFTrainer):
             )
             disable_lora_quantizers_in_config(self.quant_cfg, target_modules)
 
-        if self.is_deepspeed_enabled:
-            assert not check_awq_smoothquant(self.quant_cfg), (
-                f"QAT DeepSpeed does not currently support AWQ or SmoothQuant: {self.quant_cfg}"
+        if self.args.parallel_mode == ParallelMode.NOT_DISTRIBUTED:
+            raise ValueError(
+                "QATTrainer does not support torch.nn.DataParallel (multiple GPUs in a single"
+                " process). Use DistributedDataParallel via `torchrun` or `accelerate launch`"
+                " instead."
             )
 
         self._patch_accelerate_for_fsdp2_fix()
+
+        self._adaround_aux_callback = _AdaRoundAuxCallback(trainer=self)
+        self.add_callback(self._adaround_aux_callback)
 
         self._modelopt_state_path = os.path.join(self.args.output_dir, "modelopt_state_train.pth")
         if os.path.exists(self._modelopt_state_path) and not is_quantized(self.model):
             self._restore_modelopt_state_with_weights()
         elif is_quantized(self.model):
             self._save_modelopt_state_with_weights()
+
+        if self.quant_cfg is not None and not is_quantized(self.model):
+            algorithm = self.quant_cfg.get("algorithm")
+            method = (
+                algorithm
+                if isinstance(algorithm, str)
+                else (algorithm.get("method") if isinstance(algorithm, dict) else None)
+            )
+            if method is not None and method != "max":
+                raise ValueError(
+                    f"Only 'max' calibration is supported for training-time quantization. "
+                    f"Got algorithm='{method}'. For other algorithms, please quantize the "
+                    f"model first using mtq.quantize() and pass the quantized model."
+                )
 
         self._original_dtype = getattr(
             getattr(self.model, "config", None), "dtype", None
@@ -281,40 +364,7 @@ class QATTrainer(ModelOptHFTrainer):
         """Training step."""
         if self.quant_cfg is not None and not is_quantized(self.model):
             self._quantize_model()
-        if not hasattr(self, "_adaround_quantizers"):
-            self._discover_adaround_quantizers()
-        loss = super().training_step(*args, **kwargs)
-        # Separate backward for adaround dist_loss; loss returned above is already base_loss
-        dist_loss = self._get_adaround_dist_loss()
-        if dist_loss is not None:
-            self.accelerator.backward(dist_loss / self.current_gradient_accumulation_steps)
-            self.log(
-                {
-                    "adaround/dist_loss": dist_loss.detach().item(),
-                    "adaround/beta": self._last_adaround_beta,
-                }
-            )
-        return loss
-
-    def _discover_adaround_quantizers(self):
-        """One-time scan for enabled adaround quantizers."""
-        model = self.accelerator.unwrap_model(self.model)
-        self._adaround_quantizers = [
-            m
-            for m in model.modules()
-            if isinstance(m, NVFP4StaticAdaRoundQuantizer) and m._adaround_enabled
-        ]
-
-    def _get_adaround_dist_loss(self):
-        """Compute annealed AdaRound dist_loss. Returns None if no adaround quantizers."""
-        if not getattr(self, "_adaround_quantizers", None):
-            return None
-        progress = self.state.global_step / max(self.state.max_steps, 1)
-        q0 = self._adaround_quantizers[0]
-        beta = q0.beta_start + (q0.beta_end - q0.beta_start) * progress
-        self._last_adaround_beta = beta
-        reg = sum(q.dist_loss(beta=beta) for q in self._adaround_quantizers)
-        return q0.dist_loss_weight * reg
+        return super().training_step(*args, **kwargs)
 
     def prediction_step(self, *args, **kwargs):
         """Prediction step."""

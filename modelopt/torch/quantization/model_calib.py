@@ -2026,6 +2026,7 @@ def adaround(
                     beta_start=beta_start,
                     beta_end=beta_end,
                     freeze_weight=freeze_weight,
+                    parent_weight=getattr(module, weight_name),
                 )
 
         seen_modules.add(module)

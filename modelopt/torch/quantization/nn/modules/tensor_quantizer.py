@@ -1471,6 +1471,7 @@ class NVFP4StaticAdaRoundQuantizer(StaticBlockScaleQuantizer):
         beta_start: float = 20.0,
         beta_end: float = 2.0,
         freeze_weight: bool = True,
+        parent_weight: torch.Tensor | None = None,
     ) -> "NVFP4StaticAdaRoundQuantizer":
         """Convert an NVFP4StaticQuantizer to NVFP4StaticAdaRoundQuantizer in-place.
 
@@ -1495,6 +1496,8 @@ class NVFP4StaticAdaRoundQuantizer(StaticBlockScaleQuantizer):
             if weight_scaled is not None:
                 tq.enable_adaround(weight_scaled, temperature)
             _set_dist_loss_params(tq)
+            if freeze_weight and parent_weight is not None:
+                parent_weight.requires_grad_(False)
             return tq
         tq.__class__ = cls
         tq._is_nvfp4_static_adaround_quantizer = True
@@ -1503,6 +1506,8 @@ class NVFP4StaticAdaRoundQuantizer(StaticBlockScaleQuantizer):
         _set_dist_loss_params(tq)
         if weight_scaled is not None:
             tq.enable_adaround(weight_scaled, temperature)
+        if freeze_weight and parent_weight is not None:
+            parent_weight.requires_grad_(False)
         return tq
 
     @torch.no_grad()
