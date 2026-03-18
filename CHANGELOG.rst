@@ -9,6 +9,7 @@ NVIDIA Model Optimizer Changelog
 - Added iterator interface using CalibrationDataReader in ONNX quantization workflow.
 - Add N:M sparse softmax support to the Triton flash attention kernel (``modelopt.torch.kernels.triton_fa``). See `examples/llm_sparsity/attention_sparsity/README.md <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/llm_sparsity/attention_sparsity>`_ for usage.
 - Enable PTQ workflow for the Step3.5-Flash MoE model with NVFP4 W4A4 + FP8 KV cache quantization. See `modelopt_recipes/models/Step3.5-Flash/nvfp4-mlp-only.yaml <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/models/Step3.5-Flash/nvfp4-mlp-only.yaml>`_ for more details.
+- Add skip-softmax tile skipping to the Triton flash attention kernel (``modelopt.torch.kernels.triton_fa``). KV tiles with negligible attention scores are skipped entirely during prefill, saving V loads and computation on long sequences with strong attention locality. Integrates with ``mtsa.sparsify()`` via the ``triton_skip_softmax`` method.
 
 **Bug Fixes**
 

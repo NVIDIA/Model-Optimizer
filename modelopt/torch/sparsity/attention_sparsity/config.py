@@ -129,6 +129,16 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         ),
     )
 
+    skip_softmax_threshold: float = ModeloptField(
+        default=0.1,
+        title="Skip-softmax threshold.",
+        description=(
+            "Tiles contributing less than this fraction are skipped entirely. "
+            "Only used by triton_skip_softmax. Typical values: 1e-3 to 1e-1. "
+            "Set to 0 to disable."
+        ),
+    )
+
     @field_validator("method")
     @classmethod
     def validate_method(cls, v):
@@ -528,9 +538,24 @@ SPARSE_SOFTMAX_DEFAULT = {
 }
 
 
+# Default skip-softmax configuration for Triton kernel
+SKIP_SOFTMAX_TRITON_DEFAULT = {
+    "sparse_cfg": {
+        "*attn*": {
+            "method": "triton_skip_softmax",
+            "skip_softmax_threshold": 0.1,
+            "backend": "triton",
+            "enable": True,
+        },
+        "default": {"enable": False},
+    },
+}
+
+
 __all__ = [
     "SKIP_SOFTMAX_CALIB",
     "SKIP_SOFTMAX_DEFAULT",
+    "SKIP_SOFTMAX_TRITON_DEFAULT",
     "SPARSE_SOFTMAX_DEFAULT",
     "CalibrationConfig",
     "FlashSkipSoftmaxConfig",
