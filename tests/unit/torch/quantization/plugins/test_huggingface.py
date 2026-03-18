@@ -87,7 +87,7 @@ def test_convert_conv1d():
             assert hasattr(module, "weight_quantizer")
             assert hasattr(module, "output_quantizer")
 
-    mtq.set_quantizer_attribute(model_test, "*", {"enable": False})
+    mtq.set_quantizer_attribute(model_test, "*", ("enable", False))
 
     x = torch.randn(2, 3)
     out_1 = model_ref(x)
@@ -95,8 +95,8 @@ def test_convert_conv1d():
 
     assert torch.allclose(out_1, out_2)
 
-    mtq.set_quantizer_attribute(model_test, "*input_quantizer", {"enable": True})
-    mtq.set_quantizer_attribute(model_test, "*weight_quantizer", {"enable": True})
+    mtq.set_quantizer_attribute(model_test, "*input_quantizer", ("enable", True))
+    mtq.set_quantizer_attribute(model_test, "*weight_quantizer", ("enable", True))
     model_ref = PytorchModel()
     model_ref.load_state_dict(model_test.state_dict())
 
@@ -136,7 +136,7 @@ def test_dbrx():
         expertglu_ref.w1,
     )
 
-    mtq.set_quantizer_attribute(model_test, "*", {"enable": False})
+    mtq.set_quantizer_attribute(model_test, "*", ("enable", False))
 
     x = torch.randn(1, 4, 32)
     out_1 = model_ref(x)
@@ -170,7 +170,7 @@ def test_autoquantize_huggingface(model_provider, method):
     with context:
         best_model, search_history = mtq.auto_quantize(
             model,
-            constraints={"effective_bits": 11.0},
+            constraints=("effective_bits", 11.0),
             quantization_formats=[mtq.INT8_DEFAULT_CFG],
             data_loader=[{"input_ids": input_ids, "labels": input_ids} for _ in range(2)],
             forward_step=forward_step,

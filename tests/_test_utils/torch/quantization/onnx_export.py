@@ -30,9 +30,9 @@ def onnx_export_tester(model, device, num_bits, per_channel_quantization, consta
     axis = 0 if per_channel_quantization else None
     config = {
         "quant_cfg": [
-            {"*weight_quantizer": {"num_bits": num_bits, "axis": axis}},
-            {"*input_quantizer": {"num_bits": num_bits}},
-            {"default": {"enable": False}},
+            ("*weight_quantizer", {"num_bits": num_bits, "axis": axis}),
+            ("*input_quantizer", {"num_bits": num_bits}),
+            ("default", {"enable": False}),
         ],
         "algorithm": "max",
     }
@@ -76,7 +76,7 @@ def onnx_export_tester(model, device, num_bits, per_channel_quantization, consta
         buffer.seek(0)
         providers = ["CUDAExecutionProvider"] if device != "cpu" else ["CPUExecutionProvider"]
         ort_session = onnxruntime.InferenceSession(buffer.read(), providers=providers)
-        ort_result = ort_session.run([], {"input": dummy_input.cpu().numpy()})
+        ort_result = ort_session.run([], ("input", dummy_input.cpu().numpy()))
         ort_result = torch.tensor(ort_result[0]).to(device)
         torch_result = model(dummy_input)
         print(ort_result, torch_result)

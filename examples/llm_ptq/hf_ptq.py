@@ -82,11 +82,9 @@ def _set_kv_cache_constant_amax(quant_cfg: list) -> None:
 
     Creates a new dict for the KV bmm quantizer config to avoid mutating shared references.
     """
-    for i, entry in enumerate(quant_cfg):
-        if "*[kv]_bmm_quantizer" in entry:
-            quant_cfg[i] = {
-                "*[kv]_bmm_quantizer": {**entry["*[kv]_bmm_quantizer"], "use_constant_amax": True}
-            }
+    for i, (pattern, cfg) in enumerate(quant_cfg):
+        if pattern == "*[kv]_bmm_quantizer":
+            quant_cfg[i] = ("*[kv]_bmm_quantizer", {**cfg, "use_constant_amax": True})
             break
 
 
@@ -145,7 +143,7 @@ def extract_and_prepare_language_model_from_vl(full_model):
         # Apply disabled quant to all modules that are not part of language_model
         # This excludes them during HF export
         disabled_quant_cfg = {
-            "quant_cfg": {"default": {"enable": False}},
+            "quant_cfg": ("default", {"enable": False}),
             "algorithm": "max",
         }
 
@@ -333,7 +331,7 @@ def auto_quantize(
             getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"]
         )
         kv_cache_quant_cfg = [
-            e for e in kv_cache_quant_cfg if "default" not in e
+            e for e in kv_cache_quant_cfg if e[0] != "default"
         ]  # keep other quantizers from auto_quantize
 
         if args.kv_cache_qformat in _KV_CAST_FORMATS:
@@ -343,7 +341,7 @@ def auto_quantize(
         if args.kv_cache_qformat not in _KV_CAST_FORMATS:
             # Calibrate only the KV cache quantizers; disable all others.
             with mtq.set_quantizer_by_cfg_context(
-                language_model, [{"*": {"enable": False}}, *kv_cache_quant_cfg]
+                language_model, [("*", {"enable": False}), *kv_cache_quant_cfg]
             ):
                 mtq.calibrate(language_model, algorithm="max", forward_loop=calibrate_loop)
     return language_model
@@ -546,13 +544,15 @@ def mono_quantize(
     # For Nemotron VL models, disable quantization of vision components
     if is_nemotron_vl_model:
         print("Disabling quantization for vision components in Nemotron VL model")
-        quant_cfg["quant_cfg"]["*vision*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["*image*"] = {"enable": False}
+        quant_cfg["quant_cfg"].append(("*vision*", {"enable": False}))
+        quant_cfg["quant_cfg"].append(("*image*", {"enable": False}))
         # Also disable radio model components specifically (for Nemotron-Parse)
-        quant_cfg["quant_cfg"]["*radio*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["*visual*"] = {"enable": False}
-        quant_cfg["quant_cfg"]["*encoder*"] = {"enable": False}  # Disable encoder
-        quant_cfg["quant_cfg"]["*model_encoder*"] = {"enable": False}  # Nemotron-Parse specific
+        quant_cfg["quant_cfg"].append(("*radio*", {"enable": False}))
+        quant_cfg["quant_cfg"].append(("*visual*", {"enable": False}))
+        quant_cfg["quant_cfg"].append(("*encoder*", {"enable": False}))  # Disable encoder
+        quant_cfg["quant_cfg"].append(
+            ("*model_encoder*", {"enable": False})
+        )  # Nemotron-Parse specific
         print("Quantization will only be applied to the decoder (text generation) component")
 
     if not model_is_already_quantized or calibration_only:
@@ -971,7 +971,7 @@ def quantize_main(
             for prefix in mtp_layer_prefixes:
                 # Add exclusion pattern for this MTP layer (e.g., "*layers.92*")
                 pattern = f"*{prefix.split('.')[-2]}.{prefix.split('.')[-1]}*"
-                quant_cfg["quant_cfg"].append({pattern: {"enable": False}})
+                quant_cfg["quant_cfg"].append((pattern, {"enable": False}))
                 print(f"Excluding MTP layer from quantization: {pattern}")
 
         # Use constant amax for KV quantizers when a cast format is selected.

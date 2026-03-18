@@ -80,9 +80,7 @@ def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
 
         raise ValueError(f"Unknown type {type(quantizer_attr_cfg)}, {quantizer_attr_cfg}")
 
-    return estimate_quant_compression_for_quantizer(
-        [v for entry in quant_cfg.quant_cfg for v in entry.values()]
-    )
+    return estimate_quant_compression_for_quantizer([v for _, v in quant_cfg.quant_cfg])
 
 
 class QuantRecipe(CustomHPType):
@@ -99,7 +97,7 @@ class QuantRecipe(CustomHPType):
         name = self.get_auto_name_for_config(quant_cfg) or name
 
         if quant_cfg is None:
-            quant_cfg = {"quant_cfg": [{"*": {"enable": False}}]}
+            quant_cfg = {"quant_cfg": [("*", {"enable": False})]}
         elif isinstance(quant_cfg, str):
             assert hasattr(mtq_config, quant_cfg), f"Unknown quantization format {quant_cfg}"
             quant_cfg = getattr(mtq_config, quant_cfg)
@@ -112,7 +110,7 @@ class QuantRecipe(CustomHPType):
         # Currently KV Cache quantization is enabled for some quantization formats and disabled for others
         # This breaks the monotonicity of the quantization formats in terms of weight compression Vs accuracy
         self.config.quant_cfg.append(
-            {"*output_quantizer": mtq_config.QuantizerAttributeConfig(enable=False)}
+            ("*output_quantizer", mtq_config.QuantizerAttributeConfig(enable=False))
         )
 
         self.compression = estimate_quant_compression(self.config)
@@ -1323,7 +1321,7 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
             return [_cfg_to_dict(c) for c in v]
         return v
 
-    quant_cfg = [{k: _cfg_to_dict(v)} for k, v in quant_cfg_dict.items()]
+    quant_cfg = [(k, _cfg_to_dict(v)) for k, v in quant_cfg_dict.items()]
     warnings.warn(
         "get_auto_quantize_config: returned config uses algorithm='max'. "
         "Per-recipe calibration algorithms (e.g. smoothquant, awq) are not preserved. "
@@ -1365,7 +1363,7 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
 def _match_quantizer_cfg(quant_cfg, quantizer_attr):
     # Last-match-wins to mirror set_quantizer_by_cfg behavior
     matched = None
-    for pattern, cfg in (item for entry in quant_cfg for item in entry.items()):
+    for pattern, cfg in quant_cfg:
         if fnmatch.fnmatch(quantizer_attr, pattern):
             matched = cfg
     return matched

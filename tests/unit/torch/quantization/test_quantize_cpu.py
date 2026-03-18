@@ -36,13 +36,14 @@ from modelopt.torch.quantization.calib import MaxCalibrator
 # A test config with double-quant (using `SequentialQuantizers`)
 WINT4INT8_CFG = {
     "quant_cfg": [
-        {
-            "*weight_quantizer": [
+        (
+            "*weight_quantizer",
+            [
                 {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}, "enable": True},
                 {"num_bits": 8, "axis": 0, "enable": True},
-            ]
-        },
-        {"*input_quantizer": {"num_bits": 8, "axis": None, "enable": True}},
+            ],
+        ),
+        ("*input_quantizer", {"num_bits": 8, "axis": None, "enable": True}),
     ],
     "algorithm": "awq_lite",
 }
@@ -50,23 +51,24 @@ WINT4INT8_CFG = {
 # Test configs for per channel MSE calibration
 INT8_MSE_CFG = {
     "quant_cfg": [
-        {"*weight_quantizer": {"num_bits": 8, "axis": 0}},
-        {"*input_quantizer": {"num_bits": 8, "axis": None}},
+        ("*weight_quantizer", {"num_bits": 8, "axis": 0}),
+        ("*input_quantizer", {"num_bits": 8, "axis": None}),
     ],
     "algorithm": "mse",
 }
 
 STATIC_WEIGHT_DYNAMIC_ACTIVATION_CFG = {
     "quant_cfg": [
-        {"*weight_quantizer": {"num_bits": 8, "axis": 0}},  # Per-channel quantization
-        {
-            "*input_quantizer": {
+        ("*weight_quantizer", {"num_bits": 8, "axis": 0}),  # Per-channel quantization
+        (
+            "*input_quantizer",
+            {
                 "num_bits": 8,
                 "axis": (0, 1),
                 "type": "dynamic",
-            }
-        },  # Dynamic per-token quantization
-        {"default": {"enable": False}},
+            },
+        ),  # Dynamic per-token quantization
+        ("default", {"enable": False}),
     ],
     "algorithm": "max",
 }
@@ -79,14 +81,15 @@ class NewMaxCalibrator(MaxCalibrator):
 
 quant_cfg_custom_calib = {
     "quant_cfg": [
-        {
-            "*": {
+        (
+            "*",
+            {
                 "num_bits": 4,
                 "axis": None,
                 "enable": True,
                 "calibrator": (NewMaxCalibrator, (4, None, False)),
-            }
-        }
+            },
+        )
     ],
     "algorithm": "max",
 }
@@ -134,7 +137,7 @@ def test_save_restore(model_cls, quant_config):
 def test_quantize_invalid_cfg():
     model = SimpleLinear()
     config_invalid = {
-        "quant_cfg": [{"*": {"num_bits": 4, "axis": 0, "block_sizes": {-1: 128}}}],
+        "quant_cfg": [("*", {"num_bits": 4, "axis": 0, "block_sizes": {-1: 128}})],
         "algorithm": "max",
     }
     with pytest.raises(ValidationError, match="axis must be None when block_sizes is not None."):
@@ -174,10 +177,10 @@ def test_class_wise_config():
     model = SimpleConvLinear()
     config = {
         "quant_cfg": [
-            {"nn.Linear": {"*": {"num_bits": 4, "axis": -1, "enable": True}}},
-            {"nn.Conv2d": {"*": {"num_bits": 8, "enable": True}}},
-            {"nn.BatchNorm2d": {"*": {"enable": False}}},
-            {"*output_quantizer": {"num_bits": 8, "enable": True}},
+            ("nn.Linear", {"*": {"num_bits": 4, "axis": -1, "enable": True}}),
+            ("nn.Conv2d", {"*": {"num_bits": 8, "enable": True}}),
+            ("nn.BatchNorm2d", {"*": {"enable": False}}),
+            ("*output_quantizer", {"num_bits": 8, "enable": True}),
         ],
         "algorithm": "max",
     }
@@ -226,23 +229,24 @@ def test_static_weight_dynamic_activations():
 def test_block_sizes_axis_model():
     REF_QUANT_CFG = {  # noqa: N806
         "quant_cfg": [
-            {"*weight_quantizer": {"num_bits": 8, "axis": 0}},
-            {"*input_quantizer": {"num_bits": 8, "axis": None, "type": "dynamic"}},
-            {"default": {"enable": False}},
+            ("*weight_quantizer", {"num_bits": 8, "axis": 0}),
+            ("*input_quantizer", {"num_bits": 8, "axis": None, "type": "dynamic"}),
+            ("default", {"enable": False}),
         ],
         "algorithm": "max",
     }
     QUANT_CFG = {  # noqa: N806
         "quant_cfg": [
-            {"*weight_quantizer": {"num_bits": 8, "block_sizes": {1: None}}},
-            {
-                "*input_quantizer": {
+            ("*weight_quantizer", {"num_bits": 8, "block_sizes": {1: None}}),
+            (
+                "*input_quantizer",
+                {
                     "num_bits": 8,
                     "block_sizes": {0: None, 1: None},
                     "type": "dynamic",
-                }
-            },
-            {"default": {"enable": False}},
+                },
+            ),
+            ("default", {"enable": False}),
         ],
         "algorithm": "max",
     }

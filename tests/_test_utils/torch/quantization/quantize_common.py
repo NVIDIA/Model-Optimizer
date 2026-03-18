@@ -252,7 +252,7 @@ def data_tensor_context_parallel_test_helper(
 def auto_quantize_helper(model):
     model, search_state = mtq.auto_quantize(
         model,
-        constraints={"effective_bits": 8.0},
+        constraints=("effective_bits", 8.0),
         quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
         data_loader=[model.get_dummy_input().cuda() for _ in range(2)],
         forward_step=lambda model, batch: model(batch),

@@ -60,7 +60,7 @@ def convert_to_quantized_model(model: ModelLikeModule, config: QuantizeConfig) -
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
 
     replace_quant_module(model, version=ModeloptStateManager(model).state_version)
-    set_quantizer_by_cfg(model, config.get("quant_cfg", {}))
+    set_quantizer_by_cfg(model, config.get("quant_cfg", []))
 
     metadata = {}
     update_quantize_metadata(model, config, metadata)
@@ -76,7 +76,7 @@ def convert_to_quantized_model_svdquant(
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
 
     create_and_replace_svdquant_linear_on_the_fly(model)
-    set_quantizer_by_cfg(model, config.get("quant_cfg", {}))
+    set_quantizer_by_cfg(model, config.get("quant_cfg", []))
 
     metadata = {}
     update_quantize_metadata(model, config, metadata)
@@ -214,7 +214,7 @@ def _replace_quant_module(model: nn.Module, version=None, registry=QuantModuleRe
 def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType):
     """Update the quantizer attributes based on the specified `quant_cfg`.
 
-    `quant_cfg` is a list of single-key dicts mapping wildcards or filter functions
+    `quant_cfg` is a list of ``(pattern, attrs)`` tuples mapping wildcards or filter functions
     to its quantizer attributes which are defined in
     :class:`QuantizerAttributeConfig <.config.QuantizerAttributeConfig>`.
     The wildcards or filter functions  are matched against the quantizer module names.
@@ -228,7 +228,7 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType
     See :meth:`set_quantizer_attribute <modelopt.torch.quantization.conversion.set_quantizer_attribute>`
     for more details.
     """
-    items = [(k, v) for entry in quant_cfg for k, v in entry.items()]
+    items = list(quant_cfg)
     for pattern, cfg in items:
         if str(pattern) == "default":
             set_quantizer_attribute(quant_model, "*", cfg)
@@ -321,9 +321,7 @@ def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: QuantizeQuan
     Use this context manager with caution. Changing certain attributes of the quantizer such as
     `calibrator` can lead to unexpected behavior.
     """
-    assert not any(
-        cfg for entry in quant_cfg for cfg in entry.values() if isinstance(cfg, (list, tuple))
-    ), "list of config not support."
+    assert not any(isinstance(v, list) for _, v in quant_cfg), "list of config not support."
 
     original_attributes = {}
     for name, module in quant_model.named_modules():

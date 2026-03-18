@@ -527,7 +527,7 @@ def auto_quantize(
         "checkpoint": checkpoint,
     }
     # Disable all quantizers; AutoQuantize will enable the needed ones
-    set_quantizer_by_cfg(model, [{"*": QuantizerAttributeConfig(enable=False)}])
+    set_quantizer_by_cfg(model, [("*", QuantizerAttributeConfig(enable=False))])
     searcher.search(model, constraints, config=search_config)  # type: ignore[arg-type]
 
     return model, searcher.state_dict()

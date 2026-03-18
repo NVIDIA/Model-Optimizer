@@ -208,7 +208,13 @@ def test_general_ptq_yaml_matches_config_dicts(yaml_path, model_cfg_name, kv_cfg
     yaml_data = load_config(yaml_path)
 
     def _as_dict(qc):
-        return {k: v for entry in qc for k, v in entry.items()}
+        result = {}
+        for entry in qc:
+            if isinstance(entry, dict):
+                result.update(entry)
+            else:
+                result[entry[0]] = entry[1]
+        return result
 
     ptq = yaml_data["ptq_cfg"]
     assert {**_as_dict(model_cfg["quant_cfg"]), **_as_dict(kv_cfg["quant_cfg"])} == _as_dict(

@@ -221,7 +221,7 @@ def _collect_shared_input_modules(
     try:
         with (
             torch.no_grad(),
-            set_quantizer_by_cfg_context(model, [{"*": QuantizerAttributeConfig(enable=False)}]),
+            set_quantizer_by_cfg_context(model, [("*", QuantizerAttributeConfig(enable=False))]),
         ):
             dummy_forward_fn()
     finally:

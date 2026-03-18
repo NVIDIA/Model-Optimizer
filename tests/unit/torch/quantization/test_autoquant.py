@@ -111,8 +111,8 @@ def test_quant_recipe_hparam():
 # use this config to test custom quantization config
 INT8_CUSTOM_QUANT_TEST_CFG = {
     "quant_cfg": [
-        {"*weight_quantizer": {"num_bits": 8, "axis": 0}},
-        {"*input_quantizer": {"num_bits": 8, "axis": None}},
+        ("*weight_quantizer", {"num_bits": 8, "axis": 0}),
+        ("*input_quantizer", {"num_bits": 8, "axis": None}),
         *_default_disabled_quantizer_cfg,
     ],
     "algorithm": "smoothquant",
@@ -145,7 +145,7 @@ def test_auto_quantize(model_cls, search_formats, min_bits, search_bits, method)
 
     best_model, search_history = mtq.auto_quantize(
         model,
-        constraints={"effective_bits": search_bits},
+        constraints=("effective_bits", search_bits),
         quantization_formats=search_formats,
         data_loader=[model.get_input() for _ in range(2)],
         forward_step=lambda model, batch: model(batch),
@@ -191,7 +191,7 @@ def test_auto_quantize_disable_layers():
 
     best_model, search_history = mtq.auto_quantize(
         model,
-        constraints={"effective_bits": 5.0},
+        constraints=("effective_bits", 5.0),
         quantization_formats=[
             mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG,
             mtq.INT8_DEFAULT_CFG,
@@ -214,7 +214,7 @@ def test_auto_quantize_disabled_layers_no_poison():
 
     best_model, _ = mtq.auto_quantize(
         model,
-        constraints={"effective_bits": 5.0},
+        constraints=("effective_bits", 5.0),
         quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
         data_loader=[model.get_input() for _ in range(2)],
         forward_step=lambda model, batch: model(batch),
@@ -231,14 +231,15 @@ def test_auto_quantize_disabled_layers_no_poison():
 
 INT4INT8_AWQ_CFG = {
     "quant_cfg": [
-        {
-            "*weight_quantizer": [
+        (
+            "*weight_quantizer",
+            [
                 {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}, "enable": True},
                 {"num_bits": 8, "axis": None, "enable": True},
-            ]
-        },
-        {"*input_quantizer": {"num_bits": 8, "axis": None, "enable": True}},
-        {"default": {"enable": False}},
+            ],
+        ),
+        ("*input_quantizer", {"num_bits": 8, "axis": None, "enable": True}),
+        ("default", {"enable": False}),
     ],
     "algorithm": "awq_lite",
 }
@@ -267,7 +268,7 @@ def _test_data_parallel_auto_quantize(rank, size):
 
     model, search_history = mtq.auto_quantize(
         model,
-        constraints={"effective_bits": 11.0},
+        constraints=("effective_bits", 11.0),
         quantization_formats=[mtq.INT8_SMOOTHQUANT_CFG],
         data_loader=[model.get_input() for _ in range(2)],
         forward_step=lambda model, batch: model(batch),
@@ -376,7 +377,7 @@ def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
     # First run: save checkpoint
     model_1, state_dict_1 = mtq.auto_quantize(
         model,
-        constraints={"effective_bits": 6.0},
+        constraints=("effective_bits", 6.0),
         quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
         data_loader=[model.get_input() for _ in range(2)],
         forward_step=lambda model, batch: model(batch),
@@ -395,7 +396,7 @@ def test_auto_quantize_checkpoint_resume(method, tmp_path, capsys):
     model_2 = SimpleLinear()
     model_2, state_dict_2 = mtq.auto_quantize(
         model_2,
-        constraints={"effective_bits": 6.0},  # Same constraint
+        constraints=("effective_bits", 6.0),  # Same constraint
         quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
         data_loader=[model_2.get_input() for _ in range(2)],
         forward_step=lambda model, batch: model(batch),
@@ -463,7 +464,7 @@ def test_get_auto_quantize_config(method):
 
     _, search_state = mtq.auto_quantize(
         model,
-        constraints={"effective_bits": 6.0},
+        constraints=("effective_bits", 6.0),
         quantization_formats=[mtq.INT4_BLOCKWISE_WEIGHT_ONLY_CFG, mtq.INT8_DEFAULT_CFG],
         data_loader=[model.get_input() for _ in range(4)],
         forward_step=lambda model, batch: model(batch),
@@ -483,12 +484,12 @@ def test_get_auto_quantize_config(method):
     config = mtq.get_auto_quantize_config(search_state)
     assert "quant_cfg" in config
     assert isinstance(config["quant_cfg"], list)
-    assert any("*" in entry and entry["*"] == {"enable": False} for entry in config["quant_cfg"])
+    assert any(pattern == "*" and cfg == {"enable": False} for pattern, cfg in config["quant_cfg"])
     assert config["algorithm"] == "max"
 
     # Re-solve with different constraints
     config_resoled = mtq.get_auto_quantize_config(
-        search_state, constraints={"effective_bits": 12.0}
+        search_state, constraints=("effective_bits", 12.0)
     )
     assert "quant_cfg" in config_resoled
 

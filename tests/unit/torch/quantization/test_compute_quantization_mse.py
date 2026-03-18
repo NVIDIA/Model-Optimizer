@@ -23,8 +23,8 @@ from modelopt.torch.quantization.nn import TensorQuantizer
 
 INT8_CFG = {
     "quant_cfg": [
-        {"*weight_quantizer": {"num_bits": 8, "axis": 0}},
-        {"*input_quantizer": {"num_bits": 8, "axis": None}},
+        ("*weight_quantizer", {"num_bits": 8, "axis": 0}),
+        ("*input_quantizer", {"num_bits": 8, "axis": None}),
     ],
     "algorithm": "max",
 }
