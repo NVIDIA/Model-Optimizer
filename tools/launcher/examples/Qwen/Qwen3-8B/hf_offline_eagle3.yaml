@@ -9,8 +9,8 @@
 # All tasks share /scratchspace to pass artifacts between steps.
 #
 # Usage:
-#   uv run launch.py --yaml Qwen/Qwen3-8B/hf_offline_eagle3.yaml --yes
-#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/Qwen/Qwen3-8B/hf_offline_eagle3.yaml --yes
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_offline_eagle3.yaml --yes
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3-8B/hf_offline_eagle3.yaml --yes
 
 job_name: Qwen3-8B_EAGLE3_offline
 pipeline:

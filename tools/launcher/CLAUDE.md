@@ -2,7 +2,7 @@
 
 ## Overview
 
-The launcher submits ModelOpt quantization, training, and evaluation jobs to Slurm clusters or runs them locally with Docker. It shares core logic (`core.py`) with [nmm-sandbox](https://gitlab-master.nvidia.com/omniml/integration/nmm-sandbox)'s `slurm.py`.
+The launcher submits ModelOpt quantization, training, and evaluation jobs to Slurm clusters or runs them locally with Docker.
 
 ## Key Files
 
@@ -19,20 +19,20 @@ The launcher submits ModelOpt quantization, training, and evaluation jobs to Slu
 
 ```shell
 # Run locally with Docker
-uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml hf_local=/mnt/hf-local --yes
+uv run launch.py --yaml examples/Qwen/Qwen3-8B/megatron_lm_ptq.yaml hf_local=/mnt/hf-local --yes
 
 # Run on Slurm (set env vars first)
-uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
+uv run launch.py --yaml examples/Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
 
 # Dry run — preview resolved config
-uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml --dryrun --yes -v
+uv run launch.py --yaml examples/Qwen/Qwen3-8B/megatron_lm_ptq.yaml --dryrun --yes -v
 
 # Dump resolved config
-uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml --to-yaml resolved.yaml
+uv run launch.py --yaml examples/Qwen/Qwen3-8B/megatron_lm_ptq.yaml --to-yaml resolved.yaml
 
 # Run unit tests
 uv pip install pytest
-uv run python3 -m pytest ../tests/unit/launcher/ -v -o "addopts=" --confcutdir=../tests/unit/launcher
+uv run python3 -m pytest tests/ -v
 ```
 
 ## YAML Config Format
@@ -86,7 +86,7 @@ launch.py → imports core.py + slurm_config.py
 
 ## Adding a New Model Config
 
-1. Create `<Org>/<Model>/megatron_lm_ptq.yaml` following the format above
+1. Create `examples/<Org>/<Model>/megatron_lm_ptq.yaml` following the format above
 2. Set `MLM_MODEL_CFG` to the HuggingFace repo ID
 3. Set `QUANT_CFG` (e.g., `NVFP4_DEFAULT_CFG`, `INT8_DEFAULT_CFG`)
 4. Set GPU/node counts based on model size
@@ -94,29 +94,15 @@ launch.py → imports core.py + slurm_config.py
 
 ## Testing
 
-64 unit tests in `tests/unit/launcher/`. Run standalone without installing `modelopt`:
+65 unit tests in `tests/`. Run standalone without installing `modelopt`:
 
 From the launcher directory:
 
 ```shell
-uv run python3 -m pytest ../tests/unit/launcher/ -v -o "addopts=" --confcutdir=../tests/unit/launcher
+uv run python3 -m pytest tests/ -v
 ```
 
 Tests cover: core dataclasses, factory registry, global_vars interpolation, YAML formats, Docker/Slurm executor construction (mocked), environment merging, metadata writing, and end-to-end Docker launch via subprocess.
-
-## Compatibility with nmm-sandbox
-
-The same YAML works with both launchers:
-
-```shell
-# nmm-sandbox (internal)
-uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
-
-# Model-Optimizer/tools/launcher (public)
-uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
-```
-
-Differences: `slurm.py` has internal cluster factories, `job_yaml` batch mode (via `tools/run_job_yaml.sh`), CI review integration, and `SLURM_CLUSTER` env var for factory selection.
 
 ## Further Reading
 

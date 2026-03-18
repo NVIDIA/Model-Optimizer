@@ -4,7 +4,7 @@
 # for all available fields.
 #
 # Usage:
-#   uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
 #
 # For single-GPU local Docker, use megatron_lm_ptq_local.yaml instead.
 

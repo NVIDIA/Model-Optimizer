@@ -13,12 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared core logic for ModelOpt launcher and nmm-sandbox slurm.py.
+"""Core logic for the ModelOpt Launcher.
 
-This module contains all dataclasses, executor builders, and the job run loop
-shared between the public launcher (launch.py) and the internal CI orchestrator
-(slurm.py). Each caller provides its own config (packager, defaults, experiment
-title) and thin entrypoint.
+Dataclasses, executor builders, and the job run loop used by launch.py.
 """
 
 import dataclasses

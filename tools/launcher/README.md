@@ -11,14 +11,14 @@ git submodule update --init --recursive
 
 # Run locally with 1 GPU
 cd Model-Optimizer/tools/launcher
-uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq_local.yaml hf_local=/mnt/hf-local --yes
+uv run launch.py --yaml examples/Qwen/Qwen3-8B/megatron_lm_ptq_local.yaml hf_local=/mnt/hf-local --yes
 
 # Run on a Slurm cluster (4 GPUs)
 export SLURM_HOST=login-node.example.com
 export SLURM_ACCOUNT=my_account
-export SLURM_HF_LOCAL=/shared/hf-local
+export SLURM_HF_LOCAL=/mnt/hf-local
 export SLURM_JOB_DIR=/shared/experiments
-uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
+uv run launch.py --yaml examples/Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
 ```
 
 > **Local vs cluster:** `megatron_lm_ptq.yaml` defaults to TP=4 on 4 GPUs.
@@ -29,7 +29,7 @@ uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
 ```text
 tools/launcher/
 ├── launch.py                       # Main entrypoint
-├── core.py                         # Shared logic (also used by nmm-sandbox's slurm.py)
+├── core.py                         # Core logic (dataclasses, executors, run loop)
 ├── slurm_config.py                 # SlurmConfig dataclass and factory
 ├── common/                         # Scripts and typed tasks
 │   ├── megatron_lm/quantize/
@@ -39,7 +39,8 @@ tools/launcher/
 │   ├── vllm/query.sh               # vLLM server + query
 │   ├── eagle3/                     # EAGLE3 speculative decoding scripts
 │   └── specdec_bench/              # Speculative decoding benchmark
-├── Qwen/Qwen3-8B/                  # Example configs
+├── examples/                        # Example configs
+│   └── Qwen/Qwen3-8B/
 │   ├── megatron_lm_ptq.yaml        # PTQ (4 GPUs, Slurm)
 │   ├── megatron_lm_ptq_local.yaml  # PTQ (1 GPU, local Docker)
 │   └── hf_offline_eagle3.yaml      # EAGLE3 offline pipeline

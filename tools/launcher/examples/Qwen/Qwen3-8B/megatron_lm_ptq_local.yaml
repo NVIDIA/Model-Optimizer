@@ -4,7 +4,7 @@
 # See common/megatron_lm/quantize/task.py for all available fields.
 #
 # Usage:
-#   uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq_local.yaml hf_local=/mnt/hf-local --yes
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/megatron_lm_ptq_local.yaml hf_local=/mnt/hf-local --yes
 #
 # -----------------------------------------------------------------------------------
 # Equivalent raw SandboxTask (for reference — shows what MegatronLMQuantizeTask generates):

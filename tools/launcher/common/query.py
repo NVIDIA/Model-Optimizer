@@ -13,7 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# ruff: noqa: D100,D101,D102,D103,D107,F841,PLR1722
+"""OpenAI-compatible client for querying LLM inference servers.
+
+Used by TRT-LLM and vLLM query scripts to send prompts to a running server,
+collect responses, and optionally save them to disk for downstream pipelines
+(e.g., EAGLE3 data synthesis).
+"""
+
+# ruff: noqa: D101, D102, D103, D107, F841, PLR1722
 import argparse
 import os
 

@@ -2,7 +2,7 @@
 
 ## Adding a New Model
 
-1. Create `<Organization>/<ModelName>/` directory
+1. Create `examples/<Organization>/<ModelName>/` directory
 2. Add a YAML config using a typed task class:
 
 ```yaml
@@ -86,17 +86,3 @@ Include these three items:
 3. **Error output** — the relevant traceback from the job log.
 
 File issues at: <https://github.com/NVIDIA/Model-Optimizer/issues>
-
-## Compatibility with nmm-sandbox
-
-The same YAML works with both launchers:
-
-```bash
-# nmm-sandbox (internal)
-uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
-
-# Model-Optimizer/tools/launcher (public)
-uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
-```
-
-Differences: `slurm.py` has internal cluster factories, `SLURM_CLUSTER` env var for factory selection, CI review integration, and `tools/run_job_yaml.sh` for batch mode.

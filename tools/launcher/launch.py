@@ -16,8 +16,8 @@
 """ModelOpt Launcher — submit quantization, training, and evaluation jobs to Slurm clusters.
 
 Usage:
-    uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
-    uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml hf_local=/mnt/hf-local --yes
+    uv run launch.py --yaml examples/Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
+    uv run launch.py --yaml examples/Qwen/Qwen3-8B/megatron_lm_ptq.yaml hf_local=/mnt/hf-local --yes
 
 Environment variables:
     SLURM_HOST          Slurm login node hostname (required for remote jobs)

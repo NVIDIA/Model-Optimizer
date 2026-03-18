@@ -11,5 +11,8 @@ dependencies = [
 [tool.setuptools]
 py-modules = []
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [dependency-groups]
 dev = []

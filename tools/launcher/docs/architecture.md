@@ -2,13 +2,10 @@
 
 ## Shared Core
 
-The launcher is built on `core.py`, shared by both:
-
-- **`launch.py`** — public launcher (this repo)
-- **`slurm.py`** — internal CI orchestrator ([nmm-sandbox](https://gitlab-master.nvidia.com/omniml/integration/nmm-sandbox))
+The launcher is built on `core.py`:
 
 ```text
-core.py (shared)
+core.py
 ├── Dataclasses: SandboxTask, SandboxPipeline, GlobalVariables
 ├── Executor builders: build_slurm_executor(), build_docker_executor()
 ├── Job runner: run_jobs()
@@ -16,12 +13,12 @@ core.py (shared)
 ├── Factory registry: register_factory(), set_slurm_config_type()
 └── Default env: get_default_env()
 
-launch.py                              slurm.py (nmm-sandbox)
-├── imports core.py                    ├── imports core.py (via sys.path)
-├── slurm_config.py (env-var driven)   ├── tools/slurm_config.py (cluster-specific)
-├── registers: slurm_factory           ├── registers: oci_hsg, cw_dfw, computelab, ...
-├── packager (LAUNCHER_DIR relative)   ├── packager (repo root relative)
-└── launch() entrypoint                └── cicd() entrypoint
+launch.py
+├── imports core.py
+├── slurm_config.py (env-var driven)
+├── registers: slurm_factory
+├── packager (LAUNCHER_DIR relative)
+└── launch() entrypoint
 ```
 
 ## Code Packaging
@@ -167,17 +164,3 @@ Each experiment writes `metadata.json` to `experiments/<title>/<id>/`:
   "note": ""
 }
 ```
-
-## Compatibility with nmm-sandbox
-
-Same YAML works with both launchers:
-
-```bash
-# nmm-sandbox (internal)
-uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
-
-# Model-Optimizer/tools/launcher (public)
-uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
-```
-
-Verified: identical MMLU results (0.719 local, 0.730 OCI-HSG) from both launchers.

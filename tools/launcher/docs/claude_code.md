@@ -18,7 +18,7 @@ git submodule update --init --recursive
 > Run Qwen3-8B quantization on OCI-HSG and wait for it to finish
 
 Claude will:
-1. Run: uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
+1. Run: uv run launch.py --yaml examples/Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
 2. Monitor: NEMORUN_HOME=$(pwd) uv run nemo experiment status <id>
 3. Fetch logs: NEMORUN_HOME=$(pwd) uv run nemo experiment logs <id> 0
 4. Report the MMLU score and pass/fail status
@@ -43,7 +43,7 @@ Claude will:
 > Add Llama-3.1-70B quantization config. It needs 2 nodes with 4 GPUs each.
 
 Claude will:
-1. Create Meta/Llama-3.1-70B/megatron_lm_ptq.yaml
+1. Create examples/Meta/Llama-3.1-70B/megatron_lm_ptq.yaml
 2. Set appropriate TP/EP based on model size
 3. Reference the correct service script
 4. Test with --dryrun to verify the config
@@ -74,7 +74,7 @@ Claude will:
 
 ## Skills
 
-Available in the nmm-sandbox project:
+Available skills:
 
 | Skill | Trigger | Description |
 |---|---|---|

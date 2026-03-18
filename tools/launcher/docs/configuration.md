@@ -94,7 +94,7 @@ The `<<global_vars.X>>` syntax shares values across tasks.
 Contains `job_name` and `pipeline`:
 
 ```bash
-uv run launch.py --yaml Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
+uv run launch.py --yaml examples/Qwen/Qwen3-8B/megatron_lm_ptq.yaml --yes
 ```
 
 **`pipeline=@config.yaml`** — bare `SandboxPipeline` without `job_name` wrapper:
