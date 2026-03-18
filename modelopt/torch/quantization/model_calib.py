@@ -1596,7 +1596,7 @@ def _print_relative_mse_error(
     delta = q - w
     mse = (delta).mm(h).mul(delta).mean() / (w.mm(h).mul(w).mean() + 1e-6)
     suffix = f", n_hessian_samples: {n_samples}" if n_samples is not None else ""
-    print(f"[{module_name}] Relative MSE error: {mse.item():.2e}{suffix}")
+    print_rank_0(f"[{module_name}] Relative MSE error: {mse.item():.2e}{suffix}")
 
 
 def update_hessian(input, hessian, n_samples):
@@ -1655,7 +1655,7 @@ def prepare_hessian_inverse(h, weight, percdamp):
         h = torch.cholesky_inverse(torch.linalg.cholesky(h))
         h_inv = torch.linalg.cholesky(h, upper=True)
     except (RuntimeError, torch.linalg.LinAlgError):
-        print("Warning: Hessian is not positive definite, using identity matrix")
+        print_rank_0("Warning: Hessian is not positive definite, using identity matrix")
         h_inv = torch.eye(h.shape[0], device=h.device, dtype=h.dtype)
     return h_inv
 
@@ -1757,37 +1757,104 @@ def _build_column_qdq(quantizer, weight_shape):
     return _column_qdq_tensor, True
 
 
+def _can_use_fused_gptq(quantizer) -> bool:
+    """Check whether the fused Triton GPTQ kernel can be used for *quantizer*."""
+    if not isinstance(quantizer, NVFP4StaticQuantizer):
+        return False
+    if not hasattr(quantizer, "_amax") or quantizer._amax is None:
+        return False
+    from modelopt.torch.quantization.triton import IS_AVAILABLE as _TRITON_OK
+
+    return _TRITON_OK
+
+
 def blockwise_weight_update(module, h, block_size, percdamp, n_samples=None):
     """Update module weights using GPTQ-style blockwise quantization.
 
+    Dispatches to one of three internal paths depending on quantizer type:
+
+    1. **Fused Triton** — for :class:`NVFP4StaticQuantizer` when Triton is
+       available.  Runs the entire column loop in a single GPU kernel per
+       block (~130x faster than the unfused path on Blackwell GPUs).
+    2. **Column-QDQ** — for integer quantizers whose scale geometry allows
+       single-column fake-quant via :func:`_build_column_qdq`.
+    3. **Full-matrix fallback** — calls the quantizer on the full weight matrix
+       each column (slowest, but always correct).
+
     Args:
-        module: Neural network module with weight and weight_quantizer
-        H: Hessian matrix (d x d)
-        block_size: Size of blocks to process at once
-        percdamp: Damping percentage for Hessian diagonal
-        n_samples: Number of Hessian samples for logging (optional)
+        module: Neural network module with ``weight`` and ``weight_quantizer``.
+        h: Hessian matrix of shape ``(d, d)``.
+        block_size: Number of columns processed per block.
+        percdamp: Damping as a fraction of the mean Hessian diagonal.
+        n_samples: Number of Hessian samples (used only for logging).
     """
     weight = module.weight.data.float().clone()
-    _, num_cols = weight.shape
+    num_rows, num_cols = weight.shape
 
-    # Preprocess Hessian: handle dead neurons and add damping
     h_inv = prepare_hessian_inverse(h, weight, percdamp)
 
-    # Try to build fast column-wise qdq (avoids quantizing the full matrix per column)
-    col_qdq_fn, col_qdq_supported = _build_column_qdq(module.weight_quantizer, weight.shape)
+    quantizer = module.weight_quantizer
+    if _can_use_fused_gptq(quantizer):
+        _blockwise_weight_update_fused(weight, h_inv, quantizer, num_rows, num_cols, block_size)
+    else:
+        col_qdq_fn, col_qdq_supported = _build_column_qdq(quantizer, weight.shape)
+        _blockwise_weight_update_unfused(
+            weight, h_inv, quantizer, num_cols, block_size, col_qdq_fn, col_qdq_supported
+        )
 
-    # Process weights in blocks
+    _print_relative_mse_error(weight, module.weight.float(), h, module.name, n_samples)
+    module.weight.data = weight.reshape(module.weight.shape).to(module.weight.data.dtype)
+
+
+def _blockwise_weight_update_fused(weight, h_inv, quantizer, num_rows, num_cols, block_size):
+    """Fused Triton path for NVFP4: one kernel launch per block."""
+    from modelopt.torch.quantization.triton.gptq_fused_kernel import gptq_fused_block
+
+    group_size = quantizer.block_sizes.get(-1, None) or quantizer.block_sizes.get(1, None)
+    num_groups = math.ceil(num_cols / group_size)
+    amax_grouped = quantizer._amax.float().reshape(num_rows, num_groups).contiguous()
+    global_amax = quantizer.global_amax.float()
+
     for block_start in range(0, num_cols, block_size):
         block_end = min(block_start + block_size, num_cols)
-        n_cols = block_end - block_start
+        n_cols_blk = block_end - block_start
+
+        w_block = weight[:, block_start:block_end].clone().contiguous()
+        h_inv_cho_blk = h_inv[block_start:block_end, block_start:block_end].contiguous()
+
+        qw_block, err_block = gptq_fused_block(
+            w_block,
+            amax_grouped,
+            global_amax,
+            h_inv_cho_blk,
+            group_size,
+            block_start,
+            n_cols_blk,
+        )
+
+        weight[:, block_start:block_end] = qw_block
+        if block_end < num_cols:
+            weight[:, block_end:].addmm_(
+                err_block[:, :n_cols_blk],
+                h_inv[block_start:block_end, block_end:],
+                alpha=-1,
+            )
+
+
+def _blockwise_weight_update_unfused(
+    weight, h_inv, quantizer, num_cols, block_size, col_qdq_fn, col_qdq_supported
+):
+    """Column-QDQ or full-matrix fallback for non-NVFP4 quantizers."""
+    for block_start in range(0, num_cols, block_size):
+        block_end = min(block_start + block_size, num_cols)
+        n_cols_blk = block_end - block_start
         h_inv_cho_blk = h_inv[block_start:block_end, block_start:block_end]
 
         if col_qdq_supported:
-            # Fast path: clone only the block columns, quantize only per-column
             wblk = weight[:, block_start:block_end].clone()
             errs = torch.zeros_like(wblk)
 
-            for i in range(n_cols):
+            for i in range(n_cols_blk):
                 w_ci = wblk[:, i]
                 d = h_inv_cho_blk[i, i]
                 qdq_col = col_qdq_fn(w_ci, block_start + i)
@@ -1796,26 +1863,19 @@ def blockwise_weight_update(module, h, block_size, percdamp, n_samples=None):
                 wblk[:, i:].addr_(err, h_inv_cho_blk[i, i:], alpha=-1)
                 errs[:, i] = err
         else:
-            # Fallback: original full-matrix quantization path
             wblk = weight.clone()
             errs = torch.zeros_like(wblk[:, block_start:block_end])
 
-            for i in range(n_cols):
+            for i in range(n_cols_blk):
                 w_ci = wblk[:, block_start + i]
                 d = h_inv_cho_blk[i, i]
-                qdq = module.weight_quantizer(wblk)
+                qdq = quantizer(wblk)
                 weight[:, block_start + i] = qdq[:, block_start + i]
                 err = (w_ci - qdq[:, block_start + i]) / d
                 wblk[:, block_start + i : block_end].addr_(err, h_inv_cho_blk[i, i:], alpha=-1)
                 errs[:, i] = err
 
-        # Propagate errors to remaining weights
         weight[:, block_end:].addmm_(errs, h_inv[block_start:block_end, block_end:], alpha=-1)
-
-    # Print relative mse error
-    _print_relative_mse_error(weight, module.weight.float(), h, module.name, n_samples)
-    # Update module weights
-    module.weight.data = weight.reshape(module.weight.shape).to(module.weight.data.dtype)
 
 
 def gptq_lite(
