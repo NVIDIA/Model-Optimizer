@@ -31,7 +31,7 @@ docker run --gpus all -it --rm \
   -v ${MODELOPT_DIR}:/opt/Model-Optimizer \
   -v ${MODELOPT_DIR}/modelopt:/opt/venv/lib/python3.12/site-packages/modelopt \
   -w /opt/Model-Optimizer \
-  nvcr.io/nvidia/nemo:26.02 \
+  nvcr.io/nvidia/nemo:26.02.01 \
   /bin/bash
 ```
 
