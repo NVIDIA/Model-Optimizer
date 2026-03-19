@@ -62,19 +62,15 @@ ptq_cfg:
       enable: false
     - path: 'output.*'
       enable: false
-    - path: 'nn.BatchNorm1d'
-      cfg:
-        '*':
-          enable: false
-    - path: 'nn.BatchNorm2d'
-      cfg:
-        '*':
-          enable: false
-    - path: 'nn.BatchNorm3d'
-      cfg:
-        '*':
-          enable: false
-    - path: 'nn.LeakyReLU'
-      cfg:
-        '*':
-          enable: false
+    - type: 'nn.BatchNorm1d'
+      path: '*'
+      enable: false
+    - type: 'nn.BatchNorm2d'
+      path: '*'
+      enable: false
+    - type: 'nn.BatchNorm3d'
+      path: '*'
+      enable: false
+    - type: 'nn.LeakyReLU'
+      path: '*'
+      enable: false

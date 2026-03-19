@@ -1475,30 +1475,38 @@ class QuantizeConfig(ModeloptBaseConfig):
 
         Supports these dict forms for YAML/JSON compatibility:
 
-        - ``{"path": ..., "enable": ..., "cfg": ...}`` — explicit object with top-level enable
-        - ``{"path": ..., "enable": ...}`` — enable-only (no cfg fields)
+        - ``{"path": ..., "enable": ..., "cfg": ...}`` — glob path match with top-level enable
+        - ``{"path": ..., "enable": ...}`` — glob path match, enable-only
+        - ``{"type": ..., "path": ..., "enable": ...}`` — type match with per-path-glob enable
         - ``{"<path>": ...}`` — single-key dict (legacy)
 
-        The internal representation is always a list of ``(path, cfg)`` tuples where
-        ``enable`` (if present at the top level) is merged into ``cfg``.
+        The internal representation is always a list of ``(key, cfg)`` tuples.
+        For ``type`` entries the key is the type name and cfg is ``{path: {enable: ...}}``.
+        For ``path`` entries the key is the path glob and ``enable`` is merged into cfg.
         """
         if not isinstance(v, list):
             return v
         result = []
         for entry in v:
             if isinstance(entry, dict):
-                if "path" in entry:
-                    pattern = entry["path"]
+                if "type" in entry:
+                    type_val = entry["type"]
+                    path_val = entry["path"]
+                    sub_cfg = {}
+                    if "enable" in entry:
+                        sub_cfg["enable"] = entry["enable"]
+                    result.append((type_val, {path_val: sub_cfg}))
+                elif "path" in entry:
                     fmt = dict(entry.get("cfg") or {})
                     if "enable" in entry:
                         fmt["enable"] = entry["enable"]
-                    result.append((pattern, fmt))
+                    result.append((entry["path"], fmt))
                 elif len(entry) == 1:
                     result.append(next(iter(entry.items())))
                 else:
                     raise ValueError(
                         f"Invalid quant_cfg entry: {entry!r}. "
-                        "Expected a single-key dict or an object with a 'path' key."
+                        "Expected a single-key dict or an object with a 'path' or 'type' key."
                     )
             else:
                 result.append(entry)

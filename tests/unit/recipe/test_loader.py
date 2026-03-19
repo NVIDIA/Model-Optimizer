@@ -211,7 +211,12 @@ def test_general_ptq_yaml_matches_config_dicts(yaml_path, model_cfg_name, kv_cfg
         result = {}
         for entry in qc:
             if isinstance(entry, dict):
-                if "path" in entry:
+                if "type" in entry:
+                    sub_cfg = {}
+                    if "enable" in entry:
+                        sub_cfg["enable"] = entry["enable"]
+                    result[entry["type"]] = {entry["path"]: sub_cfg}
+                elif "path" in entry:
                     fmt = dict(entry.get("cfg") or {})
                     if "enable" in entry:
                         fmt["enable"] = entry["enable"]
