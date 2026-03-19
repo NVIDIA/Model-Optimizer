@@ -130,6 +130,12 @@ class DistillationConfig(BaseModel):
         default=None, description="Checkpoint path or 'latest' for auto-resume."
     )
 
+    # Audio-video joint training (LTX-2)
+    with_audio: bool = Field(
+        default=False,
+        description="Enable joint audio-video training. Requires audio latents in dataset.",
+    )
+
     # Mock data for testing
     use_mock_data: bool = False
     mock_data_samples: int = 100

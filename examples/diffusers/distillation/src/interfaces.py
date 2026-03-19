@@ -34,13 +34,25 @@ from torch import Tensor
 
 
 @dataclass
-class StrategyOutputs:
+class TextEmbeddings:
+    """Processed text embeddings ready for the transformer."""
+
+    video_context: Tensor  # [B, L, D] text context for video modality
+    audio_context: Tensor | None = None  # [B, L, D] text context for audio modality (None if N/A)
+
+
+@dataclass
+class BackboneInputs:
     """Output from TrainingForwardAdapter.prepare_inputs()."""
 
     noisy_input: Any
     targets: Tensor
     loss_mask: Tensor
     forward_kwargs: dict = field(default_factory=dict)
+
+    # Audio (optional, for audio-video models like LTX-2)
+    audio_targets: Tensor | None = None
+    audio_loss_mask: Tensor | None = None
 
 
 @dataclass
@@ -84,16 +96,38 @@ class TrainingForwardAdapter(Protocol):
         batch: dict[str, Tensor],
         noise: Tensor,
         timesteps: Tensor,
-    ) -> StrategyOutputs:
-        """Apply noise to latents, build model-specific inputs, compute targets."""
+        pipeline: Any = None,
+    ) -> BackboneInputs:
+        """Apply noise to latents, build model-specific inputs, compute targets.
+
+        Args:
+            pipeline: The inference pipeline, used to process raw text embeddings
+                into model-ready context (e.g. run connectors for LTX-2).
+        """
         ...
 
-    def forward_model(self, model: nn.Module, inputs: StrategyOutputs) -> Tensor:
-        """Run the model and return prediction as a single Tensor."""
+    def forward_model(self, model: nn.Module, inputs: BackboneInputs) -> Any:
+        """Run the model and return the raw model output.
+
+        The return type is model-specific (e.g. Tensor for Wan, tuple for LTX-2).
+        It is passed opaquely to compute_task_loss / compute_distillation_loss.
+        """
         ...
 
-    def compute_task_loss(self, pred: Tensor, targets: Tensor, loss_mask: Tensor) -> Tensor:
-        """Compute flow-matching task loss (typically masked MSE)."""
+    def compute_task_loss(self, model_output: Any, inputs: BackboneInputs) -> Tensor:
+        """Compute flow-matching task loss from model output and targets.
+
+        Handles all modalities (video, audio if applicable).
+        """
+        ...
+
+    def compute_distillation_loss(
+        self, student_output: Any, teacher_output: Any, inputs: BackboneInputs
+    ) -> Tensor:
+        """Compute output-level distillation loss between student and teacher.
+
+        Handles all modalities (video, audio if applicable).
+        """
         ...
 
 
@@ -122,6 +156,21 @@ class InferencePipeline(Protocol):
         device: str,
     ) -> list[CachedEmbeddings]:
         """Encode prompts via the text encoder. Must be called before unload_text_encoder()."""
+        ...
+
+    def process_text_embeddings(
+        self,
+        raw_embeds: Tensor,
+        attention_mask: Tensor,
+    ) -> TextEmbeddings:
+        """Transform raw cached text embeddings into model-ready context.
+
+        For models with text embedding connectors (e.g. LTX-2), this runs the
+        lightweight connector to produce video and audio context. For models
+        without connectors (e.g. Wan), this is an identity operation.
+
+        Called during both training (by the adapter) and inference (by generate).
+        """
         ...
 
     def unload_text_encoder(self) -> None:

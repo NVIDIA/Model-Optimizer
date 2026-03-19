@@ -147,19 +147,25 @@ def main():
     pipeline.load_components(model_config, "cuda", dtype)
 
     captions = [s[args.caption_column] for s in samples]
-    text_embeddings = []
-
-    # The key used in CachedEmbeddings.positive varies by model backend
-    # (e.g., "context" for Wan, "video_context" for LTX-2). We pick the first.
-    text_embed_key = None
+    # Each entry: (text_emb, text_mask) -- embeddings + attention mask.
+    # Backend keys vary (Wan: "context", LTX-2: "prompt_embeds" + "prompt_attention_mask").
+    # We normalize to "text_embeds" + "text_mask" in the saved file.
+    text_data: list[tuple[torch.Tensor, torch.Tensor]] = []
 
     for i in range(0, len(captions), args.batch_size):
         batch_captions = captions[i : i + args.batch_size]
         cached = pipeline.encode_prompts(batch_captions, "", "cuda")
         for emb in cached:
-            if text_embed_key is None:
-                text_embed_key = next(iter(emb.positive))
-            text_embeddings.append(emb.positive[text_embed_key])
+            pos = emb.positive
+            if "prompt_embeds" in pos:
+                # LTX-2: raw Gemma features + real attention mask
+                text_data.append((pos["prompt_embeds"].cpu(), pos["prompt_attention_mask"].cpu()))
+            else:
+                # Wan / other: first key is the embedding, mask is all-ones
+                emb_key = next(iter(pos))
+                emb_tensor = pos[emb_key].cpu()
+                mask = torch.ones(emb_tensor.shape[0], dtype=torch.int64)
+                text_data.append((emb_tensor, mask))
         if (i + args.batch_size) % 100 == 0:
             logger.info(
                 f"  Text encoding: {min(i + args.batch_size, len(captions))}/{len(captions)}"
@@ -167,13 +173,13 @@ def main():
 
     # Unload text encoder to free memory for VAE
     pipeline.unload_text_encoder()
-    logger.info(f"Phase 1 complete: {len(text_embeddings)} captions encoded")
+    logger.info(f"Phase 1 complete: {len(text_data)} captions encoded")
 
     # --- Phase 2: Encode videos ---
     logger.info("Phase 2: Encoding videos with VAE ...")
     video_paths = [s[args.video_column] for s in samples]
 
-    for i, (video_path, text_emb) in enumerate(zip(video_paths, text_embeddings)):
+    for i, (video_path, (text_emb, text_mask)) in enumerate(zip(video_paths, text_data)):
         output_path = out_dir / f"sample_{i:06d}.safetensors"
         if output_path.exists():
             continue
@@ -181,9 +187,6 @@ def main():
         video = load_video(video_path)
         latents = pipeline.encode_videos([video], "cuda")
         latent = latents[0]
-
-        # Create attention mask (all ones, length matches text embedding)
-        text_mask = torch.ones(text_emb.shape[0], dtype=torch.int8)
 
         save_file(
             {

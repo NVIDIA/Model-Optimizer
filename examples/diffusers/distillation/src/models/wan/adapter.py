@@ -22,13 +22,16 @@ plus noise application and loss.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 from torch import Tensor
 
-from ...interfaces import StrategyOutputs
+from ...interfaces import BackboneInputs
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class WanTrainingForwardAdapter:
@@ -49,7 +52,8 @@ class WanTrainingForwardAdapter:
         batch: dict[str, Tensor],
         noise: Tensor,
         timesteps: Tensor,
-    ) -> StrategyOutputs:
+        pipeline=None,
+    ) -> BackboneInputs:
         latents = batch["latents"]  # [B, C, F, H, W]
         text_embeds = batch["text_embeds"]  # [B, L, D]
 
@@ -64,7 +68,7 @@ class WanTrainingForwardAdapter:
         pt, ph, pw = self.patch_size
         seq_len = (n_f // pt) * (n_h // ph) * (n_w // pw)
 
-        return StrategyOutputs(
+        return BackboneInputs(
             noisy_input=noisy_latents,
             targets=targets,
             loss_mask=loss_mask,
@@ -76,16 +80,20 @@ class WanTrainingForwardAdapter:
             },
         )
 
-    def forward_model(self, model: nn.Module, inputs: StrategyOutputs) -> Tensor:
+    def forward_model(self, model: nn.Module, inputs: BackboneInputs) -> Tensor:
         # WanModel's internal norms promote to float32; autocast keeps
         # linear ops in bf16 to match the model weights.
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             output_list = model(**inputs.forward_kwargs)
         return torch.stack(output_list)
 
-    def compute_task_loss(self, pred: Tensor, targets: Tensor, loss_mask: Tensor) -> Tensor:
-        loss = (pred - targets).pow(2).mean()
-        return loss
+    def compute_task_loss(self, model_output: Tensor, inputs: BackboneInputs) -> Tensor:
+        return (model_output - inputs.targets).pow(2).mean()
+
+    def compute_distillation_loss(
+        self, student_output: Tensor, teacher_output: Tensor, inputs: BackboneInputs
+    ) -> Tensor:
+        return (student_output - teacher_output).pow(2).mean()
 
     def get_output_transforms(self, model: nn.Module) -> dict[str, Callable]:
         # WanAttentionBlock.forward returns x: Tensor directly -- no transform needed.

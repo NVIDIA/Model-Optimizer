@@ -14,9 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
 # Example SLURM launch script for QAD (Quantization-Aware Distillation) training.
 #
 # Supports both LTX-2 and Wan models. The script handles container setup,

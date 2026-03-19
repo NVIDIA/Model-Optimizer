@@ -35,7 +35,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from ...interfaces import CachedEmbeddings, free_gpu_memory
+from ...interfaces import CachedEmbeddings, TextEmbeddings, free_gpu_memory
 from .._deps import LTX_CORE_AVAILABLE, LTX_TRAINER_AVAILABLE
 
 if LTX_TRAINER_AVAILABLE:
@@ -109,6 +109,15 @@ class LTX2InferencePipeline:
         negative_prompt: str,
         device: str,
     ) -> list[CachedEmbeddings]:
+        """Encode prompts into raw (pre-connector) Gemma embeddings.
+
+        Returns CachedEmbeddings with keys:
+            - "prompt_embeds": [L, D] raw Gemma features (before connector)
+            - "prompt_attention_mask": [L] attention mask from tokenizer
+
+        The connector is NOT applied here -- it should be run during training
+        (by the adapter) or during inference (by the generate method).
+        """
         assert self._text_encoder is not None, (
             "Text encoder not loaded. Provide text_encoder_path in model config."
         )
@@ -118,34 +127,68 @@ class LTX2InferencePipeline:
 
         with torch.no_grad():
             for prompt in prompts:
-                # __call__ returns (video_embeds, audio_embeds, mask) -- post-connector
-                v_pos, a_pos, _ = self._text_encoder(prompt)
-                v_neg, a_neg, _ = self._text_encoder(negative_prompt)
+                # _preprocess_text returns pre-connector embeddings
+                emb_pos, mask_pos = self._text_encoder._preprocess_text(prompt, padding_side="left")
+                emb_neg, mask_neg = self._text_encoder._preprocess_text(
+                    negative_prompt, padding_side="left"
+                )
                 cached.append(
                     CachedEmbeddings(
                         positive={
-                            "video_context": v_pos.cpu(),
-                            "audio_context": a_pos.cpu(),
+                            "prompt_embeds": emb_pos[0].cpu(),
+                            "prompt_attention_mask": mask_pos[0].cpu(),
                         },
                         negative={
-                            "video_context": v_neg.cpu(),
-                            "audio_context": a_neg.cpu(),
+                            "prompt_embeds": emb_neg[0].cpu(),
+                            "prompt_attention_mask": mask_neg[0].cpu(),
                         },
                     )
                 )
 
-        # Keep connectors but offload heavy backbone
+        # Offload heavy Gemma backbone; keep connectors for training/inference
         self._text_encoder.model.to("cpu")
         self._text_encoder.feature_extractor_linear.to("cpu")
 
         return cached
 
+    def process_text_embeddings(
+        self,
+        raw_embeds: Tensor,
+        attention_mask: Tensor,
+    ) -> TextEmbeddings:
+        """Run video + audio connectors on raw Gemma embeddings."""
+        assert self._text_encoder is not None, (
+            "Text encoder connectors not available. "
+            "Was unload_text_encoder() called before loading components?"
+        )
+        with torch.no_grad():
+            video_ctx, audio_ctx, _mask = self._text_encoder._run_connectors(
+                raw_embeds, attention_mask
+            )
+        return TextEmbeddings(video_context=video_ctx, audio_context=audio_ctx)
+
     def unload_text_encoder(self) -> None:
-        if self._text_encoder is not None:
-            del self._text_encoder
-            self._text_encoder = None
+        """Free the heavy Gemma backbone but keep lightweight connectors.
+
+        After this call, encode_prompts() will no longer work, but
+        process_text_embeddings() and generate() still function.
+        """
+        if self._text_encoder is None:
+            return
+        te = self._text_encoder
+        # Delete heavy components
+        if te.model is not None:
+            del te.model
+            te.model = None
+        if te.feature_extractor_linear is not None:
+            del te.feature_extractor_linear
+            te.feature_extractor_linear = None
+        te.tokenizer = None
+        # Keep connectors on GPU (they're small)
+        te.embeddings_connector.to("cuda")
+        te.audio_embeddings_connector.to("cuda")
         free_gpu_memory()
-        logger.info("Gemma text encoder unloaded")
+        logger.info("Text encoder unloaded (connectors kept for training/inference)")
 
     def offload_to_cpu(self) -> None:
         if self._vae_decoder is not None:
@@ -221,8 +264,14 @@ class LTX2InferencePipeline:
             generator = torch.Generator(device=device).manual_seed(seed)
             noiser = GaussianNoiser(generator=generator)
 
-            v_ctx_pos = emb.positive["video_context"].to(device)
-            v_ctx_neg = emb.negative["video_context"].to(device)
+            # Run connectors on raw embeddings to get video context
+            raw_pos = emb.positive["prompt_embeds"].unsqueeze(0).to(device)
+            mask_pos = emb.positive["prompt_attention_mask"].unsqueeze(0).to(device)
+            v_ctx_pos = self.process_text_embeddings(raw_pos, mask_pos).video_context
+
+            raw_neg = emb.negative["prompt_embeds"].unsqueeze(0).to(device)
+            mask_neg = emb.negative["prompt_attention_mask"].unsqueeze(0).to(device)
+            v_ctx_neg = self.process_text_embeddings(raw_neg, mask_neg).video_context
 
             video_state = video_tools.create_initial_state(device=device, dtype=torch.bfloat16)
             video_clean_state = video_state

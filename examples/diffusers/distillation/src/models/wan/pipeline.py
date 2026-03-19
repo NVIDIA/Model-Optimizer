@@ -29,7 +29,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from ...interfaces import CachedEmbeddings, free_gpu_memory
+from ...interfaces import CachedEmbeddings, TextEmbeddings, free_gpu_memory
 from .._deps import WAN_AVAILABLE
 
 if WAN_AVAILABLE:
@@ -103,6 +103,14 @@ class WanInferencePipeline:
                 )
         self._text_encoder.model.cpu()
         return cached
+
+    def process_text_embeddings(
+        self,
+        raw_embeds: Tensor,
+        attention_mask: Tensor,
+    ) -> TextEmbeddings:
+        """Identity: Wan T5 embeddings are used directly, no connector needed."""
+        return TextEmbeddings(video_context=raw_embeds, audio_context=None)
 
     def unload_text_encoder(self) -> None:
         if self._text_encoder is not None:

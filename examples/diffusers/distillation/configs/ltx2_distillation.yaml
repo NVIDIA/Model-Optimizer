@@ -10,6 +10,9 @@
 
 defaults: default.yaml
 
+distillation:
+  with_audio: true
+
 model:
   model_name: "ltx2"
   model_path: "/path/to/ltx2-checkpoint.safetensors"

@@ -59,6 +59,7 @@ class MockDataset(Dataset):
         latent_shape: (C, F, H, W) shape of video latents.
         text_embed_dim: Dimension of text embeddings.
         text_seq_len: Sequence length for text embeddings.
+        audio_latent_shape: (C, T, F) shape of audio latents, or None to skip audio.
     """
 
     def __init__(
@@ -67,23 +68,28 @@ class MockDataset(Dataset):
         latent_shape: tuple[int, ...] = (48, 4, 32, 32),
         text_embed_dim: int = 4096,
         text_seq_len: int = 512,
+        audio_latent_shape: tuple[int, ...] | None = None,
         dtype: torch.dtype = torch.bfloat16,
     ) -> None:
         self.num_samples = num_samples
         self.latent_shape = latent_shape
         self.text_embed_dim = text_embed_dim
         self.text_seq_len = text_seq_len
+        self.audio_latent_shape = audio_latent_shape
         self.dtype = dtype
 
     def __len__(self) -> int:
         return self.num_samples
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
-        return {
+        sample = {
             "latents": torch.randn(self.latent_shape, dtype=self.dtype),
             "text_embeds": torch.randn(self.text_seq_len, self.text_embed_dim, dtype=self.dtype),
-            "text_mask": torch.ones(self.text_seq_len, dtype=torch.int8),
+            "text_mask": torch.ones(self.text_seq_len, dtype=torch.int64),
         }
+        if self.audio_latent_shape is not None:
+            sample["audio_latents"] = torch.randn(self.audio_latent_shape, dtype=self.dtype)
+        return sample
 
 
 def create_dataloader(

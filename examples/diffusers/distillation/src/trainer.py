@@ -191,7 +191,8 @@ class DistillationTrainer:
             else:
                 logger.info("Skipping calibration embedding caching (existing checkpoint found)")
 
-        # Unload text encoder (never needed again)
+        # Unload heavy text encoder backbone. Backends that need lightweight
+        # components (e.g. LTX-2 connectors) keep them for process_text_embeddings().
         logger.info("Unloading text encoder ...")
         pipeline.unload_text_encoder()
 
@@ -459,9 +460,15 @@ class DistillationTrainer:
         if cfg.distillation.use_mock_data:
             mock_shape = getattr(self._adapter, "MOCK_LATENT_SHAPE", (48, 4, 32, 32))
             mock_text_dim = getattr(self._adapter, "MOCK_TEXT_EMBED_DIM", 4096)
+            mock_audio_shape = (
+                getattr(self._adapter, "MOCK_AUDIO_LATENT_SHAPE", None)
+                if cfg.distillation.with_audio
+                else None
+            )
             mock_kwargs = {
                 "latent_shape": mock_shape,
                 "text_embed_dim": mock_text_dim,
+                "audio_latent_shape": mock_audio_shape,
                 "dtype": self._weight_dtype,
             }
             train_ds = MockDataset(
@@ -607,25 +614,25 @@ class DistillationTrainer:
         timesteps = self._sample_timesteps(B, device).to(dtype=wdtype)
 
         # Adapter: prepare model-specific inputs
-        inputs = self._adapter.prepare_inputs(batch, noise, timesteps)
+        inputs = self._adapter.prepare_inputs(batch, noise, timesteps, pipeline=self._inference_pipeline)
 
-        # Student forward
-        student_pred = self._adapter.forward_model(self._student, inputs)
+        # Student forward (model-specific output, opaque to trainer)
+        student_output = self._adapter.forward_model(self._student, inputs)
 
-        # Task loss
+        # Task loss (adapter handles all modalities: video, audio, etc.)
         if alpha > 0:
-            task_loss = self._adapter.compute_task_loss(
-                student_pred, inputs.targets, inputs.loss_mask
-            )
+            task_loss = self._adapter.compute_task_loss(student_output, inputs)
         else:
             task_loss = torch.tensor(0.0, device=device)
 
         # Distillation loss
         if alpha < 1.0:
             with torch.no_grad():
-                teacher_pred = self._adapter.forward_model(self._teacher, inputs)
-            output_distill_loss = self._compute_distillation_loss(
-                student_pred, teacher_pred, inputs.loss_mask
+                teacher_output = self._adapter.forward_model(self._teacher, inputs)
+
+            # Output-level distillation (adapter handles all modalities)
+            output_distill_loss = self._adapter.compute_distillation_loss(
+                student_output, teacher_output, inputs
             )
 
             # Layer-wise distillation loss
@@ -754,17 +761,17 @@ class DistillationTrainer:
             noise = torch.randn_like(latents)
             timesteps = self._sample_timesteps(B, device).to(dtype=wdtype)
 
-            inputs = self._adapter.prepare_inputs(batch, noise, timesteps)
-            student_pred = self._adapter.forward_model(self._student, inputs)
+            inputs = self._adapter.prepare_inputs(batch, noise, timesteps, pipeline=self._inference_pipeline)
+            student_output = self._adapter.forward_model(self._student, inputs)
 
             if alpha > 0:
-                tl = self._adapter.compute_task_loss(student_pred, inputs.targets, inputs.loss_mask)
+                tl = self._adapter.compute_task_loss(student_output, inputs)
             else:
                 tl = torch.tensor(0.0, device=device)
 
             if alpha < 1.0:
-                teacher_pred = self._adapter.forward_model(self._teacher, inputs)
-                dl = self._compute_distillation_loss(student_pred, teacher_pred, inputs.loss_mask)
+                teacher_output = self._adapter.forward_model(self._teacher, inputs)
+                dl = self._adapter.compute_distillation_loss(student_output, teacher_output, inputs)
             else:
                 dl = torch.tensor(0.0, device=device)
 

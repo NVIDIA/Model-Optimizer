@@ -27,6 +27,9 @@ distillation:
 
   resume_from_checkpoint:        # set to "latest" for auto-resume across Slurm jobs
 
+  # Audio-video joint training (LTX-2). Requires audio latents in dataset.
+  with_audio: false
+
   use_mock_data: false
   mock_data_samples: 100
 
