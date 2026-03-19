@@ -73,7 +73,7 @@ Draft Vocabulary Compression
 -----------------------------
 
 By default the draft model shares the full vocabulary of the base model. For large vocabularies
-(e.g., 128 256 tokens in Llama‑3) you can compress the draft vocabulary to a smaller working set,
+(e.g., 128,256 tokens in Llama‑3) you can compress the draft vocabulary to a smaller working set,
 reducing embedding table size and speeding up both training and inference.
 
 **Step 1 — Calibrate a vocabulary mapping**

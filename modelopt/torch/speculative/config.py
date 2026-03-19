@@ -67,10 +67,6 @@ class EagleConfig(ModeloptBaseConfig):
         default=False, description=("Whether to use detached Eagle.")
     )
 
-    eagle_hidden_state_distillation: bool = ModeloptField(
-        default=False, description=("Whether to use feature hidden states distillation.")
-    )
-
     eagle_freeze_base_model: bool = ModeloptField(
         default=True, description=("Whether to freeze base model during eagle module training.")
     )

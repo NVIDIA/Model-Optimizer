@@ -511,6 +511,8 @@ class EagleModule(MegatronModule):
                 "EAGLE module's vocab size should be <= base model vocab size!"
             )
 
+            # d2t maps compressed draft-vocab indices to full base-vocab indices.
+            # Vocab compression depends on KLD loss to populate this mapping correctly.
             self.register_buffer(
                 "d2t", torch.zeros(self.config.draft_vocab_size, dtype=torch.int64)
             )
@@ -725,11 +727,6 @@ class _DynamicEagleGPTModel(EagleModel):
             and len(self.eagle_config.eagle_aux_hidden_state_layer_ids) == 0
         ):
             self._set_default_aux_hidden_state_layers()
-
-        if len(self.eagle_config.eagle_aux_hidden_state_layer_ids) > 0:
-            assert not self.eagle_hidden_state_distillation, (
-                "EAGLE-3 does not support hidden state distillation!"
-            )
 
         # EAGLE-3 auxiliary hidden_states (only work for TP+EP, does not work for PP)
         self._aux_hidden_states = []
