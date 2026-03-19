@@ -19,6 +19,8 @@ metadata:
 ptq_cfg:
   algorithm: max
   quant_cfg:
+    - path: '*'
+      enable: false
     - path: '*mlp*weight_quantizer'
       enable: true
       cfg:
@@ -72,8 +74,6 @@ ptq_cfg:
       cfg:
         num_bits: e4m3
 
-    - path: 'default'
-      enable: false
     - path: '*block_sparse_moe.gate*'
       enable: false
     - path: '*linear_attn.conv1d*'

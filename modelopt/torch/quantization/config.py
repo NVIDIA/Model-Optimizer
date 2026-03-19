@@ -66,8 +66,8 @@ instances of
 The quantizer attributes are defined by :class:`QuantizerAttributeConfig`. See :class:`QuantizerAttributeConfig`
 for details on the quantizer attributes and their values.
 
-The key `"default"` from the quantization configuration dictionary is applied if no other wildcard or filter functions
-match the quantizer module name.
+Use `"*"` as the first entry in the quantization configuration list to set a catch-all default
+that applies to all quantizers not matched by a later, more specific entry.
 
 The quantizer attributes are applied in the order they are specified. For the missing attributes, the default attributes
 as defined by :class:`QuantizerAttributeConfig` are used.

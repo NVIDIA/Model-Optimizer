@@ -217,10 +217,9 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType
     `quant_cfg` is a list of ``(pattern, attrs)`` tuples mapping wildcards or filter functions
     to its quantizer attributes which are defined in
     :class:`QuantizerAttributeConfig <.config.QuantizerAttributeConfig>`.
-    The wildcards or filter functions  are matched against the quantizer module names.
+    The wildcards or filter functions are matched against the quantizer module names.
     The specified quantizer attributes of the matched quantizer modules are set accordingly.
-    The key ``"default"`` is a special key that sets the quantizer attributes of all the quantizers for which
-    no other wildcard or filter functions match the quantizer module name.
+    Entries are applied in order; use ``"*"`` as the first entry to set a catch-all default.
 
     In addition, the dictionary entries could also be pytorch module class names mapping the class specific
     quantization configuration. The pytorch modules should have a quantized equivalent.
@@ -228,15 +227,7 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType
     See :meth:`set_quantizer_attribute <modelopt.torch.quantization.conversion.set_quantizer_attribute>`
     for more details.
     """
-    items = list(quant_cfg)
-    for pattern, cfg in items:
-        if str(pattern) == "default":
-            set_quantizer_attribute(quant_model, "*", cfg)
-            break
-
-    for pattern, cfg in items:
-        if str(pattern) == "default":
-            continue
+    for pattern, cfg in quant_cfg:
         if str(pattern) in QuantModuleRegistry:
             parent_class = QuantModuleRegistry[str(pattern)]
             assert isinstance(cfg, dict), (
