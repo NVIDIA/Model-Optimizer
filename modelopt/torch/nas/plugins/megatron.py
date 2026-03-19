@@ -92,6 +92,7 @@ def get_te_mamba_stack_spec(moe_grouped_gemm: bool = False) -> ModuleSpec:
     # The upstream TE mamba stack spec hardcodes TEGroupedMLP for MoE.
     # Replace it with SequentialMLP (TE linear layers, no grouped gemm dependency).
     te_mamba_stack_spec = copy.deepcopy(_te_mamba_stack_spec)
+    # num_experts needs to be non-zero
     te_mamba_stack_spec.submodules.moe_layer.submodules.mlp = get_moe_module_spec(
         use_te=True, num_experts=8, moe_grouped_gemm=False
     )

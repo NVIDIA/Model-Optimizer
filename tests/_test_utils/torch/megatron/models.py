@@ -350,6 +350,8 @@ def get_mcore_mamba_hybrid_model(
         moe_grouped_gemm=moe_grouped_gemm,
         moe_ffn_hidden_size=moe_ffn_hidden_size,
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
+        moe_router_enable_expert_bias=True,
+        moe_router_score_function="sigmoid",
         add_bias_linear=False,
         pipeline_dtype=torch.bfloat16 if bf16 else torch.float32,
         bf16=bf16,

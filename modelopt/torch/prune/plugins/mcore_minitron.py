@@ -186,8 +186,8 @@ class MCoreMinitronSearcher(BaseSearcher):
     local_activations: dict[str, torch.Tensor]
     layer_scores: dict[int, torch.Tensor]
     sorted_layers: list[int] | None  # 1-indexed sorted list of layer numbers
-    # Dict from params constraint to list of tuples (ss_config, params, score)
-    top_k_candidates_per_constraint: dict[float, list[CandidateSubnet]]
+    # Dict from params constraint to list of all CandidateSubnets fitting that constraint
+    all_candidates_per_constraint: dict[float, list[CandidateSubnet]]
 
     @property
     def default_search_config(self) -> SearchConfig:
@@ -211,7 +211,7 @@ class MCoreMinitronSearcher(BaseSearcher):
             "local_activations": {},
             "layer_scores": {},
             "sorted_layers": None,
-            "top_k_candidates_per_constraint": {},
+            "all_candidates_per_constraint": {},
         }
 
     def sanitize_search_config(self, config: SearchConfig | None) -> SearchConfig:
@@ -423,10 +423,7 @@ class MCoreMinitronSearcher(BaseSearcher):
         )
 
         # 2. Perform grid-search over the search space to find subnets fitting the constraints
-        if (
-            max_params not in self.top_k_candidates_per_constraint
-            or len(self.top_k_candidates_per_constraint[max_params]) != top_k
-        ):
+        if max_params not in self.all_candidates_per_constraint:
             max_num_layers = self.model.get_hparam("num_layers").max
             search_space_configs = MCoreMinitronSearcher._generate_search_space_combos(
                 hp_choices,
@@ -438,7 +435,7 @@ class MCoreMinitronSearcher(BaseSearcher):
             selected = []
             for ss_config in tqdm(
                 search_space_configs,
-                desc=f"Finding top {top_k} (`config['top_k']`) candidates fitting the constraints...",
+                desc="Finding all candidates fitting the constraints...",
                 disable=not dist.is_master(),
             ):
                 self._prune(ss_config, prune_depth=False)
@@ -451,13 +448,13 @@ class MCoreMinitronSearcher(BaseSearcher):
                 sample(self.model, sample_func=max)  # reset to max subnet
             assert len(selected) > 0, "No subnets found fitting the constraints!"
             print_rank_0(f"Found {len(selected)} candidates fitting the constraints!")
-            self.top_k_candidates_per_constraint[max_params] = sorted(
+            self.all_candidates_per_constraint[max_params] = sorted(
                 selected, key=lambda x: x.params, reverse=True
-            )[:top_k]
+            )
             self.save_search_checkpoint(verbose=True)
         else:
             print_rank_0(f"\nUsing top {top_k} candidates from checkpoint")
-        top_k_candidates = self.top_k_candidates_per_constraint[max_params]
+        top_k_candidates = self.all_candidates_per_constraint[max_params][:top_k]
 
         print_rank_0(f"\n====================\nTop {top_k} candidates:")
         for candidate in top_k_candidates:
@@ -477,6 +474,17 @@ class MCoreMinitronSearcher(BaseSearcher):
         )
 
         # 4. Validate top-k candidates using the score_func and return the best subnet
+        # WAR for Nemotron-3-Nano-30B-A3B-BF16. Disable expert bias during candidate eval to prevent in-place
+        # __setattr__ on dynamically-sliced buffers from corrupting their shape (128 -> 120 elements).
+        _routers_with_expert_bias = []
+        for n, m in self.model.named_modules():
+            if hasattr(m, "enable_expert_bias") and m.enable_expert_bias:
+                print(
+                    f"Temporarily disabling expert bias for {n} on rank {dist.rank()} for candidate evaluation..."
+                )
+                m.enable_expert_bias = False
+                _routers_with_expert_bias.append(m)
+
         for candidate in tqdm(
             top_k_candidates,
             desc=f"Validating top {top_k} candidates on given score_func (this will take some time)...",
@@ -500,6 +508,9 @@ class MCoreMinitronSearcher(BaseSearcher):
             print_rank_0(
                 f"\t{candidate.ss_config} -> {num2hrb(candidate.params)} params, {candidate.score:.4f} score\n"
             )
+
+        for m in _routers_with_expert_bias:
+            m.enable_expert_bias = True
 
         print_rank_0(f"\n====================\nTop {top_k} candidates with scores:")
         for candidate in top_k_candidates:

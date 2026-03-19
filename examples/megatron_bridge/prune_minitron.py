@@ -264,10 +264,11 @@ def main(args: argparse.Namespace):
     }
     if args.prune_target_params is not None:
         # Restrict search space to a smaller set of candidates
+        # Allow more choices for MoE FFN as they are generally smaller
         # NOTE: You can reduce the divisors and increase config['top_k'] to potentially find a better model.
         ss_config = mtp.mcore_minitron.get_mcore_minitron_config(
             hidden_size_divisor=256,
-            ffn_hidden_size_divisor=512,
+            ffn_hidden_size_divisor=256 if (provider.num_moe_experts or 0) > 0 else 512,
             mamba_head_dim_divisor=8,
             num_moe_experts_divisor=8,
             num_layers_divisor=2,

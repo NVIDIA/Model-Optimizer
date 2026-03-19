@@ -352,7 +352,7 @@ def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
 
     assert get_mcore_param_count(model) == 10268.0
 
-    top_k = searcher_state["top_k_candidates_per_constraint"][constraints["params"]]
+    top_k = searcher_state["all_candidates_per_constraint"][constraints["params"]][:10]
     assert len(top_k) == 10
     for actual, (ss_config, params, score) in zip(top_k, expected_top_k):
         assert actual.ss_config == ss_config, (actual.ss_config, ss_config)
