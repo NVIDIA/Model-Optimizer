@@ -157,19 +157,13 @@ class DataConfig(BaseModel):
 
 class ValidationConfig(BaseModel):
     prompts: list[str] = Field(default_factory=list)
-    negative_prompt: str = (
-        "worst quality, inconsistent motion, blurry, jittery, distorted"
-    )
-    video_dims: list[int] = Field(
-        default=[512, 320, 33], description="[width, height, num_frames]"
-    )
+    negative_prompt: str = "worst quality, inconsistent motion, blurry, jittery, distorted"
+    video_dims: list[int] = Field(default=[512, 320, 33], description="[width, height, num_frames]")
     frame_rate: float = 25.0
     inference_steps: int = 30
     guidance_scale: float = 4.0
     seed: int = 42
-    interval: int = Field(
-        default=500, description="Run validation every N optimization steps."
-    )
+    interval: int = Field(default=500, description="Run validation every N optimization steps.")
     skip_initial_validation: bool = False
 
 

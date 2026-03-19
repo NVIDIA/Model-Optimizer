@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Unified distillation trainer for QAD/SAD of diffusion models.
 
 Supports quantization-aware and sparsity-aware distillation using ModelOpt,
@@ -9,7 +24,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import time
 from pathlib import Path
 
@@ -156,7 +170,9 @@ class DistillationTrainer:
 
         # Cache validation prompt embeddings
         if cfg.validation.prompts:
-            logger.info(f"Caching embeddings for {len(cfg.validation.prompts)} validation prompts ...")
+            logger.info(
+                f"Caching embeddings for {len(cfg.validation.prompts)} validation prompts ..."
+            )
             self._cached_val_embeds = pipeline.encode_prompts(
                 cfg.validation.prompts, cfg.validation.negative_prompt, "cuda"
             )
@@ -166,7 +182,9 @@ class DistillationTrainer:
             if self._needs_fresh_calibration():
                 calib_prompts = self._load_calibration_prompts()
                 if calib_prompts:
-                    logger.info(f"Caching embeddings for {len(calib_prompts)} calibration prompts ...")
+                    logger.info(
+                        f"Caching embeddings for {len(calib_prompts)} calibration prompts ..."
+                    )
                     self._cached_calib_embeds = pipeline.encode_prompts(
                         calib_prompts, cfg.validation.negative_prompt, "cuda"
                     )
@@ -373,6 +391,7 @@ class DistillationTrainer:
         elif cfg.optimizer_type == "adamw8bit":
             try:
                 import bitsandbytes as bnb
+
                 self._optimizer = bnb.optim.AdamW8bit(trainable_params, lr=cfg.learning_rate)
             except ImportError:
                 raise ImportError("adamw8bit requires bitsandbytes: pip install bitsandbytes")
@@ -446,10 +465,12 @@ class DistillationTrainer:
                 "dtype": self._weight_dtype,
             }
             train_ds = MockDataset(
-                num_samples=cfg.distillation.mock_data_samples, **mock_kwargs,
+                num_samples=cfg.distillation.mock_data_samples,
+                **mock_kwargs,
             )
             val_ds = MockDataset(
-                num_samples=min(16, cfg.distillation.mock_data_samples), **mock_kwargs,
+                num_samples=min(16, cfg.distillation.mock_data_samples),
+                **mock_kwargs,
             )
         elif cfg.data.preprocessed_data_root:
             full_ds = LatentDataset(cfg.data.preprocessed_data_root)
@@ -457,18 +478,26 @@ class DistillationTrainer:
             train_size = len(full_ds) - val_size
             train_ds, val_ds = torch.utils.data.random_split(full_ds, [train_size, val_size])
         else:
-            raise ValueError("Either data.preprocessed_data_root or distillation.use_mock_data must be set")
+            raise ValueError(
+                "Either data.preprocessed_data_root or distillation.use_mock_data must be set"
+            )
 
         # Don't pass distributed=True here: accelerator.prepare() adds its
         # own DistributedSampler.  Doing both causes double-sharding and an
         # empty dataloader when the dataset is small.
         self._dataloader = create_dataloader(
-            train_ds, cfg.optimization.batch_size, cfg.data.num_dataloader_workers,
-            shuffle=True, distributed=False,
+            train_ds,
+            cfg.optimization.batch_size,
+            cfg.data.num_dataloader_workers,
+            shuffle=True,
+            distributed=False,
         )
         self._val_dataloader = create_dataloader(
-            val_ds, cfg.optimization.batch_size, cfg.data.num_dataloader_workers,
-            shuffle=False, distributed=False,
+            val_ds,
+            cfg.optimization.batch_size,
+            cfg.data.num_dataloader_workers,
+            shuffle=False,
+            distributed=False,
         )
         self._dataloader = self._accelerator.prepare(self._dataloader)
         self._val_dataloader = self._accelerator.prepare(self._val_dataloader)
@@ -499,15 +528,18 @@ class DistillationTrainer:
             output_transforms = self._adapter.get_output_transforms(unwrapped_student)
 
         self._teacher_extractor = FeatureExtractor(
-            unwrapped_teacher, teacher_paths, output_transforms=output_transforms,
+            unwrapped_teacher,
+            teacher_paths,
+            output_transforms=output_transforms,
         )
         self._student_extractor = FeatureExtractor(
-            unwrapped_student, student_paths, output_transforms=output_transforms,
+            unwrapped_student,
+            student_paths,
+            output_transforms=output_transforms,
         )
 
         logger.info(
-            "Layer-wise distillation enabled: %d layer pairs, weight=%.2f, "
-            "loss=%s, normalize=%s",
+            "Layer-wise distillation enabled: %d layer pairs, weight=%.2f, loss=%s, normalize=%s",
             len(self._layer_pairs),
             cfg.layer_distillation_weight,
             cfg.layer_distillation_loss_type,
@@ -636,12 +668,15 @@ class DistillationTrainer:
             s_flat = student_pred.flatten(start_dim=2)
             t_flat = teacher_pred.flatten(start_dim=2)
             cos_sim = torch.nn.functional.cosine_similarity(s_flat, t_flat, dim=-1)
-            return 1.0 - cos_sim.mean()
+            loss = 1.0 - cos_sim  # [B, T]
         else:
             raise ValueError(f"Unknown distillation loss type: {loss_type}")
 
         if loss_mask is not None and loss_mask.numel() > 0:
-            mask = loss_mask.unsqueeze(-1).float()
+            # Expand mask to match loss dimensions
+            while loss_mask.dim() < loss.dim():
+                loss_mask = loss_mask.unsqueeze(-1)
+            mask = loss_mask.float()
             loss = loss.mul(mask).div(mask.mean())
 
         return loss.mean()
@@ -865,6 +900,7 @@ class DistillationTrainer:
             if tmp_dir.exists():
                 if final_dir.exists():
                     import shutil
+
                     shutil.rmtree(final_dir)
                 tmp_dir.rename(final_dir)
                 logger.info(f"Training state saved to {final_dir}")
@@ -890,7 +926,8 @@ class DistillationTrainer:
 
         checkpoints = sorted(
             [
-                d for d in ckpt_dir.iterdir()
+                d
+                for d in ckpt_dir.iterdir()
                 if d.is_dir()
                 and d.name.startswith("step_")
                 and not d.name.endswith("_tmp")
@@ -900,6 +937,7 @@ class DistillationTrainer:
         )
         for old_ckpt in checkpoints[:-keep_n]:
             import shutil
+
             logger.info(f"Removing old checkpoint: {old_ckpt.name}")
             shutil.rmtree(old_ckpt)
 
@@ -912,13 +950,16 @@ class DistillationTrainer:
             ckpt_dir = self._get_checkpoints_dir()
             if not ckpt_dir.exists():
                 return None
-            checkpoints = sorted([
-                d for d in ckpt_dir.iterdir()
-                if d.is_dir()
-                and d.name.startswith("step_")
-                and not d.name.endswith("_tmp")
-                and not d.name.endswith("_quantized")
-            ])
+            checkpoints = sorted(
+                [
+                    d
+                    for d in ckpt_dir.iterdir()
+                    if d.is_dir()
+                    and d.name.startswith("step_")
+                    and not d.name.endswith("_tmp")
+                    and not d.name.endswith("_quantized")
+                ]
+            )
             return checkpoints[-1] if checkpoints else None
 
         path = Path(resume)
@@ -1002,7 +1043,9 @@ class DistillationTrainer:
         must_save_by = cfg.checkpoints.must_save_by
         save_deadline = (train_start + must_save_by * 60) if must_save_by else None
         if save_deadline and _is_global_rank0():
-            logger.info(f"Time-limit save enabled: will save and exit after {must_save_by:.0f} minutes")
+            logger.info(
+                f"Time-limit save enabled: will save and exit after {must_save_by:.0f} minutes"
+            )
 
         # Initial validation
         if cfg.validation.interval and not cfg.validation.skip_initial_validation:
@@ -1052,7 +1095,9 @@ class DistillationTrainer:
             if is_opt_step:
                 self._global_step += 1
 
-                pbar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{self._lr_scheduler.get_last_lr()[0]:.2e}")
+                pbar.set_postfix(
+                    loss=f"{loss.item():.4f}", lr=f"{self._lr_scheduler.get_last_lr()[0]:.2e}"
+                )
 
                 if self._wandb_run:
                     self._wandb_run.log(
@@ -1102,7 +1147,9 @@ class DistillationTrainer:
             self.save_quantized_model()
 
         if _is_global_rank0():
-            logger.info(f"Training complete at step {self._global_step}. Elapsed: {elapsed / 60:.1f} min")
+            logger.info(
+                f"Training complete at step {self._global_step}. Elapsed: {elapsed / 60:.1f} min"
+            )
             if saved_path:
                 logger.info(f"Model saved to: {saved_path}")
 

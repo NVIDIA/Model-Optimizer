@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Pluggable interfaces for model-specific components.
 
 Three protocols define the contract between the unified trainer and model backends:
@@ -77,9 +92,7 @@ class TrainingForwardAdapter(Protocol):
         """Run the model and return prediction as a single Tensor."""
         ...
 
-    def compute_task_loss(
-        self, pred: Tensor, targets: Tensor, loss_mask: Tensor
-    ) -> Tensor:
+    def compute_task_loss(self, pred: Tensor, targets: Tensor, loss_mask: Tensor) -> Tensor:
         """Compute flow-matching task loss (typically masked MSE)."""
         ...
 
@@ -93,9 +106,7 @@ class InferencePipeline(Protocol):
     - VAE: kept on CPU during training, moved to GPU briefly during generate().
     """
 
-    def load_components(
-        self, model_config: Any, device: str, dtype: torch.dtype
-    ) -> None:
+    def load_components(self, model_config: Any, device: str, dtype: torch.dtype) -> None:
         """Load text encoder, VAE, and other inference components.
 
         Args:

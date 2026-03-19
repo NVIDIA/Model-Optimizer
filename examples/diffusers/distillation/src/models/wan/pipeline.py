@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Wan2.2 inference pipeline for validation video generation and data preprocessing.
 
 Wraps the official Wan2.2 T5 encoder, VAE, and denoising loop to work with
@@ -43,9 +58,7 @@ class WanInferencePipeline:
         self._var = get_variant_config(variant)
         self._config = None
 
-    def load_components(
-        self, model_config, device: str, dtype: torch.dtype
-    ) -> None:
+    def load_components(self, model_config, device: str, dtype: torch.dtype) -> None:
         if not WAN_AVAILABLE:
             raise ImportError("The 'wan' package is required for the Wan model backend.")
 
@@ -82,10 +95,12 @@ class WanInferencePipeline:
             for prompt in prompts:
                 ctx_pos = self._text_encoder([prompt], torch.device(device))
                 ctx_neg = self._text_encoder([negative_prompt], torch.device(device))
-                cached.append(CachedEmbeddings(
-                    positive={"context": ctx_pos[0].cpu()},
-                    negative={"context": ctx_neg[0].cpu()},
-                ))
+                cached.append(
+                    CachedEmbeddings(
+                        positive={"context": ctx_pos[0].cpu()},
+                        negative={"context": ctx_neg[0].cpu()},
+                    )
+                )
         self._text_encoder.model.cpu()
         return cached
 
@@ -167,18 +182,27 @@ class WanInferencePipeline:
                     timestep_expanded = timestep.expand(1, seq_len)
 
                     noise_pred_cond = model(
-                        latents, t=timestep_expanded, context=context, seq_len=seq_len,
+                        latents,
+                        t=timestep_expanded,
+                        context=context,
+                        seq_len=seq_len,
                     )[0]
                     noise_pred_uncond = model(
-                        latents, t=timestep_expanded, context=context_null, seq_len=seq_len,
+                        latents,
+                        t=timestep_expanded,
+                        context=context_null,
+                        seq_len=seq_len,
                     )[0]
                     noise_pred = noise_pred_uncond + guidance_scale * (
                         noise_pred_cond - noise_pred_uncond
                     )
 
                     temp_x0 = scheduler.step(
-                        noise_pred.unsqueeze(0), t, latent.unsqueeze(0),
-                        return_dict=False, generator=generator
+                        noise_pred.unsqueeze(0),
+                        t,
+                        latent.unsqueeze(0),
+                        return_dict=False,
+                        generator=generator,
                     )[0]
                     latent = temp_x0.squeeze(0)
                     latents = [latent]

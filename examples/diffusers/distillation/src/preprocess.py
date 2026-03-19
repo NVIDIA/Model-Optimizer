@@ -1,4 +1,19 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Preprocess raw videos + captions into precomputed latents + text embeddings.
 
 Two-phase pipeline (only one heavy model on GPU at a time):
@@ -67,17 +82,37 @@ def load_video(path: str) -> torch.Tensor:
 
 def main():
     parser = argparse.ArgumentParser(description="Preprocess dataset for distillation training")
-    parser.add_argument("--model_name", type=str, required=True, help="Model backend name (e.g. 'wan')")
+    parser.add_argument(
+        "--model_name", type=str, required=True, help="Model backend name (e.g. 'wan')"
+    )
+    parser.add_argument(
+        "--model_variant",
+        type=str,
+        default=None,
+        help="Model variant (e.g. 'ti2v-5B', 't2v-A14B' for Wan)",
+    )
     parser.add_argument("--model_path", type=str, required=True, help="Path to model checkpoint")
     parser.add_argument(
-        "--text_encoder_path", type=str, default=None,
+        "--text_encoder_path",
+        type=str,
+        default=None,
         help="Path to text encoder model (e.g. Gemma dir for LTX-2)",
     )
-    parser.add_argument("--dataset", type=str, required=True, help="Path to dataset file (.json/.jsonl/.csv)")
-    parser.add_argument("--output_dir", type=str, required=True, help="Output directory for precomputed data")
-    parser.add_argument("--video_column", type=str, default="video", help="Column name for video paths")
-    parser.add_argument("--caption_column", type=str, default="caption", help="Column name for captions")
-    parser.add_argument("--dtype", type=str, default="bfloat16", choices=["bfloat16", "float16", "float32"])
+    parser.add_argument(
+        "--dataset", type=str, required=True, help="Path to dataset file (.json/.jsonl/.csv)"
+    )
+    parser.add_argument(
+        "--output_dir", type=str, required=True, help="Output directory for precomputed data"
+    )
+    parser.add_argument(
+        "--video_column", type=str, default="video", help="Column name for video paths"
+    )
+    parser.add_argument(
+        "--caption_column", type=str, default="caption", help="Column name for captions"
+    )
+    parser.add_argument(
+        "--dtype", type=str, default="bfloat16", choices=["bfloat16", "float16", "float32"]
+    )
     parser.add_argument("--batch_size", type=int, default=1)
     args = parser.parse_args()
 
@@ -92,7 +127,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Get model backend (we only need the inference pipeline)
-    _, _, pipeline_cls = get_model_backend(args.model_name)
+    _, _, pipeline_cls = get_model_backend(args.model_name, variant=args.model_variant)
     if pipeline_cls is None:
         raise ValueError(f"Model '{args.model_name}' has no inference pipeline for preprocessing")
     pipeline = pipeline_cls()
@@ -126,7 +161,9 @@ def main():
                 text_embed_key = next(iter(emb.positive))
             text_embeddings.append(emb.positive[text_embed_key])
         if (i + args.batch_size) % 100 == 0:
-            logger.info(f"  Text encoding: {min(i + args.batch_size, len(captions))}/{len(captions)}")
+            logger.info(
+                f"  Text encoding: {min(i + args.batch_size, len(captions))}/{len(captions)}"
+            )
 
     # Unload text encoder to free memory for VAE
     pipeline.unload_text_encoder()

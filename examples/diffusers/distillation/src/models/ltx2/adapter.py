@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """LTX-2 training forward adapter.
 
 Handles patchification, Modality construction, position generation,
@@ -42,9 +57,7 @@ class LTX2TrainingForwardAdapter:
     MOCK_LATENT_SHAPE: tuple[int, ...] = (128, 4, 32, 32)
     MOCK_TEXT_EMBED_DIM: int = 3840
 
-    def __init__(
-        self, fps: float = 25.0, first_frame_conditioning_p: float = 0.0
-    ) -> None:
+    def __init__(self, fps: float = 25.0, first_frame_conditioning_p: float = 0.0) -> None:
         from ltx_core.components.patchifiers import VideoLatentPatchifier
         from ltx_core.types import SpatioTemporalScaleFactors
 
@@ -59,9 +72,9 @@ class LTX2TrainingForwardAdapter:
         noise: Tensor,
         timesteps: Tensor,
     ) -> StrategyOutputs:
-        latents = batch["latents"]         # [B, C, F, H, W]
-        text_embeds = batch["text_embeds"] # [B, L, D]  (post-connector)
-        text_mask = batch.get("text_mask") # [B, L] or None
+        latents = batch["latents"]  # [B, C, F, H, W]
+        text_embeds = batch["text_embeds"]  # [B, L, D]  (post-connector)
+        text_mask = batch.get("text_mask")  # [B, L] or None
 
         b, _c, n_f, n_h, n_w = latents.shape
         device = latents.device
@@ -79,16 +92,12 @@ class LTX2TrainingForwardAdapter:
         seq_len = noisy_patchified.shape[1]
 
         # First-frame conditioning mask [B, seq_len]
-        conditioning_mask = self._create_conditioning_mask(
-            b, seq_len, n_h, n_w, device
-        )
+        conditioning_mask = self._create_conditioning_mask(b, seq_len, n_h, n_w, device)
 
         # Replace conditioning tokens with clean latents
         if conditioning_mask.any():
             cond_expanded = conditioning_mask.unsqueeze(-1)
-            noisy_patchified = torch.where(
-                cond_expanded, clean_patchified, noisy_patchified
-            )
+            noisy_patchified = torch.where(cond_expanded, clean_patchified, noisy_patchified)
 
         # Per-token timesteps: 0 for conditioning tokens, sigma for target tokens
         per_token_ts = timesteps.view(-1, 1).expand(-1, seq_len).clone()
@@ -129,9 +138,7 @@ class LTX2TrainingForwardAdapter:
         video_pred, _audio_pred = model(**inputs.forward_kwargs)
         return video_pred  # [B, seq_len, C]
 
-    def compute_task_loss(
-        self, pred: Tensor, targets: Tensor, loss_mask: Tensor
-    ) -> Tensor:
+    def compute_task_loss(self, pred: Tensor, targets: Tensor, loss_mask: Tensor) -> Tensor:
         loss = (pred - targets).pow(2)
         if loss_mask is not None and loss_mask.numel() > 0:
             mask = loss_mask.unsqueeze(-1).float()

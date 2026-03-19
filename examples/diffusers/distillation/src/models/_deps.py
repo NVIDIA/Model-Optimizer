@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Optional dependency availability flags for model backends.
 
 Usage in model files::
@@ -6,6 +21,7 @@ Usage in model files::
 
     if WAN_AVAILABLE:
         from wan.modules.model import WanModel
+
         ...
 """
 
@@ -44,6 +60,7 @@ class _LazyStubModule(types.ModuleType):
                 f"Attempted to use '{name}' from stub module '{self.__name__}'. "
                 f"Install '{self.__name__}' to use this functionality."
             )
+
         _unavailable.__name__ = name
         _unavailable.__qualname__ = f"{self.__name__}.{name}"
         return _unavailable
@@ -60,8 +77,13 @@ def _stub_missing_wan_deps() -> None:
     """
     _STUBS = (
         "decord",
-        "sam2", "sam2.build_sam", "sam2.modeling", "sam2.modeling.sam2_base",
-        "sam2.sam2_video_predictor", "sam2.utils", "sam2.utils.misc",
+        "sam2",
+        "sam2.build_sam",
+        "sam2.modeling",
+        "sam2.modeling.sam2_base",
+        "sam2.sam2_video_predictor",
+        "sam2.utils",
+        "sam2.utils.misc",
         "sam_utils",
     )
     for mod_name in _STUBS:

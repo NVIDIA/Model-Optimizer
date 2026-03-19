@@ -64,11 +64,15 @@ Preprocess raw videos + captions into latent space:
 ```bash
 python -m src.preprocess \
     --model_name wan \
-    --model_path /path/to/Wan2.2-TI2V-5B \
     --model_variant ti2v-5B \
-    --input_dir /path/to/videos \
+    --model_path /path/to/Wan2.2-TI2V-5B \
+    --dataset /path/to/metadata.json \
     --output_dir /path/to/preprocessed
 ```
+
+The `--model_variant` flag selects the correct VAE for encoding (e.g. `ti2v-5B`
+uses a different VAE than `t2v-A14B`). See the model table above for valid variants.
+The metadata file is a JSON array of `{"video": "/path/to/video.mp4", "caption": "..."}` entries.
 
 ### QAD Training
 

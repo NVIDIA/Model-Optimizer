@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """LTX-2 inference pipeline for validation video generation and data preprocessing.
 
 Uses ltx-core components (VideoLatentTools, LTX2Scheduler, X0Model, etc.) and
@@ -57,11 +72,11 @@ class LTX2InferencePipeline:
         self._vae_decoder = None
         self._vae_encoder = None
 
-    def load_components(
-        self, model_config, device: str, dtype: torch.dtype
-    ) -> None:
+    def load_components(self, model_config, device: str, dtype: torch.dtype) -> None:
         if not LTX_TRAINER_AVAILABLE:
-            raise ImportError("The 'ltx_trainer' package is required for LTX-2 inference components.")
+            raise ImportError(
+                "The 'ltx_trainer' package is required for LTX-2 inference components."
+            )
 
         checkpoint_path = model_config.model_path
         text_encoder_path = model_config.text_encoder_path
@@ -81,14 +96,10 @@ class LTX2InferencePipeline:
             )
 
         logger.info("Loading video VAE decoder ...")
-        self._vae_decoder = load_video_vae_decoder(
-            checkpoint_path, device="cpu", dtype=dtype
-        )
+        self._vae_decoder = load_video_vae_decoder(checkpoint_path, device="cpu", dtype=dtype)
 
         logger.info("Loading video VAE encoder ...")
-        self._vae_encoder = load_video_vae_encoder(
-            checkpoint_path, device="cpu", dtype=dtype
-        )
+        self._vae_encoder = load_video_vae_encoder(checkpoint_path, device="cpu", dtype=dtype)
 
         logger.info("LTX-2 inference components loaded")
 
@@ -110,16 +121,18 @@ class LTX2InferencePipeline:
                 # __call__ returns (video_embeds, audio_embeds, mask) -- post-connector
                 v_pos, a_pos, _ = self._text_encoder(prompt)
                 v_neg, a_neg, _ = self._text_encoder(negative_prompt)
-                cached.append(CachedEmbeddings(
-                    positive={
-                        "video_context": v_pos.cpu(),
-                        "audio_context": a_pos.cpu(),
-                    },
-                    negative={
-                        "video_context": v_neg.cpu(),
-                        "audio_context": a_neg.cpu(),
-                    },
-                ))
+                cached.append(
+                    CachedEmbeddings(
+                        positive={
+                            "video_context": v_pos.cpu(),
+                            "audio_context": a_pos.cpu(),
+                        },
+                        negative={
+                            "video_context": v_neg.cpu(),
+                            "audio_context": a_neg.cpu(),
+                        },
+                    )
+                )
 
         # Keep connectors but offload heavy backbone
         self._text_encoder.model.to("cpu")
@@ -182,7 +195,11 @@ class LTX2InferencePipeline:
         scale_factors = SpatioTemporalScaleFactors.default()
 
         pixel_shape = VideoPixelShape(
-            batch=1, frames=num_frames, height=height, width=width, fps=fps,
+            batch=1,
+            frames=num_frames,
+            height=height,
+            width=width,
+            fps=fps,
         )
         video_tools = VideoLatentTools(
             patchifier=patchifier,
@@ -207,9 +224,7 @@ class LTX2InferencePipeline:
             v_ctx_pos = emb.positive["video_context"].to(device)
             v_ctx_neg = emb.negative["video_context"].to(device)
 
-            video_state = video_tools.create_initial_state(
-                device=device, dtype=torch.bfloat16
-            )
+            video_state = video_tools.create_initial_state(device=device, dtype=torch.bfloat16)
             video_clean_state = video_state
             video_state = noiser(latent_state=video_state, noise_scale=1.0)
 
@@ -240,18 +255,13 @@ class LTX2InferencePipeline:
                     # CFG
                     if cfg_guider.enabled() and v_ctx_neg is not None:
                         video_neg = replace(video_mod, context=v_ctx_neg)
-                        neg_video, _ = x0_model(
-                            video=video_neg, audio=None, perturbations=None
-                        )
-                        denoised_video = denoised_video + cfg_guider.delta(
-                            pos_video, neg_video
-                        )
+                        neg_video, _ = x0_model(video=video_neg, audio=None, perturbations=None)
+                        denoised_video = denoised_video + cfg_guider.delta(pos_video, neg_video)
 
                     # Conditioning mask
                     denoised_video = (
                         denoised_video * video_state.denoise_mask
-                        + video_clean_state.latent.float()
-                        * (1 - video_state.denoise_mask)
+                        + video_clean_state.latent.float() * (1 - video_state.denoise_mask)
                     )
 
                     # Euler step

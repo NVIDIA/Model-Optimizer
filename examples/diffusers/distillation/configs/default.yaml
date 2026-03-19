@@ -10,7 +10,7 @@ distillation:
   distillation_loss_type: "mse"
 
   # ModelOpt quantization (set to null to skip)
-  quant_cfg:                     # e.g. "FP8_DEFAULT_CFG", "INT8_DEFAULT_CFG"
+  quant_cfg:                     # e.g. "NVFP4_DEFAULT_CFG", "FP8_DEFAULT_CFG"
   calibration_size: 128
   calibration_n_steps: 30
   calibration_guidance_scale: 4.0
@@ -25,7 +25,7 @@ distillation:
   layer_distillation_loss_type: "mse"  # "mse" or "cosine"
   layer_distillation_normalize: true   # L2-normalize features (scale-invariant)
 
-  resume_from_checkpoint: "latest"
+  resume_from_checkpoint:        # set to "latest" for auto-resume across Slurm jobs
 
   use_mock_data: false
   mock_data_samples: 100
@@ -41,7 +41,7 @@ optimization:
   warmup_steps: 100
 
 data:
-  preprocessed_data_root: "/path/to/preprocessed/data"
+  preprocessed_data_root:        # path to preprocessed latents (see preprocess.py)
   num_dataloader_workers: 2
 
 validation:

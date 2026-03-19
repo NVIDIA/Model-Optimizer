@@ -1,4 +1,19 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Create a tiny synthetic dataset for testing the preprocess pipeline.
 
 Generates a few short random-noise MP4 videos + a metadata JSON file.
@@ -16,8 +31,14 @@ from pathlib import Path
 import torch
 
 
-def create_test_videos(output_dir: str, num_samples: int = 4, num_frames: int = 17,
-                       height: int = 128, width: int = 128, fps: float = 24.0) -> None:
+def create_test_videos(
+    output_dir: str,
+    num_samples: int = 4,
+    num_frames: int = 17,
+    height: int = 128,
+    width: int = 128,
+    fps: float = 24.0,
+) -> None:
     import torchvision.io as tvio
 
     out = Path(output_dir)
@@ -43,10 +64,12 @@ def create_test_videos(output_dir: str, num_samples: int = 4, num_frames: int = 
         video_path = video_dir / f"video_{i:04d}.mp4"
         tvio.write_video(str(video_path), frames, fps=fps)
 
-        samples.append({
-            "video": str(video_path),
-            "caption": captions[i % len(captions)],
-        })
+        samples.append(
+            {
+                "video": str(video_path),
+                "caption": captions[i % len(captions)],
+            }
+        )
 
     metadata_path = out / "metadata.json"
     with open(metadata_path, "w") as f:
