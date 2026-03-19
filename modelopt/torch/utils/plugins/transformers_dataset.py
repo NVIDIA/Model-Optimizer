@@ -20,6 +20,7 @@ import itertools
 import os
 
 import torch
+import torch.nn.functional as F
 import transformers
 from datasets import load_dataset
 from transformers.trainer_pt_utils import LabelSmoother
@@ -112,6 +113,13 @@ class ShardedDataset(torch.utils.data.Dataset):
             self._raw_samples = shard
 
 
+def _get_bucket_size(seq_len: int, max_len: int, granularity: int) -> int:
+    """Round seq_len up to the nearest multiple of granularity, capped at max_len."""
+    if granularity <= 0:
+        return max_len
+    return min(((seq_len + granularity - 1) // granularity) * granularity, max_len)
+
+
 class LanguageDataCollator:
     """Data collator for language modeling tasks.
 
@@ -129,6 +137,7 @@ class LanguageDataCollator:
         answer_only_loss: bool = False,
         json_key: str = "text",
         return_labels: bool = False,
+        bucket_granularity: int = 0,
     ):
         """Initialize the LanguageDataset."""
         if not isinstance(tokenizer, transformers.PreTrainedTokenizerBase):
@@ -143,6 +152,7 @@ class LanguageDataCollator:
         self.answer_only_loss = answer_only_loss
         self.json_key = json_key
         self.return_labels = return_labels
+        self.bucket_granularity = bucket_granularity
 
         if chat_template is not None:
             self.tokenizer.chat_template = chat_template
@@ -172,16 +182,19 @@ class LanguageDataCollator:
         )
 
     def _process_chat_sample(self, examples: list):
+        padding = "longest" if self.bucket_granularity > 0 else "max_length"
         tokenized_examples = self.tokenizer.apply_chat_template(
             examples,
             return_tensors="pt",
             return_dict=True,
-            padding="max_length",
+            padding=padding,
             truncation=True,
             max_length=self.train_len,
             add_generation_prompt=self.add_generation_prompt,
             return_assistant_tokens_mask=self.answer_only_loss,
         )
+        if self.bucket_granularity > 0:
+            tokenized_examples = self._pad_to_bucket(tokenized_examples)
         if self.return_labels:
             input_ids = tokenized_examples["input_ids"]
             labels = input_ids.new_full(input_ids.shape, IGNORE_TOKEN_ID)
@@ -189,14 +202,30 @@ class LanguageDataCollator:
             tokenized_examples["labels"] = labels
         return tokenized_examples
 
+    def _pad_to_bucket(self, tokenized_examples):
+        cur_len = tokenized_examples["input_ids"].shape[1]
+        bucket_len = _get_bucket_size(cur_len, self.train_len, self.bucket_granularity)
+        pad_size = bucket_len - cur_len
+        if pad_size > 0:
+            tokenized_examples["input_ids"] = F.pad(
+                tokenized_examples["input_ids"], (0, pad_size), value=self.tokenizer.pad_token_id
+            )
+            tokenized_examples["attention_mask"] = F.pad(
+                tokenized_examples["attention_mask"], (0, pad_size), value=0
+            )
+        return tokenized_examples
+
     def _process_text_sample(self, examples: list):
+        padding = "longest" if self.bucket_granularity > 0 else "max_length"
         tokenized_examples = self.tokenizer(
             examples,
             return_tensors="pt",
-            padding="max_length",
+            padding=padding,
             truncation=True,
             max_length=self.train_len,
         )
+        if self.bucket_granularity > 0:
+            tokenized_examples = self._pad_to_bucket(tokenized_examples)
         return tokenized_examples
 
     def __call__(self, examples):

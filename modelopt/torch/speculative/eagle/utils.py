@@ -35,6 +35,8 @@
 
 """Eagle model utils."""
 
+from contextlib import nullcontext
+
 import torch
 
 
@@ -70,3 +72,17 @@ def expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: int | None = No
     inverted_mask = 1.0 - expanded_mask
 
     return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
+
+
+def maybe_nvtx_range(*args, **kwargs):
+    """Helper function to create NVTX ranges if NVTX is available."""
+    try:
+        import torch.cuda.nvtx as nvtx
+
+        nvtx.range_push("nvtx init")
+        nvtx.range_pop()
+
+        return nvtx.range(*args, **kwargs)
+    except Exception:
+        # If NVTX is not available, return a no-op context manager
+        return nullcontext()

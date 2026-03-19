@@ -111,6 +111,15 @@ class TrainingArguments(transformers.TrainingArguments):
     )
     cp_size: int = field(default=1, metadata={"help": "Context parallelism size."})
     dp_shard_size: int = field(default=1, metadata={"help": "Data parallelism shard size."})
+    bucket_granularity: int = field(
+        default=512,
+        metadata={
+            "help": (
+                "Pad sequences to the nearest multiple of this value instead of training_seq_len. "
+                "Set to 0 to disable (always pad to training_seq_len)."
+            )
+        },
+    )
 
 
 @dataclass
@@ -129,6 +138,10 @@ class EagleArguments:
     mix_hidden_states: bool = field(
         default=False,
         metadata={"help": "Whether to mix hidden states from previous TTT step."},
+    )
+    disable_torch_compile: bool = field(
+        default=False,
+        metadata={"help": "Disable torch.compile on eagle forward/loss methods."},
     )
     num_ttt_steps: int = field(
         default=3,
@@ -149,9 +162,10 @@ def train():
     model_args, data_args, training_args, medusa_args, eagle_args = (
         parser.parse_args_into_dataclasses()
     )
-    training_args.parallelism_config = ParallelismConfig(
-        cp_size=training_args.cp_size, dp_shard_size=training_args.dp_shard_size
-    )
+    if training_args.cp_size > 1 or training_args.dp_shard_size > 1:
+        training_args.parallelism_config = ParallelismConfig(
+            cp_size=training_args.cp_size, dp_shard_size=training_args.dp_shard_size
+        )
     if training_args.cp_size > 1:
         patch_ring_attention_for_ttt()
         # Specific patch to accelerate 1.12.0. Removable after move to 1.13.0
@@ -212,6 +226,7 @@ def train():
                 "eagle_decoder_type": eagle_args.eagle_decoder_type,
                 "eagle_offline": use_offline_training,
                 "eagle_mix_hidden_states": eagle_args.mix_hidden_states,
+                "eagle_use_torch_compile": not eagle_args.disable_torch_compile,
                 "eagle_ttt_steps": eagle_args.num_ttt_steps,
                 "eagle_architecture_config": custom_config,
             }
@@ -231,8 +246,16 @@ def train():
 
     print_rank_0("Loading dataset...")
     if training_args.mode == "eagle3":
+        bucket_gran = training_args.bucket_granularity
+        if bucket_gran > 0 and training_args.cp_size > 1:
+            from math import lcm
+
+            bucket_gran = lcm(bucket_gran, training_args.cp_size)
         data_module = make_eagle_supervised_data_module(
-            tokenizer, data_args, train_len=training_args.training_seq_len
+            tokenizer,
+            data_args,
+            train_len=training_args.training_seq_len,
+            bucket_granularity=bucket_gran,
         )
 
     trainer = EagleTrainerWithAccLog(

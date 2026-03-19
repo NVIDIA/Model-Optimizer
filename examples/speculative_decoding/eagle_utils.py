@@ -40,6 +40,7 @@ from modelopt.torch.utils.plugins.transformers_dataset import (
     LanguageDataCollator,
     ShardedDataset,
     VisionLanguageDataCollator,
+    _get_bucket_size,
 )
 
 try:
@@ -89,8 +90,9 @@ class OfflineSupervisedDataset(Dataset):
 class EagleOfflineDataCollator:
     """Data collator that truncate or pads data for offline training."""
 
-    def __init__(self, train_len):
+    def __init__(self, train_len, bucket_granularity=0):
         self.train_len = train_len
+        self.bucket_granularity = bucket_granularity
 
     def _pad_or_truncate(self, x: torch.Tensor, length: int, dim: int = 0):
         """Pad or truncate a tensor to length along a given dimension."""
@@ -110,13 +112,19 @@ class EagleOfflineDataCollator:
         return out
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
+        if self.bucket_granularity > 0:
+            batch_max = max(item["input_ids"].shape[0] for item in features)
+            pad_len = _get_bucket_size(batch_max, self.train_len, self.bucket_granularity)
+        else:
+            pad_len = self.train_len
+
         base_batch = {
-            k: torch.stack([self._pad_or_truncate(item[k], self.train_len) for item in features])
+            k: torch.stack([self._pad_or_truncate(item[k], pad_len) for item in features])
             for k in ["input_ids", "attention_mask", "loss_mask", "labels"]
         }
 
         base_model_outputs = {
-            k: torch.stack([self._pad_or_truncate(item[k], self.train_len) for item in features])
+            k: torch.stack([self._pad_or_truncate(item[k], pad_len) for item in features])
             for k in ["base_model_hidden_states", "aux_hidden_states"]
         }
 
@@ -131,6 +139,7 @@ def make_eagle_supervised_data_module(
     tokenizer: transformers.PreTrainedTokenizer,
     data_args,
     train_len=None,
+    bucket_granularity=0,
 ) -> dict:
     if data_args.offline_data_path is None:
         train_dataset = ShardedDataset("json", data_files=data_args.data_path)
@@ -140,6 +149,7 @@ def make_eagle_supervised_data_module(
                 tokenizer=tokenizer,
                 train_len=train_len,
                 return_labels=True,
+                bucket_granularity=bucket_granularity,
             )
         else:
             data_collator = VisionLanguageDataCollator(
@@ -159,7 +169,9 @@ def make_eagle_supervised_data_module(
             raise ValueError(f"No .pt files found in {data_args.offline_data_path}")
 
         train_dataset = OfflineSupervisedDataset(dumped_files)
-        data_collator = EagleOfflineDataCollator(train_len=train_len)
+        data_collator = EagleOfflineDataCollator(
+            train_len=train_len, bucket_granularity=bucket_granularity
+        )
 
     return {
         "train_dataset": train_dataset,
