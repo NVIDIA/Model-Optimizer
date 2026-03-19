@@ -20,20 +20,16 @@ import dataclasses
 import warnings
 from typing import Any
 
-from transformers.utils import is_flash_attn_2_available  # , is_torch_sdpa_available
-
 from .block_config import BlockConfig
 from .transformers_4_44_2__configuration_llama import LlamaConfig
 
 # fakes imports to make AutoConfig infer dependencies
 from .transformers_4_44_2__modeling_rope_utils import rope_config_validation
-from .transformers_4_51_3__cache_utils import HybridChunkedCache
 from .transformers_4_51_3__configuration_llama4 import Llama4Config
 
 # make sure that auto-formatting doesn't remove the fake imports
 rope_config_validation
 Llama4Config
-HybridChunkedCache
 
 
 class DeciLMConfig(LlamaConfig):
