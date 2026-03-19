@@ -39,17 +39,13 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch import nn
-from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers import GenerationConfig
-from transformers.generation.utils import GenerationMixin
 from transformers.modeling_utils import PreTrainedModel
-from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
 from transformers.utils import (
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
     is_flash_attn_greater_or_equal_2_10,
     logging,
-    replace_return_docstrings,
 )
 
 from .block_config import AttentionConfig, FFNConfig, MambaConfig, MoEConfig
@@ -61,12 +57,7 @@ from .transformers_4_44_2__modeling_attn_mask_utils import AttentionMaskConverte
 from .transformers_4_44_2__modeling_flash_attention_utils_backward_compat import (
     _flash_attention_forward,
 )
-from .transformers_4_44_2__modeling_outputs import (
-    BaseModelOutputWithPast,
-    CausalLMOutputWithPast,
-    MoeCausalLMOutputWithPast,
-    MoeModelOutputWithPast,
-)
+from .transformers_4_44_2__modeling_outputs import BaseModelOutputWithPast, MoeModelOutputWithPast
 from .transformers_4_44_2__modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from .transformers_4_44_2__pytorch_utils import ALL_LAYERNORM_LAYERS
 from .transformers_4_51_3__modeling_llama4_attention import Llama4TextAttention, Llama4TextConfig
