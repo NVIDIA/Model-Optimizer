@@ -118,6 +118,10 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       MIX_HIDDEN_STATES="${1#*=}"
       ;;
+    --tensorboard*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      ENABLE_TENSORBOARD="${1#*=}"
+      ;;
     *)
       >&2 printf "Error: Invalid argument ${1#*=}\n"
       exit 1
@@ -159,7 +163,7 @@ LOG_STEPS=${LOG_STEPS:-100}
 DRAFT_VOCAB_CACHE=${DRAFT_VOCAB_CACHE:-""}
 MIX_HIDDEN_STATES=${MIX_HIDDEN_STATES:-"False"}
 NUM_TTT_STEPS=${NUM_TTT_STEPS:-3}
-
+ENABLE_TENSORBOARD=${ENABLE_TENSORBOARD:-"False"}
 
 if [[ "$MODE" == "eagle3" ]]; then
   if [[ -n "$EAGLE_CONFIG" ]]; then
@@ -216,6 +220,12 @@ else
   MULTI_NODE_ARGS=""
 fi
 
+if [[ "$ENABLE_TENSORBOARD" != "False" ]]; then
+  OBSERVABILITY_ARGS="--report_to tensorboard"
+else
+  OBSERVABILITY_ARGS=""
+fi
+
 # Disable tokenizers parallelism to avoid warning
 export TOKENIZERS_PARALLELISM=False
 CMD="accelerate launch $MULTI_NODE_ARGS --mixed_precision bf16 ${SCRIPT_DIR}/main.py \
@@ -253,6 +263,7 @@ CMD="accelerate launch $MULTI_NODE_ARGS --mixed_precision bf16 ${SCRIPT_DIR}/mai
     --cp_size $CP_SIZE \
     --dp_shard_size $DP_SHARD_SIZE \
     --num_ttt_steps $NUM_TTT_STEPS \
+    $OBSERVABILITY_ARGS \
 "
 
 start_time=$(date +%s)
