@@ -13,35 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Replacement library for efficiently loading and managing layer-replaced DeciLM models.
-- Uses replacement_utils for parsing, sorting, and analyzing layer replacement configurations
+Replacement library for loading models with layer replacements (AnyModel / sharded HF checkpoints).
+
+Uses replacement_utils for parsing, sorting, and analyzing layer replacement configurations.
 """
 # mypy: ignore-errors
 
 import copy
 import json
-import re
 import tempfile
 from pathlib import Path
 from typing import List, Optional
 
 import torch
 from immutabledict import immutabledict
-from lru import LRU
 from safetensors import safe_open
-from safetensors.torch import load_file as safe_load_file
 from torch import nn
 from transformers import PretrainedConfig, PreTrainedModel
 
-import modelopt.torch.utils.distributed as dist
 from modelopt.torch.puzzletron.anymodel.converter.converter import Converter
 from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.modeling_decilm import (
-    DeciLMDecoderLayer,
-    DeciLMMultiDecoderLayer,
-    DeciLMRMSNorm,
-    LMHead,
-)
+from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.modeling_decilm import DeciLMRMSNorm, LMHead
 from modelopt.torch.puzzletron.replacement_library.replacement_utils import (
     extract_block_configs_and_locations,
     parse_layer_replacement,
@@ -51,8 +43,6 @@ from modelopt.torch.puzzletron.replacement_library.replacement_utils import (
 from modelopt.torch.puzzletron.tools.checkpoint_utils import (
     PTH_SUBBLOCKS_DIR_NAME,
     SAFETENSORS_SUBBLOCKS_DIR_NAME,
-    infer_weights_dtype,
-    init_empty_module,
     init_module_with_state_dict,
     load_model_config,
 )
@@ -77,10 +67,6 @@ class ReplacementLibrary:
         self.model_config_overrides = (
             immutabledict(model_config_overrides) if (model_config_overrides is not None) else None
         )
-
-        self._loaded_replacements: dict[str, nn.ModuleList] = LRU(
-            size=256
-        )  # least-recently-used dict: a dict of fixed size that evicts old items
 
         self._dtype = None
 
@@ -237,77 +223,6 @@ class ReplacementLibrary:
         dedupped_layer_replacements = sort_replacements(dedupped_layer_replacements)
         return dedupped_layer_replacements
 
-    def get_block(
-        self, layer_replacement: dict, block_idx_in_replacement: int
-    ) -> DeciLMDecoderLayer | DeciLMMultiDecoderLayer:
-        if str(layer_replacement) not in self._loaded_replacements.keys():
-            self._loaded_replacements[str(layer_replacement)] = self._load_layer_replacement(
-                layer_replacement
-            )
-        module_list = self._loaded_replacements[str(layer_replacement)]
-        block = module_list[block_idx_in_replacement]
-        return block
-
-    def _load_layer_replacement(self, layer_replacement: dict) -> nn.ModuleList:
-        state_dict = dict()
-        for weights_path in layer_replacement["weight_paths"]:
-            if weights_path.suffix == ".safetensors":
-                curr_state_dict = safe_load_file(weights_path)
-            elif weights_path.suffix == ".pth":
-                curr_state_dict = torch.load(weights_path, weights_only=True)
-            else:
-                raise ValueError(f"Unrecognized suffix of {weights_path=}")
-            for param_name in curr_state_dict.keys():
-                assert param_name not in state_dict, (
-                    f"Duplicate entries for {param_name=} in {layer_replacement=}"
-                )
-            state_dict.update(curr_state_dict)
-
-        if len(state_dict) > 0:
-            block_indices = [
-                int(re.findall(r"^model\.layers\.(\d+)\.", param_name)[0])
-                for param_name in state_dict.keys()
-            ]
-            assert sorted(set(block_indices)) == list(
-                range(min(block_indices), max(block_indices) + 1)
-            ), (
-                f"Block indices in loaded weight files must be consecutive, but found {sorted(set(block_indices))} in {layer_replacement=}"
-            )
-
-            min_block_idx = min(block_indices)
-
-            state_dict = {
-                param_name.replace(
-                    f"model.layers.{block_idx}.", f"{block_idx - min_block_idx}."
-                ): param_weight
-                for block_idx, (param_name, param_weight) in zip(block_indices, state_dict.items())
-            }
-
-        dtype = infer_weights_dtype(state_dict)
-        model_config = copy.deepcopy(self.model_config)
-        model_config.block_configs = layer_replacement["child_block_configs"]
-        model_config.num_hidden_layers = len(layer_replacement["child_block_configs"])
-
-        module_list = nn.ModuleList(
-            [
-                (
-                    init_empty_module(DeciLMDecoderLayer, dtype, model_config, layer_idx)
-                    if (block_config.parallel_blocks is None)
-                    else init_empty_module(DeciLMMultiDecoderLayer, dtype, model_config, layer_idx)
-                )
-                for layer_idx, block_config in enumerate(layer_replacement["child_block_configs"])
-            ]
-        )
-
-        module_list.load_state_dict(state_dict, strict=True)
-        return module_list
-
-    def _move_inactive_blocks_to_cpu(self, active_blocks: list[nn.Module]) -> None:
-        for module_list in self._loaded_replacements.values():
-            for module in module_list:
-                if module not in active_blocks:
-                    module.to("cpu")
-
     def get_embedding(self) -> nn.Embedding:
         if self._embedding is None:
             state_dict = {
@@ -403,20 +318,3 @@ def _error_message_ensure_split(checkpoint_dir: Path) -> str:
         f"Encountered unsplit checkpoint dir '{checkpoint_dir}', "
         f"please call `ensure_all_checkpoints_are_split`"
     )
-
-
-def _get_owned_block_indexes(n_layer: int) -> list[int]:
-    last_process_blocks = np.array([n_layer - 1])  # less params in last gpu, leave room for logits
-
-    if dist.size() == 1:
-        # Only one process: assign everything (including the "last process" block) to rank 0
-        owned_block_indexes_per_process = [
-            np.concatenate([np.arange(n_layer - 1), last_process_blocks])
-        ]
-    else:
-        # Multiple processes: split n_layer-1 blocks, reserve the last for "last process"
-        owned_block_indexes_per_process = np.array_split(range(n_layer - 1), dist.size() - 1)
-        owned_block_indexes_per_process.append(last_process_blocks)
-
-    owned_block_indexes = owned_block_indexes_per_process[dist.rank()].tolist()
-    return owned_block_indexes
