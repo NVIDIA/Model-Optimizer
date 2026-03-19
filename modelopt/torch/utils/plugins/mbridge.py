@@ -59,6 +59,7 @@ def load_mbridge_model_from_hf(
     trust_remote_code: bool = False,
     provider_overrides: dict[str, Any] | None = None,
     init_model_parallel: bool = True,
+    moe_grouped_gemm: bool = True,
 ) -> tuple[
     AutoBridge,
     GPTModelProvider | MambaModelProvider,
@@ -73,6 +74,8 @@ def load_mbridge_model_from_hf(
         trust_remote_code: Whether to trust remote code.
         provider_overrides: Overrides for the provider.
         init_model_parallel: Whether to initialize model parallel.
+        moe_grouped_gemm: Whether to use grouped GEMM for MoE.
+            Pruning does not support grouped GEMM yet.
 
     Returns:
         A tuple of (bridge, provider, model, unwrapped_model, tokenizer).
@@ -94,11 +97,11 @@ def load_mbridge_model_from_hf(
 
     # disable moe_grouped_gemm in default TE spec until its supported
     if isinstance(provider, MambaModelProvider):
-        provider.mamba_stack_spec = get_te_mamba_stack_spec(moe_grouped_gemm=False)
+        provider.mamba_stack_spec = get_te_mamba_stack_spec(moe_grouped_gemm=moe_grouped_gemm)
     else:
         provider.transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
             num_experts=provider.num_moe_experts,
-            moe_grouped_gemm=False,
+            moe_grouped_gemm=moe_grouped_gemm,
             qk_layernorm=provider.qk_layernorm,
         )
     provider.finalize()

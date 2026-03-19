@@ -240,6 +240,7 @@ def main(args: argparse.Namespace):
             "seq_length": args.seq_length,
         },
         init_model_parallel=True,
+        moe_grouped_gemm=False,
     )
     print_rank_0(f"\nPruning model (showing PP rank0): {unwrapped_model}")
     print_rank_0(

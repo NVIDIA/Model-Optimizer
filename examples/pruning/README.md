@@ -64,6 +64,7 @@ bridge, provider, model, unwrapped_model, tokenizer = load_mbridge_model_from_hf
         "pipeline_dtype": torch.bfloat16,
         "seq_length": 4096,
     },
+    moe_grouped_gemm=False,
 )
 
 # Set up the forward loop to run on 1024 train samples
