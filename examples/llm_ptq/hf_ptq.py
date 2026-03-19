@@ -15,9 +15,9 @@
 
 import argparse
 import copy
+import importlib.util
 import os
 import random
-import sys
 import time
 import warnings
 from typing import Any
@@ -594,7 +594,12 @@ def mono_quantize(
             if args.calib_with_images and is_nemotron_vl_model:
                 calibrate_loop = create_vlm_calibration_loop(full_model, calib_dataloader)
             else:
-                calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
+                calibrate_loop = create_forward_loop(
+                    dataloader=calib_dataloader,
+                    allowed_non_tensor_keys={"base_model_outputs"}
+                    if args.specdec_offline_dataset is not None
+                    else None,
+                )
 
         if calibration_only:
             language_model = mtq.calibrate(
@@ -950,14 +955,22 @@ def quantize_main(
     print(f"Use calib batch_size {args.batch_size}")
 
     if args.specdec_offline_dataset is not None:
-        sys.path.append(os.path.join(os.path.dirname(__file__), "../speculative_decoding"))
-        from eagle_utils import make_eagle_supervised_data_module
+        _eagle_utils_path = os.path.join(
+            os.path.dirname(__file__), "../speculative_decoding/eagle_utils.py"
+        )
+        _spec = importlib.util.spec_from_file_location("eagle_utils", _eagle_utils_path)
+        assert _spec is not None and _spec.loader is not None, (
+            f"Could not load eagle_utils from {_eagle_utils_path}"
+        )
+        _eagle_utils = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_eagle_utils)
+        make_eagle_supervised_data_module = _eagle_utils.make_eagle_supervised_data_module
 
         data_args = argparse.Namespace(
             vlm_processor=None,
             vlm_img_dir=None,
             offline_data_path=args.specdec_offline_dataset,
-            devlazy_preprocessice=True,
+            lazy_preprocess=True,
             sample_size=args.calib_size[0],
         )
         data_module = make_eagle_supervised_data_module(
@@ -1082,6 +1095,9 @@ def quantize_main(
         tokenizer,
         default_padding_side,
         default_pad_token,
+        # Offline speculative decoding models require a real sample from the dataset
+        # as the dummy input for the export forward pass (shape/type inference), since
+        # their input format (base_model_outputs, etc.) differs from standard models.
         offline_specdec_input=next(iter(calib_dataloader), None)
         if args.specdec_offline_dataset is not None
         else None,
