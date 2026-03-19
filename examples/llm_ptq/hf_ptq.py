@@ -1329,6 +1329,9 @@ def parse_args() -> argparse.Namespace:
     if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
 
+    if args.specdec_offline_dataset is not None and args.sparsity_fmt != "dense":
+        parser.error("--specdec_offline_dataset is only supported with --sparsity_fmt dense (PTQ).")
+
     return args
 
 
@@ -1384,4 +1387,10 @@ if __name__ == "__main__":
 
     args.dataset = args.dataset.split(",") if isinstance(args.dataset, str) else args.dataset
     args.calib_size = [int(num_sample) for num_sample in args.calib_size.split(",")]
+
+    if args.specdec_offline_dataset is not None and len(args.calib_size) != 1:
+        raise ValueError(
+            "--specdec_offline_dataset expects a single --calib value, not a comma-separated list."
+        )
+
     main(args)
