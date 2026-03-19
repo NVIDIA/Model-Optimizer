@@ -21,8 +21,9 @@ import json
 from copy import deepcopy
 from pathlib import Path
 
+from transformers import PretrainedConfig
+
 from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import BlockConfig
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 from modelopt.torch.puzzletron.mip.utils import sort_replacements
 
 
@@ -73,7 +74,7 @@ def weights_path_to_checkpoint_dir(weights_path: Path) -> Path:
 
 def replacement_is_teacher(
     layer_replacement: dict,
-    teacher_model_config: DeciLMConfig,
+    teacher_model_config: PretrainedConfig,
     teacher_checkpoint_dir: Path,
 ) -> bool:
     paths_all_teacher = all(
@@ -86,7 +87,7 @@ def replacement_is_teacher(
 
 def is_replacement_identical_to_teacher(
     layer_replacement: dict,
-    teacher_model_config: DeciLMConfig,
+    teacher_model_config: PretrainedConfig,
 ) -> bool:
     if len(layer_replacement["parent_layer_indices"]) == 1:
         block_idx = layer_replacement["parent_layer_indices"][0]
@@ -109,7 +110,7 @@ def is_replacement_identical_to_teacher(
 
 def split_replacements_to_teacher_and_student(
     replacements: list[dict],
-    teacher_model_config: DeciLMConfig,
+    teacher_model_config: PretrainedConfig,
     teacher_checkpoint_dir: Path,
 ) -> tuple[list[dict], list[dict]]:
     teacher_replacements, student_replacements = [], []
