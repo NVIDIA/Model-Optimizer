@@ -14,8 +14,6 @@
 # limitations under the License.
 """
 Replacement library for loading models with layer replacements (AnyModel / sharded HF checkpoints).
-
-Uses replacement_utils for parsing, sorting, and analyzing layer replacement configurations.
 """
 # mypy: ignore-errors
 
@@ -25,33 +23,23 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional
 
-import torch
 from immutabledict import immutabledict
 from safetensors import safe_open
-from torch import nn
 from transformers import PretrainedConfig, PreTrainedModel
 
 from modelopt.torch.puzzletron.anymodel.converter.converter import Converter
 from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.modeling_decilm import DeciLMRMSNorm, LMHead
 from modelopt.torch.puzzletron.replacement_library.replacement_utils import (
     extract_block_configs_and_locations,
     parse_layer_replacement,
-    sort_replacements,
     weights_path_to_checkpoint_dir,
 )
 from modelopt.torch.puzzletron.tools.checkpoint_utils import (
-    PTH_SUBBLOCKS_DIR_NAME,
     SAFETENSORS_SUBBLOCKS_DIR_NAME,
-    init_module_with_state_dict,
     load_model_config,
 )
 from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import save_model_config
-from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import (
-    is_in_safetensors_format,
-    load_and_shard_model,
-    load_sharded_state_dict,
-)
+from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import load_and_shard_model
 
 
 class ReplacementLibrary:
@@ -68,13 +56,7 @@ class ReplacementLibrary:
             immutabledict(model_config_overrides) if (model_config_overrides is not None) else None
         )
 
-        self._dtype = None
-
-        self.teacher_dir = Path(replacement_library_path).parent / "ckpts" / "teacher"
         self._model_config = None
-        self._embedding = None
-        self._ln_f = None
-        self._lm_head = None
         self._arbitrary_checkpoint_dir = None
 
     @staticmethod
@@ -92,17 +74,6 @@ class ReplacementLibrary:
             if not (checkpoint_dir / SAFETENSORS_SUBBLOCKS_DIR_NAME).exists():
                 unsplit_checkpoints.append(checkpoint_dir)
         assert len(unsplit_checkpoints) == 0, f"Found unsplit checkpoints: {unsplit_checkpoints}"
-
-    @property
-    def dtype(self) -> torch.dtype:
-        if self._dtype is None:
-            ln_f = self.get_ln_f()
-            self._dtype = ln_f.weight.dtype
-        return self._dtype
-
-    @property
-    def n_layer(self) -> int:
-        return self.model_config.get_num_hidden_layers()
 
     @property
     def model_config(self) -> DeciLMConfig:
@@ -123,7 +94,7 @@ class ReplacementLibrary:
         model_config.num_hidden_layers = len(block_configs)
         return model_config
 
-    def _get_arbitrary_block_checkpoint_paths(self):
+    def _get_arbitrary_non_block_checkpoint_paths(self):
         checkpoint_dir = Path(self.get_arbitrary_checkpoint_dir())
         subblocks_dir = checkpoint_dir / SAFETENSORS_SUBBLOCKS_DIR_NAME
         non_block_paths = [p for p in subblocks_dir.glob("*.safetensors") if "block_" not in p.name]
@@ -147,7 +118,7 @@ class ReplacementLibrary:
     ):
         arbitrary_checkpoint_dir = Path(self.get_arbitrary_checkpoint_dir())
 
-        weight_paths = self._get_arbitrary_block_checkpoint_paths()
+        weight_paths = self._get_arbitrary_non_block_checkpoint_paths()
         for layer_replacement in layer_replacements:
             weight_paths += layer_replacement["weight_paths"]
 
@@ -180,122 +151,10 @@ class ReplacementLibrary:
             model = load_and_shard_model(descriptor=self.descriptor, checkpoint_path=tmpdir)
         return model
 
-    def load_checkpoint(self, checkpoint_dir: str | Path) -> PreTrainedModel:
-        checkpoint_dir = Path(checkpoint_dir).resolve()
-        layer_replacements = self._locate_replacements_of_entire_checkpoint(checkpoint_dir)
-        model = self.load_model(layer_replacements)
-        return model
-
-    def _locate_replacements_of_entire_checkpoint(self, checkpoint_dir: str | Path) -> list[dict]:
-        weight_paths_located = []
-        layer_replacements = []
-        for layer_replacement in self.replacement_library:
-            weight_paths = layer_replacement["weight_paths"]
-            weight_paths = [Path(p).absolute().resolve() for p in weight_paths]
-            layer_replacement["weight_paths"] = weight_paths
-            if len(weight_paths) > 0 and all(
-                p.is_relative_to(checkpoint_dir) for p in weight_paths
-            ):
-                layer_replacements.append(layer_replacement)
-                weight_paths_located.extend(weight_paths)
-
-        all_block_weight_paths = [
-            p
-            for p in list((checkpoint_dir / SAFETENSORS_SUBBLOCKS_DIR_NAME).iterdir())
-            if p.name not in ("embeddings.safetensors", "lm_head.safetensors")
-        ]
-        missing_paths = set(all_block_weight_paths) - set(weight_paths_located)
-        assert len(missing_paths) == 0, (
-            f"Couldn't locate replacements for the entire checkpoint {checkpoint_dir}, missing weights: {missing_paths}"
-        )
-
-        dedupped_layer_replacements = []
-        for weights_path in all_block_weight_paths:
-            replacements_with_path = [
-                rep for rep in layer_replacements if weights_path in rep["weight_paths"]
-            ]
-            largets_replacement_with_path = max(
-                replacements_with_path, key=lambda rep: len(rep["weight_paths"])
-            )
-            if largets_replacement_with_path not in dedupped_layer_replacements:
-                dedupped_layer_replacements.append(largets_replacement_with_path)
-
-        dedupped_layer_replacements = sort_replacements(dedupped_layer_replacements)
-        return dedupped_layer_replacements
-
-    def get_embedding(self) -> nn.Embedding:
-        if self._embedding is None:
-            state_dict = {
-                "weight": self._get_arbitrary_non_block_param(
-                    self.model_config.get_embedding_layer_name() + ".weight"
-                )
-            }
-            self._embedding = init_module_with_state_dict(
-                state_dict,
-                nn.Embedding,
-                num_embeddings=self.model_config.vocab_size,
-                embedding_dim=self.model_config.hidden_size,
-            )
-        return self._embedding
-
-    def get_ln_f(self) -> DeciLMRMSNorm:
-        if self._ln_f is None:
-            state_dict = {
-                "weight": self._get_arbitrary_non_block_param(
-                    self.model_config.get_final_layer_norm_layer_name() + ".weight"
-                )
-            }
-            self._ln_f = init_module_with_state_dict(
-                state_dict,
-                DeciLMRMSNorm,
-                hidden_size=self.model_config.hidden_size,
-                eps=self.model_config.rms_norm_eps,
-            )
-        return self._ln_f
-
-    def get_lm_head(self) -> nn.Linear:
-        if self._lm_head is None:
-            state_dict = {
-                "weight": self._get_arbitrary_non_block_param(
-                    self.model_config.get_lm_head_layer_name() + ".weight"
-                )
-            }
-            self._lm_head = init_module_with_state_dict(
-                state_dict,
-                LMHead,
-                out_features=self.model_config.vocab_size,
-                in_features=self.model_config.hidden_size,
-                bias=False,
-            )
-        return self._lm_head
-
-    def _get_arbitrary_non_block_param(self, param_name: str) -> torch.Tensor:
-        checkpoint_dir = self.get_arbitrary_checkpoint_dir()
-        if (
-            is_in_safetensors_format(checkpoint_dir)
-            or (checkpoint_dir / SAFETENSORS_SUBBLOCKS_DIR_NAME).exists()
-        ):
-            partial_state_dict = load_sharded_state_dict(checkpoint_dir, [param_name])
-            return partial_state_dict[param_name]
-
-        non_block_pth_path = checkpoint_dir / PTH_SUBBLOCKS_DIR_NAME / f"non_block.pth"
-        assert non_block_pth_path.exists(), _error_message_ensure_split(checkpoint_dir)
-        non_block_state_dict = torch.load(non_block_pth_path)
-        return non_block_state_dict[param_name]
-
     def get_arbitrary_checkpoint_dir(self) -> Path:
         if self._arbitrary_checkpoint_dir is None:
             self._arbitrary_checkpoint_dir = self._get_arbitrary_checkpoint_dir()
         return self._arbitrary_checkpoint_dir
-
-    def get_teacher_dir(self) -> Path:
-        return self.teacher_dir
-
-    def get_teacher_lm_head_path(self) -> Path:
-        return self.get_teacher_dir() / SAFETENSORS_SUBBLOCKS_DIR_NAME / "lm_head.safetensors"
-
-    def get_teacher_embedding_path(self) -> Path:
-        return self.get_teacher_dir() / SAFETENSORS_SUBBLOCKS_DIR_NAME / "embeddings.safetensors"
 
     def _get_arbitrary_checkpoint_dir(self) -> Path:
         for layer_replacement in self.replacement_library:
@@ -311,10 +170,3 @@ class ReplacementLibrary:
                 checkpoint_dir = weights_path_to_checkpoint_dir(weights_path)
                 checkpoint_dirs.add(checkpoint_dir)
         return list(checkpoint_dirs)
-
-
-def _error_message_ensure_split(checkpoint_dir: Path) -> str:
-    return (
-        f"Encountered unsplit checkpoint dir '{checkpoint_dir}', "
-        f"please call `ensure_all_checkpoints_are_split`"
-    )
