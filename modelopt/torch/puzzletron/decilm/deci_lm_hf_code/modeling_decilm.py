@@ -24,16 +24,10 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers.utils import logging
 
 from .block_config import FFNConfig, MoEConfig
 from .configuration_decilm import DeciLMConfig
 from .transformers_4_44_2__activations import ACT2FN
-from .transformers_4_44_2__pytorch_utils import ALL_LAYERNORM_LAYERS
-
-logger = logging.get_logger(__name__)
-
-_CONFIG_FOR_DOC = "DeciLMConfig"
 
 
 class DeciLMRMSNorm(nn.Module):
@@ -54,9 +48,6 @@ class DeciLMRMSNorm(nn.Module):
 
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
-
-
-ALL_LAYERNORM_LAYERS.append(DeciLMRMSNorm)
 
 
 def sparsity_backward_hook(*args, **kwargs):
@@ -109,32 +100,6 @@ class DeciLMGatedMLP(nn.Module):
             down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
         return down_proj
-
-
-class DeciLMVanillaMLP(nn.Module):
-    def __init__(
-        self,
-        config: DeciLMConfig,
-        ffn_config: FFNConfig,
-    ):
-        super().__init__()
-        self.config = config
-        self.ffn_config = ffn_config
-        self.hidden_size = config.hidden_size
-        self.intermediate_size = ffn_config.intermediate_size
-        self.up_proj = nn.Linear(self.hidden_size, self.intermediate_size, bias=config.mlp_bias)
-        self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.mlp_bias)
-        self.act_fn = ACT2FN[getattr(ffn_config, "hidden_act", "silu")]
-
-        if ffn_config.sparsify is not None:
-            self.register_full_backward_hook(sparsity_backward_hook)
-
-        assert self.config.pretraining_tp == 1, (
-            "Unsupported pretraining_tp != 1 for DeciLMVanillaMLP"
-        )
-
-    def forward(self, x):
-        return self.down_proj(self.act_fn(self.up_proj(x)))
 
 
 class DeciLMMoe(nn.Module):
