@@ -51,8 +51,7 @@ while [ $# -gt 0 ]; do
     --backend*)                                 BACKEND=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
     --attn_implementation*)                     ATTN_IMPLEMENTATION=$(parse_value "$@"); [[ "$1" != *=* ]] && shift ;;
     *)
-      >&2 printf "Error: Invalid argument ${1#*=}\n"
-      exit 1
+      EXTRA_ARGS="${EXTRA_ARGS:-} $1"
       ;;
   esac
   shift
@@ -179,7 +178,7 @@ CMD="accelerate launch --config-file accelerate_config/$CONFIG_FILE --main_proce
     --report_to tensorboard \
     --lora $LORA \
     --compress $COMPRESS \
-      $GRADIENT_CHECKPOINTING_ARGS $QUANT_ARGS $OPTIONAL_ARGS $DISTILLATION_ARGS
+      $GRADIENT_CHECKPOINTING_ARGS $QUANT_ARGS $OPTIONAL_ARGS $DISTILLATION_ARGS ${EXTRA_ARGS:-}
 "
 
 start_time=$(date +%s)
