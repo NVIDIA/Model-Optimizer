@@ -170,7 +170,7 @@ def test_autoquantize_huggingface(model_provider, method):
     with context:
         best_model, search_history = mtq.auto_quantize(
             model,
-            constraints=("effective_bits", 11.0),
+            constraints={"effective_bits": 11.0},
             quantization_formats=[mtq.INT8_DEFAULT_CFG],
             data_loader=[{"input_ids": input_ids, "labels": input_ids} for _ in range(2)],
             forward_step=forward_step,
@@ -196,9 +196,9 @@ def test_quantized_transformers_save_restore(tmp_path, model_cls, quant_config):
         import copy
 
         quant_config = copy.deepcopy(quant_config)
-        for entry in quant_config["quant_cfg"]:
-            if "*weight_quantizer" in entry:
-                entry["*weight_quantizer"]["block_sizes"] = {-1: 16}
+        for pat, cfg in quant_config["quant_cfg"]:
+            if pat == "*weight_quantizer":
+                cfg["block_sizes"] = {-1: 16}
                 break
     else:
         raise ValueError(f"Unsupported quant_config: {quant_config}")
