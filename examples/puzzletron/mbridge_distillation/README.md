@@ -22,7 +22,7 @@ git clone https://github.com/NVIDIA/Model-Optimizer.git ${MODELOPT_DIR}
 
 **Start Docker container:**
 
-Use the [NeMo 26.02 container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo?version=26.02):
+Use the [NeMo 26.02.01 container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo?version=26.02.01):
 
 ```bash
 # Recommended to mount a workspace directory for storing datasets and distilled models
@@ -31,7 +31,7 @@ docker run --gpus all -it --rm \
   -v ${MODELOPT_DIR}:/opt/Model-Optimizer \
   -v ${MODELOPT_DIR}/modelopt:/opt/venv/lib/python3.12/site-packages/modelopt \
   -w /opt/Model-Optimizer \
-  nvcr.io/nvidia/nemo:26.02 \
+  nvcr.io/nvidia/nemo:26.02.01 \
   /bin/bash
 ```
 
@@ -70,8 +70,8 @@ torchrun --nproc_per_node=8 examples/puzzletron/mbridge_distillation/distill_hf.
     --teacher_hf_path /path/to/teacher/huggingface/checkpoint \
     --data_paths 1.0 /path/to/hf_datasets/wikitext-103-v1/Salesforce--wikitext_wikitext-103-v1_train_text_document \
     --output_dir /path/to/distilled/checkpoint \
-    --hf_export_path /path/to/exported/hf/model \
-    --hf_model meta-llama/Llama-3.1-8B-Instruct \
+    --hf-export-path /path/to/exported/hf/model \
+    --hf-model meta-llama/Llama-3.1-8B-Instruct \
     --seq_length 4096 \
     --tp_size 8 \
     --pp_size 1 \
@@ -88,8 +88,9 @@ torchrun --nproc_per_node=8 examples/puzzletron/mbridge_distillation/distill_hf.
 
 **Notes:**
 
+- Add `--trust_remote_code` if student or teacher checkpoints need HuggingFace custom modeling code.
 - The distilled Megatron-Bridge checkpoint will be saved to `--output_dir/checkpoints/iter_<train_iters>`.
-- Add `--hf_export_path` to automatically export the final checkpoint to HuggingFace format after distillation. When using `--hf_export_path`, you must also provide `--hf_model` to specify the HuggingFace model ID to use as a template for export (e.g., `meta-llama/Llama-3.1-8B-Instruct`). The `--hf_model` should match the base architecture of the student model. The exported model can be evaluated for accuracy using the evaluation tools described in the main [README.md](../README.md#evaluation).
+- Add `--hf-export-path` to automatically export the final checkpoint to HuggingFace format after distillation. When using `--hf-export-path`, you must also provide `--hf-model` to specify the HuggingFace model ID to use as a template for export (e.g., `meta-llama/Llama-3.1-8B-Instruct`). The `--hf-model` should match the base architecture of the student model. The exported model can be evaluated for accuracy using the evaluation tools described in the main [README.md](../README.md#evaluation).
 - For production use, use larger datasets like [Nemotron-Pretraining-SFT-v1](https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-SFT-v1) and train for more iterations. See the [Megatron-Bridge distillation tutorial](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge#distillation) for best practices.
 
 ## MMLU Evaluation Results
