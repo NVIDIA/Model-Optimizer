@@ -117,3 +117,13 @@ class EagleConfig(ModeloptBaseConfig):
             "The length of the training data. Used to set original_max_position_embeddings in rope_scaling."
         ),
     )
+
+    eagle_export_rope_scaling: dict = ModeloptField(
+        default={"rope_type": "yarn", "factor": 32.0},
+        description=(
+            "The rope_scaling config to inject into the exported HuggingFace model config. "
+            "Applied when the training rope_type is 'default' (no scaling). "
+            "Defaults to YaRN with factor=32.0 for long-context inference. "
+            "original_max_position_embeddings will be automatically set to eagle_train_length during export."
+        ),
+    )

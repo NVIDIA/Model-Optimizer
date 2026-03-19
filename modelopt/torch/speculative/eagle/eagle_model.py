@@ -40,3 +40,4 @@ class EagleModel(DynamicModule):
         self.eagle_ttt_steps = config.eagle_ttt_steps
         self.eagle_mix_hidden_states = config.eagle_mix_hidden_states
         self.eagle_train_length = config.eagle_train_length
+        self.eagle_export_rope_scaling = config.eagle_export_rope_scaling

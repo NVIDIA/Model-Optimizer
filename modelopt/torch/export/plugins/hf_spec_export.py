@@ -185,18 +185,18 @@ class EagleExporter(SpeculativeDecodingExporter):
 
         # For long context quality, we disable rope scaling for training
         # and set yarn during export for inference.
-        eagle_train_length = getattr(self.model, "eagle_train_length", None)
-        if eagle_train_length is None:
-            raise ValueError("eagle_train_length is needed for rope scaling but not set.")
-        if self.model.eagle_config.rope_parameters["rope_type"] == "default":
+        eagle_export_rope_scaling = getattr(self.model, "eagle_export_rope_scaling", None)
+        if (
+            self.model.eagle_config.rope_parameters["rope_type"] == "default"
+            and eagle_export_rope_scaling is not None
+        ):
             template_config["rope_scaling"] = {
-                "rope_type": "yarn",
-                "factor": 32.0,
-                "original_max_position_embeddings": getattr(self.model, "eagle_train_length", 4096),
+                **eagle_export_rope_scaling,
+                "original_max_position_embeddings": self.model.eagle_train_length,
             }
 
         # In transformer 5.x, rope_theta is under rope_parameters, rather than main config
-        if not template_config.get("rope_theta"):
+        if template_config.get("rope_theta") is None:
             template_config["rope_theta"] = self.model.eagle_config.rope_parameters.get(
                 "rope_theta"
             )
