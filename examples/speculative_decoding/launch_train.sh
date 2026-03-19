@@ -126,6 +126,10 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       DISABLE_TORCH_COMPILE="${1#*=}"
       ;;
+    --tensorboard*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      ENABLE_TENSORBOARD="${1#*=}"
+      ;;
     *)
       >&2 printf "Error: Invalid argument ${1#*=}\n"
       exit 1
@@ -160,7 +164,7 @@ DISABLE_TQDM=${DISABLE_TQDM:-False}
 VLM_PROCESSOR=${VLM_PROCESSOR:-}
 VLM_IMG_DIR=${VLM_IMG_DIR:-}
 AR_VALIDATE_STEPS=${AR_VALIDATE_STEPS:-1000}
-ESTIMATE_AR=${ESTIMATE_AR:-False}
+ESTIMATE_AR=${ESTIMATE_AR:-True}
 CP_SIZE=${CP_SIZE:-1}
 DP_SHARD_SIZE=${DP_SHARD_SIZE:-$((TOTAL_GPU/CP_SIZE))}
 LOG_STEPS=${LOG_STEPS:-100}
@@ -169,6 +173,7 @@ MIX_HIDDEN_STATES=${MIX_HIDDEN_STATES:-"False"}
 DISABLE_TORCH_COMPILE=${DISABLE_TORCH_COMPILE:-"False"}
 NUM_TTT_STEPS=${NUM_TTT_STEPS:-3}
 BUCKET_GRANULARITY=${BUCKET_GRANULARITY:-512}
+ENABLE_TENSORBOARD=${ENABLE_TENSORBOARD:-"False"}
 
 if [[ "$MODE" == "eagle3" ]]; then
   if [[ -n "$EAGLE_CONFIG" ]]; then
@@ -225,6 +230,12 @@ else
   MULTI_NODE_ARGS=""
 fi
 
+if [[ "$ENABLE_TENSORBOARD" != "False" ]]; then
+  OBSERVABILITY_ARGS="--report_to tensorboard"
+else
+  OBSERVABILITY_ARGS=""
+fi
+
 # Disable tokenizers parallelism to avoid warning
 export TOKENIZERS_PARALLELISM=False
 CMD="accelerate launch $MULTI_NODE_ARGS --mixed_precision bf16 ${SCRIPT_DIR}/main.py \
@@ -264,6 +275,7 @@ CMD="accelerate launch $MULTI_NODE_ARGS --mixed_precision bf16 ${SCRIPT_DIR}/mai
     --dp_shard_size $DP_SHARD_SIZE \
     --num_ttt_steps $NUM_TTT_STEPS \
     --bucket_granularity $BUCKET_GRANULARITY \
+    $OBSERVABILITY_ARGS \
 "
 
 start_time=$(date +%s)

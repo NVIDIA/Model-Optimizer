@@ -319,6 +319,11 @@ trainer.save_state()
 trainer.save_model("<path to the output directory>")
 ```
 
+### Observability
+
+If W&B is installed, it will be used automatically for logging. If `--tensorboard` is provided,
+it will be used instead, outputting data into the provided log directory.
+
 ## Support Matrix
 
 | Model | Medusa | EAGLE1/2 | EAGLE3 |

@@ -29,6 +29,7 @@ from datasets import load_dataset
 from packaging.version import Version
 from scripts.ar_validate import validate_ar
 from torch.utils.data import Dataset
+from torch.utils.tensorboard import SummaryWriter
 from transformers import Trainer, TrainerCallback
 from transformers.trainer_pt_utils import LabelSmoother
 
@@ -182,34 +183,47 @@ def make_eagle_supervised_data_module(
 class EagleTrainerWithAccLog(Trainer):
     """Wrapper around Trainer that logs training accuracy."""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model_accepts_loss_kwargs = False
+
     def compute_loss(self, *args, **kwargs):
         """Override compute_loss to save train accs in trainer state."""
         if not hasattr(self.state, "training_accs"):
             self.state.training_accs = []
         kwargs.pop("num_items_in_batch", None)
-        loss, outputs = super().compute_loss(return_outputs=True, *args, **kwargs)
+        return_outputs = kwargs.pop("return_outputs", False)
+        loss, outputs = super().compute_loss(*args, return_outputs=True, **kwargs)
         if hasattr(outputs, "train_acc"):
             self.state.training_accs.append(outputs.train_acc)
-        return loss
+        return (loss, outputs) if return_outputs else loss
 
 
 class EagleTrainingPlot(TrainerCallback):
     """Callback that plot training acc and AR during training."""
 
-    def __init__(self, ar_validate_steps: int = 1000, estimate_ar: bool = False):
+    def __init__(
+        self,
+        ar_validate_steps: int = 1000,
+        estimate_ar: bool = False,
+        tb_writer: SummaryWriter | None = None,
+    ):
         self.ar_validate_steps = ar_validate_steps
         if wandb and is_master():
             wandb.init()
         self.estimate_ar = estimate_ar
+        self.tb_writer = tb_writer
+        self.last_seen_step = -1
 
-    def on_log(self, args, state, control, **kwargs):
-        """Log training acc and estimate AR during log step."""
+    def _report_stats(self, state, eval_mode: bool, **kwargs):
         if not hasattr(state, "training_accs") or len(state.training_accs) == 0:
-            return control
+            return
         average_acc = np.mean(state.training_accs, axis=0)
+        mode_name = "Eval" if eval_mode else "Training"
+        mode_id = mode_name.lower()
         if self.estimate_ar:
             # Calculate mean training AR since last log
-            # NOTE: This is only an estimate of the real AR.
+            # NOTE: This is only a estimate of the real AR.
             est_ar = 1
             acc_cumprod = 1
             for step_acc in average_acc[0]:
@@ -219,7 +233,7 @@ class EagleTrainingPlot(TrainerCallback):
             for draft_acc in average_acc[1:]:
                 acc_cumprod *= draft_acc[-1]
                 est_ar += acc_cumprod
-            print_rank_0(f"Step {state.global_step} Estimated Training AR: {est_ar:.4f}")
+            print_rank_0(f"Step {state.global_step} Estimated {mode_name} AR: {est_ar:.4f}")
 
         # log to wandb
         if wandb and is_master():
@@ -229,11 +243,44 @@ class EagleTrainingPlot(TrainerCallback):
             for i, draft_acc in enumerate(average_acc):
                 for j, step_acc in enumerate(draft_acc):
                     wandb.log(
-                        {f"parallel_{i}_step_{j}_train_acc": step_acc}, step=state.global_step
+                        {f"parallel_{i}_step_{j}_{mode_id}_acc": step_acc}, step=state.global_step
                     )
             if self.estimate_ar:
-                wandb.log({"estimated_training_ar": est_ar}, step=state.global_step)
+                wandb.log({f"estimated_{mode_id}_ar": est_ar}, step=state.global_step)
 
+        if self.tb_writer:
+            # TODO: What are in "kwargs.logs"?
+            for i, draft_acc in enumerate(average_acc):
+                for j, step_acc in enumerate(draft_acc):
+                    self.tb_writer.add_scalar(
+                        f"{mode_id}/parallel_{i}_step_{j}_{mode_id}_acc",
+                        step_acc,
+                        state.global_step,
+                    )
+            if self.estimate_ar:
+                self.tb_writer.add_scalar(f"{mode_id}/estimated_ar", est_ar, state.global_step)
+
+    def on_log(self, args, state, control, **kwargs):
+        """Log training acc and estimate AR during log step."""
+        if not hasattr(state, "training_accs") or len(state.training_accs) == 0:
+            self.last_seen_step = state.global_step
+            return control
+
+        if state.global_step != self.last_seen_step:
+            # Eval mode doesn't increment the global step, so we can use that to detect eval vs training
+            self._report_stats(state, eval_mode=False, **kwargs)
+            # reset training_accs
+            state.training_accs = []
+
+        self.last_seen_step = state.global_step
+        return control
+
+    def on_evaluate(self, args, state, control, **kwargs):
+        """Log eval acc and estimate AR during eval step."""
+        if not hasattr(state, "training_accs") or len(state.training_accs) == 0:
+            return control
+
+        self._report_stats(state, eval_mode=True, **kwargs)
         # reset training_accs
         state.training_accs = []
         return control
@@ -254,6 +301,10 @@ class EagleTrainingPlot(TrainerCallback):
                 print_rank_0(f"Step {state.global_step} AR: {sum(ars) / len(ars):.4f}")
                 if wandb and is_master():
                     wandb.log({"validate_ar": sum(ars) / len(ars)}, step=state.global_step)
+                if self.tb_writer:
+                    self.tb_writer.add_scalar(
+                        "custom/validate_ar", sum(ars) / len(ars), state.global_step
+                    )
             except Exception:
                 print_rank_0("AR validation not available.")
         return control

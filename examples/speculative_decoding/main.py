@@ -43,6 +43,8 @@ from eagle_utils import (
     make_eagle_supervised_data_module,
     patch_ring_attention_for_ttt,
 )
+from torch.utils.tensorboard import SummaryWriter
+from transformers.integrations import TensorBoardCallback
 from transformers.trainer_utils import get_last_checkpoint
 
 import modelopt.torch.opt as mto
@@ -102,7 +104,7 @@ class TrainingArguments(transformers.TrainingArguments):
     bf16: bool = field(default=True)
     mode: Literal["eagle3", "medusa"] = "eagle3"
     estimate_ar: bool = field(
-        default=False, metadata={"help": "Whether to estimate AR during training for logging."}
+        default=True, metadata={"help": "Whether to estimate AR during training for logging."}
     )
     ar_validate_steps: int = field(default=1000, metadata={"help": "Steps between AR validation."})
     disable_tqdm: bool = field(default=False, metadata={"help": "Disable tqdm progress bar."})
@@ -258,11 +260,29 @@ def train():
             bucket_granularity=bucket_gran,
         )
 
+    callbacks = []
+    tb_writer = None
+    if "tensorboard" in training_args.report_to:
+        log_dir = training_args.output_dir
+        tb_writer = SummaryWriter(log_dir=log_dir)
+        if isinstance(training_args.report_to, list):
+            training_args.report_to.remove("tensorboard")
+        else:
+            training_args.report_to = "none"
+        callbacks.append(TensorBoardCallback(tb_writer=tb_writer))
+    callbacks.append(
+        EagleTrainingPlot(
+            training_args.ar_validate_steps,
+            tb_writer=tb_writer,
+            estimate_ar=training_args.estimate_ar,
+        )
+    )
+
     trainer = EagleTrainerWithAccLog(
         model=model,
         processing_class=tokenizer,
         args=training_args,
-        callbacks=[EagleTrainingPlot(training_args.ar_validate_steps, training_args.estimate_ar)],
+        callbacks=callbacks,
         **data_module,
     )
 
