@@ -1100,7 +1100,10 @@ class HFEagleModel(EagleModel):
             )
 
             # Use SDPA attention during generation for both stability and performance
-            with temporary_set_config_value(self.eagle_config, "_attn_implementation", "sdpa"):
+            with (
+                temporary_set_config_value(self.eagle_config, "_attn_implementation", "sdpa"),
+                torch.compiler.set_stance("force_eager"),
+            ):
                 _, eagle_prenorm_h, eagle_logits, _ = self._eagle_forward(
                     eagle_input_hidden_states,
                     self._base_model_embeddings(eagle_ids),
