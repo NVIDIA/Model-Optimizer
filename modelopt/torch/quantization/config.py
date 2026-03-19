@@ -1066,21 +1066,15 @@ class QuantizeAlgorithmConfig(ModeloptBaseConfig):
 
     moe_calib_experts_ratio: float | None = ModeloptField(
         default=None,
+        gt=0.0,
+        le=1.0,
         title="% of experts to calibrate during forward pass.",
         description=(
             "If specified, we force forward tokens to % of experts during the calibration"
             " pass. This forward is for calibration purpose only and will not affect the"
-            " actual inference. Not supported for all MoE architectures; currently works"
-            " with a few HuggingFace models such as Mixtral, Qwen3Moe, MiniMax."
-        ),
-    )
-
-    moe_count_expert_calib_tokens: bool = ModeloptField(
-        default=False,
-        title="Enable expert token counting during MoE calibration.",
-        description=(
-            "If True, counts how many tokens are routed to each expert during calibration."
-            " Not supported for all MoE architectures; currently works with a few HuggingFace"
+            " actual inference. NOTE: when set, ``layer_sync_moe_local_experts_amax`` is"
+            " disabled so each expert maintains its own calibration statistics. Not"
+            " supported for all MoE architectures; currently works with a few HuggingFace"
             " models such as Mixtral, Qwen3Moe, MiniMax."
         ),
     )

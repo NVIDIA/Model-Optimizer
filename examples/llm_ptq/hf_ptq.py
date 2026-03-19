@@ -107,6 +107,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "nvfp4_omlp_only": mtq.NVFP4_OMLP_ONLY_CFG,
     "nvfp4_svdquant": mtq.NVFP4_SVDQUANT_DEFAULT_CFG,
     "mxfp8": mtq.MXFP8_DEFAULT_CFG,
+    "nvfp4_local_hessian": mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG,
 }
 
 KV_QUANT_CFG_CHOICES = {
@@ -1207,16 +1208,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--moe_calib_experts_ratio",
         type=float,
-        default=1.0,
+        default=None,
         help=(
             "Fraction of experts to calibrate during forward pass (ratio in (0.0, 1.0]). "
-            "Only used for MOE models; used to reduce the number of experts calibrated during the forward pass."
+            "Only used for MOE models; used to reduce the number of experts calibrated during the forward pass. "
             "Does not impact non-MOE models."
         ),
     )
 
     args = parser.parse_args()
-    if not (0.0 < args.moe_calib_experts_ratio <= 1.0):
+    if args.moe_calib_experts_ratio is not None and not (0.0 < args.moe_calib_experts_ratio <= 1.0):
         parser.error("--moe_calib_experts_ratio must be in the range (0.0, 1.0].")
 
     return args
