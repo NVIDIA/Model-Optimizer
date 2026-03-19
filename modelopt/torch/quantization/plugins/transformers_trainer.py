@@ -43,7 +43,9 @@ from ..utils import (
     disable_lora_quantizers_in_config,
     get_quantizer_state_dict,
     is_quantized,
+    quantizer_attr_names,
     set_quantizer_state_dict,
+    weight_attr_names,
 )
 
 # TODO: Enable documentation rendering for this class
@@ -130,6 +132,10 @@ class AdaRoundTrainingArguments:
     temperature: float = field(
         default=1.0,
         metadata={"help": "Sigmoid temperature for rounding logits."},
+    )
+    freeze_weights: bool = field(
+        default=True,
+        metadata={"help": "Freeze parent module weights when adaround is active."},
     )
 
 
@@ -263,7 +269,7 @@ class _AdaRoundAuxCallback(TrainerCallback):
         reg = sum(q.dist_loss(beta=beta) for q in self._adaround_quantizers)
         dist_loss = ada_args.dist_loss_weight * reg
         # Backward + step
-        self._trainer.accelerator.backward(dist_loss)
+        dist_loss.backward()
         self._aux_optimizer.step()
         self._trainer.log({"adaround/dist_loss": dist_loss.detach().item(), "adaround/beta": beta})
         return control
@@ -350,6 +356,7 @@ class QATTrainer(ModelOptHFTrainer):
         ) or getattr(getattr(self.model, "config", None), "torch_dtype", None)
 
         self._configure_trainable_params()
+        self._freeze_adaround_weights()
 
     def _configure_trainable_params(self):
         """Freeze/unfreeze parameters based on quant_args.trainable_params or frozen_params.
@@ -383,6 +390,27 @@ class QATTrainer(ModelOptHFTrainer):
             f"Trainable params: {trainable_count}/{total_count} "
             f"({100 * trainable_count / max(total_count, 1):.1f}%)"
         )
+
+    def _freeze_adaround_weights(self):
+        """Freeze parent module weights when adaround is active."""
+        if self.adaround_args is None or not self.adaround_args.freeze_weights:
+            return
+
+        frozen_count = 0
+        for _name, module in self.model.named_modules():
+            for weight_name in weight_attr_names(module):
+                wq_name = quantizer_attr_names(weight_name).weight_quantizer
+                quantizer = getattr(module, wq_name, None)
+                if not isinstance(quantizer, NVFP4StaticAdaRoundQuantizer):
+                    continue
+                if not quantizer._adaround_enabled:
+                    continue
+                for pname, param in module.named_parameters(recurse=False):
+                    if pname == weight_name:
+                        param.requires_grad_(False)
+                        frozen_count += 1
+        if frozen_count:
+            print_rank_0(f"AdaRound: froze {frozen_count} weight parameter(s).")
 
     def _save_modelopt_state_with_weights(self):
         """Save the modelopt weights for fsdp2 models."""
