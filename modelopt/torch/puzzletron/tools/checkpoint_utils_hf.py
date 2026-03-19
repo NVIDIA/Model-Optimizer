@@ -23,7 +23,6 @@ import concurrent.futures
 import dataclasses
 import fcntl
 import os
-import shutil
 import time
 import warnings
 from collections import defaultdict
@@ -37,7 +36,6 @@ from transformers import AutoConfig, PretrainedConfig, PreTrainedModel
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from modelopt.torch.puzzletron.decilm import deci_lm_hf_code
 from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import maybe_cast_block_configs
 from modelopt.torch.puzzletron.tools.common import infer_weights_dtype
 from modelopt.torch.puzzletron.tools.logger import mprint
@@ -377,14 +375,3 @@ def save_model_config(model_config: PretrainedConfig, checkpoint_dir: Path | str
             for conf in model_config.block_configs
         ]
     model_config.save_pretrained(checkpoint_dir)
-
-
-def copy_deci_lm_hf_code(output_dir: Path | str) -> None:
-    """
-    Copy the deci_lm_hf_code directory to the output directory.
-    """
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    code_dir = Path(deci_lm_hf_code.__file__).parent
-    for path in code_dir.glob("*.py"):
-        shutil.copy(path, output_dir / path.name)

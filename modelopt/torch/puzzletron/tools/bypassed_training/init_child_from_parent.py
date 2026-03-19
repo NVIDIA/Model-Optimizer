@@ -39,11 +39,7 @@ from modelopt.torch.puzzletron.tools.bypassed_training.child_init import (
     update_model_config,
 )
 from modelopt.torch.puzzletron.tools.checkpoint_utils import copy_tokenizer, load_state_dict
-from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import (
-    _save_checkpoint,
-    copy_deci_lm_hf_code,
-    load_model_config,
-)
+from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import _save_checkpoint, load_model_config
 from modelopt.torch.puzzletron.tools.logger import mprint
 from modelopt.torch.puzzletron.tools.sharded_checkpoint_utils import _get_model_class_from_config
 
@@ -179,8 +175,6 @@ def init_child_from_parent(
     )
     save_checkpoint_time = time.time() - start_time
     mprint(f"_save_checkpoint completed in {save_checkpoint_time:.2f} seconds")
-
-    copy_deci_lm_hf_code(output_checkpoint_dir)
 
     # Print profiling summary with actual worker counts used
     total_core_time = create_child_state_dict_time + save_checkpoint_time
