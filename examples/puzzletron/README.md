@@ -9,18 +9,23 @@ The supported modifications are:
 
 To use the Puzzle algorithm effectively, we need to specify the target number of parameters and/or the memory. The final stage is based on Mixed-Integer Programming (MIP) algorithm to find the most optimal combination of layer modifications that satisfy the target requirements.
 
-In this example, we compress the [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) model reducing GPU memory usage from 113 GiB to 96 GiB (15% reduction) with less than 1% regression in the token_accuracy_top_10 metric.
+In this example, we compress the [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) model reducing GPU memory usage from 113 GiB to 96 GiB (15% reduction) with less than 1% regression in the token_accuracy_top_10 metric. Other supported models should be compressed in a similar way. For GptOss there is one [additional step to be performed](GPTOSS.md).
+
+> **Note:** Other models are also supported. See the [configs](./configs/) directory for additional model configurations (e.g., Llama-3.2-3B-Instruct on 1x H100, Qwen2.5-7B-Instruct on 1x H100, Qwen3-8B on 1x H100, Nemotron-Nano-12B-v2 on 1x H100, Mistral-Small-24B-Instruct-2501 on 4x H100). For information on adding support for new models, see the [AnyModel Guide](../../modelopt/torch/puzzletron/anymodel/README.md).
 
 ## Environment
 
-- Install Model-Optimizer in editable mode with the corresponding dependencies:
+- Install Model-Optimizer in editable mode with the corresponding dependencies (run from the repo root):
 
 ```bash
 pip install -e .[hf,puzzletron]
-pip install -r requirements.txt
+pip install -r examples/puzzletron/requirements.txt
 ```
 
-- For this example we are using 2x NVIDIA H100 80GB HBM3 to show multi-GPU steps. You can use also use s single GPU.
+> **Note:** NeMo containers may ship `nvidia-lm-eval` which may conflict with `lm-eval` that is used for evaluation.
+> If so, run `pip uninstall nvidia-lm-eval -y` before installing requirements.
+
+- For this example we are using 2x NVIDIA H100 80GB HBM3 to show multi-GPU steps. You can use also use a single GPU.
 
 - To make use of [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) and [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2), you need to accept the terms and conditions for the corresponding model and the dataset in the Huggingface Hub. Log in to the Huggingface Hub and enter your HF token.
 
@@ -133,7 +138,7 @@ This assumes pruning, replacement library building, NAS scoring, and subblock st
 For example, let's set `target_memory: 96_000` in `llama-3_1-8B_pruneffn_memory.yaml`.
 
 ```bash
-torchrun --nproc_per_node 2 examples/puzzletron/main.py --config path/to/llama-3_1-8B_pruneffn_memory.yaml --mip-only 2>&1 | tee ./log.txt | grep "Puzzletron Progress"
+torchrun --nproc_per_node 2 examples/puzzletron/main.py --config examples/puzzletron/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml --mip-only 2>&1 | tee ./log.txt | grep "Puzzletron Progress"
 ```
 
 This will generate the following network architecture (see `log.txt`):
@@ -195,17 +200,53 @@ block_13:  attention  no_op   ffn  intermediate_11520
 block_14:  attention  no_op   ffn  intermediate_3072
 ```
 
+### MIP Sweep Mode
+
+The **MIP sweep mode** lets you explore multiple memory compression rates in a single run and compare the accuracy-memory trade-offs.
+
+#### Quick Start
+
+1. Enable sweep in your config YAML (e.g., `llama-3_1-8B_pruneffn_memory.yaml`):
+
+   ```yaml
+   mip:
+     sweep:
+       enabled: true
+       memory_compression_rates: [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+       output_csv: ${puzzle_dir}/mip_sweep_results.csv
+   ```
+
+2. Run the sweep:
+
+   ```bash
+   torchrun --nproc_per_node 2 examples/puzzletron/main.py --config examples/puzzletron/configs/llama-3_1-8B_pruneffn_memory/llama-3_1-8B_pruneffn_memory.yaml --mip-only 2>&1 | tee ./log.txt | grep "Puzzletron Progress"
+   ```
+
+3. View results: The CSV file contains compression rates, memory usage, and accuracy metrics for each configuration.
+
+#### Example Results
+
+<img src="mip_sweep_example.png" alt="MIP Sweep Results" width="600">
+
+The plot shows how token accuracy changes with different compression rates. Higher compression (0.5 = 50% of original memory) reduces accuracy, while lower compression maintains accuracy closer to the teacher model.
+
 ## Evaluation
 
-Once the model is ready, you can evaluate it using [Language Model Evaluation Harness](https://pypi.org/project/lm-eval/). For example, run the following to evaluate the model on [Massive Multitask Language Understanding](https://huggingface.co/datasets/cais/mmlu) benchmark.
+Evaluate AnyModel checkpoints using [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) directly.
 
 ```bash
-lm_eval --model hf \
-  --model_args pretrained=path/to/model,dtype=bfloat16,trust_remote_code=true,parallelize=True \
-  --tasks mmlu \
-  --num_fewshot 5 \
-  --batch_size 4
+python examples/puzzletron/evaluation/lm_eval_anymodel.py \
+    --model hf \
+    --model_args pretrained=path/to/checkpoint,dtype=bfloat16,parallelize=True \
+    --tasks mmlu \
+    --num_fewshot 5 \
+    --batch_size 4
 ```
+
+For a quick smoke test, add `--limit 10`.
+
+> **Alternative:** For server-based evaluation via an OpenAI-compatible endpoint,
+> see [evaluation/nemo_evaluator_instructions.md](./evaluation/nemo_evaluator_instructions.md).
 
 ## Inference Performance Benchmarking
 
@@ -234,21 +275,9 @@ vllm bench throughput --model path/to/model --input-len 2000 --output-len 100 --
 
 ## Knowledge Distillation
 
-To recover degradation in the quality of the compressed model, we can use knowledge distillation. This allows transferring the capabilities of the original model to the pruned one. For this, we will use [NeMo framework](https://github.com/NVIDIA-NeMo/NeMo) with the [nemo:25.07](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo?version=25.07) container.
+To recover degradation in the quality of the compressed model, we can use knowledge distillation. This allows transferring the capabilities of the original model to the pruned one.
 
-First, convert the HF model to NeMo format:
-
-```bash
-python -m nemo_export/convert_hf_to_nemo --input-ckpt-path path/to/HF-model --output-ckpt-path path/to/save/model-nemo
-```
-
-Now you can utilize all the training features available in NeMo, including distillation. Please refer to the [NeMo distillation documentation](https://docs.nvidia.com/nemo-framework/user-guide/latest/model-optimization/distillation/distillation.html).
-
-[Optional] Once distillation is complete, you can convert the distilled model back to the HuggingFace format.
-
-```bash
-python -m nemo_export/convert_nemo_to_hf --input-ckpt-path path/to/nemo-model --output-ckpt-path path/to/save/model-HF
-```
+See [mbridge_distillation/README.md](./mbridge_distillation/README.md) for instructions on using Megatron-Bridge for knowledge distillation.
 
 ## Advanced Usage
 

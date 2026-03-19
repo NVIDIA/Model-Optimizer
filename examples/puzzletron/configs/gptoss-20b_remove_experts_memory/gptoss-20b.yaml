@@ -7,10 +7,10 @@ defaults:
   - _self_
 
 puzzle_dir: ???
-descriptor: llama
+descriptor: gpt_oss
 teacher_dir: ${puzzle_dir}/ckpts/teacher/
 replacement_library_path: ${puzzle_dir}/replacement_library.json
-dataset_path: ??? # ppath to Nemotron-Post-Training-Dataset-v2
+dataset_path: ??? # path to Nemotron-Post-Training-Dataset-v2
 
 skip_realize_model: false
 
@@ -78,8 +78,8 @@ mip:
     - stats.attention_num_params
 
   human_constraints:
-    target_memory: 78_000
-    num_params: 7_000_000_000
+    target_memory: 45_000
+    num_params: 3_000_000_000
 
   mip_constraints:
   metric_overrides:
@@ -107,3 +107,4 @@ nccl_timeout_minutes: ${timedelta_minutes:10}
 hydra:
   run:
     dir: ${puzzle_dir}/hydra_logs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
