@@ -39,8 +39,6 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from modelopt.torch.puzzletron.decilm import deci_lm_hf_code
 from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import maybe_cast_block_configs
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.modeling_decilm import DeciLMForCausalLM
 from modelopt.torch.puzzletron.tools.common import infer_weights_dtype
 from modelopt.torch.puzzletron.tools.logger import mprint
 from modelopt.torch.puzzletron.tools.post_init_sparse import SparsityMethod
