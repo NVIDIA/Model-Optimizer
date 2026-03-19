@@ -35,7 +35,6 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.puzzletron.anymodel.converter import Converter
 from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptorFactory
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 from modelopt.torch.puzzletron.replacement_library.replacement_library import ReplacementLibrary
 from modelopt.torch.puzzletron.replacement_library.replacement_utils import parse_layer_replacement
 from modelopt.torch.puzzletron.tools import validate_model
