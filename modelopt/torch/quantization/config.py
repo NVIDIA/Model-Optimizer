@@ -1477,7 +1477,7 @@ class QuantizeConfig(ModeloptBaseConfig):
 
         - ``{"pattern": ..., "enable": ..., "format": ...}`` — explicit object with top-level enable
         - ``{"pattern": ..., "enable": ...}`` — enable-only (no format fields)
-        - ``{"pattern": ..., "format": ...}`` — explicit pattern/format object (legacy)
+        - ``{"pattern": ..., "cfg": ...}`` — explicit pattern/cfg object
         - ``{"<pattern>": ...}`` — single-key dict (legacy)
 
         The internal representation is always a list of ``(pattern, cfg)`` tuples where
@@ -1490,7 +1490,7 @@ class QuantizeConfig(ModeloptBaseConfig):
             if isinstance(entry, dict):
                 if "pattern" in entry:
                     pattern = entry["pattern"]
-                    fmt = dict(entry.get("format") or {})
+                    fmt = dict(entry.get("cfg") or entry.get("format") or {})
                     if "enable" in entry:
                         fmt["enable"] = entry["enable"]
                     result.append((pattern, fmt))

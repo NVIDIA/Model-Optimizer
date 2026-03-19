@@ -21,7 +21,7 @@ ptq_cfg:
   quant_cfg:
     - pattern: '*mlp*weight_quantizer'
       enable: true
-      format:
+      cfg:
         block_sizes:
           -1: 16
           type: dynamic
@@ -29,7 +29,7 @@ ptq_cfg:
         num_bits: e2m1
     - pattern: '*mlp*input_quantizer'
       enable: true
-      format:
+      cfg:
         block_sizes:
           -1: 16
           type: dynamic
@@ -37,7 +37,7 @@ ptq_cfg:
         num_bits: e2m1
     - pattern: '*block_sparse_moe*weight_quantizer'
       enable: true
-      format:
+      cfg:
         block_sizes:
           -1: 16
           type: dynamic
@@ -45,7 +45,7 @@ ptq_cfg:
         num_bits: e2m1
     - pattern: '*block_sparse_moe*input_quantizer'
       enable: true
-      format:
+      cfg:
         block_sizes:
           -1: 16
           type: dynamic
@@ -53,7 +53,7 @@ ptq_cfg:
         num_bits: e2m1
     - pattern: '*o_proj*weight_quantizer'
       enable: true
-      format:
+      cfg:
         block_sizes:
           -1: 16
           type: dynamic
@@ -61,7 +61,7 @@ ptq_cfg:
         num_bits: e2m1
     - pattern: '*o_proj*input_quantizer'
       enable: true
-      format:
+      cfg:
         block_sizes:
           -1: 16
           type: dynamic
@@ -69,7 +69,7 @@ ptq_cfg:
         num_bits: e2m1
     - pattern: '*[kv]_bmm_quantizer'
       enable: true
-      format:
+      cfg:
         num_bits: e4m3
 
     - pattern: default
@@ -95,18 +95,18 @@ ptq_cfg:
     - pattern: output.*
       enable: false
     - pattern: nn.BatchNorm1d
-      format:
+      cfg:
         '*':
           enable: false
     - pattern: nn.BatchNorm2d
-      format:
+      cfg:
         '*':
           enable: false
     - pattern: nn.BatchNorm3d
-      format:
+      cfg:
         '*':
           enable: false
     - pattern: nn.LeakyReLU
-      format:
+      cfg:
         '*':
           enable: false

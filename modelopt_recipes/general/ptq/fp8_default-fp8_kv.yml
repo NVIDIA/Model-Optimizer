@@ -20,16 +20,16 @@ ptq_cfg:
   algorithm: max
   quant_cfg:
     - pattern: '*input_quantizer'
-      format:
+      cfg:
         num_bits: e4m3
         axis:
     - pattern: '*weight_quantizer'
-      format:
+      cfg:
         num_bits: e4m3
         axis:
     - pattern: '*[kv]_bmm_quantizer'
       enable: true
-      format:
+      cfg:
         num_bits: e4m3
 
     - pattern: default
@@ -55,18 +55,18 @@ ptq_cfg:
     - pattern: output.*
       enable: false
     - pattern: nn.BatchNorm1d
-      format:
+      cfg:
         '*':
           enable: false
     - pattern: nn.BatchNorm2d
-      format:
+      cfg:
         '*':
           enable: false
     - pattern: nn.BatchNorm3d
-      format:
+      cfg:
         '*':
           enable: false
     - pattern: nn.LeakyReLU
-      format:
+      cfg:
         '*':
           enable: false
