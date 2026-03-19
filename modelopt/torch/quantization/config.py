@@ -1475,12 +1475,11 @@ class QuantizeConfig(ModeloptBaseConfig):
 
         Supports these dict forms for YAML/JSON compatibility:
 
-        - ``{"pattern": ..., "enable": ..., "format": ...}`` — explicit object with top-level enable
-        - ``{"pattern": ..., "enable": ...}`` — enable-only (no format fields)
-        - ``{"pattern": ..., "cfg": ...}`` — explicit pattern/cfg object
-        - ``{"<pattern>": ...}`` — single-key dict (legacy)
+        - ``{"path": ..., "enable": ..., "cfg": ...}`` — explicit object with top-level enable
+        - ``{"path": ..., "enable": ...}`` — enable-only (no cfg fields)
+        - ``{"<path>": ...}`` — single-key dict (legacy)
 
-        The internal representation is always a list of ``(pattern, cfg)`` tuples where
+        The internal representation is always a list of ``(path, cfg)`` tuples where
         ``enable`` (if present at the top level) is merged into ``cfg``.
         """
         if not isinstance(v, list):
@@ -1488,9 +1487,9 @@ class QuantizeConfig(ModeloptBaseConfig):
         result = []
         for entry in v:
             if isinstance(entry, dict):
-                if "pattern" in entry:
-                    pattern = entry["pattern"]
-                    fmt = dict(entry.get("cfg") or entry.get("format") or {})
+                if "path" in entry:
+                    pattern = entry["path"]
+                    fmt = dict(entry.get("cfg") or {})
                     if "enable" in entry:
                         fmt["enable"] = entry["enable"]
                     result.append((pattern, fmt))
@@ -1499,7 +1498,7 @@ class QuantizeConfig(ModeloptBaseConfig):
                 else:
                     raise ValueError(
                         f"Invalid quant_cfg entry: {entry!r}. "
-                        "Expected a single-key dict or an object with a 'pattern' key."
+                        "Expected a single-key dict or an object with a 'path' key."
                     )
             else:
                 result.append(entry)

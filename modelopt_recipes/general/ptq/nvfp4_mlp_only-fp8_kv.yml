@@ -19,7 +19,7 @@ metadata:
 ptq_cfg:
   algorithm: max
   quant_cfg:
-    - pattern: '*mlp*weight_quantizer'
+    - path: '*mlp*weight_quantizer'
       enable: true
       cfg:
         block_sizes:
@@ -27,7 +27,7 @@ ptq_cfg:
           type: dynamic
           scale_bits: e4m3
         num_bits: e2m1
-    - pattern: '*mlp*input_quantizer'
+    - path: '*mlp*input_quantizer'
       enable: true
       cfg:
         block_sizes:
@@ -35,7 +35,7 @@ ptq_cfg:
           type: dynamic
           scale_bits: e4m3
         num_bits: e2m1
-    - pattern: '*block_sparse_moe*weight_quantizer'
+    - path: '*block_sparse_moe*weight_quantizer'
       enable: true
       cfg:
         block_sizes:
@@ -43,7 +43,7 @@ ptq_cfg:
           type: dynamic
           scale_bits: e4m3
         num_bits: e2m1
-    - pattern: '*block_sparse_moe*input_quantizer'
+    - path: '*block_sparse_moe*input_quantizer'
       enable: true
       cfg:
         block_sizes:
@@ -51,46 +51,46 @@ ptq_cfg:
           type: dynamic
           scale_bits: e4m3
         num_bits: e2m1
-    - pattern: '*[kv]_bmm_quantizer'
+    - path: '*[kv]_bmm_quantizer'
       enable: true
       cfg:
         num_bits: e4m3
 
-    - pattern: default
+    - path: 'default'
       enable: false
-    - pattern: '*block_sparse_moe.gate*'
+    - path: '*block_sparse_moe.gate*'
       enable: false
-    - pattern: '*linear_attn.conv1d*'
+    - path: '*linear_attn.conv1d*'
       enable: false
-    - pattern: '*lm_head*'
+    - path: '*lm_head*'
       enable: false
-    - pattern: '*mixer.conv1d*'
+    - path: '*mixer.conv1d*'
       enable: false
-    - pattern: '*mlp.gate.*'
+    - path: '*mlp.gate.*'
       enable: false
-    - pattern: '*mlp.shared_expert_gate.*'
+    - path: '*mlp.shared_expert_gate.*'
       enable: false
-    - pattern: '*output_layer*'
+    - path: '*output_layer*'
       enable: false
-    - pattern: '*proj_out.*'
+    - path: '*proj_out.*'
       enable: false
-    - pattern: '*router*'
+    - path: '*router*'
       enable: false
-    - pattern: output.*
+    - path: 'output.*'
       enable: false
-    - pattern: nn.BatchNorm1d
+    - path: 'nn.BatchNorm1d'
       cfg:
         '*':
           enable: false
-    - pattern: nn.BatchNorm2d
+    - path: 'nn.BatchNorm2d'
       cfg:
         '*':
           enable: false
-    - pattern: nn.BatchNorm3d
+    - path: 'nn.BatchNorm3d'
       cfg:
         '*':
           enable: false
-    - pattern: nn.LeakyReLU
+    - path: 'nn.LeakyReLU'
       cfg:
         '*':
           enable: false
