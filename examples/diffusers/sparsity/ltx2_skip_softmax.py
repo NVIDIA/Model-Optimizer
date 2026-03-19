@@ -42,6 +42,7 @@ Usage::
 """
 
 import argparse
+import functools
 
 import torch
 from ltx_core.loader import LTXV_LORA_COMFY_RENAMING_MAP, LoraPathStrengthAndSDOps
@@ -97,7 +98,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-first-last",
         type=int,
-        default=0,
+        default=2,
         help="Number of first/last transformer layers to exclude from sparsity",
     )
 
@@ -126,8 +127,37 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _patch_vae_requires_grad(pipeline: TI2VidTwoStagesPipeline):
+    """Ensure VAE decoder weights have requires_grad=False.
+
+    The pipeline runs under @torch.inference_mode(), but the VAE's conv3d
+    tries to save inputs for backward when weights have requires_grad=True,
+    causing "Inference tensors cannot be saved for backward".  We wrap the
+    lazy decoder loader to disable gradients as soon as it's loaded.
+    """
+    for ledger_attr in ("stage_1_model_ledger", "stage_2_model_ledger"):
+        ledger = getattr(pipeline, ledger_attr, None)
+        if ledger is None:
+            continue
+        for loader_name in ("video_decoder", "audio_decoder"):
+            orig_loader = getattr(ledger, loader_name, None)
+            if orig_loader is None:
+                continue
+
+            def _make_patched(fn):
+                @functools.wraps(fn)
+                def patched():
+                    model = fn()
+                    model.requires_grad_(False)
+                    return model
+
+                return patched
+
+            setattr(ledger, loader_name, _make_patched(orig_loader))
+
+
 def build_pipeline() -> TI2VidTwoStagesPipeline:
-    return TI2VidTwoStagesPipeline(
+    pipeline = TI2VidTwoStagesPipeline(
         checkpoint_path=CHECKPOINT_PATH,
         distilled_lora=[
             LoraPathStrengthAndSDOps(DISTILLED_LORA_PATH, 0.8, LTXV_LORA_COMFY_RENAMING_MAP)
@@ -136,6 +166,8 @@ def build_pipeline() -> TI2VidTwoStagesPipeline:
         gemma_root=GEMMA_ROOT,
         loras=[],
     )
+    _patch_vae_requires_grad(pipeline)
+    return pipeline
 
 
 def build_sparse_config(args: argparse.Namespace) -> dict:
@@ -163,10 +195,10 @@ def build_sparse_config(args: argparse.Namespace) -> dict:
         "default": {"enable": False},
     }
 
-    # Optionally skip first/last N layers
+    # Keep first/last N layers dense (use full module path to avoid matching e.g. layer 10 for layer 0)
     for i in range(args.skip_first_last):
-        sparse_cfg[f"*.{i}.attn*"] = {"enable": False}
-        sparse_cfg[f"*.{47 - i}.attn*"] = {"enable": False}
+        sparse_cfg[f"*transformer_blocks.{i}.attn*"] = {"enable": False}
+        sparse_cfg[f"*transformer_blocks.{47 - i}.attn*"] = {"enable": False}
 
     config: dict = {"sparse_cfg": sparse_cfg}
 
@@ -283,21 +315,20 @@ def main() -> None:
     tiling_config = TilingConfig.default()
     print(f"\nGenerating: {args.prompt[:80]}...")
 
-    with torch.no_grad():
-        video, audio = pipeline(
-            prompt=args.prompt,
-            negative_prompt=DEFAULT_NEGATIVE_PROMPT,
-            seed=args.seed,
-            height=DEFAULT_2_STAGE_HEIGHT,
-            width=DEFAULT_2_STAGE_WIDTH,
-            num_frames=args.num_frames,
-            frame_rate=DEFAULT_FRAME_RATE,
-            num_inference_steps=DEFAULT_NUM_INFERENCE_STEPS,
-            video_guider_params=DEFAULT_VIDEO_GUIDER_PARAMS,
-            audio_guider_params=DEFAULT_AUDIO_GUIDER_PARAMS,
-            images=[],
-            tiling_config=tiling_config,
-        )
+    video, audio = pipeline(
+        prompt=args.prompt,
+        negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+        seed=args.seed,
+        height=DEFAULT_2_STAGE_HEIGHT,
+        width=DEFAULT_2_STAGE_WIDTH,
+        num_frames=args.num_frames,
+        frame_rate=DEFAULT_FRAME_RATE,
+        num_inference_steps=DEFAULT_NUM_INFERENCE_STEPS,
+        video_guider_params=DEFAULT_VIDEO_GUIDER_PARAMS,
+        audio_guider_params=DEFAULT_AUDIO_GUIDER_PARAMS,
+        images=[],
+        tiling_config=tiling_config,
+    )
 
     encode_video(
         video=video,
