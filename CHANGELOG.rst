@@ -1,6 +1,13 @@
 NVIDIA Model Optimizer Changelog
 ================================
 
+0.44 (2026-xx-xx)
+^^^^^^^^^^^^^^^^^
+
+**New Features**
+
+- Enable PTQ workflow for the Step3.5-Flash MoE model with NVFP4 W4A4 + FP8 KV cache quantization.
+
 0.43 (2026-03-xx)
 ^^^^^^^^^^^^^^^^^
 
