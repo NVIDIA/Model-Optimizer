@@ -196,9 +196,17 @@ def test_quantized_transformers_save_restore(tmp_path, model_cls, quant_config):
         import copy
 
         quant_config = copy.deepcopy(quant_config)
-        for pat, cfg in quant_config["quant_cfg"]:
+        for entry in quant_config["quant_cfg"]:
+            pat = (
+                entry["quantizer_path"]
+                if isinstance(entry, dict) and "quantizer_path" in entry
+                else entry[0]
+            )
             if pat == "*weight_quantizer":
-                cfg["block_sizes"] = {-1: 16}
+                if isinstance(entry, dict) and "quantizer_path" in entry:
+                    entry.setdefault("cfg", {})["block_sizes"] = {-1: 16}
+                else:
+                    entry[1]["block_sizes"] = {-1: 16}
                 break
     else:
         raise ValueError(f"Unsupported quant_config: {quant_config}")

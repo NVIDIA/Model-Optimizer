@@ -214,29 +214,37 @@ def _replace_quant_module(model: nn.Module, version=None, registry=QuantModuleRe
 def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType):
     """Update the quantizer attributes based on the specified `quant_cfg`.
 
-    `quant_cfg` is a list of ``(pattern, attrs)`` tuples mapping wildcards or filter functions
-    to its quantizer attributes which are defined in
-    :class:`QuantizerAttributeConfig <.config.QuantizerAttributeConfig>`.
-    The wildcards or filter functions are matched against the quantizer module names.
+    `quant_cfg` is a list of :class:`QuantCfgEntry <.config.QuantCfgEntry>` objects mapping
+    quantizer paths (and optionally parent classes) to their quantizer attributes, which are
+    defined in :class:`QuantizerAttributeConfig <.config.QuantizerAttributeConfig>`.
+    The ``quantizer_path`` is matched against the quantizer module names.
     The specified quantizer attributes of the matched quantizer modules are set accordingly.
     Entries are applied in order; use ``"*"`` as the first entry to set a catch-all default.
 
-    In addition, the dictionary entries could also be pytorch module class names mapping the class specific
-    quantization configuration. The pytorch modules should have a quantized equivalent.
+    In addition, entries with a ``parent_class`` field filter by the pytorch module class,
+    which must have a quantized equivalent.
 
     See :meth:`set_quantizer_attribute <modelopt.torch.quantization.conversion.set_quantizer_attribute>`
     for more details.
     """
-    for pattern, cfg in quant_cfg:
-        if str(pattern) in QuantModuleRegistry:
-            parent_class = QuantModuleRegistry[str(pattern)]
-            assert isinstance(cfg, dict), (
-                f"Expected a dictionary for quantizer configuration for child tensor quantizers of {parent_class}."
-            )
-            for sub_pattern, sub_cfg in cfg.items():
-                set_quantizer_attribute(quant_model, sub_pattern, sub_cfg, parent_class)
-            continue
-        set_quantizer_attribute(quant_model, pattern, cfg)
+    for entry in quant_cfg:
+        entry_cfg = entry.get("cfg", {}) if isinstance(entry, dict) else {}
+        effective_cfg = dict(entry_cfg) if isinstance(entry_cfg, dict) else list(entry_cfg)
+        enable = entry.get("enable") if isinstance(entry, dict) else None
+        if enable is not None and isinstance(effective_cfg, dict):
+            effective_cfg["enable"] = enable
+        parent_class_name = entry.get("parent_class") if isinstance(entry, dict) else None
+        quantizer_path = (
+            entry["quantizer_path"]
+            if isinstance(entry, dict) and "quantizer_path" in entry
+            else entry
+        )
+        assert isinstance(quantizer_path, str)
+        if parent_class_name is not None:
+            parent_class = QuantModuleRegistry[parent_class_name]
+            set_quantizer_attribute(quant_model, quantizer_path, effective_cfg, parent_class)
+        else:
+            set_quantizer_attribute(quant_model, quantizer_path, effective_cfg)
 
 
 def set_quantizer_attribute(
@@ -312,7 +320,9 @@ def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: QuantizeQuan
     Use this context manager with caution. Changing certain attributes of the quantizer such as
     `calibrator` can lead to unexpected behavior.
     """
-    assert not any(isinstance(v, list) for _, v in quant_cfg), "list of config not support."
+    assert not any(
+        isinstance(entry.get("cfg", {}), list) for entry in quant_cfg if isinstance(entry, dict)
+    ), "list of config not support."
 
     original_attributes = {}
     for name, module in quant_model.named_modules():

@@ -210,19 +210,19 @@ def test_general_ptq_yaml_matches_config_dicts(yaml_path, model_cfg_name, kv_cfg
     def _as_dict(qc):
         result = {}
         for entry in qc:
-            if isinstance(entry, dict):
-                if "type" in entry:
-                    sub_cfg = {}
-                    if "enable" in entry:
-                        sub_cfg["enable"] = entry["enable"]
-                    result[entry["type"]] = {entry["path"]: sub_cfg}
-                elif "path" in entry:
-                    fmt = dict(entry.get("cfg") or {})
-                    if "enable" in entry:
-                        fmt["enable"] = entry["enable"]
-                    result[entry["path"]] = fmt
+            if isinstance(entry, dict) and "quantizer_path" in entry:
+                parent_class = entry.get("parent_class")
+                key = parent_class if parent_class else entry["quantizer_path"]
+                cfg = entry.get("cfg", {})
+                val = dict(cfg) if isinstance(cfg, dict) else cfg
+                if entry.get("enable") is not None:
+                    val["enable"] = entry["enable"]
+                if parent_class:
+                    result[key] = {entry["quantizer_path"]: val}
                 else:
-                    result.update(entry)
+                    result[key] = val
+            elif isinstance(entry, dict):
+                result.update(entry)
             else:
                 result[entry[0]] = entry[1]
         return result

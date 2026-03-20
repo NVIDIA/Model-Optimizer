@@ -211,10 +211,24 @@ def _nvfp4_availability_check(module, input, args, kwargs):
     if not hasattr(module, "input_quantizer") or not hasattr(module, "weight_quantizer"):
         return False
 
-    quant_cfg_list: list[tuple] = mtq.NVFP4_DEFAULT_CFG["quant_cfg"]
+    quant_cfg_list = mtq.NVFP4_DEFAULT_CFG["quant_cfg"]
     # Quantizer configs
-    input_cfg = next(v for k, v in quant_cfg_list if k == "*input_quantizer")
-    weight_cfg = next(v for k, v in quant_cfg_list if k == "*weight_quantizer")
+    input_cfg = next(
+        e.get("cfg", {})
+        for e in quant_cfg_list
+        if isinstance(e, dict)
+        and "quantizer_path" in e
+        and e["quantizer_path"] == "*input_quantizer"
+    )
+    weight_cfg = next(
+        e.get("cfg", {})
+        for e in quant_cfg_list
+        if isinstance(e, dict)
+        and "quantizer_path" in e
+        and e["quantizer_path"] == "*weight_quantizer"
+    )
+    assert isinstance(input_cfg, dict)
+    assert isinstance(weight_cfg, dict)
 
     # Check input quantizer config
     for key, value in input_cfg.items():

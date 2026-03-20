@@ -111,8 +111,8 @@ def test_quant_recipe_hparam():
 # use this config to test custom quantization config
 INT8_CUSTOM_QUANT_TEST_CFG = {
     "quant_cfg": [
-        ("*weight_quantizer", {"num_bits": 8, "axis": 0}),
-        ("*input_quantizer", {"num_bits": 8, "axis": None}),
+        {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
         *_default_disabled_quantizer_cfg,
     ],
     "algorithm": "smoothquant",
@@ -231,15 +231,19 @@ def test_auto_quantize_disabled_layers_no_poison():
 
 INT4INT8_AWQ_CFG = {
     "quant_cfg": [
-        (
-            "*weight_quantizer",
-            [
+        {
+            "quantizer_path": "*weight_quantizer",
+            "cfg": [
                 {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}, "enable": True},
                 {"num_bits": 8, "axis": None, "enable": True},
             ],
-        ),
-        ("*input_quantizer", {"num_bits": 8, "axis": None, "enable": True}),
-        ("default", {"enable": False}),
+        },
+        {
+            "quantizer_path": "*input_quantizer",
+            "cfg": {"num_bits": 8, "axis": None},
+            "enable": True,
+        },
+        {"quantizer_path": "default", "enable": False},
     ],
     "algorithm": "awq_lite",
 }
@@ -484,7 +488,21 @@ def test_get_auto_quantize_config(method):
     config = mtq.get_auto_quantize_config(search_state)
     assert "quant_cfg" in config
     assert isinstance(config["quant_cfg"], list)
-    assert any(pattern == "*" and cfg == {"enable": False} for pattern, cfg in config["quant_cfg"])
+    assert any(
+        (
+            entry["quantizer_path"]
+            if isinstance(entry, dict) and "quantizer_path" in entry
+            else entry[0]
+        )
+        == "*"
+        and (
+            entry.get("enable")
+            if isinstance(entry, dict) and "quantizer_path" in entry
+            else entry[1].get("enable")
+        )
+        is False
+        for entry in config["quant_cfg"]
+    )
     assert config["algorithm"] == "max"
 
     # Re-solve with different constraints

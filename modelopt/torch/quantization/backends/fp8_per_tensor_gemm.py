@@ -97,9 +97,23 @@ def fp8_per_tensor_gemm(quant_module, input, bias=None):
 def _fp8_availability_check(module, input, args, kwargs):
     """Comprehensive check for FP8 GEMM availability."""
     # Quantizer configs
-    quant_cfg_list: list[tuple] = FP8_DEFAULT_CFG["quant_cfg"]
-    input_cfg = next(v for k, v in quant_cfg_list if k == "*input_quantizer")
-    weight_cfg = next(v for k, v in quant_cfg_list if k == "*weight_quantizer")
+    quant_cfg_list = FP8_DEFAULT_CFG["quant_cfg"]
+    input_cfg = next(
+        e.get("cfg", {})
+        for e in quant_cfg_list
+        if isinstance(e, dict)
+        and "quantizer_path" in e
+        and e["quantizer_path"] == "*input_quantizer"
+    )
+    weight_cfg = next(
+        e.get("cfg", {})
+        for e in quant_cfg_list
+        if isinstance(e, dict)
+        and "quantizer_path" in e
+        and e["quantizer_path"] == "*weight_quantizer"
+    )
+    assert isinstance(input_cfg, dict)
+    assert isinstance(weight_cfg, dict)
 
     # Check hardware support
     if not torch.cuda.is_available() or not fp8_compatible():

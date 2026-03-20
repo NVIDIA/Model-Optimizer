@@ -68,33 +68,45 @@ def get_quant_config(precision, lm_head_precision="fp16"):
     else:
         raise ValueError(f"Unsupported precision: {precision}")
 
-    quant_cfg_list: list[tuple] = list(quant_cfg["quant_cfg"])  # type: ignore[arg-type]
+    quant_cfg_list: list = [
+        e for e in quant_cfg["quant_cfg"] if isinstance(e, dict) and "quantizer_path" in e
+    ]
 
     if lm_head_precision == "fp8":
-        quant_cfg_list.append(("*lm_head.input_quantizer", {"num_bits": (4, 3), "axis": None}))
-        quant_cfg_list.append(("*lm_head.weight_quantizer", {"num_bits": (4, 3), "axis": None}))
-    elif lm_head_precision == "nvfp4":
         quant_cfg_list.append(
-            (
-                "*lm_head.input_quantizer",
-                {
-                    "num_bits": (2, 1),
-                    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-                    "axis": None,
-                    "enable": True,
-                },
-            )
+            {
+                "quantizer_path": "*lm_head.input_quantizer",
+                "cfg": {"num_bits": (4, 3), "axis": None},
+            }
         )
         quant_cfg_list.append(
-            (
-                "*lm_head.weight_quantizer",
-                {
+            {
+                "quantizer_path": "*lm_head.weight_quantizer",
+                "cfg": {"num_bits": (4, 3), "axis": None},
+            }
+        )
+    elif lm_head_precision == "nvfp4":
+        quant_cfg_list.append(
+            {
+                "quantizer_path": "*lm_head.input_quantizer",
+                "cfg": {
                     "num_bits": (2, 1),
                     "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
                     "axis": None,
-                    "enable": True,
                 },
-            )
+                "enable": True,
+            }
+        )
+        quant_cfg_list.append(
+            {
+                "quantizer_path": "*lm_head.weight_quantizer",
+                "cfg": {
+                    "num_bits": (2, 1),
+                    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                    "axis": None,
+                },
+                "enable": True,
+            }
         )
     quant_cfg["quant_cfg"] = quant_cfg_list
     return quant_cfg

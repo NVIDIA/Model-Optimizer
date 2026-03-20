@@ -52,7 +52,6 @@ except ImportError:
 from torch.distributed.fsdp import FSDPModule
 
 from modelopt.torch.quantization import set_quantizer_by_cfg_context
-from modelopt.torch.quantization.config import QuantizerAttributeConfig
 from modelopt.torch.quantization.nn import (
     NVFP4StaticQuantizer,
     SequentialQuantizer,
@@ -221,7 +220,7 @@ def _collect_shared_input_modules(
     try:
         with (
             torch.no_grad(),
-            set_quantizer_by_cfg_context(model, [("*", QuantizerAttributeConfig(enable=False))]),
+            set_quantizer_by_cfg_context(model, [{"quantizer_path": "*", "enable": False}]),
         ):
             dummy_forward_fn()
     finally:

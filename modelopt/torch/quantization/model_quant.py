@@ -35,7 +35,7 @@ from modelopt.torch.utils import atomic_print
 
 from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher, QuantRecipe
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
-from .config import QuantizeAlgoCfgType, QuantizerAttributeConfig
+from .config import QuantizeAlgoCfgType
 from .conversion import set_quantizer_attribute
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import QuantModule, TensorQuantizer
@@ -527,7 +527,7 @@ def auto_quantize(
         "checkpoint": checkpoint,
     }
     # Disable all quantizers; AutoQuantize will enable the needed ones
-    set_quantizer_by_cfg(model, [("*", QuantizerAttributeConfig(enable=False))])
+    set_quantizer_by_cfg(model, [{"quantizer_path": "*", "enable": False}])
     searcher.search(model, constraints, config=search_config)  # type: ignore[arg-type]
 
     return model, searcher.state_dict()

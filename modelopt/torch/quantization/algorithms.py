@@ -62,9 +62,22 @@ def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
 
     def estimate_quant_compression_for_quantizer(quantizer_attr_cfg):
         if isinstance(quantizer_attr_cfg, list):
+            if not quantizer_attr_cfg:
+                return 1.0
             return min(estimate_quant_compression_for_quantizer(q) for q in quantizer_attr_cfg)
         if isinstance(quantizer_attr_cfg, dict):
-            return estimate_quant_compression_for_quantizer(list(quantizer_attr_cfg.values()))
+            # Handle raw quantizer cfg dicts (e.g. {"num_bits": (4, 3), "axis": None})
+            if not quantizer_attr_cfg.get("enable", True):
+                return 1.0
+            num_bits = quantizer_attr_cfg.get("num_bits")
+            if num_bits is None:
+                return 1.0
+            if isinstance(num_bits, tuple):
+                return (sum(num_bits) + 1) / 16
+            elif isinstance(num_bits, int):
+                return num_bits / 16
+            else:
+                raise ValueError(f"Unknown quantization config {num_bits}")
 
         if isinstance(quantizer_attr_cfg, QuantizerAttributeConfig):
             if not quantizer_attr_cfg.enable:
@@ -80,7 +93,8 @@ def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
 
         raise ValueError(f"Unknown type {type(quantizer_attr_cfg)}, {quantizer_attr_cfg}")
 
-    return estimate_quant_compression_for_quantizer([v for _, v in quant_cfg.quant_cfg])
+    cfgs = [e.get("cfg", {}) for e in quant_cfg.quant_cfg]
+    return estimate_quant_compression_for_quantizer(cfgs) if cfgs else 1.0
 
 
 class QuantRecipe(CustomHPType):
@@ -109,9 +123,7 @@ class QuantRecipe(CustomHPType):
         # Disable KV Cache quantization
         # Currently KV Cache quantization is enabled for some quantization formats and disabled for others
         # This breaks the monotonicity of the quantization formats in terms of weight compression Vs accuracy
-        self.config.quant_cfg.append(
-            ("*output_quantizer", mtq_config.QuantizerAttributeConfig(enable=False))
-        )
+        self.config.quant_cfg.append({"quantizer_path": "*output_quantizer", "enable": False})
 
         self.compression = estimate_quant_compression(self.config)
 
@@ -1361,7 +1373,17 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
 def _match_quantizer_cfg(quant_cfg, quantizer_attr):
     # Last-match-wins to mirror set_quantizer_by_cfg behavior
     matched = None
-    for pattern, cfg in quant_cfg:
+    for entry in quant_cfg:
+        pattern = (
+            entry["quantizer_path"]
+            if isinstance(entry, dict) and "quantizer_path" in entry
+            else entry[0]
+        )
+        cfg = (
+            entry.get("cfg", {})
+            if isinstance(entry, dict) and "quantizer_path" in entry
+            else entry[1]
+        )
         if fnmatch.fnmatch(quantizer_attr, pattern):
             matched = cfg
     return matched
