@@ -27,7 +27,10 @@ from _test_utils.torch.puzzletron.utils import setup_test_model_and_data
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.puzzletron import puzzletron
 from modelopt.torch.puzzletron.anymodel import convert_model
-from modelopt.torch.puzzletron.mip.sweep import get_teacher_memory_from_subblock_stats
+from modelopt.torch.puzzletron.mip.sweep import (
+    get_teacher_memory_from_subblock_stats,
+    get_teacher_num_params_from_subblock_stats,
+)
 
 # The e2e test to compress a model based on Local Neural Architecture Search (Mixed Integer Programing NAS search)
 # using a one-click command.
@@ -175,20 +178,18 @@ def _test_puzzletron_multiprocess_job(
 
 
 def _assert_subblock_stats_anymodel(hf_model_name: str, hydra_cfg) -> None:
-    """Minimal subblock_stats checks and teacher-memory regression value."""
+    """Minimal subblock_stats checks and teacher memory / param regression values."""
     assert (Path(hydra_cfg.puzzle_dir) / "subblock_stats.json").is_file()
     teacher_mem_mib = get_teacher_memory_from_subblock_stats(hydra_cfg)
+    teacher_num_params = get_teacher_num_params_from_subblock_stats(hydra_cfg)
 
-    expected = EXPECTED_TEACHER_MEMORY_MIB.get(hf_model_name)
-    if expected is None:
-        pytest.fail(
-            "Missing expected teacher memory for "
-            f"{hf_model_name}: got {teacher_mem_mib}. "
-            f"Add this line to EXPECTED_TEACHER_MEMORY_MIB: {hf_model_name!r}: {teacher_mem_mib},"
-        )
-
-    assert abs(teacher_mem_mib - expected) < 1e-6, (
-        f"Teacher memory mismatch for {hf_model_name}: expected {expected}, got {teacher_mem_mib}"
+    assert abs(teacher_mem_mib - EXPECTED_TEACHER_MEMORY_MIB[hf_model_name]) < 1e-6, (
+        f"Teacher memory mismatch for {hf_model_name}: "
+        f"expected {EXPECTED_TEACHER_MEMORY_MIB[hf_model_name]}, got {teacher_mem_mib}"
+    )
+    assert abs(teacher_num_params - EXPECTED_TEACHER_NUM_PARAMS[hf_model_name]) < 1e-6, (
+        f"Teacher num_params mismatch for {hf_model_name}: "
+        f"expected {EXPECTED_TEACHER_NUM_PARAMS[hf_model_name]}, got {teacher_num_params}"
     )
 
 
@@ -305,7 +306,7 @@ EXPECTED_LM_LOSS = {
     # TODO: not reproducible in CI, skipping for now
     # "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": 4.7737884521484375,
     "nvidia/NVIDIA-Nemotron-Nano-12B-v2": 4.79390811920166,
-    # "openai/gpt-oss-20b": 4.689250946044922,
+    "openai/gpt-oss-20b": 4.689250946044922,
     "Qwen/Qwen2.5-7B-Instruct": 4.778186798095703,
     "Qwen/Qwen3-8B": 4.733874320983887,
     "Qwen/Qwen3-VL-30B-A3B-Instruct": 4.65625,
@@ -323,4 +324,18 @@ EXPECTED_TEACHER_MEMORY_MIB = {
     "Qwen/Qwen2.5-7B-Instruct": 386.22705078125,
     "Qwen/Qwen3-8B": 386.22705078125,
     "Qwen/Qwen3-VL-30B-A3B-Instruct": 420.74267578125,
+}
+
+
+# Expected total teacher params from subblock_stats
+EXPECTED_TEACHER_NUM_PARAMS = {
+    "meta-llama/Llama-3.1-8B-Instruct": 1167616.0,
+    "meta-llama/Llama-3.2-3B-Instruct": 1167616.0,
+    "mistralai/Mistral-Small-24B-Instruct-2501": 1167616.0,
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": 188993280.0,
+    "nvidia/NVIDIA-Nemotron-Nano-12B-v2": 610048.0,
+    "openai/gpt-oss-20b": 38146304.0,
+    "Qwen/Qwen2.5-7B-Instruct": 1167616.0,
+    "Qwen/Qwen3-8B": 1167616.0,
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": 19263744.0,
 }

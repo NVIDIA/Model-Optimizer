@@ -17,8 +17,10 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
+from transformers import PretrainedConfig
 
 import modelopt.torch.puzzletron.anymodel.models  # noqa: F401 — register ModelDescriptorFactory entries
 import modelopt.torch.puzzletron.mip.mip_and_realize_models as mip_and_realize_models
@@ -31,18 +33,8 @@ from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import load_model_confi
 from modelopt.torch.puzzletron.tools.logger import mprint
 
 
-def get_teacher_memory_from_subblock_stats(hydra_cfg) -> float:
-    """Calculate teacher model memory from subblock_stats.json.
-
-    Sums ``non_block`` and per-layer ``_get_block_stats(subblock_stats, block_config, layer_index)``
-    over ``model_config.block_configs``, matching :func:`run_puzzle._get_block_stats`.
-
-    Args:
-        hydra_cfg: Hydra configuration object
-
-    Returns:
-        Total teacher memory in MiB
-    """
+def _load_teacher_subblock_stats(hydra_cfg: DictConfig) -> tuple[dict[str, Any], PretrainedConfig]:
+    """Load filtered subblock_stats and teacher ``model_config`` for the current MIP scenario."""
     puzzle_dir = Path(hydra_cfg.puzzle_dir)
     teacher_dir = Path(hydra_cfg.teacher_dir)
 
@@ -82,6 +74,23 @@ def get_teacher_memory_from_subblock_stats(hydra_cfg) -> float:
             f"n_embd={hidden_size}"
         ) from e
 
+    return subblock_stats, model_config
+
+
+def get_teacher_memory_from_subblock_stats(hydra_cfg: DictConfig) -> float:
+    """Calculate teacher model memory from subblock_stats.json.
+
+    Sums ``non_block`` and per-layer ``_get_block_stats(subblock_stats, block_config, layer_index)``
+    over ``model_config.block_configs``, matching :func:`run_puzzle._get_block_stats`.
+
+    Args:
+        hydra_cfg: Hydra configuration object
+
+    Returns:
+        Total teacher memory in MiB
+    """
+    subblock_stats, model_config = _load_teacher_subblock_stats(hydra_cfg)
+
     total_memory = subblock_stats.get("non_block", {}).get("memory_mib", 0.0)
 
     for layer_idx, block_config in enumerate(model_config.block_configs):
@@ -89,6 +98,29 @@ def get_teacher_memory_from_subblock_stats(hydra_cfg) -> float:
         total_memory += block_stats["memory_mib"]
 
     return total_memory
+
+
+def get_teacher_num_params_from_subblock_stats(hydra_cfg: DictConfig) -> int:
+    """Calculate total teacher parameter count from subblock_stats.json.
+
+    Sums ``non_block`` and per-layer ``_get_block_stats(...)["num_params"]`` over
+    ``model_config.block_configs``, matching :func:`run_puzzle._get_block_stats`.
+
+    Args:
+        hydra_cfg: Hydra configuration object
+
+    Returns:
+        Total teacher parameter count (same units as subblock_stats JSON).
+    """
+    subblock_stats, model_config = _load_teacher_subblock_stats(hydra_cfg)
+
+    total_params = subblock_stats.get("non_block", {}).get("num_params", 0)
+
+    for layer_idx, block_config in enumerate(model_config.block_configs):
+        block_stats = _get_block_stats(subblock_stats, block_config, layer_idx)
+        total_params += block_stats["num_params"]
+
+    return int(total_params)
 
 
 def extract_solution_results(
