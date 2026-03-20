@@ -276,6 +276,79 @@ class UserStore:
             d.name for d in self._users_dir.iterdir() if d.is_dir() and (d / "auth.json").exists()
         ]
 
+    # ── Credential Import ──────────────────────────────────────────
+
+    def scan_local_credentials(self, home_dir: str) -> dict[str, str]:
+        """Scan a local home directory for known credentials.
+
+        Returns dict of {ENV_VAR_NAME: value} for found credentials.
+        Only reads, never modifies.
+        """
+        found: dict[str, str] = {}
+        home = Path(home_dir)
+        if not home.is_dir():
+            return found
+
+        # HuggingFace token
+        for hf_path in [
+            home / ".cache" / "huggingface" / "token",
+            home / ".huggingface" / "token",
+        ]:
+            if hf_path.exists():
+                token = hf_path.read_text(encoding="utf-8").strip()
+                if token:
+                    found["HF_TOKEN"] = token
+                    break
+
+        # NGC API key
+        ngc_config = home / ".ngc" / "config"
+        if ngc_config.exists():
+            for line in ngc_config.read_text(encoding="utf-8").splitlines():
+                if line.strip().startswith("apikey"):
+                    _, _, val = line.partition("=")
+                    val = val.strip()
+                    if val:
+                        found["NGC_API_KEY"] = val
+                        break
+
+        # Docker config (for registry auth — just note it exists, don't extract)
+        docker_config = home / ".docker" / "config.json"
+        if docker_config.exists():
+            found["_DOCKER_CONFIG"] = str(docker_config)
+
+        return found
+
+    def import_credentials(self, user_id: str, creds: dict[str, str]) -> list[str]:
+        """Import scanned credentials into user's env file.
+
+        Returns list of imported variable names.
+        """
+        imported = []
+        for key, value in creds.items():
+            if key.startswith("_"):
+                continue  # Skip metadata entries like _DOCKER_CONFIG
+            self.set_env_var(user_id, key, value)
+            imported.append(key)
+        return imported
+
+    def resolve_home_dir(self, username: str) -> str | None:
+        """Resolve a local username to their home directory."""
+        import pwd
+
+        try:
+            pw = pwd.getpwnam(username)
+            if Path(pw.pw_dir).is_dir():
+                return pw.pw_dir
+        except KeyError:
+            pass
+
+        # Fallback: check common paths
+        for prefix in ["/home", "/home/scratch." + username]:
+            candidate = Path(prefix) / username
+            if candidate.is_dir():
+                return str(candidate)
+        return None
+
     # ── Internal ─────────────────────────────────────────────────────
 
     def _ensure_user_dir(self, user_id: str):

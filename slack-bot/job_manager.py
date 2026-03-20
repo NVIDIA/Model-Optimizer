@@ -67,6 +67,7 @@ COPY_EXCLUDES = [
     "dist",
     "build",
     "*.sqsh",
+    ".claude/clusters.yaml",  # per-user, never copy from repo
 ]
 
 
@@ -116,11 +117,16 @@ class WorkspaceManager:
         else:
             await self._copy_repo(dest)
 
-        # Always inject/update cluster config
+        # Remove any repo-level clusters.yaml (don't leak other users' config)
+        claude_dir = dest / ".claude"
+        repo_clusters = claude_dir / "clusters.yaml"
+        if repo_clusters.exists():
+            repo_clusters.unlink()
+
+        # Inject user's own cluster config if they have one
         if clusters_yaml:
-            claude_dir = dest / ".claude"
             claude_dir.mkdir(exist_ok=True)
-            (claude_dir / "clusters.yaml").write_text(clusters_yaml, encoding="utf-8")
+            repo_clusters.write_text(clusters_yaml, encoding="utf-8")
 
         return dest
 

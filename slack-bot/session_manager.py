@@ -39,6 +39,10 @@ logger = logging.getLogger(__name__)
 # Must be generous — agent may sleep/poll for long-running SLURM jobs.
 IDLE_TIMEOUT = int(os.environ.get("CLAUDE_IDLE_TIMEOUT", "7200"))  # 2 hours
 
+# Track sessions that have been created (--session-id used once).
+# Subsequent calls use --resume to avoid "session already in use" error.
+_known_sessions: set[str] = set()
+
 
 @dataclass
 class StreamChunk:
@@ -165,7 +169,11 @@ def _build_cmd(
         cmd.extend(["--output-format", "stream-json", "--verbose"])
 
     if session_id:
-        cmd.extend(["--session-id", session_id])
+        if session_id in _known_sessions:
+            cmd.extend(["--resume", session_id])
+        else:
+            cmd.extend(["--session-id", session_id])
+            _known_sessions.add(session_id)
 
     cmd.extend(["-p", prompt])
     return cmd

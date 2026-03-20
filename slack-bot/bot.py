@@ -87,6 +87,12 @@ cluster_setup_state: dict[str, dict] = {}
 # Store last full response per user for /modelopt logs
 _last_response: dict[str, str] = {}
 
+# Pending credential imports awaiting user confirmation
+_pending_cred_import: dict[str, dict] = {}
+
+# Per-session locks to prevent concurrent Claude processes on the same session
+_session_locks: dict[str, asyncio.Lock] = {}
+
 # Keep strong references to background tasks to prevent GC
 _background_tasks: set = set()
 
@@ -206,6 +212,31 @@ async def _start_interactive_login(user_id: str, say, thread_ts: str | None):
 # ─── Onboarding Response Handler ────────────────────────────────────
 
 
+async def _finish_onboarding(say, thread_ts):
+    """Send the final onboarding message."""
+    await say(
+        text=(
+            "You're all set! Try: `@modelopt quantize Qwen3-0.6B with nvfp4`\n\n"
+            "Use `/modelopt help` for all commands."
+        ),
+        thread_ts=thread_ts,
+    )
+
+
+async def _start_creds_import(user_id, say, thread_ts):
+    """Ask user if they want to import credentials from their home dir."""
+    onboarding_state[user_id] = "awaiting_creds_choice"
+    await say(
+        text=(
+            "Would you like to import credentials (HF token, NGC key, etc.)?\n\n"
+            "*1️⃣* I have a user account on this server — scan my home dir\n"
+            "*2️⃣* Skip for now (set later with `/modelopt set-env`)\n\n"
+            "Reply with `1` or `2`."
+        ),
+        thread_ts=thread_ts,
+    )
+
+
 async def handle_onboarding_response(event, say):
     """Handle responses during the onboarding flow."""
     user_id = event["user"]
@@ -272,18 +303,113 @@ async def handle_onboarding_response(event, say):
             await say(text=f"Login error: {e}\nTry `/modelopt setup` again.", thread_ts=thread_ts)
         return True
 
+    if state == "awaiting_reconfig_choice":
+        del onboarding_state[user_id]
+        if text == "1":
+            # Re-authenticate
+            onboarding_state[user_id] = "awaiting_auth_choice"
+            await say(text=WELCOME_MSG, thread_ts=thread_ts)
+        elif text == "2":
+            await start_cluster_setup(user_id, say, thread_ts)
+        elif text == "3":
+            await _start_creds_import(user_id, say, thread_ts)
+        else:
+            await say(
+                text="Keeping current setup. Use `/modelopt help` for commands.",
+                thread_ts=thread_ts,
+            )
+        return True
+
     if state == "awaiting_cluster_choice":
         del onboarding_state[user_id]
         if text.lower() in ("yes", "y"):
             await start_cluster_setup(user_id, say, thread_ts)
         else:
+            onboarding_state[user_id] = "awaiting_creds_choice"
             await say(
                 text=(
-                    "All set! You can configure a cluster later with `/modelopt add-cluster`."
-                    "\n\nTry: `@modelopt quantize Qwen3-0.6B with nvfp4`"
+                    "Would you like to import credentials (HF token, NGC key, etc.)?\n\n"
+                    "*1️⃣* I have a user account on this server — scan my home dir\n"
+                    "*2️⃣* Skip for now (set later with `/modelopt set-env`)\n\n"
+                    "Reply with `1` or `2`."
                 ),
                 thread_ts=thread_ts,
             )
+        return True
+
+    if state == "awaiting_creds_choice":
+        del onboarding_state[user_id]
+        if text == "1":
+            onboarding_state[user_id] = "awaiting_username"
+            await say(
+                text="What is your username on this server?",
+                thread_ts=thread_ts,
+            )
+        else:
+            await _finish_onboarding(say, thread_ts)
+        return True
+
+    if state == "awaiting_username":
+        del onboarding_state[user_id]
+        username = text.strip()
+        home_dir = user_store.resolve_home_dir(username)
+        if not home_dir:
+            await say(
+                text=(
+                    f"Could not find home directory for `{username}`.\n"
+                    "You can set tokens manually with `/modelopt set-env HF_TOKEN=...`"
+                ),
+                thread_ts=thread_ts,
+            )
+            await _finish_onboarding(say, thread_ts)
+            return True
+
+        creds = user_store.scan_local_credentials(home_dir)
+        if not creds:
+            await say(
+                text=(
+                    f"No credentials found in `{home_dir}`.\n"
+                    "You can set tokens manually with `/modelopt set-env HF_TOKEN=...`"
+                ),
+                thread_ts=thread_ts,
+            )
+            await _finish_onboarding(say, thread_ts)
+            return True
+
+        # Show what was found
+        lines = ["*Found credentials:*"]
+        for key, val in creds.items():
+            if key.startswith("_"):
+                if key == "_DOCKER_CONFIG":
+                    lines.append(f"• Docker config: `{val}`")
+            else:
+                masked = val[:6] + "..." if len(val) > 6 else val
+                lines.append(f"• `{key}` = `{masked}`")
+
+        # Store found creds temporarily for confirmation
+        _pending_cred_import[user_id] = creds
+        onboarding_state[user_id] = "awaiting_creds_confirm"
+        await say(
+            text="\n".join(lines) + "\n\nImport these? Reply `yes` or `no`.",
+            thread_ts=thread_ts,
+        )
+        return True
+
+    if state == "awaiting_creds_confirm":
+        del onboarding_state[user_id]
+        creds = _pending_cred_import.pop(user_id, {})
+        if text.lower() in ("yes", "y") and creds:
+            imported = user_store.import_credentials(user_id, creds)
+            await say(
+                text=f"Imported: {', '.join(f'`{k}`' for k in imported)}",
+                thread_ts=thread_ts,
+            )
+        else:
+            await say(
+                text="Skipped. Use `/modelopt set-env` to add tokens later.",
+                thread_ts=thread_ts,
+            )
+        await _finish_onboarding(say, thread_ts)
         return True
 
     # Handle cluster setup flow
@@ -373,12 +499,11 @@ async def handle_cluster_setup_response(user_id, text, say, thread_ts):
 
         user_store.save_clusters_yaml(user_id, yaml_content)
         await say(
-            text=(
-                f"Cluster *{name}* configured!\n\n```{yaml_content}```\n"
-                "You're all set. Try: `@modelopt quantize Qwen3-0.6B with nvfp4`"
-            ),
+            text=f"Cluster *{name}* configured!\n\n```{yaml_content}```",
             thread_ts=thread_ts,
         )
+        # Chain to credentials import
+        await _start_creds_import(user_id, say, thread_ts)
 
     return True
 
@@ -399,8 +524,35 @@ async def handle_slash_command(ack, command, say, respond):
     args = parts[1] if len(parts) > 1 else ""
 
     if subcmd == "setup":
-        onboarding_state[user_id] = "awaiting_auth_choice"
-        await respond(text=WELCOME_MSG)
+        if user_store.is_registered(user_id):
+            # User already set up — show current config and offer options
+            info = user_store.user_info(user_id)
+            env_vars = user_store.get_env_vars(user_id)
+            has_clusters = user_store.has_clusters(user_id)
+
+            lines = ["You're already set up! Current config:\n"]
+            lines.append(f"• *Auth:* {info['auth_method'] if info else 'unknown'}")
+            lines.append(
+                f"• *Clusters:* {'configured' if has_clusters else 'none'}"
+            )
+            if env_vars:
+                env_list = ", ".join(f"`{k}`" for k in env_vars)
+                lines.append(f"• *Env vars:* {env_list}")
+            else:
+                lines.append("• *Env vars:* none")
+
+            lines.append("\nWhat would you like to do?\n")
+            lines.append("*1️⃣* Re-authenticate (new Claude login)")
+            lines.append("*2️⃣* Reconfigure cluster")
+            lines.append("*3️⃣* Import/update credentials (HF, NGC, etc.)")
+            lines.append("*4️⃣* Keep current setup — nothing to change")
+            lines.append("\nReply with `1`, `2`, `3`, or `4`.")
+
+            onboarding_state[user_id] = "awaiting_reconfig_choice"
+            await respond(text="\n".join(lines))
+        else:
+            onboarding_state[user_id] = "awaiting_auth_choice"
+            await respond(text=WELCOME_MSG)
 
     elif subcmd == "add-cluster":
         await start_cluster_setup(user_id, respond, None)
@@ -534,7 +686,6 @@ async def handle_mention(event, say):
         await say(text=WELCOME_MSG, thread_ts=thread_ts)
         return
 
-    await say(text=":hourglass_flowing_sand: Setting up job...", thread_ts=thread_ts)
     await _run_job(user_id, text, say_func=say, channel=channel, thread_ts=thread_ts)
 
 
@@ -566,7 +717,6 @@ async def handle_dm(event, say):
         await say(text=WELCOME_MSG, thread_ts=thread_ts)
         return
 
-    await say(text=":hourglass_flowing_sand: Setting up job...", thread_ts=thread_ts)
     await _run_job(user_id, text, say_func=say, channel=channel, thread_ts=thread_ts)
 
 
@@ -612,11 +762,48 @@ async def _run_job(user_id: str, prompt: str, say_func, channel: str, thread_ts:
     session_key = f"modelopt-slack-{user_id}-{thread_ts or 'ephemeral'}"
     session_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, session_key))
 
-    if thread_ts:
+    # Acquire per-session lock to prevent concurrent Claude on same session
+    if session_id not in _session_locks:
+        _session_locks[session_id] = asyncio.Lock()
+    lock = _session_locks[session_id]
+
+    if lock.locked():
+        kwargs = {"thread_ts": thread_ts} if thread_ts else {}
         await say_func(
-            text=":rocket: Working on it — this may take a while. I'll let you know when it's done.",
-            thread_ts=thread_ts,
+            text=":hourglass: Previous request still running. Waiting for it to finish...",
+            **kwargs,
         )
+
+    async with lock:
+        logger.info("Session %s acquired for user %s", session_id[:8], user_id)
+        return await _run_job_inner(
+            user_id, prompt, say_func, channel, thread_ts,
+            workspace, env, bot_context, session_id,
+        )
+
+
+async def _run_job_inner(
+    user_id, prompt, say_func, channel, thread_ts,
+    workspace, env, bot_context, session_id,
+):
+    """Run Claude (called under session lock)."""
+    # Delayed "working on it" — only show if response takes > 5 seconds
+    working_msg_sent = False
+
+    async def _send_delayed_notice():
+        nonlocal working_msg_sent
+        await asyncio.sleep(5)
+        if thread_ts:
+            working_msg_sent = True
+            await say_func(
+                text=(
+                    ":rocket: Working on it — this may take a while."
+                    " I'll let you know when it's done."
+                ),
+                thread_ts=thread_ts,
+            )
+
+    notice_task = asyncio.create_task(_send_delayed_notice())
 
     # Stream internally to keep idle detection alive. Only send final result to Slack.
     full_response = ""
@@ -635,6 +822,10 @@ async def _run_job(user_id: str, prompt: str, say_func, channel: str, thread_ts:
     except Exception as e:
         full_response += f"\n\n:x: Failed: {e}"
         logger.error("Request failed for user %s: %s", user_id, e)
+    finally:
+        notice_task.cancel()
+
+    logger.info("Session %s done for user %s", session_id[:8], user_id)
 
     # Send final response
     if not full_response.strip():
