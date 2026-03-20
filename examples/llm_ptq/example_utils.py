@@ -567,6 +567,9 @@ def get_model(
     try:
         hf_config = AutoConfig.from_pretrained(ckpt_path, **config_kwargs)
 
+        if not hasattr(hf_config, "moe_latent_size"):
+            hf_config.moe_latent_size = None
+
         if is_nemotron_vl(hf_config):
             print(
                 "Detected Nemotron VL model from config. "

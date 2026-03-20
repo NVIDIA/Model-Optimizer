@@ -2157,8 +2157,12 @@ def gptq(
     def _make_hessian_forward(module_name):
         def hessian_forward(self, input, *args, **kwargs):
             inp = input.to_local() if hasattr(input, "to_local") else input
+            if self.input_quantizer is not None and self.input_quantizer.is_enabled:
+                hessian_input = self.input_quantizer(inp)
+            else:
+                hessian_input = inp
             state = hessian_state[module_name]
-            hessian, n_samples = update_hessian(inp, state["hessian"], state["n_samples"])
+            hessian, n_samples = update_hessian(hessian_input, state["hessian"], state["n_samples"])
             hessian_state[module_name] = {"hessian": hessian, "n_samples": n_samples}
 
             self.weight_quantizer.disable()
