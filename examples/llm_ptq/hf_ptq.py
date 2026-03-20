@@ -273,6 +273,7 @@ def auto_quantize(
             "int4_awq",
             "nvfp4",
             "nvfp4_awq",
+            "nvfp4_mse",
             "w4a8_awq",
             "fp8_pb_wo",
             "w4a8_mxfp4_fp8",
