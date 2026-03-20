@@ -309,6 +309,7 @@ def main(args: argparse.Namespace):
                     train_iters=args.train_iters,
                     hf_export_path=args.hf_export_path,
                     hf_model=args.hf_model,
+                    trust_remote_code=args.trust_remote_code,
                 )
             except Exception as e:
                 print(f"⚠️  Export failed: {e}")
