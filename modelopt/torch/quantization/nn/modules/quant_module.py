@@ -120,14 +120,7 @@ class QuantModule(DynamicModule):
                 module.to(non_tq_param_or_buffer.device)
 
     def iter_weights_for_calibration(self):
-        """Yield ``(weight, weight_quantizer)`` pairs for weight-only calibration.
-
-        The default implementation iterates over all weights returned by
-        :func:`~modelopt.torch.quantization.utils.weight_attr_names`.  Subclasses that
-        store weights under non-standard attribute names (e.g.
-        ``_QuantTEGroupedLinear`` uses ``weight0``, ``weight1``, …) should
-        override this method.
-        """
+        """Yield ``(weight, weight_quantizer)`` pairs for weight-only calibration."""
         from modelopt.torch.quantization.utils import quantizer_attr_names, weight_attr_names
 
         for weight_name in weight_attr_names(self):
