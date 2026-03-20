@@ -16,7 +16,8 @@
 
 from pathlib import Path
 
-from _test_utils.examples.run_command import run_example_command
+import torch
+from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.distributed.utils import get_free_port
 from _test_utils.torch.puzzletron.utils import create_and_save_small_hf_model, create_tokenizer
 from transformers import AutoModelForCausalLM
@@ -36,71 +37,47 @@ def test_distill_hf(project_root_path: Path, tmp_path: Path):
         project_root_path, tmp_path
     )
 
-    # Prepare output directory
     output_dir = tmp_path / "distill_output"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Prepare HF export directory
     hf_export_dir = tmp_path / "hf_export"
-    hf_export_dir.mkdir(parents=True, exist_ok=True)
 
     # Build command-line arguments for distill_hf.py
-    # Use torchrun for distributed execution (single GPU for testing)
-    nproc_per_node = 1
-    tp_size = 1
+    nproc_per_node = torch.cuda.device_count()
+    tp_size = nproc_per_node
     train_iters = 5
 
     cmd_parts = [
         "torchrun",
         f"--nproc_per_node={nproc_per_node}",
         "--master-addr",
-        "127.0.0.1",  # Explicitly set master address
+        "127.0.0.1",
         "--master-port",
-        str(get_free_port()),  # Pass port directly to torchrun to avoid conflicts
+        str(get_free_port()),
         "distill_hf.py",
-        "--student_hf_path",
-        student_hf_path,
-        "--teacher_hf_path",
-        teacher_hf_path,
-        "--output_dir",
-        str(output_dir),
-        "--hf-export-path",
-        str(hf_export_dir),  # Export to HuggingFace format
-        "--hf-model",
-        "meta-llama/Llama-3.1-8B-Instruct",  # Note: uses hyphen, not underscore
-        "--tp_size",
-        str(tp_size),
-        "--pp_size",
-        "1",
-        "--seq_length",
-        "128",  # Reduced for faster forward/backward passes
-        "--use_mock_data",  # Use mock data to avoid disk I/O overhead
-        "--split",
-        "99,1,0",
-        "--mbs",
-        "1",
-        "--gbs",
-        "4",  # Global batch size
-        "--train_iters",
-        str(train_iters),  # Minimal iterations for smoke test
-        "--lr",
-        "0.0001",
-        "--min_lr",
-        "1e-5",
-        "--lr_warmup_iters",
-        "2",  # Reduced warmup iterations
-        "--eval_interval",
-        "100",  # Disable evaluation (set to > train_iters)
-        "--eval_iters",
-        "0",  # No evaluation iterations
-        "--log_interval",
-        "5",  # Reduced logging frequency
+        "--use_mock_data",
     ]
-
-    run_example_command(
+    extend_cmd_parts(
         cmd_parts,
-        example_path="puzzletron/mbridge_distillation",
+        student_hf_path=student_hf_path,
+        teacher_hf_path=teacher_hf_path,
+        output_dir=str(output_dir),
+        tp_size=tp_size,
+        pp_size=1,
+        seq_length=128,
+        split="99,1,0",
+        mbs=1,
+        gbs=4,
+        train_iters=train_iters,
+        lr=0.0001,
+        min_lr=1e-5,
+        lr_warmup_iters=2,
+        eval_interval=100,
+        eval_iters=0,
+        log_interval=5,
+        hf_export_path=str(hf_export_dir),
+        hf_model="meta-llama/Llama-3.1-8B-Instruct",
     )
+
+    run_example_command(cmd_parts, example_path="puzzletron/mbridge_distillation")
 
     # Check that distillation checkpoint contains run_config.yaml
     run_config_path = output_dir / "checkpoints" / f"iter_{train_iters:07d}" / "run_config.yaml"
@@ -141,14 +118,13 @@ def _prepare_student_and_teacher_models(project_root_path: Path, tmp_path: Path)
     # Create tokenizer (uses local tokenizer from test resources)
     tokenizer = create_tokenizer(project_root_path)
 
-    # Create student model using utility function
-    # This uses local config files and preserves model-specific settings
+    # Create student model using utility function (loads config from Hub).
     # TODO: Make the student model using different ffn sizes across layers.
     create_and_save_small_hf_model(
         output_path=str(student_hf_dir),
         vocab_size=tokenizer.vocab_size,
         tokenizer=tokenizer,
-        hf_config_name="llama_3_1_8b_instruct",
+        hf_model_name="meta-llama/Llama-3.1-8B-Instruct",
         hybrid_override_pattern=None,
     )
 
@@ -157,7 +133,7 @@ def _prepare_student_and_teacher_models(project_root_path: Path, tmp_path: Path)
         output_path=str(teacher_hf_dir),
         vocab_size=tokenizer.vocab_size,
         tokenizer=tokenizer,
-        hf_config_name="llama_3_1_8b_instruct",
+        hf_model_name="meta-llama/Llama-3.1-8B-Instruct",
         hybrid_override_pattern=None,
     )
 
