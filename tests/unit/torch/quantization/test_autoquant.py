@@ -28,7 +28,7 @@ from modelopt.torch.quantization.algorithms import (
     QuantRecipeHparam,
     estimate_quant_compression,
 )
-from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg
+from modelopt.torch.quantization.config import _base_disable_all, _default_disabled_quantizer_cfg
 from modelopt.torch.utils.distributed import DistributedProcessGroup
 
 
@@ -111,6 +111,7 @@ def test_quant_recipe_hparam():
 # use this config to test custom quantization config
 INT8_CUSTOM_QUANT_TEST_CFG = {
     "quant_cfg": [
+        *_base_disable_all,
         {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
         {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
         *_default_disabled_quantizer_cfg,
