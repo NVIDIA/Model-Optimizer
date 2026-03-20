@@ -418,14 +418,31 @@ _nvfp4_quantizer = {
     "enable": True,
 }
 
-NVFP4_DEFAULT_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": _nvfp4_quantizer,
-        "*input_quantizer": _nvfp4_quantizer,
-        **_default_disabled_quantizer_cfg,
-    },
-    "algorithm": "max",
+_nvfp4_quantizer_bs32 = {
+    "num_bits": (2, 1),
+    "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (4, 3)},
+    "enable": True,
 }
+
+
+def _nvfp4_selective_quant_cfg(
+    layer_patterns: list[str],
+    *,
+    quantizer: dict = _nvfp4_quantizer,
+    weight_only: bool = False,
+    algorithm: str | dict = "max",
+) -> dict:
+    """Build an NVFP4 config that quantizes only the specified layer patterns."""
+    quant_cfg: dict[str, object] = {}
+    for pattern in layer_patterns:
+        quant_cfg[f"{pattern}weight_quantizer"] = quantizer
+        if not weight_only:
+            quant_cfg[f"{pattern}input_quantizer"] = quantizer
+    quant_cfg.update(_default_disabled_quantizer_cfg)
+    return {"quant_cfg": quant_cfg, "algorithm": algorithm}
+
+
+NVFP4_DEFAULT_CFG = _nvfp4_selective_quant_cfg(["*"])
 
 NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = {
     "quant_cfg": {
@@ -481,32 +498,13 @@ MAMBA_MOE_NVFP4_CONSERVATIVE_CFG = {
 }
 
 
-NVFP4_AWQ_LITE_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": _nvfp4_quantizer,
-        "*input_quantizer": _nvfp4_quantizer,
-        **_default_disabled_quantizer_cfg,
-    },
-    "algorithm": "awq_lite",
-}
+NVFP4_AWQ_LITE_CFG = _nvfp4_selective_quant_cfg(["*"], algorithm="awq_lite")
 
-NVFP4_AWQ_CLIP_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": _nvfp4_quantizer,
-        "*input_quantizer": _nvfp4_quantizer,
-        **_default_disabled_quantizer_cfg,
-    },
-    "algorithm": {"method": "awq_clip"},
-}
+NVFP4_AWQ_CLIP_CFG = _nvfp4_selective_quant_cfg(["*"], algorithm={"method": "awq_clip"})
 
-NVFP4_AWQ_FULL_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": _nvfp4_quantizer,
-        "*input_quantizer": _nvfp4_quantizer,
-        **_default_disabled_quantizer_cfg,
-    },
-    "algorithm": {"method": "awq_full", "alpha_step": 0.1},
-}
+NVFP4_AWQ_FULL_CFG = _nvfp4_selective_quant_cfg(
+    ["*"], algorithm={"method": "awq_full", "alpha_step": 0.1}
+)
 
 
 NVFP4_AFFINE_KV_CFG = {
@@ -569,14 +567,9 @@ NVFP4_KV_ROTATE_CFG = {
     "algorithm": "max",
 }
 
-NVFP4_SVDQUANT_DEFAULT_CFG = {
-    "quant_cfg": {
-        "*weight_quantizer": _nvfp4_quantizer,
-        "*input_quantizer": _nvfp4_quantizer,
-        **_default_disabled_quantizer_cfg,
-    },
-    "algorithm": {"method": "svdquant", "lowrank": 32},
-}
+NVFP4_SVDQUANT_DEFAULT_CFG = _nvfp4_selective_quant_cfg(
+    ["*"], algorithm={"method": "svdquant", "lowrank": 32}
+)
 
 W4A8_NVFP4_FP8_CFG = {
     "quant_cfg": {
@@ -611,52 +604,12 @@ MXFP4_MLP_WEIGHT_ONLY_CFG = {
     "algorithm": None,
 }
 
-NVFP4_MLP_WEIGHT_ONLY_CFG = {
-    "quant_cfg": {
-        "*mlp*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {
-                -1: 32,
-                "type": "dynamic",
-                "scale_bits": (4, 3),
-            },  # Note: block_size is 32 here
-            "enable": True,
-        },
-        "*block_sparse_moe*weight_quantizer": {
-            "num_bits": (2, 1),
-            "block_sizes": {
-                -1: 32,
-                "type": "dynamic",
-                "scale_bits": (4, 3),
-            },  # Note: block_size is 32 here
-            "enable": True,
-        },
-        **_default_disabled_quantizer_cfg,
-    },
-    "algorithm": "max",
-}
-
-_nvfp4_mlp_only_quant_cfg = {
-    "*mlp*weight_quantizer": _nvfp4_quantizer,
-    "*mlp*input_quantizer": _nvfp4_quantizer,
-    "*block_sparse_moe*weight_quantizer": _nvfp4_quantizer,
-    "*block_sparse_moe*input_quantizer": _nvfp4_quantizer,
-    **_default_disabled_quantizer_cfg,
-}
-
-NVFP4_MLP_ONLY_CFG = {
-    "quant_cfg": _nvfp4_mlp_only_quant_cfg,
-    "algorithm": "max",
-}
-
-NVFP4_OMLP_ONLY_CFG = {
-    "quant_cfg": {
-        "*o_proj*weight_quantizer": _nvfp4_quantizer,
-        "*o_proj*input_quantizer": _nvfp4_quantizer,
-        **_nvfp4_mlp_only_quant_cfg,
-    },
-    "algorithm": "max",
-}
+NVFP4_MLP_WEIGHT_ONLY_CFG = _nvfp4_selective_quant_cfg(
+    ["*mlp*", "*block_sparse_moe*"], quantizer=_nvfp4_quantizer_bs32, weight_only=True
+)
+NVFP4_EXPERTS_ONLY_CFG = _nvfp4_selective_quant_cfg(["*mlp.experts*", "*block_sparse_moe*"])
+NVFP4_MLP_ONLY_CFG = _nvfp4_selective_quant_cfg(["*mlp*", "*block_sparse_moe*"])
+NVFP4_OMLP_ONLY_CFG = _nvfp4_selective_quant_cfg(["*o_proj*", "*mlp*", "*block_sparse_moe*"])
 
 # DO NOT ADD NEW CONFIGS HERE. If you want to add a new general recipe, add it to
 # modelopt_recipes/general/ptq/ as a yaml file
@@ -689,6 +642,7 @@ choices: set[str] = {
     "NVFP4_MLP_WEIGHT_ONLY_CFG",
     "MXFP4_MLP_WEIGHT_ONLY_CFG",
     "NVFP4_MLP_ONLY_CFG",
+    "NVFP4_EXPERTS_ONLY_CFG",
     "NVFP4_OMLP_ONLY_CFG",
     "MAMBA_MOE_NVFP4_CONSERVATIVE_CFG",
     "MAMBA_MOE_NVFP4_AGGRESSIVE_CFG",
