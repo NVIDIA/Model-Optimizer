@@ -144,6 +144,7 @@ def get_args():
     parser.add_argument("--wandb_exp_name", type=str, help="Wandb experiment name (optional)")
     # Export arguments
     parser.add_argument(
+        "--hf_export_path",
         "--hf-export-path",
         type=str,
         default=None,
@@ -153,6 +154,7 @@ def get_args():
         ),
     )
     parser.add_argument(
+        "--hf_model",
         "--hf-model",
         type=str,
         required=True,
