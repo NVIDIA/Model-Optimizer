@@ -20,6 +20,8 @@ import dataclasses
 import warnings
 from typing import Any
 
+from transformers.utils import is_flash_attn_2_available
+
 from .block_config import BlockConfig
 from .transformers_4_44_2__configuration_llama import LlamaConfig
 
