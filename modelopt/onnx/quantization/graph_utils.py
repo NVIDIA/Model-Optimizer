@@ -1157,9 +1157,8 @@ def find_nodes_from_convs_to_exclude(graph: Graph, quantize_mode: str = "int8"):
             # For FP8, exclude small-channel convolutions. These layers do not benefit from
             # FP8 quantization and cause perf regressions on GPUs where the FP8 conv kernels
             # are slower than FP16 CASK kernels for small channels.
-            if (
-                quantize_mode == "fp8"
-                and (output_channel <= _MIN_CHANNELS_FP8 or input_channel <= _MIN_CHANNELS_FP8)
+            if quantize_mode == "fp8" and (
+                output_channel <= _MIN_CHANNELS_FP8 or input_channel <= _MIN_CHANNELS_FP8
             ):
                 logger.debug(
                     f"Excluding small-channel Conv from FP8 quantization: {node.name} "
