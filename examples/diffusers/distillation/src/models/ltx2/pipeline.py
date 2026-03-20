@@ -184,9 +184,10 @@ class LTX2InferencePipeline:
             del te.feature_extractor_linear
             te.feature_extractor_linear = None
         te.tokenizer = None
-        # Keep connectors on GPU (they're small)
-        te.embeddings_connector.to("cuda")
-        te.audio_embeddings_connector.to("cuda")
+        # Keep connectors on current GPU (they're small)
+        device = torch.device("cuda", torch.cuda.current_device())
+        te.embeddings_connector.to(device)
+        te.audio_embeddings_connector.to(device)
         free_gpu_memory()
         logger.info("Text encoder unloaded (connectors kept for training/inference)")
 

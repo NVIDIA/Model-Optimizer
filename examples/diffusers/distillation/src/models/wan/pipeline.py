@@ -66,12 +66,18 @@ class WanInferencePipeline:
         self._config = self._var["config"]()
 
         t5_path = os.path.join(path, self._config.t5_checkpoint)
+        # Prefer local tokenizer dir (avoids HuggingFace network calls).
+        # Wan ships tokenizer files under <model_root>/google/umt5-xxl/.
+        tokenizer_path = self._config.t5_tokenizer
+        local_tokenizer = os.path.join(path, tokenizer_path)
+        if os.path.isdir(local_tokenizer):
+            tokenizer_path = local_tokenizer
         self._text_encoder = T5EncoderModel(
             text_len=self._config.text_len,
             dtype=dtype,
             device=torch.device("cpu"),
             checkpoint_path=t5_path,
-            tokenizer_path=self._config.t5_tokenizer,
+            tokenizer_path=tokenizer_path,
         )
 
         vae_mod = importlib.import_module(self._var["vae_module"])

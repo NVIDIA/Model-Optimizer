@@ -81,8 +81,8 @@ class WanTrainingForwardAdapter:
         )
 
     def forward_model(self, model: nn.Module, inputs: BackboneInputs) -> Tensor:
-        # WanModel's internal norms promote to float32; autocast keeps
-        # linear ops in bf16 to match the model weights.
+        # WanModel norms promote to float32 internally; autocast keeps
+        # matmuls in bf16 to match the original Wan inference code.
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             output_list = model(**inputs.forward_kwargs)
         return torch.stack(output_list)

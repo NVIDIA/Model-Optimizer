@@ -102,6 +102,7 @@ class DistillationTrainer:
         self._inference_pipeline = inference_pipeline
 
         self._global_step = 0
+        self._data_epoch = 0
         self._wandb_run = None
 
         set_seed(config.seed)
@@ -671,30 +672,6 @@ class DistillationTrainer:
 
         return total_loss
 
-    def _compute_distillation_loss(
-        self, student_pred: Tensor, teacher_pred: Tensor, loss_mask: Tensor
-    ) -> Tensor:
-        loss_type = self._config.distillation.distillation_loss_type
-
-        if loss_type == "mse":
-            loss = torch.nn.functional.mse_loss(student_pred, teacher_pred, reduction="none")
-        elif loss_type == "cosine":
-            s_flat = student_pred.flatten(start_dim=2)
-            t_flat = teacher_pred.flatten(start_dim=2)
-            cos_sim = torch.nn.functional.cosine_similarity(s_flat, t_flat, dim=-1)
-            loss = 1.0 - cos_sim  # [B, T]
-        else:
-            raise ValueError(f"Unknown distillation loss type: {loss_type}")
-
-        if loss_mask is not None and loss_mask.numel() > 0:
-            # Expand mask to match loss dimensions
-            while loss_mask.dim() < loss.dim():
-                loss_mask = loss_mask.unsqueeze(-1)
-            mask = loss_mask.float()
-            loss = loss.mul(mask).div(mask.mean())
-
-        return loss.mean()
-
     def _compute_layer_distillation_loss(self) -> Tensor:
         """Compute distillation loss across hooked intermediate layers."""
         assert self._student_extractor is not None
@@ -1078,10 +1055,12 @@ class DistillationTrainer:
                 f"batch_size={cfg.optimization.batch_size}"
             )
 
+        start_micro = self._global_step * grad_accum
+        total_micro = total_steps * grad_accum
         pbar = tqdm(
-            range(self._global_step, total_steps * grad_accum),
-            initial=self._global_step * grad_accum,
-            total=total_steps * grad_accum,
+            range(start_micro, total_micro),
+            initial=start_micro,
+            total=total_micro,
             desc="Training",
             disable=not _is_global_rank0(),
         )
@@ -1091,6 +1070,10 @@ class DistillationTrainer:
             try:
                 batch = next(data_iter)
             except StopIteration:
+                self._data_epoch += 1
+                sampler = getattr(self._dataloader, "sampler", None)
+                if sampler is not None and hasattr(sampler, "set_epoch"):
+                    sampler.set_epoch(self._data_epoch)
                 data_iter = iter(self._dataloader)
                 batch = next(data_iter)
 
