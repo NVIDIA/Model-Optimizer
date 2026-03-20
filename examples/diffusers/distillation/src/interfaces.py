@@ -25,8 +25,10 @@ from __future__ import annotations
 
 import gc
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 import torch
 import torch.nn as nn

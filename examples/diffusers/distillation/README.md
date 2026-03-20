@@ -4,14 +4,14 @@ Unified trainer for quantization-aware distillation (QAD) of video diffusion
 models using NVIDIA ModelOpt. A frozen full-precision **teacher** guides a
 quantized **student** to recover quality lost from quantization:
 
-```
+```text
 L = alpha * L_task + (1 - alpha) * L_distill
 ```
 
 Optionally, layer-wise distillation matches intermediate transformer block
 outputs for stronger gradient signal:
 
-```
+```text
 L_distill = (1 - gamma) * L_output + gamma * L_layer
 ```
 
@@ -118,7 +118,7 @@ teacher and student, the same module name is used for both.
 
 Model configs inherit shared defaults from `configs/default.yaml`:
 
-```
+```text
 configs/
 ├── default.yaml              # Shared: optimization, checkpoints, flow matching, ...
 ├── wan_distillation.yaml     # Wan-specific: model, validation dims, wandb tags
@@ -206,7 +206,7 @@ automatically.
 
 ## Outputs
 
-```
+```text
 outputs/
 ├── model_weights_final.safetensors   # Inference-ready weights
 ├── checkpoints/

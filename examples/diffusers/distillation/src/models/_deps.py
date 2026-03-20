@@ -75,7 +75,7 @@ def _stub_missing_wan_deps() -> None:
     the parts of wan we actually use (configs, modules, textimage2video)
     without installing the full s2v/animate dependency stack.
     """
-    _STUBS = (
+    _stubs = (
         "decord",
         "sam2",
         "sam2.build_sam",
@@ -86,7 +86,7 @@ def _stub_missing_wan_deps() -> None:
         "sam2.utils.misc",
         "sam_utils",
     )
-    for mod_name in _STUBS:
+    for mod_name in _stubs:
         if mod_name not in sys.modules and not _available(mod_name):
             sys.modules[mod_name] = _LazyStubModule(mod_name)
 

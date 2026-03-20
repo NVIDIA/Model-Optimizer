@@ -26,16 +26,21 @@ import json
 import logging
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from accelerate import Accelerator, DistributedType
+from accelerate import Accelerator
 from accelerate.utils import set_seed
 from torch import Tensor
 from tqdm import tqdm
 
-from .config import TrainerConfig
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from .config import TrainerConfig
+
 from .dataset import LatentDataset, MockDataset, create_dataloader
 from .feature_extractor import FeatureExtractor
 from .interfaces import (
@@ -264,6 +269,7 @@ class DistillationTrainer:
             mto.restore(self._student, str(cfg.restore_quantized_checkpoint))
             return
 
+        assert cfg.quant_cfg is not None, "quant_cfg must be set for quantization"
         quant_config = getattr(mtq, cfg.quant_cfg, None)
         if quant_config is None:
             raise ValueError(f"Unknown ModelOpt quant config: {cfg.quant_cfg}")
@@ -455,7 +461,6 @@ class DistillationTrainer:
 
     def _init_dataloaders(self) -> None:
         cfg = self._config
-        distributed = self._accelerator.distributed_type != DistributedType.NO
 
         if cfg.distillation.use_mock_data:
             mock_shape = getattr(self._adapter, "MOCK_LATENT_SHAPE", (48, 4, 32, 32))
@@ -530,7 +535,7 @@ class DistillationTrainer:
         unwrapped_teacher = self._accelerator.unwrap_model(self._teacher)
 
         # Collect per-module output transforms from the adapter (if available)
-        output_transforms: dict[str, object] = {}
+        output_transforms: dict[str, Callable[..., Any]] = {}
         if hasattr(self._adapter, "get_output_transforms"):
             output_transforms = self._adapter.get_output_transforms(unwrapped_student)
 
@@ -607,14 +612,16 @@ class DistillationTrainer:
                 batch[k] = v.to(dtype=wdtype)
 
         latents = batch["latents"]
-        B = latents.shape[0]
+        batch_size = latents.shape[0]
 
         # Sample noise and timesteps (in weight dtype to avoid float32 promotion)
         noise = torch.randn_like(latents)
-        timesteps = self._sample_timesteps(B, device).to(dtype=wdtype)
+        timesteps = self._sample_timesteps(batch_size, device).to(dtype=wdtype)
 
         # Adapter: prepare model-specific inputs
-        inputs = self._adapter.prepare_inputs(batch, noise, timesteps, pipeline=self._inference_pipeline)
+        inputs = self._adapter.prepare_inputs(
+            batch, noise, timesteps, pipeline=self._inference_pipeline
+        )
 
         # Student forward (model-specific output, opaque to trainer)
         student_output = self._adapter.forward_model(self._student, inputs)
@@ -757,11 +764,13 @@ class DistillationTrainer:
                     batch[k] = v.to(dtype=wdtype)
 
             latents = batch["latents"]
-            B = latents.shape[0]
+            batch_size = latents.shape[0]
             noise = torch.randn_like(latents)
-            timesteps = self._sample_timesteps(B, device).to(dtype=wdtype)
+            timesteps = self._sample_timesteps(batch_size, device).to(dtype=wdtype)
 
-            inputs = self._adapter.prepare_inputs(batch, noise, timesteps, pipeline=self._inference_pipeline)
+            inputs = self._adapter.prepare_inputs(
+                batch, noise, timesteps, pipeline=self._inference_pipeline
+            )
             student_output = self._adapter.forward_model(self._student, inputs)
 
             if alpha > 0:

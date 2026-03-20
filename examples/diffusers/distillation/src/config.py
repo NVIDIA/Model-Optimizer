@@ -22,7 +22,10 @@ from pydantic import BaseModel, Field, field_validator
 
 class ModelConfig(BaseModel):
     model_name: str = Field(
-        description="Model backend name (e.g. 'wan', 'ltx2'). Selects the loader/adapter/pipeline from models/ registry."
+        description=(
+            "Model backend name (e.g. 'wan', 'ltx2'). "
+            "Selects the loader/adapter/pipeline from models/ registry."
+        )
     )
     model_variant: str | None = Field(
         default=None,
@@ -48,7 +51,10 @@ class DistillationConfig(BaseModel):
         default=0.0,
         ge=0.0,
         le=1.0,
-        description="Loss mixing: L = alpha * L_task + (1-alpha) * L_distill. 0 = pure distillation, 1 = pure task loss.",
+        description=(
+            "Loss mixing: L = alpha * L_task + (1-alpha) * L_distill. "
+            "0 = pure distillation, 1 = pure task loss."
+        ),
     )
     distillation_loss_type: str = Field(default="mse", description="'mse' or 'cosine'.")
 
@@ -111,7 +117,7 @@ class DistillationConfig(BaseModel):
     def _validate_layer_modules(cls, v):
         if v is None:
             return v
-        result = []
+        result: list[str | list[str]] = []
         for entry in v:
             if isinstance(entry, str):
                 result.append(entry)

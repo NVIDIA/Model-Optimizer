@@ -18,10 +18,13 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 
-import torch.nn as nn
-from torch import Tensor
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    import torch.nn as nn
+    from torch import Tensor
 
 logger = logging.getLogger(__name__)
 

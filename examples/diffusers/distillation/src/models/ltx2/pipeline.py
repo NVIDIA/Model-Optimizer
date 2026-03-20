@@ -331,6 +331,7 @@ class LTX2InferencePipeline:
             self._vae_decoder.to(device)
             latent = video_state_unpatch.latent.to(dtype=torch.bfloat16)
             with torch.no_grad():
+                assert self._vae_decoder is not None
                 decoded = self._vae_decoder(latent)
             self._vae_decoder.to("cpu")
 
