@@ -99,6 +99,52 @@ The recommended pattern used by all built-in configs is:
 
 ----------
 
+Entry Atomicity
+===============
+
+Each entry in ``quant_cfg`` is a **complete, self-contained configuration unit**. When an entry
+matches a quantizer, it **completely replaces** that quantizer's configuration — it does not merge
+with or incrementally update settings left by earlier entries.
+
+Concretely, if an entry specifies only a subset of quantizer attributes (e.g. only ``num_bits``),
+all unspecified attributes are filled in with their default values from
+:class:`QuantizerAttributeConfig <modelopt.torch.quantization.config.QuantizerAttributeConfig>`.
+The resulting *complete* config is then written to the quantizer, discarding whatever any prior
+matching entry had set.
+
+This means:
+
+- **Last entry wins, fully.** If two entries both match ``*weight_quantizer``, the second entry
+  does not inherit the first entry's settings — it replaces them entirely.
+- **No hidden state accumulation.** The final configuration of a quantizer depends only on the
+  *last* entry in the list that matched it, making behavior easy to reason about.
+- **Changing one field requires a full spec.** Because each entry is a complete replacement, to
+  change only one attribute of a quantizer that was already configured, you must reproduce the
+  full desired config in the new entry. Any attribute omitted from the entry will revert to its
+  default, not to the value set by an earlier entry.
+
+For example, given the following two entries both matching ``*weight_quantizer``:
+
+.. code-block:: python
+
+    # Entry 1 — sets FP8 per-channel
+    {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": 0}},
+
+    # Entry 2 — sets INT4 blockwise (axis is NOT inherited from Entry 1)
+    {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 4, "block_sizes": {-1: 128}}},
+
+After Entry 2 is applied, the quantizer has ``num_bits=4``, ``block_sizes={-1: 128}``, and
+``axis=None`` (the default). The ``axis=0`` set by Entry 1 is gone.
+
+.. note::
+
+    This atomicity property is what makes the deny-all-then-re-enable pattern safe and
+    predictable: the deny-all entry (``{"quantizer_path": "*", "enable": False}``) completely
+    resets every quantizer, and subsequent entries each independently configure their targets from a
+    clean default state.
+
+----------
+
 Common Patterns
 ===============
 
