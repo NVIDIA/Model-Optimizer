@@ -21,7 +21,7 @@ Two-phase pipeline (only one heavy model on GPU at a time):
 2. Load VAE encoder -> encode all videos -> save -> unload VAE
 
 Usage:
-    python -m src.preprocess \
+    python -m distill.preprocess \
         --model_name wan \
         --model_path /path/to/Wan2.2/checkpoint \
         --dataset /path/to/dataset.json \

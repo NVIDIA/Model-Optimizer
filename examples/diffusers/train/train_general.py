@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -13,3 +14,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Thin entry point for ``accelerate launch``.
+
+``distill/run.py`` uses relative imports so it cannot be invoked as a plain
+script.  This wrapper sits one level up and delegates via an absolute import:
+
+    accelerate launch train_general.py --config configs/my_config.yaml
+"""
+
+from distill.run import main
+
+if __name__ == "__main__":
+    main()

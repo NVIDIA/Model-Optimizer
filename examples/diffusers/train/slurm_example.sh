@@ -62,7 +62,7 @@ GPUS_PER_NODE=8
 ROOT_PATH="/path/to/workdir"
 # Model-Optimizer source tree (mounted into the container)
 MODELOPT_PATH="$ROOT_PATH/Model-Optimizer"
-DISTILL_PATH="$MODELOPT_PATH/examples/diffusers/distillation"
+DISTILL_PATH="$MODELOPT_PATH/examples/diffusers/train"
 # Container image
 CONTAINER="$ROOT_PATH/container.sqsh"
 # Container mount spec (adjust for your filesystem)

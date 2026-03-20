@@ -27,7 +27,7 @@ Supported models:
 ## Installation
 
 ```bash
-cd examples/diffusers/distillation
+cd examples/diffusers/train
 
 # Install the distillation package + ONE model backend:
 pip install -e ".[wan]"    # For Wan2.2
@@ -62,7 +62,7 @@ accelerate launch \
 Preprocess raw videos + captions into latent space:
 
 ```bash
-python -m src.preprocess \
+python -m distill.preprocess \
     --model_name wan \
     --model_variant ti2v-5B \
     --model_path /path/to/Wan2.2-TI2V-5B \
