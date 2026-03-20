@@ -18,12 +18,15 @@
 import json
 from pathlib import Path
 
+from omegaconf import OmegaConf
+
 import modelopt.torch.puzzletron.anymodel.models  # noqa: F401 — register ModelDescriptorFactory entries
 import modelopt.torch.puzzletron.mip.mip_and_realize_models as mip_and_realize_models
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.puzzletron.anymodel.model_descriptor.model_descriptor_factory import (
     ModelDescriptorFactory,
 )
+from modelopt.torch.puzzletron.mip.run_puzzle import _get_block_stats, filter_subblock_stats_by_args
 from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import load_model_config
 from modelopt.torch.puzzletron.tools.logger import mprint
 
@@ -31,13 +34,8 @@ from modelopt.torch.puzzletron.tools.logger import mprint
 def get_teacher_memory_from_subblock_stats(hydra_cfg) -> float:
     """Calculate teacher model memory from subblock_stats.json.
 
-    Replicates the MIP solver's memory calculation logic:
-    - Loads subblock_stats.json which contains memory measurements for all subblock configs
-    - Finds the teacher FFN subblock (with full intermediate_size)
-    - Finds the teacher Attention subblock (full attention, not no_op)
-    - Calculates: non_block_memory + (ffn_memory + attention_memory) * num_layers
-
-    This matches how the MIP solver computes total model memory via _get_block_stats().
+    Sums ``non_block`` and per-layer ``_get_block_stats(subblock_stats, block_config, layer_index)``
+    over ``model_config.block_configs``, matching :func:`run_puzzle._get_block_stats`.
 
     Args:
         hydra_cfg: Hydra configuration object
@@ -52,22 +50,19 @@ def get_teacher_memory_from_subblock_stats(hydra_cfg) -> float:
     trust_remote_code = descriptor.requires_trust_remote_code()
     model_config = load_model_config(teacher_dir, trust_remote_code=trust_remote_code)
     lm_config = descriptor.get_language_model_config(model_config)
-
-    num_layers = lm_config.num_hidden_layers
     hidden_size = lm_config.hidden_size
-    teacher_num_kv_heads = lm_config.num_key_value_heads
-    teacher_dense_intermediate = getattr(lm_config, "intermediate_size", None)
-    # MoE: expert width in subblocks vs HF (Nemotron/Qwen VL); GPT-OSS may only set intermediate_size
-    teacher_moe_expert_dim = getattr(lm_config, "moe_intermediate_size", None)
 
-    # Get the MIP configuration
     mip_subblock_args = hydra_cfg.mip.subblock_stats_args[0]
-    batch_size = mip_subblock_args["batch_size"]
-    weights_dtype = str(mip_subblock_args["weights_dtype"])
-    activations_dtype = str(mip_subblock_args["activations_dtype"])
-    kv_cache_dtype = str(mip_subblock_args["kv_cache_dtype"])
+    subblock_stats_args = OmegaConf.to_container(mip_subblock_args, resolve=True)
+    # Subblock_stats.json can list multiple runs that share batch/dtypes but differ by hidden size;
+    # filter_subblock_stats_by_args needs n_embd so exactly one row matches the teacher.
+    subblock_stats_args = {**subblock_stats_args, "n_embd": hidden_size}
 
-    # Load subblock_stats.json
+    batch_size = subblock_stats_args["batch_size"]
+    weights_dtype = str(subblock_stats_args["weights_dtype"])
+    activations_dtype = str(subblock_stats_args["activations_dtype"])
+    kv_cache_dtype = str(subblock_stats_args["kv_cache_dtype"])
+
     subblock_stats_path = puzzle_dir / "subblock_stats.json"
     if not subblock_stats_path.exists():
         raise FileNotFoundError(
@@ -78,84 +73,20 @@ def get_teacher_memory_from_subblock_stats(hydra_cfg) -> float:
     with open(subblock_stats_path) as f:
         subblock_stats_list = json.load(f)
 
-    # Find the entry matching our MIP configuration and teacher's n_embd
-    matching_stats = None
-    for stats_entry in subblock_stats_list:
-        args = stats_entry["args"]
-        if (
-            args["batch_size"] == batch_size
-            and args["weights_dtype"] == weights_dtype
-            and args["activations_dtype"] == activations_dtype
-            and args["kv_cache_dtype"] == kv_cache_dtype
-            and args.get("n_embd") == hidden_size
-        ):
-            matching_stats = stats_entry
-            break
-
-    if matching_stats is None:
+    try:
+        subblock_stats = filter_subblock_stats_by_args(subblock_stats_list, subblock_stats_args)
+    except AssertionError as e:
         raise ValueError(
-            f"No subblock_stats entry found for batch_size={batch_size}, "
+            f"No unique subblock_stats entry for batch_size={batch_size}, "
             f"dtypes=({weights_dtype}, {activations_dtype}, {kv_cache_dtype}), "
             f"n_embd={hidden_size}"
-        )
+        ) from e
 
-    # Get non-block memory (embeddings, LM head, etc.)
-    total_memory = matching_stats.get("non_block", {}).get("memory_mib", 0.0)
+    total_memory = subblock_stats.get("non_block", {}).get("memory_mib", 0.0)
 
-    # Find the teacher FFN and Attention subblocks
-    # Note: Each subblock is EITHER attention OR ffn, not both
-    # We need to find BOTH and add their memory together
-    teacher_ffn_subblock = None
-    teacher_attention_subblock = None
-
-    for subblock in matching_stats.get("subblocks", []):
-        subblock_class = subblock.get("subblock_config_class", "")
-        subblock_config = subblock.get("subblock_config", {})
-
-        # Dense FFN: intermediate_size on FFNConfig. MoE FFN: intermediate_size is cleared; use moe.expert_intermediate_dim.
-        if "FFN" in subblock_class:
-            if subblock_config.get("no_op", False):
-                pass
-            elif subblock_config.get("moe"):
-                moe = subblock_config["moe"]
-                expert_dim = moe.get("expert_intermediate_dim")
-                # Nemotron / Qwen VL: match HF `moe_intermediate_size`. GPT-OSS: no `moe_intermediate_size`; match `intermediate_size`.
-                # TODO: This if-else is hacky. We should have a better way to handle this.
-                if expert_dim is not None and (
-                    expert_dim == teacher_moe_expert_dim
-                    or (
-                        teacher_moe_expert_dim is None
-                        and teacher_dense_intermediate is not None
-                        and expert_dim == teacher_dense_intermediate
-                    )
-                ):
-                    teacher_ffn_subblock = subblock
-            else:
-                ffn_size = subblock_config.get("intermediate_size")
-                if ffn_size == teacher_dense_intermediate:
-                    teacher_ffn_subblock = subblock
-
-        # Check for Attention subblocks with teacher's num_key_value_heads
-        elif "Attention" in subblock_class:
-            kv_heads = subblock_config.get("num_key_value_heads")
-            if kv_heads == teacher_num_kv_heads and not subblock_config.get("no_op", False):
-                teacher_attention_subblock = subblock
-
-    if teacher_ffn_subblock is None:
-        raise ValueError(
-            "Could not find teacher FFN subblock: "
-            f"expected dense intermediate_size={teacher_dense_intermediate} "
-            f"or MoE expert_intermediate_dim={teacher_moe_expert_dim}"
-        )
-
-    if teacher_attention_subblock is None:
-        raise ValueError(
-            f"Could not find teacher Attention subblock with num_key_value_heads={teacher_num_kv_heads}"
-        )
-
-    # Calculate total teacher memory: non_block + (ffn_memory + attention_memory) * num_layers
-    per_layer_memory = teacher_ffn_subblock["memory_mib"] + teacher_attention_subblock["memory_mib"]
-    total_memory += per_layer_memory * num_layers
+    for layer_idx, block_config in enumerate(model_config.block_configs):
+        block_stats = _get_block_stats(subblock_stats, block_config, layer_idx)
+        total_memory += block_stats["memory_mib"]
 
     return total_memory
 

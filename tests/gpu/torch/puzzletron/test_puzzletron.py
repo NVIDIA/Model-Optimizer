@@ -27,6 +27,7 @@ from _test_utils.torch.puzzletron.utils import setup_test_model_and_data
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.puzzletron import puzzletron
 from modelopt.torch.puzzletron.anymodel import convert_model
+from modelopt.torch.puzzletron.mip.sweep import get_teacher_memory_from_subblock_stats
 
 # The e2e test to compress a model based on Local Neural Architecture Search (Mixed Integer Programing NAS search)
 # using a one-click command.
@@ -106,7 +107,7 @@ def _test_puzzletron_multiprocess_job(
     dist.barrier()
 
     # Compress the model using a one-click approach
-    puzzletron.puzzletron(
+    hydra_cfg = puzzletron.puzzletron(
         str(hydra_config_dir), hydra_config_name, str(puzzle_dir), str(dataset_path)
     )
 
@@ -157,7 +158,7 @@ def _test_puzzletron_multiprocess_job(
 
         # assertions for the build_library_and_stats step 4
         assert (puzzle_dir / "replacement_library.json").is_file()
-        assert (puzzle_dir / "subblock_stats.json").is_file()
+        _assert_subblock_stats_anymodel(hf_model_name, hydra_cfg)
 
         # assertions for the scoring step 5
         solution_0_filepath = (
@@ -173,50 +174,22 @@ def _test_puzzletron_multiprocess_job(
     )
 
 
-# Expected pruning activation values per model
-# Each model has a list of (score, channels) tuples for each FFN layer
-EXPECTED_PRUNING_VALUES = {
-    "meta-llama/Llama-3.1-8B-Instruct": [
-        {"score": 73, "channels": 95},
-        {"score": 440, "channels": 174},
-    ],
-    "meta-llama/Llama-3.2-3B-Instruct": [
-        {"score": 79, "channels": 95},
-        {"score": 428, "channels": 174},
-    ],
-    "mistralai/Mistral-Small-24B-Instruct-2501": [
-        {"score": 73, "channels": 95},
-        {"score": 431, "channels": 174},
-    ],
-    # NemotronH with pattern "*-" has only 1 FFN layer (the "-" layer)
-    "nvidia/NVIDIA-Nemotron-Nano-12B-v2": [
-        {"score": 70, "channels": 509},
-    ],
-    # nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16 uses MoE expert pruning, not FFN pruning
-    "Qwen/Qwen2.5-7B-Instruct": [
-        {"score": 96, "channels": 433},
-        {"score": 485, "channels": 105},
-    ],
-    "Qwen/Qwen3-8B": [
-        {"score": 208, "channels": 51},
-        {"score": 475, "channels": 266},
-    ],
-}
+def _assert_subblock_stats_anymodel(hf_model_name: str, hydra_cfg) -> None:
+    """Minimal subblock_stats checks and teacher-memory regression value."""
+    assert (Path(hydra_cfg.puzzle_dir) / "subblock_stats.json").is_file()
+    teacher_mem_mib = get_teacher_memory_from_subblock_stats(hydra_cfg)
 
+    expected = EXPECTED_TEACHER_MEMORY_MIB.get(hf_model_name)
+    if expected is None:
+        pytest.fail(
+            "Missing expected teacher memory for "
+            f"{hf_model_name}: got {teacher_mem_mib}. "
+            f"Add this line to EXPECTED_TEACHER_MEMORY_MIB: {hf_model_name!r}: {teacher_mem_mib},"
+        )
 
-# Expected lm_loss values per model
-EXPECTED_LM_LOSS = {
-    "meta-llama/Llama-3.1-8B-Instruct": 4.706878662109375,
-    "meta-llama/Llama-3.2-3B-Instruct": 4.816886901855469,
-    "mistralai/Mistral-Small-24B-Instruct-2501": 4.709150314331055,
-    # TODO: not reproducible in CI, skipping for now
-    # "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": 4.7737884521484375,
-    "nvidia/NVIDIA-Nemotron-Nano-12B-v2": 4.79390811920166,
-    # "openai/gpt-oss-20b": 4.689250946044922,
-    "Qwen/Qwen2.5-7B-Instruct": 4.778186798095703,
-    "Qwen/Qwen3-8B": 4.733874320983887,
-    "Qwen/Qwen3-VL-30B-A3B-Instruct": 4.65625,
-}
+    assert abs(teacher_mem_mib - expected) < 1e-6, (
+        f"Teacher memory mismatch for {hf_model_name}: expected {expected}, got {teacher_mem_mib}"
+    )
 
 
 def _assert_score_pruning_activations(puzzle_dir: Path, hf_model_name: str):
@@ -291,3 +264,63 @@ def _assert_mip_solutions(puzzle_dir: Path, hf_model_name: str):
 
     # Validate lm_loss
     _assert_lm_loss(puzzle_dir, hf_model_name)
+
+
+# Expected pruning activation values per model
+# Each model has a list of (score, channels) tuples for each FFN layer
+EXPECTED_PRUNING_VALUES = {
+    "meta-llama/Llama-3.1-8B-Instruct": [
+        {"score": 73, "channels": 95},
+        {"score": 440, "channels": 174},
+    ],
+    "meta-llama/Llama-3.2-3B-Instruct": [
+        {"score": 79, "channels": 95},
+        {"score": 428, "channels": 174},
+    ],
+    "mistralai/Mistral-Small-24B-Instruct-2501": [
+        {"score": 73, "channels": 95},
+        {"score": 431, "channels": 174},
+    ],
+    # NemotronH with pattern "*-" has only 1 FFN layer (the "-" layer)
+    "nvidia/NVIDIA-Nemotron-Nano-12B-v2": [
+        {"score": 70, "channels": 509},
+    ],
+    # nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16 uses MoE expert pruning, not FFN pruning
+    "Qwen/Qwen2.5-7B-Instruct": [
+        {"score": 96, "channels": 433},
+        {"score": 485, "channels": 105},
+    ],
+    "Qwen/Qwen3-8B": [
+        {"score": 208, "channels": 51},
+        {"score": 475, "channels": 266},
+    ],
+}
+
+
+# Expected lm_loss values per model
+EXPECTED_LM_LOSS = {
+    "meta-llama/Llama-3.1-8B-Instruct": 4.706878662109375,
+    "meta-llama/Llama-3.2-3B-Instruct": 4.816886901855469,
+    "mistralai/Mistral-Small-24B-Instruct-2501": 4.709150314331055,
+    # TODO: not reproducible in CI, skipping for now
+    # "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": 4.7737884521484375,
+    "nvidia/NVIDIA-Nemotron-Nano-12B-v2": 4.79390811920166,
+    # "openai/gpt-oss-20b": 4.689250946044922,
+    "Qwen/Qwen2.5-7B-Instruct": 4.778186798095703,
+    "Qwen/Qwen3-8B": 4.733874320983887,
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": 4.65625,
+}
+
+
+# Expected teacher memory from subblock_stats (MiB)
+EXPECTED_TEACHER_MEMORY_MIB = {
+    "meta-llama/Llama-3.1-8B-Instruct": 386.22705078125,
+    "meta-llama/Llama-3.2-3B-Instruct": 386.22705078125,
+    "mistralai/Mistral-Small-24B-Instruct-2501": 386.22705078125,
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": 552.47607421875,
+    "nvidia/NVIDIA-Nemotron-Nano-12B-v2": 193.16357421875,
+    "openai/gpt-oss-20b": 456.75830078125,
+    "Qwen/Qwen2.5-7B-Instruct": 386.22705078125,
+    "Qwen/Qwen3-8B": 386.22705078125,
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": 420.74267578125,
+}
