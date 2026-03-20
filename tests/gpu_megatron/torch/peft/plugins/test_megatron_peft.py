@@ -34,27 +34,30 @@ from modelopt.torch.utils.plugins import megatron_prefill
 
 NVFP4_DEFAULT_CONFIG = {
     "quant_cfg": [
-        (
-            "*weight_quantizer",
-            {
+        {"quantizer_path": "*", "enable": False},
+        {
+            "quantizer_path": "*weight_quantizer",
+            "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
                 "axis": None,
-                "enable": True,
             },
-        ),
-        (
-            "*input_quantizer",
-            {
+            "enable": True,
+        },
+        {
+            "quantizer_path": "*input_quantizer",
+            "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
                 "axis": None,
-                "enable": True,
             },
-        ),
-        ("*output_quantizer", {"enable": False}),
-        ("*output_layer*", {"enable": False}),  # Note: only output_layer is disabled.
-        ("default", {"enable": False}),
+            "enable": True,
+        },
+        {"quantizer_path": "*output_quantizer", "enable": False},
+        {
+            "quantizer_path": "*output_layer*",
+            "enable": False,
+        },  # Note: only output_layer is disabled.
     ],
     "algorithm": "max",
 }

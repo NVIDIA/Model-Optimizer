@@ -135,20 +135,28 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 
 """
 
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict, cast
 
 from pydantic import ValidationInfo, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.utils.network import ConstructorLike
 
-QuantCfgEntry = dict[str, Any]
 
-_base_disable_all: list[QuantCfgEntry] = [
+class QuantizerCfgEntry(TypedDict, total=False):
+    """A single entry in a ``quant_cfg`` list."""
+
+    quantizer_path: str  # required; matched against quantizer module names
+    parent_class: str  # optional; filters by pytorch module class name (e.g. "nn.Linear")
+    cfg: dict[str, Any] | list[dict[str, Any]]  # quantizer attribute config(s)
+    enable: bool  # shorthand to set/unset the quantizer's enable flag
+
+
+_base_disable_all: list[QuantizerCfgEntry] = [
     {"quantizer_path": "*", "enable": False},
 ]
 
-_default_disabled_quantizer_cfg: list[QuantCfgEntry] = [
+_default_disabled_quantizer_cfg: list[QuantizerCfgEntry] = [
     {"parent_class": "nn.BatchNorm1d", "quantizer_path": "*", "enable": False},
     {"parent_class": "nn.BatchNorm2d", "quantizer_path": "*", "enable": False},
     {"parent_class": "nn.BatchNorm3d", "quantizer_path": "*", "enable": False},
@@ -158,17 +166,23 @@ _default_disabled_quantizer_cfg: list[QuantCfgEntry] = [
         "quantizer_path": "*proj_out.*",
         "enable": False,
     },  # In Whisper model, lm_head has key name proj_out
-    {"quantizer_path": "*block_sparse_moe.gate*", "enable": False},  # Skip the MOE router
+    {
+        "quantizer_path": "*block_sparse_moe.gate*",
+        "enable": False,
+    },  # Skip the MOE router
     {"quantizer_path": "*router*", "enable": False},  # Skip the MOE router
     {"quantizer_path": "*mlp.gate.*", "enable": False},  # Skip the MOE router
-    {"quantizer_path": "*mlp.shared_expert_gate.*", "enable": False},  # Skip the MOE router
+    {
+        "quantizer_path": "*mlp.shared_expert_gate.*",
+        "enable": False,
+    },  # Skip the MOE router
     {"quantizer_path": "*linear_attn.conv1d*", "enable": False},
     {"quantizer_path": "*mixer.conv1d*", "enable": False},  # Skip mamba conv1d
     {"quantizer_path": "*output_layer*", "enable": False},
     {"quantizer_path": "output.*", "enable": False},
 ]
 
-_mamba_moe_disabled_quantizer_cfg: list[QuantCfgEntry] = [
+_mamba_moe_disabled_quantizer_cfg: list[QuantizerCfgEntry] = [
     {"quantizer_path": "*fc1_latent_proj*", "enable": False},  # Skip Latent MOE
     {"quantizer_path": "*fc2_latent_proj*", "enable": False},  # Skip Latent MOE
     {"quantizer_path": "*q_proj*", "enable": False},  # Skip QKV Linear
@@ -210,8 +224,14 @@ INT8_WEIGHT_ONLY_CFG = {
 FP8_DEFAULT_CFG = {
     "quant_cfg": [
         *_base_disable_all,
-        {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
-        {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {
+            "quantizer_path": "*weight_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+        },
+        {
+            "quantizer_path": "*input_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+        },
         *_default_disabled_quantizer_cfg,
     ],
     "algorithm": "max",
@@ -220,8 +240,14 @@ FP8_DEFAULT_CFG = {
 MAMBA_MOE_FP8_AGGRESSIVE_CFG = {
     "quant_cfg": [
         *_base_disable_all,
-        {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
-        {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {
+            "quantizer_path": "*weight_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+        },
+        {
+            "quantizer_path": "*input_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+        },
         *_default_disabled_quantizer_cfg,
         *_mamba_moe_disabled_quantizer_cfg,
     ],
@@ -231,8 +257,14 @@ MAMBA_MOE_FP8_AGGRESSIVE_CFG = {
 MAMBA_MOE_FP8_CONSERVATIVE_CFG = {
     "quant_cfg": [
         *_base_disable_all,
-        {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
-        {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {
+            "quantizer_path": "*weight_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+        },
+        {
+            "quantizer_path": "*input_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+        },
         *_default_disabled_quantizer_cfg,
         *_mamba_moe_disabled_quantizer_cfg,
         {"quantizer_path": "*mixer.in_proj*", "enable": False},  # Skip mamba linear
@@ -427,7 +459,10 @@ W4A8_MXFP4_FP8_CFG = {
             },
             "enable": True,
         },
-        {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {
+            "quantizer_path": "*input_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+        },
         *_default_disabled_quantizer_cfg,
     ],
     "algorithm": None,
@@ -1461,11 +1496,60 @@ class GPTQLiteConfig(QuantizeAlgorithmConfig):
     )
 
 
-QuantizeQuantCfgType = list[QuantCfgEntry]
+QuantizeQuantCfgType = list[QuantizerCfgEntry]
 
 _QuantizeAlgoCfgType = str | dict | QuantizeAlgorithmConfig | None
 
 QuantizeAlgoCfgType = _QuantizeAlgoCfgType | list[_QuantizeAlgoCfgType] | None
+
+
+def normalize_quant_cfg_list(v: list) -> list[QuantizerCfgEntry]:
+    """Normalize a raw quant_cfg list into a list of QuantizerCfgEntry dicts.
+
+    Supports these input forms per entry:
+    - ``{"quantizer_path": ..., "enable": ..., "cfg": ...}`` — passed through as-is
+    - ``{"<quantizer_path>": ...}`` — single-key dict (legacy)
+    - ``(quantizer_path, cfg_dict)`` — tuple form (legacy)
+    """
+
+    def _tuple_to_entry(key: str, value) -> QuantizerCfgEntry:
+        if isinstance(key, str) and key.startswith("nn."):
+            assert isinstance(value, dict) and len(value) == 1
+            q_path, sub_cfg = next(iter(value.items()))
+            sub_cfg = dict(sub_cfg)
+            enable = sub_cfg.pop("enable", None)
+            entry: QuantizerCfgEntry = {
+                "parent_class": key,
+                "quantizer_path": q_path,
+                "cfg": sub_cfg,
+            }
+            if enable is not None:
+                entry["enable"] = enable
+            return entry
+        else:
+            if isinstance(value, dict):
+                cfg = {k: val for k, val in value.items() if k != "enable"}
+                enable = value.get("enable")
+            else:
+                cfg = value
+                enable = None
+            entry = {"quantizer_path": key, "cfg": cfg}
+            if enable is not None:
+                entry["enable"] = enable
+            return entry
+
+    result: list[QuantizerCfgEntry] = []
+    for raw in v:
+        if isinstance(raw, dict) and "quantizer_path" in raw:
+            result.append(cast("QuantizerCfgEntry", raw))
+        elif isinstance(raw, dict) and len(raw) == 1:
+            key, val = next(iter(raw.items()))
+            result.append(_tuple_to_entry(key, val))
+        elif isinstance(raw, (tuple, list)) and len(raw) == 2:
+            result.append(_tuple_to_entry(raw[0], raw[1]))
+        else:
+            raise ValueError(f"Invalid quant_cfg entry: {raw!r}.")
+    return result
 
 
 class QuantizeConfig(ModeloptBaseConfig):
@@ -1487,62 +1571,10 @@ class QuantizeConfig(ModeloptBaseConfig):
     @field_validator("quant_cfg", mode="before")
     @classmethod
     def normalize_quant_cfg(cls, v):
-        """Normalize quant_cfg entries: convert dict and tuple forms to QuantCfgEntry dicts.
-
-        Supports these input forms:
-        - ``{"quantizer_path": ..., "enable": ..., "cfg": ...}`` — passed through as-is
-        - ``{"<quantizer_path>": ...}`` — single-key dict (legacy)
-        - ``(quantizer_path, cfg_dict)`` — tuple form (legacy)
-        """
+        """Normalize quant_cfg entries: convert dict and tuple forms to QuantizerCfgEntry dicts."""
         if not isinstance(v, list):
             return v
-        result = []
-        for entry in v:
-            if isinstance(entry, dict) and "quantizer_path" in entry:
-                result.append(entry)
-            elif isinstance(entry, dict):
-                if len(entry) == 1:
-                    key, val = next(iter(entry.items()))
-                    result.append(cls._tuple_to_entry(key, val))
-                else:
-                    raise ValueError(
-                        f"Invalid quant_cfg entry: {entry!r}. "
-                        "Expected a dict with 'quantizer_path', a single-key dict, or a (quantizer_path, cfg) tuple."
-                    )
-            elif isinstance(entry, (tuple, list)) and len(entry) == 2:
-                result.append(cls._tuple_to_entry(entry[0], entry[1]))
-            else:
-                raise ValueError(f"Invalid quant_cfg entry: {entry!r}.")
-        return result
-
-    @classmethod
-    def _tuple_to_entry(cls, key: str, value) -> "QuantCfgEntry":
-        """Convert a (key, value) tuple to a QuantCfgEntry dict."""
-        if isinstance(key, str) and key.startswith("nn."):
-            # nn.* type entry: value is {quantizer_path: {enable: ...}}
-            assert isinstance(value, dict) and len(value) == 1
-            q_path, sub_cfg = next(iter(value.items()))
-            sub_cfg = dict(sub_cfg)
-            enable = sub_cfg.pop("enable", None)
-            new_entry: QuantCfgEntry = {
-                "parent_class": key,
-                "quantizer_path": q_path,
-                "cfg": sub_cfg,
-            }
-            if enable is not None:
-                new_entry["enable"] = enable
-            return new_entry
-        else:
-            if isinstance(value, dict):
-                cfg = {k: v for k, v in value.items() if k != "enable"}
-                enable = value.get("enable")
-            else:
-                cfg = value
-                enable = None
-            new_entry = {"quantizer_path": key, "cfg": cfg}
-            if enable is not None:
-                new_entry["enable"] = enable
-            return new_entry
+        return normalize_quant_cfg_list(v)
 
     @field_validator("quant_cfg", mode="after")
     @classmethod
@@ -1598,11 +1630,12 @@ def need_calibration(config):
             if isinstance(entry, dict) and "quantizer_path" in entry
             else entry[0]
         )
-        cfg = (
-            entry.get("cfg", {})
-            if isinstance(entry, dict) and "quantizer_path" in entry
-            else entry[1]
-        )
+        if isinstance(entry, dict) and "quantizer_path" in entry:
+            cfg = dict(entry.get("cfg") or {})
+            if "enable" in entry:
+                cfg["enable"] = entry["enable"]
+        else:
+            cfg = entry[1]
         if "weight_quantizer" in name:
             # We don't calibrate weight quantizer
             continue
@@ -1610,10 +1643,8 @@ def need_calibration(config):
         if isinstance(cfg, list):
             for _config in cfg:
                 if _not_dynamic(_config):
-                    print(f"{cfg}: True")
                     return True
         elif isinstance(cfg, dict) and _not_dynamic(cfg):
-            print(f"{cfg}: True")
             return True
 
     return False

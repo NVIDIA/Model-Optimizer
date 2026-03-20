@@ -155,7 +155,7 @@ def extract_and_prepare_language_model_from_vl(full_model):
         # Apply disabled quant to all modules that are not part of language_model
         # This excludes them during HF export
         disabled_quant_cfg = {
-            "quant_cfg": ("default", {"enable": False}),
+            "quant_cfg": [{"quantizer_path": "*", "enable": False}],
             "algorithm": "max",
         }
 
@@ -343,10 +343,7 @@ def auto_quantize(
             getattr(mtq, KV_QUANT_CFG_CHOICES[args.kv_cache_qformat])["quant_cfg"]
         )
         kv_cache_quant_cfg = [
-            e
-            for e in kv_cache_quant_cfg
-            if (e["quantizer_path"] if isinstance(e, dict) and "quantizer_path" in e else e[0])
-            != "default"
+            e for e in kv_cache_quant_cfg if e["quantizer_path"] != "*"
         ]  # keep other quantizers from auto_quantize
 
         if args.kv_cache_qformat in _KV_CAST_FORMATS:

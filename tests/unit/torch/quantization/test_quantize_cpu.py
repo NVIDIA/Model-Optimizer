@@ -59,16 +59,15 @@ INT8_MSE_CFG = {
 
 STATIC_WEIGHT_DYNAMIC_ACTIVATION_CFG = {
     "quant_cfg": [
-        ("*weight_quantizer", {"num_bits": 8, "axis": 0}),  # Per-channel quantization
-        (
-            "*input_quantizer",
-            {
-                "num_bits": 8,
-                "axis": (0, 1),
-                "type": "dynamic",
-            },
-        ),  # Dynamic per-token quantization
-        ("default", {"enable": False}),
+        {"quantizer_path": "*", "enable": False},
+        {
+            "quantizer_path": "*weight_quantizer",
+            "cfg": {"num_bits": 8, "axis": 0},
+        },  # Per-channel quantization
+        {
+            "quantizer_path": "*input_quantizer",
+            "cfg": {"num_bits": 8, "axis": (0, 1), "type": "dynamic"},
+        },  # Dynamic per-token quantization
     ],
     "algorithm": "max",
 }
@@ -137,7 +136,9 @@ def test_save_restore(model_cls, quant_config):
 def test_quantize_invalid_cfg():
     model = SimpleLinear()
     config_invalid = {
-        "quant_cfg": [("*", {"num_bits": 4, "axis": 0, "block_sizes": {-1: 128}})],
+        "quant_cfg": [
+            {"quantizer_path": "*", "cfg": {"num_bits": 4, "axis": 0, "block_sizes": {-1: 128}}}
+        ],
         "algorithm": "max",
     }
     with pytest.raises(ValidationError, match="axis must be None when block_sizes is not None."):
@@ -229,24 +230,26 @@ def test_static_weight_dynamic_activations():
 def test_block_sizes_axis_model():
     REF_QUANT_CFG = {  # noqa: N806
         "quant_cfg": [
-            ("*weight_quantizer", {"num_bits": 8, "axis": 0}),
-            ("*input_quantizer", {"num_bits": 8, "axis": None, "type": "dynamic"}),
-            ("default", {"enable": False}),
+            {"quantizer_path": "*", "enable": False},
+            {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            {
+                "quantizer_path": "*input_quantizer",
+                "cfg": {"num_bits": 8, "axis": None, "type": "dynamic"},
+            },
         ],
         "algorithm": "max",
     }
     QUANT_CFG = {  # noqa: N806
         "quant_cfg": [
-            ("*weight_quantizer", {"num_bits": 8, "block_sizes": {1: None}}),
-            (
-                "*input_quantizer",
-                {
-                    "num_bits": 8,
-                    "block_sizes": {0: None, 1: None},
-                    "type": "dynamic",
-                },
-            ),
-            ("default", {"enable": False}),
+            {"quantizer_path": "*", "enable": False},
+            {
+                "quantizer_path": "*weight_quantizer",
+                "cfg": {"num_bits": 8, "block_sizes": {1: None}},
+            },
+            {
+                "quantizer_path": "*input_quantizer",
+                "cfg": {"num_bits": 8, "block_sizes": {0: None, 1: None}, "type": "dynamic"},
+            },
         ],
         "algorithm": "max",
     }

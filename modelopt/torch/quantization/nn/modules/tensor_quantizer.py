@@ -218,12 +218,27 @@ class TensorQuantizer(nn.Module):
                 calib_cls, args, kwargs = standardize_constructor_args(val)
             return calib_cls(*args, **kwargs)
 
+        def _axis_setter(val):
+            if getattr(self, "_calibrator", None) is not None:
+                self._calibrator._axis = val
+            return val
+
+        def _block_sizes_setter(val):
+            if val is not None:
+                # block_sizes and axis are mutually exclusive; clear axis when block_sizes is set
+                setattr(self, "_axis", None)
+                if getattr(self, "_calibrator", None) is not None:
+                    self._calibrator._axis = None
+            return val
+
         # Some attributes need custom handling.
         # By default, attributes from config are mapped to a name ``f"_{attribute}"``
         _custom_setters: dict[str, tuple[str, Callable]] = {
             "enable": ("_disabled", lambda val: val is False),
             "type": ("_dynamic", lambda val: val == "dynamic"),
             "calibrator": ("_calibrator", _calibrator_setter),
+            "axis": ("_axis", _axis_setter),
+            "block_sizes": ("_block_sizes", _block_sizes_setter),
             "backend": ("backend", lambda val: val),
             "backend_extra_args": ("backend_extra_args", lambda val: val or {}),
             "use_constant_amax": ("_use_constant_amax", lambda val: val),

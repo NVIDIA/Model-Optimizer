@@ -41,7 +41,6 @@ ptq_cfg:
       enable: true
       cfg:
         num_bits: e4m3
-
     - quantizer_path: '*block_sparse_moe.gate*'
       enable: false
     - quantizer_path: '*linear_attn.conv1d*'

@@ -231,6 +231,7 @@ def test_auto_quantize_disabled_layers_no_poison():
 
 INT4INT8_AWQ_CFG = {
     "quant_cfg": [
+        {"quantizer_path": "*", "enable": False},
         {
             "quantizer_path": "*weight_quantizer",
             "cfg": [
@@ -243,7 +244,6 @@ INT4INT8_AWQ_CFG = {
             "cfg": {"num_bits": 8, "axis": None},
             "enable": True,
         },
-        {"quantizer_path": "default", "enable": False},
     ],
     "algorithm": "awq_lite",
 }

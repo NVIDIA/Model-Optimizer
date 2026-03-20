@@ -111,7 +111,7 @@ class QuantRecipe(CustomHPType):
         name = self.get_auto_name_for_config(quant_cfg) or name
 
         if quant_cfg is None:
-            quant_cfg = {"quant_cfg": [("*", {"enable": False})]}
+            quant_cfg = {"quant_cfg": [{"quantizer_path": "*", "enable": False}]}
         elif isinstance(quant_cfg, str):
             assert hasattr(mtq_config, quant_cfg), f"Unknown quantization format {quant_cfg}"
             quant_cfg = getattr(mtq_config, quant_cfg)
@@ -1322,7 +1322,7 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
             return [_cfg_to_dict(c) for c in v]
         return v
 
-    quant_cfg: list[tuple] = [("*", {"enable": False})]
+    quant_cfg: list[dict] = [{"quantizer_path": "*", "enable": False}]
     for hparam_name, recipe in best_recipe.items():
         if recipe == QuantRecipe(quant_cfg=None):
             continue
@@ -1331,7 +1331,12 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
             for quantizer_attr in ("input_quantizer", "weight_quantizer"):
                 matched_cfg = _match_quantizer_cfg(recipe.config.quant_cfg, quantizer_attr)
                 if matched_cfg is not None:
-                    quant_cfg.append((f"{module_name}.{quantizer_attr}", _cfg_to_dict(matched_cfg)))
+                    quant_cfg.append(
+                        {
+                            "quantizer_path": f"{module_name}.{quantizer_attr}",
+                            "cfg": _cfg_to_dict(matched_cfg),
+                        }
+                    )
     warnings.warn(
         "get_auto_quantize_config: returned config uses algorithm='max'. "
         "Per-recipe calibration algorithms (e.g. smoothquant, awq) are not preserved. "

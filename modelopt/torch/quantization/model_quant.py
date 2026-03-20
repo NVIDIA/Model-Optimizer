@@ -178,17 +178,15 @@ def quantize(
             .. code-block::python
 
                 config = {
-
                     "quant_cfg": [
+                        # Disable all quantizers by default
+                        {"quantizer_path": "*", "enable": False},
                         # "num_bits" specifies the number of bits for quantization
                         # "axis" specifies the axis for quantization
-                        ("*weight_quantizer", {"num_bits": 8, "axis": 0}),
-                        ("*input_quantizer", {"num_bits": 8, "axis": -1}),
-
-                        # Default quantization settings
-                        ("default", {"num_bits": 8, "axis": None}),
-                    ]
-                    "algorithm": "max"
+                        {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+                        {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 8, "axis": -1}},
+                    ],
+                    "algorithm": "max",
                 }
 
             See :ref:`Quantization Formats <quantization-formats>` to learn more about the supported

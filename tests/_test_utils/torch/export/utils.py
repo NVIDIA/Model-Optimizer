@@ -86,126 +86,127 @@ class SmallQKVModel(torch.nn.Module):
 # Quantization configs
 partial_fp8_config = {
     "quant_cfg": [
-        ("*.1.weight_quantizer", {"num_bits": (4, 3), "axis": None}),
-        ("*.1.input_quantizer", {"num_bits": (4, 3), "axis": None}),
-        ("default", {"num_bits": 8, "enable": False}),
+        {"quantizer_path": "*", "enable": False},
+        {"quantizer_path": "*.1.weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_path": "*.1.input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
     ],
     "algorithm": "max",
 }
 
 partial_w4a8_config = {
     "quant_cfg": [
-        (
-            "*.2.weight_quantizer",
-            [
+        {"quantizer_path": "*", "enable": False},
+        {
+            "quantizer_path": "*.2.weight_quantizer",
+            "cfg": [
                 {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}, "enable": True},
                 {"num_bits": (4, 3), "axis": None, "enable": True},
             ],
-        ),
-        ("*.2.input_quantizer", {"num_bits": (4, 3), "axis": None, "enable": True}),
-        ("default", {"num_bits": 8, "enable": False}),
+        },
+        {
+            "quantizer_path": "*.2.input_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+            "enable": True,
+        },
     ],
     "algorithm": "awq_lite",
 }
 
 partial_nvfp4_config = {
     "quant_cfg": [
-        (
-            "*.1.weight_quantizer",
-            {
+        {"quantizer_path": "*", "enable": False},
+        {
+            "quantizer_path": "*.1.weight_quantizer",
+            "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
                 "axis": None,
-                "enable": True,
             },
-        ),
-        (
-            "*.1.input_quantizer",
-            {
+            "enable": True,
+        },
+        {
+            "quantizer_path": "*.1.input_quantizer",
+            "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
                 "axis": None,
-                "enable": True,
             },
-        ),
-        (
-            "*.2.weight_quantizer",
-            {
+            "enable": True,
+        },
+        {
+            "quantizer_path": "*.2.weight_quantizer",
+            "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
                 "axis": None,
-                "enable": True,
             },
-        ),
-        (
-            "*.2.input_quantizer",
-            {
+            "enable": True,
+        },
+        {
+            "quantizer_path": "*.2.input_quantizer",
+            "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
                 "axis": None,
-                "enable": True,
             },
-        ),
-        ("default", {"enable": False}),
+            "enable": True,
+        },
     ],
     "algorithm": "max",
 }
 
 partial_nvfp4_awq_config = {
     "quant_cfg": [
-        (
-            "*.2.weight_quantizer",
-            {
+        {"quantizer_path": "*", "enable": False},
+        {
+            "quantizer_path": "*.2.weight_quantizer",
+            "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
                 "axis": None,
-                "enable": True,
             },
-        ),
-        (
-            "*.2.input_quantizer",
-            {
+            "enable": True,
+        },
+        {
+            "quantizer_path": "*.2.input_quantizer",
+            "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
                 "axis": None,
-                "enable": True,
             },
-        ),
-        (
-            "*.1.weight_quantizer",
-            {
+            "enable": True,
+        },
+        {
+            "quantizer_path": "*.1.weight_quantizer",
+            "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
                 "axis": None,
-                "enable": False,
             },
-        ),
-        (
-            "*.1.input_quantizer",
-            {
+            "enable": False,
+        },
+        {
+            "quantizer_path": "*.1.input_quantizer",
+            "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
                 "axis": None,
-                "enable": False,
             },
-        ),
-        ("default", {"enable": False}),
+            "enable": False,
+        },
     ],
     "algorithm": "awq_lite",
 }
 
 partial_int4_awq_config = {
     "quant_cfg": [
-        (
-            "*.2.weight_quantizer",
-            {
-                "num_bits": 4,
-                "block_sizes": {-1: 128, "type": "static"},
-                "enable": True,
-            },
-        ),
-        ("*.2.input_quantizer", {"enable": False}),
-        ("default", {"enable": False}),
+        {"quantizer_path": "*", "enable": False},
+        {
+            "quantizer_path": "*.2.weight_quantizer",
+            "cfg": {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
+            "enable": True,
+        },
+        {"quantizer_path": "*.2.input_quantizer", "enable": False},
     ],
     "algorithm": {"method": "awq_lite", "alpha_step": 0.1},
     # "algorithm": {"method": "awq_full", "alpha_step": 0.1, "max_co_batch_size": 1024},
@@ -214,66 +215,110 @@ partial_int4_awq_config = {
 
 partial_fp8_kv_cache_config = {
     "quant_cfg": [
-        ("*.1.weight_quantizer", {"num_bits": (4, 3), "axis": None}),
-        ("*.1.input_quantizer", {"num_bits": (4, 3), "axis": None}),
-        ("*output_quantizer", {"num_bits": (4, 3), "axis": None, "enable": True}),
-        ("default", {"enable": False}),
+        {"quantizer_path": "*", "enable": False},
+        {"quantizer_path": "*.1.weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_path": "*.1.input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {
+            "quantizer_path": "*output_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+            "enable": True,
+        },
     ],
     "algorithm": "max",
 }
 
 partial_int8_kv_cache_config = {
     "quant_cfg": [
-        ("*.1.weight_quantizer", {"num_bits": (4, 3), "axis": None}),
-        ("*.1.input_quantizer", {"num_bits": (4, 3), "axis": None}),
-        ("*output_quantizer", {"num_bits": 8, "axis": None, "enable": True}),
-        ("default", {"enable": False}),
+        {"quantizer_path": "*", "enable": False},
+        {"quantizer_path": "*.1.weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_path": "*.1.input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {
+            "quantizer_path": "*output_quantizer",
+            "cfg": {"num_bits": 8, "axis": None},
+            "enable": True,
+        },
     ],
     "algorithm": "max",
 }
 
 partial_nvfp4_kv_cache_config = {
     "quant_cfg": [
-        ("*.1.weight_quantizer", {"num_bits": (4, 3), "axis": None}),
-        ("*.1.input_quantizer", {"num_bits": (4, 3), "axis": None}),
-        (
-            "*[kv]_bmm_quantizer",
-            {
+        {"quantizer_path": "*", "enable": False},
+        {"quantizer_path": "*.1.weight_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {"quantizer_path": "*.1.input_quantizer", "cfg": {"num_bits": (4, 3), "axis": None}},
+        {
+            "quantizer_path": "*[kv]_bmm_quantizer",
+            "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
                 "axis": None,
-                "enable": True,
             },
-        ),
-        ("default", {"enable": False}),
+            "enable": True,
+        },
     ],
     "algorithm": "max",
 }
 
 only_weight_quantizer_fp8_config = {
     "quant_cfg": [
-        ("*weight_quantizer", {"num_bits": (4, 3), "axis": None, "enable": True}),
-        ("*input_quantizer", {"num_bits": (4, 3), "axis": None, "enable": False}),
-        ("*output_quantizer", {"num_bits": (4, 3), "axis": None, "enable": False}),
-        ("default", {"enable": False}),
+        {"quantizer_path": "*", "enable": False},
+        {
+            "quantizer_path": "*weight_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+            "enable": True,
+        },
+        {
+            "quantizer_path": "*input_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+            "enable": False,
+        },
+        {
+            "quantizer_path": "*output_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+            "enable": False,
+        },
     ],
     "algorithm": "max",
 }
 only_input_quantizer_fp8_config = {
     "quant_cfg": [
-        ("*weight_quantizer", {"num_bits": (4, 3), "axis": None, "enable": False}),
-        ("*input_quantizer", {"num_bits": (4, 3), "axis": None, "enable": True}),
-        ("*output_quantizer", {"num_bits": (4, 3), "axis": None, "enable": False}),
-        ("default", {"enable": False}),
+        {"quantizer_path": "*", "enable": False},
+        {
+            "quantizer_path": "*weight_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+            "enable": False,
+        },
+        {
+            "quantizer_path": "*input_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+            "enable": True,
+        },
+        {
+            "quantizer_path": "*output_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+            "enable": False,
+        },
     ],
     "algorithm": "max",
 }
 only_output_quantizer_fp8_config = {
     "quant_cfg": [
-        ("*weight_quantizer", {"num_bits": (4, 3), "axis": None, "enable": False}),
-        ("*input_quantizer", {"num_bits": (4, 3), "axis": None, "enable": False}),
-        ("*output_quantizer", {"num_bits": (4, 3), "axis": None, "enable": True}),
-        ("default", {"enable": False}),
+        {"quantizer_path": "*", "enable": False},
+        {
+            "quantizer_path": "*weight_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+            "enable": False,
+        },
+        {
+            "quantizer_path": "*input_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+            "enable": False,
+        },
+        {
+            "quantizer_path": "*output_quantizer",
+            "cfg": {"num_bits": (4, 3), "axis": None},
+            "enable": True,
+        },
     ],
     "algorithm": "max",
 }

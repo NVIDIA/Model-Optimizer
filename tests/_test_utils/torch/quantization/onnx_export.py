@@ -30,9 +30,9 @@ def onnx_export_tester(model, device, num_bits, per_channel_quantization, consta
     axis = 0 if per_channel_quantization else None
     config = {
         "quant_cfg": [
-            ("*weight_quantizer", {"num_bits": num_bits, "axis": axis}),
-            ("*input_quantizer", {"num_bits": num_bits}),
-            ("default", {"enable": False}),
+            {"quantizer_path": "*", "enable": False},
+            {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": num_bits, "axis": axis}},
+            {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": num_bits}},
         ],
         "algorithm": "max",
     }

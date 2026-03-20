@@ -90,15 +90,15 @@ class TestQuantizerAttributeConfig:
 
 WINT4INT8_CFG = {
     "quant_cfg": [
-        (
-            "*weight_quantizer",
-            [
+        {"quantizer_path": "*", "enable": False},
+        {
+            "quantizer_path": "*weight_quantizer",
+            "cfg": [
                 {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}, "enable": True},
                 {"num_bits": 8, "axis": 0, "enable": True},
             ],
-        ),
-        ("*input_quantizer", {"num_bits": 8, "enable": True}),
-        ("default", {"enable": False}),
+        },
+        {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 8}, "enable": True},
     ],
     "algorithm": "awq_full",
 }

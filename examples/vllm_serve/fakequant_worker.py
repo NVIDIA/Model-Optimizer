@@ -170,10 +170,18 @@ def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: list) -> list:
     if not any(isinstance(m, MLAAttention) for m in model.modules()):
         return kv_quant_cfg
 
-    kv_config = next((cfg for pat, cfg in kv_quant_cfg if pat == "*[kv]_bmm_quantizer"), None)
-    if kv_config is not None:
-        kv_quant_cfg.append(("*kv_c_bmm_quantizer", kv_config))
-        kv_quant_cfg.append(("*k_pe_bmm_quantizer", kv_config))
+    kv_entry = next(
+        (
+            e
+            for e in kv_quant_cfg
+            if isinstance(e, dict) and e.get("quantizer_path") == "*[kv]_bmm_quantizer"
+        ),
+        None,
+    )
+    if kv_entry is not None:
+        kv_config = kv_entry.get("cfg", {})
+        kv_quant_cfg.append({"quantizer_path": "*kv_c_bmm_quantizer", "cfg": kv_config})
+        kv_quant_cfg.append({"quantizer_path": "*k_pe_bmm_quantizer", "cfg": kv_config})
         print("MLA detected: added *kv_c_bmm_quantizer and k_pe_bmm_quantizer config")
 
     return kv_quant_cfg

@@ -33,6 +33,7 @@ from .config import (
     QuantizeQuantCfgType,
     QuantizerAttributeConfig,
     _QuantizeExportConfig,
+    normalize_quant_cfg_list,
 )
 from .nn import (
     NVFP4StaticQuantizer,
@@ -214,7 +215,7 @@ def _replace_quant_module(model: nn.Module, version=None, registry=QuantModuleRe
 def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType):
     """Update the quantizer attributes based on the specified `quant_cfg`.
 
-    `quant_cfg` is a list of :class:`QuantCfgEntry <.config.QuantCfgEntry>` objects mapping
+    `quant_cfg` is a list of :class:`QuantizerCfgEntry <.config.QuantizerCfgEntry>` objects mapping
     quantizer paths (and optionally parent classes) to their quantizer attributes, which are
     defined in :class:`QuantizerAttributeConfig <.config.QuantizerAttributeConfig>`.
     The ``quantizer_path`` is matched against the quantizer module names.
@@ -227,24 +228,23 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType
     See :meth:`set_quantizer_attribute <modelopt.torch.quantization.conversion.set_quantizer_attribute>`
     for more details.
     """
+    quant_cfg = normalize_quant_cfg_list(quant_cfg)
     for entry in quant_cfg:
-        entry_cfg = entry.get("cfg", {}) if isinstance(entry, dict) else {}
-        effective_cfg = dict(entry_cfg) if isinstance(entry_cfg, dict) else list(entry_cfg)
-        enable = entry.get("enable") if isinstance(entry, dict) else None
-        if enable is not None and isinstance(effective_cfg, dict):
-            effective_cfg["enable"] = enable
-        parent_class_name = entry.get("parent_class") if isinstance(entry, dict) else None
-        quantizer_path = (
-            entry["quantizer_path"]
-            if isinstance(entry, dict) and "quantizer_path" in entry
-            else entry
-        )
-        assert isinstance(quantizer_path, str)
+        entry_cfg = entry.get("cfg", {})
+        enable = entry.get("enable")
+        if isinstance(entry_cfg, dict):
+            if enable is not None:
+                entry_cfg["enable"] = enable
+            elif entry_cfg:
+                # cfg present without explicit enable → implicitly enable the quantizer
+                entry_cfg = {**entry_cfg, "enable": True}
+        quantizer_path: str = entry["quantizer_path"]
+        parent_class_name = entry.get("parent_class")
         if parent_class_name is not None:
             parent_class = QuantModuleRegistry[parent_class_name]
-            set_quantizer_attribute(quant_model, quantizer_path, effective_cfg, parent_class)
+            set_quantizer_attribute(quant_model, quantizer_path, entry_cfg, parent_class)
         else:
-            set_quantizer_attribute(quant_model, quantizer_path, effective_cfg)
+            set_quantizer_attribute(quant_model, quantizer_path, entry_cfg)
 
 
 def set_quantizer_attribute(
@@ -320,9 +320,10 @@ def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: QuantizeQuan
     Use this context manager with caution. Changing certain attributes of the quantizer such as
     `calibrator` can lead to unexpected behavior.
     """
-    assert not any(
-        isinstance(entry.get("cfg", {}), list) for entry in quant_cfg if isinstance(entry, dict)
-    ), "list of config not support."
+    quant_cfg = normalize_quant_cfg_list(quant_cfg)
+    assert not any(isinstance(entry.get("cfg", {}), list) for entry in quant_cfg), (
+        "list of config not support."
+    )
 
     original_attributes = {}
     for name, module in quant_model.named_modules():
