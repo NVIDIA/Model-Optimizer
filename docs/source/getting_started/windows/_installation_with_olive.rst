@@ -30,8 +30,8 @@ Setup Steps for Olive with ModelOpt-Windows
 
      .. code-block:: shell
 
-            $ pip install onnxruntime-genai-directml>=0.4.0
-            $ pip install onnxruntime-directml==1.20.0
+            $ pip install onnxruntime-genai-directml==0.6.0
+            $ pip install onnxruntime-directml==1.21.1
 
    - Above onnxruntime and onnxruntime-genai packages enable Olive workflow with the corresponding Execution-Provider (EP). Choose CUDA EP for NVIDIA RTX GPUs, or DirectML EP for other systems.
 
