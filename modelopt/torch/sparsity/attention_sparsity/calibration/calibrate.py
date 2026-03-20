@@ -28,7 +28,7 @@ from modelopt.torch.utils import get_module_device
 from ..config import CalibrationConfig
 from ..conversion import print_sparse_attention_summary
 from ..utils import get_named_sparse_attention_modules
-from .calibrator import DynamicThresholdCalibrator
+from .calibrator import DynamicThresholdCalibrator, PercentileThresholdCalibrator
 from .ruler_dataset import RulerDatasetBuilder
 
 
@@ -253,6 +253,16 @@ def calibrate_sparse_attention(
         print("No sparse attention modules found for calibration")
         return {}
 
+    # Detect method type from config
+    sparse_cfg = config.get("sparse_cfg", {})
+    method_name = None
+    for key, val in sparse_cfg.items():
+        if isinstance(val, dict) and "method" in val:
+            method_name = val["method"]
+            break
+    if method_name == "flash_skip_softmax_diffusion":
+        return _calibrate_diffusion(model, sparse_modules, calib_config, forward_loop)
+
     print(f"Calibrating {len(sparse_modules)} sparse attention modules together...")
 
     # When a user-provided forward_loop is given, skip tokenizer extraction and
@@ -381,4 +391,66 @@ def calibrate_sparse_attention(
         "calibration_params": calibration_params,
         "target_sparse_ratio": target_dict,
         "calibration_results": calibration_results,
+    }
+
+
+def _calibrate_diffusion(
+    model: nn.Module,
+    sparse_modules: list[tuple[str, Any]],
+    calib_config: CalibrationConfig,
+    forward_loop: Callable | None,
+) -> dict[str, Any]:
+    """Calibrate sparse attention for diffusion models using percentile method.
+
+    Args:
+        model: Model with sparse attention modules
+        sparse_modules: Named sparse attention modules
+        calib_config: Calibration configuration
+        forward_loop: User-provided forward loop (required for diffusion models)
+
+    Returns:
+        Dictionary with calibration results
+    """
+    if forward_loop is None:
+        raise ValueError(
+            "forward_loop is required for flash_skip_softmax_diffusion calibration. "
+            "Provide a callable that runs the diffusion model forward pass."
+        )
+
+    target_dict = calib_config.target_sparse_ratio
+    target_sparsity = target_dict.get("prefill", 0.2)
+
+    if target_sparsity <= 0.0:
+        print("Target prefill sparsity is 0.0, skipping calibration")
+        return {}
+
+    print(f"\nCalibrating {len(sparse_modules)} sparse attention modules (diffusion percentile)...")
+
+    calibrator = PercentileThresholdCalibrator()
+    result = calibrator.calibrate(
+        model, forward_loop, phase="prefill", target_sparsity=target_sparsity
+    )
+
+    if "threshold" not in result:
+        warnings.warn("Percentile calibration did not produce valid results")
+        return {}
+
+    # Apply calibration params to all modules
+    calibration_params: dict[str, dict[str, float]] = {
+        "prefill": {"threshold": result["threshold"]}
+    }
+
+    print(f"\nApplying percentile calibration to {len(sparse_modules)} modules:")
+    print(f"  prefill: threshold={result['threshold']:.6f}, target={target_sparsity:.0%}")
+
+    for _, module in sparse_modules:
+        module._sparse_method_instance.calibration_params = calibration_params
+        module._sparse_method_instance.target_sparse_ratio = target_dict
+
+    print_sparse_attention_summary(model)
+
+    return {
+        "calibration_params": calibration_params,
+        "target_sparse_ratio": target_dict,
+        "calibration_results": {"prefill": result},
     }

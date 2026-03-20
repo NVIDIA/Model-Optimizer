@@ -453,10 +453,32 @@ SKIP_SOFTMAX_DIFFUSERS = {
 }
 
 
+# Pre-defined configuration for diffusers models with percentile calibration.
+# Uses gap/log(seq_k) normalization for sequence-length-invariant thresholds.
+SKIP_SOFTMAX_DIFFUSION_CALIB = {
+    "sparse_cfg": {
+        "calibration": {
+            "target_sparse_ratio": {"prefill": 0.2},
+        },
+        "*attn*": {
+            "method": "flash_skip_softmax_diffusion",
+            "br": 128,
+            "bc": 128,
+            "backend": "pytorch",
+            "is_causal": False,
+            "collect_stats": True,
+            "enable": True,
+        },
+        "default": {"enable": False},
+    },
+}
+
+
 __all__ = [
     "SKIP_SOFTMAX_CALIB",
     "SKIP_SOFTMAX_DEFAULT",
     "SKIP_SOFTMAX_DIFFUSERS",
+    "SKIP_SOFTMAX_DIFFUSION_CALIB",
     "CalibrationConfig",
     "FlashSkipSoftmaxConfig",
     "SparseAttentionAttributeConfig",

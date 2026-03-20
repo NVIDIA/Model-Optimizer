@@ -336,3 +336,127 @@ class DynamicThresholdCalibrator:
         """Set thresholds list on sparse attention modules."""
         for module in modules:
             module._sparse_method_instance.thresholds = thresholds
+
+
+class PercentileThresholdCalibrator:
+    """Percentile-based threshold calibrator for diffusion models.
+
+    Calibration Algorithm:
+        1. Run forward pass in calibration mode, collecting all normalized gaps
+           (min_gap_per_block_column / log(seq_k)) from every attention layer.
+        2. Compute threshold = percentile(all_gaps, (1 - target_sparsity) * 100)
+
+    At inference time:
+        - Skip block if gap >= threshold * log(seq_k)
+        - threshold is sequence-length-invariant (~2% drift across 3x length change)
+    """
+
+    def calibrate(
+        self,
+        model: nn.Module,
+        forward_loop: Callable,
+        phase: str,
+        target_sparsity: float,
+    ) -> dict[str, Any]:
+        """Calibrate percentile threshold.
+
+        Args:
+            model: Model with sparse attention modules
+            forward_loop: Callable that forwards calibration data through model
+            phase: Phase to calibrate (typically "prefill" for diffusion)
+            target_sparsity: Target fraction of blocks to skip (e.g., 0.2 for 20%)
+
+        Returns:
+            Dict with threshold, calibration_type, and statistics
+        """
+        attention_modules = get_sparse_attention_modules(model)
+
+        if not attention_modules:
+            raise ValueError("No sparse attention modules found for calibration")
+
+        print(f"Starting percentile calibration ({phase} phase, target={target_sparsity:.0%})")
+
+        self._enable_calibration_mode(attention_modules)
+
+        with torch.no_grad():
+            forward_loop(model)
+
+        all_gaps = self._extract_normalized_gaps(attention_modules, phase)
+
+        self._disable_calibration_mode(attention_modules)
+
+        if len(all_gaps) == 0:
+            warnings.warn("No normalized gaps collected during calibration")
+            return {}
+
+        percentile_value = (1 - target_sparsity) * 100
+        threshold = float(np.percentile(all_gaps, percentile_value))
+
+        print(f"\nPercentile Calibration Results ({phase}):")
+        print(f"  Total gap values: {len(all_gaps):,}")
+        print(f"  Threshold (p{percentile_value:.0f}): {threshold:.6f}")
+        print(f"  Gap range: [{all_gaps.min():.4f}, {all_gaps.max():.4f}]")
+        print(f"  Gap mean: {all_gaps.mean():.4f}, median: {np.median(all_gaps):.4f}")
+
+        print("\nEffective scaled thresholds (threshold * log(seq_k)):")
+        for seq_k in [4608, 6144, 9216, 18432]:
+            import math
+
+            print(f"  seq_k={seq_k}: {threshold * math.log(seq_k):.4f}")
+
+        return {
+            "phase": phase,
+            "threshold": threshold,
+            "target_sparsity": target_sparsity,
+            "calibration_type": "percentile",
+            "num_gap_values": len(all_gaps),
+            "gap_range": [float(all_gaps.min()), float(all_gaps.max())],
+        }
+
+    def _enable_calibration_mode(self, modules: list[nn.Module]):
+        """Enable calibration mode on sparse attention modules."""
+        for idx, module in enumerate(modules):
+            if not module._stats_manager:
+                module._stats_manager = SparseAttentionStatsManager(
+                    module_name=f"sparse_attn_{idx}", enabled=True
+                )
+            else:
+                module._stats_manager.enabled = True
+
+            module._stats_manager.set_calibration_mode(enabled=True, reset_history=True)
+            module._sparse_method_instance.set_calibration_mode(True)
+
+    def _disable_calibration_mode(self, modules: list[nn.Module]):
+        """Disable calibration mode."""
+        for module in modules:
+            if module._stats_manager:
+                module._stats_manager.set_calibration_mode(enabled=False)
+            module._sparse_method_instance.set_calibration_mode(False)
+
+    def _extract_normalized_gaps(self, modules: list[nn.Module], phase: str) -> np.ndarray:
+        """Extract and concatenate all normalized gaps from calibration stats.
+
+        Args:
+            modules: List of sparse attention modules
+            phase: Phase to filter by
+
+        Returns:
+            1D numpy array of all normalized gap values
+        """
+        all_gaps = []
+
+        for module in modules:
+            if not hasattr(module, "_stats_manager") or module._stats_manager is None:
+                continue
+
+            stats_list = module._stats_manager.get_calibration_stats(phase)
+            for sample_stat in stats_list:
+                if "normalized_gaps" in sample_stat:
+                    gaps = sample_stat["normalized_gaps"]
+                    if isinstance(gaps, np.ndarray) and len(gaps) > 0:
+                        all_gaps.append(gaps)
+
+        if not all_gaps:
+            return np.array([], dtype=np.float32)
+
+        return np.concatenate(all_gaps)

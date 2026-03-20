@@ -13,32 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""LTX-2 inference with skip-softmax sparse attention.
+"""LTX-2 inference with skip-softmax sparse attention for diffusion models.
 
 This example applies skip-softmax sparse attention to the LTX-2 video
-generation model.  Skip-softmax identifies attention blocks whose
-contribution to softmax output is negligible (below a threshold) and
-skips them, reducing computation while preserving quality.
+generation model using the diffusion-specific percentile calibration method.
+Unlike the LLM exponential model, this uses gap/log(seq_k) normalization
+which is sequence-length-invariant (~2% drift across 3x resolution change).
 
 Only the stage-1 backbone is sparsified.  Stage 2 (spatial upsampler +
 distilled LoRA) runs unmodified.
 
 Usage::
 
-    # Static threshold (quick, no calibration)
-    python ltx2_skip_softmax.py --prompt "A cat playing piano" --output out.mp4
-
-    # With calibration (automatically tunes threshold for target sparsity)
+    # With calibration (recommended — generates a short video to calibrate)
     python ltx2_skip_softmax.py --prompt "A cat playing piano" --output out.mp4 \
-        --calibrate --target-sparsity 0.5
-
-    # Custom threshold
-    python ltx2_skip_softmax.py --prompt "A cat playing piano" --output out.mp4 \
-        --threshold 5e-4
+        --calibrate --target-sparsity 0.2
 
     # Disable on first/last 2 layers (higher quality, less speedup)
     python ltx2_skip_softmax.py --prompt "A cat playing piano" --output out.mp4 \
-        --skip-first-last 2
+        --calibrate --target-sparsity 0.2 --skip-first-last 2
 """
 
 import argparse
@@ -59,6 +52,7 @@ from ltx_pipelines.utils.constants import (
     DEFAULT_SEED,
     DEFAULT_VIDEO_GUIDER_PARAMS,
 )
+from ltx_core.quantization.policy import QuantizationPolicy
 from ltx_pipelines.utils.media_io import encode_video
 
 import modelopt.torch.sparsity.attention_sparsity as mtsa
@@ -79,7 +73,7 @@ DEFAULT_NUM_FRAMES = 121
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="LTX-2 video generation with skip-softmax sparse attention"
+        description="LTX-2 video generation with skip-softmax sparse attention (diffusion)"
     )
     parser.add_argument("--prompt", type=str, required=True, help="Text prompt for generation")
     parser.add_argument("--output", type=str, default="output.mp4", help="Output video path")
@@ -90,12 +84,6 @@ def parse_args() -> argparse.Namespace:
 
     # Sparse attention options
     parser.add_argument(
-        "--threshold",
-        type=float,
-        default=1e-3,
-        help="Skip-softmax threshold (lower = less sparsity, higher quality)",
-    )
-    parser.add_argument(
         "--skip-first-last",
         type=int,
         default=2,
@@ -104,12 +92,14 @@ def parse_args() -> argparse.Namespace:
 
     # Calibration options
     parser.add_argument(
-        "--calibrate", action="store_true", help="Calibrate threshold automatically"
+        "--calibrate",
+        action="store_true",
+        help="Calibrate threshold via percentile method (recommended)",
     )
     parser.add_argument(
         "--target-sparsity",
         type=float,
-        default=0.5,
+        default=0.2,
         help="Target sparsity ratio for calibration (0.0-1.0)",
     )
     parser.add_argument(
@@ -121,8 +111,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--calib-frames",
         type=int,
-        default=61,
-        help="Number of frames per calibration sample (shorter = faster)",
+        default=81,
+        help="Number of frames per calibration sample",
     )
     return parser.parse_args()
 
@@ -171,11 +161,12 @@ def build_pipeline() -> TI2VidTwoStagesPipeline:
 
 
 def build_sparse_config(args: argparse.Namespace) -> dict:
-    """Build sparse attention config from CLI args."""
-    # Base config for all attention modules
+    """Build sparse attention config from CLI args.
+
+    Uses flash_skip_softmax_diffusion which requires percentile calibration.
+    """
     attn_cfg = {
-        "method": "flash_skip_softmax",
-        "thresholds": {"prefill": [args.threshold]},
+        "method": "flash_skip_softmax_diffusion",
         "br": 128,
         "bc": 128,
         "backend": "pytorch",
@@ -195,40 +186,17 @@ def build_sparse_config(args: argparse.Namespace) -> dict:
         "default": {"enable": False},
     }
 
-    # Keep first/last N layers dense (use full module path to avoid matching e.g. layer 10 for layer 0)
+    # Keep first/last N layers dense
     for i in range(args.skip_first_last):
         sparse_cfg[f"*transformer_blocks.{i}.attn*"] = {"enable": False}
         sparse_cfg[f"*transformer_blocks.{47 - i}.attn*"] = {"enable": False}
 
     config: dict = {"sparse_cfg": sparse_cfg}
 
-    # Add calibration section if requested
+    # Percentile calibration (required for diffusion method)
     if args.calibrate:
         sparse_cfg["calibration"] = {
             "target_sparse_ratio": {"prefill": args.target_sparsity},
-            # Diffusion attention is less sparse than LLM attention, so we need
-            # more aggressive thresholds to explore the 30-70% sparsity range.
-            "threshold_trials": [
-                1e-4,
-                1e-3,
-                1e-2,
-                5e-2,
-                1e-1,
-                2e-1,
-                3e-1,
-                5e-1,
-                7e-1,
-                8e-1,
-                9e-1,
-                0.95,
-                0.99,
-                0.995,
-                0.999,
-                0.9995,
-                0.9999,
-                0.99995,
-                0.99999,
-            ],
         }
 
     return config
@@ -237,36 +205,34 @@ def build_sparse_config(args: argparse.Namespace) -> dict:
 def build_calibration_forward_loop(
     pipeline: TI2VidTwoStagesPipeline,
     num_steps: int = 10,
-    num_frames: int = 61,
+    num_frames: int = 81,
 ):
-    """Build a forward loop for calibration.
+    """Build a forward loop for percentile calibration.
 
-    Runs a few prompts through the pipeline to collect sparsity statistics.
+    Generates a short video to collect normalized gap statistics across all
+    attention layers and timesteps.  One prompt is typically sufficient.
     """
     calib_prompts = [
         "A serene lake at sunset with mountains in the background",
-        # "A bustling city street with cars and pedestrians",
-        # "A close-up of colorful flowers swaying in the wind",
     ]
     tiling_config = TilingConfig.default()
 
     def forward_loop(model):
-        with torch.no_grad():
-            for prompt in calib_prompts:
-                pipeline(
-                    prompt=prompt,
-                    negative_prompt=DEFAULT_NEGATIVE_PROMPT,
-                    seed=DEFAULT_SEED,
-                    height=DEFAULT_2_STAGE_HEIGHT,
-                    width=DEFAULT_2_STAGE_WIDTH,
-                    num_frames=num_frames,
-                    frame_rate=DEFAULT_FRAME_RATE,
-                    num_inference_steps=num_steps,
-                    video_guider_params=DEFAULT_VIDEO_GUIDER_PARAMS,
-                    audio_guider_params=DEFAULT_AUDIO_GUIDER_PARAMS,
-                    images=[],
-                    tiling_config=tiling_config,
-                )
+        for prompt in calib_prompts:
+            pipeline(
+                prompt=prompt,
+                negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+                seed=DEFAULT_SEED,
+                height=DEFAULT_2_STAGE_HEIGHT,
+                width=DEFAULT_2_STAGE_WIDTH,
+                num_frames=num_frames,
+                frame_rate=DEFAULT_FRAME_RATE,
+                num_inference_steps=num_steps,
+                video_guider_params=DEFAULT_VIDEO_GUIDER_PARAMS,
+                audio_guider_params=DEFAULT_AUDIO_GUIDER_PARAMS,
+                images=[],
+                tiling_config=tiling_config,
+            )
 
     return forward_loop
 

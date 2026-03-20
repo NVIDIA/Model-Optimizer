@@ -16,11 +16,12 @@
 """Calibration framework for sparse attention methods."""
 
 from .calibrate import calibrate_sparse_attention
-from .calibrator import DynamicThresholdCalibrator
+from .calibrator import DynamicThresholdCalibrator, PercentileThresholdCalibrator
 from .ruler_dataset import RulerDatasetBuilder
 
 __all__ = [
     "DynamicThresholdCalibrator",
+    "PercentileThresholdCalibrator",
     "RulerDatasetBuilder",
     "calibrate_sparse_attention",
 ]
