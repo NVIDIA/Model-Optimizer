@@ -56,12 +56,21 @@ def resolve_layer_pairs(
     return pairs
 
 
-def get_seq_length(latents: torch.Tensor, patch_size: int = 1) -> int | None:
+def get_seq_length(
+    latents: torch.Tensor, patch_size: int | tuple[int, ...] = 1
+) -> int | None:
     """Patchified token count from a 5-D latent ``[B, C, F, H, W]``.
+
+    Args:
+        patch_size: int (uniform) or tuple ``(pt, ph, pw)`` per dimension.
 
     Returns None for non-5D tensors.
     """
     if latents.ndim != 5:
         return None
     _, _, f, h, w = latents.shape
-    return (f // patch_size) * (h // patch_size) * (w // patch_size)
+    if isinstance(patch_size, int):
+        pt = ph = pw = patch_size
+    else:
+        pt, ph, pw = patch_size
+    return (f // pt) * (h // ph) * (w // pw)
