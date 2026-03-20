@@ -27,11 +27,14 @@ from modelopt.torch.speculative.utils import load_vlm_or_llm_with_kwargs
 mto.enable_huggingface_checkpointing()
 
 
-def validate_ar(model, tokenizer, ds, steps=3, osl=20, num_samples=80, device=None):
+def validate_ar(
+    model, tokenizer, ds, steps=3, osl=20, num_samples=80, device=None, disable_pbar=False
+):
     validator = HFARValidation(model, tokenizer)
     num_samples = min(num_samples, len(ds))
     ars = []
-    for i in tqdm(range(num_samples), desc="Validating AR"):
+    print("validating AR...")
+    for i in tqdm(range(num_samples), disable=disable_pbar):
         prompt = ds[i]["prompt"][0]
         input_ids = tokenizer(prompt, return_tensors="pt").input_ids
         # Apply chat template to the prompt, continuing with assistant response
