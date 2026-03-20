@@ -113,7 +113,6 @@ repos:
               examples/speculative_decoding/main.py|
               examples/speculative_decoding/medusa_utils.py|
               examples/speculative_decoding/server_generate.py|
-              examples/puzzletron/evaluation/lm_eval_anymodel.py|
               experimental/dms/models/qwen3/configuration_qwen3_dms.py|
               experimental/dms/models/qwen3/modeling_qwen3_dms.py|
           )$
