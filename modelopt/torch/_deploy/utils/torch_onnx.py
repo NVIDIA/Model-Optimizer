@@ -608,7 +608,7 @@ def get_onnx_bytes_and_metadata(
                 op_block_list=["QuantizeLinear", "DequantizeLinear", "Div"],
             )
             # Change FP32 cast nodes feeding into Concat/Add to FP16
-            onnx_opt_graph = change_casts_to_fp16(onnx_opt_graph, ["Concat", "Add"])
+            onnx_opt_graph = change_casts_to_fp16(onnx_opt_graph, ["Concat", "Add", "Sqrt"])
         else:
             onnx_opt_graph = convert_to_f16(
                 onnx_opt_graph, low_precision_type=weights_dtype, keep_io_types=False
