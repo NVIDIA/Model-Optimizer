@@ -237,14 +237,16 @@ For debugging purposes or simple customizations, you can modify an existing conf
 
 .. code-block:: python
 
-    # Create a copy of the default INT8 configuration
-    config = mtq.INT8_DEFAULT_CFG.copy()
+    import copy
 
-    # Disable input quantizers for all layers
-    config["quant_cfg"]["*input_quantizer"]["enable"] = False
+    # Create a deep copy of the default INT8 configuration
+    config = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
+
+    # Disable input quantizers for all layers (appended last, so it takes precedence)
+    config["quant_cfg"].append({"quantizer_path": "*input_quantizer", "enable": False})
 
     # Disable all quantizers for layers matching the pattern "layer1.*"
-    config["quant_cfg"]["*layer1.*"] = {"enable": False}
+    config["quant_cfg"].append({"quantizer_path": "*layer1.*", "enable": False})
 
 Advanced Configuration Creation
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -256,11 +258,14 @@ For exploring new quantization recipes, you can compose a completely new configu
     # Custom configuration for INT4 block-wise weights and INT8 dynamic activations
     MY_CUSTOM_CONFIG = {
         "quant_cfg": [
+            # Disable all quantizers by default, then enable selectively
+            {"quantizer_path": "*", "enable": False},
+
             # Configure weight quantizers with 4-bit precision and 128-element blocks
-            ("*weight_quantizer", {"num_bits": 4, "block_sizes": {-1: 128}, "enable": True}),
+            {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 4, "block_sizes": {-1: 128}}, "enable": True},
 
             # Configure input quantizers with 8-bit dynamic quantization
-            ("*input_quantizer", {"num_bits": 8, "type": "dynamic", "block_sizes": {-1: None}}),
+            {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 8, "type": "dynamic", "block_sizes": {-1: None}}},
 
             # Include default disabled quantizer configurations
             *_default_disabled_quantizer_cfg,
@@ -394,8 +399,10 @@ You can specify ``custom_calib`` as ``algorithm`` in ``quant_cfg`` to use it. He
 
     # create quantization configuration with "custom_calib" method
     quant_cfg = {
-        'quant_cfg': {'*weight_quantizer': ..},
-        'algorithm':  {"method": 'custom_calib'},
+        'quant_cfg': [
+            {"quantizer_path": "*weight_quantizer", "cfg": {...}},
+        ],
+        'algorithm': {"method": 'custom_calib'},
     }
 
 
