@@ -59,16 +59,16 @@ NVFP4_WEIGHT_ACT_MSE_CFG = {
 
 NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG = {
     "quant_cfg": [
-        (
-            "*weight_quantizer",
-            {
+        {
+            "quantizer_path": "*weight_quantizer",
+            "cfg": {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
                 "axis": None,
-                "enable": True,
             },
-        ),
-        ("*input_quantizer", {"enable": False}),
+            "enable": True,
+        },
+        {"quantizer_path": "*input_quantizer", "enable": False},
     ],
     "algorithm": {
         "method": "mse",

@@ -36,14 +36,18 @@ from modelopt.torch.quantization.calib import MaxCalibrator
 # A test config with double-quant (using `SequentialQuantizers`)
 WINT4INT8_CFG = {
     "quant_cfg": [
-        (
-            "*weight_quantizer",
-            [
+        {
+            "quantizer_path": "*weight_quantizer",
+            "cfg": [
                 {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}, "enable": True},
                 {"num_bits": 8, "axis": 0, "enable": True},
             ],
-        ),
-        ("*input_quantizer", {"num_bits": 8, "axis": None, "enable": True}),
+        },
+        {
+            "quantizer_path": "*input_quantizer",
+            "cfg": {"num_bits": 8, "axis": None},
+            "enable": True,
+        },
     ],
     "algorithm": "awq_lite",
 }
@@ -51,8 +55,8 @@ WINT4INT8_CFG = {
 # Test configs for per channel MSE calibration
 INT8_MSE_CFG = {
     "quant_cfg": [
-        ("*weight_quantizer", {"num_bits": 8, "axis": 0}),
-        ("*input_quantizer", {"num_bits": 8, "axis": None}),
+        {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+        {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
     ],
     "algorithm": "mse",
 }
@@ -80,15 +84,15 @@ class NewMaxCalibrator(MaxCalibrator):
 
 quant_cfg_custom_calib = {
     "quant_cfg": [
-        (
-            "*",
-            {
+        {
+            "quantizer_path": "*",
+            "cfg": {
                 "num_bits": 4,
                 "axis": None,
-                "enable": True,
                 "calibrator": (NewMaxCalibrator, (4, None, False)),
             },
-        )
+            "enable": True,
+        }
     ],
     "algorithm": "max",
 }
@@ -178,10 +182,20 @@ def test_class_wise_config():
     model = SimpleConvLinear()
     config = {
         "quant_cfg": [
-            ("nn.Linear", {"*": {"num_bits": 4, "axis": -1, "enable": True}}),
-            ("nn.Conv2d", {"*": {"num_bits": 8, "enable": True}}),
-            ("nn.BatchNorm2d", {"*": {"enable": False}}),
-            ("*output_quantizer", {"num_bits": 8, "enable": True}),
+            {
+                "parent_class": "nn.Linear",
+                "quantizer_path": "*",
+                "cfg": {"num_bits": 4, "axis": -1},
+                "enable": True,
+            },
+            {
+                "parent_class": "nn.Conv2d",
+                "quantizer_path": "*",
+                "cfg": {"num_bits": 8},
+                "enable": True,
+            },
+            {"parent_class": "nn.BatchNorm2d", "quantizer_path": "*", "enable": False},
+            {"quantizer_path": "*output_quantizer", "cfg": {"num_bits": 8}, "enable": True},
         ],
         "algorithm": "max",
     }

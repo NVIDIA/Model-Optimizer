@@ -50,40 +50,51 @@ INT4-FP8 AWQ (W4A8)                 ``W4A8_AWQ_BETA_CFG``
 Quantization Configs
 ================================
 
-Quantization config is dictionary specifying the values for keys ``"quant_cfg"`` and
-``"algorithm"``. The ``"quant_cfg"`` key specifies the quantization configurations. The
-``"algorithm"`` key specifies the ``algorithm`` argument to
-:meth:`calibrate <modelopt.torch.quantization.model_calib.calibrate>`. Please see :class:`QuantizeConfig`
-for the quantization config definition.
+Quantization config is a dictionary with two top-level keys:
 
-'Quantization configurations' is a dictionary mapping wildcards or filter functions
-to its 'quantizer attributes'. The wildcards or filter functions  are matched
-against the quantizer module names. The quantizer modules have names ending with
-``weight_quantizer`` and ``input_quantizer`` and they perform weight quantization and
-input quantization (or activation quantization) respectively. The quantizer modules are generally
-instances of
-:class:`TensorQuantizer <modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer>`.
-The quantizer attributes are defined by :class:`QuantizerAttributeConfig`. See :class:`QuantizerAttributeConfig`
-for details on the quantizer attributes and their values.
+- ``"quant_cfg"``: an ordered list of :class:`QuantizerCfgEntry` dicts that specify which
+  quantizers to configure and how.
+- ``"algorithm"``: the calibration algorithm passed to
+  :meth:`calibrate <modelopt.torch.quantization.model_calib.calibrate>`.
 
-Use `"*"` as the first entry in the quantization configuration list to set a catch-all default
-that applies to all quantizers not matched by a later, more specific entry.
+Please see :class:`QuantizeConfig` for the full config schema.
 
-The quantizer attributes are applied in the order they are specified. For the missing attributes, the default attributes
-as defined by :class:`QuantizerAttributeConfig` are used.
+``quant_cfg`` — Entry Format
+-----------------------------
 
-Quantizer attributes can also be a list of dictionaries. In this case, the matched quantizer module
-is replaced with a
-:class:`SequentialQuantizer <modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer>`
-module which is used to quantize a tensor in multiple formats sequentially. Each quantizer attribute
-dictionary in the list specifies the quantization formats for each quantization step of the
-sequential quantizer. For example, `SequentialQuantizer` is used in 'INT4 Weights, FP8 Activations'
-quantization in which the weights are quantized in INT4 followed by FP8.
+Each entry in the ``quant_cfg`` list is a :class:`QuantizerCfgEntry` with the following fields:
 
-In addition, the dictionary entries could also be pytorch module class names mapping the class specific
-quantization configurations. The pytorch modules should have a quantized equivalent.
+- ``quantizer_path`` *(required)*: a wildcard string matched against quantizer module names.
+  Quantizer modules are instances of
+  :class:`TensorQuantizer <modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer>`
+  and have names ending with ``weight_quantizer``, ``input_quantizer``, etc.
+- ``parent_class`` *(optional)*: restricts matching to quantizers whose immediate parent module is
+  of this PyTorch class (e.g. ``"nn.Linear"``). If omitted, all matching quantizers are targeted
+  regardless of their parent class.
+- ``cfg`` *(optional)*: a dict of quantizer attributes as defined by
+  :class:`QuantizerAttributeConfig`, or a list of such dicts. When a list is given, the matched
+  :class:`TensorQuantizer <modelopt.torch.quantization.nn.modules.tensor_quantizer.TensorQuantizer>`
+  is replaced with a
+  :class:`SequentialQuantizer <modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer>`
+  that applies each format in sequence. This is used for example in W4A8 quantization where weights
+  are quantized first in INT4 and then in FP8.
+- ``enable`` *(optional)*: shorthand to enable or disable matched quantizers without specifying a
+  full ``cfg``. When ``cfg`` is present but ``enable`` is absent, the quantizer is implicitly
+  enabled.
 
-To get the string representation of a module class, do:
+``quant_cfg`` — Ordering and Precedence
+-----------------------------------------
+
+Entries are applied **in list order**; later entries override earlier ones for any quantizer they
+match. The recommended pattern is:
+
+1. Start with a deny-all entry ``{"quantizer_path": "*", "enable": False}`` (provided as
+   :data:`_base_disable_all`) to disable every quantizer by default.
+2. Follow with format-specific entries that selectively enable and configure the desired quantizers.
+3. Append :data:`_default_disabled_quantizer_cfg` to enforce standard exclusions (e.g. BatchNorm
+   layers, LM head, MoE routers).
+
+To get the string representation of a module class for use in ``parent_class``, do:
 
 .. code-block::
 
@@ -98,12 +109,15 @@ Here is an example of a quantization config:
 
     MY_QUANT_CFG = {
         "quant_cfg": [
-            # Quantizer wildcard strings mapping to quantizer attributes
-            ("*weight_quantizer", {"num_bits": 8, "axis": 0}),
-            ("*input_quantizer", {"num_bits": 8, "axis": None}),
+            # Deny all quantizers by default
+            {"quantizer_path": "*", "enable": False},
 
-            # Module class names mapping to quantizer configurations
-            ("nn.LeakyReLU", {"*input_quantizer": {"enable": False}}),
+            # Enable and configure weight and input quantizers
+            {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+
+            # Disable input quantizers specifically for LeakyReLU layers
+            {"quantizer_path": "*input_quantizer", "parent_class": "nn.LeakyReLU", "enable": False},
         ]
     }
 
@@ -128,7 +142,7 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 
     # Create custom config
     CUSTOM_INT4_AWQ_CFG = copy.deepcopy(mtq.INT4_AWQ_CFG)
-    CUSTOM_INT4_AWQ_CFG["quant_cfg"].append(("*lm_head*", {"enable": False}))
+    CUSTOM_INT4_AWQ_CFG["quant_cfg"].append({"quantizer_path": "*lm_head*", "enable": False})
 
     # quantize model
     model = mtq.quantize(model, CUSTOM_INT4_AWQ_CFG, forward_loop)
@@ -1509,10 +1523,9 @@ def normalize_quant_cfg_list(v: list) -> list[QuantizerCfgEntry]:
     Supports these input forms per entry:
     - ``{"quantizer_path": ..., "enable": ..., "cfg": ...}`` — passed through as-is
     - ``{"<quantizer_path>": ...}`` — single-key dict (legacy)
-    - ``(quantizer_path, cfg_dict)`` — tuple form (legacy)
     """
 
-    def _tuple_to_entry(key: str, value) -> QuantizerCfgEntry:
+    def _dict_to_entry(key: str, value) -> QuantizerCfgEntry:
         if isinstance(key, str) and key.startswith("nn."):
             assert isinstance(value, dict) and len(value) == 1
             q_path, sub_cfg = next(iter(value.items()))
@@ -1544,9 +1557,7 @@ def normalize_quant_cfg_list(v: list) -> list[QuantizerCfgEntry]:
             result.append(cast("QuantizerCfgEntry", raw))
         elif isinstance(raw, dict) and len(raw) == 1:
             key, val = next(iter(raw.items()))
-            result.append(_tuple_to_entry(key, val))
-        elif isinstance(raw, (tuple, list)) and len(raw) == 2:
-            result.append(_tuple_to_entry(raw[0], raw[1]))
+            result.append(_dict_to_entry(key, val))
         else:
             raise ValueError(f"Invalid quant_cfg entry: {raw!r}.")
     return result

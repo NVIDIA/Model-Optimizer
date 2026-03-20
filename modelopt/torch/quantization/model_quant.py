@@ -322,8 +322,11 @@ def auto_quantize(
 
                 INT8_CUSTOM_QUANT_CFG = {
                     "quant_cfg": [
-                        ("*weight_quantizer", {"num_bits": 8, "axis": 0}),
-                        ("*input_quantizer", {"num_bits": 8, "axis": None}),
+                        {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+                        {
+                            "quantizer_path": "*input_quantizer",
+                            "cfg": {"num_bits": 8, "axis": None},
+                        },
                     ],
                     "algorithm": "smoothquant",
                 }

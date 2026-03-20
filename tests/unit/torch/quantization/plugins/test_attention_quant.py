@@ -62,8 +62,8 @@ class SDPAAttention(nn.Module):
 
 kv_cache_config = {
     "quant_cfg": [
-        ("*[kv]_bmm_quantizer", {"num_bits": 4, "enable": True}),
-        ("*softmax_quantizer", {"enable": False}),
+        {"quantizer_path": "*[kv]_bmm_quantizer", "cfg": {"num_bits": 4}, "enable": True},
+        {"quantizer_path": "*softmax_quantizer", "enable": False},
     ],
     "algorithm": "max",
 }
