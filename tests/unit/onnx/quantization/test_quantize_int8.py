@@ -77,11 +77,11 @@ def test_int8_with_calibration_reader(tmp_path, high_precision_dtype):
             self.get_next_calls = 0
 
         def get_next(self):
-            self.get_first_calls += 1
+            self.get_next_calls += 1
             return next(self.iter, None)
 
         def get_first(self):
-            self.get_next_calls += 1
+            self.get_first_calls += 1
             return self.data_list[0]
 
         def rewind(self):
