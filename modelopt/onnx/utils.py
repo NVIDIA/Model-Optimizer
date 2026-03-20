@@ -23,7 +23,6 @@ import uuid
 from collections import defaultdict
 from typing import Any
 
-import google.protobuf.message
 import numpy as np
 import onnx
 import onnx_graphsurgeon as gs
@@ -643,19 +642,18 @@ def get_variable_inputs(node: Node) -> list[Variable]:
 def save_onnx(model: onnx.ModelProto, onnx_path: str, save_as_external_data: bool = False):
     """Save an ONNX model to given path. If a model is larger than 2GB, will save with external data."""
     size_threshold = 2 * (1024**3)  # 2GB
-    try:
-        model_proto = model.SerializeToString()
-        model_size = len(model_proto)
-        save_as_external_data = save_as_external_data or model_size > size_threshold
-        logger.debug(
-            f"Model size: {model_size} bytes, using external data: {save_as_external_data}"
-        )
-
-    except (ValueError, google.protobuf.message.EncodeError) as e:
-        logger.warning(
-            "Model exceeds 2GB limit, switching to external data storage. Error message: [%s]", e
-        )
-        save_as_external_data = True
+    if not save_as_external_data:
+        try:
+            model_proto = model.SerializeToString()
+        except Exception as e:
+            logger.warning("Failed to serialize model. Saving tensors as external data. (%s)", e)
+            save_as_external_data = True
+        else:
+            model_size = len(model_proto)
+            save_as_external_data = model_size > size_threshold
+            logger.debug(
+                f"Model size: {model_size} bytes, using external data: {save_as_external_data}"
+            )
 
     # Set ir_version to 10, remove it once ORT supports ir_version 11
     model.ir_version = 10
