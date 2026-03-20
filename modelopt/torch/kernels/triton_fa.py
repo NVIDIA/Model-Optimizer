@@ -46,7 +46,7 @@ if "PYTEST_VERSION" in __import__("os").environ:
 
 
 # ---------------------------------------------------------------------------
-# N:M structured sparsity helpers
+# N:M sparse softmax helpers
 # ---------------------------------------------------------------------------
 @triton.jit
 def _sparse_nm_masks_m4(x0, x1, x2, x3, N: tl.constexpr):
@@ -106,11 +106,15 @@ def _apply_sparse_nm_to_qk_tile(
     SPARSITY_N: tl.constexpr,
     SPARSITY_M: tl.constexpr,
 ):
-    """Apply N:M structured sparsity to a QK score tile.
+    """Apply N:M sparse softmax to a QK score tile.
 
     For every ``SPARSITY_M`` consecutive elements along the N (key) dimension,
     keeps the top ``SPARSITY_N`` values and sets the rest to ``-inf``.
     ``BLOCK_N`` must be divisible by ``SPARSITY_M``.
+
+    For M=4, exactly N values are retained (ties broken by position).
+    For M=8, a threshold-based approach (``tl.sort``) may retain more
+    than N values when ties straddle the threshold boundary.
     """
     tl.static_assert(SPARSITY_M == 4 or SPARSITY_M == 8, "SPARSITY_M must be 4 or 8")  # noqa: PLR1714
     MASK_VAL: tl.constexpr = float("-inf")
@@ -141,7 +145,7 @@ def _apply_sparse_nm_to_qk_tile(
         sorted_vals = tl.sort(reshaped, dim=2)
         KTH_IDX: tl.constexpr = SPARSITY_M - SPARSITY_N  # index of N-th largest in ascending order
 
-        # Extract the threshold value (one extraction vs eight before)
+        # Extract the threshold value at KTH_IDX via masked sum
         # Use 0.0 as fill (not -inf) so sum equals just the KTH element
         cols = tl.arange(0, 8)[None, None, :]
         threshold = tl.sum(tl.where(cols == KTH_IDX, sorted_vals, 0.0), axis=2)
@@ -213,7 +217,7 @@ def _attn_fwd(
     STORE_LSE: tl.constexpr,  # Whether to save LSE for backward pass
     SPARSITY_N: tl.constexpr = 0,  # N:M sparsity — keep top-N of every M elements (0 = disabled)
     SPARSITY_M: tl.constexpr = 4,  # N:M sparsity — group size (4 or 8)
-    NUM_SINK_TOKENS: tl.constexpr = 0,  # First N tokens kept dense (attention sinks)
+    NUM_SINK_BLOCKS: tl.constexpr = 0,  # Leading KV blocks kept dense (attention sinks)
     DENSE_WINDOW_BLOCKS: tl.constexpr = 1,  # Local blocks near diagonal kept dense
 ):
     # --- Grid: (batch, num_q_heads, num_q_tiles) ---
@@ -272,14 +276,14 @@ def _attn_fwd(
         scores = tl.dot(q, k) * qk_scale
         scores = _apply_mask(scores, q_pos, kv_pos, seq_len_q, seq_len_kv, kv_start, IS_CAUSAL)
 
-        # --- Optional 2:4 structured sparsity ---
+        # --- Optional N:M sparse softmax ---
         if SPARSITY_N > 0:
             # Check if this KV tile should be kept dense
-            is_sink = kv_start < NUM_SINK_TOKENS
+            kv_block_idx = kv_start // BLOCK_N
+            is_sink = kv_block_idx < NUM_SINK_BLOCKS
             # causal_offset handles chunked prefill: q starts at (seq_len_kv - seq_len_q)
             causal_offset = seq_len_kv - seq_len_q
             q_abs_block = (tile_q * BLOCK_M + causal_offset) // BLOCK_N
-            kv_block_idx = kv_start // BLOCK_N
             block_distance = q_abs_block - kv_block_idx
             is_local = (block_distance < DENSE_WINDOW_BLOCKS) and (block_distance >= 0)
             if not is_sink and not is_local:
@@ -405,7 +409,7 @@ def _attn_bwd_dq(
     HEAD_DIM: tl.constexpr,
     SPARSITY_N: tl.constexpr = 0,
     SPARSITY_M: tl.constexpr = 4,
-    NUM_SINK_TOKENS: tl.constexpr = 0,
+    NUM_SINK_BLOCKS: tl.constexpr = 0,
     DENSE_WINDOW_BLOCKS: tl.constexpr = 1,
 ):
     """Phase 3 of backward: compute dQ for one Q tile, looping over KV tiles.
@@ -473,12 +477,12 @@ def _attn_bwd_dq(
         scores = tl.dot(q, kT) * qk_scale
         scores = _apply_mask(scores, q_pos, kv_pos, seq_len_q, seq_len_kv, kv_start, IS_CAUSAL)
 
-        # Re-apply 2:4 sparsity to match forward pass
+        # Re-apply N:M sparse softmax to match forward pass
         if SPARSITY_N > 0:
-            is_sink = kv_start < NUM_SINK_TOKENS
+            kv_block_idx = kv_start // BLOCK_N
+            is_sink = kv_block_idx < NUM_SINK_BLOCKS
             causal_offset = seq_len_kv - seq_len_q
             q_abs_block = (tile_q * BLOCK_M + causal_offset) // BLOCK_N
-            kv_block_idx = kv_start // BLOCK_N
             block_distance = q_abs_block - kv_block_idx
             is_local = (block_distance < DENSE_WINDOW_BLOCKS) and (block_distance >= 0)
             if not is_sink and not is_local:
@@ -537,7 +541,7 @@ def _attn_bwd_dkdv(
     HEAD_DIM: tl.constexpr,
     SPARSITY_N: tl.constexpr = 0,
     SPARSITY_M: tl.constexpr = 4,
-    NUM_SINK_TOKENS: tl.constexpr = 0,
+    NUM_SINK_BLOCKS: tl.constexpr = 0,
     DENSE_WINDOW_BLOCKS: tl.constexpr = 1,
 ):
     """Phase 2 of backward: compute dK, dV for one KV tile.
@@ -613,12 +617,12 @@ def _attn_bwd_dkdv(
             scores = tl.dot(q_tile, kT) * qk_scale
             scores = _apply_mask(scores, q_pos, kv_pos, seq_len_q, seq_len_kv, kv_start, IS_CAUSAL)
 
-            # Re-apply 2:4 sparsity to match forward pass
+            # Re-apply N:M sparse softmax to match forward pass
             if SPARSITY_N > 0:
-                is_sink = kv_start < NUM_SINK_TOKENS
+                kv_block_idx = kv_start // BLOCK_N
+                is_sink = kv_block_idx < NUM_SINK_BLOCKS
                 causal_offset = seq_len_kv - seq_len_q
                 q_abs_block = (qi * BLOCK_M + causal_offset) // BLOCK_N
-                kv_block_idx = kv_start // BLOCK_N
                 block_distance = q_abs_block - kv_block_idx
                 is_local = (block_distance < DENSE_WINDOW_BLOCKS) and (block_distance >= 0)
                 if not is_sink and not is_local:
@@ -661,7 +665,7 @@ class _Attention(torch.autograd.Function):
         max_input_len_k,
         sparsity_n,
         sparsity_m,
-        num_sink_tokens,
+        num_sink_blocks,
         dense_window_blocks,
     ):
         HEAD_DIM = q.shape[2]
@@ -719,7 +723,7 @@ class _Attention(torch.autograd.Function):
             STORE_LSE=True,
             SPARSITY_N=sparsity_n,
             SPARSITY_M=sparsity_m,
-            NUM_SINK_TOKENS=num_sink_tokens,
+            NUM_SINK_BLOCKS=num_sink_blocks,
             DENSE_WINDOW_BLOCKS=dense_window_blocks,
             # BLOCK_M, BLOCK_N, num_warps, num_stages chosen by autotune
         )
@@ -737,7 +741,7 @@ class _Attention(torch.autograd.Function):
         ctx.batch = batch
         ctx.sparsity_n = sparsity_n
         ctx.sparsity_m = sparsity_m
-        ctx.num_sink_tokens = num_sink_tokens
+        ctx.num_sink_blocks = num_sink_blocks
         ctx.dense_window_blocks = dense_window_blocks
         return o
 
@@ -815,7 +819,7 @@ class _Attention(torch.autograd.Function):
             HEAD_DIM=HEAD_DIM,
             SPARSITY_N=ctx.sparsity_n,
             SPARSITY_M=ctx.sparsity_m,
-            NUM_SINK_TOKENS=ctx.num_sink_tokens,
+            NUM_SINK_BLOCKS=ctx.num_sink_blocks,
             DENSE_WINDOW_BLOCKS=ctx.dense_window_blocks,
             num_warps=num_warps,
             num_stages=1,
@@ -838,7 +842,7 @@ class _Attention(torch.autograd.Function):
             HEAD_DIM=HEAD_DIM,
             SPARSITY_N=ctx.sparsity_n,
             SPARSITY_M=ctx.sparsity_m,
-            NUM_SINK_TOKENS=ctx.num_sink_tokens,
+            NUM_SINK_BLOCKS=ctx.num_sink_blocks,
             DENSE_WINDOW_BLOCKS=ctx.dense_window_blocks,
             num_warps=num_warps,
             num_stages=1,
@@ -862,10 +866,10 @@ def attention(
     *,
     sparsity_n: int = 0,
     sparsity_m: int = 4,
-    num_sink_tokens: int = 0,
+    num_sink_blocks: int = 0,
     dense_window_blocks: int = 1,
 ) -> torch.Tensor:
-    """Variable-length flash attention with GQA, autograd, and optional N:M sparsity.
+    """Variable-length flash attention with GQA, autograd, and optional N:M sparse softmax.
 
     Args:
         q: [total_q_tokens, num_q_heads, head_dim]
@@ -884,8 +888,7 @@ def attention(
             ``sparsity_n=2, sparsity_m=4`` for 2:4 sparsity;
             ``sparsity_n=4, sparsity_m=8`` for 4:8 sparsity.
         sparsity_m: N:M sparsity — group size (4 or 8).
-        num_sink_tokens: KV blocks containing any of the first N token positions
-            are kept dense (attention sinks). Granularity is per-block.
+        num_sink_blocks: Number of leading KV blocks to keep dense (attention sinks).
         dense_window_blocks: KV blocks within this distance from the query
             diagonal are kept dense (local attention window).
 
@@ -907,7 +910,7 @@ def attention(
         max_input_len_k,
         sparsity_n,
         sparsity_m,
-        num_sink_tokens,
+        num_sink_blocks,
         dense_window_blocks,
     )
 

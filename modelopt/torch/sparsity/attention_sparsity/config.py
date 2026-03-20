@@ -96,6 +96,39 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         ),
     )
 
+    sparsity_n: int = ModeloptField(
+        default=2,
+        title="N in N:M sparsity.",
+        description=(
+            "Keep top-N of every M attention scores. Only used by triton_sparse_softmax. "
+            "Set to 0 to disable sparsity."
+        ),
+    )
+
+    sparsity_m: int = ModeloptField(
+        default=4,
+        title="M in N:M sparsity.",
+        description="Group size for N:M sparsity (4 or 8). Only used by triton_sparse_softmax.",
+    )
+
+    num_sink_blocks: int = ModeloptField(
+        default=0,
+        title="Number of sink blocks.",
+        description=(
+            "Number of leading KV blocks to keep dense (attention sinks). "
+            "Only used by triton_sparse_softmax."
+        ),
+    )
+
+    dense_window_blocks: int = ModeloptField(
+        default=1,
+        title="Dense window blocks.",
+        description=(
+            "Number of local attention blocks around diagonal to keep dense. "
+            "Only used by triton_sparse_softmax."
+        ),
+    )
+
     @field_validator("method")
     @classmethod
     def validate_method(cls, v):
@@ -434,9 +467,27 @@ SKIP_SOFTMAX_CALIB = {
 }
 
 
+# Default N:M sparse softmax configuration
+SPARSE_SOFTMAX_DEFAULT = {
+    "sparse_cfg": {
+        "*attn*": {
+            "method": "triton_sparse_softmax",
+            "sparsity_n": 2,
+            "sparsity_m": 4,
+            "num_sink_blocks": 0,
+            "dense_window_blocks": 1,
+            "backend": "triton",
+            "enable": True,
+        },
+        "default": {"enable": False},
+    },
+}
+
+
 __all__ = [
     "SKIP_SOFTMAX_CALIB",
     "SKIP_SOFTMAX_DEFAULT",
+    "SPARSE_SOFTMAX_DEFAULT",
     "CalibrationConfig",
     "FlashSkipSoftmaxConfig",
     "SparseAttentionAttributeConfig",
