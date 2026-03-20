@@ -1091,7 +1091,7 @@ def find_nodes_from_convs_to_exclude(graph: Graph, quantize_mode: str = "int8"):
     - The input and output channels should be >= 16. The exception is for Conv layers in INT8 quantization mode,
       which supports it if the input or output channel % 8.
     - The filter size for FP8 conv kernels should be less than 32.
-    - For FP8 mode, Conv nodes with input or output channels < _MIN_CHANNELS_FP8 are excluded.
+    - For FP8 mode, Conv nodes with input or output channels <= _MIN_CHANNELS_FP8 are excluded.
       Small-channel convolutions do not benefit from FP8 quantization.
 
     Args:
