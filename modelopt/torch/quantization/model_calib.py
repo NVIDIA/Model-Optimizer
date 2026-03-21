@@ -17,6 +17,7 @@
 
 import math
 import os
+import time
 import warnings
 from collections.abc import Callable
 from functools import partial
@@ -1850,6 +1851,8 @@ def _blockwise_weight_update_unfused(
         n_cols_blk = block_end - block_start
         h_inv_cho_blk = h_inv[block_start:block_end, block_start:block_end]
 
+        # wblk is a scratch copy for intra-block error propagation; weight gets
+        # the final quantized values. Inter-block errors are propagated via addmm_ below.
         if col_qdq_supported:
             wblk = weight[:, block_start:block_end].clone()
             errs = torch.zeros_like(wblk)
@@ -2110,7 +2113,21 @@ def gptq(
     block_size: int = 128,
     **kwargs,
 ):
-    """GPTQ quantization - a GPTQ variant.
+    """GPTQ quantization for a single decoder layer.
+
+    Invoked by ``sequential_calibrate`` which walks layers one at a time so each
+    layer sees activations already updated by the quantization of preceding layers.
+    Within a layer the steps are:
+
+    1. ``max_calibrate`` to set amax values from the current activations.
+    2. Promote eligible quantizers to ``NVFP4StaticQuantizer`` (two-level scaling).
+    3. Collect per-linear-layer Hessian matrices via forward hooks.
+    4. Blockwise weight updates using the inverse Hessian to compensate for
+       rounding error (the core GPTQ column-wise update).
+
+    In contrast to ``gptq_lite``, which quantizes all layers in parallel using the
+    original (unquantized) activations, this method performs sequential calibration
+    and therefore produces more accurate Hessian estimates.
 
     Args:
         layer: A single decoder layer to quantize.
@@ -2119,8 +2136,6 @@ def gptq(
         percdamp: Percentage of avg Hessian diagonal for damping (default: 0.01).
         block_size: Block size for GPTQ weight update.
     """
-    import time
-
     total_start = time.time()
 
     # Set weight amax and activation amax for the current layer using max_calibrate

@@ -1409,19 +1409,15 @@ class LocalHessianCalibConfig(QuantizeAlgorithmConfig):
     )
 
 class GPTQConfig(QuantizeAlgorithmConfig):
-    """The config for GPTQ lite.
+    """The config for GPTQ quantization.
 
-    GPTQ lite is a variant of GPTQ that does not exactly follow the official GPTQ implementation.
-
-    GPTQ lite does not perform sequential quantization of layers. This means that the updated
-    activations are not used to process the next layer.
+    GPTQ minimizes the layer-wise quantization error by using second-order (Hessian) information
+    to perform blockwise weight updates that compensate for rounding loss. Layers are quantized
+    sequentially so that each layer's Hessian is computed from activations that already reflect
+    the quantization of preceding layers.
 
     The default values are taken from the official GPTQ implementation:
     https://github.com/IST-DASLab/FP-Quant/blob/d2e3092f968262c4de5fb050e1aef568a280dadd/src/quantization/gptq.py#L35
-
-    Note: This feature is currently experimental and may not translate to improved accuracy as expected.
-
-
     """
 
     method: Literal["gptq"] = ModeloptField("gptq")
@@ -1438,12 +1434,7 @@ class GPTQConfig(QuantizeAlgorithmConfig):
         description="""The block size for GPTQ weight update, which must be a multiple of the
         group_size used in the quantization.""",
     )
-    hessian_state_path: str | None = ModeloptField(
-        default=None,
-        title="Path to the Hessian state file.",
-        description="""The path to the Hessian state file. If hessian path exists, we load from
-         hessian file instead of recomputing them.""",
-    )
+
 
 
 class SmoothQuantCalibConfig(QuantizeAlgorithmConfig):
