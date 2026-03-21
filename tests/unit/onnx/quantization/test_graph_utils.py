@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -66,6 +66,22 @@ def test_fp8_small_channel_conv_exclusion(oc, ic, expected_excluded):
 
 def test_fp8_small_channel_exclusion_does_not_affect_int8():
     """The small-channel FP8 exclusion should not apply in int8 mode."""
-    graph = _make_conv_graph(output_channels=16, input_channels=64, kernel_shape=(3, 3))
+    # OC=8 would be excluded in FP8 (see oc=8, ic=8 case above), but not in int8.
+    graph = _make_conv_graph(output_channels=8, input_channels=64, kernel_shape=(3, 3))
     excluded = find_nodes_from_convs_to_exclude(graph, quantize_mode="int8")
     assert "Conv_0" not in excluded
+
+
+@pytest.mark.parametrize(
+    "oc, ic",
+    [
+        (15, 64),
+        (64, 15),
+        (1, 1),
+    ],
+)
+def test_fp8_channels_below_16_excluded_by_general_check(oc, ic):
+    """Channels strictly < 16 are excluded by the general channel check, not the FP8 check."""
+    graph = _make_conv_graph(output_channels=oc, input_channels=ic, kernel_shape=(3, 3))
+    excluded = find_nodes_from_convs_to_exclude(graph, quantize_mode="fp8")
+    assert "Conv_0" in excluded
