@@ -115,3 +115,8 @@ class EagleConfig(ModeloptBaseConfig):
         default=True,
         description="Whether to use torch.compile on eagle forward/loss methods for faster training.",
     )
+
+    eagle_enable_nvtx: bool = ModeloptField(
+        default=False,
+        description="Whether to enable NVTX ranges for profiling eagle forward/loss methods.",
+    )
