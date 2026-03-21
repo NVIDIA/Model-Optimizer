@@ -558,7 +558,19 @@ def duplicate_shared_constants(onnx_model: onnx.ModelProto) -> tuple[onnx.ModelP
 
 def check_model(model: onnx.ModelProto) -> None:
     """Checks if the given model is valid."""
-    if model.ByteSize() > (2 * (1024**3)):  # 2GB limit
+    save_as_external_data = False
+    try:
+        model_size = model.ByteSize()
+    except Exception as e:
+        logger.warning(
+            "Failed to compute model size with ByteSize (%s). Using external data path.", e
+        )
+        save_as_external_data = True
+    else:
+        if model_size <= 0 or model_size > (2 * (1024**3)):
+            save_as_external_data = True
+
+    if save_as_external_data:
         with tempfile.TemporaryDirectory() as temp_dir:
             # ONNX also looks in CWD, so we need to use a unique id
             unique_id = str(uuid.uuid4())[:8]
@@ -1159,7 +1171,19 @@ def infer_types_verification(model: onnx.ModelProto) -> onnx.ModelProto:
 
 def infer_shapes(model: onnx.ModelProto, **kwargs):
     """Infers shapes of the onnx graph, handles large models."""
-    if model.ByteSize() > (2 * (1024**3)):  # 2GB limit
+    save_as_external_data = False
+    try:
+        model_size = model.ByteSize()
+    except Exception as e:
+        logger.warning(
+            "Failed to compute model size with ByteSize (%s). Using external data path.", e
+        )
+        save_as_external_data = True
+    else:
+        if model_size <= 0 or model_size > (2 * (1024**3)):
+            save_as_external_data = True
+
+    if save_as_external_data:
         with tempfile.TemporaryDirectory() as temp_dir:
             # ONNX also looks in CWD, so we need to use a unique id
             unique_id = str(uuid.uuid4())[:8]
