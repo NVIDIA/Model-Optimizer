@@ -644,23 +644,16 @@ class HFEagleModel(EagleModel):
 
         torch._dynamo.config.suppress_errors = True  # Allow fallback to eager mode
 
-        # Individual try-catch for each function to maximize torch.compile usage
-        try:
-            self._prepare_eagle_inputs = torch.compile(self._prepare_eagle_inputs, dynamic=False)
-        except Exception:
-            print("Disabling torch.compile for _prepare_eagle_inputs due to compilation error.")
-
-        try:
-            self._eagle_forward = torch.compile(
-                self._eagle_forward, dynamic=False, mode="max-autotune"
-            )
-        except Exception:
-            print("Disabling torch.compile for _eagle_forward due to compilation error.")
-
-        try:
-            self._eagle_loss = torch.compile(self._eagle_loss, dynamic=False, fullgraph=True)
-        except Exception:
-            print("Disabling torch.compile for _eagle_loss due to compilation error.")
+        compile_targets = [
+            ("_prepare_eagle_inputs", {}),
+            ("_eagle_forward", {"mode": "max-autotune"}),
+            ("_eagle_loss", {"fullgraph": True}),
+        ]
+        for name, kwargs in compile_targets:
+            try:
+                setattr(self, name, torch.compile(getattr(self, name), dynamic=False, **kwargs))
+            except Exception:  # noqa: PERF203
+                print(f"Disabling torch.compile for {name} due to compilation error.")
 
     def _get_ttt_attention_mask(self, batch_size, seq_length, ttt_step):
         # compile and cached flex attention masks in first call
