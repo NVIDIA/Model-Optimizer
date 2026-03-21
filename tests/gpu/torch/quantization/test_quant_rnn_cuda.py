@@ -21,7 +21,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from modelopt.torch.quantization import set_quantizer_attribute
+from modelopt.torch.quantization.conversion import set_quantizer_attributes_partial
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 
 
@@ -44,7 +44,7 @@ def test_no_quant_proj(original_cls, bidirectional, bias):
     rnn_object_original = copy.deepcopy(rnn_object)
     quant_rnn_object = QuantModuleRegistry.convert(rnn_object)
 
-    set_quantizer_attribute(quant_rnn_object, lambda name: True, {"enable": False})
+    set_quantizer_attributes_partial(quant_rnn_object, lambda name: True, {"enable": False})
 
     test_input = torch.randn((3, 2, 8), device="cuda")
 

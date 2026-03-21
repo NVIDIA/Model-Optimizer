@@ -30,13 +30,15 @@ from modelopt.torch.opt import apply_mode
 from modelopt.torch.opt.searcher import ForwardLoop
 from modelopt.torch.opt.utils import forward_with_reshard
 from modelopt.torch.quantization.config import QuantizeConfig
-from modelopt.torch.quantization.conversion import set_quantizer_by_cfg
+from modelopt.torch.quantization.conversion import (
+    set_quantizer_attributes_partial,
+    set_quantizer_by_cfg,
+)
 from modelopt.torch.utils import atomic_print
 
 from .algorithms import AutoQuantizeGradientSearcher, AutoQuantizeKLDivSearcher, QuantRecipe
 from .algorithms import get_auto_quantize_config as _get_auto_quantize_config
 from .config import QuantizeAlgoCfgType
-from .conversion import set_quantizer_attribute
 from .mode import QuantizeModeRegistry, get_modelike_from_algo_cfg
 from .nn import QuantModule, TensorQuantizer
 from .utils import is_quantized
@@ -575,12 +577,12 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
 
 def disable_quantizer(model: nn.Module, wildcard_or_filter_func: str | Callable):
     """Disable quantizer by wildcard or filter function."""
-    set_quantizer_attribute(model, wildcard_or_filter_func, {"enable": False})
+    set_quantizer_attributes_partial(model, wildcard_or_filter_func, {"enable": False})
 
 
 def enable_quantizer(model: nn.Module, wildcard_or_filter_func: str | Callable):
     """Enable quantizer by wildcard or filter function."""
-    set_quantizer_attribute(model, wildcard_or_filter_func, {"enable": True})
+    set_quantizer_attributes_partial(model, wildcard_or_filter_func, {"enable": True})
 
 
 @atomic_print

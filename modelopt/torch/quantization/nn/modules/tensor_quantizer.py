@@ -203,8 +203,8 @@ class TensorQuantizer(nn.Module):
         # Optional quantizer cache for caching quantizer related encoding or tensors.
         self._quantizer_cache = None
 
-    def set_from_attribute_config(self, attribute_cfg: QuantizerAttributeConfig | dict):
-        """Set quantizer attributes from attribute_dict.
+    def set_from_attribute_config(self, attribute_cfg: QuantizerAttributeConfig | dict[str, Any]):
+        """Set quantizer attributes from attribute_cfg.
 
         The attributes are defined in
         :class:`QuantizerAttributeConfig <modelopt.torch.quantization.config.QuantizerAttributeConfig>`.
@@ -1423,10 +1423,7 @@ class SequentialQuantizer(nn.Sequential):
         return {"num_quantizers": len(self), "is_sequential_quantizer": True}
 
     def set_from_attribute_config(
-        self,
-        attributes: list[dict[str, Any] | QuantizerAttributeConfig]
-        | dict[str, Any]
-        | QuantizerAttributeConfig,
+        self, attributes: list[QuantizerAttributeConfig] | list[dict[str, Any]]
     ):
         """Set the attributes of contained quantizers from a list of attribute_dicts."""
         if not isinstance(attributes, (list, tuple)):

@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from modelopt.torch.quantization import set_quantizer_attribute, tensor_quant
+from modelopt.torch.quantization import set_quantizer_attributes_partial, tensor_quant
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 
 
@@ -42,7 +42,7 @@ class TestQuantLeakyReLU:
         negative_slope = 0.01
         leaky_relu_object = nn.LeakyReLU(negative_slope=negative_slope)
         quant_leaky_relu_object = QuantModuleRegistry.convert(leaky_relu_object)
-        set_quantizer_attribute(quant_leaky_relu_object, lambda name: True, {"axis": (1)})
+        set_quantizer_attributes_partial(quant_leaky_relu_object, lambda name: True, {"axis": (1)})
 
         test_input = torch.randn(input_shape)
         quant_input = tensor_quant.fake_tensor_quant(

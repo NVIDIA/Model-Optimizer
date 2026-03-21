@@ -20,7 +20,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from modelopt.torch.quantization import set_quantizer_attribute, tensor_quant
+from modelopt.torch.quantization import tensor_quant
+from modelopt.torch.quantization.conversion import set_quantizer_attributes_partial
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 
 NUM_CHANNELS = 3
@@ -90,7 +91,7 @@ class TestQuantBatchNormND:
     def test_fake_quant_per_channel(self, original_cls, input_shape):
         batchnorm_object = original_cls(NUM_CHANNELS, affine=True)
         quant_batchnorm_object = QuantModuleRegistry.convert(batchnorm_object)
-        set_quantizer_attribute(quant_batchnorm_object, lambda name: True, {"axis": (1)})
+        set_quantizer_attributes_partial(quant_batchnorm_object, lambda name: True, {"axis": (1)})
 
         test_input = torch.randn(input_shape)
         reduce_dims = list(range(len(test_input.shape)))

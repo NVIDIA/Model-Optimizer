@@ -47,7 +47,7 @@ def test_quantize_replace(model_cls):
         assert not isinstance(module, nn.Conv2d) or _is_quantized_linear_conv(module)
         assert not isinstance(module, nn.Linear) or _is_quantized_linear_conv(module)
 
-    mtq.set_quantizer_attribute(model_atq, "*", {"enable": False})
+    mtq.set_quantizer_attributes_partial(model_atq, "*", {"enable": False})
 
     out_ref = model_ref(dummy_input)
     out_atq = model_atq(dummy_input)
