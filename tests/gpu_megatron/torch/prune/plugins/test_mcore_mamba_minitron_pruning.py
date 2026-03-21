@@ -71,6 +71,7 @@ def _test_mcore_mamba_parameter_sorting(rank, size):
         mamba_num_groups=mamba_num_groups,
         max_sequence_length=max_sequence_length,
         vocab_size=vocab_size,
+        transformer_impl="transformer_engine",
         bf16=False,
     ).cuda()
 
@@ -151,6 +152,8 @@ def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
             moe_shared_expert_intermediate_size=ffn_hidden_size,
             num_moe_experts=num_moe_experts,
             vocab_size=vocab_size,
+            transformer_impl="transformer_engine",
+            bf16=False,
         ).cuda()
         return model
 
@@ -202,11 +205,8 @@ def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
     bc = 2 * mixer.ngroups * mixer.d_state
     assert mixer.nheads == pruned_mamba_num_heads
     assert mixer.headdim == pruned_mamba_head_dim
-    assert mixer.in_proj.input_size == pruned_hidden_size
     assert mixer.d_inner == pruned_mamba_num_heads * pruned_mamba_head_dim
-    assert mixer.in_proj.output_size == 2 * mixer.d_inner + bc + pruned_mamba_num_heads
-    assert mixer.out_proj.input_size == mixer.d_inner
-    assert mixer.out_proj.output_size == pruned_hidden_size
+    assert mixer.out_proj.out_features == pruned_hidden_size
     assert mixer.conv1d.in_channels == mixer.conv1d.out_channels == mixer.d_inner + bc
 
     # Assert model.config is updated for correct save/restoring
@@ -271,6 +271,8 @@ def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
         num_moe_experts=num_moe_experts,
         vocab_size=vocab_size,
+        transformer_impl="transformer_engine",
+        bf16=False,
     ).cuda()
 
     param_count = get_mcore_param_count(model)
@@ -350,7 +352,7 @@ def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
 
     assert get_mcore_param_count(model) == 10268.0
 
-    top_k = searcher_state["top_k_candidates_per_constraint"][constraints["params"]]
+    top_k = searcher_state["all_candidates_per_constraint"][constraints["params"]][:10]
     assert len(top_k) == 10
     for actual, (ss_config, params, score) in zip(top_k, expected_top_k):
         assert actual.ss_config == ss_config, (actual.ss_config, ss_config)

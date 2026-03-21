@@ -64,6 +64,7 @@ def _test_mcore_gpt_parameter_sorting(activation_func, rank, size):
         max_sequence_length=max_sequence_length,
         vocab_size=vocab_size,
         activation_func=activation_func,
+        transformer_impl="transformer_engine",
         bf16=False,
     ).cuda()
 
@@ -166,6 +167,7 @@ def _test_mcore_gpt_pruning(
             position_embedding_type=position_embedding_type,
             activation_func=activation_func,
             normalization=normalization,
+            transformer_impl="transformer_engine",
             num_layers_in_first_pipeline_stage=num_layers_in_first_pipeline_stage,
             num_layers_in_last_pipeline_stage=num_layers_in_last_pipeline_stage,
         ).cuda()
@@ -206,7 +208,7 @@ def _test_mcore_gpt_pruning(
     model, pruning_scores = prune_minitron(model, constraints, config, channel_divisor)
     if not skip_sorting:
         assert pruning_scores["layer_scores"]
-        assert pruning_scores["activations_per_rank"]
+        assert pruning_scores["local_activations"]
 
     # Assert weights are pruned correctly
     for layer in model.decoder.layers:
@@ -337,6 +339,7 @@ def _test_mcore_gpt_moe_parameter_sorting(rank, size):
         max_sequence_length=max_sequence_length,
         vocab_size=vocab_size,
         activation_func="squared_relu",
+        transformer_impl="transformer_engine",
         num_moe_experts=num_moe_experts,
         moe_ffn_hidden_size=moe_ffn_hidden_size,
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
@@ -413,6 +416,7 @@ def _test_mcore_gpt_pruning_moe(ckpt_path, rank, size):
             max_sequence_length=max_sequence_length,
             vocab_size=vocab_size,
             activation_func="squared_relu",
+            transformer_impl="transformer_engine",
             num_moe_experts=num_moe_experts,
             moe_ffn_hidden_size=moe_ffn_hidden_size,
             moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,

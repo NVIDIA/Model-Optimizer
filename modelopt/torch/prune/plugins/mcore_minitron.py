@@ -34,6 +34,7 @@ from warnings import warn
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from megatron.core.extensions.transformer_engine import TELayerNormColumnParallelLinear
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.models.mamba.mamba_model import MambaModel
 from megatron.core.parallel_state import (
@@ -182,11 +183,11 @@ class MCoreMinitronSearcher(BaseSearcher):
     - `top_k`: Number of candidates to consider for score_func validation (default: 10).
     """
 
-    activations_per_rank: list[dict[str, torch.Tensor]]
+    local_activations: dict[str, torch.Tensor]
     layer_scores: dict[int, torch.Tensor]
     sorted_layers: list[int] | None  # 1-indexed sorted list of layer numbers
-    # Dict from params constraint to list of tuples (ss_config, params, score)
-    top_k_candidates_per_constraint: dict[float, list[CandidateSubnet]]
+    # Dict from params constraint to list of all CandidateSubnets fitting that constraint
+    all_candidates_per_constraint: dict[float, list[CandidateSubnet]]
 
     @property
     def default_search_config(self) -> SearchConfig:
@@ -207,10 +208,10 @@ class MCoreMinitronSearcher(BaseSearcher):
     def default_state_dict(self) -> SearchStateDict:
         """Return default state dict for importance scores and activations from forward loop."""
         return {
-            "activations_per_rank": [],
+            "local_activations": {},
             "layer_scores": {},
             "sorted_layers": None,
-            "top_k_candidates_per_constraint": {},
+            "all_candidates_per_constraint": {},
         }
 
     def sanitize_search_config(self, config: SearchConfig | None) -> SearchConfig:
@@ -273,8 +274,10 @@ class MCoreMinitronSearcher(BaseSearcher):
     def run_search(self) -> None:
         """Run forward loop to collect activations, sort parameters, and prune the model."""
         registry = ImportanceEstimatorRegistry(self.model)
-        if self.layer_scores and self.activations_per_rank:  # Available from checkpoint
-            registry.set_activations_and_layer_scores(self.activations_per_rank, self.layer_scores)
+        if self.local_activations and self.layer_scores:  # Available from per-rank checkpoint
+            registry.set_local_activations_and_layer_scores(
+                self.local_activations, self.layer_scores
+            )
         elif not self.config["skip_sorting"]:
             assert self.forward_loop is not None
             is_training = self.model.training
@@ -284,8 +287,8 @@ class MCoreMinitronSearcher(BaseSearcher):
             self.model.train(is_training)
 
             # Store activations and layer scores for re-pruning with different export configs
-            self.activations_per_rank, self.layer_scores = (
-                registry.get_activations_and_layer_scores()
+            self.local_activations, self.layer_scores = (
+                registry.get_local_activations_and_layer_scores()
             )
             self.save_search_checkpoint(verbose=True)
 
@@ -384,7 +387,6 @@ class MCoreMinitronSearcher(BaseSearcher):
         for m in self.model.modules():
             if isinstance(m, _DynamicMoELayer):
                 m._export_reinit_token_dispatcher()
-                break
 
     def search_best_arch_by_params(self) -> dict:
         """Search for the best architecture based on the given parameters constraints.
@@ -421,10 +423,7 @@ class MCoreMinitronSearcher(BaseSearcher):
         )
 
         # 2. Perform grid-search over the search space to find subnets fitting the constraints
-        if (
-            max_params not in self.top_k_candidates_per_constraint
-            or len(self.top_k_candidates_per_constraint[max_params]) != top_k
-        ):
+        if max_params not in self.all_candidates_per_constraint:
             max_num_layers = self.model.get_hparam("num_layers").max
             search_space_configs = MCoreMinitronSearcher._generate_search_space_combos(
                 hp_choices,
@@ -436,7 +435,7 @@ class MCoreMinitronSearcher(BaseSearcher):
             selected = []
             for ss_config in tqdm(
                 search_space_configs,
-                desc=f"Finding top {top_k} (`config['top_k']`) candidates fitting the constraints...",
+                desc="Finding all candidates fitting the constraints...",
                 disable=not dist.is_master(),
             ):
                 self._prune(ss_config, prune_depth=False)
@@ -449,13 +448,13 @@ class MCoreMinitronSearcher(BaseSearcher):
                 sample(self.model, sample_func=max)  # reset to max subnet
             assert len(selected) > 0, "No subnets found fitting the constraints!"
             print_rank_0(f"Found {len(selected)} candidates fitting the constraints!")
-            self.top_k_candidates_per_constraint[max_params] = sorted(
+            self.all_candidates_per_constraint[max_params] = sorted(
                 selected, key=lambda x: x.params, reverse=True
-            )[:top_k]
+            )
             self.save_search_checkpoint(verbose=True)
         else:
             print_rank_0(f"\nUsing top {top_k} candidates from checkpoint")
-        top_k_candidates = self.top_k_candidates_per_constraint[max_params]
+        top_k_candidates = self.all_candidates_per_constraint[max_params][:top_k]
 
         print_rank_0(f"\n====================\nTop {top_k} candidates:")
         for candidate in top_k_candidates:
@@ -475,6 +474,17 @@ class MCoreMinitronSearcher(BaseSearcher):
         )
 
         # 4. Validate top-k candidates using the score_func and return the best subnet
+        # WAR for Nemotron-3-Nano-30B-A3B-BF16. Disable expert bias during candidate eval to prevent in-place
+        # __setattr__ on dynamically-sliced buffers from corrupting their shape (128 -> 120 elements).
+        _routers_with_expert_bias = []
+        for n, m in self.model.named_modules():
+            if hasattr(m, "enable_expert_bias") and m.enable_expert_bias:
+                print(
+                    f"Temporarily disabling expert bias for {n} on rank {dist.rank()} for candidate evaluation..."
+                )
+                m.enable_expert_bias = False
+                _routers_with_expert_bias.append(m)
+
         for candidate in tqdm(
             top_k_candidates,
             desc=f"Validating top {top_k} candidates on given score_func (this will take some time)...",
@@ -498,6 +508,9 @@ class MCoreMinitronSearcher(BaseSearcher):
             print_rank_0(
                 f"\t{candidate.ss_config} -> {num2hrb(candidate.params)} params, {candidate.score:.4f} score\n"
             )
+
+        for m in _routers_with_expert_bias:
+            m.enable_expert_bias = True
 
         print_rank_0(f"\n====================\nTop {top_k} candidates with scores:")
         for candidate in top_k_candidates:
@@ -865,6 +878,11 @@ class ImportanceEstimatorRegistry:
             handle.remove()
         self._hooks.clear()
 
+        # Unpatch return_layernorm_output on fused TELayerNormColumnParallelLinear modules
+        for m in self.model.modules():
+            if isinstance(m, TELayerNormColumnParallelLinear):
+                m.return_layernorm_output = False
+
     def get_layer_scores(self) -> dict[int, torch.Tensor]:
         """Get the layer scores (1-indexed) from the model.
 
@@ -893,45 +911,38 @@ class ImportanceEstimatorRegistry:
 
         return layer_scores
 
-    def get_activations_and_layer_scores(
+    def get_local_activations_and_layer_scores(
         self,
-    ) -> tuple[list[dict[str, torch.Tensor]], dict[int, torch.Tensor]]:
-        """Get the per-rank activations and layer scores from the model."""
-        local_activations = {}
-        for n, m in self.model.named_modules():
-            if hasattr(m, "_activations"):
-                local_activations[n] = m._activations
-        activations_per_rank = dist.allgather(
-            local_activations, group=get_pipeline_model_parallel_group()
-        )
-        assert len(activations_per_rank) == get_pipeline_model_parallel_world_size()
+    ) -> tuple[dict[str, torch.Tensor], dict[int, torch.Tensor]]:
+        """Get this rank's local activations and global layer scores from the model.
 
+        Each rank saves its own activations to its per-rank checkpoint file (no allgather needed).
+        Layer scores are gathered across all PP ranks to produce a global ranking.
+        """
+        local_activations = {
+            n: m._activations for n, m in self.model.named_modules() if hasattr(m, "_activations")
+        }
         layer_scores = self.get_layer_scores()
 
-        return activations_per_rank, layer_scores
+        return local_activations, layer_scores
 
-    def set_activations_and_layer_scores(
+    def set_local_activations_and_layer_scores(
         self,
-        activations_per_rank: list[dict[str, torch.Tensor]],
+        local_activations: dict[str, torch.Tensor],
         layer_scores: dict[int, torch.Tensor],
     ) -> None:
-        """Set the pre-computed layer_scores and per-rank activations instead of running forward.
+        """Set the pre-computed layer_scores and local activations instead of running forward.
 
         Args:
-            activations_per_rank: List of dicts from module name to activations. Should match PP size.
-            layer_scores: Dict from layer_number (1-indexed) to score.
+            local_activations: Dict from module name to activations for this rank.
+            layer_scores: Dict from layer_number (1-indexed) to score (global across all PP ranks).
         """
-        print_rank_0("Loading activations and scores per rank from checkpoint...")
-        rank = get_pipeline_model_parallel_rank()
-        pp_size = get_pipeline_model_parallel_world_size()
-        assert len(activations_per_rank) == pp_size, (
-            f"Expected same PP size for stored pruning scores ({len(activations_per_rank)}) as current ({pp_size})!"
-        )
+        print_rank_0("Loading activations and scores from per-rank checkpoint...")
         for layer in self.model.decoder.layers:
             layer._scores = layer_scores[layer.layer_number]
         for n, m in self.model.named_modules():
             if hasattr(m, "_activations"):
-                m._activations = activations_per_rank[rank][n]
+                m._activations = local_activations[n]
 
 
 # Module-specific registration functions
@@ -941,25 +952,48 @@ def _register_hidden_size_importance(
     """Register importance estimators for Language Model (GPT/Mamba) modules."""
     module._register_temp_attribute("_activations", {})
 
-    def _emb_layernorm_forward_hook(mod, module_inner, input, output):
-        """Hook to collect activations for importance estimation.
+    def _collect_activations(mod, module_id, activations_tensor):
+        """Accumulate activation importance scores for a given module."""
+        activations_tensor = activations_tensor.to(torch.float32)
+        activations = activations_tensor.abs().mean(dim=0)  # [batch_size, hidden_size]
+        activations = activations.pow(2).sum(dim=0)
+        if module_id not in mod._activations:
+            mod._activations[module_id] = activations
+        else:
+            mod._activations[module_id] += (
+                activations  # aggregate sum instead of mean of scores for simplicity
+            )
 
-        Activations are computed as mean over seq_len and then squared and summed over batch_size.
-        Later we take the square root of the sum to get the L2 norm.
+    def _fused_ln_linear_forward_hook(mod, module_inner, input, output):
+        """Hook on TELayerNormColumnParallelLinear with return_layernorm_output=True.
+
+        Extracts the exact layernorm output from TE's fused kernel and restores
+        the normal return format so downstream code is not affected.
         """
+        # Output format with return_layernorm_output=True:
+        #   te_return_bias=True:  MCore returns (linear_out, bias, ln_out)
+        #   te_return_bias=False: MCore returns ((linear_out, ln_out), None)
+        if module_inner.te_return_bias:
+            linear_out, bias, ln_out = output
+            fixed_output = (linear_out, bias)
+        else:
+            (linear_out, ln_out), bias = output
+            fixed_output = (linear_out, bias)
+
+        # Gather over all TP regions
+        # NOTE: This is not used at the moment since we restrict to TP=1
+        ln_out = gather_from_tensor_model_parallel_region(ln_out).detach()
+        _collect_activations(mod, id(module_inner), ln_out)
+
+        # Return the normal output format so downstream code (e.g. SelfAttention) is not affected
+        return fixed_output
+
+    def _layernorm_forward_hook(mod, module_inner, input, output):
+        """Hook on separate layernorm modules (e.g. TENorm for MoE pre_mlp_layernorm)."""
         # Gather output [seq_len, batch_size, hidden_size] over all TP regions
         # NOTE: This is not used at the moment since we restrict to TP=1
         output = gather_from_tensor_model_parallel_region(output).detach()
-
-        output = output.to(torch.float32)  # use full precision to avoid overflow
-        activations = output.abs().mean(dim=0)  # [batch_size, hidden_size]
-        activations = activations.pow(2).sum(dim=0)
-        if id(module_inner) not in mod._activations:
-            mod._activations[id(module_inner)] = activations
-        else:
-            mod._activations[id(module_inner)] += (
-                activations  # aggregate sum instead of mean of scores for simplicity
-            )
+        _collect_activations(mod, id(module_inner), output)
 
     def _estimate_hidden_size_importance(mod):
         """Return the activation magnitude-based importance of the hidden_size."""
@@ -973,25 +1007,44 @@ def _register_hidden_size_importance(
         torch.distributed.all_reduce(activations, op=torch.distributed.ReduceOp.SUM)
         return activations
 
-    # Register hooks for all layers
+    # Register hooks to collect post-layernorm activations for hidden_size importance.
+    # Layernorms are fused into TELayerNormColumnParallelLinear. We temporarily
+    # patch return_layernorm_output=True so TE's fused kernel returns the layernorm output.
+    # For MoE layers, pre_mlp_layernorm is a separate TENorm — use a regular forward hook.
+    for m in module.modules():
+        if isinstance(m, TELayerNormColumnParallelLinear):
+            m.return_layernorm_output = True
+
     for layer in module.decoder.layers:
         if isinstance(layer, _DynamicTransformerLayer):
             if isinstance(layer.self_attention, _DynamicSelfAttention):
+                # input_layernorm is fused into self_attention.linear_qkv
                 registry.register_hook(
-                    layer.input_layernorm,
-                    partial(_emb_layernorm_forward_hook, module),
+                    layer.self_attention.linear_qkv,
+                    partial(_fused_ln_linear_forward_hook, module),
                     hook_type="forward",
                 )
 
-            if isinstance(layer.mlp, (_DynamicMLP, _DynamicSequentialMLP)):
+            if isinstance(layer.mlp, _DynamicMoELayer):
+                # MoE layers have a separate pre_mlp_layernorm (TENorm, not IdentityOp)
                 registry.register_hook(
                     layer.pre_mlp_layernorm,
-                    partial(_emb_layernorm_forward_hook, module),
+                    partial(_layernorm_forward_hook, module),
+                    hook_type="forward",
+                )
+            elif isinstance(layer.mlp, _DynamicMLP):
+                # Dense MLP: pre_mlp_layernorm is fused into mlp.linear_fc1
+                registry.register_hook(
+                    layer.mlp.linear_fc1,
+                    partial(_fused_ln_linear_forward_hook, module),
                     hook_type="forward",
                 )
         elif isinstance(layer, _DynamicMambaLayer):
+            # Mamba norm is fused into mixer.in_proj
             registry.register_hook(
-                layer.norm, partial(_emb_layernorm_forward_hook, module), hook_type="forward"
+                layer.mixer.in_proj,
+                partial(_fused_ln_linear_forward_hook, module),
+                hook_type="forward",
             )
 
     registry.register_importance(

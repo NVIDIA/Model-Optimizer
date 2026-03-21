@@ -12,6 +12,7 @@ on:
       - "tests/unit/**"
       - "pyproject.toml"
       - "tox.ini"
+      - "tools/launcher/**"
   schedule:
     - cron: "0 0 * * *" # Nightly
   workflow_dispatch: # On-demand
@@ -98,6 +99,23 @@ jobs:
       - uses: ./.github/actions/ubuntu-setup
       - name: Run unit tests
         run: pip install tox && tox -e py312-torch210-tf_${{ matrix.tf }}-unit
+  launcher:
+    if: github.event_name == 'pull_request'
+    needs: [linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Run launcher tests
+        working-directory: tools/launcher
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          uv venv .venv
+          uv pip install -e . pytest
+          uv run python3 -m pytest -v
   partial-install:
     if: github.event_name == 'pull_request'
     needs: [linux]
@@ -114,7 +132,7 @@ jobs:
   unit-pr-required-check:
     # Run even if some jobs are skipped
     if: ${{ github.event_name == 'pull_request' && always() }}
-    needs: [linux, windows, multi-py, multi-torch, multi-transformers, partial-install]
+    needs: [linux, windows, multi-py, multi-torch, multi-transformers, partial-install, launcher]
     runs-on: ubuntu-latest
     steps:
       - name: Required unit tests did not succeed
@@ -124,5 +142,6 @@ jobs:
           needs.multi-py.result != 'success' ||
           needs.multi-torch.result != 'success' ||
           needs.multi-transformers.result != 'success' ||
-          needs.partial-install.result != 'success' }}
+          needs.partial-install.result != 'success' ||
+          needs.launcher.result != 'success' }}
         run: exit 1
