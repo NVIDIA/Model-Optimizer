@@ -323,7 +323,7 @@ async def handle_onboarding_response(event, say):
     if state == "awaiting_cluster_choice":
         del onboarding_state[user_id]
         if text.lower() in ("yes", "y"):
-            await start_cluster_setup(user_id, say, thread_ts)
+            await start_cluster_setup(user_id, say, thread_ts, from_onboarding=True)
         else:
             onboarding_state[user_id] = "awaiting_creds_choice"
             await say(
@@ -422,12 +422,45 @@ async def handle_onboarding_response(event, say):
 # ─── Cluster Setup ───────────────────────────────────────────────────
 
 
-async def start_cluster_setup(user_id, say, thread_ts):
-    """Begin interactive cluster configuration."""
-    cluster_setup_state[user_id] = {"step": "name"}
+async def start_cluster_setup(user_id, say, thread_ts, *, from_onboarding=False):
+    """Begin interactive cluster configuration.
+
+    Shows existing clusters and offers to add/update/remove.
+    """
+    existing_yaml = user_store.read_clusters_yaml(user_id)
+    if existing_yaml:
+        try:
+            import yaml
+
+            existing = yaml.safe_load(existing_yaml) or {}
+            clusters = existing.get("clusters", {})
+            default = existing.get("default_cluster", "")
+            names = list(clusters.keys())
+            cluster_list = "\n".join(
+                f"• `{n}`" + (" _(default)_" if n == default else "") for n in names
+            )
+            cluster_setup_state[user_id] = {
+                "step": "action", "existing": existing, "from_onboarding": from_onboarding,
+            }
+            await say(
+                text=(
+                    f"You have {len(names)} cluster(s) configured:\n{cluster_list}\n\n"
+                    "*1️⃣* Add a new cluster\n"
+                    "*2️⃣* Update an existing cluster\n"
+                    "*3️⃣* Remove a cluster\n"
+                    "*4️⃣* Done — keep current config\n\n"
+                    "Reply with `1`, `2`, `3`, or `4`."
+                ),
+                thread_ts=thread_ts,
+            )
+            return
+        except Exception:
+            pass  # Fall through to fresh setup
+
+    cluster_setup_state[user_id] = {"step": "name", "from_onboarding": from_onboarding}
     await say(
         text=(
-            "Let's set up a remote cluster.\n\n*Step 1/5:* What would you like to call this"
+            "Let's set up a remote cluster.\n\n*Step 1/6:* What would you like to call this"
             " cluster? (e.g., `cw-dfw`, `selene`, `my-workstation`)"
         ),
         thread_ts=thread_ts,
@@ -435,75 +468,175 @@ async def start_cluster_setup(user_id, say, thread_ts):
 
 
 async def handle_cluster_setup_response(user_id, text, say, thread_ts):
-    """Handle multi-step cluster configuration."""
+    """Handle multi-step cluster configuration with add/update/remove support."""
+    import yaml as _yaml
+
     state = cluster_setup_state[user_id]
     step = state["step"]
+
+    # ── Action selection (existing clusters) ──
+    if step == "action":
+        existing = state.get("existing", {})
+        clusters = existing.get("clusters", {})
+        if text == "1":
+            state["step"] = "name"
+            await say(
+                text="*Step 1/6:* Name for the new cluster?"
+                " (e.g., `cw-dfw`, `selene`, `my-workstation`)",
+                thread_ts=thread_ts,
+            )
+        elif text == "2":
+            names = list(clusters.keys())
+            state["step"] = "pick_update"
+            await say(
+                text="Which cluster to update?\n"
+                + "\n".join(f"• `{n}`" for n in names)
+                + "\n\nReply with the cluster name.",
+                thread_ts=thread_ts,
+            )
+        elif text == "3":
+            names = list(clusters.keys())
+            state["step"] = "pick_remove"
+            await say(
+                text="Which cluster to remove?\n"
+                + "\n".join(f"• `{n}`" for n in names)
+                + "\n\nReply with the cluster name.",
+                thread_ts=thread_ts,
+            )
+        else:
+            del cluster_setup_state[user_id]
+            await say(text="Keeping current cluster config.", thread_ts=thread_ts)
+        return True
+
+    if step == "pick_update":
+        name = text.strip()
+        existing = state.get("existing", {})
+        if name not in existing.get("clusters", {}):
+            await say(text=f"Cluster `{name}` not found. Try again.", thread_ts=thread_ts)
+            return True
+        state["name"] = name
+        state["step"] = "login_node"
+        old = existing["clusters"][name]
+        await say(
+            text=f"Updating *{name}*. Type `skip` to keep current value.\n\n"
+            f"*Step 2/6:* Login node? (current: `{old.get('login_node', '?')}`)",
+            thread_ts=thread_ts,
+        )
+        return True
+
+    if step == "pick_remove":
+        name = text.strip()
+        existing = state.get("existing", {})
+        clusters = existing.get("clusters", {})
+        if name not in clusters:
+            await say(text=f"Cluster `{name}` not found. Try again.", thread_ts=thread_ts)
+            return True
+        del clusters[name]
+        if existing.get("default_cluster") == name and clusters:
+            existing["default_cluster"] = next(iter(clusters))
+        del cluster_setup_state[user_id]
+        yaml_content = _yaml.dump(existing, default_flow_style=False)
+        user_store.save_clusters_yaml(user_id, yaml_content)
+        await say(
+            text=f"Removed cluster `{name}`.\n\n```{yaml_content}```",
+            thread_ts=thread_ts,
+        )
+        return True
+
+    # ── Shared steps for add/update ──
+    existing = state.get("existing", {})
+    old = existing.get("clusters", {}).get(state.get("name", ""), {})
 
     if step == "name":
         state["name"] = text.strip().replace(" ", "-")
         state["step"] = "login_node"
         await say(
-            text=(
-                f"Cluster alias: *{state['name']}*\n\n*Step 2/5:* Login node hostname?"
-                " (e.g., `cluster-login.example.com`)"
-            ),
+            text=f"Cluster alias: *{state['name']}*\n\n"
+            "*Step 2/6:* Login node hostname?"
+            " (e.g., `cluster-login.example.com`)",
             thread_ts=thread_ts,
         )
     elif step == "login_node":
-        state["login_node"] = text.strip()
+        val = text.strip()
+        state["login_node"] = old.get("login_node", "") if val.lower() == "skip" else val
         state["step"] = "user"
+        cur = old.get("user", "")
         await say(
-            text="*Step 3/5:* SSH username? (default: your system username)",
+            text="*Step 3/6:* SSH username?"
+            + (f" (current: `{cur}`, type `skip` to keep)" if cur else ""),
             thread_ts=thread_ts,
         )
     elif step == "user":
-        state["user"] = text.strip() if text.strip() else None
-        state["step"] = "workspace"
+        val = text.strip()
+        state["user"] = old.get("user") if val.lower() == "skip" else (val or None)
+        state["step"] = "ssh_key"
+        cur = old.get("ssh_key", "")
         await say(
-            text="*Step 4/5:* Remote working directory? (e.g., `/home/username/modelopt` or `~/modelopt`)",
+            text="*Step 4/6:* SSH private key path? Must be an absolute path"
+            " (e.g., `/home/username/.ssh/id_rsa`)."
+            + (f" (current: `{cur}`, type `skip` to keep)" if cur else "")
+            + " Type `skip` to use SSH default.",
+            thread_ts=thread_ts,
+        )
+    elif step == "ssh_key":
+        val = text.strip()
+        if val.lower() == "skip":
+            state["ssh_key"] = old.get("ssh_key")
+        else:
+            state["ssh_key"] = val
+        state["step"] = "workspace"
+        cur = old.get("workspace", "")
+        await say(
+            text="*Step 5/6:* Remote working directory?"
+            + (f" (current: `{cur}`, type `skip` to keep)" if cur else ""),
             thread_ts=thread_ts,
         )
     elif step == "workspace":
-        state["workspace"] = text.strip()
+        val = text.strip()
+        state["workspace"] = old.get("workspace", "") if val.lower() == "skip" else val
         state["step"] = "gpu_type"
+        cur = old.get("gpu_type", "")
         await say(
-            text=(
-                "*Step 5/5:* GPU type on this cluster?"
-                " (e.g., `H100`, `B200`, `A100` — used for format recommendations."
-                " Type `skip` if unknown.)"
-            ),
+            text="*Step 6/6:* GPU type?"
+            + (f" (current: `{cur}`, type `skip` to keep)" if cur else "")
+            + " Type `skip` if unknown.",
             thread_ts=thread_ts,
         )
     elif step == "gpu_type":
-        gpu = text.strip() if text.strip().lower() != "skip" else None
+        gpu_text = text.strip()
+        if gpu_text.lower() == "skip":
+            gpu = old.get("gpu_type")
+        else:
+            gpu = gpu_text or old.get("gpu_type")
         del cluster_setup_state[user_id]
 
         name = state["name"]
-        yaml_lines = ["clusters:", f"  {name}:"]
-        yaml_lines.append(f"    login_node: {state['login_node']}")
+        new_cluster = {"login_node": state["login_node"]}
         if state.get("user"):
-            yaml_lines.append(f"    user: {state['user']}")
-        yaml_lines.append(f"    workspace: {state['workspace']}")
+            new_cluster["user"] = state["user"]
+        if state.get("ssh_key"):
+            new_cluster["ssh_key"] = state["ssh_key"]
+        new_cluster["workspace"] = state["workspace"]
         if gpu:
-            yaml_lines.append(f"    gpu_type: {gpu}")
-        yaml_lines.append(f"\ndefault_cluster: {name}")
+            new_cluster["gpu_type"] = gpu
 
-        yaml_content = "\n".join(yaml_lines) + "\n"
+        # Merge into existing config
+        config = existing if existing else {}
+        if "clusters" not in config:
+            config["clusters"] = {}
+        config["clusters"][name] = new_cluster
+        if not config.get("default_cluster"):
+            config["default_cluster"] = name
 
-        existing = user_store.read_clusters_yaml(user_id)
-        if existing:
-            await say(
-                text=f"You already have a cluster config. Replacing with new one.\n\n```{yaml_content}```",
-                thread_ts=thread_ts,
-            )
-
+        yaml_content = _yaml.dump(config, default_flow_style=False)
         user_store.save_clusters_yaml(user_id, yaml_content)
         await say(
             text=f"Cluster *{name}* configured!\n\n```{yaml_content}```",
             thread_ts=thread_ts,
         )
-        # Chain to credentials import
-        await _start_creds_import(user_id, say, thread_ts)
+        # Only chain to credentials import during initial onboarding
+        if state.get("from_onboarding"):
+            await _start_creds_import(user_id, say, thread_ts)
 
     return True
 
@@ -743,14 +876,20 @@ async def _run_job(user_id: str, prompt: str, say_func, channel: str, thread_ts:
     env["MODELOPT_REPO_DIR"] = str(workspace_mgr.repo_dir)
 
     bot_context = (
-        f"You are running via the ModelOpt Slack bot. "
+        f"You are running via the ModelOpt Slack bot in --print mode. "
         f"Workspace root: {ws_root} (contains per-model workspaces). "
         f"Upstream repo: {workspace_mgr.repo_dir} (read-only, use for fresh copies). "
         f"Read skills/common/workspace-management.md before creating workspaces. "
         f"Check existing workspaces with: ls $MODELOPT_WORKSPACE_ROOT/ "
-        f"SAFETY: You are running unattended — no human can approve actions. "
+        f"IMPORTANT RESTRICTIONS: "
+        f"1. You are running in --print mode. CronCreate, background tasks, and Agent "
+        f"subagents are NOT available. They will silently fail. "
+        f"To monitor SLURM jobs, use sleep-based polling in a bash loop "
+        f"(e.g., while squeue -j JOBID | grep -q RUNNING; do sleep 60; done). "
+        f"2. SAFETY: You are running unattended — no human can approve actions. "
         f"NEVER run destructive commands (rm -rf /, kill -9, fdisk, mkfs, etc.). "
-        f"NEVER modify files outside your workspace ({ws_root}) or the user's remote home directory. "
+        f"NEVER modify files outside your workspace ({ws_root}) or the user's "
+        f"remote home directory. "
         f"Do NOT modify the upstream repo ({workspace_mgr.repo_dir}). "
         f"Do NOT modify system files, global configs, or other users' data. "
         f"If a task seems risky or ambiguous, output a warning instead of proceeding."

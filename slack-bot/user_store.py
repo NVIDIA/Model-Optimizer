@@ -56,6 +56,12 @@ class UserStore:
         self._users_dir.mkdir(parents=True, exist_ok=True)
         self._key_store = key_store
 
+        # Shared cache for large model downloads (all users share this)
+        self._shared_cache = self._data_dir / "shared-cache"
+        self._shared_cache.mkdir(parents=True, exist_ok=True)
+        (self._shared_cache / "huggingface").mkdir(exist_ok=True)
+        (self._shared_cache / "torch").mkdir(exist_ok=True)
+
     # ── User Directory ───────────────────────────────────────────────
 
     def user_dir(self, user_id: str) -> Path:
@@ -130,12 +136,21 @@ class UserStore:
 
         Loads:
         1. System env
-        2. User's personal env file (HF_TOKEN, NGC credentials, etc.)
-        3. Claude auth credentials
+        2. Shared cache paths (HF_HOME, TORCH_HOME — shared across users)
+        3. User's personal env file (HF_TOKEN, NGC credentials, etc.)
+        4. Claude auth credentials
+
+        Note: user env vars can override shared cache paths if needed.
         """
         env = os.environ.copy()
 
-        # Load user's personal env vars
+        # Set shared cache dirs (large model downloads shared across users)
+        shared_cache = str(self._shared_cache)
+        env.setdefault("HF_HOME", f"{shared_cache}/huggingface")
+        env.setdefault("TORCH_HOME", f"{shared_cache}/torch")
+        env.setdefault("TRANSFORMERS_CACHE", f"{shared_cache}/huggingface/hub")
+
+        # Load user's personal env vars (can override cache paths)
         env_file = self.user_dir(user_id) / "env"
         if env_file.exists():
             for line in env_file.read_text().splitlines():

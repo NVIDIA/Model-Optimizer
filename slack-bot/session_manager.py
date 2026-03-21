@@ -160,6 +160,7 @@ def _build_cmd(
         claude_bin,
         "--print",
         "--dangerously-skip-permissions",
+        "--disallowed-tools", "CronCreate,CronDelete,CronList,Agent",
     ]
 
     if system_prompt_extra:
