@@ -38,7 +38,6 @@ from .config import (
     AWQLiteCalibConfig,
     CompressConfig,
     GPTQConfig,
-    GPTQLiteConfig,
     LocalHessianCalibConfig,
     MaxCalibConfig,
     MseCalibConfig,
@@ -61,7 +60,6 @@ from .conversion import (
 from .model_calib import (
     awq,
     gptq,
-    gptq_lite,
     local_hessian_calibrate,
     max_calibrate,
     mse_calibrate,
@@ -492,18 +490,6 @@ class SVDQuantModeDescriptor(BaseCalibrateModeDescriptor):
     def restore(self) -> RestoreEntrypoint:
         """The mode's entrypoint for restoring a model."""
         return restore_svdquant_model
-
-
-@CalibrateModeRegistry.register_mode
-class GPTQLiteModeDescriptor(BaseCalibrateModeDescriptor):
-    """Mode for GPTQ calibration algorithm."""
-
-    @property
-    def config_class(self) -> type[QuantizeAlgorithmConfig]:
-        """Specifies the config class for the mode."""
-        return GPTQLiteConfig
-
-    _calib_func = gptq_lite
 
 
 @CalibrateModeRegistry.register_mode

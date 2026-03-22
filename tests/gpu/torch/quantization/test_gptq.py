@@ -21,14 +21,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
-from modelopt.torch.quantization.model_calib import (
-    _blockwise_weight_update_fused,
-    _blockwise_weight_update_unfused,
-    blockwise_weight_update,
-    prepare_hessian_inverse,
-    update_hessian,
-)
-from modelopt.torch.quantization.nn import NVFP4StaticQuantizer
+from modelopt.torch.quantization.model_calib import GPTQHandle, update_hessian
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 from modelopt.torch.utils.dataset_utils import create_forward_loop, get_dataset_dataloader
 
@@ -163,8 +156,10 @@ def test_gptq_updates(block_size, dim, model_weight, expect_weight_change):
         f"n_samples should be {expected_tokens_2}, got {n_samples}"
     )
 
-    hessian = hessian.to(input.device)
-    blockwise_weight_update(model, hessian, block_size, 0.1)
+    handle = GPTQHandle(model, "linear")
+    handle.hessian = hessian.to(input.device)
+    handle.n_samples = n_samples
+    handle.quantize(block_size, 0.1)
     if expect_weight_change:
         # Weight must change as GPTQ updates weights to adjust for quantization error
         assert not torch.allclose(model.weight.data, q_dq_weight), "Weight should not be equal"
@@ -196,7 +191,10 @@ def test_gptq_export_roundtrip():
     hessian, n_samples = update_hessian(input_tensor, hessian, n_samples)
     hessian = hessian.to("cuda")
 
-    blockwise_weight_update(model, hessian, block_size, percdamp=0.1)
+    handle = GPTQHandle(model, "linear")
+    handle.hessian = hessian
+    handle.n_samples = n_samples
+    handle.quantize(block_size, percdamp=0.1)
 
     # Save the QDQ reference from the quantizer applied to GPTQ'd weights
     gptq_weight_shape = model.weight.data.shape
@@ -306,88 +304,4 @@ def test_gptq_e2e_flow(quant_cfg):
     )
     print(
         f"Generated ids after quantization: {tokenizer.decode(generated_ids_after_ptq[0], skip_special_tokens=True)}"
-    )
-
-
-@pytest.mark.parametrize("dim", [256, 512])
-def test_fused_vs_unfused_nvfp4(dim):
-    """Verify that the fused Triton GPTQ kernel produces equivalent results to the unfused path.
-
-    The fused kernel computes NVFP4 quantisation inline using Triton intrinsics,
-    which can differ slightly from the PyTorch-level quantiser path (different FP
-    rounding order).  On real models (dim >= 4096) the relative MSE difference is
-    typically < 0.1%; at the smaller dims used here the tolerance is set to 20%.
-    """
-    from modelopt.torch.quantization.model_calib import _promote_nvfp4_static_quantizers
-
-    torch.manual_seed(RAND_SEED)
-    block_size = min(128, dim)
-
-    # NVFP4_WEIGHT_ONLY_GPTQ_CFG uses *static* blocks, which get promoted to
-    # NVFP4StaticQuantizer — the prerequisite for the fused Triton path.
-    quant_cfg = copy.deepcopy(mtq.NVFP4_WEIGHT_ONLY_GPTQ_CFG)
-    quant_cfg["algorithm"] = "max"  # calibrate only, don't run GPTQ
-
-    model = torch.nn.Linear(dim, dim, bias=False).to("cuda")
-    model.name = "test_fused"
-    original_weight = model.weight.data.clone()
-    inp = torch.randn(4, 32, dim, device="cuda")
-
-    mtq.quantize(model, quant_cfg, forward_loop=lambda m: m(inp))
-
-    # Promote to NVFP4StaticQuantizer (normally done by gptq / sequential_calibrate)
-    n_promoted = _promote_nvfp4_static_quantizers(model)
-    assert n_promoted > 0, "Expected at least one quantizer to be promoted"
-
-    quantizer = model.weight_quantizer
-    assert isinstance(quantizer, NVFP4StaticQuantizer), (
-        f"Expected NVFP4StaticQuantizer, got {type(quantizer).__name__}"
-    )
-
-    # Restore original weight and compute Hessian
-    model.weight.data = original_weight.clone()
-    hessian = torch.zeros(dim, dim, dtype=torch.float32)
-    n_samples = 0
-    hessian, n_samples = update_hessian(inp, hessian, n_samples)
-    hessian = hessian.to("cuda")
-
-    # --- Run fused path ---
-    weight_fused = original_weight.float().clone()
-    num_rows, num_cols = weight_fused.shape
-    h_inv = prepare_hessian_inverse(hessian, weight_fused, percdamp=0.01)
-    _blockwise_weight_update_fused(weight_fused, h_inv, quantizer, num_rows, num_cols, block_size)
-
-    # --- Run unfused path ---
-    weight_unfused = original_weight.float().clone()
-    h_inv_unfused = prepare_hessian_inverse(hessian, weight_unfused, percdamp=0.01)
-    _blockwise_weight_update_unfused(
-        weight_unfused, h_inv_unfused, quantizer, num_cols, block_size, None, False
-    )
-
-    # Both paths must produce non-trivial updates
-    assert not torch.equal(weight_fused, original_weight.float()), (
-        "Fused path did not update weights"
-    )
-    assert not torch.equal(weight_unfused, original_weight.float()), (
-        "Unfused path did not update weights"
-    )
-
-    # Compare Hessian-weighted relative MSE
-    def _relative_mse(q, w, h):
-        delta = q - w
-        return (delta.mm(h).mul(delta).mean() / (w.mm(h).mul(w).mean() + 1e-6)).item()
-
-    orig_f = original_weight.float()
-    mse_fused = _relative_mse(weight_fused, orig_f, hessian)
-    mse_unfused = _relative_mse(weight_unfused, orig_f, hessian)
-
-    assert mse_fused > 0, "Fused MSE should be positive"
-    assert mse_unfused > 0, "Unfused MSE should be positive"
-
-    # At small test dimensions, inline Triton FP4 rounding can diverge up to ~15%
-    # from the PyTorch path.  On production-scale layers this drops below 0.1%.
-    relative_mse_diff = abs(mse_fused - mse_unfused) / max(mse_fused, mse_unfused)
-    assert relative_mse_diff < 0.20, (
-        f"Fused ({mse_fused:.6e}) and unfused ({mse_unfused:.6e}) MSE differ by "
-        f"{relative_mse_diff:.2%}, expected < 20%"
     )

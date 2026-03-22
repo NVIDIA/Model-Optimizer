@@ -16,7 +16,6 @@
 """Calibration utilities."""
 
 import math
-import os
 import time
 import warnings
 from collections.abc import Callable
@@ -1571,33 +1570,149 @@ def svdquant(
     max_calibrate(model, forward_loop)
 
 
-def _print_relative_mse_error(
-    q: torch.Tensor,
-    w: torch.Tensor,
-    h: torch.Tensor,
-    module_name: str,
-    n_samples: int | None = None,
-):
-    """Print relative mean squared error between quantized and original weights.
+class GPTQHandle:
+    """Encapsulates per-module GPTQ state and operations.
 
-    Computes the Hessian-weighted relative MSE between quantized and original weights,
-    providing a measure of quantization quality. This metric is adapted from the GPTQ
-    repository.
+    Owns the Hessian, patches the forward during collection, and contains
+    the blockwise weight-update logic.
 
-    Args:
-        q (torch.Tensor): Quantized weight tensor
-        w (torch.Tensor): Original weight tensor
-        h (torch.Tensor): Hessian matrix used for weighting the error
-        module_name (str): Name of the module for logging purposes
-        n_samples (int | None): Number of Hessian samples (batches) used for this layer
-    Note:
-        Implementation adapted from the GPTQ repository:
-        https://github.com/IST-DASLab/FP-Quant
+    Instance attributes set during ``__init__``:
+        module, name, hessian, n_samples
+
+    Instance attributes set during ``quantize``:
+        weight: float working copy of module weights (mutated in-place by update methods)
+        h_inv: upper-triangular Cholesky factor of the damped inverse Hessian
     """
-    delta = q - w
-    mse = (delta).mm(h).mul(delta).mean() / (w.mm(h).mul(w).mean() + 1e-6)
-    suffix = f", n_hessian_samples: {n_samples}" if n_samples is not None else ""
-    print_rank_0(f"[{module_name}] Relative MSE error: {mse.item():.2e}{suffix}")
+
+    CACHE_NAME = "_forward_no_gptq_hessian"
+
+    def __init__(self, module, name, offload_to_cpu=False):
+        self.module = module
+        self.name = name
+        in_features = module.weight.shape[-1]
+        device = module.weight.device
+        if offload_to_cpu and get_used_gpu_mem_fraction(device) > 0.65:
+            device = "cpu"
+        self.hessian = torch.zeros(in_features, in_features, dtype=torch.float32, device=device)
+        self.n_samples = 0
+        # Set by quantize(); listed here for documentation.
+        self.weight: torch.Tensor | None = None
+        self.h_inv: torch.Tensor | None = None
+
+    def setup(self):
+        """Patch the module's forward to accumulate Hessian during the collection pass."""
+        gptq_handle = self
+
+        def hessian_forward(self, input, *args, **kwargs):
+            inp = input.to_local() if hasattr(input, "to_local") else input
+            if self.input_quantizer is not None and self.input_quantizer.is_enabled:
+                hessian_input = self.input_quantizer(inp)
+            else:
+                hessian_input = inp
+            gptq_handle.hessian, gptq_handle.n_samples = update_hessian(
+                hessian_input, gptq_handle.hessian, gptq_handle.n_samples
+            )
+
+            self.weight_quantizer.disable()
+            out = self._forward_no_gptq_hessian(input, *args, **kwargs)
+            self.weight_quantizer.enable()
+            return out
+
+        bind_forward_method(self.module, hessian_forward, self.CACHE_NAME)
+
+    def cleanup(self):
+        """Unpatch the module's forward method."""
+        unpatch_forward_method(self.module, self.CACHE_NAME)
+
+    def quantize(self, block_size, percdamp):
+        """Run GPTQ blockwise weight update on this module.
+
+        Populates ``self.weight`` and ``self.h_inv``, runs the blockwise update,
+        logs MSE, and writes the result back to the module.
+        """
+        hessian = self.hessian.to(self.module.weight.device)
+        self.weight = self.module.weight.data.float().clone()
+        self._prepare_hessian_inverse(hessian, percdamp)
+
+        self._blockwise_update(block_size)
+
+        self._print_mse_error(hessian)
+        self.module.weight.data = self.weight.reshape(self.module.weight.shape).to(
+            self.module.weight.data.dtype
+        )
+
+    # ------------------------------------------------------------------
+    # Quantize helpers — all read from self.module, self.weight, self.h_inv
+    # ------------------------------------------------------------------
+
+    def _prepare_hessian_inverse(self, hessian, percdamp):
+        """Compute damped inverse Hessian and store as ``self.h_inv``.
+
+        Dead-neuron columns (all-zero in ``self.weight``) are zeroed in the
+        Hessian before inversion, matching the FP-Quant reference:
+        https://github.com/IST-DASLab/FP-Quant/blob/d2e3092f968262c4de5fb050e1aef568a280dadd/src/quantization/gptq.py#L200
+        """
+        assert self.weight is not None, "_prepare_hessian_inverse called before quantize()"
+        h = hessian.clone()
+        zero_cols = torch.nonzero(self.weight.eq(0).all(dim=0)).unsqueeze(-1)
+
+        h[zero_cols, :] = 0
+        h[:, zero_cols] = 0
+        h[zero_cols, zero_cols] = 1
+
+        damp = percdamp * torch.mean(torch.diag(h))
+        diag_indices = torch.arange(h.shape[0], device=h.device)
+        h[diag_indices, diag_indices] += damp
+
+        try:
+            h = torch.cholesky_inverse(torch.linalg.cholesky(h))
+            self.h_inv = torch.linalg.cholesky(h, upper=True)
+        except (RuntimeError, torch.linalg.LinAlgError):
+            print_rank_0("Warning: Hessian is not positive definite, using identity matrix")
+            self.h_inv = torch.eye(h.shape[0], device=h.device, dtype=h.dtype)
+
+    def _blockwise_update(self, block_size):
+        """Column-wise GPTQ update using full-matrix QDQ.
+
+        For each column, quantizes the full weight matrix via the quantizer and
+        extracts the quantized column. This is the standard GPTQ approach.
+
+        Reads/writes ``self.weight`` and ``self.h_inv`` in-place.
+        """
+        assert self.weight is not None and self.h_inv is not None, (
+            "_blockwise_update called before _prepare_hessian_inverse()"
+        )
+        quantizer = self.module.weight_quantizer
+        num_cols = self.weight.shape[1]
+
+        for block_start in range(0, num_cols, block_size):
+            block_end = min(block_start + block_size, num_cols)
+            n_cols_blk = block_end - block_start
+            h_inv_cho_blk = self.h_inv[block_start:block_end, block_start:block_end]
+
+            wblk = self.weight.clone()
+            errs = torch.zeros_like(wblk[:, block_start:block_end])
+
+            for i in range(n_cols_blk):
+                w_ci = wblk[:, block_start + i]
+                d = h_inv_cho_blk[i, i]
+                qdq = quantizer(wblk)
+                self.weight[:, block_start + i] = qdq[:, block_start + i]
+                err = (w_ci - qdq[:, block_start + i]) / d
+                wblk[:, block_start + i : block_end].addr_(err, h_inv_cho_blk[i, i:], alpha=-1)
+                errs[:, i] = err
+
+            self.weight[:, block_end:].addmm_(
+                errs, self.h_inv[block_start:block_end, block_end:], alpha=-1
+            )
+
+    def _print_mse_error(self, hessian):
+        """Log Hessian-weighted relative MSE between ``self.weight`` and original weights."""
+        w_orig = self.module.weight.float()
+        delta = self.weight - w_orig
+        mse = (delta).mm(hessian).mul(delta).mean() / (w_orig.mm(hessian).mul(w_orig).mean() + 1e-6)
+        suffix = f", n_hessian_samples: {self.n_samples}" if self.n_samples else ""
+        print_rank_0(f"[{self.name}] Relative MSE error: {mse.item():.2e}{suffix}")
 
 
 def update_hessian(input, hessian, n_samples):
@@ -1625,407 +1740,17 @@ def update_hessian(input, hessian, n_samples):
     return hessian, n_samples
 
 
-def prepare_hessian_inverse(h, weight, percdamp):
-    """Prepare inverse Hessian with dead neuron handling and damping.
+def _get_quantized_linear_layers(parent: nn.Module) -> list[tuple[str, nn.Module]]:
+    """Return (name, module) pairs for all quantized linear layers with enabled weight quantizers.
 
-    Args:
-        h: Hessian matrix to update
-        weight: Weight tensor to prepare Hessian for
-        percdamp: Damping percentage for Hessian diagonal
-    Returns:
-        h_inv: Inverse Hessian matrix
-    Implementation adapted from the FP-Quant repository:
-    https://github.com/IST-DASLab/FP-Quant/blob/d2e3092f968262c4de5fb050e1aef568a280dadd/src/quantization/gptq.py#L200
+    Also sets ``module.name`` on each returned module for downstream logging.
     """
-    h = h.clone()
-    # Handle dead neurons (zero weight columns)
-    # Get columns with all zeros in weight
-    zero_cols = torch.nonzero(weight.eq(0).all(dim=0)).unsqueeze(-1)
-
-    # Zero out entire rows and columns in Hessian for dead neurons
-    h[zero_cols, :] = 0
-    h[:, zero_cols] = 0
-    h[zero_cols, zero_cols] = 1
-
-    # Add damping to diagonal
-    damp = percdamp * torch.mean(torch.diag(h))
-    diag_indices = torch.arange(h.shape[0], device=h.device)
-    h[diag_indices, diag_indices] += damp
-
-    try:
-        h = torch.cholesky_inverse(torch.linalg.cholesky(h))
-        h_inv = torch.linalg.cholesky(h, upper=True)
-    except (RuntimeError, torch.linalg.LinAlgError):
-        print_rank_0("Warning: Hessian is not positive definite, using identity matrix")
-        h_inv = torch.eye(h.shape[0], device=h.device, dtype=h.dtype)
-    return h_inv
-
-
-def _build_column_qdq(quantizer, weight_shape):
-    """Build a fast column-wise quantize-dequantize function for integer quantizers.
-
-    Instead of calling the full TensorQuantizer on the entire weight matrix (which
-    quantizes all elements) and extracting one column, this returns a closure that
-    quantizes only a single column using the quantizer's pre-computed amax/scales.
-
-    Since max_calibrate fixes the amax before GPTQ weight updates, quantizing a
-    single column with the same fixed scale gives bit-identical results to
-    quantizing the full matrix and extracting that column.
-
-    Args:
-        quantizer: The weight TensorQuantizer (already calibrated).
-        weight_shape: Shape of the weight tensor (out_features, in_features).
-
-    Returns:
-        Tuple of (column_qdq_fn, supported) where:
-        - column_qdq_fn(column, col_idx) -> qdq_column  (if supported)
-        - supported: True if column-wise qdq is available, False to fall back.
-    """
-    # Unsupported: NVFP4 (two-level FP4 scaling), FP quantization (num_bits is a tuple)
-    if isinstance(quantizer, NVFP4StaticQuantizer):
-        return None, False
-    if isinstance(quantizer._num_bits, tuple):
-        return None, False
-
-    # Unsupported: pre_quant_scale (SmoothQuant) or rotation transforms mix columns
-    if getattr(quantizer, "pre_quant_scale", None) is not None:
-        return None, False
-    if getattr(quantizer, "rotate_is_enabled", False):
-        return None, False
-
-    # Need calibrated amax
-    if not hasattr(quantizer, "_amax") or quantizer._amax is None:
-        return None, False
-
-    num_bits = quantizer._num_bits
-    unsigned = getattr(quantizer, "_unsigned", False)
-    narrow_range = getattr(quantizer, "_narrow_range", False)
-    max_bound = (2 ** (num_bits - 1 + int(unsigned))) - 1
-    min_bound = -max_bound + int(narrow_range)
-
-    amax = quantizer._amax.float()
-    out_features, in_features = weight_shape
-
-    # Determine quantization geometry from block_sizes
-    block_sizes = quantizer.block_sizes
-    group_size = None
-    if block_sizes is not None:
-        # Skip dynamic block quantization
-        if block_sizes.get("type", "static") == "dynamic":
-            return None, False
-        group_size = block_sizes.get(-1, None) or block_sizes.get(len(weight_shape) - 1, None)
-
-    if group_size is not None and group_size > 0:
-        # Per-group block quantization along last dim.
-        # After _setup_for_blockquant, weight is reshaped to (-1, group_size) with axis=(0,).
-        # amax shape: (out_features * n_groups, 1) where n_groups = in_features // group_size.
-        if in_features % group_size != 0:
-            return None, False  # Padding case — fall back
-
-        n_groups = in_features // group_size
-
-        try:
-            # Reshape amax to (out_features, n_groups) for O(1) group lookup
-            amax_2d = amax.reshape(out_features, n_groups)
-        except RuntimeError:
-            return None, False
-
-        def _column_qdq_group(
-            col, col_idx, _a=amax_2d, _mx=max_bound, _mn=min_bound, _gs=group_size
-        ):
-            col_scale = _mx / _a[:, col_idx // _gs].clamp(min=1e-12)
-            return torch.clamp(torch.round(col * col_scale), _mn, _mx) / col_scale
-
-        return _column_qdq_group, True
-
-    # Per-channel (axis != None) or per-tensor (axis == None)
-    axis = quantizer.axis
-    if axis is not None:
-        # Per-channel: amax has shape (out_features, 1) or similar
-        col_scale = max_bound / amax.reshape(-1).clamp(min=1e-12)
-
-        def _column_qdq_channel(col, col_idx, _s=col_scale, _mx=max_bound, _mn=min_bound):
-            return torch.clamp(torch.round(col * _s), _mn, _mx) / _s
-
-        return _column_qdq_channel, True
-
-    # Per-tensor: single scalar scale
-    scalar_scale = max_bound / amax.clamp(min=1e-12).item()
-
-    def _column_qdq_tensor(col, col_idx, _s=scalar_scale, _mx=max_bound, _mn=min_bound):
-        return torch.clamp(torch.round(col * _s), _mn, _mx) / _s
-
-    return _column_qdq_tensor, True
-
-
-def _can_use_fused_gptq(quantizer) -> bool:
-    """Check whether the fused Triton GPTQ kernel can be used for *quantizer*."""
-    if not isinstance(quantizer, NVFP4StaticQuantizer):
-        return False
-    if not hasattr(quantizer, "_amax") or quantizer._amax is None:
-        return False
-    from modelopt.torch.quantization.triton import IS_AVAILABLE as _TRITON_OK
-
-    return _TRITON_OK
-
-
-def blockwise_weight_update(module, h, block_size, percdamp, n_samples=None):
-    """Update module weights using GPTQ-style blockwise quantization.
-
-    Dispatches to one of three internal paths depending on quantizer type:
-
-    1. **Fused Triton** — for :class:`NVFP4StaticQuantizer` when Triton is
-       available.  Runs the entire column loop in a single GPU kernel per
-       block (~130x faster than the unfused path on Blackwell GPUs).
-    2. **Column-QDQ** — for integer quantizers whose scale geometry allows
-       single-column fake-quant via :func:`_build_column_qdq`.
-    3. **Full-matrix fallback** — calls the quantizer on the full weight matrix
-       each column (slowest, but always correct).
-
-    Args:
-        module: Neural network module with ``weight`` and ``weight_quantizer``.
-        h: Hessian matrix of shape ``(d, d)``.
-        block_size: Number of columns processed per block.
-        percdamp: Damping as a fraction of the mean Hessian diagonal.
-        n_samples: Number of Hessian samples (used only for logging).
-    """
-    weight = module.weight.data.float().clone()
-    num_rows, num_cols = weight.shape
-
-    h_inv = prepare_hessian_inverse(h, weight, percdamp)
-
-    quantizer = module.weight_quantizer
-    if _can_use_fused_gptq(quantizer):
-        _blockwise_weight_update_fused(weight, h_inv, quantizer, num_rows, num_cols, block_size)
-    else:
-        col_qdq_fn, col_qdq_supported = _build_column_qdq(quantizer, weight.shape)
-        _blockwise_weight_update_unfused(
-            weight, h_inv, quantizer, num_cols, block_size, col_qdq_fn, col_qdq_supported
-        )
-
-    _print_relative_mse_error(weight, module.weight.float(), h, module.name, n_samples)
-    module.weight.data = weight.reshape(module.weight.shape).to(module.weight.data.dtype)
-
-
-def _blockwise_weight_update_fused(weight, h_inv, quantizer, num_rows, num_cols, block_size):
-    """Fused Triton path for NVFP4: one kernel launch per block."""
-    from modelopt.torch.quantization.triton.gptq_fused_kernel import gptq_fused_block
-
-    group_size = quantizer.block_sizes.get(-1, None) or quantizer.block_sizes.get(1, None)
-    num_groups = math.ceil(num_cols / group_size)
-    amax_grouped = quantizer._amax.float().reshape(num_rows, num_groups).contiguous()
-    global_amax = quantizer.global_amax.float()
-
-    for block_start in range(0, num_cols, block_size):
-        block_end = min(block_start + block_size, num_cols)
-        n_cols_blk = block_end - block_start
-
-        w_block = weight[:, block_start:block_end].clone().contiguous()
-        h_inv_cho_blk = h_inv[block_start:block_end, block_start:block_end].contiguous()
-
-        qw_block, err_block = gptq_fused_block(
-            w_block,
-            amax_grouped,
-            global_amax,
-            h_inv_cho_blk,
-            group_size,
-            block_start,
-            n_cols_blk,
-        )
-
-        weight[:, block_start:block_end] = qw_block
-        if block_end < num_cols:
-            weight[:, block_end:].addmm_(
-                err_block[:, :n_cols_blk],
-                h_inv[block_start:block_end, block_end:],
-                alpha=-1,
-            )
-
-
-def _blockwise_weight_update_unfused(
-    weight, h_inv, quantizer, num_cols, block_size, col_qdq_fn, col_qdq_supported
-):
-    """Column-QDQ or full-matrix fallback for non-NVFP4 quantizers."""
-    for block_start in range(0, num_cols, block_size):
-        block_end = min(block_start + block_size, num_cols)
-        n_cols_blk = block_end - block_start
-        h_inv_cho_blk = h_inv[block_start:block_end, block_start:block_end]
-
-        # wblk is a scratch copy for intra-block error propagation; weight gets
-        # the final quantized values. Inter-block errors are propagated via addmm_ below.
-        if col_qdq_supported:
-            wblk = weight[:, block_start:block_end].clone()
-            errs = torch.zeros_like(wblk)
-
-            for i in range(n_cols_blk):
-                w_ci = wblk[:, i]
-                d = h_inv_cho_blk[i, i]
-                qdq_col = col_qdq_fn(w_ci, block_start + i)
-                weight[:, block_start + i] = qdq_col
-                err = (w_ci - qdq_col) / d
-                wblk[:, i:].addr_(err, h_inv_cho_blk[i, i:], alpha=-1)
-                errs[:, i] = err
-        else:
-            wblk = weight.clone()
-            errs = torch.zeros_like(wblk[:, block_start:block_end])
-
-            for i in range(n_cols_blk):
-                w_ci = wblk[:, block_start + i]
-                d = h_inv_cho_blk[i, i]
-                qdq = quantizer(wblk)
-                weight[:, block_start + i] = qdq[:, block_start + i]
-                err = (w_ci - qdq[:, block_start + i]) / d
-                wblk[:, block_start + i : block_end].addr_(err, h_inv_cho_blk[i, i:], alpha=-1)
-                errs[:, i] = err
-
-        weight[:, block_end:].addmm_(errs, h_inv[block_start:block_end, block_end:], alpha=-1)
-
-
-def gptq_lite(
-    model: nn.Module,
-    forward_loop: ForwardLoop | None = None,
-    percdamp: float = 0.01,
-    block_size: int = 128,
-    hessian_state_path: str | None = None,
-):
-    """GPTQ-lite quantization - a simplified GPTQ variant.
-
-    Key differences from GPTQ:
-    - Layers are quantized in parallel (not sequentially with updated activations)
-    - Uses group-wise updates instead of column-wise updates
-
-    Args:
-        model: Model to be calibrated.
-        forward_loop: Callable that forwards calibration data through the model.
-        percdamp: Percentage of avg Hessian diagonal for damping (default: 0.01).
-        block_size: Block size for GPTQ weight update.
-        hessian_state_path: Path to save/load Hessian state. If None, compute without saving.
-            If path exists, load from it. If path doesnt exist then save computed hessians to path.
-
-    See :class:`GPTQLiteConfig <modelopt.torch.quantization.config.GPTQLiteConfig>` for
-    details on the remaining arguments.
-
-    Note: This feature is currently experimental and may not translate to improved accuracy as expected.
-    """
-    # Dictionary to store hessian matrices: {layer_name: {"hessian": Tensor, "n_samples": int}}
-    hessian_state = {}
-
-    def initialize_hessian_state(tensor_mapping):
-        """Initialize hessian state with zeros."""
-        for name, (shape, device) in tensor_mapping.items():
-            # Use CPU if GPU memory is tight
-            target_device = "cpu" if get_used_gpu_mem_fraction(device) > 0.65 else device
-            hessian_state[name] = {
-                "hessian": torch.zeros(shape, dtype=torch.float32, device=target_device),
-                "n_samples": 0,
-            }
-
-    def load_hessian_state(path, tensor_mapping):
-        """Load hessian state from file."""
-        print_rank_0(f"Loading hessian state from {path}")
-        loaded_state = torch.load(path, map_location="cpu")
-
-        for name, (shape, device) in tensor_mapping.items():
-            if name not in loaded_state:
-                raise KeyError(f"Layer '{name}' not found in loaded hessian state")
-
-            # Move to appropriate device based on memory
-            target_device = "cpu" if get_used_gpu_mem_fraction(device) > 0.65 else device
-            hessian_state[name] = {
-                "hessian": loaded_state[name]["hessian"].to(target_device),
-                "n_samples": loaded_state[name]["n_samples"],
-            }
-
-        print_rank_0(f"Successfully loaded hessian state with {len(hessian_state)} layers")
-
-    def save_hessian_state(path):
-        """Save hessian state to file."""
-        print_rank_0(f"Saving hessian state to {path}")
-        try:
-            # Move to CPU for saving
-            cpu_state = {
-                name: {"hessian": state["hessian"].cpu(), "n_samples": state["n_samples"]}
-                for name, state in hessian_state.items()
-            }
-
-            os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
-            torch.save(cpu_state, path)
-            print_rank_0(f"Successfully saved hessian state to {path}")
-        except Exception as e:
-            print_rank_0(f"Error saving hessian state: {e}")
-            print_rank_0("Continuing execution...")
-
-    def hessian_hook(module, input, output):
-        """Hook to intercept activations and update hessian matrix."""
-        state = hessian_state[module.name]
-        hessian, n_samples = update_hessian(input[0], state["hessian"], state["n_samples"])
-        hessian_state[module.name] = {"hessian": hessian, "n_samples": n_samples}
-
-    # Phase 1: Collect statistics for quantizers
-    max_calibrate(model)
-
-    # Phase 2: Build tensor mapping for all quantized layers
-    tensor_mapping = {}
-    for name, module in model.named_modules():
+    layers = []
+    for name, module in parent.named_modules():
         if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
-            in_features = module.weight.shape[-1]
-            tensor_mapping[name] = ((in_features, in_features), module.weight.device)
-            module.name = name  # Attach name for easy access in hooks
-
-    # Phase 3: Load or compute Hessians
-    hessian_exists = hessian_state_path is not None and os.path.exists(hessian_state_path)
-    save_hessians = hessian_state_path is not None and not hessian_exists
-
-    if hessian_exists:
-        print_rank_0(f"Loading hessian state from {hessian_state_path}")
-        load_hessian_state(hessian_state_path, tensor_mapping)
-    else:
-        if forward_loop is None:
-            raise ValueError("forward_loop must be provided when computing Hessians")
-
-        # Initialize hessian state
-        initialize_hessian_state(tensor_mapping)
-
-        # Register hooks to collect activations
-        handles = []
-        for name, module in model.named_modules():
-            if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
-                handles.append(module.register_forward_hook(hessian_hook))
-
-        # Run forward loop to compute hessians
-        print_rank_0("Computing Hessian matrices...")
-        forward_loop(model)
-
-        for handle in handles:
-            handle.remove()
-
-    # Save if configured
-    if save_hessians:
-        try:
-            save_hessian_state(hessian_state_path)
-        except Exception as e:
-            print_rank_0(f"Error saving hessian state: {e}")
-            print_rank_0("Continuing execution...")
-
-    # Phase 4: Update weights using computed Hessians
-    print_rank_0("Updating weights using GPTQ-lite algorithm...")
-
-    quantized_modules = [
-        (name, module)
-        for name, module in model.named_modules()
-        if is_quantized_linear(module) and module.weight_quantizer.is_enabled
-    ]
-
-    # Perform blockwise weight updates
-    for name, module in tqdm(quantized_modules, desc="Quantizing layers"):
-        state = hessian_state[module.name]
-        hessian = state["hessian"].to(module.weight.device)
-        blockwise_weight_update(module, hessian, block_size, percdamp)
-        # Delete hessian state to free memory
-        del hessian_state[module.name]
-        torch.cuda.empty_cache()
-
-    print_rank_0("GPTQ-lite quantization completed successfully")
+            module.name = name
+            layers.append((name, module))
+    return layers
 
 
 @torch.no_grad()
@@ -2107,17 +1832,22 @@ def _promote_nvfp4_static_quantizers(model: nn.Module) -> int:
 
 @torch.no_grad()
 def gptq(
-    layer: nn.Module,
+    model: nn.Module,
     forward_loop: ForwardLoop,
     percdamp: float = 0.01,
     block_size: int = 128,
-    **kwargs,
 ):
-    """GPTQ quantization for a single decoder layer.
+    """GPTQ quantization.
 
-    Invoked by ``sequential_calibrate`` which walks layers one at a time so each
-    layer sees activations already updated by the quantization of preceding layers.
-    Within a layer the steps are:
+    Works in two modes depending on ``use_sequential`` in the config:
+
+    * **Sequential** (``use_sequential=True``): ``sequential_calibrate`` calls this
+      function once per decoder layer with updated activations, producing more
+      accurate Hessian estimates.
+    * **Non-sequential** (``use_sequential=False``): called once on the full model.
+      All layers are quantized in parallel from the original activations.
+
+    Per-module steps:
 
     1. ``max_calibrate`` to set amax values from the current activations.
     2. Promote eligible quantizers to ``NVFP4StaticQuantizer`` (two-level scaling).
@@ -2125,106 +1855,38 @@ def gptq(
     4. Blockwise weight updates using the inverse Hessian to compensate for
        rounding error (the core GPTQ column-wise update).
 
-    In contrast to ``gptq_lite``, which quantizes all layers in parallel using the
-    original (unquantized) activations, this method performs sequential calibration
-    and therefore produces more accurate Hessian estimates.
-
     Args:
-        layer: A single decoder layer to quantize.
-        forward_loop: Callable that replays calibration inputs through the layer.
-            Provided by ``sequential_calibrate`` which captures per-layer activations.
+        model: The module to quantize — either the full model or a single decoder
+            layer when invoked by ``sequential_calibrate``.
+        forward_loop: Callable that replays calibration inputs through *model*.
         percdamp: Percentage of avg Hessian diagonal for damping (default: 0.01).
         block_size: Block size for GPTQ weight update.
     """
     total_start = time.time()
 
-    # Set weight amax and activation amax for the current layer using max_calibrate
-    max_calibrate(layer, forward_loop=forward_loop)
+    max_calibrate(model, forward_loop=forward_loop)
+    _promote_nvfp4_static_quantizers(model)
 
-    # Promote NVFP4 static quantizers so they use the two-level scaling path
-    n_promoted = _promote_nvfp4_static_quantizers(layer)
-    if n_promoted:
-        print_rank_0(f"Promoted {n_promoted} quantizer(s) to NVFP4StaticQuantizer")
-
-    # Dictionary to store hessian matrices for all linear layers in this decoder
-    hessian_state = {}
-
-    # Phase 1: Build tensor mapping for all quantized linear layers in this decoder layer
-    tensor_mapping = {}
-    for name, module in layer.named_modules():
-        if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
-            in_features = module.weight.shape[-1]
-            tensor_mapping[name] = ((in_features, in_features), module.weight.device)
-            module.name = name  # Attach name for easy access in hooks
-
-    if not tensor_mapping:
-        print_rank_0("No quantized linear layers found in decoder layer, skipping GPTQ")
+    quantized_layers = _get_quantized_linear_layers(model)
+    if not quantized_layers:
+        print_rank_0("No quantized linear layers found, skipping GPTQ")
         return
 
-    # Initialize hessian state with zeros
-    for name, (shape, device) in tensor_mapping.items():
-        hessian_state[name] = {
-            "hessian": torch.zeros(shape, dtype=torch.float32, device=device),
-            "n_samples": 0,
-        }
+    gptq_handles = {name: GPTQHandle(m, name, offload_to_cpu=True) for name, m in quantized_layers}
+    for handle in gptq_handles.values():
+        handle.setup()
 
-    # Phase 2: Patch forwards to collect Hessians (similar to local_hessian_calibrate)
-    def _make_hessian_forward(module_name):
-        def hessian_forward(self, input, *args, **kwargs):
-            inp = input.to_local() if hasattr(input, "to_local") else input
-            if self.input_quantizer is not None and self.input_quantizer.is_enabled:
-                hessian_input = self.input_quantizer(inp)
-            else:
-                hessian_input = inp
-            state = hessian_state[module_name]
-            hessian, n_samples = update_hessian(hessian_input, state["hessian"], state["n_samples"])
-            hessian_state[module_name] = {"hessian": hessian, "n_samples": n_samples}
+    print_rank_0(f"Computing Hessians for {len(gptq_handles)} linear layers...")
+    forward_loop(model)
 
-            self.weight_quantizer.disable()
-            out = self._forward_no_gptq_hessian(input, *args, **kwargs)
-            self.weight_quantizer.enable()
-            return out
+    for handle in gptq_handles.values():
+        handle.cleanup()
 
-        return hessian_forward
-
-    patched_modules = []
-    for name, module in layer.named_modules():
-        if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
-            bind_forward_method(module, _make_hessian_forward(name), "_forward_no_gptq_hessian")
-            patched_modules.append(module)
-
-    # Run forward passes to collect Hessians
-    hessian_start = time.time()
-    print_rank_0(f"Computing Hessians for {len(tensor_mapping)} linear layers...")
-    forward_loop(layer)
-
-    # Unpatch forwards
-    for module in patched_modules:
-        unpatch_forward_method(module, "_forward_no_gptq_hessian")
-
-    torch.cuda.synchronize() if torch.cuda.is_available() else None
-    hessian_time = time.time() - hessian_start
-
-    # Phase 3: Update weights using computed Hessians (same as gptq_lite)
-    weight_update_start = time.time()
     print_rank_0("Updating weights using GPTQ algorithm...")
-    for name, module in layer.named_modules():
-        if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
-            state = hessian_state[module.name]
-            hessian = state["hessian"].to(module.weight.device)
-            blockwise_weight_update(
-                module, hessian, block_size, percdamp, n_samples=state["n_samples"]
-            )
-            del hessian_state[module.name]
+    for handle in gptq_handles.values():
+        handle.quantize(block_size, percdamp)
+    del gptq_handles
+
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-
-    torch.cuda.synchronize() if torch.cuda.is_available() else None
-    weight_update_time = time.time() - weight_update_start
-
-    total_time = time.time() - total_start
-    print_rank_0(
-        f"GPTQ timing - Hessian: {hessian_time:.2f}s, "
-        f"Weight update: {weight_update_time:.2f}s, "
-        f"Total: {total_time:.2f}s"
-    )
+    print_rank_0(f"GPTQ time: {time.time() - total_start:.2f}s")
