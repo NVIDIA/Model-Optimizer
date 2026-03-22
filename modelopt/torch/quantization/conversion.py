@@ -32,7 +32,6 @@ from .config import (
     QuantizeConfig,
     QuantizeQuantCfgType,
     QuantizerAttributeConfig,
-    QuantizerCfgEntry,
     _QuantizeExportConfig,
     normalize_quant_cfg_list,
 )
@@ -53,7 +52,6 @@ __all__ = [
     "set_quantizer_attributes_partial",
     "set_quantizer_by_cfg",
     "set_quantizer_by_cfg_context",
-    "set_quantizer_by_cfg_partial_context",
     "unregister",
 ]
 
@@ -215,19 +213,6 @@ def _replace_quant_module(model: nn.Module, version=None, registry=QuantModuleRe
         _replace_quant_module(getattr(model, name), version=version, registry=registry)
 
 
-def _parse_quant_cfg_entry(entry: QuantizerCfgEntry, enable_missing_as_true: bool = True):
-    parent_class_name = entry.get("parent_class")
-    if parent_class_name is not None:
-        parent_class = QuantModuleRegistry[parent_class_name]
-    else:
-        parent_class = None
-
-    cfg = entry.get("cfg") or {}
-    enable = entry.get("enable") if entry.get("enable") is not None else enable_missing_as_true
-
-    return cfg, enable, parent_class
-
-
 def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType):
     """Apply a quantization config list to the quantizers in ``quant_model``.
 
@@ -238,8 +223,9 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType
       :func:`fnmatch`.
     - ``cfg`` *(optional)*: a dict of :class:`QuantizerAttributeConfig <.config.QuantizerAttributeConfig>`
       fields, or a list of such dicts for sequential quantization.
-    - ``enable`` *(optional)*: ``True`` or ``False`` to enable or disable matched quantizers.
-      When omitted, defaults to ``True``.
+    - ``enable`` *(optional)*: ``True`` or ``False`` to toggle matched quantizers on or off.
+      When omitted but ``cfg`` is present, defaults to ``True``.  Every entry must specify at
+      least one of ``cfg`` or ``enable`` — an entry with only ``quantizer_path`` is invalid.
     - ``parent_class`` *(optional)*: restricts matching to quantizers whose immediate parent
       module is of this PyTorch class name.
 
@@ -249,27 +235,38 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType
     The typical pattern is to deny all first (``{"quantizer_path": "*", "enable": False}``), then
     selectively enable and configure target quantizers in subsequent entries.
 
-    **Enable-Fale only entries:** an entry with no ``cfg`` but enalbe False would be a complete reset to
-    of the matching quantizers of all quantizer attributes to their defaults.
+    **``enable`` and ``cfg`` are independent:**
 
-    **Enable-True only entries:** an entry with no ``cfg`` but enalbe True is invalid. An error will be raised.
+    - An entry with ``cfg`` (and optionally ``enable``) fully replaces the matched quantizer's
+      attributes. If ``enable`` is omitted, the quantizer is implicitly enabled.
+    - ``{"enable": False}`` without ``cfg`` **only** toggles the matched quantizers off, leaving
+      all other attributes unchanged.
+    - ``{"enable": True}`` without ``cfg`` **only** toggles the matched quantizers on, using
+      whatever attributes they currently have (or their defaults if never configured).
 
     See :ref:`quant-cfg` for the full format reference and common patterns.
     """
     quant_cfg = normalize_quant_cfg_list(quant_cfg)
+
     for entry in quant_cfg:
         quantizer_path: str = entry["quantizer_path"]
-        cfg, enable, parent_class = _parse_quant_cfg_entry(entry, enable_missing_as_true=True)
-        if enable and not cfg:
-            raise ValueError(
-                f"Entry {entry} has enable=True but no cfg, which will reset all attributes to defaults."
-            )
+        cfg = entry["cfg"]  # None, dict, or list — always explicit after normalization
+        enable: bool = entry["enable"]  # always explicit after normalization
+        parent_class_name = entry.get("parent_class")
+        parent_class = QuantModuleRegistry[parent_class_name] if parent_class_name else None
 
-        if isinstance(cfg, dict):
-            attributes = QuantizerAttributeConfig(**cfg, enable=enable)
+        if not cfg:
+            # No cfg: only toggle the enable state, leave all other attributes unchanged.
+            set_quantizer_attributes_partial(
+                quant_model, quantizer_path, {"enable": enable}, parent_class
+            )
         else:
-            attributes = [QuantizerAttributeConfig(**c, enable=enable) for c in cfg]
-        set_quantizer_attributes_full(quant_model, quantizer_path, attributes, parent_class)
+            # Has cfg: apply full replacement with the explicit enable value.
+            if isinstance(cfg, dict):
+                attributes = QuantizerAttributeConfig(**cfg, enable=enable)
+            else:
+                attributes = [QuantizerAttributeConfig(**c, enable=enable) for c in cfg]
+            set_quantizer_attributes_full(quant_model, quantizer_path, attributes, parent_class)
 
 
 def _match_quantizer(
@@ -421,18 +418,26 @@ def set_quantizer_attributes_partial(
 
 @contextmanager
 def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType):
-    """Context manager for setting quantizer attributes using `quant_cfg`.
+    """Context manager that temporarily applies a quantization config and restores the original state on exit.
 
-    The set attributes will be reset to the original attributes after exiting the context manager.
-    See :meth:`set_quantizer_by_cfg` for more details.
+    Calls :func:`set_quantizer_by_cfg` on entry and reverts every
+    :class:`TensorQuantizer <nn.modules.tensor_quantizer.TensorQuantizer>` in
+    ``quant_model`` to its original attributes on exit.
 
-    Use this context manager with caution. Changing certain attributes of the quantizer such as
-    `calibrator` can lead to unexpected behavior.
+    .. caution::
+        Changing stateful attributes such as ``calibrator`` inside this context may produce
+        unexpected behavior because those objects are not deep-copied during save/restore.
+
+    Args:
+        quant_model: A quantized PyTorch model whose quantizers will be temporarily reconfigured.
+        quant_cfg: A quantization config (or list of
+            :class:`QuantizerCfgEntry <.config.QuantizerCfgEntry>` dicts) passed directly to
+            :func:`set_quantizer_by_cfg`.  Sequential ``cfg`` lists are not allowed.
+
+    Yields:
+        None — the context body runs with the new quantizer attributes active.
     """
     quant_cfg = normalize_quant_cfg_list(quant_cfg)
-    assert not any(isinstance(entry.get("cfg", {}), list) for entry in quant_cfg), (
-        "list of config not support."
-    )
 
     original_attributes = {}
     for name, module in quant_model.named_modules():
@@ -441,59 +446,6 @@ def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: QuantizeQuan
 
     set_quantizer_by_cfg(quant_model, quant_cfg)
     yield
-    for name, module in quant_model.named_modules():
-        if isinstance(module, TensorQuantizer):
-            module.set_from_modelopt_state(original_attributes[name], properties_only=True)
-
-
-@contextmanager
-def set_quantizer_by_cfg_partial_context(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType):
-    """Context manager for partially updating quantizer attributes using ``quant_cfg``.
-
-    This API shall be used internal only.
-
-    Unlike :func:`set_quantizer_by_cfg_context`, only the attributes explicitly specified in each
-    entry's ``cfg`` (and ``enable``, if provided) are modified; all other quantizer attributes
-    remain unchanged. The modified attributes are restored to their original values on exit.
-
-    ``enable`` is treated as optional here — if omitted from an entry it is **not** defaulted to
-    ``True`` (contrast with :func:`set_quantizer_by_cfg` where omitting ``enable`` defaults it to
-    ``True``). Pass ``enable`` explicitly to toggle the enabled state.
-
-    Use this context manager with caution. Changing certain attributes of the quantizer such as
-    `calibrator` can lead to unexpected behavior.
-
-    Args:
-        quant_model: A pytorch model with quantizers inserted.
-        quant_cfg: A quantization config list; see :func:`set_quantizer_by_cfg` for the format.
-            ``cfg`` values are treated as **partial** attribute dicts — unspecified fields are left
-            unchanged on matched quantizers.
-    """
-    quant_cfg = normalize_quant_cfg_list(quant_cfg)
-    assert not any(isinstance(entry.get("cfg", {}), list) for entry in quant_cfg), (
-        "list of config not supported."
-    )
-
-    # Save the full state of every quantizer that will be touched by at least one entry.
-    original_attributes: dict[str, dict] = {}
-    for name, module in quant_model.named_modules():
-        if isinstance(module, TensorQuantizer):
-            original_attributes[name] = module.get_modelopt_state(properties_only=True)
-
-    # Apply partial updates: only the keys present in cfg (+ enable when explicit).
-    for entry in quant_cfg:
-        quantizer_path = entry["quantizer_path"]
-        cfg, enable, parent_class = _parse_quant_cfg_entry(entry, enable_missing_as_true=False)
-
-        if isinstance(cfg, dict):
-            attributes = dict(**cfg, enable=enable)
-        else:
-            attributes = [dict(**c, enable=enable) for c in cfg]
-        set_quantizer_attributes_partial(quant_model, quantizer_path, attributes, parent_class)
-
-    yield
-
-    # Restore only the quantizers that were modified.
     for name, module in quant_model.named_modules():
         if isinstance(module, TensorQuantizer):
             module.set_from_modelopt_state(original_attributes[name], properties_only=True)

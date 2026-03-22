@@ -60,10 +60,53 @@ Each entry in the list is a dictionary with the following fields:
        for sequential quantization (see :ref:`sequential-quantizers`).
    * - ``enable``
      - No
-     - ``True`` or ``False``. When ``cfg`` is also absent, this is a **complete replacement**:
-       all quantizer attributes are reset to their defaults and ``enable`` is set accordingly.
-       When ``cfg`` is present, ``enable`` overrides the ``enable`` field inside ``cfg``.
-       When omitted, defaults to ``True``.
+     - ``True`` or ``False``. Toggles matched quantizers on or off, independently of ``cfg``.
+       When ``cfg`` is absent, **only** the enabled/disabled state is changed — all other
+       attributes remain untouched. When ``cfg`` is present, ``enable`` sets the enabled state
+       of the newly-configured quantizer. When ``cfg`` is present and ``enable`` is omitted,
+       the quantizer is implicitly enabled (``True``).
+
+.. note::
+
+    Every entry must specify at least one of ``cfg`` or ``enable`` in addition to
+    ``quantizer_path``.  An entry with only ``quantizer_path`` and no other keys is **invalid**
+    and will raise a ``ValueError`` at config-processing time.  This prevents subtle bugs where
+    a bare ``{"quantizer_path": "*"}`` would silently behave as ``enable=True`` for all
+    quantizers.
+
+----------
+
+Default Quantizer Configuration
+================================
+
+When a quantizer is enabled but has never been touched by a ``cfg`` entry — either because no
+entry in the list matched it, or because it was only reached by enable-only entries — it operates
+with the default attributes of
+:class:`QuantizerAttributeConfig <modelopt.torch.quantization.config.QuantizerAttributeConfig>`:
+
+.. code-block:: python
+
+    {
+        "num_bits":                 8,       # 8-bit integer quantization
+        "axis":                     None,    # per-tensor scale (no per-channel axis)
+        "fake_quant":               True,    # simulate quantization in forward pass (PTQ / QAT)
+        "unsigned":                 False,   # signed integer range, e.g. [-128, 127] for INT8
+        "narrow_range":             False,   # full range; True would restrict to [-127, 127] for INT8
+        "type":                     "static",  # static calibration (not dynamic per-inference)
+        "block_sizes":              None,    # no block quantization; set for NF4 / MXFP formats
+        "bias":                     None,    # no affine bias correction
+        "calibrator":               "max",   # use max-abs calibration to determine amax
+        "rotate":                   False,   # no Hadamard rotation (QuaRot / SpinQuant)
+        "pass_through_bwd":         True,    # straight-through estimator for QAT gradients
+        "trt_high_precision_dtype": "Float", # cast QDQ nodes to fp32 for TRT StronglyType export
+        "backend":                  None,    # use the built-in quantization backend
+        "backend_extra_args":       None,    # no extra args for custom backends
+        "use_constant_amax":        False,   # calibrate amax; True hard-codes FP8 E4M3 max (448.0)
+    }
+
+In practice this means an un-configured but enabled quantizer performs **INT8 per-tensor static
+fake-quantization** with a max-calibrated scale. This is rarely the intended behavior — every
+quantizer you want active should be explicitly configured with a ``cfg`` entry.
 
 ----------
 
@@ -104,9 +147,9 @@ The recommended pattern used by all built-in configs is:
 Entry Atomicity
 ===============
 
-Each entry in ``quant_cfg`` is a **complete, self-contained configuration unit**. When an entry
-matches a quantizer, it **completely replaces** that quantizer's configuration — it does not merge
-with or incrementally update settings left by earlier entries.
+Each ``cfg``-bearing entry in ``quant_cfg`` is a **complete, self-contained configuration unit**.
+When an entry with ``cfg`` matches a quantizer, it **completely replaces** that quantizer's
+configuration — it does not merge with or incrementally update settings left by earlier entries.
 
 Concretely, if an entry specifies only a subset of quantizer attributes (e.g. only ``num_bits``),
 all unspecified attributes are filled in with their default values from
@@ -116,14 +159,24 @@ matching entry had set.
 
 This means:
 
-- **Last entry wins, fully.** If two entries both match ``*weight_quantizer``, the second entry
-  does not inherit the first entry's settings — it replaces them entirely.
+- **Last cfg-entry wins, fully.** If two entries both match ``*weight_quantizer`` and both carry
+  a ``cfg``, the second entry does not inherit the first entry's settings — it replaces them entirely.
 - **No hidden state accumulation.** The final configuration of a quantizer depends only on the
-  *last* entry in the list that matched it, making behavior easy to reason about.
-- **Changing one field requires a full spec.** Because each entry is a complete replacement, to
-  change only one attribute of a quantizer that was already configured, you must reproduce the
+  *last* ``cfg``-bearing entry in the list that matched it, making behavior easy to reason about.
+- **Changing one field requires a full spec.** Because each ``cfg`` entry is a complete replacement,
+  to change only one attribute of a quantizer that was already configured, you must reproduce the
   full desired config in the new entry. Any attribute omitted from the entry will revert to its
   default, not to the value set by an earlier entry.
+
+**Enable-only entries are the exception.** An entry with no ``cfg`` (only ``enable``) is *not* a
+full replacement — it solely flips the on/off state of matched quantizers, leaving all other
+attributes unchanged:
+
+- ``{"quantizer_path": "*", "enable": False}`` disables all quantizers without touching their
+  configured attributes. Use this as the first step in a deny-all-then-configure pattern.
+- ``{"quantizer_path": "*weight_quantizer", "enable": True}`` (no ``cfg``) re-enables weight
+  quantizers using whatever attributes they currently carry (or their defaults if they were never
+  configured by a ``cfg`` entry).
 
 For example, given the following two entries both matching ``*weight_quantizer``:
 
@@ -140,11 +193,9 @@ After Entry 2 is applied, the quantizer has ``num_bits=4``, ``block_sizes={-1: 1
 
 .. note::
 
-    This atomicity property is what makes the deny-all-then-re-enable pattern safe and
-    predictable: the deny-all entry (``{"quantizer_path": "*", "enable": False}``) completely
-    resets every quantizer to defaults, and subsequent entries each independently configure their
-    targets from a clean default state. The same full-reset semantics apply to any entry with no
-    ``cfg`` — including ``{"quantizer_path": "*", "enable": True}``.
+    The deny-all-then-configure pattern is safe and predictable precisely because
+    ``{"quantizer_path": "*", "enable": False}`` **only** disables quantizers without resetting
+    their attributes. Subsequent ``cfg`` entries then configure targets from a known default state.
 
 ----------
 
@@ -239,9 +290,10 @@ are quantized first in INT4 and then in FP8:
     {
         "quantizer_path": "*weight_quantizer",
         "cfg": [
-            {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}, "enable": True},
-            {"num_bits": (4, 3), "enable": True},  # FP8
+            {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
+            {"num_bits": (4, 3)},  # FP8
         ],
+        "enable": True,
     }
 
 ----------

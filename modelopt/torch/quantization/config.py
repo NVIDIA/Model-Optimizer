@@ -78,9 +78,10 @@ Each entry in the ``quant_cfg`` list is a :class:`QuantizerCfgEntry` with the fo
   :class:`SequentialQuantizer <modelopt.torch.quantization.nn.modules.tensor_quantizer.SequentialQuantizer>`
   that applies each format in sequence. This is used for example in W4A8 quantization where weights
   are quantized first in INT4 and then in FP8.
-- ``enable`` *(optional)*: shorthand to enable or disable matched quantizers without specifying a
-  full ``cfg``. When ``cfg`` is present but ``enable`` is absent, the quantizer is implicitly
-  enabled.
+- ``enable`` *(optional)*: toggles matched quantizers on (``True``) or off (``False``),
+  independently of ``cfg``. When ``cfg`` is present and ``enable`` is absent, the quantizer is
+  implicitly enabled. When ``enable`` is the only field (no ``cfg``), it only flips the on/off
+  state — all other attributes remain unchanged.
 
 ``quant_cfg`` — Ordering and Precedence
 -----------------------------------------
@@ -161,9 +162,9 @@ class QuantizerCfgEntry(TypedDict, total=False):
     """A single entry in a ``quant_cfg`` list."""
 
     quantizer_path: str  # required; matched against quantizer module names
-    parent_class: str  # optional; filters by pytorch module class name (e.g. "nn.Linear")
-    cfg: dict[str, Any] | list[dict[str, Any]]  # quantizer attribute config(s)
-    enable: bool  # shorthand to set/unset the quantizer's enable flag
+    parent_class: str | None  # optional; filters by pytorch module class name (e.g. "nn.Linear")
+    cfg: dict[str, Any] | list[dict[str, Any]] | None  # quantizer attribute config(s)
+    enable: bool | None  # toggles matched quantizers on/off; independent of cfg
 
 
 _base_disable_all: list[QuantizerCfgEntry] = [
@@ -1517,11 +1518,39 @@ QuantizeAlgoCfgType = _QuantizeAlgoCfgType | list[_QuantizeAlgoCfgType] | None
 
 
 def normalize_quant_cfg_list(v: list) -> list[QuantizerCfgEntry]:
-    """Normalize a raw quant_cfg list into a list of QuantizerCfgEntry dicts.
+    """Normalize a raw quant_cfg list into a list of :class:`QuantizerCfgEntry` dicts.
 
-    Supports these input forms per entry:
-    - ``{"quantizer_path": ..., "enable": ..., "cfg": ...}`` — passed through as-is
-    - ``{"<quantizer_path>": ...}`` — single-key dict (legacy)
+    Supports the following input forms per entry:
+
+    - New format: ``{"quantizer_path": ..., "enable": ..., "cfg": ...}`` — passed through.
+    - Legacy single-key format: ``{"<quantizer_path>": <cfg_or_dict>}`` — converted to new format.
+    - Legacy ``nn.*``-scoped format: ``{"nn.<Class>": {"<quantizer_path>": <cfg>}}`` — converted
+      to a new-format entry with ``parent_class`` set.
+
+    **Validation** — an entry is rejected if it carries no instruction, i.e. it specifies neither
+    ``cfg`` nor ``enable``.  Concretely, the following are invalid:
+
+    - An empty entry ``{}``.
+    - An entry with only ``quantizer_path`` and no other keys — the only effect would be an
+      implicit ``enable=True``, which must be stated explicitly.
+
+    **Normalization** — after conversion and validation every entry is put into canonical form:
+
+    - ``enable`` is set to ``True`` if not explicitly specified.
+    - ``cfg`` is set to ``None`` if not present in the entry.
+
+    Every returned entry is therefore guaranteed to have the keys ``quantizer_path``, ``enable``,
+    and ``cfg`` (plus optionally ``parent_class``).
+
+    Args:
+        v: A list of raw quant_cfg entries in any supported format.
+
+    Returns:
+        A list of :class:`QuantizerCfgEntry` dicts in canonical normalized form.
+
+    Raises:
+        ValueError: If any entry has only ``quantizer_path`` with neither ``cfg`` nor ``enable``,
+            or if the entry format is not recognized.
     """
 
     def _dict_to_entry(key: str, value) -> QuantizerCfgEntry:
@@ -1553,12 +1582,26 @@ def normalize_quant_cfg_list(v: list) -> list[QuantizerCfgEntry]:
     result: list[QuantizerCfgEntry] = []
     for raw in v:
         if isinstance(raw, dict) and "quantizer_path" in raw:
-            result.append(cast("QuantizerCfgEntry", raw))
+            entry: dict = dict(raw)  # copy to avoid mutating caller's data
         elif isinstance(raw, dict) and len(raw) == 1:
             key, val = next(iter(raw.items()))
-            result.append(_dict_to_entry(key, val))
+            entry = dict(_dict_to_entry(key, val))
         else:
             raise ValueError(f"Invalid quant_cfg entry: {raw!r}.")
+
+        # Validate: must carry at least one instruction beyond the path selector.
+        if "cfg" not in entry and "enable" not in entry:
+            raise ValueError(
+                f"Invalid quant_cfg entry: {raw!r} — each entry must specify 'cfg', 'enable', "
+                "or both. An entry with only 'quantizer_path' has no effect (implicit "
+                "enable=True is not allowed; set it explicitly)."
+            )
+
+        # Normalize: make enable and cfg always explicit.
+        entry.setdefault("enable", True)
+        entry.setdefault("cfg", None)
+
+        result.append(cast("QuantizerCfgEntry", entry))
     return result
 
 
