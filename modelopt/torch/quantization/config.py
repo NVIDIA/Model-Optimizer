@@ -537,7 +537,7 @@ _nvfp4_cfg = {
     "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
 }
 
-_nvfp4_quantizer_bs32 = {
+_nvfp4_cfg_bs32 = {
     "num_bits": (2, 1),
     "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (4, 3)},
     "enable": True,
@@ -547,12 +547,12 @@ _nvfp4_quantizer_bs32 = {
 def _nvfp4_selective_quant_cfg(
     layer_patterns: list[str],
     *,
-    quantizer: dict = _nvfp4_quantizer,
+    quantizer: dict = _nvfp4_cfg,
     weight_only: bool = False,
     algorithm: str | dict = "max",
 ) -> dict:
     """Build an NVFP4 config that quantizes only the specified layer patterns."""
-    quant_cfg: dict[str, object] = []
+    quant_cfg: list[QuantizerCfgEntry] = []
     quant_cfg.extend(_base_disable_all)
     for pattern in layer_patterns:
         quant_cfg.append({"quantizer_path": f"{pattern}weight_quantizer", "cfg": quantizer})
@@ -769,7 +769,7 @@ MXFP4_MLP_WEIGHT_ONLY_CFG = {
 }
 
 NVFP4_MLP_WEIGHT_ONLY_CFG = _nvfp4_selective_quant_cfg(
-    ["*mlp*", "*block_sparse_moe*"], quantizer=_nvfp4_quantizer_bs32, weight_only=True
+    ["*mlp*", "*block_sparse_moe*"], quantizer=_nvfp4_cfg_bs32, weight_only=True
 )
 NVFP4_EXPERTS_ONLY_CFG = _nvfp4_selective_quant_cfg(["*mlp.experts*", "*block_sparse_moe*"])
 NVFP4_MLP_ONLY_CFG = _nvfp4_selective_quant_cfg(["*mlp*", "*block_sparse_moe*"])

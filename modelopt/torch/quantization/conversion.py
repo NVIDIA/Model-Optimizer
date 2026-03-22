@@ -379,6 +379,9 @@ def set_quantizer_attributes_partial(
             update. Keys must be valid fields of
             :class:`QuantizerAttributeConfig <.config.QuantizerAttributeConfig>`. Only the
             specified keys are written; all other attributes on the quantizer remain unchanged.
+            When a ``dict`` is passed and the matched module is a
+            :class:`SequentialQuantizer <nn.modules.tensor_quantizer.SequentialQuantizer>`,
+            the dict is broadcast to every sub-quantizer.
             When a ``list`` is passed, the matched module must already be a
             :class:`SequentialQuantizer <nn.modules.tensor_quantizer.SequentialQuantizer>` —
             unlike :func:`set_quantizer_attributes_full`, this function will **not** replace a
@@ -403,17 +406,17 @@ def set_quantizer_attributes_partial(
     for name, module in quant_model.named_modules():
         if _match_quantizer(wildcard_or_filter_func, name, module, parent_class, quant_model):
             module = cast("TensorQuantizer | SequentialQuantizer", module)  # for type checker
-            if isinstance(partial_attributes, list) and not isinstance(module, SequentialQuantizer):
-                raise ValueError(f"Attributes is a list but {module} is not a SequentialQuantizer.")
-            if isinstance(partial_attributes, dict) and not isinstance(module, TensorQuantizer):
-                raise ValueError(
-                    f"Attributes is a dictionary but {module} is not a TensorQuantizer."
-                )
-
             if isinstance(partial_attributes, list):
-                cast("SequentialQuantizer", module).set_from_attribute_config(partial_attributes)
+                if not isinstance(module, SequentialQuantizer):
+                    raise ValueError(
+                        f"Attributes is a list but {module} is not a SequentialQuantizer."
+                    )
+                module.set_from_attribute_config(partial_attributes)
+            elif isinstance(module, SequentialQuantizer):
+                # Broadcast the dict to all sub-quantizers.
+                module.set_from_attribute_config([partial_attributes] * len(module))
             else:
-                cast("TensorQuantizer", module).set_from_attribute_config(partial_attributes)
+                module.set_from_attribute_config(partial_attributes)
 
 
 @contextmanager

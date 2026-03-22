@@ -94,6 +94,7 @@ def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
         raise ValueError(f"Unknown type {type(quantizer_attr_cfg)}, {quantizer_attr_cfg}")
 
     cfgs = [e.get("cfg", {}) for e in quant_cfg.quant_cfg]
+    cfgs = [c for c in cfgs if c is not None]
     return estimate_quant_compression_for_quantizer(cfgs) if cfgs else 1.0
 
 
