@@ -59,10 +59,12 @@ class TestQuantizerAttributeConfig:
     def test_num_bits(self):
         """Test num_bits for both integer and tuple cases."""
 
-        # enable=True alone is valid: it produces a default 8-bit config with enable=True.
-        cfg = QuantizerAttributeConfig(enable=True)
-        assert cfg.enable is True
-        assert cfg.num_bits == 8
+        with pytest.raises(
+            ValueError,
+            match="Invalid quantizer config: Cannot specify only {'enable': True}. "
+            "Additional parameters are required when enabling quantization.",
+        ):
+            QuantizerAttributeConfig(enable=True)
 
         with pytest.raises(
             ValueError, match="num_bits must be a positive integer or a tuple of positive integers."
