@@ -60,8 +60,10 @@ Each entry in the list is a dictionary with the following fields:
        for sequential quantization (see :ref:`sequential-quantizers`).
    * - ``enable``
      - No
-     - ``True`` or ``False``. Shorthand for enabling or disabling matched quantizers. When ``enable`` is omitted, the quantizer
-       is implicitly enabled.
+     - ``True`` or ``False``. When ``cfg`` is also absent, this is a **complete replacement**:
+       all quantizer attributes are reset to their defaults and ``enable`` is set accordingly.
+       When ``cfg`` is present, ``enable`` overrides the ``enable`` field inside ``cfg``.
+       When omitted, defaults to ``True``.
 
 ----------
 
@@ -140,8 +142,9 @@ After Entry 2 is applied, the quantizer has ``num_bits=4``, ``block_sizes={-1: 1
 
     This atomicity property is what makes the deny-all-then-re-enable pattern safe and
     predictable: the deny-all entry (``{"quantizer_path": "*", "enable": False}``) completely
-    resets every quantizer, and subsequent entries each independently configure their targets from a
-    clean default state.
+    resets every quantizer to defaults, and subsequent entries each independently configure their
+    targets from a clean default state. The same full-reset semantics apply to any entry with no
+    ``cfg`` — including ``{"quantizer_path": "*", "enable": True}``.
 
 ----------
 

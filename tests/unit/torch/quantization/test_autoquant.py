@@ -236,9 +236,10 @@ INT4INT8_AWQ_CFG = {
         {
             "quantizer_path": "*weight_quantizer",
             "cfg": [
-                {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}, "enable": True},
-                {"num_bits": 8, "axis": None, "enable": True},
+                {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
+                {"num_bits": 8, "axis": None},
             ],
+            "enable": True,
         },
         {
             "quantizer_path": "*input_quantizer",

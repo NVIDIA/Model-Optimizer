@@ -99,9 +99,10 @@ partial_w4a8_config = {
         {
             "quantizer_path": "*.2.weight_quantizer",
             "cfg": [
-                {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}, "enable": True},
-                {"num_bits": (4, 3), "axis": None, "enable": True},
+                {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
+                {"num_bits": (4, 3), "axis": None},
             ],
+            "enable": True,
         },
         {
             "quantizer_path": "*.2.input_quantizer",

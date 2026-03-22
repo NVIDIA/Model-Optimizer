@@ -1313,11 +1313,12 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
 
     def _cfg_to_dict(v):
         if isinstance(v, mtq_config.QuantizerAttributeConfig):
-            return {
-                "enable": v.enable,
-                "num_bits": v.num_bits,
-                **v.model_dump(exclude_defaults=True),
-            }
+            return (
+                {
+                    "num_bits": v.num_bits,
+                    **v.model_dump(exclude_defaults=True),
+                },
+            )
         if isinstance(v, list):
             return [_cfg_to_dict(c) for c in v]
         return v
@@ -1329,12 +1330,15 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
         module_names = search_state["candidate_stats"][hparam_name]["module_names"]
         for module_name in module_names:
             for quantizer_attr in ("input_quantizer", "weight_quantizer"):
-                matched_cfg = _match_quantizer_cfg(recipe.config.quant_cfg, quantizer_attr)
+                matched_cfg, matched_enable = _match_quantizer_cfg(
+                    recipe.config.quant_cfg, quantizer_attr
+                )
                 if matched_cfg is not None:
                     quant_cfg.append(
                         {
                             "quantizer_path": f"{module_name}.{quantizer_attr}",
                             "cfg": _cfg_to_dict(matched_cfg),
+                            "enable": matched_enable,
                         }
                     )
     warnings.warn(
@@ -1378,17 +1382,13 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
 def _match_quantizer_cfg(quant_cfg, quantizer_attr):
     # Last-match-wins to mirror set_quantizer_by_cfg behavior
     matched = None
+    matched_enable = False
     for entry in quant_cfg:
-        pattern = (
-            entry["quantizer_path"]
-            if isinstance(entry, dict) and "quantizer_path" in entry
-            else entry[0]
-        )
-        cfg = (
-            entry.get("cfg", {})
-            if isinstance(entry, dict) and "quantizer_path" in entry
-            else entry[1]
-        )
+        pattern = entry["quantizer_path"]
+        cfg = entry.get("cfg", {})
+        enable = entry.get("enable", True)
         if fnmatch.fnmatch(quantizer_attr, pattern):
             matched = cfg
-    return matched
+            matched_enable = enable
+
+    return matched, matched_enable

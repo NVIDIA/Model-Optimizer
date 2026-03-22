@@ -94,9 +94,10 @@ WINT4INT8_CFG = {
         {
             "quantizer_path": "*weight_quantizer",
             "cfg": [
-                {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}, "enable": True},
-                {"num_bits": 8, "axis": 0, "enable": True},
+                {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
+                {"num_bits": 8, "axis": 0},
             ],
+            "enable": True,
         },
         {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 8}, "enable": True},
     ],

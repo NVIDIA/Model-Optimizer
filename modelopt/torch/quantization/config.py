@@ -370,13 +370,12 @@ W4A8_AWQ_BETA_CFG = {
                 {
                     "num_bits": 4,
                     "block_sizes": {-1: 128, "type": "static"},
-                    "enable": True,
                 },
                 {
                     "num_bits": (4, 3),
-                    "enable": True,
                 },
             ],
+            "enable": True,
         },
         {
             "quantizer_path": "*input_quantizer",
