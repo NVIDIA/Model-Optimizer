@@ -62,6 +62,10 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       TRAIN_BS="${1#*=}"
       ;;
+    --gradient_accumulation_steps*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      GRAD_ACCUM_STEPS="${1#*=}"
+      ;;
     --eagle_config*)
       if [[ "$1" != *=* ]]; then shift; fi
       EAGLE_CONFIG="${1#*=}"
@@ -158,6 +162,7 @@ NUM_EPOCHS=${NUM_EPOCHS:-1}
 SAVE_STEPS=${SAVE_STEPS:-$DEFAULT_SAVE_STEPS}
 LR=${LR:-"1e-4"}
 TRAIN_BS=${TRAIN_BS:-1}
+GRAD_ACCUM_STEPS=${GRAD_ACCUM_STEPS:-1}
 TRAINING_SEQ_LEN=${TRAINING_SEQ_LEN:-2048}
 OFFLINE_DATA_PATH=${OFFLINE_DATA_PATH:-""}
 DISABLE_TQDM=${DISABLE_TQDM:-False}
@@ -204,13 +209,14 @@ else
   VLM_ARGS=""
 fi
 
-if [[ "$TOTAL_GPU" -gt 1 ]]; then
-  #Use FSDP2 when multi GPU available
-  FSDP_ARGS="--fsdp 'full_shard' --fsdp_config ${SCRIPT_DIR}/fsdp_config.json"
-else
-  #Otherwise, single GPU training
-  FSDP_ARGS=""
-fi
+# if [[ "$TOTAL_GPU" -gt 1 ]]; then
+#   #Use FSDP2 when multi GPU available
+#   FSDP_ARGS="--fsdp 'full_shard' --fsdp_config ${SCRIPT_DIR}/fsdp_config.json"
+# else
+#   #Otherwise, single GPU training
+#   FSDP_ARGS=""
+# fi
+FSDP_ARGS=""
 
 
 if [[ "$DRAFT_VOCAB_CACHE" != "" ]]; then
@@ -226,6 +232,8 @@ if [[ "$NUM_NODES" != 1 ]]; then
                    --rdzv_backend c10d \
                    --main_process_ip $HEAD_NODE_IP \
                    --main_process_port 29500"
+elif [[ "$TOTAL_GPU" -gt 1 ]]; then
+  MULTI_NODE_ARGS="--multi_gpu"
 else
   MULTI_NODE_ARGS=""
 fi
@@ -249,15 +257,17 @@ CMD="accelerate launch $MULTI_NODE_ARGS --mixed_precision bf16 ${SCRIPT_DIR}/mai
     --num_train_epochs $NUM_EPOCHS \
     --per_device_train_batch_size $TRAIN_BS \
     --per_device_eval_batch_size $TRAIN_BS \
-    --gradient_accumulation_steps 1 \
+    --gradient_accumulation_steps $GRAD_ACCUM_STEPS \
     --do_eval False \
     --eval_accumulation_steps 1 \
     --save_strategy steps \
     --save_steps $SAVE_STEPS \
+    --save_total_limit 3 \
     --learning_rate $LR \
     --weight_decay 0.0 \
-    --warmup_steps 100 \
-    --lr_scheduler_type linear \
+    --warmup_steps 1000 \
+    --lr_scheduler_type warmup_stable_decay \
+    --lr_scheduler_kwargs '{\"num_decay_steps\": 10000}' \
     --logging_steps $LOG_STEPS \
     --tf32 True \
     --data_path $DATA \
@@ -276,8 +286,11 @@ CMD="accelerate launch $MULTI_NODE_ARGS --mixed_precision bf16 ${SCRIPT_DIR}/mai
     --num_ttt_steps $NUM_TTT_STEPS \
     --bucket_granularity $BUCKET_GRANULARITY \
     $OBSERVABILITY_ARGS \
+    --vllm_url http://localhost:8046,http://localhost:8047 \
+    --dataloader_num_workers 8 --dataloader_prefetch_factor 2 \
 "
 
+    # --vllm_url http://localhost:8040,http://localhost:8041,http://localhost:8042,http://localhost:8043,http://localhost:8044,http://localhost:8045,http://localhost:8046,http://localhost:8047 \
 start_time=$(date +%s)
 sh -c "$CMD"
 echo "Total time taken: $(( $(date +%s) - $start_time )) seconds"

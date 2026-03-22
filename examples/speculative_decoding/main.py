@@ -87,6 +87,18 @@ class DataArguments:
     )
     vlm_img_dir: str = field(default=None, metadata={"help": "Path to the VLM image directory."})
     vlm_processor: str = field(default=None, metadata={"help": "Path to the VLM processor."})
+    vllm_url: str = field(
+        default=None,
+        metadata={
+            "help": "Comma-separated vLLM server URL(s) for remote-online training "
+            "(e.g. http://localhost:8000). Supports up to one URL per DDP worker "
+            "(matched by LOCAL_RANK)."
+        },
+    )
+    answer_only_loss: bool = field(
+        default=False,
+        metadata={"help": "Only compute loss on assistant tokens (requires chat template support)."},
+    )
 
 
 @dataclass
@@ -186,6 +198,8 @@ def train():
     checkpoint = training_args.resume_from_checkpoint or last_checkpoint
 
     use_offline_training = data_args.offline_data_path is not None
+    use_remote_online = data_args.vllm_url is not None
+    use_offline_forward = use_offline_training or use_remote_online
 
     if checkpoint:
         with patch_transformers5_params_loading():
@@ -196,7 +210,7 @@ def train():
     else:
         # To avoid OOM for large models, we load and convert model on CPU first.
         # Model will be moved to GPU during HF trainer.init().
-        offline_kwargs = {"num_hidden_layers": 0} if use_offline_training else {}
+        offline_kwargs = {"num_hidden_layers": 0} if use_offline_forward else {}
         model_config, model = load_vlm_or_llm_with_kwargs(
             model_args.model_name_or_path,
             torch_dtype="auto",
@@ -204,8 +218,8 @@ def train():
             trust_remote_code=True,
             **offline_kwargs,
         )
-        if use_offline_training:
-            # When doing offline training, we need to set num_hidden_layers
+        if use_offline_forward:
+            # When doing offline/remote-online training, we need to set num_hidden_layers
             # since we override it when loading the model for space savings
             model.config.num_orig_hidden_layers = model_config.num_hidden_layers
         tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -226,7 +240,7 @@ def train():
 
             config = {
                 "eagle_decoder_type": eagle_args.eagle_decoder_type,
-                "eagle_offline": use_offline_training,
+                "eagle_offline": use_offline_forward,
                 "eagle_mix_hidden_states": eagle_args.mix_hidden_states,
                 "eagle_use_torch_compile": not eagle_args.disable_torch_compile,
                 "eagle_ttt_steps": eagle_args.num_ttt_steps,

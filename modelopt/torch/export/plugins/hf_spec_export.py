@@ -43,6 +43,7 @@ LLAMA_EAGLE_SINGLE_LAYER = {
         "layers.0.post_attention_layernorm",
         "norm",
         "fc",
+        "fc_input_norm",
     },
     "optional": {"d2t", "lm_head"},
 }
@@ -64,6 +65,7 @@ KIMIK2_EAGLE_SINGLE_LAYER = {
         "layers.0.post_attention_layernorm",
         "norm",
         "fc",
+        "fc_input_norm",
     },
     "optional": {
         "d2t",
@@ -121,6 +123,7 @@ class EagleExporter(SpeculativeDecodingExporter):
                 "layers.0.input_layernorm",
                 "norm",
                 "fc",
+                "fc_input_norm",
             }:
                 assert f"{key}.weight".replace("layers.0", f"layers.{i}") in export_sd, (
                     f"Missing required key: {key}.weight"
@@ -147,6 +150,7 @@ class EagleExporter(SpeculativeDecodingExporter):
         # Use base model's lm head if draft model doesn't have one
         if "lm_head.weight" not in export_sd:
             export_sd["lm_head.weight"] = full_state_dict["lm_head.weight"]
+            print("Using base model's lm_head.weight for export since it's missing in draft model.")
 
         self._check_valid_sd(export_sd)
 

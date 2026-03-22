@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import inspect
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -42,6 +43,7 @@ from modelopt.torch.utils.plugins.transformers_dataset import (
     ShardedDataset,
     VisionLanguageDataCollator,
     _get_bucket_size,
+    _sharegpt_to_openai_messages,
 )
 
 try:
@@ -50,6 +52,114 @@ except ImportError:
     wandb = None
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
+
+
+def _load_and_cleanup_hidden_states(path: str) -> dict[str, torch.Tensor]:
+    """Load hidden states saved by vLLM with flock synchronization, then cleanup files."""
+    import fcntl
+
+    lock_path = path + ".lock"
+    with open(lock_path) as lf:
+        fcntl.flock(lf, fcntl.LOCK_SH)
+        data = torch.load(path, map_location="cpu")
+    os.remove(path)
+    os.remove(lock_path)
+    return data
+
+def clean_tools(tools):
+    """Recursively remove None values from tool schemas (e.g. default: null)."""
+    if isinstance(tools, dict):
+        return {k: clean_tools(v) for k, v in tools.items() if v is not None}
+    if isinstance(tools, list):
+        return [clean_tools(t) for t in tools]
+    return tools
+
+class RemoteOnlineDataset(Dataset):
+    """Dataset that tokenizes conversations and fetches hidden states from a remote vLLM server.
+
+    Each __getitem__ call tokenizes a raw conversation, sends the token IDs to a vLLM
+    server via HTTP, and loads the resulting hidden states from shared memory. This is
+    designed to be used with DataLoader num_workers > 0 for concurrent HTTP requests.
+
+    Args:
+        raw_dataset: A ShardedDataset of raw JSONL conversations.
+        tokenizer: HuggingFace tokenizer for the base model.
+        vllm_url: Base URL of the vLLM server (e.g. "http://localhost:8000").
+        train_len: Maximum sequence length.
+        answer_only_loss: If True, only compute loss on assistant tokens.
+    """
+
+    def __init__(self, raw_dataset, tokenizer, vllm_url, train_len, answer_only_loss=False):
+        super().__init__()
+        self.raw_dataset = raw_dataset
+        self.vllm_url = vllm_url
+        chat_template_path = "/root/eagle/ModelOptNew/gptoss_chat_template.jinja"
+        with open(chat_template_path) as f:
+            chat_template = f.read()
+        self._tokenizer = LanguageDataCollator(
+            tokenizer=tokenizer,
+            train_len=train_len,
+            return_labels=True,
+            answer_only_loss=True, # Use answer-only loss for in-distribution training
+            bucket_granularity=0,
+            chat_template=chat_template,
+        )
+
+    def __len__(self):
+        return len(self.raw_dataset)
+
+    def __getitem__(self, i) -> dict[str, torch.Tensor]:
+        import requests
+
+        # 1. Extract messages from raw example
+        example = self.raw_dataset[i]
+        messages = example["messages"]
+        tools = example["tools"]
+
+        # 2. Tokenize using LanguageDataCollator's _process_chat_sample
+        kwargs=dict(tools=tools, enable_thinking=True)
+        if "reasoning_effort" in example:
+            kwargs["reasoning_effort"] = example["reasoning_effort"]
+
+        tokenized = self._tokenizer._process_chat_sample([messages], **kwargs)
+        input_ids = tokenized["input_ids"].squeeze(0)
+        labels = tokenized["labels"].squeeze(0)
+        attention_mask = tokenized["attention_mask"].squeeze(0)
+
+        # Derive unpadded length and strip padding before sending to vLLM
+        real_len = attention_mask.sum().item()
+        unpadded_ids = input_ids[:real_len]
+
+        # 3. POST to vLLM server
+        resp = requests.post(
+            f"{self.vllm_url}/v1/completions",
+            json={"prompt": unpadded_ids.tolist(), "max_tokens": 1},
+        )
+        resp.raise_for_status()
+        hs_path = resp.json()["kv_transfer_params"]["hidden_states_path"]
+
+        # 4. Load hidden states and cleanup files
+        hs_data = _load_and_cleanup_hidden_states(hs_path)
+        hidden_states = hs_data["hidden_states"]  # [num_tokens, num_layers, hidden_size]
+
+        # 5. Split: last layer = out_hiddens, rest = aux_hiddens
+        base_model_hidden_states = hidden_states[:, -1, :]  # [T, H]
+        aux_hidden_states = hidden_states[:, :, :].flatten(-2, -1)  # [T, num_aux*H] # Includes last layer always. Change to hidden_states[:, :-1, :] to exclude last layer
+
+        # 6. Build loss_mask
+        if "assistant_masks" in tokenized:
+            loss_mask = tokenized["assistant_masks"].squeeze(0)[:real_len].float()
+        else:
+            loss_mask = torch.ones(real_len, dtype=input_ids.dtype)
+
+        return {
+            "input_ids": unpadded_ids,
+            "base_model_hidden_states": base_model_hidden_states,
+            "aux_hidden_states": aux_hidden_states,
+            "attention_mask": torch.ones(real_len, dtype=input_ids.dtype),
+            "loss_mask": loss_mask,
+            "labels": labels[:real_len],
+        }
 
 
 class OfflineSupervisedDataset(Dataset):
@@ -142,7 +252,27 @@ def make_eagle_supervised_data_module(
     train_len=None,
     bucket_granularity=0,
 ) -> dict:
-    if data_args.offline_data_path is None:
+    if getattr(data_args, "vllm_url", None) is not None:
+        # Remote-online training: tokenize + fetch hidden states from vLLM server
+        print_rank_0("Using remote-online training with vLLM server...")
+        urls = [u.strip() for u in data_args.vllm_url.split(",")]
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        rank_url = urls[local_rank % len(urls)]
+        print(f"  Rank {local_rank} using vLLM server: {rank_url}")
+        # print_rank_0(f"  Rank {local_rank} using vLLM server: {rank_url}")
+
+        train_dataset = RemoteOnlineDataset(
+            raw_dataset=ShardedDataset("json", data_files=data_args.data_path),
+            tokenizer=tokenizer,
+            vllm_url=rank_url,
+            train_len=train_len,
+            answer_only_loss=getattr(data_args, "answer_only_loss", False),
+        )
+        data_collator = EagleOfflineDataCollator(
+            train_len=train_len, bucket_granularity=bucket_granularity
+        )
+
+    elif data_args.offline_data_path is None:
         train_dataset = ShardedDataset("json", data_files=data_args.data_path)
 
         if not data_args.vlm_processor:

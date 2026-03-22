@@ -48,9 +48,12 @@ def _sharegpt_to_openai_messages(conversations: list[dict]):
     }
     messages = []
     for msg in conversations:
-        role = role_mapping[msg["role"]]
-        content = msg["content"]
-        messages.append({"role": role, "content": content})
+        msg = {**msg, "role": role_mapping.get(msg["role"], msg["role"])}
+        if msg.get("reasoning_content"):
+            msg["thinking"] = msg.pop("reasoning_content")
+        if msg.get("reasoning"):
+            msg["thinking"] = msg.pop("reasoning")
+        messages.append(msg)
     return messages
 
 
@@ -94,14 +97,25 @@ class ShardedDataset(torch.utils.data.Dataset):
         return self._raw_samples[index]
 
     def _load_dataset(self):
-        dataset = load_dataset(
-            self.name,
-            self.subset,
-            data_files=self.data_files,
-            split=self.split,
-            # num_proc=4,  # TODO: Make this configurable
-            streaming=self.num_streaming_samples is not None,
-        )
+        import json
+        filename = self.data_files[0] if isinstance(self.data_files, (list, tuple)) else self.data_files
+        raw_samples = []
+        with open(filename) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                raw_samples.append(json.loads(line))
+        self._raw_samples = raw_samples
+        return
+        # dataset = load_dataset(
+        #     self.name,
+        #     self.subset,
+        #     data_files=self.data_files,
+        #     split=self.split,
+        #     # num_proc=4,  # TODO: Make this configurable
+        #     streaming=self.num_streaming_samples is not None,
+        # )
 
         shard = dataset.shard(num_shards=self.num_shards, index=self.shard_index)
 
@@ -181,7 +195,7 @@ class LanguageDataCollator:
             REMOVE_THINK_CHAT_TEMPLATE, ""
         )
 
-    def _process_chat_sample(self, examples: list):
+    def _process_chat_sample(self, examples: list, **kwargs):
         padding = "longest" if self.bucket_granularity > 0 else "max_length"
         tokenized_examples = self.tokenizer.apply_chat_template(
             examples,
@@ -192,6 +206,7 @@ class LanguageDataCollator:
             max_length=self.train_len,
             add_generation_prompt=self.add_generation_prompt,
             return_assistant_tokens_mask=self.answer_only_loss,
+            **kwargs
         )
         if self.bucket_granularity > 0:
             tokenized_examples = self._pad_to_bucket(tokenized_examples)

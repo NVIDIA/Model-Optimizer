@@ -262,11 +262,13 @@ class EagleModule(nn.Module):
 
         if config.use_aux_hidden_state:
             # In EAGLE-3, the FC concentrate hidden states from multiple base model layers
+            num_fc_in_params = len(config.eagle_aux_hidden_state_layer_ids) * config.hidden_size
             self.fc = nn.Linear(
-                len(config.eagle_aux_hidden_state_layer_ids) * config.hidden_size,
+                num_fc_in_params,
                 config.hidden_size,
                 bias=bias,
             )
+            self.fc_input_norm = LlamaRMSNorm(num_fc_in_params, eps=config.rms_norm_eps)
 
             first_layer_attn = self.layers[0].self_attn
 
@@ -292,9 +294,9 @@ class EagleModule(nn.Module):
                 num_layers=self.config.parallel_draft_heads_num_layers,
             )
 
-    def _maybe_init_rope(self):
+    def _maybe_init_rope(self, device=None):
         if self.config.eagle_decoder_type == "llama" and not hasattr(self, "rotary_emb"):
-            self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
+            self.rotary_emb = LlamaRotaryEmbedding(config=self.config, device=device)
 
     def _expand_first_attn_in_dim(self, first_layer_attn):
         """Modify qkv projection in first layer to accept 2h hidden size."""
@@ -568,7 +570,10 @@ class HFEagleModel(EagleModel):
         # Hidden size and vocab size must match base model
         self.eagle_config.hidden_size = self._base_llm_config.hidden_size
         self.eagle_config.vocab_size = self._base_llm_config.vocab_size
-        self.eagle_config.max_position_embeddings = self._base_llm_config.max_position_embeddings
+        # self.eagle_config.max_position_embeddings = self._base_llm_config.max_position_embeddings
+        self.eagle_config.max_position_embeddings = 4096
+        print(f"EAGLE using {self.eagle_config.max_position_embeddings} max position embeddings")
+
         self.eagle_config.draft_vocab_size = getattr(
             self.eagle_config, "draft_vocab_size", self.eagle_config.vocab_size
         )
@@ -601,6 +606,7 @@ class HFEagleModel(EagleModel):
         # find base model, lm head, and embeddings paths
         self._find_base_model_parts()
         self.eagle_module.to(self._base_model.dtype).to(self._get_eagle_device())
+        self.base_llm_dtype = self._base_llm_config.dtype or self._base_model.dtype or torch.bfloat16
 
         # EAGLE-3 auxiliary hidden_states
         if (not self.eagle_offline) and self.eagle_config.use_aux_hidden_state:
@@ -706,7 +712,7 @@ class HFEagleModel(EagleModel):
         # Prepare eagle_input_hiddens
         if self.eagle_config.use_aux_hidden_state:
             # concat base model intermediate (pre-norm) hiddens
-            eagle_input_hiddens = self.eagle_module.fc(base_outputs.aux_hiddens)
+            eagle_input_hiddens = self.eagle_module.fc(self.eagle_module.fc_input_norm(base_outputs.aux_hiddens))
         else:
             # use base model output (post-norm)hiddens
             eagle_input_hiddens = base_outputs.out_hiddens
@@ -762,7 +768,7 @@ class HFEagleModel(EagleModel):
     ) -> BlockMask | torch.Tensor:
         """Return TTT attention_mask tensor of type BlockMask or Tensor depends on eagle attn impl."""
         msk_func = get_ttt_msk_func(seq_length, ttt_step)
-        dtypemin = torch.finfo(self._base_llm_config.dtype).min
+        dtypemin = torch.finfo(self.base_llm_dtype).min
         q_len = seq_length
         kv_len = seq_length * (1 + ttt_step)
         if self.eagle_config._attn_implementation == "flex_attention":
@@ -778,7 +784,7 @@ class HFEagleModel(EagleModel):
                 torch.arange(kv_len).view(1, 1, 1, kv_len),
             ).to(self.device)
             tensor_mask = torch.full_like(
-                tensor_mask, 0, dtype=self._base_llm_config.dtype, device=self.device
+                tensor_mask, 0, dtype=self.base_llm_dtype, device=self.device
             ).masked_fill(~tensor_mask, dtypemin)
 
             # Note: (hg) repeat mask for kimi-k2 compatibility
@@ -910,7 +916,7 @@ class HFEagleModel(EagleModel):
             assert "base_model_outputs" in kwargs
             base_outputs = EagleBaseModelOutput.from_offline_dict(kwargs["base_model_outputs"])
             if base_outputs.logits is None:
-                base_outputs.logits = self.lm_head(base_outputs.out_hiddens)
+                base_outputs.logits = self.lm_head(self.model.norm(base_outputs.out_hiddens)) # TODO(ben): This will need to be dynamic depending on whether the captured hidden states are pre-norm or post-norm.
             past_key_values = None
         else:
             base_outputs, past_key_values = self._base_model_forward(
@@ -950,7 +956,7 @@ class HFEagleModel(EagleModel):
             base_outputs,
         )
 
-        self.eagle_module._maybe_init_rope()
+        self.eagle_module._maybe_init_rope(device=input_ids.device)
 
         # ====Run eagle forward with extra training-time-test steps====
         for ttt_step in range(self.eagle_ttt_steps):
@@ -983,10 +989,9 @@ class HFEagleModel(EagleModel):
                     batch_size, seq_len_s, device=eagle_input_hiddens.device
                 ).argsort(dim=1)[:, :num_to_replace]
 
-                batch_indices = torch.arange(batch_size)[:, None]
-                eagle_input_hiddens[batch_indices, rand_indices] = eagle_output_hiddens[
-                    batch_indices, rand_indices
-                ]
+                mask = torch.zeros(batch_size, seq_len_s, device=eagle_input_hiddens.device, dtype=torch.bool)
+                mask.scatter_(1, rand_indices, True)
+                eagle_input_hiddens = torch.where(mask.unsqueeze(-1), eagle_output_hiddens, eagle_input_hiddens)
             else:
                 eagle_input_hiddens = eagle_output_hiddens
 
@@ -1087,7 +1092,7 @@ class HFEagleModel(EagleModel):
         else:
             eagle_input_hidden_states = base_model_hidden_states
 
-        self.eagle_module._maybe_init_rope()
+        self.eagle_module._maybe_init_rope(device=input_ids.device)
         draft_tokens = []
         for step in range(steps):
             b, seq_length = eagle_ids.shape
