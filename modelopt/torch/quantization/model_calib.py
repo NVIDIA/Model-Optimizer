@@ -1624,7 +1624,7 @@ class GPTQHandle:
         """Unpatch the module's forward method."""
         unpatch_forward_method(self.module, self.CACHE_NAME)
 
-    def quantize(self, block_size, percdamp):
+    def update_weights(self, block_size, percdamp):
         """Run GPTQ blockwise weight update on this module.
 
         Populates ``self.weight`` and ``self.h_inv``, runs the blockwise update,
@@ -1724,6 +1724,8 @@ def update_hessian(input, hessian, n_samples):
         n_samples: Number of samples already processed
     Returns:
         Tuple of (updated_hessian, new_sample_count)
+
+    Note: input must be non-empty (batch_size > 0); a zero-sized input causes division by zero.
     """
     # Flatten to 2D (total_tokens, features) first, so batch_size counts tokens
     input_flat = input.reshape(-1, input.shape[-1]).t().float()
@@ -1738,19 +1740,6 @@ def update_hessian(input, hessian, n_samples):
     hessian.add_((scaled_input @ scaled_input.t()).to(hessian.device))
 
     return hessian, n_samples
-
-
-def _get_quantized_linear_layers(parent: nn.Module) -> list[tuple[str, nn.Module]]:
-    """Return (name, module) pairs for all quantized linear layers with enabled weight quantizers.
-
-    Also sets ``module.name`` on each returned module for downstream logging.
-    """
-    layers = []
-    for name, module in parent.named_modules():
-        if is_quantized_linear(module) and module.weight_quantizer.is_enabled:
-            module.name = name
-            layers.append((name, module))
-    return layers
 
 
 @torch.no_grad()
@@ -1867,7 +1856,11 @@ def gptq(
     max_calibrate(model, forward_loop=forward_loop)
     _promote_nvfp4_static_quantizers(model)
 
-    quantized_layers = _get_quantized_linear_layers(model)
+    quantized_layers = [
+        (n, m)
+        for n, m in model.named_modules()
+        if is_quantized_linear(m) and m.weight_quantizer.is_enabled
+    ]
     if not quantized_layers:
         print_rank_0("No quantized linear layers found, skipping GPTQ")
         return
@@ -1884,7 +1877,7 @@ def gptq(
 
     print_rank_0("Updating weights using GPTQ algorithm...")
     for handle in gptq_handles.values():
-        handle.quantize(block_size, percdamp)
+        handle.update_weights(block_size, percdamp)
     del gptq_handles
 
     if torch.cuda.is_available():

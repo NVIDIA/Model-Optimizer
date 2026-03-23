@@ -276,7 +276,7 @@ def test_gptq_e2e_flow(quant_cfg):
     model.eval()
 
     quant_cfg = copy.deepcopy(quant_cfg)
-    quant_cfg["algorithm"] = "gptq_lite"
+    quant_cfg["algorithm"] = {"method": "gptq", "use_sequential": True}
     # Define quantizer/dataloader
     calib_dataloader = get_dataset_dataloader(
         dataset_name="cnn_dailymail",

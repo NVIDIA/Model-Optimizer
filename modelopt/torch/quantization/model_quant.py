@@ -565,7 +565,7 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
             config = mtq.get_auto_quantize_config(search_state)
 
             # [Optional] Customize algorithm if needed
-            config["algorithm"] = {"method": "gptq_lite", "sequential": True}
+            config["algorithm"] = {"method": "gptq", "sequential": True}
 
             # Reuse on the same model (e.g. run a longer calibration pass)
             model = mtq.quantize(model, config, forward_loop=calibrate_loop)
