@@ -2,6 +2,10 @@
 name: evaluation
 description: Evaluate accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Use when user says "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "accuracy drop", "run nel", or needs to measure how quantization affects model quality. Handles model deployment, config generation, and evaluation execution.
 license: Apache-2.0
+# Based on nel-assistant skill from NeMo Evaluator Launcher (commit f1fa073)
+# https://github.com/NVIDIA-NeMo/Evaluator/tree/f1fa073/packages/nemo-evaluator-launcher/.claude/skills/nel-assistant
+# Modifications: renamed to evaluation, added workspace management (Step 0),
+# auto-detect ModelOpt quantization format, quantization-aware benchmark defaults.
 ---
 
 ## NeMo Evaluator Launcher Assistant
@@ -84,6 +88,35 @@ Ask for model path. Determine type:
 
 - Checkpoint path (starts with `/` or `./`) → set `deployment.checkpoint_path: <path>` and `deployment.hf_model_handle: null`
 - HF handle (e.g., `org/model-name`) → set `deployment.hf_model_handle: <handle>` and `deployment.checkpoint_path: null`
+
+**Auto-detect ModelOpt quantization format** (checkpoint paths only):
+
+Check for `hf_quant_config.json` in the checkpoint directory:
+
+```bash
+cat <checkpoint_path>/hf_quant_config.json 2>/dev/null
+```
+
+If found, read `quantization.quant_algo` and set the correct vLLM/SGLang quantization flag in `deployment.extra_args`:
+
+| `quant_algo` | Flag to add |
+|-------------|-------------|
+| `FP8` | `--quantization modelopt` |
+| `W4A8_AWQ` | `--quantization modelopt` |
+| `NVFP4`, `NVFP4_AWQ` | `--quantization modelopt_fp4` |
+
+If no `hf_quant_config.json`, the checkpoint is unquantized — no flag needed.
+
+**Quantization-aware benchmark defaults:**
+
+When a quantized checkpoint is detected, recommend benchmarks sensitive to quantization accuracy loss:
+
+- **Always include**: MMLU (general knowledge, most affected by quantization)
+- **Recommended**: GSM8K (math reasoning — sensitive to precision loss), ARC-Challenge (reasoning)
+- **Good to add**: HumanEval (code generation — catches subtle degradation), Winogrande (commonsense)
+- **Less useful for quant comparison**: IFEval (instruction following — rarely affected by quantization)
+
+Present these recommendations to the user and ask which to include. If the user already specified benchmarks, keep their choice but mention any accuracy-sensitive benchmarks they may have missed.
 
 Use WebSearch to find model card (HuggingFace, build.nvidia.com). Read it carefully, the FULL text, the devil is in the details. Extract ALL relevant configurations:
 

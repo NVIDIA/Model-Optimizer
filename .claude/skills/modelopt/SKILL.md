@@ -63,10 +63,27 @@ Output: running server at `http://localhost:<port>`.
 Input: quantized checkpoint path, evaluation tasks.
 Output: accuracy scores per task.
 
-## Step 4: Present Results and Iterate
+## Step 4: Baseline Comparison (PTQ + Evaluate only)
+
+After evaluation completes, ask: **"Would you like to compare against the unquantized baseline?"**
+
+If yes:
+1. Run the evaluation skill again with the **original model path** (from Step 1) and the same benchmark tasks
+2. Present a side-by-side comparison table:
+
+```text
+| Benchmark | BF16 (baseline) | FP8 (quantized) | Delta |
+|-----------|-----------------|-----------------|-------|
+| MMLU      | 67.3%           | 65.2%           | -2.1% |
+| GSM8K     | 54.1%           | 52.8%           | -1.3% |
+```
+
+3. Flag any benchmark with >2% accuracy drop — suggest trying a lighter quantization format
+
+## Step 5: Present Results and Iterate
 
 Show results and ask: **"Are you satisfied with these results?"**
 
 - **Yes** — Done. Report final model path and summary.
-- **No** — Propose a different recipe (lighter or heavier), loop to Step 2.
+- **No** — Propose a different recipe (lighter or heavier quantization), loop to Step 2.
 - **Quit** — Report partial results. Clean up any running servers.
