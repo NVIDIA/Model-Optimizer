@@ -119,13 +119,8 @@ class DeciLMConfig(LlamaConfig):
     def _choose_llama4_attn_implementation(self, llama4_attn_implementation):
         self.llama4_attn_implementation = llama4_attn_implementation
         if self.llama4_attn_implementation is None:
-            # if is_torch_sdpa_available():
-            if True:
-                _print_once("auto-setting llama4_attn_implementation to sdpa")
-                self.llama4_attn_implementation = "sdpa"
-            else:
-                _print_once("auto-setting llama4_attn_implementation to eager")
-                self.llama4_attn_implementation = "eager"
+            _print_once("auto-setting llama4_attn_implementation to sdpa")
+            self.llama4_attn_implementation = "sdpa"
 
     def _choose_llama3_attn_implementation(self, kwargs: dict[str, Any]) -> str:
         attn_implementation = kwargs.pop("attn_implementation", None)
