@@ -15,7 +15,7 @@
 
 """This module defines the model_config format.
 
-This format can be converted from huggingface, nemo or modelopt-quantized model.
+This format can be converted from huggingface, megatron or modelopt-quantized model.
 And we will build tensorrt_llm engine from the context saved with this format.
 """
 
