@@ -516,8 +516,7 @@ FP8_KV_CFG = {
             },
             "enable": True,
         },
-    ],
-    "algorithm": "max",
+    ]
 }
 
 FP8_AFFINE_KV_CFG = {
@@ -529,8 +528,7 @@ FP8_AFFINE_KV_CFG = {
                 "bias": {-2: None, -4: None, "type": "static"},
             },
         },
-    ],
-    "algorithm": "max",
+    ]
 }
 
 _nvfp4_cfg = {
@@ -646,13 +644,13 @@ NVFP4_AFFINE_KV_CFG = {
             },
             "enable": True,
         },
-    ],
+    ]
 }
 
 NVFP4_KV_CFG = {
     "quant_cfg": [
         {"quantizer_path": "*[kv]_bmm_quantizer", "cfg": _nvfp4_cfg, "enable": True},
-    ],
+    ]
 }
 
 # Moved from examples/diffusers/quantization/config.py to here
@@ -714,8 +712,7 @@ NVFP4_KV_ROTATE_CFG = {
             "enable": True,
         },
         {"quantizer_path": "*v_bmm_quantizer", "cfg": _nvfp4_cfg, "enable": True},
-    ],
-    "algorithm": "max",
+    ]
 }
 
 NVFP4_SVDQUANT_DEFAULT_CFG = _nvfp4_selective_quant_cfg(
