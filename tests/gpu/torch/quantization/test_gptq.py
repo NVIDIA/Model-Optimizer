@@ -21,7 +21,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export.unified_export_hf import _export_quantized_weight
-from modelopt.torch.quantization.model_calib import GPTQHandle, update_hessian
+from modelopt.torch.quantization.model_calib import gptq, update_hessian
 from modelopt.torch.quantization.qtensor.nvfp4_tensor import NVFP4QTensor
 from modelopt.torch.utils.dataset_utils import create_forward_loop, get_dataset_dataloader
 
@@ -127,39 +127,20 @@ def test_update_hessian():
 def test_gptq_updates(block_size, dim, model_weight, expect_weight_change):
     model = torch.nn.Linear(dim, dim).to("cuda")
     model.weight.data = model_weight
-    model.name = "linear"
     original_weight = model_weight.clone()
-    input = torch.randn(2, 16, dim).to("cuda")
-    hessian = torch.zeros(dim, dim).to("cpu")
-    n_samples = 0
+    input_tensor = torch.randn(2, 16, dim).to("cuda")
     quant_cfg = mtq.NVFP4_DEFAULT_CFG
 
-    mtq.quantize(model, quant_cfg, forward_loop=lambda model: model(input))
+    mtq.quantize(model, quant_cfg, forward_loop=lambda model: model(input_tensor))
 
     # Get qdq weight
     q_dq_weight = model.weight_quantizer(model.weight.data)
 
-    # Restore original weight
+    # Restore original weight before GPTQ
     model.weight.data = original_weight.clone()
 
-    hessian, n_samples = update_hessian(input, hessian, n_samples)
-
-    # Verify n_samples counts total tokens (batch * seq_len) after flattening
-    expected_tokens = input.shape[0] * input.shape[1]  # 2 * 16 = 32
-    assert n_samples == expected_tokens, f"n_samples should be {expected_tokens}, got {n_samples}"
-
-    # Perform another forward pass to update hessian matrix
-    input_2 = torch.randn(3, 16, dim).to("cuda")
-    hessian, n_samples = update_hessian(input_2, hessian, n_samples)
-    expected_tokens_2 = expected_tokens + input_2.shape[0] * input_2.shape[1]  # 32 + 48 = 80
-    assert n_samples == expected_tokens_2, (
-        f"n_samples should be {expected_tokens_2}, got {n_samples}"
-    )
-
-    handle = GPTQHandle(model, "linear")
-    handle.hessian = hessian.to(input.device)
-    handle.n_samples = n_samples
-    handle.quantize(block_size, 0.1)
+    # Run GPTQ through the public API
+    gptq(model, forward_loop=lambda m: m(input_tensor), percdamp=0.1, block_size=block_size)
     if expect_weight_change:
         # Weight must change as GPTQ updates weights to adjust for quantization error
         assert not torch.allclose(model.weight.data, q_dq_weight), "Weight should not be equal"
@@ -175,7 +156,6 @@ def test_gptq_export_roundtrip():
 
     # Step 1: Create a simple linear model and quantize to install NVFP4 quantizers
     model = torch.nn.Linear(dim, dim).to("cuda")
-    model.name = "linear"
     original_weight = model.weight.data.clone()
     input_tensor = torch.randn(2, 16, dim).to("cuda")
     quant_cfg = mtq.NVFP4_DEFAULT_CFG
@@ -186,15 +166,7 @@ def test_gptq_export_roundtrip():
     model.weight.data = original_weight.clone()
 
     # Step 2: Perform GPTQ — compute Hessian and update weights
-    hessian = torch.zeros(dim, dim, dtype=torch.float32)
-    n_samples = 0
-    hessian, n_samples = update_hessian(input_tensor, hessian, n_samples)
-    hessian = hessian.to("cuda")
-
-    handle = GPTQHandle(model, "linear")
-    handle.hessian = hessian
-    handle.n_samples = n_samples
-    handle.quantize(block_size, percdamp=0.1)
+    gptq(model, forward_loop=lambda m: m(input_tensor), percdamp=0.1, block_size=block_size)
 
     # Save the QDQ reference from the quantizer applied to GPTQ'd weights
     gptq_weight_shape = model.weight.data.shape
