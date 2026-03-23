@@ -144,6 +144,48 @@ class Benchmark(ABC):
         except Exception as e:
             self.logger.warning(f"Failed to save logs to {file}: {e}")
 
+_SUBGRAPH_SAFE_FLAGS = frozenset({
+    "stronglyTyped", "maxTactics", "sparsity", "maxAuxStreams",
+    "builderOptimizationLevel",
+    "fp16", "int8", "fp8", "best", "noTF32",
+    "useCudaGraph", "useSpinWait", "profilingVerbosity", "verbose",
+    "separateProfileRun", "noDataTransfers", "dumpProfile", "dumpLayerInfo",
+    "avgRuns", "iterations", "warmUp", "duration",
+    "saveEngine", "timingCacheFile",
+    "staticPlugins", "dynamicPlugins",
+    "noMyelinFusion", "workspace", "memPoolSize",
+    "safe",
+})
+
+
+def _extract_flag_name(arg: str) -> str:
+    """Extract the flag name from a trtexec argument like '--maxTactics=2000'."""
+    return arg.lstrip("-").split("=", 1)[0]
+
+
+def _filter_subgraph_safe_args(cmd: list[str]) -> list[str]:
+    """Keep only subgraph-safe args from a trtexec command list.
+
+    Shape args (--optShapes, --minShapes, --maxShapes) are stripped here because
+    they are rebuilt per-subgraph by the caller.  All other model-specific args
+    (--loadInputs, --exportOutput, --shapes, etc.) are also excluded.
+    """
+    filtered: list[str] = []
+    skip_next = False
+    for c in cmd:
+        if skip_next:
+            skip_next = False
+            continue
+        if not c.startswith("-"):
+            filtered.append(c)
+            continue
+        flag = _extract_flag_name(c)
+        if flag in _SUBGRAPH_SAFE_FLAGS:
+            filtered.append(c)
+        elif "=" not in c:
+            skip_next = True
+    return filtered
+
 
 def _dedup_trtexec_args(
     base_args: list[tuple[str, str | None]], user_args: list[str]
@@ -323,10 +365,11 @@ class TrtExecBenchmark(Benchmark):
             cmd = list(self._base_cmd)
 
             if strip_shape_args:
-                cmd = [
-                    c for c in cmd
-                    if not any(c.startswith(p) for p in ("--optShapes", "--minShapes", "--maxShapes"))
-                ]
+                before = cmd[:]
+                cmd = _filter_subgraph_safe_args(cmd)
+                removed = set(before) - set(cmd)
+                if removed:
+                    self.logger.debug(f"Subgraph filter removed: {removed}")
 
             cmd.append(f"--onnx={model_path}")
 

@@ -929,15 +929,29 @@ def subgraph_autotuning_workflow(
             skipped += 1
             continue
 
-        # Build per-subgraph shape args
+        # Build per-subgraph shape args only if the subgraph has dynamic inputs
         subgraph_extra_args = None
         if has_dynamic_shapes:
-            subgraph_extra_args = _build_subgraph_shape_args(
-                group.input_tensors,
-                min_tensor_shapes, opt_tensor_shapes, max_tensor_shapes,
+            sub_model_proto = onnx.load_from_string(sub_bytes)
+            has_dynamic_inputs = any(
+                any(
+                    (not dim.dim_value and dim.dim_value != 0)
+                    for dim in inp.type.tensor_type.shape.dim
+                )
+                for inp in sub_model_proto.graph.input
+                if inp.type.HasField("tensor_type")
+                and inp.type.tensor_type.HasField("shape")
             )
-            if subgraph_extra_args:
-                logger.debug(f"  Subgraph shape args: {subgraph_extra_args}")
+            if has_dynamic_inputs:
+                subgraph_extra_args = _build_subgraph_shape_args(
+                    group.input_tensors,
+                    min_tensor_shapes, opt_tensor_shapes, max_tensor_shapes,
+                )
+                if subgraph_extra_args:
+                    logger.debug(f"  Subgraph shape args: {subgraph_extra_args}")
+            else:
+                logger.debug("  Subgraph has static inputs, skipping shape args")
+            del sub_model_proto
 
         # Generate heuristic schemes
         schemes = generate_heuristic_schemes(graph, group)
