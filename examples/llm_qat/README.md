@@ -33,7 +33,7 @@ Quantization aware distillation (QAD) can be used to further improve accuracy of
 
 ### Hugging Face QAT / QAD
 
-> **_NOTE:_** In this example, a QAT and QAD workflow is demonstrated for Huggingface text generation model for supervised fine-tuning (SFT). However, the workflow is general and can be extended to frameworks such as [Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) and models beyond LLMs such as CNN based vision models.
+> **_NOTE:_** In this example, a QAT and QAD workflow is demonstrated for Huggingface text generation model for supervised fine-tuning (SFT). However, the workflow is general and can be extended to frameworks such as [Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) and models beyond LLMs such as CNN-based vision models.
 
 #### System Requirements
 

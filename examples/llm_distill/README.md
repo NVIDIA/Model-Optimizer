@@ -131,7 +131,7 @@ Loss balancers:
 
 | Model | type | confirmed compatible |
 | :---: | :---: | :---: |
-| Nemotron | mamba | ✅ |
+| Nemotron | mamba hybrid | ✅ |
 | Llama 3 | llama | ✅ |
 | Llama 4 | llama | ✅ |
 | Gemma 2 | gemma | ✅ |
