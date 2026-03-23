@@ -15,7 +15,7 @@
 
 metadata:
   recipe_type: ptq
-  description: NVFP4 static weight and dynamic activation for all linear layers (W4A4), FP8 KV cache, max calibration.
+  description: NVFP4 static weight and dynamic activation for MoE/MLP projections (W4A4), FP8 KV cache, max calibration.
 ptq_cfg:
   algorithm: max
   quant_cfg:
@@ -47,7 +47,7 @@ ptq_cfg:
         scale_bits: e4m3
       num_bits: e2m1
       enable: true
-    '*share_expert.*':
+    '*share_expert*':
       enable: false
     '*moe.gate.*':
       enable: false

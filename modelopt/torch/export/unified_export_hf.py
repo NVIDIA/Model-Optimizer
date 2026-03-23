@@ -701,9 +701,11 @@ def _reconstruct_step3p5_moe_linear(model: nn.Module) -> None:
             requires_grad=False,
         )
 
-        # Stack per-expert scales back under the original attribute names
+        # Stack per-expert scales back under the original attribute names.
+        # Check all experts: some may lack input_scale if they were never routed
+        # during calibration, so only stack when every expert has the attribute.
         for attr in ("weight_scale", "weight_scale_2", "input_scale"):
-            if hasattr(experts[0], attr):
+            if all(hasattr(experts[i], attr) for i in range(n)):
                 module.register_buffer(
                     attr,
                     torch.stack([getattr(experts[i], attr) for i in range(n)]),

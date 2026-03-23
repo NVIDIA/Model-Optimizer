@@ -47,24 +47,6 @@ ptq_cfg:
         scale_bits: e4m3
       num_bits: e2m1
       enable: true
-    '*moe*weight_quantizer':
-      block_sizes:
-        -1: 16
-        type: dynamic
-        scale_bits: e4m3
-      num_bits: e2m1
-      enable: true
-    '*moe*input_quantizer':
-      block_sizes:
-        -1: 16
-        type: dynamic
-        scale_bits: e4m3
-      num_bits: e2m1
-      enable: true
-    '*moe.gate.*':
-      enable: false
-    '*share_expert*':
-      enable: false
     default:
       enable: false
     '*block_sparse_moe.gate*':
