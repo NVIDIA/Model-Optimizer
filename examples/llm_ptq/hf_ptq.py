@@ -109,7 +109,6 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "nvfp4_experts_only": mtq.NVFP4_EXPERTS_ONLY_CFG,
     "nvfp4_omlp_only": mtq.NVFP4_OMLP_ONLY_CFG,
     "nvfp4_svdquant": mtq.NVFP4_SVDQUANT_DEFAULT_CFG,
-    "nvfp4_gptq": mtq.NVFP4_GPTQ_CFG,
     "mxfp8": mtq.MXFP8_DEFAULT_CFG,
     "nvfp4_local_hessian": mtq.NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG,
 }
@@ -1029,7 +1028,6 @@ def quantize_main(
         is_nemotron_vl_model,
         first_text_speech_dataset,
     )
-
     export_quantized(
         args,
         full_model,
@@ -1188,7 +1186,6 @@ def parse_args() -> argparse.Namespace:
         default=False,
         action="store_true",
     )
-
     parser.add_argument(
         "--low_memory_mode",
         help=(
