@@ -2,6 +2,7 @@ name: Docs
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, closed]
     branches: [main, release/*, feature/*]
   push:
     branches: [main]
@@ -14,9 +15,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
-# contents: write required to push to gh-pages branch
 permissions:
-  contents: write
+  contents: write       # push to gh-pages branch
+  pull-requests: write  # post/update preview URL comment on PRs
 
 jobs:
   build-docs:
@@ -34,6 +35,24 @@ jobs:
           name: docs-html
           path: docs/build/html
 
+  deploy-preview:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Per-PR concurrency without cancel-in-progress so 'closed' cleanup always runs
+    concurrency:
+      group: pr-preview-${{ github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/ubuntu-setup
+      - name: Build docs
+        if: github.event.action != 'closed'
+        run: pip install tox && tox -e build-docs
+      - name: Deploy / remove PR preview
+        uses: rossjrw/pr-preview-action@v1
+        with:
+          source-dir: docs/build/html
+
   deploy-gh-pages:
     if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     needs: build-docs
@@ -49,5 +68,5 @@ jobs:
         uses: JamesIves/github-pages-deploy-action@v4
         with:
           folder: docs/build/html
-          # Preserve PR preview subdirectories deployed by pr-preview.yml
+          # Preserve PR preview subdirectories deployed by the deploy-preview job
           clean-exclude: pr-preview
