@@ -43,7 +43,6 @@ from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
     FFNConfig,
     SubblockConfig,
 )
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 from modelopt.torch.puzzletron.replacement_library.replacement_utils import parse_layer_replacement
 from modelopt.torch.puzzletron.subblock_stats.calc_subblock_params_and_memory import (
     calc_subblock_active_params,
@@ -300,7 +299,7 @@ def calculate_subblock_stats_for_puzzle_dir(
     model_config = load_model_config(teacher_dir, trust_remote_code=trust_remote_code)
     # Get language model config for LM-specific attributes (VL models have nested config)
     lm_config = descriptor.get_language_model_config(model_config)
-    subblock_configs = _load_subblock_configs(master_puzzle_dir, ffn_hidden_sizes, model_config)
+    subblock_configs = _load_subblock_configs(master_puzzle_dir, ffn_hidden_sizes)
 
     subblock_stats_file = master_puzzle_dir / subblock_stats_filename
     if subblock_stats_file.exists() and not merge_with_existing_stats:
@@ -383,7 +382,7 @@ def calculate_subblock_stats_for_puzzle_dir(
 
 
 def _load_subblock_configs(
-    master_puzzle_dir: Path, ffn_hidden_sizes: ListConfig, model_config: DeciLMConfig
+    master_puzzle_dir: Path, ffn_hidden_sizes: ListConfig
 ) -> list[SubblockConfig]:
     try:
         subblock_configs = _load_subblock_configs_from_replacement_library(master_puzzle_dir)

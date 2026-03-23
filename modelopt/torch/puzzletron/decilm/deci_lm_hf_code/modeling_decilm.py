@@ -15,7 +15,7 @@
 
 # Copyright 2024 Nvidia Corporation, Google Inc, HuggingFace Inc, EleutherAI. All rights reserved.
 #
-# Minimal DeciLM helpers for puzzletron. Full decoder stacks live in transformers via AnyModel.
+# Small nn helpers for puzzletron pipeline code. Model configs come from HuggingFace ``AutoConfig`` (AnyModel).
 # ``LMHead`` is a distinct ``nn.Linear`` subclass so pipeline / FSDP code can target it explicitly
 # (see ``validate_runtime_pipeline``).
 # mypy: ignore-errors

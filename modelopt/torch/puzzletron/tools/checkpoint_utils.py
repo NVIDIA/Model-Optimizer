@@ -14,9 +14,7 @@
 # limitations under the License.
 # mypy: ignore-errors
 
-"""It provides general utilities for loading and initializing PyTorch model checkpoints,
-particularly for DeciLM models.
-"""
+"""Utilities for loading and initializing PyTorch model checkpoints (AnyModel / HF layouts)."""
 
 import concurrent.futures
 import warnings
@@ -136,7 +134,7 @@ def skip_init(module_cls, *args, **kwargs) -> nn.Module:
 
 
 def is_valid_decilm_checkpoint(checkpoint_dir: Path | str, trust_remote_code: bool = False) -> bool:
-    """Validate that a checkpoint is in DeciLM format (has block_configs).
+    """True if the checkpoint config loads and defines ``block_configs`` (AnyModel / puzzletron layout).
 
     Args:
         checkpoint_dir: Path to checkpoint directory
@@ -145,13 +143,13 @@ def is_valid_decilm_checkpoint(checkpoint_dir: Path | str, trust_remote_code: bo
             trust the source of the model. Defaults to False for security.
 
     Returns:
-        True if checkpoint is valid DeciLM format, False otherwise
+        True if the config has ``block_configs``, False otherwise
     """
     try:
         model_config = load_model_config(checkpoint_dir, trust_remote_code=trust_remote_code)
         if model_config.block_configs is None:
             warnings.warn(
-                f"Skipping checkpoint '{checkpoint_dir}' - not in DeciLM format (missing block_configs)"
+                f"Skipping checkpoint '{checkpoint_dir}' - missing block_configs (not an AnyModel-style layout)"
             )
             return False
         return True

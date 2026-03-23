@@ -29,15 +29,13 @@ repos:
         exclude: >
           (?x)^(
               ^examples/specdec_bench/specdec_bench/datasets/speed\.py$|
-              modelopt/torch/puzzletron/decilm/deci_lm_hf_code/block_config\.py|
-              modelopt/torch/puzzletron/decilm/deci_lm_hf_code/transformers_.*\.py
+              modelopt/torch/puzzletron/decilm/deci_lm_hf_code/block_config\.py
           )$
       - id: ruff-format
         exclude: >
           (?x)^(
               ^examples/specdec_bench/specdec_bench/datasets/speed\.py$|
-              modelopt/torch/puzzletron/decilm/deci_lm_hf_code/block_config\.py|
-              modelopt/torch/puzzletron/decilm/deci_lm_hf_code/transformers_.*\.py
+              modelopt/torch/puzzletron/decilm/deci_lm_hf_code/block_config\.py
           )$
 
   - repo: https://github.com/pre-commit/mirrors-mypy
@@ -95,7 +93,6 @@ repos:
               modelopt/torch/speculative/eagle/utils.py|
               modelopt/torch/speculative/plugins/transformers.py|
               modelopt/torch/utils/plugins/megatron_mmlu.py|
-              modelopt/torch/puzzletron/decilm/deci_lm_hf_code/transformers_.*\.py|
               examples/chained_optimizations/bert_prune_distill_quantize.py|
               examples/deepseek/quantize_to_nvfp4.py|
               examples/deepseek/ptq.py|

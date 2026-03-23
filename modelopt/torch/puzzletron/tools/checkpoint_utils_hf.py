@@ -15,8 +15,7 @@
 # mypy: ignore-errors
 
 """
-Provides utilities for loading and saving PyTorch model checkpoints in the Hugging Face format,
-particularly for DeciLM models.
+Utilities for loading and saving Hugging Face-format checkpoints (``AutoConfig`` + optional ``block_configs``).
 """
 
 import concurrent.futures

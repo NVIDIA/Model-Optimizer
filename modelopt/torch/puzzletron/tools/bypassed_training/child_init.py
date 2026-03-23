@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
+from transformers import PretrainedConfig
 from typeguard import check_type
 
 from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
@@ -37,7 +38,6 @@ from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
     _get_dataclass_type,
     _is_dataclass_type,
 )
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 from modelopt.torch.puzzletron.pruning.pruning_utils import (
     ACTIVATIONS_LOG,
     GQAInitMode,
@@ -72,8 +72,8 @@ def _process_single_layer(
     descriptor,
     parent_state_dict: dict,
     new_state_dict: dict,
-    original_config: DeciLMConfig,
-    new_config: DeciLMConfig,
+    original_config: PretrainedConfig,
+    new_config: PretrainedConfig,
     gqa_init_mode: GQAInitMode,
     mlp_init_mode: MlpInitMode,
     mlp_init_config: Optional[dict[str, Any]],
@@ -336,8 +336,8 @@ def create_child_state_dict(
     descriptor,
     original_state_dict: dict,
     new_state_dict: dict,
-    original_config: DeciLMConfig,
-    new_config: DeciLMConfig,
+    original_config: PretrainedConfig,
+    new_config: PretrainedConfig,
     gqa_init_mode: GQAInitMode,
     ignore_fn: IgnoreFn = default_ignore_fn,
     mlp_init_mode: MlpInitMode = MlpInitMode.CopyAsIs,
@@ -667,11 +667,11 @@ def _init_mlp(
     *,
     mlp_init_mode: Union[MlpInitMode, str],
     layer_idx: int,
-    original_config: DeciLMConfig,
+    original_config: PretrainedConfig,
     mlp_init_config: Optional[dict[str, Any]],
     original_state_dict: dict,
     new_state_dict: dict,
-    new_config: DeciLMConfig,
+    new_config: PretrainedConfig,
     keys: dict[str, str],
     ignored_keys: set[str],
     expert_idx: Optional[int] = None,
@@ -749,7 +749,7 @@ def _prune_experts_by_score(
 
 def _init_linear_attn(
     parent_state_dict: dict[str, torch.Tensor],
-    parent_config: DeciLMConfig,
+    parent_config: PretrainedConfig,
     layer_idx: int,
     v_key: str,
     o_key: str,
@@ -788,9 +788,9 @@ def _init_linear_mlp(teacher_mlp_state_dict: dict[str, torch.Tensor]) -> torch.T
 
 
 def update_model_config(
-    model_config: DeciLMConfig,
+    model_config: PretrainedConfig,
     model_config_overrides: None | list[dict[str, Any]] | str | dict | Path = None,
-) -> DeciLMConfig:
+) -> PretrainedConfig:
     new_model_config = deepcopy(model_config)
     if model_config_overrides is None:
         return new_model_config
@@ -893,8 +893,8 @@ def _parse_model_config_overrides(
 def _apply_hidden_size_pruning(
     out_state_dict: dict[str, torch.Tensor],
     original_state_dict: dict[str, torch.Tensor],
-    new_config: DeciLMConfig,
-    original_config: DeciLMConfig,
+    new_config: PretrainedConfig,
+    original_config: PretrainedConfig,
     descriptor,
     hidden_size_init_mode: HiddenSizeInitMode,
     channel_importance_path: Optional[str] = None,

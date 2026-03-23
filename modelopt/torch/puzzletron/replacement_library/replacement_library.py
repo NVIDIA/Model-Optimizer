@@ -28,7 +28,6 @@ from safetensors import safe_open
 from transformers import PretrainedConfig, PreTrainedModel
 
 from modelopt.torch.puzzletron.anymodel.converter.converter import Converter
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 from modelopt.torch.puzzletron.replacement_library.replacement_utils import (
     extract_block_configs_and_locations,
     parse_layer_replacement,
@@ -76,7 +75,7 @@ class ReplacementLibrary:
         assert len(unsplit_checkpoints) == 0, f"Found unsplit checkpoints: {unsplit_checkpoints}"
 
     @property
-    def model_config(self) -> DeciLMConfig:
+    def model_config(self) -> PretrainedConfig:
         if self._model_config is None:
             trust_remote_code = self.descriptor.requires_trust_remote_code()
             self._model_config = load_model_config(

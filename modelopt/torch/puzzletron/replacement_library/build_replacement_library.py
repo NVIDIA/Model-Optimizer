@@ -422,7 +422,7 @@ def _get_last_checkpoint_from_each_experiment(
                 "If you are Ido Galil, tell Tomer that you got this exception ;) "
             )
 
-    # Filter out non-DeciLM checkpoints (e.g., unconverted Llama checkpoints)
+    # Filter out checkpoints without block_configs (e.g. unconverted raw HF layouts)
     valid_checkpoint_dirs = [
         cp
         for cp in checkpoint_dirs
