@@ -314,7 +314,6 @@ EXPECTED_LM_LOSS = {
 
 
 # Expected teacher memory from subblock_stats (MiB)
-# Goldens from CI after meta ``calculate_subblock_params`` for attention/Mamba (see log.txt got=).
 EXPECTED_TEACHER_MEMORY_MIB = {
     "meta-llama/Llama-3.1-8B-Instruct": 395.60205078125,
     "meta-llama/Llama-3.2-3B-Instruct": 395.60205078125,
@@ -329,7 +328,6 @@ EXPECTED_TEACHER_MEMORY_MIB = {
 
 
 # Expected total teacher params from subblock_stats
-# Memory deltas imply param deltas at bf16: Δparams ≈ ΔMiB * 524288 (when only weight bytes move).
 EXPECTED_TEACHER_NUM_PARAMS = {
     "meta-llama/Llama-3.1-8B-Instruct": 6082816.0,
     "meta-llama/Llama-3.2-3B-Instruct": 6082816.0,
