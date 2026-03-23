@@ -88,6 +88,27 @@ _KERNEL_DESCRIPTIONS = {
 }
 
 
+def _detect_available_kernels() -> list[str]:
+    """Return the list of kernels available in the installed sageattention version."""
+    try:
+        import sageattention as _sa
+    except ImportError:
+        return []
+
+    available = []
+    if hasattr(_sa, "sageattn"):
+        available.append(KERNEL_SAGE1)
+    if hasattr(_sa, "sageattn_qk_int8_pv_fp16_cuda"):
+        available.append(KERNEL_SAGE2_FP16)
+    if hasattr(_sa, "sageattn_qk_int8_pv_fp8_cuda"):
+        available.append(KERNEL_SAGE2_FP8)
+    return available
+
+
+# Populated once at startup; used to warn and skip unavailable kernels.
+AVAILABLE_KERNELS: list[str] = _detect_available_kernels()
+
+
 # ---------------------------------------------------------------------------
 # SageAttention patching
 # ---------------------------------------------------------------------------
@@ -190,15 +211,22 @@ def enable_sage_attention(kernel: str = KERNEL_SAGE2_FP8) -> None:
 
     Args:
         kernel: One of ``"sage1"``, ``"sage2-fp16"``, ``"sage2-fp8"``.
+            If the requested kernel is not available in the installed
+            sageattention version, falls back to ``"sage1"``.
     """
     global _active_kernel, _sage_calls, _fallback_calls
-    try:
-        import sageattention  # noqa: F401
-    except ImportError as e:
-        raise ImportError("SageAttention is not installed. Run: pip install sageattention") from e
+    if not AVAILABLE_KERNELS:
+        raise ImportError("SageAttention is not installed. Run: pip install sageattention")
 
     if kernel not in KERNEL_CHOICES:
         raise ValueError(f"Unknown kernel {kernel!r}. Choose from {KERNEL_CHOICES}")
+
+    if kernel not in AVAILABLE_KERNELS:
+        print(
+            f"[SageAttention] WARNING: kernel={kernel!r} not available in installed "
+            f"sageattention version (available: {AVAILABLE_KERNELS}). Falling back to sage1."
+        )
+        kernel = KERNEL_SAGE1
 
     _active_kernel = kernel
     _sage_calls = 0
@@ -352,8 +380,11 @@ def main() -> None:
         # Baseline
         results["baseline"] = run_inference(pipe, args, label="baseline")
 
-        # All three sage kernels
+        # Available sage kernels
         for kernel in KERNEL_CHOICES:
+            if kernel not in AVAILABLE_KERNELS:
+                print(f"\n[{kernel}] Skipped — not available in installed sageattention version")
+                continue
             enable_sage_attention(kernel)
             results[kernel] = run_inference(pipe, args, label=kernel)
             print_sage_stats()
@@ -365,6 +396,9 @@ def main() -> None:
         print(f"  {'-' * 40}")
         print(f"  {'baseline (SDPA)':<20} {t_base:>7.1f}s   {'1.00x':>8}")
         for kernel in KERNEL_CHOICES:
+            if kernel not in results:
+                print(f"  {kernel:<20} {'N/A':>8}   {'N/A':>8}  (not available)")
+                continue
             t = results[kernel]
             print(f"  {kernel:<20} {t:>7.1f}s   {t_base / t:>7.2f}x")
         print(f"{'=' * 55}")
