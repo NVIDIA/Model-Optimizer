@@ -1,5 +1,10 @@
 NVIDIA Model Optimizer Changelog
 ================================
+0.44 (2026-04-xx)
+
+**New Features**
+- Added iterator interface using CalibrationDataReader in ONNX quantization workflow.
+
 
 0.44 (2026-05-xx)
 ^^^^^^^^^^^^^^^^^
