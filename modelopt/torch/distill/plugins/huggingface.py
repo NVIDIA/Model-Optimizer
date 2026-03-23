@@ -15,11 +15,14 @@
 
 """ModelOpt plugin to train HuggingFace models with knowledge distillation."""
 
+from contextlib import contextmanager
+
 import torch.nn as nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 import modelopt.torch.distill as mtd
 from modelopt.torch.opt.plugins import ModelOptHFTrainer
+from modelopt.torch.opt.plugins.transformers import _fsdp_forward_redirect
 from modelopt.torch.utils import print_rank_0
 
 IGNORE_INDEX = nn.CrossEntropyLoss().ignore_index
@@ -37,7 +40,88 @@ class KDTrainer(ModelOptHFTrainer):
         assert distill_config is not None, "`distill_config` is required for distillation."
         self.distill_config = distill_config
         self._convert_to_distillation_model()
-        self.compute_loss_func = self.compute_kd_loss
+        if self.use_liger_kernel:
+            self._setup_liger_fused_loss()
+        else:
+            self.compute_loss_func = self.compute_kd_loss
+
+    def _get_lm_head(self, model):
+        """Resolve student lm_head. Overrides base to handle distillation wrapper."""
+        return model.lm_head
+
+    def _get_teacher_lm_head(self, model):
+        """Resolve teacher lm_head at call time."""
+        return self._get_lm_head(model._teacher_model)
+
+    def _setup_liger_fused_loss(self):
+        """Set up fused JSD for KD.
+
+        No-op when called from ModelOptHFTrainer.__init__ (teacher not yet created).
+        Re-called from KDTrainer.__init__ after _convert_to_distillation_model().
+        """
+        model = self.accelerator.unwrap_model(self.model)
+        if not hasattr(model, "_teacher_model"):
+            return
+        teacher = model._teacher_model
+        if not hasattr(model, "lm_head") or not hasattr(teacher, "lm_head"):
+            self.use_liger_kernel = False
+            self.compute_loss_func = self.compute_kd_loss
+            return
+
+        loss_fn = next(iter(model._layers_to_loss.values()))
+        self._liger_temperature = getattr(loss_fn, "_temperature", 1.0)
+        self.compute_loss_func = self._liger_loss_func
+
+    @contextmanager
+    def _liger_identity_lm_head(self):
+        """Patch both student+teacher lm_heads to identity."""
+        model = self.accelerator.unwrap_model(self.model)
+        student_lm_head = self._get_lm_head(model)
+        teacher_lm_head = self._get_teacher_lm_head(model)
+        student_orig = student_lm_head.forward
+        teacher_orig = teacher_lm_head.forward
+        student_lm_head.forward = lambda x: x
+        teacher_lm_head.forward = lambda x: x
+        try:
+            yield
+        finally:
+            student_lm_head.forward = student_orig
+            teacher_lm_head.forward = teacher_orig
+
+    def _liger_loss_func(self, outputs, labels, **kwargs):
+        """Fused lm_head + JSD for KD."""
+        from liger_kernel.transformers import LigerFusedLinearJSD
+
+        model = self.accelerator.unwrap_model(self.model)
+
+        (student_layer, teacher_layer), _ = next(iter(model._layers_to_loss.items()))
+        student_hs = student_layer._intermediate_output.logits
+        teacher_hs = teacher_layer._intermediate_output.logits
+        student_layer._intermediate_output = None
+        teacher_layer._intermediate_output = None
+
+        student_lm_head = self._get_lm_head(model)
+        teacher_lm_head = self._get_teacher_lm_head(model)
+
+        # Causal LM shift
+        student_hs = student_hs[..., :-1, :].contiguous().view(-1, student_hs.size(-1))
+        teacher_hs = teacher_hs[..., :-1, :].contiguous().view(-1, teacher_hs.size(-1))
+        shift_labels = labels[..., 1:].contiguous().view(-1)
+
+        jsd = LigerFusedLinearJSD(jsd_beta=0.0, temperature=self._liger_temperature)
+
+        def _compute():
+            return jsd(
+                student_hs,
+                student_lm_head.weight,
+                teacher_hs,
+                teacher_lm_head.weight,
+                shift_labels,
+            )
+
+        if self.is_fsdp_enabled:
+            return _fsdp_forward_redirect(self.model, _compute)
+        return _compute()
 
     def compute_kd_loss(self, outputs, labels, **kwargs):
         """KD loss with ignore-index masking."""

@@ -1529,6 +1529,7 @@ class NVFP4StaticAdaRoundQuantizer(StaticBlockScaleQuantizer):
         round_prob = (torch.sigmoid(round_logits / self.temperature) * 1.2 - 0.1).clamp(0, 1)
         if not self.training:
             round_prob = (round_prob > 0.5).to(round_prob.dtype)
+
         return round_prob
 
     def dist_loss(self, beta: float = 2.0) -> torch.Tensor:

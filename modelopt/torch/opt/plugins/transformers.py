@@ -15,14 +15,17 @@
 
 """ModelOpt plugin for enabling automatic save/restore of ModelOpt state for HuggingFace models."""
 
+import fnmatch
 import types
+import warnings
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 
 import torch
 from transformers import PreTrainedModel, Trainer, TrainerCallback
 from transformers import modeling_utils as tf_modeling_utils
 
-from modelopt.torch.utils import report_memory
+from modelopt.torch.utils import print_rank_0, report_memory
 
 from ..conversion import ModeloptStateManager
 from .huggingface import (
@@ -32,7 +35,7 @@ from .huggingface import (
     register_for_patching,
 )
 
-__all__ = ["ModelOptHFTrainer"]
+__all__ = ["ModelOptHFTrainer", "ModelOptTrainerArguments"]
 
 
 @contextmanager
@@ -138,14 +141,167 @@ class _MemoryReportCallback(TrainerCallback):
             _report_memory("Memory usage at evaluation")
 
 
+@dataclass
+class ModelOptTrainerArguments:
+    """Arguments for ModelOptHFTrainer controlling param freezing and loss fusion.
+
+    This class can be used with HuggingFace's ``HfArgumentParser`` for CLI parsing.
+    """
+
+    trainable_params: list[str] | None = field(
+        default=None,
+        metadata={
+            "nargs": "+",
+            "help": (
+                "Glob patterns (fnmatch) for parameters that should be trainable. "
+                "All other parameters will be frozen. Mutually exclusive with frozen_params."
+            ),
+        },
+    )
+    frozen_params: list[str] | None = field(
+        default=None,
+        metadata={
+            "nargs": "+",
+            "help": (
+                "Glob patterns (fnmatch) for parameters that should be frozen. "
+                "Mutually exclusive with trainable_params."
+            ),
+        },
+    )
+
+
 class ModelOptHFTrainer(Trainer):
     """A drop-in replacement of HuggingFace's Trainer for ModelOpt.
 
     This class adds extra utilities for ModelOpt checkpointing and memory reporting.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, trainer_args: ModelOptTrainerArguments | None = None, **kwargs):
         """Initialize."""
         enable_huggingface_checkpointing()
         super().__init__(*args, **kwargs)
+        self.trainer_args = trainer_args or ModelOptTrainerArguments()
+        self._apply_gradient_checkpointing_defaults()
         self.add_callback(_MemoryReportCallback())
+        self.use_liger_kernel = self.args.use_liger_kernel
+        if self.use_liger_kernel:
+            if self.is_fsdp_enabled and not self.accelerator.is_fsdp2:
+                raise ValueError("Liger fused loss is not supported with FSDP1. Use FSDP2 instead.")
+            self._setup_liger_fused_loss()
+        self._configure_trainable_params()
+
+    def _apply_gradient_checkpointing_defaults(self):
+        """Ensure non-reentrant gradient checkpointing when no explicit kwargs are set."""
+        args = self.args
+        if not getattr(args, "gradient_checkpointing", False):
+            return
+        if args.gradient_checkpointing_kwargs is None:
+            args.gradient_checkpointing_kwargs = {"use_reentrant": False}
+        else:
+            # use_reentrant=True requires embedding weights to have requires_grad=True,
+            # which conflicts when training is disabled for those layers.
+            if args.gradient_checkpointing_kwargs.get("use_reentrant", False):
+                warnings.warn(
+                    "ModelOpt overriding `use_reentrant=True` to `use_reentrant=False` "
+                    "for gradient checkpointing compatibility.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            args.gradient_checkpointing_kwargs["use_reentrant"] = False
+
+    def _configure_trainable_params(self):
+        """Freeze/unfreeze parameters based on trainer_args.trainable_params or frozen_params."""
+        trainable = self.trainer_args.trainable_params
+        frozen = self.trainer_args.frozen_params
+        if not trainable and not frozen:
+            return
+        if trainable and frozen:
+            raise ValueError("trainable_params and frozen_params are mutually exclusive.")
+
+        def _matches(name, patterns):
+            return any(fnmatch.fnmatch(name, p) for p in patterns)
+
+        model = self.model
+        if trainable:
+            for name, param in model.named_parameters():
+                param.requires_grad_(_matches(name, trainable))
+        else:
+            for name, param in model.named_parameters():
+                if _matches(name, frozen):
+                    param.requires_grad_(False)
+
+        trainable_count = sum(p.requires_grad for p in model.parameters())
+        total_count = sum(1 for _ in model.parameters())
+        print_rank_0(
+            f"Trainable params: {trainable_count}/{total_count} "
+            f"({100 * trainable_count / max(total_count, 1):.1f}%)"
+        )
+
+    def _get_lm_head(self, model):
+        """Resolve lm_head from model at call time (no cached pointer to FSDP-managed params)."""
+        return model.lm_head
+
+    def _setup_liger_fused_loss(self):
+        """Set compute_loss_func for fused CE."""
+        model = self.accelerator.unwrap_model(self.model)
+        if not hasattr(model, "lm_head"):
+            self.use_liger_kernel = False
+            return
+        self.compute_loss_func = self._liger_loss_func
+
+    @contextmanager
+    def _liger_identity_lm_head(self):
+        """Temporarily patch lm_head to identity for fused loss computation."""
+        model = self.accelerator.unwrap_model(self.model)
+        lm_head = self._get_lm_head(model)
+        original_forward = lm_head.forward
+        lm_head.forward = lambda x: x
+        try:
+            yield
+        finally:
+            lm_head.forward = original_forward
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        """Compute loss, patching lm_head to identity when using liger fused loss."""
+        if self.use_liger_kernel:
+            with self._liger_identity_lm_head():
+                return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
+        return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
+
+    def _liger_loss_func(self, outputs, labels, num_items_in_batch=None, **kwargs):
+        """Fused lm_head + CE loss via liger kernel."""
+        from liger_kernel.transformers.model.loss_utils import LigerForCausalLMLoss
+
+        model = self.accelerator.unwrap_model(self.model)
+        hidden_states = outputs.logits
+        lm_head = self._get_lm_head(model)
+
+        def _compute():
+            return LigerForCausalLMLoss(
+                hidden_states=hidden_states,
+                lm_head_weight=lm_head.weight,
+                labels=labels,
+                hidden_size=hidden_states.size(-1),
+                num_items_in_batch=num_items_in_batch,
+            )
+
+        if self.is_fsdp_enabled:
+            return _fsdp_forward_redirect(self.model, _compute)
+        return _compute()
+
+
+def _fsdp_forward_redirect(fsdp_module, fn):
+    """Run ``fn`` inside ``fsdp_module``'s forward to unshard child module params.
+
+    In FSDP2 child modules (e.g. lm_head) are not their own FSDPModule.
+    To unshard their weights we redirect ``fn`` through the FSDP parent's forward.
+    """
+    original_forward = fsdp_module.forward
+
+    def wrapped_forward(*a, **kw):
+        fsdp_module.forward = original_forward
+        return fn()
+
+    fsdp_module.forward = wrapped_forward
+    # Dummy arg required since FSDP2 forward expects at least one argument.
+    return fsdp_module("_fsdp_redirect")

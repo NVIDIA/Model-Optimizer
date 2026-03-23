@@ -46,6 +46,7 @@ from utils import (
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.distill.plugins.huggingface import LMLogitsLoss
+from modelopt.torch.opt.plugins.transformers import ModelOptTrainerArguments
 from modelopt.torch.quantization.plugins.transformers_trainer import (
     AdaRoundTrainingArguments,
     QADTrainer,
@@ -169,26 +170,6 @@ class QuantizationArguments:
             )
         },
     )
-    trainable_params: list[str] | None = field(
-        default=None,
-        metadata={
-            "nargs": "+",
-            "help": (
-                "Glob patterns (fnmatch) for parameters that should be trainable. "
-                "All other parameters will be frozen. Mutually exclusive with frozen_params."
-            ),
-        },
-    )
-    frozen_params: list[str] | None = field(
-        default=None,
-        metadata={
-            "nargs": "+",
-            "help": (
-                "Glob patterns (fnmatch) for parameters that should be frozen. "
-                "Mutually exclusive with trainable_params."
-            ),
-        },
-    )
 
 
 def train():
@@ -198,10 +179,11 @@ def train():
             TrainingArguments,
             DataArguments,
             QuantizationArguments,
+            ModelOptTrainerArguments,
             AdaRoundTrainingArguments,
         )
     )
-    model_args, training_args, data_args, quant_args, adaround_args = (
+    model_args, training_args, data_args, quant_args, trainer_args, adaround_args = (
         parser.parse_args_into_dataclasses()
     )
     print_rank_0(f"arguments: {model_args}, {training_args}, {data_args}, {quant_args}")
@@ -259,10 +241,6 @@ def train():
     if checkpoint is not None and training_args.lora:
         raise RuntimeError("Does not support LoRA resuming training yet!")
 
-    # Torch >= 2.4 throws an error if `use_reentrant` is not set explicitly
-    if training_args.gradient_checkpointing and training_args.gradient_checkpointing_kwargs is None:
-        training_args.gradient_checkpointing_kwargs = {"use_reentrant": True}
-
     if quant_args.quant_cfg is not None:
         quant_args.quant_cfg = (
             CUSTOM_QUANT_CFG[quant_args.quant_cfg]
@@ -295,6 +273,7 @@ def train():
         args=training_args,
         quant_args=quant_args,
         adaround_args=adaround_args,
+        trainer_args=trainer_args,
         **distill_kwargs,
         **data_module,
     )

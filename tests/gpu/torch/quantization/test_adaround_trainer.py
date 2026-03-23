@@ -107,7 +107,11 @@ class TestQATTrainer:
         )
         trainer.train()
 
-        assert not trainer._adaround_aux_callback._adaround_quantizers
+        # No adaround quantizers should exist in a standard INT8 config
+        assert not any(
+            isinstance(m, NVFP4StaticAdaRoundQuantizer) and m._adaround_enabled
+            for m in model.modules()
+        )
 
     def test_adaround(self, tmp_path):
         """QATTrainer with adaround: dist_loss added, round_logits get gradients."""
@@ -125,13 +129,17 @@ class TestQATTrainer:
         )
         trainer.train()
 
-        adaround_quantizers = trainer._adaround_aux_callback._adaround_quantizers
-        assert adaround_quantizers and len(adaround_quantizers) > 0
-        assert trainer._adaround_aux_callback._aux_optimizer is not None
-        # Verify round_logits got gradients during training
+        adaround_quantizers = [
+            m for m in model.modules()
+            if isinstance(m, NVFP4StaticAdaRoundQuantizer) and m._adaround_enabled
+        ]
+        assert len(adaround_quantizers) > 0
         for q in adaround_quantizers:
-            assert isinstance(q, NVFP4StaticAdaRoundQuantizer)
             assert q.round_logits.requires_grad
+        # Verify adaround metrics were logged
+        logged_keys = {k for entry in trainer.state.log_history for k in entry}
+        assert "adaround/dist_loss" in logged_keys
+        assert "adaround/beta" in logged_keys
 
 
 class TestQADTrainer:
@@ -161,4 +169,11 @@ class TestQADTrainer:
         )
         trainer.train()
 
-        assert len(trainer._adaround_aux_callback._adaround_quantizers) > 0
+        adaround_quantizers = [
+            m for m in student.modules()
+            if isinstance(m, NVFP4StaticAdaRoundQuantizer) and m._adaround_enabled
+        ]
+        assert len(adaround_quantizers) > 0
+        # Verify adaround metrics were logged
+        logged_keys = {k for entry in trainer.state.log_history for k in entry}
+        assert "adaround/dist_loss" in logged_keys

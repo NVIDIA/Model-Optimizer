@@ -16,7 +16,6 @@
 """ModelOpt plugin for transformers Trainer."""
 
 import contextlib
-import fnmatch
 import gc
 import json
 import os
@@ -85,26 +84,6 @@ class QuantizationArguments:
                 "Whether to compress the model weights after quantization for QLoRA. "
                 "This is useful for reducing the model size."
             )
-        },
-    )
-    trainable_params: list[str] | None = field(
-        default=None,
-        metadata={
-            "nargs": "+",
-            "help": (
-                "Glob patterns (fnmatch) for parameters that should be trainable. "
-                "All other parameters will be frozen. Mutually exclusive with frozen_params."
-            ),
-        },
-    )
-    frozen_params: list[str] | None = field(
-        default=None,
-        metadata={
-            "nargs": "+",
-            "help": (
-                "Glob patterns (fnmatch) for parameters that should be frozen. "
-                "Mutually exclusive with trainable_params."
-            ),
         },
     )
 
@@ -203,83 +182,11 @@ def _patch_fsdp2_post_backward():
     FSDPParamGroup.post_backward = _patched_post_backward
 
 
-class _AdaRoundAuxCallback(TrainerCallback):
-    """Callback that steps an auxiliary SGD optimizer for AdaRound dist_loss."""
-
-    def __init__(self, trainer):
-        self._trainer = trainer
-        self._adaround_quantizers = None  # lazy init
-        self._aux_optimizer = None
-        self._group_map = []  # aux group idx -> main optimizer group idx
-
-    def _lazy_init(self):
-        model = self._trainer.accelerator.unwrap_model(self._trainer.model)
-        self._adaround_quantizers = [
-            m
-            for m in model.modules()
-            if isinstance(m, NVFP4StaticAdaRoundQuantizer) and m._adaround_enabled
-        ]
-        if not self._adaround_quantizers:
-            return
-
-        # Build a map from param id -> main optimizer group index
-        main_optimizer = self._trainer.optimizer
-        pid_to_group = {}
-        for group_idx, group in enumerate(main_optimizer.param_groups):
-            for p in group["params"]:
-                pid_to_group[id(p)] = group_idx
-
-        # Collect adaround params grouped by their main optimizer group
-        seen = set()
-        groups_dict = {}  # main group idx -> list of adaround params
-        for q in self._adaround_quantizers:
-            for p in q.parameters():
-                if p.requires_grad and id(p) not in seen:
-                    seen.add(id(p))
-                    main_idx = pid_to_group.get(id(p), 0)
-                    groups_dict.setdefault(main_idx, []).append(p)
-
-        # Create aux optimizer with separate param_groups mirroring main groups
-        param_groups = []
-        self._group_map = []
-        for main_idx in sorted(groups_dict):
-            lr = main_optimizer.param_groups[main_idx]["lr"]
-            param_groups.append({"params": groups_dict[main_idx], "lr": lr})
-            self._group_map.append(main_idx)
-
-        self._aux_optimizer = torch.optim.SGD(param_groups, lr=0, momentum=0)
-
-    def on_optimizer_step(self, args, state, control, **kwargs):
-        ada_args = self._trainer.adaround_args
-        if ada_args is None:
-            return control
-        if self._adaround_quantizers is None:
-            self._lazy_init()
-        if not self._adaround_quantizers or self._aux_optimizer is None:
-            return control
-        # Sync LR from main optimizer's scheduled LR
-        main_groups = self._trainer.optimizer.param_groups
-        for aux_idx, main_idx in enumerate(self._group_map):
-            self._aux_optimizer.param_groups[aux_idx]["lr"] = main_groups[main_idx]["lr"]
-        # Zero round_logits grads (task-loss grads already consumed by main optimizer)
-        self._aux_optimizer.zero_grad()
-        # Compute annealed dist_loss
-        progress = state.global_step / max(state.max_steps, 1)
-        beta = ada_args.beta_start + (ada_args.beta_end - ada_args.beta_start) * progress
-        reg = sum(q.dist_loss(beta=beta) for q in self._adaround_quantizers)
-        dist_loss = ada_args.dist_loss_weight * reg
-        # Backward + step
-        dist_loss.backward()
-        self._aux_optimizer.step()
-        self._trainer.log({"adaround/dist_loss": dist_loss.detach().item(), "adaround/beta": beta})
-        return control
-
-
 class QATTrainer(ModelOptHFTrainer):
     """A drop-in replacement of HuggingFace's Trainer for quantization aware training with ModelOpt.
 
     Args:
-        quant_args: General quantization arguments (quant_cfg, calib_size, trainable/frozen params).
+        quant_args: General quantization arguments (quant_cfg, calib_size).
         adaround_args: AdaRound-specific training arguments (beta annealing, dist_loss_weight).
             When ``None``, the AdaRound auxiliary callback is a no-op.
     """
@@ -328,9 +235,6 @@ class QATTrainer(ModelOptHFTrainer):
 
         self._patch_accelerate_for_fsdp2_fix()
 
-        self._adaround_aux_callback = _AdaRoundAuxCallback(trainer=self)
-        self.add_callback(self._adaround_aux_callback)
-
         self._modelopt_state_path = os.path.join(self.args.output_dir, "modelopt_state_train.pth")
         if os.path.exists(self._modelopt_state_path) and not is_quantized(self.model):
             self._restore_modelopt_state_with_weights()
@@ -355,41 +259,28 @@ class QATTrainer(ModelOptHFTrainer):
             getattr(self.model, "config", None), "dtype", None
         ) or getattr(getattr(self.model, "config", None), "torch_dtype", None)
 
-        self._configure_trainable_params()
+        if self._is_adaround():
+            self._setup_adaround()
+
+    def _is_adaround(self):
+        """Return True if the model contains any AdaRound quantizers."""
+        return any(
+            isinstance(m, NVFP4StaticAdaRoundQuantizer) and m._adaround_enabled
+            for _, m in self.model.named_modules()
+        )
+
+    def _setup_adaround(self):
+        """Set up AdaRound: register aux callback and freeze parent weights."""
+        self._adaround_pending_metrics = {}
+        self.add_callback(_AdaRoundAuxCallback(trainer=self))
         self._freeze_adaround_weights()
 
-    def _configure_trainable_params(self):
-        """Freeze/unfreeze parameters based on quant_args.trainable_params or frozen_params.
-
-        Must be called before optimizer creation (i.e. from ``__init__``).
-        """
-        if self.quant_args is None:
-            return
-        trainable = getattr(self.quant_args, "trainable_params", None)
-        frozen = getattr(self.quant_args, "frozen_params", None)
-        if not trainable and not frozen:
-            return
-        if trainable and frozen:
-            raise ValueError("trainable_params and frozen_params are mutually exclusive.")
-
-        def _matches(name, patterns):
-            return any(fnmatch.fnmatch(name, p) for p in patterns)
-
-        model = self.model
-        if trainable:
-            for name, param in model.named_parameters():
-                param.requires_grad_(_matches(name, trainable))
-        else:
-            for name, param in model.named_parameters():
-                if _matches(name, frozen):
-                    param.requires_grad_(False)
-
-        trainable_count = sum(p.requires_grad for p in model.parameters())
-        total_count = sum(1 for _ in model.parameters())
-        print_rank_0(
-            f"Trainable params: {trainable_count}/{total_count} "
-            f"({100 * trainable_count / max(total_count, 1):.1f}%)"
-        )
+    def log(self, logs, *args, **kwargs):
+        """Override to inject adaround metrics before standard logging."""
+        if hasattr(self, "_adaround_pending_metrics") and self._adaround_pending_metrics:
+            logs.update(self._adaround_pending_metrics)
+            self._adaround_pending_metrics = {}
+        return super().log(logs, *args, **kwargs)
 
     def _freeze_adaround_weights(self):
         """Freeze parent module weights when adaround is active."""
@@ -620,3 +511,71 @@ class QADTrainer(KDTrainer, QATTrainer):
         model = self.accelerator.unwrap_model(self.model)
         with model.hide_teacher_model(), model.only_student_forward():
             return super()._quantize_model()
+
+
+class _AdaRoundAuxCallback(TrainerCallback):
+    """Callback that updates AdaRound rounding logits via per-param dist_loss after each step."""
+
+    def __init__(self, trainer):
+        self._trainer = trainer
+        self._adaround_quantizers = None  # lazy init
+
+    def _lazy_init(self):
+        model = self._trainer.accelerator.unwrap_model(self._trainer.model)
+        self._adaround_quantizers = []
+        for name, m in model.named_modules():
+            if isinstance(m, NVFP4StaticAdaRoundQuantizer) and m._adaround_enabled:
+                m._debug_name = name
+                self._adaround_quantizers.append(m)
+
+        # Map each quantizer's round_logits to its optimizer param group index
+        pid_to_group = {}
+        for group_idx, group in enumerate(self._trainer.optimizer.param_groups):
+            for p in group["params"]:
+                pid_to_group[id(p)] = group_idx
+        self._multiplier = {}  # quantizer -> scalar tensor
+        self._param_group_idx = {}  # quantizer -> optimizer group index
+        dev = self._adaround_quantizers[0].round_logits.device
+        for q in self._adaround_quantizers:
+            self._multiplier[q] = torch.zeros(1, device=dev)
+            self._param_group_idx[q] = pid_to_group.get(id(q.round_logits), 0)
+        self._round_logits_params = [q.round_logits for q in self._adaround_quantizers]
+        self._dist_loss_acc = torch.zeros(1, device=dev)
+
+    def _update_multipliers(self):
+        ada_args = self._trainer.adaround_args
+        param_groups = self._trainer.optimizer.param_groups
+        for q in self._adaround_quantizers:
+            lr = param_groups[self._param_group_idx[q]]["lr"]
+            self._multiplier[q].copy_(torch.tensor(lr * ada_args.dist_loss_weight))
+
+    def on_step_end(self, args, state, control, **kwargs):
+        ada_args = self._trainer.adaround_args
+        if self._adaround_quantizers is None:
+            self._lazy_init()
+
+        self._update_multipliers()
+        progress = state.global_step / max(state.max_steps, 1)
+        beta = ada_args.beta_start + (ada_args.beta_end - ada_args.beta_start) * progress
+
+        self._dist_loss_acc.zero_()
+        for q in self._adaround_quantizers:
+            if q.round_logits.grad is not None:
+                q.round_logits.grad.zero_()
+            dist_loss = q.dist_loss(beta=beta)
+            dist_loss.backward()
+            self._dist_loss_acc += dist_loss.detach()
+
+        total_grad_norm = torch.nn.utils.get_total_norm(self._round_logits_params)
+
+        for q in self._adaround_quantizers:
+            with torch.no_grad():
+                q.round_logits.data -= self._multiplier[q] * q.round_logits.grad
+            q.round_logits.grad.zero_()
+
+        self._trainer._adaround_pending_metrics = {
+            "adaround/dist_loss": self._dist_loss_acc.item(),
+            "adaround/beta": beta,
+            "adaround/grad_norm": total_grad_norm.item() if isinstance(total_grad_norm, torch.Tensor) else total_grad_norm,
+        }
+        return control
