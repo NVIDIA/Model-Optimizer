@@ -4,7 +4,7 @@
 With this release Puzzle algorithm supports only experts removal for `Gpt-Oss`.
 
 This model comes as a quantized checkpoint i.e. MoE experts matrices are quantized with _MXFP4_ format.
-In the prunning steps puzzle utilizes decompressed model (back to BF16) for statistics and scores computation.
+In the pruning steps puzzle utilizes decompressed model (back to BF16) for statistics and scores computation.
 This means, during the conversion to puzzle format we decompress the model and store it as a BF16.
 Once the pruning is done i.e. experts to be removed are identified and the process is finished, user may want to get back the _MXFP4_ format of the checkpoint.
 To do so, there is an additional script, that takes the original and the pruned checkpoint and outputs pruned checkpoint in _MXFP4_ format.

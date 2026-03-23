@@ -28,6 +28,7 @@ def export_to_hf_and_copy_config(
     train_iters: int,
     hf_export_path: str,
     hf_model: str,
+    trust_remote_code: bool = False,
 ) -> None:
     """
     Export Megatron checkpoint to HuggingFace format and copy config.json from student model.
@@ -43,6 +44,7 @@ def export_to_hf_and_copy_config(
         train_iters: Number of training iterations (used to construct final checkpoint path)
         hf_export_path: Directory path where the HuggingFace model will be saved
         hf_model: HuggingFace model ID to use as template for export (e.g., meta-llama/Llama-3.1-8B-Instruct)
+        trust_remote_code: Whether to trust remote modeling code when loading the HF template model
     """
     print_rank_0(f"\n{'=' * 80}")
     print_rank_0("Exporting to HuggingFace format...")
@@ -58,7 +60,7 @@ def export_to_hf_and_copy_config(
     # Create bridge using standard model ID (not AnyModel checkpoint) to avoid sharding structure issues
     print_rank_0("🌉 Creating bridge...")
     print_rank_0(f"   Using model ID: {hf_model}")
-    bridge = AutoBridge.from_hf_pretrained(hf_model, trust_remote_code=True)
+    bridge = AutoBridge.from_hf_pretrained(hf_model, trust_remote_code=trust_remote_code)
 
     print_rank_0("📤 Exporting to HuggingFace format...")
     # Use strict=False for test_distill_hf.py which uses small models (2 layers) with fewer layers
