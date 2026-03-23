@@ -111,8 +111,8 @@ def get_args() -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Path to save/restore intermediate pruning scores for resuming / faster re-run. "
-            "If not provided, it will default to `<output_path>/modelopt_pruning_scores.pth`"
+            "Directory to save/restore per-rank intermediate pruning scores for resuming / faster re-run. "
+            "If not provided, it will default to `<output_path>/modelopt_pruning_scores`"
         ),
     )
 
@@ -187,13 +187,11 @@ def get_args() -> argparse.Namespace:
     # Post-process arguments
     if args.prune_intermediate_ckpt is None:
         if args.output_megatron_path:
-            args.prune_intermediate_ckpt = (
-                f"{args.output_megatron_path}/modelopt_pruning_scores.pth"
-            )
+            args.prune_intermediate_ckpt = f"{args.output_megatron_path}/modelopt_pruning_scores"
         elif args.output_hf_path:
-            args.prune_intermediate_ckpt = f"{args.output_hf_path}/modelopt_pruning_scores.pth"
+            args.prune_intermediate_ckpt = f"{args.output_hf_path}/modelopt_pruning_scores"
         print_rank_0(
-            "No checkpoint provided to cache intermediate pruning scores. "
+            "No directory provided to cache per-rank intermediate pruning scores. "
             f"Setting to: {args.prune_intermediate_ckpt}"
         )
 
