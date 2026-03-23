@@ -176,7 +176,21 @@ def _preprocess_onnx(
         )
 
     if original_opset_version < target_opset and original_opset_version != 1:
-        onnx_model = onnx.version_converter.convert_version(onnx_model, target_opset)
+        try:
+            onnx_model = onnx.version_converter.convert_version(onnx_model, target_opset)
+        except Exception as e:
+            logger.warning(
+                "onnx.version_converter failed (%s). Performing lightweight opset update.", e
+            )
+            current_opset = {opset.domain: opset.version for opset in onnx_model.opset_import}
+            new_opset_imports = [onnx.helper.make_opsetid("", target_opset)]
+            if "com.microsoft" not in current_opset:
+                new_opset_imports.append(onnx.helper.make_opsetid("com.microsoft", 1))
+            for domain, version in current_opset.items():
+                if domain not in ["", "ai.onnx"]:
+                    new_opset_imports.append(onnx.helper.make_opsetid(domain, version))
+            onnx_model.ClearField("opset_import")
+            onnx_model.opset_import.extend(new_opset_imports)
         onnx_path = os.path.join(output_dir, f"{model_name}_opset{target_opset}.onnx")
         save_onnx(onnx_model, onnx_path, use_external_data_format)
         logger.info(f"Model is cloned to {onnx_path} with opset_version {target_opset}")

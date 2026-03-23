@@ -558,7 +558,19 @@ def duplicate_shared_constants(onnx_model: onnx.ModelProto) -> tuple[onnx.ModelP
 
 def check_model(model: onnx.ModelProto) -> None:
     """Checks if the given model is valid."""
-    if model.ByteSize() > (2 * (1024**3)):  # 2GB limit
+    save_as_external_data = False
+    try:
+        model_size = model.ByteSize()
+    except Exception as e:
+        logger.warning(
+            "Failed to compute model size with ByteSize (%s). Using external data path.", e
+        )
+        save_as_external_data = True
+    else:
+        if model_size <= 0 or model_size > (2 * (1024**3)):
+            save_as_external_data = True
+
+    if save_as_external_data:
         with tempfile.TemporaryDirectory() as temp_dir:
             # ONNX also looks in CWD, so we need to use a unique id
             unique_id = str(uuid.uuid4())[:8]
@@ -642,21 +654,18 @@ def get_variable_inputs(node: Node) -> list[Variable]:
 def save_onnx(model: onnx.ModelProto, onnx_path: str, save_as_external_data: bool = False):
     """Save an ONNX model to given path. If a model is larger than 2GB, will save with external data."""
     size_threshold = 2 * (1024**3)  # 2GB
-    try:
-        model_proto = model.SerializeToString()
-        model_size = len(model_proto)
-        save_as_external_data = save_as_external_data or model_size > size_threshold
-        logger.debug(
-            f"Model size: {model_size} bytes, using external data: {save_as_external_data}"
-        )
-
-    except ValueError as e:
-        if "Message onnx.ModelProto exceeds maximum protobuf size of 2GB" in str(e):
-            logger.warning("Model exceeds 2GB limit, switching to external data storage")
+    if not save_as_external_data:
+        try:
+            model_proto = model.SerializeToString()
+        except Exception as e:
+            logger.warning("Failed to serialize model. Saving tensors as external data. (%s)", e)
             save_as_external_data = True
         else:
-            logger.error(f"Failed to serialize model: {e!s}")
-            raise
+            model_size = len(model_proto)
+            save_as_external_data = model_size > size_threshold
+            logger.debug(
+                f"Model size: {model_size} bytes, using external data: {save_as_external_data}"
+            )
 
     # Set ir_version to 10, remove it once ORT supports ir_version 11
     model.ir_version = 10
@@ -1162,7 +1171,19 @@ def infer_types_verification(model: onnx.ModelProto) -> onnx.ModelProto:
 
 def infer_shapes(model: onnx.ModelProto, **kwargs):
     """Infers shapes of the onnx graph, handles large models."""
-    if model.ByteSize() > (2 * (1024**3)):  # 2GB limit
+    save_as_external_data = False
+    try:
+        model_size = model.ByteSize()
+    except Exception as e:
+        logger.warning(
+            "Failed to compute model size with ByteSize (%s). Using external data path.", e
+        )
+        save_as_external_data = True
+    else:
+        if model_size <= 0 or model_size > (2 * (1024**3)):
+            save_as_external_data = True
+
+    if save_as_external_data:
         with tempfile.TemporaryDirectory() as temp_dir:
             # ONNX also looks in CWD, so we need to use a unique id
             unique_id = str(uuid.uuid4())[:8]
