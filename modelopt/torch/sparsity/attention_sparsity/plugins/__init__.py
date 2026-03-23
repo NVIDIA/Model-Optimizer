@@ -15,6 +15,8 @@
 
 """Plugins for sparse attention integration with various frameworks."""
 
+from modelopt.torch.utils import import_plugin
+
 # List of model plugins that are called during conversion
 # Each plugin is a callable that takes (model) and performs validation/setup
 CUSTOM_MODEL_PLUGINS: list = []
