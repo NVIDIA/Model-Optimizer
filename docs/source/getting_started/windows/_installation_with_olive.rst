@@ -17,14 +17,14 @@ Setup Steps for Olive with ModelOpt-Windows
 
          pip install olive-ai[nvmo]
 
-   - **Install Prerequisites:** Ensure all required dependencies are installed. For example, to use DirectML Execution-Provider (EP) based onnxruntime and onnxruntime-genai packages, run the following commands:
+   - **Install Prerequisites:** Ensure all required dependencies are installed. For example, to install CUDA Execution-Provider (EP) based onnxruntime and onnxruntime-genai packages, run the following commands:
 
      .. code-block:: shell
 
-            $ pip install onnxruntime-genai-directml>=0.4.0
-            $ pip install onnxruntime-directml==1.20.0
+            $ pip install onnxruntime-genai-cuda
+            $ pip install onnxruntime-gpu
 
-   - Above onnxruntime and onnxruntime-genai packages enable Olive workflow with DirectML Execution-Provider (EP). To use other EPs, install corresponding packages.
+   - Above onnxruntime and onnxruntime-genai packages enable Olive workflow with CUDA Execution-Provider (EP). To use other EPs, install corresponding packages; refer to the ONNX Runtime's `EP documentation <https://onnxruntime.ai/docs/execution-providers/>`_ for details about differfent EPs and thier requirements and installation instructions.
 
    - Additionally, ensure that dependencies for Model Optimizer - Windows are met as mentioned in the :ref:`Install-Page-Standalone-Windows`.
 
