@@ -49,8 +49,8 @@ from modelopt.torch.puzzletron.subblock_stats.calc_subblock_params_and_memory im
     calc_subblock_active_params,
     calculate_non_block_memory,
     calculate_non_block_params,
-    calculate_puzzle_row_subblock_num_params,
     calculate_subblock_memory,
+    calculate_subblock_params,
 )
 from modelopt.torch.puzzletron.tools.checkpoint_utils import load_model_config
 from modelopt.torch.puzzletron.tools.logger import mprint
@@ -176,19 +176,16 @@ def calculate_subblock_stats(
         if not isinstance(subblock_memory, dict):
             subblock_memory = {"memory_mib": subblock_memory, "kv_cache_memory_mib": 0.0}
 
-        subblock_params = calculate_puzzle_row_subblock_num_params(
-            subblock_config, n_embd, model_config, descriptor
-        )
+        subblock_params = calculate_subblock_params(model_config, subblock_config, descriptor)
         if moe_stats_file is not None:
             subblock_active_params = calc_subblock_active_params(
                 subblock_config,
+                model_config,
+                descriptor,
                 n_embd,
-                n_head,
                 moe_stats_file,
                 batch_size,
                 parent_layer_indices[0],
-                model_config,
-                descriptor,
             )
         else:
             subblock_active_params = subblock_params

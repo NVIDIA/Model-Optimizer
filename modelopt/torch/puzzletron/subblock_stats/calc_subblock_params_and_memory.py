@@ -66,8 +66,6 @@ def calculate_subblock_memory(
     """``model_config`` / ``descriptor`` are required (puzzletron-style); FFN uses them for meta init."""
     if subblock_config.no_op:
         return 0
-    if subblock_config.replace_with_linear:
-        return calculate_linear_memory(n_embd, weights_dtype)
     if isinstance(subblock_config, FFNConfig):
         return calculate_ffn_memory(
             subblock_config,
@@ -155,38 +153,20 @@ def calculate_subblock_params(
     return sum(p.numel() for p in decoder_layer.parameters())
 
 
-def calculate_puzzle_row_subblock_num_params(
-    subblock_config: FFNConfig | AttentionConfig,
-    n_embd: int,
+def calc_subblock_active_params(
+    sublayer_config: FFNConfig | AttentionConfig,
     model_config: PretrainedConfig,
     descriptor: Type[ModelDescriptor],
-) -> int:
-    """Puzzle row param count: handles ``no_op`` / ``replace_with_linear``; else meta ``calculate_subblock_params``."""
-    if subblock_config.no_op:
-        return 0
-    if subblock_config.replace_with_linear:
-        return calculate_linear_params(n_embd)
-    return calculate_subblock_params(model_config, subblock_config, descriptor)
-
-
-def calc_subblock_active_params(
-    subblock_config: FFNConfig | AttentionConfig,
     n_embd: int,
-    n_head: int,
     moe_stats_file: str,
     batch_size: int,
     block_idx: int,
-    model_config: PretrainedConfig,
-    descriptor: Type[ModelDescriptor],
 ) -> int:
-    if not (isinstance(subblock_config, FFNConfig) and subblock_config.is_moe):
-        return calculate_puzzle_row_subblock_num_params(
-            subblock_config, n_embd, model_config, descriptor
-        )
-    else:
-        return estimate_moe_active_params(
-            subblock_config, n_embd, moe_stats_file, batch_size, block_idx
-        )
+    if not (isinstance(sublayer_config, FFNConfig) and sublayer_config.is_moe):
+        return calculate_subblock_params(model_config, sublayer_config, descriptor)
+    return estimate_moe_active_params(
+        sublayer_config, n_embd, moe_stats_file, batch_size, block_idx
+    )
 
 
 def load_moe_stats(stats_file: str) -> dict:
@@ -327,19 +307,6 @@ def calculate_ffn_memory(
     # TODO: How to separate between expert weights and the rest for any model (same as puzzletron).
     num_params = calculate_subblock_params(model_config, ffn_config, descriptor)
     return num_params * sizeof_dtype(weights_dtype) / 2**20
-
-
-def calculate_linear_memory(
-    n_embd: int,
-    weights_dtype: torch.dtype,
-) -> float:
-    return calculate_linear_params(n_embd) * sizeof_dtype(weights_dtype) / 2**20
-
-
-def calculate_linear_params(
-    n_embd: int,
-) -> int:
-    return n_embd**2 + n_embd
 
 
 def calculate_non_block_memory(
