@@ -304,7 +304,7 @@ EXPECTED_LM_LOSS = {
     "meta-llama/Llama-3.2-3B-Instruct": 4.816886901855469,
     "mistralai/Mistral-Small-24B-Instruct-2501": 4.709150314331055,
     # TODO: not reproducible in CI, skipping for now
-    # "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": 4.7737884521484375,
+    # "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": 4.733944892883301,
     "nvidia/NVIDIA-Nemotron-Nano-12B-v2": 4.79390811920166,
     "openai/gpt-oss-20b": 4.689250946044922,
     "Qwen/Qwen2.5-7B-Instruct": 4.778186798095703,
@@ -314,28 +314,30 @@ EXPECTED_LM_LOSS = {
 
 
 # Expected teacher memory from subblock_stats (MiB)
+# Goldens from CI after meta ``calculate_subblock_params`` for attention/Mamba (see log.txt got=).
 EXPECTED_TEACHER_MEMORY_MIB = {
-    "meta-llama/Llama-3.1-8B-Instruct": 386.22705078125,
-    "meta-llama/Llama-3.2-3B-Instruct": 386.22705078125,
-    "mistralai/Mistral-Small-24B-Instruct-2501": 386.22705078125,
-    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": 552.47607421875,
-    "nvidia/NVIDIA-Nemotron-Nano-12B-v2": 193.16357421875,
-    "openai/gpt-oss-20b": 456.75830078125,
-    "Qwen/Qwen2.5-7B-Instruct": 386.22705078125,
-    "Qwen/Qwen3-8B": 386.22705078125,
-    "Qwen/Qwen3-VL-30B-A3B-Instruct": 420.74267578125,
+    "meta-llama/Llama-3.1-8B-Instruct": 395.60205078125,
+    "meta-llama/Llama-3.2-3B-Instruct": 395.60205078125,
+    "mistralai/Mistral-Small-24B-Instruct-2501": 395.60205078125,
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": 202.10107421875,
+    "nvidia/NVIDIA-Nemotron-Nano-12B-v2": 202.10107421875,
+    "openai/gpt-oss-20b": 437.302490234375,
+    "Qwen/Qwen2.5-7B-Instruct": 386.228515625,
+    "Qwen/Qwen3-8B": 395.60302734375,
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": 406.11865234375,
 }
 
 
 # Expected total teacher params from subblock_stats
+# Memory deltas imply param deltas at bf16: Δparams ≈ ΔMiB * 524288 (when only weight bytes move).
 EXPECTED_TEACHER_NUM_PARAMS = {
-    "meta-llama/Llama-3.1-8B-Instruct": 1167616.0,
-    "meta-llama/Llama-3.2-3B-Instruct": 1167616.0,
-    "mistralai/Mistral-Small-24B-Instruct-2501": 1167616.0,
-    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": 188993280.0,
-    "nvidia/NVIDIA-Nemotron-Nano-12B-v2": 610048.0,
-    "openai/gpt-oss-20b": 38146304.0,
-    "Qwen/Qwen2.5-7B-Instruct": 1167616.0,
-    "Qwen/Qwen3-8B": 1167616.0,
-    "Qwen/Qwen3-VL-30B-A3B-Instruct": 19263744.0,
+    "meta-llama/Llama-3.1-8B-Instruct": 6082816.0,
+    "meta-llama/Llama-3.2-3B-Instruct": 6082816.0,
+    "mistralai/Mistral-Small-24B-Instruct-2501": 6082816.0,
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": 5295872.0,
+    "nvidia/NVIDIA-Nemotron-Nano-12B-v2": 5295872.0,
+    "openai/gpt-oss-20b": 27945856.0,
+    "Qwen/Qwen2.5-7B-Instruct": 1168384.0,
+    "Qwen/Qwen3-8B": 6083328.0,
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": 11596544.0,
 }

@@ -21,21 +21,28 @@ for different subblock types (FFN, Attention, Mamba, MoE) in large language mode
 considering various data types, batch sizes, and sequence lengths.
 """
 
+import copy
 import json
 import math
 from pathlib import Path
+from typing import Type
 
 import numpy as np
 import torch
+from transformers import PretrainedConfig
 
+from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
+from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
 from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
     AttentionConfig,
+    BlockConfig,
     FFNConfig,
     MambaConfig,
+    maybe_cast_block_configs,
 )
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
-from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.modeling_decilm import DeciLMMoe
+from modelopt.torch.puzzletron.tools.checkpoint_utils_hf import init_model_from_config
 from modelopt.torch.puzzletron.utils.utils import (
+    EmptyInitOnDevice,
     calculate_kv_dim,
     raise_unknown_subblock_config_error,
     sizeof_dtype,
@@ -53,21 +60,36 @@ def calculate_subblock_memory(
     weights_dtype: torch.dtype,
     kv_cache_dtype: torch.dtype,
     allocate_prefill_query: bool,
+    model_config: PretrainedConfig,
+    descriptor: Type[ModelDescriptor],
 ) -> float | dict[str, float]:
+    """``model_config`` / ``descriptor`` are required (puzzletron-style); FFN uses them for meta init."""
     if subblock_config.no_op:
         return 0
     if subblock_config.replace_with_linear:
         return calculate_linear_memory(n_embd, weights_dtype)
     if isinstance(subblock_config, FFNConfig):
-        return calculate_ffn_memory(subblock_config, n_embd, weights_dtype)
+        return calculate_ffn_memory(
+            subblock_config,
+            model_config,
+            descriptor,
+            weights_dtype,
+        )
     if isinstance(subblock_config, AttentionConfig):
         if subblock_config.is_mamba:
             return calculate_mamba_memory(
-                subblock_config.mamba, n_embd, batch_size, weights_dtype, kv_cache_dtype
+                subblock_config,
+                model_config,
+                descriptor,
+                batch_size,
+                weights_dtype,
+                kv_cache_dtype,
             )
         else:
             return calculate_attention_memory(
                 subblock_config,
+                model_config,
+                descriptor,
                 batch_size,
                 prefill_seq_len,
                 generation_seq_len,
@@ -82,22 +104,69 @@ def calculate_subblock_memory(
 
 
 def calculate_subblock_params(
+    config: PretrainedConfig,
+    layer_config: BlockConfig | FFNConfig | AttentionConfig,
+    descriptor: Type[ModelDescriptor],
+) -> int:
+    """Count parameters on one meta decoder layer (puzzletron ``calculate_subblock_params`` parity).
+
+    Uses ``BlockConfig`` / ``to_blockconfig()`` and ``deci_x_patcher`` instead of Puzzletron's
+    ``LayerConfig`` / ``puzzletron_patcher``.
+    """
+    if isinstance(layer_config, FFNConfig):
+        block_config = layer_config.to_blockconfig()
+    elif isinstance(layer_config, AttentionConfig):
+        block_config = layer_config.to_blockconfig()
+    else:
+        block_config = layer_config
+
+    ffn = block_config.ffn
+    attn = block_config.attention
+    ffn_no_op = ffn is None or ffn.no_op
+    attn_no_op = attn is None or attn.no_op
+    if not (ffn_no_op or attn_no_op):
+        raise AssertionError(
+            "One of ffn or attention must be no-op for sublayer param calculation "
+            "(single subblock at a time)."
+        )
+    if ffn_no_op and attn_no_op:
+        return 0
+
+    _config = copy.deepcopy(config)
+    lm_config = descriptor.get_language_model_config(_config)
+    lm_config.num_hidden_layers = 1
+
+    block_configs = maybe_cast_block_configs([block_config])
+    _config.block_configs = block_configs
+    if lm_config is not _config:
+        lm_config.block_configs = block_configs
+
+    with (
+        EmptyInitOnDevice("meta"),
+        deci_x_patcher(model_descriptor=descriptor, block_configs=block_configs),
+    ):
+        model = init_model_from_config(
+            _config,
+            trust_remote_code=descriptor.requires_trust_remote_code(),
+            suspend_keep_in_fp32_module_validation=True,
+        )
+
+    decoder_layer = model.get_submodule(descriptor.layer_block_name(index=0))
+    return sum(p.numel() for p in decoder_layer.parameters())
+
+
+def calculate_puzzle_row_subblock_num_params(
     subblock_config: FFNConfig | AttentionConfig,
     n_embd: int,
-    n_head: int,
+    model_config: PretrainedConfig,
+    descriptor: Type[ModelDescriptor],
 ) -> int:
+    """Puzzle row param count: handles ``no_op`` / ``replace_with_linear``; else meta ``calculate_subblock_params``."""
     if subblock_config.no_op:
         return 0
     if subblock_config.replace_with_linear:
         return calculate_linear_params(n_embd)
-    if isinstance(subblock_config, FFNConfig):
-        return calculate_ffn_params(subblock_config, n_embd)
-    if isinstance(subblock_config, AttentionConfig):
-        if subblock_config.is_mamba:
-            return calculate_mamba_params(subblock_config.mamba, n_embd)
-        else:
-            return calculate_attention_params(subblock_config, n_embd, n_head)
-    raise_unknown_subblock_config_error(subblock_config)
+    return calculate_subblock_params(model_config, subblock_config, descriptor)
 
 
 def calc_subblock_active_params(
@@ -107,9 +176,13 @@ def calc_subblock_active_params(
     moe_stats_file: str,
     batch_size: int,
     block_idx: int,
+    model_config: PretrainedConfig,
+    descriptor: Type[ModelDescriptor],
 ) -> int:
     if not (isinstance(subblock_config, FFNConfig) and subblock_config.is_moe):
-        return calculate_subblock_params(subblock_config, n_embd, n_head)
+        return calculate_puzzle_row_subblock_num_params(
+            subblock_config, n_embd, model_config, descriptor
+        )
     else:
         return estimate_moe_active_params(
             subblock_config, n_embd, moe_stats_file, batch_size, block_idx
@@ -168,6 +241,8 @@ def estimate_moe_active_params(
 
 def calculate_attention_memory(
     attention_config: AttentionConfig,
+    model_config: PretrainedConfig,
+    descriptor: Type[ModelDescriptor],
     batch_size: int,
     prefill_seq_len: int,
     generation_seq_len: int,
@@ -193,7 +268,7 @@ def calculate_attention_memory(
     total_num_tokens = seq_len * (batch_size + prefill_queue_size)
     kv_cache_size = total_num_tokens * kv_dim
     query_prefill_size = seq_len * n_embd if allocate_prefill_query else 0
-    num_params = calculate_attention_params(attention_config, n_embd, n_head)
+    num_params = calculate_subblock_params(model_config, attention_config, descriptor)
     total_memory = (
         kv_cache_size * sizeof_dtype(kv_cache_dtype)
         + query_prefill_size * sizeof_dtype(weights_dtype)
@@ -203,50 +278,21 @@ def calculate_attention_memory(
     return {"memory_mib": total_memory, "kv_cache_memory_mib": kv_cache_memory}
 
 
-def calculate_attention_params(
-    attention_config: AttentionConfig,
-    n_embd: int,
-    n_head: int,
-) -> int:
-    kv_dim = calculate_kv_dim(attention_config.num_key_value_heads, n_head, n_embd)
-    return (
-        n_embd * n_embd * 2  # Wq + Wo
-        + n_embd * kv_dim  # Wk + Wv
-        + n_embd  # rms norm
-    )
-
-
 def calculate_mamba_memory(
-    mamba_config: MambaConfig,
-    n_embd: int,
+    attention_config: AttentionConfig,
+    model_config: PretrainedConfig,
+    descriptor: Type[ModelDescriptor],
     batch_size: int,
     weights_dtype: torch.dtype,
     kv_cache_dtype: torch.dtype,
 ) -> int:
+    assert attention_config.mamba is not None
+    mamba_config = attention_config.mamba
+    num_params = calculate_subblock_params(model_config, attention_config, descriptor)
     return (
-        calculate_mamba_params(mamba_config, n_embd) * sizeof_dtype(weights_dtype)
+        num_params * sizeof_dtype(weights_dtype)
         + calculate_mamba_state_size(mamba_config, batch_size) * sizeof_dtype(kv_cache_dtype)
     ) / 2**20
-
-
-def calculate_mamba_params(
-    mamba_config: MambaConfig,
-    n_embd: int,
-) -> int:
-    d_inner, in_proj_dim, conv_dim, kernel_size = _calculate_mamba_intermediates(mamba_config)
-    param_shapes = {
-        "A_log": (mamba_config.num_heads,),
-        "D": (mamba_config.num_heads,),
-        "conv1d.bias": (conv_dim,),
-        "conv1d.weight": (conv_dim, 1, kernel_size),
-        "dt_bias": (mamba_config.num_heads,),
-        "in_proj.weight": (in_proj_dim, n_embd),
-        "norm.weight": (d_inner,),
-        "out_proj.weight": (n_embd, d_inner),
-    }
-    mamba_mixer_params = sum([math.prod(shape) for shape in param_shapes.values()])
-    rms_norm_params = n_embd
-    return mamba_mixer_params + rms_norm_params
 
 
 def calculate_mamba_state_size(
@@ -271,6 +317,18 @@ def _calculate_mamba_intermediates(mamba_config: MambaConfig) -> tuple[int, ...]
     return d_inner, in_proj_dim, conv_dim, kernel_size
 
 
+def calculate_ffn_memory(
+    ffn_config: FFNConfig,
+    model_config: PretrainedConfig,
+    descriptor: Type[ModelDescriptor],
+    weights_dtype: torch.dtype | str,
+    experts_dtype: torch.dtype | str | None = None,
+) -> float:
+    # TODO: How to separate between expert weights and the rest for any model (same as puzzletron).
+    num_params = calculate_subblock_params(model_config, ffn_config, descriptor)
+    return num_params * sizeof_dtype(weights_dtype) / 2**20
+
+
 def calculate_linear_memory(
     n_embd: int,
     weights_dtype: torch.dtype,
@@ -282,47 +340,6 @@ def calculate_linear_params(
     n_embd: int,
 ) -> int:
     return n_embd**2 + n_embd
-
-
-def calculate_ffn_memory(
-    ffn_config: FFNConfig,
-    n_embd: int,
-    weights_dtype: torch.dtype,
-) -> float:
-    num_params = calculate_ffn_params(ffn_config, n_embd)
-    return num_params * sizeof_dtype(weights_dtype) / 2**20
-
-
-def calculate_ffn_params(
-    ffn_config: FFNConfig,
-    n_embd: int,
-) -> float:
-    if ffn_config.is_moe:
-        return calculate_moe_params(ffn_config, n_embd)
-    else:
-        return calculate_dense_ffn_params(ffn_config, n_embd)
-
-
-def calculate_dense_ffn_params(
-    ffn_config: FFNConfig,
-    n_embd: int,
-) -> int:
-    intermediate_size = ffn_config.intermediate_size
-    num_linear_layers = 3 if getattr(ffn_config, "gated", True) else 2
-    rms_norm_params = n_embd
-    return n_embd * intermediate_size * num_linear_layers + rms_norm_params
-
-
-def calculate_moe_params(
-    ffn_config: FFNConfig,
-    n_embd: int,
-) -> int:
-    with torch.device("meta"):
-        config = DeciLMConfig(hidden_size=n_embd)
-        moe = DeciLMMoe(config, ffn_config)
-    moe_params = sum(p.numel() for p in moe.parameters())
-    layernorm_params = n_embd
-    return moe_params + layernorm_params
 
 
 def calculate_non_block_memory(

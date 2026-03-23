@@ -31,6 +31,7 @@ import torch
 from immutabledict import immutabledict
 from omegaconf import DictConfig, ListConfig, OmegaConf
 from tqdm import tqdm
+from transformers import PretrainedConfig
 
 from modelopt.torch.puzzletron.anymodel.model_descriptor import (
     ModelDescriptor,
@@ -48,8 +49,8 @@ from modelopt.torch.puzzletron.subblock_stats.calc_subblock_params_and_memory im
     calc_subblock_active_params,
     calculate_non_block_memory,
     calculate_non_block_params,
+    calculate_puzzle_row_subblock_num_params,
     calculate_subblock_memory,
-    calculate_subblock_params,
 )
 from modelopt.torch.puzzletron.tools.checkpoint_utils import load_model_config
 from modelopt.torch.puzzletron.tools.logger import mprint
@@ -72,6 +73,8 @@ python -m modelopt.torch.puzzletron.subblock_stats.calc_subblock_stats PUZZLE_DI
 def calculate_subblock_stats(
     calc_subblock_stats_config: DictConfig,
     teacher_dir: Path,
+    model_config: PretrainedConfig,
+    descriptor: Type[ModelDescriptor],
     master_puzzle_dir: Path,
     subblock_configs: list[immutabledict[str, AttentionConfig | FFNConfig]],
     batch_size: int,
@@ -167,14 +170,25 @@ def calculate_subblock_stats(
             weights_dtype,
             kv_cache_dtype,
             allocate_prefill_query,
+            model_config=model_config,
+            descriptor=descriptor,
         )
         if not isinstance(subblock_memory, dict):
             subblock_memory = {"memory_mib": subblock_memory, "kv_cache_memory_mib": 0.0}
 
-        subblock_params = calculate_subblock_params(subblock_config, n_embd, n_head)
+        subblock_params = calculate_puzzle_row_subblock_num_params(
+            subblock_config, n_embd, model_config, descriptor
+        )
         if moe_stats_file is not None:
             subblock_active_params = calc_subblock_active_params(
-                subblock_config, n_embd, n_head, moe_stats_file, batch_size, parent_layer_indices[0]
+                subblock_config,
+                n_embd,
+                n_head,
+                moe_stats_file,
+                batch_size,
+                parent_layer_indices[0],
+                model_config,
+                descriptor,
             )
         else:
             subblock_active_params = subblock_params
@@ -337,6 +351,8 @@ def calculate_subblock_stats_for_puzzle_dir(
         curr_subblock_stats = calculate_subblock_stats(
             calc_subblock_stats_config,
             teacher_dir=teacher_dir,
+            model_config=model_config,
+            descriptor=descriptor,
             master_puzzle_dir=master_puzzle_dir,
             subblock_configs=subblock_configs,
             batch_size=batch_size,

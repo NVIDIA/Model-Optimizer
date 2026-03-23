@@ -20,6 +20,7 @@ particularly for DeciLM models.
 """
 
 import concurrent.futures
+import contextlib
 import dataclasses
 import fcntl
 import os
@@ -31,8 +32,9 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 import torch
+import transformers
 from safetensors.torch import save_file as safe_save_file
-from transformers import AutoConfig, PretrainedConfig, PreTrainedModel
+from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
@@ -119,6 +121,64 @@ def load_model_config(
             raise ValueError(f"Unexpected config keys: {unused_kwargs.keys()}")
 
     return config
+
+
+def _get_model_class_from_config(config: PretrainedConfig) -> type:
+    """Resolve HuggingFace model class from ``config.architectures`` (see puzzletron checkpoint_utils_hf)."""
+    if hasattr(config, "architectures") and config.architectures:
+        model_class_name = config.architectures[0]
+        if hasattr(transformers, model_class_name):
+            return getattr(transformers, model_class_name)
+        mprint(
+            f"Warning: {model_class_name} not found in transformers, "
+            "falling back to AutoModelForCausalLM"
+        )
+    return AutoModelForCausalLM
+
+
+@contextlib.contextmanager
+def _suspend_keep_in_fp32_modules_for_model_init(model_class: type):
+    """Clear class-level ``_keep_in_fp32_modules`` during ``_from_config`` (Transformers 4.51+ post_init vs patcher)."""
+    saved = [
+        (c, c.__dict__["_keep_in_fp32_modules"])
+        for c in model_class.__mro__
+        if c is not object and "_keep_in_fp32_modules" in c.__dict__
+    ]
+    for c, _ in saved:
+        c._keep_in_fp32_modules = None
+    try:
+        yield
+    finally:
+        for c, v in saved:
+            c._keep_in_fp32_modules = v
+
+
+def init_model_from_config(
+    config: PretrainedConfig,
+    *,
+    trust_remote_code: bool = True,
+    suspend_keep_in_fp32_module_validation: bool = False,
+    **kwargs,
+) -> PreTrainedModel:
+    """Build a model from config on meta/uninitialized weights (used e.g. for subblock param counts).
+
+    Args:
+        suspend_keep_in_fp32_module_validation: When True, temporarily clear class-level
+            ``_keep_in_fp32_modules`` for the resolved model class while building. Use only
+            when a patcher replaces layer structure (e.g. single-layer MoE param counting).
+    """
+    model_class = _get_model_class_from_config(config)
+    ctx = (
+        _suspend_keep_in_fp32_modules_for_model_init(model_class)
+        if suspend_keep_in_fp32_module_validation
+        else contextlib.nullcontext()
+    )
+    with ctx:
+        if model_class is AutoModelForCausalLM:
+            return model_class.from_config(config, trust_remote_code=trust_remote_code, **kwargs)
+        # Concrete model classes (e.g. GptOssForCausalLM): _from_config forwards kwargs to __init__,
+        # which does not accept trust_remote_code (only AutoModel uses it when loading custom code).
+        return model_class._from_config(config, **kwargs)
 
 
 def save_checkpoint(

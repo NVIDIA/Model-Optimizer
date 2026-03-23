@@ -18,14 +18,14 @@
 # Pared-down DeciLM building blocks for Model-Optimizer puzzletron / AnyModel flows.
 # The full HF DeciLM decoder stack (decoder layers, attention, rope, etc.) is not vendored here;
 # AnyModel loads real models via transformers. This module keeps shared helpers: RMSNorm,
-# gated/vanilla MLP (used by MoE accounting), MoE, and LMHead for replacement / validation code.
+# gated MLP, and LMHead for replacement / validation code.
 # mypy: ignore-errors
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from .block_config import FFNConfig, MoEConfig
+from .block_config import FFNConfig
 from .configuration_decilm import DeciLMConfig
 from .transformers_4_44_2__activations import ACT2FN
 
@@ -100,107 +100,6 @@ class DeciLMGatedMLP(nn.Module):
             down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
         return down_proj
-
-
-class DeciLMMoe(nn.Module):
-    """
-    Implementation of Mixture of Experts module for DeciLM.
-    Equivalent to Llama4 MoE but implemented more frugally.
-    """
-
-    def __init__(self, config: DeciLMConfig, ffn_config: FFNConfig):
-        super().__init__()
-        self.config = config
-        self.ffn_config = ffn_config
-
-        # MoE parameters
-        assert ffn_config.moe is not None, "MoE configuration must be provided to use DeciLMMoe"
-        self.moe_config: MoEConfig = ffn_config.moe
-        self.hidden_dim = config.hidden_size
-        self.num_experts_per_tok = self.moe_config.num_experts_per_tok
-        self.num_local_experts = self.moe_config.num_local_experts
-        self.expert_intermediate_dim = self.moe_config.expert_intermediate_dim
-        self.shared_expert_intermediate_dim = self.moe_config.shared_expert_intermediate_dim
-
-        # Initialize experts and router
-        routed_expert_ffn_config = FFNConfig(
-            intermediate_size=self.expert_intermediate_dim,
-        )
-
-        self.experts = nn.ModuleList(
-            [
-                DeciLMGatedMLP(config, routed_expert_ffn_config)
-                for _ in range(self.num_local_experts)
-            ]
-        )
-
-        self.router = nn.Linear(config.hidden_size, self.num_local_experts, bias=False)
-
-        # Initialize shared expert as a standard MLP
-        shared_expert_ffn_config = FFNConfig(
-            intermediate_size=self.moe_config.shared_expert_intermediate_dim
-        )
-        self.shared_expert = DeciLMGatedMLP(config, shared_expert_ffn_config)
-
-        if ffn_config.sparsify is not None:
-            self.register_full_backward_hook(sparsity_backward_hook)
-
-    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass through the MoE layer.
-
-        Args:
-            hidden_states (torch.Tensor): Input tensor of shape (batch, seq_len, hidden_dim)
-
-        Returns:
-            tuple:
-                - torch.Tensor: Output tensor of shape (batch, seq_len, hidden_dim)
-                - torch.Tensor: Router scores for loss computation
-        """
-        router_logits = self.router(hidden_states)
-
-        routed_out = self.forward_routed_experts(hidden_states, router_logits)
-
-        shared_out = self.shared_expert(hidden_states)
-
-        moe_out = routed_out + shared_out
-
-        return moe_out, router_logits
-
-    def forward_routed_experts(
-        self, hidden_states: torch.Tensor, router_logits: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        For each expert:
-        1. Build the input to the expert based on the router mask
-        2. Run the expert
-        3. Add the result of the expert into the total MoE result using +=
-        """
-        router_top_values, router_indices = torch.topk(
-            router_logits, self.num_experts_per_tok, dim=-1
-        )
-        router_scores = torch.sigmoid(router_top_values.float()).to(hidden_states.dtype)
-
-        routed_out = torch.zeros_like(hidden_states)
-        for i_expert in range(self.num_local_experts):
-            expert_mask = router_indices == i_expert
-            if expert_mask.any():
-                is_token_routed_to_this_expert = expert_mask.any(dim=-1)
-                relevant_hidden_states = hidden_states[is_token_routed_to_this_expert, :]
-                relevant_scores = router_scores[expert_mask]
-                expert_in = relevant_hidden_states * relevant_scores.unsqueeze(-1)
-
-                expert_out = self.experts[i_expert](expert_in).to(hidden_states.device)
-
-                routed_out[is_token_routed_to_this_expert, :] += expert_out
-
-        return routed_out
-
-    def extra_repr(self) -> str:
-        return (
-            f"(MoE): num_local_experts={self.num_local_experts}, "
-            f"expert_intermediate_dim={self.expert_intermediate_dim},"
-        )
 
 
 class LMHead(nn.Linear):
