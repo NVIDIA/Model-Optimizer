@@ -75,11 +75,25 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="LTX-2 video generation with skip-softmax sparse attention (diffusion)"
     )
-    parser.add_argument("--prompt", type=str, required=True, help="Text prompt for generation")
+    parser.add_argument("--prompt", type=str, default=None, help="Text prompt for generation")
+    parser.add_argument(
+        "--prompt-dir",
+        type=str,
+        default=None,
+        help="Directory of .txt prompt files (one prompt per file). Overrides --prompt.",
+    )
     parser.add_argument("--output", type=str, default="output.mp4", help="Output video path")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Directory to save videos when using --prompt-dir (one .mp4 per prompt file)",
+    )
     parser.add_argument(
         "--num-frames", type=int, default=DEFAULT_NUM_FRAMES, help="Number of frames"
     )
+    parser.add_argument("--height", type=int, default=DEFAULT_2_STAGE_HEIGHT, help="Video height")
+    parser.add_argument("--width", type=int, default=DEFAULT_2_STAGE_WIDTH, help="Video width")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Random seed")
 
     # Sparse attention options
@@ -307,34 +321,55 @@ def main() -> None:
     print("Applying skip-softmax sparse attention...")
     mtsa.sparsify(transformer, config, forward_loop=forward_loop)
 
+    # ---- Build prompt list ----
+    import os
+
+    prompts_and_outputs: list[tuple[str, str]] = []
+    if args.prompt_dir:
+        os.makedirs(args.output_dir or "output_videos", exist_ok=True)
+        output_dir = args.output_dir or "output_videos"
+        prompt_files = sorted(
+            f for f in os.listdir(args.prompt_dir) if f.endswith(".txt")
+        )
+        for pf in prompt_files:
+            with open(os.path.join(args.prompt_dir, pf)) as f:
+                prompt = f.read().strip()
+            stem = os.path.splitext(pf)[0]
+            prompts_and_outputs.append((prompt, os.path.join(output_dir, f"{stem}.mp4")))
+    elif args.prompt:
+        prompts_and_outputs.append((args.prompt, args.output))
+    else:
+        raise ValueError("Either --prompt or --prompt-dir must be provided")
+
     # ---- Generate ----
     tiling_config = TilingConfig.default()
-    print(f"\nGenerating: {args.prompt[:80]}...")
+    for i, (prompt, output_path) in enumerate(prompts_and_outputs):
+        print(f"\nGenerating [{i + 1}/{len(prompts_and_outputs)}]: {prompt[:80]}...")
 
-    video, audio = pipeline(
-        prompt=args.prompt,
-        negative_prompt=DEFAULT_NEGATIVE_PROMPT,
-        seed=args.seed,
-        height=DEFAULT_2_STAGE_HEIGHT,
-        width=DEFAULT_2_STAGE_WIDTH,
-        num_frames=args.num_frames,
-        frame_rate=DEFAULT_FRAME_RATE,
-        num_inference_steps=DEFAULT_NUM_INFERENCE_STEPS,
-        video_guider_params=DEFAULT_VIDEO_GUIDER_PARAMS,
-        audio_guider_params=DEFAULT_AUDIO_GUIDER_PARAMS,
-        images=[],
-        tiling_config=tiling_config,
-    )
+        video, audio = pipeline(
+            prompt=prompt,
+            negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+            seed=args.seed,
+            height=args.height,
+            width=args.width,
+            num_frames=args.num_frames,
+            frame_rate=DEFAULT_FRAME_RATE,
+            num_inference_steps=DEFAULT_NUM_INFERENCE_STEPS,
+            video_guider_params=DEFAULT_VIDEO_GUIDER_PARAMS,
+            audio_guider_params=DEFAULT_AUDIO_GUIDER_PARAMS,
+            images=[],
+            tiling_config=tiling_config,
+        )
 
-    encode_video(
-        video=video,
-        fps=DEFAULT_FRAME_RATE,
-        audio=audio,
-        audio_sample_rate=AUDIO_SAMPLE_RATE,
-        output_path=args.output,
-        video_chunks_number=get_video_chunks_number(args.num_frames, tiling_config),
-    )
-    print(f"Saved to {args.output}")
+        encode_video(
+            video=video,
+            fps=DEFAULT_FRAME_RATE,
+            audio=audio,
+            audio_sample_rate=AUDIO_SAMPLE_RATE,
+            output_path=output_path,
+            video_chunks_number=get_video_chunks_number(args.num_frames, tiling_config),
+        )
+        print(f"Saved to {output_path}")
 
     # ---- Print stats ----
     print_sparsity_summary(transformer)
