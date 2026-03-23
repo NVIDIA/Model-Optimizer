@@ -27,6 +27,7 @@ from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
 from torch.distributed.tensor import Replicate
 
+from modelopt.torch.quantization.config import QuantizerCfgEntry
 from modelopt.torch.utils import get_unwrapped_name, print_rank_0
 
 if TYPE_CHECKING:
@@ -827,13 +828,25 @@ def fsdp2_aware_weight_update(root_model, modules_to_update, reshard=True):
 
 
 def update_quant_cfg_with_kv_cache_quant(
-    quant_cfg: dict[str, Any], kv_cache_quant_cfg: dict[str, Any]
+    quant_cfg: dict[str, Any], kv_cache_quant_cfg: list[QuantizerCfgEntry]
 ) -> dict[str, Any]:
-    """Update the quant_cfg with the kv cache quant_cfg."""
+    """Update the quant_cfg with the kv cache quant_cfg.
+
+    Args:
+        quant_cfg: The outer quantization config dict (with ``"quant_cfg"`` and ``"algorithm"`` keys).
+        kv_cache_quant_cfg: A list of :class:`QuantizerCfgEntry
+            <modelopt.torch.quantization.config.QuantizerCfgEntry>` dicts for KV cache quantization,
+            typically ``some_kv_cfg["quant_cfg"]``.
+
+    Returns:
+        A deep copy of ``quant_cfg`` with the KV cache entries appended to ``quant_cfg["quant_cfg"]``.
+    """
     # If quant_cfg["quant_cfg"] is None, it corresponds to only kv cache quantization case
     quant_cfg = copy.deepcopy(quant_cfg)
-    inner: list = quant_cfg.get("quant_cfg") or [{"quantizer_path": "*", "enable": False}]
-    quant_cfg["quant_cfg"] = inner + list(kv_cache_quant_cfg.items())
+    inner: list[QuantizerCfgEntry] = quant_cfg.get("quant_cfg") or [
+        {"quantizer_path": "*", "enable": False}
+    ]
+    quant_cfg["quant_cfg"] = inner + list(kv_cache_quant_cfg)
 
     # Set default algorithm for kv cache quantization if not provided.
     if not quant_cfg.get("algorithm"):
