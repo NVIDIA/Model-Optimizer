@@ -16,15 +16,26 @@
 """Wan2.2 Text-to-Video inference with SageAttention.
 
 SageAttention (https://arxiv.org/pdf/2410.02367) replaces
-``F.scaled_dot_product_attention`` with a faster INT8 kernel:
+``F.scaled_dot_product_attention`` with a faster INT8/FP8 kernel:
 
 - Q and K are quantized to INT8 (K is smoothed via mean-subtraction first)
-- V stays in FP16; the P·V product uses an FP16 accumulator
+- V stays in FP16 or FP8 depending on the kernel variant
 - ~2× faster attention than FlashAttention2 with negligible accuracy loss
 
-This script patches ``F.scaled_dot_product_attention`` globally before
-loading the pipeline so every attention call in the Wan2.2 transformer
-goes through SageAttention automatically.
+Three kernel variants are supported via ``--kernel``:
+
+``sage1``
+    ``sageattn`` — SageAttention v1 auto-selector. INT8 QK, FP16 PV.
+    Works on Ampere, Ada, Hopper.
+
+``sage2-fp16``
+    ``sageattn_qk_int8_pv_fp16_cuda`` — SageAttention2, INT8 QK, FP16 PV.
+    Per-thread quantization granularity. Faster than sage1 on Ada/Hopper.
+
+``sage2-fp8`` (default on Ada/Hopper)
+    ``sageattn_qk_int8_pv_fp8_cuda`` — SageAttention2++. INT8 QK, FP8 PV
+    with two-stage FP32+FP16 accumulator. Fastest option on Ada (SM89) and
+    Hopper (SM90).
 
 Requirements::
 
@@ -32,19 +43,22 @@ Requirements::
 
 Usage::
 
-    # SageAttention (default)
+    # SageAttention2++ (default, fastest on Ada)
     python wan2_sage_attention.py --prompt "Two cats boxing on a stage"
 
-    # Baseline — standard SDPA, no SageAttention
-    python wan2_sage_attention.py --prompt "Two cats boxing on a stage" --baseline
+    # Explicit kernel selection
+    python wan2_sage_attention.py --prompt "..." --kernel sage2-fp16
+
+    # Baseline — standard SDPA (uses flash_attn if installed)
+    python wan2_sage_attention.py --prompt "..." --baseline
+
+    # Benchmark all kernels back-to-back
+    python wan2_sage_attention.py --prompt "..." --benchmark
 
     # Smaller 5B model (fits on a single 24 GB GPU)
     python wan2_sage_attention.py \\
         --model Wan-AI/Wan2.2-TI2V-5B-Diffusers \\
         --prompt "Two cats boxing on a stage"
-
-    # Benchmark both modes back-to-back
-    python wan2_sage_attention.py --prompt "Two cats boxing on a stage" --benchmark
 """
 
 import argparse
@@ -61,18 +75,76 @@ MODEL_TI2V_5B = "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
 DEFAULT_MODEL = MODEL_T2V_14B
 DEFAULT_NEGATIVE_PROMPT = "low quality, blurry, distorted, watermark, text, cropped, overexposed"
 
+# Kernel choices
+KERNEL_SAGE1 = "sage1"
+KERNEL_SAGE2_FP16 = "sage2-fp16"
+KERNEL_SAGE2_FP8 = "sage2-fp8"
+KERNEL_CHOICES = [KERNEL_SAGE1, KERNEL_SAGE2_FP16, KERNEL_SAGE2_FP8]
+
+_KERNEL_DESCRIPTIONS = {
+    KERNEL_SAGE1: "sageattn (SA1, INT8 QK + FP16 PV, auto-select)",
+    KERNEL_SAGE2_FP16: "sageattn_qk_int8_pv_fp16_cuda (SA2, INT8 QK + FP16 PV, per-thread)",
+    KERNEL_SAGE2_FP8: "sageattn_qk_int8_pv_fp8_cuda (SA2++, INT8 QK + FP8 PV, fp32+fp16 accum)",
+}
+
 
 # ---------------------------------------------------------------------------
 # SageAttention patching
 # ---------------------------------------------------------------------------
 
 # Keep a reference to the original SDPA so we can restore it and fall back
-# when SageAttention can't handle a particular call (e.g. non-None attn_mask).
+# when SageAttention cannot handle a particular call.
 _orig_sdpa = F.scaled_dot_product_attention
+
+# Active kernel name — set by enable_sage_attention()
+_active_kernel: str = KERNEL_SAGE2_FP8
 
 # Call counters — reset by enable_sage_attention()
 _sage_calls: int = 0
 _fallback_calls: int = 0
+
+
+def _run_sage_kernel(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    is_causal: bool,
+    scale: float | None,
+) -> torch.Tensor:
+    """Dispatch to the selected SageAttention kernel."""
+    if _active_kernel == KERNEL_SAGE1:
+        from sageattention import sageattn
+
+        return sageattn(query, key, value, tensor_layout="HND", is_causal=is_causal, sm_scale=scale)
+
+    elif _active_kernel == KERNEL_SAGE2_FP16:
+        from sageattention import sageattn_qk_int8_pv_fp16_cuda
+
+        return sageattn_qk_int8_pv_fp16_cuda(
+            query,
+            key,
+            value,
+            tensor_layout="HND",
+            is_causal=is_causal,
+            qk_quant_gran="per_thread",
+            sm_scale=scale,
+            smooth_k=True,
+        )
+
+    else:  # KERNEL_SAGE2_FP8
+        from sageattention import sageattn_qk_int8_pv_fp8_cuda
+
+        return sageattn_qk_int8_pv_fp8_cuda(
+            query,
+            key,
+            value,
+            tensor_layout="HND",
+            is_causal=is_causal,
+            qk_quant_gran="per_thread",
+            sm_scale=scale,
+            pv_accum_dtype="fp32+fp16",  # SA2++ two-stage accumulator, fastest on Ada
+            smooth_k=True,
+        )
 
 
 def _sageattn_sdpa_compat(
@@ -90,7 +162,7 @@ def _sageattn_sdpa_compat(
     Falls back to standard SDPA when SageAttention cannot be applied:
     - ``attn_mask`` is not None (SageAttention does not support arbitrary masks)
     - ``dropout_p > 0`` (training-time dropout)
-    - Input dtype is not FP16 or BF16 (e.g. FP32 during VAE encoding/decoding)
+    - Input dtype is not FP16 or BF16 (e.g. FP32 during VAE encode/decode)
     """
     global _sage_calls, _fallback_calls
     if (
@@ -109,39 +181,34 @@ def _sageattn_sdpa_compat(
             scale=scale,
         )
 
-    # sageattn uses sm_scale instead of scale; tensors are (B, H, N, D) = "HND"
-    from sageattention import sageattn
-
     _sage_calls += 1
-    return sageattn(query, key, value, tensor_layout="HND", is_causal=is_causal, sm_scale=scale)
+    return _run_sage_kernel(query, key, value, is_causal=is_causal, scale=scale)
 
 
-def print_sage_stats() -> None:
-    """Print how many attention calls went through sageattn vs fallback."""
-    total = _sage_calls + _fallback_calls
-    print(
-        f"[SageAttention] calls: {_sage_calls} sageattn, {_fallback_calls} fallback (total {total})"
-    )
+def enable_sage_attention(kernel: str = KERNEL_SAGE2_FP8) -> None:
+    """Patch ``F.scaled_dot_product_attention`` globally with SageAttention.
 
-
-def enable_sage_attention() -> None:
-    """Patch ``F.scaled_dot_product_attention`` globally with SageAttention."""
-    global _sage_calls, _fallback_calls
+    Args:
+        kernel: One of ``"sage1"``, ``"sage2-fp16"``, ``"sage2-fp8"``.
+    """
+    global _active_kernel, _sage_calls, _fallback_calls
     try:
         import sageattention  # noqa: F401
     except ImportError as e:
         raise ImportError("SageAttention is not installed. Run: pip install sageattention") from e
 
+    if kernel not in KERNEL_CHOICES:
+        raise ValueError(f"Unknown kernel {kernel!r}. Choose from {KERNEL_CHOICES}")
+
+    _active_kernel = kernel
     _sage_calls = 0
     _fallback_calls = 0
+
     F.scaled_dot_product_attention = _sageattn_sdpa_compat
-    # Also patch the reference inside torch.nn.functional module object so
-    # any code that imported SDPA directly still gets the patched version.
     import torch.nn.functional as _F
 
     _F.scaled_dot_product_attention = _sageattn_sdpa_compat
-    print("[SageAttention] Patched F.scaled_dot_product_attention → sageattn")
-    print("  Q/K: INT8 (K mean-smoothed), V: FP16, accumulator: FP16")
+    print(f"[SageAttention] kernel={kernel}  {_KERNEL_DESCRIPTIONS[kernel]}")
 
 
 def disable_sage_attention() -> None:
@@ -153,13 +220,21 @@ def disable_sage_attention() -> None:
 
 
 @contextmanager
-def sage_attention_ctx():
+def sage_attention_ctx(kernel: str = KERNEL_SAGE2_FP8):
     """Context manager that enables SageAttention for the duration of the block."""
-    enable_sage_attention()
+    enable_sage_attention(kernel)
     try:
         yield
     finally:
         disable_sage_attention()
+
+
+def print_sage_stats() -> None:
+    """Print how many attention calls went through sageattn vs fallback."""
+    total = _sage_calls + _fallback_calls
+    print(
+        f"[SageAttention] calls: {_sage_calls} sageattn, {_fallback_calls} fallback (total {total})"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +317,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--guidance-scale", type=float, default=4.0)
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument(
+        "--kernel",
+        type=str,
+        default=KERNEL_SAGE2_FP8,
+        choices=KERNEL_CHOICES,
+        help=(
+            "SageAttention kernel variant. "
+            "sage1: SA1 auto-select; "
+            "sage2-fp16: SA2 INT8+FP16; "
+            "sage2-fp8: SA2++ INT8+FP8 (fastest on Ada/Hopper)"
+        ),
+    )
+    parser.add_argument(
         "--baseline",
         action="store_true",
         help="Run with standard SDPA instead of SageAttention",
@@ -249,7 +336,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--benchmark",
         action="store_true",
-        help="Run both baseline and SageAttention back-to-back and report speedup",
+        help="Run baseline + all three SageAttention kernels back-to-back",
     )
     return parser.parse_args()
 
@@ -260,27 +347,34 @@ def main() -> None:
     pipe = load_pipeline(args.model)
 
     if args.benchmark:
-        # Baseline pass (standard SDPA)
-        t_base = run_inference(pipe, args, label="baseline")
+        results: dict[str, float] = {}
 
-        # SageAttention pass
-        enable_sage_attention()
-        t_sage = run_inference(pipe, args, label="sage")
-        print_sage_stats()
-        disable_sage_attention()
+        # Baseline
+        results["baseline"] = run_inference(pipe, args, label="baseline")
 
-        print(f"\n{'=' * 50}")
-        print(f"  Baseline:        {t_base:.1f}s")
-        print(f"  SageAttention:   {t_sage:.1f}s")
-        print(f"  Speedup:         {t_base / t_sage:.2f}x")
-        print(f"{'=' * 50}")
+        # All three sage kernels
+        for kernel in KERNEL_CHOICES:
+            enable_sage_attention(kernel)
+            results[kernel] = run_inference(pipe, args, label=kernel)
+            print_sage_stats()
+            disable_sage_attention()
+
+        t_base = results["baseline"]
+        print(f"\n{'=' * 55}")
+        print(f"  {'Kernel':<20} {'Time':>8}   {'Speedup':>8}")
+        print(f"  {'-' * 40}")
+        print(f"  {'baseline (SDPA)':<20} {t_base:>7.1f}s   {'1.00x':>8}")
+        for kernel in KERNEL_CHOICES:
+            t = results[kernel]
+            print(f"  {kernel:<20} {t:>7.1f}s   {t_base / t:>7.2f}x")
+        print(f"{'=' * 55}")
 
     elif args.baseline:
         run_inference(pipe, args, label="baseline")
 
     else:
-        enable_sage_attention()
-        run_inference(pipe, args, label="sage")
+        enable_sage_attention(args.kernel)
+        run_inference(pipe, args, label=args.kernel)
         print_sage_stats()
         disable_sage_attention()
 
