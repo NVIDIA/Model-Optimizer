@@ -98,7 +98,7 @@ This mode can be useful when you know the exact dimensions you want to prune to 
 # Specify the pruning constraints (Check Support Matrix for available pruning dimensions)
 # Save minitron scores at checkpoint so we can re-run pruning with different constraints without running the forward loop again
 constraints = {"export_config": {"num_layers": 32, "hidden_size": 3584, "ffn_hidden_size": 10240}}
-config = {"forward_loop": forward_loop, "checkpoint": "/path/to/cache/pruning/scores.pth"}
+config = {"forward_loop": forward_loop, "checkpoint": "/path/to/cache/pruning/scores/"}
 
 mtp.prune(...)
 ```
@@ -130,7 +130,7 @@ def score_func(m):
 constraints = {"params": 6e9}  # Prune to 6B parameters
 config = {
     "forward_loop": forward_loop,
-    "checkpoint": "/path/to/cache/pruning/scores.pth",
+    "checkpoint": "/path/to/cache/pruning/scores/",
     "score_func": score_func,
     # Optional: Configure search space constraints (showing defaults)
     "max_width_pruning": 0.4,  # Maximum 40% per width pruning hparams (hidden_size, ffn_hidden_size, etc.)
