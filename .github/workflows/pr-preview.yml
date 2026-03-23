@@ -1,0 +1,28 @@
+name: PR Docs Preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+    branches: [main, release/*, feature/*]
+
+# One preview deployment per PR; do not cancel so 'closed' cleanup always runs
+concurrency: pr-preview-${{ github.event.pull_request.number }}
+
+permissions:
+  contents: write       # push preview to gh-pages branch
+  pull-requests: write  # post/update preview URL comment on the PR
+
+jobs:
+  deploy-preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/ubuntu-setup
+      - name: Build docs
+        if: github.event.action != 'closed'
+        run: pip install tox && tox -e build-docs
+      - name: Deploy / remove PR preview
+        uses: rossjrw/pr-preview-action@v1
+        with:
+          source-dir: docs/build/html
