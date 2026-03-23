@@ -150,9 +150,10 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 
 """
 
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal, cast
 
 from pydantic import ValidationInfo, field_validator, model_validator
+from typing_extensions import TypedDict
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.utils.network import ConstructorLike
