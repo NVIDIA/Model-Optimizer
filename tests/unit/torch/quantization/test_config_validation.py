@@ -15,6 +15,8 @@
 
 """Test of quantization config validations."""
 
+import pytest
+
 from modelopt.torch.quantization.config import (
     FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
     FP8_DEFAULT_CFG,
@@ -23,6 +25,7 @@ from modelopt.torch.quantization.config import (
     NVFP4_DEFAULT_CFG,
     W4A8_AWQ_BETA_CFG,
     need_calibration,
+    normalize_quant_cfg_list,
 )
 
 
@@ -33,3 +36,94 @@ def test_need_calibration():
     assert need_calibration(INT4_AWQ_CFG)
     assert need_calibration(W4A8_AWQ_BETA_CFG)
     assert need_calibration(NVFP4_DEFAULT_CFG)
+
+
+class TestNormalizeQuantCfgList:
+    def test_new_format_passthrough(self):
+        """New-format entries are returned unchanged (only canonical defaults added)."""
+        raw = [{"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}}]
+        result = normalize_quant_cfg_list(raw)
+        assert len(result) == 1
+        assert result[0]["quantizer_path"] == "*weight_quantizer"
+        assert result[0]["cfg"] == {"num_bits": 8, "axis": 0}
+        assert result[0]["enable"] is True  # defaulted
+
+    def test_new_format_enable_false(self):
+        """Explicit enable=False is preserved."""
+        raw = [{"quantizer_path": "*", "enable": False}]
+        result = normalize_quant_cfg_list(raw)
+        assert result[0]["enable"] is False
+        assert result[0]["cfg"] is None  # defaulted
+
+    def test_new_format_explicit_enable_true_no_cfg(self):
+        """Explicit enable=True with no cfg is valid and cfg defaults to None."""
+        raw = [{"quantizer_path": "*", "enable": True}]
+        result = normalize_quant_cfg_list(raw)
+        assert result[0]["enable"] is True
+        assert result[0]["cfg"] is None
+
+    def test_legacy_single_key_dict(self):
+        """Legacy {'*path': {attrs}} is converted to new format."""
+        raw = [{"*weight_quantizer": {"num_bits": 8, "axis": 0}}]
+        result = normalize_quant_cfg_list(raw)
+        assert result[0]["quantizer_path"] == "*weight_quantizer"
+        assert result[0]["cfg"] == {"num_bits": 8, "axis": 0}
+        assert result[0]["enable"] is True  # defaulted
+
+    def test_legacy_single_key_dict_with_enable(self):
+        """Legacy {'*path': {'enable': False}} splits enable out from cfg."""
+        raw = [{"*input_quantizer": {"enable": False}}]
+        result = normalize_quant_cfg_list(raw)
+        assert result[0]["quantizer_path"] == "*input_quantizer"
+        assert result[0]["enable"] is False
+        assert result[0]["cfg"] == {}
+
+    def test_legacy_nn_class_scoped(self):
+        """Legacy {'nn.Linear': {'*': {attrs}}} is converted with parent_class."""
+        raw = [{"nn.Linear": {"*": {"enable": False}}}]
+        result = normalize_quant_cfg_list(raw)
+        assert result[0]["parent_class"] == "nn.Linear"
+        assert result[0]["quantizer_path"] == "*"
+        assert result[0]["enable"] is False
+
+    def test_normalization_cfg_defaults_to_none(self):
+        """Entries without cfg get cfg=None after normalization."""
+        raw = [{"quantizer_path": "*lm_head*", "enable": False}]
+        result = normalize_quant_cfg_list(raw)
+        assert "cfg" in result[0]
+        assert result[0]["cfg"] is None
+
+    def test_normalization_enable_defaults_to_true(self):
+        """Entries with cfg but no enable get enable=True after normalization."""
+        raw = [{"quantizer_path": "*", "cfg": {"num_bits": 4}}]
+        result = normalize_quant_cfg_list(raw)
+        assert result[0]["enable"] is True
+
+    def test_empty_list(self):
+        """Empty list is returned unchanged."""
+        assert normalize_quant_cfg_list([]) == []
+
+    def test_multiple_entries_order_preserved(self):
+        """The order of entries is preserved."""
+        raw = [
+            {"quantizer_path": "*", "enable": False},
+            {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8}},
+        ]
+        result = normalize_quant_cfg_list(raw)
+        assert result[0]["quantizer_path"] == "*"
+        assert result[1]["quantizer_path"] == "*weight_quantizer"
+
+    def test_error_on_quantizer_path_only(self):
+        """Entry with only quantizer_path and no cfg or enable is rejected."""
+        with pytest.raises(ValueError, match="must specify 'cfg', 'enable'"):
+            normalize_quant_cfg_list([{"quantizer_path": "*"}])
+
+    def test_error_on_empty_dict(self):
+        """An empty dict entry is rejected."""
+        with pytest.raises(ValueError):
+            normalize_quant_cfg_list([{}])
+
+    def test_error_on_multi_key_legacy_dict(self):
+        """A multi-key legacy dict (no quantizer_path) is rejected."""
+        with pytest.raises(ValueError):
+            normalize_quant_cfg_list([{"*weight_quantizer": {}, "*input_quantizer": {}}])

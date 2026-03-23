@@ -15,6 +15,8 @@
 
 """Unit tests for modelopt.recipe.loader and modelopt.recipe.loader.load_config."""
 
+import re
+
 import pytest
 
 from modelopt.recipe.config import ModelOptPTQRecipe, RecipeType
@@ -164,7 +166,7 @@ def test_load_recipe_dir(tmp_path):
     (tmp_path / "recipe.yml").write_text(
         "metadata:\n  recipe_type: ptq\n  description: Dir test.\n"
     )
-    (tmp_path / "ptq_cfg.yml").write_text("algorithm: max\nquant_cfg: {}\n")
+    (tmp_path / "ptq_cfg.yml").write_text("algorithm: max\nquant_cfg: []\n")
     recipe = load_recipe(tmp_path)
     assert recipe.recipe_type == RecipeType.PTQ
     assert recipe.description == "Dir test."
@@ -200,35 +202,49 @@ def test_load_recipe_dir_missing_ptq_cfg_raises(tmp_path):
     ],
 )
 def test_general_ptq_yaml_matches_config_dicts(yaml_path, model_cfg_name, kv_cfg_name):
-    """Each general/ptq YAML's merged quant_cfg matches the corresponding config.py dicts."""
+    """Each general/ptq YAML's quant_cfg list matches the merged Python config dicts."""
+    import json
+
     import modelopt.torch.quantization.config as qcfg
+    from modelopt.torch.quantization.config import normalize_quant_cfg_list
 
     model_cfg = getattr(qcfg, model_cfg_name)
     kv_cfg = getattr(qcfg, kv_cfg_name)
     yaml_data = load_config(yaml_path)
 
-    def _as_dict(qc):
-        result = {}
-        for entry in qc:
-            if isinstance(entry, dict) and "quantizer_path" in entry:
-                parent_class = entry.get("parent_class")
-                key = parent_class if parent_class else entry["quantizer_path"]
-                cfg = entry.get("cfg", {})
-                val = dict(cfg) if isinstance(cfg, dict) else cfg
-                if entry.get("enable") is not None:
-                    val["enable"] = entry["enable"]
-                if parent_class:
-                    result[key] = {entry["quantizer_path"]: val}
-                else:
-                    result[key] = val
-            elif isinstance(entry, dict):
-                result.update(entry)
-            else:
-                result[entry[0]] = entry[1]
+    def _normalize_fpx(val):
+        """Normalize FPx representations to a canonical ``[E, M]`` list.
+
+        Python configs may use tuple form ``(E, M)`` or string alias ``"eEmM"``;
+        YAML always uses the string form.  Both are converted to ``[E, M]`` so the
+        comparison is representation-agnostic.
+        """
+        if isinstance(val, str):
+            m = re.fullmatch(r"e(\d+)m(\d+)", val)
+            if m:
+                return [int(m.group(1)), int(m.group(2))]
+        if isinstance(val, tuple) and len(val) == 2 and all(isinstance(x, int) for x in val):
+            return list(val)
+        if isinstance(val, dict):
+            return {str(k): _normalize_fpx(v) for k, v in val.items()}
+        return val
+
+    def _normalize_entries(raw_entries):
+        """Normalize a raw quant_cfg list to a canonical, JSON-serialisable form."""
+        entries = normalize_quant_cfg_list(list(raw_entries))
+        result = []
+        for entry in entries:
+            e = {k: v for k, v in entry.items() if v is not None}
+            if "cfg" in e and e["cfg"] is not None:
+                e["cfg"] = _normalize_fpx(e["cfg"])
+            result.append(e)
         return result
 
-    ptq = yaml_data["ptq_cfg"]
-    assert {**_as_dict(model_cfg["quant_cfg"]), **_as_dict(kv_cfg["quant_cfg"])} == _as_dict(
-        ptq["quant_cfg"]
-    )
-    assert model_cfg["algorithm"] == ptq["algorithm"]
+    def _sort_key(entry):
+        return json.dumps(entry, sort_keys=True, default=str)
+
+    python_entries = _normalize_entries(model_cfg["quant_cfg"] + kv_cfg["quant_cfg"])
+    yaml_entries = _normalize_entries(yaml_data["ptq_cfg"]["quant_cfg"])
+
+    assert sorted(python_entries, key=_sort_key) == sorted(yaml_entries, key=_sort_key)
+    assert model_cfg["algorithm"] == yaml_data["ptq_cfg"]["algorithm"]

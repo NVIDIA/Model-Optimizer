@@ -32,6 +32,12 @@ from pydantic import ValidationError
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.calib import MaxCalibrator
+from modelopt.torch.quantization.config import QuantizerAttributeConfig
+from modelopt.torch.quantization.conversion import set_quantizer_attributes_full
+from modelopt.torch.quantization.nn.modules.tensor_quantizer import (
+    SequentialQuantizer,
+    TensorQuantizer,
+)
 
 # A test config with double-quant (using `SequentialQuantizers`)
 WINT4INT8_CFG = {
@@ -300,3 +306,97 @@ def test_quantize_twice():
     out2 = model(inputs)
 
     assert torch.allclose(out1, out2), "Re-quantization with same config should be idempotent"
+
+
+class TestSetQuantizerAttributesFull:
+    """Tests for set_quantizer_attributes_full and its atomicity semantics."""
+
+    def _quantize(self, model):
+        return mtq.quantize(model, mtq.INT8_DEFAULT_CFG, lambda m: m(m.get_input()))
+
+    def test_basic_full_replacement(self):
+        """set_quantizer_attributes_full replaces all attributes on matched quantizers."""
+        model = self._quantize(SimpleLinear())
+        attrs = QuantizerAttributeConfig(num_bits=4, axis=0)
+        set_quantizer_attributes_full(model, "*weight_quantizer", attrs)
+        for name, module in model.named_modules():
+            if name.endswith("weight_quantizer"):
+                assert isinstance(module, TensorQuantizer)
+                assert module.num_bits == 4
+                assert module.axis == 0
+
+    def test_atomicity_unset_fields_revert_to_defaults(self):
+        """A full replacement reverts unspecified fields to QuantizerAttributeConfig defaults."""
+        model = self._quantize(SimpleLinear())
+        # First configure with axis=0 (non-default)
+        set_quantizer_attributes_full(
+            model, "*weight_quantizer", QuantizerAttributeConfig(num_bits=8, axis=0)
+        )
+        for name, module in model.named_modules():
+            if name.endswith("weight_quantizer"):
+                assert module.axis == 0
+
+        # Now replace with only num_bits=4; axis should revert to default (None)
+        set_quantizer_attributes_full(
+            model, "*weight_quantizer", QuantizerAttributeConfig(num_bits=4)
+        )
+        default_axis = QuantizerAttributeConfig().axis
+        for name, module in model.named_modules():
+            if name.endswith("weight_quantizer"):
+                assert module.num_bits == 4
+                assert module.axis == default_axis
+
+    def test_parent_class_filter(self):
+        """parent_class restricts which quantizers are affected."""
+        model = self._quantize(SimpleConvLinear())
+        # Only set num_bits=4 for quantizers inside nn.Linear modules
+        set_quantizer_attributes_full(
+            model,
+            "*weight_quantizer",
+            QuantizerAttributeConfig(num_bits=4),
+            parent_class=torch.nn.Linear,
+        )
+        for name, module in model.named_modules():
+            if not name.endswith("weight_quantizer"):
+                continue
+            parent_name = name.rpartition(".")[0]
+            parent = model.get_submodule(parent_name)
+            if isinstance(parent, torch.nn.Linear):
+                assert module.num_bits == 4
+            else:
+                # Conv2d weight_quantizers should be unchanged (still 8-bit from INT8_DEFAULT_CFG)
+                assert module.num_bits == 8
+
+    def test_wildcard_no_match_is_noop(self):
+        """A wildcard that matches nothing silently does nothing."""
+        model = self._quantize(SimpleLinear())
+        # Record state before
+        bits_before = {
+            n: m.num_bits for n, m in model.named_modules() if isinstance(m, TensorQuantizer)
+        }
+        set_quantizer_attributes_full(
+            model, "*nonexistent_quantizer*", QuantizerAttributeConfig(num_bits=4)
+        )
+        bits_after = {
+            n: m.num_bits for n, m in model.named_modules() if isinstance(m, TensorQuantizer)
+        }
+        assert bits_before == bits_after
+
+    def test_invalid_attributes_type_raises(self):
+        """Passing a plain dict instead of QuantizerAttributeConfig raises ValueError."""
+        model = self._quantize(SimpleLinear())
+        with pytest.raises((ValueError, AttributeError)):
+            set_quantizer_attributes_full(model, "*weight_quantizer", {"num_bits": 4})  # type: ignore[arg-type]
+
+    def test_list_attributes_creates_sequential_quantizer(self):
+        """A list of QuantizerAttributeConfig replaces TensorQuantizer with SequentialQuantizer."""
+        model = self._quantize(SimpleLinear())
+        attrs = [
+            QuantizerAttributeConfig(num_bits=4, block_sizes={-1: 128}),
+            QuantizerAttributeConfig(num_bits=8, axis=0),
+        ]
+        set_quantizer_attributes_full(model, "*weight_quantizer", attrs)
+        for name, module in model.named_modules():
+            if name.endswith("weight_quantizer"):
+                assert isinstance(module, SequentialQuantizer)
+                assert len(module) == 2
