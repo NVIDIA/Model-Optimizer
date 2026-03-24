@@ -320,7 +320,7 @@ def _add_cross_kv_outputs(
 
 
 def add_cross_kv_to_encoder(
-    encoder_path: str,
+    model_path: str,
     output_path: str,
     hf_model_id: str,
     hidden_state_output_name: str = "last_hidden_state",
@@ -349,7 +349,7 @@ def add_cross_kv_to_encoder(
     6. Generates genai_config.json and audio_processor_config.json (optional)
 
     Args:
-        encoder_path: Path to encoder ONNX model.
+        model_path: Path to encoder ONNX model.
         output_path: Path to save modified encoder.
         hf_model_id: HuggingFace model ID for loading cross-attention weights.
         hidden_state_output_name: Name of encoder hidden state output.
@@ -369,7 +369,7 @@ def add_cross_kv_to_encoder(
     Example:
         >>> from modelopt.onnx.graph_surgery import add_cross_kv_to_encoder
         >>> model = add_cross_kv_to_encoder(
-        ...     encoder_path="encoder_model.onnx",
+        ...     model_path="encoder_model.onnx",
         ...     output_path="encoder_model_with_kv.onnx",
         ...     hf_model_id="openai/whisper-large-v3-turbo",
         ... )
@@ -380,9 +380,9 @@ def add_cross_kv_to_encoder(
     )
 
     if verbose:
-        logger.info(f"Loading encoder model from: {encoder_path}")
+        logger.info(f"Loading encoder model from: {model_path}")
 
-    encoder_model = onnx.load(encoder_path, load_external_data=True)
+    encoder_model = onnx.load(model_path, load_external_data=True)
 
     # Detect model dtype
     onnx_dtype, np_dtype = detect_model_dtype(encoder_model)

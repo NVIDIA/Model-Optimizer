@@ -47,13 +47,13 @@ Example usage:
     ... )
     >>> # Add cross-attention KV cache outputs to encoder (GenAI compatible)
     >>> add_cross_kv_to_encoder(
-    ...     encoder_path="encoder_model.onnx",
+    ...     model_path="encoder_model.onnx",
     ...     output_path="encoder_with_kv.onnx",
     ...     hf_model_id="openai/whisper-large-v3-turbo",
     ... )
     >>> # Standalone FP16 to BF16 conversion
     >>> convert_fp16_to_bf16(
-    ...     input_path="model_fp16.onnx",
+    ...     model_path="model_fp16.onnx",
     ...     output_path="model_bf16.onnx",
     ... )
     >>>
@@ -69,15 +69,11 @@ from .encoder_cross_kv import add_cross_kv_to_encoder
 from .gqa_replacement import replace_attention_with_gqa
 from .utils.dtype_conversion import convert_fp16_to_bf16
 
-# Registry of available graph surgeries.
-# Maps surgery name -> (function, input_path_param_name)
-# input_path_param_name is the keyword argument name for the input model path
-# (different surgeries use different names: model_path, encoder_path, input_path)
 _SURGERY_REGISTRY = {
-    "replace-gqa": (replace_attention_with_gqa, "model_path"),
-    "add-cross-kv": (add_cross_kv_to_encoder, "encoder_path"),
-    "convert-bf16": (convert_fp16_to_bf16, "input_path"),
-    "transpose-dq": (transpose_dequantize_linear_weights, "model_path"),
+    "replace-gqa": replace_attention_with_gqa,
+    "add-cross-kv": add_cross_kv_to_encoder,
+    "convert-bf16": convert_fp16_to_bf16,
+    "transpose-dq": transpose_dequantize_linear_weights,
 }
 
 
@@ -88,7 +84,7 @@ def get_available_surgeries() -> list[str]:
 
 def run_graph_surgery(
     surgery_name: str,
-    input_path: str,
+    model_path: str,
     output_path: str,
     **kwargs,
 ):
@@ -103,7 +99,7 @@ def run_graph_surgery(
     Args:
         surgery_name: Name of the surgery to run (e.g. 'replace-gqa', 'transpose-dq').
             Use get_available_surgeries() to see all available options.
-        input_path: Path to the input ONNX model.
+        model_path: Path to the input ONNX model.
         output_path: Path to save the output ONNX model.
         **kwargs: Surgery-specific parameters. Passed directly to the surgery function.
 
@@ -119,7 +115,7 @@ def run_graph_surgery(
         ['replace-gqa', 'add-cross-kv', 'convert-bf16', 'transpose-dq']
         >>> run_graph_surgery(
         ...     "replace-gqa",
-        ...     input_path="model.onnx",
+        ...     model_path="model.onnx",
         ...     output_path="model_gqa.onnx",
         ...     hf_model_id="meta-llama/Llama-2-7b-hf",
         ... )
@@ -128,8 +124,8 @@ def run_graph_surgery(
         available = ", ".join(f"'{s}'" for s in _SURGERY_REGISTRY)
         raise ValueError(f"Unknown surgery: '{surgery_name}'. Available surgeries: {available}")
 
-    func, input_param_name = _SURGERY_REGISTRY[surgery_name]
-    return func(**{input_param_name: input_path, "output_path": output_path}, **kwargs)
+    func = _SURGERY_REGISTRY[surgery_name]
+    return func(model_path=model_path, output_path=output_path, **kwargs)
 
 
 __all__ = [
