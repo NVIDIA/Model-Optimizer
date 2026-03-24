@@ -72,11 +72,75 @@ def _apply_mask(
 
 
 # ---------------------------------------------------------------------------
-# Forward kernel
+# V-mean precomputation kernel (for V2.5 fresh v_mean)
 # ---------------------------------------------------------------------------
-@triton.autotune(configs=_FWD_CONFIGS, key=["N_CTX", "HEAD_DIM"])
 @triton.jit
-def _attn_fwd(
+def _precompute_vmean(
+    V,  # [total_kv, num_kv_heads, head_dim]
+    Vmean,  # [batch, num_kv_heads, num_kv_tiles, BLOCK_D] output
+    b_start_loc_k,  # [batch] start offset of each KV sequence
+    b_seq_len_k,  # [batch] length of each KV sequence
+    stride_vbs,
+    stride_vh,
+    stride_vm_b,
+    stride_vm_h,
+    stride_vm_t,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+):
+    """Precompute mean of V vectors per KV tile.
+
+    Grid: (batch, num_kv_heads, num_kv_tiles)
+    Each thread block computes mean(V[tile]) → [BLOCK_D].
+    """
+    batch_idx = tl.program_id(0)
+    kv_head_idx = tl.program_id(1)
+    tile_kv = tl.program_id(2)
+
+    seq_len_kv = tl.load(b_seq_len_k + batch_idx)
+    kv_offset = tl.load(b_start_loc_k + batch_idx)
+
+    kv_start = tile_kv * BLOCK_N
+    if kv_start >= seq_len_kv:
+        return
+
+    kv_pos = tl.arange(0, BLOCK_N)
+    dim_pos = tl.arange(0, BLOCK_D)
+    d_mask = dim_pos < HEAD_DIM
+    kv_mask = (kv_start + kv_pos) < seq_len_kv
+
+    # Load V tile [BLOCK_N, BLOCK_D]
+    v_ptrs = (
+        (kv_offset + kv_start + kv_pos[:, None]) * stride_vbs
+        + kv_head_idx * stride_vh
+        + dim_pos[None, :]
+    )
+    v = tl.load(V + v_ptrs, mask=kv_mask[:, None] & d_mask[None, :], other=0.0)
+
+    # Count valid tokens for correct mean
+    n_valid = tl.sum(kv_mask.to(tl.float32))
+    n_valid = tl.maximum(n_valid, 1.0)  # avoid div by zero
+
+    # mean(V, dim=0) → [BLOCK_D]
+    v_mean = tl.sum(v.to(tl.float32), 0) / n_valid
+
+    # Store
+    out_ptr = (
+        Vmean
+        + batch_idx * stride_vm_b
+        + kv_head_idx * stride_vm_h
+        + tile_kv * stride_vm_t
+        + dim_pos
+    )
+    tl.store(out_ptr, v_mean, mask=d_mask)
+
+
+# ---------------------------------------------------------------------------
+# Forward kernel body (shared by autotuned and fixed-config paths)
+# ---------------------------------------------------------------------------
+@triton.jit
+def _attn_fwd_body(
     Q,  # [total_q, num_q_heads, head_dim] query tensor
     K,  # [total_kv, num_kv_heads, head_dim] key tensor
     V,  # [total_kv, num_kv_heads, head_dim] value tensor
@@ -99,23 +163,26 @@ def _attn_fwd(
     stride_lse_head,  # LSE strides: per-token, per-head
     N_CTX,  # Max Q sequence length (autotune cache key only)
     kv_group_num: tl.constexpr,  # GQA ratio: num_q_heads // num_kv_heads
-    BLOCK_M: tl.constexpr,  # Q tile size (autotuned)
+    BLOCK_M: tl.constexpr,  # Q tile size
     BLOCK_D: tl.constexpr,  # Head dim tile size (next_power_of_2(HEAD_DIM))
-    BLOCK_N: tl.constexpr,  # KV tile size (autotuned)
+    BLOCK_N: tl.constexpr,  # KV tile size
     IS_CAUSAL: tl.constexpr,  # Whether to apply causal mask
     HEAD_DIM: tl.constexpr,  # Actual head dimension (for d_mask)
     STORE_LSE: tl.constexpr,  # Whether to save LSE for backward pass
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,  # Skip KV tiles with negligible scores
-    skip_threshold_log2=0.0,  # Effective log2-space threshold (regular param, not constexpr)
+    skip_threshold_log2=0.0,  # Effective log2-space threshold
+    # --- V2.5 parameters (optional) ---
+    APPLY_SKIP_V25: tl.constexpr = False,  # Pool-K approximate weight + fresh v_mean
+    Vmean_cache=None,  # [batch, num_kv_heads, num_kv_tiles, BLOCK_D] float32 (precomputed)
+    stride_vm_b=0,  # Vmean_cache strides
+    stride_vm_h=0,
+    stride_vm_t=0,
 ):
     # --- Grid: (batch, num_q_heads, num_q_tiles) ---
-    # Example: batch=2, num_q_heads=32, seq_len=256, BLOCK_M=128
-    #   grid = (2, 32, 2), 128 thread blocks launched in parallel
-    #   block (1, 5, 0) handles: batch 1, Q head 5, tokens 0-127
-    batch_idx = tl.program_id(0)  # 0..batch-1
-    head_idx = tl.program_id(1)  # 0..num_q_heads-1
-    tile_q = tl.program_id(2)  # 0..ceil(seq_len/BLOCK_M)-1
-    kv_head_idx = head_idx // kv_group_num  # GQA: map Q head to shared KV head
+    batch_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+    tile_q = tl.program_id(2)
+    kv_head_idx = head_idx // kv_group_num
 
     # --- Load Q and KV varlen metadata ---
     seq_len_q = tl.load(b_seq_len + batch_idx)
@@ -124,35 +191,33 @@ def _attn_fwd(
     kv_offset = tl.load(b_start_loc_k + batch_idx)
 
     if tile_q * BLOCK_M >= seq_len_q:
-        return  # This Q tile is past the sequence end
+        return
 
     # --- Tile position indices ---
-    q_pos = tile_q * BLOCK_M + tl.arange(0, BLOCK_M)  # Absolute Q token positions
-    kv_pos = tl.arange(0, BLOCK_N)  # Relative KV positions within a tile
-    dim_pos = tl.arange(0, BLOCK_D)  # Head dimension positions
-    d_mask = dim_pos < HEAD_DIM  # Mask for non-power-of-2 head dims
+    q_pos = tile_q * BLOCK_M + tl.arange(0, BLOCK_M)
+    kv_pos = tl.arange(0, BLOCK_N)
+    dim_pos = tl.arange(0, BLOCK_D)
+    d_mask = dim_pos < HEAD_DIM
 
     # --- Load Q tile [BLOCK_M, BLOCK_D]: stays in SRAM for the entire KV loop ---
     q_ptrs = (q_offset + q_pos[:, None]) * stride_qbs + head_idx * stride_qh + dim_pos[None, :]
     q = tl.load(Q + q_ptrs, mask=(q_pos[:, None] < seq_len_q) & d_mask[None, :], other=0.0)
 
-    # Base pointers for K and V at this KV head (per-tile offset added in loop)
     k_base = K + kv_head_idx * stride_kh
     v_base = V + kv_head_idx * stride_vh
 
     # --- Online softmax state (per Q row) ---
-    row_max = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")  # Running max for stability
-    row_sum = tl.zeros([BLOCK_M], dtype=tl.float32)  # Running sum of exp(scores)
-    acc = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)  # Running weighted sum of V
+    row_max = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
+    row_sum = tl.zeros([BLOCK_M], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)
 
-    # Causal bound: Q position i only attends to KV positions 0..i
     kv_bound = seq_len_kv if not IS_CAUSAL else tl.minimum((tile_q + 1) * BLOCK_M, seq_len_kv)
 
     # --- Main loop: iterate over KV tiles ---
     for kv_start in range(0, kv_bound, BLOCK_N):
-        kv_start = tl.multiple_of(kv_start, BLOCK_N)  # Compiler hint for alignment
+        kv_start = tl.multiple_of(kv_start, BLOCK_N)
 
-        # Load K^T [BLOCK_D, BLOCK_N] (transposed layout for Q @ K^T matmul)
+        # Load K^T [BLOCK_D, BLOCK_N]
         k_offs = (kv_offset + kv_start + kv_pos[None, :]) * stride_kbs + dim_pos[:, None]
         k = tl.load(
             k_base + k_offs,
@@ -165,18 +230,15 @@ def _attn_fwd(
         scores = _apply_mask(scores, q_pos, kv_pos, seq_len_q, seq_len_kv, kv_start, IS_CAUSAL)
 
         if APPLY_SKIP_SOFTMAX:
-            # --- Skip-softmax path: check tile, skip V load if all rows negligible ---
-            # Compute tile row max once — reused for both skip check and softmax update
+            # --- Skip-softmax: check tile, skip V load if all rows negligible ---
             tile_row_max = tl.max(scores, 1)  # [BLOCK_M]
             can_skip = tile_row_max < (row_max + skip_threshold_log2)
             all_skip = tl.min(can_skip.to(tl.int32)) == 1
 
             if not all_skip:
-                # Online softmax update (reuses tile_row_max — no second tl.max)
-                # For skipped rows: tile_row_max < row_max, so m_new = row_max (no change)
+                # Online softmax update
                 m_new = tl.maximum(row_max, tile_row_max)
                 p = tl.math.exp2(scores - m_new[:, None])
-                # Zero out skipped rows (instead of masking scores and recomputing max)
                 p = tl.where(can_skip[:, None], 0.0, p)
                 l_new = tl.sum(p, 1)
                 correction = tl.math.exp2(row_max - m_new)
@@ -192,10 +254,32 @@ def _attn_fwd(
                 )
                 acc = tl.dot(p.to(v.dtype), v, acc)
                 row_max = m_new
-            # else: all rows negligible — skip V load, softmax update, accumulation
+            # All rows negligible — skip V load, softmax update, accumulation
+            elif APPLY_SKIP_V25:
+                # V2.5: pool-K approximate weight + fresh precomputed v_mean
+                # k is [BLOCK_D, BLOCK_N] (transposed K already in SRAM)
+                k_mean = tl.sum(k.to(tl.float32), 1) / BLOCK_N  # [BLOCK_D]
+                # Q @ k_mean → [BLOCK_M] per-row approximate score
+                approx_score = tl.sum(q.to(tl.float32) * k_mean[None, :], 1) * qk_scale
+                # BLOCK_M exponentials (not BLOCK_M*BLOCK_N)
+                p_approx = tl.math.exp2(approx_score - row_max)  # [BLOCK_M]
+
+                # Load fresh precomputed v_mean
+                kv_tile_idx = kv_start // BLOCK_N
+                vm_ptr = (
+                    Vmean_cache
+                    + batch_idx * stride_vm_b
+                    + kv_head_idx * stride_vm_h
+                    + kv_tile_idx * stride_vm_t
+                    + dim_pos
+                )
+                fresh_v_mean = tl.load(vm_ptr, mask=d_mask, other=0.0)  # [BLOCK_D]
+
+                # Update denominator and accumulator
+                row_sum += p_approx
+                acc += p_approx[:, None] * fresh_v_mean[None, :]
         else:
             # --- Standard path: no skip check ---
-            # Online softmax update
             m_new = tl.maximum(row_max, tl.max(scores, 1))
             p = tl.math.exp2(scores - m_new[:, None])
             l_new = tl.sum(p, 1)
@@ -203,7 +287,6 @@ def _attn_fwd(
             row_sum = row_sum * correction + l_new
             acc = acc * correction[:, None]
 
-            # Load V and accumulate
             v_offs = (kv_offset + kv_start + kv_pos[:, None]) * stride_vbs + dim_pos[None, :]
             v = tl.load(
                 v_base + v_offs,
@@ -216,16 +299,87 @@ def _attn_fwd(
     # --- Final normalization: output = acc / row_sum ---
     acc = acc / row_sum[:, None]
 
-    # Save LSE for backward pass (log2-space: lse = max + log2(sum))
     if STORE_LSE:
         lse = row_max + tl.math.log2(row_sum)
         lse = tl.where(row_sum == 0.0, float("-inf"), lse)
         lse_ptrs = (q_offset + q_pos) * stride_lse_tok + head_idx * stride_lse_head
         tl.store(Lse + lse_ptrs, lse, mask=q_pos < seq_len_q)
 
-    # --- Store output [BLOCK_M, BLOCK_D] ---
     o_ptrs = (q_offset + q_pos[:, None]) * stride_obs + head_idx * stride_oh + dim_pos[None, :]
     tl.store(Out + o_ptrs, acc, mask=(q_pos[:, None] < seq_len_q) & d_mask[None, :])
+
+
+# ---------------------------------------------------------------------------
+# Forward kernel (autotuned wrapper around _attn_fwd_body)
+# ---------------------------------------------------------------------------
+@triton.autotune(configs=_FWD_CONFIGS, key=["N_CTX", "HEAD_DIM"])
+@triton.jit
+def _attn_fwd(
+    Q,
+    K,
+    V,
+    qk_scale,
+    b_start_loc,
+    b_seq_len,
+    b_start_loc_k,
+    b_seq_len_k,
+    Out,
+    Lse,
+    stride_qbs,
+    stride_qh,
+    stride_kbs,
+    stride_kh,
+    stride_vbs,
+    stride_vh,
+    stride_obs,
+    stride_oh,
+    stride_lse_tok,
+    stride_lse_head,
+    N_CTX,
+    kv_group_num: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    STORE_LSE: tl.constexpr,
+    APPLY_SKIP_SOFTMAX: tl.constexpr = False,
+    skip_threshold_log2=0.0,
+):
+    """Autotuned forward kernel (V1 skip-softmax, no V2.5 cache)."""
+    _attn_fwd_body(
+        Q,
+        K,
+        V,
+        qk_scale,
+        b_start_loc,
+        b_seq_len,
+        b_start_loc_k,
+        b_seq_len_k,
+        Out,
+        Lse,
+        stride_qbs,
+        stride_qh,
+        stride_kbs,
+        stride_kh,
+        stride_vbs,
+        stride_vh,
+        stride_obs,
+        stride_oh,
+        stride_lse_tok,
+        stride_lse_head,
+        N_CTX,
+        kv_group_num=kv_group_num,
+        BLOCK_M=BLOCK_M,
+        BLOCK_D=BLOCK_D,
+        BLOCK_N=BLOCK_N,
+        IS_CAUSAL=IS_CAUSAL,
+        HEAD_DIM=HEAD_DIM,
+        STORE_LSE=STORE_LSE,
+        APPLY_SKIP_SOFTMAX=APPLY_SKIP_SOFTMAX,
+        skip_threshold_log2=skip_threshold_log2,
+        APPLY_SKIP_V25=False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -739,6 +893,99 @@ class _Attention(torch.autograd.Function):
         return dq, dk, dv, None, None, None, None, None, None, None, None, None, None
 
 
+def _attention_v25_forward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    b_start_loc: torch.Tensor,
+    b_seq_len: torch.Tensor,
+    max_input_len: int,
+    is_causal: bool,
+    sm_scale: float,
+    b_start_loc_k: torch.Tensor,
+    b_seq_len_k: torch.Tensor,
+    max_input_len_k: int,
+    skip_threshold_log2: float,
+    v_mean_cache: torch.Tensor,
+) -> torch.Tensor:
+    """V2.5 forward: pool-K approximate weights + fresh precomputed v_mean.
+
+    No autograd — V2.5 is a forward-only inference optimization.
+    """
+    HEAD_DIM = q.shape[2]
+    num_q_heads = q.shape[1]
+    num_kv_heads = k.shape[1]
+    kv_group_num = num_q_heads // num_kv_heads
+    batch = b_seq_len.shape[0]
+    qk_scale = sm_scale * LOG2E
+    BLOCK_D = triton.next_power_of_2(HEAD_DIM)
+    BLOCK_M = 128
+    BLOCK_N = 64
+
+    o = torch.empty_like(q)
+    lse = torch.empty(q.shape[0], num_q_heads, device=q.device, dtype=torch.float32)
+
+    # Precompute fresh v_mean for all KV tiles (VSA-style)
+    num_kv_tiles = triton.cdiv(max_input_len_k, BLOCK_N)
+    _precompute_vmean[(batch, num_kv_heads, num_kv_tiles)](
+        v,
+        v_mean_cache,
+        b_start_loc_k,
+        b_seq_len_k,
+        v.stride(0),
+        v.stride(1),
+        v_mean_cache.stride(0),
+        v_mean_cache.stride(1),
+        v_mean_cache.stride(2),
+        BLOCK_N=BLOCK_N,
+        BLOCK_D=BLOCK_D,
+        HEAD_DIM=HEAD_DIM,
+    )
+
+    grid = (batch, num_q_heads, triton.cdiv(max_input_len, BLOCK_M))
+
+    _attn_fwd_body[grid](
+        q,
+        k,
+        v,
+        qk_scale,
+        b_start_loc,
+        b_seq_len,
+        b_start_loc_k,
+        b_seq_len_k,
+        o,
+        lse,
+        q.stride(0),
+        q.stride(1),
+        k.stride(0),
+        k.stride(1),
+        v.stride(0),
+        v.stride(1),
+        o.stride(0),
+        o.stride(1),
+        lse.stride(0),
+        lse.stride(1),
+        N_CTX=max_input_len,
+        kv_group_num=kv_group_num,
+        BLOCK_M=BLOCK_M,
+        BLOCK_D=BLOCK_D,
+        BLOCK_N=BLOCK_N,
+        IS_CAUSAL=is_causal,
+        HEAD_DIM=HEAD_DIM,
+        STORE_LSE=False,
+        APPLY_SKIP_SOFTMAX=True,
+        skip_threshold_log2=skip_threshold_log2,
+        APPLY_SKIP_V25=True,
+        Vmean_cache=v_mean_cache,
+        stride_vm_b=v_mean_cache.stride(0),
+        stride_vm_h=v_mean_cache.stride(1),
+        stride_vm_t=v_mean_cache.stride(2),
+        num_warps=4,
+        num_stages=1,
+    )
+    return o
+
+
 def attention(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -754,6 +1001,7 @@ def attention(
     *,
     skip_softmax_threshold: float | None = None,
     skip_softmax_normalize_by_seqlen: bool = False,
+    v_mean_cache: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Variable-length flash attention with GQA, autograd, and optional skip-softmax.
 
@@ -770,23 +1018,57 @@ def attention(
         b_seq_len_k: [batch] length for K/V (None = same as Q).
         max_input_len_k: Maximum K/V sequence length (None = same as Q).
         skip_softmax_threshold: Skip KV tiles whose max attention score is
-            below ``running_max * threshold`` for all Q rows. This is an
-            approximation that trades accuracy for speed — tiles with
-            negligible softmax contributions are skipped entirely (no V
-            load or accumulation). Set to ``None`` or ``0`` to disable.
-            Typical values: 1e-3 to 1e-1. The backward pass re-applies
-            the same skip decision using the saved LSE for consistency.
-        skip_softmax_normalize_by_seqlen: When True (diffusion mode), the
-            threshold is interpreted as a normalized gap value and converted
-            via ``-threshold * log2(seq_k)``. This makes the skip decision
-            sequence-length-invariant: ``skip if gap >= threshold * log(seq_k)``.
-            When False (default, LLM mode), the threshold is converted via
-            ``log2(threshold)`` for a fixed-ratio comparison.
+            below ``running_max * threshold`` for all Q rows.
+        skip_softmax_normalize_by_seqlen: When True (diffusion mode), converts
+            threshold via ``-threshold * log2(seq_k)`` for sequence-length
+            invariance. When False (LLM mode), uses ``log2(threshold)``.
+        v_mean_cache: V2.5 precomputed per-tile mean V vector. Shape
+            ``[batch, num_kv_heads, num_kv_tiles, head_dim_padded]``.
+            Populated by a precompute kernel before attention. Skipped tiles
+            use pool-K approximate weight + this fresh v_mean.
 
     Returns:
         Output tensor [total_q_tokens, num_q_heads, head_dim].
     """
+    import math
+
     sm_scale = 1.0 / (q.shape[2] ** 0.5) if softmax_scale is None else softmax_scale
+
+    apply_skip = skip_softmax_threshold is not None and skip_softmax_threshold > 0.0
+    use_v25 = apply_skip and v_mean_cache is not None
+
+    if use_v25:
+        # V2.5 path: no autograd, fixed block sizes, cache read/write
+        if b_seq_len_k is None:
+            b_seq_len_k = b_seq_len
+            b_start_loc_k = b_start_loc
+            max_input_len_k = max_input_len
+        assert b_start_loc_k is not None
+        assert max_input_len_k is not None
+        assert skip_softmax_threshold is not None
+
+        if skip_softmax_normalize_by_seqlen:
+            skip_threshold_log2 = -skip_softmax_threshold * math.log2(max_input_len_k)
+        else:
+            skip_threshold_log2 = math.log2(skip_softmax_threshold)
+
+        return _attention_v25_forward(
+            q,
+            k,
+            v,
+            b_start_loc,
+            b_seq_len,
+            max_input_len,
+            is_causal,
+            sm_scale,
+            b_start_loc_k,
+            b_seq_len_k,
+            max_input_len_k,
+            skip_threshold_log2,
+            v_mean_cache,
+        )
+
+    # Standard path (V1 or no skip) with autograd support
     return _Attention.apply(
         q,
         k,

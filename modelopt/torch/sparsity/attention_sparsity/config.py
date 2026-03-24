@@ -106,6 +106,17 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         ),
     )
 
+    enable_v25: bool = ModeloptField(
+        default=False,
+        title="Enable V2.5 cached approximation.",
+        description=(
+            "When True, skipped tiles use cached sum_p and v_mean from the "
+            "previous denoising step to approximate their contribution. "
+            "Improves accuracy over V1 (which contributes nothing for skipped tiles). "
+            "Only used by triton_skip_softmax_diffusion."
+        ),
+    )
+
     @field_validator("method")
     @classmethod
     def validate_method(cls, v):

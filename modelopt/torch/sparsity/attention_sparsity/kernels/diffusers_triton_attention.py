@@ -47,16 +47,23 @@ _thread_local = threading.local()
 def set_triton_skip_softmax_config(
     threshold: float | None = None,
     normalize_by_seqlen: bool = False,
+    enable_v25: bool = False,
 ) -> None:
     """Set thread-local skip-softmax config for the next Triton attention call."""
     _thread_local.skip_threshold = threshold
     _thread_local.normalize_by_seqlen = normalize_by_seqlen
+    _thread_local.enable_v25 = enable_v25
+    # V2.5 v_mean buffer is lazy-allocated on first attention call
+    if not enable_v25:
+        _thread_local.v_mean_cache = None
 
 
 def clear_triton_skip_softmax_config() -> None:
     """Clear thread-local skip-softmax config."""
     _thread_local.skip_threshold = None
     _thread_local.normalize_by_seqlen = False
+    _thread_local.enable_v25 = False
+    _thread_local.v_mean_cache = None
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +129,22 @@ def _diffusers_triton_attention(
         kw["skip_softmax_normalize_by_seqlen"] = getattr(
             _thread_local, "normalize_by_seqlen", False
         )
+
+        # V2.5: lazy-allocate and pass caches
+        if getattr(_thread_local, "enable_v25", False):
+            import triton
+
+            BLOCK_N = 64
+            n_kt = math.ceil(seq_k / BLOCK_N)
+            BLOCK_D = triton.next_power_of_2(head_dim)
+
+            vm = getattr(_thread_local, "v_mean_cache", None)
+            if vm is None or vm.shape != (batch, num_heads_kv, n_kt, BLOCK_D):
+                _thread_local.v_mean_cache = torch.zeros(
+                    batch, num_heads_kv, n_kt, BLOCK_D, device=device, dtype=torch.float32
+                )
+
+            kw["v_mean_cache"] = _thread_local.v_mean_cache
 
     o = attention(q, k, v, **kw)
 

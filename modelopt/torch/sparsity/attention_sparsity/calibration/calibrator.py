@@ -342,8 +342,8 @@ class PercentileThresholdCalibrator:
     """Percentile-based threshold calibrator for diffusion models.
 
     Calibration Algorithm:
-        1. Run forward pass in calibration mode, collecting all normalized gaps
-           (min_gap_per_block_column / log(seq_k)) from every attention layer.
+        1. Run forward pass in calibration mode, collecting all per-row normalized
+           gaps ((cummax - block_max) / log(seq_k)) from every attention layer.
         2. Compute threshold = percentile(all_gaps, (1 - target_sparsity) * 100)
 
     At inference time:

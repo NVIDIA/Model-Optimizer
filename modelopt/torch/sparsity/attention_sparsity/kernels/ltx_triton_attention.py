@@ -38,11 +38,15 @@ def set_ltx_triton_context(
     active: bool,
     threshold: float | None = None,
     normalize_by_seqlen: bool = False,
+    enable_v25: bool = False,
 ) -> None:
     """Set thread-local Triton skip-softmax config for LTX-2 attention."""
     _thread_local.active = active
     _thread_local.threshold = threshold
     _thread_local.normalize_by_seqlen = normalize_by_seqlen
+    _thread_local.enable_v25 = enable_v25
+    if not enable_v25:
+        _thread_local.v_mean_cache = None
 
 
 def clear_ltx_triton_context() -> None:
@@ -50,14 +54,17 @@ def clear_ltx_triton_context() -> None:
     _thread_local.active = False
     _thread_local.threshold = None
     _thread_local.normalize_by_seqlen = False
+    _thread_local.enable_v25 = False
+    _thread_local.v_mean_cache = None
 
 
-def _get_ltx_triton_context() -> tuple[bool, float | None, bool]:
-    """Return (active, threshold, normalize_by_seqlen)."""
+def _get_ltx_triton_context() -> tuple[bool, float | None, bool, bool]:
+    """Return (active, threshold, normalize_by_seqlen, enable_v25)."""
     return (
         getattr(_thread_local, "active", False),
         getattr(_thread_local, "threshold", None),
         getattr(_thread_local, "normalize_by_seqlen", False),
+        getattr(_thread_local, "enable_v25", False),
     )
 
 
@@ -112,6 +119,22 @@ def _ltx_triton_attention(
         kw["skip_softmax_threshold"] = threshold
         kw["skip_softmax_normalize_by_seqlen"] = normalize_by_seqlen
 
+        # V2.5: lazy-allocate and pass caches
+        if getattr(_thread_local, "enable_v25", False):
+            import triton
+
+            BLOCK_N = 64
+            n_kt = math.ceil(seq_k / BLOCK_N)
+            BLOCK_D = triton.next_power_of_2(dim_head)
+
+            vm = getattr(_thread_local, "v_mean_cache", None)
+            if vm is None or vm.shape != (b, heads, n_kt, BLOCK_D):
+                _thread_local.v_mean_cache = torch.zeros(
+                    b, heads, n_kt, BLOCK_D, device=device, dtype=torch.float32
+                )
+
+            kw["v_mean_cache"] = _thread_local.v_mean_cache
+
     o = attention(q_flat, k_flat, v_flat, **kw)
 
     # Reshape back: [B*T, H, D] → [B, T, H*D]
@@ -136,7 +159,7 @@ class _TritonLTXAttentionWrapper:
         heads: int,
         mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        active, threshold, normalize_by_seqlen = _get_ltx_triton_context()
+        active, threshold, normalize_by_seqlen, _ = _get_ltx_triton_context()
         if active:
             return _ltx_triton_attention(q, k, v, heads, mask, threshold, normalize_by_seqlen)
         return self._original_fn(q, k, v, heads, mask)

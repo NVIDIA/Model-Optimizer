@@ -58,6 +58,7 @@ class TritonSkipSoftmaxDiffusion(SparseAttentionMethod):
         self.bc = config.get("bc", 128)
         self.backend = config.get("backend", "triton")
         self.is_causal = config.get("is_causal", False)
+        self.enable_v25 = config.get("enable_v25", False)
 
         # These are set by the Triton kernel integration and read by HF/diffusers backends
         self.skip_softmax_threshold: float | None = None
@@ -131,14 +132,17 @@ class TritonSkipSoftmaxDiffusion(SparseAttentionMethod):
         total_blocks = num_block_rows * num_block_cols
 
         if self._calibration_mode:
-            # Collect min-gap-per-block normalized by log(seq_k)
-            min_gap = gap.min(dim=-2)[0]
-            normalized_gap = min_gap / log_seq_k
+            # Collect per-row normalized gaps for percentile calibration.
+            # gap shape: [batch, heads, block_rows, br, block_cols]
+            # We collect ALL per-row gaps (not per-block min) because the
+            # percentile on per-row gaps produces the correct threshold for
+            # the block-level skip decision (skip block if ALL rows agree).
+            normalized_gap = gap / log_seq_k
 
-            # Exclude padded tiles
-            block_max_tile = block_max.min(dim=-2)[0]
-            valid_mask = block_max_tile > torch.finfo(attn_weights.dtype).min
+            # Exclude padded rows/tiles: padded positions have block_max = dtype.min
+            valid_mask = block_max > torch.finfo(attn_weights.dtype).min
             valid_gaps = normalized_gap[valid_mask].detach().float().cpu().numpy()
+            del gap, normalized_gap, valid_mask, block_max, block_max_cummax
 
             stats = {
                 "sparsity": [0.0],
@@ -267,6 +271,7 @@ class TritonSkipSoftmaxDiffusion(SparseAttentionMethod):
                     set_triton_skip_softmax_config(
                         threshold=threshold,
                         normalize_by_seqlen=True,
+                        enable_v25=self.enable_v25,
                     )
                     stack.callback(clear_triton_skip_softmax_config)
                 except ImportError:
@@ -283,6 +288,7 @@ class TritonSkipSoftmaxDiffusion(SparseAttentionMethod):
                         active=True,
                         threshold=threshold,
                         normalize_by_seqlen=True,
+                        enable_v25=self.enable_v25,
                     )
                     stack.callback(clear_ltx_triton_context)
                 except ImportError:
