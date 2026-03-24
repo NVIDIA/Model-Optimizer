@@ -163,9 +163,7 @@ class _VLLMParallelLinear(QuantModule):
         if w is None or not isinstance(w, torch.Tensor) or w.is_meta:
             return
         if pqs.device != w.device or pqs.dtype != w.dtype:
-            self.input_quantizer._pre_quant_scale.data = pqs.data.to(
-                device=w.device, dtype=w.dtype
-            )
+            self.input_quantizer._pre_quant_scale.data = pqs.data.to(device=w.device, dtype=w.dtype)
 
     def modelopt_post_restore(self, prefix: str = "") -> None:
         super().modelopt_post_restore(prefix=prefix)
@@ -383,7 +381,7 @@ CUSTOM_MODEL_PLUGINS.add(vllm_replace_quant_module_hook)
 
 
 def _vllm_attention_modelopt_post_restore(self) -> None:
-    """Shared post-restore: resolve device, move module. """
+    """Shared post-restore: resolve device, move module."""
     device, dtype = _get_device_dtype(self, None)
     if device is None or dtype is None:
         raise RuntimeError(

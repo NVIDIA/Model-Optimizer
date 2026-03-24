@@ -99,9 +99,7 @@ def test_hf_vllm_export(tmp_path, quant_cfg):
         )
 
     # Verify quantizer state dict: same keys, weight quantizer amaxes cleared, input amaxes kept
-    quantizer_state_dict = torch.load(modelopt_state_file, weights_only=True)[
-        "modelopt_state_weights"
-    ]
+    quantizer_state_dict = torch.load(modelopt_state_file)["modelopt_state_weights"]
     assert len(quantizer_state_dict) > 0, (
         f"modelopt_state_weights should not be empty in {modelopt_state_file}"
     )
