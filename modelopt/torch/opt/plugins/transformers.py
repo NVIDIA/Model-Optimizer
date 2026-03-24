@@ -93,12 +93,12 @@ def _save_pretrained_with_checks(self, save_directory, *args, **kwargs):
 
 # [Fix for huggingface bug] deepspeed zero3 training backend only loads params into the model from
 # state_dict, but not buffers. So lets explicitly load the buffers into the model from state_dict.
-def _load_params_and_buffers_into_zero3_model(model_to_load, state_dict):
+def _load_params_and_buffers_into_zero3_model(model_to_load, state_dict, load_config=None):
     buffer_names = [name for name, _ in model_to_load.named_buffers()]
     buffer_state_dict = {k: v for k, v in state_dict.items() if k in buffer_names}
     model_to_load.load_state_dict(buffer_state_dict, strict=False)
     return tf_modeling_utils._modelopt_cache["_load_state_dict_into_zero3_model"](
-        model_to_load, state_dict
+        model_to_load, state_dict, load_config
     )
 
 

@@ -333,10 +333,14 @@ class HFParallelLinear(torch.nn.Linear, DynamicModule):
     shard = None
 
     def _setup(self):
-        assert self.weight.placements == self.shard, (
-            f"Received unexpected shard {self.weight.placements} for {self}"
-        )
-        tp_group = self.weight.device_mesh.get_group()
+        if isinstance(self.weight, torch.distributed.tensor.DTensor):  # transformers<5.0
+            assert self.weight.placements == self.shard, (
+                f"Received unexpected shard {self.weight.placements} for {self}"
+            )
+            device_mesh = self.weight.device_mesh
+        else:  # transformers>=5.0: weights are plain Parameters, mesh is on the module
+            device_mesh = self._hf_device_mesh
+        tp_group = device_mesh.get_group()
         self._parallel_state = ParallelState(data_parallel_group=-1, tensor_parallel_group=tp_group)
 
     @classmethod
@@ -371,14 +375,17 @@ class _QuantHFParallelLinear(_ParallelLinear):
 
     @contextmanager
     def enable_weight_access_and_writeback(self):
-        assert self.weight.placements == self.shard, (
-            f"Received unexpected shard {self.weight.placements} for {self}"
-        )
-        weight = self.weight
-        # TODO: To support TP + FSDP, we need to redistribute the tensor with replicate instead of shard
-        self.weight = nn.Parameter(weight.to_local())
-        yield
-        self.weight = weight
+        if isinstance(self.weight, torch.distributed.tensor.DTensor):  # transformers<5.0
+            assert self.weight.placements == self.shard, (
+                f"Received unexpected shard {self.weight.placements} for {self}"
+            )
+            weight = self.weight
+            # TODO: To support TP + FSDP, we need to redistribute the tensor with replicate instead of shard
+            self.weight = nn.Parameter(weight.to_local())
+            yield
+            self.weight = weight
+        else:  # transformers>=5.0: weights are already plain Parameters
+            yield
 
 
 @QuantModuleRegistry.register({HFColumnParallelLinear: "HFColumnParallelLinear"})
@@ -523,7 +530,7 @@ class _QuantSparseMoe(QuantModule):
                 super().forward(hidden_states)
                 self.gate.top_k = original_top_k
             else:
-                # Path for transformers < 5.0
+                # Path for transformers<5.0
                 if hasattr(self, "gate") and hasattr(self.gate, "top_k"):
                     top_k_owner = self.gate
                 else:

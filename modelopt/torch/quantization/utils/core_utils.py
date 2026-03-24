@@ -524,7 +524,14 @@ def sync_moe_expert_amax(experts):
     2. For any ``weight_quantizer`` that is enabled but has ``amax is None`` (expert
        received no tokens during calibration), runs a weight-only ``max_calibrate``
        to populate the missing amax.
+
+    No-op for batched expert modules (e.g. transformers>=5.0 ``Qwen3MoeExperts``)
+    that store all expert weights in a single 3D tensor without per-expert sub-modules.
     """
+    if not hasattr(experts, "__iter__"):
+        # transformers>=5.0: batched experts, no per-expert quantizers
+        return
+
     from ..nn import TensorQuantizer
 
     amax_dict: dict[str, torch.Tensor] = {}
