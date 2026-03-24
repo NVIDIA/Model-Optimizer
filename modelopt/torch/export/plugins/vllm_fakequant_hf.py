@@ -121,7 +121,7 @@ def export_hf_vllm_fq_checkpoint(
         if key.endswith("weight_quantizer"):
             # Weight quantizer amaxes were folded into weights; clear them so they
             # are not reloaded on the vLLM side.
-            quantizer_state_dict[key] = {}
+            quantizer_state_dict.pop(key)
         elif key in input_quantizers_folded_pqs:
             # For input_quantizers in input_quantizers_folded_pqs: we folded pre_quant_scale
             # into weights, so strip it from both tensor state and metadata to avoid double-apply.
@@ -136,10 +136,7 @@ def export_hf_vllm_fq_checkpoint(
     qstate = quantizer_state(model)
     for key in list(qstate):
         if key.endswith("weight_quantizer") and qstate[key].get("_disabled"):
-            qstate[key] = {
-                "_disabled": True,
-                "_pytorch_state_metadata": {"params": {}, "buffers": {}},
-            }
+            qstate.pop(key)
         elif key in input_quantizers_folded_pqs:
             # For input_quantizers in input_quantizers_folded_pqs: we folded pre_quant_scale
             # into weights, so strip it from metadata to avoid double-apply.

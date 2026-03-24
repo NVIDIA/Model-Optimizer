@@ -17,13 +17,18 @@
 
 import importlib
 from contextlib import contextmanager
+from itertools import chain
 
 import torch
-import vllm.attention as vllm_attention
+
+# Try multiple import paths for vLLM compatibility across versions
+if importlib.util.find_spec("vllm.attention"):
+    import vllm.attention as vllm_attention  # vllm < 0.16.0
+else:
+    import vllm.model_executor.layers.attention as vllm_attention  # vllm >= 0.16.0
+
 import vllm.model_executor.layers.fused_moe.layer as vllm_fused_moe_layer
 import vllm.model_executor.layers.linear as vllm_linear
-from vllm.attention.layers.cross_attention import CrossAttention
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.distributed.parallel_state import get_dp_group, get_ep_group, get_tp_group
 
 from ...utils.distributed import ParallelState
@@ -42,8 +47,24 @@ for module_path in [
     except ImportError:
         continue
 
+if importlib.util.find_spec("vllm.attention.layers"):  # vllm < 0.15.0
+    from vllm.attention.layers.cross_attention import CrossAttention
+    from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
+else:
+    try:
+        from vllm.model_executor.layers.attention.cross_attention import CrossAttention
+    except ImportError:
+        CrossAttention = None
+    try:
+        from vllm.model_executor.layers.attention.encoder_only_attention import EncoderOnlyAttention
+    except ImportError:
+        EncoderOnlyAttention = None
+
+if importlib.util.find_spec("vllm.attention.layer"):
+    import vllm.attention.layer as vllm_attention
+
 try:
-    from vllm.attention.layer import MLAAttention as VllmMLAAttention
+    VllmMLAAttention = vllm_attention.MLAAttention
 except ImportError:
     VllmMLAAttention = None
 
@@ -80,6 +101,87 @@ def disable_compilation(model):
             model.model.do_not_compile = do_not_compile
         elif hasattr(model, "language_model"):
             model.language_model.model.do_not_compile = do_not_compile
+
+
+# vLLM Attention stores ``device`` / ``dtype`` as plain attributes; ``dtype`` may be a string
+# (e.g. ``"float16"``, ``"auto"``) rather than ``torch.dtype``. Before we wrap layers in
+# ``QuantModule``, we copy resolved ``(device, dtype)`` onto each Attention instance.
+#
+# We infer dtype from real tensors when possible: skip ``TensorQuantizer`` subtrees so
+# calibration buffers (amax, etc.) do not override weight dtype. We only look at each module
+# and its *immediate* children—vLLM often hangs weights on child modules, and a full
+# ``named_modules()`` recurse here would be redundant with the outer scan.
+
+
+def _first_local_tensor(module: torch.nn.Module) -> torch.Tensor | None:
+    """First parameter or buffer on ``module`` or its immediate children (not recursive)."""
+    for mod in (module, *module.children()):
+        for t in chain(mod.parameters(recurse=False), mod.buffers(recurse=False)):
+            return t
+    return None
+
+
+def _model_device_dtype_or_default(model: torch.nn.Module) -> tuple[torch.device, torch.dtype]:
+    """Use first real weight/buffer on the model; else CUDA ``bfloat16`` or CPU ``float32``."""
+    for m in model.modules():
+        if isinstance(m, TensorQuantizer):
+            continue
+        t = _first_local_tensor(m)
+        if t is not None and not getattr(t, "is_meta", False):
+            return t.device, t.dtype
+    if torch.cuda.is_available():
+        return torch.device("cuda", torch.cuda.current_device()), torch.bfloat16
+    return torch.device("cpu"), torch.float32
+
+
+def _vllm_attr_dtype_to_torch(dtype) -> torch.dtype:
+    """Turn vLLM ``dtype`` (``torch.dtype`` or string) into ``torch.dtype``."""
+    if isinstance(dtype, torch.dtype):
+        return dtype
+    if isinstance(dtype, str) and dtype != "auto":
+        return getattr(torch, dtype, torch.bfloat16)
+    return torch.bfloat16
+
+
+def _get_device_dtype(module: torch.nn.Module, fallback: tuple | None) -> tuple:
+    """``(device, dtype)`` for one Attention module: explicit attrs → KV cache → local tensor → fallback."""
+    dev, dt = getattr(module, "device", None), getattr(module, "dtype", None)
+    if dev is not None and dt is not None:
+        return dev, _vllm_attr_dtype_to_torch(dt)
+
+    kv = getattr(module, "kv_cache", None)
+    if kv and kv[0] is not None:
+        t0 = kv[0]
+        spec = getattr(module, "kv_cache_dtype", t0.dtype)
+        out_dtype = t0.dtype if spec == "auto" else _vllm_attr_dtype_to_torch(spec)
+        return t0.device, out_dtype
+
+    if (t := _first_local_tensor(module)) is not None:
+        return t.device, t.dtype
+
+    return fallback or (None, None)
+
+
+def vllm_replace_quant_module_hook(model: torch.nn.Module) -> None:
+    """Set device/dtype on Attention modules before QuantModule replacement."""
+    fb = _model_device_dtype_or_default(model)
+    for _n, m in model.named_modules():
+        if isinstance(m, _ATTENTION_TYPES):
+            m.device, m.dtype = _get_device_dtype(m, fb)
+
+
+CUSTOM_MODEL_PLUGINS.add(vllm_replace_quant_module_hook)
+
+
+def _vllm_attention_modelopt_post_restore(self) -> None:
+    """Shared post-restore: resolve device, move module."""
+    device, dtype = _get_device_dtype(self, None)
+    if device is None or dtype is None:
+        raise RuntimeError(
+            "Could not determine device/dtype for vLLM Attention. "
+            "Ensure vllm_replace_quant_module_hook runs before replace_quant_module."
+        )
+    self.to(device=device)
 
 
 class FakeQuantMethod:
@@ -321,74 +423,6 @@ if vllm_shared_fused_moe_layer is not None:
     )
     class _QuantVLLMSharedFusedMoE(_QuantFusedMoEBase):
         pass
-
-
-def _get_ref(m: torch.nn.Module):
-    """First param or buffer from module or children (avoids tensor-in-boolean-context)."""
-    for mod in [m, *m.children()]:
-        p = next(mod.parameters(recurse=False), None)
-        if p is None:
-            p = next(mod.buffers(recurse=False), None)
-        if p is not None:
-            return p
-    return None
-
-
-def _resolve_dtype(dtype) -> torch.dtype:
-    """Resolve a dtype string (e.g. 'float16') or 'auto' to a torch.dtype."""
-    if isinstance(dtype, torch.dtype):
-        return dtype
-    if isinstance(dtype, str) and dtype != "auto":
-        return getattr(torch, dtype, torch.float16)
-    return torch.float16
-
-
-def _get_device_dtype(module: torch.nn.Module, fallback: tuple | None) -> tuple:
-    """(device, dtype) from module.device/dtype > kv_cache > ref > fallback."""
-    dev, dt = getattr(module, "device", None), getattr(module, "dtype", None)
-    if dev is not None and dt is not None:
-        return (dev, _resolve_dtype(dt))
-    kv = getattr(module, "kv_cache", None)
-    if kv and kv[0] is not None:
-        d = getattr(module, "kv_cache_dtype", kv[0].dtype)
-        return (kv[0].device, kv[0].dtype if d == "auto" else _resolve_dtype(d))
-    ref = _get_ref(module)
-    if ref is not None:
-        return (ref.device, ref.dtype)
-    return fallback or (None, None)
-
-
-def vllm_replace_quant_module_hook(model: torch.nn.Module) -> None:
-    """Set device/dtype on Attention modules before QuantModule replacement."""
-    fallback = (
-        (torch.device("cuda", torch.cuda.current_device()), torch.float16)
-        if torch.cuda.is_available()
-        else (torch.device("cpu"), torch.float32)
-    )
-    for _n, m in model.named_modules():
-        if isinstance(m, TensorQuantizer):
-            continue
-        p = _get_ref(m)
-        if p is not None and not getattr(p, "is_meta", False):
-            fallback = (p.device, p.dtype)
-            break
-    for _n, m in model.named_modules():
-        if isinstance(m, _ATTENTION_TYPES):
-            m.device, m.dtype = _get_device_dtype(m, fallback)
-
-
-CUSTOM_MODEL_PLUGINS.add(vllm_replace_quant_module_hook)
-
-
-def _vllm_attention_modelopt_post_restore(self) -> None:
-    """Shared post-restore: resolve device, move module."""
-    device, dtype = _get_device_dtype(self, None)
-    if device is None or dtype is None:
-        raise RuntimeError(
-            "Could not determine device/dtype for vLLM Attention. "
-            "Ensure vllm_replace_quant_module_hook runs before replace_quant_module."
-        )
-    self.to(device=device)
 
 
 @QuantModuleRegistry.register({vllm_attention.Attention: "vllm_Attention"})

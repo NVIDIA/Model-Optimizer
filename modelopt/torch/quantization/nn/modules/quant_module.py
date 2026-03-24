@@ -97,7 +97,6 @@ class QuantModule(DynamicModule):
             2. For sharded modules the restored states of TensorQuantizer could be incorrect. This is because
                 parallelism such as TP might have been changed between saving and resoring. So we need to re-calculate
                 the state shapes. Hence such modules should override this and implement their own logic.
-
         """
         # Get a parameter or buffer that does not belong to a TensorQuantizer
         non_tq_param_or_buffer = None

@@ -513,8 +513,7 @@ def set_quantizer_state_dict(model: nn.Module, quantizer_state_dict: dict):
     for name, module in model.named_modules():
         key = get_unwrapped_name(name, model)
         if isinstance(module, TensorQuantizer) and key in quantizer_state_dict:
-            if quantizer_state_dict[key]:  # skip empty dicts (quantizer has no saved state)
-                module.load_state_dict(quantizer_state_dict[key])
+            module.load_state_dict(quantizer_state_dict[key])
 
 
 def sync_moe_expert_amax(experts):
