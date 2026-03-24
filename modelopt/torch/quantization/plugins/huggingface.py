@@ -172,14 +172,20 @@ class _QuantAttention(QuantModule):
         The forward method is used to patch the attention interface with _quantized_attention.
         Once output tensors are generated, it restores the original attention interface.
         """
+        # In transformers>=5.0 some attention classes (e.g. BertAttention) no longer store
+        # `self.config` directly; fall back to searching child modules for a config attribute.
+        _config = getattr(self, "config", None)
+        if _config is None:
+            _config = next(
+                (getattr(m, "config", None) for m in self.children() if hasattr(m, "config")),
+                None,
+            )
+        _attn_impl = getattr(_config, "_attn_implementation", None) if _config is not None else None
 
         def _is_eager_attention():
-            if self.config._attn_implementation == "eager":
+            if _attn_impl is None or _attn_impl == "eager":
                 return True
-            return bool(
-                self.config._attn_implementation == "sdpa"
-                and kwargs.get("output_attentions", False)
-            )
+            return bool(_attn_impl == "sdpa" and kwargs.get("output_attentions", False))
 
         # Get the original transformers module before wrapped in any ModelOpt DynamicModule
         module: ModuleType = inspect.getmodule(self.get_attn_type(self))
@@ -188,7 +194,7 @@ class _QuantAttention(QuantModule):
         original_attention_interface = (
             module.eager_attention_forward
             if _is_eager_attention()
-            else module.ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+            else module.ALL_ATTENTION_FUNCTIONS[_attn_impl]
         )
         patch_fn = partial(self._quantized_attention, original_attention_interface)
 
@@ -201,7 +207,7 @@ class _QuantAttention(QuantModule):
                 )
             module.eager_attention_forward = patch_fn  # type: ignore[attr-defined]
         else:
-            module.ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation] = patch_fn
+            module.ALL_ATTENTION_FUNCTIONS[_attn_impl] = patch_fn
 
         try:
             outputs = super().forward(*args, **kwargs)
@@ -210,9 +216,7 @@ class _QuantAttention(QuantModule):
             if _is_eager_attention():
                 module.eager_attention_forward = original_attention_interface  # type: ignore[attr-defined]
             else:
-                module.ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation] = (
-                    original_attention_interface
-                )
+                module.ALL_ATTENTION_FUNCTIONS[_attn_impl] = original_attention_interface
 
         return outputs
 
@@ -603,22 +607,20 @@ class _QuantDbrxExperts(QuantModule):
         """Modify the DbrxExpert."""
         # No setup is needed for DbrxExpert, we only need to update DbrxExpertGLU
 
-    # forward method copied from the original dbrx repo - https://github.com/databricks/dbrx/blob/a3200393/model/modeling_dbrx.py#L795
     def forward(
         self,
         x: torch.Tensor,
-        weights: torch.Tensor,
-        top_weights: torch.Tensor,
         top_experts: torch.LongTensor,
+        top_weights: torch.Tensor,
     ) -> torch.Tensor:
         bsz, q_len, hidden_size = x.shape
         x = x.view(-1, hidden_size)
         out = torch.zeros_like(x)
 
-        expert_mask = nn.functional.one_hot(top_experts, num_classes=self.moe_num_experts).permute(
+        expert_mask = nn.functional.one_hot(top_experts, num_classes=self.num_experts).permute(
             2, 1, 0
         )
-        for expert_idx in range(self.moe_num_experts):
+        for expert_idx in range(self.num_experts):
             topk_idx, token_idx = torch.where(expert_mask[expert_idx])
             if token_idx.shape[0] == 0:
                 continue
@@ -648,41 +650,48 @@ class _QuantDbrxExpertGLU(QuantModule):
                 with torch.no_grad():
                     module.weight.copy_(weights[expert_idx].detach())
 
+        # In transformers 5.0, DbrxExpertGLU.forward uses raw matmul: x @ w1[i] where
+        # w1[i] has shape (ffn_hidden_size, hidden_size). To match via F.linear (which
+        # computes x @ W.T), we store weights transposed: W = w1[i].T.
         self.w1_linear = nn.ModuleList(
-            [
-                nn.Linear(self.hidden_size, self.ffn_hidden_size, bias=False)
-                for _ in range(self.moe_num_experts)
-            ]
-        )
-        _copy_weights(
-            self.w1_linear,
-            self.w1.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size),
-        )
-        delattr(self, "w1")
-
-        self.v1_linear = nn.ModuleList(
-            [
-                nn.Linear(self.hidden_size, self.ffn_hidden_size, bias=False)
-                for _ in range(self.moe_num_experts)
-            ]
-        )
-        _copy_weights(
-            self.v1_linear,
-            self.v1.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size),
-        )
-        delattr(self, "v1")
-
-        self.w2_linear = nn.ModuleList(
             [
                 nn.Linear(self.ffn_hidden_size, self.hidden_size, bias=False)
                 for _ in range(self.moe_num_experts)
             ]
         )
         _copy_weights(
-            self.w2_linear,
-            self.w2.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size).transpose(
+            self.w1_linear,
+            self.w1.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size).transpose(
                 1, 2
             ),
+        )
+        delattr(self, "w1")
+
+        self.v1_linear = nn.ModuleList(
+            [
+                nn.Linear(self.ffn_hidden_size, self.hidden_size, bias=False)
+                for _ in range(self.moe_num_experts)
+            ]
+        )
+        _copy_weights(
+            self.v1_linear,
+            self.v1.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size).transpose(
+                1, 2
+            ),
+        )
+        delattr(self, "v1")
+
+        # w2: down_proj uses intermediate.matmul(w2[i].t()) = F.linear(intermediate, w2[i])
+        # so W = w2[i] directly (no extra transpose needed).
+        self.w2_linear = nn.ModuleList(
+            [
+                nn.Linear(self.hidden_size, self.ffn_hidden_size, bias=False)
+                for _ in range(self.moe_num_experts)
+            ]
+        )
+        _copy_weights(
+            self.w2_linear,
+            self.w2.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size),
         )
         delattr(self, "w2")
 
@@ -882,11 +891,18 @@ class _QuantDbrxFFN(_QuantSparseMoe):
 
     @property
     def top_k(self):
-        return self.router.moe_top_k
+        # In older transformers, top_k was stored on DbrxRouter as moe_top_k.
+        # In transformers 5.0, DbrxFFN stores it as a plain attribute (top_k).
+        if hasattr(self.router, "moe_top_k"):
+            return self.router.moe_top_k
+        return self.__dict__.get("top_k", 1)
 
     @top_k.setter
     def top_k(self, value):
-        self.router.moe_top_k = value
+        if hasattr(self.router, "moe_top_k"):
+            self.router.moe_top_k = value
+        else:
+            self.__dict__["top_k"] = value
 
 
 @contextmanager

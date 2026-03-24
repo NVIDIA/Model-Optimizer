@@ -110,7 +110,8 @@ def test_dbrx():
     assert DbrxExpertGLU in QuantModuleRegistry
 
     config = DbrxConfig(
-        ffn_config=DbrxFFNConfig(ffn_hidden_size=8, moe_num_experts=2), hidden_size=32
+        ffn_config=DbrxFFNConfig(ffn_hidden_size=8, moe_num_experts=2, hidden_size=32),
+        hidden_size=32,
     )
 
     model_ref = DbrxFFN(config)
@@ -131,14 +132,17 @@ def test_dbrx():
     assert hasattr(expertglu_test, "v1_linear") and not hasattr(expertglu_test, "v1")
     assert hasattr(expertglu_test, "w2_linear") and not hasattr(expertglu_test, "w2")
 
+    # Weights are stored transposed (W = w1[i].T) to match F.linear semantics with
+    # transformers 5.0's raw matmul: x @ w1[i] = F.linear(x, w1[i].T)
     assert torch.allclose(
-        torch.concat(list(expertglu_test.w1_linear.parameters()), dim=0),
+        torch.concat([m.weight.T for m in expertglu_test.w1_linear], dim=0),
         expertglu_ref.w1,
     )
 
     mtq.set_quantizer_attribute(model_test, "*", {"enable": False})
 
-    x = torch.randn(1, 4, 32)
+    # In transformers 5.0, the FFN input dimension is ffn_hidden_size (not hidden_size)
+    x = torch.randn(1, 4, 8)
     out_1 = model_ref(x)
     out_2 = model_test(x)
     assert torch.allclose(out_1[0], out_2[0])
