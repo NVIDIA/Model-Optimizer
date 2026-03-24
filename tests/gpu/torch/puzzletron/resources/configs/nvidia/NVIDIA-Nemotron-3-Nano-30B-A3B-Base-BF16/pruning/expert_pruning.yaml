@@ -9,7 +9,7 @@ pruning_mixin:
     _target_: modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor
     target_name: "mixer"
 
-hook_class: ${get_object:modelopt.torch.nas.plugins.megatron_hooks.base_hooks.NemotronHRemoveExpertsIndependentHook}
+hook_class: ${get_object:modelopt.torch.prune.importance_hooks.expert_removal_hooks.NemotronHRemoveExpertsIndependentHook}
 activation_hooks_kwargs:    # Additional kwargs to pass to the hook init
 
 num_experts_to_keep_list: [96, 64, 32, 16, 8]  # num_experts in teacher is 128

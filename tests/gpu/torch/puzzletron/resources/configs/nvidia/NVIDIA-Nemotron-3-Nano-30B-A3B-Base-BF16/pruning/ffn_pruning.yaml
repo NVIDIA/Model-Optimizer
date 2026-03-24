@@ -7,7 +7,7 @@ pruning_mixin:
   layer_descriptor:
     _target_: modelopt.torch.puzzletron.anymodel.models.llama.llama_model_descriptor.LlamaFFNIntermediateLayerDescriptor
 
-hook_class: ${get_object:modelopt.torch.nas.plugins.megatron_hooks.base_hooks.IterativeChannelContributionHook}
+hook_class: ${get_object:modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook}
 activation_hooks_kwargs:    # Additional kwargs to pass to the hook init
 
 intermediate_size_list: [3072, 5888, 8704, 11520]  # teacher_intermediate_size is 14336

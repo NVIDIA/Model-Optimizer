@@ -8,7 +8,7 @@ pruning_mixin:
   layer_descriptor:
     _target_: modelopt.torch.puzzletron.anymodel.models.qwen3_8b.qwen3_8b_model_descriptor.Qwen3_8BFFNIntermediateLayerDescriptor
 
-hook_class: ${get_object:modelopt.torch.nas.plugins.megatron_hooks.base_hooks.IterativeChannelContributionHook}
+hook_class: ${get_object:modelopt.torch.prune.importance_hooks.base_hooks.IterativeChannelContributionHook}
 activation_hooks_kwargs:
   method: iterative
   target_layer: "mlp.down_proj"

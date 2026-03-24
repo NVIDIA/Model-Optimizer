@@ -19,8 +19,8 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import torch
 from transformers import PretrainedConfig
 
-from modelopt.torch.nas.plugins.megatron_hooks.base_hooks import (
-    ForwardHook,
+from modelopt.torch.prune.importance_hooks.base_hooks import ForwardHook
+from modelopt.torch.prune.importance_hooks.expert_removal_hooks import (
     NemotronHRemoveExpertsIndependentHook,
     Qwen3VLRemoveExpertsIndependentHook,
     RankedChoiceVotingHook,

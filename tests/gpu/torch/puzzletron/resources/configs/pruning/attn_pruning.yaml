@@ -9,7 +9,7 @@ pruning_mixin:
   layer_descriptor:
     _target_: ???
 
-hook_class: ${get_object:modelopt.torch.nas.plugins.megatron_hooks.base_hooks.IndependentKvHeadContributionHook}
+hook_class: ${get_object:modelopt.torch.prune.importance_hooks.base_hooks.IndependentKvHeadContributionHook}
 activation_hooks_kwargs:
   method: independent_kv_head_contribution
   optimize_for: memory    # IndependentKvHeadContributionHook implementation that consumes less memory

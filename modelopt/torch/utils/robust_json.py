@@ -55,8 +55,13 @@ class RobustJSONEncoder(json.JSONEncoder):
                 # User-defined function in main — fallback to just the name
                 return o.__name__
             return f"{o.__module__}.{o.__qualname__}"
+        if inspect.isclass(o):
+            return f"{o.__module__}.{o.__qualname__}"
         if isinstance(o, datetime.timedelta):
             return str(o)
+        # Fallback for arbitrary objects (e.g. mixins injected into Hydra configs)
+        if hasattr(o, "__class__") and hasattr(o.__class__, "__module__"):
+            return f"{o.__class__.__module__}.{o.__class__.__qualname__}"
         return super().default(o)
 
 

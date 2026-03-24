@@ -129,8 +129,8 @@ activation_hooks_kwargs:
 
 ### Adding a New Hook Class
 
-1. **Implement the hook** in `modelopt/torch/nas/plugins/megatron_hooks/base_hooks.py`:
-   - Extend an existing hook base class (e.g., `RemoveExpertsIndependentHook`)
+1. **Implement the hook** under `modelopt/torch/prune/importance_hooks/` (e.g. `base_hooks.py` for generic hooks, `expert_removal_hooks.py` for MoE expert removal):
+   - Extend an existing hook base class (e.g., `RemoveExpertsIndependentHook` in `expert_removal_hooks.py`)
    - Implement required methods (e.g., `get_router_logits_and_routed_experts`)
 
 2. **Register the hook** in the appropriate pruning mixin's `supported_hooks()`:
@@ -159,9 +159,9 @@ activation_hooks_kwargs:
 
 | Type | Mixin | Example Hooks |
 |------|-------|---------------|
-| FFN intermediate | [`FFNIntermediatePruningMixIn`](../pruning/ffn_intermediate_pruning_mixin.py) | [`IterativeChannelContributionHook`](../../../nas/plugins/megatron_hooks/base_hooks.py), [`IndependentChannelContributionHook`](../../../nas/plugins/megatron_hooks/base_hooks.py) |
-| Expert removal | [`ExpertRemovalPruningMixIn`](../pruning/expert_removal_pruning_mixin.py) | [`NemotronHRemoveExpertsIndependentHook`](../../../nas/plugins/megatron_hooks/base_hooks.py), [`Qwen3VLRemoveExpertsIndependentHook`](../../../nas/plugins/megatron_hooks/base_hooks.py) |
-| KV heads | [`KVHeadsPruningMixIn`](../pruning/kv_heads_pruning_mixin.py) | [`IndependentKvHeadContributionHook`](../../../nas/plugins/megatron_hooks/base_hooks.py) |
+| FFN intermediate | [`FFNIntermediatePruningMixIn`](../pruning/ffn_intermediate_pruning_mixin.py) | [`IterativeChannelContributionHook`](../../prune/importance_hooks/base_hooks.py), [`IndependentChannelContributionHook`](../../prune/importance_hooks/base_hooks.py) |
+| Expert removal | [`ExpertRemovalPruningMixIn`](../pruning/expert_removal_pruning_mixin.py) | [`NemotronHRemoveExpertsIndependentHook`](../../prune/importance_hooks/expert_removal_hooks.py), [`Qwen3VLRemoveExpertsIndependentHook`](../../prune/importance_hooks/expert_removal_hooks.py) |
+| KV heads | [`KVHeadsPruningMixIn`](../pruning/kv_heads_pruning_mixin.py) | [`IndependentKvHeadContributionHook`](../../prune/importance_hooks/base_hooks.py) |
 
 ## Implementing `block_config_to_layer_overrides`
 

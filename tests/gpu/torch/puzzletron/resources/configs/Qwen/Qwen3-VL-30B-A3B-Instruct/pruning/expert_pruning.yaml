@@ -9,7 +9,7 @@ pruning_mixin:
     _target_: modelopt.torch.puzzletron.anymodel.models.qwen3_vl_30b_a3b_instruct.qwen3_vl_30b_a3b_instruct_model_descriptor.Qwen3VL30BA3BInstructExpertRemovalLayerDescriptor
     target_name: "mlp"
 
-hook_class: ${get_object:modelopt.torch.nas.plugins.megatron_hooks.base_hooks.Qwen3VLRemoveExpertsIndependentHook}
+hook_class: ${get_object:modelopt.torch.prune.importance_hooks.expert_removal_hooks.Qwen3VLRemoveExpertsIndependentHook}
 activation_hooks_kwargs:
 
 # num_experts_to_keep must be >= num_experts_per_tok (can't route to more experts than exist)

@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Type
 import torch
 from transformers import PretrainedConfig
 
-from modelopt.torch.nas.plugins.megatron_hooks.base_hooks import (
+from modelopt.torch.prune.importance_hooks.base_hooks import (
     ForwardHook,
     IndependentChannelContributionHook,
     IterativeChannelContributionHook,
