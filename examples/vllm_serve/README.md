@@ -60,17 +60,20 @@ lm_eval --model local-completions --tasks gsm8k --model_args model=<model_name>,
 
 Step 1: export the model with bf16 weights and quantizer state. To export the model:
 
-- For **HF** models, use `hf_ptq_export.py`:
+- For **HF** models, use `examples/llm_ptq/hf_ptq.py` with `--vllm_fakequant_export`:
 
 ```bash
-python  hf_ptq_export.py\
+python ../llm_ptq/hf_ptq.py \
   --pyt_ckpt_path <MODEL_PATH> \
-  --quant_cfg NVFP4_DEFAULT_CFG \
+  --qformat nvfp4 \
+  --calib_size 512 \
   --export_path <EXPORT_DIR> \
+  --vllm_fakequant_export \
   --trust_remote_code
 ```
 
   This creates `<EXPORT_DIR>/vllm_fq_modelopt_state.pth` (ModelOpt quantizer state for vLLM fake-quant reload) and saves the HF-exported model under `<EXPORT_DIR>` (config/tokenizer/weights).
+
   Note: `--pyt_ckpt_path` can point to either an HF checkpoint or a ModelOpt-saved checkpoint (e.g., a QAT/QAD checkpoint produced by `examples/llm_qat/main.py`). If the input checkpoint is already quantized, the script will **skip re-quantization** and only export artifacts for vLLM fakequant reload.
 
 - For **MCore** models, export the model with flag `--export-vllm-fq` as described in [Megatron-LM README](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt#-nvfp4-quantization-qauntization-aware-training-and-model-export). This generates `quantizer_state.pth`, which contains quantizer tensors for vLLM reload via `QUANT_FILE_PATH`.
