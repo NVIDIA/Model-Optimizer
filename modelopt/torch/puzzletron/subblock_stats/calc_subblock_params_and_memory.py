@@ -32,7 +32,6 @@ import torch
 from transformers import PretrainedConfig
 
 from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
-from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
 from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
     AttentionConfig,
     BlockConfig,
@@ -108,8 +107,14 @@ def calculate_subblock_params(
 ) -> int:
     """Count parameters on one meta decoder layer (puzzletron ``calculate_subblock_params`` parity).
 
-    Uses ``BlockConfig`` / ``to_blockconfig()`` and ``deci_x_patcher`` instead of Puzzletron's
-    ``LayerConfig`` / ``puzzletron_patcher``.
+    Unlike ``puzzletron_patcher`` during ``__init__``, we do **not** use ``deci_x_patcher`` here:
+    for models such as GPT-OSS, Transformers ``post_init`` validates ``_keep_in_fp32_modules``
+    against the module tree; replacing norms / attn / mlp with no-op placeholders **before**
+    ``post_init`` raises (e.g. ``post_attention_layernorm`` … not part of the modules).
+
+    With ``num_hidden_layers == 1`` we merge ``block_config_to_layer_overrides`` into the LM config
+    (what the patcher would pass into ``DecoderLayer.__init__``), build a stock layer, run
+    ``post_init``, then apply ``attn_no_op_post_init`` / ``mlp_no_op_post_init`` for param counting.
     """
     if isinstance(layer_config, FFNConfig):
         block_config = layer_config.to_blockconfig()
@@ -139,17 +144,34 @@ def calculate_subblock_params(
     if lm_config is not _config:
         lm_config.block_configs = block_configs
 
-    with (
-        EmptyInitOnDevice("meta"),
-        deci_x_patcher(model_descriptor=descriptor, block_configs=block_configs),
-    ):
+    # Replaced earlier pattern:
+    #   with EmptyInitOnDevice("meta"), deci_x_patcher(..., block_configs=block_configs):
+    #       model = init_model_from_config(_config, ...)
+    # That fails on GPT-OSS with recent Transformers: ``deci_x_patcher`` runs
+    # ``attn_no_op_post_init`` / ``mlp_no_op_post_init`` inside ``DecoderLayer.__init__``, so norms
+    # / attn / mlp are swapped for placeholders before ``GptOssModel.post_init`` runs; ``post_init``
+    # then raises ``ValueError`` (e.g. ``post_attention_layernorm`` in ``_keep_in_fp32_modules`` no
+    # longer matches the tree). Below we merge per-layer fields manually, init without the patcher,
+    # then call the same descriptor no-op hooks on the built layer (equivalent param count for
+    # ``num_hidden_layers == 1``).
+
+    # ``block_config_to_layer_overrides`` may include keys with value ``None``; we omit those so
+    # ``lm_config.update`` does not overwrite existing fields with ``None`` (same rule as
+    # ``override_config_with_block_configs`` inside ``deci_x_patcher``).
+    layer_overrides = descriptor.block_config_to_layer_overrides(block_configs[0])
+    lm_config.update({k: v for k, v in layer_overrides.items() if v is not None})
+
+    with EmptyInitOnDevice("meta"):
         model = init_model_from_config(
             _config,
             trust_remote_code=descriptor.requires_trust_remote_code(),
-            suspend_keep_in_fp32_module_validation=True,
         )
 
     decoder_layer = model.get_submodule(descriptor.layer_block_name(index=0))
+    if attn_no_op:
+        descriptor.attn_no_op_post_init(decoder_layer)
+    if ffn_no_op:
+        descriptor.mlp_no_op_post_init(decoder_layer)
     return sum(p.numel() for p in decoder_layer.parameters())
 
 

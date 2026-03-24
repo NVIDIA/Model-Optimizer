@@ -92,6 +92,7 @@ def get_args():
         required=True,
         help="HuggingFace model name or path for the teacher (e.g. Qwen/Qwen3-8B)",
     )
+    parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
     # Parallelism arguments
     parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
@@ -143,6 +144,7 @@ def get_args():
     parser.add_argument("--wandb_exp_name", type=str, help="Wandb experiment name (optional)")
     # Export arguments
     parser.add_argument(
+        "--hf_export_path",
         "--hf-export-path",
         type=str,
         default=None,
@@ -152,6 +154,7 @@ def get_args():
         ),
     )
     parser.add_argument(
+        "--hf_model",
         "--hf-model",
         type=str,
         required=True,
@@ -178,7 +181,7 @@ def main(args: argparse.Namespace):
 
     # Build student and teacher model providers
     def _build_model_provider(hf_path):
-        bridge = AutoBridge.from_hf_pretrained(hf_path)
+        bridge = AutoBridge.from_hf_pretrained(hf_path, trust_remote_code=args.trust_remote_code)
         provider = bridge.to_megatron_provider(load_weights=True)
 
         # Override parallelism / training settings
@@ -306,6 +309,7 @@ def main(args: argparse.Namespace):
                     train_iters=args.train_iters,
                     hf_export_path=args.hf_export_path,
                     hf_model=args.hf_model,
+                    trust_remote_code=args.trust_remote_code,
                 )
             except Exception as e:
                 print(f"⚠️  Export failed: {e}")
