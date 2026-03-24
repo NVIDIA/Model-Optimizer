@@ -154,15 +154,24 @@ class _VLLMParallelLinear(QuantModule):
         self.fake_quant_method = FakeQuantMethod(self.quant_method)
         self.parallel_state = create_parallel_state()
 
-    def forward(self, input_):
-        # pre_quant_scale (SmoothQuant) is stored as CPU float32. vLLM's CUTLASS kernels
-        # require device/dtype to match activations; HF's F.linear silently promotes.
-        # Cast lazily here so the fix applies after set_quantizer_state_dict reloads buffers.
+    def _sync_input_pre_quant_scale_to_weight(self) -> None:
+        """Align pre_quant_scale to weight (vLLM CUTLASS expects matching device/dtype)."""
         pqs = getattr(self.input_quantizer, "_pre_quant_scale", None)
-        if pqs is not None and (pqs.device != input_.device or pqs.dtype != input_.dtype):
+        if pqs is None:
+            return
+        w = getattr(self, "weight", None)
+        if w is None or not isinstance(w, torch.Tensor) or w.is_meta:
+            return
+        if pqs.device != w.device or pqs.dtype != w.dtype:
             self.input_quantizer._pre_quant_scale.data = pqs.data.to(
-                device=input_.device, dtype=input_.dtype
+                device=w.device, dtype=w.dtype
             )
+
+    def modelopt_post_restore(self, prefix: str = "") -> None:
+        super().modelopt_post_restore(prefix=prefix)
+        self._sync_input_pre_quant_scale_to_weight()
+
+    def forward(self, input_):
         # This context manager will conflict with torch.compile
         # with replace_function(self, "quant_method", self.fake_quant_method):
         # Manually replace quant_method instead
@@ -171,6 +180,17 @@ class _VLLMParallelLinear(QuantModule):
         output = super().forward(input_)
         self.quant_method = self._quant_method
         return output
+
+
+def post_restore_vllm_parallel_linears(model: torch.nn.Module) -> None:
+    """Re-run modelopt_post_restore on vLLM parallel linears after set_quantizer_state_dict.
+
+    restore_quantizer_state already calls modelopt_post_restore on all QuantModules, but vLLM
+    reload paths that load modelopt_state_weights via set_quantizer_state_dict do not.
+    """
+    for module in model.modules():
+        if isinstance(module, _VLLMParallelLinear):
+            module.modelopt_post_restore("")
 
 
 @QuantModuleRegistry.register({vllm_linear.RowParallelLinear: "vllm_RowParallelLinear"})
@@ -362,13 +382,8 @@ def vllm_replace_quant_module_hook(model: torch.nn.Module) -> None:
 CUSTOM_MODEL_PLUGINS.add(vllm_replace_quant_module_hook)
 
 
-def _vllm_attention_modelopt_post_restore(self, quantizers: list) -> None:
-    """Shared post-restore: validate scalar quantizers, resolve device/dtype, move module."""
-    for tq in quantizers:
-        if not all(v.numel() == 1 for v in tq.state_dict().values()):
-            raise NotImplementedError(
-                "Only scalar states are supported for KV Cache/BMM Quantizers"
-            )
+def _vllm_attention_modelopt_post_restore(self) -> None:
+    """Shared post-restore: resolve device, move module. """
     device, dtype = _get_device_dtype(self, None)
     if device is None or dtype is None:
         raise RuntimeError(
@@ -393,9 +408,7 @@ class _QuantVLLMAttention(QuantModule):
         return super().forward(query, key, value, *args, **kwargs)
 
     def modelopt_post_restore(self, prefix: str = "") -> None:
-        _vllm_attention_modelopt_post_restore(
-            self, [self.q_bmm_quantizer, self.k_bmm_quantizer, self.v_bmm_quantizer]
-        )
+        _vllm_attention_modelopt_post_restore(self)
 
 
 @QuantModuleRegistry.register({CrossAttention: "vllm_CrossAttention"})
@@ -417,6 +430,7 @@ if VllmMLAAttention is not None:
             self.kv_c_bmm_quantizer = TensorQuantizer()
             self.k_pe_bmm_quantizer = TensorQuantizer()
             self.parallel_state = create_parallel_state()
+            self._bmm_disable_compile = False
 
         def forward(self, query, kv_c, k_pe, *args, **kwargs):
             query = self.q_bmm_quantizer(query)
@@ -425,7 +439,4 @@ if VllmMLAAttention is not None:
             return super().forward(query, kv_c, k_pe, *args, **kwargs)
 
         def modelopt_post_restore(self, prefix: str = "") -> None:
-            _vllm_attention_modelopt_post_restore(
-                self,
-                [self.q_bmm_quantizer, self.kv_c_bmm_quantizer, self.k_pe_bmm_quantizer],
-            )
+            _vllm_attention_modelopt_post_restore(self)

@@ -143,6 +143,8 @@ def _merge_values_by_max_or_concat(merged_key: str, key_value_pairs: list[tuple[
     Merge values by taking max for amax, concatenating for others.
     Used for quantizer state weights (tensor values).
     """
+    if not key_value_pairs:
+        raise ValueError(f"Cannot merge '{merged_key}': key_value_pairs is empty")
     values = [value for _, value in key_value_pairs]
 
     # Check if values are dicts (OrderedDict) containing tensors
@@ -240,8 +242,12 @@ def convert_modelopt_state_to_vllm(
 
     This function converts the quantizer state from HuggingFace format to vLLM compatible format.
 
+    Note: modifies modelopt_state in place (pops keys). Callers that need the
+    original dict should pass a copy.
+
     Args:
-        modelopt_state: HuggingFace modelopt state dict
+        modelopt_state: HuggingFace modelopt state dict (modified in place)
+        map_fun: Optional function to remap non-quantizer keys to vLLM names
 
     Returns:
         vLLM compatible modelopt state dict
