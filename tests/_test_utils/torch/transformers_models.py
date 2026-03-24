@@ -227,14 +227,15 @@ def create_tiny_bert_dir(tmp_path: Path | str, **config_kwargs) -> Path:
 def tf_output_tester(model_ref, model_test):
     inputs = model_ref.dummy_inputs
     model_ref.eval()
-    model_test.eval()
+    model_test.to(model_ref.dtype).eval()
     output_ref = model_ref(**inputs)
     output_test = model_test(**inputs)
+    atol = 1e-2 if model_ref.dtype == torch.bfloat16 else 1e-6
     if hasattr(output_ref, "logits"):
-        assert torch.allclose(output_ref.logits, output_test.logits, atol=1e-6)
+        assert torch.allclose(output_ref.logits, output_test.logits, atol=atol)
     else:
-        assert torch.allclose(output_ref.start_logits, output_test.start_logits, atol=1e-6)
-        assert torch.allclose(output_ref.end_logits, output_test.end_logits, atol=1e-6)
+        assert torch.allclose(output_ref.start_logits, output_test.start_logits, atol=atol)
+        assert torch.allclose(output_ref.end_logits, output_test.end_logits, atol=atol)
 
 
 def tf_modelopt_state_and_output_tester(model_ref, model_test):
