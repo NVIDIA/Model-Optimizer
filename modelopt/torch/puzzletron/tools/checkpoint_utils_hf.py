@@ -138,10 +138,14 @@ def _get_model_class_from_config(config: PretrainedConfig) -> type:
 def init_model_from_config(
     config: PretrainedConfig,
     *,
-    trust_remote_code: bool = True,
+    trust_remote_code: bool = False,
     **kwargs,
 ) -> PreTrainedModel:
-    """Build a model from config on meta/uninitialized weights (used e.g. for subblock param counts)."""
+    """Build a model from config on meta/uninitialized weights (used e.g. for subblock param counts).
+
+    ``trust_remote_code`` defaults to False (only ``AutoModelForCausalLM.from_config`` uses it).
+    Pass True when loading configs that rely on custom modeling code from the checkpoint.
+    """
     model_class = _get_model_class_from_config(config)
     if model_class is AutoModelForCausalLM:
         return model_class.from_config(config, trust_remote_code=trust_remote_code, **kwargs)
