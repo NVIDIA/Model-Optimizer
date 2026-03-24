@@ -68,7 +68,9 @@ REPO_DIR = os.environ.get(
     str(Path(__file__).resolve().parent.parent),
 )
 
-DATA_DIR = os.environ.get("DATA_DIR", "/data/modelopt")
+DATA_DIR = os.environ.get(
+    "DATA_DIR", os.path.join(os.path.expanduser("~"), ".local", "share", "modelopt")
+)
 
 MAX_SLACK_LENGTH = 3900
 
@@ -440,7 +442,9 @@ async def start_cluster_setup(user_id, say, thread_ts, *, from_onboarding=False)
                 f"• `{n}`" + (" _(default)_" if n == default else "") for n in names
             )
             cluster_setup_state[user_id] = {
-                "step": "action", "existing": existing, "from_onboarding": from_onboarding,
+                "step": "action",
+                "existing": existing,
+                "from_onboarding": from_onboarding,
             }
             await say(
                 text=(
@@ -665,9 +669,7 @@ async def handle_slash_command(ack, command, say, respond):
 
             lines = ["You're already set up! Current config:\n"]
             lines.append(f"• *Auth:* {info['auth_method'] if info else 'unknown'}")
-            lines.append(
-                f"• *Clusters:* {'configured' if has_clusters else 'none'}"
-            )
+            lines.append(f"• *Clusters:* {'configured' if has_clusters else 'none'}")
             if env_vars:
                 env_list = ", ".join(f"`{k}`" for k in env_vars)
                 lines.append(f"• *Env vars:* {env_list}")
@@ -916,14 +918,28 @@ async def _run_job(user_id: str, prompt: str, say_func, channel: str, thread_ts:
     async with lock:
         logger.info("Session %s acquired for user %s", session_id[:8], user_id)
         return await _run_job_inner(
-            user_id, prompt, say_func, channel, thread_ts,
-            workspace, env, bot_context, session_id,
+            user_id,
+            prompt,
+            say_func,
+            channel,
+            thread_ts,
+            workspace,
+            env,
+            bot_context,
+            session_id,
         )
 
 
 async def _run_job_inner(
-    user_id, prompt, say_func, channel, thread_ts,
-    workspace, env, bot_context, session_id,
+    user_id,
+    prompt,
+    say_func,
+    channel,
+    thread_ts,
+    workspace,
+    env,
+    bot_context,
+    session_id,
 ):
     """Run Claude (called under session lock)."""
     # Delayed "working on it" — only show if response takes > 5 seconds

@@ -113,7 +113,7 @@ If the user has not specified a format, **recommend one based on the GPU detecte
 
 | GPU generation | Memory priority | Accuracy priority |
 |----------------|-----------------|-------------------|
-| **Blackwell** (B100, B200, GB200) | `nvfp4_mlp_only` | `nvfp4_omlp_only` |
+| **Blackwell** (B100, B200, GB200) | `nvfp4_mlp_only` | `nvfp4_awq_lite` |
 | **Hopper** (H100, H200) or older | `int4_awq` | `fp8` |
 
 Tell the user which GPU was detected and which format you are recommending, and why.
@@ -125,7 +125,7 @@ For reference, all available configs are in `modelopt/torch/quantization/config.
 | Format | Config | Notes |
 |--------|--------|-------|
 | NVFP4 MLP-only | `NVFP4_MLP_ONLY_CFG` | Recommended for Blackwell; best accuracy/throughput tradeoff |
-| NVFP4 output+MLP | `NVFP4_OMLP_ONLY_CFG` | Slightly higher accuracy than MLP-only |
+| NVFP4 MLP weight-only | `NVFP4_MLP_WEIGHT_ONLY_CFG` | Quantize MLP weights only (no activations) |
 | NVFP4 all layers | `NVFP4_DEFAULT_CFG` | May reduce accuracy; see README |
 | NVFP4 + AWQ calibration | `NVFP4_AWQ_LITE_CFG` | Best NVFP4 accuracy, slower calibration |
 | FP8 per-tensor | `FP8_DEFAULT_CFG` | Accuracy-first for Hopper |

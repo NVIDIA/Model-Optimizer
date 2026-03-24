@@ -27,7 +27,7 @@
 #   remote_submit_job <job_script>          # SLURM only
 #   remote_poll_job <job_id>                # SLURM only
 #   remote_wait_job <job_id> [interval=30]  # SLURM only
-#   remote_docker_run "<docker_cmd>"        # Docker only
+#   remote_docker_run <container_or_image> "<command>"  # Docker only
 #   remote_tail_log <remote_log_path> [lines=50]
 #
 # After remote_load_cluster, these env vars are set:
@@ -108,8 +108,7 @@ _ssh_base_opts() {
     local ctl_path
     ctl_path="$(_ssh_control_path)"
     opts+=" -o ControlPath='${ctl_path}'"
-    # If master is already running, just reuse it; otherwise don't try to become master
-    # (remote_start_session handles starting the master)
+    # ControlMaster=auto: reuse existing master if available, otherwise start a new one
     opts+=" -o ControlMaster=auto"
     if [[ -n "${REMOTE_SSH_KEY:-}" ]]; then
         opts+=" -i $REMOTE_SSH_KEY"
