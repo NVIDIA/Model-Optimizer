@@ -38,7 +38,8 @@ The table below lists the setup steps to prepare your environment for evaluating
 | **Open PowerShell as Administrator** | - |
 | **Create and Activate a Virtual Environment** <br> _(Optional but Recommended)_ | `python -m venv llm_env` <br> `.\llm_env\Scripts\Activate.ps1` |
 | **Install PyTorch and Related Packages** | `pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128` |
-| **Install ONNX Runtime Packages** | `pip install onnxruntime-directml==1.21.1` <br> `pip install onnxruntime-genai-directml==0.6.0` |
+| **Install ONNX Runtime Packages (CUDA)** | `pip install onnxruntime` <br> `pip install onnxruntime-genai-cuda` |
+| **Install ONNX Runtime Packages (DirectML)** | `pip install onnxruntime-directml==1.21.1` <br> `pip install onnxruntime-genai-directml==0.6.0` |
 | **Install Benchmark Requirements** | `pip install -r requirements.txt` |
 | **Download MMLU Data** | `mkdir data` <br> `curl -o .\data\mmlu.tar https://people.eecs.berkeley.edu/~hendrycks/data.tar` <br> `tar -xf .\data\mmlu.tar -C .\data` <br> `Move-Item .\data\data .\data\mmlu` |
 
