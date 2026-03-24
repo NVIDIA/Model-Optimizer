@@ -308,7 +308,7 @@ This will modify the model in-place with eagle training forward, making it compa
 
 ```python
 # Create a trainer
-trainer = transformers.Trainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
+trainer = transformers.Trainer(model=model, processing_class=tokenizer, args=training_args, **data_module)
 trainer._move_model_to_device(model, trainer.args.device)
 
 # Enable HF checkpointing so that the saved model will contain the speculative decoding module

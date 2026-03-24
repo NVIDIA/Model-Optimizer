@@ -111,7 +111,7 @@ def generate_sample_output(model, tokenizer, args):
         padding=False,
     )
     if torch.cuda.is_available():
-        inputs = {k: v.cuda() for k, v in inputs.items()}
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
         # Generate
         with torch.no_grad():
