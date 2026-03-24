@@ -118,6 +118,35 @@ jobs:
       pip_install_extras: "[hf,dev-test]"
       runner: linux-amd64-gpu-rtxpro6000-latest-2
 
+  ##### NeMo Example Tests #####
+  nemo-pr:
+    needs: [check-file-changes, wait-checks]
+    if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
+    strategy: &nemo_strategy
+      fail-fast: false
+      matrix:
+        example: [megatron_bridge]
+    uses: ./.github/workflows/_example_tests_runner.yml
+    secrets: inherit
+    with:
+      docker_image: "nvcr.io/nvidia/nemo:26.02"
+      example: ${{ matrix.example }}
+      timeout_minutes: 30
+      pip_install_extras: "[hf,dev-test]"
+      runner: linux-amd64-gpu-rtxpro6000-latest-1
+
+  nemo-non-pr:
+    if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
+    strategy: *nemo_strategy
+    uses: ./.github/workflows/_example_tests_runner.yml
+    secrets: inherit
+    with:
+      docker_image: "nvcr.io/nvidia/nemo:26.02"
+      example: ${{ matrix.example }}
+      timeout_minutes: 30
+      pip_install_extras: "[hf,dev-test]"
+      runner: linux-amd64-gpu-rtxpro6000-latest-2
+
   ##### ONNX/TensorRT Example Tests #####
   onnx-pr:
     needs: [check-file-changes, wait-checks]
@@ -149,7 +178,7 @@ jobs:
   example-pr-required-check:
     # Run even if example tests are skipped
     if: ${{ startsWith(github.ref, 'refs/heads/pull-request/') && always() }}
-    needs: [check-file-changes, torch-pr, trtllm-pr, onnx-pr]
+    needs: [check-file-changes, torch-pr, trtllm-pr, nemo-pr, onnx-pr]
     runs-on: ubuntu-latest
     steps:
       - name: Required GPU tests did not succeed
@@ -158,6 +187,7 @@ jobs:
           (needs.check-file-changes.outputs.any_changed == 'true' && (
             needs.torch-pr.result != 'success' ||
             needs.trtllm-pr.result != 'success' ||
+            needs.nemo-pr.result != 'success' ||
             needs.onnx-pr.result != 'success'
           ))
         run: exit 1

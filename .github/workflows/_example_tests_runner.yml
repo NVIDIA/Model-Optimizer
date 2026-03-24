@@ -51,14 +51,15 @@ jobs:
           apt-get update && apt-get install -y git-lfs
           git lfs install --system
 
-          pip install ".${{ inputs.pip_install_extras }}"
+          # use `python -m pip` instead of `pip` to avoid conflicts with system pip for nemo containers
+          python -m pip install ".${{ inputs.pip_install_extras }}"
 
           if [[ "${{ inputs.example }}" == *"diffusers"* ]]; then
             echo "Uninstalling apex for diffusers: T5 Int8 (PixArt) + Apex is not supported as per https://github.com/huggingface/transformers/issues/21391"
-            pip uninstall -y apex || true
+            python -m pip uninstall -y apex || true
           fi
 
-          find examples/${{ inputs.example }} -name "requirements.txt" | while read req_file; do pip install -r "$req_file" || exit 1; done
+          find examples/${{ inputs.example }} -name "requirements.txt" | while read req_file; do python -m pip install -r "$req_file" || exit 1; done
       - name: Run tests
         run: |
           echo "Running tests for: ${{ inputs.example }}"
