@@ -97,7 +97,7 @@ def restore_quantized_model(
 def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: MetadataDict):
     """Restore the quantizer states from the given state dict.
 
-    For NeMo-MCore sharded checkpoint (torch-dist), quantizer_state is removed from the
+    For MCore sharded checkpoint (torch-dist), quantizer_state is removed from the
     metadata and stored with the main checkpoint as extra_state (similar to TransformerEngine).
     This is because quantizer_state's keys also need to be sharded/remapped during resuming.
     The restore of the quantizer_state is moved to QuantModule.set_extra_state when
@@ -105,11 +105,11 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
 
     Here we detect whether quantizer_state exists in the metadata. The model already has
     QuantModule replaced but without quantizer_state nor any buffer attached. For more
-    details regarding how NeMo-MCore sharded checkpoint is restored,
+    details regarding how MCore sharded checkpoint is restored,
     see modelopt.torch.opt.plugins.mcore_dist_checkpointing.restore_sharded_modelopt_state.
     """
     if "quantizer_state" not in metadata:
-        # MCore-NeMo sharded checkpoint (`torch-dist`) has its quantizer_state stored as the
+        # MCore sharded checkpoint (`torch-dist`) has its quantizer_state stored as the
         # extra_state of `QuantModule`. The quantizer_state is resumed with
         # QuantModule.set_extra_state().
         return model

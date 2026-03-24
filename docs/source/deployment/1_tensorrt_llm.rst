@@ -15,7 +15,7 @@ ModelOpt toolkit supports automatic conversion of ModelOpt exported LLM to the T
 
 This conversion is achieved by:
 
-#. Converting Huggingface, NeMo and ModelOpt exported checkpoints to the TensorRT-LLM checkpoint.
+#. Converting Huggingface, Megatron-Bridge and ModelOpt exported checkpoints to the TensorRT-LLM checkpoint.
 #. Building TensorRT-LLM engine from the TensorRT-LLM checkpoint.
 
 

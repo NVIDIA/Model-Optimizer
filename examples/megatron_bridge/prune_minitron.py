@@ -111,8 +111,8 @@ def get_args() -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Path to save/restore intermediate pruning scores for resuming / faster re-run. "
-            "If not provided, it will default to `<output_path>/modelopt_pruning_scores.pth`"
+            "Directory to save/restore per-rank intermediate pruning scores for resuming / faster re-run. "
+            "If not provided, it will default to `<output_path>/modelopt_pruning_scores`"
         ),
     )
 
@@ -187,13 +187,11 @@ def get_args() -> argparse.Namespace:
     # Post-process arguments
     if args.prune_intermediate_ckpt is None:
         if args.output_megatron_path:
-            args.prune_intermediate_ckpt = (
-                f"{args.output_megatron_path}/modelopt_pruning_scores.pth"
-            )
+            args.prune_intermediate_ckpt = f"{args.output_megatron_path}/modelopt_pruning_scores"
         elif args.output_hf_path:
-            args.prune_intermediate_ckpt = f"{args.output_hf_path}/modelopt_pruning_scores.pth"
+            args.prune_intermediate_ckpt = f"{args.output_hf_path}/modelopt_pruning_scores"
         print_rank_0(
-            "No checkpoint provided to cache intermediate pruning scores. "
+            "No directory provided to cache per-rank intermediate pruning scores. "
             f"Setting to: {args.prune_intermediate_ckpt}"
         )
 
@@ -240,8 +238,9 @@ def main(args: argparse.Namespace):
             "seq_length": args.seq_length,
         },
         init_model_parallel=True,
+        moe_grouped_gemm=False,
     )
-    print_rank_0(f"\nPruning {unwrapped_model=}")
+    print_rank_0(f"\nPruning model (showing PP rank0): {unwrapped_model}")
     print_rank_0(
         f"Original model params: {num2hrb(mtp.mcore_minitron.get_mcore_param_count(unwrapped_model))}"
     )
@@ -264,10 +263,11 @@ def main(args: argparse.Namespace):
     }
     if args.prune_target_params is not None:
         # Restrict search space to a smaller set of candidates
+        # Allow more choices for MoE FFN as they are generally smaller
         # NOTE: You can reduce the divisors and increase config['top_k'] to potentially find a better model.
         ss_config = mtp.mcore_minitron.get_mcore_minitron_config(
             hidden_size_divisor=256,
-            ffn_hidden_size_divisor=512,
+            ffn_hidden_size_divisor=256 if (provider.num_moe_experts or 0) > 0 else 512,
             mamba_head_dim_divisor=8,
             num_moe_experts_divisor=8,
             num_layers_divisor=2,
@@ -317,7 +317,7 @@ def main(args: argparse.Namespace):
             else "hybrid_layer_pattern"
         )
         setattr(provider, hybrid_key, getattr(unwrapped_model, hybrid_key))
-    print_rank_0(f"\nPruned {unwrapped_model=}")
+    print_rank_0(f"\nPruned model (showing PP rank0): {unwrapped_model}")
     print_rank_0(
         f"Pruned model params: {num2hrb(mtp.mcore_minitron.get_mcore_param_count(unwrapped_model))}"
     )

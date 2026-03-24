@@ -101,7 +101,7 @@ class EagleConfig(ModeloptBaseConfig):
     )
 
     eagle_ttt_steps: int = ModeloptField(
-        default=4, description=("The number of train-time-test steps in training.")
+        default=3, description=("The number of train-time-test steps in training.")
     )
 
     eagle_mix_hidden_states: bool = ModeloptField(
@@ -109,4 +109,14 @@ class EagleConfig(ModeloptBaseConfig):
         description=(
             "Whether to mix hidden states of multiple TTT steps. It is a technique to reduce training cost."
         ),
+    )
+
+    eagle_use_torch_compile: bool = ModeloptField(
+        default=True,
+        description="Whether to use torch.compile on eagle forward/loss methods for faster training.",
+    )
+
+    eagle_enable_nvtx: bool = ModeloptField(
+        default=False,
+        description="Whether to enable NVTX ranges for profiling eagle forward/loss methods.",
     )
