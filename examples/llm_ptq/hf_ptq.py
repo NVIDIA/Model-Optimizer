@@ -1071,13 +1071,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--export_path", default="exported_model")
     parser.add_argument(
-        "--vllm_fakequant_export",
-        default=False,
-        action="store_true",
-        help="Export as vLLM fake-quant checkpoint (produces vllm_fq_modelopt_state.pth "
-        "for use with vllm_serve_fakequant.py).",
-    )
-    parser.add_argument(
         "--dataset",
         help=(
             f"name of a dataset, or a comma separated list of datasets. "
@@ -1230,6 +1223,13 @@ def parse_args() -> argparse.Namespace:
             "Only used for MOE models; used to reduce the number of experts calibrated during the forward pass. "
             "Does not impact non-MOE models."
         ),
+    )
+    parser.add_argument(
+        "--vllm_fakequant_export",
+        default=False,
+        action="store_true",
+        help="Export as vLLM fake-quant checkpoint (produces vllm_fq_modelopt_state.pth "
+        "for use with vllm_serve_fakequant.py).",
     )
 
     args = parser.parse_args()
