@@ -113,7 +113,8 @@ class FakeQuantMethod:
         Returns:
             torch.Tensor: The quantized output tensor.
         """
-        x = layer.input_quantizer(x)
+        if layer.input_quantizer.is_enabled:
+            x = layer.input_quantizer(x)
         if layer.weight_quantizer.is_enabled:
             original_weight = layer.weight
             quantized_tensor = layer.weight_quantizer(layer.weight)
@@ -154,6 +155,14 @@ class _VLLMParallelLinear(QuantModule):
         self.parallel_state = create_parallel_state()
 
     def forward(self, input_):
+        # pre_quant_scale (SmoothQuant) is stored as CPU float32. vLLM's CUTLASS kernels
+        # require device/dtype to match activations; HF's F.linear silently promotes.
+        # Cast lazily here so the fix applies after set_quantizer_state_dict reloads buffers.
+        pqs = getattr(self.input_quantizer, "_pre_quant_scale", None)
+        if pqs is not None and (pqs.device != input_.device or pqs.dtype != input_.dtype):
+            self.input_quantizer._pre_quant_scale.data = pqs.data.to(
+                device=input_.device, dtype=input_.dtype
+            )
         # This context manager will conflict with torch.compile
         # with replace_function(self, "quant_method", self.fake_quant_method):
         # Manually replace quant_method instead
@@ -366,7 +375,7 @@ def _vllm_attention_modelopt_post_restore(self, quantizers: list) -> None:
             "Could not determine device/dtype for vLLM Attention. "
             "Ensure vllm_replace_quant_module_hook runs before replace_quant_module."
         )
-    self.to(device=device, dtype=dtype)
+    self.to(device=device)
 
 
 @QuantModuleRegistry.register({vllm_attention.Attention: "vllm_Attention"})

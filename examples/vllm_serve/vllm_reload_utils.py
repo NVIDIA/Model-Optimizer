@@ -152,6 +152,10 @@ def _merge_values_by_max_or_concat(merged_key: str, key_value_pairs: list[tuple[
             tensors = [v[dict_key] for v in values]
             if "_amax" in dict_key:
                 merged_value[dict_key] = torch.stack(tensors).max(dim=0)[0]
+            elif "_pre_quant_scale" in dict_key:
+                # _pre_quant_scale is per-input-channel: identical across q/k/v projections
+                # since they share the same input. Do not concatenate; take the first value.
+                merged_value[dict_key] = tensors[0]
             else:
                 merged_value[dict_key] = torch.cat(tensors, dim=0)
         return merged_value
@@ -172,6 +176,12 @@ def _merge_values_require_identical(merged_key: str, key_value_pairs: list[tuple
     keys = [k for k, _ in key_value_pairs]
     values = [v for _, v in key_value_pairs]
     first_value = values[0]
+
+    # If all quantizers are disabled, their shape-specific fields (e.g. _amax_shape_for_export)
+    # will differ across q/k/v projections even though the config is logically the same.
+    # Since disabled quantizers are not used, skip the equality check.
+    if all(isinstance(v, dict) and v.get("_disabled") for v in values):
+        return first_value
 
     for i, val in enumerate(values[1:], start=1):
         if not _values_equal(val, first_value):
@@ -209,7 +219,16 @@ def convert_dict_to_vllm(
             # Single key, just rename it
             _, value = key_value_pairs[0]
             vllm_state_dict[merged_key] = value
-    return map_fun(vllm_state_dict) if map_fun is not None else vllm_state_dict
+    if map_fun is None:
+        return vllm_state_dict
+    # Quantizer module-path keys (e.g. "layers.0.mlp.gate_proj.input_quantizer") must NOT
+    # go through map_fun (hf_to_vllm_mapper.apply_dict), which maps weight tensor paths and
+    # drops any key it doesn't recognise — including all quantizer keys. Split them out,
+    # apply map_fun only to non-quantizer keys, then merge back.
+    quantizer_keys = {k: v for k, v in vllm_state_dict.items() if "_quantizer" in k}
+    non_quantizer_keys = {k: v for k, v in vllm_state_dict.items() if "_quantizer" not in k}
+    mapped = map_fun(non_quantizer_keys) if non_quantizer_keys else {}
+    return {**mapped, **quantizer_keys}
 
 
 def convert_modelopt_state_to_vllm(
@@ -277,9 +296,18 @@ def filter_modelopt_state_quantizer_state_for_model(
         metadata = mode_entry[1].get("metadata", {})
         if "quantizer_state" in metadata:
             saved = metadata["quantizer_state"]
-            # Keep keys that exist in the model, but remove if quantizer is disabled
+
+            # Keep keys that exist in the model. Remove disabled quantizers UNLESS they
+            # have registered buffers (e.g. _pre_quant_scale from AWQ/smoothquant on a
+            # disabled input_quantizer). Those buffers must reach _reset_pytorch_state_from_metadata
+            # so they get registered before set_quantizer_state_dict loads the values.
+            def _has_buffers(state: dict) -> bool:
+                return bool(state.get("_pytorch_state_metadata", {}).get("buffers"))
+
             filtered = {
-                k: v for k, v in saved.items() if k in model_keys and k not in disabled_keys
+                k: v
+                for k, v in saved.items()
+                if k in model_keys and (k not in disabled_keys or _has_buffers(v))
             }
             # Add state for quantizers in model but not in metadata (e.g. disabled/excluded)
             for k in model_keys - filtered.keys():

@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from copy import deepcopy
+
 import pytest
 import torch
 from _test_utils.torch.transformers_models import create_tiny_llama_dir
@@ -19,6 +21,7 @@ from transformers import AutoModelForCausalLM
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_hf_vllm_fq_checkpoint
+from modelopt.torch.quantization.model_quant import fold_weight
 
 
 @pytest.mark.parametrize("quant_cfg", [mtq.FP8_DEFAULT_CFG])
@@ -26,9 +29,10 @@ def test_hf_vllm_export(tmp_path, quant_cfg):
     """Test HuggingFace model export for vLLM with fake quantization.
 
     This test verifies:
-    1. Exported model weights match the folded (fake-quantized) weights
-    2. vllm_fq_modelopt_state.pth is created; hf_quant_config.json is not
-    3. Weight quantizer states are empty after fold; input quantizer amaxes are preserved
+    1. Input model is NOT mutated by export (weights and quantizer state unchanged)
+    2. Exported weights match folded (fake-quantized) weights
+    3. vllm_fq_modelopt_state.pth is created; hf_quant_config.json is not
+    4. Weight quantizer states are empty in saved state dict; input quantizer amaxes preserved
     """
 
     # Create a tiny LLaMA model for testing
@@ -48,15 +52,27 @@ def test_hf_vllm_export(tmp_path, quant_cfg):
     model = mtq.quantize(model, quant_cfg, forward_loop)
     quantizer_state_dict_before = mtq.utils.get_quantizer_state_dict(model)
 
+    # Compute expected exported weights: deepcopy → fold (export writes folded weights)
+    folded_model = deepcopy(model)
+    fold_weight(folded_model)
+    expected_weights = {k: v for k, v in folded_model.state_dict().items() if "quantizer" not in k}
+    del folded_model
+
+    # Snapshot model state before export to verify it is not mutated
+    state_dict_before_export = {k: v.clone() for k, v in model.state_dict().items()}
+
     # Export directory
     export_dir = tmp_path / "vllm_export"
     export_dir.mkdir(exist_ok=True)
 
-    # Export for vLLM — folds weights in-place, disables weight quantizers
     export_hf_vllm_fq_checkpoint(model, export_dir=export_dir)
 
-    # Capture folded weights from the (now mutated) model for comparison
-    expected_weights = {k: v for k, v in model.state_dict().items() if "quantizer" not in k}
+    # Verify the input model is not mutated: all state dict values unchanged
+    state_dict_after_export = model.state_dict()
+    for key, param_before in state_dict_before_export.items():
+        assert torch.allclose(param_before, state_dict_after_export[key], atol=0), (
+            f"Model was mutated by export: {key} changed"
+        )
 
     # check if vllm_fq_modelopt_state.pth file exists
     modelopt_state_file = export_dir / "vllm_fq_modelopt_state.pth"
