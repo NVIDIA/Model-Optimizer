@@ -25,7 +25,7 @@ pip install -r examples/puzzletron/requirements.txt
 > **Note:** NeMo containers may ship `nvidia-lm-eval` which may conflict with `lm-eval` that is used for evaluation.
 > If so, run `pip uninstall nvidia-lm-eval -y` before installing requirements.
 
-- For this example we are using 2x NVIDIA H100 80GB HBM3 to show multi-GPU steps. You can use also use s single GPU.
+- For this example we are using 2x NVIDIA H100 80GB HBM3 to show multi-GPU steps. You can use also use a single GPU.
 
 - To make use of [Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) and [Nemotron-Post-Training-Dataset-v2](https://huggingface.co/datasets/nvidia/Nemotron-Post-Training-Dataset-v2), you need to accept the terms and conditions for the corresponding model and the dataset in the Huggingface Hub. Log in to the Huggingface Hub and enter your HF token.
 
