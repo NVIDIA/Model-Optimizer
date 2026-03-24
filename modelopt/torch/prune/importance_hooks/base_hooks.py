@@ -734,7 +734,7 @@ class LayerNormContributionHook(ForwardHook):
         all_scores = []
         for activation_file in activation_files:
             print(f"Loading activations from {activation_file}")
-            activation_data = safe_load(activation_file)
+            activation_data = safe_load(activation_file, map_location="cpu")
 
             # Extract scores from the activation data
             for module_name, hook_data in activation_data.items():

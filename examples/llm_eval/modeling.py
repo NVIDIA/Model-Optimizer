@@ -74,6 +74,7 @@ from transformers import (
 
 class EvalModel(BaseModel, arbitrary_types_allowed=True):
     model_path: str
+    trust_remote_code: bool = False
     max_input_length: int = 512
     max_output_length: int = 512
     dtype: str = "auto"
@@ -92,7 +93,6 @@ class EvalModel(BaseModel, arbitrary_types_allowed=True):
 
 
 class OpenAIModel(EvalModel):
-    model_path: str
     engine: str = ""
     use_azure: bool = False
     tokenizer: tiktoken.Encoding | None
@@ -173,7 +173,6 @@ class OpenAIModel(EvalModel):
 
 
 class SeqToSeqModel(EvalModel):
-    model_path: str
     model: PreTrainedModel | None = None
     tokenizer: PreTrainedTokenizer | None = None
     lora_path: str = ""
@@ -191,7 +190,9 @@ class SeqToSeqModel(EvalModel):
             args.update(torch_dtype=getattr(torch, self.dtype) if self.dtype != "auto" else "auto")
             if self.attn_implementation:
                 args["attn_implementation"] = self.attn_implementation
-            self.model = AutoModelForSeq2SeqLM.from_pretrained(self.model_path, **args)
+            self.model = AutoModelForSeq2SeqLM.from_pretrained(
+                self.model_path, trust_remote_code=self.trust_remote_code, **args
+            )
             print_gpu_utilization()
             if self.lora_path:
                 self.model = PeftModel.from_pretrained(self.model, self.lora_path)
@@ -199,7 +200,9 @@ class SeqToSeqModel(EvalModel):
             if "device_map" not in args:
                 self.model.to(self.device)
         if self.tokenizer is None:
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.model_path, trust_remote_code=self.trust_remote_code
+            )
 
     def run(self, prompt: str, **kwargs) -> str:
         self.load()
@@ -247,7 +250,7 @@ class CausalModel(SeqToSeqModel):
             if self.attn_implementation:
                 args["attn_implementation"] = self.attn_implementation
             self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_path, trust_remote_code=True, **args
+                self.model_path, trust_remote_code=self.trust_remote_code, **args
             )
             self.model.eval()
             if "device_map" not in args:
@@ -256,7 +259,9 @@ class CausalModel(SeqToSeqModel):
             # Sampling with temperature will cause MMLU to drop
             self.model.generation_config.do_sample = False
         if self.tokenizer is None:
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.model_path, trust_remote_code=self.trust_remote_code
+            )
 
     def run(self, prompt: str, **kwargs) -> str:
         self.load()
@@ -487,10 +492,12 @@ class GPTQModel(LlamaModel):
 class ChatGLMModel(SeqToSeqModel):
     def load(self):
         if self.tokenizer is None:
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.model_path, trust_remote_code=self.trust_remote_code
+            )
         if self.model is None:
             self.model = AutoModel.from_pretrained(
-                self.model_path, trust_remote_code=True
+                self.model_path, trust_remote_code=self.trust_remote_code
             ).half()  # FP16 is required for ChatGLM
             self.model.eval()
             self.model.to(self.device)

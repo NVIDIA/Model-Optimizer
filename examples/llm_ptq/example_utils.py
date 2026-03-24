@@ -53,7 +53,13 @@ SPECULATIVE_MODEL_LIST = ["Eagle", "Medusa"]
 
 
 def run_nemotron_vl_preview(
-    full_model, tokenizer, input_ids, pyt_ckpt_path, stage_name, allow_fallback=False
+    full_model,
+    tokenizer,
+    input_ids,
+    pyt_ckpt_path,
+    stage_name,
+    allow_fallback=False,
+    trust_remote_code=False,
 ):
     """Run text-only and VL preview generation for Nemotron VL models.
 
@@ -64,7 +70,7 @@ def run_nemotron_vl_preview(
         pyt_ckpt_path: Path to the model checkpoint
         stage_name: Description of the stage (e.g., "before quantization", "after quantization")
         allow_fallback: Whether to allow fallback to standard generate on failure
-
+        trust_remote_code: Whether to trust remote code for Huggingface models and tokenizers
     Returns:
         Generated text response or None if generation failed
     """
@@ -80,7 +86,7 @@ def run_nemotron_vl_preview(
 
     # Try text-only generation (may fail for encoder-decoder models like Nemotron-Parse)
     text_response = run_text_only_generation(
-        full_model, tokenizer, question, generation_config, pyt_ckpt_path
+        full_model, tokenizer, question, generation_config, pyt_ckpt_path, trust_remote_code
     )
 
     generated_ids = None
@@ -93,7 +99,7 @@ def run_nemotron_vl_preview(
 
     # Run additional VL test with images
     print(f"Running additional VL test with images ({stage_name})...")
-    run_vl_preview_generation(full_model, tokenizer, pyt_ckpt_path, stage_name)
+    run_vl_preview_generation(full_model, tokenizer, pyt_ckpt_path, stage_name, trust_remote_code)
 
     return generated_ids
 

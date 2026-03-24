@@ -55,6 +55,7 @@ def validate_ar(model, tokenizer, ds, steps=3, osl=20, num_samples=80, device=No
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, required=True, help="Path to model directory")
+    parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
     parser.add_argument("--steps", type=int, default=3, help="Steps for AR validation")
     parser.add_argument(
         "--osl", type=int, default=32, help="Output sequence length for AR validation"
@@ -72,8 +73,12 @@ def main():
 
     accelerator = Accelerator()
     # Load model and tokenizer
-    model = load_vlm_or_llm(args.model_path, device_map="auto")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+    model = load_vlm_or_llm(
+        args.model_path, device_map="auto", trust_remote_code=args.trust_remote_code
+    )
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_path, trust_remote_code=args.trust_remote_code
+    )
     model.eval()
     model = accelerator.prepare(model)
 
