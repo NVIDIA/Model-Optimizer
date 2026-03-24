@@ -24,7 +24,9 @@ Setup Steps for Olive with ModelOpt-Windows
             $ pip install onnxruntime-genai-cuda
             $ pip install onnxruntime-gpu
 
-   - Above onnxruntime and onnxruntime-genai packages enable Olive workflow with CUDA Execution-Provider (EP). To use other EPs, install corresponding packages; refer to the ONNX Runtime's `EP documentation <https://onnxruntime.ai/docs/execution-providers/>`_ for details about differfent EPs and thier requirements and installation instructions.
+   - Above onnxruntime and onnxruntime-genai packages enable Olive workflow with CUDA Execution-Provider (EP). To use other EPs, install corresponding packages.
+
+   - Refer to the ONNX Runtime's `EP documentation <https://onnxruntime.ai/docs/execution-providers/>`_ for details about different EPs, their requirements, and installation instructions.
 
    - Additionally, ensure that dependencies for Model Optimizer - Windows are met as mentioned in the :ref:`Install-Page-Standalone-Windows`.
 

@@ -51,7 +51,14 @@ pip install nvidia-modelopt[onnx]
 
 ### Installation with Olive
 
-The ModelOpt-Windows is integrated in Microsoft's [Olive](https://microsoft.github.io/Olive/) framework. To install ModelOpt with Olive, please refer to the [detailed installation instructions](https://nvidia.github.io/Model-Optimizer/getting_started/windows/_installation_for_Windows.html).
+The ModelOpt-Windows is integrated into Microsoft's [Olive](https://microsoft.github.io/Olive/) framework. Run the following commands to install ModelOpt through Olive.
+
+```bash
+pip install olive-ai[nvmo]
+pip install onnxruntime-genai-cuda
+```
+
+For more details, or to use different [ONNX Runtime Execution Providers](https://onnxruntime.ai/docs/execution-providers/), refer to the [detailed installation instructions](https://nvidia.github.io/Model-Optimizer/getting_started/windows/_installation_for_Windows.html).
 
 ## Techniques
 
