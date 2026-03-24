@@ -52,6 +52,8 @@ def _fakequant_run_prolog_worker(self) -> None:
         tokenizer.pad_token = tokenizer.eos_token
 
     model = self.model_runner.model
+    if hasattr(model, "unwrap"):
+        model = model.unwrap()
     if quant_config["modelopt_state_path"]:
         print(f"Loading modelopt state from {quant_config['modelopt_state_path']}")
         # Load on CPU to avoid failures when the checkpoint was saved from a different
@@ -90,9 +92,6 @@ def _fakequant_run_prolog_worker(self) -> None:
         )
 
         calibrate_loop = calibrate_fun(calib_dataloader, self)
-
-        if hasattr(model, "unwrap"):
-            model = model.unwrap()
 
         quant_cfg = get_quant_config(quant_config, model)
 
