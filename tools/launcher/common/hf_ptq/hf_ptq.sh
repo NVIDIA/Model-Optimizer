@@ -16,7 +16,7 @@
 # limitations under the License.
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source ${SCRIPT_DIR}/../service_utils.sh
+source "${SCRIPT_DIR}/../service_utils.sh"
 
 trap 'error_handler $0 $LINENO' ERR # ERROR HANDLER
 trap 'exit_handler' EXIT
