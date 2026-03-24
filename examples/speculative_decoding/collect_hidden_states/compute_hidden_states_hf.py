@@ -85,6 +85,12 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="""Data parallel world size. Number of tasks on SLURM.""",
     )
+    parser.add_argument(
+        "--trust_remote_code",
+        help="Set trust_remotecode for Huggingface models and tokenizers",
+        default=False,
+        action="store_true",
+    )
 
     return parser.parse_args()
 
@@ -130,11 +136,11 @@ def main(args: argparse.Namespace) -> None:
         dataset = dataset.select(range(args.debug_max_num_conversations))
 
     model = AutoModel.from_pretrained(
-        args.model, dtype="auto", device_map="auto", trust_remote_code=True
+        args.model, dtype="auto", device_map="auto", trust_remote_code=args.trust_remote_code
     )
     num_hidden_layers = getattr(model.config, "num_hidden_layers", None)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=args.trust_remote_code)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.chat_template = tokenizer.chat_template.replace(REMOVE_THINK_CHAT_TEMPLATE, "")

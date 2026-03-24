@@ -85,9 +85,7 @@ def main(args):
     print(f"\n\n-- Content of input audio-file = {prediction}\n\n")
 
     if args.run_wer_test:
-        librispeech_test_clean = load_dataset(
-            "librispeech_asr", "clean", split="test", trust_remote_code=True
-        )
+        librispeech_test_clean = load_dataset("librispeech_asr", "clean", split="test")
 
         references = []
         predictions = []

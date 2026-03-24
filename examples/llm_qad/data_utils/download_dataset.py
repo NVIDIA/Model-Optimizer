@@ -30,14 +30,14 @@ TRAIN_RATIO, VALID_RATIO = 0.95, 0.025
 _TOKENIZER = None
 
 
-def init_tokenizer(name: str) -> None:
+def init_tokenizer(name: str, trust_remote_code: bool = False) -> None:
     """Load HuggingFace tokenizer for chat template."""
     global _TOKENIZER
     if name:
         from transformers import AutoTokenizer
 
         print(f"Loading tokenizer: {name}")
-        _TOKENIZER = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
+        _TOKENIZER = AutoTokenizer.from_pretrained(name, trust_remote_code=trust_remote_code)
 
 
 def format_text(messages: list[dict], reasoning: str = "") -> str:
@@ -159,10 +159,16 @@ def main():
     p.add_argument(
         "--include-reasoning", action="store_true", help="Include COT for Thinking models"
     )
+    p.add_argument(
+        "--trust_remote_code",
+        help="Set trust_remotecode for Huggingface models and tokenizers",
+        default=False,
+        action="store_true",
+    )
     args = p.parse_args()
 
     if args.tokenizer:
-        init_tokenizer(args.tokenizer)
+        init_tokenizer(args.tokenizer, args.trust_remote_code)
 
     # Build suffix
     suffix = f"{int(args.sample_percent)}pct"

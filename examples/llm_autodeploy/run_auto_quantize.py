@@ -118,10 +118,11 @@ def modelopt_ptq(
     auto_quantize_bits: float | None = None,
     calib_dataset: str = "cnn_dailymail",
     calib_batch_size: int = 8,
+    trust_remote_code: bool = False,
 ) -> torch.nn.Module:
     """Quantize the model with modelopt."""
     model = AutoModelForCausalLM.from_pretrained(
-        model_path, trust_remote_code=True, dtype="auto", device_map="auto"
+        model_path, trust_remote_code=trust_remote_code, dtype="auto", device_map="auto"
     )
     model.eval()
 
@@ -129,7 +130,7 @@ def modelopt_ptq(
         model_path,
         model_max_length=2048,
         padding_side="left",
-        trust_remote_code=True,
+        trust_remote_code=trust_remote_code,
     )
     # sanitize tokenizer
     if tokenizer.pad_token != "<unk>":
@@ -203,6 +204,12 @@ if __name__ == "__main__":
             "regular quantization without auto_quantize search will be applied."
         ),
     )
+    parser.add_argument(
+        "--trust_remote_code",
+        help="Set trust_remotecode for Huggingface models and tokenizers",
+        default=False,
+        action="store_true",
+    )
 
     args = parser.parse_args()
 
@@ -213,4 +220,5 @@ if __name__ == "__main__":
         args.num_samples,
         auto_quantize_bits=args.effective_bits,
         calib_batch_size=args.calib_batch_size,
+        trust_remote_code=args.trust_remote_code,
     )
