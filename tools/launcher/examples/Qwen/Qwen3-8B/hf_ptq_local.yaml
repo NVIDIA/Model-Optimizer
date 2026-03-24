@@ -13,6 +13,8 @@ pipeline:
 
   task_0:
     script: common/hf_ptq/hf_ptq.sh
+    args:
+      - --dataset cnn_dailymail
     environment:
       - HF_MODEL: /hf-local/Qwen/Qwen3-8B
       - QFORMAT: fp8
