@@ -108,8 +108,10 @@ def calculate_subblock_params(
 ) -> int:
     """Count parameters on one meta decoder layer (puzzletron ``calculate_subblock_params`` parity).
 
-    Uses ``BlockConfig`` / ``to_blockconfig()`` and ``deci_x_patcher`` instead of Puzzletron's
-    ``LayerConfig`` / ``puzzletron_patcher``.
+    Mirrors ``puzzletron.subblock_stats.calc_subblock_memory.calculate_subblock_params``:
+    mock a one-layer model, attach a single entry in ``block_configs``, and build under
+    ``EmptyInitOnDevice("meta")`` with ``deci_x_patcher`` (AnyModel analogue of ``puzzletron_patcher``).
+    Pass ``block_configs`` explicitly so VL models with nested LM config still see per-layer data.
     """
     if isinstance(layer_config, FFNConfig):
         block_config = layer_config.to_blockconfig()
@@ -139,6 +141,8 @@ def calculate_subblock_params(
     if lm_config is not _config:
         lm_config.block_configs = block_configs
 
+    # Pass block_configs explicitly so patcher works for VL models where decoder layers receive
+    # nested config (e.g. text_config) without block_configs (parity with puzzletron_patcher).
     with (
         EmptyInitOnDevice("meta"),
         deci_x_patcher(model_descriptor=descriptor, block_configs=block_configs),
@@ -146,7 +150,6 @@ def calculate_subblock_params(
         model = init_model_from_config(
             _config,
             trust_remote_code=descriptor.requires_trust_remote_code(),
-            suspend_keep_in_fp32_module_validation=True,
         )
 
     decoder_layer = model.get_submodule(descriptor.layer_block_name(index=0))
