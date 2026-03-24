@@ -64,6 +64,28 @@ NVFP4_DEFAULT_CONFIG = {
     "algorithm": "max",
 }
 
+NVFP4_ASYMMETRIC_CONFIG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+            "bias": {-1: None, "type": "static", "method": "mean"},
+        },
+        "*input_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+            "bias": {-1: None, "type": "dynamic", "method": "mean"}, #bias must be dynamic
+        },
+        "*output_quantizer": {"enable": False},
+        "default": {"enable": False},
+    },
+    "algorithm": "max",
+}
+
 NVFP4_FP8_MHA_CONFIG = {
     "quant_cfg": {
         "**weight_quantizer": {

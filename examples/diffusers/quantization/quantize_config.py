@@ -78,6 +78,7 @@ class QuantizationConfig:
     lowrank: int = 32  # SVDQuant lowrank
     quantize_mha: bool = False
     compress: bool = False
+    asymmetric: bool = False
 
     def validate(self) -> None:
         """Validate configuration consistency."""
