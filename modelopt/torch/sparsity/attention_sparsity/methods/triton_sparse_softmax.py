@@ -17,8 +17,6 @@
 
 from contextlib import contextmanager
 
-import torch
-
 from .registry import SparseAttentionMethod, register_sparse_method
 
 
@@ -52,17 +50,8 @@ class TritonSparseSoftmaxMethod(SparseAttentionMethod):
         """Method name identifier."""
         return "triton_sparse_softmax"
 
-    def calculate_sparsity(self, attention_scores):
-        """Return a no-op mask (sparsity is applied inside the Triton kernel)."""
-        mask = torch.ones_like(attention_scores, dtype=torch.bool)
-        return mask, {}
-
-    def apply_sparsity(self, attention_scores, sparse_mask=None):
-        """Not supported — sparsity is fused into the Triton kernel."""
-        raise NotImplementedError(
-            "triton_sparse_softmax applies sparsity inside the Triton kernel. "
-            "Use backend='triton' or backend='vllm', not backend='pytorch'."
-        )
+    # calculate_sparsity and apply_sparsity use base class defaults
+    # (no-op mask and NotImplementedError) — sparsity is fused into the Triton kernel.
 
     def get_sparse_context(self, module):
         """Return context manager that activates N:M sparse softmax during forward."""
