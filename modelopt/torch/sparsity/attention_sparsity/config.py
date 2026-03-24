@@ -18,7 +18,7 @@
 from collections.abc import Callable
 from typing import Any
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
@@ -111,21 +111,21 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         description="Group size for N:M sparsity (4 or 8). Only used by triton_sparse_softmax.",
     )
 
-    num_sink_blocks: int = ModeloptField(
+    num_sink_tokens: int = ModeloptField(
         default=0,
-        title="Number of sink blocks.",
+        title="Number of sink tokens.",
         description=(
-            "Number of leading KV blocks to keep dense (attention sinks). "
-            "Only used by triton_sparse_softmax."
+            "KV positions before this index are kept dense (attention sinks). "
+            "Absolute token count. Only used by triton_sparse_softmax."
         ),
     )
 
-    dense_window_blocks: int = ModeloptField(
-        default=1,
-        title="Dense window blocks.",
+    dense_window_size: int = ModeloptField(
+        default=64,
+        title="Dense window size in tokens.",
         description=(
-            "Number of local attention blocks around diagonal to keep dense. "
-            "Only used by triton_sparse_softmax."
+            "Tokens near the query diagonal kept dense (local attention window). "
+            "Absolute token count. Default 64. Only used by triton_sparse_softmax."
         ),
     )
 
@@ -147,6 +147,38 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
                 f"attn_implementation='eager'), 'triton' (requires "
                 f"attn_implementation='modelopt_triton')."
             )
+        return v
+
+    @field_validator("sparsity_m")
+    @classmethod
+    def validate_sparsity_m(cls, v):
+        """Validate sparsity_m is 4 or 8."""
+        if v not in (4, 8):
+            raise ValueError(f"sparsity_m must be 4 or 8, got {v}")
+        return v
+
+    @field_validator("sparsity_n")
+    @classmethod
+    def validate_sparsity_n(cls, v):
+        """Validate sparsity_n is non-negative."""
+        if v < 0:
+            raise ValueError(f"sparsity_n must be >= 0, got {v}")
+        return v
+
+    @field_validator("num_sink_tokens")
+    @classmethod
+    def validate_num_sink_tokens(cls, v):
+        """Validate num_sink_tokens is non-negative."""
+        if v < 0:
+            raise ValueError(f"num_sink_tokens must be >= 0, got {v}")
+        return v
+
+    @field_validator("dense_window_size")
+    @classmethod
+    def validate_dense_window_size(cls, v):
+        """Validate dense_window_size is non-negative."""
+        if v < 0:
+            raise ValueError(f"dense_window_size must be >= 0, got {v}")
         return v
 
     @field_validator("br", "bc")
@@ -192,6 +224,18 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
                 f"got prefill={lengths['prefill']}, decode={lengths['decode']}"
             )
         return v
+
+    @model_validator(mode="after")
+    def validate_sparsity_n_vs_m(self):
+        """Validate sparsity_n < sparsity_m when sparsity is enabled."""
+        if self.sparsity_n > 0:
+            max_n = 3 if self.sparsity_m == 4 else 4
+            if self.sparsity_n > max_n:
+                raise ValueError(
+                    f"sparsity_n={self.sparsity_n} exceeds max for sparsity_m={self.sparsity_m}. "
+                    f"Valid range: 1..{max_n}"
+                )
+        return self
 
 
 class CalibrationConfig(ModeloptBaseConfig):
@@ -474,8 +518,8 @@ SPARSE_SOFTMAX_DEFAULT = {
             "method": "triton_sparse_softmax",
             "sparsity_n": 2,
             "sparsity_m": 4,
-            "num_sink_blocks": 0,
-            "dense_window_blocks": 1,
+            "num_sink_tokens": 0,
+            "dense_window_size": 64,
             "backend": "triton",
             "enable": True,
         },

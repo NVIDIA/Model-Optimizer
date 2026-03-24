@@ -217,8 +217,8 @@ def _attn_fwd(
     STORE_LSE: tl.constexpr,  # Whether to save LSE for backward pass
     SPARSITY_N: tl.constexpr = 0,  # N:M sparsity — keep top-N of every M elements (0 = disabled)
     SPARSITY_M: tl.constexpr = 4,  # N:M sparsity — group size (4 or 8)
-    NUM_SINK_BLOCKS: tl.constexpr = 0,  # Leading KV blocks kept dense (attention sinks)
-    DENSE_WINDOW_BLOCKS: tl.constexpr = 1,  # Local blocks near diagonal kept dense
+    NUM_SINK_TOKENS: tl.constexpr = 0,  # KV positions before this are kept dense (attention sinks)
+    DENSE_WINDOW_SIZE: tl.constexpr = 64,  # Tokens near diagonal kept dense (absolute, BLOCK_N-independent)
 ):
     # --- Grid: (batch, num_q_heads, num_q_tiles) ---
     # Example: batch=2, num_q_heads=32, seq_len=256, BLOCK_M=128
@@ -279,13 +279,13 @@ def _attn_fwd(
         # --- Optional N:M sparse softmax ---
         if SPARSITY_N > 0:
             # Check if this KV tile should be kept dense
-            kv_block_idx = kv_start // BLOCK_N
-            is_sink = kv_block_idx < NUM_SINK_BLOCKS
+            # Token-level checks (BLOCK_N-independent so forward/backward agree)
+            is_sink = kv_start < NUM_SINK_TOKENS
             # causal_offset handles chunked prefill: q starts at (seq_len_kv - seq_len_q)
             causal_offset = seq_len_kv - seq_len_q
-            q_abs_block = (tile_q * BLOCK_M + causal_offset) // BLOCK_N
-            block_distance = q_abs_block - kv_block_idx
-            is_local = (block_distance < DENSE_WINDOW_BLOCKS) and (block_distance >= 0)
+            q_abs_pos = tile_q * BLOCK_M + causal_offset
+            token_distance = q_abs_pos - kv_start
+            is_local = (token_distance >= 0) and (token_distance < DENSE_WINDOW_SIZE)
             if not is_sink and not is_local:
                 scores = _apply_sparse_nm_to_qk_tile(
                     scores, BLOCK_M, BLOCK_N, SPARSITY_N, SPARSITY_M
@@ -409,8 +409,8 @@ def _attn_bwd_dq(
     HEAD_DIM: tl.constexpr,
     SPARSITY_N: tl.constexpr = 0,
     SPARSITY_M: tl.constexpr = 4,
-    NUM_SINK_BLOCKS: tl.constexpr = 0,
-    DENSE_WINDOW_BLOCKS: tl.constexpr = 1,
+    NUM_SINK_TOKENS: tl.constexpr = 0,
+    DENSE_WINDOW_SIZE: tl.constexpr = 64,
 ):
     """Phase 3 of backward: compute dQ for one Q tile, looping over KV tiles.
 
@@ -479,12 +479,12 @@ def _attn_bwd_dq(
 
         # Re-apply N:M sparse softmax to match forward pass
         if SPARSITY_N > 0:
-            kv_block_idx = kv_start // BLOCK_N
-            is_sink = kv_block_idx < NUM_SINK_BLOCKS
+            # Token-level checks (BLOCK_N-independent so forward/backward agree)
+            is_sink = kv_start < NUM_SINK_TOKENS
             causal_offset = seq_len_kv - seq_len_q
-            q_abs_block = (tile_q * BLOCK_M + causal_offset) // BLOCK_N
-            block_distance = q_abs_block - kv_block_idx
-            is_local = (block_distance < DENSE_WINDOW_BLOCKS) and (block_distance >= 0)
+            q_abs_pos = tile_q * BLOCK_M + causal_offset
+            token_distance = q_abs_pos - kv_start
+            is_local = (token_distance >= 0) and (token_distance < DENSE_WINDOW_SIZE)
             if not is_sink and not is_local:
                 scores = _apply_sparse_nm_to_qk_tile(
                     scores, BLOCK_M, BLOCK_N, SPARSITY_N, SPARSITY_M
@@ -541,8 +541,8 @@ def _attn_bwd_dkdv(
     HEAD_DIM: tl.constexpr,
     SPARSITY_N: tl.constexpr = 0,
     SPARSITY_M: tl.constexpr = 4,
-    NUM_SINK_BLOCKS: tl.constexpr = 0,
-    DENSE_WINDOW_BLOCKS: tl.constexpr = 1,
+    NUM_SINK_TOKENS: tl.constexpr = 0,
+    DENSE_WINDOW_SIZE: tl.constexpr = 64,
 ):
     """Phase 2 of backward: compute dK, dV for one KV tile.
 
@@ -619,12 +619,12 @@ def _attn_bwd_dkdv(
 
             # Re-apply N:M sparse softmax to match forward pass
             if SPARSITY_N > 0:
-                kv_block_idx = kv_start // BLOCK_N
-                is_sink = kv_block_idx < NUM_SINK_BLOCKS
+                # Token-level checks (BLOCK_N-independent so forward/backward agree)
+                is_sink = kv_start < NUM_SINK_TOKENS
                 causal_offset = seq_len_kv - seq_len_q
-                q_abs_block = (qi * BLOCK_M + causal_offset) // BLOCK_N
-                block_distance = q_abs_block - kv_block_idx
-                is_local = (block_distance < DENSE_WINDOW_BLOCKS) and (block_distance >= 0)
+                q_abs_pos = qi * BLOCK_M + causal_offset
+                token_distance = q_abs_pos - kv_start
+                is_local = (token_distance >= 0) and (token_distance < DENSE_WINDOW_SIZE)
                 if not is_sink and not is_local:
                     scores = _apply_sparse_nm_to_qk_tile(
                         scores, BLOCK_M, BLOCK_N, SPARSITY_N, SPARSITY_M
@@ -665,8 +665,8 @@ class _Attention(torch.autograd.Function):
         max_input_len_k,
         sparsity_n,
         sparsity_m,
-        num_sink_blocks,
-        dense_window_blocks,
+        num_sink_tokens,
+        dense_window_size,
     ):
         HEAD_DIM = q.shape[2]
         num_q_heads = q.shape[1]
@@ -723,8 +723,8 @@ class _Attention(torch.autograd.Function):
             STORE_LSE=True,
             SPARSITY_N=sparsity_n,
             SPARSITY_M=sparsity_m,
-            NUM_SINK_BLOCKS=num_sink_blocks,
-            DENSE_WINDOW_BLOCKS=dense_window_blocks,
+            NUM_SINK_TOKENS=num_sink_tokens,
+            DENSE_WINDOW_SIZE=dense_window_size,
             # BLOCK_M, BLOCK_N, num_warps, num_stages chosen by autotune
         )
 
@@ -741,8 +741,8 @@ class _Attention(torch.autograd.Function):
         ctx.batch = batch
         ctx.sparsity_n = sparsity_n
         ctx.sparsity_m = sparsity_m
-        ctx.num_sink_blocks = num_sink_blocks
-        ctx.dense_window_blocks = dense_window_blocks
+        ctx.num_sink_tokens = num_sink_tokens
+        ctx.dense_window_size = dense_window_size
         return o
 
     @staticmethod
@@ -819,8 +819,8 @@ class _Attention(torch.autograd.Function):
             HEAD_DIM=HEAD_DIM,
             SPARSITY_N=ctx.sparsity_n,
             SPARSITY_M=ctx.sparsity_m,
-            NUM_SINK_BLOCKS=ctx.num_sink_blocks,
-            DENSE_WINDOW_BLOCKS=ctx.dense_window_blocks,
+            NUM_SINK_TOKENS=ctx.num_sink_tokens,
+            DENSE_WINDOW_SIZE=ctx.dense_window_size,
             num_warps=num_warps,
             num_stages=1,
         )
@@ -842,8 +842,8 @@ class _Attention(torch.autograd.Function):
             HEAD_DIM=HEAD_DIM,
             SPARSITY_N=ctx.sparsity_n,
             SPARSITY_M=ctx.sparsity_m,
-            NUM_SINK_BLOCKS=ctx.num_sink_blocks,
-            DENSE_WINDOW_BLOCKS=ctx.dense_window_blocks,
+            NUM_SINK_TOKENS=ctx.num_sink_tokens,
+            DENSE_WINDOW_SIZE=ctx.dense_window_size,
             num_warps=num_warps,
             num_stages=1,
         )
@@ -866,8 +866,8 @@ def attention(
     *,
     sparsity_n: int = 0,
     sparsity_m: int = 4,
-    num_sink_blocks: int = 0,
-    dense_window_blocks: int = 1,
+    num_sink_tokens: int = 0,
+    dense_window_size: int = 64,
 ) -> torch.Tensor:
     """Variable-length flash attention with GQA, autograd, and optional N:M sparse softmax.
 
@@ -888,9 +888,11 @@ def attention(
             ``sparsity_n=2, sparsity_m=4`` for 2:4 sparsity;
             ``sparsity_n=4, sparsity_m=8`` for 4:8 sparsity.
         sparsity_m: N:M sparsity — group size (4 or 8).
-        num_sink_blocks: Number of leading KV blocks to keep dense (attention sinks).
-        dense_window_blocks: KV blocks within this distance from the query
-            diagonal are kept dense (local attention window).
+        num_sink_tokens: KV positions before this token index are kept dense
+            (attention sinks). Absolute token count, BLOCK_N-independent.
+        dense_window_size: Tokens near the query diagonal kept dense (local
+            attention window). Absolute token count, BLOCK_N-independent.
+            Default 64 (one reference block).
 
     Returns:
         Output tensor [total_q_tokens, num_q_heads, head_dim].
@@ -910,8 +912,8 @@ def attention(
         max_input_len_k,
         sparsity_n,
         sparsity_m,
-        num_sink_blocks,
-        dense_window_blocks,
+        num_sink_tokens,
+        dense_window_size,
     )
 
 

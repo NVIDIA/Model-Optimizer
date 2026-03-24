@@ -105,14 +105,14 @@ def triton_attention_forward(
         kw["b_seq_len_k"] = torch.full((batch,), seq_k, device=device, dtype=torch.int32)
         kw["max_input_len_k"] = seq_k
 
-    # N:M sparse softmax
-    if getattr(module, "_apply_sparse_nm", False):
+    # N:M sparse softmax — prefill only (decode should not sparsify KV)
+    if not is_decode and getattr(module, "_apply_sparse_nm", False):
         method = getattr(module, "_sparse_method_instance", None)
         if method is not None:
             kw["sparsity_n"] = getattr(method, "sparsity_n", 2)
             kw["sparsity_m"] = getattr(method, "sparsity_m", 4)
-            kw["num_sink_blocks"] = getattr(method, "num_sink_blocks", 0)
-            kw["dense_window_blocks"] = getattr(method, "dense_window_blocks", 1)
+            kw["num_sink_tokens"] = getattr(method, "num_sink_tokens", 0)
+            kw["dense_window_size"] = getattr(method, "dense_window_size", 64)
 
     o = attention(q, k, v, **kw)
 

@@ -358,15 +358,15 @@ class TestHFIntegration:
             logits_dense = model_dense(input_ids=ids).logits
         del model_dense
 
-        # Sparse via mtsa.sparsify() with dense_window_blocks=0 to force sparsity on all tiles
+        # Sparse via mtsa.sparsify() with dense_window_size=0 to force sparsity on all tiles
         sparse_cfg = {
             "sparse_cfg": {
                 "*attn*": {
                     "method": "triton_sparse_softmax",
                     "sparsity_n": 2,
                     "sparsity_m": 4,
-                    "num_sink_blocks": 0,
-                    "dense_window_blocks": 0,
+                    "num_sink_tokens": 0,
+                    "dense_window_size": 0,
                     "backend": "triton",
                     "enable": True,
                 },
