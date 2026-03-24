@@ -324,6 +324,67 @@ def get_tensor_consumer_node_indices(graph: onnx.GraphProto | gs.Graph) -> dict[
     return tensor_consumer_map
 
 
+def find_conv_to_layernorm_nodes(
+    graph: Graph,
+    cask_fusible_partitions: list[list[Node]],
+) -> list[Node]:
+    """Find LayerNormalization nodes whose input comes from a CASK (Conv) partition.
+
+    When a Conv's output feeds into a LayerNormalization, the Conv output should be
+    quantized to enable faster INT8 kernels in TRT. This function detects such patterns
+    and returns the LayerNormalization nodes that should be added to the quantizable
+    nodes list so that Q/DQ pairs are inserted on their input (i.e. the Conv output).
+
+    Args:
+        graph: ONNX model graph.
+        cask_fusible_partitions: List of CASK fusible partitions.
+
+    Returns:
+        List of LayerNormalization nodes that consume CASK partition outputs.
+    """
+    # Collect the output tensor names from CASK partitions
+    cask_output_tensor_names = set()
+    for partition in cask_fusible_partitions:
+        last_node = partition[-1]
+        for output_tensor in last_node.outputs:
+            cask_output_tensor_names.add(output_tensor.name)
+
+    conv_to_ln_nodes = []
+    for node in graph.nodes:
+        if node.op != "LayerNormalization":
+            continue
+
+        # Check if the first input (activation) comes from a CASK partition output
+        # possibly through copy ops (Reshape, Transpose, etc.)
+        if _is_input_from_cask_partition(node.inputs[0], cask_output_tensor_names):
+            conv_to_ln_nodes.append(node)
+            logger.debug(
+                f"Found Conv->LayerNorm pattern: LayerNorm node '{node.name}' "
+                f"consumes CASK partition output"
+            )
+
+    logger.info(f"Found {len(conv_to_ln_nodes)} Conv->LayerNorm patterns to quantize")
+    return conv_to_ln_nodes
+
+
+def _is_input_from_cask_partition(tensor: Tensor, cask_output_tensor_names: set[str]) -> bool:
+    """Check if a tensor originates from a CASK partition output, traversing through copy ops."""
+    if tensor.name in cask_output_tensor_names:
+        return True
+
+    # Traverse backward through copy ops (Reshape, Transpose, etc.)
+    if tensor.inputs:
+        producer = tensor.inputs[0]
+        if is_copy_op(producer.op):
+            for inp in producer.inputs:
+                if not isinstance(inp, Constant) and _is_input_from_cask_partition(
+                    inp, cask_output_tensor_names
+                ):
+                    return True
+
+    return False
+
+
 def filter_quantizable_kgen_heads(
     cask_fusible_partitions: list[list[Node]],
     kgen_partitions: list[list[Node]],
