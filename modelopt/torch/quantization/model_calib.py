@@ -80,30 +80,27 @@ def filter_calib_modules(
         include_modules: If provided, only modules whose names match at least one fnmatch pattern
             are calibrated.  All others are skipped.
         exclude_modules: If provided, modules whose names match at least one fnmatch pattern are
-            skipped.  When a module name matches both ``include_modules`` and ``exclude_modules``,
-            exclusion takes precedence and the module is skipped.
-
-    Note:
-        Only quantized linear modules (as identified by :func:`is_quantized_linear`) are filtered.
-        ``TensorQuantizer`` instances inside non-linear quantized modules (e.g. layer norms,
-        embeddings) are not disabled even if their module name matches a pattern.
+            skipped.  Mutually exclusive with ``include_modules``.
 
     Example::
 
         with filter_calib_modules(model, exclude_modules=["*lm_head*"]):
             mse_calibrate(model, forward_loop)
     """
+    if include_modules is not None and exclude_modules is not None:
+        raise ValueError(
+            "include_modules and exclude_modules are mutually exclusive; specify only one."
+        )
+
     if include_modules is None and exclude_modules is None:
         yield
         return
 
     def _should_calibrate(name: str) -> bool:
         if include_modules is not None:
-            if not any(fnmatch.fnmatch(name, p) for p in include_modules):
-                return False
+            return any(fnmatch.fnmatch(name, p) for p in include_modules)
         if exclude_modules is not None:
-            if any(fnmatch.fnmatch(name, p) for p in exclude_modules):
-                return False
+            return not any(fnmatch.fnmatch(name, p) for p in exclude_modules)
         return True
 
     disabled = []

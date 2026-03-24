@@ -1050,10 +1050,7 @@ class CalibrationConfig(ModeloptBaseConfig):
             "If provided, only modules whose names match at least one of the fnmatch patterns are "
             "calibrated. Modules that do not match any pattern are skipped and retain their "
             "pre-existing calibration state. "
-            "If a module name matches both ``include_modules`` and ``exclude_modules``, "
-            "exclusion takes precedence and the module is skipped. "
-            "Note: filtering applies only to quantized linear modules; TensorQuantizers in "
-            "non-linear modules (e.g. layer norms, embeddings) are unaffected."
+            "Mutually exclusive with ``exclude_modules``; specifying both raises an error. "
         ),
     )
 
@@ -1063,12 +1060,17 @@ class CalibrationConfig(ModeloptBaseConfig):
         description=(
             "If provided, modules whose names match at least one of the fnmatch patterns are "
             "skipped during calibration and retain their pre-existing calibration state. "
-            "If a module name matches both ``include_modules`` and ``exclude_modules``, "
-            "exclusion takes precedence. "
-            "Note: filtering applies only to quantized linear modules; TensorQuantizers in "
-            "non-linear modules (e.g. layer norms, embeddings) are unaffected."
+            "Mutually exclusive with ``include_modules``; specifying both raises an error. "
         ),
     )
+
+    @model_validator(mode="after")
+    def _check_include_exclude_mutually_exclusive(self) -> "CalibrationConfig":
+        if self.include_modules is not None and self.exclude_modules is not None:
+            raise ValueError(
+                "include_modules and exclude_modules are mutually exclusive; specify only one."
+            )
+        return self
 
 
 # Backward-compatible alias — deprecated, will be removed in a future release.

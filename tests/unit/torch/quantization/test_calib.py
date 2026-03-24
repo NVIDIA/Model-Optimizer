@@ -22,6 +22,7 @@ import pytest
 import torch
 import torch.nn as nn
 from _test_utils.torch.quantization.quantize_common import get_awq_config
+from pydantic import ValidationError
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.config import QuantizerAttributeConfig
@@ -643,6 +644,18 @@ def test_filter_no_op_when_none():
         amax_after = _get_weight_amax(model, name)
         assert torch.allclose(amax_before, amax_after), (
             f"{name} amax changed unexpectedly when filter_calib_modules args are None"
+        )
+
+
+def test_include_and_exclude_modules_mutually_exclusive():
+    """Specifying both include_modules and exclude_modules raises a ValueError."""
+    model, _ = _make_quantized_mlp()
+    # Via CalibrationConfig (pydantic validation)
+    with pytest.raises(ValidationError, match="mutually exclusive"):
+        mtq.calibrate(
+            model,
+            algorithm={"method": "mse", "include_modules": ["net.0"], "exclude_modules": ["net.4"]},
+            forward_loop=None,
         )
 
 
