@@ -4,6 +4,10 @@ This folder includes popular 3rd-party LLM benchmarks for LLM accuracy evaluatio
 
 The following instructions show how to evaluate the Model Optimizer quantized LLM with the benchmarks, including the TensorRT-LLM deployment.
 
+## NeMo Evaluator
+
+[NeMo Evaluator](https://docs.nvidia.com/nemo/evaluator/latest/get-started/quickstart/index.html#self-hosted-options) is the recommended way to evaluate a large choice of benchmarks on quantized checkpoints generated from [llm_ptq](../llm_ptq). Quantized checkpoints can be served with [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm), or [SGLang](https://github.com/sgl-project/sglang) and then evaluated using NeMo Evaluator.
+
 ## LM-Eval-Harness
 
 [LM-Eval-Harness](https://github.com/EleutherAI/lm-evaluation-harness) provides a unified framework to test generative language models on a large number of different evaluation tasks.
