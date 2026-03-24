@@ -28,6 +28,7 @@ from typing import Any
 import regex as re
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from tqdm import tqdm
 
 from modelopt.torch.opt.conversion import ModeloptStateManager
@@ -160,7 +161,7 @@ class QuantRecipe(CustomHPType):
         model_calib._ENABLE_FOLDING_PQS_TO_WEIGHTS = True
         for name, module in model.named_modules():
             if is_quantized_linear(module):
-                with SequentialQuantizer.convert_to_single_quantizer(model):
+                with SequentialQuantizer.convert_to_single_quantizer(module):
                     if module.weight_quantizer.pre_quant_scale is not None:
                         weight_pqs = module.weight_quantizer.pre_quant_scale
                         delattr(module.weight_quantizer, "_pre_quant_scale")
@@ -184,12 +185,14 @@ class QuantRecipeHparam(Hparam):
         quant_modules: list[nn.Module] | None = None,
         score_modules: list[nn.Module] | None = None,
         name: str | None = None,
+        quant_module_names: list[str] | None = None,
     ) -> None:
         """Initializes Hparam with original value and choices."""
         choices = sorted({*(choices if choices else []), QuantRecipe(quant_cfg=None)})
         super().__init__(choices, original=choices[0])
 
         self.name = name
+        self.quant_module_names = quant_module_names or []
 
         self.quant_modules = list(set(quant_modules or []))
         self.score_modules = list(set(score_modules or self.quant_modules))
@@ -333,11 +336,14 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
     candidate_stats: dict[str, dict[str, list[float]]]
     best: dict[str, Any]
+    quantizer_states: dict
+    method_name: str | None = None
 
     quant_grouping_rules = [
         r"^(.*?)\.(q_proj|k_proj|v_proj)$",  # q_proj, k_proj, v_proj for llama like models
         # gate_proj, up_proj, down_proj for Qwen3 like MoE models
         r"^(.*?\.mlp\.experts)\.\d+\.(gate_proj|up_proj|down_proj)$",
+        r"^(.*?\.mixer\.experts)\.\d+\.(up_proj|down_proj)$",  # NemotronH MoE experts
         r"^(.*?)\.(gate_proj|up_proj)$",  # gate_proj, up_proj for llama like models
         r"^(.*?)\.(\d+\.(w1|w2|w3))$",  # mixtral experts
         r"^(.*?)\.((w1_linear|w2_linear|w3_linear)\.\d+)$",  # dbrx experts
@@ -363,7 +369,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
     def default_state_dict(self) -> SearchStateDict:
         """Get the default state dict for AutoQuantize."""
         return {
+            "method": self.method_name,
             "candidate_stats": defaultdict(dict),
+            "quantizer_states": {},
             "best": {"recipe": {}, "constraints": {}, "score": float("inf"), "is_satisfied": False},
         }
 
@@ -378,6 +386,9 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             "`forward_step` must be provided for `auto_quantize`."
         )
         return config
+
+    def load_search_checkpoint(self) -> bool:
+        return super().load_search_checkpoint(strict=False)
 
     @staticmethod
     def _is_auto_quantize_module(module):
@@ -517,12 +528,13 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             disabled = any(disabled for _, _, disabled, _ in module_info_list)
             score_modules = [score_module for _, _, _, score_module in module_info_list]
 
-            quant_recipes = None if disabled else quant_recipes
+            _quant_recipes = None if disabled else quant_recipes
             hparam = QuantRecipeHparam(
-                quant_recipes,
+                _quant_recipes,
                 quant_modules=quant_modules,
                 score_modules=score_modules,
                 name=str(group_key),
+                quant_module_names=[name for _, name, _, _ in module_info_list],
             )
 
             for module in quant_modules:
@@ -570,6 +582,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             self.candidate_stats[name]["formats"] = formats
             self.candidate_stats[name]["scores"] = scores
             self.candidate_stats[name]["costs"] = costs
+            self.candidate_stats[name]["module_names"] = hparam.quant_module_names
 
     def _run_func(self, func, num_iters=1, desc=""):
         for i, data in tqdm(
@@ -584,7 +597,17 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         # Import here to avoid circular import
         from modelopt.torch.quantization.model_quant import calibrate
 
+        from .conversion import restore_quantizer_state, update_quantize_metadata
+        from .utils import get_quantizer_state_dict, set_quantizer_state_dict
+
         super().before_search()
+        restored_method = getattr(self, "method", None)
+        if self.candidate_stats and restored_method not in (None, self.method_name):
+            raise ValueError(
+                f"Checkpoint method '{restored_method}' does not match current method "
+                f"'{self.method_name}'. Use a different checkpoint path."
+            )
+        self.method = self.method_name
 
         search_recipes = self._get_search_recipes(self.config["quantization_formats"])
         self._verify_constraint(search_recipes)
@@ -595,8 +618,25 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
         QuantRecipe.disable_folding_pqs_to_weights()
 
         # Iterate over the search recipes and calibrate the quantizers for each recipe
+        calibrated_new = False
         for recipe in search_recipes:
             if recipe == QuantRecipe(quant_cfg=None):  # No-quant format
+                continue
+
+            for name, hparam in named_hparams(self.model, configurable=True):
+                if not isinstance(hparam, QuantRecipeHparam):
+                    continue
+                hparam.active = recipe
+
+            if recipe in self.quantizer_states:
+                saved = self.quantizer_states[recipe]
+                # config is unused by restore_quantizer_state
+                restore_quantizer_state(
+                    self.model, QuantizeConfig(), {"quantizer_state": saved["metadata"]}
+                )
+                set_quantizer_state_dict(self.model, saved["state_dict"])
+                if self.config["verbose"]:
+                    print_rank_0(f"AutoQuantize: Restored calibration for {recipe}")
                 continue
 
             # Lets reduce the number of calibration steps for AWQ since it takes longer
@@ -613,12 +653,6 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
                     desc=f"Calibrating for {recipe}",
                 )
 
-            for name, hparam in named_hparams(self.model, configurable=True):
-                if not isinstance(hparam, QuantRecipeHparam):
-                    continue
-                hparam.active = recipe
-
-            # Now calibrate the quantizers for the recipe
             calibrate(
                 self.model,
                 algorithm=recipe.config.algorithm,
@@ -628,6 +662,17 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             # across layers, lets not save this new mode in the modelopt state.
             # TODO: This is a hack. We need to create a mode for auto_quantize to handle this in a clean way.
             ModeloptStateManager(self.model).state_dict().pop()
+            metadata: dict = {}
+            # config is unused by update_quantize_metadata
+            update_quantize_metadata(self.model, QuantizeConfig(), metadata)
+            self.quantizer_states[recipe] = {
+                "metadata": metadata["quantizer_state"],
+                "state_dict": get_quantizer_state_dict(self.model),
+            }
+            calibrated_new = True
+
+        if calibrated_new:
+            self.save_search_checkpoint(verbose=self.config["verbose"])
 
         if self.candidate_stats:
             if self.config["verbose"]:
@@ -636,8 +681,15 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
         self.estimate_sensitivity_scores()
         self.initialize_candidate_stats()
-        # Save checkpoint after successful score estimation
         self.save_search_checkpoint(verbose=self.config["verbose"])
+
+    @staticmethod
+    def _print_recipe_summary(best_recipe, total_cost, total_weight_size, prefix="AutoQuantize"):
+        for name, recipe in best_recipe.items():
+            print_rank_0(f"{prefix} best recipe for {name.replace('.quant_recipe', '')}: {recipe}")
+        effective_bits = (total_cost / total_weight_size) * 16
+        print_rank_0(f"{prefix} effective bits: {effective_bits:.2f}")
+        return effective_bits
 
     @staticmethod
     def _get_total_weight_size(modules):
@@ -695,16 +747,13 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
             get_hparam(self.model, name).active = best_format
             best_constraints += best_hparam_recipe_info["costs"]
             best_scores += best_hparam_recipe_info["scores"]
-            if verbose:
-                print_rank_0(
-                    f"AutoQuantize best recipe for {name.replace('.quant_recipe', '')}: {best_recipe[name]}"
-                )
 
-        effective_bits_from_search = (best_constraints / total_weight_size) * 16
         if verbose:
-            print_rank_0(
-                f"AutoQuantize effective bits from search: {effective_bits_from_search: .2f}"
+            effective_bits_from_search = self._print_recipe_summary(
+                best_recipe, best_constraints, total_weight_size
             )
+        else:
+            effective_bits_from_search = (best_constraints / total_weight_size) * 16
 
         self.best["recipe"] = best_recipe
         self.best["constraints"] = {"effective_bits": effective_bits_from_search}
@@ -753,9 +802,12 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
     can be estimated together at a single point (e.g., the MLP output level).
     """
 
+    method_name = "gradient"
+
     score_module_rules = [
         # Use MLP layer output for gate_proj, up_proj, down_proj for Qwen3 like MoE models (local and shared experts)
         r"^(.*?\.mlp)\.experts\.\d+\.(gate_proj|up_proj|down_proj)$",
+        r"^(.*?\.mixer)\.experts\.\d+\.(up_proj|down_proj)$",  # NemotronH MoE experts
         r"^(.*?)\.(\d+\.(w1|w2|w3))$",  # mixtral experts
         r"^(.*?)\.((w1_linear|w2_linear|w3_linear)\.\d+)$",  # dbrx experts
     ]
@@ -1025,9 +1077,7 @@ class AutoQuantizeGradientSearcher(_AutoQuantizeBaseSearcher):
 
 # TODO: Enable torch compile for this function
 # Currently modelopt.onnx is breaking this
-def _get_softmax_dist(
-    logits: torch.Tensor, tp_group, return_log_prob: bool = False
-) -> torch.Tensor:
+def _get_log_softmax_dist(logits: torch.Tensor, tp_group) -> torch.Tensor:
     # TODO: test this
     dtype = logits.dtype
     max_logits = torch.amax(logits, dim=-1, keepdim=True)
@@ -1035,46 +1085,23 @@ def _get_softmax_dist(
     logits = (logits - max_logits).float()
     sum_exp_logits = torch.exp(torch.logsumexp(logits, dim=-1, keepdim=True))
     torch.distributed.all_reduce(sum_exp_logits, op=torch.distributed.ReduceOp.SUM, group=tp_group)
-    logits = logits - torch.log(sum_exp_logits)
-    if return_log_prob:
-        return logits.to(dtype)
-    else:
-        return torch.exp(logits).to(dtype)
+    return (logits - torch.log(sum_exp_logits)).to(dtype)
 
 
-def _get_softmax(logits: torch.Tensor, return_log_prob: bool = False) -> torch.Tensor:
-    # TODO: do we need to do log_softmax in float32?
-    # log_softmax is supposed to be numerically stable implementation
-    log_prob = torch.log_softmax(logits.float(), dim=-1)
-    if return_log_prob:
-        return log_prob
-    else:
-        return torch.exp(log_prob)
-
-
-def _get_p_log_q(p: torch.Tensor, log_q: torch.Tensor) -> torch.Tensor:
-    return torch.sum(p * log_q).float()
-
-
-def _get_prob_from_logits(
-    logits: torch.Tensor, return_log_prob: bool = False, lm_head: nn.Module = None
-) -> torch.Tensor:
+def _get_log_prob(logits: torch.Tensor, lm_head: nn.Module = None) -> torch.Tensor:
     parallel_state: ParallelState | None = (
         getattr(lm_head, "parallel_state", None) if lm_head is not None else None
     )
     if parallel_state is not None and parallel_state.tensor_parallel_group.is_initialized():
-        return _get_softmax_dist(
-            logits, parallel_state.tensor_parallel_group.group, return_log_prob
-        )
-    return _get_softmax(logits, return_log_prob)
+        return _get_log_softmax_dist(logits, parallel_state.tensor_parallel_group.group)
+    return torch.log_softmax(logits.float(), dim=-1)
 
 
 def _get_kl_div_loss(
-    prob_unquant: torch.Tensor, logits_quant: torch.Tensor, lm_head: nn.Module = None
+    log_prob_unquant: torch.Tensor, logits_quant: torch.Tensor, lm_head: nn.Module = None
 ) -> torch.Tensor:
-    log_prob_quant = _get_prob_from_logits(logits_quant, return_log_prob=True, lm_head=lm_head)
-    # We dont need to calculate the full kl div loss here, just get - p*log_q
-    return -_get_p_log_q(prob_unquant, log_prob_quant)
+    log_prob_quant = _get_log_prob(logits_quant, lm_head=lm_head)
+    return F.kl_div(log_prob_quant, log_prob_unquant, reduction="sum", log_target=True)
 
 
 def _get_lm_head(model: nn.Module) -> nn.Module:
@@ -1089,6 +1116,8 @@ def _get_lm_head(model: nn.Module) -> nn.Module:
 
 class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
     """A searcher for AutoQuantize algorithm that uses KL-Divergence loss based score estimation."""
+
+    method_name = "kl_div"
 
     @property
     def default_search_config(self):
@@ -1141,11 +1170,7 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
         ):
             set_to_unquantized()
             logits_unquant = self.config["forward_step"](self.model, data)
-            prob_unquant = _get_prob_from_logits(
-                logits_unquant,
-                return_log_prob=False,
-                lm_head=_get_lm_head(self.model),
-            )
+            log_prob_unquant = _get_log_prob(logits_unquant, lm_head=_get_lm_head(self.model))
 
             for name, hparam in tqdm(
                 list(named_hparams(self.model, configurable=True)), desc="Evaluating hparams"
@@ -1157,7 +1182,9 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
                         continue
                     hparam.active = recipe
                     logits_quant = self.config["forward_step"](self.model, data)
-                    score = _get_kl_div_loss(prob_unquant, logits_quant, _get_lm_head(self.model))
+                    score = _get_kl_div_loss(
+                        log_prob_unquant, logits_quant, _get_lm_head(self.model)
+                    )
                     if hparam._importance_dict[recipe][hparam.score_modules[0]] is None:
                         hparam._importance_dict[recipe][hparam.score_modules[0]] = score
                     else:
@@ -1252,3 +1279,91 @@ class AutoQuantizeKLDivSearcher(_AutoQuantizeBaseSearcher):
 
 # Backward compatibility alias (defaults to gradient-based searcher)
 AutoQuantizeSearcher = AutoQuantizeGradientSearcher
+
+
+def get_auto_quantize_config(search_state, constraints=None, verbose=False):
+    """Build a flat quant config dict from auto_quantize search_state.
+
+    Re-solves for ``constraints`` if provided, otherwise uses the best recipe from the search.
+
+    Args:
+        search_state: The state dict returned by :func:`auto_quantize`.
+        constraints: Optional dict with ``effective_bits`` key to re-solve for a new target.
+        verbose: If True, prints the per-layer recipe assignments.
+
+    Returns:
+        A config dict suitable for :func:`quantize`.
+    """
+    if constraints is not None:
+        best_recipe = _resolve_best_recipe(search_state, constraints, verbose=verbose)
+    else:
+        best_recipe = search_state["best"]["recipe"]
+
+    quant_cfg: dict[str, Any] = {"*": {"enable": False}}
+    for hparam_name, recipe in best_recipe.items():
+        if recipe == QuantRecipe(quant_cfg=None):
+            continue
+        module_names = search_state["candidate_stats"][hparam_name]["module_names"]
+        for module_name in module_names:
+            for quantizer_attr in ("input_quantizer", "weight_quantizer"):
+                matched_cfg = _match_quantizer_cfg(recipe.config.quant_cfg, quantizer_attr)
+                if matched_cfg is not None:
+                    quant_cfg[f"{module_name}.{quantizer_attr}"] = matched_cfg
+
+    def _cfg_to_dict(v):
+        if isinstance(v, mtq_config.QuantizerAttributeConfig):
+            return {
+                "enable": v.enable,
+                "num_bits": v.num_bits,
+                **v.model_dump(exclude_defaults=True),
+            }
+        if isinstance(v, list):
+            return [_cfg_to_dict(c) for c in v]
+        return v
+
+    quant_cfg = {k: _cfg_to_dict(v) for k, v in quant_cfg.items()}
+    warnings.warn(
+        "get_auto_quantize_config: returned config uses algorithm='max'. "
+        "Per-recipe calibration algorithms (e.g. smoothquant, awq) are not preserved. "
+        "Update config['algorithm'] if a different calibration algorithm is needed (e.g. 'gptq')."
+    )
+    return {"quant_cfg": quant_cfg, "algorithm": "max"}
+
+
+def _resolve_best_recipe(search_state, constraints, verbose=False):
+    effective_bits = constraints["effective_bits"]
+    compression = effective_bits / 16.0
+    candidate_stats = search_state["candidate_stats"]
+    total_weight_size = sum(s["costs"][-1] for s in candidate_stats.values())
+    max_weight_size = total_weight_size * compression
+    method = search_state["method"]
+
+    if method == "gradient":
+        searcher = AutoQuantizeGradientSearcher()
+    elif method == "kl_div":
+        searcher = AutoQuantizeKLDivSearcher()
+    else:
+        raise ValueError(
+            f"Unknown autoquant search method: {method!r}. Expected 'gradient' or 'kl_div'."
+        )
+
+    searcher.candidate_stats = candidate_stats
+    best_recipe_info, _ = searcher.run_search_with_stats(max_weight_size, verbose=verbose)
+
+    best_recipe = {name: info["format"] for name, info in best_recipe_info.items()}
+    if verbose:
+        total_cost = sum(info["costs"] for info in best_recipe_info.values())
+        _AutoQuantizeBaseSearcher._print_recipe_summary(
+            best_recipe, total_cost, total_weight_size, prefix="get_auto_quantize_config"
+        )
+
+    return best_recipe
+
+
+def _match_quantizer_cfg(quant_cfg, quantizer_attr):
+    # Last-match-wins to mirror set_quantizer_by_cfg behavior
+    matched = None
+    for pattern, cfg in quant_cfg.items():
+        if fnmatch.fnmatch(quantizer_attr, pattern):
+            matched = cfg
+    return matched

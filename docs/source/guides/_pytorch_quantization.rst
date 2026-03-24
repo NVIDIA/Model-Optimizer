@@ -5,7 +5,7 @@ PyTorch Quantization
 Key advantages offered by ModelOpt's PyTorch quantization:
 
 #. Support advanced quantization formats, e.g., Block-wise Int4 and FP8.
-#. Native support for LLM models in Hugging Face and NeMo.
+#. Native support for LLM models in Hugging Face, Megatron-Bridge and Megatron-LM.
 #. Advanced Quantization algorithms, e.g., SmoothQuant, AWQ.
 #. Deployment support to ONNX and NVIDIA TensorRT.
 
@@ -76,7 +76,7 @@ After PTQ, the model can be exported to ONNX with the normal PyTorch ONNX export
 
     torch.onnx.export(model, sample_input, onnx_file)
 
-ModelOpt also supports direct export of Huggingface or Nemo LLM models to TensorRT-LLM for deployment.
+ModelOpt also supports direct export of Huggingface or Megatron-Bridge/Megatron-LM LLM models to TensorRT-LLM for deployment.
 Please see :doc:`TensorRT-LLM Deployment <../deployment/1_tensorrt_llm>` for more details.
 
 .. note::

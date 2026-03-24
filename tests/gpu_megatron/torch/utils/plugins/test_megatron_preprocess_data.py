@@ -17,30 +17,10 @@ import json
 import os
 from pathlib import Path
 
-from datasets import load_dataset
+import pytest
 
+from modelopt.torch.utils.dataset_utils import download_hf_dataset_as_jsonl
 from modelopt.torch.utils.plugins.megatron_preprocess_data import megatron_preprocess_data
-
-
-def download_and_prepare_minipile_dataset(output_dir: Path) -> Path:
-    """Download the nanotron/minipile_100_samples dataset and convert to JSONL format.
-
-    Args:
-        output_dir: Directory to save the JSONL file
-
-    Returns:
-        Path to the created JSONL file
-    """
-    dataset = load_dataset("nanotron/minipile_100_samples", split="train")
-
-    jsonl_file = output_dir / "minipile_100_samples.jsonl"
-
-    with open(jsonl_file, "w", encoding="utf-8") as f:
-        for item in dataset:
-            json_obj = {"text": item["text"]}
-            f.write(json.dumps(json_obj) + "\n")
-
-    return jsonl_file
 
 
 def test_megatron_preprocess_data_with_minipile_jsonl(tmp_path):
@@ -52,9 +32,10 @@ def test_megatron_preprocess_data_with_minipile_jsonl(tmp_path):
     3. Calls megatron_preprocess_data with jsonl_paths
     4. Verifies that output files are created
     """
-    input_jsonl = download_and_prepare_minipile_dataset(tmp_path)
+    input_jsonl = download_hf_dataset_as_jsonl("nanotron/minipile_100_samples", tmp_path / "raw")
+    assert len(input_jsonl) == 1, "Expected 1 JSONL file"
+    input_jsonl = Path(input_jsonl[0])
 
-    assert input_jsonl.exists(), "Input JSONL file should exist"
     assert input_jsonl.stat().st_size > 0, "Input JSONL file should not be empty"
 
     with open(input_jsonl, encoding="utf-8") as f:
@@ -71,7 +52,7 @@ def test_megatron_preprocess_data_with_minipile_jsonl(tmp_path):
         workers=1,
     )
 
-    output_prefix = tmp_path / "minipile_100_samples"
+    output_prefix = tmp_path / "nanotron--minipile_100_samples_default_train"
     expected_bin_file = f"{output_prefix}_text_document.bin"
     expected_idx_file = f"{output_prefix}_text_document.idx"
 
@@ -86,19 +67,27 @@ def test_megatron_preprocess_data_with_minipile_jsonl(tmp_path):
     assert os.path.getsize(expected_idx_file) > 0, "Index file should not be empty"
 
 
-def test_megatron_preprocess_data_with_hf_dataset(tmp_path):
+@pytest.mark.parametrize(
+    ("hf_dataset", "hf_split", "json_keys"),
+    [
+        ("nanotron/minipile_100_samples", "train", ["text"]),
+        ("HuggingFaceTB/everyday-conversations-llama3.1-2k", "test_sft", ["messages"]),
+    ],
+)
+def test_megatron_preprocess_data_with_hf_dataset(tmp_path, hf_dataset, hf_split, json_keys):
     """Test megatron_preprocess_data with dataset download, --append_eod and --max_sequence_length.
 
     Downloads nanotron/minipile_100_samples train split from Hugging Face and tokenizes it.
     """
     megatron_preprocess_data(
-        hf_dataset="nanotron/minipile_100_samples",
-        hf_split="train",
+        hf_dataset=hf_dataset,
+        hf_split=hf_split,
+        hf_max_samples_per_split=10,
         output_dir=tmp_path,
-        tokenizer_name_or_path="gpt2",
-        json_keys=["text"],
+        tokenizer_name_or_path="Qwen/Qwen3-0.6B",
+        json_keys=json_keys,
         append_eod=True,
-        max_sequence_length=512,
+        max_sequence_length=32,
         workers=4,
     )
 

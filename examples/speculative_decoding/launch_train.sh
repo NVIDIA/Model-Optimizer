@@ -86,6 +86,10 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       AR_VALIDATE_STEPS="${1#*=}"
       ;;
+    --num_ttt_steps*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      NUM_TTT_STEPS="${1#*=}"
+      ;;
     --cp_size*)
       if [[ "$1" != *=* ]]; then shift; fi
       CP_SIZE="${1#*=}"
@@ -109,6 +113,14 @@ while [ $# -gt 0 ]; do
     --head_node_ip*)
       if [[ "$1" != *=* ]]; then shift; fi
       HEAD_NODE_IP="${1#*=}"
+      ;;
+    --mix_hidden_states*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      MIX_HIDDEN_STATES="${1#*=}"
+      ;;
+    --disable_torch_compile*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      DISABLE_TORCH_COMPILE="${1#*=}"
       ;;
     *)
       >&2 printf "Error: Invalid argument ${1#*=}\n"
@@ -149,6 +161,9 @@ CP_SIZE=${CP_SIZE:-1}
 DP_SHARD_SIZE=${DP_SHARD_SIZE:-$((TOTAL_GPU/CP_SIZE))}
 LOG_STEPS=${LOG_STEPS:-100}
 DRAFT_VOCAB_CACHE=${DRAFT_VOCAB_CACHE:-""}
+MIX_HIDDEN_STATES=${MIX_HIDDEN_STATES:-"False"}
+DISABLE_TORCH_COMPILE=${DISABLE_TORCH_COMPILE:-"False"}
+NUM_TTT_STEPS=${NUM_TTT_STEPS:-3}
 
 
 if [[ "$MODE" == "eagle3" ]]; then
@@ -234,6 +249,8 @@ CMD="accelerate launch $MULTI_NODE_ARGS --mixed_precision bf16 ${SCRIPT_DIR}/mai
     --disable_tqdm $DISABLE_TQDM \
     --estimate_ar $ESTIMATE_AR \
     --ar_validate_steps $AR_VALIDATE_STEPS \
+    --mix_hidden_states $MIX_HIDDEN_STATES \
+    --disable_torch_compile $DISABLE_TORCH_COMPILE \
     $DRAFT_VOCAB_CACHE_ARGS \
     $VLM_ARGS \
     $OFFLINE_TRAINING_ARGS \
@@ -241,6 +258,7 @@ CMD="accelerate launch $MULTI_NODE_ARGS --mixed_precision bf16 ${SCRIPT_DIR}/mai
     $FSDP_ARGS \
     --cp_size $CP_SIZE \
     --dp_shard_size $DP_SHARD_SIZE \
+    --num_ttt_steps $NUM_TTT_STEPS \
 "
 
 start_time=$(date +%s)

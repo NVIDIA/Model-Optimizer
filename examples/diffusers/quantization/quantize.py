@@ -297,18 +297,25 @@ class ExportManager:
         self.logger.info("Backbone checkpoints restored successfully")
 
     # TODO: should not do the any data type
-    def export_hf_ckpt(self, pipe: Any) -> None:
+    def export_hf_ckpt(self, pipe: Any, model_config: ModelConfig | None = None) -> None:
         """
         Export quantized model to HuggingFace checkpoint format.
 
         Args:
             pipe: Diffusion pipeline containing the quantized model
+            model_config: Model configuration (used to pass model-specific export kwargs)
         """
         if not self.config.hf_ckpt_dir:
             return
 
         self.logger.info(f"Exporting HuggingFace checkpoint to {self.config.hf_ckpt_dir}")
-        export_hf_checkpoint(pipe, export_dir=self.config.hf_ckpt_dir)
+        kwargs: dict[str, Any] = {}
+        if model_config and model_config.model_type == ModelType.LTX2:
+            merged_path = model_config.extra_params.get("merged_base_safetensor_path")
+            if merged_path:
+                self.logger.info(f"Merging base safetensors from {merged_path} for LTX2 export")
+                kwargs["merged_base_safetensor_path"] = merged_path
+        export_hf_checkpoint(pipe, export_dir=self.config.hf_ckpt_dir, **kwargs)
         self.logger.info("HuggingFace checkpoint export completed successfully")
 
 
@@ -601,7 +608,7 @@ def main() -> None:
             quant_config.format,
         )
 
-        export_manager.export_hf_ckpt(pipe)
+        export_manager.export_hf_ckpt(pipe, model_config)
 
         logger.info(
             f"Quantization process completed successfully! Time taken = {time.time() - s} seconds"
