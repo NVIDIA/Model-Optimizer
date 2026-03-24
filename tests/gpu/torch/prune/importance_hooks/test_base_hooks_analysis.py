@@ -54,7 +54,7 @@ def test_evaluate_importance_scores_with_l2_norm_hook():
 
     # Create layer and hook
     layer = nn.Linear(in_features=50, out_features=30, bias=False)
-    hook = L2NormHook(max_size=None)
+    hook = L2NormHook()
 
     # Run evaluation
     metrics = _run_hook_and_evaluate(layer, hook, num_iterations=1000, prune_ratio=0.4)

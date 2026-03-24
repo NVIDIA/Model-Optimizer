@@ -30,6 +30,8 @@ from typing import Any
 
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
+__all__ = ["json_dump", "json_dumps", "json_load"]
+
 
 class RobustJSONEncoder(json.JSONEncoder):
     """JSON encoder that handles dataclasses, paths, enums, and other special types."""

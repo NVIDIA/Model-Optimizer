@@ -77,7 +77,7 @@ def test_l2_norm_hook():
     torch.manual_seed(42)
 
     linear_layer = nn.Linear(in_features=6, out_features=4, bias=False)
-    hook = L2NormHook(max_size=None)
+    hook = L2NormHook()
     linear_layer.register_forward_hook(hook)
 
     num_iterations = 3

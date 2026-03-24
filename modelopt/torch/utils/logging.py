@@ -33,7 +33,6 @@ from . import distributed as dist
 
 __all__ = [
     "DeprecatedError",
-    "aprint",
     "atomic_print",
     "capture_io",
     "no_stdout",
@@ -201,8 +200,3 @@ def silence_matched_warnings(pattern=None):
 
 class DeprecatedError(NotImplementedError):
     """Error for deprecated functions."""
-
-
-def aprint(*args, **kwargs):
-    """All ranks from all nodes print."""
-    print(*args, **kwargs, flush=True)

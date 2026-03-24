@@ -22,7 +22,9 @@ This module provides:
 Usage Example:
 --------------
 
-Step 1: Capture outputs from multiple layers:
+Step 1\: Capture outputs from multiple layers\:
+
+.. code-block:: python
 
     from modelopt.torch.prune.importance_hooks.compare_module_outputs import (
         OutputSaveHook,
@@ -43,20 +45,25 @@ Step 1: Capture outputs from multiple layers:
     # Save all layer outputs
     save_multi_layer_outputs(hooks, "output_unpruned.pt")
 
-Step 2: Compare outputs from different model variants:
+Step 2\: Compare outputs from different model variants\:
+
+.. code-block:: shell
 
     python compare_module_outputs.py \
         --reference output_unpruned.pt \
         --compare output_l2norm.pt \
         --output-json comparison_stats.json
 
-The saved file format:
-{
-    'decoder.layers.0.mlp.linear_fc2': Tensor([steps, seq_len, batch, hidden]),
-    'decoder.layers.1.mlp.linear_fc2': Tensor([...]),
-    ...
-    'metadata': {'num_layers': N, 'num_steps': M, 'layer_names': [...]}
-}
+The saved file format\:
+
+.. code-block:: text
+
+    {
+        'decoder.layers.0.mlp.linear_fc2': Tensor([steps, seq_len, batch, hidden]),
+        'decoder.layers.1.mlp.linear_fc2': Tensor([...]),
+        ...
+        'metadata': {'num_layers': N, 'num_steps': M, 'layer_names': [...]}
+    }
 """
 
 import argparse
