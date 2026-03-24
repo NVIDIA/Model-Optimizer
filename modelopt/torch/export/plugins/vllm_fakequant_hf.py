@@ -119,35 +119,30 @@ def export_hf_vllm_fq_checkpoint(
     quantizer_state_dict = get_quantizer_state_dict(model)
     for key in list(quantizer_state_dict):
         if key.endswith("weight_quantizer"):
-            # Weight quantizer amaxes were folded into weights; clear them so they
-            # are not reloaded on the vLLM side.
+            # Fakequant amax is folded into HF weights; do not reload weight quantizer tensors.
             quantizer_state_dict.pop(key)
         elif key in input_quantizers_folded_pqs:
-            # For input_quantizers in input_quantizers_folded_pqs: we folded pre_quant_scale
-            # into weights, so strip it from both tensor state and metadata to avoid double-apply.
+            # pre_quant_scale was folded into the weight; keep the buffer for strict load but
+            # save identity so activations are not scaled twice.
             qstate_val = quantizer_state_dict[key]
             if isinstance(qstate_val, dict) and "_pre_quant_scale" in qstate_val:
-                qstate_val = {k: v for k, v in qstate_val.items() if k != "_pre_quant_scale"}
-                quantizer_state_dict[key] = qstate_val
+                quantizer_state_dict[key]["_pre_quant_scale"] = torch.ones_like(
+                    qstate_val["_pre_quant_scale"]
+                )
     modelopt_state = mto.modelopt_state(model)
-    # modelopt_state only updates the last mode's metadata; quantize may not be last (e.g. after
-    # calibrate). Explicitly refresh quantizer_state so weight_quantizers show _disabled=True.
-    # For disabled weight quantizers, keep only minimal metadata (weights are folded, amax unused).
+    # ``modelopt_state`` may be stale if another mode (e.g. calibrate) ran last. Rebuild
+    # ``quantizer_state`` and drop disabled weight quantizer entries (weights already folded).
     qstate = quantizer_state(model)
     for key in list(qstate):
         if key.endswith("weight_quantizer") and qstate[key].get("_disabled"):
             qstate.pop(key)
-        elif key in input_quantizers_folded_pqs:
-            # For input_quantizers in input_quantizers_folded_pqs: we folded pre_quant_scale
-            # into weights, so strip it from metadata to avoid double-apply.
-            meta = qstate[key].get("_pytorch_state_metadata", {})
-            if "_pre_quant_scale" in meta.get("buffers", {}):
-                meta["buffers"].pop("_pre_quant_scale")
+
     for mode_str, m_state in modelopt_state.get("modelopt_state_dict", []):
         if mode_str == "quantize" and "metadata" in m_state:
             m_state["metadata"]["quantizer_state"] = qstate
             break
 
+    # Per-quantizer tensor dict loaded alongside metadata on reload.
     modelopt_state["modelopt_state_weights"] = quantizer_state_dict
     torch.save(modelopt_state, export_dir / "vllm_fq_modelopt_state.pth")
 
