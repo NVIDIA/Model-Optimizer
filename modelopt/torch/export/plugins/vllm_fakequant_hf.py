@@ -20,9 +20,10 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.opt as mto
-from modelopt.torch.export.layer_utils import is_attention, is_quantlinear
+from modelopt.torch.quantization.conversion import quantizer_state
 from modelopt.torch.quantization.nn import QuantModule, TensorQuantizer
 from modelopt.torch.quantization.utils import get_quantizer_state_dict
+from modelopt.torch.utils import get_unwrapped_name
 
 __all__ = ["export_hf_vllm_fq_checkpoint"]
 
@@ -33,57 +34,139 @@ def export_hf_vllm_fq_checkpoint(
 ):
     """Exports the model with weight quantizers folded into weights.
 
+    Model parameters are never mutated. Folded weights are computed by applying
+    each weight quantizer's fake-quant to a copy of the state dict returned by
+    model.state_dict(). The only transient in-place change is disabling weight
+    quantizers (_disabled=True) while saving modelopt_state, immediately
+    restored in a finally block.
+
     This function:
-    1. Folds each weight quantizer into its weight (fake-quant applied in-place) and disables it
-    2. Saves remaining quantizer states (input/output/attention amaxes) for reload
-    3. Saves model weights
+    1. Builds a clean HF state dict: applies each weight quantizer's fake-quant
+       to the corresponding weight tensors in a state dict copy, then filters out
+       quantizer tensors
+    2. Disables weight quantizers in-place, saves modelopt state and quantizer
+       state dict (input/output/attention amaxes; weight quantizers disabled),
+       then re-enables weight quantizers
+    3. Saves the folded HF weights via save_pretrained
 
     Args:
-        model: The quantized model to export
+        model: The quantized model to export. Not mutated (only _disabled flag on
+            weight quantizers is transiently toggled and immediately restored).
         export_dir: Directory to save the checkpoint
 
     """
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
 
-    # Step 1: Fold weight quantizers into weights in-place and disable them.
-    # Weight quantizers must remain in the model until AFTER state is saved so that
-    # the disabled state (_disabled=True) is captured in modelopt_state and
-    # quantizer_state_dict. Deletion happens in step 3.
+    # Step 1: Build the folded HF state dict.
+    # model.state_dict() returns detached copies of all tensors, so model
+    # parameters are never modified. Apply each weight quantizer's fake-quant
+    # to the corresponding weight tensor in the copy.
+    state_dict = model.state_dict()
+    fakequant_weights = set()
+    input_quantizers_folded_pqs = (
+        set()
+    )  # keys for input_quantizers where pre_quant_scale was folded
+    with torch.no_grad():
+        for module_name, module in model.named_modules():
+            if not isinstance(module, QuantModule):
+                continue
+            for attr_name, quantizer in module.named_children():
+                if not (
+                    attr_name.endswith("weight_quantizer")
+                    and isinstance(quantizer, TensorQuantizer)
+                    and quantizer.fake_quant
+                    and quantizer.is_enabled
+                ):
+                    continue
+                weight_name = attr_name.removesuffix("_quantizer")
+                prefix = f"{module_name}." if module_name else ""
+                sd_key = f"{prefix}{weight_name}"
+                assert sd_key not in fakequant_weights, (
+                    f"Weight {sd_key} has already been fakequantized"
+                )
+                if sd_key in state_dict:
+                    w = state_dict[sd_key]
+                    w_quant = quantizer(w.float()).to(w.dtype).detach()
+                    # Fold pre_quant_scale: (x*s)@fake_quant(W) = x@(fake_quant(W)*s)
+                    # Only valid when input_quantizer does NOT fake-quant activations. If it does
+                    # fake_quant(x*s), the non-linearity prevents folding s into W.
+                    inp_attr = attr_name.replace("weight_quantizer", "input_quantizer")
+                    if hasattr(module, inp_attr):
+                        inp_q = getattr(module, inp_attr)
+                        if (
+                            hasattr(inp_q, "_pre_quant_scale")
+                            and inp_q._pre_quant_scale is not None
+                            and (inp_q._disabled or not inp_q._if_quant)
+                        ):
+                            scale = inp_q._pre_quant_scale.squeeze()
+                            w_quant = (w_quant * scale[None, :]).to(w_quant.dtype)
+                            inp_q_key = get_unwrapped_name(
+                                f"{module_name}.{inp_attr}" if module_name else inp_attr, model
+                            )
+                            input_quantizers_folded_pqs.add(inp_q_key)
+                    state_dict[sd_key] = w_quant
+                    fakequant_weights.add(sd_key)
+
+    # Filter quantizer tensors out for a clean HF checkpoint.
+    clean_sd = {k: v for k, v in state_dict.items() if "quantizer" not in k}
+
+    # Step 2: Disable weight quantizers, save modelopt state + quantizer state
+    # dict, then re-enable. The _disabled=True flag is captured in modelopt_state
+    # so that on vLLM reload weight quantizers stay off while input/output/
+    # attention quantizers remain active.
+    wqs_to_restore = []
     for _, module in model.named_modules():
         if isinstance(module, QuantModule):
-            module.fold_weight()
-            for attr_name in dir(module):
-                if attr_name.endswith("weight_quantizer"):
-                    wq = getattr(module, attr_name)
-                    if isinstance(wq, TensorQuantizer):
-                        wq.disable()
+            for attr_name, quantizer in module.named_children():
+                if (
+                    attr_name.endswith("weight_quantizer")
+                    and isinstance(quantizer, TensorQuantizer)
+                    and quantizer.is_enabled
+                ):
+                    quantizer.disable()
+                    wqs_to_restore.append(quantizer)
 
-    # Step 2: Save modelopt state with weight quantizers present but disabled.
-    # On reload, _disabled=True is restored via set_from_modelopt_state so weight
-    # quantizers stay off while input/output/attention quantizers remain active.
     quantizer_state_dict = get_quantizer_state_dict(model)
-
+    for key in list(quantizer_state_dict):
+        if key.endswith("weight_quantizer"):
+            # Weight quantizer amaxes were folded into weights; clear them so they
+            # are not reloaded on the vLLM side.
+            quantizer_state_dict[key] = {}
+        elif key in input_quantizers_folded_pqs:
+            # For input_quantizers in input_quantizers_folded_pqs: we folded pre_quant_scale
+            # into weights, so strip it from both tensor state and metadata to avoid double-apply.
+            qstate_val = quantizer_state_dict[key]
+            if isinstance(qstate_val, dict) and "_pre_quant_scale" in qstate_val:
+                qstate_val = {k: v for k, v in qstate_val.items() if k != "_pre_quant_scale"}
+                quantizer_state_dict[key] = qstate_val
     modelopt_state = mto.modelopt_state(model)
+    # modelopt_state only updates the last mode's metadata; quantize may not be last (e.g. after
+    # calibrate). Explicitly refresh quantizer_state so weight_quantizers show _disabled=True.
+    # For disabled weight quantizers, keep only minimal metadata (weights are folded, amax unused).
+    qstate = quantizer_state(model)
+    for key in list(qstate):
+        if key.endswith("weight_quantizer") and qstate[key].get("_disabled"):
+            qstate[key] = {
+                "_disabled": True,
+                "_pytorch_state_metadata": {"params": {}, "buffers": {}},
+            }
+        elif key in input_quantizers_folded_pqs:
+            # For input_quantizers in input_quantizers_folded_pqs: we folded pre_quant_scale
+            # into weights, so strip it from metadata to avoid double-apply.
+            meta = qstate[key].get("_pytorch_state_metadata", {})
+            if "_pre_quant_scale" in meta.get("buffers", {}):
+                meta["buffers"].pop("_pre_quant_scale")
+    for mode_str, m_state in modelopt_state.get("modelopt_state_dict", []):
+        if mode_str == "quantize" and "metadata" in m_state:
+            m_state["metadata"]["quantizer_state"] = qstate
+            break
+
     modelopt_state["modelopt_state_weights"] = quantizer_state_dict
     torch.save(modelopt_state, export_dir / "vllm_fq_modelopt_state.pth")
-    # Step 3: Remove quantizer attrs from model before saving HF weights.
-    for _, module in model.named_modules():
-        if is_quantlinear(module):
-            for attr in ["weight_quantizer", "input_quantizer", "output_quantizer"]:
-                if hasattr(module, attr):
-                    delattr(module, attr)
-            module.export()
-        if is_attention(module):
-            for attr in [
-                "q_bmm_quantizer",
-                "k_bmm_quantizer",
-                "v_bmm_quantizer",
-                "softmax_quantizer",
-            ]:
-                if hasattr(module, attr):
-                    delattr(module, attr)
-            module.export()
 
-    # Save model
-    model.save_pretrained(export_dir, state_dict=model.state_dict(), save_modelopt_state=False)
+    # Step 3: Save HF weights using the pre-built folded state dict.
+    model.save_pretrained(export_dir, state_dict=clean_sd, save_modelopt_state=False)
+
+    for wq in wqs_to_restore:
+        wq.enable()
