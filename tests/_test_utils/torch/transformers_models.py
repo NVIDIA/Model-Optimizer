@@ -207,7 +207,6 @@ def get_tiny_bert(**config_kwargs) -> PreTrainedModel:
         "intermediate_size": 32,
         "num_hidden_layers": 2,
         "num_attention_heads": 16,
-        "num_key_value_heads": 2,
         "max_position_embeddings": 32,
         "vocab_size": 32,
     }

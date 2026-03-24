@@ -292,7 +292,7 @@ def main(args: argparse.Namespace):
 
         pruning_constraints = {"params": args.prune_target_params}
         print_rank_0(
-            f"Using NAS-based automatic pruning with score function: {args.prune_score_func}"
+            f"Using NAS-based automatic pruning with score function: {args.prune_score_func}. "
             "You can change this to be any other metric you want to maximize (e.g. negative validation loss)."
         )
 
