@@ -29,7 +29,10 @@ from vllm_reload_utils import (
 )
 
 import modelopt.torch.quantization as mtq
-from modelopt.torch.quantization.plugins.vllm import disable_compilation
+from modelopt.torch.quantization.plugins.vllm import (
+    disable_compilation,
+    post_restore_vllm_parallel_linears,
+)
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 
 quant_config: dict[str, Any] = {
@@ -44,9 +47,10 @@ quant_config: dict[str, Any] = {
 
 
 def _fakequant_run_prolog_worker(self) -> None:
+    trust_remote_code = os.environ.get("TRUST_REMOTE_CODE", "false").lower() == "true"
     tokenizer = AutoTokenizer.from_pretrained(
         self.model_runner.model_config.tokenizer,
-        trust_remote_code=True,
+        trust_remote_code=trust_remote_code,
     )
     if tokenizer.pad_token != "<unk>" or tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -75,8 +79,9 @@ def _fakequant_run_prolog_worker(self) -> None:
         if modelopt_weights is not None:
             # convert quantizer state values to vllm format
             modelopt_weights = convert_dict_to_vllm(modelopt_weights, map_fun=map_fun)
-            # set quantizer state to model's state_dict
             mtq.utils.set_quantizer_state_dict(model, modelopt_weights)
+            # set_quantizer_state_dict does not invoke modelopt_post_restore (unlike restore_quantizer_state).
+            post_restore_vllm_parallel_linears(model)
 
     else:
         if quant_config["quant_file_path"]:
