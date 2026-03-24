@@ -430,7 +430,6 @@ if VllmMLAAttention is not None:
             self.kv_c_bmm_quantizer = TensorQuantizer()
             self.k_pe_bmm_quantizer = TensorQuantizer()
             self.parallel_state = create_parallel_state()
-            self._bmm_disable_compile = False
 
         def forward(self, query, kv_c, k_pe, *args, **kwargs):
             query = self.q_bmm_quantizer(query)

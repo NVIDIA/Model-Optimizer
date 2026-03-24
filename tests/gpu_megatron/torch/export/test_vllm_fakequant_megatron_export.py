@@ -96,7 +96,7 @@ def _test_mcore_vllm_export(tmp_path, quant_cfg, rank, size):
 
     # check if quant_amax.pth file exists
     quant_amax_file = export_dir / "vllm_fq_modelopt_state.pth"
-    assert quant_amax_file.exists(), f"quantizer_state.pth file should be created in {export_dir}"
+    assert quant_amax_file.exists(), f"vllm_fq_modelopt_state.pth file should be created in {export_dir}"
 
     # make sure hf_quant_config.json file does not exist
     hf_quant_config_file = export_dir / "hf_quant_config.json"

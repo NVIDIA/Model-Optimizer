@@ -32,28 +32,17 @@ def export_hf_vllm_fq_checkpoint(
     model: nn.Module,
     export_dir: Path | str,
 ):
-    """Exports the model with weight quantizers folded into weights.
+    """Export quantized HF weights + ``vllm_fq_modelopt_state.pth`` for vLLM fake-quant reload.
 
-    Model parameters are never mutated. Folded weights are computed by applying
-    each weight quantizer's fake-quant to a copy of the state dict returned by
-    model.state_dict(). The only transient in-place change is disabling weight
-    quantizers (_disabled=True) while saving modelopt_state, immediately
-    restored in a finally block.
-
-    This function:
-    1. Builds a clean HF state dict: applies each weight quantizer's fake-quant
-       to the corresponding weight tensors in a state dict copy, then filters out
-       quantizer tensors
-    2. Disables weight quantizers in-place, saves modelopt state and quantizer
-       state dict (input/output/attention amaxes; weight quantizers disabled),
-       then re-enables weight quantizers
-    3. Saves the folded HF weights via save_pretrained
+    Folds fake-quant weights into a ``state_dict()`` copy (optional
+    ``pre_quant_scale`` into weight when input fake-quant is off), drops quantizer
+    keys from the HF save, briefly disables weight quantizers to snapshot
+    ModelOpt/quantizer state, then re-enables them. Writes ``export_dir`` via
+    ``save_pretrained(..., save_modelopt_state=False)``.
 
     Args:
-        model: The quantized model to export. Not mutated (only _disabled flag on
-            weight quantizers is transiently toggled and immediately restored).
-        export_dir: Directory to save the checkpoint
-
+        model: In-memory quantized model.
+        export_dir: Output dir for HF files and ``vllm_fq_modelopt_state.pth``.
     """
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
