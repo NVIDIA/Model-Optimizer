@@ -15,6 +15,7 @@
 
 """ModelOpt plugin for enabling automatic save/restore of ModelOpt state for HuggingFace models."""
 
+import os
 import types
 from contextlib import contextmanager
 
@@ -26,6 +27,7 @@ from modelopt.torch.utils import report_memory
 
 from ..conversion import ModeloptStateManager
 from .huggingface import (
+    _get_modelopt_state_path,
     _new_save_pretrained,
     _patch_model_init_for_modelopt,
     enable_huggingface_checkpointing,
@@ -60,6 +62,37 @@ def _undo_torch_init_override_by_transformers():
         setattr(torch.nn.init, name, init_func)
 
 
+def _restore_qtensor_wrappers(model, model_path):
+    """Re-wrap QTensorWrapper weights that were replaced during HF weight loading.
+
+    Transformers>=5.0 uses ``setattr`` to load weights, which replaces ``QTensorWrapper``
+    objects with plain ``Parameter`` tensors.  The compressed data is loaded correctly but
+    the wrapper metadata (original shape, dtype, qtensor class) is lost.  This function
+    reads the saved ``q_tensor_state`` from ``modelopt_state.pth`` and re-wraps the affected
+    weights.
+    """
+    modelopt_state_path = _get_modelopt_state_path(model_path)
+    if not os.path.isfile(modelopt_state_path):
+        return
+
+    from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
+    from modelopt.torch.quantization.qtensor import QTensorWrapper
+
+    state = torch.load(modelopt_state_path, map_location="cpu", weights_only=False)
+    for _mode_name, mode_config in state.get("modelopt_state_dict", []):
+        q_tensor_state = mode_config.get("metadata", {}).get("q_tensor_state", {})
+        for name, module in model.named_modules():
+            if (
+                isinstance(module, RealQuantLinear)
+                and name in q_tensor_state
+                and not isinstance(module.weight, QTensorWrapper)
+            ):
+                module._parameters["weight"] = QTensorWrapper(
+                    qtensor=module.weight.data,
+                    metadata=q_tensor_state[name]["metadata"],
+                )
+
+
 def _new_from_pretrained(cls, /, pretrained_model_name_or_path, *args, **kwargs):
     """Patch for `cls.from_pretrained` method to restore ModelOpt state."""
     with _patch_model_init_for_modelopt(
@@ -68,6 +101,8 @@ def _new_from_pretrained(cls, /, pretrained_model_name_or_path, *args, **kwargs)
         model = types.MethodType(cls._modelopt_cache["from_pretrained"].__func__, cls)(
             pretrained_model_name_or_path, *args, **kwargs
         )
+
+    _restore_qtensor_wrappers(model, pretrained_model_name_or_path)
 
     return model
 
