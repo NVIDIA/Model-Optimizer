@@ -40,7 +40,7 @@ def get_calib_dataloader(
     else:
         raise NotImplementedError
 
-    batch_encoded = tokenizer.batch_encode_plus(
+    batch_encoded = tokenizer(
         dataset, return_tensors="pt", padding=True, truncation=True, max_length=block_size
     )
     if device:

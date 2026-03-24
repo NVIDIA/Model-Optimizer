@@ -129,7 +129,7 @@ class DataCollator:
             [instance[key] for instance in instances] for key in ("src_idx", "label_idx")
         )
 
-        batch_encoded = self.tokenizer.batch_encode_plus(
+        batch_encoded = self.tokenizer(
             sources,
             return_tensors="pt",
             padding=True,
