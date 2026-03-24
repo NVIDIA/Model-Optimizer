@@ -103,7 +103,7 @@ parse_options() {
     exit 1
   fi
 
-  VALID_TASKS=("quant" "mmlu" "mtbench" "lm_eval" "livecodebench" "simple_eval")
+  VALID_TASKS=("quant" "mmlu" "lm_eval" "livecodebench" "simple_eval")
 
   for task in $(echo "$TASKS" | tr ',' ' '); do
     is_valid_task=false

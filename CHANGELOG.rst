@@ -51,6 +51,10 @@ NVIDIA Model Optimizer Changelog
 - Add support for block-granular RHT for non-power-of-2 dimensions.
 - Replace modelopt FP8 QDQ nodes with native ONNX QDQ nodes.
 
+**Deprecations**
+
+- Removed MT-Bench (FastChat) support from ``examples/llm_eval``. The ``run_fastchat.sh`` and ``gen_model_answer.py`` scripts have been deleted, and the ``mtbench`` task has been removed from the ``llm_ptq`` example scripts.
+
 **Misc**
 
 - Migrated project metadata from ``setup.py`` to a fully declarative ``pyproject.toml``.
