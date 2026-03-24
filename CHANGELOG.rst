@@ -1,5 +1,6 @@
-NVIDIA Model Optimizer Changelog
-================================
+Changelog
+=========
+
 0.44 (2026-05-xx)
 ^^^^^^^^^^^^^^^^^
 
@@ -14,6 +15,10 @@ NVIDIA Model Optimizer Changelog
 **Bug Fixes**
 
 - Fix Minitron pruning (``mcore_minitron``) for MoE models. Importance estimation hooks were incorrectly registered for MoE modules and NAS step was hanging before this.
+
+**Misc**
+
+- Add ``transformers>=5.0`` support.
 
 0.43 (2026-04-09)
 ^^^^^^^^^^^^^^^^^

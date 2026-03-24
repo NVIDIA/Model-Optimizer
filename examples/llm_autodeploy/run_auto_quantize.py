@@ -121,7 +121,7 @@ def modelopt_ptq(
 ) -> torch.nn.Module:
     """Quantize the model with modelopt."""
     model = AutoModelForCausalLM.from_pretrained(
-        model_path, trust_remote_code=True, torch_dtype="auto", device_map="auto"
+        model_path, trust_remote_code=True, dtype="auto", device_map="auto"
     )
     model.eval()
 

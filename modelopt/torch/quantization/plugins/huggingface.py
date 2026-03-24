@@ -925,10 +925,7 @@ def patch_compressed_linear_loading():
 
         with patch_compressed_linear_loading():
             model = AutoModelForCausalLM.from_pretrained(
-                ckpt_path,
-                device_map="auto",
-                trust_remote_code=True,
-                torch_dtype="auto",
+                ckpt_path, device_map="auto", trust_remote_code=True, dtype="auto"
             )
     """
     try:

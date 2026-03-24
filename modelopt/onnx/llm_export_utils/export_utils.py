@@ -53,7 +53,7 @@ class ModelLoader:
         """Load HuggingFace model based on model type."""
         print(f"Loading HF model from {self.hf_model_path} with model type {self.model_type}")
         self.hf_model = AutoModelForCausalLM.from_pretrained(
-            self.hf_model_path, torch_dtype=torch.float16, trust_remote_code=trust_remote_code
+            self.hf_model_path, dtype=torch.float16, trust_remote_code=trust_remote_code
         )
 
         return self.hf_model.eval().cuda()  # type: ignore[attr-defined]

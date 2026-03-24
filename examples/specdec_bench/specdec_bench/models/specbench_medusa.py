@@ -100,7 +100,7 @@ class SpecBenchMedusaModel(Model):
             self.draft_model_path,
             model_dir,
             medusa_num_heads=self.medusa_num_heads,
-            torch_dtype=torch_dtype,
+            dtype=torch_dtype,
             low_cpu_mem_usage=True,
         )
         self.model = self.model.to(self.device)

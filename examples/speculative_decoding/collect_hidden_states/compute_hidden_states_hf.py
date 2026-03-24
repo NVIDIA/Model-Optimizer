@@ -130,7 +130,7 @@ def main(args: argparse.Namespace) -> None:
         dataset = dataset.select(range(args.debug_max_num_conversations))
 
     model = AutoModel.from_pretrained(
-        args.model, torch_dtype="auto", device_map="auto", trust_remote_code=True
+        args.model, dtype="auto", device_map="auto", trust_remote_code=True
     )
     num_hidden_layers = getattr(model.config, "num_hidden_layers", None)
 
