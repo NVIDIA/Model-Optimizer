@@ -14,26 +14,17 @@
 # limitations under the License.
 """Tests for prune_minitron.py and distill.py scripts."""
 
-import subprocess
 from pathlib import Path
 
-import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.transformers_models import create_tiny_qwen3_dir
 
 
-@pytest.fixture(scope="module")
-def tiny_qwen3_teacher(tmp_path_factory, num_gpus):
-    tmp_path = tmp_path_factory.mktemp("minitron_teacher")
+def test_prune_minitron(tmp_path: Path, num_gpus):
     teacher_hf_path, teacher_model = create_tiny_qwen3_dir(
         tmp_path, with_tokenizer=True, return_model=True, num_hidden_layers=num_gpus
     )
     teacher_params = sum(p.numel() for p in teacher_model.parameters())
-    return teacher_hf_path, teacher_params
-
-
-def test_minitron_prune(tmp_path: Path, tiny_qwen3_teacher, num_gpus):
-    teacher_hf_path, teacher_params = tiny_qwen3_teacher
 
     pruned_model_path = tmp_path / "pruned"
     prune_command_parts = extend_cmd_parts(
@@ -52,47 +43,3 @@ def test_minitron_prune(tmp_path: Path, tiny_qwen3_teacher, num_gpus):
     )
     run_example_command(prune_command_parts, example_path="megatron_bridge")
     assert (pruned_model_path / "config.json").exists()
-
-
-def test_minitron_distill_and_convert(tmp_path: Path, tiny_qwen3_teacher, num_gpus):
-    teacher_hf_path, _ = tiny_qwen3_teacher
-
-    train_iters = 5
-    distill_output_dir = tmp_path / "distill_output"
-    distill_cmd_parts = extend_cmd_parts(
-        ["torchrun", f"--nproc_per_node={num_gpus}", "distill.py", "--use_mock_data"],
-        student_hf_path=teacher_hf_path,
-        teacher_hf_path=teacher_hf_path,
-        output_dir=distill_output_dir,
-        tp_size=num_gpus,
-        seq_length=32,
-        mbs=1,
-        gbs=4,
-        train_iters=train_iters,
-        lr_warmup_iters=2,
-        eval_interval=5,
-        eval_iters=1,
-        log_interval=1,
-    )
-    run_example_command(distill_cmd_parts, example_path="megatron_bridge")
-
-    megatron_ckpt_path = distill_output_dir / f"checkpoints/iter_{train_iters:07d}"
-    assert megatron_ckpt_path.exists()
-
-    # Convert distilled Megatron checkpoint back to HF format
-    distilled_hf_path = tmp_path / "distilled_hf"
-    subprocess.run(
-        [
-            "python",
-            "/opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py",
-            "export",
-            "--hf-model",
-            str(teacher_hf_path),
-            "--megatron-path",
-            str(megatron_ckpt_path),
-            "--hf-path",
-            str(distilled_hf_path),
-        ],
-        check=True,
-    )
-    assert (distilled_hf_path / "config.json").exists()

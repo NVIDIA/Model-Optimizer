@@ -144,7 +144,7 @@ def get_args() -> argparse.Namespace:
         help=(
             "Score function to use for NAS-based pruning (--prune_target_params). "
             "Format: mmlu_<N>pct where <N> is the percentage of MMLU data to sample per subject "
-            "(e.g. mmlu_5pct for 5%%, mmlu_100pct for full eval)."
+            "(e.g. mmlu_5pct for 5%, mmlu_100pct for full eval)."
         ),
     )
     parser.add_argument(
