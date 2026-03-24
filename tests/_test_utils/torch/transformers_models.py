@@ -19,7 +19,6 @@ from pathlib import Path
 import pytest
 import torch
 from _test_utils.torch.misc import set_seed
-from packaging.version import Version
 
 transformers = pytest.importorskip("transformers")
 from transformers import (
@@ -27,6 +26,7 @@ from transformers import (
     AutoModelForQuestionAnswering,
     AutoTokenizer,
     BertConfig,
+    GptOssConfig,
     LlamaConfig,
     PreTrainedModel,
     Qwen3Config,
@@ -34,9 +34,6 @@ from transformers import (
     T5Config,
     T5ForConditionalGeneration,
 )
-
-if Version(transformers.__version__) >= Version("4.55"):
-    from transformers import GptOssConfig
 
 import modelopt.torch.opt as mto
 
@@ -110,8 +107,6 @@ def get_tiny_qwen3_moe(**config_kwargs) -> PreTrainedModel:
 ##### GPT-OSS #####
 def get_tiny_gpt_oss(**config_kwargs) -> PreTrainedModel:
     set_seed(SEED)
-    if Version(transformers.__version__) < Version("4.55"):
-        pytest.skip("GptOssForCausalLM is not supported in transformers < 4.55")
 
     kwargs = {
         "dtype": torch.bfloat16,

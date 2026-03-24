@@ -35,8 +35,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-import transformers
-from packaging.version import Version
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
@@ -79,10 +77,7 @@ CACHED_SHARD_TTT_MASKS = {}
 
 def _get_empty_cache(config):
     """Return an empty cache. Handle different versions of transformers for unit tests."""
-    if Version(transformers.__version__) >= Version("4.54"):
-        return DynamicCache(config=config)
-    else:
-        return DynamicCache()
+    return DynamicCache(config=config)
 
 
 @MedusaDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})

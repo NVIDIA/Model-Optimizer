@@ -302,7 +302,10 @@ def main(args: argparse.Namespace):
                 f"Invalid score function: {args.prune_score_func}. "
                 "Expected format: mmlu_<N>pct (e.g. mmlu_5pct)"
             )
-        _mmlu_pct = int(match.group(1)) / 100.0
+        mmlu_pct = int(match.group(1))
+        if not 0 < mmlu_pct <= 100:
+            raise ValueError("--prune_score_func percentage must be in the range [1, 100].")
+        _mmlu_pct = mmlu_pct / 100.0
 
         def score_func(m):
             return megatron_mmlu(m, tokenizer, percentage=_mmlu_pct)
