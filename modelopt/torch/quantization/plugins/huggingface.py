@@ -1475,8 +1475,12 @@ class _QuantMoELinear(QuantModule):
     each expert gets its own weight_quantizer and input_quantizer, calibrated
     only on tokens actually routed to that expert.
 
-    On export, _reconstruct_step3p5_moe_linear() stacks the per-expert quantized
+    On export, _reconstruct_fused_moe_linear() stacks the per-expert quantized
     weights and scales back into the original 3D format.
+
+    Note: we use expansion-then-reconstruction rather than the add_module() approach
+    (as in _QuantQwen35MoeExperts) because vLLM requires stacked 3D scaling factors;
+    per-expert expanded keys are not accepted by the downstream serving engine.
     """
 
     def _setup(self):
@@ -1527,6 +1531,48 @@ def register_step3p5_moe_on_the_fly(model):
                     _QuantMoELinear
                 )
             break
+
+
+def _reconstruct_fused_moe_linear(model: nn.Module) -> None:
+    """Reconstruct QuantMoELinear per-expert weights back to original 3D MoELinear format.
+
+    After _process_quantized_modules, each expert's nn.Linear inside QuantMoELinear has:
+      - weight: fp4-quantized tensor [out_features, in_features]
+      - weight_scale, weight_scale_2: per-block / global scales
+      - input_scale: activation scale (if calibrated)
+
+    This stacks them back into the original MoELinear layout so the exported state_dict
+    uses the original key names (e.g. moe.up_proj.weight with shape [N, out, in]).
+
+    Note: QuantMoELinear is the dynamically generated class name (Quant + MoELinear),
+    not _QuantMoELinear which is the implementation class.
+    """
+    for _name, module in model.named_modules():
+        # Match QuantMoELinear (dynamically generated name) not _QuantMoELinear (implementation class)
+        if type(module).__name__ != "QuantMoELinear":
+            continue
+
+        n = module.num_experts
+        experts = module.experts
+
+        # Reconstruct 3D weight: [num_experts, out_features, in_features]
+        module.weight = nn.Parameter(
+            torch.stack([experts[i].weight.data for i in range(n)]),
+            requires_grad=False,
+        )
+
+        # Stack per-expert scales back under the original attribute names.
+        # Check all experts: some may lack input_scale if they were never routed
+        # during calibration, so only stack when every expert has the attribute.
+        for attr in ("weight_scale", "weight_scale_2", "input_scale"):
+            if all(hasattr(experts[i], attr) for i in range(n)):
+                module.register_buffer(
+                    attr,
+                    torch.stack([getattr(experts[i], attr) for i in range(n)]),
+                )
+
+        # Remove expanded experts — the reconstructed 3D tensors replace them
+        del module.experts
 
 
 CUSTOM_MODEL_PLUGINS.update(

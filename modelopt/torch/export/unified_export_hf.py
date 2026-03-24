@@ -641,7 +641,7 @@ def _process_quantized_modules(
         ):
             sub_module.unpack_weight()
         if get_quantization_format(sub_module) != QUANTIZATION_NONE:
-            # Skip QuantMoELinear - it's handled separately in _reconstruct_step3p5_moe_linear
+            # Skip QuantMoELinear - it's handled separately in _reconstruct_fused_moe_linear
             if type(sub_module).__name__ == "QuantMoELinear":
                 continue
             if is_quantlinear(sub_module):
@@ -671,48 +671,6 @@ def _process_quantized_modules(
                 with fsdp2_aware_weight_update(model, sub_module, reshard=False):
                     for weight_name in ["gate_up_proj", "down_proj"]:
                         _export_quantized_weight(sub_module, dtype, weight_name)
-
-
-def _reconstruct_step3p5_moe_linear(model: nn.Module) -> None:
-    """Reconstruct QuantMoELinear per-expert weights back to original 3D MoELinear format.
-
-    After _process_quantized_modules, each expert's nn.Linear inside QuantMoELinear has:
-      - weight: fp4-quantized tensor [out_features, in_features]
-      - weight_scale, weight_scale_2: per-block / global scales
-      - input_scale: activation scale (if calibrated)
-
-    This stacks them back into the original MoELinear layout so the exported state_dict
-    uses the original key names (e.g. moe.up_proj.weight with shape [N, out, in]).
-
-    Note: QuantMoELinear is the dynamically generated class name (Quant + MoELinear),
-    not _QuantMoELinear which is the implementation class.
-    """
-    for name, module in model.named_modules():
-        # Match QuantMoELinear (dynamically generated name) not _QuantMoELinear (implementation class)
-        if type(module).__name__ != "QuantMoELinear":
-            continue
-
-        n = module.num_experts
-        experts = module.experts
-
-        # Reconstruct 3D weight: [num_experts, out_features, in_features]
-        module.weight = nn.Parameter(
-            torch.stack([experts[i].weight.data for i in range(n)]),
-            requires_grad=False,
-        )
-
-        # Stack per-expert scales back under the original attribute names.
-        # Check all experts: some may lack input_scale if they were never routed
-        # during calibration, so only stack when every expert has the attribute.
-        for attr in ("weight_scale", "weight_scale_2", "input_scale"):
-            if all(hasattr(experts[i], attr) for i in range(n)):
-                module.register_buffer(
-                    attr,
-                    torch.stack([getattr(experts[i], attr) for i in range(n)]),
-                )
-
-        # Remove expanded experts — the reconstructed 3D tensors replace them
-        del module.experts
 
 
 def _export_transformers_checkpoint(
@@ -836,8 +794,10 @@ def _export_transformers_checkpoint(
     # Process all quantized modules and export weights
     _process_quantized_modules(model, dtype, is_modelopt_qlora)
 
-    # Reconstruct Step3p5 MoELinear: per-expert _QuantLinear weights → original 3D format
-    _reconstruct_step3p5_moe_linear(model)
+    # Reconstruct fused MoELinear: per-expert _QuantLinear weights → original 3D format
+    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
+
+    _reconstruct_fused_moe_linear(model)
 
     if accelerator is not None:
         # Gather state_dict from all ranks
