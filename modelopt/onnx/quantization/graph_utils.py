@@ -1153,7 +1153,7 @@ def find_nodes_from_convs_to_exclude(graph: Graph, quantize_mode: str = "int8"):
                 logger.debug(f"Found large filter conv for FP8: {node.name}")
                 unsupported_conv_nodes.append(node.name)
                 # skip the small-channel check below; already excluded
-                continue  
+                continue
 
             # For FP8, exclude small-channel convolutions. These layers do not benefit from
             # FP8 quantization and cause perf regressions on GPUs where the FP8 conv kernels

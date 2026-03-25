@@ -41,7 +41,7 @@ def _make_conv_graph(output_channels, input_channels, kernel_shape=(3, 3), name=
 
 
 @pytest.mark.parametrize(
-    "oc, ic, expected_excluded",
+    ("oc", "ic", "expected_excluded"),
     [
         (16, 64, True),
         (64, 16, True),
@@ -73,7 +73,7 @@ def test_fp8_small_channel_exclusion_does_not_affect_int8():
 
 
 @pytest.mark.parametrize(
-    "oc, ic",
+    ("oc", "ic"),
     [
         (15, 64),
         (64, 15),
