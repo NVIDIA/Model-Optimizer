@@ -29,7 +29,7 @@ from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
 
 
 @ConverterFactory.register_decorator("qwen3_vl")
-class Qwen3VL30BA3BInstructConverter(Converter):
+class Qwen3VLConverter(Converter):
     @staticmethod
     def create_block_configs_from_main_config(config: Qwen3VLMoeConfig) -> List[BlockConfig]:
         # Qwen3-VL MoE has nested text_config

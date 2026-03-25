@@ -44,7 +44,7 @@ from modelopt.torch.puzzletron.utils.dummy_modules import DummyBlock
 
 
 @ModelDescriptorFactory.register_decorator("qwen3")
-class Qwen3_8BModelDescriptor(ModelDescriptor):
+class Qwen3ModelDescriptor(ModelDescriptor):
     @staticmethod
     def decoder_layer_cls():
         return Qwen3DecoderLayer
@@ -135,7 +135,7 @@ class Qwen3_8BModelDescriptor(ModelDescriptor):
 
 
 @dataclass
-class Qwen3_8BFFNIntermediateLayerDescriptor(FFNIntermediateLayerDescriptor):
+class Qwen3FFNIntermediateLayerDescriptor(FFNIntermediateLayerDescriptor):
     down_proj_name: str = "mlp.down_proj"
     ffn_prefix_name: str = "model.layers.{layer_idx}.mlp"
     linear_weight_names: List[str] = field(
@@ -144,7 +144,7 @@ class Qwen3_8BFFNIntermediateLayerDescriptor(FFNIntermediateLayerDescriptor):
 
 
 @dataclass
-class Qwen3_8BKVHeadsLayerDescriptor(KVHeadsLayerDescriptor):
+class Qwen3KVHeadsLayerDescriptor(KVHeadsLayerDescriptor):
     o_proj_name: str = "self_attn.o_proj"
     attn_prefix_name: str = "model.layers.{layer_idx}.self_attn"
     qkvo_weight_names: List[str] = field(

@@ -28,7 +28,7 @@ from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
 
 
 @ConverterFactory.register_decorator("qwen3")
-class Qwen3_8BConverter(Converter):
+class Qwen3Converter(Converter):
     @staticmethod
     def create_block_configs_from_main_config(config: Qwen3Config) -> List[BlockConfig]:
         num_hidden_layers = config.num_hidden_layers

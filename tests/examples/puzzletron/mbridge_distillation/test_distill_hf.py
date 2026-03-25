@@ -28,7 +28,7 @@ from modelopt.torch.puzzletron.anymodel import convert_model
 def test_distill_hf(project_root_path: Path, tmp_path: Path):
     """Integration test for distill_hf.py.
 
-    Creates Llama models programmatically, converts them to heterogeneous format (AnyModel),
+    Creates Qwen3 models programmatically, converts them to heterogeneous format (AnyModel),
     and runs mbridge distillation. The models are created with reduced size for faster testing.
     Models are converted to include block_configs.
     """
@@ -59,7 +59,7 @@ def test_distill_hf(project_root_path: Path, tmp_path: Path):
         cmd_parts,
         student_hf_path=student_hf_path,
         teacher_hf_path=teacher_hf_path,
-        output_dir=str(output_dir),
+        output_dir=output_dir,
         tp_size=tp_size,
         pp_size=1,
         seq_length=128,
@@ -73,8 +73,8 @@ def test_distill_hf(project_root_path: Path, tmp_path: Path):
         eval_interval=100,
         eval_iters=0,
         log_interval=5,
-        hf_export_path=str(hf_export_dir),
-        hf_model="meta-llama/Llama-3.1-8B-Instruct",
+        hf_export_path=hf_export_dir,
+        hf_model="Qwen/Qwen3-0.6B",
     )
 
     run_example_command(cmd_parts, example_path="puzzletron/mbridge_distillation")
@@ -84,11 +84,7 @@ def test_distill_hf(project_root_path: Path, tmp_path: Path):
     assert run_config_path.exists(), f"Expected run_config.yaml to exist at: {run_config_path}"
 
     # Verify that the distilled model can be loaded in HuggingFace format
-    model = AutoModelForCausalLM.from_pretrained(
-        str(hf_export_dir),
-        local_files_only=True,
-        trust_remote_code=True,
-    )
+    model = AutoModelForCausalLM.from_pretrained(str(hf_export_dir))
     assert model is not None, "Failed to load distilled model with AutoModelForCausalLM"
 
     print(
@@ -100,7 +96,7 @@ def test_distill_hf(project_root_path: Path, tmp_path: Path):
 def _prepare_student_and_teacher_models(project_root_path: Path, tmp_path: Path) -> tuple[str, str]:
     """Prepare student and teacher models for distillation.
 
-    Creates Llama models programmatically, converts them to heterogeneous format (AnyModel),
+    Creates Qwen3 models programmatically, converts them to heterogeneous format (AnyModel),
     and returns the paths to the converted checkpoints.
 
     Args:
@@ -124,7 +120,7 @@ def _prepare_student_and_teacher_models(project_root_path: Path, tmp_path: Path)
         output_path=str(student_hf_dir),
         vocab_size=tokenizer.vocab_size,
         tokenizer=tokenizer,
-        hf_model_name="meta-llama/Llama-3.1-8B-Instruct",
+        hf_model_name="Qwen/Qwen3-0.6B",
         hybrid_override_pattern=None,
     )
 
@@ -133,7 +129,7 @@ def _prepare_student_and_teacher_models(project_root_path: Path, tmp_path: Path)
         output_path=str(teacher_hf_dir),
         vocab_size=tokenizer.vocab_size,
         tokenizer=tokenizer,
-        hf_model_name="meta-llama/Llama-3.1-8B-Instruct",
+        hf_model_name="Qwen/Qwen3-0.6B",
         hybrid_override_pattern=None,
     )
 
@@ -143,15 +139,11 @@ def _prepare_student_and_teacher_models(project_root_path: Path, tmp_path: Path)
     teacher_anymodel_dir = tmp_path / "teacher_anymodel"
 
     convert_model(
-        input_dir=str(student_hf_dir),
-        output_dir=str(student_anymodel_dir),
-        converter="llama",
+        input_dir=str(student_hf_dir), output_dir=str(student_anymodel_dir), converter="qwen3"
     )
 
     convert_model(
-        input_dir=str(teacher_hf_dir),
-        output_dir=str(teacher_anymodel_dir),
-        converter="llama",
+        input_dir=str(teacher_hf_dir), output_dir=str(teacher_anymodel_dir), converter="qwen3"
     )
     print("Models converted to AnyModel format:")
     print(f"  Student AnyModel: {student_anymodel_dir}")

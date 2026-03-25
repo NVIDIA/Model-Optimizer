@@ -13,9 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from modelopt.torch.puzzletron.anymodel.models.qwen3_vl_30b_a3b_instruct.qwen3_vl_30b_a3b_instruct_converter import (
-    Qwen3VL30BA3BInstructConverter,
-)
-from modelopt.torch.puzzletron.anymodel.models.qwen3_vl_30b_a3b_instruct.qwen3_vl_30b_a3b_instruct_model_descriptor import (
-    Qwen3VL30BA3BInstructModelDescriptor,
+from modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_converter import Qwen3Converter
+from modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_model_descriptor import (
+    Qwen3ModelDescriptor,
 )

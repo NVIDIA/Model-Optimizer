@@ -4,4 +4,4 @@ defaults:
 
 pruning_mixin:
   layer_descriptor:
-    _target_: modelopt.torch.puzzletron.anymodel.models.qwen3_8b.qwen3_8b_model_descriptor.Qwen3_8BFFNIntermediateLayerDescriptor
+    _target_: modelopt.torch.puzzletron.anymodel.models.qwen3.qwen3_model_descriptor.Qwen3FFNIntermediateLayerDescriptor
