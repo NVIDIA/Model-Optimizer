@@ -20,7 +20,6 @@ from contextlib import contextmanager
 from typing import Any
 
 import torch
-from vllm_reload_utils import convert_dict_to_vllm, convert_modelopt_state_to_vllm
 from tqdm import tqdm
 from transformers import AutoTokenizer
 from vllm.sampling_params import SamplingParams
@@ -35,7 +34,6 @@ from vllm_reload_utils import (
 
 import modelopt.torch.quantization as mtq
 import modelopt.torch.quantization.plugins.vllm as modelopt_vllm_plugin
-from modelopt.torch.opt.conversion import restore_from_modelopt_state
 from modelopt.torch.utils.dataset_utils import get_dataset_dataloader
 
 
@@ -225,6 +223,21 @@ def _fakequant_run_prolog_worker(self) -> None:
             quant_cfg = mtq.utils.update_quant_cfg_with_kv_cache_quant(
                 quant_cfg, quant_kv_cfg["quant_cfg"]
             )
+
+        # When skip zones are active, the FP8 skip quantizer must be calibrated
+        # alongside the NVFP4 quantizer. Inject it into the merged quant_cfg here
+        # so its amax is collected during mtq.quantize(). It is only exercised at
+        # inference time (inside _quantize_kv) once set_kv_quant_skip_tokens() has
+        # been called; the "default: enable: False" in KV configs would otherwise
+        # disable it, so we add an explicit entry that overrides the default.
+        skip_first_m = quant_config["kv_skip_first_m"]
+        skip_last_n = quant_config["kv_skip_last_n"]
+        if (skip_first_m or skip_last_n) and quant_kv_cfg:
+            quant_cfg.setdefault("quant_cfg", {})["*[kv]_bmm_fp8_quantizer"] = {
+                "num_bits": (4, 3),
+                "axis": None,
+                "enable": True,
+            }
 
         with disable_compilation(model):
             print("quantizing model...")
