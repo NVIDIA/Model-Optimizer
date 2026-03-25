@@ -23,6 +23,8 @@ Input format: flat packed [total_tokens, num_heads, head_dim] with per-sequence
 metadata (b_start_loc, b_seq_len). Supports causal masking and autograd.
 """
 
+import math
+
 import torch
 import triton
 import triton.language as tl
@@ -249,7 +251,7 @@ def _attn_fwd(
     NUM_SINK_TOKENS: tl.constexpr = 0,  # KV positions before this are kept dense (attention sinks)
     DENSE_WINDOW_SIZE: tl.constexpr = 64,  # Tokens near diagonal kept dense (absolute, BLOCK_N-independent)
     APPLY_SKIP_SOFTMAX: tl.constexpr = False,  # Skip KV tiles with negligible scores
-    SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(threshold) for skip decision
+    SKIP_THRESHOLD_LOG2: tl.constexpr = 0.0,  # log2(lambda) * sm_scale, pre-scaled for comparison on scaled scores
 ):
     # --- Grid: (batch, num_q_heads, num_q_tiles) ---
     # Example: batch=2, num_q_heads=32, seq_len=256, BLOCK_M=128
@@ -323,25 +325,36 @@ def _attn_fwd(
                 )
 
         if APPLY_SKIP_SOFTMAX:
-            # --- Skip-softmax path: check tile, skip V load if all rows negligible ---
-            # Compute tile row max once — reused for both skip check and softmax update
-            tile_row_max = tl.max(scores, 1)  # [BLOCK_M]
+            # --- Skip-softmax (BLASST, https://arxiv.org/pdf/2512.12087) ---
+            #
+            # Algorithm: During FlashAttention's block-wise computation, we
+            # maintain a running maximum m_i^(j) across blocks. If a block's
+            # local maximum ~m_i^(j) is significantly smaller than the running
+            # maximum m_i^(j):
+            #
+            #   ~m_i^(j) - m_i^(j) < ln(lambda)
+            #
+            # then exp(~m_i^(j) - m_i^(j)) < lambda ≈ 0, meaning the block's
+            # contribution to the final output is negligible. We skip the
+            # softmax computation, V load, and BMM2 computation entirely.
+            #
+            # The threshold is pre-scaled by qk_scale in the Python wrapper so
+            # it can be compared directly against scaled scores (matching the
+            # BLASST reference semantics on unscaled scores).
+            tile_row_max = tl.max(scores, 1)  # [BLOCK_M] — ~m_i^(j) (scaled)
+            # Per-row: True if row's tile max is negligible vs running max
             can_skip = tile_row_max < (row_max + SKIP_THRESHOLD_LOG2)
-            all_skip = tl.min(can_skip.to(tl.int32)) == 1
+            # Per-tile: skip entire tile only if ALL rows are negligible
+            skip_tile = tl.min(can_skip.to(tl.int32)) == 1
 
-            if not all_skip:
-                # Online softmax update (reuses tile_row_max — no second tl.max)
-                # For skipped rows: tile_row_max < row_max, so m_new = row_max (no change)
+            if not skip_tile:
                 m_new = tl.maximum(row_max, tile_row_max)
                 p = tl.math.exp2(scores - m_new[:, None])
-                # Zero out skipped rows (instead of masking scores and recomputing max)
-                p = tl.where(can_skip[:, None], 0.0, p)
                 l_new = tl.sum(p, 1)
                 correction = tl.math.exp2(row_max - m_new)
                 row_sum = row_sum * correction + l_new
                 acc = acc * correction[:, None]
 
-                # Load V and accumulate
                 v_offs = (kv_offset + kv_start + kv_pos[:, None]) * stride_vbs + dim_pos[None, :]
                 v = tl.load(
                     v_base + v_offs,
@@ -350,7 +363,7 @@ def _attn_fwd(
                 )
                 acc = tl.dot(p.to(v.dtype), v, acc)
                 row_max = m_new
-            # else: all rows negligible — skip V load, softmax update, accumulation
+            # else: tile skipped: no softmax computation, V load, and BMM2 computation
         else:
             # --- Standard path: no skip check ---
             # Online softmax update
@@ -767,12 +780,14 @@ class _Attention(torch.autograd.Function):
         # Triton tiles must be powers of 2; pad head dim
         BLOCK_D = triton.next_power_of_2(HEAD_DIM)
 
-        # Skip-softmax: convert threshold to log2 space for the kernel
+        # Skip-softmax: convert threshold to scaled log2 space for the kernel.
+        # The BLASST reference (https://arxiv.org/pdf/2512.12087) checks
+        # ln(lambda) on unscaled scores. Our kernel works in log2-scaled space
+        # (scores pre-multiplied by qk_scale = sm_scale * LOG2E), so we
+        # pre-scale: threshold_scaled = log2(lambda) * sm_scale.
         apply_skip = skip_softmax_threshold is not None and skip_softmax_threshold > 0.0
         if apply_skip:
-            import math
-
-            skip_threshold_log2 = math.log2(skip_softmax_threshold)
+            skip_threshold_log2 = math.log2(skip_softmax_threshold) * sm_scale
         else:
             skip_threshold_log2 = 0.0
 
@@ -992,13 +1007,12 @@ def attention(
         dense_window_size: Tokens near the query diagonal kept dense (local
             attention window). Absolute token count, BLOCK_N-independent.
             Default 64 (one reference block).
-        skip_softmax_threshold: Skip KV tiles whose max attention score is
-            below ``running_max * threshold`` for all Q rows. This is an
-            approximation that trades accuracy for speed — tiles with
-            negligible softmax contributions are skipped entirely (no V
-            load or accumulation). Set to ``None`` or ``0`` to disable.
-            Typical values: 1e-3 to 1e-1. The backward pass re-applies
-            the same skip decision using the saved LSE for consistency.
+        skip_softmax_threshold: BLASST threshold lambda
+            (https://arxiv.org/pdf/2512.12087). Skip KV tiles where
+            ``exp(tile_max - running_max) < lambda``, meaning the tile's
+            softmax contribution is negligible. Tiles are skipped entirely
+            (no softmax, V load, or BMM2). The threshold is applied on
+            unscaled scores. Set to ``None`` or ``0`` to disable.
 
     Returns:
         Output tensor [total_q_tokens, num_q_heads, head_dim].
