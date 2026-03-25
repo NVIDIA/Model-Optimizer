@@ -47,10 +47,13 @@ def test_real_quantize(model_cls, config):
     # update config to fit test cases
     if config == mtq.INT4_AWQ_CFG:
         # reduce block sizes for simple testing models
-        config["quant_cfg"]["*weight_quantizer"]["block_sizes"] = {
-            -1: 16,
-            "scale_bits": 8,
-        }
+        for entry in config["quant_cfg"]:
+            if entry.get("quantizer_path") == "*weight_quantizer":
+                entry.setdefault("cfg", {})["block_sizes"] = {
+                    -1: 16,
+                    "scale_bits": 8,
+                }
+                break
         if model_cls is SimpleConv or model_cls is SimpleConvLinear:
             pytest.skip(
                 "INT4_AWQ_CFG requires even number of elements on last dimension for weights."
@@ -101,10 +104,13 @@ def test_save_restore(model_cls, config):
     # update config to fit test cases
     if config == mtq.INT4_AWQ_CFG:
         # reduce block sizes for simple testing models
-        config["quant_cfg"]["*weight_quantizer"]["block_sizes"] = {
-            -1: 16,
-            "scale_bits": 8,
-        }
+        for entry in config["quant_cfg"]:
+            if entry.get("quantizer_path") == "*weight_quantizer":
+                entry.setdefault("cfg", {})["block_sizes"] = {
+                    -1: 16,
+                    "scale_bits": 8,
+                }
+                break
         if model_cls is SimpleConv or model_cls is SimpleConvLinear:
             pytest.skip(
                 "INT4_AWQ_CFG requires even number of elements on last dimension for weights."
