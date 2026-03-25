@@ -204,26 +204,10 @@ def test_gptq_export_roundtrip():
     num_mismatched = (diff > 1e-3).sum().item()
     total_elements = diff.numel()
 
-    print("\n--- Diff Stats ---")
-    print(f"  Max diff:  {max_diff}")
-    print(f"  Mean diff: {diff.mean().item()}")
-    print(f"  Median diff: {diff.median().item()}")
-    print(f"  Std diff:  {diff.std().item()}")
-    print(
-        f"  Mismatched (>1e-3): {num_mismatched}/{total_elements} "
-        f"({100 * num_mismatched / total_elements:.2f}%)"
-    )
-    print(
-        f"  Max diff at [{max_diff_row}, {max_diff_col}]: "
-        f"deq={deq_weight[max_diff_row, max_diff_col].item()}, "
-        f"qdq_ref={qdq_ref[max_diff_row, max_diff_col].item()}"
-    )
-
     assert torch.allclose(deq_weight, qdq_ref.to(torch.bfloat16), atol=1e-2), (
         f"Dequantized weight does not match QDQ reference. "
-        f"Max diff: {max_diff} at [{max_diff_row}, {max_diff_col}] "
-        f"(deq={deq_weight[max_diff_row, max_diff_col].item()}, "
-        f"qdq_ref={qdq_ref[max_diff_row, max_diff_col].item()})"
+        f"Max diff: {max_diff} at [{max_diff_row}, {max_diff_col}], "
+        f"mismatched (>1e-3): {num_mismatched}/{total_elements}"
     )
 
 

@@ -39,12 +39,14 @@ from .conversion import create_and_replace_svdquant_linear_on_the_fly, set_quant
 from .nn import NVFP4StaticQuantizer, QuantModule, SequentialQuantizer, TensorQuantizer
 from .utils import (
     disable_calib,
+    disabled_weight_quantizers,
     enable_fake_quant,
     enable_quant,
     enable_weight_access_and_writeback,
     is_quantized_column_parallel_linear,
     is_quantized_linear,
     is_quantized_row_parallel_linear,
+    promote_nvfp4_static_quantizers,
     quantizer_attr_names,
     reduce_amax,
     weight_attr_names,
@@ -1647,33 +1649,6 @@ def sequential_calibrate(
     print_rank_0("Sequential calibration completed")
 
 
-def _promote_nvfp4_static_quantizers(model: nn.Module) -> int:
-    """Convert eligible TensorQuantizers to NVFP4StaticQuantizer in-place.
-
-    After max calibration sets per-block amax values, NVFP4 static quantizers
-    need to be promoted so they use the two-level scaling path (global amax +
-    per-block amax) instead of the generic E4M3 path.
-
-    Returns the number of quantizers converted.
-    """
-    converted = 0
-    for _name, module in list(model.named_modules()):
-        if isinstance(module, TensorQuantizer) and not module._disabled:
-            if module._calibrator is not None and not module._dynamic and hasattr(module, "_amax"):
-                is_nvfp4_static = (
-                    module.is_static_block_quant
-                    and module._num_bits == (2, 1)
-                    and module._block_sizes is not None
-                    and module._block_sizes.get("scale_bits") == (4, 3)
-                )
-                if is_nvfp4_static:
-                    initial_amax = module._amax.clone().detach()
-                    global_amax = reduce_amax(initial_amax, axis=None)
-                    NVFP4StaticQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
-                    converted += 1
-    return converted
-
-
 @torch.no_grad()
 def gptq(
     model: nn.Module,
@@ -1750,9 +1725,8 @@ def gptq(
                     hessian_input, gptq_helper.hessian, gptq_helper.n_samples
                 )
 
-                self.weight_quantizer.disable()
                 out = self._forward_no_gptq_hessian(input, *args, **kwargs)
-                self.weight_quantizer.enable()
+
                 return out
 
             bind_forward_method(self.module, hessian_forward, self.CACHE_NAME)
@@ -1760,6 +1734,12 @@ def gptq(
         def cleanup(self):
             """Unpatch the module's forward method."""
             unpatch_forward_method(self.module, self.CACHE_NAME)
+
+        def free(self):
+            """Release Hessian and working tensors to reclaim memory."""
+            self.hessian = None
+            self.weight = None
+            self.h_inv = None
 
         def update_weights(self, block_size, percdamp):
             """Run GPTQ blockwise weight update on this module.
@@ -1822,6 +1802,14 @@ def gptq(
                 "_blockwise_update called before _prepare_hessian_inverse()"
             )
             quantizer = self.module.weight_quantizer
+            block_sizes = getattr(quantizer, "block_sizes", None)
+            if block_sizes is not None:
+                group_size = block_sizes.get(-1)
+                if group_size is not None and block_size % group_size != 0:
+                    raise ValueError(
+                        f"GPTQ block_size ({block_size}) must be divisible by the quantizer"
+                        f" group_size ({group_size})"
+                    )
             num_cols = self.weight.shape[1]
 
             for block_start in range(0, num_cols, block_size):
@@ -1858,7 +1846,7 @@ def gptq(
     total_start = time.time()
 
     max_calibrate(model, forward_loop=forward_loop)
-    _promote_nvfp4_static_quantizers(model)
+    promote_nvfp4_static_quantizers(model)
 
     quantized_layers = [
         (n, m)
@@ -1874,7 +1862,9 @@ def gptq(
         handle.setup()
 
     print_rank_0(f"Computing Hessians for {len(gptq_handles)} linear layers...")
-    forward_loop(model)
+
+    with disabled_weight_quantizers(model):
+        forward_loop(model)
 
     for handle in gptq_handles.values():
         handle.cleanup()
@@ -1882,6 +1872,7 @@ def gptq(
     print_rank_0("Updating weights using GPTQ algorithm...")
     for handle in gptq_handles.values():
         handle.update_weights(block_size, percdamp)
+        handle.free()
     del gptq_handles
 
     if torch.cuda.is_available():

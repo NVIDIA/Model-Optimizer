@@ -1544,14 +1544,14 @@ class GPTQConfig(QuantizeAlgorithmConfig):
     """
 
     method: Literal["gptq"] = ModeloptField("gptq")
-    percdamp: float | None = ModeloptField(
+    percdamp: float = ModeloptField(
         default=0.01,
         gt=0.0,
         le=1.0,
         title="Percentage damping factor.",
         description="The percentage of average Hessian diagonal used for damping.",
     )
-    block_size: int | None = ModeloptField(
+    block_size: int = ModeloptField(
         default=128,
         title="Block size for GPTQ weight update.",
         description="""The block size for GPTQ weight update, which must be a multiple of the
