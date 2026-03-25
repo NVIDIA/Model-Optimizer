@@ -68,33 +68,6 @@ def _patch_transformers_compat(mod) -> None:
             except ImportError:
                 pass
 
-    # PreTrainedTokenizerBase.vocab_size raises NotImplementedError in transformers 5.0
-    # for tokenizers that don't implement it. Python 3's hasattr() only catches
-    # AttributeError, so callers using hasattr(tok, 'vocab_size') get a crash instead
-    # of False. Re-raise as AttributeError so hasattr works correctly.
-    try:
-        from transformers.tokenization_utils_base import (
-            PreTrainedTokenizerBase as _PreTrainedTokenizerBase,
-        )
-
-        _orig_vocab_size_fget = _PreTrainedTokenizerBase.vocab_size.fget
-
-        def _safe_vocab_size(self):
-            try:
-                return _orig_vocab_size_fget(self)
-            except NotImplementedError:
-                # Processors (e.g. Qwen2VLProcessor) inherit vocab_size from
-                # PreTrainedTokenizerBase but don't implement it — delegate to
-                # the inner tokenizer if present.
-                inner = getattr(self, "tokenizer", None)
-                if inner is not None and inner is not self:
-                    return inner.vocab_size
-                raise AttributeError("vocab_size not implemented for this tokenizer")
-
-        _PreTrainedTokenizerBase.vocab_size = property(_safe_vocab_size)
-    except Exception:
-        pass
-
     # AutoConfig.register raises ValueError when a model type is already built into
     # transformers (e.g. exaone_moe added in 5.0). Older packages like TRT-LLM call
     # register without exist_ok=True. Patch CONFIG_MAPPING.register to silently skip.
@@ -114,13 +87,18 @@ def _patch_transformers_compat(mod) -> None:
 try:
     from transformers import __version__ as _transformers_version
 
-    if not (_Version(_transformers_version) >= _Version("5.0")):
+    if _Version(_transformers_version) < _Version("4.56"):
         _warnings.warn(
             f"transformers {_transformers_version} is not tested with current version of modelopt and may cause issues."
             " Please install recommended version with `pip install -U nvidia-modelopt[hf]` if working with HF models.",
         )
+    elif _Version(_transformers_version) >= _Version("5.0"):
+        _warnings.warn(
+            "transformers>=5.0 support is experimental. Unified Hugging Face checkpoint export for quantized "
+            "checkpoints may not work for some models yet.",
+        )
 
-    # Temporary workaround until https://github.com/NVIDIA/TensorRT-LLM/pull/12541 makes it into a TRT-LLM container
+    # Temporary workaround until TRT-LLM container supports transformers 5.0
     if "transformers" in _sys.modules:
         _patch_transformers_compat(_sys.modules["transformers"])
     else:

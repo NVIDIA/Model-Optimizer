@@ -21,6 +21,4 @@ from _test_utils.examples.run_command import run_vlm_ptq_command
 
 @pytest.mark.parametrize("quant", ["fp8", "int8_sq", "nvfp4"])
 def test_qwen_vl(quant):
-    if quant == "fp8":
-        pytest.skip(reason="FP8 is not supported for Qwen2-VL")
     run_vlm_ptq_command(model=QWEN_VL_PATH, quant=quant)

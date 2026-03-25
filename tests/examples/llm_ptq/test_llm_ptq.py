@@ -12,9 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-
 import pytest
+import transformers
 from _test_utils.examples.llm_ptq_utils import PTQCommand
 from _test_utils.examples.models import (
     BART_PATH,
@@ -23,6 +22,7 @@ from _test_utils.examples.models import (
     TINY_LLAMA_PATH,
     WHISPER_PATH,
 )
+from packaging.version import Version
 
 
 @pytest.mark.parametrize(
@@ -52,7 +52,10 @@ def test_ptq_mixtral(command):
     command.run(MIXTRAL_PATH)
 
 
-@pytest.mark.skip(reason="Whisper requires torchcodec and other system packages")
+@pytest.mark.skipif(
+    Version(transformers.__version__) >= Version("5.0"),
+    reason="Whisper requires torchcodec and other system packages for transformers>=5.0",
+)
 @pytest.mark.parametrize(
     "command",
     [
