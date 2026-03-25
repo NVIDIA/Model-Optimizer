@@ -46,7 +46,13 @@ All format definitions: `modelopt/torch/quantization/config.py`.
 
 **Goal: checkpoint on disk** (`.safetensors` + `config.json`). Always smoke test first (`--calib_size 4`), then full calibration.
 
-### 4A — Direct: supported model
+**Which path?** Based on step 1:
+
+- SLURM or Docker+GPU detected → **4B (Launcher)**
+- Bare GPU, no Docker/SLURM → **4A (Direct)**
+- Unsupported model (any env) → **4C (Custom script)**
+
+### 4A — Direct: supported model (bare GPU, no Docker/SLURM)
 
 ```bash
 pip install --no-build-isolation "nvidia-modelopt[hf]"

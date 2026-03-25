@@ -44,8 +44,10 @@ Run these checks on the **target machine** (local, or via SSH if remote):
 ```bash
 which srun sbatch 2>/dev/null && echo "SLURM"
 docker info 2>/dev/null | grep -qi nvidia && echo "Docker+GPU"
-python -c "import torch; print(torch.cuda.device_count(), 'GPUs')" 2>/dev/null
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null
 ```
+
+Use `nvidia-smi` for GPU detection — it's more reliable than `torch.cuda` which depends on the Python environment having CUDA-enabled PyTorch installed.
 
 ### Execution context summary
 
