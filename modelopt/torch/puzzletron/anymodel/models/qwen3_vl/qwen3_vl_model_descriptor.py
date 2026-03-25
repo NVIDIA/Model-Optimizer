@@ -202,7 +202,7 @@ class Qwen3VLExpertRemovalLayerDescriptor(ExpertRemovalLayerDescriptor):
     moe_prefix_name: str = "model.language_model.layers.{layer_idx}.mlp"
     # Router: Qwen3VLMoeTextTopKRouter has self.weight, no bias
     router_weights: List[str] = field(default_factory=lambda: ["gate.weight"])
-    router_biases: List[str] = field(default_factory=lambda: [])
+    router_biases: List[str] = field(default_factory=list)
     # Fused expert format: Qwen3VLMoeTextExperts stores all experts in single tensors
     # with shape [num_experts, ...] instead of separate tensors per expert.
     is_fused_experts: bool = True

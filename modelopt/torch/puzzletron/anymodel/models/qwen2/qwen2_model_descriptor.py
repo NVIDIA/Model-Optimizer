@@ -144,5 +144,3 @@ class Qwen2FFNIntermediateLayerDescriptor(LlamaFFNIntermediateLayerDescriptor):
 
     Qwen2 uses the same FFN structure as Llama (gate_proj, up_proj, down_proj).
     """
-
-    pass

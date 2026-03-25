@@ -16,9 +16,9 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Sequence
 from contextlib import contextmanager
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     ContextManager,
@@ -43,6 +43,9 @@ from torch import Tensor
 from torch._subclasses import FakeTensor, FakeTensorMode
 from typing_extensions import override
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 Fn = TypeVar("Fn", bound=Callable)
 
 
@@ -61,11 +64,11 @@ class DynamoDisable(Protocol):
 
 
 try:
-    dynamo_skip: DynamoSkip = cast(Any, torch._dynamo.decorators).skip
-    dynamo_disable: DynamoDisable = cast(Any, torch._dynamo.decorators).disable
+    dynamo_skip: DynamoSkip = cast("Any", torch._dynamo.decorators).skip
+    dynamo_disable: DynamoDisable = cast("Any", torch._dynamo.decorators).disable
 except:
-    dynamo_skip: DynamoSkip = cast(Any, torch._dynamo.eval_frame).skip
-    dynamo_disable: DynamoDisable = cast(Any, torch._dynamo.eval_frame).disable
+    dynamo_skip: DynamoSkip = cast("Any", torch._dynamo.eval_frame).skip
+    dynamo_disable: DynamoDisable = cast("Any", torch._dynamo.eval_frame).disable
 
 
 TModule = TypeVar("TModule", bound=nn.Module)
@@ -264,7 +267,7 @@ class MyFakeTensor(Tensor):
             dispatch_device=True,
             device_for_backend_keys=device,
         )
-        return cast(MyFakeTensor, self)
+        return cast("MyFakeTensor", self)
 
     @classmethod
     @dynamo_disable

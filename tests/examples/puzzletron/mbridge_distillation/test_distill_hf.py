@@ -84,7 +84,7 @@ def test_distill_hf(project_root_path: Path, tmp_path: Path):
     assert run_config_path.exists(), f"Expected run_config.yaml to exist at: {run_config_path}"
 
     # Verify that the distilled model can be loaded in HuggingFace format
-    model = AutoModelForCausalLM.from_pretrained(str(hf_export_dir))
+    model = AutoModelForCausalLM.from_pretrained(hf_export_dir)
     assert model is not None, "Failed to load distilled model with AutoModelForCausalLM"
 
     print(

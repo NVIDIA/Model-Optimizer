@@ -20,6 +20,7 @@ import argparse
 import dataclasses
 import enum
 import json
+import sys
 from collections.abc import Hashable, Iterable
 from copy import deepcopy
 from pathlib import Path
@@ -401,14 +402,14 @@ def _assert_valid_config(args, puzzle_profile):
     missing_args = [arg for arg in required_args if arg not in args or getattr(args, arg) is None]
     if missing_args:
         mprint(f"error: The following arguments are required: {', '.join(missing_args)}")
-        exit(1)
+        sys.exit(1)
 
     # Make sure we have specified subblock_stats_args
     if "subblock_stats_args" not in args and "subblock_stats_args" not in puzzle_profile:
         mprint(
             "error: Must specify `subblock_stats_arrs` in either puzzle_profile or as a commandline arg."
         )
-        exit(1)
+        sys.exit(1)
 
     # Make sure we have specified constraints
     if (
@@ -420,7 +421,7 @@ def _assert_valid_config(args, puzzle_profile):
         mprint(
             "error: Must specify either `mip_constraints` or `human_constraints` in one of puzzle_profile or as a commandline argument."
         )
-        exit(1)
+        sys.exit(1)
 
 
 def _get_minimal_unique_names(dicts: list[dict]) -> list[str]:

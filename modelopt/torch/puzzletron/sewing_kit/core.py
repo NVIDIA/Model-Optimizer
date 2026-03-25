@@ -676,8 +676,6 @@ class StitchedModule(nn.Module):
                                 if work is not None:
                                     work.wait()
 
-                        pass
-
                     if len(node.stitches_from) > 0:
                         assert len(peers) == 1, (
                             f"Cannot use multiple peers when using RemoteTarget as a source ({peers=})"
