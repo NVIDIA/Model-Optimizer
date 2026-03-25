@@ -1,6 +1,6 @@
 # Remote Execution
 
-Read this when Claude Code runs on a different machine than the target GPU cluster/workstation. This covers SSH connectivity, cluster config, persistent sessions, and remote command execution. For SLURM-specific details (job scripts, containers, partitions, monitoring), see `slurm-setup.md`.
+Read this when Claude Code runs on a different machine than the target GPU cluster/workstation. This covers SSH connectivity, cluster config, persistent sessions, and remote command execution.
 
 ---
 
@@ -58,7 +58,7 @@ Auto-discovers whether the remote has SLURM, Docker, or bare-metal GPUs. Sets `R
 
 After detection, proceed with the environment-specific setup:
 
-- **SLURM** → read `slurm-setup.md`, but prefix all commands with `remote_run`
+- **SLURM** → prefix all commands with `remote_run`. For SLURM job scripts, see the skill's own references.
 - **Docker** → use `remote_docker_run <container> "<command>"`
 - **Bare metal** → use `remote_run` directly
 
@@ -102,17 +102,15 @@ scp /local/script.sh ${REMOTE_USER}@${REMOTE_HOST}:/remote/path/
 
 When submitting SLURM jobs remotely, write **two files** locally to avoid shell escaping issues:
 
-1. **SLURM wrapper** (e.g., `ptq_slurm.sh`) — `#SBATCH` directives + `srun` with container
-2. **Inner runner** (e.g., `ptq_run.sh`) — the actual work (runs inside the container)
+1. **SLURM wrapper** (e.g., `job_slurm.sh`) — `#SBATCH` directives + `srun` with container
+2. **Inner runner** (e.g., `run.sh`) — the actual work (runs inside the container)
 
 Then upload both and submit:
 
 ```bash
 remote_sync_to /local/scripts/ scripts/
-JOBID=$(remote_run "sbatch /remote/path/scripts/ptq_slurm.sh" | grep -o '[0-9]\+' | tail -1)
+JOBID=$(remote_run "sbatch /remote/path/scripts/job_slurm.sh" | grep -o '[0-9]\+' | tail -1)
 ```
-
-For the SLURM wrapper template and container flags, see `slurm-setup.md`.
 
 ---
 

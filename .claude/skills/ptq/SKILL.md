@@ -7,21 +7,19 @@ description: This skill should be used when the user asks to "quantize a model",
 
 Produce a quantized checkpoint from a pretrained model. **Read `examples/llm_ptq/README.md` first** — it has the support matrix, CLI flags, and accuracy guidance.
 
-## Step 1 — Environment setup
+## Step 1 — Environment
 
 Read `skills/common/environment-setup.md` and `skills/common/workspace-management.md`. After completing them you should know:
 
 - ModelOpt source is available
-- Execution context: SLURM / Docker / bare metal, local / remote
-- Whether the launcher is available
-- Which workspace to use (existing or new, named by model)
+- Local or remote (+ cluster config if remote)
+- SLURM / Docker+GPU / bare GPU
+- Launcher available?
+- Which workspace to use
 
 ## Step 2 — Is the model supported?
 
-Check `modelopt/torch/export/model_utils.py` for `MODEL_NAME_TO_TYPE`. If the model class matches a key → **supported**.
-
-- **Supported** → use `hf_ptq.py` (step 4A) or launcher (step 4B)
-- **Unsupported** → read `references/unsupported-models.md`, write custom script (step 4C)
+Check `modelopt/torch/export/model_utils.py` for `MODEL_NAME_TO_TYPE`. If the model class matches → **supported**. Otherwise → **unsupported**.
 
 ## Step 3 — Choose quantization format
 
@@ -46,15 +44,20 @@ All format definitions: `modelopt/torch/quantization/config.py`.
 
 **Goal: checkpoint on disk** (`.safetensors` + `config.json`).
 
-**IMPORTANT — sequential smoke test**: Run a smoke test first with `--calib_size 4` (or `CALIB_SIZE: "4"` in YAML). Wait for it to complete and verify it succeeded. Only then run the full calibration (`--calib_size 512`).
+**IMPORTANT**: Run a smoke test first (`--calib_size 4`). Wait for it to succeed. Then run full calibration (`--calib_size 512`).
 
-**Which path?** Based on step 1:
+### Which path?
 
-- SLURM or Docker+GPU detected → **4B (Launcher)**
-- Bare GPU, no Docker/SLURM → **4A (Direct)**
-- Unsupported model (any env) → **4C (Custom script)**
+```text
+Supported? ──→ YES ──→ SLURM (local or remote)? ──→ LAUNCHER (4B)
+                  │     Local Docker + GPU? ────────→ LAUNCHER (4B)
+                  │     Remote Docker (no SLURM)? ──→ MANUAL via remote_run (4A)
+                  │     Bare GPU (local or remote)? → MANUAL (4A)
+                  │
+                  └→ NO (unsupported) ──→ Any env ──→ CUSTOM SCRIPT (4C)
+```
 
-### 4A — Direct: supported model (bare GPU, no Docker/SLURM)
+### 4A — Direct: supported model, manual execution
 
 ```bash
 pip install --no-build-isolation "nvidia-modelopt[hf]"
@@ -66,21 +69,27 @@ python examples/llm_ptq/hf_ptq.py \
     --export_path <output>
 ```
 
-Run `--help` for all options. For remote: wrap in SSH or SLURM job script.
+Run `--help` for all options.
 
-### 4B — Launcher: supported model on SLURM/Docker
+For remote: use `remote_run` from `remote_exec.sh` (see `skills/common/remote-execution.md`).
 
-Write a YAML config and run via the launcher. See `references/launcher-guide.md` for full details.
+### 4B — Launcher: supported model on SLURM or local Docker
+
+Write a YAML config using `common/hf_ptq/hf_ptq.sh`. See `references/launcher-guide.md` for the full template.
 
 ```bash
-cd tools/launcher && uv run launch.py --yaml <config.yaml> --yes
+cd tools/launcher
+# SLURM (remote or local):
+SLURM_HOST=<host> SLURM_ACCOUNT=<acct> uv run launch.py --yaml <config.yaml> user=<ssh_user> identity=<ssh_key> --yes
+# Local Docker:
+uv run launch.py --yaml <config.yaml> hf_local=<hf_cache> --yes
 ```
 
-The launcher handles container setup, job submission, and monitoring.
+The launcher blocks and tails logs until the job completes.
 
 ### 4C — Custom script: unsupported model
 
-Follow `references/unsupported-models.md` to write a custom PTQ script. Core steps:
+Follow `references/unsupported-models.md`. Core steps:
 
 1. Load model (dequantize FP8 if needed)
 2. Monkey-patch unsupported layers, register with `mtq.register()`
@@ -88,11 +97,11 @@ Follow `references/unsupported-models.md` to write a custom PTQ script. Core ste
 4. `mtq.quantize(model, config, forward_loop)`
 5. `export_hf_checkpoint(model, export_dir)`
 
-Run directly, via SSH, or via SLURM job script. Install custom deps as needed (e.g., specific transformers version).
+Run directly (local) or via `remote_run` (remote). For SLURM environments, use a job script (see `references/slurm-setup.md`).
 
 ### Monitoring
 
-- **Launcher**: blocks and tails logs until job completes (via `nemo_run`)
+- **Launcher**: blocks and tails logs automatically
 - **SLURM (manual)**: poll with `squeue -u $USER` + `sleep` (not cron or background tasks)
 - **Local**: watch stdout
 
@@ -118,14 +127,14 @@ Report the path and size to the user.
 ## References
 
 | Reference | When to read |
-|-----------|-------------|
-| `references/launcher-guide.md` | Supported model on SLURM/Docker |
-| `references/unsupported-models.md` | Model not in `MODEL_NAME_TO_TYPE` |
-| `references/remote-execution.md` | SSH remote execution without launcher |
-| `references/slurm-setup.md` | Manual SLURM job scripts without launcher |
-| `skills/common/environment-setup.md` | Source checkout + env detection (shared) |
-| `skills/common/workspace-management.md` | Organize work by model name |
-| `tools/launcher/CLAUDE.md` | Launcher architecture and full config docs |
+| --- | --- |
+| `skills/common/environment-setup.md` | Step 1: detect env |
+| `skills/common/workspace-management.md` | Step 1: organize work by model |
+| `references/launcher-guide.md` | Step 4B: launcher YAML config |
+| `references/unsupported-models.md` | Step 2/4C: unsupported model |
+| `skills/common/remote-execution.md` | Remote execution via SSH |
+| `references/slurm-setup.md` | Manual SLURM job scripts |
+| `tools/launcher/CLAUDE.md` | Launcher full docs |
 | `examples/llm_ptq/README.md` | Support matrix, CLI, accuracy |
 | `modelopt/torch/quantization/config.py` | Format definitions |
 | `modelopt/torch/export/model_utils.py` | Supported architectures |
