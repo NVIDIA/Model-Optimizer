@@ -267,3 +267,19 @@ def test_block_sizes_axis_model():
         if hasattr(module, "weight_quantizer"):
             assert name_ref == name
             assert torch.allclose(module_ref.weight_quantizer.amax, module.weight_quantizer.amax)
+
+
+def test_quantize_twice():
+    """Test that calling mtq.quantize twice on the same model works."""
+    model = SimpleLinear()
+    inputs = model.get_input()
+
+    def forward_loop(model):
+        return model(inputs)
+
+    model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop=forward_loop)
+    out1 = model(inputs)
+    model = mtq.quantize(model, mtq.INT8_DEFAULT_CFG, forward_loop=forward_loop)
+    out2 = model(inputs)
+
+    assert torch.allclose(out1, out2), "Re-quantization with same config should be idempotent"

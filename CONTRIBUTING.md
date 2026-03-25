@@ -39,6 +39,12 @@ To run the pre-commit hooks without committing, use:
 pre-commit run --all-files
 ```
 
+## Adding a new PIP dependency
+
+Currently we have 2 places where we mention pip dependencies: [pyproject.toml](./pyproject.toml) for dependencies that are required for the ModelOpt library and `examples/<example-name>/requirements.txt` for dependencies that are required for the specific examples.
+
+If adding a new PIP dependency to any of these, make sure to verify the LICENSE of the dependency. If its not a permissive license (e.g. MIT, Apache 2), you need to provide a justification for the use of the dependency in the PR and check with `@NVIDIA/modelopt-setup-codeowners` if its allowed or not.
+
 ## 🔒 Security coding practices
 
 All contributors must follow the security coding practices documented in *Security Coding Practices for

@@ -24,6 +24,7 @@ from .mcore_custom import (
     ROW_TP,
     CustomModuleMapping,
     GroupedMLPMerging,
+    GroupedMLPSlicing,
     NameRemapping,
     QKVMerging,
     QKVSlicing,
@@ -125,6 +126,7 @@ nemotron_h_causal_lm_export: dict[str, CustomModuleMapping] = {
     "conv1d": NameRemapping("backbone.layers.{}.mixer.conv1d."),
     "in_proj": NameRemapping("backbone.layers.{}.mixer.in_proj."),
     "out_proj": NameRemapping("backbone.layers.{}.mixer.out_proj."),
+    "fused_norm": NameRemapping("backbone.layers.{}.norm.weight"),
     # Attention
     "input_layernorm": NameRemapping("backbone.layers.{}.norm."),
     "linear_qkv": QKVSlicing("backbone.layers.{}.mixer."),
@@ -147,6 +149,9 @@ nemotron_h_causal_lm_export: dict[str, CustomModuleMapping] = {
     # Latent MoE
     "fc1_latent_proj": NameRemapping("backbone.layers.{}.mixer.fc1_latent_proj."),
     "fc2_latent_proj": NameRemapping("backbone.layers.{}.mixer.fc2_latent_proj."),
+    # Grouped local experts (TEGroupedMLP: fused per-expert weights)
+    "experts.linear_fc1": GroupedMLPSlicing("backbone.layers.{}.mixer.experts.{{}}.up_proj"),
+    "experts.linear_fc2": GroupedMLPSlicing("backbone.layers.{}.mixer.experts.{{}}.down_proj"),
     # MTP
     "mtp.enorm": NameRemapping("mtp.layers.{}.enorm."),
     "mtp.hnorm": NameRemapping("mtp.layers.{}.hnorm."),

@@ -216,6 +216,7 @@ class PipelineManager:
         fp8_quantization = params.pop("fp8_quantization", None) or params.pop(
             "fp8transformer", False
         )
+        params.pop("merged_base_safetensor_path", None)
 
         if not checkpoint_path:
             raise ValueError("Missing required extra_param: checkpoint_path.")

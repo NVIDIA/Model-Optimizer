@@ -29,7 +29,7 @@ Cache Diffusion is a technique that reuses cached outputs from previous diffusio
 
 ### Docker
 
-Please use the TensorRT docker image (e.g., `nvcr.io/nvidia/tensorrt:25.08-py3`) or visit our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html) for more information.
+Please use the TensorRT docker image (e.g., `nvcr.io/nvidia/tensorrt:26.02-py3`) or visit our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html) for more information.
 
 Also follow the installation steps below to upgrade to the latest version of Model Optimizer and install example-specific dependencies.
 
@@ -116,7 +116,9 @@ python quantize.py \
     --hf-ckpt-dir ./hf_ckpt
 ```
 
-#### [LTX-2](https://github.com/Lightricks/LTX-2) FP4 (torch checkpoint export)
+#### [LTX-2](https://github.com/Lightricks/LTX-2) FP4
+
+This example produces three outputs: a PyTorch checkpoint (`--quantized-torch-ckpt-save-path`), a Hugging Face checkpoint (`--hf-ckpt-dir`), and a ComfyUI-compatible merged safetensor (`--extra-param merged_base_safetensor_path`).
 
 ```sh
 python quantize.py \
@@ -126,7 +128,9 @@ python quantize.py \
     --extra-param spatial_upsampler_path=./ltx-2-spatial-upscaler-x2-1.0.safetensors \
     --extra-param gemma_root=./gemma-3-12b-it-qat-q4_0-unquantized \
     --extra-param fp8transformer=true \
-    --quantized-torch-ckpt-save-path ./ltx-2-transformer.pt
+    --quantized-torch-ckpt-save-path ./ltx-2-transformer.pt \
+    --hf-ckpt-dir ./LTX2-NVFP4/ \
+    --extra-param merged_base_safetensor_path=./ltx-2-19b-dev-fp8.safetensors
 ```
 
 #### Important Parameters

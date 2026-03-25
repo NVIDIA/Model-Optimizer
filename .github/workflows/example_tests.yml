@@ -60,15 +60,28 @@ jobs:
   nemo-pr:
     needs: [check-file-changes, wait-checks]
     if: startsWith(github.ref, 'refs/heads/pull-request/') && needs.check-file-changes.outputs.any_changed == 'true'
-    strategy:
+    strategy: &nemo_strategy
       fail-fast: false
       matrix:
-        example: [puzzletron]
+        example: [megatron_bridge, puzzletron]
     uses: ./.github/workflows/_example_tests_runner.yml
     secrets: inherit
     with:
       docker_image: "nvcr.io/nvidia/nemo:26.02"
       example: ${{ matrix.example }}
+      timeout_minutes: 30
+      pip_install_extras: "[hf,puzzletron,dev-test]"
+      runner: linux-amd64-gpu-rtxpro6000-latest-1
+
+  nemo-non-pr:
+    if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
+    strategy: *nemo_strategy
+    uses: ./.github/workflows/_example_tests_runner.yml
+    secrets: inherit
+    with:
+      docker_image: "nvcr.io/nvidia/nemo:26.02"
+      example: ${{ matrix.example }}
+      timeout_minutes: 30
       pip_install_extras: "[hf,puzzletron,dev-test]"
       runner: linux-amd64-gpu-rtxpro6000-latest-2
 

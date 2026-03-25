@@ -224,7 +224,9 @@ def test_llama(command):
             mini_sm=89,
         ),
         *ModelDeployerList(
-            model_id="nvidia/QwQ-32B-NVFP4", backend=("trtllm", "vllm", "sglang"), mini_sm=100
+            model_id="nvidia/QwQ-32B-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            mini_sm=100,
         ),
         *ModelDeployerList(
             model_id="nvidia/Qwen3-32B-NVFP4",
@@ -262,6 +264,30 @@ def test_llama(command):
             tensor_parallel_size=8,
             mini_sm=100,
         ),
+        *ModelDeployerList(
+            model_id="nvidia/Qwen3-Coder-480B-A35B-Instruct-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/Qwen3-235B-A22B-Instruct-2507-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/Qwen3-235B-A22B-Thinking-2507-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
+        *ModelDeployerList(
+            model_id="nvidia/Qwen3.5-397B-A17B-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
     ],
     ids=idfn,
 )
@@ -273,7 +299,9 @@ def test_qwen(command):
     "command",
     [
         *ModelDeployerList(
-            model_id="nvidia/Mixtral-8x7B-Instruct-v0.1-FP8", backend=("trtllm", "vllm", "sglang")
+            model_id="nvidia/Mixtral-8x7B-Instruct-v0.1-FP8",
+            backend=("trtllm", "vllm", "sglang"),
+            mini_sm=89,
         ),
         *ModelDeployerList(
             model_id="nvidia/Mixtral-8x7B-Instruct-v0.1-NVFP4",
@@ -375,6 +403,12 @@ def test_phi(command):
             tensor_parallel_size=8,
             mini_sm=100,
         ),
+        *ModelDeployerList(
+            model_id="nvidia/Kimi-K2.5-NVFP4",
+            backend=("trtllm", "vllm", "sglang"),
+            tensor_parallel_size=8,
+            mini_sm=100,
+        ),
     ],
     ids=idfn,
 )
@@ -399,7 +433,7 @@ def test_kimi(command):
         ),
         *ModelDeployerList(
             model_id="nvidia/Llama-3_1-Nemotron-Ultra-253B-v1-FP8",
-            backend=("vllm",),
+            backend=("trtllm", "vllm", "sglang"),
             tensor_parallel_size=8,
             mini_sm=89,
         ),
@@ -541,11 +575,11 @@ def test_medusa(command):
     ids=idfn,
 )
 def test_eagle(command):
-    """Skip test if MODELOPT_LOCAL_MODEL_ROOT is set but model doesn't exist locally.
-    speculative models shoule be loaded by local path"""
-    local_root = os.getenv("MODELOPT_LOCAL_MODEL_ROOT")
+    """Skip test if MODELOPT_LOCAL_EAGLE_MODEL is set but model doesn't exist locally.
+    speculative models should be loaded by local path"""
+    local_root = os.getenv("MODELOPT_LOCAL_EAGLE_MODEL")
     if not local_root:
-        return
+        pytest.skip("MODELOPT_LOCAL_EAGLE_MODEL is not set")
 
     local_path = os.path.join(local_root, command.model_id)
     if os.path.isdir(local_path):

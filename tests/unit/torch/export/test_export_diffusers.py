@@ -16,7 +16,12 @@
 import json
 
 import pytest
-from _test_utils.torch.diffusers_models import get_tiny_dit, get_tiny_flux, get_tiny_unet
+from _test_utils.torch.diffusers_models import (
+    get_tiny_dit,
+    get_tiny_flux,
+    get_tiny_flux2,
+    get_tiny_unet,
+)
 
 pytest.importorskip("diffusers")
 
@@ -29,7 +34,9 @@ def _load_config(config_path):
         return json.load(file)
 
 
-@pytest.mark.parametrize("model_factory", [get_tiny_unet, get_tiny_dit, get_tiny_flux])
+@pytest.mark.parametrize(
+    "model_factory", [get_tiny_unet, get_tiny_dit, get_tiny_flux, get_tiny_flux2]
+)
 def test_export_diffusers_models_non_quantized(tmp_path, model_factory):
     model = model_factory()
     export_dir = tmp_path / f"export_{type(model).__name__}"
@@ -82,3 +89,34 @@ def test_export_diffusers_unet_quantized_matches_llm_config(tmp_path, monkeypatc
     config_data = _load_config(config_path)
     assert "quantization_config" in config_data
     assert config_data["quantization_config"] == convert_hf_quant_config_format(dummy_quant_config)
+
+
+def test_flux2_dummy_inputs_shape():
+    """Verify Flux2-specific dummy input shapes: 4-col RoPE ids, no pooled_projections, guidance."""
+    import torch
+
+    from modelopt.torch.export.diffusers_utils import generate_diffusion_dummy_inputs
+
+    model = get_tiny_flux2()
+    cfg = model.config
+    inputs = generate_diffusion_dummy_inputs(model, torch.device("cpu"), torch.float32)
+
+    assert inputs is not None, "generate_diffusion_dummy_inputs returned None for Flux2"
+
+    # hidden_states: (batch, seq_len, in_channels)
+    assert inputs["hidden_states"].shape == (1, 16, cfg.in_channels)
+
+    # encoder_hidden_states: (batch, text_seq_len, joint_attention_dim)
+    assert inputs["encoder_hidden_states"].shape == (1, 8, cfg.joint_attention_dim)
+
+    # RoPE ids must have 4 columns (not 3 like Flux1)
+    rope_ndim = len(cfg.axes_dims_rope)
+    assert rope_ndim == 4
+    assert inputs["img_ids"].shape == (16, rope_ndim)
+    assert inputs["txt_ids"].shape == (8, rope_ndim)
+
+    # Flux2 must NOT have pooled_projections (unlike Flux1)
+    assert "pooled_projections" not in inputs
+
+    # guidance_embeds defaults to True for Flux2
+    assert "guidance" in inputs

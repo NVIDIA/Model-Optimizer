@@ -43,7 +43,6 @@ from eagle_utils import (
     make_eagle_supervised_data_module,
     patch_ring_attention_for_ttt,
 )
-from medusa_utils import make_medusa_supervised_data_module
 from transformers.trainer_utils import get_last_checkpoint
 
 import modelopt.torch.opt as mto
@@ -127,6 +126,18 @@ class EagleArguments:
         default="llama",
         metadata={"help": "The class of eagle decoder to use. Available options: llama, kimik2"},
     )
+    mix_hidden_states: bool = field(
+        default=False,
+        metadata={"help": "Whether to mix hidden states from previous TTT step."},
+    )
+    disable_torch_compile: bool = field(
+        default=False,
+        metadata={"help": "Disable torch.compile on eagle forward/loss methods."},
+    )
+    num_ttt_steps: int = field(
+        default=3,
+        metadata={"help": "Number of train-time-test steps to use during training."},
+    )
 
 
 def train():
@@ -142,9 +153,10 @@ def train():
     model_args, data_args, training_args, medusa_args, eagle_args = (
         parser.parse_args_into_dataclasses()
     )
-    training_args.parallelism_config = ParallelismConfig(
-        cp_size=training_args.cp_size, dp_shard_size=training_args.dp_shard_size
-    )
+    if training_args.cp_size > 1 or training_args.dp_shard_size > 1:
+        training_args.parallelism_config = ParallelismConfig(
+            cp_size=training_args.cp_size, dp_shard_size=training_args.dp_shard_size
+        )
     if training_args.cp_size > 1:
         patch_ring_attention_for_ttt()
         # Specific patch to accelerate 1.12.0. Removable after move to 1.13.0
@@ -204,6 +216,9 @@ def train():
             config = {
                 "eagle_decoder_type": eagle_args.eagle_decoder_type,
                 "eagle_offline": use_offline_training,
+                "eagle_mix_hidden_states": eagle_args.mix_hidden_states,
+                "eagle_use_torch_compile": not eagle_args.disable_torch_compile,
+                "eagle_ttt_steps": eagle_args.num_ttt_steps,
                 "eagle_architecture_config": custom_config,
             }
 
@@ -221,9 +236,7 @@ def train():
             raise Exception(f"{training_args.mode} is not supported!")
 
     print_rank_0("Loading dataset...")
-    if training_args.mode == "medusa":
-        data_module = make_medusa_supervised_data_module(tokenizer, data_args)
-    elif training_args.mode == "eagle3":
+    if training_args.mode == "eagle3":
         data_module = make_eagle_supervised_data_module(
             tokenizer, data_args, train_len=training_args.training_seq_len
         )

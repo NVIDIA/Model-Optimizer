@@ -35,7 +35,7 @@ import onnx_graphsurgeon as gs
 import yaml
 
 from modelopt.onnx.logging_config import logger
-from modelopt.onnx.op_types import is_linear_op
+from modelopt.onnx.op_types import get_activation_ops, is_linear_op
 from modelopt.onnx.quantization.autotune.common import (
     AutotunerNotInitializedError,
     Config,
@@ -46,7 +46,10 @@ from modelopt.onnx.quantization.autotune.common import (
     Region,
 )
 from modelopt.onnx.quantization.autotune.export_utils import export_qdq_onnx
-from modelopt.onnx.quantization.autotune.insertion_points import ResolvedInsertionPoint
+from modelopt.onnx.quantization.autotune.insertion_points import (
+    ResolvedInsertionPoint,
+    get_autotuner_quantizable_ops,
+)
 from modelopt.onnx.quantization.autotune.region_pattern import RegionPattern
 from modelopt.onnx.quantization.graph_utils import get_tensor_consumer_node_indices
 
@@ -435,6 +438,125 @@ class QDQAutotunerBase:
             logger.debug(f"  → Excluded {len(all_region_ips)} overlapping insertion points")
 
     @_requires_init
+    def get_resolved_insertion_points(
+        self, best: bool = True, verbose: bool = False
+    ) -> set[ResolvedInsertionPoint]:
+        """Compute Q/DQ insertion points for the best schemes (assuming best=True).
+
+        Args:
+            best: If True, use the best scheme for each region. If False, use the current scheme.
+            verbose: If True, log matched-region counts and per-region insertion point details.
+
+        Returns:
+            Set of ResolvedInsertionPoint objects representing where Q/DQ pairs should be inserted.
+
+        Raises:
+            AutotunerNotInitializedError: If initialize() hasn't been called
+        """
+        resolved_insertion_points: set[ResolvedInsertionPoint] = set()
+        matched_regions = 0
+
+        if verbose:
+            logger.debug(f"Resolving Q/DQ insertion points from {len(self.regions)} regions")
+
+        for region in self.regions:
+            current_scheme, pattern = self._resolve_scheme_for_region(region, best)
+            if current_scheme is None:
+                continue
+            self._exclude_overlapping_insertion_points(resolved_insertion_points, region, pattern)
+            new_insertion_points = pattern.matches(region, self.graph, current_scheme)
+            if new_insertion_points:
+                resolved_insertion_points.update(new_insertion_points)
+                matched_regions += 1
+                if verbose:
+                    logger.debug(f"  → Added {len(new_insertion_points)} insertion points")
+        if verbose:
+            logger.debug(
+                f"Matched {matched_regions}/{len(self.regions)} regions, "
+                f"total {len(resolved_insertion_points)} unique insertion points"
+            )
+        return resolved_insertion_points
+
+    @_requires_init
+    def get_ort_quantization_config(
+        self,
+    ) -> tuple[list[str], list[str], list[tuple[gs.Node, gs.Node, str]], list[str]]:
+        """Derive ORT quantization configuration from resolved insertion points.
+
+        Returns the four parameters consumed by INT8 and FP8 quantize() to replicate the autotuner's
+        Q/DQ placement decisions without exporting any intermediate ONNX file to disk.
+
+        Returns:
+            nodes_to_quantize: Node names that have at least one covered Q/DQ input.
+            op_types_to_quantize: Op types eligible for quantization.
+            no_quantize_inputs: List of (src_node, dst_node, tensor_name) tuples for inputs
+              of quantized nodes that should NOT receive Q/DQ.
+            op_types_needing_output_quant: Producer op types whose output feeds a covered
+              activation-op input (needed so ORT inserts Q/DQ between e.g. Add and Relu).
+
+        Raises:
+            AutotunerNotInitializedError: If initialize() hasn't been called.
+        """
+        resolved_ips = self.get_resolved_insertion_points(best=True)
+        graph = self.graph
+
+        # Build (node_index, input_index) pairs that have Q/DQ
+        covered: set[tuple[int, int]] = set()
+        for ip in resolved_ips:
+            if ip.node_index is not None and ip.input_index is not None:
+                covered.add((ip.node_index, ip.input_index))
+            else:
+                # Tensor-level insertion point: expand to all consumer (node, input) pairs
+                for consumer_idx in graph.tensor_users_map.get(ip.tensor_name, []):
+                    node = graph.nodes[consumer_idx]
+                    for inp_idx, inp in enumerate(node.inputs):
+                        if getattr(inp, "name", None) == ip.tensor_name:
+                            covered.add((consumer_idx, inp_idx))
+
+        # Nodes that consume a covered (DQ-fed) input
+        quantized_node_indices: set[int] = {node_idx for node_idx, _ in covered}
+
+        # Also include producer nodes of covered inputs: a producer whose output feeds a
+        # covered slot needs to be in nodes_to_quantize so ORT can place Q on its output
+        # (e.g., Add must be included when Q/DQ sits between Add and Relu).
+        node_name_to_idx = {node.name: i for i, node in enumerate(graph.nodes)}
+        for node_idx, inp_idx in covered:
+            tensor = graph.nodes[node_idx].inputs[inp_idx]
+            if tensor.inputs:
+                producer_idx = node_name_to_idx.get(tensor.inputs[0].name)
+                if producer_idx is not None:
+                    quantized_node_indices.add(producer_idx)
+
+        nodes_to_quantize = [graph.nodes[i].name for i in quantized_node_indices]
+        op_types_to_quantize = list(get_autotuner_quantizable_ops())
+
+        # Inputs of quantized nodes NOT covered by Q/DQ (only non-constant producer inputs)
+        no_quantize_inputs: list[tuple[gs.Node, gs.Node, str]] = []
+        for node_idx in quantized_node_indices:
+            node = graph.nodes[node_idx]
+            for inp_idx, inp in enumerate(node.inputs):
+                if (node_idx, inp_idx) not in covered and getattr(inp, "name", None):
+                    if inp.inputs:
+                        no_quantize_inputs.append((inp.inputs[0], node, inp.name))
+
+        # Producer op types whose output feeds a covered activation-op input
+        # (e.g., to support Add->Q/DQ->Relu patterns)
+        op_types_needing_output_quant: set[str] = set()
+        for node_idx, inp_idx in covered:
+            node = graph.nodes[node_idx]
+            if node.op in get_activation_ops():
+                tensor = node.inputs[inp_idx]
+                if tensor.inputs:
+                    op_types_needing_output_quant.add(tensor.inputs[0].op)
+
+        return (
+            nodes_to_quantize,
+            op_types_to_quantize,
+            no_quantize_inputs,
+            list(op_types_needing_output_quant),
+        )
+
+    @_requires_init
     def export_onnx(
         self, output_path: str | None = None, insert_qdq: bool = True, best: bool = False
     ) -> bytes:
@@ -469,29 +591,7 @@ class QDQAutotunerBase:
         )
 
         if insert_qdq:
-            matched_regions = 0
-
-            logger.debug(f"Resolving Q/DQ insertion points from {len(self.regions)} regions")
-
-            for region in self.regions:
-                current_scheme, pattern = self._resolve_scheme_for_region(region, best)
-                if current_scheme is None:
-                    continue
-
-                self._exclude_overlapping_insertion_points(
-                    resolved_insertion_points, region, pattern
-                )
-
-                new_ips = pattern.matches(region, self.graph, current_scheme)
-                if new_ips:
-                    resolved_insertion_points.update(new_ips)
-                    matched_regions += 1
-                    logger.debug(f"  → Added {len(new_ips)} insertion points")
-
-            logger.debug(
-                f"Matched {matched_regions}/{len(self.regions)} regions, "
-                f"total {len(resolved_insertion_points)} unique insertion points"
-            )
+            resolved_insertion_points = self.get_resolved_insertion_points(best=best, verbose=True)
 
         unique_tensors = len(resolved_insertion_points)
 

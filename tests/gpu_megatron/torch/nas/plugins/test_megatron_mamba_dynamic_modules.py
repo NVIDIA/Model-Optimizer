@@ -31,11 +31,12 @@ from modelopt.torch.nas.plugins.megatron import (
     _DynamicColumnParallelLinear,
     _DynamicEmbedding,
     _DynamicExtendedRMSNorm,
-    _DynamicLayerNorm,
     _DynamicMambaLayer,
     _DynamicMambaMixer,
     _DynamicMCoreLanguageModel,
-    _DynamicRowParallelLinear,
+    _DynamicTELayerNormColumnParallelLinear,
+    _DynamicTENorm,
+    _DynamicTERowParallelLinear,
 )
 from modelopt.torch.nas.traced_hp import TracedHp
 from modelopt.torch.opt.utils import named_dynamic_modules, search_space_size
@@ -71,6 +72,8 @@ def _test_mamba_search_space(rank, size):
         mamba_num_groups=mamba_num_groups,
         max_sequence_length=max_sequence_length,
         vocab_size=vocab_size,
+        transformer_impl="transformer_engine",
+        bf16=False,
     ).cuda()
     mamba_num_heads = model.decoder.layers[0].mixer.nheads
 
@@ -95,13 +98,13 @@ def _test_mamba_search_space(rank, size):
     for layer in model.decoder.layers:
         assert isinstance(layer, _DynamicMambaLayer)
         assert isinstance(layer.mixer, _DynamicMambaMixer)
-        assert isinstance(layer.mixer.in_proj, _DynamicColumnParallelLinear)
-        assert isinstance(layer.mixer.out_proj, _DynamicRowParallelLinear)
+        assert isinstance(layer.mixer.in_proj, _DynamicTELayerNormColumnParallelLinear)
+        assert isinstance(layer.mixer.out_proj, _DynamicTERowParallelLinear)
         assert isinstance(layer.mixer.conv1d, _DynamicConvNd)
         if layer.mixer.rmsnorm:
             assert isinstance(layer.mixer.norm, _DynamicExtendedRMSNorm)
     if is_pipeline_last_stage():
-        assert isinstance(model.decoder.final_norm, _DynamicLayerNorm)
+        assert isinstance(model.decoder.final_norm, _DynamicTENorm)
         assert isinstance(model.output_layer, _DynamicColumnParallelLinear)
 
     # NOTE: `search_space_size` does not reduce across TP/PP groups
@@ -121,7 +124,7 @@ def _test_mamba_search_space(rank, size):
     prompt_tokens = torch.randint(0, vocab_size, (batch_size, max_sequence_length)).cuda()
     for sample_func in [min, max, centroid]:
         mtn.sample(model, sample_func)
-        output = run_mcore_inference(model, prompt_tokens)
+        output = run_mcore_inference(model, prompt_tokens, model.hidden_size)
         assert output.shape == (batch_size, max_sequence_length, vocab_size)
 
     # Make sure export and forward pass works on centroid model

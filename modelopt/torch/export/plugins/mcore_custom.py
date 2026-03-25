@@ -115,6 +115,18 @@ class GroupedMLPMerging(CustomModuleMapping):
         )
 
 
+class GroupedMLPSlicing(CustomModuleMapping):
+    """A custom module mapping that slices fused grouped MLP weights into per-expert weights."""
+
+    def __init__(self, target_name_or_prefix: str = "", func_kwargs: dict[str, Any] = {}):
+        """Create a custom module mapping that slices grouped MLP weights for export."""
+        super().__init__(
+            func_name="grouped_mlp_slicing",
+            target_name_or_prefix=target_name_or_prefix,
+            func_kwargs=func_kwargs,
+        )
+
+
 class GatedMLPMerging(CustomModuleMapping):
     """A custom module mapping that merges gate_proj and up_proj."""
 

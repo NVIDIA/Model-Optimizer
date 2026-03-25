@@ -21,42 +21,49 @@ import tempfile
 from pathlib import Path
 
 from modelopt.onnx.logging_config import logger
+from modelopt.onnx.quantization.autotune.utils import (
+    StoreWithExplicitFlag,
+    get_node_filter_list,
+    validate_file_path,
+)
 from modelopt.onnx.quantization.autotune.workflows import (
     init_benchmark_instance,
     region_pattern_autotuning_workflow,
 )
 
 DEFAULT_OUTPUT_DIR = "./autotuner_output"
-DEFAULT_NUM_SCHEMES = 30
+DEFAULT_NUM_SCHEMES = 50
 DEFAULT_QUANT_TYPE = "int8"
 DEFAULT_DQ_DTYPE = "float32"
 DEFAULT_TIMING_CACHE = str(Path(tempfile.gettempdir()) / "trtexec_timing.cache")
-DEFAULT_WARMUP_RUNS = 5
-DEFAULT_TIMING_RUNS = 20
+DEFAULT_WARMUP_RUNS = 50
+DEFAULT_TIMING_RUNS = 100
+MODE_PRESETS = {
+    "quick": {"schemes_per_region": 30, "warmup_runs": 10, "timing_runs": 50},
+    "default": {
+        "schemes_per_region": DEFAULT_NUM_SCHEMES,
+        "warmup_runs": DEFAULT_WARMUP_RUNS,
+        "timing_runs": DEFAULT_TIMING_RUNS,
+    },
+    "extensive": {"schemes_per_region": 200, "warmup_runs": 50, "timing_runs": 200},
+}
 
 
-def validate_file_path(path: str | None, description: str) -> Path | None:
-    """Validate that a file path exists.
+def apply_mode_presets(args) -> None:
+    """Apply --mode preset to schemes_per_region, warmup_runs, timing_runs.
 
-    Args:
-        path: Path string to validate (can be None)
-        description: Description of the file for error messages
-
-    Returns:
-        Path object if valid, None if path is None
-
-    Raises:
-        SystemExit: If path is provided but doesn't exist
+    Only applies preset for an option when that option was not explicitly set on the
+    command line (explicit flags override the preset even when the value equals the default).
     """
-    if path is None:
-        return None
-
-    path_obj = Path(path)
-    if not path_obj.exists():
-        logger.error(f"{description} not found: {path_obj}")
-        sys.exit(1)
-
-    return path_obj
+    if args.mode not in MODE_PRESETS:
+        return
+    preset = MODE_PRESETS[args.mode]
+    if not getattr(args, "_explicit_num_schemes", False):
+        args.num_schemes = preset["schemes_per_region"]
+    if not getattr(args, "_explicit_warmup_runs", False):
+        args.warmup_runs = preset["warmup_runs"]
+    if not getattr(args, "_explicit_timing_runs", False):
+        args.timing_runs = preset["timing_runs"]
 
 
 def log_benchmark_config(args):
@@ -93,13 +100,16 @@ def run_autotune() -> int:
         - 1: Autotuning failed (exception occurred)
         - 130: Interrupted by user (Ctrl+C)
     """
-    args = _get_autotune_parser().parse_args()
+    args = get_parser().parse_args()
+    apply_mode_presets(args)
     model_path = validate_file_path(args.onnx_path, "Model file")
     validate_file_path(args.qdq_baseline, "QDQ baseline model")
     output_dir = Path(args.output_dir)
 
     log_benchmark_config(args)
     trtexec_args = getattr(args, "trtexec_benchmark_args", None)
+    if trtexec_args and isinstance(trtexec_args, str):
+        trtexec_args = trtexec_args.split()
     benchmark_instance = init_benchmark_instance(
         use_trtexec=args.use_trtexec,
         plugin_libraries=args.plugin_libraries,
@@ -114,20 +124,9 @@ def run_autotune() -> int:
         return 1
 
     try:
-        node_filter_list = None
-        if args.node_filter_list:
-            filter_file = validate_file_path(args.node_filter_list, "Node filter list file")
-            if filter_file:
-                with open(filter_file) as f:
-                    node_filter_list = [
-                        line.strip()
-                        for line in f
-                        if line.strip() and not line.strip().startswith("#")
-                    ]
-                logger.info(f"Loaded {len(node_filter_list)} filter patterns from {filter_file}")
-
+        node_filter_list = get_node_filter_list(args.node_filter_list)
         region_pattern_autotuning_workflow(
-            model_path=str(model_path),
+            model_or_path=str(model_path),
             output_dir=output_dir,
             num_schemes_per_region=args.num_schemes,
             pattern_cache_file=args.pattern_cache_file,
@@ -156,8 +155,11 @@ def run_autotune() -> int:
         return 1
 
 
-def _get_autotune_parser() -> argparse.ArgumentParser:
-    """Create and configure the command-line argument parser."""
+def get_parser() -> argparse.ArgumentParser:
+    """Create and return the autotune CLI argument parser.
+
+    Intended for Sphinx documentation and programmatic use (e.g. subparsers).
+    """
     parser = argparse.ArgumentParser(
         prog="modelopt.onnx.quantization.autotune",
         description="ONNX Q/DQ Autotuning with TensorRT",
@@ -166,6 +168,12 @@ def _get_autotune_parser() -> argparse.ArgumentParser:
 Examples:
   # Basic usage
   python -m modelopt.onnx.quantization.autotune --onnx_path model.onnx
+
+  # Quick mode (fewer schemes and benchmark runs for fast iteration)
+  python -m modelopt.onnx.quantization.autotune --onnx_path model.onnx --mode quick
+
+  # Extensive mode (more schemes and runs for thorough tuning)
+  python -m modelopt.onnx.quantization.autotune --onnx_path model.onnx --mode extensive
 
   # Import patterns from QDQ baseline model
   python -m modelopt.onnx.quantization.autotune \\
@@ -199,12 +207,25 @@ Examples:
     # Autotuning Strategy
     strategy_group = parser.add_argument_group("Autotuning Strategy")
     strategy_group.add_argument(
+        "--mode",
+        type=str,
+        default="default",
+        choices=["quick", "default", "extensive"],
+        help="Preset for schemes_per_region, warmup_runs, and timing_runs. "
+        "'quick': fewer schemes/runs for fast iteration; "
+        "'default': balanced; "
+        "'extensive': more schemes/runs for thorough tuning. "
+        "Explicit --schemes_per_region, --warmup_runs, --timing_runs override the preset.",
+    )
+    strategy_group.add_argument(
         "--schemes_per_region",
         "-s",
         type=int,
         default=DEFAULT_NUM_SCHEMES,
         dest="num_schemes",
-        help=f"Number of schemes to test per region (default: {DEFAULT_NUM_SCHEMES})",
+        action=StoreWithExplicitFlag,
+        explicit_attr="_explicit_num_schemes",
+        help=f"Schemes per region (default: {DEFAULT_NUM_SCHEMES}; preset from --mode if not set)",
     )
     strategy_group.add_argument(
         "--pattern_cache",
@@ -268,13 +289,17 @@ Examples:
         "--warmup_runs",
         type=int,
         default=DEFAULT_WARMUP_RUNS,
-        help=f"Number of warmup runs (default: {DEFAULT_WARMUP_RUNS})",
+        action=StoreWithExplicitFlag,
+        explicit_attr="_explicit_warmup_runs",
+        help=f"Number of warmup runs (default: {DEFAULT_WARMUP_RUNS}; preset from --mode applies if not set)",
     )
     trt_group.add_argument(
         "--timing_runs",
         type=int,
         default=DEFAULT_TIMING_RUNS,
-        help=f"Number of timing runs (default: {DEFAULT_TIMING_RUNS})",
+        action=StoreWithExplicitFlag,
+        explicit_attr="_explicit_timing_runs",
+        help=f"Number of timing runs (default: {DEFAULT_TIMING_RUNS}; preset from --mode applies if not set)",
     )
     trt_group.add_argument(
         "--plugin_libraries",

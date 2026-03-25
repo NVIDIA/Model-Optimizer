@@ -78,8 +78,11 @@ def megatron_prefill(
             .view(batch_size, 1, seq_len, seq_len)
         )
 
-        # NOTE: we don't support traditional positional embedding. Only RoPE or YaRN are supported.
-        position_ids = None
+        position_ids = (
+            torch.arange(seq_len, dtype=torch.long, device=device)
+            .unsqueeze(0)
+            .expand(batch_size, -1)
+        )
 
         output_tensor = model(
             data["tokens"],
@@ -209,8 +212,11 @@ def megatron_generate(
         else:
             attention_mask = None
 
-        # NOTE: we don't support traditional positional embedding. Only RoPE or YaRN are supported.
-        position_ids = None
+        position_ids = (
+            torch.arange(seq_len, dtype=torch.long, device=device)
+            .unsqueeze(0)
+            .expand(batch_size, -1)
+        )
 
         # Check if this is a VLM model (has vision inputs)
         _has_pixel_values = data.get("pixel_values") is not None

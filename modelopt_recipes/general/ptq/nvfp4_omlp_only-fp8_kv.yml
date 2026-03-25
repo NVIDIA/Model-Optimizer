@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+metadata:
+  recipe_type: ptq
+  description: NVFP4 static weight and dynamic activation for all linear layers including output projections, FP8 KV cache, max calibration.
+ptq_cfg:
+  algorithm: max
+  quant_cfg:
+    '*mlp*weight_quantizer':
+      block_sizes:
+        -1: 16
+        type: dynamic
+        scale_bits: e4m3
+      num_bits: e2m1
+      enable: true
+    '*mlp*input_quantizer':
+      block_sizes:
+        -1: 16
+        type: dynamic
+        scale_bits: e4m3
+      num_bits: e2m1
+      enable: true
+    '*block_sparse_moe*weight_quantizer':
+      block_sizes:
+        -1: 16
+        type: dynamic
+        scale_bits: e4m3
+      num_bits: e2m1
+      enable: true
+    '*block_sparse_moe*input_quantizer':
+      block_sizes:
+        -1: 16
+        type: dynamic
+        scale_bits: e4m3
+      num_bits: e2m1
+      enable: true
+    '*o_proj*weight_quantizer':
+      block_sizes:
+        -1: 16
+        type: dynamic
+        scale_bits: e4m3
+      num_bits: e2m1
+      enable: true
+    '*o_proj*input_quantizer':
+      block_sizes:
+        -1: 16
+        type: dynamic
+        scale_bits: e4m3
+      num_bits: e2m1
+      enable: true
+    default:
+      enable: false
+    '*block_sparse_moe.gate*':
+      enable: false
+    '*linear_attn.conv1d*':
+      enable: false
+    '*lm_head*':
+      enable: false
+    '*mixer.conv1d*':
+      enable: false
+    '*mlp.gate.*':
+      enable: false
+    '*mlp.shared_expert_gate.*':
+      enable: false
+    '*output_layer*':
+      enable: false
+    '*proj_out.*':
+      enable: false
+    '*router*':
+      enable: false
+    output.*:
+      enable: false
+    nn.BatchNorm1d:
+      '*':
+        enable: false
+    nn.BatchNorm2d:
+      '*':
+        enable: false
+    nn.BatchNorm3d:
+      '*':
+        enable: false
+    nn.LeakyReLU:
+      '*':
+        enable: false
+    '*[kv]_bmm_quantizer':
+      num_bits: e4m3
+      enable: true

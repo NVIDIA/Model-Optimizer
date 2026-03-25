@@ -36,6 +36,7 @@ See `README.md` in this directory for more details.
 import argparse
 import json
 import os
+import re
 
 import torch
 from megatron.bridge import AutoBridge
@@ -89,8 +90,10 @@ def get_args() -> argparse.Namespace:
         "--calib_dataset_name",
         type=str,
         default="nemotron-post-training-dataset-v2",
-        choices=get_supported_datasets(),
-        help="Dataset name for calibration",
+        help=(
+            f"HF Dataset name or local path for calibration (supported options: {', '.join(get_supported_datasets())}. "
+            "You can also pass any other dataset and see if auto-detection for your dataset works."
+        ),
     )
     parser.add_argument(
         "--calib_num_samples", type=int, default=1024, help="Number of samples for calibration"
@@ -109,8 +112,8 @@ def get_args() -> argparse.Namespace:
         type=str,
         default=None,
         help=(
-            "Path to save/restore intermediate pruning scores for resuming / faster re-run. "
-            "If not provided, it will default to `<output_path>/modelopt_pruning_scores.pth`"
+            "Directory to save/restore per-rank intermediate pruning scores for resuming / faster re-run. "
+            "If not provided, it will default to `<output_path>/modelopt_pruning_scores`"
         ),
     )
 
@@ -137,11 +140,20 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--prune_score_func",
         type=str,
-        choices=["mmlu_5pct"],
         default="mmlu_5pct",
         help=(
-            "Score function to use for NAS-based pruning (--prune_target_params). Currently supported: "
-            "mmlu_5pct (MMLU on 5% sampled data per subject for faster eval). "
+            "Score function to use for NAS-based pruning (--prune_target_params). Only supports MMLU at the moment. "
+            "Format: mmlu_<N>pct where <N> is the percentage of MMLU data to sample per subject "
+            "(e.g. mmlu_5pct for 5%, mmlu_100pct for full eval)."
+        ),
+    )
+    parser.add_argument(
+        "--ss_channel_divisor",
+        type=int,
+        default=None,
+        help=(
+            "hidden_size / ffn_hidden_size divisor for NAS-based pruning (--prune_target_params). "
+            "Leave as None to use default divisors."
         ),
     )
     parser.add_argument(
@@ -185,13 +197,11 @@ def get_args() -> argparse.Namespace:
     # Post-process arguments
     if args.prune_intermediate_ckpt is None:
         if args.output_megatron_path:
-            args.prune_intermediate_ckpt = (
-                f"{args.output_megatron_path}/modelopt_pruning_scores.pth"
-            )
+            args.prune_intermediate_ckpt = f"{args.output_megatron_path}/modelopt_pruning_scores"
         elif args.output_hf_path:
-            args.prune_intermediate_ckpt = f"{args.output_hf_path}/modelopt_pruning_scores.pth"
+            args.prune_intermediate_ckpt = f"{args.output_hf_path}/modelopt_pruning_scores"
         print_rank_0(
-            "No checkpoint provided to cache intermediate pruning scores. "
+            "No directory provided to cache per-rank intermediate pruning scores. "
             f"Setting to: {args.prune_intermediate_ckpt}"
         )
 
@@ -238,8 +248,9 @@ def main(args: argparse.Namespace):
             "seq_length": args.seq_length,
         },
         init_model_parallel=True,
+        moe_grouped_gemm=False,
     )
-    print_rank_0(f"\nPruning {unwrapped_model=}")
+    print_rank_0(f"\nPruning model (showing PP rank0): {unwrapped_model}")
     print_rank_0(
         f"Original model params: {num2hrb(mtp.mcore_minitron.get_mcore_param_count(unwrapped_model))}"
     )
@@ -262,25 +273,44 @@ def main(args: argparse.Namespace):
     }
     if args.prune_target_params is not None:
         # Restrict search space to a smaller set of candidates
+        # Allow more choices for MoE FFN as they are generally smaller
         # NOTE: You can reduce the divisors and increase config['top_k'] to potentially find a better model.
+        hidden_size_divisor = args.ss_channel_divisor if args.ss_channel_divisor else 256
+        ffn_hidden_size_divisor = (
+            args.ss_channel_divisor
+            if args.ss_channel_divisor
+            else (256 if (provider.num_moe_experts or 0) > 0 else 512)
+        )
         ss_config = mtp.mcore_minitron.get_mcore_minitron_config(
-            hidden_size_divisor=256,
-            ffn_hidden_size_divisor=512,
+            hidden_size_divisor=hidden_size_divisor,
+            ffn_hidden_size_divisor=ffn_hidden_size_divisor,
             mamba_head_dim_divisor=8,
             num_moe_experts_divisor=8,
             num_layers_divisor=2,
         )
+        print_rank_0(f"Using search space config: {ss_config}")
 
         pruning_constraints = {"params": args.prune_target_params}
         print_rank_0(
-            f"Using NAS-based automatic pruning with score function: {args.prune_score_func}"
+            f"Using NAS-based automatic pruning with score function: {args.prune_score_func}. "
             "You can change this to be any other metric you want to maximize (e.g. negative validation loss)."
         )
 
-        def score_func_mmlu(m):
-            return megatron_mmlu(m, tokenizer, percentage=0.05)
+        match = re.fullmatch(r"mmlu_(\d+)pct", args.prune_score_func)
+        if not match:
+            raise ValueError(
+                f"Invalid score function: {args.prune_score_func}. "
+                "Expected format: mmlu_<N>pct (e.g. mmlu_5pct)"
+            )
+        mmlu_pct = int(match.group(1))
+        if not 0 < mmlu_pct <= 100:
+            raise ValueError("--prune_score_func percentage must be in the range [1, 100].")
+        _mmlu_pct = mmlu_pct / 100.0
 
-        pruning_config["score_func"] = score_func_mmlu
+        def score_func(m):
+            return megatron_mmlu(m, tokenizer, percentage=_mmlu_pct)
+
+        pruning_config["score_func"] = score_func
         pruning_config["max_width_pruning"] = args.max_width_pruning
         pruning_config["max_depth_pruning"] = args.max_depth_pruning
         pruning_config["hparams_to_skip"] = args.hparams_to_skip
@@ -309,8 +339,13 @@ def main(args: argparse.Namespace):
     if mto.ModeloptStateManager.has_state_for_mode_type("prune", model=unwrapped_model):
         mto.ModeloptStateManager.remove_state(unwrapped_model)
     if isinstance(provider, MambaModelProvider):
-        provider.hybrid_override_pattern = unwrapped_model.hybrid_override_pattern
-    print_rank_0(f"\nPruned {unwrapped_model=}")
+        hybrid_key = (
+            "hybrid_override_pattern"
+            if hasattr(unwrapped_model, "hybrid_override_pattern")
+            else "hybrid_layer_pattern"
+        )
+        setattr(provider, hybrid_key, getattr(unwrapped_model, hybrid_key))
+    print_rank_0(f"\nPruned model (showing PP rank0): {unwrapped_model}")
     print_rank_0(
         f"Pruned model params: {num2hrb(mtp.mcore_minitron.get_mcore_param_count(unwrapped_model))}"
     )
@@ -372,8 +407,8 @@ def main(args: argparse.Namespace):
             hf_cfg.layer_types = [
                 lt for i, lt in enumerate(hf_cfg.layer_types) if i + 1 in kept_layer_nums
             ]
-        if hasattr(hf_cfg, "hybrid_override_pattern"):
-            hf_cfg.hybrid_override_pattern = unwrapped_model.hybrid_override_pattern
+        if isinstance(provider, MambaModelProvider) and hasattr(hf_cfg, "hybrid_override_pattern"):
+            hf_cfg.hybrid_override_pattern = getattr(unwrapped_model, hybrid_key)
         hf_cfg.num_hidden_layers = mcore_cfg.num_layers
 
         # Save dummy pruned HF model to get the correct bridge for saving pruned weights

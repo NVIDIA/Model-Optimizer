@@ -52,9 +52,6 @@ with import_plugin("huggingface"):
 with import_plugin("megatron"):
     from .megatron import *
 
-with import_plugin("nemo"):
-    from .nemo import *
-
 with import_plugin("peft"):
     from .peft import *
 

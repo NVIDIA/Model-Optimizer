@@ -15,9 +15,12 @@
 
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
-"""Processing large data to tokenize for pretraining.
+"""Processing large data pretraining and post-training datasets to tokenize for usage in megatron pretraining scripts.
 
-Usage to tokenize one or more JSONL files:
+We apply chat_template to the data if the JSON key is a list of message dicts (e.g. Nemotron-Post-Training-Dataset-v2)
+so that we can tokenize the data for usage in megatron pretraining scripts.
+
+Usage to tokenize one or more JSONL files (pretraining, ``text`` key):
 
 ```bash
 python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
@@ -36,6 +39,21 @@ python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
     --output_dir /path/to/tokenized/Qwen3/ \
     --tokenizer Qwen/Qwen3-0.6B
 ```
+
+Usage to tokenize a post-training dataset with ``messages`` key (chat format):
+
+```bash
+python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
+    --jsonl_paths path/to/sft_data.jsonl \
+    --json_keys messages \
+    --output_dir /path/to/tokenized/Qwen3/ \
+    --tokenizer Qwen/Qwen3-0.6B
+```
+
+When the value for a JSON key is a list of message dicts (e.g.
+``[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]``),
+``tokenizer.apply_chat_template`` is automatically used to render the conversation
+into a single text string before tokenization.
 
 Usage to download and tokenize a dataset from Hugging Face Hub:
 
@@ -56,23 +74,20 @@ If you skip --hf_split, it will download and tokenize all splits for the subset.
 import argparse
 import json
 import multiprocessing
-import os
 from pathlib import Path
-from warnings import warn
 
-import requests
-from datasets import load_dataset
-from huggingface_hub.utils import build_hf_headers
 from megatron.core.datasets import indexed_dataset
 from transformers import AutoTokenizer
 
 from modelopt.torch.utils import num2hrb
+from modelopt.torch.utils.dataset_utils import download_hf_dataset_as_jsonl
 
 __all__ = ["megatron_preprocess_data"]
 
 
 class _Encoder:
     tokenizer: AutoTokenizer = None
+    _chat_template_logged: set[str] = set()
 
     def __init__(
         self,
@@ -101,21 +116,35 @@ class _Encoder:
         doc_len = 0
         enc_len = 0
         for key in self.json_keys:
-            text = data[key]
+            value = data[key]
+
+            if isinstance(value, list):
+                if key not in _Encoder._chat_template_logged:
+                    _Encoder._chat_template_logged.add(key)
+                    print(f"Applying chat_template to '{key}' key")
+                kwargs = {}
+                tools = data.get("tools")
+                if tools:
+                    kwargs["tools"] = tools
+                text = _Encoder.tokenizer.apply_chat_template(value, tokenize=False, **kwargs)
+            else:
+                text = value
 
             # Truncate text by character length if specified
-            doc_len += len(text)
             if self.max_document_length is not None:
+                original_length = len(text)
                 text = text[: self.max_document_length]
-                # print(f"Document truncated from {original_length} to {self.max_document_length} characters")
+                if original_length != len(text):
+                    print(f"Document truncated from {original_length} to {len(text)} characters")
+            doc_len += len(text)
 
             # Tokenize the entire text as one document
             encoded = _Encoder.tokenizer.encode(text)
 
-            enc_len += len(encoded)
             if self.max_sequence_length is not None:
                 encoded = encoded[: self.max_sequence_length]
                 # print(f"Sequence truncated from {original_length} to {self.max_sequence_length} tokens")
+            enc_len += len(encoded)
 
             if len(encoded) > 0 and self.append_eod:
                 encoded.append(_Encoder.tokenizer.eos_token_id)
@@ -188,82 +217,6 @@ class _Partition:
         return final_enc_len
 
 
-def _download_hf_dataset(
-    dataset: str,
-    output_dir: str | Path,
-    json_keys: list[str],
-    name: str | None = None,
-    split: str | None = "train",
-    max_samples_per_split: int | None = None,
-) -> list[str]:
-    """Download a Hugging Face dataset and save as JSONL files.
-
-    Returns:
-        List of paths to downloaded JSONL files.
-    """
-    print(f"Downloading dataset {dataset} from Hugging Face")
-    jsonl_paths: list[str] = []
-
-    try:
-        response = requests.get(
-            f"https://datasets-server.huggingface.co/splits?dataset={dataset}",
-            headers=build_hf_headers(),
-            timeout=10,
-        )
-        response.raise_for_status()
-    except requests.RequestException as e:
-        raise RuntimeError(f"Failed to fetch dataset splits for {dataset}: {e}") from e
-
-    response_json = response.json()
-    print(f"\nFound {len(response_json['splits'])} total splits for {dataset}:")
-    for entry in response_json["splits"]:
-        print(f"\t{entry}")
-
-    splits_to_process = []
-    for entry in response_json["splits"]:
-        if name is not None and name != entry.get("config", None):
-            continue
-        if split is not None and split != entry["split"]:
-            continue
-        splits_to_process.append(entry)
-
-    print(f"\nFound {len(splits_to_process)} splits to process:")
-    for entry in splits_to_process:
-        print(f"\t{entry}")
-
-    for entry in splits_to_process:
-        skip_processing = False
-        path = entry["dataset"]
-        name = entry.get("config", None)
-        split = entry["split"]
-        if max_samples_per_split is not None:
-            split = f"{split}[:{max_samples_per_split}]"
-        jsonl_file_path = f"{output_dir}/raw/{path.replace('/', '--')}_{name}_{split}.jsonl"
-
-        print(f"\nLoading HF dataset {path=}, {name=}, {split=}")
-        if os.path.exists(jsonl_file_path):
-            jsonl_paths.append(jsonl_file_path)
-            print(f"\t[SKIP] Raw dataset {jsonl_file_path} already exists")
-            continue
-        ds = load_dataset(path=path, name=name, split=split)
-
-        for key in json_keys:
-            if key not in ds.features:
-                warn(f"[SKIP] {key=} not found in {ds.features=}")
-                skip_processing = True
-                break
-
-        if skip_processing:
-            continue
-
-        print(f"Saving raw dataset to {jsonl_file_path}")
-        ds.to_json(jsonl_file_path)
-        jsonl_paths.append(jsonl_file_path)
-
-    print(f"\n\nTokenizing JSONL paths: {jsonl_paths}\n")
-    return jsonl_paths
-
-
 def megatron_preprocess_data(
     *,
     input_dir: str | Path | None = None,
@@ -309,14 +262,15 @@ def megatron_preprocess_data(
         )
 
     if hf_dataset is not None:
-        jsonl_paths = _download_hf_dataset(
+        jsonl_paths = download_hf_dataset_as_jsonl(
             hf_dataset,
-            output_dir,
+            f"{output_dir}/raw",
             json_keys,
             name=hf_name,
             split=hf_split,
             max_samples_per_split=hf_max_samples_per_split,
         )
+        print(f"\n\nTokenizing downloaded JSONL files: {jsonl_paths}\n")
 
     if input_dir is not None:
         file_names = sorted(Path(input_dir).glob("*.jsonl"))
@@ -338,7 +292,7 @@ def megatron_preprocess_data(
         num_tokens = partition.process_json_file(name, output_dir, encoder)
         final_enc_len += num_tokens
 
-    print(f"\n\n>>> Total number of tokens currently processed: {num2hrb(final_enc_len)}")
+    print(f"\n\n>>> Total number of tokens currently processed: {num2hrb(final_enc_len)}\nDone!")
 
 
 def main():

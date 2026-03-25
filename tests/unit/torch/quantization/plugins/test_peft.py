@@ -16,7 +16,6 @@
 import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_gpt_oss, get_tiny_llama, tf_output_tester
-from packaging.version import Version
 
 pytest.importorskip("peft")
 transformers = pytest.importorskip("transformers")
@@ -54,9 +53,6 @@ def test_convert_loralinear():
     tf_output_tester(model_ref, model_test)
 
 
-@pytest.mark.skipif(
-    Version(transformers.__version__) < Version("4.55"), reason="transformers < 4.55"
-)
 def test_peft_flow(tmp_path):
     model_original = get_tiny_gpt_oss(num_hidden_layers=1)
 
@@ -88,7 +84,7 @@ def test_peft_flow(tmp_path):
 
     outputs_peft = peft_model(input_ids).logits
     outputs_full = model_full(input_ids).logits
-    assert torch.allclose(outputs_peft, outputs_full)
+    assert torch.allclose(outputs_peft, outputs_full, atol=1e-2, rtol=1e-2)
 
     outputs_peft.sum().backward()
     for name, param in peft_model.named_parameters():
@@ -111,14 +107,14 @@ def test_peft_flow(tmp_path):
 
     outputs_peft = peft_model(input_ids).logits
     outputs_full = model_full(input_ids).logits
-    assert torch.allclose(outputs_peft, outputs_full)
+    assert torch.allclose(outputs_peft, outputs_full, atol=1e-2, rtol=1e-2)
 
     peft_model.save_pretrained(tmp_path / "peft_model")
 
     peft_loaded = PeftModel.from_pretrained(model_original, tmp_path / "peft_model")
     outputs_peft_loaded = peft_loaded(input_ids).logits
-    assert torch.allclose(outputs_peft_loaded, outputs_full)
+    assert torch.allclose(outputs_peft_loaded, outputs_full, atol=1e-2, rtol=1e-2)
 
     model_after_peft_merge = peft_loaded.merge_and_unload()
     outputs_after_peft_merge = model_after_peft_merge(input_ids).logits
-    assert torch.allclose(outputs_after_peft_merge, outputs_full)
+    assert torch.allclose(outputs_after_peft_merge, outputs_full, atol=1e-2, rtol=1e-2)

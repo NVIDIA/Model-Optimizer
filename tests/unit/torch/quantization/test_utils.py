@@ -20,6 +20,7 @@ from modelopt.torch.quantization.utils import (
     convert_quantization_axis_to_reduce_axis,
     reduce_block_amax,
 )
+from modelopt.torch.quantization.utils.activation_collector import LayerActivationCollector
 
 
 @pytest.mark.parametrize(
@@ -101,3 +102,214 @@ def test_convert_quantization_axis_to_reduce_axis(shape, quant_axis, expected_re
         assert reduced.shape == tuple(expected_shape), (
             f"Reduction result shape {reduced.shape} doesn't match expected {tuple(expected_shape)}"
         )
+
+
+def test_layer_activation_collector_support_api(monkeypatch):
+    class _SupportedModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = torch.nn.ModuleList([torch.nn.Identity()])
+
+    class _UnsupportedModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear = torch.nn.Linear(4, 4)
+
+    supported = _SupportedModel()
+    unsupported = _UnsupportedModel()
+
+    def _supports_layers(model):
+        return hasattr(model, "layers")
+
+    def _discover_layers(model):
+        return model.layers
+
+    monkeypatch.setattr(LayerActivationCollector, "_decoder_layer_support", [])
+    LayerActivationCollector.register_decoder_layer_support(_supports_layers, _discover_layers)
+
+    assert LayerActivationCollector.is_supported(supported)
+    assert LayerActivationCollector.get_decoder_layers(supported) is supported.layers
+    assert not LayerActivationCollector.is_supported(unsupported)
+    assert LayerActivationCollector.get_decoder_layers(unsupported) is None
+
+
+def test_layer_activation_collector_decoder_discoverer_resolution_order(monkeypatch):
+    class _Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = torch.nn.ModuleList([torch.nn.Identity()])
+
+    calls = {"first": 0, "second": 0}
+
+    def _supported(_model):
+        return True
+
+    def _first_discoverer(_model):
+        calls["first"] += 1
+
+    def _second_discoverer(model):
+        calls["second"] += 1
+        return model.layers
+
+    monkeypatch.setattr(
+        LayerActivationCollector,
+        "_decoder_layer_support",
+        [(_supported, _first_discoverer), (_supported, _second_discoverer)],
+    )
+
+    model = _Model()
+    resolved = LayerActivationCollector.get_decoder_layers(model)
+    assert resolved is model.layers
+    assert calls["first"] == 1
+    assert calls["second"] == 1
+
+
+def test_layer_activation_collector_decoder_discoverer_no_match(monkeypatch):
+    class _Model(torch.nn.Module):
+        pass
+
+    def _unsupported(_model):
+        return False
+
+    def _discoverer(_model):
+        return torch.nn.ModuleList([torch.nn.Identity()])
+
+    monkeypatch.setattr(
+        LayerActivationCollector, "_decoder_layer_support", [(_unsupported, _discoverer)]
+    )
+
+    model = _Model()
+    assert LayerActivationCollector.get_decoder_layers(model) is None
+    assert not LayerActivationCollector.is_supported(model)
+
+
+def test_layer_activation_collector_decoder_discoverer_dedup(monkeypatch):
+    class _Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = torch.nn.ModuleList([torch.nn.Identity()])
+
+    def _supported(model):
+        return hasattr(model, "layers")
+
+    def _discoverer(model):
+        return model.layers
+
+    monkeypatch.setattr(LayerActivationCollector, "_decoder_layer_support", [])
+    LayerActivationCollector.register_decoder_layer_support(_supported, _discoverer)
+    LayerActivationCollector.register_decoder_layer_support(_supported, _discoverer)
+
+    assert len(LayerActivationCollector._decoder_layer_support) == 1
+
+
+def test_layer_activation_collector_skip_forward_captures_correct_inputs(monkeypatch):
+    """The skip/run/capture strategy produces the same inputs as a plain forward."""
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self, scale: float):
+            super().__init__()
+            self.scale = scale
+
+        def forward(self, hidden_states):
+            return hidden_states * self.scale
+
+    class _ToyDecoder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = torch.nn.ModuleList([_ToyLayer(2.0), _ToyLayer(0.5), _ToyLayer(3.0)])
+
+        def forward(self, hidden_states):
+            for layer in self.layers:
+                hidden_states = layer(hidden_states)
+            return hidden_states
+
+    monkeypatch.setattr(
+        LayerActivationCollector,
+        "_decoder_layer_support",
+        [(lambda m: hasattr(m, "layers"), lambda m: m.layers)],
+    )
+
+    model = _ToyDecoder()
+    batches = [torch.tensor([[1.0, 2.0]]), torch.tensor([[3.0, 4.0]])]
+
+    def _forward_loop(m):
+        for b in batches:
+            m(b)
+
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers()
+    try:
+        inp0 = collector.get_input_activations(model.layers[0], _forward_loop)
+        inp1 = collector.get_input_activations(model.layers[1], _forward_loop)
+        inp2 = collector.get_input_activations(model.layers[2], _forward_loop)
+    finally:
+        collector._unpatch_all_layers()
+
+    expected_0 = batches
+    expected_1 = [model.layers[0](b) for b in batches]
+    expected_2 = [model.layers[1](b) for b in expected_1]
+
+    for (args, _kw), exp in zip(inp0, expected_0):
+        assert torch.allclose(args[0], exp)
+    for (args, _kw), exp in zip(inp1, expected_1):
+        assert torch.allclose(args[0], exp)
+    for (args, _kw), exp in zip(inp2, expected_2):
+        assert torch.allclose(args[0], exp)
+
+
+def test_layer_activation_collector_run_uses_cached_inputs_not_parent(monkeypatch):
+    """Verify that the 'run' layer uses cached inputs, not garbage from skip layers."""
+
+    call_log = []
+
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self, name, bias):
+            super().__init__()
+            self.layer_name = name
+            self.bias = bias
+
+        def forward(self, hidden_states):
+            call_log.append(self.layer_name)
+            return hidden_states + self.bias
+
+    class _ToyDecoder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = torch.nn.ModuleList(
+                [_ToyLayer("L0", 1.0), _ToyLayer("L1", 2.0), _ToyLayer("L2", 3.0)]
+            )
+
+        def forward(self, hidden_states):
+            for layer in self.layers:
+                hidden_states = layer(hidden_states)
+            return hidden_states
+
+    monkeypatch.setattr(
+        LayerActivationCollector,
+        "_decoder_layer_support",
+        [(lambda m: hasattr(m, "layers"), lambda m: m.layers)],
+    )
+
+    model = _ToyDecoder()
+    batches = [torch.tensor([[10.0]])]
+
+    def _forward_loop(m):
+        for b in batches:
+            m(b)
+
+    collector = LayerActivationCollector(model)
+    collector._patch_all_layers()
+    try:
+        collector.get_input_activations(model.layers[0], _forward_loop)
+        call_log.clear()
+        collector.get_input_activations(model.layers[1], _forward_loop)
+        call_log_for_layer1 = list(call_log)
+        call_log.clear()
+        inp2 = collector.get_input_activations(model.layers[2], _forward_loop)
+    finally:
+        collector._unpatch_all_layers()
+
+    assert "L0" in call_log_for_layer1
+    assert "L1" not in call_log_for_layer1
+
+    assert torch.allclose(inp2[0][0][0], torch.tensor([[10.0 + 1.0 + 2.0]]))

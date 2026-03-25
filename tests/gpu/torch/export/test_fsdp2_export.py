@@ -18,6 +18,7 @@ from functools import partial
 import pytest
 import torch
 from _test_utils.torch.export.utils import SmallQKVModel, ToyModel
+from _test_utils.torch.misc import minimum_sm
 from torch.distributed._composable.fsdp import fully_shard
 
 import modelopt.torch.quantization as mtq
@@ -205,6 +206,7 @@ def _export_quantized_weight_test(rank, size, quant_config, bias):
         _compare_parameters_and_buffers(model, non_fsdp_model)
 
 
+@minimum_sm(90)
 def test_fsdp2_weight_compress_context_for_export(dist_workers):
     dist_workers.run(_compress_weight_test)
 
@@ -225,6 +227,7 @@ def test_fsdp2_weight_update_context_for_export(dist_workers):
         # mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG, #TODO: Fix unit test for this case
         mtq.W4A8_MXFP4_FP8_CFG,
         mtq.NVFP4_MLP_ONLY_CFG,
+        mtq.NVFP4_OMLP_ONLY_CFG,
     ],
 )
 @pytest.mark.parametrize("bias", [True, False])
@@ -244,6 +247,7 @@ def test_fsdp2_weight_update_context_for_fuse_layers(dist_workers, quant_config,
         # mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG, #TODO: Fix unit test for this case
         mtq.W4A8_MXFP4_FP8_CFG,
         mtq.NVFP4_MLP_ONLY_CFG,
+        mtq.NVFP4_OMLP_ONLY_CFG,
     ],
 )
 @pytest.mark.parametrize("bias", [True, False])

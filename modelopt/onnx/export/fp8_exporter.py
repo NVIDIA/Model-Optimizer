@@ -22,6 +22,8 @@ import onnx_graphsurgeon as gs
 import torch
 from onnx_graphsurgeon.ir.tensor import LazyValues
 
+from modelopt.onnx.logging_config import logger
+
 from .base_exporter import ONNXQuantExporter
 
 
@@ -45,13 +47,13 @@ class FP8QuantExporter(ONNXQuantExporter):
         Even though modelopt supports FP8 onnx export, the weights are represented in fp32 + QDQ.
         The storage is therefore very bad. In this function,
         Q nodes will get removed from the weights and have only DQ nodes with those converted FP8
-        weights in the output model.
+        weights in the output model. TRT custom ops are converted to native ONNX DequantizeLinear.
 
         Parameters:
-            onnx_model: ONNX model with FP32/FP16 weights and QDQ nodes.
+            onnx_model: ONNX model with FP32/FP16 weights and TRT_FP8 QDQ nodes.
 
         Returns:
-            ONNX model with FP8 weights and only DQ nodes for weights (QDQ preserved for activations).
+            ONNX model with FP8 weights and native ONNX DQ nodes for weights (QDQ preserved for activations).
         """
         start_time = time.time()
         print("Replacing all (fp32 weights + fp8 QDQ) with (fp8 weights + DQ)...")
@@ -62,7 +64,7 @@ class FP8QuantExporter(ONNXQuantExporter):
 
         for node in graph.nodes:
             if node.op == "TRT_FP8QuantizeLinear":
-                # Should not remove input QDQ
+                # Should not remove input QDQ (only process weight quantization)
                 if not isinstance(node.inputs[0], gs.Constant):
                     continue
 
@@ -88,7 +90,7 @@ class FP8QuantExporter(ONNXQuantExporter):
                 onnx_weights_fp8 = gs.Constant(quantizer_name + "/fp8_weights", values)
 
                 node.outputs.clear()
-                # DQ Op is separated out
+                # Convert TRT DQ to native ONNX DequantizeLinear with FP8 weights
                 dq_op.inputs[0] = onnx_weights_fp8
                 dq_op.op = "DequantizeLinear"
                 dq_op.outputs[0].dtype = dq_op.inputs[1].dtype
@@ -101,5 +103,46 @@ class FP8QuantExporter(ONNXQuantExporter):
 
     @staticmethod
     def post_process(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
-        """Post-processes the ONNX model for FP8 quantization."""
-        return onnx_model
+        """Post-processes the ONNX model for FP8 quantization.
+
+        Converts TRT_FP8 QDQ ops to native ONNX QuantizeLinear/DequantizeLinear:
+        - TRT_FP8QuantizeLinear -> QuantizeLinear with FP8E4M3FN zero_point and saturate=1
+        - TRT_FP8DequantizeLinear -> DequantizeLinear
+
+        Args:
+            onnx_model: The ONNX model containing TRT_FP8 quantization nodes.
+
+        Returns:
+            The post-processed ONNX model with native ONNX quantization ops.
+        """
+        logger.info("Post-processing FP8 quantized model")
+        graph = gs.import_onnx(onnx_model)
+
+        # Convert TRT_FP8QuantizeLinear to native QuantizeLinear
+        for node in graph.nodes:
+            if node.op == "TRT_FP8QuantizeLinear":
+                node.op = "QuantizeLinear"
+                # Add FP8 zero_point if not present
+                if len(node.inputs) == 2:
+                    # Create FP8 zero point constant
+                    zp_tensor = onnx.TensorProto()
+                    zp_tensor.data_type = onnx.TensorProto.FLOAT8E4M3FN
+                    zp_tensor.dims.extend([1])  # 1-element tensor
+                    zp_tensor.raw_data = b"\x00"  # Zero in FP8
+                    zp_values = LazyValues(zp_tensor)
+                    zero_point = gs.Constant(node.name + "_zero_point", zp_values)
+                    node.inputs.append(zero_point)
+                # Add saturate attribute for FP8
+                node.attrs["saturate"] = 1
+                logger.debug(f"Converted {node.name} from TRT_FP8QuantizeLinear to QuantizeLinear")
+
+        # Convert TRT_FP8DequantizeLinear to native DequantizeLinear
+        for node in graph.nodes:
+            if node.op == "TRT_FP8DequantizeLinear":
+                node.op = "DequantizeLinear"
+                logger.debug(
+                    f"Converted {node.name} from TRT_FP8DequantizeLinear to DequantizeLinear"
+                )
+
+        graph.cleanup().toposort()
+        return gs.export_onnx(graph)
