@@ -124,10 +124,12 @@ def _test_mcore_gpt_pruning(
     uneven_pp,
     position_embedding_type,
     skip_sorting,
-    ckpt_path,
+    ckpt_dir,
     rank,
     size,
 ):
+    set_seed(SEED)
+
     channel_divisor = 4
 
     hidden_size = channel_divisor * 4
@@ -170,6 +172,7 @@ def _test_mcore_gpt_pruning(
             transformer_impl="transformer_engine",
             num_layers_in_first_pipeline_stage=num_layers_in_first_pipeline_stage,
             num_layers_in_last_pipeline_stage=num_layers_in_last_pipeline_stage,
+            use_cpu_initialization=True,  # Ensure deterministic weight init across CUDA versions
         ).cuda()
         return model
 
@@ -198,11 +201,11 @@ def _test_mcore_gpt_pruning(
     constraints = {"export_config": export_config}
 
     config = {
-        "checkpoint": ckpt_path,
+        "checkpoint": ckpt_dir,
         "skip_sorting": skip_sorting,
     }
     if skip_sorting:
-        assert ckpt_path is None
+        assert ckpt_dir is None
     else:
         config["forward_loop"] = forward_loop
     model, pruning_scores = prune_minitron(model, constraints, config, channel_divisor)
@@ -238,11 +241,11 @@ def _test_mcore_gpt_pruning(
     output = run_mcore_inference(model, prompt_tokens, pruned_hidden_size)
 
     # Assert re-pruning from checkpoint works without running the forward loop again
-    if ckpt_path:
+    if ckpt_dir:
         model_rerun = _get_model(initialize_megatron=False)
         model_rerun.load_state_dict(sd)
         model_rerun, pruning_scores = prune_minitron(
-            model_rerun, constraints, {"checkpoint": ckpt_path}, channel_divisor
+            model_rerun, constraints, {"checkpoint": ckpt_dir}, channel_divisor
         )
 
         output_rerun = run_mcore_inference(model_rerun, prompt_tokens, pruned_hidden_size)
@@ -307,7 +310,7 @@ def test_mcore_gpt_pruning(
             uneven_pp,
             position_embedding_type,
             skip_sorting,
-            tmp_path / "minitron_scores.pth" if test_ckpt else None,
+            tmp_path / "minitron_scores" if test_ckpt else None,
         ),
     )
 
@@ -394,7 +397,7 @@ def test_mcore_gpt_moe_parameter_sorting(dist_workers):
     dist_workers.run(_test_mcore_gpt_moe_parameter_sorting)
 
 
-def _test_mcore_gpt_pruning_moe(ckpt_path, rank, size):
+def _test_mcore_gpt_pruning_moe(ckpt_dir, rank, size):
     channel_divisor = 4
 
     num_layers = size
@@ -446,7 +449,7 @@ def _test_mcore_gpt_pruning_moe(ckpt_path, rank, size):
     prune_minitron(
         model,
         constraints,
-        {"checkpoint": ckpt_path, "forward_loop": forward_loop},
+        {"checkpoint": ckpt_dir, "forward_loop": forward_loop},
         channel_divisor,
     )
 
@@ -483,14 +486,14 @@ def _test_mcore_gpt_pruning_moe(ckpt_path, rank, size):
     # Assert re-pruning from checkpoint works without running the forward loop again
     model_rerun = _get_model(initialize_megatron=False)
     model_rerun.load_state_dict(sd)
-    prune_minitron(model_rerun, constraints, {"checkpoint": ckpt_path}, channel_divisor)
+    prune_minitron(model_rerun, constraints, {"checkpoint": ckpt_dir}, channel_divisor)
 
     output_rerun = run_mcore_inference(model_rerun, prompt_tokens, pruned_hidden_size)
     assert torch.allclose(output, output_rerun, atol=1e-5)
 
 
 def test_mcore_gpt_pruning_moe(dist_workers, tmp_path):
-    dist_workers.run(partial(_test_mcore_gpt_pruning_moe, tmp_path / "minitron_scores.pth"))
+    dist_workers.run(partial(_test_mcore_gpt_pruning_moe, tmp_path / "minitron_scores"))
 
 
 def test_generate_search_space_combos():

@@ -9,14 +9,14 @@ This directory contains examples of using Model Optimizer with [NeMo Megatron-Br
 | Pre-Requisites | Development environment setup | \[[Link](#pre-requisites)\] |
 | Pruning | Examples of pruning a model using Minitron algorithm | \[[Link](#pruning)\] |
 | Distillation | Examples of distillation a pruned or quantized model | \[[Link](#distillation)\] |
-| Quantization | Examples of quantizing a model | \[[Link](#quantization)\] |
+| Post-Training Quantization | Examples of quantizing a model | \[[Link](#post-training-quantization)\] |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] |
 
 </div>
 
 ## Pre-Requisites
 
-Running these examples requires many additional dependencies to be installed (e.g., Megatron-Bridge, Megatron-core, etc.), hence we strongly recommend directly using the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.02.01`) which has all the dependencies installed.
+Running these examples requires many additional dependencies to be installed (e.g., Megatron-Bridge, Megatron-core, etc.), hence we strongly recommend directly using the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.02`) which has all the dependencies installed.
 
 To get the ModelOpt examples scripts, mount your Model-Optimizer repo to the container as follows:
 
@@ -26,7 +26,7 @@ if [ ! -d "${MODELOPT_DIR}" ]; then
   git clone https://github.com/NVIDIA/Model-Optimizer.git ${MODELOPT_DIR}
 fi
 
-export DOCKER_IMAGE=nvcr.io/nvidia/nemo:26.02.01
+export DOCKER_IMAGE=nvcr.io/nvidia/nemo:26.02
 docker run \
   --gpus all \
   --shm-size=16GB \
@@ -90,7 +90,7 @@ torchrun --nproc_per_node 1 prune_minitron.py --help
 
 This section shows how to distill a student model from a teacher model in the Megatron-Bridge framework.
 
-This can be used stand-alone or after pruning (see [Pruning](#pruning)) / quantization (see [Quantization](#quantization)) to recover accuracy of the model by distilling from the original model (teacher).
+This can be used stand-alone or after [Pruning](#pruning) / [Post-Training Quantization](#post-training-quantization) to recover accuracy of the model by distilling from the original model (teacher).
 
 The [distill.py](distill.py) script loads student and teacher models from HuggingFace checkpoints and saves the distilled model to `<output_dir>/checkpoints` in Megatron distributed checkpoint format.
 
@@ -207,9 +207,9 @@ uv run python /opt/Megatron-Bridge/examples/conversion/convert_checkpoints.py ex
 
 For more details, you can refer to the checkpoint conversion scripts in the [Megatron-Bridge README](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/conversion).
 
-## Quantization
+## Post-Training Quantization
 
-TODO
+Checkout Quantization scripts for LLMs and VLMs in the Megatron-Bridge repository [here](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/quantization).
 
 ## Resources
 

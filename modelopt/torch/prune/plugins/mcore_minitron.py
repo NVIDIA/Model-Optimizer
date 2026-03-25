@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Module implementing top-level ``mcore_minitron`` pruning handler for NVIDIA Megatron-Core / NeMo models.
+"""Module implementing top-level ``mcore_minitron`` pruning handler for NVIDIA Megatron-Core models.
 
 Minitron pruning algorithm uses activation magnitudes to estimate importance of neurons / attention heads / mamba heads
 in the model.
