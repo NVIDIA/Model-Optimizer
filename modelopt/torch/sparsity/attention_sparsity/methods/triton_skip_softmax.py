@@ -17,8 +17,6 @@
 
 from contextlib import contextmanager
 
-import torch
-
 from .registry import SparseAttentionMethod, register_sparse_method
 
 
@@ -46,18 +44,6 @@ class TritonSkipSoftmaxMethod(SparseAttentionMethod):
     def name(self) -> str:
         """Method name identifier."""
         return "triton_skip_softmax"
-
-    def calculate_sparsity(self, attention_scores):
-        """Return a no-op mask (skip decision is made inside the Triton kernel)."""
-        mask = torch.ones_like(attention_scores, dtype=torch.bool)
-        return mask, {}
-
-    def apply_sparsity(self, attention_scores, sparse_mask=None):
-        """Not supported — tile skipping is fused into the Triton kernel."""
-        raise NotImplementedError(
-            "triton_skip_softmax applies tile skipping inside the Triton kernel. "
-            "Use backend='triton', not backend='pytorch'."
-        )
 
     def get_sparse_context(self, module):
         """Return context manager that activates skip-softmax during forward."""
