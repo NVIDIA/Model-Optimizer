@@ -17,10 +17,8 @@
 
 import torch
 import torch.nn as nn
-from megatron.core.dist_checkpointing import ShardedTensor
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 from megatron.core.transformer.module import MegatronModule
-from megatron.core.transformer.moe.experts import SequentialMLP
 
 from modelopt.torch.quantization.nn import QuantModuleRegistry
 from modelopt.torch.quantization.plugins.megatron import (
@@ -33,6 +31,7 @@ from modelopt.torch.quantization.plugins.megatron import (
 try:
     from megatron.core.extensions.transformer_engine import (
         TEColumnParallelLinear,
+        TELayerNormColumnParallelLinear,
         TERowParallelLinear,
     )
 
@@ -172,6 +171,8 @@ class _LoRAMegatronColumnParallelLinear(_MegatronParallelLoRABase):
             bias=False,
             gather_output=False,
             init_method=attr_config.lora_b_init,
+            is_expert=getattr(self, "is_expert", False),
+            tp_group=getattr(self, "tp_group", None),
         )
 
         self._register_adapter_with_device(
@@ -230,6 +231,8 @@ class _LoRAMegatronRowParallelLinear(_MegatronParallelLoRABase):
             skip_bias_add=True,
             bias=False,
             init_method=attr_config.lora_a_init,
+            is_expert=getattr(self, "is_expert", False),
+            tp_group=getattr(self, "tp_group", None),
         )
 
         lora_b = nn.Linear(
@@ -268,45 +271,6 @@ class _LoRAMegatronRowParallelLinear(_MegatronParallelLoRABase):
 
         return sharded_state_dict
 
-# Register quantized versions if available
-LoRAModuleRegistry.register({QuantColumnParallelLinear: "quant_megatron_ColumnParallelLinear"})(
-    _LoRAMegatronColumnParallelLinear
-)
-LoRAModuleRegistry.register({QuantRowParallelLinear: "quant_megatron_RowParallelLinear"})(
-    _LoRAMegatronRowParallelLinear
-)
-
-
-class _QuantLoRAMegatronColumnParallelLinear(
-    _LoRAMegatronColumnParallelLinear, QuantColumnParallelLinear
-):
-    """Quantized LoRA ColumnParallelLinear that combines LoRA and quantization.
-
-    This class ensures that the base layer functionality is quantized while
-    preserving LoRA adapter functionality.
-    """
-
-    def _setup(self):
-        QuantColumnParallelLinear._setup(self)
-
-
-class _QuantLoRAMegatronRowParallelLinear(_LoRAMegatronRowParallelLinear, QuantRowParallelLinear):
-    """Quantized LoRA RowParallelLinear that combines LoRA and quantization.
-
-    This class ensures that the base layer functionality is quantized while
-    preserving LoRA adapter functionality.
-    """
-
-    def _setup(self):
-        QuantRowParallelLinear._setup(self)
-
-
-QuantModuleRegistry.register(
-    {_LoRAMegatronColumnParallelLinear: "lora_megatron_ColumnParallelLinear"}
-)(_QuantLoRAMegatronColumnParallelLinear)
-QuantModuleRegistry.register({_LoRAMegatronRowParallelLinear: "lora_megatron_RowParallelLinear"})(
-    _QuantLoRAMegatronRowParallelLinear
-)
 
 if HAS_TE:
 
@@ -379,6 +343,12 @@ if HAS_TE:
                     sharded_state_dict.update(lora_b_sharded)
 
             return sharded_state_dict
+
+    # TELayerNormColumnParallelLinear has the same in_features/out_features semantics
+    # as TEColumnParallelLinear, so we reuse the same LoRA mixin.
+    LoRAModuleRegistry.register(
+        {TELayerNormColumnParallelLinear: "te_megatron_LayerNormColumnParallelLinear"}
+    )(_LoRATEColumnParallelLinear)
 
     @LoRAModuleRegistry.register({TERowParallelLinear: "te_megatron_RowParallelLinear"})
     class _LoRATERowParallelLinear(_MegatronParallelLoRABase):
@@ -478,3 +448,43 @@ if HAS_TE:
     QuantModuleRegistry.register({_LoRATERowParallelLinear: "lora_te_megatron_RowParallelLinear"})(
         _QuantLoRATERowParallelLinear
     )
+
+# Register quantized versions if available (after TE so TE-specific entries take priority)
+LoRAModuleRegistry.register({QuantColumnParallelLinear: "quant_megatron_ColumnParallelLinear"})(
+    _LoRAMegatronColumnParallelLinear
+)
+LoRAModuleRegistry.register({QuantRowParallelLinear: "quant_megatron_RowParallelLinear"})(
+    _LoRAMegatronRowParallelLinear
+)
+
+
+class _QuantLoRAMegatronColumnParallelLinear(
+    _LoRAMegatronColumnParallelLinear, QuantColumnParallelLinear
+):
+    """Quantized LoRA ColumnParallelLinear that combines LoRA and quantization.
+
+    This class ensures that the base layer functionality is quantized while
+    preserving LoRA adapter functionality.
+    """
+
+    def _setup(self):
+        QuantColumnParallelLinear._setup(self)
+
+
+class _QuantLoRAMegatronRowParallelLinear(_LoRAMegatronRowParallelLinear, QuantRowParallelLinear):
+    """Quantized LoRA RowParallelLinear that combines LoRA and quantization.
+
+    This class ensures that the base layer functionality is quantized while
+    preserving LoRA adapter functionality.
+    """
+
+    def _setup(self):
+        QuantRowParallelLinear._setup(self)
+
+
+QuantModuleRegistry.register(
+    {_LoRAMegatronColumnParallelLinear: "lora_megatron_ColumnParallelLinear"}
+)(_QuantLoRAMegatronColumnParallelLinear)
+QuantModuleRegistry.register({_LoRAMegatronRowParallelLinear: "lora_megatron_RowParallelLinear"})(
+    _QuantLoRAMegatronRowParallelLinear
+)

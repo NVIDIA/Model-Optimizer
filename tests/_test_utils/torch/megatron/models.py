@@ -140,7 +140,6 @@ def get_mcore_gpt_model(
     transformer_impl: str = "modelopt" if HAS_TE else "local",
     use_cpu_initialization: bool = False,
     bf16: bool = True,
-    use_te: bool = False,
     # MoE-specific parameters
     moe_grouped_gemm: bool = False,
     moe_ffn_hidden_size: int | None = None,
@@ -148,6 +147,11 @@ def get_mcore_gpt_model(
     num_moe_experts: int | None = None,
     **config_kwargs: dict,
 ) -> GPTModel:
+    """
+    Args:
+        transformer_impl: The implementation of the transformer layer.
+            Can be "local", "transformer_engine", or "modelopt".
+    """
     assert activation_func in ["swiglu", "squared_relu"]
     assert normalization in ["LayerNorm", "RMSNorm"]
     assert transformer_impl in ["local", "transformer_engine", "modelopt"]
@@ -213,7 +217,6 @@ def get_mcore_gpt_model(
             num_experts=num_moe_experts,
             normalization=normalization,
             moe_grouped_gemm=moe_grouped_gemm,
-            use_te=use_te,
         )
     else:
         assert HAS_TE, "Transformer Engine not installed"

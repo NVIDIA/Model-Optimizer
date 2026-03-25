@@ -19,12 +19,7 @@ from functools import partial
 import pytest
 import torch
 import torch.nn.init as init
-from _test_utils.torch.megatron.models import (
-    HAS_MAMBA,
-    HAS_TE,
-    get_mcore_gpt_model,
-    get_mcore_mamba_hybrid_model,
-)
+from _test_utils.torch.megatron.models import HAS_TE, get_mcore_gpt_model
 from _test_utils.torch.megatron.utils import initialize_for_megatron
 from megatron.core import dist_checkpointing
 
@@ -34,12 +29,14 @@ from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
     restore_sharded_modelopt_state,
     save_sharded_modelopt_state,
 )
+from modelopt.torch.peft.lora.config import MOE_LORA_CFG, MOE_LORA_RANDOM_INIT_CFG
 from modelopt.torch.peft.lora.layer import LoRAModule
 from modelopt.torch.utils.plugins import megatron_prefill
 
 if HAS_TE:
     from megatron.core.extensions.transformer_engine import (
         TEColumnParallelLinear,
+        TELayerNormColumnParallelLinear,
         TERowParallelLinear,
     )
 
@@ -135,23 +132,6 @@ DEFAULT_LORA_CFG_RANDOM_INIT_SMALL_RANK_TEST = {
     },
 }
 
-MOE_SEQUENTIAL_MLP_LORA_CFG = {
-    "adapter_type": "lora",
-    "adapter_name": "moe_default",
-    "adapter_cfg": {
-        # Disable for all layers by default; only enable on SequentialMLP modules
-        # whose full module name ends with "experts" (not its inner linear layers).
-        "*": {"enable": False},
-        "*experts": {
-            "rank": 8,
-            "scale": 1.0,
-            "lora_a_init": init.kaiming_uniform_,
-            "lora_b_init": init.kaiming_uniform_,
-            "enable": True,
-        },
-    },
-}
-
 SELECTIVE_LAYER_LORA_CFG = {
     "adapter_type": "lora",
     "adapter_name": "selective",
@@ -192,6 +172,8 @@ def _gpt_model_provider(
 ):
     """Build the model."""
 
+    transformer_impl = "transformer_engine" if use_te else "modelopt"
+
     if meta_device:
         with torch.device("meta"):
             gpt_model = get_mcore_gpt_model(
@@ -200,8 +182,7 @@ def _gpt_model_provider(
                 ffn_hidden_size=None,
                 num_attention_heads=4,
                 activation_func="squared_relu",
-                transformer_impl="local",
-                use_te=use_te,
+                transformer_impl=transformer_impl,
                 hidden_size=hidden_size,
                 vocab_size=vocab_size,
                 use_cpu_initialization=meta_device,
@@ -214,8 +195,7 @@ def _gpt_model_provider(
             ffn_hidden_size=None,
             num_attention_heads=4,
             activation_func="squared_relu",
-            transformer_impl="local",
-            use_te=use_te,
+            transformer_impl=transformer_impl,
             moe_grouped_gemm=moe_grouped_gemm,
             hidden_size=hidden_size,
             vocab_size=vocab_size,
@@ -475,47 +455,25 @@ def test_adapter_gradient_flow_freeze_base_model(dist_workers, lora_config, tmp_
     )
 
 
-MOE_LORA_CFG_TEST = {
-    "adapter_type": "lora",
-    "adapter_name": "moe_lora",
-    "freeze_base_layers": True,
-    "adapter_cfg": {
-        "*": {"enable": False},
-        "*local_experts*linear_fc1*": {
-            "rank": 64,
-            "enable": True,
-            "lora_a_init": init.kaiming_uniform_,
-            "lora_b_init": init.kaiming_uniform_,
-        },
-        "*local_experts*linear_fc2*": {
-            "rank": 64,
-            "enable": True,
-            "lora_a_init": init.kaiming_uniform_,
-            "lora_b_init": init.kaiming_uniform_,
-        },
-    },
-}
-
-
-def _test_mamba_moe_freeze_base_layers_only_lora_layers(lora_config, rank, size):
+def _test_moe_freeze_base_layers_only_lora_layers(lora_config, base_layer_frozen, rank, size):
     """Test that freeze_base_layers only freezes base weights of layers with LoRA adapters.
 
     With the MOE LoRA config, only local_experts linear_fc1/fc2 get LoRA adapters.
-    All other layers (Mamba, attention, shared experts, embeddings, output_layer) should
+    All other layers (attention, embeddings, output_layer, router weights) should
     remain trainable.
     """
+    import torch._dynamo
+
+    torch._dynamo.reset()
+    torch._dynamo.config.disable = True
+
     hidden_size = 64
     initialize_for_megatron(tensor_model_parallel_size=size, pipeline_model_parallel_size=1)
-    # Pattern "MEM" = Mamba, MoE, Mamba — 3 layers with MoE in the middle
-    model = get_mcore_mamba_hybrid_model(
-        tensor_model_parallel_size=size,
+    model = _gpt_model_provider(
+        tp_size=size,
         hidden_size=hidden_size,
-        num_layers=3,
-        hybrid_override_pattern="MEM",
         num_moe_experts=8,
-        moe_ffn_hidden_size=64,
-        moe_shared_expert_intermediate_size=32,
-    ).cuda()
+    )
     prompt_tokens = torch.randint(0, model.vocab_size, (2, model.max_sequence_length)).cuda()
 
     mtpeft.update_model(model, lora_config)
@@ -532,12 +490,23 @@ def _test_mamba_moe_freeze_base_layers_only_lora_layers(lora_config, rank, size)
         .view(batch_size, 1, seq_len, seq_len)
     )
 
+    # With standard LoRA init (lora_b=0), lora_a gets zero gradients on the first pass.
+    # An optimizer step makes lora_b non-zero, so the second pass gives non-zero gradients
+    # for both lora_a and lora_b. Running two steps is harmless for random init configs.
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    optimizer.zero_grad()
     output = model(prompt_tokens, position_ids=None, attention_mask=attention_mask)
+    loss = output.sum()
+    loss.backward()
+    optimizer.step()
 
+    optimizer.zero_grad()
+    output = model(prompt_tokens, position_ids=None, attention_mask=attention_mask)
     loss = output.sum()
     loss.backward()
 
     has_lora_params = False
+    lora_nonzero_grad_count = 0
     has_frozen_expert_base = False
     has_trainable_non_expert = False
 
@@ -546,15 +515,19 @@ def _test_mamba_moe_freeze_base_layers_only_lora_layers(lora_config, rank, size)
             # LoRA adapter weights should be trainable
             has_lora_params = True
             assert param.grad is not None, f"LoRA param {name} should have grad"
-            assert torch.any(param.grad != 0), f"LoRA param {name} grad is all zeros"
+            # MoE routing may send zero tokens to some experts, so individual
+            # expert LoRA params can legitimately have zero gradients.
+            if torch.any(param.grad != 0):
+                lora_nonzero_grad_count += 1
         elif "local_experts" in name and ("linear_fc1" in name or "linear_fc2" in name):
             # Base weights of local_experts linear layers (which have LoRA) should be frozen
-            has_frozen_expert_base = True
-            assert param.grad is None, (
-                f"Base param {name} in LoRA-adapted layer should be frozen (grad=None)"
-            )
+            if base_layer_frozen:
+                has_frozen_expert_base = True
+                assert param.grad is None, (
+                    f"Base param {name} in LoRA-adapted layer should be frozen (grad=None)"
+                )
         else:
-            # All other params (mamba, attention, shared experts, embeddings, output_layer,
+            # All other params (attention, embeddings, output_layer,
             # router weights, etc.) should NOT be frozen
             has_trainable_non_expert = True
             assert param.grad is not None, (
@@ -563,14 +536,34 @@ def _test_mamba_moe_freeze_base_layers_only_lora_layers(lora_config, rank, size)
 
     # Sanity checks: ensure we actually tested all three categories
     assert has_lora_params, "No LoRA params found — test config may be wrong"
-    assert has_frozen_expert_base, "No frozen expert base params found — test config may be wrong"
+    assert lora_nonzero_grad_count > 0, (
+        "All LoRA params have zero grad — no experts received tokens"
+    )
+    assert has_frozen_expert_base == base_layer_frozen, (
+        "No frozen expert base params found — test config may be wrong"
+    )
     assert has_trainable_non_expert, "No trainable non-expert params found — model may be wrong"
 
 
-@pytest.mark.skipif(not HAS_MAMBA, reason="Mamba not installed")
-def test_mamba_moe_freeze_base_layers_only_lora_layers(dist_workers):
+MOE_LORA_CFG_UNFROZEN = copy.deepcopy(MOE_LORA_CFG)
+MOE_LORA_CFG_UNFROZEN["freeze_base_layers"] = False
+
+MOE_LORA_RANDOM_INIT_CFG_UNFROZEN = copy.deepcopy(MOE_LORA_RANDOM_INIT_CFG)
+MOE_LORA_RANDOM_INIT_CFG_UNFROZEN["freeze_base_layers"] = False
+
+
+@pytest.mark.parametrize(
+    ("lora_config", "base_layer_frozen"),
+    [
+        (MOE_LORA_CFG, True),  # Frozen base layers, standard init
+        (MOE_LORA_CFG_UNFROZEN, False),  # Unfrozen base layers, standard init
+        (MOE_LORA_RANDOM_INIT_CFG, True),  # Frozen base layers, random init
+        (MOE_LORA_RANDOM_INIT_CFG_UNFROZEN, False),  # Unfrozen base layers, random init
+    ],
+)
+def test_moe_freeze_base_layers_only_lora_layers(dist_workers, lora_config, base_layer_frozen):
     dist_workers.run(
-        partial(_test_mamba_moe_freeze_base_layers_only_lora_layers, MOE_LORA_CFG_TEST)
+        partial(_test_moe_freeze_base_layers_only_lora_layers, lora_config, base_layer_frozen)
     )
 
 
@@ -998,7 +991,7 @@ def _test_te_lora_module_types(lora_config, rank, size):
 
         adapter = module._lora_adapters[adapter_name]
 
-        if isinstance(module, TEColumnParallelLinear):
+        if isinstance(module, (TEColumnParallelLinear, TELayerNormColumnParallelLinear)):
             col_lora_count += 1
             # lora_b must be a TEColumnParallelLinear (sharded along output dim)
             assert isinstance(adapter["lora_b"], TEColumnParallelLinear), (
