@@ -44,7 +44,9 @@ All format definitions: `modelopt/torch/quantization/config.py`.
 
 ## Step 4 — Run PTQ
 
-**Goal: checkpoint on disk** (`.safetensors` + `config.json`). Always smoke test first (`--calib_size 4`), then full calibration.
+**Goal: checkpoint on disk** (`.safetensors` + `config.json`).
+
+**IMPORTANT — sequential smoke test**: Run a smoke test first with `--calib_size 4` (or `CALIB_SIZE: "4"` in YAML). Wait for it to complete and verify it succeeded. Only then run the full calibration (`--calib_size 512`).
 
 **Which path?** Based on step 1:
 

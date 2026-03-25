@@ -1,113 +1,78 @@
 # Using the ModelOpt Launcher for PTQ
 
-The launcher (`tools/launcher/`) handles SLURM, Docker, and local execution. Read `tools/launcher/CLAUDE.md` for full documentation. This guide covers PTQ-specific usage.
+The launcher (`tools/launcher/`) handles SLURM and Docker execution. Read `tools/launcher/CLAUDE.md` for full docs.
 
 ## Quick Start
 
 ```bash
 cd tools/launcher
-uv run launch.py --yaml <config.yaml> --yes
+uv run launch.py --yaml <config.yaml> --yes          # SLURM (SLURM_HOST set)
+uv run launch.py --yaml <config.yaml> hf_local=<cache> --yes  # Local Docker
 ```
 
-## Writing a PTQ Config
+## HF Transformers PTQ Config
 
-### For supported models (typed task)
-
-Use the `MegatronLMQuantizeTask` for clean configs:
+The launcher provides `common/hf_ptq/hf_ptq.sh` which wraps `hf_ptq.py`. Configure via environment variables:
 
 ```yaml
 job_name: <Model>_<Format>
 pipeline:
   task_0:
-    _target_: common.megatron_lm.quantize.task.MegatronLMQuantizeTask
-    config:
-      model: <HuggingFace model ID>
-      quant_cfg: <QUANT_CFG name, e.g., NVFP4_DEFAULT_CFG>
-      tp: <tensor parallelism>
-      calib_dataset: abisee/cnn_dailymail
-      calib_size: 512
-      hf_local: /hf-local/
-    slurm_config:
-      _factory_: "slurm_factory"
-      nodes: 1
-      ntasks_per_node: <tp>
-      gpus_per_node: <tp>
-```
-
-Available `quant_cfg` values — check `modelopt/torch/quantization/config.py` for the full list.
-
-### For custom scripts (raw SandboxTask)
-
-When using a custom PTQ script (e.g., unsupported models):
-
-```yaml
-job_name: <Model>_custom_ptq
-pipeline:
-  task_0:
-    script: <path_to_your_script.sh>
-    args:
-      - --model <model_path>
-      - --output <output_path>
+    script: common/hf_ptq/hf_ptq.sh
     environment:
-      - HF_TOKEN: <token>
-      - CUDA_VISIBLE_DEVICES: "0"
+      - HF_MODEL: <HuggingFace model ID, e.g. Qwen/Qwen3-0.6B>
+      - QFORMAT: <format, e.g. nvfp4, fp8, int4_awq>
+      - CALIB_SIZE: "512"
+      - EXPORT_PATH: /scratchspace/exported_model
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 1
-      gpus_per_node: 1
+      gpus_per_node: <num_gpus>
 ```
 
-Place custom scripts in `tools/launcher/common/` so the packager includes them.
+Extra `hf_ptq.py` flags can be passed via `args`:
 
-## SLURM vs Local
+```yaml
+    args:
+      - --batch_size 2
+      - --trust_remote_code
+```
 
-The launcher auto-detects based on environment variables:
+## Output Location
 
-| Variable | Purpose | Example |
-|----------|---------|---------|
-| `SLURM_HOST` | Login node for SSH submission | `cluster-login.example.com` |
-| `SLURM_ACCOUNT` | SLURM account | `my_account` |
-| `SLURM_PARTITION` | SLURM partition | `batch` |
-| `HF_TOKEN` | HuggingFace token for gated models | `hf_abc...` |
+`EXPORT_PATH` controls the path inside the container (default: `/scratchspace/exported_model`). The launcher mounts `/scratchspace` to a host directory automatically — you cannot change the host path.
 
-If `SLURM_HOST` is set → SLURM execution. Otherwise → local Docker.
-
-For local Docker, pass `hf_local=` to specify the model cache:
+To find the checkpoint on the host after completion:
 
 ```bash
-uv run launch.py --yaml <config> hf_local=/mnt/hf-local --yes
+find tools/launcher/local_experiments -name "config.json" -path "*/exported_model/*" 2>/dev/null
 ```
 
-## GPU Sizing Guide
+## SLURM vs Local Docker
 
-| Model size | TP | GPUs | Nodes |
-|------------|-----|------|-------|
-| < 15B | 1 | 1 | 1 |
-| 15B-40B | 2-4 | 2-4 | 1 |
-| 40B-100B | 4-8 | 4-8 | 1 |
-| 100B+ | 8+ | 8+ | 2+ (use FSDP2 or multi-node) |
+| Condition | Mode | Invocation |
+| --- | --- | --- |
+| `SLURM_HOST` env var set | SLURM | `uv run launch.py --yaml <cfg> --yes` |
+| `hf_local=` passed | Local Docker | `uv run launch.py --yaml <cfg> hf_local=<cache> --yes` |
 
-## Dry Run and Debug
+For SLURM, also set `SLURM_ACCOUNT` and optionally `SLURM_HF_LOCAL`.
 
-Preview what the launcher will do without running:
+## Known Issues
+
+- **UID mapping in Docker**: May cause `getpwuid` failures. Add `USER=user` and `LOGNAME=user` to environment.
+- **Megatron-LM submodule**: Only needed for `MegatronLMQuantizeTask` (Megatron models). HF PTQ via `common/hf_ptq/hf_ptq.sh` does not require it.
+
+## Dry Run
 
 ```bash
 uv run launch.py --yaml <config> --dryrun --yes -v
 ```
 
-Export resolved config:
-
-```bash
-uv run launch.py --yaml <config> --to-yaml resolved.yaml
-```
-
-## Example Configs
-
-Check `tools/launcher/examples/` for working configs:
+## Examples
 
 ```bash
 ls tools/launcher/examples/
 ```
 
-Copy and modify the closest match for your model.
+Copy and modify the closest match.
