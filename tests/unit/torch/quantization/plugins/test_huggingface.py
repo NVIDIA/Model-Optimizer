@@ -194,7 +194,7 @@ def test_autoquantize_huggingface(model_provider, method):
     ],
 )
 def test_quantized_transformers_save_restore(tmp_path, model_cls, quant_config):
-    tiny_llama_dir = create_tiny_llama_dir(tmp_path)
+    tiny_llama_dir = create_tiny_llama_dir(tmp_path, dtype=torch.float32)
     # update config to fit test cases
     if quant_config == mtq.INT4_AWQ_CFG:
         quant_config["quant_cfg"]["*weight_quantizer"]["block_sizes"] = {-1: 16}
