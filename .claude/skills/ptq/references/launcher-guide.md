@@ -66,6 +66,7 @@ The launcher SSHes to `SLURM_HOST` via `nemo_run.SSHTunnel`. If `identity` is om
 | `login_node` | `SLURM_HOST` env var |
 | `user` | `user=` CLI arg |
 | `ssh_key` | `identity=` CLI arg |
+| `workspace` | `SLURM_JOB_DIR` env var (remote dir for job artifacts, default: `~/experiments`) |
 | `slurm.default_account` | `SLURM_ACCOUNT` env var |
 
 ## Known Issues
