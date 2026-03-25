@@ -38,6 +38,8 @@ accelerate launch --multi_gpu --num_processes <num_copies_of_your_model> \
 
 ### Quantized (simulated)
 
+The `pretrained` model must be the **original unquantized model**. The script will first apply simulated quantization using the specified `quant_cfg`, then run the evaluation benchmark on the resulting fake-quantized model.
+
 - For simulated quantization with any of the default quantization formats:
 
 Multi-GPU evaluation without data-parallelism:
@@ -119,6 +121,8 @@ python mmlu.py --model_name causal --model_path <HF model folder or model card>
 
 ### Quantized (simulated)
 
+The `model_path` must be the **original unquantized model**. The script will first apply simulated quantization using the specified `quant_cfg`, then run the evaluation benchmark on the resulting fake-quantized model.
+
 ```bash
 # MODELOPT_QUANT_CFG: Choose from [INT8_SMOOTHQUANT_CFG|FP8_DEFAULT_CFG|NVFP4_DEFAULT_CFG|INT4_AWQ_CFG|W4A8_AWQ_BETA_CFG|MXFP8_DEFAULT_CFG]
 python mmlu.py --model_name causal --model_path <HF model folder or model card> --quant_cfg MODELOPT_QUANT_CFG
@@ -154,6 +158,8 @@ bash run_fastchat.sh -h <HF model folder or model card>
 ```
 
 ### Quantized (simulated)
+
+The model path must be the **original unquantized model**. The script will first apply simulated quantization using the specified `quant_cfg`, then run the evaluation benchmark on the resulting fake-quantized model.
 
 ```bash
 # MODELOPT_QUANT_CFG: Choose from [INT8_SMOOTHQUANT_CFG|FP8_DEFAULT_CFG|INT4_AWQ_CFG|W4A8_AWQ_BETA_CFG]
