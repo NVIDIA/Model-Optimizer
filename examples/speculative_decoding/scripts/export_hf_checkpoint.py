@@ -29,7 +29,7 @@ def parse_args():
         description="Export a HF checkpoint (with ModelOpt state) for deployment."
     )
     parser.add_argument("--model_path", type=str, default="Path of the trained checkpoint.")
-    parser.add_argument("--trust_remote_code", type=bool, default=False, help="Trust remote code")
+    parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
     parser.add_argument(
         "--export_path", type=str, default="Destination directory for exported files."
     )

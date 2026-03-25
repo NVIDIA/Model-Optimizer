@@ -25,7 +25,7 @@ from transformers import modeling_utils as tf_modeling_utils
 
 from modelopt.torch.utils import report_memory
 
-from ..conversion import ModeloptStateManager
+from ..conversion import ModeloptStateManager, load_modelopt_state
 from .huggingface import (
     _get_modelopt_state_path,
     _new_save_pretrained,
@@ -78,9 +78,11 @@ def _restore_qtensor_wrappers(model, model_path):
     from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
     from modelopt.torch.quantization.qtensor import QTensorWrapper
 
-    state = torch.load(modelopt_state_path, map_location="cpu", weights_only=False)
-    for _mode_name, mode_config in state.get("modelopt_state_dict", []):
+    state = load_modelopt_state(modelopt_state_path)
+    for _, mode_config in state["modelopt_state_dict"]:
         q_tensor_state = mode_config.get("metadata", {}).get("q_tensor_state", {})
+        if not q_tensor_state:
+            continue
         for name, module in model.named_modules():
             if (
                 isinstance(module, RealQuantLinear)

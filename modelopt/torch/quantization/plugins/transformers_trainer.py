@@ -29,7 +29,7 @@ import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.distill.plugins.huggingface import KDTrainer
 from modelopt.torch.opt.plugins import ModelOptHFTrainer
-from modelopt.torch.utils import print_rank_0
+from modelopt.torch.utils import get_module_device, print_rank_0
 
 from ..config import QuantizeConfig
 from ..nn import TensorQuantizer
@@ -191,8 +191,16 @@ class QATTrainer(ModelOptHFTrainer):
         if getattr(self.args, "lora_config", None) is not None and not hasattr(
             self.model, "peft_config"
         ):
+            # NOTE: Adapter weights are created on CPU; move only the new parameters to the
+            # model's device.  A full self.model.to(device) is unsafe for FSDP-wrapped
+            # models because it would try to consolidate sharded parameters.
+            existing_params = {id(p) for p in self.model.parameters()}
             # TODO: use get_peft_model here instead of add_adapter
             self.model.add_adapter(self.args.lora_config)
+            device = get_module_device(self.model)
+            for p in self.model.parameters():
+                if id(p) not in existing_params and p.device != device:
+                    p.data = p.data.to(device)
             print_rank_0("Lora adapter added.")
 
         if hasattr(self.model, "peft_config") and self.quant_cfg is not None:

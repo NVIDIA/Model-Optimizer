@@ -86,7 +86,8 @@ class WrapperModelForCausalLM(torch.nn.Module):
 
         outputs = self.model(input_ids=input_ids, past_key_values=past_key_values, use_cache=True)
         hidden_states = outputs[0]
-        past_key_values = outputs.past_key_values.to_legacy_cache()
+        cache = outputs.past_key_values
+        past_key_values = tuple(zip(cache.key_cache, cache.value_cache))
         logits = self.lm_head(hidden_states)
         return logits, past_key_values
 

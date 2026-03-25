@@ -55,7 +55,7 @@ def validate_ar(model, tokenizer, ds, steps=3, osl=20, num_samples=80, device=No
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_path", type=str, required=True, help="Path to model directory")
-    parser.add_argument("--trust_remote_code", type=bool, default=False, help="Trust remote code")
+    parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
     parser.add_argument("--steps", type=int, default=3, help="Steps for AR validation")
     parser.add_argument(
         "--osl", type=int, default=32, help="Output sequence length for AR validation"
