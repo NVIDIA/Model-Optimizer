@@ -9,11 +9,12 @@ Produce a quantized checkpoint from a pretrained model. **Read `examples/llm_ptq
 
 ## Step 1 — Environment setup
 
-Read `skills/common/environment-setup.md`. After completing it you should know:
+Read `skills/common/environment-setup.md` and `skills/common/workspace-management.md`. After completing them you should know:
 
 - ModelOpt source is available
 - Execution context: SLURM / Docker / bare metal, local / remote
 - Whether the launcher is available
+- Which workspace to use (existing or new, named by model)
 
 ## Step 2 — Is the model supported?
 
@@ -115,6 +116,7 @@ Report the path and size to the user.
 | `references/remote-execution.md` | SSH remote execution without launcher |
 | `references/slurm-setup.md` | Manual SLURM job scripts without launcher |
 | `skills/common/environment-setup.md` | Source checkout + env detection (shared) |
+| `skills/common/workspace-management.md` | Organize work by model name |
 | `tools/launcher/CLAUDE.md` | Launcher architecture and full config docs |
 | `examples/llm_ptq/README.md` | Support matrix, CLI, accuracy |
 | `modelopt/torch/quantization/config.py` | Format definitions |
