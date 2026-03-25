@@ -103,79 +103,62 @@ def disable_compilation(model):
             model.language_model.model.do_not_compile = do_not_compile
 
 
-# vLLM Attention stores ``device`` / ``dtype`` as plain attributes; ``dtype`` may be a string
-# (e.g. ``"float16"``, ``"auto"``) rather than ``torch.dtype``. Before we wrap layers in
-# ``QuantModule``, we copy resolved ``(device, dtype)`` onto each Attention instance.
-#
-# We infer dtype from real tensors when possible: skip ``TensorQuantizer`` subtrees so
-# calibration buffers (amax, etc.) do not override weight dtype. We only look at each module
-# and its *immediate* children—vLLM often hangs weights on child modules, and a full
-# ``named_modules()`` recurse here would be redundant with the outer scan.
+# vLLM Attention stores ``device``/``dtype`` as plain attrs; ``dtype`` may be a string
+# (e.g. ``"float16"``, ``"auto"``). We resolve and stamp concrete torch types before
+# QuantModule replacement. Priority: explicit attrs → KV-cache → shallow tensor scan.
+# No model-wide fallback: a tensor from a different shard gives the wrong device under TP.
 
 
-def _first_local_tensor(module: torch.nn.Module) -> torch.Tensor | None:
-    """First parameter or buffer on ``module`` or its immediate children (not recursive)."""
-    for mod in (module, *module.children()):
-        for t in chain(mod.parameters(recurse=False), mod.buffers(recurse=False)):
-            return t
-    return None
-
-
-def _model_device_dtype_or_default(model: torch.nn.Module) -> tuple[torch.device, torch.dtype]:
-    """Use first real weight/buffer on the model; else CUDA ``bfloat16`` or CPU ``float32``."""
-    for m in model.modules():
-        if isinstance(m, TensorQuantizer):
-            continue
-        t = _first_local_tensor(m)
-        if t is not None and not getattr(t, "is_meta", False):
-            return t.device, t.dtype
-    if torch.cuda.is_available():
-        return torch.device("cuda", torch.cuda.current_device()), torch.bfloat16
-    return torch.device("cpu"), torch.float32
-
-
-def _vllm_attr_dtype_to_torch(dtype) -> torch.dtype:
-    """Turn vLLM ``dtype`` (``torch.dtype`` or string) into ``torch.dtype``."""
+def _vllm_attr_dtype_to_torch(dtype) -> torch.dtype | None:
+    """Resolve vLLM dtype attr to ``torch.dtype``; ``None`` for ``"auto"`` (caller falls through)."""
     if isinstance(dtype, torch.dtype):
         return dtype
     if isinstance(dtype, str) and dtype != "auto":
-        return getattr(torch, dtype, torch.bfloat16)
-    return torch.bfloat16
+        resolved = getattr(torch, dtype, None)
+        if resolved is None:
+            raise ValueError(f"Unrecognized vLLM dtype string: {dtype!r}")
+        return resolved
+    return None
 
 
-def _get_device_dtype(module: torch.nn.Module, fallback: tuple | None) -> tuple:
-    """``(device, dtype)`` for one Attention module: explicit attrs → KV cache → local tensor → fallback."""
+def _get_device_dtype(module: torch.nn.Module) -> tuple:
+    """Return ``(device, dtype)`` for a vLLM Attention module, or ``(None, None)`` if unresolvable."""
+    # Explicit attrs set by vLLM at construction — primary path.
     dev, dt = getattr(module, "device", None), getattr(module, "dtype", None)
     if dev is not None and dt is not None:
-        return dev, _vllm_attr_dtype_to_torch(dt)
+        dt_resolved = _vllm_attr_dtype_to_torch(dt)
+        if dt_resolved is not None:
+            return dev, dt_resolved
 
+    # KV-cache tensors are available after allocation; respect kv_cache_dtype when set.
     kv = getattr(module, "kv_cache", None)
     if kv and kv[0] is not None:
         t0 = kv[0]
         spec = getattr(module, "kv_cache_dtype", t0.dtype)
-        out_dtype = t0.dtype if spec == "auto" else _vllm_attr_dtype_to_torch(spec)
+        out_dtype = t0.dtype if spec == "auto" else (_vllm_attr_dtype_to_torch(spec) or t0.dtype)
         return t0.device, out_dtype
 
-    if (t := _first_local_tensor(module)) is not None:
-        return t.device, t.dtype
+    # Shallow scan: weights often live on child modules rather than the attention module itself.
+    for mod in (module, *module.children()):
+        for t in chain(mod.parameters(recurse=False), mod.buffers(recurse=False)):
+            return t.device, t.dtype
 
-    return fallback or (None, None)
+    return None, None
 
 
 def vllm_replace_quant_module_hook(model: torch.nn.Module) -> None:
-    """Set device/dtype on Attention modules before QuantModule replacement."""
-    fb = _model_device_dtype_or_default(model)
+    """Stamp resolved (device, dtype) onto Attention modules before QuantModule replacement."""
     for _n, m in model.named_modules():
         if isinstance(m, _ATTENTION_TYPES):
-            m.device, m.dtype = _get_device_dtype(m, fb)
+            m.device, m.dtype = _get_device_dtype(m)
 
 
 CUSTOM_MODEL_PLUGINS.add(vllm_replace_quant_module_hook)
 
 
 def _vllm_attention_modelopt_post_restore(self) -> None:
-    """Shared post-restore: resolve device, move module."""
-    device, dtype = _get_device_dtype(self, None)
+    """Move Attention module to its correct device after ModelOpt state restore."""
+    device, dtype = _get_device_dtype(self)
     if device is None or dtype is None:
         raise RuntimeError(
             "Could not determine device/dtype for vLLM Attention. "
