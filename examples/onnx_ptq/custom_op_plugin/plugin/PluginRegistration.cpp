@@ -19,7 +19,6 @@
 // to discover and load plugins from this shared library.
 // Based on https://github.com/leimao/TensorRT-Custom-Plugin-Example.
 
-#include <iostream>
 #include <mutex>
 
 #include <NvInferRuntime.h>

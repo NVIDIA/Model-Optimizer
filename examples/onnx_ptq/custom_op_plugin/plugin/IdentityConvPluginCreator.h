@@ -21,6 +21,7 @@
 #ifndef TENSORRT_IDENTITY_CONV_PLUGIN_CREATOR_H
 #define TENSORRT_IDENTITY_CONV_PLUGIN_CREATOR_H
 
+#include <string>
 #include <vector>
 
 #include <NvInferRuntime.h>
@@ -28,17 +29,7 @@
 namespace nvinfer1 {
 namespace plugin {
 
-class BaseCreator : public nvinfer1::IPluginCreator {
-public:
-  void setPluginNamespace(char const *libNamespace) noexcept override { mNamespace = libNamespace; }
-
-  char const *getPluginNamespace() const noexcept override { return mNamespace.c_str(); }
-
-protected:
-  std::string mNamespace;
-};
-
-class IdentityConvCreator : public BaseCreator {
+class IdentityConvCreator : public nvinfer1::IPluginCreator {
 public:
   IdentityConvCreator();
 
@@ -56,11 +47,13 @@ public:
   nvinfer1::IPluginV2IOExt *deserializePlugin(char const *name, void const *serialData,
                                               size_t serialLength) noexcept override;
 
+  void setPluginNamespace(char const *libNamespace) noexcept override { mNamespace = libNamespace; }
+
+  char const *getPluginNamespace() const noexcept override { return mNamespace.c_str(); }
+
 private:
   nvinfer1::PluginFieldCollection mFC;
   std::vector<nvinfer1::PluginField> mPluginAttributes;
-
-protected:
   std::string mNamespace;
 };
 

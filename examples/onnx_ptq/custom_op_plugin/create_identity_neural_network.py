@@ -84,7 +84,9 @@ def create_identity_neural_network(output_path: str) -> None:
     )
     model = gs.export_onnx(graph)
     # Shape inference does not work with the custom operator.
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    dirname = os.path.dirname(output_path)
+    if dirname:
+        os.makedirs(dirname, exist_ok=True)
     onnx.save(model, output_path)
     print(f"Saved ONNX model to {output_path}")
 

@@ -22,9 +22,6 @@
 #ifndef TENSORRT_IDENTITY_CONV_PLUGIN_H
 #define TENSORRT_IDENTITY_CONV_PLUGIN_H
 
-#include <string>
-#include <vector>
-
 #include <cuda_runtime.h>
 
 #include <NvInferRuntimePlugin.h>

@@ -27,8 +27,6 @@ void caughtError(std::exception const &e) {
   getLogger()->log(nvinfer1::ILogger::Severity::kINTERNAL_ERROR, e.what());
 }
 
-void logInfo(char const *msg) { getLogger()->log(nvinfer1::ILogger::Severity::kINFO, msg); }
-
 void reportAssertion(bool success, char const *msg, char const *file, int32_t line) {
   if (!success) {
     std::ostringstream stream;

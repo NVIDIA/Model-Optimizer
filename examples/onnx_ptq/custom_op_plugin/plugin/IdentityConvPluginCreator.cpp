@@ -18,9 +18,8 @@
 // TensorRT IdentityConv plugin creator (factory) implementation.
 // Based on https://github.com/leimao/TensorRT-Custom-Plugin-Example.
 
+#include <cstring>
 #include <exception>
-#include <iostream>
-#include <mutex>
 
 #include <NvInferRuntimePlugin.h>
 
