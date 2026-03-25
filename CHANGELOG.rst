@@ -1,17 +1,13 @@
 NVIDIA Model Optimizer Changelog
 ================================
-0.44 (2026-04-xx)
-
-**New Features**
-- Added iterator interface using CalibrationDataReader in ONNX quantization workflow.
-
-
 0.44 (2026-05-xx)
 ^^^^^^^^^^^^^^^^^
 
 **New Features**
 
 - Support full Transformer Engine spec for Minitron pruning (``mcore_minitron``). Now we no longer need to use custom ModelOpt spec. Note that this does not affect the usage of the pruning workflow but makes pruning slightly faster and may result in slightly different pruned model because of different kernel and numerics.
+- Added iterator interface using CalibrationDataReader in ONNX quantization workflow.
+- Enable PTQ workflow for the Step3.5-Flash MoE model with NVFP4 W4A4 + FP8 KV cache quantization. See `modelopt_recipes/models/Step3.5-Flash/nvfp4-mlp-only.yaml <https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt_recipes/models/Step3.5-Flash/nvfp4-mlp-only.yaml>`_ for more details.
 
 **Bug Fixes**
 
@@ -50,6 +46,11 @@ NVIDIA Model Optimizer Changelog
 - Add support for Nemotron-3 (NemotronHForCausalLM) model quantization and support for NemotronH MoE expert support in ``auto_quantize`` grouping and scoring rules.
 - Add support for block-granular RHT for non-power-of-2 dimensions.
 - Replace modelopt FP8 QDQ nodes with native ONNX QDQ nodes.
+
+**Deprecations**
+
+- Removed MT-Bench (FastChat) support from ``examples/llm_eval``. The ``run_fastchat.sh`` and ``gen_model_answer.py`` scripts have been deleted, and the ``mtbench`` task has been removed from the ``llm_ptq`` example scripts.
+- Remove deprecated NeMo-2.0 Framework references.
 
 **Misc**
 

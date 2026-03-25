@@ -128,6 +128,8 @@ def _test_mcore_gpt_pruning(
     rank,
     size,
 ):
+    set_seed(SEED)
+
     channel_divisor = 4
 
     hidden_size = channel_divisor * 4
@@ -170,6 +172,7 @@ def _test_mcore_gpt_pruning(
             transformer_impl="transformer_engine",
             num_layers_in_first_pipeline_stage=num_layers_in_first_pipeline_stage,
             num_layers_in_last_pipeline_stage=num_layers_in_last_pipeline_stage,
+            use_cpu_initialization=True,  # Ensure deterministic weight init across CUDA versions
         ).cuda()
         return model
 

@@ -89,7 +89,6 @@ repos:
               examples/deepseek/ptq.py|
               examples/diffusers/cache_diffusion/pipeline/models/sdxl.py|
               examples/diffusers/quantization/onnx_utils/export.py|
-              examples/llm_eval/gen_model_answer.py|
               examples/llm_eval/humaneval.py|
               examples/llm_eval/lm_eval_hf.py|
               examples/llm_eval/mmlu.py|

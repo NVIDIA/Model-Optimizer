@@ -64,4 +64,3 @@ venv/
 **.pkl
 **.pickle
 **.tar.gz
-**.nemo

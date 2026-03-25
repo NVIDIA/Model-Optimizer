@@ -4,6 +4,10 @@ This folder includes popular 3rd-party LLM benchmarks for LLM accuracy evaluatio
 
 The following instructions show how to evaluate the Model Optimizer quantized LLM with the benchmarks, including the TensorRT-LLM deployment.
 
+## NeMo Evaluator
+
+[NeMo Evaluator](https://docs.nvidia.com/nemo/evaluator/latest/get-started/quickstart/index.html#self-hosted-options) is the recommended way to evaluate a large choice of benchmarks on quantized checkpoints generated from [llm_ptq](../llm_ptq). Quantized checkpoints can be served with [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [vLLM](https://github.com/vllm-project/vllm), or [SGLang](https://github.com/sgl-project/sglang) and then evaluated using NeMo Evaluator.
+
 ## LM-Eval-Harness
 
 [LM-Eval-Harness](https://github.com/EleutherAI/lm-evaluation-harness) provides a unified framework to test generative language models on a large number of different evaluation tasks.
@@ -142,34 +146,6 @@ python mmlu.py --model_name causal --model_path <HF model folder or model card> 
 ```bash
 python mmlu.py --model_name causal --model_path <HF model folder or model card> --checkpoint_dir <Quantized checkpoint dir>
 ```
-
-## MT-Bench
-
-[MT-Bench](https://arxiv.org/abs/2306.05685). These responses are generated using [FastChat](https://github.com/lm-sys/FastChat).
-
-### Baseline
-
-```bash
-bash run_fastchat.sh -h <HF model folder or model card>
-```
-
-### Quantized (simulated)
-
-```bash
-# MODELOPT_QUANT_CFG: Choose from [INT8_SMOOTHQUANT_CFG|FP8_DEFAULT_CFG|INT4_AWQ_CFG|W4A8_AWQ_BETA_CFG]
-bash run_fastchat.sh -h <HF model folder or model card> --quant_cfg MODELOPT_QUANT_CFG
-```
-
-### Evaluate with TensorRT-LLM
-
-```bash
-bash run_fastchat.sh -h <HF model folder or model card> <Quantized checkpoint dir>
-```
-
-### Judging the responses
-
-The responses to questions from MT Bench will be stored under `data/mt_bench/model_answer`.
-The quality of the responses can be judged using [llm_judge](https://github.com/lm-sys/FastChat/tree/main/fastchat/llm_judge) from the FastChat repository. Please refer to the [llm_judge](https://github.com/lm-sys/FastChat/tree/main/fastchat/llm_judge) to compute the final MT-Bench score.
 
 ## LiveCodeBench
 
