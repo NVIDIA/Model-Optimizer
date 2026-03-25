@@ -18,7 +18,7 @@ Changelog
 
 **Misc**
 
-- Add ``transformers>=5.0`` support.
+- Bump minimum recommended transformers version to 5.0.
 
 0.43 (2026-04-09)
 ^^^^^^^^^^^^^^^^^
