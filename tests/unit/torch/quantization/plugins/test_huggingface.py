@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import os
 import warnings
 from contextlib import nullcontext
@@ -28,6 +27,7 @@ from _test_utils.torch.transformers_models import (
     get_tiny_qwen3_moe,
     tf_modelopt_state_and_output_tester,
 )
+from packaging.version import Version
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.nn import QuantLinear, QuantModuleRegistry
@@ -105,6 +105,10 @@ def test_convert_conv1d():
     assert torch.allclose(out_1, out_2)
 
 
+@pytest.mark.skipif(
+    Version(transformers.__version__) < Version("5.0"),
+    reason="test_dbrx is not supported for transformers<5.0",
+)
 def test_dbrx():
     assert DbrxExperts in QuantModuleRegistry
     assert DbrxExpertGLU in QuantModuleRegistry

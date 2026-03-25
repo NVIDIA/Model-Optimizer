@@ -16,10 +16,10 @@
 """Utilities to describe symbols in the dynamic attention module."""
 
 import torch
-from packaging.version import Version as _Version
+import transformers
+from packaging.version import Version
 from torch import nn
-from transformers import __version__ as _transformers_version
-from transformers.models.bert.modeling_bert import BertAttention
+from transformers.models.bert.modeling_bert import BertAttention, BertLayer
 from transformers.models.gptj.modeling_gptj import GPTJAttention
 
 from ..symbols import Symbol, SymInfo, SymMap
@@ -66,8 +66,7 @@ def get_hf_attn_sym_info_unsortable(mod: nn.Module) -> SymInfo:
 # BertAttention is a registered leaf (the proxy is not iterable). Patch BertLayer.forward to use
 # indexing instead, and call feed_forward_chunk directly (equivalent to apply_chunking_to_forward
 # with chunk_size=0, which is the default for BERT).
-if _Version(_transformers_version) >= _Version("5.0"):
-    from transformers.models.bert.modeling_bert import BertLayer as _BertLayer
+if Version(transformers.__version__) >= Version("5.0"):
 
     def _fx_friendly_bert_layer_forward(
         self,
@@ -113,4 +112,4 @@ if _Version(_transformers_version) >= _Version("5.0"):
         # chunk_size_feed_forward=0, which is the BERT default).
         return self.feed_forward_chunk(attention_output)
 
-    _BertLayer.forward = _fx_friendly_bert_layer_forward
+    BertLayer.forward = _fx_friendly_bert_layer_forward
