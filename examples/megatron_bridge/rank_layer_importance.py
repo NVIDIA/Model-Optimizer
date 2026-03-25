@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Estimate per-layer importance by comparing final hidden states with a full-model reference."""
+
 import argparse
 from collections import defaultdict
 
@@ -47,6 +49,7 @@ mse_loss = torch.nn.MSELoss(reduction="mean").cuda()
 def noop_mlp_forward_patch(
     hidden_states,
 ):
+    """Return zero activations for the MLP sublayer (no contribution to hidden states)."""
     return torch.zeros_like(hidden_states), None
 
 
@@ -59,6 +62,7 @@ def noop_attn_forward_patch(
     inference_params=None,
     packed_seq_params=None,
 ):
+    """Return zero activations for the attention sublayer (no contribution to hidden states)."""
     return torch.zeros_like(hidden_states), None
 
 
@@ -69,6 +73,7 @@ def noop_mamba_forward_patch(
     inference_params=None,
     rotary_pos_emb=None,
 ):
+    """Return zero state from a Mamba-style block (no contribution to hidden states)."""
     return torch.zeros_like(hidden_states)
 
 
@@ -81,6 +86,7 @@ def noop_transformer_forward_patch(
     inference_params=None,
     packed_seq_params=None,
 ):
+    """Pass through hidden states unchanged for a full transformer layer (identity layer)."""
     return hidden_states.clone(), inference_context
 
 
@@ -100,6 +106,7 @@ def noop_gpt_block_forward_patch(
     *,
     inference_params: BaseInferenceContext | None = None,
 ):
+    """Replace a GPT decoder block with identity (clone input); used when simulating a dropped layer."""
     return hidden_states.clone(), inference_context
 
 
@@ -107,6 +114,7 @@ def normalized_mse_loss_per_sample(
     hidden_states: torch.Tensor,
     target_hidden_states: torch.Tensor,
 ) -> torch.Tensor:
+    """Per-batch-item normalized MSE between ``hidden_states`` and ``target_hidden_states``."""
     return torch.stack(
         [
             normalized_mse_loss(hidden_states[i_sample], target_hidden_states[i_sample])
@@ -118,6 +126,7 @@ def normalized_mse_loss_per_sample(
 def normalized_mse_loss(
     input: torch.Tensor, target: torch.Tensor, reduction: str = "mean", epsilon: float = 1e-6
 ) -> torch.Tensor:
+    """MSE between ``input`` and ``target`` scaled by MSE of ``target`` to a near-zero baseline."""
     loss = F.mse_loss(input, target, reduction=reduction) / F.mse_loss(
         target, torch.zeros_like(target) + epsilon, reduction=reduction
     )
@@ -125,7 +134,10 @@ def normalized_mse_loss(
 
 
 class LastHiddenImportanceHook(torch.nn.Module):
+    """Forward hook on final norm: stores reference hiddens, then MSE/logits distance vs. reference."""
+
     def __init__(self, module, name, nlast_tokens=0):
+        """Initialize hook with module and name; store reference hiddens, logits, and hook."""
         super().__init__()
 
         self.forward_hook = module.register_forward_hook(self.hook_fn, with_kwargs=False)
@@ -139,9 +151,11 @@ class LastHiddenImportanceHook(torch.nn.Module):
         self.lm_head = None
 
     def set_lm_head(self, lm_head):
+        """Attach the output LM head so logits distances can be computed alongside hidden MSE."""
         self.lm_head = lm_head
 
     def hook_fn(self, module, input, output):
+        """Collect reference final hiddens or append normalized MSE (and optional logits MSE) vs. reference."""
         # seq x batch x dim
         hidden_out = output.detach().permute(1, 0, 2)  # batch x seq x dim
 
@@ -167,11 +181,13 @@ class LastHiddenImportanceHook(torch.nn.Module):
             )
 
     def load_reference(self):
+        """Clear buffers and switch to mode that records reference outputs on the next forward passes."""
         self.reference_hidden = []
         self.reference_load = True
         print_rank_0("> Loading reference outputs")
 
     def load_rankings(self):
+        """First call ends reference capture; later calls gather per-step distances into ``activations_stats``."""
         if self.reference_load:  # the first call only swithches the accumultors
             self.reference_load = False
             return
@@ -190,6 +206,7 @@ class LastHiddenImportanceHook(torch.nn.Module):
         self.logits_distance = []
 
     def gather_across_dp(self, tensor):
+        """Concatenate ``tensor`` from all data-parallel ranks along dim 0."""
         # Get the data parallel group
         dp_group = get_data_parallel_group()
         dp_world_size = get_data_parallel_world_size()
@@ -202,14 +219,19 @@ class LastHiddenImportanceHook(torch.nn.Module):
         return torch.cat(tensor_list, dim=0)
 
     def reset_stats(self):
+        """Drop accumulated layer-wise stats before a new importance pass."""
         self.activations_stats = defaultdict(list)
 
     def close(self):
+        """Remove the registered forward hook."""
         self.forward_hook.remove()
 
 
 def setup_gates(unwrapped_model):
+    """Register ``LastHiddenImportanceHook`` on final LayerNorm/RMSNorm modules as ``logits_gate_list``."""
+
     def setup_out_gate(unwrapped_model):
+        """Attach hooks to every final norm module named with ``'final'``."""
         logits_importance = torch.nn.ModuleList()
         for name, module in unwrapped_model.named_modules():
             if isinstance(module, (LayerNorm, RMSNorm)) and "final" in name:
@@ -220,6 +242,7 @@ def setup_gates(unwrapped_model):
 
 
 def get_args() -> argparse.Namespace:
+    """Parse CLI arguments for HF path, pipeline layout, calibration data, and optional dropped layers."""
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--hf_model_name_or_path", type=str, required=True)
     parser.add_argument("--trust_remote_code", action="store_true")
@@ -253,10 +276,10 @@ def get_args() -> argparse.Namespace:
             "Useful for iterative pruning"
         ),
     )
+
     parser.add_argument(
         "--save_scores_path", type=str, default="scores.pt", help="Path to save scores"
     )
-
     args = parser.parse_args()
 
     print_rank_0("\n==================== Arguments ====================")
@@ -274,6 +297,7 @@ def collect_scores(
     drop_blocks: list[int] = [],
     drop_group: int = 1,
 ):
+    """Build dict layer_idx -> metric tensors from hook stats; print layer order by mean MSE."""
     stats = unwrapped_model.logits_gate_list[0].activations_stats
     metrics = list(stats.keys())
     num_layers = len(stats[metrics[0]])
@@ -283,7 +307,6 @@ def collect_scores(
         scores[i] = {}
         for metric in metrics:
             scores[i][metric] = stats[metric][i].cpu()
-
     # print(f"{scores=}")
     print("Layers ordered by <MSE> importance:")
     res = sorted(
@@ -296,6 +319,7 @@ def collect_scores(
 
 
 def estimate_layer_importance(args: argparse.Namespace):
+    """Load model via Megatron-Bridge, record baseline final hiddens, then score each layer as identity-pass."""
     pp_size = dist.size()
     if args.num_layers_in_first_pipeline_stage is None:
         args.num_layers_in_first_pipeline_stage = args.num_layers // pp_size
@@ -348,6 +372,10 @@ def estimate_layer_importance(args: argparse.Namespace):
 
     # Prepare model
     def patch_model(layer_id, block="transformer"):
+        """No-op if ``layer_id < 0``; otherwise replace local decoder block forward with identity.
+
+        Returns original forward.
+        """
         if layer_id == -1:
             return None
         patch_register = unwrapped_model.decoder.layers[layer_id].forward
@@ -357,12 +385,14 @@ def estimate_layer_importance(args: argparse.Namespace):
         return patch_register
 
     def unpatch_model(layer_id, patch_register, block="transformer"):
+        """Restore original forward for local layer ``layer_id`` when ``layer_id >= 0``."""
         if layer_id == -1:
             return None
         print_rank_0(f"Unpatching gpt block {layer_id} ")
         unwrapped_model.decoder.layers[layer_id].forward = patch_register
 
     def layer_id_in_this_rank(layer_id):
+        """Map global layer index to local decoder index on this pipeline stage, or ``-1`` if not local."""
         if (
             layer_id >= offset and layer_id < offset + args.num_layers_in_first_pipeline_stage
             if args.num_layers_in_first_pipeline_stage
@@ -373,18 +403,22 @@ def estimate_layer_importance(args: argparse.Namespace):
             return -1
 
     def load_reference():
+        """On last pipeline stage, reset hook to capture reference final hiddens on next forwards."""
         if is_pipeline_last_stage():
             unwrapped_model.logits_gate_list[0].load_reference()
 
     def load_rankings():
+        """On last pipeline stage, finalize hook pass (reference switch or append gathered distances)."""
         if is_pipeline_last_stage():
             unwrapped_model.logits_gate_list[0].load_rankings()
 
     def reset_stats():
+        """On last pipeline stage, clear accumulated importance metrics in the hook."""
         if is_pipeline_last_stage():
             unwrapped_model.logits_gate_list[0].reset_stats()
 
     def reset_train_data_iterator():
+        """New HF calibration forward loop over the configured dataset (fresh iterator)."""
         forward_loop = get_hf_mbridge_calibration_loop(
             model=model,
             provider=provider,
@@ -425,7 +459,7 @@ def estimate_layer_importance(args: argparse.Namespace):
     if is_pipeline_last_stage() and get_data_parallel_rank() == 0:
         scores = collect_scores(unwrapped_model)
         assert scores is not None
-        torch.save(scores, args.save_scores_path)
+        torch.save(scores, f"scores_{get_pipeline_model_parallel_rank()}.pt")
 
 
 if __name__ == "__main__":
