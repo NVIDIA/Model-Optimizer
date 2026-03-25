@@ -69,14 +69,29 @@ def _check_for_libcudnn():
             f"{lib_pattern} is accessible in {lib_path}! Please check that this is the correct version needed"
             f" for your ORT version at https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements."
         )
-    else:
-        logger.error(f"cuDNN library not found in {env_variable}")
-        raise FileNotFoundError(
-            f"{lib_pattern} is not accessible in {env_variable}! Please make sure that the path to that library"
-            f" is in the env var to use the CUDA or TensorRT EP and ensure that the correct version is available."
-            f" Versioning compatibility can be checked at https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements."
-        )
-    return found
+        return True
+
+    # Not found in system path — try preloading from Python site-packages
+    logger.warning(f"cuDNN not found in {env_variable}. Trying onnxruntime.preload_dlls()...")
+    if hasattr(ort, "preload_dlls"):
+        try:
+            ort.preload_dlls()
+            logger.info(
+                "onnxruntime.preload_dlls() succeeded; CUDA/cuDNN DLLs preloaded from site-packages."
+                " Please check that this is the correct version needed for your ORT version at"
+                " https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements."
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"onnxruntime.preload_dlls() also failed: {e}")
+
+    logger.error(f"cuDNN library not found in {env_variable} or site-packages")
+    raise FileNotFoundError(
+        f"{lib_pattern} is not accessible in {env_variable} and onnxruntime.preload_dlls() could not locate it either."
+        f" Please make sure that the path to that library is in the env var, or install the cuDNN pip package"
+        f" (e.g. nvidia-cudnn-cu12) to use the CUDA or TensorRT EP."
+        f" Versioning compatibility can be checked at https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements."
+    )
 
 
 def _check_for_nv_tensorrt_rtx_libs():
