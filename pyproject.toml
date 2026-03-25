@@ -2,7 +2,7 @@
 ###############################  BUILD CONFIGURATION  ##############################################
 ####################################################################################################
 [build-system]
-requires = ["setuptools>=80", "setuptools-scm>=8"]
+requires = ["setuptools>=80", "setuptools-scm>=8,<10"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools_scm]
