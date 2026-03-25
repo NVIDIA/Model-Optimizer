@@ -51,12 +51,22 @@ find tools/launcher/local_experiments -name "config.json" -path "*/exported_mode
 
 ## SLURM vs Local Docker
 
-| Condition | Mode | Invocation |
-| --- | --- | --- |
-| `SLURM_HOST` env var set | SLURM | `uv run launch.py --yaml <cfg> --yes` |
-| `hf_local=` passed | Local Docker | `uv run launch.py --yaml <cfg> hf_local=<cache> --yes` |
+| Mode | Invocation |
+| --- | --- |
+| Remote SLURM | `SLURM_HOST=<host> SLURM_ACCOUNT=<acct> uv run launch.py --yaml <cfg> user=<ssh_user> identity=<ssh_key> --yes` |
+| Local SLURM | `SLURM_HOST=$(hostname) SLURM_ACCOUNT=<acct> uv run launch.py --yaml <cfg> --yes` |
+| Local Docker | `uv run launch.py --yaml <cfg> hf_local=<cache> --yes` |
 
-For SLURM, also set `SLURM_ACCOUNT` and optionally `SLURM_HF_LOCAL`.
+The launcher SSHes to `SLURM_HOST` via `nemo_run.SSHTunnel`. If `identity` is omitted, it uses `~/.ssh/id_rsa`.
+
+**If using `clusters.yaml`**: read the cluster config and map fields to launcher args:
+
+| `clusters.yaml` field | Launcher arg/env |
+| --- | --- |
+| `login_node` | `SLURM_HOST` env var |
+| `user` | `user=` CLI arg |
+| `ssh_key` | `identity=` CLI arg |
+| `slurm.default_account` | `SLURM_ACCOUNT` env var |
 
 ## Known Issues
 

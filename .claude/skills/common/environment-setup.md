@@ -18,14 +18,27 @@ git clone https://github.com/NVIDIA/Model-Optimizer.git && cd Model-Optimizer
 
 ### Where: local or remote?
 
-- **Local**: The user wants to run on the current machine
-- **Remote**: The user mentions a hostname, cluster, SSH, or a cluster config exists:
+- **Local**: The user wants to run on the current machine (no cluster/hostname mentioned)
+- **Remote**: The user mentions a hostname, cluster name, SSH, or wants to run on a specific cluster
 
-  ```bash
-  cat ~/.config/modelopt/clusters.yaml 2>/dev/null || cat .claude/clusters.yaml 2>/dev/null
-  ```
+**If the user names a cluster or hostname**, check for cluster config:
 
-If remote and no config exists, ask the user for: hostname, SSH username, SSH key path, remote working directory. Then create `~/.config/modelopt/clusters.yaml`:
+```bash
+cat ~/.config/modelopt/clusters.yaml 2>/dev/null || cat .claude/clusters.yaml 2>/dev/null
+```
+
+**If the cluster exists in config → use remote execution tools:**
+
+```bash
+source .claude/skills/common/remote_exec.sh
+remote_load_cluster <cluster_name>    # loads config into env vars
+remote_check_ssh                      # establishes persistent SSH session
+remote_detect_env                     # detects SLURM/Docker/bare on remote
+```
+
+This sets `REMOTE_HOST`, `REMOTE_USER`, `REMOTE_ENV_TYPE`, and SLURM defaults. Use `remote_run` for all subsequent remote commands. See `references/remote-execution.md` for full details.
+
+**If remote and no config exists**, ask the user for: hostname, SSH username, SSH key path, remote working directory. Then create `~/.config/modelopt/clusters.yaml`:
 
 ```yaml
 clusters:
@@ -39,7 +52,9 @@ default_cluster: <alias>
 
 ### How: SLURM, Docker, or bare metal?
 
-Run these checks on the **target machine** (local, or via SSH if remote):
+**Skip this if you already ran `remote_detect_env` above** — it sets `REMOTE_ENV_TYPE` for you.
+
+Only run these checks for **local** execution (no remote cluster):
 
 ```bash
 which srun sbatch 2>/dev/null && echo "SLURM"
@@ -53,14 +68,16 @@ Use `nvidia-smi` for GPU detection — it's more reliable than `torch.cuda` whic
 
 After detection, you should know which row you're in:
 
-| Environment | Launcher? | Execution method |
-| --- | --- | --- |
-| Remote SLURM | Yes | `SLURM_HOST=<host> uv run launch.py --yaml <cfg> --yes` |
-| Local SLURM | Yes | `SLURM_HOST=$(hostname) uv run launch.py --yaml <cfg> --yes` |
-| Local Docker + GPU | Yes | `uv run launch.py --yaml <cfg> hf_local=<cache> --yes` |
-| Remote bare GPU (SSH) | No | SSH + run scripts directly. See `references/remote-execution.md` |
-| Local bare GPU | No | Run scripts directly |
-| No GPU anywhere | — | **Stop**: task requires a CUDA GPU |
+| Environment | How detected | Launcher? | Execution method |
+| --- | --- | --- | --- |
+| Remote SLURM | `remote_detect_env` → `REMOTE_ENV_TYPE=slurm` | Yes | `SLURM_HOST=$REMOTE_HOST SLURM_ACCOUNT=<acct> uv run launch.py --yaml <cfg> --yes` |
+| Local SLURM | `which srun` succeeds locally | Yes | `SLURM_HOST=$(hostname) uv run launch.py --yaml <cfg> --yes` |
+| Local Docker + GPU | `docker info` shows nvidia locally | Yes | `uv run launch.py --yaml <cfg> hf_local=<cache> --yes` |
+| Remote bare GPU | `remote_detect_env` → `REMOTE_ENV_TYPE=bare` | No | Use `remote_run` to run scripts. See `references/remote-execution.md` |
+| Local bare GPU | `nvidia-smi` succeeds, no Docker/SLURM | No | Run scripts directly |
+| No GPU anywhere | — | — | **Stop**: task requires a CUDA GPU |
+
+For Remote SLURM, get `SLURM_ACCOUNT` from the cluster config's `slurm.default_account` field.
 
 ## 3. Launcher setup (if applicable)
 
