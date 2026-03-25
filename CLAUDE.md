@@ -38,13 +38,14 @@ Primarily Python codebase with optional C++/CUDA extensions supporting PyTorch, 
 
 ## Architecture
 
-ModelOpt is organized into three top-level namespaces:
+ModelOpt code base is organized into four top-level namespaces:
 
 | Namespace | Path | Role |
 |-----------|------|------|
 | `modelopt.torch` | `modelopt/torch/` | Core PyTorch optimization library |
 | `modelopt.onnx` | `modelopt/onnx/` | ONNX model quantization and export |
 | `modelopt.deploy` | `modelopt/deploy/` | Deployment utilities for LLMs |
+| `modelopt.recipe` | `modelopt/recipe/` | Recipe loading, parsing, and validation infrastructure |
 
 ### `modelopt.torch` Sub-packages
 
@@ -68,6 +69,15 @@ A **mode** is the unit of model optimization in ModelOpt. Each algorithm (quanti
 etc.) is implemented as one or more modes. Modes are recorded in the model's `modelopt_state` so
 optimization workflows can be composed, saved, and restored.
 
+### Core Abstraction: Recipes
+
+A **recipe** is a declarative YAML specification of an optimization configuration. Recipes decouple optimization specs from code, enabling reuse, sharing, and version control.
+
+**Built-in recipes** (`modelopt_recipes/`):
+
+- `general/ptq/` — general-purpose PTQ recipes
+- `configs/` — shared configuration units referenced by recipes
+
 ## Key Files
 
 | File | Role |
@@ -79,6 +89,9 @@ optimization workflows can be composed, saved, and restored.
 | `modelopt/torch/export/unified_export_hf.py` | Unified HF checkpoint export |
 | `modelopt/torch/export/model_config_export.py` | TRT-LLM model config export |
 | `modelopt/deploy/llm/` | LLM deployment utilities |
+| `modelopt/recipe/loader.py` | `load_recipe()` / `load_config()` public API |
+| `modelopt/recipe/config.py` | Recipe Pydantic models (`ModelOptPTQRecipe`, `RecipeType`) |
+| `modelopt_recipes/general/ptq/` | Built-in PTQ recipe YAML files |
 | `pyproject.toml` | Optional dependency groups (`[onnx]`, `[hf]`, `[all]`, `[dev]`); ruff, mypy, pytest, bandit, and coverage config |
 | `.pre-commit-config.yaml` | Pre-commit hooks (ruff, mypy, clang-format, license headers) |
 | `tox.ini` | Test environment definitions |
@@ -92,6 +105,7 @@ optimization workflows can be composed, saved, and restored.
 | **Optional dependencies** | Features gated by install extras (`[onnx]`, `[hf]`, `[all]`); avoid hard imports at module level |
 | **Config dataclasses** | Each mode has a typed config; use Pydantic or dataclass conventions |
 | **State dict** | Models carry `modelopt_state` for checkpoint save/restore across optimization steps |
+| **Declarative recipes** | YAML-based optimization specs in `modelopt_recipes/`; loaded via `load_recipe()`, passed to the model optimization system |
 
 ## CI / Testing
 

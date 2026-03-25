@@ -11,7 +11,6 @@ Quantization Aware Training (QAT) helps to improve the model accuracy beyond pos
 | Support Matrix | View the support matrix to see quantization compatibility and feature availability across different models | \[[Link](#support-matrix)\] | |
 | End to End QAT | Example scripts demonstrating quantization techniques for optimizing Hugging Face models | \[[Link](#end-to-end-qat-example)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
 | End to End QAD | Example scripts demonstrating quantization aware distillation techniques for optimizing Hugging Face models | \[[Link](#end-to-end-qad-example)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/1_quantization.html)\] |
-| NeMo QAT/QAD Simplified Flow | Example script demonstrating end-to-end QAT/QAD in NeMo | \[[Link](../nemo_run/qat/README.md)\] | |
 | Evaluate Accuracy | Evaluating model accuracy after QAT/QAD (with fake quantization) | \[[Link](#testing-qat-model-with-llm-benchmarks-for-accuracy-evaluation)\] | |
 | Deployment | Deploying the model after QAT/QAD | \[[Link](#deployment)\] | |
 | QLoRA | Model training with reduced GPU memory | \[[Link](#end-to-end-qlora-with-real-quantization)\] | |
@@ -34,7 +33,7 @@ Quantization aware distillation (QAD) can be used to further improve accuracy of
 
 ### Hugging Face QAT / QAD
 
-> **_NOTE:_** In this example, a QAT and QAD workflow is demonstrated for Huggingface text generation model for supervised fine-tuning (SFT). However, the workflow is general and can be extended to frameworks such as [NeMo](https://docs.nvidia.com/nemo-framework/user-guide/latest/model-optimization/quantization/quantization.html) and models beyond LLMs such as CNN based vision models.
+> **_NOTE:_** In this example, a QAT and QAD workflow is demonstrated for Huggingface text generation model for supervised fine-tuning (SFT). However, the workflow is general and can be extended to frameworks such as [Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) and models beyond LLMs such as CNN-based vision models.
 
 #### System Requirements
 
@@ -141,10 +140,6 @@ trainer.train()  # Train the quantized model using distillation (i.e, QAD)
 # Save the final student model weights; An example usage
 trainer.save_model()
 ```
-
-### NeMo QAT/QAD Simplified Flow Example
-
-The [examples/nemo_run/qat](../nemo_run/qat) directory also contains an end-to-end NeMo QAT Simplified Flow example, which supports both QAT with cross-entropy loss and QAD (quantization-aware distillation) with knowledge-distillation loss between the full-precision teacher and quantized student models. Refer to [README](../nemo_run/qat/README.md) for more detail.
 
 ## Support Matrix
 

@@ -1466,10 +1466,120 @@ LayerActivationCollector.register_decoder_layer_support(
     is_homogeneous_hf_model, get_homogeneous_hf_decoder_layers
 )
 
+
+class _QuantMoELinear(QuantModule):
+    """Quantization wrapper for Step3p5 MoELinear modules (fused expert weights).
+
+    MoELinear has weight shape [num_experts, out_features, in_features] with
+    forward(x, expert_id). We expand it into per-expert nn.Linear modules so
+    each expert gets its own weight_quantizer and input_quantizer, calibrated
+    only on tokens actually routed to that expert.
+
+    On export, _reconstruct_fused_moe_linear() stacks the per-expert quantized
+    weights and scales back into the original 3D format.
+
+    Note: we use expansion-then-reconstruction rather than the add_module() approach
+    (as in _QuantQwen35MoeExperts) because vLLM requires stacked 3D scaling factors;
+    per-expert expanded keys are not accepted by the downstream serving engine.
+    """
+
+    def _setup(self):
+        from accelerate import init_empty_weights
+
+        dtype, device = self.weight.dtype, self.weight.device
+
+        with init_empty_weights():
+            experts = nn.ModuleList(
+                [
+                    nn.Linear(self.in_features, self.out_features, bias=False)
+                    for _ in range(self.num_experts)
+                ]
+            )
+
+        for i in range(self.num_experts):
+            experts[i].to_empty(device=device)
+            with torch.no_grad():
+                experts[i].weight.data = self.weight[i].detach().to(dtype=dtype, device=device)
+
+        delattr(self, "weight")
+        self.experts = experts
+
+    def forward(self, x, expert_id):
+        # experts[expert_id] is a _QuantLinear after quantization wrapping,
+        # providing per-expert input_quantizer and weight_quantizer.
+        # Cast input to match expert weight dtype before linear operation,
+        # then cast output to float32 to match original MoELinear forward behavior.
+        expert = self.experts[expert_id]
+        x = x.to(expert.weight.dtype)
+        return expert(x).float()
+
+
+def register_step3p5_moe_on_the_fly(model):
+    """Register Step3p5 MoELinear for quantization.
+
+    Step3p5 uses a custom MoELinear class (loaded via trust_remote_code) with
+    weight shape [num_experts, out_features, in_features] and forward(x, expert_id).
+    We detect it by model class name, then grab the type from the first MoE layer.
+    """
+    if type(model).__name__ not in ("Step3p5ForCausalLM", "Step3p5Model"):
+        return
+    for module in model.modules():
+        if type(module).__name__ == "Step3p5MoEMLP":
+            moe_linear_type = type(module.up_proj)
+            if QuantModuleRegistry.get(moe_linear_type) is None:
+                QuantModuleRegistry.register({moe_linear_type: f"hf.{moe_linear_type.__name__}"})(
+                    _QuantMoELinear
+                )
+            break
+
+
+def _reconstruct_fused_moe_linear(model: nn.Module) -> None:
+    """Reconstruct QuantMoELinear per-expert weights back to original 3D MoELinear format.
+
+    After _process_quantized_modules, each expert's nn.Linear inside QuantMoELinear has:
+      - weight: fp4-quantized tensor [out_features, in_features]
+      - weight_scale, weight_scale_2: per-block / global scales
+      - input_scale: activation scale (if calibrated)
+
+    This stacks them back into the original MoELinear layout so the exported state_dict
+    uses the original key names (e.g. moe.up_proj.weight with shape [N, out, in]).
+
+    Note: QuantMoELinear is the dynamically generated class name (Quant + MoELinear),
+    not _QuantMoELinear which is the implementation class.
+    """
+    for _name, module in model.named_modules():
+        # Match QuantMoELinear (dynamically generated name) not _QuantMoELinear (implementation class)
+        if type(module).__name__ != "QuantMoELinear":
+            continue
+
+        n = module.num_experts
+        experts = module.experts
+
+        # Reconstruct 3D weight: [num_experts, out_features, in_features]
+        module.weight = nn.Parameter(
+            torch.stack([experts[i].weight.data for i in range(n)]),
+            requires_grad=False,
+        )
+
+        # Stack per-expert scales back under the original attribute names.
+        # Check all experts: some may lack input_scale if they were never routed
+        # during calibration, so only stack when every expert has the attribute.
+        for attr in ("weight_scale", "weight_scale_2", "input_scale"):
+            if all(hasattr(experts[i], attr) for i in range(n)):
+                module.register_buffer(
+                    attr,
+                    torch.stack([getattr(experts[i], attr) for i in range(n)]),
+                )
+
+        # Remove expanded experts — the reconstructed 3D tensors replace them
+        del module.experts
+
+
 CUSTOM_MODEL_PLUGINS.update(
     [
         register_falcon_linears_on_the_fly,
         register_dbrx_moe_on_the_fly,
+        register_step3p5_moe_on_the_fly,
         register_sparse_moe_on_the_fly,
         register_hf_attentions_on_the_fly,
         convert_hf_parallel_linears_on_the_fly,

@@ -1,0 +1,47 @@
+name: Delete Outdated PR Branches
+
+on:
+  schedule:
+    - cron: "0 9 * * 1" # Every Monday at 9:00 UTC
+  workflow_dispatch: # On-demand
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  delete-outdated-pr-branches:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Delete branches for closed/merged PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ github.repository }}"
+          DELETED=0
+          SKIPPED=0
+
+          # List all remote branches matching pull-request/<num>
+          git fetch --prune origin
+          for branch in $(git branch -r | grep -oP 'origin/pull-request/\K[0-9]+' | sort -un); do
+            FULL_BRANCH="pull-request/${branch}"
+            STATE=$(gh pr view "$branch" --repo "$REPO" --json state --jq '.state' 2>/dev/null || echo "")
+
+            if [ "$STATE" = "CLOSED" ] || [ "$STATE" = "MERGED" ]; then
+              echo "Deleting branch '${FULL_BRANCH}' (PR #${branch} is ${STATE})"
+              git push origin --delete "$FULL_BRANCH" && DELETED=$((DELETED + 1)) || true
+            elif [ "$STATE" = "OPEN" ]; then
+              echo "Skipping branch '${FULL_BRANCH}' (PR #${branch} is still OPEN)"
+              SKIPPED=$((SKIPPED + 1))
+            else
+              echo "Skipping branch '${FULL_BRANCH}' (could not determine PR #${branch} state)"
+              SKIPPED=$((SKIPPED + 1))
+            fi
+          done
+
+          echo ""
+          echo "Done. Deleted: ${DELETED}, Skipped: ${SKIPPED}"

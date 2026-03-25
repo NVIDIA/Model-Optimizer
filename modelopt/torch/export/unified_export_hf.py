@@ -641,6 +641,9 @@ def _process_quantized_modules(
         ):
             sub_module.unpack_weight()
         if get_quantization_format(sub_module) != QUANTIZATION_NONE:
+            # Skip QuantMoELinear - it's handled separately in _reconstruct_fused_moe_linear
+            if type(sub_module).__name__ == "QuantMoELinear":
+                continue
             if is_quantlinear(sub_module):
                 try:
                     with fsdp2_aware_weight_update(model, sub_module, reshard=False):
@@ -790,6 +793,11 @@ def _export_transformers_checkpoint(
 
     # Process all quantized modules and export weights
     _process_quantized_modules(model, dtype, is_modelopt_qlora)
+
+    # Reconstruct fused MoELinear: per-expert _QuantLinear weights → original 3D format
+    from modelopt.torch.quantization.plugins.huggingface import _reconstruct_fused_moe_linear
+
+    _reconstruct_fused_moe_linear(model)
 
     if accelerator is not None:
         # Gather state_dict from all ranks

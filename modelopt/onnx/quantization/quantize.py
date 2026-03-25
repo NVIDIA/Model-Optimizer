@@ -43,6 +43,7 @@ import onnx
 import onnx.onnx_cpp2py_export.checker as C
 import onnx_graphsurgeon as gs
 import onnxslim
+from onnxruntime.quantization.calibrate import CalibrationDataReader
 
 from modelopt.onnx.logging_config import configure_logging, logger
 from modelopt.onnx.op_types import is_data_dependent_shape_op
@@ -319,6 +320,7 @@ def quantize(
     calibration_data: CalibrationDataType = None,
     calibration_method: str | None = None,
     calibration_cache_path: str | None = None,
+    calibration_data_reader: CalibrationDataReader | None = None,
     calibration_shapes: str | None = None,
     calibration_eps: list[str] = ["cpu", "cuda:0", "trt"],
     override_shapes: str | None = None,
@@ -375,6 +377,8 @@ def quantize(
             and int4: {'awq_clip' (default), 'awq_lite', 'awq_full', 'rtn_dq'}.
         calibration_cache_path:
             Path to pre-calculated activation tensor ranges, also known as calibration cache.
+        calibration_data_reader:
+            Instance of a CalibrationDataReader object to provide calibration data.
         calibration_shapes:
             Input shapes used for calibration process.
             It should be provided as a string representing the shape of each input tensors for one calibration step.
@@ -585,13 +589,14 @@ def quantize(
     )
     trt_plugins = update_trt_ep_support(calibration_eps, has_dds_op, has_custom_op, trt_plugins)  # type: ignore[arg-type]
 
-    # Use random scales if calibration data is not supplied
-    if calibration_data is None:
-        calibration_data_reader = RandomDataProvider(onnx_path, calibration_shapes)
-    else:
-        calibration_data_reader = CalibrationDataProvider(
-            onnx_path, calibration_data, calibration_shapes
-        )
+    if calibration_data_reader is None:
+        # Use random scales if calibration data is not supplied
+        if calibration_data is None:
+            calibration_data_reader = RandomDataProvider(onnx_path, calibration_shapes)
+        else:
+            calibration_data_reader = CalibrationDataProvider(
+                onnx_path, calibration_data, calibration_shapes
+            )
 
     nodes_to_quantize = nodes_to_quantize or []
     nodes_to_exclude = nodes_to_exclude or []
