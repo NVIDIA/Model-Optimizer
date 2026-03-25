@@ -1,53 +1,64 @@
 # Workspace Management
 
-When running via the Slack bot (or any multi-user environment), each user has a **workspace root** containing model-specific workspaces. Each workspace is a copy of the Model-Optimizer repo where the agent can freely modify code.
+Organize work by model name so outputs (checkpoints, logs) are easy to find and reuse across PTQ → deploy → eval pipelines.
 
-## Environment Variables
+## Single-user (default)
 
-The bot sets these env vars before launching Claude:
-
-- `MODELOPT_WORKSPACE_ROOT` — user's workspace root (e.g., `/data/modelopt/users/U123/jobs/`)
-- `MODELOPT_REPO_DIR` — path to the shared upstream repo (read-only source for copies)
-
-If these are not set, you are running locally — skip workspace management.
-
-## When to Create vs Reuse a Workspace
-
-**Before starting any task**, check for an existing workspace that matches:
+Create a work directory named after the model in the current project:
 
 ```bash
-# List existing workspaces
-ls "$MODELOPT_WORKSPACE_ROOT/" 2>/dev/null
+mkdir -p ./workspaces/<model-name>
 ```
 
-**Reuse** an existing workspace when:
-
-- The task involves the same model (e.g., deploying a model you just quantized)
-- The task needs output from a previous step (e.g., eval needs the PTQ checkpoint)
-- The user says "deploy the model I just quantized" or similar
-
-**Create a new workspace** when:
-
-- This is a new model not seen before
-- The user explicitly asks for a fresh start
-- The existing workspace's code modifications are incompatible (rare)
-
-## Creating a New Workspace
-
-Name workspaces by model/purpose, not timestamps:
+Use descriptive names, not timestamps:
 
 ```bash
-# Good names
-qwen3-0.6b
-llama-3.1-8b-fp8
-deepseek-v3-nvfp4
+# Good
+workspaces/qwen3-0.6b-nvfp4/
+workspaces/llama-3.1-8b-fp8/
 
-# Bad names (don't use)
-ptq-20260318-143022
-job-001
+# Bad
+workspaces/ptq-20260318-143022/
+workspaces/job-001/
 ```
 
-To create:
+Store outputs (checkpoints, logs) inside the workspace:
+
+```bash
+workspaces/qwen3-0.6b-nvfp4/
+  output/          # quantized checkpoint
+  logs/            # job logs
+  scripts/         # custom PTQ scripts (if unsupported model)
+```
+
+## When to Reuse vs Create
+
+**Before starting any task**, check for an existing workspace:
+
+```bash
+ls ./workspaces/ 2>/dev/null
+```
+
+**Reuse** when:
+
+- Same model (e.g., deploying a model you just quantized)
+- Task needs output from a previous step (e.g., eval needs the PTQ checkpoint)
+- User says "deploy the model I just quantized"
+
+**Create new** when:
+
+- New model not seen before
+- User explicitly asks for a fresh start
+- Different quantization format for same model (e.g., `qwen3-0.6b-fp8` vs `qwen3-0.6b-nvfp4`)
+
+## Multi-user / Slack bot
+
+When `MODELOPT_WORKSPACE_ROOT` is set, use it instead of `./workspaces/`:
+
+- `MODELOPT_WORKSPACE_ROOT` — user's workspace root (set by the bot)
+- `MODELOPT_REPO_DIR` — shared upstream repo (read-only, use for fresh copies)
+
+To create a workspace, copy the upstream repo (without `.git`):
 
 ```bash
 rsync -a --quiet \
@@ -56,31 +67,19 @@ rsync -a --quiet \
     "$MODELOPT_REPO_DIR/" "$MODELOPT_WORKSPACE_ROOT/<name>/"
 ```
 
-Then `cd` into the new workspace and continue with the task.
-
-## Injecting Cluster Config
-
-If `.claude/clusters.yaml` exists in the current workspace, it was injected by the bot. When creating a new workspace, copy it over:
-
-```bash
-cp "$MODELOPT_WORKSPACE_ROOT/default/.claude/clusters.yaml" \
-   "$MODELOPT_WORKSPACE_ROOT/<new-name>/.claude/clusters.yaml" 2>/dev/null
-```
-
 ## Example Flow
 
 ```text
 User: "quantize Qwen3-0.6B with nvfp4"
-Agent: ls $MODELOPT_WORKSPACE_ROOT/  → empty or no "qwen3-0.6b"
-       → create workspace "qwen3-0.6b"
-       → run PTQ, output to qwen3-0.6b/output/
+Agent: ls workspaces/ → no "qwen3-0.6b-nvfp4"
+       → mkdir workspaces/qwen3-0.6b-nvfp4
+       → run PTQ, output to workspaces/qwen3-0.6b-nvfp4/output/
 
 User: "deploy the model I just quantized"
-Agent: ls $MODELOPT_WORKSPACE_ROOT/  → sees "qwen3-0.6b"
-       → reuse workspace, find checkpoint at qwen3-0.6b/output/
-       → deploy from there
+Agent: ls workspaces/ → sees "qwen3-0.6b-nvfp4"
+       → reuse, find checkpoint at workspaces/qwen3-0.6b-nvfp4/output/
 
 User: "now quantize Llama-3.1-8B with fp8"
-Agent: ls $MODELOPT_WORKSPACE_ROOT/  → sees "qwen3-0.6b", no llama
-       → create workspace "llama-3.1-8b-fp8"
+Agent: ls workspaces/ → no llama
+       → mkdir workspaces/llama-3.1-8b-fp8
 ```
