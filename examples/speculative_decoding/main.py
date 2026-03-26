@@ -157,7 +157,7 @@ def train():
     model_args, data_args, training_args, medusa_args, eagle_args = (
         parser.parse_args_into_dataclasses()
     )
-    if data_args.data_path is None and data_args.offline_data_path is None:
+    if not data_args.data_path and not data_args.offline_data_path:
         raise ValueError("Either data_path or offline_data_path must be provided.")
     if training_args.cp_size > 1 or training_args.dp_shard_size > 1:
         training_args.parallelism_config = ParallelismConfig(
