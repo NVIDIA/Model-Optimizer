@@ -73,7 +73,10 @@ def test_quantize(model_cls, config):
 
     if config == mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG:
         # reduce block sizes for simple testing models
-        config["quant_cfg"]["*weight_quantizer"]["block_sizes"] = {-1: 8, -2: 8}
+        for entry in config["quant_cfg"]:
+            if entry.get("quantizer_path") == "*weight_quantizer":
+                entry["cfg"]["block_sizes"] = {-1: 8, -2: 8}
+                break
     model = model_cls().cuda()
     calib_data = [model.get_input().cuda() for _ in range(1)]
     quantize_model_and_forward(model, config, calib_data)

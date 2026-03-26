@@ -304,7 +304,7 @@ def _test_sharded_state_dict(
 ):
     # Must disable output_layer quantization since output_layer amax cannot be restore via
     # sharded_state_dict. All output_layer quantizers state are removed.
-    config["quant_cfg"]["*output_layer*"] = {"enable": False}
+    config["quant_cfg"].append({"quantizer_path": "*output_layer*", "enable": False})
 
     if modelopt_version is not None:
         mto.conversion.__version__ = modelopt_version
