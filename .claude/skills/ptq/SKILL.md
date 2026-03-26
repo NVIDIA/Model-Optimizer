@@ -19,24 +19,27 @@ Read `skills/common/environment-setup.md` and `skills/common/workspace-managemen
 
 ## Step 2 — Is the model supported?
 
-Read `modelopt/torch/export/model_utils.py` and find the `MODEL_NAME_TO_TYPE` dict. The matching logic is **case-insensitive substring**: if any key appears as a substring of the model's class name, it's supported (e.g., key `"Llama"` matches `LlamaForCausalLM`). If no key matches → **unsupported**.
+Check the support table in `examples/llm_ptq/README.md` for verified HF models.
+
+- **Listed** → supported, use `hf_ptq.py` (step 4A/4B)
+- **Not listed** → read `references/unsupported-models.md` to determine if `hf_ptq.py` can still work or if a custom script is needed (step 4C)
 
 ## Step 3 — Choose quantization format
 
-**First**, check for a pre-built recipe:
+**First**, check for a model-specific recipe:
 
 ```bash
-ls modelopt_recipes/models/ modelopt_recipes/general/ptq/ 2>/dev/null
+ls modelopt_recipes/models/ 2>/dev/null
 ```
 
-If a recipe matches, use `--recipe <path>`.
+If a model-specific recipe exists, use `--recipe <path>` — it may contain tuned settings.
 
-**If no recipe**, recommend based on GPU (details in `examples/llm_ptq/README.md`):
+**If no model-specific recipe**, choose a format based on GPU (details in `examples/llm_ptq/README.md`):
 
 - **Blackwell** (B100/B200/GB200): `nvfp4` variants
 - **Hopper** (H100/H200) or older: `fp8` or `int4_awq`
 
-All format definitions: `modelopt/torch/quantization/config.py`.
+Use `--qformat <name>` (e.g., `--qformat nvfp4`). Format definitions: `modelopt/torch/quantization/config.py`. General PTQ recipes in `modelopt_recipes/general/ptq/` correspond to the same formats — `--qformat` is the simpler way to use them.
 
 > NVFP4 can be calibrated on Hopper but requires Blackwell for inference.
 
@@ -44,23 +47,25 @@ All format definitions: `modelopt/torch/quantization/config.py`.
 
 **Goal: checkpoint on disk** (`.safetensors` + `config.json`).
 
-**IMPORTANT**: Run a smoke test first (`--calib_size 4`). Wait for it to succeed. Then run full calibration (`--calib_size 512`).
+For **listed models** (4A/4B): run full calibration directly (`--calib_size 512`).
+For **unlisted models** (4C): run a smoke test first (`--calib_size 4`), wait for success, then full calibration.
 
 ### Which path?
 
 ```text
-Supported? ──→ YES ──→ SLURM (local or remote)? ──→ LAUNCHER (4B)
-                  │     Local Docker + GPU? ────────→ LAUNCHER (4B)
-                  │     Remote Docker (no SLURM)? ──→ MANUAL via remote_run (4A)
-                  │     Bare GPU (local or remote)? → MANUAL (4A)
+In README table? ─→ YES ──→ SLURM (local or remote)? ──→ LAUNCHER (4B)
+                  │          Local Docker + GPU? ────────→ LAUNCHER (4B)
+                  │          Remote Docker (no SLURM)? ──→ MANUAL (4A)
+                  │          Bare GPU (local or remote)? → MANUAL (4A)
                   │
-                  └→ NO (unsupported) ──→ Any env ──→ CUSTOM SCRIPT (4C)
+                  └→ NOT LISTED ──→ UNLISTED MODEL (4C)
 ```
 
 ### 4A — Direct: supported model, manual execution
 
 ```bash
 pip install --no-build-isolation "nvidia-modelopt[hf]"
+pip install -r examples/llm_ptq/requirements.txt
 
 python examples/llm_ptq/hf_ptq.py \
     --pyt_ckpt_path <model> \
@@ -87,15 +92,9 @@ uv run launch.py --yaml <config.yaml> hf_local=<hf_cache> --yes
 
 The launcher blocks and tails logs until the job completes.
 
-### 4C — Custom script: unsupported model
+### 4C — Unlisted model
 
-Follow `references/unsupported-models.md`. Core steps:
-
-1. Load model (dequantize FP8 if needed)
-2. Monkey-patch unsupported layers, register with `mtq.register()`
-3. Create calibration dataloader
-4. `mtq.quantize(model, config, forward_loop)`
-5. `export_hf_checkpoint(model, export_dir)`
+Follow `references/unsupported-models.md`. It guides you through checking the model source, deciding whether a patched script is needed, and writing patches if required. Unlisted models are risky — monitor the run and be ready to debug.
 
 Run directly (local) or via `remote_run` (remote). For SLURM, use a job script — see `skills/common/slurm-setup.md` for generic patterns and `references/slurm-setup.md` for PTQ-specific details (container, GPU sizing, FSDP2).
 
@@ -132,11 +131,11 @@ Report the path and size to the user.
 | `skills/common/workspace-management.md` | Step 1: always |
 | `references/launcher-guide.md` | Step 4B only (launcher path) |
 | `tools/launcher/CLAUDE.md` | Step 4B only, if you need more launcher detail |
-| `references/unsupported-models.md` | Step 4C only (unsupported model) |
+| `references/unsupported-models.md` | Step 4C only (unlisted model) |
 | `skills/common/remote-execution.md` | Step 4A/4C only, if target is remote |
 | `skills/common/slurm-setup.md` | Step 4A/4C only, if using SLURM manually (not launcher) |
 | `references/slurm-setup.md` | Step 4A/4C only, PTQ-specific SLURM (container, FSDP2) |
 | `examples/llm_ptq/README.md` | Step 3: support matrix, CLI flags, accuracy |
 | `modelopt/torch/quantization/config.py` | Step 3: format definitions |
-| `modelopt/torch/export/model_utils.py` | Step 2: supported architectures |
+| `modelopt/torch/export/model_utils.py` | Step 4C: TRT-LLM export type mapping |
 | `modelopt_recipes/` | Step 3: pre-built recipes |

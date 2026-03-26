@@ -1,6 +1,8 @@
-# Extending ModelOpt PTQ to Unsupported Models
+# Handling Unlisted Models
 
-When a model architecture is not in `MODEL_NAME_TO_TYPE` (in `modelopt/torch/export/model_utils.py`), follow the investigation steps below before writing any custom code.
+The model is not in the verified support table (`examples/llm_ptq/README.md`). This does NOT mean it won't work — ModelOpt auto-detects standard HF modules (linear layers, attention, MoE blocks with `gate`+`experts`). Many unlisted models work with `hf_ptq.py` out of the box.
+
+Follow the investigation steps below to determine if `hf_ptq.py` works or if patches are needed.
 
 ## Step A — Locate the model source
 
@@ -76,6 +78,15 @@ for n in sorted(names): print(n)
 
 Compare against the `enable`/`disable` patterns in the config. Add custom overrides using Pattern 6 if needed. Always verify with `mtq.print_quant_summary(model)` after quantization.
 
+## Step E — Run and iterate
+
+After Steps A-D:
+
+- **No patches needed** (all standard modules) → run `hf_ptq.py` with a smoke test (`--calib_size 4`). If it succeeds, proceed with full calibration. If it fails, read the error and revisit Steps C/D.
+- **Patches needed** → write a custom script using the patterns below, then smoke test it. Debug failures iteratively — quantization errors often reveal additional modules that need patching.
+
+---
+
 ## Pattern 1: Custom Module with TensorQuantizer
 
 For modules that use raw `nn.Parameter` + `F.linear()` instead of `nn.Linear`, inject `TensorQuantizer` modules and apply them in the forward pass.
@@ -109,29 +120,29 @@ class QuantCustomModule(OriginalModule):
 - Quantizer names MUST end with `_input_quantizer` or `_weight_quantizer` for wildcard matching
 - The `__init__` must call `super().__init__()` then `self._setup()`
 
-## Pattern 2: MoE Calibration Wrapper
+## Pattern 2: MoE Models
 
-MoE models route tokens to a subset of experts (top-k). During calibration, experts that receive no tokens won't have their quantization scales calibrated. Fix this with a wrapper that temporarily routes all tokens to all experts:
+MoE models route tokens to a subset of experts (top-k). During calibration, experts that receive no tokens won't have their quantization scales calibrated.
+
+**In most cases, ModelOpt handles this automatically.** The HuggingFace plugin auto-detects MoE blocks with the standard `gate` + `experts` pattern (`register_sparse_moe_on_the_fly`) and registers `_QuantSparseMoe`, which:
+
+- Syncs input quantizer amax across all experts after calibration (`layer_sync_moe_local_experts_amax`)
+- Runs weight-only calibration for experts that received no tokens (`sync_moe_expert_amax`)
+
+**When you still need custom work:**
+
+- **Fused expert weights** (e.g., Qwen3.5's `Qwen3_5MoeExperts`, Step3.5's `MoELinear`): These store all expert weights in a single tensor `[num_experts, out, in]` instead of separate `nn.Linear` per expert. Use Pattern 1 to create a `QuantModule` that expands fused weights into per-expert modules with their own quantizers.
+
+- **Non-standard MoE structure** (no `gate`/`experts` attributes): Auto-detection won't find it. Either add `layer_sync_moe_local_experts_amax` to your custom class, or call `sync_moe_expert_amax` manually after quantization:
 
 ```python
-class CalibMoE(OriginalMoE):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._setup()
+from modelopt.torch.quantization.utils import sync_moe_expert_amax
 
-    def _setup(self):
-        self._original_top_k = self.top_k
-
-    def forward(self, hidden_states):
-        # First pass: all experts get calibration data
-        self.top_k = self.num_experts
-        super().forward(hidden_states)
-        # Second pass: normal routing for actual output
-        self.top_k = self._original_top_k
-        return super().forward(hidden_states)
+mtq.quantize(model, config, forward_loop)
+for name, module in model.named_modules():
+    if hasattr(module, 'experts'):  # adjust to match the model
+        sync_moe_expert_amax(module.experts)
 ```
-
-Adjust attribute names (`top_k`, `num_experts`, `topk_group`, `n_group`, etc.) to match the model's implementation. Read the model's MoE source code to find the correct names.
 
 ## Pattern 3: Registering with ModelOpt
 
@@ -141,7 +152,6 @@ Register all custom classes BEFORE calling `mtq.quantize()`:
 import modelopt.torch.quantization as mtq
 
 mtq.register(original_cls=OriginalModule, quantized_cls=QuantCustomModule)
-mtq.register(original_cls=OriginalMoE, quantized_cls=CalibMoE)
 ```
 
 `mtq.register()` tells ModelOpt to replace all instances of `original_cls` with `quantized_cls` during quantization. The replacement class must be a subclass of the original.
