@@ -968,7 +968,24 @@ class _Attention(torch.autograd.Function):
             num_stages=1,
         )
 
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None
+        return (
+            dq,
+            dk,
+            dv,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 def attention(
@@ -988,7 +1005,6 @@ def attention(
     sparsity_m: int = 4,
     num_sink_tokens: int = 0,
     dense_window_size: int = 64,
-    *,
     skip_softmax_threshold: float | None = None,
 ) -> torch.Tensor:
     """Variable-length flash attention with GQA, autograd, and optional N:M sparse softmax and skip-softmax.

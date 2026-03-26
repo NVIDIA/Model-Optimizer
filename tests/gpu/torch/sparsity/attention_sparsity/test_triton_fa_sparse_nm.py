@@ -346,3 +346,83 @@ class TestSparseBackward:
         assert not torch.allclose(v_d.grad, v_s.grad, atol=1e-3), (
             "dV same with and without sparsity"
         )
+
+
+# ---------------------------------------------------------------------------
+# Integration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
+class TestSparseNMIntegration:
+    """N:M sparse softmax integration tests."""
+
+    def test_sparse_disabled_matches_dense(self):
+        """sparsity_n=0 produces bit-identical output to default (dense)."""
+        seq_lens = [128, 128]
+        total = sum(seq_lens)
+        scale = 1.0 / (64**0.5)
+
+        torch.manual_seed(99)
+        q, k, v = make_qkv(total, 4, 2, 64)
+        locs, lens = make_varlen_meta(seq_lens)
+
+        out_dense = attention(q, k, v, locs, lens, 128, softmax_scale=scale)
+        out_n0 = attention(q, k, v, locs, lens, 128, softmax_scale=scale, sparsity_n=0)
+        assert torch.equal(out_dense, out_n0)
+
+    def test_sparse_nm_via_sparsify(self, tiny_llama_dir):
+        """mtsa.sparsify() with N:M sparse softmax produces finite logits that differ from dense."""
+        pytest.importorskip("transformers")
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        import modelopt.torch.sparsity.attention_sparsity as mtsa
+
+        tok = AutoTokenizer.from_pretrained(tiny_llama_dir)
+        if tok.pad_token_id is None:
+            tok.pad_token_id = tok.eos_token_id
+        ids = torch.randint(1, tok.vocab_size, (1, 64), device="cuda")
+
+        # Dense baseline (triton backend, no sparsity)
+        model_dense = AutoModelForCausalLM.from_pretrained(
+            tiny_llama_dir,
+            attn_implementation="modelopt_triton",
+            torch_dtype=torch.bfloat16,
+            device_map="cuda",
+        )
+        model_dense.eval()
+        with torch.no_grad():
+            logits_dense = model_dense(input_ids=ids).logits
+        del model_dense
+
+        # Sparse via mtsa.sparsify() with dense_window_size=0 to force sparsity on all tiles
+        sparse_cfg = {
+            "sparse_cfg": {
+                "*attn*": {
+                    "method": "triton_sparse_softmax",
+                    "sparsity_n": 2,
+                    "sparsity_m": 4,
+                    "num_sink_tokens": 0,
+                    "dense_window_size": 0,
+                    "backend": "triton",
+                    "enable": True,
+                },
+                "default": {"enable": False},
+            },
+        }
+        model_sparse = AutoModelForCausalLM.from_pretrained(
+            tiny_llama_dir,
+            torch_dtype=torch.bfloat16,
+            device_map="cuda",
+        )
+        mtsa.sparsify(model_sparse, sparse_cfg)
+        assert model_sparse.config._attn_implementation == "modelopt_triton"
+        model_sparse.eval()
+        with torch.no_grad():
+            logits_sparse = model_sparse(input_ids=ids).logits
+
+        assert not torch.isnan(logits_sparse).any(), "NaN in sparse logits"
+        assert not torch.isinf(logits_sparse).any(), "Inf in sparse logits"
+        assert not torch.allclose(logits_sparse, logits_dense, atol=1e-2), (
+            "Sparse logits identical to dense — sparsity may not be applied"
+        )
