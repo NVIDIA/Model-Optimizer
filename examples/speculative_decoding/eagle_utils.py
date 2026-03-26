@@ -154,7 +154,7 @@ def make_eagle_supervised_data_module(
         assert not data_args.vlm_processor, "Offline data is not supported for VLM."
 
         offline_data_path = Path(data_args.offline_data_path)
-        dumped_files = [str(p) for p in offline_data_path.glob("*.pt")]
+        dumped_files = [str(p) for p in offline_data_path.rglob("*.pt")]
         if not dumped_files:
             raise ValueError(f"No .pt files found in {data_args.offline_data_path}")
 

@@ -15,6 +15,7 @@
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 import safetensors.torch
@@ -23,6 +24,44 @@ from _test_utils.examples.run_command import run_example_command
 from packaging.version import Version
 
 from modelopt.torch.export.plugins.hf_spec_export import LLAMA_EAGLE_SINGLE_LAYER
+
+
+def generate_offline_pt_data(
+    output_dir,
+    num_files: int = 8,
+    seq_len: int = 128,
+    hidden_size: int = 512,
+    vocab_size: int = 32000,
+    num_aux_layers: int = 2,
+) -> Path:
+    """Generate fake offline training .pt files for EAGLE3 offline training tests.
+
+    Each file contains the keys expected by OfflineSupervisedDataset:
+      - input_ids:         LongTensor of shape (seq_len,)
+      - hidden_states:     FloatTensor of shape (seq_len, hidden_size)
+      - aux_hidden_states: FloatTensor of shape (seq_len, hidden_size*num_aux_layers)
+
+    Args:
+        output_dir: Directory to write .pt files into.
+        num_files: Number of .pt files to generate.
+        seq_len: Sequence length. Defaults to 128.
+        hidden_size: Hidden size matching the base model. Defaults to 512 (tiny_llama).
+        vocab_size: Vocabulary size matching the base model. Defaults to 32000 (tiny_llama).
+        num_aux_layers: Number of auxiliary layers. Defaults to 2.
+    Returns:
+        Path to the output directory.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    torch.manual_seed(42)
+    for i in range(num_files):
+        sample = {
+            "input_ids": torch.randint(0, vocab_size, (seq_len,)),
+            "hidden_states": torch.randn(seq_len, hidden_size),
+            "aux_hidden_states": torch.randn(seq_len, hidden_size * num_aux_layers),
+        }
+        torch.save(sample, output_dir / f"sample_{i:04d}.pt")
+    return output_dir
 
 
 @pytest.fixture(scope="module")
@@ -161,6 +200,109 @@ def test_convert_to_vllm_ckpt(tiny_llama_path, eagle_output_dir):
             "--input", eagle_output_dir / "eagle-tinyllama-export",
             "--verifier", tiny_llama_path,
             "--output", eagle_output_dir / "eagle-tinyllama-export-vllm-one-ckpt",
+        ],
+        "speculative_decoding",
+    )
+
+
+@pytest.mark.parametrize(
+    ("model_source", "use_fake_base"),
+    [
+        (None, False),                       # tiny_llama (from fixture), no FakeBase
+        ("moonshotai/Kimi-K2.5", True),      # remote HF repo, FakeBaseModel
+        ("moonshotai/Kimi-K2-Thinking", True),     # remote HF repo, no FakeBaseModel
+        ("MiniMaxAI/MiniMax-M2.5", True),
+    ],
+    ids=["tinyllama", "kimi-k2.5","kimi-k2-thinking","minimax-m2.5"],
+)
+def test_offline_eagle3_training(
+    tiny_llama_path, tiny_daring_anteater_path, tmp_path, eagle_output_dir,
+    model_source, use_fake_base,
+):
+    """Test Eagle3 training with pre-computed hidden states (offline mode / FakeBaseModel)."""
+    import transformers
+
+    model_path = tiny_llama_path if model_source is None else model_source
+    model_id = "tinyllama" if model_source is None else model_source.split("/")[-1]
+    output_subdir = eagle_output_dir / f"eagle-{model_id}-offline"
+
+    cfg = transformers.AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+
+    if model_source=="moonshotai/Kimi-K2.5":
+        #vlm, get text config
+        cfg = cfg.text_config
+
+    offline_data_dir = generate_offline_pt_data(
+        tmp_path / "offline_data",
+        hidden_size=cfg.hidden_size,
+        vocab_size=cfg.vocab_size,
+        num_aux_layers=min(cfg.num_hidden_layers, 3),
+    )
+
+    tiny_eagle_config = {
+        "max_position_embeddings": 128,
+        "num_hidden_layers": 1,
+        "intermediate_size": 64,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 2,
+        "head_dim": 64,
+    }
+    config_file = tmp_path / "tiny_eagle_config_offline.json"
+    with open(config_file, "w") as f:
+        json.dump(tiny_eagle_config, f)
+
+    cmd = [
+        "./launch_train.sh",
+        "--model", model_path,
+        "--data", tiny_daring_anteater_path,
+        "--offline-data", offline_data_dir,
+        "--num_epochs", "0.1",
+        "--lr", "1e-5",
+        "--mode", "eagle3",
+        "--eagle_config", str(config_file),
+        "--output_dir", output_subdir,
+        "--training_seq_len", "64",
+        "--trust_remote_code", "True",
+        "--fsdp", "False",
+    ]
+    if use_fake_base:
+        cmd += ["--use_fake_base_for_offline", "true"]
+    run_example_command(cmd, "speculative_decoding")
+    assert os.path.exists(output_subdir / "config.json")
+
+
+def test_offline_resume_training_kimi(tiny_daring_anteater_path, tmp_path, eagle_output_dir):
+    """Test resume of offline Eagle3 training from a FakeBaseModel checkpoint (Kimi-K2.5).
+
+    Depends on test_offline_eagle3_training["kimi-k2.5"] having run first.
+    Exercises AutoModelForCausalLM.from_pretrained with model_type='fake_base_model'.
+    """
+    import transformers
+
+    checkpoint_dir = eagle_output_dir / "eagle-Kimi-K2.5-offline"
+    config = transformers.AutoConfig.from_pretrained(checkpoint_dir, trust_remote_code=True)
+
+    offline_data_dir = generate_offline_pt_data(
+        tmp_path / "offline_data_resume",
+        hidden_size=config.hidden_size,
+        vocab_size=config.vocab_size,
+        num_aux_layers=min(config.num_hidden_layers, 3),
+    )
+
+    run_example_command(
+        [
+            "./launch_train.sh",
+            "--model", checkpoint_dir,
+            "--data", tiny_daring_anteater_path,
+            "--offline-data", offline_data_dir,
+            "--num_epochs", "0.2",
+            "--lr", "1e-5",
+            "--mode", "eagle3",
+            "--output_dir", checkpoint_dir,
+            "--training_seq_len", "64",
+            "--trust_remote_code", "True",
+            "--fsdp", "False",
+            "--use_fake_base_for_offline", "true",
         ],
         "speculative_decoding",
     )

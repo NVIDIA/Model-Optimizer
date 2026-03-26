@@ -122,6 +122,18 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       DISABLE_TORCH_COMPILE="${1#*=}"
       ;;
+    --use_fake_base_for_offline*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      USE_FAKE_BASE_FOR_OFFLINE="${1#*=}"
+      ;;
+    --trust_remote_code*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      TRUST_REMOTE_CODE="${1#*=}"
+      ;;
+    --fsdp*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      FSDP="${1#*=}"
+      ;;
     *)
       >&2 printf "Error: Invalid argument ${1#*=}\n"
       exit 1
@@ -134,9 +146,16 @@ set -x
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 NUM_NODES=${NUM_NODES:-1}
-GPU_PER_NODE=${GPU_PER_NODE:-$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)}
-TOTAL_GPU=$((NUM_NODES * GPU_PER_NODE))
-echo "Total GPUs: $TOTAL_GPU (NUM_NODES: $NUM_NODES, GPU_PER_NODE: $GPU_PER_NODE)"
+if [[ "$NUM_NODES" != 1 ]]; then
+  #Multi Node Training
+  GPU_PER_NODE=${GPU_PER_NODE:-$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)}
+  TOTAL_GPU=$((NUM_NODES * GPU_PER_NODE))
+  echo "Total GPUs: $TOTAL_GPU (NUM_NODES: $NUM_NODES, GPU_PER_NODE: $GPU_PER_NODE)"
+else
+  #Single Node Training, GPU can be specified by $CUDA_VISIBLE_DEVICES
+  TOTAL_GPU=$(python -c "import torch; print(torch.cuda.device_count())")
+  echo "Total GPUs: $TOTAL_GPU (Single Node Training)"
+fi
 # Calculate save_steps
 DEFAULT_SAVE_STEPS=$((8192 / TOTAL_GPU))
 
@@ -165,6 +184,9 @@ MIX_HIDDEN_STATES=${MIX_HIDDEN_STATES:-"False"}
 DISABLE_TORCH_COMPILE=${DISABLE_TORCH_COMPILE:-"False"}
 NUM_TTT_STEPS=${NUM_TTT_STEPS:-3}
 
+USE_FAKE_BASE_FOR_OFFLINE=${USE_FAKE_BASE_FOR_OFFLINE:-"False"}
+TRUST_REMOTE_CODE=${TRUST_REMOTE_CODE:-"False"}
+FSDP=${FSDP:-"False"}
 
 if [[ "$MODE" == "eagle3" ]]; then
   if [[ -n "$EAGLE_CONFIG" ]]; then
@@ -195,7 +217,7 @@ else
   VLM_ARGS=""
 fi
 
-if [[ "$TOTAL_GPU" -gt 1 ]]; then
+if [[ "$TOTAL_GPU" -gt 1 && "$FSDP" == "True" ]]; then
   #Use FSDP2 when multi GPU available
   FSDP_ARGS="--fsdp 'full_shard' --fsdp_config ${SCRIPT_DIR}/fsdp_config.json"
 else
@@ -251,6 +273,8 @@ CMD="accelerate launch $MULTI_NODE_ARGS --mixed_precision bf16 ${SCRIPT_DIR}/mai
     --ar_validate_steps $AR_VALIDATE_STEPS \
     --mix_hidden_states $MIX_HIDDEN_STATES \
     --disable_torch_compile $DISABLE_TORCH_COMPILE \
+    --use_fake_base_for_offline $USE_FAKE_BASE_FOR_OFFLINE \
+    --trust_remote_code $TRUST_REMOTE_CODE \
     $DRAFT_VOCAB_CACHE_ARGS \
     $VLM_ARGS \
     $OFFLINE_TRAINING_ARGS \
