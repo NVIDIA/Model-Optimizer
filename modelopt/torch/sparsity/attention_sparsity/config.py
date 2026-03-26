@@ -18,7 +18,7 @@
 from collections.abc import Callable
 from typing import Any
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 
@@ -96,6 +96,39 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
         ),
     )
 
+    sparsity_n: int = ModeloptField(
+        default=2,
+        title="N in N:M sparsity.",
+        description=(
+            "Keep top-N of every M attention scores. Only used by triton_sparse_softmax. "
+            "Set to 0 to disable sparsity."
+        ),
+    )
+
+    sparsity_m: int = ModeloptField(
+        default=4,
+        title="M in N:M sparsity.",
+        description="Group size for N:M sparsity (4 or 8). Only used by triton_sparse_softmax.",
+    )
+
+    num_sink_tokens: int = ModeloptField(
+        default=0,
+        title="Number of sink tokens.",
+        description=(
+            "KV positions before this index are kept dense (attention sinks). "
+            "Absolute token count. Only used by triton_sparse_softmax."
+        ),
+    )
+
+    dense_window_size: int = ModeloptField(
+        default=64,
+        title="Dense window size in tokens.",
+        description=(
+            "Tokens near the query diagonal kept dense (local attention window). "
+            "Absolute token count. Default 64. Only used by triton_sparse_softmax."
+        ),
+    )
+
     @field_validator("method")
     @classmethod
     def validate_method(cls, v):
@@ -114,6 +147,38 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
                 f"attn_implementation='eager'), 'triton' (requires "
                 f"attn_implementation='modelopt_triton')."
             )
+        return v
+
+    @field_validator("sparsity_m")
+    @classmethod
+    def validate_sparsity_m(cls, v):
+        """Validate sparsity_m is 4 or 8."""
+        if v not in (4, 8):
+            raise ValueError(f"sparsity_m must be 4 or 8, got {v}")
+        return v
+
+    @field_validator("sparsity_n")
+    @classmethod
+    def validate_sparsity_n(cls, v):
+        """Validate sparsity_n is non-negative."""
+        if v < 0:
+            raise ValueError(f"sparsity_n must be >= 0, got {v}")
+        return v
+
+    @field_validator("num_sink_tokens")
+    @classmethod
+    def validate_num_sink_tokens(cls, v):
+        """Validate num_sink_tokens is non-negative."""
+        if v < 0:
+            raise ValueError(f"num_sink_tokens must be >= 0, got {v}")
+        return v
+
+    @field_validator("dense_window_size")
+    @classmethod
+    def validate_dense_window_size(cls, v):
+        """Validate dense_window_size is non-negative."""
+        if v < 0:
+            raise ValueError(f"dense_window_size must be >= 0, got {v}")
         return v
 
     @field_validator("br", "bc")
@@ -159,6 +224,18 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
                 f"got prefill={lengths['prefill']}, decode={lengths['decode']}"
             )
         return v
+
+    @model_validator(mode="after")
+    def validate_sparsity_n_vs_m(self):
+        """Validate sparsity_n is within the supported range for the given sparsity_m."""
+        if self.sparsity_n > 0:
+            max_n = 3 if self.sparsity_m == 4 else self.sparsity_m - 1
+            if self.sparsity_n > max_n:
+                raise ValueError(
+                    f"sparsity_n={self.sparsity_n} exceeds max for sparsity_m={self.sparsity_m}. "
+                    f"Valid range: 1..{max_n}"
+                )
+        return self
 
 
 class CalibrationConfig(ModeloptBaseConfig):
@@ -434,9 +511,27 @@ SKIP_SOFTMAX_CALIB = {
 }
 
 
+# Default N:M sparse softmax configuration
+SPARSE_SOFTMAX_DEFAULT = {
+    "sparse_cfg": {
+        "*attn*": {
+            "method": "triton_sparse_softmax",
+            "sparsity_n": 2,
+            "sparsity_m": 4,
+            "num_sink_tokens": 0,
+            "dense_window_size": 64,
+            "backend": "triton",
+            "enable": True,
+        },
+        "default": {"enable": False},
+    },
+}
+
+
 __all__ = [
     "SKIP_SOFTMAX_CALIB",
     "SKIP_SOFTMAX_DEFAULT",
+    "SPARSE_SOFTMAX_DEFAULT",
     "CalibrationConfig",
     "FlashSkipSoftmaxConfig",
     "SparseAttentionAttributeConfig",

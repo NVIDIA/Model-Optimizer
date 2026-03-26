@@ -13,11 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GPU tests for Triton flash attention kernel."""
+"""GPU tests for Triton flash attention kernel (dense path)."""
 
 import pytest
 import torch
 import torch.nn.functional as F
+from conftest import make_qkv, make_varlen_meta, sdpa_reference
 
 pytestmark = [
     pytest.mark.filterwarnings("ignore::UserWarning"),
@@ -34,45 +35,14 @@ if TRITON_KERNEL_AVAILABLE:
         register_triton_attention()
 
 
-def _sdpa_reference(q, k, v, b_start_loc, b_seq_len):
-    """SDPA causal reference. Supports GQA. Returns [total_tokens, num_heads, dim]."""
-    batch = b_seq_len.shape[0]
-    num_q, num_kv = q.shape[1], k.shape[1]
-    parts = []
-    for b in range(batch):
-        s, n = int(b_start_loc[b].item()), int(b_seq_len[b].item())
-        qb = q[s : s + n].unsqueeze(0).permute(0, 2, 1, 3)
-        kb = k[s : s + n].unsqueeze(0).permute(0, 2, 1, 3)
-        vb = v[s : s + n].unsqueeze(0).permute(0, 2, 1, 3)
-        if num_q != num_kv:
-            r = num_q // num_kv
-            kb = kb.repeat_interleave(r, dim=1)
-            vb = vb.repeat_interleave(r, dim=1)
-        ob = F.scaled_dot_product_attention(qb, kb, vb, is_causal=True)
-        parts.append(ob.permute(0, 2, 1, 3).squeeze(0))
-    return torch.cat(parts, dim=0)
-
-
-@pytest.fixture(scope="module")
-def tiny_llama_dir(tmp_path_factory):
-    """Tiny Llama: 2 layers, 64 hidden, 4 q-heads, 2 kv-heads, head_dim=16."""
-    from _test_utils.torch.transformers_models import create_tiny_llama_dir
-
-    return create_tiny_llama_dir(
-        tmp_path_factory.mktemp("tiny_llama"),
-        with_tokenizer=True,
-        num_hidden_layers=2,
-        hidden_size=64,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        intermediate_size=64,
-        max_position_embeddings=64,
-    )
+# ---------------------------------------------------------------------------
+# Forward correctness
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
-class TestTritonFaVsSdpa:
-    """Triton flash attention matches PyTorch SDPA for prefill and decode."""
+class TestForward:
+    """Forward pass correctness for dense attention."""
 
     @pytest.mark.parametrize(
         ("dtype", "num_heads", "num_kv_heads", "head_dim"),
@@ -84,42 +54,27 @@ class TestTritonFaVsSdpa:
         ids=["fp32_mha", "fp16_gqa", "bf16_gqa_hdim128"],
     )
     def test_prefill_matches_sdpa(self, dtype, num_heads, num_kv_heads, head_dim):
-        """Prefill matches SDPA."""
+        """Dense prefill matches SDPA."""
         seq_lens = [8, 12]
         total = sum(seq_lens)
         scale = 1.0 / (head_dim**0.5)
 
         torch.manual_seed(123)
-        q = torch.randn(total, num_heads, head_dim, device="cuda", dtype=dtype)
-        k = torch.randn(total, num_kv_heads, head_dim, device="cuda", dtype=dtype)
-        v = torch.randn(total, num_kv_heads, head_dim, device="cuda", dtype=dtype)
-        locs = torch.tensor([0, seq_lens[0]], device="cuda", dtype=torch.int32)
-        lens = torch.tensor(seq_lens, device="cuda", dtype=torch.int32)
+        q, k, v = make_qkv(total, num_heads, num_kv_heads, head_dim, dtype=dtype)
+        locs, lens = make_varlen_meta(seq_lens)
 
-        o = attention(
-            q,
-            k,
-            v,
-            b_start_loc=locs,
-            b_seq_len=lens,
-            max_input_len=max(seq_lens),
-            is_causal=True,
-            softmax_scale=scale,
-        )
-        torch.testing.assert_close(o, _sdpa_reference(q, k, v, locs, lens), rtol=1e-3, atol=1e-3)
+        o = attention(q, k, v, locs, lens, max(seq_lens), softmax_scale=scale)
+        torch.testing.assert_close(o, sdpa_reference(q, k, v, locs, lens), rtol=1e-3, atol=1e-3)
 
     def test_decode_matches_sdpa(self):
-        """Decode matches SDPA."""
+        """Dense decode matches SDPA."""
         batch = 2
-        seq_lens_k = [5, 9]  # KV lengths (context + current token)
+        seq_lens_k = [5, 9]
         num_heads, num_kv_heads, head_dim = 4, 2, 32
         scale = 1.0 / (head_dim**0.5)
 
         torch.manual_seed(103)
-        # Q: one token per batch element -> flat [batch, num_heads, head_dim]
         q_flat = torch.randn(batch, num_heads, head_dim, device="cuda", dtype=torch.float32)
-
-        # K/V: variable-length, packed into flat tensors
         total_kv = sum(seq_lens_k)
         k_flat = torch.randn(total_kv, num_kv_heads, head_dim, device="cuda", dtype=torch.float32)
         v_flat = torch.randn(total_kv, num_kv_heads, head_dim, device="cuda", dtype=torch.float32)
@@ -136,9 +91,9 @@ class TestTritonFaVsSdpa:
             q_flat,
             k_flat,
             v_flat,
-            b_start_loc=b_start_loc_q,
-            b_seq_len=b_seq_len_q,
-            max_input_len=1,
+            b_start_loc_q,
+            b_seq_len_q,
+            1,
             is_causal=False,
             softmax_scale=scale,
             b_start_loc_k=b_start_loc_k,
@@ -149,7 +104,7 @@ class TestTritonFaVsSdpa:
         for i in range(batch):
             sl = seq_lens_k[i]
             s = cumsum[i]
-            qb = q_flat[i : i + 1].unsqueeze(2)  # [1, heads, 1, dim]
+            qb = q_flat[i : i + 1].unsqueeze(2)
             kb = k_flat[s : s + sl].unsqueeze(0).permute(0, 2, 1, 3)
             vb = v_flat[s : s + sl].unsqueeze(0).permute(0, 2, 1, 3)
             kb = kb.repeat_interleave(num_heads // num_kv_heads, dim=1)
@@ -157,10 +112,152 @@ class TestTritonFaVsSdpa:
             ref = F.scaled_dot_product_attention(qb, kb, vb, is_causal=False).squeeze(2)
             torch.testing.assert_close(out[i : i + 1], ref, rtol=1e-3, atol=1e-3)
 
+    def test_sparse_disabled_matches_dense(self):
+        """sparsity_n=0 produces bit-identical output to default (dense)."""
+        seq_lens = [128, 128]
+        total = sum(seq_lens)
+        scale = 1.0 / (64**0.5)
+
+        torch.manual_seed(99)
+        q, k, v = make_qkv(total, 4, 2, 64)
+        locs, lens = make_varlen_meta(seq_lens)
+
+        out_dense = attention(q, k, v, locs, lens, 128, softmax_scale=scale)
+        out_n0 = attention(q, k, v, locs, lens, 128, softmax_scale=scale, sparsity_n=0)
+        assert torch.equal(out_dense, out_n0)
+
+
+# ---------------------------------------------------------------------------
+# Backward correctness (dense)
+# ---------------------------------------------------------------------------
+
 
 @pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
-class TestSparseAttentionIntegration:
-    """HF model + mtsa.sparsify integration."""
+class TestBackward:
+    """Backward pass gradient correctness for dense attention."""
+
+    def _sdpa_backward_ref(self, q, k, v, scale, is_causal=True):
+        """Run SDPA forward+backward, return gradients."""
+        q_ref = q.clone().unsqueeze(0).permute(0, 2, 1, 3).requires_grad_(True)
+        k_ref = k.clone().unsqueeze(0).permute(0, 2, 1, 3).requires_grad_(True)
+        v_ref = v.clone().unsqueeze(0).permute(0, 2, 1, 3).requires_grad_(True)
+        num_q, num_kv = q_ref.shape[1], k_ref.shape[1]
+        if num_q != num_kv:
+            r = num_q // num_kv
+            k_exp = k_ref.repeat_interleave(r, dim=1)
+            v_exp = v_ref.repeat_interleave(r, dim=1)
+        else:
+            k_exp, v_exp = k_ref, v_ref
+        o_ref = F.scaled_dot_product_attention(
+            q_ref, k_exp, v_exp, is_causal=is_causal, scale=scale
+        )
+        o_ref.sum().backward()
+        dq = q_ref.grad.permute(0, 2, 1, 3).squeeze(0)
+        dk = k_ref.grad.permute(0, 2, 1, 3).squeeze(0)
+        dv = v_ref.grad.permute(0, 2, 1, 3).squeeze(0)
+        return dq.detach(), dk.detach(), dv.detach()
+
+    def test_dense_causal_matches_sdpa(self):
+        """dQ, dK, dV match SDPA for causal self-attention."""
+        seq_len, num_heads, num_kv_heads, head_dim = 16, 2, 2, 32
+        scale = 1.0 / (head_dim**0.5)
+
+        torch.manual_seed(42)
+        q, k, v = make_qkv(seq_len, num_heads, num_kv_heads, head_dim, dtype=torch.float32)
+        q.requires_grad_(True)
+        k.requires_grad_(True)
+        v.requires_grad_(True)
+        locs, lens = make_varlen_meta([seq_len])
+
+        attention(q, k, v, locs, lens, seq_len, softmax_scale=scale).sum().backward()
+        dq_ref, dk_ref, dv_ref = self._sdpa_backward_ref(q.detach(), k.detach(), v.detach(), scale)
+
+        torch.testing.assert_close(q.grad, dq_ref, rtol=5e-3, atol=5e-3)
+        torch.testing.assert_close(k.grad, dk_ref, rtol=5e-3, atol=5e-3)
+        torch.testing.assert_close(v.grad, dv_ref, rtol=5e-3, atol=5e-3)
+
+    def test_dense_gqa_matches_sdpa(self):
+        """Dense backward with GQA (4 q-heads, 2 kv-heads), seq_len=256."""
+        seq_len, num_heads, num_kv_heads, head_dim = 256, 4, 2, 32
+        scale = 1.0 / (head_dim**0.5)
+
+        torch.manual_seed(43)
+        q, k, v = make_qkv(seq_len, num_heads, num_kv_heads, head_dim, dtype=torch.float32)
+        q.requires_grad_(True)
+        k.requires_grad_(True)
+        v.requires_grad_(True)
+        locs, lens = make_varlen_meta([seq_len])
+
+        attention(q, k, v, locs, lens, seq_len, softmax_scale=scale).sum().backward()
+        dq_ref, dk_ref, dv_ref = self._sdpa_backward_ref(q.detach(), k.detach(), v.detach(), scale)
+
+        torch.testing.assert_close(q.grad, dq_ref, rtol=5e-3, atol=5e-3)
+        torch.testing.assert_close(k.grad, dk_ref, rtol=5e-3, atol=5e-3)
+        torch.testing.assert_close(v.grad, dv_ref, rtol=5e-3, atol=5e-3)
+
+    def test_dense_multi_batch_variable_length(self):
+        """Multi-batch variable-length backward matches per-sample SDPA."""
+        seq_lens = [8, 12]
+        total = sum(seq_lens)
+        num_heads, num_kv_heads, head_dim = 2, 2, 32
+        scale = 1.0 / (head_dim**0.5)
+
+        torch.manual_seed(45)
+        q, k, v = make_qkv(total, num_heads, num_kv_heads, head_dim, dtype=torch.float32)
+        q.requires_grad_(True)
+        k.requires_grad_(True)
+        v.requires_grad_(True)
+        locs, lens = make_varlen_meta(seq_lens)
+
+        attention(q, k, v, locs, lens, max(seq_lens), softmax_scale=scale).sum().backward()
+
+        dq_ref = torch.zeros_like(q)
+        dk_ref = torch.zeros_like(k)
+        dv_ref = torch.zeros_like(v)
+        for b in range(len(seq_lens)):
+            s, n = int(locs[b].item()), seq_lens[b]
+            dq_b, dk_b, dv_b = self._sdpa_backward_ref(
+                q.detach()[s : s + n],
+                k.detach()[s : s + n],
+                v.detach()[s : s + n],
+                scale,
+            )
+            dq_ref[s : s + n] = dq_b
+            dk_ref[s : s + n] = dk_b
+            dv_ref[s : s + n] = dv_b
+
+        torch.testing.assert_close(q.grad, dq_ref, rtol=5e-3, atol=5e-3)
+        torch.testing.assert_close(k.grad, dk_ref, rtol=5e-3, atol=5e-3)
+        torch.testing.assert_close(v.grad, dv_ref, rtol=5e-3, atol=5e-3)
+
+    def test_dense_longer_sequences(self):
+        """Dense backward with seq_len=512, GQA, exercises multi-tile loops."""
+        seq_len, num_heads, num_kv_heads, head_dim = 512, 4, 2, 64
+        scale = 1.0 / (head_dim**0.5)
+
+        torch.manual_seed(49)
+        q, k, v = make_qkv(seq_len, num_heads, num_kv_heads, head_dim, dtype=torch.float32)
+        q.requires_grad_(True)
+        k.requires_grad_(True)
+        v.requires_grad_(True)
+        locs, lens = make_varlen_meta([seq_len])
+
+        attention(q, k, v, locs, lens, seq_len, softmax_scale=scale).sum().backward()
+        dq_ref, dk_ref, dv_ref = self._sdpa_backward_ref(q.detach(), k.detach(), v.detach(), scale)
+
+        torch.testing.assert_close(q.grad, dq_ref, rtol=5e-3, atol=5e-3)
+        torch.testing.assert_close(k.grad, dk_ref, rtol=5e-3, atol=5e-3)
+        torch.testing.assert_close(v.grad, dv_ref, rtol=5e-3, atol=5e-3)
+
+
+# ---------------------------------------------------------------------------
+# HuggingFace integration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
+class TestHFIntegration:
+    """HF model integration with Triton attention backend."""
 
     def test_triton_matches_eager(self, tiny_llama_dir):
         """Triton attention produces same logits and generated tokens as eager."""
@@ -172,7 +269,6 @@ class TestSparseAttentionIntegration:
             tok.pad_token_id = tok.eos_token_id
         ids = tok("The capital of France is", return_tensors="pt").input_ids.to("cuda")
 
-        # Eager baseline
         model_eager = AutoModelForCausalLM.from_pretrained(
             tiny_llama_dir,
             attn_implementation="eager",
@@ -190,7 +286,6 @@ class TestSparseAttentionIntegration:
             )
         del model_eager
 
-        # Triton
         model_triton = AutoModelForCausalLM.from_pretrained(
             tiny_llama_dir,
             attn_implementation="modelopt_triton",
@@ -207,15 +302,13 @@ class TestSparseAttentionIntegration:
                 pad_token_id=tok.pad_token_id,
             )
 
-        # Logits should be close (bf16 tolerance)
         torch.testing.assert_close(logits_triton, logits_eager, rtol=2e-2, atol=2e-2)
-        # Generated tokens must be identical (greedy decoding is deterministic)
         assert torch.equal(out_triton, out_eager), (
             f"Generated tokens differ:\n  eager:  {out_eager}\n  triton: {out_triton}"
         )
 
     def test_triton_padded_batch(self, tiny_llama_dir):
-        """Padded batch (2D attention mask) produces valid logits for each sequence."""
+        """Padded batch produces valid logits."""
         pytest.importorskip("transformers")
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -240,200 +333,61 @@ class TestSparseAttentionIntegration:
             logits = model(**inputs).logits
         assert not torch.isnan(logits).any() and not torch.isinf(logits).any()
 
+    def test_sparse_nm_via_sparsify(self, tiny_llama_dir):
+        """mtsa.sparsify() with N:M sparse softmax produces finite logits that differ from dense."""
+        pytest.importorskip("transformers")
+        from transformers import AutoModelForCausalLM, AutoTokenizer
 
-@pytest.mark.skipif(not TRITON_KERNEL_AVAILABLE, reason="Need CUDA + triton")
-class TestBackward:
-    """Backward pass gradient correctness tests."""
+        import modelopt.torch.sparsity.attention_sparsity as mtsa
 
-    def _sdpa_backward_ref(self, q, k, v, scale, is_causal=True):
-        """Run SDPA forward+backward, return output and gradients."""
-        q_ref = q.clone().unsqueeze(0).permute(0, 2, 1, 3).requires_grad_(True)
-        k_ref = k.clone().unsqueeze(0).permute(0, 2, 1, 3).requires_grad_(True)
-        v_ref = v.clone().unsqueeze(0).permute(0, 2, 1, 3).requires_grad_(True)
-        num_q, num_kv = q_ref.shape[1], k_ref.shape[1]
-        if num_q != num_kv:
-            r = num_q // num_kv
-            k_exp = k_ref.repeat_interleave(r, dim=1)
-            v_exp = v_ref.repeat_interleave(r, dim=1)
-        else:
-            k_exp, v_exp = k_ref, v_ref
-        o_ref = F.scaled_dot_product_attention(
-            q_ref, k_exp, v_exp, is_causal=is_causal, scale=scale
+        tok = AutoTokenizer.from_pretrained(tiny_llama_dir)
+        if tok.pad_token_id is None:
+            tok.pad_token_id = tok.eos_token_id
+        # Use a long input (fill max_position_embeddings=64) so sparsity has tiles to prune
+        ids = torch.randint(1, tok.vocab_size, (1, 64), device="cuda")
+
+        # Dense baseline (triton backend, no sparsity)
+        model_dense = AutoModelForCausalLM.from_pretrained(
+            tiny_llama_dir,
+            attn_implementation="modelopt_triton",
+            torch_dtype=torch.bfloat16,
+            device_map="cuda",
         )
-        o_ref.sum().backward()
-        dq = q_ref.grad.permute(0, 2, 1, 3).squeeze(0)
-        dk = k_ref.grad.permute(0, 2, 1, 3).squeeze(0)
-        dv = v_ref.grad.permute(0, 2, 1, 3).squeeze(0)
-        return o_ref.permute(0, 2, 1, 3).squeeze(0).detach(), dq.detach(), dk.detach(), dv.detach()
+        model_dense.eval()
+        with torch.no_grad():
+            logits_dense = model_dense(input_ids=ids).logits
+        del model_dense
 
-    def test_backward_causal_matches_sdpa(self):
-        """dQ, dK, dV match SDPA backward for causal self-attention."""
-        from modelopt.torch.kernels import attention
-
-        seq_len = 16
-        num_heads, num_kv_heads, head_dim = 2, 2, 32
-        scale = 1.0 / (head_dim**0.5)
-
-        torch.manual_seed(42)
-        q = torch.randn(
-            seq_len, num_heads, head_dim, device="cuda", dtype=torch.float32, requires_grad=True
+        # Sparse via mtsa.sparsify() with dense_window_size=0 to force sparsity on all tiles
+        sparse_cfg = {
+            "sparse_cfg": {
+                "*attn*": {
+                    "method": "triton_sparse_softmax",
+                    "sparsity_n": 2,
+                    "sparsity_m": 4,
+                    "num_sink_tokens": 0,
+                    "dense_window_size": 0,
+                    "backend": "triton",
+                    "enable": True,
+                },
+                "default": {"enable": False},
+            },
+        }
+        model_sparse = AutoModelForCausalLM.from_pretrained(
+            tiny_llama_dir,
+            torch_dtype=torch.bfloat16,
+            device_map="cuda",
         )
-        k = torch.randn(
-            seq_len, num_kv_heads, head_dim, device="cuda", dtype=torch.float32, requires_grad=True
+        mtsa.sparsify(model_sparse, sparse_cfg)
+        assert model_sparse.config._attn_implementation == "modelopt_triton"
+        model_sparse.eval()
+        with torch.no_grad():
+            logits_sparse = model_sparse(input_ids=ids).logits
+
+        # Sparse output should be finite
+        assert not torch.isnan(logits_sparse).any(), "NaN in sparse logits"
+        assert not torch.isinf(logits_sparse).any(), "Inf in sparse logits"
+        # Sparse output should differ from dense (sparsity changes attention)
+        assert not torch.allclose(logits_sparse, logits_dense, atol=1e-2), (
+            "Sparse logits identical to dense — sparsity may not be applied"
         )
-        v = torch.randn(
-            seq_len, num_kv_heads, head_dim, device="cuda", dtype=torch.float32, requires_grad=True
-        )
-
-        o = attention(
-            q,
-            k,
-            v,
-            b_start_loc=torch.tensor([0], device="cuda", dtype=torch.int32),
-            b_seq_len=torch.tensor([seq_len], device="cuda", dtype=torch.int32),
-            max_input_len=seq_len,
-            is_causal=True,
-            softmax_scale=scale,
-        )
-        o.sum().backward()
-
-        _, dq_ref, dk_ref, dv_ref = self._sdpa_backward_ref(
-            q.detach(), k.detach(), v.detach(), scale, is_causal=True
-        )
-
-        torch.testing.assert_close(q.grad, dq_ref, rtol=5e-3, atol=5e-3)
-        torch.testing.assert_close(k.grad, dk_ref, rtol=5e-3, atol=5e-3)
-        torch.testing.assert_close(v.grad, dv_ref, rtol=5e-3, atol=5e-3)
-
-    def test_backward_gqa(self):
-        """Backward with GQA (4 q-heads, 2 kv-heads), multi-tile (seq_len=256)."""
-        from modelopt.torch.kernels import attention
-
-        seq_len = 256
-        num_heads, num_kv_heads, head_dim = 4, 2, 32
-        scale = 1.0 / (head_dim**0.5)
-
-        torch.manual_seed(43)
-        q = torch.randn(
-            seq_len, num_heads, head_dim, device="cuda", dtype=torch.float32, requires_grad=True
-        )
-        k = torch.randn(
-            seq_len, num_kv_heads, head_dim, device="cuda", dtype=torch.float32, requires_grad=True
-        )
-        v = torch.randn(
-            seq_len, num_kv_heads, head_dim, device="cuda", dtype=torch.float32, requires_grad=True
-        )
-
-        o = attention(
-            q,
-            k,
-            v,
-            b_start_loc=torch.tensor([0], device="cuda", dtype=torch.int32),
-            b_seq_len=torch.tensor([seq_len], device="cuda", dtype=torch.int32),
-            max_input_len=seq_len,
-            is_causal=True,
-            softmax_scale=scale,
-        )
-        o.sum().backward()
-
-        _, dq_ref, dk_ref, dv_ref = self._sdpa_backward_ref(
-            q.detach(), k.detach(), v.detach(), scale, is_causal=True
-        )
-
-        torch.testing.assert_close(q.grad, dq_ref, rtol=5e-3, atol=5e-3)
-        torch.testing.assert_close(k.grad, dk_ref, rtol=5e-3, atol=5e-3)
-        torch.testing.assert_close(v.grad, dv_ref, rtol=5e-3, atol=5e-3)
-
-    def test_backward_multi_batch_variable_length(self):
-        """Multi-batch variable-length causal backward matches per-sample SDPA."""
-        from modelopt.torch.kernels import attention
-
-        seq_lens = [8, 12]
-        total = sum(seq_lens)
-        num_heads, num_kv_heads, head_dim = 2, 2, 32
-        scale = 1.0 / (head_dim**0.5)
-
-        torch.manual_seed(45)
-        q = torch.randn(
-            total, num_heads, head_dim, device="cuda", dtype=torch.float32, requires_grad=True
-        )
-        k = torch.randn(
-            total, num_kv_heads, head_dim, device="cuda", dtype=torch.float32, requires_grad=True
-        )
-        v = torch.randn(
-            total, num_kv_heads, head_dim, device="cuda", dtype=torch.float32, requires_grad=True
-        )
-        locs = torch.tensor([0, seq_lens[0]], device="cuda", dtype=torch.int32)
-        lens = torch.tensor(seq_lens, device="cuda", dtype=torch.int32)
-
-        o = attention(
-            q,
-            k,
-            v,
-            b_start_loc=locs,
-            b_seq_len=lens,
-            max_input_len=max(seq_lens),
-            is_causal=True,
-            softmax_scale=scale,
-        )
-        o.sum().backward()
-
-        # Per-sample SDPA reference
-        dq_ref = torch.zeros_like(q)
-        dk_ref = torch.zeros_like(k)
-        dv_ref = torch.zeros_like(v)
-        for b in range(len(seq_lens)):
-            s, n = int(locs[b].item()), seq_lens[b]
-            _, dq_b, dk_b, dv_b = self._sdpa_backward_ref(
-                q.detach()[s : s + n],
-                k.detach()[s : s + n],
-                v.detach()[s : s + n],
-                scale,
-                is_causal=True,
-            )
-            dq_ref[s : s + n] = dq_b
-            dk_ref[s : s + n] = dk_b
-            dv_ref[s : s + n] = dv_b
-
-        torch.testing.assert_close(q.grad, dq_ref, rtol=5e-3, atol=5e-3)
-        torch.testing.assert_close(k.grad, dk_ref, rtol=5e-3, atol=5e-3)
-        torch.testing.assert_close(v.grad, dv_ref, rtol=5e-3, atol=5e-3)
-
-    def test_backward_longer_sequences(self):
-        """Backward with seq_len=512, GQA, exercises multi-tile loops."""
-        from modelopt.torch.kernels import attention
-
-        seq_len = 512
-        num_heads, num_kv_heads, head_dim = 4, 2, 64
-        scale = 1.0 / (head_dim**0.5)
-
-        torch.manual_seed(49)
-        q = torch.randn(
-            seq_len, num_heads, head_dim, device="cuda", dtype=torch.float32, requires_grad=True
-        )
-        k = torch.randn(
-            seq_len, num_kv_heads, head_dim, device="cuda", dtype=torch.float32, requires_grad=True
-        )
-        v = torch.randn(
-            seq_len, num_kv_heads, head_dim, device="cuda", dtype=torch.float32, requires_grad=True
-        )
-
-        o = attention(
-            q,
-            k,
-            v,
-            b_start_loc=torch.tensor([0], device="cuda", dtype=torch.int32),
-            b_seq_len=torch.tensor([seq_len], device="cuda", dtype=torch.int32),
-            max_input_len=seq_len,
-            is_causal=True,
-            softmax_scale=scale,
-        )
-        o.sum().backward()
-
-        _, dq_ref, dk_ref, dv_ref = self._sdpa_backward_ref(
-            q.detach(), k.detach(), v.detach(), scale, is_causal=True
-        )
-
-        torch.testing.assert_close(q.grad, dq_ref, rtol=5e-3, atol=5e-3)
-        torch.testing.assert_close(k.grad, dk_ref, rtol=5e-3, atol=5e-3)
-        torch.testing.assert_close(v.grad, dv_ref, rtol=5e-3, atol=5e-3)
