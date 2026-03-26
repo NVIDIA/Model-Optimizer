@@ -31,6 +31,7 @@ from modelopt.torch.export import export_hf_checkpoint
 from modelopt.torch.sparsity.attention_sparsity.config import (
     SKIP_SOFTMAX_CALIB,
     SKIP_SOFTMAX_DEFAULT,
+    SPARSE_SOFTMAX_DEFAULT,
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 
@@ -43,6 +44,7 @@ mto.enable_huggingface_checkpointing()
 SPARSE_ATTN_CFG_CHOICES = {
     "skip_softmax": SKIP_SOFTMAX_DEFAULT,
     "skip_softmax_calib": SKIP_SOFTMAX_CALIB,
+    "sparse_softmax": SPARSE_SOFTMAX_DEFAULT,
 }
 
 
@@ -168,9 +170,10 @@ def main(args):
 
     # Apply CLI overrides to sparse_cfg
     sparse_cfg = sparse_config.get("sparse_cfg", {})
-    for layer_cfg in sparse_cfg.values():
-        if isinstance(layer_cfg, dict) and "method" in layer_cfg:
-            layer_cfg["backend"] = args.backend
+    if args.backend is not None:
+        for layer_cfg in sparse_cfg.values():
+            if isinstance(layer_cfg, dict) and "method" in layer_cfg:
+                layer_cfg["backend"] = args.backend
     if args.target_sparse_ratio is not None:
         calib = sparse_cfg.setdefault("calibration", {})
         assert isinstance(calib, dict)
@@ -240,9 +243,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--backend",
         type=str,
-        default="pytorch",
+        default=None,
         choices=["pytorch", "triton"],
-        help="Backend for sparse attention (default: pytorch). 'triton' uses the fused Triton kernel.",
+        help="Backend for sparse attention. Overrides the config default if set. "
+        "'triton' uses the fused Triton kernel.",
     )
 
     # Sequence length arguments

@@ -227,9 +227,9 @@ class SparseAttentionAttributeConfig(ModeloptBaseConfig):
 
     @model_validator(mode="after")
     def validate_sparsity_n_vs_m(self):
-        """Validate sparsity_n < sparsity_m when sparsity is enabled."""
+        """Validate sparsity_n is within the supported range for the given sparsity_m."""
         if self.sparsity_n > 0:
-            max_n = 3 if self.sparsity_m == 4 else 4
+            max_n = 3 if self.sparsity_m == 4 else self.sparsity_m - 1
             if self.sparsity_n > max_n:
                 raise ValueError(
                     f"sparsity_n={self.sparsity_n} exceeds max for sparsity_m={self.sparsity_m}. "
