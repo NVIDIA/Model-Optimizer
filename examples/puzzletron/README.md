@@ -235,7 +235,7 @@ The plot shows how token accuracy changes with different compression rates. High
 Evaluate AnyModel checkpoints using [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) directly.
 
 ```bash
-python examples/puzzletron/evaluation/lm_eval_anymodel.py \
+python examples/llm_eval/lm_eval_hf.py \
     --model hf \
     --model_args pretrained=path/to/checkpoint,dtype=bfloat16,parallelize=True \
     --tasks mmlu \

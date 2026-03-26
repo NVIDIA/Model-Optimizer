@@ -96,7 +96,6 @@ repos:
               examples/llm_eval/modeling.py|
               examples/llm_qat/main.py|
               examples/llm_sparsity/weight_sparsity/finetune.py|
-              examples/puzzletron/evaluation/lm_eval_anymodel.py|
               examples/specdec_bench/specdec_bench/models/specbench_medusa.py|
               examples/speculative_decoding/main.py|
               examples/speculative_decoding/medusa_utils.py|
