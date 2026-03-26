@@ -56,7 +56,7 @@ def export_hf_vllm_fq_checkpoint(
     input_quantizers_folded_pqs = (
         set()
     )  # keys for input_quantizers where pre_quant_scale was folded
-    with torch.no_grad():
+    with torch.inference_mode():
         for module_name, module in model.named_modules():
             if not isinstance(module, QuantModule):
                 continue
@@ -76,7 +76,7 @@ def export_hf_vllm_fq_checkpoint(
                 )
                 if sd_key in state_dict:
                     w = state_dict[sd_key]
-                    w_quant = quantizer(w.float()).to(w.dtype).detach()
+                    w_quant = quantizer(w.float()).to(w.dtype).cpu()
                     # Fold pre_quant_scale: (x*s)@fake_quant(W) = x@(fake_quant(W)*s)
                     # Only valid when input_quantizer does NOT fake-quant activations. If it does
                     # fake_quant(x*s), the non-linearity prevents folding s into W.
@@ -86,7 +86,7 @@ def export_hf_vllm_fq_checkpoint(
                         if (
                             hasattr(inp_q, "_pre_quant_scale")
                             and inp_q._pre_quant_scale is not None
-                            and (inp_q._disabled or not inp_q._if_quant)
+                            and inp_q._disabled
                         ):
                             scale = inp_q._pre_quant_scale.squeeze()
                             w_quant = (w_quant * scale[None, :]).to(w_quant.dtype)

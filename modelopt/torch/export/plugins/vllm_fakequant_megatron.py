@@ -25,7 +25,7 @@ import torch
 from modelopt.torch.export.model_config import QUANTIZATION_NONE
 from modelopt.torch.export.unified_export_megatron import GPTModelExporter
 from modelopt.torch.quantization.utils import get_quantizer_state_dict
-from modelopt.torch.utils.distributed import DistributedProcessGroup, barrier, is_master
+from modelopt.torch.utils.distributed import DistributedProcessGroup, is_master
 
 __all__ = ["export_mcore_gpt_to_hf_vllm_fq"]
 
@@ -66,7 +66,6 @@ def gather_mcore_vllm_fq_quantized_state_dict(
     )
     if is_master():
         torch.save(merged_quantizer_state_dict, Path(save_directory) / "quantizer_state.pth")
-    barrier()
 
 
 class VllmFqGPTModelExporter(GPTModelExporter):
