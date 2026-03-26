@@ -41,7 +41,14 @@ srun \
     --container-mounts="<data_root>:<data_root>" \
     --container-workdir="<workdir>" \
     --no-container-mount-home \
-    bash -c "<command>"
+    bash -c "
+        # Unset SLURM distributed env vars for single-process scripts (e.g., hf_ptq.py).
+        # srun sets WORLD_SIZE/LOCAL_RANK/etc. which cause PyTorch to init a process group
+        # and wrap tensors as DTensors, breaking NVFP4 export. Only needed for scripts that
+        # use device_map='auto' (not FSDP2/multinode which handle DTensors properly).
+        unset SLURM_PROCID SLURM_LOCALID SLURM_NTASKS WORLD_SIZE LOCAL_RANK RANK
+        <command>
+    "
 ```
 
 Submit and capture the job ID:
