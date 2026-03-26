@@ -379,6 +379,7 @@ class TestHFIntegration:
             device_map="cuda",
         )
         mtsa.sparsify(model_sparse, sparse_cfg)
+        assert model_sparse.config._attn_implementation == "modelopt_triton"
         model_sparse.eval()
         with torch.no_grad():
             logits_sparse = model_sparse(input_ids=ids).logits

@@ -107,6 +107,8 @@ def triton_attention_forward(
 
     # N:M sparse softmax — prefill only (decode should not sparsify KV)
     if not is_decode and getattr(module, "_apply_sparse_nm", False):
+        # _sparse_method_instance is set by SparseAttentionModule._init_sparse_method()
+        # in modelopt/torch/sparsity/attention_sparsity/sparse_attention.py
         method = getattr(module, "_sparse_method_instance", None)
         if method is not None:
             kw["sparsity_n"] = getattr(method, "sparsity_n", 2)

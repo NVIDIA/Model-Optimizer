@@ -156,6 +156,35 @@ def _apply_sparse_nm_to_qk_tile(
 
 
 # ---------------------------------------------------------------------------
+# Sink/window dense-region check
+# ---------------------------------------------------------------------------
+@triton.jit
+def _is_dense_region(
+    kv_start,
+    tile_q,
+    seq_len_q,
+    seq_len_kv,
+    BLOCK_M: tl.constexpr,
+    NUM_SINK_TOKENS: tl.constexpr,
+    DENSE_WINDOW_SIZE: tl.constexpr,
+):
+    """Check if a KV tile falls in a dense region (sink tokens or local window).
+
+    Uses absolute token positions so the result is BLOCK_N-independent,
+    ensuring forward and backward (which may use different BLOCK_N) agree.
+
+    Returns:
+        True if the tile should be kept dense (skip N:M sparsification).
+    """
+    is_sink = kv_start < NUM_SINK_TOKENS
+    causal_offset = seq_len_kv - seq_len_q
+    q_abs_pos = tile_q * BLOCK_M + causal_offset
+    token_distance = q_abs_pos - kv_start
+    is_local = (token_distance >= 0) and (token_distance < DENSE_WINDOW_SIZE)
+    return is_sink or is_local
+
+
+# ---------------------------------------------------------------------------
 # Masking helper
 # ---------------------------------------------------------------------------
 @triton.jit
@@ -278,15 +307,15 @@ def _attn_fwd(
 
         # --- Optional N:M sparse softmax ---
         if SPARSITY_N > 0:
-            # Check if this KV tile should be kept dense
-            # Token-level checks (BLOCK_N-independent so forward/backward agree)
-            is_sink = kv_start < NUM_SINK_TOKENS
-            # causal_offset handles chunked prefill: q starts at (seq_len_kv - seq_len_q)
-            causal_offset = seq_len_kv - seq_len_q
-            q_abs_pos = tile_q * BLOCK_M + causal_offset
-            token_distance = q_abs_pos - kv_start
-            is_local = (token_distance >= 0) and (token_distance < DENSE_WINDOW_SIZE)
-            if not is_sink and not is_local:
+            if not _is_dense_region(
+                kv_start,
+                tile_q,
+                seq_len_q,
+                seq_len_kv,
+                BLOCK_M,
+                NUM_SINK_TOKENS,
+                DENSE_WINDOW_SIZE,
+            ):
                 scores = _apply_sparse_nm_to_qk_tile(
                     scores, BLOCK_M, BLOCK_N, SPARSITY_N, SPARSITY_M
                 )
@@ -479,13 +508,15 @@ def _attn_bwd_dq(
 
         # Re-apply N:M sparse softmax to match forward pass
         if SPARSITY_N > 0:
-            # Token-level checks (BLOCK_N-independent so forward/backward agree)
-            is_sink = kv_start < NUM_SINK_TOKENS
-            causal_offset = seq_len_kv - seq_len_q
-            q_abs_pos = tile_q * BLOCK_M + causal_offset
-            token_distance = q_abs_pos - kv_start
-            is_local = (token_distance >= 0) and (token_distance < DENSE_WINDOW_SIZE)
-            if not is_sink and not is_local:
+            if not _is_dense_region(
+                kv_start,
+                tile_q,
+                seq_len_q,
+                seq_len_kv,
+                BLOCK_M,
+                NUM_SINK_TOKENS,
+                DENSE_WINDOW_SIZE,
+            ):
                 scores = _apply_sparse_nm_to_qk_tile(
                     scores, BLOCK_M, BLOCK_N, SPARSITY_N, SPARSITY_M
                 )
@@ -619,13 +650,15 @@ def _attn_bwd_dkdv(
 
             # Re-apply N:M sparse softmax to match forward pass
             if SPARSITY_N > 0:
-                # Token-level checks (BLOCK_N-independent so forward/backward agree)
-                is_sink = kv_start < NUM_SINK_TOKENS
-                causal_offset = seq_len_kv - seq_len_q
-                q_abs_pos = qi * BLOCK_M + causal_offset
-                token_distance = q_abs_pos - kv_start
-                is_local = (token_distance >= 0) and (token_distance < DENSE_WINDOW_SIZE)
-                if not is_sink and not is_local:
+                if not _is_dense_region(
+                    kv_start,
+                    qi,
+                    seq_len_q,
+                    seq_len_kv,
+                    BLOCK_M,
+                    NUM_SINK_TOKENS,
+                    DENSE_WINDOW_SIZE,
+                ):
                     scores = _apply_sparse_nm_to_qk_tile(
                         scores, BLOCK_M, BLOCK_N, SPARSITY_N, SPARSITY_M
                     )
