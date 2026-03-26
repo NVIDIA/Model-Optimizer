@@ -36,7 +36,7 @@ from modelopt.torch.utils import print_rank_0
 
 from ..config import QuantizeConfig
 from ..nn import TensorQuantizer
-from ..nn.modules.tensor_quantizer import NVFP4StaticAdaRoundQuantizer
+from ..nn.modules.tensor_quantizer import NVFP4StaticAdaRoundQuantizer, StaticBlockScaleQuantizer
 from ..utils import (
     calibrate_with_adapters,
     disable_lora_quantizers_in_config,
@@ -118,6 +118,25 @@ class AdaRoundTrainingArguments:
     )
 
 
+@dataclass
+class QuantErrorTrainingArguments:
+    """Training-time arguments for quantization error regularization.
+
+    After each optimizer step, computes MSE between quantized and original weights
+    and applies a manual gradient step to push weights toward quantized grid points.
+    The coefficient is linearly annealed from ``qerr_coeff_start`` to ``qerr_coeff_stop``.
+    """
+
+    qerr_coeff_start: float = field(
+        default=0.01,
+        metadata={"help": "Initial quantization error coefficient (low = permissive early)."},
+    )
+    qerr_coeff_stop: float = field(
+        default=0.1,
+        metadata={"help": "Final quantization error coefficient (high = strong regularization)."},
+    )
+
+
 class QuantizationArgumentsWithConfig(QuantizationArguments):
     """Quantization arguments for quantization aware training with config.
 
@@ -189,6 +208,8 @@ class QATTrainer(ModelOptHFTrainer):
         quant_args: General quantization arguments (quant_cfg, calib_size).
         adaround_args: AdaRound-specific training arguments (beta annealing, dist_loss_weight).
             When ``None``, the AdaRound auxiliary callback is a no-op.
+        qerr_args: Quantization error regularization arguments (coefficient annealing).
+            When ``None``, the quantization error callback is a no-op.
     """
 
     def __init__(
@@ -196,6 +217,7 @@ class QATTrainer(ModelOptHFTrainer):
         *args,
         quant_args: QuantizationArgumentsWithConfig | QuantizationArguments | None = None,
         adaround_args: AdaRoundTrainingArguments | None = None,
+        qerr_args: QuantErrorTrainingArguments | None = None,
         **kwargs,
     ):
         """Initialize the trainer with modelopt states."""
@@ -203,6 +225,7 @@ class QATTrainer(ModelOptHFTrainer):
 
         self.quant_args = quant_args
         self.adaround_args = adaround_args
+        self.qerr_args = qerr_args
         quant_cfg = None
         if quant_args is not None and getattr(quant_args, "quant_cfg", None):
             quant_cfg = (
@@ -259,12 +282,23 @@ class QATTrainer(ModelOptHFTrainer):
             getattr(self.model, "config", None), "dtype", None
         ) or getattr(getattr(self.model, "config", None), "torch_dtype", None)
 
+        if self.adaround_args is not None and self.qerr_args is not None:
+            raise ValueError("adaround_args and qerr_args are mutually exclusive.")
+
         if self._is_adaround():
             self._setup_adaround()
 
+        if self.qerr_args is not None:
+            self._setup_qerr()
+
+    def _setup_qerr(self):
+        """Set up quantization error regularization: register aux callback."""
+        self._qerr_pending_metrics = {}
+        self.add_callback(_QuantErrorAuxCallback(trainer=self))
+
     def _is_adaround(self):
-        """Return True if the model contains any AdaRound quantizers."""
-        return any(
+        """Return True if adaround_args is provided and model contains AdaRound quantizers."""
+        return self.adaround_args is not None and any(
             isinstance(m, NVFP4StaticAdaRoundQuantizer) and m._adaround_enabled
             for _, m in self.model.named_modules()
         )
@@ -276,10 +310,13 @@ class QATTrainer(ModelOptHFTrainer):
         self._freeze_adaround_weights()
 
     def log(self, logs, *args, **kwargs):
-        """Override to inject adaround metrics before standard logging."""
+        """Override to inject auxiliary metrics before standard logging."""
         if hasattr(self, "_adaround_pending_metrics") and self._adaround_pending_metrics:
             logs.update(self._adaround_pending_metrics)
             self._adaround_pending_metrics = {}
+        if hasattr(self, "_qerr_pending_metrics") and self._qerr_pending_metrics:
+            logs.update(self._qerr_pending_metrics)
+            self._qerr_pending_metrics = {}
         return super().log(logs, *args, **kwargs)
 
     def _freeze_adaround_weights(self):
@@ -543,6 +580,7 @@ class _AdaRoundAuxCallback(TrainerCallback):
         self._dist_loss_acc = torch.zeros(1, device=dev)
 
     def _update_multipliers(self):
+        assert self._adaround_quantizers is not None
         ada_args = self._trainer.adaround_args
         param_groups = self._trainer.optimizer.param_groups
         for q in self._adaround_quantizers:
@@ -553,6 +591,7 @@ class _AdaRoundAuxCallback(TrainerCallback):
         ada_args = self._trainer.adaround_args
         if self._adaround_quantizers is None:
             self._lazy_init()
+        assert self._adaround_quantizers is not None
 
         self._update_multipliers()
         progress = state.global_step / max(state.max_steps, 1)
@@ -576,6 +615,93 @@ class _AdaRoundAuxCallback(TrainerCallback):
         self._trainer._adaround_pending_metrics = {
             "adaround/dist_loss": self._dist_loss_acc.item(),
             "adaround/beta": beta,
-            "adaround/grad_norm": total_grad_norm.item() if isinstance(total_grad_norm, torch.Tensor) else total_grad_norm,
+            "adaround/grad_norm": total_grad_norm.item()
+            if isinstance(total_grad_norm, torch.Tensor)
+            else total_grad_norm,
+        }
+        return control
+
+
+class _QuantErrorAuxCallback(TrainerCallback):
+    """Callback that regularizes weights toward quantized grid points after each optimizer step.
+
+    Computes per-weight MSE = mean((Q(w) - w)^2) and applies independent manual SGD steps.
+    For StaticBlockScaleQuantizer, uses _cast_ste (pointwise grid snap without scaling).
+    For other TensorQuantizers, uses the full quantizer forward.
+    The coefficient is linearly annealed from qerr_coeff_start to qerr_coeff_stop.
+    """
+
+    def __init__(self, trainer):
+        self._trainer = trainer
+        self._weight_entries = None  # lazy init
+
+    def _lazy_init(self):
+        model = self._trainer.accelerator.unwrap_model(self._trainer.model)
+        self._weight_entries = []  # list of (weight_param, quantizer)
+        for _name, module in model.named_modules():
+            for weight_name in weight_attr_names(module):
+                wq_name = quantizer_attr_names(weight_name).weight_quantizer
+                quantizer = getattr(module, wq_name, None)
+                if quantizer is None or not quantizer.is_enabled:
+                    continue
+                weight = getattr(module, weight_name, None)
+                if not isinstance(weight, torch.nn.Parameter):
+                    continue
+                self._weight_entries.append((weight, quantizer))
+
+        pid_to_group = {}
+        for group_idx, group in enumerate(self._trainer.optimizer.param_groups):
+            for p in group["params"]:
+                pid_to_group[id(p)] = group_idx
+        self._param_group_idx = {}
+        self._multiplier = {}
+        for weight, _q in self._weight_entries:
+            self._param_group_idx[id(weight)] = pid_to_group.get(id(weight), 0)
+            self._multiplier[id(weight)] = torch.zeros(1, device=weight.device)
+
+        dev = self._weight_entries[0][0].device if self._weight_entries else torch.device("cpu")
+        self._mse_acc = torch.zeros(1, device=dev)
+
+    def _update_multipliers(self, qerr_coeff):
+        param_groups = self._trainer.optimizer.param_groups
+        for weight, _q in self._weight_entries:  # type: ignore[union-attr]
+            lr = param_groups[self._param_group_idx[id(weight)]]["lr"]
+            self._multiplier[id(weight)].fill_(lr * qerr_coeff)
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if self._weight_entries is None:
+            self._lazy_init()
+        if not self._weight_entries:
+            return control
+
+        qerr_args = self._trainer.qerr_args
+        progress = state.global_step / max(state.max_steps, 1)
+        qerr_coeff = (
+            qerr_args.qerr_coeff_start
+            + (qerr_args.qerr_coeff_stop - qerr_args.qerr_coeff_start) * progress
+        )
+
+        self._update_multipliers(qerr_coeff)
+        self._mse_acc.zero_()
+
+        for weight, quantizer in self._weight_entries:
+            if weight.grad is not None:
+                weight.grad.zero_()
+
+            if isinstance(quantizer, StaticBlockScaleQuantizer):
+                q_weight = quantizer._cast_ste(weight)
+            else:
+                q_weight = quantizer(weight)
+            mse = ((q_weight - weight) ** 2).mean()
+            mse.backward()
+            self._mse_acc += mse.detach()
+
+            with torch.no_grad():
+                weight.data -= self._multiplier[id(weight)] * weight.grad
+            weight.grad.zero_()
+
+        self._trainer._qerr_pending_metrics = {
+            "qerr/mse": self._mse_acc.item(),
+            "qerr/coeff": qerr_coeff,
         }
         return control
