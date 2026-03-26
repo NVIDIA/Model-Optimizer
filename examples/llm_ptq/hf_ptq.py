@@ -329,7 +329,7 @@ def auto_quantize(
         ),
         verbose=True,
         # Disable all default disabled layers such as lm_head, mlp.gate, router etc.
-        disabled_layers=[entry.quantizer_path for entry in _default_disabled_quantizer_cfg],
+        disabled_layers=[entry["quantizer_path"] for entry in _default_disabled_quantizer_cfg],
         method=auto_quantize_method,
         checkpoint=auto_quantize_checkpoint,
     )
