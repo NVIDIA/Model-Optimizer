@@ -20,6 +20,8 @@ import json
 import pytest
 import safetensors.torch
 import torch
+
+pytest.importorskip("transformers")
 import transformers
 
 from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
