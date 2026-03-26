@@ -346,9 +346,8 @@ class QATTrainer(ModelOptHFTrainer):
             adapter_name = self.model.active_adapters()[0]
             device = get_module_device(self.model)
             self.model.delete_adapter(adapter_name)
-            self.model.load_adapter(
-                self.state.best_model_checkpoint, adapter_name, torch_device=device
-            )
+            self.model.load_adapter(self.state.best_model_checkpoint, adapter_name)
+            self.model.to(device)
         else:
             super()._load_best_model(*args, **kwargs)
 

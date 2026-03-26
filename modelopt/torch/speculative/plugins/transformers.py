@@ -560,9 +560,21 @@ class HFEagleModel(EagleModel):
         elif self.eagle_decoder_type == "kimik2":
             decoder_cls = _setup_kimi_k2_decoder()
 
-        self.eagle_config = PretrainedConfig.from_dict(config.eagle_architecture_config)
+        arch_config = config.eagle_architecture_config
+
+        # Populate base-model-dependent fields before constructing PretrainedConfig,
+        # since transformers >=5.4 validates rope_scaling during __init__.
+        arch_config.setdefault("hidden_size", self._base_llm_config.hidden_size)
+        arch_config.setdefault("vocab_size", self._base_llm_config.vocab_size)
+        arch_config.setdefault(
+            "max_position_embeddings", self._base_llm_config.max_position_embeddings
+        )
+        rope_scaling = arch_config.get("rope_scaling")
+        if rope_scaling and "rope_theta" not in rope_scaling and "rope_theta" in arch_config:
+            rope_scaling["rope_theta"] = arch_config["rope_theta"]
+
+        self.eagle_config = PretrainedConfig.from_dict(arch_config)
         self.eagle_config.eagle_decoder_type = self.eagle_decoder_type
-        # Hidden size and vocab size must match base model
         self.eagle_config.hidden_size = self._base_llm_config.hidden_size
         self.eagle_config.vocab_size = self._base_llm_config.vocab_size
         self.eagle_config.max_position_embeddings = self._base_llm_config.max_position_embeddings
