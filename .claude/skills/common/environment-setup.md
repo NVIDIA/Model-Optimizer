@@ -12,18 +12,16 @@ If not found: `git clone https://github.com/NVIDIA/Model-Optimizer.git && cd Mod
 
 ## Env-2. Local or remote?
 
-- **Local**: User wants to run on the current machine
-- **Remote**: User mentions a hostname, cluster, or SSH
-
-If remote, check for cluster config:
+1. **User explicitly requests local or remote** → follow the user's choice
+2. **User doesn't specify** → check for cluster config:
 
 ```bash
 cat ~/.config/modelopt/clusters.yaml 2>/dev/null || cat .claude/clusters.yaml 2>/dev/null
 ```
 
-If no config, ask user for: hostname, SSH username, SSH key path, remote workdir. Create `~/.config/modelopt/clusters.yaml` (see `skills/common/remote-execution.md` for format).
+If a cluster config exists with content → **use the remote cluster** (do not fall back to local even if local GPUs are available — the cluster config indicates the user's preferred execution environment). Otherwise → **local execution**.
 
-Then connect:
+For remote, connect:
 
 ```bash
 source .claude/skills/common/remote_exec.sh
@@ -31,6 +29,8 @@ remote_load_cluster <cluster_name>
 remote_check_ssh
 remote_detect_env    # sets REMOTE_ENV_TYPE = slurm / docker / bare
 ```
+
+If remote but no config, ask user for: hostname, SSH username, SSH key path, remote workdir. Create `~/.config/modelopt/clusters.yaml` (see `skills/common/remote-execution.md` for format).
 
 ## Env-3. What compute is available?
 
