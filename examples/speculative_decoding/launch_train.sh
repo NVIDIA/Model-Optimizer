@@ -170,6 +170,7 @@ SAVE_STEPS=${SAVE_STEPS:-$DEFAULT_SAVE_STEPS}
 LR=${LR:-"1e-4"}
 TRAIN_BS=${TRAIN_BS:-1}
 TRAINING_SEQ_LEN=${TRAINING_SEQ_LEN:-2048}
+DATA=${DATA:-""}
 OFFLINE_DATA_PATH=${OFFLINE_DATA_PATH:-""}
 DISABLE_TQDM=${DISABLE_TQDM:-False}
 VLM_PROCESSOR=${VLM_PROCESSOR:-}
@@ -204,10 +205,10 @@ if [[ "$OFFLINE_DATA_PATH" != "" ]]; then
     echo "Offline data path $OFFLINE_DATA_PATH does not exist or is not a directory."
     exit 1
   else
-    OFFLINE_TRAINING_ARGS="--offline-data-path $OFFLINE_DATA_PATH --ar_validate_steps -1"
+    DATA_ARGS="--offline-data-path $OFFLINE_DATA_PATH --ar_validate_steps -1"
   fi
 else
-  OFFLINE_TRAINING_ARGS=""
+  DATA_ARGS="--data_path $DATA"
 fi
 
 
@@ -267,7 +268,7 @@ CMD="accelerate launch $MULTI_NODE_ARGS --mixed_precision bf16 ${SCRIPT_DIR}/mai
     --lr_scheduler_type linear \
     --logging_steps $LOG_STEPS \
     --tf32 True \
-    --data_path $DATA \
+    $DATA_ARGS \
     --disable_tqdm $DISABLE_TQDM \
     --estimate_ar $ESTIMATE_AR \
     --ar_validate_steps $AR_VALIDATE_STEPS \
@@ -277,7 +278,6 @@ CMD="accelerate launch $MULTI_NODE_ARGS --mixed_precision bf16 ${SCRIPT_DIR}/mai
     --trust_remote_code $TRUST_REMOTE_CODE \
     $DRAFT_VOCAB_CACHE_ARGS \
     $VLM_ARGS \
-    $OFFLINE_TRAINING_ARGS \
     $SPECULATIVE_ARGS \
     $FSDP_ARGS \
     --cp_size $CP_SIZE \

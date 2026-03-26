@@ -68,6 +68,7 @@ class ModelArguments:
 @dataclass
 class DataArguments:
     data_path: str = field(
+        default=None,
         metadata={"help": "Path to the training data."},
     )
     eval_data_path: str = field(default=None, metadata={"help": "Path to the evaluation data."})
@@ -156,6 +157,8 @@ def train():
     model_args, data_args, training_args, medusa_args, eagle_args = (
         parser.parse_args_into_dataclasses()
     )
+    if data_args.data_path is None and data_args.offline_data_path is None:
+        raise ValueError("Either data_path or offline_data_path must be provided.")
     if training_args.cp_size > 1 or training_args.dp_shard_size > 1:
         training_args.parallelism_config = ParallelismConfig(
             cp_size=training_args.cp_size, dp_shard_size=training_args.dp_shard_size
