@@ -88,7 +88,7 @@ def export_hf_vllm_fq_checkpoint(
                             and inp_q._pre_quant_scale is not None
                             and inp_q._disabled
                         ):
-                            scale = inp_q._pre_quant_scale.squeeze()
+                            scale = inp_q._pre_quant_scale.squeeze().to(device=w_quant.device)
                             w_quant = (w_quant * scale[None, :]).to(w_quant.dtype)
                             inp_q_key = get_unwrapped_name(
                                 f"{module_name}.{inp_attr}" if module_name else inp_attr, model
