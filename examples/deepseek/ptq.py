@@ -309,38 +309,70 @@ def ptq(
     mtq_cfg = getattr(mtq, quant_cfg)
 
     # disable head that corresponds to lm_head (for the huggingface checkpoint)
-    mtq_cfg["quant_cfg"]["*head*"] = {"enable": False}
+    mtq_cfg["quant_cfg"].append({"quantizer_path": "*head*", "enable": False})
 
     allowed_mla_quant = [None, "per_tensor_fp8", "nvfp4"]
     assert mla_quant in allowed_mla_quant, f"mla_quant must be {allowed_mla_quant}"
 
     if not mla_quant:
-        mtq_cfg["quant_cfg"]["*attn*"] = {"enable": False}
+        mtq_cfg["quant_cfg"].append({"quantizer_path": "*attn*", "enable": False})
     elif mla_quant == "per_tensor_fp8":
-        mtq_cfg["quant_cfg"]["*attn*weight_quantizer"] = {"num_bits": (4, 3), "axis": None}
-        mtq_cfg["quant_cfg"]["*attn*input_quantizer"] = {"num_bits": (4, 3), "axis": None}
+        mtq_cfg["quant_cfg"].extend(
+            [
+                {
+                    "quantizer_path": "*attn*weight_quantizer",
+                    "cfg": {"num_bits": (4, 3), "axis": None},
+                },
+                {
+                    "quantizer_path": "*attn*input_quantizer",
+                    "cfg": {"num_bits": (4, 3), "axis": None},
+                },
+            ]
+        )
     elif mla_quant == "nvfp4":  # for DeepSeek-R1-0528-NVFP4-Turbo
         mla_linear_layers = ["*wq_a*", "*wq_b*", "*wkv_a*", "*wkv_b*", "*wo*"]
         mla_nvfp4_linear_layers = ["*wq_a*", "*wkv_a*", "*wq_b*", "*wo*"]
         for layer in mla_linear_layers:
             if layer in mla_nvfp4_linear_layers:
                 # wq_a, wkv_a, wq_b, wo use NVFP4 quantization
-                mtq_cfg["quant_cfg"][layer + "_quantizer"] = {
-                    "num_bits": (2, 1),
-                    "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
-                    "axis": None,
-                    "enable": True,
-                }
+                mtq_cfg["quant_cfg"].append(
+                    {
+                        "quantizer_path": layer + "_quantizer",
+                        "cfg": {
+                            "num_bits": (2, 1),
+                            "block_sizes": {-1: 16, "type": "dynamic", "scale_bits": (4, 3)},
+                            "axis": None,
+                        },
+                        "enable": True,
+                    }
+                )
             else:
-                mtq_cfg["quant_cfg"][layer + "_quantizer"] = {"enable": False}
+                mtq_cfg["quant_cfg"].append(
+                    {"quantizer_path": layer + "_quantizer", "enable": False}
+                )
 
         # Disable BMM quantizers
-        mtq_cfg["quant_cfg"]["*attn.kv_bmm_quantizer*"] = {"enable": False}
-        mtq_cfg["quant_cfg"]["*attn.pe_bmm_quantizer*"] = {"enable": False}
+        mtq_cfg["quant_cfg"].extend(
+            [
+                {"quantizer_path": "*attn.kv_bmm_quantizer*", "enable": False},
+                {"quantizer_path": "*attn.pe_bmm_quantizer*", "enable": False},
+            ]
+        )
 
     if not args.disable_wo_quant and "FP4" in quant_cfg:
-        mtq_cfg["quant_cfg"]["*wo*weight_quantizer"] = mtq_cfg["quant_cfg"]["*input_quantizer"]
-        mtq_cfg["quant_cfg"]["*wo*input_quantizer"] = mtq_cfg["quant_cfg"]["*weight_quantizer"]
+        # Find the default input/weight quantizer cfgs to swap for wo layers
+        input_cfg = next(
+            e["cfg"] for e in mtq_cfg["quant_cfg"] if e.get("quantizer_path") == "*input_quantizer"
+        )
+        weight_cfg = next(
+            e["cfg"] for e in mtq_cfg["quant_cfg"] if e.get("quantizer_path") == "*weight_quantizer"
+        )
+        mtq_cfg["quant_cfg"].extend(
+            [
+                {"quantizer_path": "*wo*weight_quantizer", "cfg": input_cfg},
+                {"quantizer_path": "*wo*input_quantizer", "cfg": weight_cfg},
+            ]
+        )
 
     ## ptq
     transformer = mtq.quantize(transformer, mtq_cfg, calibrate_loop)
