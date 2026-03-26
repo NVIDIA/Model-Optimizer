@@ -70,7 +70,15 @@ class OfflineSupervisedDataset(Dataset):
         return len(self.dumped_files)
 
     def __getitem__(self, i) -> dict[str, torch.Tensor]:
-        offline_data = torch.load(self.dumped_files[i])
+        try:
+            offline_data = torch.load(self.dumped_files[i])
+        except Exception as e:
+            print(
+                f"[ERROR] Failed to load file at index={i}, "
+                f"path='{self.dumped_files[i]}', error={e}. "
+                "Reusing data from previous index (i-1)."
+            )
+            return self.__getitem__(i - 1)
 
         labels = torch.full_like(offline_data["input_ids"], IGNORE_TOKEN_ID)
         labels[..., :-1] = offline_data["input_ids"][..., 1:]
