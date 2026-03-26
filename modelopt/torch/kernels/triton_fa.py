@@ -568,7 +568,11 @@ def _attn_bwd_dq(
 
         p = tl.math.exp2(scores - lse[:, None])
 
-        # Re-apply skip-softmax: zero out rows that were skipped in forward
+        # Skip-softmax backward: zero out P for rows with negligible contribution.
+        # Per-row using final LSE because forward/backward tile sizes may differ
+        # (forward autotunes BLOCK_N; backward uses a fixed size), so per-tile
+        # skip masks from forward wouldn't align. LSE >= any intermediate running
+        # max, so this conservatively zeros out at least what forward skipped.
         if APPLY_SKIP_SOFTMAX:
             tile_row_max = tl.max(scores, 1)
             can_skip = tile_row_max < (lse + SKIP_THRESHOLD_LOG2)
@@ -718,7 +722,11 @@ def _attn_bwd_dkdv(
 
             p = tl.math.exp2(scores - lse[:, None])
 
-            # Re-apply skip-softmax: zero out rows that were skipped in forward
+            # Skip-softmax backward: zero out P for rows with negligible contribution.
+            # Per-row using final LSE because forward/backward tile sizes may differ
+            # (forward autotunes BLOCK_N; backward uses a fixed size), so per-tile
+            # skip masks from forward wouldn't align. LSE >= any intermediate running
+            # max, so this conservatively zeros out at least what forward skipped.
             if APPLY_SKIP_SOFTMAX:
                 tile_row_max = tl.max(scores, 1)
                 can_skip = tile_row_max < (lse + SKIP_THRESHOLD_LOG2)
