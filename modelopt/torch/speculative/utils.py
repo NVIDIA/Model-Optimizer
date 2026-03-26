@@ -553,10 +553,12 @@ def patch_transformers5_params_loading():
     """
     # Skip patching for non-applicable transformers version
     if importlib.util.find_spec("transformers.core_model_loading") is None:
+        yield
         return
     from transformers import core_model_loading
 
     if not hasattr(core_model_loading, "set_param_for_module"):
+        yield
         return
 
     orig_set_param_for_module = core_model_loading.set_param_for_module
