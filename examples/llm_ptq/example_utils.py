@@ -364,6 +364,11 @@ def load_mtp_weights(
         mtp_layer_prefixes = set()
         for key in keys:
             parts = key.split(".")
+            # Capture the top-level MTP module prefix (e.g., "mtp" from "mtp.fc.weight")
+            # so that non-layer MTP weights like mtp.fc, mtp.norm are also excluded
+            if parts:
+                mtp_layer_prefixes.add(parts[0])
+            # Also capture specific layer prefixes (e.g., "mtp.layers.0")
             for i, part in enumerate(parts):
                 if part == "layers" and i + 1 < len(parts) and parts[i + 1].isdigit():
                     prefix = ".".join(parts[: i + 2])

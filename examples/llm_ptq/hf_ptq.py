@@ -979,8 +979,13 @@ def quantize_main(
         if mtp_layer_prefixes:
             quant_cfg = copy.deepcopy(quant_cfg)
             for prefix in mtp_layer_prefixes:
-                # Add exclusion pattern for this MTP layer (e.g., "*layers.92*")
-                pattern = f"*{prefix.split('.')[-2]}.{prefix.split('.')[-1]}*"
+                parts = prefix.split(".")
+                if len(parts) >= 2:
+                    # Multi-component prefix (e.g., "mtp.layers.0" -> "*layers.0*")
+                    pattern = f"*{parts[-2]}.{parts[-1]}*"
+                else:
+                    # Single-component prefix (e.g., "mtp" -> "*mtp*")
+                    pattern = f"*{prefix}*"
                 quant_cfg["quant_cfg"][pattern] = {"enable": False}
                 print(f"Excluding MTP layer from quantization: {pattern}")
 
