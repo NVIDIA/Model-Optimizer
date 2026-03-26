@@ -2,7 +2,7 @@
 
 Common detection for all ModelOpt skills. After this, you know what's available.
 
-## 1. Get ModelOpt source
+## Env-1. Get ModelOpt source
 
 ```bash
 ls examples/llm_ptq/hf_ptq.py 2>/dev/null && echo "Source found"
@@ -10,7 +10,7 @@ ls examples/llm_ptq/hf_ptq.py 2>/dev/null && echo "Source found"
 
 If not found: `git clone https://github.com/NVIDIA/Model-Optimizer.git && cd Model-Optimizer`
 
-## 2. Local or remote?
+## Env-2. Local or remote?
 
 - **Local**: User wants to run on the current machine
 - **Remote**: User mentions a hostname, cluster, or SSH
@@ -32,7 +32,7 @@ remote_check_ssh
 remote_detect_env    # sets REMOTE_ENV_TYPE = slurm / docker / bare
 ```
 
-## 3. What compute is available?
+## Env-3. What compute is available?
 
 Run on the **target machine** (local, or via `remote_run` if remote):
 
@@ -48,7 +48,12 @@ Also check:
 ls tools/launcher/launch.py 2>/dev/null && echo "Launcher available"
 ```
 
-No GPU anywhere → **stop**: task requires a CUDA GPU.
+**No GPU detected?**
+
+- If local with no GPU and no cluster config → ask the user:
+  *"No local GPU detected. Do you have a remote machine or cluster with GPUs? If so, I'll need connection details (hostname, SSH username, key path, remote workdir) to run there."*
+- If user provides remote info → create `clusters.yaml`, go back to Env-2
+- If user has no GPU anywhere → **stop**: this task requires a CUDA GPU
 
 ## Summary
 

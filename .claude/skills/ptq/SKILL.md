@@ -19,7 +19,7 @@ Read `skills/common/environment-setup.md` and `skills/common/workspace-managemen
 
 ## Step 2 — Is the model supported?
 
-Check `modelopt/torch/export/model_utils.py` for `MODEL_NAME_TO_TYPE`. If the model class matches → **supported**. Otherwise → **unsupported**.
+Read `modelopt/torch/export/model_utils.py` and find the `MODEL_NAME_TO_TYPE` dict. The matching logic is **case-insensitive substring**: if any key appears as a substring of the model's class name, it's supported (e.g., key `"Llama"` matches `LlamaForCausalLM`). If no key matches → **unsupported**.
 
 ## Step 3 — Choose quantization format
 
@@ -97,7 +97,7 @@ Follow `references/unsupported-models.md`. Core steps:
 4. `mtq.quantize(model, config, forward_loop)`
 5. `export_hf_checkpoint(model, export_dir)`
 
-Run directly (local) or via `remote_run` (remote). For SLURM environments, use a job script (see `references/slurm-setup.md`).
+Run directly (local) or via `remote_run` (remote). For SLURM, use a job script — see `skills/common/slurm-setup.md` for generic patterns and `references/slurm-setup.md` for PTQ-specific details (container, GPU sizing, FSDP2).
 
 ### Monitoring
 
@@ -128,14 +128,15 @@ Report the path and size to the user.
 
 | Reference | When to read |
 | --- | --- |
-| `skills/common/environment-setup.md` | Step 1: detect env |
-| `skills/common/workspace-management.md` | Step 1: organize work by model |
-| `references/launcher-guide.md` | Step 4B: launcher YAML config |
-| `references/unsupported-models.md` | Step 2/4C: unsupported model |
-| `skills/common/remote-execution.md` | Remote execution via SSH |
-| `references/slurm-setup.md` | Manual SLURM job scripts |
-| `tools/launcher/CLAUDE.md` | Launcher full docs |
-| `examples/llm_ptq/README.md` | Support matrix, CLI, accuracy |
-| `modelopt/torch/quantization/config.py` | Format definitions |
-| `modelopt/torch/export/model_utils.py` | Supported architectures |
-| `modelopt_recipes/` | Pre-built recipes |
+| `skills/common/environment-setup.md` | Step 1: always |
+| `skills/common/workspace-management.md` | Step 1: always |
+| `references/launcher-guide.md` | Step 4B only (launcher path) |
+| `tools/launcher/CLAUDE.md` | Step 4B only, if you need more launcher detail |
+| `references/unsupported-models.md` | Step 4C only (unsupported model) |
+| `skills/common/remote-execution.md` | Step 4A/4C only, if target is remote |
+| `skills/common/slurm-setup.md` | Step 4A/4C only, if using SLURM manually (not launcher) |
+| `references/slurm-setup.md` | Step 4A/4C only, PTQ-specific SLURM (container, FSDP2) |
+| `examples/llm_ptq/README.md` | Step 3: support matrix, CLI flags, accuracy |
+| `modelopt/torch/quantization/config.py` | Step 3: format definitions |
+| `modelopt/torch/export/model_utils.py` | Step 2: supported architectures |
+| `modelopt_recipes/` | Step 3: pre-built recipes |
