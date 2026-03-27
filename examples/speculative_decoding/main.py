@@ -104,7 +104,7 @@ class TrainingArguments(transformers.TrainingArguments):
     )
     dataloader_drop_last: bool = field(default=True)
     bf16: bool = field(default=True)
-    mode: Literal["eagle3", "medusa"] = "eagle3"
+    mode: Literal["eagle3", "medusa", "dflash"] = "eagle3"
     estimate_ar: bool = field(
         default=False, metadata={"help": "Whether to estimate AR during training for logging."}
     )
@@ -144,6 +144,21 @@ class EagleArguments:
     )
 
 
+@dataclass
+class DFlashArguments:
+    dflash_block_size: int = field(
+        default=16, metadata={"help": "Block size for DFlash parallel prediction."}
+    )
+    dflash_num_layers: int = field(
+        default=5, metadata={"help": "Number of decoder layers in the DFlash draft module."}
+    )
+    dflash_config: str = field(default=None, metadata={"help": "Path to dflash_config.json"})
+    dflash_disable_torch_compile: bool = field(
+        default=False,
+        metadata={"help": "Disable torch.compile on DFlash forward/loss methods."},
+    )
+
+
 def train():
     parser = transformers.HfArgumentParser(
         (
@@ -152,9 +167,10 @@ def train():
             TrainingArguments,
             MedusaArguments,
             EagleArguments,
+            DFlashArguments,
         )
     )
-    model_args, data_args, training_args, medusa_args, eagle_args = (
+    model_args, data_args, training_args, medusa_args, eagle_args, dflash_args = (
         parser.parse_args_into_dataclasses()
     )
     if not data_args.data_path and not data_args.offline_data_path:
@@ -236,11 +252,24 @@ def train():
                     )
                 model.eagle_module.d2t = torch.load(data_args.draft_vocab_cache)
                 print_rank_0(f"Loaded draft vocab cache from {data_args.draft_vocab_cache}.")
+        elif training_args.mode == "dflash":
+            custom_config = (
+                json.load(open(dflash_args.dflash_config)) if dflash_args.dflash_config else {}
+            )
+            custom_config.setdefault("num_hidden_layers", dflash_args.dflash_num_layers)
+
+            config = {
+                "dflash_block_size": dflash_args.dflash_block_size,
+                "dflash_use_torch_compile": not dflash_args.dflash_disable_torch_compile,
+                "dflash_architecture_config": custom_config,
+            }
+
+            mtsp.convert(model, [("dflash", config)])
         else:
             raise Exception(f"{training_args.mode} is not supported!")
 
     print_rank_0("Loading dataset...")
-    if training_args.mode == "eagle3":
+    if training_args.mode in ("eagle3", "dflash"):
         data_module = make_eagle_supervised_data_module(
             tokenizer, data_args, train_len=training_args.training_seq_len
         )
