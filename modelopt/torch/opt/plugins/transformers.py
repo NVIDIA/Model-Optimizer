@@ -291,6 +291,14 @@ class ModelOptHFTrainer(Trainer):
                 raise ValueError(
                     f"lr_config entry must be str -> dict, got {pattern!r} -> {kwargs!r}"
                 )
+            # PyYAML safe_load parses bare exponential notation (e.g. 1e-5)
+            # as strings instead of floats. Coerce numeric string values.
+            for key, val in kwargs.items():
+                if isinstance(val, str):
+                    try:
+                        kwargs[key] = float(val)
+                    except ValueError:
+                        pass
         return cfg
 
     def _match_lr_config_pattern(self, name: str) -> str | None:
