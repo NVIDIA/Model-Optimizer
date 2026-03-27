@@ -104,7 +104,7 @@ class AdaRoundTrainingArguments:
         default=2.0,
         metadata={"help": "Final beta for dist_loss annealing (low = forces binary)."},
     )
-    dist_loss_weight: float = field(
+    dist_loss_coeff: float = field(
         default=0.01,
         metadata={"help": "Lambda multiplier for dist_loss regularization."},
     )
@@ -128,12 +128,12 @@ class QuantErrorTrainingArguments:
     """
 
     qerr_coeff_start: float = field(
-        default=0.01,
-        metadata={"help": "Initial quantization error coefficient (low = permissive early)."},
+        default=0.0,
+        metadata={"help": "Initial quantization error coefficient (0 = monitor only, no gradient)."},
     )
     qerr_coeff_stop: float = field(
-        default=0.1,
-        metadata={"help": "Final quantization error coefficient (high = strong regularization)."},
+        default=0.0,
+        metadata={"help": "Final quantization error coefficient (0 = monitor only, no gradient)."},
     )
 
 
@@ -206,7 +206,7 @@ class QATTrainer(ModelOptHFTrainer):
 
     Args:
         quant_args: General quantization arguments (quant_cfg, calib_size).
-        adaround_args: AdaRound-specific training arguments (beta annealing, dist_loss_weight).
+        adaround_args: AdaRound-specific training arguments (beta annealing, dist_loss_coeff).
             When ``None``, the AdaRound auxiliary callback is a no-op.
         qerr_args: Quantization error regularization arguments (coefficient annealing).
             When ``None``, the quantization error callback is a no-op.
@@ -282,13 +282,9 @@ class QATTrainer(ModelOptHFTrainer):
             getattr(self.model, "config", None), "dtype", None
         ) or getattr(getattr(self.model, "config", None), "torch_dtype", None)
 
-        if self.adaround_args is not None and self.qerr_args is not None:
-            raise ValueError("adaround_args and qerr_args are mutually exclusive.")
-
         if self._is_adaround():
             self._setup_adaround()
-
-        if self.qerr_args is not None:
+        elif self.qerr_args is not None:
             self._setup_qerr()
 
     def _setup_qerr(self):
@@ -585,7 +581,7 @@ class _AdaRoundAuxCallback(TrainerCallback):
         param_groups = self._trainer.optimizer.param_groups
         for q in self._adaround_quantizers:
             lr = param_groups[self._param_group_idx[q]]["lr"]
-            self._multiplier[q].copy_(torch.tensor(lr * ada_args.dist_loss_weight))
+            self._multiplier[q].copy_(torch.tensor(lr * ada_args.dist_loss_coeff))
 
     def on_step_end(self, args, state, control, **kwargs):
         ada_args = self._trainer.adaround_args
@@ -662,6 +658,14 @@ class _QuantErrorAuxCallback(TrainerCallback):
         dev = self._weight_entries[0][0].device if self._weight_entries else torch.device("cpu")
         self._mse_acc = torch.zeros(1, device=dev)
 
+    def _compute_mse(self, weight, quantizer):
+        """Compute MSE between original and quantized weight."""
+        if isinstance(quantizer, StaticBlockScaleQuantizer):
+            q_weight = quantizer._cast_ste(weight)
+        else:
+            q_weight = quantizer(weight)
+        return ((q_weight - weight) ** 2).mean()
+
     def _update_multipliers(self, qerr_coeff):
         param_groups = self._trainer.optimizer.param_groups
         for weight, _q in self._weight_entries:  # type: ignore[union-attr]
@@ -681,24 +685,25 @@ class _QuantErrorAuxCallback(TrainerCallback):
             + (qerr_args.qerr_coeff_stop - qerr_args.qerr_coeff_start) * progress
         )
 
-        self._update_multipliers(qerr_coeff)
         self._mse_acc.zero_()
 
-        for weight, quantizer in self._weight_entries:
-            if weight.grad is not None:
+        if qerr_coeff > 0:
+            # Active regularization: compute MSE, apply gradient step
+            self._update_multipliers(qerr_coeff)
+            for weight, quantizer in self._weight_entries:
+                if weight.grad is not None:
+                    weight.grad.zero_()
+                mse = self._compute_mse(weight, quantizer)
+                mse.backward()
+                self._mse_acc += mse.detach()
+                with torch.no_grad():
+                    weight.data -= self._multiplier[id(weight)] * weight.grad
                 weight.grad.zero_()
-
-            if isinstance(quantizer, StaticBlockScaleQuantizer):
-                q_weight = quantizer._cast_ste(weight)
-            else:
-                q_weight = quantizer(weight)
-            mse = ((q_weight - weight) ** 2).mean()
-            mse.backward()
-            self._mse_acc += mse.detach()
-
+        else:
+            # Monitor only: compute MSE without gradient
             with torch.no_grad():
-                weight.data -= self._multiplier[id(weight)] * weight.grad
-            weight.grad.zero_()
+                for weight, quantizer in self._weight_entries:
+                    self._mse_acc += self._compute_mse(weight, quantizer)
 
         self._trainer._qerr_pending_metrics = {
             "qerr/mse": self._mse_acc.item(),

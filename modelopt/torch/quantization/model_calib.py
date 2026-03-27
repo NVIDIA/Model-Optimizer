@@ -1974,7 +1974,7 @@ def adaround(
     ``scale_after_dequant_args`` can be provided to run
     :func:`scale_after_dequant` first (calibration + weight pre-scaling).
 
-    Training-time knobs (beta annealing, dist_loss_weight, temperature, param
+    Training-time knobs (beta annealing, dist_loss_coeff, temperature, param
     freezing) are configured via ``AdaRoundTrainingArguments`` on the trainer.
 
     Args:

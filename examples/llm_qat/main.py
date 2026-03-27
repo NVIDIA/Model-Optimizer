@@ -51,6 +51,7 @@ from modelopt.torch.quantization.plugins.transformers_trainer import (
     AdaRoundTrainingArguments,
     QADTrainer,
     QATTrainer,
+    QuantErrorTrainingArguments,
 )
 from modelopt.torch.utils import print_rank_0
 
@@ -181,9 +182,10 @@ def train():
             QuantizationArguments,
             ModelOptTrainerArguments,
             AdaRoundTrainingArguments,
+            QuantErrorTrainingArguments,
         )
     )
-    model_args, training_args, data_args, quant_args, trainer_args, adaround_args = (
+    model_args, training_args, data_args, quant_args, trainer_args, adaround_args, qerr_args = (
         parser.parse_args_into_dataclasses()
     )
     print_rank_0(f"arguments: {model_args}, {training_args}, {data_args}, {quant_args}")
@@ -273,6 +275,7 @@ def train():
         args=training_args,
         quant_args=quant_args,
         adaround_args=adaround_args,
+        qerr_args=qerr_args,
         trainer_args=trainer_args,
         **distill_kwargs,
         **data_module,

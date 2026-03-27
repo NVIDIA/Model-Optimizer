@@ -1435,7 +1435,7 @@ class AdaRoundConfig(QuantizeAlgorithmConfig):
     round-to-nearest-even. If the model is not yet in scale-after-dequant mode,
     ``scale_after_dequant_args`` can be provided to run that conversion first.
 
-    Training-time knobs (beta annealing, dist_loss_weight, temperature, freeze
+    Training-time knobs (beta annealing, dist_loss_coeff, temperature, freeze
     behaviour) are configured via ``AdaRoundTrainingArguments`` on the trainer.
     """
 
