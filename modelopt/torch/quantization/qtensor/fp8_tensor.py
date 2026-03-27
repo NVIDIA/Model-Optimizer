@@ -149,3 +149,7 @@ class FP8QTensor(BaseQuantizedTensor):
         scales = scales.to(self._quantized_data.device)
 
         return (quantized_data.to(dtype) * scales.to(dtype))[slices]
+
+# Register FP8QTensor as safe global
+from modelopt.torch.utils.serialization import add_modelopt_safe_globals
+add_modelopt_safe_globals([FP8QTensor])

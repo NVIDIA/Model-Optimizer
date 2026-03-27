@@ -25,6 +25,7 @@ from typing import Any
 import torch
 
 from modelopt.torch.utils import distributed as dist
+from modelopt.torch.utils.serialization import safe_load
 
 from .model_config_utils import (
     model_config_from_dict,
@@ -41,7 +42,7 @@ class NFSWorkspace:
           communication nor barrier. It is users' responsibility to synchronize
           all ranks (local and remove processes).
 
-    This implementation uses `torch.save` and `torch.load` for serialization.
+    This implementation uses `torch.save` and `safe_load` for serialization.
 
     Args:
         workspace_path: the path to the NFS directory for postprocess cross rank communication.
@@ -91,8 +92,7 @@ class NFSWorkspace:
             raise ValueError("NFSWorkspace is not initialized!")
         state_path = self._get_state_path(target_rank)
         if state_path.exists():
-            # Security NOTE: weights_only=False is used here on ModelOpt-generated ckpt, not on untrusted user input
-            state = torch.load(state_path, map_location="cpu", weights_only=False)
+            state = safe_load(state_path, map_location="cpu")
             return state["config"], state["weight"]
         else:
             return None, None
@@ -157,7 +157,7 @@ def get_tensors_parallel(tensor: torch.Tensor, ranks: list[int], group=None):
                 tensors.append(tensor)
             else:
                 shm = SharedMemory(name=f"rank_{rank}", create=False)
-                shared_tensor = torch.load(BytesIO(shm.buf))
+                shared_tensor = safe_load(BytesIO(shm.buf))
                 tensors.append(shared_tensor)
                 shm_readers.append(shm)
     try:
@@ -276,7 +276,7 @@ def get_configs_parallel(config, ranks: list[int], group, workspace_path: Path |
 
                 if len_json != 0:
                     config_dict = json.loads(shm.buf[8 : 8 + len_json].tobytes().decode())
-                    weights = torch.load(BytesIO(shm.buf[8 + len_json :]))
+                    weights = safe_load(BytesIO(shm.buf[8 + len_json :]))
                     restore_model_config(config_dict, weights)
                     config = model_config_from_dict(config_dict)
 

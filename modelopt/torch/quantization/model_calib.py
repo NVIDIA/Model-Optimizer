@@ -1729,12 +1729,17 @@ def gptq_lite(
                 "n_samples": 0,
             }
 
-    def load_hessian_state(path, tensor_mapping):
-        """Load hessian state from file."""
-        print_rank_0(f"Loading hessian state from {path}")
-        loaded_state = torch.load(path, map_location="cpu")
+    from modelopt.torch.utils.serialization import safe_load
 
-        for name, (shape, device) in tensor_mapping.items():
+    ...
+
+        def load_hessian_state(path, tensor_mapping):
+            \"\"\"Load hessian state from file.\"\"\"
+            print_rank_0(f\"Loading hessian state from {path}\")
+            loaded_state = safe_load(path, map_location=\"cpu\")
+
+            for name, (shape, device) in tensor_mapping.items():
+
             if name not in loaded_state:
                 raise KeyError(f"Layer '{name}' not found in loaded hessian state")
 

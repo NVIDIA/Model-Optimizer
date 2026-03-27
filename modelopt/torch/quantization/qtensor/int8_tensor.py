@@ -122,3 +122,7 @@ class INT8QTensor(BaseQuantizedTensor):
         scales = scales.to(self._quantized_data.device)
 
         return (self._quantized_data.view(torch.int8).to(dtype) * scales.to(dtype))[slices]
+
+# Register INT8QTensor as safe global
+from modelopt.torch.utils.serialization import add_modelopt_safe_globals
+add_modelopt_safe_globals([INT8QTensor])

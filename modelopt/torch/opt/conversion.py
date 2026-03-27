@@ -35,6 +35,7 @@ import torch.nn as nn
 
 from modelopt import __version__
 from modelopt.torch.utils import ModelLike, init_model_from_model_like, unwrap_model
+from modelopt.torch.utils.serialization import safe_load
 
 from .config import ConfigDict, ModeloptBaseConfig
 from .mode import (
@@ -523,12 +524,8 @@ def load_modelopt_state(modelopt_state_path: str | os.PathLike, **kwargs) -> dic
     Returns:
         A modelopt state dictionary describing the modifications to the model.
     """
-    # Security NOTE: weights_only=False is used here on ModelOpt-generated state_dict, not on untrusted user input
-    kwargs.setdefault("weights_only", False)
     kwargs.setdefault("map_location", "cpu")
-    # TODO: Add some validation to ensure the file is a valid modelopt state file.
-    modelopt_state = torch.load(modelopt_state_path, **kwargs)
-    return modelopt_state
+    return safe_load(modelopt_state_path, **kwargs)
 
 
 def restore_from_modelopt_state(
@@ -550,7 +547,9 @@ def restore_from_modelopt_state(
 
         # Restore the previously saved modelopt state followed by model weights
         mto.restore_from_modelopt_state(model, modelopt_state_path="modelopt_state.pt")
-        model.load_state_dict(torch.load("model_weights.pt"), ...)  # Load the model weights
+        model.load_state_dict(
+            torch.load("model_weights.pt", weights_only=True), ...
+        )  # Load the model weights
 
     If you want to restore the model weights and the modelopt state with saved scales, please use
     :meth:`mto.restore()<modelopt.torch.opt.conversion.restore>`.
@@ -628,8 +627,8 @@ def restore(model: ModelLike, f: str | os.PathLike | BinaryIO, **kwargs) -> nn.M
 
     # load checkpoint
     kwargs.setdefault("map_location", "cpu")
-    kwargs.setdefault("weights_only", False)
-    objs = torch.load(f, **kwargs)
+    # Security NOTE: weights_only=True is used here on ModelOpt-generated checkpoints
+    objs = safe_load(f, **kwargs)
 
     # restore model architecture
     model_restored = restore_from_modelopt_state(model, objs["modelopt_state"])

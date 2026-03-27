@@ -631,5 +631,31 @@ class ModelConfig:
 
     @property
     def hidden_act(self):
-        """Returns the hidden_act of the model."""
+        \"\"\"Returns the hidden_act of the model.\"\"\"
         return self.layers[0].mlp.hidden_act
+
+
+    # Register all config classes as safe globals
+    from modelopt.torch.utils.serialization import add_modelopt_safe_globals
+
+    add_modelopt_safe_globals(
+    [
+        EmbeddingConfig,
+        LayernormConfig,
+        LinearConfig,
+        LinearActConfig,
+        ConvConfig,
+        QKVConfig,
+        RelativeAttentionTableConfig,
+        AttentionConfig,
+        MLPConfig,
+        ExpertConfig,
+        RgLruConfig,
+        RecurrentConfig,
+        MOEConfig,
+        DecoderLayerConfig,
+        MedusaHeadConfig,
+        ModelConfig,
+    ]
+    )
+

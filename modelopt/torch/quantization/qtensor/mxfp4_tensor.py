@@ -142,3 +142,7 @@ class MXFP4QTensor(BaseQuantizedTensor):
 
         # Reshape back to the original shape
         return x_float.reshape(original_shape).to(dtype)
+
+# Register MXFP4QTensor as safe global
+from modelopt.torch.utils.serialization import add_modelopt_safe_globals
+add_modelopt_safe_globals([MXFP4QTensor])

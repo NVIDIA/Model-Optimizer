@@ -21,6 +21,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+import megatron.core as mcore
 import torch
 from megatron.core import dist_checkpointing, mpu
 from megatron.core.dist_checkpointing.serialization import get_default_load_sharded_strategy
@@ -32,6 +33,7 @@ import modelopt
 import modelopt.torch.opt as mto
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.utils.network import SUPPORTED_WRAPPERS
+from modelopt.torch.utils.serialization import safe_load
 
 SUPPORTED_WRAPPERS[Float16Module] = "module"
 
@@ -131,6 +133,14 @@ def save_sharded_modelopt_state(
         os.makedirs(modelopt_checkpoint_name, exist_ok=True)
     modelopt_state = copy.deepcopy(mto.modelopt_state(model[0]))
     remove_per_module_state(modelopt_state)
+
+    # Persist metadata for MCore version and sharded layout
+    modelopt_state["mcore_metadata"] = {
+        "version": mcore.__version__,
+        "singleton_local_shards": True,  # Consistent with _MegatronMLP.sharded_state_dict()
+        "sharded_strategy": sharded_strategy,
+    }
+
     dist_checkpointing.save(modelopt_state, modelopt_checkpoint_name, sharded_strategy)
 
 
@@ -156,7 +166,8 @@ def _load_extra_state_from_sharded_checkpoint(
         is set to `True` (was not set before) in megatron-core-0.15.0. This flag affects the
         sharded state_dict format and must be consistent between saving and loading.
     """
-    sharded_state_dict = model.sharded_state_dict(prefix=prefix)
+    # sharded_state_dict() should be called with metadata if provided to maintain consistency
+    sharded_state_dict = model.sharded_state_dict(prefix=prefix, metadata=metadata)
     extra_sharded_state_dict = {k: v for k, v in sharded_state_dict.items() if "_extra_state" in k}
     extra_state_dict = dist_checkpointing.load(
         extra_sharded_state_dict,
@@ -203,10 +214,14 @@ def restore_sharded_modelopt_state(
         return
 
     # Loading the common modelopt_state (replicated on all ranks)
-    # Security NOTE: weights_only=False is used here on NVIDIA-generated file, not on untrusted user input
-    common_modelopt_state = torch.load(
-        modelopt_checkpoint_name + "/" + COMMON_STATE_FNAME, weights_only=False
+    common_modelopt_state = safe_load(
+        modelopt_checkpoint_name + "/" + COMMON_STATE_FNAME, map_location="cpu"
     )
+
+    # Try to retrieve metadata from checkpoint
+    mcore_metadata = common_modelopt_state.get("mcore_metadata", None)
+    if metadata is None:
+        metadata = mcore_metadata
 
     modelopt_load_version = common_modelopt_state["modelopt_version"]
 

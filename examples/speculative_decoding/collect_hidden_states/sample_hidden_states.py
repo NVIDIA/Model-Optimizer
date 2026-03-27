@@ -1,3 +1,4 @@
+from modelopt.torch.utils.serialization import safe_load
 # SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -60,7 +61,7 @@ def main(args: argparse.Namespace) -> None:
     )
 
     for i, file in enumerate(sampled_files):
-        data = torch.load(file)
+        data = safe_load(file)
         expected_keys = [
             "input_ids",
             "hidden_states",

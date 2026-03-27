@@ -116,7 +116,7 @@ class QTensorWrapper(torch.nn.Parameter):
         changing_device, changing_dtype, *_ = torch._C._nn._parse_to(*args, **kwargs)
         if changing_device:
             self.data = self.data.to(device=changing_device)
-        dtype = changing_dtype if changing_dtype else self.metadata["dtype"]
+        dtype = changing_dtype or self.metadata["dtype"]
         return QTensorWrapper(
             self.metadata["qtensor_class"](self.metadata["shape"], dtype, self.data)
         )
@@ -227,3 +227,9 @@ def pack_real_quantize_weight(module, force_quantize: bool = False):
             if name != "":
                 with fsdp2_aware_weight_update(module, m):
                     _compress_and_update_module_weight(m)
+
+
+# Register QTensor types as safe globals
+from modelopt.torch.utils.serialization import add_modelopt_safe_globals
+
+add_modelopt_safe_globals([BaseQuantizedTensor, QTensorWrapper])

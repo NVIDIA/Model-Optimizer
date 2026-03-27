@@ -3,6 +3,10 @@ NVIDIA Model Optimizer Changelog
 0.44 (2026-05-xx)
 ^^^^^^^^^^^^^^^^^
 
+**Backward Breaking Changes**
+
+- Changed the default of ``weights_only`` to ``True`` in ``torch.load`` for secure checkpoint loading. If you need to load a checkpoint that requires unpickling arbitrary objects, explicitly set ``weights_only=False``.
+
 **New Features**
 
 - Support full Transformer Engine spec for Minitron pruning (``mcore_minitron``). Now we no longer need to use custom ModelOpt spec. Note that this does not affect the usage of the pruning workflow but makes pruning slightly faster and may result in slightly different pruned model because of different kernel and numerics.

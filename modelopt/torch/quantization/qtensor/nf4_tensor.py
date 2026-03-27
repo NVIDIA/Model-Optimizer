@@ -197,3 +197,7 @@ class NF4QTensor(BaseQuantizedTensor):
                 .reshape(self.metadata["shape"])
                 .to(dtype)
             )
+
+# Register NF4QTensor as safe global
+from modelopt.torch.utils.serialization import add_modelopt_safe_globals
+add_modelopt_safe_globals([NF4QTensor])

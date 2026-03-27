@@ -1,3 +1,4 @@
+from modelopt.torch.utils.serialization import safe_load
 # Adapted from https://github.com/tatsu-lab/stanford_alpaca/blob/3783d18/train.py
 
 #    Copyright 2023 Rohan Taori, Ishaan Gulrajani, Tianyi Zhang, Yann Dubois, Xuechen Li
@@ -234,7 +235,7 @@ def train():
                     raise FileNotFoundError(
                         f"Draft vocab cache provided but not found: {data_args.draft_vocab_cache}"
                     )
-                model.eagle_module.d2t = torch.load(data_args.draft_vocab_cache)
+                model.eagle_module.d2t = safe_load(data_args.draft_vocab_cache)
                 print_rank_0(f"Loaded draft vocab cache from {data_args.draft_vocab_cache}.")
         else:
             raise Exception(f"{training_args.mode} is not supported!")

@@ -41,6 +41,7 @@ from modelopt.torch.utils.plugins.transformers_dataset import (
     ShardedDataset,
     VisionLanguageDataCollator,
 )
+from modelopt.torch.utils.serialization import safe_load
 
 try:
     import wandb
@@ -71,7 +72,7 @@ class OfflineSupervisedDataset(Dataset):
 
     def __getitem__(self, i) -> dict[str, torch.Tensor]:
         try:
-            offline_data = torch.load(self.dumped_files[i])
+            offline_data = safe_load(self.dumped_files[i])
         except Exception as e:
             print(
                 f"[ERROR] Failed to load file at index={i}, "

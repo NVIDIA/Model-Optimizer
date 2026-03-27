@@ -260,3 +260,7 @@ class MXFP8QTensor(BaseQuantizedTensor):
         dequantized = dequantized[..., : original_shape[-1]]
 
         return dequantized.to(dtype)
+
+# Register MXFP8QTensor as safe global
+from modelopt.torch.utils.serialization import add_modelopt_safe_globals
+add_modelopt_safe_globals([MXFP8QTensor])

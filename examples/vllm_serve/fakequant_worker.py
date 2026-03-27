@@ -1,3 +1,4 @@
+from modelopt.torch.utils.serialization import safe_load
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -284,7 +285,7 @@ def _fakequant_run_prolog_worker(self) -> None:
     amax_file_path = quant_config["amax_file_path"]
     if amax_file_path:
         print(f"Loading amax values from {amax_file_path}")
-        saved_amax_dict = torch.load(amax_file_path)
+        saved_amax_dict = safe_load(amax_file_path)
         # convert amax keys to vLLM format
         if hasattr(self.model_runner.model, "hf_to_vllm_mapper"):
             saved_amax_dict = self.model_runner.model.hf_to_vllm_mapper.apply_dict(saved_amax_dict)

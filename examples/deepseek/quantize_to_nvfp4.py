@@ -1,3 +1,4 @@
+from modelopt.torch.utils.serialization import safe_load
 # Adapted from https://github.com/deepseek-ai/DeepSeek-V3/blob/2f7b80eecebf3d1c84da5a0d465f6639ea175012/inference/fp8_cast_bf16.py
 # MIT License
 
@@ -98,7 +99,7 @@ def remove_quantization_config_from_original_config(export_dir: str) -> None:
 
 def load_and_preprocess_state_dict(modelopt_state_root, world_size=8):
     state_dict_list = [
-        torch.load(f"{modelopt_state_root}/amax_dict_rank{rank}-mp{world_size}.pt")
+        safe_load(f"{modelopt_state_root}/amax_dict_rank{rank}-mp{world_size}.pt")
         for rank in range(world_size)
     ]
 

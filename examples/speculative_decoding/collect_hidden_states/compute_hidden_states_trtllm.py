@@ -1,3 +1,4 @@
+from modelopt.torch.utils.serialization import safe_load
 # SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -219,7 +220,7 @@ def main(args: argparse.Namespace) -> None:
         if not trtllm_dumped_file.exists():
             return False
         with open(trtllm_dumped_file, "rb") as f:
-            trtllm_dumped = torch.load(f)
+            trtllm_dumped = safe_load(f)
         assert isinstance(trtllm_dumped, list) and len(trtllm_dumped) == 1, (
             "TRTLLM dumped should be a list with one element"
         )

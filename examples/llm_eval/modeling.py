@@ -1,3 +1,4 @@
+from modelopt.torch.utils.serialization import safe_load
 # Adapted from https://github.com/declare-lab/instruct-eval/blob/720e66f627369266ed1cfd74426666ec37e524bc/modeling.py
 
 # MIT License
@@ -428,7 +429,7 @@ def load_quant(
 
         model.load_state_dict(safe_load(checkpoint), strict=False)
     else:
-        model.load_state_dict(torch.load(checkpoint), strict=False)
+        model.load_state_dict(safe_load(checkpoint), strict=False)
 
     if eval:
         quant.make_quant_attn(model)
