@@ -21,18 +21,17 @@ with paged KV cache support. Integration approach:
 - No module replacement — the Attention module stays intact with all its state
 - Only ``impl`` is swapped from FlashAttentionImpl to ModelOptSparseAttentionImpl
 - KV cache update is handled by vLLM (inherited ``do_kv_cache_update``)
-- Only ``forward()`` is overridden to call our Triton kernel for prefill
-- Decode falls back to FlashAttention (sparse attention has no benefit for single-token queries)
+- Only ``forward()`` is overridden to call our Triton kernel for both prefill and decode
 """
 
 import torch
-
-from modelopt.torch.kernels.triton_fa import attention as triton_attention
 from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
     FlashAttentionImpl,
     FlashAttentionMetadata,
 )
+
+from modelopt.torch.kernels.triton_fa import attention as triton_attention
 
 # Sparse config is set by the worker before model loading
 _sparse_config: dict = {}
@@ -50,7 +49,7 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
     Inherits from FlashAttentionImpl to reuse:
     - __init__ (all configuration)
     - do_kv_cache_update (KV cache writing)
-    Only overrides forward() to replace the attention computation for prefill.
+    Only overrides forward() to replace the attention computation.
     """
 
     def forward(
@@ -72,21 +71,8 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
             # Profiling run
             return output.fill_(0)
 
-        # Decode: fall back to FlashAttention (no benefit from sparse attention)
-        if attn_metadata.max_query_len <= 1:
-            return super().forward(
-                layer,
-                query,
-                key,
-                value,
-                kv_cache,
-                attn_metadata,
-                output=output,
-                output_scale=output_scale,
-                output_block_scale=output_block_scale,
-            )
-
         num_actual_tokens = attn_metadata.num_actual_tokens
+        is_prefill = attn_metadata.max_query_len > 1
 
         # Unpack paged KV cache: [2, num_blocks, page_size, num_kv_heads, head_dim]
         key_cache, value_cache = kv_cache.unbind(0)
@@ -120,29 +106,35 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
 
         b_start_loc = cu_seqlens_q[:batch]
         b_seq_len = cu_seqlens_q[1 : batch + 1] - cu_seqlens_q[:batch]
-        max_query_len = attn_metadata.max_query_len
 
-        # Dummy K/V for paged mode — must have correct num_kv_heads for GQA ratio
+        # Dummy K/V for paged mode: not used by the kernel (KV are read from
+        # k_cache/v_cache via block_table), but shape[1] must be num_kv_heads
+        # so the kernel computes the correct GQA ratio (num_q_heads // num_kv_heads).
         k_dummy = torch.empty(0, self.num_kv_heads, self.head_size, device=q.device, dtype=q.dtype)
-        v_dummy = k_dummy
 
-        # Call ModelOpt Triton kernel with paged KV
+        # Call ModelOpt Triton kernel with paged KV.
+        # b_seq_len is the query length (e.g., 6 for prefill, 1 for decode).
+        # b_seq_len_k is the total KV length including cache (e.g., 6 for first
+        # prefill, 7/8/... for subsequent decode steps).
         triton_out = triton_attention(
             q,
             k=k_dummy,
-            v=v_dummy,
+            v=k_dummy,
+            # Query metadata
             b_start_loc=b_start_loc,
             b_seq_len=b_seq_len,
-            max_input_len=max_query_len,
-            is_causal=True,
+            max_input_len=attn_metadata.max_query_len,
+            is_causal=is_prefill,  # causal for prefill, non-causal for decode
             softmax_scale=self.scale,
-            b_start_loc_k=None,
-            b_seq_len_k=seq_lens,
+            # KV metadata
+            b_start_loc_k=None,  # paged mode: KV offsets not needed
+            b_seq_len_k=seq_lens,  # total KV length per sequence
             max_input_len_k=attn_metadata.max_seq_len,
-            k_cache=key_cache,
-            v_cache=value_cache,
-            block_table=attn_metadata.block_table,
-            page_size=page_size,
+            # Paged KV cache
+            k_cache=key_cache,  # [num_blocks, page_size, num_kv_heads, head_dim]
+            v_cache=value_cache,  # [num_blocks, page_size, num_kv_heads, head_dim]
+            block_table=attn_metadata.block_table,  # [batch, max_blocks]
+            page_size=page_size,  # tokens per page in the KV cache
             **sparse_kw,
         )
 

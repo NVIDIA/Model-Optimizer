@@ -29,9 +29,8 @@ import sys
 from pathlib import Path
 
 import uvloop
-from packaging import version
-
 import vllm
+from packaging import version
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 

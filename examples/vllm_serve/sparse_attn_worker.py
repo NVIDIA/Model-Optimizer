@@ -17,8 +17,7 @@
 
 ``SparseAttnWorker``: Replaces ``FlashAttentionImpl`` with
 ``ModelOptSparseAttentionImpl`` on each Attention module after model loading.
-The sparse impl uses the ModelOpt Triton kernel for prefill and falls back to
-FlashAttention for decode.
+The sparse impl uses the ModelOpt Triton kernel for both prefill and decode.
 
 ``SparseQuantWorker``: Applies quantization first, then sparse attention via
 direct module walk (registry stacking does not work due to ``_DMRegistryCls``
@@ -37,10 +36,10 @@ from typing import Any
 
 import torch
 from fakequant_worker import disable_compilation
+from vllm.v1.worker.gpu_worker import Worker as BaseWorker
 
 import modelopt.torch.sparsity.attention_sparsity as mtsa
 from modelopt.torch.kernels.triton_fa import attention as triton_attention
-from vllm.v1.worker.gpu_worker import Worker as BaseWorker
 
 # ---------------------------------------------------------------------------
 # Configuration from environment variables
