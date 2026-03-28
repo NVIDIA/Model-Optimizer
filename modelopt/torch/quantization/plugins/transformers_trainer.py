@@ -229,9 +229,6 @@ class QATTrainer(ModelOptHFTrainer):
         """Initialize the trainer with modelopt states."""
         super().__init__(*args, **kwargs)
 
-        if adaround_args is not None and qerr_args is not None:
-            raise ValueError("adaround_args and qerr_args are mutually exclusive.")
-
         self.quant_args = quant_args
         self.adaround_args = adaround_args
         self.qerr_args = qerr_args

@@ -24,7 +24,6 @@ from transformers.training_args import ParallelMode
 
 import modelopt.torch.quantization as mtq
 from modelopt.torch.quantization.plugins.transformers_trainer import (
-    AdaRoundTrainingArguments,
     QATTrainer,
     QuantErrorTrainingArguments,
     QuantizationArguments,
@@ -128,16 +127,3 @@ class TestQuantErrorCallback:
         assert "qerr/sum" not in logged_keys
         assert "qerr/coeff" not in logged_keys
 
-    def test_qerr_and_adaround_mutually_exclusive(self, tmp_path):
-        """Passing both adaround_args and qerr_args raises ValueError."""
-        model = get_tiny_llama().cuda()
-        dataset = _make_dummy_dataset()
-
-        with pytest.raises(ValueError, match="mutually exclusive"):
-            QATTrainer(
-                model=model,
-                args=_make_training_args(tmp_path),
-                train_dataset=dataset,
-                adaround_args=AdaRoundTrainingArguments(),
-                qerr_args=QuantErrorTrainingArguments(),
-            )
