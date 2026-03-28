@@ -1,7 +1,7 @@
 # Model
 model_name_or_path: openai/gpt-oss-20b
 attn_implementation: eager
-torch_dtype: bfloat16
+dtype: bfloat16
 
 # Dataset
 dataset_name: HuggingFaceH4/Multilingual-Thinking
@@ -22,7 +22,7 @@ lr_scheduler_kwargs:
   min_lr_rate: 0.1
 output_dir: gpt-oss-20b-multilingual-reasoner
 report_to:
-  - trackio
+  - none
 seed: 42
 eval_on_start: true
 eval_strategy: steps
