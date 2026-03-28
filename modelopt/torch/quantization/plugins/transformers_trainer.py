@@ -129,11 +129,17 @@ class QuantErrorTrainingArguments:
 
     qerr_coeff_start: float = field(
         default=0.0,
-        metadata={"help": "Initial quantization error coefficient (0 = monitor only, no gradient)."},
+        metadata={
+            "help": "Initial quantization error coefficient (0 = monitor only, no gradient)."
+        },
     )
     qerr_coeff_stop: float = field(
         default=0.0,
         metadata={"help": "Final quantization error coefficient (0 = monitor only, no gradient)."},
+    )
+    qerr_reduction: str = field(
+        default="sum",
+        metadata={"help": "Reduction for quantization error: 'mean' or 'sum'. Default 'sum'."},
     )
 
 
@@ -222,6 +228,9 @@ class QATTrainer(ModelOptHFTrainer):
     ):
         """Initialize the trainer with modelopt states."""
         super().__init__(*args, **kwargs)
+
+        if adaround_args is not None and qerr_args is not None:
+            raise ValueError("adaround_args and qerr_args are mutually exclusive.")
 
         self.quant_args = quant_args
         self.adaround_args = adaround_args
@@ -671,7 +680,10 @@ class _QuantErrorAuxCallback(TrainerCallback):
             q_weight = q_weight.reshape(orig_shape)
         else:
             q_weight = quantizer(weight)
-        return ((q_weight - weight) ** 2).mean()
+        sq_err = (q_weight - weight) ** 2
+        if self._trainer.qerr_args.qerr_reduction == "sum":
+            return sq_err.sum()
+        return sq_err.mean()
 
     def _update_multipliers(self, qerr_coeff):
         param_groups = self._trainer.optimizer.param_groups
@@ -712,8 +724,9 @@ class _QuantErrorAuxCallback(TrainerCallback):
                 for weight, quantizer in self._weight_entries:
                     self._mse_acc += self._compute_mse(weight, quantizer)
 
+        reduction = self._trainer.qerr_args.qerr_reduction
         self._trainer._qerr_pending_metrics = {
-            "qerr/mse": self._mse_acc.item(),
+            f"qerr/{reduction}": self._mse_acc.item(),
             "qerr/coeff": qerr_coeff,
         }
         return control

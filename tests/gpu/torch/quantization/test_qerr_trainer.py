@@ -90,7 +90,7 @@ class TestQuantErrorCallback:
         trainer.train()
 
         logged_keys = {k for entry in trainer.state.log_history for k in entry}
-        assert "qerr/mse" in logged_keys
+        assert "qerr/sum" in logged_keys
         assert "qerr/coeff" in logged_keys
 
     def test_qerr_with_lazy_quantization(self, tmp_path):
@@ -108,7 +108,7 @@ class TestQuantErrorCallback:
         trainer.train()
 
         logged_keys = {k for entry in trainer.state.log_history for k in entry}
-        assert "qerr/mse" in logged_keys
+        assert "qerr/sum" in logged_keys
         assert "qerr/coeff" in logged_keys
 
     def test_no_qerr(self, tmp_path):
@@ -125,7 +125,7 @@ class TestQuantErrorCallback:
         trainer.train()
 
         logged_keys = {k for entry in trainer.state.log_history for k in entry}
-        assert "qerr/mse" not in logged_keys
+        assert "qerr/sum" not in logged_keys
         assert "qerr/coeff" not in logged_keys
 
     def test_qerr_and_adaround_mutually_exclusive(self, tmp_path):
