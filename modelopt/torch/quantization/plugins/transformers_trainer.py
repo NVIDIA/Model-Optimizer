@@ -595,6 +595,15 @@ class _AdaRoundAuxCallback(TrainerCallback):
             self._lazy_init()
         assert self._adaround_quantizers is not None
 
+        # Skip adaround step when round_logits are frozen (e.g. freeze-round paradigm)
+        if not any(q.round_logits.requires_grad for q in self._adaround_quantizers):
+            self._trainer._adaround_pending_metrics = {
+                "adaround/dist_loss": 0.0,
+                "adaround/beta": 0.0,
+                "adaround/grad_norm": 0.0,
+            }
+            return control
+
         self._update_multipliers()
         progress = state.global_step / max(state.max_steps, 1)
         beta = ada_args.beta_start + (ada_args.beta_end - ada_args.beta_start) * progress
@@ -677,7 +686,7 @@ class _QuantErrorAuxCallback(TrainerCallback):
             q_weight = q_weight.reshape(orig_shape)
         else:
             q_weight = quantizer(weight)
-        sq_err = (q_weight - weight) ** 2
+        sq_err = (q_weight.detach() - weight) ** 2
         if self._trainer.qerr_args.qerr_reduction == "sum":
             return sq_err.sum()
         return sq_err.mean()
