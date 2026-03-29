@@ -235,23 +235,31 @@ class EagleTrainingPlot(TrainerCallback):
         return control
 
     def on_step_end(self, args, state, control, **kwargs):
-        """Run AR validation periodically, if available."""
+        """Run AR validation periodically, if available.
+
+        Only runs on rank 0 to avoid DDP deadlock — other ranks skip and
+        synchronize via barrier.
+        """
         if self.ar_validate_steps <= 0:
             return control
         if state.global_step % self.ar_validate_steps == 0 and state.global_step > 0:
-            print_rank_0("Running AR validation...")
-            try:
-                ars = validate_ar(
-                    model=kwargs["model"],
-                    tokenizer=kwargs["processing_class"],
-                    ds=load_dataset("HuggingFaceH4/mt_bench_prompts")["train"],
-                    device=kwargs["model"].device,
-                )
-                print_rank_0(f"Step {state.global_step} AR: {sum(ars) / len(ars):.4f}")
-                if wandb and is_master():
-                    wandb.log({"validate_ar": sum(ars) / len(ars)}, step=state.global_step)
-            except Exception:
-                print_rank_0("AR validation not available.")
+            if is_master():
+                print_rank_0("Running AR validation...")
+                try:
+                    ars = validate_ar(
+                        model=kwargs["model"],
+                        tokenizer=kwargs["processing_class"],
+                        ds=load_dataset("HuggingFaceH4/mt_bench_prompts")["train"],
+                        device=kwargs["model"].device,
+                    )
+                    print_rank_0(f"Step {state.global_step} AR: {sum(ars) / len(ars):.4f}")
+                    if wandb:
+                        wandb.log({"validate_ar": sum(ars) / len(ars)}, step=state.global_step)
+                except Exception:
+                    print_rank_0("AR validation not available.")
+            # Barrier to synchronize all ranks after validation
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
         return control
 
 
