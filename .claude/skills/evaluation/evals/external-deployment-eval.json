@@ -1,0 +1,17 @@
+{
+  "skills": ["evaluation"],
+  "query": "evaluate my model that's already running at http://myserver:8000",
+  "files": [],
+  "expected_behavior": [
+    "Verifies nel is installed",
+    "Asks 5 base config questions — user selects deployment=None (External) since model is already deployed",
+    "Runs nel skills build-config with --deployment none",
+    "Configures target.api_endpoint with the user's existing server URL",
+    "Does NOT start a deployment — uses the external endpoint directly",
+    "api_key_name should already be defined for external deployment",
+    "Asks user for model type (base/chat/reasoning) and benchmark selection",
+    "Fills remaining config values",
+    "Runs dry-run, test, then full evaluation against the external endpoint",
+    "Reports results"
+  ]
+}

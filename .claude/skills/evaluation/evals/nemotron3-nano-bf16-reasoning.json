@@ -1,5 +1,5 @@
 {
-  "skills": ["nel-assistant"],
+  "skills": ["evaluation"],
   "query": "Help me evaluate Nemotron 3 Nano BF16 from NVIDIA",
   "files": [],
   "expected_behavior": [

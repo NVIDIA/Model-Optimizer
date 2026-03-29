@@ -1,0 +1,22 @@
+{
+  "skills": ["evaluation"],
+  "query": "evaluate my FP8 quantized Llama checkpoint at ./llama-3.1-8b-fp8 on MMLU and GSM8K",
+  "files": [],
+  "expected_behavior": [
+    "Verifies nel is installed by running 'nel --version'",
+    "Asks all 5 base config questions (execution, deployment, auto-export, model type, benchmarks)",
+    "Runs 'nel skills build-config' with correct flags matching user answers",
+    "Sets deployment.checkpoint_path to ./llama-3.1-8b-fp8 and deployment.hf_model_handle to null",
+    "Auto-detects quantization format by reading ./llama-3.1-8b-fp8/hf_quant_config.json",
+    "Finds quant_algo=FP8 and adds --quantization modelopt to deployment.extra_args",
+    "Recommends accuracy-sensitive benchmarks: MMLU (always), GSM8K (math reasoning), ARC-Challenge",
+    "Searches web for Llama-3.1-8B model card and extracts sampling params, context length, TP settings",
+    "Asks user for GPU count to set tensor_parallel_size",
+    "Fills in remaining ??? values by asking user",
+    "Shows task list and confirms with user",
+    "Runs dry-run first: nel run --config <config> --dry-run",
+    "Then test run with limit_samples=10",
+    "Then full evaluation",
+    "Reports accuracy results per benchmark"
+  ]
+}

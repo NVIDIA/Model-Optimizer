@@ -1,0 +1,16 @@
+{
+  "skills": ["evaluation"],
+  "query": "evaluate accuracy of my NVFP4 quantized model at ./llama-nvfp4",
+  "files": [],
+  "expected_behavior": [
+    "Verifies nel is installed",
+    "Asks 5 base config questions",
+    "Sets deployment.checkpoint_path to ./llama-nvfp4",
+    "Auto-detects quantization by reading ./llama-nvfp4/hf_quant_config.json",
+    "Finds quant_algo contains 'FP4' or 'NVFP4' and adds --quantization modelopt_fp4 to deployment.extra_args",
+    "Does NOT use --quantization modelopt (that's for FP8 only)",
+    "Recommends quantization-sensitive benchmarks: MMLU, GSM8K, ARC-Challenge",
+    "Mentions that NVFP4 inference requires Blackwell GPUs",
+    "Proceeds with standard evaluation flow"
+  ]
+}

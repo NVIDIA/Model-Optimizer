@@ -1,0 +1,12 @@
+{
+  "skills": ["evaluation"],
+  "query": "evaluate my quantized model",
+  "files": [],
+  "expected_behavior": [
+    "Checks if nel is installed by running 'nel --version'",
+    "nel command not found or errors",
+    "Instructs user to install: pip install nemo-evaluator-launcher",
+    "Does NOT attempt to proceed without nel installed",
+    "After user installs, re-checks nel --version and proceeds with workflow"
+  ]
+}

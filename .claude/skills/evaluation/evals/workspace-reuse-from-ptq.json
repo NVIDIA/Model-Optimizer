@@ -1,0 +1,15 @@
+{
+  "skills": ["evaluation"],
+  "query": "evaluate the model I just quantized",
+  "files": [],
+  "expected_behavior": [
+    "Checks if MODELOPT_WORKSPACE_ROOT is set",
+    "If set: reads skills/common/workspace-management.md",
+    "Lists existing workspaces and finds the one from prior PTQ step",
+    "Reuses the workspace to access the quantized checkpoint",
+    "Auto-detects quantization format from hf_quant_config.json in the checkpoint",
+    "Sets correct deployment.extra_args based on detected format (--quantization modelopt or modelopt_fp4)",
+    "Recommends quantization-sensitive benchmarks since this is a quantized model",
+    "Proceeds with standard evaluation workflow"
+  ]
+}

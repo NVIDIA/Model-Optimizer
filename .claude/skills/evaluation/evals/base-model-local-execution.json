@@ -1,0 +1,18 @@
+{
+  "skills": ["evaluation"],
+  "query": "evaluate Qwen/Qwen3-0.6B on standard benchmarks locally",
+  "files": [],
+  "expected_behavior": [
+    "Verifies nel is installed",
+    "Asks 5 base config questions — user selects: execution=local, deployment=vllm, export=none, model_type=base, benchmarks=standard",
+    "Runs nel skills build-config --execution local --deployment vllm --model_type base --benchmarks standard",
+    "Sets deployment.hf_model_handle to Qwen/Qwen3-0.6B and deployment.checkpoint_path to null",
+    "No hf_quant_config.json since this is an HF hub model — no quantization flag needed",
+    "Searches web for Qwen3-0.6B model card to extract deployment settings",
+    "For local execution: no SLURM-specific config needed",
+    "Fills remaining ??? values",
+    "Shows task list for confirmation",
+    "Runs dry-run, then test with limit_samples=10, then full evaluation",
+    "Reports results"
+  ]
+}

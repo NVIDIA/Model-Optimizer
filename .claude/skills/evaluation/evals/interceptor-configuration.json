@@ -1,0 +1,16 @@
+{
+  "skills": ["evaluation"],
+  "query": "evaluate my model and configure request/response logging interceptors",
+  "files": [],
+  "expected_behavior": [
+    "Follows standard evaluation workflow through Step 6",
+    "In Step 7 (Interceptors): tells user to see the interceptors documentation URL",
+    "Does NOT provide general information about interceptors without reading the docs",
+    "If user asks to configure logging interceptor: reads the interceptor webpage",
+    "Configures interceptor under evaluation.nemo_evaluator_config.config.target.api_endpoint.adapter_config (NOT under target.api_endpoint.adapter_config)",
+    "Uses field names from CLI Configuration section after --overrides keyword",
+    "Does NOT define interceptors list directly (would override full chain with unintended consequences)",
+    "Uses correct field names: max_logged_requests and max_logged_responses (NOT max_saved_* or max_*)",
+    "Proceeds with evaluation after interceptor configuration"
+  ]
+}

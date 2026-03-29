@@ -1,0 +1,18 @@
+{
+  "skills": ["evaluation"],
+  "query": "evaluate a 405B parameter model, I have 4 nodes available",
+  "files": [],
+  "expected_behavior": [
+    "Verifies nel is installed",
+    "Asks 5 base config questions",
+    "In Step 6 (Advanced - Multi-node): asks which pattern applies",
+    "For a single 405B model: recommends Pattern B (multi-node single instance with Ray TP/PP)",
+    "Uses vllm_ray deployment config: defaults: [deployment: vllm_ray]",
+    "Sets execution.num_nodes: 2 or 4 depending on GPU memory",
+    "Configures deployment.tensor_parallel_size and pipeline_parallel_size",
+    "Explains: num_instances controls independent instances (with HAProxy), while this is single-instance across nodes",
+    "If user wants throughput AND cross-node: explains Pattern A+B combined",
+    "Notes: num_nodes must be divisible by num_instances",
+    "Proceeds with standard evaluation flow after multi-node config"
+  ]
+}

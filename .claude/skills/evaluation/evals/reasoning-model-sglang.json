@@ -1,0 +1,21 @@
+{
+  "skills": ["evaluation"],
+  "query": "evaluate QwQ-32B reasoning model with math benchmarks on SLURM using SGLang",
+  "files": [],
+  "expected_behavior": [
+    "Verifies nel is installed",
+    "Asks 5 base config questions — user selects: execution=slurm, deployment=sglang, model_type=reasoning, benchmarks=math_reasoning",
+    "Runs nel skills build-config with --execution slurm --deployment sglang --model_type reasoning --benchmarks math_reasoning",
+    "Searches web for QwQ-32B model card",
+    "Configures reasoning toggle: either via adapter_config.custom_system_prompt (/think, /no_think) or via adapter_config.params_to_add with chat_template_kwargs.enable_thinking",
+    "Sets higher max_new_tokens for reasoning (thinking tokens can be long)",
+    "Asks user about reasoning effort/budget if configurable",
+    "Configures SGLang-specific deployment settings",
+    "Asks user for SLURM hostname, account, partition, walltime",
+    "For nemo_skills.* tasks with self-deployment: adds target.api_endpoint.api_key_name: DUMMY_API_KEY",
+    "Disables reasoning for tasks where it's not needed (e.g., IFEval) using task-level overrides",
+    "Shows task list for confirmation",
+    "Exports DUMMY_API_KEY=dummy before running",
+    "Runs dry-run, test, then full evaluation"
+  ]
+}

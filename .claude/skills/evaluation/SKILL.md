@@ -112,48 +112,22 @@ If found, read `quantization.quant_algo` and set the correct vLLM/SGLang quantiz
 | `FP8` | `--quantization modelopt` |
 | `W4A8_AWQ` | `--quantization modelopt` |
 | `NVFP4`, `NVFP4_AWQ` | `--quantization modelopt_fp4` |
+| Other values | Try `--quantization modelopt`; consult vLLM/SGLang docs if unsure |
 
-If no `hf_quant_config.json`, the checkpoint is unquantized — no flag needed.
+If no `hf_quant_config.json`, also check `config.json` for a `quantization_config` section with `quant_method: "modelopt"`. If neither is found, the checkpoint is unquantized — no flag needed.
 
 **Quantization-aware benchmark defaults:**
 
 When a quantized checkpoint is detected, recommend benchmarks sensitive to quantization accuracy loss:
 
-- **Always include**: MMLU (general knowledge, most affected by quantization)
+- **Always include**: MMLU (general knowledge — typically shows measurable accuracy loss from quantization)
 - **Recommended**: GSM8K (math reasoning — sensitive to precision loss), ARC-Challenge (reasoning)
 - **Good to add**: HumanEval (code generation — catches subtle degradation), Winogrande (commonsense)
-- **Less useful for quant comparison**: IFEval (instruction following — rarely affected by quantization)
+- **Less useful for quant comparison**: IFEval (instruction following — typically less affected, but worth including for aggressive quantization like FP4)
 
 Present these recommendations to the user and ask which to include. If the user already specified benchmarks, keep their choice but mention any accuracy-sensitive benchmarks they may have missed.
 
-Use WebSearch to find model card (HuggingFace, build.nvidia.com). Read it carefully, the FULL text, the devil is in the details. Extract ALL relevant configurations:
-
-- Sampling params (`temperature`, `top_p`)
-- Context length (`deployment.extra_args: "--max-model-len <value>"`)
-- TP/DP settings (to set them appropriately, AskUserQuestion on how many GPUs the model will be deployed)
-- Reasoning config (if applicable):
-  - reasoning on/off: use either:
-    - `adapter_config.custom_system_prompt` (like `/think`, `/no_think`) and no `adapter_config.params_to_add` (leave `params_to_add` unrelated to reasoning untouched)
-    - `adapter_config.params_to_add` for payload modifier (like `"chat_template_kwargs": {"enable_thinking": true/false}`) and no `adapter_config.custom_system_prompt` and `adapter_config.use_system_prompt: false` (leave `custom_system_prompt` and `use_system_prompt` unrelated to reasoning untouched).
-  - reasoning effort/budget (if it's configurable, AskUserQuestion what reasoning effort they want)
-  - higher `max_new_tokens`
-  - etc.
-- Deployment-specific `extra_args` for vLLM/SGLang (look for the vLLM/SGLang deployment command)
-- Deployment-specific vLLM/SGLang versions (by default we use latest docker images, but you can control it with `deployment.image` e.g. vLLM above `vllm/vllm-openai:v0.11.0` stopped supporting `rope-scaling` arg used by Qwen models)
-- ARM64 / non-standard GPU compatibility: The default `vllm/vllm-openai` image only supports common GPU architectures. For ARM64 platforms or GPUs with non-standard compute capabilities (e.g., NVIDIA GB10 with sm_121), use NGC vLLM images instead:
-  - Example: `deployment.image: nvcr.io/nvidia/vllm:26.01-py3`
-  - AskUserQuestion about their GPU architecture if the model card doesn't specify deployment constraints
-- Any preparation requirements (e.g., downloading reasoning parsers, custom plugins):
-  - If the model card mentions downloading files (like reasoning parsers, custom plugins) before deployment, add `deployment.pre_cmd` with the download command
-  - Use `curl` instead of `wget` as it's more widely available in Docker containers
-  - Example: `pre_cmd: curl -L -o reasoning_parser.py https://huggingface.co/.../reasoning_parser.py`
-  - When using `pip install` in `pre_cmd`, always use `--no-cache-dir` to avoid cross-device link errors in Docker containers (the pip cache and temp directories may be on different filesystems)
-  - Example: `pre_cmd: pip3 install --no-cache-dir flash-attn --no-build-isolation`
-- Any other model-specific requirements
-
-Remember to check `evaluation.nemo_evaluator_config` and `evaluation.tasks.*.nemo_evaluator_config` overrides too for parameters to adjust (e.g. disabling reasoning)!
-
-Present findings, explain each setting, ask user to confirm or adjust. If no model card found, ask user directly for the above configurations.
+Read `references/model-card-research.md` for the full extraction checklist (sampling params, reasoning config, ARM64 compatibility, pre_cmd, etc.). Use WebSearch to research the model card, present findings, and ask the user to confirm.
 
 **Step 4: Fill in remaining missing values**
 
@@ -197,57 +171,7 @@ Show tasks in the current config. Loop until the user confirms the task list is 
 
 **Step 6: Advanced - Multi-node**
 
-There are two multi-node patterns. Ask the user which applies:
-
-**Pattern A: Multi-instance (independent instances with HAProxy)**
-
-Only if model >120B parameters or user wants more throughput. Explain: "Each node runs an independent deployment instance. HAProxy load-balances requests across all instances."
-
-```yaml
-execution:
-    num_nodes: 4       # Total nodes
-    num_instances: 4   # 4 independent instances → HAProxy auto-enabled
-```
-
-**Pattern B: Multi-node single instance (Ray TP/PP across nodes)**
-
-When a single model is too large for one node and needs pipeline parallelism across nodes. Use `vllm_ray` deployment config:
-
-```yaml
-defaults:
-  - deployment: vllm_ray   # Built-in Ray cluster setup (replaces manual pre_cmd)
-
-execution:
-    num_nodes: 2           # Single instance spanning 2 nodes
-
-deployment:
-    tensor_parallel_size: 8
-    pipeline_parallel_size: 2
-```
-
-**Pattern A+B combined: Multi-instance with multi-node instances**
-
-For very large models needing both cross-node parallelism AND multiple instances:
-
-```yaml
-defaults:
-  - deployment: vllm_ray
-
-execution:
-    num_nodes: 4       # Total nodes
-    num_instances: 2   # 2 instances of 2 nodes each → HAProxy auto-enabled
-
-deployment:
-    tensor_parallel_size: 8
-    pipeline_parallel_size: 2
-```
-
-**Common Confusions**
-
-- **`num_instances`** controls independent deployment instances with HAProxy. **`data_parallel_size`** controls DP replicas *within* a single instance.
-- Global data parallelism is `num_instances x data_parallel_size` (e.g., 2 instances x 8 DP each = 16 replicas).
-- With multi-instance, `parallelism` in task config is the total concurrent requests across all instances, not per-instance.
-- `num_nodes` must be divisible by `num_instances`.
+If the user needs multi-node evaluation (model >120B, or more throughput), read `references/multi-node.md` for the configuration patterns (HAProxy multi-instance, Ray TP/PP, or combined).
 
 **Step 7: Advanced - Interceptors**
 
@@ -374,7 +298,7 @@ Now, copy this checklist and track your progress:
 
 ```text
 Config Generation Progress:
-- [ ] Step 0: Check workspace (if multi-user)
+- [ ] Step 0: Check workspace (if MODELOPT_WORKSPACE_ROOT is set)
 - [ ] Step 1: Check if nel is installed
 - [ ] Step 2: Build the base config file
 - [ ] Step 3: Configure model path and parameters
