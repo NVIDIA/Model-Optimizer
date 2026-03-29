@@ -1,0 +1,17 @@
+{
+  "skills": ["deployment"],
+  "query": "deploy my quantized model on the SLURM cluster",
+  "files": [],
+  "expected_behavior": [
+    "Checks for cluster config at ~/.config/modelopt/clusters.yaml or .claude/clusters.yaml",
+    "Sources .claude/skills/common/remote_exec.sh",
+    "Calls remote_load_cluster, remote_check_ssh, remote_detect_env",
+    "Checks if checkpoint is already on remote (e.g., from prior PTQ run) before syncing; only syncs if local",
+    "For SLURM: writes a job script with srun --container-image and --container-mounts on srun line (not #SBATCH)",
+    "Starts vLLM/SGLang server inside the container via srun",
+    "Gets allocated node hostname from squeue -j $JOBID -o %N",
+    "Verifies remotely: remote_run 'curl -s http://localhost:8000/health'",
+    "Reports the remote endpoint (http://<node_hostname>:8000) and notes SLURM network restrictions",
+    "Reads framework-specific reference (references/vllm.md or references/sglang.md) for deployment flags"
+  ]
+}

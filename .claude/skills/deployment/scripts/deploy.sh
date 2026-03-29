@@ -45,10 +45,10 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-log_info()    { printf "${BLUE}[INFO]${NC} %s\n" "$1"; }
-log_success() { printf "${GREEN}[OK]${NC} %s\n" "$1"; }
-log_warn()    { printf "${YELLOW}[WARN]${NC} %s\n" "$1"; }
-log_error()   { printf "${RED}[ERROR]${NC} %s\n" "$1"; }
+log_info()    { printf "${BLUE}[INFO]${NC} %s\n" "$1" >&2; }
+log_success() { printf "${GREEN}[OK]${NC} %s\n" "$1" >&2; }
+log_warn()    { printf "${YELLOW}[WARN]${NC} %s\n" "$1" >&2; }
+log_error()   { printf "${RED}[ERROR]${NC} %s\n" "$1" >&2; }
 
 usage() {
     cat <<EOF
@@ -104,19 +104,30 @@ detect_quantization() {
         return
     fi
 
+    # Require python3 for JSON parsing
+    if ! command -v python3 &>/dev/null; then
+        log_error "python3 is required to detect quantization format but is not installed"
+        return 1
+    fi
+
     # Local checkpoint: check hf_quant_config.json
     local quant_config="$model_path/hf_quant_config.json"
     if [[ -f "$quant_config" ]]; then
         log_info "Found hf_quant_config.json"
 
-        # Check for FP4/NVFP4
-        if python3 -c "
+        local quant_algo
+        quant_algo=$(python3 -c "
 import json, sys
 with open(sys.argv[1]) as f:
     cfg = json.load(f)
 quant_algo = cfg.get('quantization', {}).get('quant_algo', '')
 print(quant_algo)
-" "$quant_config" 2>/dev/null | grep -qi "fp4"; then
+" "$quant_config" 2>&1) || {
+            log_error "Failed to parse hf_quant_config.json: $quant_algo"
+            return 1
+        }
+
+        if echo "$quant_algo" | grep -qi "fp4"; then
             echo "modelopt_fp4"
         else
             echo "modelopt"
@@ -130,8 +141,11 @@ with open(sys.argv[1]) as f:
     cfg = json.load(f)
 qc = cfg.get('quantization_config', {})
 if qc.get('quant_method') == 'modelopt':
-    print(qc.get('quant_type', 'fp8'))
-" "$model_path/config.json" 2>/dev/null)
+    print(qc.get('quant_algo', 'fp8'))
+" "$model_path/config.json" 2>&1) || {
+            log_error "Failed to parse config.json: $quant_method"
+            return 1
+        }
         if [[ -n "$quant_method" ]]; then
             log_info "Found quantization_config in config.json (quant_method=modelopt)"
             if echo "$quant_method" | grep -qi "fp4"; then
@@ -168,15 +182,32 @@ detect_gpu() {
 is_server_running() {
     if [[ -f "$PID_FILE" ]]; then
         local pid
-        pid=$(cat "$PID_FILE")
-        if ps -p "$pid" >/dev/null 2>&1; then
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        if [[ ! "$pid" =~ ^[0-9]+$ ]]; then
+            rm -f "$PID_FILE"
+            return 1
+        fi
+        # Verify the PID is actually a Python/vLLM/SGLang process (not PID reuse)
+        local cmdline
+        cmdline=$(ps -p "$pid" -o args= 2>/dev/null) || { rm -f "$PID_FILE"; return 1; }
+        if echo "$cmdline" | grep -q "vllm\|sglang\|python"; then
             return 0
         fi
+        # PID exists but is not our server — stale PID file
+        rm -f "$PID_FILE"
     fi
     return 1
 }
 
 start_server() {
+    # Validate GPU availability and TP size
+    local gpu_count
+    gpu_count=$(detect_gpu) || exit 1
+    if [[ "$TP_SIZE" -gt "$gpu_count" ]]; then
+        log_error "Requested TP size ($TP_SIZE) exceeds available GPUs ($gpu_count)"
+        exit 1
+    fi
+
     if [[ -z "$MODEL" ]]; then
         log_error "--model is required"
         usage
@@ -185,6 +216,13 @@ start_server() {
     if is_server_running; then
         log_warn "Server already running (PID: $(cat "$PID_FILE"))"
         return 0
+    fi
+
+    # Check if port is already in use
+    if ss -tlnp 2>/dev/null | grep -q ":${PORT} " || \
+       lsof -i ":${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+        log_error "Port $PORT is already in use — stop the existing service or use --port <other_port>"
+        exit 1
     fi
 
     mkdir -p "$LOG_DIR"
@@ -241,6 +279,15 @@ start_vllm() {
     log_info "Command: ${cmd[*]}"
     nohup "${cmd[@]}" >"$LOG_FILE" 2>&1 &
     echo $! >"$PID_FILE"
+
+    # Check for immediate crash (missing module, port conflict, CUDA error)
+    sleep 2
+    if ! ps -p "$(cat "$PID_FILE")" >/dev/null 2>&1; then
+        log_error "Server process exited immediately. Last log lines:"
+        tail -20 "$LOG_FILE" 2>/dev/null
+        rm -f "$PID_FILE"
+        exit 1
+    fi
     log_success "vLLM started (PID: $(cat "$PID_FILE"))"
 }
 
@@ -259,6 +306,15 @@ start_sglang() {
     log_info "Command: ${cmd[*]}"
     nohup "${cmd[@]}" >"$LOG_FILE" 2>&1 &
     echo $! >"$PID_FILE"
+
+    # Check for immediate crash
+    sleep 2
+    if ! ps -p "$(cat "$PID_FILE")" >/dev/null 2>&1; then
+        log_error "Server process exited immediately. Last log lines:"
+        tail -20 "$LOG_FILE" 2>/dev/null
+        rm -f "$PID_FILE"
+        exit 1
+    fi
     log_success "SGLang started (PID: $(cat "$PID_FILE"))"
 }
 
@@ -271,7 +327,7 @@ start_trtllm() {
 
 # Option 1: AutoDeploy (recommended)
 ./examples/llm_autodeploy/scripts/run_auto_quant_and_deploy.sh \\
-    --hf_ckpt $MODEL \\
+    --hf_ckpt "$MODEL" \\
     --save_quantized_ckpt <output_path> \\
     --quant fp8,nvfp4 \\
     --effective_bits 4.5
@@ -286,7 +342,7 @@ TRTEOF
 
     log_warn "TRT-LLM server mode not yet automated in this script."
     log_warn "Use vLLM or SGLang for OpenAI-compatible serving of ModelOpt checkpoints."
-    exit 1
+    return 1
 }
 
 wait_for_server() {
@@ -342,7 +398,18 @@ stop_server() {
     # Force kill
     log_warn "Force killing..."
     kill -9 -- -"$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
+    sleep 1
+    if ps -p "$pid" >/dev/null 2>&1; then
+        log_error "Failed to kill server process $pid — manual intervention required"
+    fi
     rm -f "$PID_FILE" "$META_FILE"
+
+    # Check for orphaned GPU worker processes
+    local orphans
+    orphans=$(pgrep -f "vllm\|sglang" 2>/dev/null | wc -l)
+    if [[ "$orphans" -gt 0 ]]; then
+        log_warn "Found $orphans potential orphaned server processes — run: pkill -f 'vllm|sglang'"
+    fi
     log_success "Server stopped (forced)"
 }
 
@@ -374,15 +441,16 @@ print(data['data'][0]['id'])
         exit 1
     fi
 
+    local payload
+    payload=$(python3 -c "
+import json, sys
+print(json.dumps({'model': sys.argv[1], 'prompt': 'The capital of France is', 'max_tokens': 32, 'temperature': 0.7}))
+" "$model_id")
+
     local response
     response=$(curl -s "http://localhost:$PORT/v1/completions" \
         -H "Content-Type: application/json" \
-        -d "{
-            \"model\": \"$model_id\",
-            \"prompt\": \"The capital of France is\",
-            \"max_tokens\": 32,
-            \"temperature\": 0.7
-        }")
+        -d "$payload")
 
     echo "$response" | python3 -m json.tool 2>/dev/null || echo "$response"
 
@@ -445,11 +513,11 @@ while [[ $# -gt 0 ]]; do
                 usage
             fi
             ;;&
-        --model)               MODEL="$2"; shift 2 ;;
-        --framework)           FRAMEWORK="$2"; shift 2 ;;
-        --port)                PORT="$2"; shift 2 ;;
-        --tp)                  TP_SIZE="$2"; shift 2 ;;
-        --quantization)        QUANTIZATION="$2"; shift 2 ;;
+        --model)               MODEL="$2"; _CLI_MODEL=1; shift 2 ;;
+        --framework)           FRAMEWORK="$2"; _CLI_FRAMEWORK=1; shift 2 ;;
+        --port)                PORT="$2"; _CLI_PORT=1; shift 2 ;;
+        --tp)                  TP_SIZE="$2"; _CLI_TP=1; shift 2 ;;
+        --quantization)        QUANTIZATION="$2"; _CLI_QUANT=1; shift 2 ;;
         --gpu-memory-utilization) VRAM="$2"; shift 2 ;;
         --log-dir)             LOG_DIR="$2"; LOG_FILE="$LOG_DIR/server.log"; PID_FILE="$LOG_DIR/server.pid"; META_FILE="$LOG_DIR/server.meta"; shift 2 ;;
         start|stop|test|status|restart|detect)
@@ -464,13 +532,39 @@ if [[ -z "$COMMAND" ]]; then
     usage
 fi
 
+# Validate numeric arguments
+if [[ -n "$PORT" && ! "$PORT" =~ ^[0-9]+$ ]]; then
+    log_error "--port must be a number, got: $PORT"
+    exit 1
+fi
+if [[ -n "$TP_SIZE" && ! "$TP_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+    log_error "--tp must be a positive integer, got: $TP_SIZE"
+    exit 1
+fi
+
 # Execute
 case "$COMMAND" in
     start)   start_server ;;
     stop)    stop_server ;;
     test)    test_api ;;
     status)  show_status ;;
-    restart) stop_server; sleep 2; start_server ;;
+    restart)
+        # Load ALL fields from metadata, then let CLI args override
+        if [[ -f "$META_FILE" ]]; then
+            local saved_model saved_framework saved_port saved_quant saved_tp
+            saved_model=$(grep '^MODEL=' "$META_FILE" | cut -d= -f2- | tr -d "'")
+            saved_framework=$(grep '^FRAMEWORK=' "$META_FILE" | cut -d= -f2- | tr -d "'")
+            saved_port=$(grep '^PORT=' "$META_FILE" | cut -d= -f2- | tr -d "'")
+            saved_quant=$(grep '^QUANTIZATION=' "$META_FILE" | cut -d= -f2- | tr -d "'")
+            saved_tp=$(grep '^TP_SIZE=' "$META_FILE" | cut -d= -f2- | tr -d "'")
+            # Apply saved values as defaults; CLI args (tracked via _CLI_*) win
+            [[ -z "${_CLI_MODEL:-}" ]]     && MODEL="${saved_model:-$MODEL}"
+            [[ -z "${_CLI_FRAMEWORK:-}" ]] && FRAMEWORK="${saved_framework:-$FRAMEWORK}"
+            [[ -z "${_CLI_PORT:-}" ]]      && PORT="${saved_port:-$PORT}"
+            [[ -z "${_CLI_QUANT:-}" ]]     && QUANTIZATION="${saved_quant:-$QUANTIZATION}"
+            [[ -z "${_CLI_TP:-}" ]]        && TP_SIZE="${saved_tp:-$TP_SIZE}"
+        fi
+        stop_server; sleep 2; start_server ;;
     detect)
         if [[ -z "$MODEL" ]]; then
             log_error "--model is required for detect"
