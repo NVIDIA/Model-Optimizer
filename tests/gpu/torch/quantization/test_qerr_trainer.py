@@ -126,4 +126,3 @@ class TestQuantErrorCallback:
         logged_keys = {k for entry in trainer.state.log_history for k in entry}
         assert "qerr/sum" not in logged_keys
         assert "qerr/coeff" not in logged_keys
-

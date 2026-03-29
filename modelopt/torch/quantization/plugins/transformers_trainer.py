@@ -675,8 +675,8 @@ class _QuantErrorAuxCallback(TrainerCallback):
 
     def _compute_mse(self, weight, quantizer):
         """Compute MSE between original and quantized weight."""
-        if isinstance(quantizer, StaticBlockScaleQuantizer):
-            # Reshape to [num_blocks, block_size] as expected by the Triton FP4 kernel
+        if isinstance(quantizer, StaticBlockScaleQuantizer) and not quantizer._lsq:
+            # scale_after_dequant: weights are pre-divided, use raw cast
             orig_shape = weight.shape
             if hasattr(quantizer, "_block_reshape_size"):
                 w = weight.reshape(quantizer._block_reshape_size)

@@ -18,7 +18,7 @@
 import fnmatch
 import types
 import warnings
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -295,10 +295,8 @@ class ModelOptHFTrainer(Trainer):
             # as strings instead of floats. Coerce numeric string values.
             for key, val in kwargs.items():
                 if isinstance(val, str):
-                    try:
+                    with suppress(ValueError):
                         kwargs[key] = float(val)
-                    except ValueError:
-                        pass
         return cfg
 
     def _match_lr_config_pattern(self, name: str) -> str | None:

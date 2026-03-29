@@ -1273,6 +1273,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
     """
 
     _scale_after_dequant: bool = False
+    _lsq: bool = False
     _quant_max_bound: float = 6.0
     _quantize_scales: bool = True
 
@@ -1352,13 +1353,13 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
             return self._short_tensor(amax, fmt)
         return super()._short_amax(fmt)
 
-    def enable_scale_after_dequant(
+    def _enable_learnable_scales(
         self,
         per_block_scale: torch.Tensor,
         per_tensor_scale: torch.Tensor = None,
         quantize_scales: bool = True,
     ):
-        """Set up scale-after-dequant mode with learnable per-block scale.
+        """Shared setup: register learnable per-block scale and optional per-tensor scale.
 
         Args:
             per_block_scale: Per-block scale (learnable Parameter).
@@ -1376,6 +1377,25 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         self._scale_after_dequant = True
         self._quantize_scales = quantize_scales
 
+    def enable_scale_after_dequant(
+        self,
+        per_block_scale: torch.Tensor,
+        per_tensor_scale: torch.Tensor = None,
+        quantize_scales: bool = True,
+    ):
+        """Scale-after-dequant mode. Weights must be pre-divided by caller."""
+        self._enable_learnable_scales(per_block_scale, per_tensor_scale, quantize_scales)
+
+    def enable_lsq(
+        self,
+        per_block_scale: torch.Tensor,
+        per_tensor_scale: torch.Tensor = None,
+        quantize_scales: bool = True,
+    ):
+        """LSQ mode. Weights are NOT pre-divided; forward does s*Q(x/s)."""
+        self._enable_learnable_scales(per_block_scale, per_tensor_scale, quantize_scales)
+        self._lsq = True
+
     def _cast_ste(self, inputs):
         """Cast inputs to quantized representable values (no scaling)."""
         if isinstance(self._num_bits, tuple):
@@ -1392,9 +1412,12 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
             else:
                 scale = scale_raw
 
-            w_cast = self._cast_ste(inputs)
-
             scale = scale.to(dtype=inputs.dtype)
+
+            if self._lsq:
+                w_cast = self._cast_ste(inputs / scale.view(-1, 1))
+            else:
+                w_cast = self._cast_ste(inputs)
 
             return w_cast * scale.view(-1, 1)
 

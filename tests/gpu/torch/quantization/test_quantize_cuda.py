@@ -88,6 +88,22 @@ NVFP4_WEIGHT_SCALE_LEARN_CFG = {
     },
 }
 
+NVFP4_WEIGHT_LSQ_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {"enable": False},
+    },
+    "algorithm": {
+        "method": "lsq",
+        "scale_algorithm": {"method": "mse", "fp8_scale_sweep": True},
+    },
+}
+
 NVFP4_ADAROUND_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
@@ -232,6 +248,54 @@ def test_scale_after_dequant_grad():
     found = False
     for module in model.modules():
         if isinstance(module, NVFP4StaticQuantizer) and module._scale_after_dequant:
+            assert module._per_block_scale.grad is not None
+            found = True
+    assert found
+
+
+def test_lsq_grad():
+    """Test LSQ: quantizers in LSQ mode, per_block_scale gets gradients, output is finite."""
+    if get_cuda_ext_mx() is None:
+        pytest.skip("cuda_ext_mx is not available")
+
+    import copy
+
+    model = nn.Sequential(nn.Linear(32, 64, bias=False), nn.Linear(64, 16, bias=False)).cuda()
+    model_ref = copy.deepcopy(model)
+
+    calib_data = [torch.randn(2, 32, device="cuda") for _ in range(4)]
+
+    def forward_loop(model):
+        for x in calib_data:
+            model(x)
+
+    # Reference: MSE + FP8 sweep only
+    mtq.quantize(model_ref, NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG, forward_loop)
+
+    # LSQ (internally runs MSE + FP8 sweep, then converts to LSQ mode)
+    mtq.quantize(model, NVFP4_WEIGHT_LSQ_CFG, forward_loop)
+
+    # Verify output is finite
+    x = torch.randn(2, 32, device="cuda")
+    with torch.no_grad():
+        out = model(x)
+    assert torch.isfinite(out).all(), "Non-finite output detected"
+
+    # Verify quantizers are in LSQ mode
+    for module in model.modules():
+        if isinstance(module, NVFP4StaticQuantizer) and module._scale_after_dequant:
+            assert module._lsq, "Quantizer should be in LSQ mode"
+            assert isinstance(module._per_block_scale, nn.Parameter)
+            assert module._per_block_scale.requires_grad
+            assert not module._per_tensor_scale.requires_grad
+
+    # Forward + backward: verify per_block_scale gets gradients
+    out = model(x)
+    out.sum().backward()
+
+    found = False
+    for module in model.modules():
+        if isinstance(module, NVFP4StaticQuantizer) and module._lsq:
             assert module._per_block_scale.grad is not None
             found = True
     assert found

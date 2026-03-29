@@ -1428,6 +1428,26 @@ class ScaleAfterDequantConfig(QuantizeAlgorithmConfig):
     )
 
 
+class LSQConfig(QuantizeAlgorithmConfig):
+    """Config for LSQ (Learned Step Size Quantization) algorithm.
+
+    Like scale_after_dequant, but weights are NOT pre-divided. The forward pass
+    computes s * Q(x/s), so the quantization grid adapts as the learned scale changes.
+    """
+
+    method: Literal["lsq"] = ModeloptField("lsq")
+
+    scale_algorithm: dict | None = ModeloptField(
+        default=None,
+        title="Scale calibration algorithm to run first.",
+        description=(
+            "Dict with 'method' key: 'mse', 'local_hessian', or 'max'. "
+            "Optional keys include 'fp8_scale_sweep' for FP4 formats. "
+            "Defaults to {'method': 'mse'} if None."
+        ),
+    )
+
+
 class AdaRoundConfig(QuantizeAlgorithmConfig):
     """Config for AdaRound algorithm.
 

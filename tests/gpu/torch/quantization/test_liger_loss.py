@@ -26,8 +26,8 @@ from transformers.training_args import ParallelMode
 
 pytest.importorskip("liger_kernel")
 
-from modelopt.torch.distill.plugins.huggingface import KDTrainer, LMLogitsLoss  # noqa: E402
-from modelopt.torch.opt.plugins.transformers import ModelOptHFTrainer  # noqa: E402
+from modelopt.torch.distill.plugins.huggingface import KDTrainer, LMLogitsLoss
+from modelopt.torch.opt.plugins.transformers import ModelOptHFTrainer
 
 
 @pytest.fixture(autouse=True)
@@ -101,9 +101,9 @@ class TestLigerCELoss:
 
         assert len(losses_a) == len(losses_b) > 0
         for step, (la, lb) in enumerate(zip(losses_a, losses_b)):
-            assert torch.allclose(
-                torch.tensor(la), torch.tensor(lb), atol=1e-5
-            ), f"CE loss mismatch at step {step}: regular={la}, liger={lb}"
+            assert torch.allclose(torch.tensor(la), torch.tensor(lb), atol=1e-5), (
+                f"CE loss mismatch at step {step}: regular={la}, liger={lb}"
+            )
 
 
 class TestLigerJSDLoss:
@@ -154,6 +154,6 @@ class TestLigerJSDLoss:
 
         assert len(losses_a) == len(losses_b) > 0
         for step, (la, lb) in enumerate(zip(losses_a, losses_b)):
-            assert torch.allclose(
-                torch.tensor(la), torch.tensor(lb), atol=1e-5
-            ), f"JSD loss mismatch at step {step}: regular={la}, liger={lb}"
+            assert torch.allclose(torch.tensor(la), torch.tensor(lb), atol=1e-5), (
+                f"JSD loss mismatch at step {step}: regular={la}, liger={lb}"
+            )

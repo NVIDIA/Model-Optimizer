@@ -18,7 +18,6 @@
 import importlib
 
 import torch
-
 import vllm.attention as vllm_attention
 import vllm.model_executor.layers.fused_moe.layer as vllm_fused_moe_layer
 import vllm.model_executor.layers.linear as vllm_linear

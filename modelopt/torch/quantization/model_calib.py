@@ -1863,6 +1863,82 @@ def _convert_to_static_block_quantizers(model: nn.Module):
                 StaticBlockScaleQuantizer.from_tensor_quantizer(module, global_amax=global_amax)
 
 
+def _run_scale_calibration(model, forward_loop, scale_algorithm, caller_name):
+    """Run calibration and convert to StaticBlockScaleQuantizer if needed."""
+    if scale_algorithm is None:
+        scale_algorithm = {"method": "mse"}
+
+    method = scale_algorithm.get("method")
+    supported = ("mse", "local_hessian", "max")
+    assert method in supported, f"{caller_name}: method must be one of {supported}, got '{method}'"
+
+    algo_kwargs = {k: v for k, v in scale_algorithm.items() if k != "method"}
+    calib_funcs = {
+        "mse": mse_calibrate,
+        "local_hessian": local_hessian_calibrate,
+        "max": max_calibrate,
+    }
+    calib_funcs[method](model, forward_loop=forward_loop, **algo_kwargs)
+
+    if method == "max":
+        _convert_to_static_block_quantizers(model)
+
+
+def _compute_block_scales(quantizer):
+    """Compute per-block and per-tensor scales from a StaticBlockScaleQuantizer.
+
+    Returns (per_block_scale, per_tensor_scale, quantize_scales).
+    """
+    from .tensor_quant import scaled_e4m3
+
+    amax = quantizer._amax.float()
+    max_representable = quantizer._quant_max_bound
+    quantize_scales = _is_quantized_block_scale(quantizer)
+    per_tensor_scale = None
+
+    with same_device_as(amax):
+        if quantize_scales:
+            global_amax = quantizer._global_amax.float()
+            per_block_scale = scaled_e4m3(
+                amax / max_representable,
+                global_amax / max_representable,
+                None,
+                4,
+                3,
+            )
+            per_tensor_scale = global_amax / max_representable
+        else:
+            per_block_scale = amax / max_representable
+
+    bad = (per_block_scale == 0) | torch.isinf(per_block_scale) | torch.isnan(per_block_scale)
+    per_block_scale = torch.where(bad, torch.ones_like(per_block_scale), per_block_scale)
+
+    return per_block_scale, per_tensor_scale, quantize_scales
+
+
+def _get_block_size(quantizer):
+    """Extract the block size from a StaticBlockScaleQuantizer."""
+    block_size = quantizer._block_sizes.get(-1, None) or quantizer._block_sizes.get(
+        next(k for k in quantizer._block_sizes if isinstance(k, int)), None
+    )
+    assert block_size is not None, "Could not determine block size"
+    return block_size
+
+
+def _iter_weight_quantizers(model):
+    """Yield (module, weight_name, quantizer) for each StaticBlockScaleQuantizer with amax."""
+    seen_modules = set()
+    for name, module in model.named_modules():
+        if module in seen_modules:
+            continue
+        for weight_name in weight_attr_names(module):
+            wq_name = quantizer_attr_names(weight_name).weight_quantizer
+            quantizer = getattr(module, wq_name, None)
+            if isinstance(quantizer, StaticBlockScaleQuantizer) and quantizer.amax is not None:
+                yield module, weight_name, quantizer
+        seen_modules.add(module)
+
+
 @torch.no_grad()
 def scale_after_dequant(
     model: nn.Module,
@@ -1879,86 +1955,55 @@ def scale_after_dequant(
             Dict with 'method' key: 'mse', 'local_hessian', or 'max'.
             Defaults to {'method': 'mse'} if None.
     """
-    from .tensor_quant import scaled_e4m3
+    _run_scale_calibration(model, forward_loop, scale_algorithm, "scale_after_dequant")
 
-    if scale_algorithm is None:
-        scale_algorithm = {"method": "mse"}
+    for module, weight_name, quantizer in _iter_weight_quantizers(model):
+        per_block_scale, per_tensor_scale, quantize_scales = _compute_block_scales(quantizer)
+        block_size = _get_block_size(quantizer)
 
-    method = scale_algorithm.get("method")
-    supported = ("mse", "local_hessian", "max")
-    assert method in supported, (
-        f"scale_after_dequant: method must be one of {supported}, got '{method}'"
-    )
+        with enable_weight_access_and_writeback(module, model):
+            w = getattr(module, weight_name)
+            orig_shape = w.shape
+            w_flat = w.data.float().reshape(-1, block_size)
+            w_flat = w_flat / per_block_scale.view(-1, 1)
+            w.data.copy_(w_flat.reshape(orig_shape).to(w.dtype))
 
-    algo_kwargs = {k: v for k, v in scale_algorithm.items() if k != "method"}
-    calib_funcs = {
-        "mse": mse_calibrate,
-        "local_hessian": local_hessian_calibrate,
-        "max": max_calibrate,
-    }
-    calib_funcs[method](model, forward_loop=forward_loop, **algo_kwargs)
+        quantizer.enable_scale_after_dequant(
+            per_block_scale,
+            per_tensor_scale,
+            quantize_scales=quantize_scales,
+        )
 
-    # max_calibrate doesn't convert to StaticBlockScaleQuantizer, so do it here
-    if method == "max":
-        _convert_to_static_block_quantizers(model)
 
-    seen_modules = set()
-    for name, module in model.named_modules():
-        if module in seen_modules:
-            continue
-        for weight_name in weight_attr_names(module):
-            wq_name = quantizer_attr_names(weight_name).weight_quantizer
-            quantizer = getattr(module, wq_name, None)
-            if not isinstance(quantizer, StaticBlockScaleQuantizer):
-                continue
-            if quantizer.amax is None:
-                continue
+@torch.no_grad()
+def lsq(
+    model: nn.Module,
+    forward_loop: ForwardLoop | None = None,
+    scale_algorithm: dict | None = None,
+    **kwargs,
+):
+    """Run scale calibration then convert to LSQ mode (no weight pre-division).
 
-            amax = quantizer._amax.float()
+    Like scale_after_dequant, but weights are NOT pre-divided. The forward pass
+    computes s * Q(x/s), so the quantization grid adapts as the learned scale changes.
 
-            max_representable = quantizer._quant_max_bound
+    Args:
+        model: Quantized model.
+        forward_loop: Calibration data forward loop.
+        scale_algorithm: Calibration algorithm config to run first.
+            Dict with 'method' key: 'mse', 'local_hessian', or 'max'.
+            Defaults to {'method': 'mse'} if None.
+    """
+    _run_scale_calibration(model, forward_loop, scale_algorithm, "lsq")
 
-            quantize_scales = _is_quantized_block_scale(quantizer)
-            per_tensor_scale = None
+    for module, weight_name, quantizer in _iter_weight_quantizers(model):
+        per_block_scale, per_tensor_scale, quantize_scales = _compute_block_scales(quantizer)
 
-            with same_device_as(amax):
-                if quantize_scales:
-                    global_amax = quantizer._global_amax.float()
-                    per_block_scale = scaled_e4m3(
-                        amax / max_representable,
-                        global_amax / max_representable,
-                        None,
-                        4,
-                        3,
-                    )
-                    per_tensor_scale = global_amax / max_representable
-                else:
-                    per_block_scale = amax / max_representable
-
-            bad = (
-                (per_block_scale == 0) | torch.isinf(per_block_scale) | torch.isnan(per_block_scale)
-            )
-            per_block_scale = torch.where(bad, torch.ones_like(per_block_scale), per_block_scale)
-
-            block_size = quantizer._block_sizes.get(-1, None) or quantizer._block_sizes.get(
-                next(k for k in quantizer._block_sizes if isinstance(k, int)), None
-            )
-            assert block_size is not None, "Could not determine block size"
-
-            with enable_weight_access_and_writeback(module, model):
-                w = getattr(module, weight_name)
-                orig_shape = w.shape
-                w_flat = w.data.float().reshape(-1, block_size)
-                w_flat = w_flat / per_block_scale.view(-1, 1)
-                w.data.copy_(w_flat.reshape(orig_shape).to(w.dtype))
-
-            quantizer.enable_scale_after_dequant(
-                per_block_scale,
-                per_tensor_scale,
-                quantize_scales=quantize_scales,
-            )
-
-        seen_modules.add(module)
+        quantizer.enable_lsq(
+            per_block_scale,
+            per_tensor_scale,
+            quantize_scales=quantize_scales,
+        )
 
 
 @torch.no_grad()

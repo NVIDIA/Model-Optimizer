@@ -130,7 +130,8 @@ class TestQATTrainer:
         trainer.train()
 
         adaround_quantizers = [
-            m for m in model.modules()
+            m
+            for m in model.modules()
             if isinstance(m, NVFP4StaticAdaRoundQuantizer) and m._adaround_enabled
         ]
         assert len(adaround_quantizers) > 0
@@ -170,7 +171,8 @@ class TestQADTrainer:
         trainer.train()
 
         adaround_quantizers = [
-            m for m in student.modules()
+            m
+            for m in student.modules()
             if isinstance(m, NVFP4StaticAdaRoundQuantizer) and m._adaround_enabled
         ]
         assert len(adaround_quantizers) > 0

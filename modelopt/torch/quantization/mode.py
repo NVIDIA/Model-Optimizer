@@ -40,6 +40,7 @@ from .config import (
     CompressConfig,
     GPTQLiteConfig,
     LocalHessianCalibConfig,
+    LSQConfig,
     MaxCalibConfig,
     MseCalibConfig,
     QuantizeAlgoCfgType,
@@ -64,6 +65,7 @@ from .model_calib import (
     awq,
     gptq_lite,
     local_hessian_calibrate,
+    lsq,
     max_calibrate,
     mse_calibrate,
     scale_after_dequant,
@@ -502,6 +504,18 @@ class ScaleAfterDequantModeDescriptor(BaseCalibrateModeDescriptor):
         return ScaleAfterDequantConfig
 
     _calib_func = scale_after_dequant
+
+
+@CalibrateModeRegistry.register_mode
+class LSQModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for LSQ (Learned Step Size Quantization) algorithm."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return LSQConfig
+
+    _calib_func = lsq
 
 
 @CalibrateModeRegistry.register_mode
