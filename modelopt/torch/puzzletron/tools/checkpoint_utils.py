@@ -162,9 +162,14 @@ def copy_tokenizer(
     source_dir_or_tokenizer_name: Path | str,
     target_dir: Path | str,
     on_failure: Literal["raise", "warn"] = "raise",
+    trust_remote_code: bool = False,
 ) -> None:
     """Prefer loading the tokenizer from huggingface hub (when tokenizer_name.txt file is available)
     to avoid collision between transformers versions.
+
+    Args:
+        trust_remote_code: Passed to ``AutoTokenizer.from_pretrained``. Use True only for models
+            that need custom tokenizer code and come from a trusted source.
     """
     source_tokenizer_name_path = Path(source_dir_or_tokenizer_name) / "tokenizer_name.txt"
     if source_tokenizer_name_path.exists():
@@ -173,7 +178,7 @@ def copy_tokenizer(
     tokenizer = None
     try:
         tokenizer = AutoTokenizer.from_pretrained(
-            source_dir_or_tokenizer_name, trust_remote_code=True
+            source_dir_or_tokenizer_name, trust_remote_code=trust_remote_code
         )
     except Exception:
         message = f"Couldn't load tokenizer from '{source_dir_or_tokenizer_name}'"

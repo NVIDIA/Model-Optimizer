@@ -127,7 +127,13 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
     tokenizer = _load_tokenizer(args)
     if not args.skip_validation:
         val_dataloader = (
-            validate_model.prepare_dataloader(args, tokenizer) if dist.is_master() else None
+            validate_model.prepare_dataloader(
+                args,
+                tokenizer,
+                trust_remote_code=descriptor.requires_trust_remote_code(),
+            )
+            if dist.is_master()
+            else None
         )
 
     output_dir = (
@@ -191,7 +197,11 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
                     pass
             save_checkpoint(model, checkpoint_dir, descriptor)
 
-            copy_tokenizer(args.tokenizer_name, checkpoint_dir)
+            copy_tokenizer(
+                args.tokenizer_name,
+                checkpoint_dir,
+                trust_remote_code=descriptor.requires_trust_remote_code(),
+            )
 
         dist.barrier()
 
