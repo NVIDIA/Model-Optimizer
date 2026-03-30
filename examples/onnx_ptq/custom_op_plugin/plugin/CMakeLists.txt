@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Based on https://github.com/leimao/TensorRT-Custom-Plugin-Example.
+
 cmake_minimum_required(VERSION 3.18)
 
 project(IDENTITY-CONV-PLUGIN VERSION 0.0.1 LANGUAGES CXX)

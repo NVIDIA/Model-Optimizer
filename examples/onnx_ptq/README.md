@@ -26,8 +26,6 @@ Please use the TensorRT docker image (e.g., `nvcr.io/nvidia/tensorrt:26.02-py3`)
 
 > **Note:** If you are using `onnxruntime-gpu`, we recommend using `nvcr.io/nvidia/tensorrt:25.06-py3` as it is built with CUDA 12, which is required by the stable `onnxruntime-gpu` package.
 
-> **Note:** If you are using `onnxruntime-gpu`, we recommend using `nvcr.io/nvidia/tensorrt:25.06-py3` as it is built with CUDA 12, which is required by the stable `onnxruntime-gpu` package.
-
 Set the following environment variables inside the TensorRT docker.
 
 ```bash
@@ -174,7 +172,7 @@ python -m modelopt.onnx.quantization \
 
 This feature requires `TensorRT 10+` and `ORT>=1.20`. For proper usage, please make sure that the paths to `libcudnn*.so` and TensorRT `lib/` are in the `LD_LIBRARY_PATH` env variable and that the `tensorrt` python package is installed.
 
-A self-contained example is provided in the [`custom_op_plugin/`](./custom_op_plugin/) subfolder. Please see the steps below.
+A self-contained example is provided in the [`custom_op_plugin/`](./custom_op_plugin/) subfolder, based on [leimao/TensorRT-Custom-Plugin-Example](https://github.com/leimao/TensorRT-Custom-Plugin-Example). Please see the steps below.
 
 **Step 1**: Build the TensorRT plugin and create the sample ONNX model.
 

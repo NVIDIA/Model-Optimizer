@@ -21,6 +21,8 @@
 #ifndef TENSORRT_PLUGIN_UTILS_H
 #define TENSORRT_PLUGIN_UTILS_H
 
+#include <exception>
+
 void caughtError(std::exception const &e);
 
 #define PLUGIN_ASSERT(val) reportAssertion((val), #val, __FILE__, __LINE__)
