@@ -67,11 +67,11 @@ Run distillation directly from HuggingFace checkpoints (student and teacher) wit
 ```bash
 torchrun --nproc_per_node=8 examples/puzzletron/mbridge_distillation/distill_hf.py \
     --student_hf_path /path/to/student/huggingface/checkpoint \
+    --student_hf_model meta-llama/Llama-3.1-8B-Instruct \
     --teacher_hf_path /path/to/teacher/huggingface/checkpoint \
     --data_paths 1.0 /path/to/hf_datasets/wikitext-103-v1/Salesforce--wikitext_wikitext-103-v1_train_text_document \
     --output_dir /path/to/distilled/checkpoint \
-    --hf-export-path /path/to/exported/hf/model \
-    --hf-model meta-llama/Llama-3.1-8B-Instruct \
+    --hf_export_path /path/to/exported/hf/model \
     --seq_length 4096 \
     --tp_size 8 \
     --pp_size 1 \
@@ -90,7 +90,7 @@ torchrun --nproc_per_node=8 examples/puzzletron/mbridge_distillation/distill_hf.
 
 - Add `--trust_remote_code` if student or teacher checkpoints need HuggingFace custom modeling code.
 - The distilled Megatron-Bridge checkpoint will be saved to `--output_dir/checkpoints/iter_<train_iters>`.
-- Add `--hf-export-path` (or `--hf_export_path`) to automatically export the final checkpoint to HuggingFace format after distillation. When exporting, you must also provide `--hf-model` / `--hf_model` as the HuggingFace model ID for the export template (e.g., `meta-llama/Llama-3.1-8B-Instruct`). It should match the base architecture of the student model. The exported model can be evaluated for accuracy using the evaluation tools described in the main [README.md](../README.md#evaluation).
+- Add `--hf_export_path` to automatically export the final checkpoint to HuggingFace format after distillation. When exporting, you must also provide `--student_hf_model` as the HuggingFace model ID for the export template (e.g., `meta-llama/Llama-3.1-8B-Instruct`). It should match the base architecture of the student model. The exported model can be evaluated for accuracy using the evaluation tools described in the main [README.md](../README.md#evaluation).
 - For production use, use larger datasets like [Nemotron-Pretraining-SFT-v1](https://huggingface.co/datasets/nvidia/Nemotron-Pretraining-SFT-v1) and train for more iterations. See the [Megatron-Bridge distillation tutorial](https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge#distillation) for best practices.
 
 ## MMLU Evaluation Results
