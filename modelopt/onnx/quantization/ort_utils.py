@@ -71,11 +71,26 @@ def _check_for_libcudnn():
         )
     else:
         # Not found in system path — try preloading from Python site-packages
-        logger.error(f"cuDNN library not found in {env_variable}")
+        logger.warning(f"cuDNN not found in {env_variable}. Trying onnxruntime.preload_dlls()...")
+        if hasattr(ort, "preload_dlls"):
+            try:
+                ort.preload_dlls()
+                logger.info(
+                    "onnxruntime.preload_dlls() succeeded; CUDA/cuDNN DLLs preloaded from site-packages."
+                    " Please check that this is the correct version needed for your ORT version at"
+                    " https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements."
+                )
+                return True
+            except Exception as e:
+                logger.warning(f"onnxruntime.preload_dlls() also failed: {e}")
+
+        logger.error(f"cuDNN library not found in {env_variable} or site-packages")
         raise FileNotFoundError(
-            f"{lib_pattern} is not accessible in {env_variable}! Please make sure that the path to that library"
-            f" is in the env var to use the CUDA or TensorRT EP and ensure that the correct version is available."
-            f" Versioning compatibility can be checked at https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements."
+            f"{lib_pattern} is not accessible in {env_variable} and onnxruntime.preload_dlls()"
+            f" could not locate it either. Please make sure that the path to that library is in the"
+            f" env var, or install the cuDNN pip package (e.g. nvidia-cudnn-cu12) to use the CUDA or"
+            f" TensorRT EP. Versioning compatibility can be checked at"
+            f" https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements."
         )
     return found
 
