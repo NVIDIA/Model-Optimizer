@@ -136,7 +136,6 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
             if state.get("_is_nvfp4_static_adaround_quantizer") and not isinstance(
                 module, NVFP4StaticAdaRoundQuantizer
             ):
-                module._scale_after_dequant = state.get("_scale_after_dequant", False)
                 NVFP4StaticAdaRoundQuantizer.from_nvfp4_quantizer(module)
             module.set_from_modelopt_state(quantizer_state_dict[name])
 

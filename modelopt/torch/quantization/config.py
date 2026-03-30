@@ -1493,9 +1493,12 @@ class SmoothLAQConfig(QuantizeAlgorithmConfig):
 class AdaRoundConfig(QuantizeAlgorithmConfig):
     """Config for AdaRound algorithm.
 
-    Converts NVFP4 quantizers to use learnable rounding decisions instead of
-    round-to-nearest-even. If the model is not yet in smooth_lsq mode,
-    ``smooth_lsq_args`` can be provided to run that conversion first.
+    Converts static block quantizers to use learnable rounding decisions instead
+    of round-to-nearest-even. An ``init_algorithm`` can be provided to run
+    calibration and mode conversion before enabling AdaRound.
+
+    Supports any learnable-scale init (smooth_lsq, lsq, laq, smooth_laq) or
+    plain calibration (max, mse, local_hessian) which auto-converts via smooth_lsq.
 
     Training-time knobs (beta annealing, dist_loss_coeff, temperature, freeze
     behaviour) are configured via ``AdaRoundTrainingArguments`` on the trainer.
@@ -1503,13 +1506,15 @@ class AdaRoundConfig(QuantizeAlgorithmConfig):
 
     method: Literal["adaround"] = ModeloptField("adaround")
 
-    smooth_lsq_args: dict | None = ModeloptField(
+    init_algorithm: dict | None = ModeloptField(
         default=None,
-        title="Arguments for smooth_lsq conversion.",
+        title="Init algorithm to run before AdaRound.",
         description=(
-            "If provided, :func:`smooth_lsq` is called first with these arguments "
-            "to calibrate and convert the model before enabling AdaRound. "
-            "Example: ``{'scale_algorithm': {'method': 'mse', 'fp8_scale_sweep': True}}``."
+            "Dict with 'method' key specifying the init algorithm "
+            "(smooth_lsq, lsq, laq, smooth_laq, mse, max, local_hessian). "
+            "For learnable methods, include 'scale_algorithm' sub-dict. "
+            "Plain calibration methods auto-convert via smooth_lsq. "
+            "Example: ``{'method': 'smooth_lsq', 'scale_algorithm': {'method': 'mse', 'fp8_scale_sweep': True}}``."
         ),
     )
 

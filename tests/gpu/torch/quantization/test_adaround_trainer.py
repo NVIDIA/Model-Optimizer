@@ -55,7 +55,10 @@ NVFP4_ADAROUND_CFG = {
     },
     "algorithm": {
         "method": "adaround",
-        "smooth_lsq_args": {"scale_algorithm": {"method": "mse", "fp8_scale_sweep": True}},
+        "init_algorithm": {
+            "method": "smooth_lsq",
+            "scale_algorithm": {"method": "mse", "fp8_scale_sweep": True},
+        },
     },
 }
 

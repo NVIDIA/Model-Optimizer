@@ -148,7 +148,10 @@ NVFP4_ADAROUND_CFG = {
     },
     "algorithm": {
         "method": "adaround",
-        "smooth_lsq_args": {"scale_algorithm": {"method": "mse", "fp8_scale_sweep": True}},
+        "init_algorithm": {
+            "method": "smooth_lsq",
+            "scale_algorithm": {"method": "mse", "fp8_scale_sweep": True},
+        },
     },
 }
 
@@ -268,7 +271,7 @@ def test_smooth_lsq_grad():
 
     # Verify quantizers are in smooth_lsq mode
     for module in model.modules():
-        if isinstance(module, NVFP4StaticQuantizer) and module._scale_after_dequant:
+        if isinstance(module, NVFP4StaticQuantizer) and module._smooth_lsq:
             assert isinstance(module._per_block_scale, nn.Parameter)
             assert module._per_block_scale.requires_grad
             assert not module._per_tensor_scale.requires_grad
@@ -279,7 +282,7 @@ def test_smooth_lsq_grad():
 
     found = False
     for module in model.modules():
-        if isinstance(module, NVFP4StaticQuantizer) and module._scale_after_dequant:
+        if isinstance(module, NVFP4StaticQuantizer) and module._smooth_lsq:
             assert module._per_block_scale.grad is not None
             found = True
     assert found
@@ -315,7 +318,7 @@ def test_lsq_grad():
 
     # Verify quantizers are in LSQ mode
     for module in model.modules():
-        if isinstance(module, NVFP4StaticQuantizer) and module._scale_after_dequant:
+        if isinstance(module, NVFP4StaticQuantizer) and module._lsq:
             assert module._lsq, "Quantizer should be in LSQ mode"
             assert isinstance(module._per_block_scale, nn.Parameter)
             assert module._per_block_scale.requires_grad
@@ -431,7 +434,7 @@ def test_adaround_grad():
     # Reference: smooth_lsq only (no adaround)
     mtq.quantize(model_ref, NVFP4_WEIGHT_SCALE_LEARN_CFG, forward_loop)
 
-    # Single call: adaround with embedded smooth_lsq_args
+    # Single call: adaround with embedded init_algorithm
     mtq.quantize(model, NVFP4_ADAROUND_CFG, forward_loop)
 
     # -- 1. Verify quantizers are upgraded to NVFP4StaticAdaRoundQuantizer --
@@ -486,3 +489,81 @@ def test_adaround_grad():
         # With stretched sigmoid, values near 0/1 are expected but not exact for all entries.
         # At minimum, no value should be far from {0, 1}.
         assert hard, "Eval round_prob is not 0 or 1"
+
+
+def _adaround_cfg(init_algorithm):
+    """Build an adaround quantization config with the given init_algorithm."""
+    return {
+        "quant_cfg": {
+            "*weight_quantizer": {
+                "num_bits": (2, 1),
+                "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+                "axis": None,
+                "enable": True,
+            },
+            "*input_quantizer": {"enable": False},
+        },
+        "algorithm": {"method": "adaround", "init_algorithm": init_algorithm},
+    }
+
+
+@pytest.mark.parametrize(
+    "init_algorithm",
+    [
+        {"method": "smooth_lsq", "scale_algorithm": {"method": "mse", "fp8_scale_sweep": True}},
+        {"method": "lsq", "scale_algorithm": {"method": "mse", "fp8_scale_sweep": True}},
+        {"method": "laq", "scale_algorithm": {"method": "mse", "fp8_scale_sweep": True}},
+        {"method": "smooth_laq", "scale_algorithm": {"method": "mse", "fp8_scale_sweep": True}},
+        {"method": "mse", "fp8_scale_sweep": True},
+        {"method": "max"},
+        {"method": "local_hessian", "fp8_scale_sweep": True},
+    ],
+    ids=["smooth_lsq", "lsq", "laq", "smooth_laq", "mse", "max", "local_hessian"],
+)
+def test_adaround_with_init_algorithms(init_algorithm):
+    """AdaRound works with any init algorithm: learnable-scale or plain calibration."""
+    if get_cuda_ext_mx() is None:
+        pytest.skip("cuda_ext_mx is not available")
+
+    model = nn.Sequential(nn.Linear(32, 64, bias=False), nn.Linear(64, 16, bias=False)).cuda()
+    calib_data = [torch.randn(2, 32, device="cuda") for _ in range(4)]
+
+    def forward_loop(model):
+        for x in calib_data:
+            model(x)
+
+    mtq.quantize(model, _adaround_cfg(init_algorithm), forward_loop)
+
+    # 1. Verify quantizers are upgraded with adaround enabled
+    adaround_quantizers = [
+        m
+        for m in model.modules()
+        if isinstance(m, NVFP4StaticAdaRoundQuantizer) and m._adaround_enabled
+    ]
+    assert len(adaround_quantizers) > 0, "No NVFP4StaticAdaRoundQuantizer found"
+
+    # 2. round_logits is learnable
+    for q in adaround_quantizers:
+        assert isinstance(q.round_logits, nn.Parameter)
+        assert q.round_logits.requires_grad
+
+    # 3. Forward produces finite output
+    x = torch.randn(2, 32, device="cuda")
+    model.train()
+    out = model(x)
+    assert torch.isfinite(out).all(), "Non-finite output in train mode"
+
+    # 4. Backward flows to round_logits
+    out.sum().backward()
+    for q in adaround_quantizers:
+        assert q.round_logits.grad is not None, "round_logits did not receive gradients"
+        assert q.round_logits.grad.abs().sum() > 0, "round_logits gradients are all zero"
+
+    # 5. Eval mode: hard rounding (0 or 1)
+    model.eval()
+    with torch.no_grad():
+        out_eval = model(x)
+    assert torch.isfinite(out_eval).all(), "Non-finite output in eval mode"
+    for q in adaround_quantizers:
+        round_prob = q.get_round_prob()
+        assert ((round_prob == 0) | (round_prob == 1)).all(), "Eval round_prob is not 0 or 1"

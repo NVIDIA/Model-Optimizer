@@ -1272,7 +1272,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
     Uses _global_amax and inherited _amax for per-block amax values.
     """
 
-    _scale_after_dequant: bool = False
+    _smooth_lsq: bool = False
     _lsq: bool = False
     _laq: bool = False
     _smooth_laq: bool = False
@@ -1317,7 +1317,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
             )
         if self._laq:
             return self._amax_learnt
-        if self._scale_after_dequant:
+        if self._smooth_lsq or self._lsq:
             if hasattr(self, "_per_block_scale"):
                 return self._per_block_scale * self._quant_max_bound
         if not hasattr(self, "_amax"):
@@ -1365,7 +1365,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
             )
         if self._laq:
             return self._short_tensor(self._amax_learnt.data, fmt)
-        if self._scale_after_dequant:
+        if self._smooth_lsq or self._lsq:
             if hasattr(self, "_per_block_scale"):
                 amax = self._per_block_scale.data * self._quant_max_bound
                 return self._short_tensor(amax, fmt)
@@ -1392,7 +1392,6 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         )
         if per_tensor_scale is not None:
             self.register_buffer("_per_tensor_scale", per_tensor_scale.clone().detach().float())
-        self._scale_after_dequant = True
         self._quantize_scales = quantize_scales
 
     def enable_smooth_lsq(
@@ -1403,6 +1402,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
     ):
         """SmoothLSQ mode. Weights must be pre-divided by caller."""
         self._enable_learnable_scales(per_block_scale, per_tensor_scale, quantize_scales)
+        self._smooth_lsq = True
 
     def enable_lsq(
         self,
@@ -1459,7 +1459,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
 
     def _fake_quantize(self, inputs):
         """Fake quantization using two-level scaling with _amax and _global_amax."""
-        if self._laq or self._smooth_laq or self._scale_after_dequant:
+        if self._laq or self._smooth_laq or self._smooth_lsq or self._lsq:
             # Step 1: Compute dequant scale (raw)
             if self._laq or self._smooth_laq:
                 scale_raw = _to_local(self._amax_learnt).clamp(min=1e-8) / self._quant_max_bound
@@ -1533,7 +1533,7 @@ class NVFP4StaticAdaRoundQuantizer(StaticBlockScaleQuantizer):
     In **eval mode** hard rounding is used (``round_prob > 0.5``).
     In **train mode** soft rounding is used (continuous sigmoid).
 
-    Currently only supported with ``_scale_after_dequant`` mode.
+    Works with any ``StaticBlockScaleQuantizer``.
     """
 
     def __init__(self, *args, **kwargs):
@@ -1558,7 +1558,6 @@ class NVFP4StaticAdaRoundQuantizer(StaticBlockScaleQuantizer):
         assert isinstance(tq, StaticBlockScaleQuantizer), (
             f"Expected StaticBlockScaleQuantizer, got {type(tq)}"
         )
-        assert tq._scale_after_dequant, "AdaRound only supported with _scale_after_dequant mode."
 
         if isinstance(tq, cls):
             if weight_scaled is not None:

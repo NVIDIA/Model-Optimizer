@@ -2082,29 +2082,50 @@ def smooth_laq(
 def adaround(
     model: nn.Module,
     forward_loop: ForwardLoop | None = None,
-    smooth_lsq_args: dict | None = None,
+    init_algorithm: dict | None = None,
     **kwargs,
 ):
-    """Convert NVFP4 quantizers to use AdaRound.
+    """Convert static block quantizers to use AdaRound (learned rounding).
 
-    If the model is not yet in ``smooth_lsq`` mode,
-    ``smooth_lsq_args`` can be provided to run
-    :func:`smooth_lsq` first (calibration + weight pre-scaling).
+    Works with any ``StaticBlockScaleQuantizer``. An ``init_algorithm`` can be
+    provided to run calibration + mode conversion before enabling AdaRound.
 
-    Training-time knobs (beta annealing, dist_loss_coeff, temperature, param
-    freezing) are configured via ``AdaRoundTrainingArguments`` on the trainer.
+    For learnable-scale methods (smooth_lsq, lsq, laq, smooth_laq), the
+    specified algorithm is run directly. For plain calibration methods
+    (max, mse, local_hessian), the model is auto-converted to smooth_lsq
+    using the specified method as the scale calibration algorithm.
 
     Args:
         model: Quantized model.
         forward_loop: Calibration data forward loop. Required when
-            ``smooth_lsq_args`` is provided.
-        smooth_lsq_args: If provided, call :func:`smooth_lsq`
-            first with these keyword arguments.  Example::
+            ``init_algorithm`` is provided.
+        init_algorithm: Init algorithm config dict with a ``method`` key.
+            Examples::
 
-                {"scale_algorithm": {"method": "mse", "fp8_scale_sweep": True}}
+                {
+                    "method": "smooth_lsq",
+                    "scale_algorithm": {"method": "mse", "fp8_scale_sweep": True},
+                }
+                {
+                    "method": "laq",
+                    "scale_algorithm": {"method": "local_hessian", "fp8_scale_sweep": True},
+                }
+                {"method": "mse", "fp8_scale_sweep": True}  # auto-converts via smooth_lsq
     """
-    if smooth_lsq_args is not None:
-        smooth_lsq(model, forward_loop=forward_loop, **smooth_lsq_args)
+    if init_algorithm is not None:
+        method = init_algorithm.get("method", "smooth_lsq")
+        algo_args = {k: v for k, v in init_algorithm.items() if k != "method"}
+        learnable_dispatch = {
+            "smooth_lsq": smooth_lsq,
+            "lsq": lsq,
+            "laq": laq,
+            "smooth_laq": smooth_laq,
+        }
+        if method in learnable_dispatch:
+            learnable_dispatch[method](model, forward_loop=forward_loop, **algo_args)
+        else:
+            # Plain calibration (max/mse/local_hessian) → auto-convert via smooth_lsq
+            smooth_lsq(model, forward_loop=forward_loop, scale_algorithm=init_algorithm)
 
     seen_modules = set()
     for name, module in model.named_modules():
@@ -2115,20 +2136,41 @@ def adaround(
             quantizer = getattr(module, wq_name, None)
             if not isinstance(quantizer, StaticBlockScaleQuantizer):
                 continue
-            if not quantizer._scale_after_dequant:
-                continue
 
-            block_size = quantizer._block_sizes.get(-1, None) or quantizer._block_sizes.get(
-                next(k for k in quantizer._block_sizes if isinstance(k, int)), None
-            )
-            assert block_size is not None, "Could not determine block size"
+            block_size = _get_block_size(quantizer)
 
             with enable_weight_access_and_writeback(module, model):
                 w = getattr(module, weight_name)
-                weight_scaled = w.data.float().reshape(-1, block_size)
+                w_flat = w.data.float().reshape(-1, block_size)
+                weight_scaled = _compute_weight_scaled(quantizer, w_flat)
 
                 NVFP4StaticAdaRoundQuantizer.from_nvfp4_quantizer(
                     quantizer, weight_scaled=weight_scaled
                 )
 
         seen_modules.add(module)
+
+
+def _compute_weight_scaled(quantizer, w_flat):
+    """Compute pre-scaled weights for AdaRound initialization.
+
+    Returns weights divided by per-block scale so values lie in [-6, 6].
+    For smooth_lsq, weights are already pre-divided.
+    """
+    if quantizer._smooth_lsq:
+        return w_flat
+    if quantizer._lsq:
+        scale = quantizer._per_block_scale.data.float().clamp(min=1e-8)
+        return w_flat / scale.view(-1, 1)
+    if quantizer._laq:
+        scale = quantizer._amax_learnt.data.float().clamp(min=1e-8) / quantizer._quant_max_bound
+        return w_flat / scale.view(-1, 1)
+    if quantizer._smooth_laq:
+        scale = quantizer._amax_frozen.data.float().clamp(min=1e-8) / quantizer._quant_max_bound
+        return w_flat / scale.view(-1, 1)
+    # Fallback for plain calibration (shouldn't happen if init_algorithm was provided)
+    amax = quantizer.amax
+    if amax is not None:
+        scale = (amax.float().clamp(min=1e-8) / quantizer._quant_max_bound).view(-1, 1)
+        return w_flat / scale
+    return w_flat
