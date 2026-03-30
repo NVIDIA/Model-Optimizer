@@ -36,8 +36,8 @@ Four attention kernel variants are supported via ``--kernel``:
 
 ``nvfp4`` (always available)
     Python-level NVFP4 E2M1 attention. Inspired by SageAttention3:
-    - Same channel-wise mean smoothing as fp8
-    - Per-token scaling to NVFP4 range, rounded to nearest of 8 levels {0,0.5,1,1.5,2,3,4,6}
+    - Q and K: channel-smoothed, per-token scaled, rounded to nearest of 8 levels {0,0.5,1,1.5,2,3,4,6}
+    - V: kept in original precision (BF16) — SA3 applies FP4 to the post-softmax P matrix, not V
     - No CUDA kernel required. Use to measure accuracy vs FP8.
 
 Requirements::
@@ -93,7 +93,7 @@ KERNEL_CHOICES = [KERNEL_FP8, KERNEL_NVFP4, KERNEL_SAGE1, KERNEL_SAGE2_FP16, KER
 
 _KERNEL_DESCRIPTIONS = {
     KERNEL_FP8: "FP8 E4M3 QKV (Python-level, SA2-inspired smoothing, no CUDA kernel required)",
-    KERNEL_NVFP4: "NVFP4 E2M1 QKV (Python-level, SA3-inspired smoothing, no CUDA kernel required)",
+    KERNEL_NVFP4: "NVFP4 E2M1 QK + BF16 V (Python-level, SA3-inspired: V not quantized to preserve content)",
     KERNEL_SAGE1: "sageattn (SA1, INT8 QK + FP16 PV, auto-select)",
     KERNEL_SAGE2_FP16: "sageattn_qk_int8_pv_fp16_cuda (SA2, INT8 QK + FP16 PV, per-thread)",
     KERNEL_SAGE2_FP8: "sageattn_qk_int8_pv_fp8_cuda (SA2++, INT8 QK + FP8 PV, fp32+fp16 accum)",
@@ -300,11 +300,20 @@ def _nvfp4_sdpa(
     is_causal: bool,
     scale: float | None,
 ) -> torch.Tensor:
-    """NVFP4 E2M1 attention with SA3-inspired Q/K/V smoothing."""
+    """NVFP4 E2M1 attention: Q and K quantized to NVFP4, V kept at original precision.
+
+    In SageAttention3 (arXiv 2505.11594), NVFP4 is applied to the post-softmax
+    attention probability matrix P = softmax(QK^T / sqrt(d)), not to V directly.
+    V is multiplied with the NVFP4-quantized P in BF16/FP16 precision.
+
+    Quantizing V to FP4 causes severe color/texture loss because V carries the
+    actual content that gets weighted and summed into the output.  Q and K are
+    only used for computing routing weights, so their quantization noise is
+    far less visible.
+    """
     q_dq = _smooth_quantize_fp4(query)
     k_dq = _smooth_quantize_fp4(key)
-    v_dq = _smooth_quantize_fp4(value)
-    return _orig_sdpa(q_dq, k_dq, v_dq, is_causal=is_causal, scale=scale)
+    return _orig_sdpa(q_dq, k_dq, value, is_causal=is_causal, scale=scale)
 
 
 # ---------------------------------------------------------------------------
