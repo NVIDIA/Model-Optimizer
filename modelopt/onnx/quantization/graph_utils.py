@@ -324,6 +324,78 @@ def get_tensor_consumer_node_indices(graph: onnx.GraphProto | gs.Graph) -> dict[
     return tensor_consumer_map
 
 
+def _is_following_cask_partition(
+    node: Node, cask_partition_nodes: set[str], max_depth: int = 10
+) -> bool:
+    """Check if a CASK fusible partition can be reached by traversing backward through copy ops.
+
+    Args:
+        node: The node to check.
+        cask_partition_nodes: Set of node names belonging to CASK partitions.
+        max_depth: Maximum recursion depth to guard against pathological graphs.
+
+    Returns:
+        True if the node belongs to or follows a CASK partition through copy ops.
+    """
+    if node.name in cask_partition_nodes:
+        return True
+
+    if max_depth <= 0 or not is_copy_op(node.op):
+        return False
+
+    parent_nodes = get_parent_nodes(node)
+    if len(parent_nodes) == 0:
+        return False
+
+    return all(
+        _is_following_cask_partition(parent, cask_partition_nodes, max_depth - 1)
+        for parent in parent_nodes
+    )
+
+
+def find_conv_to_layernorm_nodes(
+    graph: Graph,
+    cask_fusible_partitions: list[list[Node]],
+) -> list[Node]:
+    """Find LayerNormalization nodes whose input comes from a CASK (Conv) partition.
+
+    When a Conv's output feeds into a LayerNormalization, the Conv output should be
+    quantized to enable faster INT8 kernels in TRT. This function detects such patterns
+    and returns the LayerNormalization nodes that should be added to the quantizable
+    nodes list so that Q/DQ pairs are inserted on their input (i.e. the Conv output).
+
+    Args:
+        graph: ONNX model graph.
+        cask_fusible_partitions: List of CASK fusible partitions.
+
+    Returns:
+        List of LayerNormalization nodes that consume CASK partition outputs.
+    """
+    cask_partition_nodes: set[str] = set()
+    for partition in cask_fusible_partitions:
+        cask_partition_nodes.update(node.name for node in partition)
+
+    conv_to_ln_nodes = []
+    for node in graph.nodes:
+        if node.op != "LayerNormalization":
+            continue
+
+        # Check if the first input (activation) comes from a CASK partition
+        # possibly through copy ops (Reshape, Transpose, etc.)
+        inp_tensor = node.inputs[0]
+        if inp_tensor.inputs:
+            producer = inp_tensor.inputs[0]
+            if _is_following_cask_partition(producer, cask_partition_nodes):
+                conv_to_ln_nodes.append(node)
+                logger.debug(
+                    f"Found Conv->LayerNorm pattern: LayerNorm node '{node.name}' "
+                    f"consumes CASK partition output"
+                )
+
+    logger.info(f"Found {len(conv_to_ln_nodes)} Conv->LayerNorm patterns to quantize")
+    return conv_to_ln_nodes
+
+
 def filter_quantizable_kgen_heads(
     cask_fusible_partitions: list[list[Node]],
     kgen_partitions: list[list[Node]],
@@ -331,26 +403,11 @@ def filter_quantizable_kgen_heads(
     graph: Graph,
 ) -> tuple[list[Node], list[tuple[Node, Node, str]]]:
     """Returns the list of kgen head names if it follows a CASK partition."""
-    cask_partition_nodes = set()
+    cask_partition_nodes: set[str] = set()
     for partition in cask_fusible_partitions:
-        cask_partition_nodes.update([node.name for node in partition])
+        cask_partition_nodes.update(node.name for node in partition)
 
     cask_partition_heads = [partition[0] for partition in cask_fusible_partitions]
-
-    def _is_following_cask_partition(node: Node):
-        # Checking if cask fusible partition can be reached backward
-        # ignoring the copy ops
-        if node.name in cask_partition_nodes:
-            return True
-
-        if not is_copy_op(node.op):
-            return False
-
-        parent_nodes = get_parent_nodes(node)
-        if len(parent_nodes) == 0:
-            return False
-
-        return all(_is_following_cask_partition(parent) for parent in parent_nodes)
 
     def _is_mha_epilogue_pattern(node: Node, graph: Graph):
         if head_node.op != "Add":
@@ -422,7 +479,10 @@ def filter_quantizable_kgen_heads(
         # and decide which input of kgen head needs quantization
         for parent in head_parents:
             # If the head is consuming output of any quantizable op, then it is quantizable
-            if _is_following_cask_partition(parent) or parent.op in output_quantization_candidates:
+            if (
+                _is_following_cask_partition(parent, cask_partition_nodes)
+                or parent.op in output_quantization_candidates
+            ):
                 # The mask add of MHA should not be quantized
                 if _is_mha_epilogue_pattern(head_node, graph):
                     no_quantize_inputs_of_head.append(
