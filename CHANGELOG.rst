@@ -18,6 +18,7 @@ Changelog
 
 **Misc**
 
+- Bump minimum required PyTorch version to 2.8.
 - Add experimental support for transformers>=5.0. Unified Hugging Face checkpoint export for quantized checkpoints may not work for some models with transformers>=5.0 yet.
 
 0.43 (2026-04-09)

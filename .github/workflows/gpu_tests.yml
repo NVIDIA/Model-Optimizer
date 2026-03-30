@@ -76,7 +76,7 @@ jobs:
     container: &gpu_container
       image: nvcr.io/nvidia/${{ matrix.container_image }}
       env:
-        GIT_DEPTH: 1000 # For correct version for tests/gpu/torch/quantization/plugins/test_megatron.py
+        GIT_DEPTH: 1000 # For correct version
         PIP_CONSTRAINT: "" # Disable pip constraint for upgrading packages
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps: &gpu_steps
@@ -85,6 +85,9 @@ jobs:
       - name: Setup environment variables
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
+      - name: Upgrade transformers for gpu-trtllm test since TRT-LLM container is using transformers 4.57
+        if: matrix.example == 'gpu-trtllm'
+        run: pip install -U transformers
       - name: Run gpu tests
         run: pip install tox-current-env && tox -e cuda13-${{ matrix.example }} --current-env
   gpu-tests-non-pr:

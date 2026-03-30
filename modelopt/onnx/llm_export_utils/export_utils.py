@@ -76,7 +76,7 @@ class WrapperModelForCausalLM(torch.nn.Module):
         self.lm_head = model.lm_head
         self.config = model.config
 
-    def forward(self, input_ids: torch.Tensor | None, past_key_values: tuple):
+    def forward(self, input_ids: torch.Tensor, past_key_values: tuple):
         """Forward pass."""
         # Convert tuple cache to DynamicCache for models that require it (e.g., Qwen3)
         cache = DynamicCache(config=self.config)
@@ -84,7 +84,27 @@ class WrapperModelForCausalLM(torch.nn.Module):
         cache.value_cache = [kv[1] for kv in past_key_values]
         past_key_values = cache
 
-        outputs = self.model(input_ids=input_ids, past_key_values=past_key_values, use_cache=True)
+        # Pre-compute a 4D causal mask so that transformers' internal mask creation
+        # (which relies on Python-int shapes) is bypassed entirely. During ONNX/JIT tracing,
+        # tensor.shape[N] can return a 0-dim scalar tensor instead of a Python int, which breaks
+        # the masking code in transformers>=5.4
+        seq_len = input_ids.shape[1]
+        past_len = past_key_values.get_seq_length()  # type: ignore[attr-defined]
+        causal_mask = (
+            torch.tril(
+                torch.ones(seq_len, past_len + seq_len, dtype=torch.bool, device=input_ids.device),
+                diagonal=past_len,
+            )
+            .unsqueeze(0)
+            .unsqueeze(0)
+        )
+
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=causal_mask,
+            past_key_values=past_key_values,
+            use_cache=True,
+        )
         hidden_states = outputs[0]
         cache = outputs.past_key_values
         past_key_values = tuple(zip(cache.key_cache, cache.value_cache))
