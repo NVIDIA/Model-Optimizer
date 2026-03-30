@@ -58,9 +58,11 @@ from .utils import (
 __all__ = [
     "adaround",
     "awq",
+    "laq",
     "local_hessian_calibrate",
     "max_calibrate",
-    "scale_after_dequant",
+    "smooth_laq",
+    "smooth_lsq",
     "smoothquant",
     "svdquant",
 ]
@@ -1940,13 +1942,15 @@ def _iter_weight_quantizers(model):
 
 
 @torch.no_grad()
-def scale_after_dequant(
+def smooth_lsq(
     model: nn.Module,
     forward_loop: ForwardLoop | None = None,
     scale_algorithm: dict | None = None,
     **kwargs,
 ):
-    """Run scale calibration then convert static block quantizers to scale-after-dequant mode.
+    """Run scale calibration then convert static block quantizers to SmoothLSQ mode.
+
+    Weights are pre-divided by per-block scale. Forward: w_q = Q_STE(w_s) * s.
 
     Args:
         model: Quantized model.
@@ -1955,7 +1959,7 @@ def scale_after_dequant(
             Dict with 'method' key: 'mse', 'local_hessian', or 'max'.
             Defaults to {'method': 'mse'} if None.
     """
-    _run_scale_calibration(model, forward_loop, scale_algorithm, "scale_after_dequant")
+    _run_scale_calibration(model, forward_loop, scale_algorithm, "smooth_lsq")
 
     for module, weight_name, quantizer in _iter_weight_quantizers(model):
         per_block_scale, per_tensor_scale, quantize_scales = _compute_block_scales(quantizer)
@@ -1968,7 +1972,7 @@ def scale_after_dequant(
             w_flat = w_flat / per_block_scale.view(-1, 1)
             w.data.copy_(w_flat.reshape(orig_shape).to(w.dtype))
 
-        quantizer.enable_scale_after_dequant(
+        quantizer.enable_smooth_lsq(
             per_block_scale,
             per_tensor_scale,
             quantize_scales=quantize_scales,
@@ -1984,7 +1988,7 @@ def lsq(
 ):
     """Run scale calibration then convert to LSQ mode (no weight pre-division).
 
-    Like scale_after_dequant, but weights are NOT pre-divided. The forward pass
+    Like smooth_lsq, but weights are NOT pre-divided. The forward pass
     computes s * Q(x/s), so the quantization grid adapts as the learned scale changes.
 
     Args:
@@ -2007,17 +2011,89 @@ def lsq(
 
 
 @torch.no_grad()
+def laq(
+    model: nn.Module,
+    forward_loop: ForwardLoop | None = None,
+    scale_algorithm: dict | None = None,
+    **kwargs,
+):
+    """Run scale calibration then convert to LAQ mode (learns a_max, not s directly).
+
+    Like LSQ, but the learnable parameter is a_max; scale is derived as s = a_max / Q_max.
+    Weights are NOT pre-divided.
+
+    Args:
+        model: Quantized model.
+        forward_loop: Calibration data forward loop.
+        scale_algorithm: Calibration algorithm config to run first.
+            Dict with 'method' key: 'mse', 'local_hessian', or 'max'.
+            Defaults to {'method': 'mse'} if None.
+    """
+    _run_scale_calibration(model, forward_loop, scale_algorithm, "laq")
+
+    for module, weight_name, quantizer in _iter_weight_quantizers(model):
+        per_block_scale, per_tensor_scale, quantize_scales = _compute_block_scales(quantizer)
+
+        quantizer.enable_laq(
+            per_block_scale,
+            per_tensor_scale,
+            quantize_scales=quantize_scales,
+        )
+
+
+@torch.no_grad()
+def smooth_laq(
+    model: nn.Module,
+    forward_loop: ForwardLoop | None = None,
+    scale_algorithm: dict | None = None,
+    **kwargs,
+):
+    """Run scale calibration then convert to SmoothLAQ mode.
+
+    Like SmoothLSQ, but learns a_max instead of s. Weights are pre-divided by a_max.
+    Forward: w_s = w_a * Q_max, s = a_max / Q_max, w_q = Q_STE(w_s) * s.
+
+    Args:
+        model: Quantized model.
+        forward_loop: Calibration data forward loop.
+        scale_algorithm: Calibration algorithm config to run first.
+            Dict with 'method' key: 'mse', 'local_hessian', or 'max'.
+            Defaults to {'method': 'mse'} if None.
+    """
+    _run_scale_calibration(model, forward_loop, scale_algorithm, "smooth_laq")
+
+    for module, weight_name, quantizer in _iter_weight_quantizers(model):
+        per_block_scale, per_tensor_scale, quantize_scales = _compute_block_scales(quantizer)
+        block_size = _get_block_size(quantizer)
+
+        amax = per_block_scale * quantizer._quant_max_bound
+
+        with enable_weight_access_and_writeback(module, model):
+            w = getattr(module, weight_name)
+            orig_shape = w.shape
+            w_flat = w.data.float().reshape(-1, block_size)
+            w_flat = w_flat / amax.view(-1, 1)
+            w.data.copy_(w_flat.reshape(orig_shape).to(w.dtype))
+
+        quantizer.enable_smooth_laq(
+            per_block_scale,
+            per_tensor_scale,
+            quantize_scales=quantize_scales,
+        )
+
+
+@torch.no_grad()
 def adaround(
     model: nn.Module,
     forward_loop: ForwardLoop | None = None,
-    scale_after_dequant_args: dict | None = None,
+    smooth_lsq_args: dict | None = None,
     **kwargs,
 ):
     """Convert NVFP4 quantizers to use AdaRound.
 
-    If the model is not yet in ``scale_after_dequant`` mode,
-    ``scale_after_dequant_args`` can be provided to run
-    :func:`scale_after_dequant` first (calibration + weight pre-scaling).
+    If the model is not yet in ``smooth_lsq`` mode,
+    ``smooth_lsq_args`` can be provided to run
+    :func:`smooth_lsq` first (calibration + weight pre-scaling).
 
     Training-time knobs (beta annealing, dist_loss_coeff, temperature, param
     freezing) are configured via ``AdaRoundTrainingArguments`` on the trainer.
@@ -2025,14 +2101,14 @@ def adaround(
     Args:
         model: Quantized model.
         forward_loop: Calibration data forward loop. Required when
-            ``scale_after_dequant_args`` is provided.
-        scale_after_dequant_args: If provided, call :func:`scale_after_dequant`
+            ``smooth_lsq_args`` is provided.
+        smooth_lsq_args: If provided, call :func:`smooth_lsq`
             first with these keyword arguments.  Example::
 
                 {"scale_algorithm": {"method": "mse", "fp8_scale_sweep": True}}
     """
-    if scale_after_dequant_args is not None:
-        scale_after_dequant(model, forward_loop=forward_loop, **scale_after_dequant_args)
+    if smooth_lsq_args is not None:
+        smooth_lsq(model, forward_loop=forward_loop, **smooth_lsq_args)
 
     seen_modules = set()
     for name, module in model.named_modules():

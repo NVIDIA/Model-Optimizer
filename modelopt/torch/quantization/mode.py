@@ -39,6 +39,7 @@ from .config import (
     AWQLiteCalibConfig,
     CompressConfig,
     GPTQLiteConfig,
+    LAQConfig,
     LocalHessianCalibConfig,
     LSQConfig,
     MaxCalibConfig,
@@ -46,7 +47,8 @@ from .config import (
     QuantizeAlgoCfgType,
     QuantizeAlgorithmConfig,
     QuantizeConfig,
-    ScaleAfterDequantConfig,
+    SmoothLAQConfig,
+    SmoothLSQConfig,
     SmoothQuantCalibConfig,
     SVDQuantConfig,
     _QuantizeExportConfig,
@@ -64,11 +66,13 @@ from .model_calib import (
     adaround,
     awq,
     gptq_lite,
+    laq,
     local_hessian_calibrate,
     lsq,
     max_calibrate,
     mse_calibrate,
-    scale_after_dequant,
+    smooth_laq,
+    smooth_lsq,
     smoothquant,
     svdquant,
 )
@@ -495,15 +499,15 @@ class GPTQLiteModeDescriptor(BaseCalibrateModeDescriptor):
 
 
 @CalibrateModeRegistry.register_mode
-class ScaleAfterDequantModeDescriptor(BaseCalibrateModeDescriptor):
-    """Mode for scale-after-dequant algorithm."""
+class SmoothLSQModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for SmoothLSQ algorithm."""
 
     @property
     def config_class(self) -> type[QuantizeAlgorithmConfig]:
         """Specifies the config class for the mode."""
-        return ScaleAfterDequantConfig
+        return SmoothLSQConfig
 
-    _calib_func = scale_after_dequant
+    _calib_func = smooth_lsq
 
 
 @CalibrateModeRegistry.register_mode
@@ -516,6 +520,30 @@ class LSQModeDescriptor(BaseCalibrateModeDescriptor):
         return LSQConfig
 
     _calib_func = lsq
+
+
+@CalibrateModeRegistry.register_mode
+class LAQModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for LAQ (Learnt Amax Quantization) algorithm."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return LAQConfig
+
+    _calib_func = laq
+
+
+@CalibrateModeRegistry.register_mode
+class SmoothLAQModeDescriptor(BaseCalibrateModeDescriptor):
+    """Mode for SmoothLAQ algorithm."""
+
+    @property
+    def config_class(self) -> type[QuantizeAlgorithmConfig]:
+        """Specifies the config class for the mode."""
+        return SmoothLAQConfig
+
+    _calib_func = smooth_laq
 
 
 @CalibrateModeRegistry.register_mode

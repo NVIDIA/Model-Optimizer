@@ -1274,6 +1274,8 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
 
     _scale_after_dequant: bool = False
     _lsq: bool = False
+    _laq: bool = False
+    _smooth_laq: bool = False
     _quant_max_bound: float = 6.0
     _quantize_scales: bool = True
 
@@ -1307,9 +1309,12 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
 
     @property
     def amax(self):
-        """Return amax, derived from per_block_scale if in scale-after-dequant mode."""
-        if self._scale_after_dequant and hasattr(self, "_per_block_scale"):
-            return self._per_block_scale * self._quant_max_bound
+        """Return amax, derived from learnable scale/amax parameters if in learnable mode."""
+        if self._scale_after_dequant:
+            if hasattr(self, "_amax_param"):
+                return self._amax_param
+            if hasattr(self, "_per_block_scale"):
+                return self._per_block_scale * self._quant_max_bound
         if not hasattr(self, "_amax"):
             return None
         return self._amax
@@ -1347,10 +1352,13 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
             self._global_amax.data.copy_(value.clone().detach().to(self._global_amax.device))
 
     def _short_amax(self, fmt=".4f"):
-        """Short description of amax, accounting for scale-after-dequant mode."""
-        if self._scale_after_dequant and hasattr(self, "_per_block_scale"):
-            amax = self._per_block_scale.data * self._quant_max_bound
-            return self._short_tensor(amax, fmt)
+        """Short description of amax, accounting for learnable scale modes."""
+        if self._scale_after_dequant:
+            if hasattr(self, "_amax_param"):
+                return self._short_tensor(self._amax_param.data, fmt)
+            if hasattr(self, "_per_block_scale"):
+                amax = self._per_block_scale.data * self._quant_max_bound
+                return self._short_tensor(amax, fmt)
         return super()._short_amax(fmt)
 
     def _enable_learnable_scales(
@@ -1377,13 +1385,13 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         self._scale_after_dequant = True
         self._quantize_scales = quantize_scales
 
-    def enable_scale_after_dequant(
+    def enable_smooth_lsq(
         self,
         per_block_scale: torch.Tensor,
         per_tensor_scale: torch.Tensor = None,
         quantize_scales: bool = True,
     ):
-        """Scale-after-dequant mode. Weights must be pre-divided by caller."""
+        """SmoothLSQ mode. Weights must be pre-divided by caller."""
         self._enable_learnable_scales(per_block_scale, per_tensor_scale, quantize_scales)
 
     def enable_lsq(
@@ -1396,6 +1404,32 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         self._enable_learnable_scales(per_block_scale, per_tensor_scale, quantize_scales)
         self._lsq = True
 
+    def enable_laq(
+        self,
+        per_block_scale: torch.Tensor,
+        per_tensor_scale: torch.Tensor = None,
+        quantize_scales: bool = True,
+    ):
+        """LAQ mode. Learns a_max; s = a_max/Q_max. Weights NOT pre-divided."""
+        amax = per_block_scale.clone().detach().float() * self._quant_max_bound
+        self._enable_learnable_scales(per_block_scale, per_tensor_scale, quantize_scales)
+        del self._per_block_scale
+        self._amax_param = nn.Parameter(amax, requires_grad=True)
+        self._laq = True
+
+    def enable_smooth_laq(
+        self,
+        per_block_scale: torch.Tensor,
+        per_tensor_scale: torch.Tensor = None,
+        quantize_scales: bool = True,
+    ):
+        """SmoothLAQ mode. Learns a_max; weights pre-divided by a_max."""
+        amax = per_block_scale.clone().detach().float() * self._quant_max_bound
+        self._enable_learnable_scales(per_block_scale, per_tensor_scale, quantize_scales)
+        del self._per_block_scale
+        self._amax_param = nn.Parameter(amax, requires_grad=True)
+        self._smooth_laq = True
+
     def _cast_ste(self, inputs):
         """Cast inputs to quantized representable values (no scaling)."""
         if isinstance(self._num_bits, tuple):
@@ -1405,7 +1439,11 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
     def _fake_quantize(self, inputs):
         """Fake quantization using two-level scaling with _amax and _global_amax."""
         if self._scale_after_dequant:
-            scale_raw = _to_local(self._per_block_scale).clamp(min=0)
+            if self._laq or self._smooth_laq:
+                amax = _to_local(self._amax_param).clamp(min=1e-8)
+                scale_raw = amax / self._quant_max_bound
+            else:
+                scale_raw = _to_local(self._per_block_scale).clamp(min=0)
 
             if self._quantize_scales:
                 scale = scaled_e4m3(scale_raw, self._per_tensor_scale, None, 4, 3)
@@ -1414,8 +1452,10 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
 
             scale = scale.to(dtype=inputs.dtype)
 
-            if self._lsq:
-                w_cast = self._cast_ste(inputs / scale.view(-1, 1))
+            if self._lsq or self._laq:
+                w_cast = self._cast_ste(inputs.float() / scale.float().view(-1, 1))
+            elif self._smooth_laq:
+                w_cast = self._cast_ste(inputs * self._quant_max_bound)
             else:
                 w_cast = self._cast_ste(inputs)
 

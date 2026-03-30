@@ -83,7 +83,7 @@ NVFP4_WEIGHT_SCALE_LEARN_CFG = {
         "*input_quantizer": {"enable": False},
     },
     "algorithm": {
-        "method": "scale_after_dequant",
+        "method": "smooth_lsq",
         "scale_algorithm": {"method": "mse", "fp8_scale_sweep": True},
     },
 }
@@ -104,6 +104,38 @@ NVFP4_WEIGHT_LSQ_CFG = {
     },
 }
 
+NVFP4_WEIGHT_LAQ_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {"enable": False},
+    },
+    "algorithm": {
+        "method": "laq",
+        "scale_algorithm": {"method": "mse", "fp8_scale_sweep": True},
+    },
+}
+
+NVFP4_WEIGHT_SMOOTH_LAQ_CFG = {
+    "quant_cfg": {
+        "*weight_quantizer": {
+            "num_bits": (2, 1),
+            "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
+            "axis": None,
+            "enable": True,
+        },
+        "*input_quantizer": {"enable": False},
+    },
+    "algorithm": {
+        "method": "smooth_laq",
+        "scale_algorithm": {"method": "mse", "fp8_scale_sweep": True},
+    },
+}
+
 NVFP4_ADAROUND_CFG = {
     "quant_cfg": {
         "*weight_quantizer": {
@@ -116,7 +148,7 @@ NVFP4_ADAROUND_CFG = {
     },
     "algorithm": {
         "method": "adaround",
-        "scale_after_dequant_args": {"scale_algorithm": {"method": "mse", "fp8_scale_sweep": True}},
+        "smooth_lsq_args": {"scale_algorithm": {"method": "mse", "fp8_scale_sweep": True}},
     },
 }
 
@@ -203,8 +235,8 @@ def test_save_restore(model_cls, quant_config):
     save_restore_test(model_cls, "cuda", quant_config, test_cpu_restore=test_cpu_restore)
 
 
-def test_scale_after_dequant_grad():
-    """Test scale_after_dequant: outputs match FP8 sweep, and per_block_scale gets gradients."""
+def test_smooth_lsq_grad():
+    """Test smooth_lsq: outputs match FP8 sweep, and per_block_scale gets gradients."""
     if get_cuda_ext_mx() is None:
         pytest.skip("cuda_ext_mx is not available")
 
@@ -222,7 +254,7 @@ def test_scale_after_dequant_grad():
     # Reference: MSE + FP8 sweep only
     mtq.quantize(model_ref, NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG, forward_loop)
 
-    # scale_after_dequant (internally runs MSE + FP8 sweep, then converts)
+    # smooth_lsq (internally runs MSE + FP8 sweep, then converts)
     mtq.quantize(model, NVFP4_WEIGHT_SCALE_LEARN_CFG, forward_loop)
 
     # Outputs should match before any training
@@ -234,7 +266,7 @@ def test_scale_after_dequant_grad():
         f"Output mismatch: max diff = {(out - out_ref).abs().max().item()}"
     )
 
-    # Verify quantizers are in scale_after_dequant mode
+    # Verify quantizers are in smooth_lsq mode
     for module in model.modules():
         if isinstance(module, NVFP4StaticQuantizer) and module._scale_after_dequant:
             assert isinstance(module._per_block_scale, nn.Parameter)
@@ -301,6 +333,85 @@ def test_lsq_grad():
     assert found
 
 
+def test_laq_grad():
+    """Test LAQ: quantizers in LAQ mode, _amax_param gets gradients, output is finite."""
+    if get_cuda_ext_mx() is None:
+        pytest.skip("cuda_ext_mx is not available")
+
+    model = nn.Sequential(nn.Linear(32, 64, bias=False), nn.Linear(64, 16, bias=False)).cuda()
+
+    calib_data = [torch.randn(2, 32, device="cuda") for _ in range(4)]
+
+    def forward_loop(model):
+        for x in calib_data:
+            model(x)
+
+    mtq.quantize(model, NVFP4_WEIGHT_LAQ_CFG, forward_loop)
+
+    x = torch.randn(2, 32, device="cuda")
+    with torch.no_grad():
+        out = model(x)
+    assert torch.isfinite(out).all(), "Non-finite output detected"
+
+    for module in model.modules():
+        if isinstance(module, NVFP4StaticQuantizer) and module._laq:
+            assert isinstance(module._amax_param, nn.Parameter)
+            assert module._amax_param.requires_grad
+
+    out = model(x)
+    out.sum().backward()
+
+    found = False
+    for module in model.modules():
+        if isinstance(module, NVFP4StaticQuantizer) and module._laq:
+            assert module._amax_param.grad is not None
+            found = True
+    assert found
+
+
+def test_smooth_laq_grad():
+    """Test SmoothLAQ: outputs match FP8 sweep, _amax_param gets gradients."""
+    if get_cuda_ext_mx() is None:
+        pytest.skip("cuda_ext_mx is not available")
+
+    import copy
+
+    model = nn.Sequential(nn.Linear(32, 64, bias=False), nn.Linear(64, 16, bias=False)).cuda()
+    model_ref = copy.deepcopy(model)
+
+    calib_data = [torch.randn(2, 32, device="cuda") for _ in range(4)]
+
+    def forward_loop(model):
+        for x in calib_data:
+            model(x)
+
+    mtq.quantize(model_ref, NVFP4_WEIGHT_MSE_FP8_SWEEP_CFG, forward_loop)
+    mtq.quantize(model, NVFP4_WEIGHT_SMOOTH_LAQ_CFG, forward_loop)
+
+    x = torch.randn(2, 32, device="cuda")
+    with torch.no_grad():
+        out_ref = model_ref(x)
+        out = model(x)
+    assert torch.allclose(out, out_ref, atol=1e-5), (
+        f"Output mismatch: max diff = {(out - out_ref).abs().max().item()}"
+    )
+
+    for module in model.modules():
+        if isinstance(module, NVFP4StaticQuantizer) and module._smooth_laq:
+            assert isinstance(module._amax_param, nn.Parameter)
+            assert module._amax_param.requires_grad
+
+    out = model(x)
+    out.sum().backward()
+
+    found = False
+    for module in model.modules():
+        if isinstance(module, NVFP4StaticQuantizer) and module._smooth_laq:
+            assert module._amax_param.grad is not None
+            found = True
+    assert found
+
+
 def test_adaround_grad():
     """Test adaround: quantizers upgraded, round_logits gets gradients, dist_loss works."""
     if get_cuda_ext_mx() is None:
@@ -317,10 +428,10 @@ def test_adaround_grad():
         for x in calib_data:
             model(x)
 
-    # Reference: scale_after_dequant only (no adaround)
+    # Reference: smooth_lsq only (no adaround)
     mtq.quantize(model_ref, NVFP4_WEIGHT_SCALE_LEARN_CFG, forward_loop)
 
-    # Single call: adaround with embedded scale_after_dequant_args
+    # Single call: adaround with embedded smooth_lsq_args
     mtq.quantize(model, NVFP4_ADAROUND_CFG, forward_loop)
 
     # -- 1. Verify quantizers are upgraded to NVFP4StaticAdaRoundQuantizer --

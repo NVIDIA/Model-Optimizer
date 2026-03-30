@@ -1408,14 +1408,15 @@ class SVDQuantConfig(QuantizeAlgorithmConfig):
     )
 
 
-class ScaleAfterDequantConfig(QuantizeAlgorithmConfig):
-    """Config for scale-after-dequant algorithm.
+class SmoothLSQConfig(QuantizeAlgorithmConfig):
+    """Config for SmoothLSQ algorithm.
 
     Runs calibration (mse, local_hessian, or max), then converts static block
-    quantizers to learnable-scale mode for fine-tuning.
+    quantizers to learnable-scale mode. Weights are pre-divided by scale so the
+    learned parameter is the scaled weight w_s. Forward: w_q = Q_STE(w_s) * s.
     """
 
-    method: Literal["scale_after_dequant"] = ModeloptField("scale_after_dequant")
+    method: Literal["smooth_lsq"] = ModeloptField("smooth_lsq")
 
     scale_algorithm: dict | None = ModeloptField(
         default=None,
@@ -1431,7 +1432,7 @@ class ScaleAfterDequantConfig(QuantizeAlgorithmConfig):
 class LSQConfig(QuantizeAlgorithmConfig):
     """Config for LSQ (Learned Step Size Quantization) algorithm.
 
-    Like scale_after_dequant, but weights are NOT pre-divided. The forward pass
+    Like smooth_lsq, but weights are NOT pre-divided. The forward pass
     computes s * Q(x/s), so the quantization grid adapts as the learned scale changes.
     """
 
@@ -1448,12 +1449,53 @@ class LSQConfig(QuantizeAlgorithmConfig):
     )
 
 
+class LAQConfig(QuantizeAlgorithmConfig):
+    """Config for LAQ (Learnt Amax Quantization) algorithm.
+
+    Like LSQ, but learns a_max instead of scale s directly.
+    Scale is derived as s = a_max / Q_max. Weights are NOT pre-divided.
+    Forward: w_q = Q_STE(w / s) * s where s = a_max / Q_max.
+    """
+
+    method: Literal["laq"] = ModeloptField("laq")
+
+    scale_algorithm: dict | None = ModeloptField(
+        default=None,
+        title="Scale calibration algorithm to run first.",
+        description=(
+            "Dict with 'method' key: 'mse', 'local_hessian', or 'max'. "
+            "Optional keys include 'fp8_scale_sweep' for FP4 formats. "
+            "Defaults to {'method': 'mse'} if None."
+        ),
+    )
+
+
+class SmoothLAQConfig(QuantizeAlgorithmConfig):
+    """Config for SmoothLAQ algorithm.
+
+    Like SmoothLSQ, but learns a_max instead of scale s. Weights are pre-divided
+    by a_max. Forward: w_s = w_a * Q_max, s = a_max / Q_max, w_q = Q_STE(w_s) * s.
+    """
+
+    method: Literal["smooth_laq"] = ModeloptField("smooth_laq")
+
+    scale_algorithm: dict | None = ModeloptField(
+        default=None,
+        title="Scale calibration algorithm to run first.",
+        description=(
+            "Dict with 'method' key: 'mse', 'local_hessian', or 'max'. "
+            "Optional keys include 'fp8_scale_sweep' for FP4 formats. "
+            "Defaults to {'method': 'mse'} if None."
+        ),
+    )
+
+
 class AdaRoundConfig(QuantizeAlgorithmConfig):
     """Config for AdaRound algorithm.
 
     Converts NVFP4 quantizers to use learnable rounding decisions instead of
-    round-to-nearest-even. If the model is not yet in scale-after-dequant mode,
-    ``scale_after_dequant_args`` can be provided to run that conversion first.
+    round-to-nearest-even. If the model is not yet in smooth_lsq mode,
+    ``smooth_lsq_args`` can be provided to run that conversion first.
 
     Training-time knobs (beta annealing, dist_loss_coeff, temperature, freeze
     behaviour) are configured via ``AdaRoundTrainingArguments`` on the trainer.
@@ -1461,11 +1503,11 @@ class AdaRoundConfig(QuantizeAlgorithmConfig):
 
     method: Literal["adaround"] = ModeloptField("adaround")
 
-    scale_after_dequant_args: dict | None = ModeloptField(
+    smooth_lsq_args: dict | None = ModeloptField(
         default=None,
-        title="Arguments for scale_after_dequant conversion.",
+        title="Arguments for smooth_lsq conversion.",
         description=(
-            "If provided, :func:`scale_after_dequant` is called first with these arguments "
+            "If provided, :func:`smooth_lsq` is called first with these arguments "
             "to calibrate and convert the model before enabling AdaRound. "
             "Example: ``{'scale_algorithm': {'method': 'mse', 'fp8_scale_sweep': True}}``."
         ),
