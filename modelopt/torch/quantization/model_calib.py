@@ -1179,6 +1179,17 @@ def awq_lite(
                     module.parallel_state.data_parallel_group,
                 )
 
+    # Disable AWQ for uncalibrated experts (e.g. when moe_calib_experts_ratio < 1.0,
+    # some experts may never receive tokens during the cache phase, leaving act_scale
+    # as a Python float instead of a tensor, which would crash in get_scale()).
+    for name, module in model.named_modules():
+        if (
+            is_quantized_linear(module)
+            and hasattr(module, "awq_lite")
+            and module.awq_lite.num_cache_steps == 0
+        ):
+            module.awq_lite.is_enabled = False
+
     AWQLiteHelper.cache_mode = False
     print_rank_0("awq_lite: Searching parameters...")
     with torch.no_grad():
