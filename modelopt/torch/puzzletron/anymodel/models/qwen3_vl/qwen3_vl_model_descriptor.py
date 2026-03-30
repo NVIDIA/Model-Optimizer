@@ -19,7 +19,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List
 
-import torch.nn as nn
 from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
     Qwen3VLMoeTextDecoderLayer,
     Qwen3VLMoeTextRotaryEmbedding,
@@ -46,7 +45,7 @@ from modelopt.torch.puzzletron.pruning.kv_heads_pruning_mixin import KVHeadsLaye
 
 
 @ModelDescriptorFactory.register_decorator("qwen3_vl")
-class Qwen3VL30BA3BInstructModelDescriptor(ModelDescriptor):
+class Qwen3VLModelDescriptor(ModelDescriptor):
     @staticmethod
     def uses_autocast() -> bool:
         """
@@ -90,7 +89,7 @@ class Qwen3VL30BA3BInstructModelDescriptor(ModelDescriptor):
     @staticmethod
     def init_rotary_embedding(model, runtime):
         # Re-initialize text rotary embedding on correct device and dtype
-        text_config = Qwen3VL30BA3BInstructModelDescriptor.get_language_model_config(model.config)
+        text_config = Qwen3VLModelDescriptor.get_language_model_config(model.config)
         model.model.language_model.rotary_emb = Qwen3VLMoeTextRotaryEmbedding(
             config=text_config
         ).to(device=runtime.device, dtype=runtime.dtype)
@@ -171,7 +170,7 @@ class Qwen3VL30BA3BInstructModelDescriptor(ModelDescriptor):
 
 
 @dataclass
-class Qwen3VL30BA3BInstructFFNIntermediateLayerDescriptor(FFNIntermediateLayerDescriptor):
+class Qwen3VLFFNIntermediateLayerDescriptor(FFNIntermediateLayerDescriptor):
     down_proj_name: str = "mlp.down_proj"
     ffn_prefix_name: str = "model.language_model.layers.{layer_idx}.mlp"
     linear_weight_names: List[str] = field(
@@ -180,7 +179,7 @@ class Qwen3VL30BA3BInstructFFNIntermediateLayerDescriptor(FFNIntermediateLayerDe
 
 
 @dataclass
-class Qwen3VL30BA3BInstructKVHeadsLayerDescriptor(KVHeadsLayerDescriptor):
+class Qwen3VLKVHeadsLayerDescriptor(KVHeadsLayerDescriptor):
     o_proj_name: str = "self_attn.o_proj"
     attn_prefix_name: str = "model.language_model.layers.{layer_idx}.self_attn"
     qkvo_weight_names: List[str] = field(
@@ -189,7 +188,7 @@ class Qwen3VL30BA3BInstructKVHeadsLayerDescriptor(KVHeadsLayerDescriptor):
 
 
 @dataclass
-class Qwen3VL30BA3BInstructExpertRemovalLayerDescriptor(ExpertRemovalLayerDescriptor):
+class Qwen3VLExpertRemovalLayerDescriptor(ExpertRemovalLayerDescriptor):
     """
     Qwen3-VL MoE layer descriptor.
 
@@ -203,7 +202,7 @@ class Qwen3VL30BA3BInstructExpertRemovalLayerDescriptor(ExpertRemovalLayerDescri
     moe_prefix_name: str = "model.language_model.layers.{layer_idx}.mlp"
     # Router: Qwen3VLMoeTextTopKRouter has self.weight, no bias
     router_weights: List[str] = field(default_factory=lambda: ["gate.weight"])
-    router_biases: List[str] = field(default_factory=lambda: [])
+    router_biases: List[str] = field(default_factory=list)
     # Fused expert format: Qwen3VLMoeTextExperts stores all experts in single tensors
     # with shape [num_experts, ...] instead of separate tensors per expert.
     is_fused_experts: bool = True

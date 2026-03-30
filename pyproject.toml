@@ -218,20 +218,11 @@ extend-ignore = [
     "D",
     "E",
     "F",
-    "FURB",
-    "ISC",
     "N",
     "PERF",
-    "PGH",
-    "PIE",
-    "PLE",
-    "PLR",
-    "PT",
     "RUF",
     "SIM",
-    "TC",
     "UP",
-    "W",
 ] # TODO: Disabled for now, will enable later, once all puzzletron code is migrated
 "modelopt/torch/quantization/triton/*" = ["N803", "N806", "E731"] # triton style
 "modelopt/torch/sparsity/attention_sparsity/kernels/*" = [

@@ -151,7 +151,6 @@ class NemotronHModelDescriptor(ModelDescriptor):
         """
         NemotronH has no positional embeddings
         """
-        pass
 
     @staticmethod
     def input_embedding_name():

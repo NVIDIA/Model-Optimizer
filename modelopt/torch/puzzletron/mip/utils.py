@@ -21,8 +21,6 @@ from typing import Any
 class InfeasibleError(Exception):
     """Exception raised when optimization problem is infeasible."""
 
-    pass
-
 
 def sort_replacements(layer_replacements: list[dict]) -> list[dict]:
     """Sort layer replacements by parent layer indices.

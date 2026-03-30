@@ -203,7 +203,6 @@ def calculate_subblock_stats(
         )
 
     if is_calc_runtime:
-        pass
         # TODO: fix
         # from puzzle_tools.calc_subblock_runtime import measure_non_block_runtime_ms
         # non_block_runtime_ms, embedding_runtime_ms, lm_head_runtime_ms = \

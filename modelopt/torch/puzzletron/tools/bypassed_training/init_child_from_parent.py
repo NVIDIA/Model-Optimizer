@@ -70,8 +70,7 @@ def init_child_from_parent(
     - max_layer_workers: Number of threads for parallel layer processing (default: auto-calculate min(CPU count, num layers))
     """
     assert (
-        gqa_init_mode != GQAInitMode.RandomKV
-        and gqa_init_mode != GQAInitMode.RandomBlock
+        gqa_init_mode not in [GQAInitMode.RandomKV, GQAInitMode.RandomBlock]
         and mlp_init_mode != MlpInitMode.Random
         and linear_init_mode != LinearInitMode.Random
     ), (
