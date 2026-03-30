@@ -133,7 +133,7 @@ def _convert_constant_node_to_bf16(node: onnx.NodeProto) -> bool:
 
 
 def convert_fp16_to_bf16(
-    input_path: str,
+    model_path: str,
     output_path: str,
     external_data: bool = True,
     verbose: bool = True,
@@ -147,7 +147,7 @@ def convert_fp16_to_bf16(
     4. All Cast nodes that target FP16 to target BF16
 
     Args:
-        input_path: Path to input FP16 ONNX model.
+        model_path: Path to input FP16 ONNX model.
         output_path: Path to output BF16 ONNX model.
         external_data: Whether to save weights as external data.
         verbose: Whether to print progress messages.
@@ -157,16 +157,16 @@ def convert_fp16_to_bf16(
 
     Example:
         >>> stats = convert_fp16_to_bf16(
-        ...     input_path="model_fp16.onnx",
+        ...     model_path="model_fp16.onnx",
         ...     output_path="model_bf16.onnx",
         ... )
         >>> logger.info(f"Converted {stats['initializers_converted']} initializers")
     """
     if verbose:
-        logger.info(f"Loading model from: {input_path}")
+        logger.info(f"Loading model from: {model_path}")
 
     # Load model with external data
-    model = onnx.load(input_path, load_external_data=True)
+    model = onnx.load(model_path, load_external_data=True)
     graph = model.graph
 
     # Statistics
