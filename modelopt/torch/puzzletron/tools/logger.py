@@ -71,7 +71,7 @@ class DistributedLogger(logging.Logger):
         # Only main rank at node 0 to print
         elif (
             (ranks == "main" and self.global_rank != 0)
-            or (ranks == "last" and self.local_rank != self.world_size - 1)
+            or (ranks == "last" and self.global_rank != self.world_size - 1)
             or (ranks == "local_main" and self.local_rank != 0)
         ):
             return

@@ -156,7 +156,7 @@ class PuzzleConstraints:
             return self.constraints
 
         assert all(key in subblock_stats_args for key in ("batch_size", "generation_seq_len")), (
-            "Can't realize human constraints without 'block_size' and 'generation_seq_len' in subblock_stats_args."
+            "Can't realize human constraints without 'batch_size' and 'generation_seq_len' in subblock_stats_args."
         )
         batch_size = subblock_stats_args["batch_size"]
         generation_seq_len = subblock_stats_args["generation_seq_len"]
@@ -192,7 +192,7 @@ class PuzzleConstraints:
         return mip_constraints
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args() -> DictConfig:
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--puzzle_profile", type=parse_path)
@@ -228,11 +228,11 @@ def parse_args() -> argparse.Namespace:
     )
 
     args = parser.parse_args()
-    return args
+    return DictConfig(vars(args))
 
 
 def run_single_puzzle_config(
-    args: argparse.Namespace | DictConfig,
+    args: DictConfig,
     gathered_metrics: dict,
     subblock_stats: dict,
     subblock_stats_args: dict,
@@ -432,7 +432,7 @@ def _get_minimal_unique_names(dicts: list[dict]) -> list[str]:
     return ["-".join(f"{k}_{d[k]}".replace(".", "_") for k in non_common_keys) for d in dicts]
 
 
-def run_puzzle(args: argparse.Namespace | DictConfig) -> list[str]:
+def run_puzzle(args: DictConfig) -> list[str]:
     # Loads config from args/puzzle_profile
     if args.puzzle_profile is not None:
         with open(args.puzzle_profile) as f:

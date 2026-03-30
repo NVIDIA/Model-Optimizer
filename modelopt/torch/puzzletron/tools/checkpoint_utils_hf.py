@@ -63,8 +63,6 @@ MODULE_WITHIN_LAYER_TO_FILE_TYPE = {
 }
 LAYERS_MODULE_NAME = "model.layers"
 
-warnings.filterwarnings("ignore", "You are using `torch.load` with `weights_only=False`*.")
-
 
 def force_cache_dynamic_modules(
     config: PretrainedConfig, checkpoint_dir: Path | str, trust_remote_code: bool = False

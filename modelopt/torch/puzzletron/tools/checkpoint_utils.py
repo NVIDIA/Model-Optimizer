@@ -35,14 +35,12 @@ SAFETENSORS_SUBBLOCKS_DIR_NAME = "subblocks_safetensors"
 PTH_SUBBLOCKS_DIR_NAME = "subblocks"
 STATE_DICT_FILE_NAME = "model.pth"
 
-warnings.filterwarnings("ignore", "You are using `torch.load` with `weights_only=False`*.")
-
 
 def load_state_dict(checkpoint_dir: Path | str) -> dict[str, torch.Tensor]:
     checkpoint_dir = _normalize_checkpoint_dir(checkpoint_dir)
 
     if (state_dict_path := checkpoint_dir / STATE_DICT_FILE_NAME).exists():
-        return torch.load(state_dict_path, map_location="cpu", weights_only=False)
+        return torch.load(state_dict_path, map_location="cpu", weights_only=True)
 
     if (safetensors_subblocks_dir := checkpoint_dir / SAFETENSORS_SUBBLOCKS_DIR_NAME).exists():
         return _load_state_dict_from_subblocks(safetensors_subblocks_dir)
@@ -76,7 +74,7 @@ def _load_state_dict_from_subblocks(subblocks_dir: Path) -> dict[str, torch.Tens
     safetensors_paths = list(subblocks_dir.glob("*.safetensors"))
 
     if len(torch_paths) != 0:
-        load_fn = partial(torch.load, map_location="cpu", weights_only=False)
+        load_fn = partial(torch.load, map_location="cpu", weights_only=True)
         file_paths = torch_paths
     elif len(safetensors_paths) != 0:
         load_fn = safe_load_file
@@ -162,6 +160,7 @@ def copy_tokenizer(
     source_dir_or_tokenizer_name: Path | str,
     target_dir: Path | str,
     on_failure: Literal["raise", "warn"] = "raise",
+    trust_remote_code: bool = False,
 ) -> None:
     """Prefer loading the tokenizer from huggingface hub (when tokenizer_name.txt file is available)
     to avoid collision between transformers versions.
@@ -173,7 +172,7 @@ def copy_tokenizer(
     tokenizer = None
     try:
         tokenizer = AutoTokenizer.from_pretrained(
-            source_dir_or_tokenizer_name, trust_remote_code=True
+            source_dir_or_tokenizer_name, trust_remote_code=trust_remote_code
         )
     except Exception:
         message = f"Couldn't load tokenizer from '{source_dir_or_tokenizer_name}'"
