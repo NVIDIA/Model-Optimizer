@@ -438,25 +438,18 @@ class HFDFlashModel(DFlashModel):
     ):
         """Training forward matching SpecForge OnlineDFlashModel.forward."""
         if not self.training:
-            # Call base model directly to avoid DynamicModule dispatch loop
-            model_output = self._base_model(
+            return super().forward(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
                 inputs_embeds=inputs_embeds,
+                labels=labels,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
                 cache_position=cache_position,
                 **kwargs,
-            )
-            logits = self._base_model_lm_head(model_output.last_hidden_state)
-            return ModelOutput(
-                logits=logits,
-                past_key_values=getattr(model_output, "past_key_values", None),
-                hidden_states=getattr(model_output, "hidden_states", None),
-                attentions=getattr(model_output, "attentions", None),
             )
 
         bsz, seq_len = input_ids.shape
@@ -464,17 +457,14 @@ class HFDFlashModel(DFlashModel):
         device = input_ids.device
 
         # 1. Run base model → raw multi-layer hidden states
-        # Use self._base_model directly to avoid DynamicModule dispatch loop
+        # Use super().forward() which goes through DynamicModule → original model
+        # (same pattern as EAGLE's HFEagleModel)
         with torch.no_grad():
-            model_output = self._base_model(
+            base_outputs = super().forward(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 output_hidden_states=True,
             )
-        base_outputs = ModelOutput(
-            logits=self._base_model_lm_head(model_output.last_hidden_state),
-            hidden_states=model_output.hidden_states,
-        )
 
         # Extract and concatenate target layer hidden states
         offset = 1
