@@ -35,9 +35,10 @@ Four attention kernel variants are supported via ``--kernel``:
     - No CUDA kernel required. Use for accuracy verification on any GPU.
 
 ``nvfp4`` (always available)
-    Python-level NVFP4 E2M1 attention. Inspired by SageAttention3:
-    - Q and K: channel-smoothed, per-token scaled, rounded to nearest of 8 levels {0,0.5,1,1.5,2,3,4,6}
-    - V: kept in BF16 (quantizing V causes visible color/texture loss)
+    Python-level NVFP4 E2M1 attention. Faithful to SageAttention3 (arXiv 2505.11594):
+    - Q, K, V stay in BF16
+    - Post-softmax P matrix is per-row scaled and rounded to nearest of 8 levels {0,0.5,1,1.5,2,3,4,6}
+    - Manual attention: Q@K^T → scale → mask → softmax → NVFP4(P) → P@V
     - No CUDA kernel required. Use to measure accuracy vs FP8.
 
 Requirements::
@@ -93,7 +94,7 @@ KERNEL_CHOICES = [KERNEL_FP8, KERNEL_NVFP4, KERNEL_SAGE1, KERNEL_SAGE2_FP16, KER
 
 _KERNEL_DESCRIPTIONS = {
     KERNEL_FP8: "FP8 E4M3 QKV (Python-level, SA2-inspired smoothing, no CUDA kernel required)",
-    KERNEL_NVFP4: "NVFP4 E2M1 QK + BF16 V (Python-level, SA3-inspired)",
+    KERNEL_NVFP4: "NVFP4 E2M1 post-softmax P (Python-level, SA3-faithful manual attention)",
     KERNEL_SAGE1: "sageattn (SA1, INT8 QK + FP16 PV, auto-select)",
     KERNEL_SAGE2_FP16: "sageattn_qk_int8_pv_fp16_cuda (SA2, INT8 QK + FP16 PV, per-thread)",
     KERNEL_SAGE2_FP8: "sageattn_qk_int8_pv_fp8_cuda (SA2++, INT8 QK + FP8 PV, fp32+fp16 accum)",
@@ -256,41 +257,25 @@ def _quantize_to_fp4_levels(x_abs: torch.Tensor) -> torch.Tensor:
     return levels[idx]
 
 
-def _smooth_quantize_fp4(x: torch.Tensor) -> torch.Tensor:
-    """Smooth + NVFP4 E2M1-quantize + dequantize a Q, K, or V tensor.
+def _quantize_p_to_fp4(p: torch.Tensor) -> torch.Tensor:
+    """Per-row scale + NVFP4 E2M1 quantize + dequantize the post-softmax P matrix.
 
-    Mirrors the SA3 (arXiv 2505.11594) channel-wise smoothing strategy:
-
-    1. Subtract per-channel mean across the token dimension.
-    2. Scale so the per-token max maps to ``_FP4_MAX`` (6.0).
-    3. Round to the nearest NVFP4 E2M1 level via a boundary lookup.
-    4. Dequantize back to the original dtype and restore the mean.
-
-    No CUDA kernel required — works on any GPU or CPU.
+    P values are non-negative probabilities that sum to 1 per row.  No mean
+    subtraction is applied (unlike Q/K smoothing) because probabilities are
+    inherently non-negative.  A per-row max-based scale maps the row peak to
+    ``_FP4_MAX`` (6.0) so all 8 NVFP4 levels are utilised.
 
     Args:
-        x: Attention tensor ``(B, H, N, D)``.
+        p: Post-softmax attention weights ``(B, H, N, N)``, float32.
 
     Returns:
-        Tensor of the same shape and dtype, simulating NVFP4 E2M1 precision.
+        Quantized-dequantized P of the same shape in float32.
     """
-    orig_dtype = x.dtype
-    x = x.float()
-
-    # Step 1 — channel smoothing
-    mean = x.mean(dim=-2, keepdim=True)
-    x_smooth = x - mean
-
-    # Step 2 — per-token scale to fit in [-FP4_MAX, FP4_MAX]
-    scale = x_smooth.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / _FP4_MAX
-    x_scaled = (x_smooth / scale).clamp(-_FP4_MAX, _FP4_MAX)
-
-    # Step 3 — quantize: preserve sign, round magnitude to nearest FP4 level
-    sign = x_scaled.sign()
-    x_dq = sign * _quantize_to_fp4_levels(x_scaled.abs())
-
-    # Step 4 — dequantize and restore mean
-    return (x_dq * scale + mean).to(orig_dtype)
+    # Per-row scale: map max value in each row to FP4_MAX
+    scale = p.amax(dim=-1, keepdim=True).clamp(min=1e-12) / _FP4_MAX
+    p_scaled = (p / scale).clamp(0.0, _FP4_MAX)  # P is non-negative
+    p_dq = _quantize_to_fp4_levels(p_scaled)
+    return p_dq * scale
 
 
 def _nvfp4_sdpa(
@@ -300,19 +285,44 @@ def _nvfp4_sdpa(
     is_causal: bool,
     scale: float | None,
 ) -> torch.Tensor:
-    """NVFP4 E2M1 attention: Q and K quantized to NVFP4, V kept in BF16.
+    """SA3-faithful NVFP4 E2M1 attention: quantize post-softmax P, not Q/K/V.
 
-    In SageAttention3 (arXiv 2505.11594), NVFP4 is applied to the post-softmax
-    attention probability matrix P = softmax(QK^T / sqrt(d)), not to V directly.
-    V is multiplied with the NVFP4-quantized P in BF16/FP16 precision.
+    SageAttention3 (arXiv 2505.11594) applies NVFP4 to the attention probability
+    matrix P = softmax(QK^T / sqrt(d)), not to Q, K, or V.  This gives much
+    better quality than quantizing Q/K because:
 
-    Quantizing V causes visible color/texture loss because V carries the actual
-    content that gets weighted and summed into the output.  Q and K are only used
-    for computing routing weights, so their quantization noise is far less visible.
+    - Q/K errors propagate non-linearly through softmax; P errors are just
+      additive noise on the weighted sum.
+    - P has a sparse distribution (a few large weights, many near zero) that
+      maps naturally onto NVFP4's 8 levels after per-row scaling.
+
+    The manual attention loop (no flash-attention fusion) is slower than the
+    real SA3 CUDA kernel but faithfully simulates its quantization behaviour
+    for accuracy measurement.
     """
-    q_dq = _smooth_quantize_fp4(query)
-    k_dq = _smooth_quantize_fp4(key)
-    return _orig_sdpa(q_dq, k_dq, value, is_causal=is_causal, scale=scale)
+    orig_dtype = query.dtype
+    scale_factor = (query.size(-1) ** -0.5) if scale is None else scale
+
+    # Compute attention scores in float32 for numerical stability
+    q = query.float()
+    k = key.float()
+    v = value.float()
+
+    attn = torch.matmul(q, k.transpose(-2, -1)) * scale_factor
+
+    if is_causal:
+        n = attn.size(-2)
+        m = attn.size(-1)
+        causal_mask = torch.ones(n, m, dtype=torch.bool, device=attn.device).tril()
+        attn = attn.masked_fill(~causal_mask, float("-inf"))
+
+    p = torch.softmax(attn, dim=-1)
+
+    # Quantize P to NVFP4 — this is what SA3 does
+    p_dq = _quantize_p_to_fp4(p)
+
+    out = torch.matmul(p_dq, v)
+    return out.to(orig_dtype)
 
 
 # ---------------------------------------------------------------------------
