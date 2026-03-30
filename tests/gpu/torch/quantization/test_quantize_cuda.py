@@ -334,7 +334,7 @@ def test_lsq_grad():
 
 
 def test_laq_grad():
-    """Test LAQ: quantizers in LAQ mode, _amax_param gets gradients, output is finite."""
+    """Test LAQ: quantizers in LAQ mode, _amax_learnt gets gradients, output is finite."""
     if get_cuda_ext_mx() is None:
         pytest.skip("cuda_ext_mx is not available")
 
@@ -355,8 +355,8 @@ def test_laq_grad():
 
     for module in model.modules():
         if isinstance(module, NVFP4StaticQuantizer) and module._laq:
-            assert isinstance(module._amax_param, nn.Parameter)
-            assert module._amax_param.requires_grad
+            assert isinstance(module._amax_learnt, nn.Parameter)
+            assert module._amax_learnt.requires_grad
 
     out = model(x)
     out.sum().backward()
@@ -364,13 +364,13 @@ def test_laq_grad():
     found = False
     for module in model.modules():
         if isinstance(module, NVFP4StaticQuantizer) and module._laq:
-            assert module._amax_param.grad is not None
+            assert module._amax_learnt.grad is not None
             found = True
     assert found
 
 
 def test_smooth_laq_grad():
-    """Test SmoothLAQ: outputs match FP8 sweep, _amax_param gets gradients."""
+    """Test SmoothLAQ: outputs match FP8 sweep, _amax_learnt gets gradients."""
     if get_cuda_ext_mx() is None:
         pytest.skip("cuda_ext_mx is not available")
 
@@ -398,8 +398,8 @@ def test_smooth_laq_grad():
 
     for module in model.modules():
         if isinstance(module, NVFP4StaticQuantizer) and module._smooth_laq:
-            assert isinstance(module._amax_param, nn.Parameter)
-            assert module._amax_param.requires_grad
+            assert isinstance(module._amax_learnt, nn.Parameter)
+            assert module._amax_learnt.requires_grad
 
     out = model(x)
     out.sum().backward()
@@ -407,7 +407,7 @@ def test_smooth_laq_grad():
     found = False
     for module in model.modules():
         if isinstance(module, NVFP4StaticQuantizer) and module._smooth_laq:
-            assert module._amax_param.grad is not None
+            assert module._amax_learnt.grad is not None
             found = True
     assert found
 

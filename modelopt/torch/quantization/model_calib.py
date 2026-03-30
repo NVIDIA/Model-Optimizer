@@ -2010,6 +2010,22 @@ def lsq(
         )
 
 
+def _compute_laq_params(quantizer):
+    """Compute amax and scale-quantization params for LAQ/SmoothLAQ."""
+    amax = quantizer._amax.float()
+    quantize_scales = _is_quantized_block_scale(quantizer)
+    per_tensor_scale = None
+
+    with same_device_as(amax):
+        if quantize_scales:
+            global_amax = quantizer._global_amax.float()
+            per_tensor_scale = global_amax / quantizer._quant_max_bound
+        bad = (amax == 0) | torch.isinf(amax) | torch.isnan(amax)
+        amax = torch.where(bad, torch.full_like(amax, quantizer._quant_max_bound), amax)
+
+    return amax, per_tensor_scale, quantize_scales
+
+
 @torch.no_grad()
 def laq(
     model: nn.Module,
@@ -2017,10 +2033,9 @@ def laq(
     scale_algorithm: dict | None = None,
     **kwargs,
 ):
-    """Run scale calibration then convert to LAQ mode (learns a_max, not s directly).
+    """Run scale calibration then convert to LAQ mode.
 
-    Like LSQ, but the learnable parameter is a_max; scale is derived as s = a_max / Q_max.
-    Weights are NOT pre-divided.
+    Learns a_max parameter; scale derived as s = a_max / Q_max. Weights NOT pre-divided.
 
     Args:
         model: Quantized model.
@@ -2032,13 +2047,8 @@ def laq(
     _run_scale_calibration(model, forward_loop, scale_algorithm, "laq")
 
     for module, weight_name, quantizer in _iter_weight_quantizers(model):
-        per_block_scale, per_tensor_scale, quantize_scales = _compute_block_scales(quantizer)
-
-        quantizer.enable_laq(
-            per_block_scale,
-            per_tensor_scale,
-            quantize_scales=quantize_scales,
-        )
+        amax, per_tensor_scale, quantize_scales = _compute_laq_params(quantizer)
+        quantizer.enable_laq(amax, per_tensor_scale, quantize_scales)
 
 
 @torch.no_grad()
@@ -2050,8 +2060,9 @@ def smooth_laq(
 ):
     """Run scale calibration then convert to SmoothLAQ mode.
 
-    Like SmoothLSQ, but learns a_max instead of s. Weights are pre-divided by a_max.
-    Forward: w_s = w_a * Q_max, s = a_max / Q_max, w_q = Q_STE(w_s) * s.
+    Learns a_max for dequantization; frozen a_max_0 for quantization.
+    Forward: w_q = Q_STE(w / a_max_0 * Q_max), w_qdq = w_q * (a_max / Q_max).
+    Weights are NOT pre-divided.
 
     Args:
         model: Quantized model.
@@ -2063,23 +2074,8 @@ def smooth_laq(
     _run_scale_calibration(model, forward_loop, scale_algorithm, "smooth_laq")
 
     for module, weight_name, quantizer in _iter_weight_quantizers(model):
-        per_block_scale, per_tensor_scale, quantize_scales = _compute_block_scales(quantizer)
-        block_size = _get_block_size(quantizer)
-
-        amax = per_block_scale * quantizer._quant_max_bound
-
-        with enable_weight_access_and_writeback(module, model):
-            w = getattr(module, weight_name)
-            orig_shape = w.shape
-            w_flat = w.data.float().reshape(-1, block_size)
-            w_flat = w_flat / amax.view(-1, 1)
-            w.data.copy_(w_flat.reshape(orig_shape).to(w.dtype))
-
-        quantizer.enable_smooth_laq(
-            per_block_scale,
-            per_tensor_scale,
-            quantize_scales=quantize_scales,
-        )
+        amax, per_tensor_scale, quantize_scales = _compute_laq_params(quantizer)
+        quantizer.enable_smooth_laq(amax, per_tensor_scale, quantize_scales)
 
 
 @torch.no_grad()

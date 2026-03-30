@@ -1310,9 +1310,14 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
     @property
     def amax(self):
         """Return amax, derived from learnable scale/amax parameters if in learnable mode."""
+        if self._smooth_laq:
+            raise RuntimeError(
+                "SmoothLAQ has separate frozen (_amax_frozen) and learnable (_amax_learnt) "
+                "parameters. Access them directly."
+            )
+        if self._laq:
+            return self._amax_learnt
         if self._scale_after_dequant:
-            if hasattr(self, "_amax_param"):
-                return self._amax_param
             if hasattr(self, "_per_block_scale"):
                 return self._per_block_scale * self._quant_max_bound
         if not hasattr(self, "_amax"):
@@ -1353,9 +1358,14 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
 
     def _short_amax(self, fmt=".4f"):
         """Short description of amax, accounting for learnable scale modes."""
+        if self._smooth_laq:
+            return (
+                f"frozen={self._short_tensor(self._amax_frozen.data, fmt)}, "
+                f"learnt={self._short_tensor(self._amax_learnt.data, fmt)}"
+            )
+        if self._laq:
+            return self._short_tensor(self._amax_learnt.data, fmt)
         if self._scale_after_dequant:
-            if hasattr(self, "_amax_param"):
-                return self._short_tensor(self._amax_param.data, fmt)
             if hasattr(self, "_per_block_scale"):
                 amax = self._per_block_scale.data * self._quant_max_bound
                 return self._short_tensor(amax, fmt)
@@ -1406,28 +1416,33 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
 
     def enable_laq(
         self,
-        per_block_scale: torch.Tensor,
+        amax: torch.Tensor,
         per_tensor_scale: torch.Tensor = None,
         quantize_scales: bool = True,
     ):
         """LAQ mode. Learns a_max; s = a_max/Q_max. Weights NOT pre-divided."""
-        amax = per_block_scale.clone().detach().float() * self._quant_max_bound
-        self._enable_learnable_scales(per_block_scale, per_tensor_scale, quantize_scales)
-        del self._per_block_scale
-        self._amax_param = nn.Parameter(amax, requires_grad=True)
+        if hasattr(self, "_amax"):
+            delattr(self, "_amax")
+        self._amax_learnt = nn.Parameter(amax.clone().detach().float(), requires_grad=True)
+        if per_tensor_scale is not None:
+            self.register_buffer("_per_tensor_scale", per_tensor_scale.clone().detach().float())
+        self._quantize_scales = quantize_scales
         self._laq = True
 
     def enable_smooth_laq(
         self,
-        per_block_scale: torch.Tensor,
+        amax: torch.Tensor,
         per_tensor_scale: torch.Tensor = None,
         quantize_scales: bool = True,
     ):
-        """SmoothLAQ mode. Learns a_max; weights pre-divided by a_max."""
-        amax = per_block_scale.clone().detach().float() * self._quant_max_bound
-        self._enable_learnable_scales(per_block_scale, per_tensor_scale, quantize_scales)
-        del self._per_block_scale
-        self._amax_param = nn.Parameter(amax, requires_grad=True)
+        """SmoothLAQ mode. Learns a_max for dequant; frozen a_max_0 for quant."""
+        if hasattr(self, "_amax"):
+            delattr(self, "_amax")
+        self._amax_learnt = nn.Parameter(amax.clone().detach().float(), requires_grad=True)
+        self.register_buffer("_amax_frozen", amax.clone().detach().float())
+        if per_tensor_scale is not None:
+            self.register_buffer("_per_tensor_scale", per_tensor_scale.clone().detach().float())
+        self._quantize_scales = quantize_scales
         self._smooth_laq = True
 
     def _cast_ste(self, inputs):
@@ -1436,29 +1451,36 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
             return fp4_cast_ste(inputs)
         return int_cast_ste(inputs, self._num_bits, self._unsigned, self._narrow_range)
 
+    def _quantize_scale(self, scale_raw):
+        """Optionally FP8-quantize a per-block scale tensor."""
+        if self._quantize_scales:
+            return scaled_e4m3(scale_raw, self._per_tensor_scale, None, 4, 3)
+        return scale_raw
+
     def _fake_quantize(self, inputs):
         """Fake quantization using two-level scaling with _amax and _global_amax."""
-        if self._scale_after_dequant:
+        if self._laq or self._smooth_laq or self._scale_after_dequant:
+            # Step 1: Compute dequant scale (raw)
             if self._laq or self._smooth_laq:
-                amax = _to_local(self._amax_param).clamp(min=1e-8)
-                scale_raw = amax / self._quant_max_bound
+                scale_raw = _to_local(self._amax_learnt).clamp(min=1e-8) / self._quant_max_bound
             else:
                 scale_raw = _to_local(self._per_block_scale).clamp(min=0)
 
-            if self._quantize_scales:
-                scale = scaled_e4m3(scale_raw, self._per_tensor_scale, None, 4, 3)
+            # Step 2: Optional FP8 quantization of dequant scale
+            scale = self._quantize_scale(scale_raw).to(dtype=inputs.dtype)
+
+            # Step 3: Compute quantization input
+            if self._smooth_laq:
+                scale_frozen_raw = _to_local(self._amax_frozen) / self._quant_max_bound
+                scale_frozen = self._quantize_scale(scale_frozen_raw).to(inputs.dtype)
+                quant_input = inputs.float() / scale_frozen.float().view(-1, 1)
+            elif self._lsq or self._laq:
+                quant_input = inputs.float() / scale.float().view(-1, 1)
             else:
-                scale = scale_raw
+                quant_input = inputs
 
-            scale = scale.to(dtype=inputs.dtype)
-
-            if self._lsq or self._laq:
-                w_cast = self._cast_ste(inputs.float() / scale.float().view(-1, 1))
-            elif self._smooth_laq:
-                w_cast = self._cast_ste(inputs * self._quant_max_bound)
-            else:
-                w_cast = self._cast_ste(inputs)
-
+            # Step 4: Cast + dequant (shared)
+            w_cast = self._cast_ste(quant_input)
             return w_cast * scale.view(-1, 1)
 
         if self.amax is not None:
