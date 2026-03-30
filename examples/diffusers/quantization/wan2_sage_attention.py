@@ -73,7 +73,7 @@ import torch.nn.functional as F
 MODEL_T2V_14B = "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
 MODEL_TI2V_5B = "Wan-AI/Wan2.2-TI2V-5B-Diffusers"
 
-DEFAULT_MODEL = MODEL_T2V_14B
+DEFAULT_MODEL = MODEL_TI2V_5B
 DEFAULT_NEGATIVE_PROMPT = "low quality, blurry, distorted, watermark, text, cropped, overexposed"
 
 # Kernel choices
