@@ -134,7 +134,15 @@ def validate_model(
     descriptor = ModelDescriptorFactory.get(args.descriptor)
 
     if val_dataloader is None:
-        val_dataloader = prepare_dataloader(args, tokenizer) if dist.is_master() else None
+        val_dataloader = (
+            prepare_dataloader(
+                args,
+                tokenizer,
+                trust_remote_code=descriptor.requires_trust_remote_code(),
+            )
+            if dist.is_master()
+            else None
+        )
     validation_full_iters = (
         args.eval_samples // args.micro_batch_size
     )  # model pipeline, single data rank
@@ -231,13 +239,16 @@ def prepare_model(
 
 
 def prepare_dataloader(
-    args: DictConfig, tokenizer: PreTrainedTokenizerBase | None = None
+    args: DictConfig,
+    tokenizer: PreTrainedTokenizerBase | None = None,
+    trust_remote_code: bool = False,
 ) -> DataLoader:
     if tokenizer is None:
         tokenizer_name = getattr(args, "tokenizer_name", None)
         assert (tokenizer_name is not None) or (args.model_name_or_path is not None)
         tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer_name or args.model_name_or_path, trust_remote_code=True
+            tokenizer_name or args.model_name_or_path,
+            trust_remote_code=trust_remote_code,
         )
 
     val_dataloader = create_validation_dataloader(
