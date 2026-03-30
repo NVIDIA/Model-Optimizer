@@ -1264,6 +1264,13 @@ class TensorQuantizer(nn.Module):
             self.register_buffer(key, value)
 
 
+def _amax_to_scale(amax: torch.Tensor, max_bound: float) -> torch.Tensor:
+    """Convert amax to per-block scale, guarding against zeros."""
+    scale = amax.float() / max_bound
+    scale = torch.where(scale == 0, torch.ones_like(scale), scale)
+    return scale
+
+
 class StaticBlockScaleQuantizer(TensorQuantizer):
     """TensorQuantizer for static block quantization with two-level scaling.
 
@@ -1462,16 +1469,17 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
         if self._laq or self._smooth_laq or self._smooth_lsq or self._lsq:
             # Step 1: Compute dequant scale (raw)
             if self._laq or self._smooth_laq:
-                scale_raw = _to_local(self._amax_learnt).clamp(min=1e-8) / self._quant_max_bound
+                scale_raw = _amax_to_scale(_to_local(self._amax_learnt), self._quant_max_bound)
             else:
-                scale_raw = _to_local(self._per_block_scale).clamp(min=0)
+                scale_raw = _to_local(self._per_block_scale).float()
 
             # Step 2: Optional FP8 quantization of dequant scale
-            scale = self._quantize_scale(scale_raw).to(dtype=inputs.dtype)
-
+            scale = self._quantize_scale(scale_raw)
             # Step 3: Compute quantization input
             if self._smooth_laq:
-                scale_frozen_raw = _to_local(self._amax_frozen) / self._quant_max_bound
+                scale_frozen_raw = _amax_to_scale(
+                    _to_local(self._amax_frozen), self._quant_max_bound
+                )
                 scale_frozen = self._quantize_scale(scale_frozen_raw).to(inputs.dtype)
                 quant_input = inputs.float() / scale_frozen.float().view(-1, 1)
             elif self._lsq or self._laq:
@@ -1479,9 +1487,9 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
             else:
                 quant_input = inputs
 
-            # Step 4: Cast + dequant (shared)
+            # Step 4: Cast + dequant (shared), cast back to input dtype
             w_cast = self._cast_ste(quant_input)
-            return w_cast * scale.view(-1, 1)
+            return (w_cast * scale.view(-1, 1).to(w_cast.dtype)).to(inputs.dtype)
 
         if self.amax is not None:
             if isinstance(self._num_bits, tuple):

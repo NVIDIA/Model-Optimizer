@@ -1891,6 +1891,7 @@ def _compute_block_scales(quantizer):
 
     Returns (per_block_scale, per_tensor_scale, quantize_scales).
     """
+    from .nn.modules.tensor_quantizer import _amax_to_scale
     from .tensor_quant import scaled_e4m3
 
     amax = quantizer._amax.float()
@@ -1902,18 +1903,15 @@ def _compute_block_scales(quantizer):
         if quantize_scales:
             global_amax = quantizer._global_amax.float()
             per_block_scale = scaled_e4m3(
-                amax / max_representable,
-                global_amax / max_representable,
+                _amax_to_scale(amax, max_representable),
+                _amax_to_scale(global_amax, max_representable),
                 None,
                 4,
                 3,
             )
-            per_tensor_scale = global_amax / max_representable
+            per_tensor_scale = _amax_to_scale(global_amax, max_representable)
         else:
-            per_block_scale = amax / max_representable
-
-    bad = (per_block_scale == 0) | torch.isinf(per_block_scale) | torch.isnan(per_block_scale)
-    per_block_scale = torch.where(bad, torch.ones_like(per_block_scale), per_block_scale)
+            per_block_scale = _amax_to_scale(amax, max_representable)
 
     return per_block_scale, per_tensor_scale, quantize_scales
 
@@ -2012,6 +2010,8 @@ def lsq(
 
 def _compute_laq_params(quantizer):
     """Compute amax and scale-quantization params for LAQ/SmoothLAQ."""
+    from .nn.modules.tensor_quantizer import _amax_to_scale
+
     amax = quantizer._amax.float()
     quantize_scales = _is_quantized_block_scale(quantizer)
     per_tensor_scale = None
@@ -2019,7 +2019,7 @@ def _compute_laq_params(quantizer):
     with same_device_as(amax):
         if quantize_scales:
             global_amax = quantizer._global_amax.float()
-            per_tensor_scale = global_amax / quantizer._quant_max_bound
+            per_tensor_scale = _amax_to_scale(global_amax, quantizer._quant_max_bound)
         bad = (amax == 0) | torch.isinf(amax) | torch.isnan(amax)
         amax = torch.where(bad, torch.full_like(amax, quantizer._quant_max_bound), amax)
 
@@ -2157,20 +2157,23 @@ def _compute_weight_scaled(quantizer, w_flat):
     Returns weights divided by per-block scale so values lie in [-6, 6].
     For smooth_lsq, weights are already pre-divided.
     """
+    from .nn.modules.tensor_quantizer import _amax_to_scale
+
     if quantizer._smooth_lsq:
         return w_flat
     if quantizer._lsq:
-        scale = quantizer._per_block_scale.data.float().clamp(min=1e-8)
+        scale = quantizer._per_block_scale.data.float()
+        scale = torch.where(scale == 0, torch.ones_like(scale), scale)
         return w_flat / scale.view(-1, 1)
     if quantizer._laq:
-        scale = quantizer._amax_learnt.data.float().clamp(min=1e-8) / quantizer._quant_max_bound
+        scale = _amax_to_scale(quantizer._amax_learnt.data, quantizer._quant_max_bound)
         return w_flat / scale.view(-1, 1)
     if quantizer._smooth_laq:
-        scale = quantizer._amax_frozen.data.float().clamp(min=1e-8) / quantizer._quant_max_bound
+        scale = _amax_to_scale(quantizer._amax_frozen.data, quantizer._quant_max_bound)
         return w_flat / scale.view(-1, 1)
     # Fallback for plain calibration (shouldn't happen if init_algorithm was provided)
     amax = quantizer.amax
     if amax is not None:
-        scale = (amax.float().clamp(min=1e-8) / quantizer._quant_max_bound).view(-1, 1)
+        scale = _amax_to_scale(amax, quantizer._quant_max_bound).view(-1, 1)
         return w_flat / scale
     return w_flat
