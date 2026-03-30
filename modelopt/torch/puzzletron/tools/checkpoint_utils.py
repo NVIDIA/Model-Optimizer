@@ -35,8 +35,6 @@ SAFETENSORS_SUBBLOCKS_DIR_NAME = "subblocks_safetensors"
 PTH_SUBBLOCKS_DIR_NAME = "subblocks"
 STATE_DICT_FILE_NAME = "model.pth"
 
-warnings.filterwarnings("ignore", "You are using `torch.load` with `weights_only=False`*.")
-
 
 def load_state_dict(checkpoint_dir: Path | str) -> dict[str, torch.Tensor]:
     checkpoint_dir = _normalize_checkpoint_dir(checkpoint_dir)
@@ -162,6 +160,7 @@ def copy_tokenizer(
     source_dir_or_tokenizer_name: Path | str,
     target_dir: Path | str,
     on_failure: Literal["raise", "warn"] = "raise",
+    trust_remote_code: bool = False,
 ) -> None:
     """Prefer loading the tokenizer from huggingface hub (when tokenizer_name.txt file is available)
     to avoid collision between transformers versions.
@@ -173,7 +172,7 @@ def copy_tokenizer(
     tokenizer = None
     try:
         tokenizer = AutoTokenizer.from_pretrained(
-            source_dir_or_tokenizer_name, trust_remote_code=True
+            source_dir_or_tokenizer_name, trust_remote_code=trust_remote_code
         )
     except Exception:
         message = f"Couldn't load tokenizer from '{source_dir_or_tokenizer_name}'"

@@ -191,7 +191,11 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
                     pass
             save_checkpoint(model, checkpoint_dir, descriptor)
 
-            copy_tokenizer(args.tokenizer_name, checkpoint_dir)
+            copy_tokenizer(
+                args.tokenizer_name,
+                checkpoint_dir,
+                trust_remote_code=descriptor.requires_trust_remote_code(),
+            )
 
         dist.barrier()
 

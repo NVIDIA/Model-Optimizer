@@ -19,6 +19,7 @@
 import dataclasses
 import json
 import os
+import warnings
 from functools import partial
 from itertools import product
 from pathlib import Path
@@ -118,6 +119,7 @@ def calculate_subblock_stats(
     }
     # Compute runtime stats for unique subblocks only
     if is_calc_runtime:
+        raise NotImplementedError("Runtime stats calculation is not implemented yet")
         subblock_configs_nolayerindex = set(
             [subblock_config["subblock_config"] for subblock_config in subblock_configs]
         )
@@ -314,7 +316,7 @@ def calculate_subblock_stats_for_puzzle_dir(
 
     moe_stats_file = master_puzzle_dir / moe_stats_filename
     if not moe_stats_file.exists():
-        Warning(
+        warnings.warn(
             f"MOE stats file {moe_stats_file} does not exist, can't calculate num active params"
         )
         moe_stats_file = None
