@@ -668,20 +668,22 @@ def model_type_is_enc_dec(model):
 def download_hf_dataset_as_jsonl(
     dataset_name: str,
     output_dir: str | Path,
-    json_keys: list[str] = ["text"],
+    json_keys: str | list[str] = ["text"],
     name: str | None = None,
     split: str | None = "train",
     max_samples_per_split: int | None = None,
+    num_proc: int | None = None,
 ) -> list[str]:
     """Download a Hugging Face dataset and save as JSONL files.
 
     Args:
         dataset_name: Name or HuggingFace path of the dataset to download
         output_dir: Directory to save the JSONL files
-        json_keys: List of keys to extract from the dataset. Defaults to ["text"].
+        json_keys: Key or list of keys to extract from the dataset. Defaults to ["text"].
         name: Name of the subset to download
         split: Split of the dataset to download. Defaults to "train".
         max_samples_per_split: Maximum number of samples to download per split. Defaults to None.
+        num_proc: Number of processes to use for parallel processing. Defaults to None.
 
     Returns:
         List of paths to downloaded JSONL files.
@@ -690,6 +692,8 @@ def download_hf_dataset_as_jsonl(
     from huggingface_hub.utils import build_hf_headers
 
     print(f"Downloading dataset {dataset_name} from Hugging Face")
+    if isinstance(json_keys, str):
+        json_keys = [json_keys]
     jsonl_paths: list[str] = []
 
     try:
@@ -745,7 +749,7 @@ def download_hf_dataset_as_jsonl(
             continue
 
         print(f"Saving raw dataset to {jsonl_file_path}")
-        ds.to_json(jsonl_file_path)
+        ds.to_json(jsonl_file_path, num_proc=num_proc)
         jsonl_paths.append(jsonl_file_path)
 
     return jsonl_paths
