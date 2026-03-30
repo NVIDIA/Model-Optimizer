@@ -26,6 +26,50 @@ You can either edit the `quant_config` dictionary in `vllm_serve_fakequant.py`, 
 | QUANT_CFG       | Quantization format                              | NVFP4_DEFAULT_CFG   |
 | KV_QUANT_CFG    | Quantization format for KV Cache                 | None                |
 | AMAX_FILE_PATH  | Optional path to amax file (for loading amax)    | None                |
+| KV_ATTN_MATH    | Attention math precision for KV fake-quant       | None                |
+
+### KV_ATTN_MATH=fp8 — NVFP4 KV emulation with FP8 attention math
+
+Setting `KV_ATTN_MATH=fp8` together with an NVFP4 KV config enables a more
+accurate emulation of NVFP4 KV cache on hardware where the attention BMM runs
+in FP8 precision (e.g., Blackwell with FlashInfer or TRT-LLM kernels).
+
+**How it works:**
+
+1. `KV_QUANT_CFG` (e.g. `NVFP4_KV_CFG`) applies NVFP4 fake-quantization to K
+   and V, introducing NVFP4-level quantization noise into the BF16 tensors.
+2. vLLM writes those BF16 K/V values into an FP8 KV cache
+   (`--kv-cache-dtype fp8`) with **scale=1.0** — a direct dtype cast.
+3. FlashInfer (or TRT-LLM on SM100) reads the FP8 KV cache and executes the
+   attention BMM in FP8 precision.
+
+**Required launch flags:**
+
+```bash
+KV_QUANT_CFG=NVFP4_KV_CFG \
+KV_ATTN_MATH=fp8 \
+python vllm_serve_fakequant.py <model_path> \
+    --kv-cache-dtype fp8 \
+    -tp 8 --host 0.0.0.0 --port 8000
+```
+
+`--kv-cache-dtype fp8` is **mandatory** when `KV_ATTN_MATH=fp8` is set.
+Without it, vLLM stores K/V in BF16 and FlashInfer runs BF16 attention,
+defeating the purpose of this mode.
+
+The `KV_ATTN_MATH=fp8` flag locks the FP8 KV cache scales to 1.0 and disables
+vLLM's dynamic scale computation, ensuring the direct-cast assumption holds.
+
+**Combining with weight/activation quantization:**
+
+```bash
+QUANT_CFG=NVFP4_DEFAULT_CFG \
+KV_QUANT_CFG=NVFP4_KV_CFG \
+KV_ATTN_MATH=fp8 \
+python vllm_serve_fakequant.py <model_path> \
+    --kv-cache-dtype fp8 \
+    -tp 8 --host 0.0.0.0 --port 8000
+```
 
 Set these variables in your shell or Docker environment as needed to customize calibration.
 
