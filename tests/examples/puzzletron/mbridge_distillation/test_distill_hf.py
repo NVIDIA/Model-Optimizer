@@ -74,7 +74,7 @@ def test_distill_hf(project_root_path: Path, tmp_path: Path):
         eval_iters=0,
         log_interval=5,
         hf_export_path=hf_export_dir,
-        hf_model=student_hf_dir,
+        student_hf_model=student_hf_dir,
     )
 
     run_example_command(cmd_parts, example_path="puzzletron/mbridge_distillation")
