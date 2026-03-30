@@ -18,6 +18,7 @@
 import glob
 import os
 import platform
+import sys
 from collections.abc import Sequence
 
 import onnxruntime as ort
@@ -72,7 +73,7 @@ def _check_for_libcudnn():
     else:
         # Not found in system path — try preloading from Python site-packages
         logger.warning(f"cuDNN not found in {env_variable}. Trying onnxruntime.preload_dlls()...")
-        if hasattr(ort, "preload_dlls"):
+        if hasattr(ort, "preload_dlls") and sys.version_info[:2] != (3, 10):
             try:
                 ort.preload_dlls()
                 logger.info(
