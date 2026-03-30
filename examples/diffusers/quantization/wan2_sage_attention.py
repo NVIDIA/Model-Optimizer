@@ -34,11 +34,12 @@ Four attention kernel variants are supported via ``--kernel``:
     - Dequantize back to BF16, then run standard SDPA
     - No CUDA kernel required. Use for accuracy verification on any GPU.
 
-``nvfp4`` (always available)
-    Python-level NVFP4 E2M1 attention. Faithful to SageAttention3 (arXiv 2505.11594):
+``int4`` (always available)
+    Python-level INT4 post-softmax P attention. Inspired by SageAttention3 (arXiv 2505.11594):
     - Q, K, V stay in BF16
-    - Post-softmax P matrix is per-row scaled and rounded to nearest of 8 levels {0,0.5,1,1.5,2,3,4,6}
-    - Manual attention: Q@K^T → scale → mask → softmax → NVFP4(P) → P@V
+    - Post-softmax P matrix is per-row scaled and rounded to 16 unsigned INT4 levels (0..15)
+    - Manual attention: Q@K^T → scale → mask → softmax → INT4(P) → P@V
+    - 16 levels vs NVFP4's 8 levels — better coverage of dense diffusion attention
     - No CUDA kernel required. Use to measure accuracy vs FP8.
 
 Requirements::
@@ -86,15 +87,15 @@ DEFAULT_NEGATIVE_PROMPT = "low quality, blurry, distorted, watermark, text, crop
 
 # Kernel choices
 KERNEL_FP8 = "fp8"
-KERNEL_NVFP4 = "nvfp4"
+KERNEL_INT4 = "int4"
 KERNEL_SAGE1 = "sage1"
 KERNEL_SAGE2_FP16 = "sage2-fp16"
 KERNEL_SAGE2_FP8 = "sage2-fp8"
-KERNEL_CHOICES = [KERNEL_FP8, KERNEL_NVFP4, KERNEL_SAGE1, KERNEL_SAGE2_FP16, KERNEL_SAGE2_FP8]
+KERNEL_CHOICES = [KERNEL_FP8, KERNEL_INT4, KERNEL_SAGE1, KERNEL_SAGE2_FP16, KERNEL_SAGE2_FP8]
 
 _KERNEL_DESCRIPTIONS = {
     KERNEL_FP8: "FP8 E4M3 QKV (Python-level, SA2-inspired smoothing, no CUDA kernel required)",
-    KERNEL_NVFP4: "NVFP4 E2M1 post-softmax P (Python-level, SA3-faithful manual attention)",
+    KERNEL_INT4: "INT4 post-softmax P (Python-level, SA3-inspired manual attention, 16 levels)",
     KERNEL_SAGE1: "sageattn (SA1, INT8 QK + FP16 PV, auto-select)",
     KERNEL_SAGE2_FP16: "sageattn_qk_int8_pv_fp16_cuda (SA2, INT8 QK + FP16 PV, per-thread)",
     KERNEL_SAGE2_FP8: "sageattn_qk_int8_pv_fp8_cuda (SA2++, INT8 QK + FP8 PV, fp32+fp16 accum)",
@@ -113,14 +114,8 @@ _SUPPORTED_SM = {80, 86, 89, 90, 100}
 # FP8 max value for float8_e4m3fn
 _FP8_MAX = 448.0
 
-# NVFP4 E2M1 representable positive values and their rounding boundaries.
-# Format: 1 sign + 2 exponent + 1 mantissa bit, exponent bias = 1.
-# Positive levels:  0.0  0.5  1.0  1.5  2.0  3.0  4.0  6.0
-# Rounding boundaries (midpoints between adjacent levels):
-#                   0.25 0.75 1.25 1.75 2.5  3.5  5.0
-_FP4_MAX = 6.0
-_FP4_BOUNDARIES = [0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0]
-_FP4_LEVELS = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+# Unsigned INT4 max (0..15 = 16 levels)
+_INT4_MAX = 15
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +138,7 @@ def _detect_available_kernels() -> list[str]:
     """Return kernels available given the installed packages and GPU."""
     available = []
 
-    # fp8 and nvfp4 are pure Python — available on any GPU / PyTorch version
+    # fp8 and int4 are pure Python — available on any GPU / PyTorch version
     if _fp8_available():
         available.append(KERNEL_FP8)
     else:
@@ -151,8 +146,8 @@ def _detect_available_kernels() -> list[str]:
             "[FP8] WARNING: torch.float8_e4m3fn not found. "
             "Upgrade to PyTorch >= 2.1 to use the fp8 kernel."
         )
-    # nvfp4 uses only standard float ops — always available
-    available.append(KERNEL_NVFP4)
+    # int4 uses only standard float ops — always available
+    available.append(KERNEL_INT4)
 
     try:
         import sageattention as _sa
@@ -241,29 +236,16 @@ def _fp8_sdpa(
 
 
 # ---------------------------------------------------------------------------
-# NVFP4 attention — Python-level, SA3-inspired
+# INT4 attention — Python-level, SA3-inspired
 # ---------------------------------------------------------------------------
 
 
-def _quantize_to_fp4_levels(x_abs: torch.Tensor) -> torch.Tensor:
-    """Round absolute values to the nearest NVFP4 E2M1 representable level.
+def _quantize_p_to_int4(p: torch.Tensor) -> torch.Tensor:
+    """Per-row scale + unsigned INT4 quantize + dequantize the post-softmax P matrix.
 
-    Uses vectorised ``torch.bucketize`` against the 7 midpoint boundaries
-    between the 8 positive FP4 levels ``{0, 0.5, 1, 1.5, 2, 3, 4, 6}``.
-    """
-    boundaries = torch.tensor(_FP4_BOUNDARIES, dtype=x_abs.dtype, device=x_abs.device)
-    levels = torch.tensor(_FP4_LEVELS, dtype=x_abs.dtype, device=x_abs.device)
-    idx = torch.bucketize(x_abs.contiguous(), boundaries)
-    return levels[idx]
-
-
-def _quantize_p_to_fp4(p: torch.Tensor) -> torch.Tensor:
-    """Per-row scale + NVFP4 E2M1 quantize + dequantize the post-softmax P matrix.
-
-    P values are non-negative probabilities that sum to 1 per row.  No mean
-    subtraction is applied (unlike Q/K smoothing) because probabilities are
-    inherently non-negative.  A per-row max-based scale maps the row peak to
-    ``_FP4_MAX`` (6.0) so all 8 NVFP4 levels are utilised.
+    Uses 16 levels (0..15) versus NVFP4's 8 levels, giving better coverage of
+    the dense attention distributions found in video diffusion transformers.
+    No mean subtraction — P is non-negative by definition.
 
     Args:
         p: Post-softmax attention weights ``(B, H, N, N)``, float32.
@@ -271,39 +253,31 @@ def _quantize_p_to_fp4(p: torch.Tensor) -> torch.Tensor:
     Returns:
         Quantized-dequantized P of the same shape in float32.
     """
-    # Per-row scale: map max value in each row to FP4_MAX
-    scale = p.amax(dim=-1, keepdim=True).clamp(min=1e-12) / _FP4_MAX
-    p_scaled = (p / scale).clamp(0.0, _FP4_MAX)  # P is non-negative
-    p_dq = _quantize_to_fp4_levels(p_scaled)
+    scale = p.amax(dim=-1, keepdim=True).clamp(min=1e-12) / _INT4_MAX
+    p_scaled = (p / scale).clamp(0.0, _INT4_MAX)
+    p_dq = p_scaled.round()  # nearest integer in [0, 15]
     return p_dq * scale
 
 
-def _nvfp4_sdpa(
+def _int4_sdpa(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
     is_causal: bool,
     scale: float | None,
 ) -> torch.Tensor:
-    """SA3-faithful NVFP4 E2M1 attention: quantize post-softmax P, not Q/K/V.
+    """SA3-inspired INT4 attention: quantize post-softmax P to 16 levels.
 
-    SageAttention3 (arXiv 2505.11594) applies NVFP4 to the attention probability
-    matrix P = softmax(QK^T / sqrt(d)), not to Q, K, or V.  This gives much
-    better quality than quantizing Q/K because:
+    Implements the SA3 (arXiv 2505.11594) idea of quantizing P = softmax(QK^T/√d)
+    rather than Q/K/V.  Uses unsigned INT4 (16 levels) instead of NVFP4 (8 levels)
+    for better quality on dense diffusion attention distributions.
 
-    - Q/K errors propagate non-linearly through softmax; P errors are just
-      additive noise on the weighted sum.
-    - P has a sparse distribution (a few large weights, many near zero) that
-      maps naturally onto NVFP4's 8 levels after per-row scaling.
-
-    The manual attention loop (no flash-attention fusion) is slower than the
-    real SA3 CUDA kernel but faithfully simulates its quantization behaviour
-    for accuracy measurement.
+    Manual attention loop (no flash-attention fusion) — slower than a real CUDA
+    kernel but faithfully simulates the quantization noise for accuracy measurement.
     """
     orig_dtype = query.dtype
     scale_factor = (query.size(-1) ** -0.5) if scale is None else scale
 
-    # Compute attention scores in float32 for numerical stability
     q = query.float()
     k = key.float()
     v = value.float()
@@ -317,9 +291,7 @@ def _nvfp4_sdpa(
         attn = attn.masked_fill(~causal_mask, float("-inf"))
 
     p = torch.softmax(attn, dim=-1)
-
-    # Quantize P to NVFP4 — this is what SA3 does
-    p_dq = _quantize_p_to_fp4(p)
+    p_dq = _quantize_p_to_int4(p)
 
     out = torch.matmul(p_dq, v)
     return out.to(orig_dtype)
@@ -345,8 +317,8 @@ def _run_kernel(
     if _active_kernel == KERNEL_FP8:
         return _fp8_sdpa(query, key, value, is_causal=is_causal, scale=scale)
 
-    if _active_kernel == KERNEL_NVFP4:
-        return _nvfp4_sdpa(query, key, value, is_causal=is_causal, scale=scale)
+    if _active_kernel == KERNEL_INT4:
+        return _int4_sdpa(query, key, value, is_causal=is_causal, scale=scale)
 
     if _active_kernel == KERNEL_SAGE1:
         from sageattention import sageattn
