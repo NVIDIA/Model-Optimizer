@@ -53,6 +53,7 @@ import modelopt.torch.sparsity as mts
 from modelopt.recipe import ModelOptPTQRecipe, load_recipe
 from modelopt.torch.export import (
     export_hf_checkpoint,
+    export_hf_vllm_fq_checkpoint,
     export_speculative_decoding,
     export_tensorrt_llm_checkpoint,
     get_model_type,
@@ -681,16 +682,21 @@ def export_quantized(
 
             # Load any missing weights from non-standard safetensors (handled in get_model for non-low-memory mode)
             # Store the MTP layer prefixes on the model for later exclusion from quantization
-            mtp_layer_prefixes, mtp_state_dict = load_mtp_weights(full_model, args.pyt_ckpt_path)
+            if args.vllm_fakequant_export:
+                export_hf_vllm_fq_checkpoint(full_model, export_dir=export_path)
+            else:
+                mtp_layer_prefixes, mtp_state_dict = load_mtp_weights(
+                    full_model, args.pyt_ckpt_path
+                )
 
-            if mtp_layer_prefixes:
-                full_model._mtp_layer_prefixes = mtp_layer_prefixes
+                if mtp_layer_prefixes:
+                    full_model._mtp_layer_prefixes = mtp_layer_prefixes
 
-            export_hf_checkpoint(
-                full_model,
-                export_dir=export_path,
-                extra_state_dict=mtp_state_dict,
-            )
+                export_hf_checkpoint(
+                    full_model,
+                    export_dir=export_path,
+                    extra_state_dict=mtp_state_dict,
+                )
 
         # Restore default padding and export the tokenizer as well.
         if tokenizer is not None:
@@ -1217,6 +1223,13 @@ def parse_args() -> argparse.Namespace:
             "Only used for MOE models; used to reduce the number of experts calibrated during the forward pass. "
             "Does not impact non-MOE models."
         ),
+    )
+    parser.add_argument(
+        "--vllm_fakequant_export",
+        default=False,
+        action="store_true",
+        help="Export as vLLM fake-quant checkpoint (produces vllm_fq_modelopt_state.pth "
+        "for use with vllm_serve_fakequant.py).",
     )
 
     args = parser.parse_args()

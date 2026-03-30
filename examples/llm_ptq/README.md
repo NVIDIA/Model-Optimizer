@@ -346,6 +346,8 @@ with torch.inference_mode():
 python hf_ptq.py --pyt_ckpt_path <huggingface_model_card> --qformat fp8 --export_path <quantized_ckpt_path> --trust_remote_code
 ```
 
+> *For exporting fake-quantized models for vLLM serving (e.g., for research or kernels not yet supported in real-quant), use the `--vllm_fakequant_export` flag. See [vllm_serve/README.md](../vllm_serve/README.md) for details.*
+
 ### Hugging Face framework [Script](./scripts/huggingface_example.sh)
 
 Alternatively, the framework script `huggingface_example.sh` also supports quantize and export:
