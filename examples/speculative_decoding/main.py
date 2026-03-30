@@ -159,7 +159,14 @@ class DFlashArguments:
     )
     dflash_mask_token_id: int = field(
         default=None,
-        metadata={"help": "Mask token ID for DFlash. If not set, uses pad_token_id."},
+        metadata={"help": "Mask token ID for DFlash. If not set, auto-detected from model."},
+    )
+    dflash_use_logit_distillation: bool = field(
+        default=False,
+        metadata={
+            "help": "Use logit distillation (KD from target model) instead of hard CE. "
+            "Enables training with data not synthesized by the target model."
+        },
     )
 
 
@@ -267,6 +274,7 @@ def train():
             config = {
                 "dflash_block_size": dflash_args.dflash_block_size,
                 "dflash_use_torch_compile": not dflash_args.dflash_disable_torch_compile,
+                "dflash_self_logit_distillation": dflash_args.dflash_use_logit_distillation,
                 "dflash_architecture_config": custom_config,
             }
 

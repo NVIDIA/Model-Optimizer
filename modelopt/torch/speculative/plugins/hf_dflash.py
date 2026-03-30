@@ -504,7 +504,7 @@ class HFDFlashModel(DFlashModel):
             attention_mask=dflash_attn_mask,
         )
 
-        # 7. Loss: hard CE, position i predicts token i
+        # 7. Loss computation
         logits = self._base_model_lm_head(hidden)
         dflash_loss_mask = create_dflash_loss_mask(effective_len, block_size, device)
         combined_mask = loss_mask_input * dflash_loss_mask.unsqueeze(0)
@@ -518,7 +518,20 @@ class HFDFlashModel(DFlashModel):
         active_labels = labels_flat[active_indices]
 
         if active_logits.numel() > 0:
-            loss = F.cross_entropy(active_logits, active_labels)
+            if self.dflash_self_logit_distillation:
+                # Logit distillation: learn from target model's output distribution
+                # This works regardless of whether training data matches the target model
+                base_logits_trunc = base_outputs.logits[:, :effective_len, :]
+                base_logits_flat = base_logits_trunc.reshape(-1, base_logits_trunc.size(-1))
+                active_base_logits = base_logits_flat[active_indices].detach()
+                target_soft = torch.softmax(active_base_logits, dim=-1)
+                draft_logsoft = torch.log_softmax(active_logits, dim=-1)
+                loss = -(target_soft * draft_logsoft).sum(dim=-1).mean()
+            else:
+                # Hard CE: predict ground truth tokens directly
+                # Only works well when training data is synthesized by the target model
+                loss = F.cross_entropy(active_logits, active_labels)
+
             with torch.no_grad():
                 preds = active_logits.argmax(dim=-1)
                 accuracy = (preds == active_labels).float().mean().item()
