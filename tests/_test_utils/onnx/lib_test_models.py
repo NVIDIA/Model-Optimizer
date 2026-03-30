@@ -1009,3 +1009,118 @@ def build_conv_resize_model():
     onnx.checker.check_model(model_inferred)
 
     return model_inferred
+
+
+def build_conv_layernorm_model():
+    """Build a ConvNext-like model with Conv -> Transpose -> LayerNorm pattern.
+
+    This creates a simplified ConvNext block:
+    Conv -> Transpose(NCHW->NHWC) -> LayerNorm -> Transpose(NHWC->NCHW) -> Conv
+    """
+    channels = 32
+    input_names = ["input_0"]
+    output_names = ["output_0"]
+    input_shapes = [(1, 3, 56, 56)]
+    output_shapes = [(1, channels, 14, 14)]
+
+    inputs = [
+        helper.make_tensor_value_info(input_name, onnx.TensorProto.FLOAT, input_shape)
+        for input_name, input_shape in zip(input_names, input_shapes)
+    ]
+    outputs = [
+        helper.make_tensor_value_info(output_name, onnx.TensorProto.FLOAT, output_shape)
+        for output_name, output_shape in zip(output_names, output_shapes)
+    ]
+
+    nodes = [
+        # Stem Conv: 3 -> channels with stride 4
+        helper.make_node(
+            op_type="Conv",
+            inputs=["input_0", "stem_conv_w", "stem_conv_b"],
+            outputs=["stem_conv_out"],
+            name="stem_conv",
+            kernel_shape=[4, 4],
+            strides=[4, 4],
+        ),
+        # Transpose NCHW -> NHWC for LayerNorm
+        helper.make_node(
+            op_type="Transpose",
+            inputs=["stem_conv_out"],
+            outputs=["stem_transpose1_out"],
+            name="stem_transpose1",
+            perm=[0, 2, 3, 1],
+        ),
+        # LayerNorm over last axis (channels)
+        helper.make_node(
+            op_type="LayerNormalization",
+            inputs=["stem_transpose1_out", "stem_ln_scale", "stem_ln_bias"],
+            outputs=["stem_ln_out"],
+            name="stem_ln",
+            axis=-1,
+            epsilon=1e-6,
+        ),
+        # Transpose NHWC -> NCHW
+        helper.make_node(
+            op_type="Transpose",
+            inputs=["stem_ln_out"],
+            outputs=["stem_transpose2_out"],
+            name="stem_transpose2",
+            perm=[0, 3, 1, 2],
+        ),
+        # Second Conv to produce output
+        helper.make_node(
+            op_type="Conv",
+            inputs=["stem_transpose2_out", "conv2_w", "conv2_b"],
+            outputs=["output_0"],
+            name="conv2",
+            kernel_shape=[1, 1],
+        ),
+    ]
+
+    initializers = [
+        helper.make_tensor(
+            "stem_conv_w",
+            onnx.TensorProto.FLOAT,
+            [channels, 3, 4, 4],
+            np.random.randn(channels * 3 * 4 * 4).astype(np.float32).tolist(),
+        ),
+        helper.make_tensor(
+            "stem_conv_b",
+            onnx.TensorProto.FLOAT,
+            [channels],
+            np.random.randn(channels).astype(np.float32).tolist(),
+        ),
+        helper.make_tensor(
+            "stem_ln_scale",
+            onnx.TensorProto.FLOAT,
+            [channels],
+            np.ones(channels).astype(np.float32).tolist(),
+        ),
+        helper.make_tensor(
+            "stem_ln_bias",
+            onnx.TensorProto.FLOAT,
+            [channels],
+            np.zeros(channels).astype(np.float32).tolist(),
+        ),
+        helper.make_tensor(
+            "conv2_w",
+            onnx.TensorProto.FLOAT,
+            [channels, channels, 1, 1],
+            np.random.randn(channels * channels * 1 * 1).astype(np.float32).tolist(),
+        ),
+        helper.make_tensor(
+            "conv2_b",
+            onnx.TensorProto.FLOAT,
+            [channels],
+            np.random.randn(channels).astype(np.float32).tolist(),
+        ),
+    ]
+
+    graph = helper.make_graph(nodes, "conv_layernorm", inputs, outputs, initializer=initializers)
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    model.ir_version = 8
+
+    model_inferred = onnx.shape_inference.infer_shapes(model)
+    onnx.checker.check_model(model_inferred)
+
+    return model_inferred

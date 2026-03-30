@@ -280,6 +280,7 @@ def configure_ort(
     logger.debug("Registering custom QDQ operators")
     QDQRegistry["BatchNormalization"] = QDQNormalization
     QDQRegistry["ConvTranspose"] = QDQConvTranspose
+    QDQRegistry["LayerNormalization"] = QDQNormalization  # Conv->LayerNorm quantization
     QDQRegistry["LRN"] = QDQNormalization  # Example: caffenet-12.onnx
     QDQRegistry["HardSwish"] = (
         QDQOperatorBase  # Example: mobilenet_v3_opset17, efficientvit_b3_opset17

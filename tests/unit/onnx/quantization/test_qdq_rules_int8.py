@@ -23,6 +23,7 @@ from _test_utils.onnx.lib_test_models import (
     build_conv_act_pool_model,
     build_conv_batchnorm_sig_mul_model,
     build_conv_isinf_model,
+    build_conv_layernorm_model,
     build_convtranspose_conv_residual_model,
     build_r1a_model,
     build_resnet_block,
@@ -243,3 +244,41 @@ def test_conv_isinf_int8(tmp_path):
             assert inp.dtype == supported_dtype, (
                 f"Node of type {node.op} has type {inp.dtype} but should have type {supported_dtype}"
             )
+
+
+def test_conv_layernorm_quantization(tmp_path):
+    """Test that Conv -> LayerNorm pattern gets Q/DQ on the Conv output.
+
+    Bug 5271237: ModelOpt should detect Conv -> LayerNorm pattern and quantize
+    the Conv output (LayerNorm input) to enable faster INT8 kernels in TRT.
+    """
+    model = build_conv_layernorm_model()
+    onnx_path = os.path.join(tmp_path, "model.onnx")
+    onnx.save(model, onnx_path)
+
+    # Quantize the input model
+    quantize(onnx_path)
+
+    output_onnx_path = onnx_path.replace(".onnx", ".quant.onnx")
+    assert os.path.isfile(output_onnx_path)
+
+    # Load the output model and check QDQ node placements
+    graph = gs.import_onnx(onnx.load(output_onnx_path))
+
+    # Check that Conv nodes are quantized (inputs have Q/DQ)
+    conv_nodes = [n for n in graph.nodes if n.op == "Conv"]
+    assert assert_nodes_are_quantized(conv_nodes)
+
+    # Check that LayerNormalization has Q/DQ on its activation input
+    ln_nodes = [n for n in graph.nodes if n.op == "LayerNormalization"]
+    assert len(ln_nodes) == 1, f"Expected 1 LayerNorm node, found {len(ln_nodes)}"
+
+    ln_node = ln_nodes[0]
+    # The activation input (input[0]) should come from a DequantizeLinear node
+    activation_input = ln_node.inputs[0]
+    assert activation_input.inputs, "LayerNorm activation input has no producer"
+    producer = activation_input.inputs[0]
+    assert producer.op == "DequantizeLinear", (
+        f"LayerNorm activation input should come from DequantizeLinear, "
+        f"but comes from {producer.op}. Conv->LayerNorm output quantization is missing!"
+    )
