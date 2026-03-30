@@ -87,11 +87,6 @@ def test_distill_hf(project_root_path: Path, tmp_path: Path):
     model = AutoModelForCausalLM.from_pretrained(hf_export_dir)
     assert model is not None, "Failed to load distilled model with AutoModelForCausalLM"
 
-    print(
-        f"PYTEST SUMMARY: test_distill_hf test has finished successfully. "
-        f"Output directory: {output_dir}, HF export: {hf_export_dir}"
-    )
-
 
 def _prepare_student_and_teacher_models(
     project_root_path: Path, tmp_path: Path

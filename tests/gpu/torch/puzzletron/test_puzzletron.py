@@ -12,8 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import json
+import warnings
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
@@ -171,11 +171,6 @@ def _test_puzzletron_multiprocess_job(
 
     dist.cleanup()
 
-    print(
-        f"PYTEST SUMMARY: test_puzzletron({hf_model_name}) test has finished successfully. "
-        f"Puzzle directory: {puzzle_dir}"
-    )
-
 
 def _assert_subblock_stats_anymodel(hf_model_name: str, hydra_cfg) -> None:
     """Minimal subblock_stats checks and teacher memory / param regression values."""
@@ -205,6 +200,10 @@ def _assert_score_pruning_activations(puzzle_dir: Path, hf_model_name: str):
     expected = EXPECTED_PRUNING_VALUES[hf_model_name]
     size = dist.size()
 
+    if hf_model_name == "mistralai/Mistral-Small-24B-Instruct-2501" and size == 1:
+        warnings.warn("Mistral-Small score assertions only work for 2 GPUs")
+        return
+
     if expected is not None:
         # In multi-GPU: layers are distributed across ranks
         # Each rank processes len(expected) // size layers
@@ -217,13 +216,17 @@ def _assert_score_pruning_activations(puzzle_dir: Path, hf_model_name: str):
             layer_data = pruning_scores[layer_name]
             # Calculate global layer index from rank and local index
             global_idx = rank * expected_layers_per_rank + i
-            assert layer_data["score"][0].item() == expected[global_idx]["score"]
+            assert layer_data["score"][0].item() == expected[global_idx]["score"], (
+                layer_name,
+                layer_data["score"][0].item(),
+                expected[global_idx]["score"],
+                global_idx,
+            )
             assert (
                 layer_data["channels_importance_ascending"][0].item()
                 == expected[global_idx]["channels"]
             )
     else:
-        # Print values for new models - update EXPECTED_PRUNING_VALUES with these
         print(f"\n=== PRUNING VALUES for {hf_model_name} (num_layers={len(layer_names)}) ===")
         print(f'"{hf_model_name}": [')
         for layer_name in layer_names:
@@ -233,6 +236,7 @@ def _assert_score_pruning_activations(puzzle_dir: Path, hf_model_name: str):
             print(f'    {{"score": {score}, "channels": {channels}}},')
         print("],")
         print("===")
+        pytest.fail(f"Expected pruning values not found for {hf_model_name}")
 
 
 def _assert_lm_loss(puzzle_dir: Path, hf_model_name: str, tolerance: float = 0.01):

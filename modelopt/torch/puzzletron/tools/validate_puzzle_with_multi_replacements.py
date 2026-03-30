@@ -124,7 +124,7 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
         args.solutions_to_validate = list(range(len(puzzle_solutions)))
     puzzle_solutions = [puzzle_solutions[i] for i in args.solutions_to_validate]
 
-    tokenizer = _load_tokenizer(args)
+    tokenizer = _load_tokenizer(args, trust_remote_code=descriptor.requires_trust_remote_code())
     if not args.skip_validation:
         val_dataloader = (
             validate_model.prepare_dataloader(args, tokenizer) if dist.is_master() else None
@@ -231,14 +231,18 @@ def can_realize_as_symlinks(layer_replacements: list[dict]) -> bool:
     return True
 
 
-def _load_tokenizer(args: DictConfig) -> PreTrainedTokenizerBase:
+def _load_tokenizer(args: DictConfig, trust_remote_code: bool = False) -> PreTrainedTokenizerBase:
     tokenizer = None
     if (tokenizer_name := getattr(args, "tokenizer_name", None)) is not None:
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_name, trust_remote_code=trust_remote_code
+        )
     elif args.teacher_dir is not None:
         try:
-            tokenizer = AutoTokenizer.from_pretrained(args.teacher_dir, trust_remote_code=True)
-        except:
+            tokenizer = AutoTokenizer.from_pretrained(
+                args.teacher_dir, trust_remote_code=trust_remote_code
+            )
+        except Exception:
             pass
     if tokenizer is None:
         warnings.warn("Couldn't find a tokenizer, trying to continue without one")

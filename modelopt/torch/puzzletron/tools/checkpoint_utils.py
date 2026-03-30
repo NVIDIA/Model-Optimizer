@@ -145,7 +145,7 @@ def is_valid_decilm_checkpoint(checkpoint_dir: Path | str, trust_remote_code: bo
     """
     try:
         model_config = load_model_config(checkpoint_dir, trust_remote_code=trust_remote_code)
-        if model_config.block_configs is None:
+        if not hasattr(model_config, "block_configs") or model_config.block_configs is None:
             warnings.warn(
                 f"Skipping checkpoint '{checkpoint_dir}' - missing block_configs (not an AnyModel-style layout)"
             )

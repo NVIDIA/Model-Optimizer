@@ -407,7 +407,7 @@ def _assert_valid_config(args, puzzle_profile):
     # Make sure we have specified subblock_stats_args
     if "subblock_stats_args" not in args and "subblock_stats_args" not in puzzle_profile:
         mprint(
-            "error: Must specify `subblock_stats_arrs` in either puzzle_profile or as a commandline arg."
+            "error: Must specify `subblock_stats_args` in either puzzle_profile or as a commandline arg."
         )
         sys.exit(1)
 

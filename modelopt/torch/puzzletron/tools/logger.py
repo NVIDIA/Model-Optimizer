@@ -62,7 +62,7 @@ class DistributedLogger(logging.Logger):
         if ranks not in ["all", "main", "local_main", "last"]:
             raise NotImplementedError(
                 f"Could not broadcast msg {msg} - "
-                f"ranks parameters choices are ['all', 'main', 'local_main']. Got {ranks}"
+                f"ranks parameters choices are ['all', 'main', 'local_main', 'last']. Got {ranks}"
             )
         # All ranks to print
         if ranks == "all":
