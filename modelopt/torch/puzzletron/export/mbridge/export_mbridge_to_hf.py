@@ -63,16 +63,8 @@ def export_to_hf_and_copy_config(
     bridge = AutoBridge.from_hf_pretrained(hf_model, trust_remote_code=trust_remote_code)
 
     print_rank_0("📤 Exporting to HuggingFace format...")
-    # Use strict=False for test_distill_hf.py which uses small models (2 layers) with fewer layers
-    # than the template model (32 layers). This allows partial exports when some tensors are missing.
-    # Note: This is NOT needed when running on real compressed puzzletron student models,
-    # which have the same number of layers as the template model (some may be skipped via no_op
-    # in block_configs, but all layer tensors are still present in the checkpoint).
     bridge.export_ckpt(
-        megatron_path=megatron_path,
-        hf_path=hf_export_path,
-        show_progress=True,
-        strict=False,  # Needed for test_distill_hf.py small models; not needed for real compressed models
+        megatron_path=megatron_path, hf_path=hf_export_path, show_progress=True, strict=True
     )
 
     print_rank_0(f"✅ Successfully exported model to: {hf_export_path}")

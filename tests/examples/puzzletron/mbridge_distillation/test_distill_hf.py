@@ -33,8 +33,8 @@ def test_distill_hf(project_root_path: Path, tmp_path: Path):
     Models are converted to include block_configs.
     """
     # Prepare student and teacher models
-    student_hf_path, teacher_hf_path = _prepare_student_and_teacher_models(
-        project_root_path, tmp_path
+    student_hf_dir, student_anymodel_dir, _, teacher_anymodel_dir = (
+        _prepare_student_and_teacher_models(project_root_path, tmp_path)
     )
 
     output_dir = tmp_path / "distill_output"
@@ -57,8 +57,8 @@ def test_distill_hf(project_root_path: Path, tmp_path: Path):
     ]
     extend_cmd_parts(
         cmd_parts,
-        student_hf_path=student_hf_path,
-        teacher_hf_path=teacher_hf_path,
+        student_hf_path=student_anymodel_dir,
+        teacher_hf_path=teacher_anymodel_dir,
         output_dir=output_dir,
         tp_size=tp_size,
         pp_size=1,
@@ -74,7 +74,7 @@ def test_distill_hf(project_root_path: Path, tmp_path: Path):
         eval_iters=0,
         log_interval=5,
         hf_export_path=hf_export_dir,
-        hf_model="Qwen/Qwen3-0.6B",
+        hf_model=student_hf_dir,
     )
 
     run_example_command(cmd_parts, example_path="puzzletron/mbridge_distillation")
@@ -93,18 +93,14 @@ def test_distill_hf(project_root_path: Path, tmp_path: Path):
     )
 
 
-def _prepare_student_and_teacher_models(project_root_path: Path, tmp_path: Path) -> tuple[str, str]:
+def _prepare_student_and_teacher_models(
+    project_root_path: Path, tmp_path: Path
+) -> tuple[Path, Path, Path, Path]:
     """Prepare student and teacher models for distillation.
 
     Creates Qwen3 models programmatically, converts them to heterogeneous format (AnyModel),
     and returns the paths to the converted checkpoints.
 
-    Args:
-        project_root_path: Path to the project root directory
-        tmp_path: Temporary directory for test artifacts
-
-    Returns:
-        Tuple of (student_hf_path, teacher_hf_path) as strings
     """
 
     # Create temporary directories for models
@@ -149,4 +145,4 @@ def _prepare_student_and_teacher_models(project_root_path: Path, tmp_path: Path)
     print(f"  Student AnyModel: {student_anymodel_dir}")
     print(f"  Teacher AnyModel: {teacher_anymodel_dir}")
 
-    return student_anymodel_dir, teacher_anymodel_dir
+    return student_hf_dir, student_anymodel_dir, teacher_hf_dir, teacher_anymodel_dir
