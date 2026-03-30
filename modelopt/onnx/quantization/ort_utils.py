@@ -70,6 +70,7 @@ def _check_for_libcudnn():
             f" for your ORT version at https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html#requirements."
         )
     else:
+        # Not found in system path — try preloading from Python site-packages
         logger.error(f"cuDNN library not found in {env_variable}")
         raise FileNotFoundError(
             f"{lib_pattern} is not accessible in {env_variable}! Please make sure that the path to that library"
