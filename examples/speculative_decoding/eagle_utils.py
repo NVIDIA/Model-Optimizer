@@ -203,6 +203,12 @@ class EagleTrainingPlot(TrainerCallback):
         if not hasattr(state, "training_accs") or len(state.training_accs) == 0:
             return control
         average_acc = np.mean(state.training_accs, axis=0)
+        # Always print accuracy to console
+        try:
+            acc_str = ", ".join(f"{a:.4f}" for a in np.array(average_acc).flatten())
+            print_rank_0(f"Step {state.global_step} Training Acc: [{acc_str}]")
+        except Exception:
+            print_rank_0(f"Step {state.global_step} Training Acc: {average_acc}")
         if self.estimate_ar:
             # Calculate mean training AR since last log
             # NOTE: This is only an estimate of the real AR.
