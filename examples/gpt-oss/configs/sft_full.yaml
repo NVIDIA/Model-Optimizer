@@ -1,7 +1,7 @@
 # Model
 model_name_or_path: openai/gpt-oss-20b
 attn_implementation: eager
-torch_dtype: bfloat16
+dtype: bfloat16
 
 # Dataset
 dataset_name: HuggingFaceH4/Multilingual-Thinking
