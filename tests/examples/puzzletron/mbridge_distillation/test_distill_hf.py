@@ -19,7 +19,8 @@ from pathlib import Path
 import torch
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 from _test_utils.torch.distributed.utils import get_free_port
-from _test_utils.torch.puzzletron.utils import create_and_save_small_hf_model, create_tokenizer
+from _test_utils.torch.puzzletron.utils import create_and_save_small_hf_model
+from _test_utils.torch.transformers_models import get_tiny_tokenizer
 from transformers import AutoModelForCausalLM
 
 from modelopt.torch.puzzletron.anymodel import convert_model
@@ -103,13 +104,12 @@ def _prepare_student_and_teacher_models(
     teacher_hf_dir = tmp_path / "teacher_hf"
 
     # Create tokenizer (uses local tokenizer from test resources)
-    tokenizer = create_tokenizer(project_root_path)
+    tokenizer = get_tiny_tokenizer()
 
     # Create student model using utility function (loads config from Hub).
     # TODO: Make the student model using different ffn sizes across layers.
     create_and_save_small_hf_model(
         output_path=str(student_hf_dir),
-        vocab_size=tokenizer.vocab_size,
         tokenizer=tokenizer,
         hf_model_name="Qwen/Qwen3-0.6B",
         hybrid_override_pattern=None,
@@ -118,7 +118,6 @@ def _prepare_student_and_teacher_models(
     # Create teacher model (same as student for testing)
     create_and_save_small_hf_model(
         output_path=str(teacher_hf_dir),
-        vocab_size=tokenizer.vocab_size,
         tokenizer=tokenizer,
         hf_model_name="Qwen/Qwen3-0.6B",
         hybrid_override_pattern=None,

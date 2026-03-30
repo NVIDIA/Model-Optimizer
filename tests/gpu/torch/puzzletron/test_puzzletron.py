@@ -94,7 +94,7 @@ def _test_puzzletron_multiprocess_job(
 
     # Setup the test model and data.
     puzzle_dir, hf_checkpoint_path, dataset_path = setup_test_model_and_data(
-        project_root_path, tmp_path, rank, hf_model_name, hybrid_override_pattern
+        tmp_path, rank, hf_model_name, hybrid_override_pattern
     )
     hydra_config_dir = project_root_path / "tests/gpu/torch/puzzletron/resources/configs"
     model_basename = hf_model_name.split("/")[1]
