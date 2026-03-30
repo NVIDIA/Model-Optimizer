@@ -4,7 +4,7 @@ Pruning
 
 .. tip::
 
-    Checkout `Qwen 3 NeMo Minitron Pruning & Distillation <https://github.com/NVIDIA-NeMo/NeMo/tree/main/tutorials/llm/qwen/pruning-distillation>`_ and
+    Checkout `Megatron-Bridge Minitron Pruning & Distillation <https://github.com/NVIDIA/Model-Optimizer/tree/main/examples/megatron_bridge>`_ and
     `ResNet20 on CIFAR-10 Notebook <https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/pruning/cifar_resnet.ipynb>`_
     for an end-to-end example of pruning.
 
@@ -16,7 +16,7 @@ These pruning methods support pruning the convolutional and linear layers, and
 attention heads of the model. More details on these pruning modes is as follows:
 
 #.  ``mcore_minitron``: A pruning method developed by NVIDIA Research for pruning GPT, Mamba and Hybrid
-    Transformer Mamba models in NVIDIA NeMo or Megatron-LM framework. It uses the activation magnitudes to prune
+    Transformer Mamba models in NVIDIA Megatron-Bridge or Megatron-LM framework. It uses the activation magnitudes to prune
     the embedding hidden size, mlp ffn hidden size, transformer attention heads, GQA query groups,
     mamba heads and head dimension, and number of layers of the model.
     Checkout more details of the algorithm in the `paper <https://arxiv.org/abs/2408.11796>`_.

@@ -202,7 +202,6 @@ class TestQuantSparseMoe:
 
         converted = QuantModuleRegistry.convert(moe_block)
         assert converted._moe_calib_experts_ratio is None
-        assert converted._moe_count_expert_calib_tokens is False
         assert not hasattr(converted, "expert_token_count")
 
     def test_forward_default_config_passthrough(self):
@@ -216,7 +215,7 @@ class TestQuantSparseMoe:
         ref_block.load_state_dict(moe_block.state_dict())
         converted = QuantModuleRegistry.convert(moe_block)
 
-        x = torch.randn(1, 4, 32)
+        x = torch.randn(1, 4, 32, dtype=ref_block.gate.weight.dtype)
         with torch.no_grad():
             out_ref = ref_block(x)
             out_test = converted(x)
@@ -249,7 +248,7 @@ class TestQuantSparseMoe:
                 m._if_calib = True
                 break
 
-        x = torch.randn(1, 4, 32)
+        x = torch.randn(1, 4, 32, dtype=converted.gate.weight.dtype)
         with torch.no_grad():
             converted(x)
 
@@ -259,18 +258,23 @@ class TestQuantSparseMoe:
             assert converted.top_k == original_top_k
 
     def test_token_counting_lazy_init(self):
-        """When moe_count_expert_calib_tokens is enabled, token counting infra is lazy-inited."""
+        """When moe_calib_experts_ratio > 0, token counting infra is lazy-inited."""
         model = get_tiny_qwen3_moe()
         moe_block = self._get_moe_block(model)
         if QuantModuleRegistry.get(type(moe_block)) is None:
             register_sparse_moe_on_the_fly(model)
 
         converted = QuantModuleRegistry.convert(moe_block)
-        converted._moe_count_expert_calib_tokens = True
+        converted._moe_calib_experts_ratio = 0.5
 
         assert not hasattr(converted, "expert_token_count")
 
-        x = torch.randn(1, 4, 32)
+        # Simulate calibration mode so lazy-init triggers during forward
+        # Set _if_calib on an expert sub-module (not set by default since only the MoE
+        # block was converted, not the full model).
+        next(converted.experts.modules())._if_calib = True
+
+        x = torch.randn(1, 4, 32, dtype=converted.gate.weight.dtype)
         with torch.no_grad():
             converted(x)
 
@@ -288,7 +292,7 @@ class TestQuantSparseMoe:
             top_k = converted.top_k if hasattr(converted, "top_k") else converted.gate.top_k
 
         converted.expert_token_count.zero_()
-        tokens = torch.randn(8, hidden_size)
+        tokens = torch.randn(8, hidden_size, dtype=converted.gate.weight.dtype)
         with torch.no_grad():
             converted.gate(tokens)
         assert converted.expert_token_count.sum().item() == 8 * top_k
@@ -305,8 +309,7 @@ def test_qwen3_moe_quantize_with_token_forcing_and_counting():
     quant_cfg = copy.deepcopy(mtq.INT8_DEFAULT_CFG)
     quant_cfg["algorithm"] = {
         "method": "max",
-        "moe_calib_experts_ratio": 1.0,
-        "moe_count_expert_calib_tokens": True,
+        "moe_calib_experts_ratio": 0.5,
     }
 
     def calib_fn(model):

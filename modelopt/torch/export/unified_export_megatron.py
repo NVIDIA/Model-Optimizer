@@ -1114,7 +1114,7 @@ class GPTModelExporter:
         merged_weight = torch.stack(weight_list, dim=0)
 
         # Transpose the last two dimensions to match HuggingFace format
-        # NeMo format: [num_experts, out_features, in_features]
+        # Megatron format: [num_experts, out_features, in_features]
         # HF format: [num_experts, in_features, out_features]
         merged_weight = merged_weight.transpose(-2, -1).contiguous()
 
@@ -1182,7 +1182,7 @@ class GPTModelExporter:
         merged_weight = torch.stack(weight_list, dim=0)
 
         # Transpose the last two dimensions to match HuggingFace format (except for GptOssForCausalLM)
-        # NeMo format: [num_experts, out_features, in_features]
+        # Megatron format: [num_experts, out_features, in_features]
         # HF format: [num_experts, in_features, out_features]
 
         # TODO: Need to decide if we want to transpose the weight or not.

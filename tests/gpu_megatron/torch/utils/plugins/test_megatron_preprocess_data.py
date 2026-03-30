@@ -17,6 +17,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from modelopt.torch.utils.dataset_utils import download_hf_dataset_as_jsonl
 from modelopt.torch.utils.plugins.megatron_preprocess_data import megatron_preprocess_data
 
@@ -65,19 +67,27 @@ def test_megatron_preprocess_data_with_minipile_jsonl(tmp_path):
     assert os.path.getsize(expected_idx_file) > 0, "Index file should not be empty"
 
 
-def test_megatron_preprocess_data_with_hf_dataset(tmp_path):
+@pytest.mark.parametrize(
+    ("hf_dataset", "hf_split", "json_keys"),
+    [
+        ("nanotron/minipile_100_samples", "train", ["text"]),
+        ("HuggingFaceTB/everyday-conversations-llama3.1-2k", "test_sft", ["messages"]),
+    ],
+)
+def test_megatron_preprocess_data_with_hf_dataset(tmp_path, hf_dataset, hf_split, json_keys):
     """Test megatron_preprocess_data with dataset download, --append_eod and --max_sequence_length.
 
     Downloads nanotron/minipile_100_samples train split from Hugging Face and tokenizes it.
     """
     megatron_preprocess_data(
-        hf_dataset="nanotron/minipile_100_samples",
-        hf_split="train",
+        hf_dataset=hf_dataset,
+        hf_split=hf_split,
+        hf_max_samples_per_split=10,
         output_dir=tmp_path,
-        tokenizer_name_or_path="gpt2",
-        json_keys=["text"],
+        tokenizer_name_or_path="Qwen/Qwen3-0.6B",
+        json_keys=json_keys,
         append_eod=True,
-        max_sequence_length=512,
+        max_sequence_length=32,
         workers=4,
     )
 

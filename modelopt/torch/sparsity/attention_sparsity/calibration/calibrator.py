@@ -24,7 +24,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from scipy.optimize import curve_fit
-from tqdm import tqdm
 
 from ..stats_manager import SparseAttentionStatsManager
 from ..utils import get_sparse_attention_modules
@@ -91,9 +90,9 @@ class DynamicThresholdCalibrator:
         """Calibrate a and b parameters for Exponential model.
 
         Algorithm:
-            1. For each threshold λ_j in threshold_trials:
-               - Run ALL samples, collect sparsities S_ij for each sample i
-               - Compute scale_factor_ij = λ_j × L_i (where L_i is sample length)
+            1. Set thresholds = threshold_trials on all modules, run ONE forward pass.
+               Each module returns a sparsity list (one entry per threshold) per sample.
+               Unpack to get (scale_factor_ij = λ_j × L_i, sparsity_ij) pairs.
 
             2. Fit Exponential model to ALL (sf_ij, S_ij) pairs:
                scale_factor = a * exp(b * sparsity)
@@ -121,29 +120,25 @@ class DynamicThresholdCalibrator:
         print(f"Starting Exponential model calibration ({phase} phase)")
         print(f"Threshold trials: {len(self.threshold_trials)}")
 
-        # Stage 1: Collect ALL (scale_factor, sparsity) pairs for all thresholds and samples
-        print(f"\nStage 1: Collecting {phase} sparsity data for all thresholds...")
+        # Stage 1: Collect ALL (scale_factor, sparsity) pairs in a single forward pass.
+        # All threshold_trials are passed at once; each module returns a sparsity list
+        # with one entry per threshold, eliminating the need for repeated forward passes.
+        print(f"\nStage 1: Collecting {phase} sparsity data for all thresholds in one pass...")
 
-        # Collect ALL individual data points (not averaged)
         all_data_points = []  # List of {"threshold", "length", "scale_factor", "sparsity"}
 
-        for threshold in tqdm(self.threshold_trials, desc=f"Testing thresholds ({phase})"):
-            self._set_threshold(attention_modules, threshold)
-            self._enable_calibration_mode(attention_modules)
-            with torch.no_grad():
-                forward_loop(model)
-            per_sample_stats = self._extract_calibration_stats(attention_modules, phase=phase)
-            self._disable_calibration_mode(attention_modules)
+        self._set_thresholds(attention_modules, self.threshold_trials)
+        self._enable_calibration_mode(attention_modules)
+        with torch.no_grad():
+            forward_loop(model)
+        per_sample_stats = self._extract_calibration_stats(attention_modules, phase=phase)
+        self._disable_calibration_mode(attention_modules)
 
-            if not per_sample_stats:
-                continue
-
-            # Collect individual (scale_factor, sparsity) pairs for each sample
-            for sample_stat in per_sample_stats:
-                length = sample_stat["sample_length"]
-                sparsity = sample_stat["sparsity"]
+        for sample_stat in per_sample_stats:
+            length = sample_stat["sample_length"]
+            sparsity_list = sample_stat["sparsity"]
+            for threshold, sparsity in zip(self.threshold_trials, sparsity_list):
                 scale_factor = threshold * length
-
                 all_data_points.append(
                     {
                         "threshold": threshold,
@@ -307,17 +302,26 @@ class DynamicThresholdCalibrator:
         aggregated_stats = []
 
         for sample_idx in range(num_samples):
-            sparsities = []
+            sparsity_lists = []
             sample_length = 0
 
             for module_stats in all_per_sample_stats:
                 if sample_idx < len(module_stats):
                     sample_stat = module_stats[sample_idx]
-                    sparsities.append(sample_stat.get("sparsity", 0.0))
+                    sparsity = sample_stat.get("sparsity", [])
+                    sparsity_lists.append(sparsity if isinstance(sparsity, list) else [sparsity])
                     if not sample_length and "sample_length" in sample_stat:
                         sample_length = sample_stat["sample_length"]
 
-            avg_sparsity = float(np.mean(sparsities)) if sparsities else 0.0
+            if not sparsity_lists:
+                continue
+
+            lengths = [len(s) for s in sparsity_lists]
+            assert len(set(lengths)) == 1, (
+                f"All modules must have the same number of thresholds, got {lengths}"
+            )
+            n = lengths[0]
+            avg_sparsity = [float(np.mean([sl[i] for sl in sparsity_lists])) for i in range(n)]
 
             aggregated_stats.append(
                 {
@@ -328,7 +332,7 @@ class DynamicThresholdCalibrator:
 
         return aggregated_stats
 
-    def _set_threshold(self, modules: list[nn.Module], threshold: float):
-        """Set threshold on sparse attention modules."""
+    def _set_thresholds(self, modules: list[nn.Module], thresholds: list[float]):
+        """Set thresholds list on sparse attention modules."""
         for module in modules:
-            module._sparse_method_instance.threshold = threshold
+            module._sparse_method_instance.thresholds = thresholds

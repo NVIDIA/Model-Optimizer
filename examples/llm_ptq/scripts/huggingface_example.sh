@@ -30,7 +30,7 @@ for i in $(env | grep ^PMI_ | cut -d"=" -f 1); do unset -v $i; done
 for i in $(env | grep ^PMIX_ | cut -d"=" -f 1); do unset -v $i; done
 
 if [ -z "$MODEL_PATH" ]; then
-    echo "Unsupported model argument: Expected a huggingface model path or model name or a nemo path" >&2
+    echo "Unsupported model argument: Expected a huggingface model path or model name" >&2
     exit 1
 fi
 
@@ -53,9 +53,9 @@ esac
 IFS=","
 for qformat in $QFORMAT; do
     case $qformat in
-    fp8 | fp8_pc_pt | fp8_pb_wo | int8_wo | int8_sq | int4_awq | w4a8_awq | fp16 | bf16 | nvfp4 | nvfp4_awq | w4a8_nvfp4_fp8 | w4a8_mxfp4_fp8 | nvfp4_mlp_only | nvfp4_omlp_only | nvfp4_svdquant | mxfp8) ;;
+    fp8 | fp8_pc_pt | fp8_pb_wo | int8_wo | int8_sq | int4_awq | w4a8_awq | fp16 | bf16 | nvfp4 | nvfp4_awq | w4a8_nvfp4_fp8 | w4a8_mxfp4_fp8 | nvfp4_mlp_only | nvfp4_experts_only | nvfp4_omlp_only | nvfp4_svdquant | mxfp8) ;;
     *)
-        echo "Unknown quant argument: Expected one of: [fp8, fp8_pc_pt, fp8_pb_wo, int8_wo, int8_sq, int4_awq, w4a8_awq, fp16, bf16, nvfp4, nvfp4_awq, w4a8_nvfp4_fp8, w4a8_mxfp4_fp8, nvfp4_mlp_only, nvfp4_omlp_only, nvfp4_svdquant, mxfp8]" >&2
+        echo "Unknown quant argument: Expected one of: [fp8, fp8_pc_pt, fp8_pb_wo, int8_wo, int8_sq, int4_awq, w4a8_awq, fp16, bf16, nvfp4, nvfp4_awq, w4a8_nvfp4_fp8, w4a8_mxfp4_fp8, nvfp4_mlp_only, nvfp4_experts_only, nvfp4_omlp_only, nvfp4_svdquant, mxfp8]" >&2
         exit 1
         ;;
     esac
@@ -295,19 +295,6 @@ if [[ $TASKS =~ "mmlu" ]]; then
 
 fi
 
-if [[ $TASKS =~ "mtbench" ]]; then
-
-    pushd ../llm_eval/
-
-    bash run_fastchat.sh -h $MODEL_ABS_PATH -e $SAVE_PATH
-    find data/mt_bench/model_answer/ -type f -name '*.jsonl' -exec mv {} $SAVE_PATH \;
-
-    JSONL_PATH=$(readlink -f $(find $SAVE_PATH -type f -name '*.jsonl'))
-    echo "FastChat generation complete. The results are saved under $JSONL_PATH . Please run the judge(https://github.com/lm-sys/FastChat/tree/main/fastchat/llm_judge) to evaluate the quality of the responses."
-
-    popd
-
-fi
 
 if [[ $TASKS =~ "livecodebench" || $TASKS =~ "simple_eval" ]]; then
     # Clean a previous session if exists

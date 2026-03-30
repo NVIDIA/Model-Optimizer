@@ -443,6 +443,16 @@ def _setup_kimi_k2_decoder():
     kimi_k2_module.DeepseekV3Attention._init_rope = lambda self: None
     kimi_k2_module.DeepseekV3Attention.forward = patched_fwd_with_lazy_rope_init
 
+    # Kimi implementation is based on older transformers which use "past_key_value" argument
+    # We patch it to "past_key_values" for compatibility
+    original_decoder_layer_forward = kimi_k2_module.DeepseekV3DecoderLayer.forward
+
+    def patched_decoder_layer_fwd(self, *args, **kwargs):
+        kwargs["past_key_value"] = kwargs.pop("past_key_values", None)
+        return original_decoder_layer_forward(self, *args, **kwargs)
+
+    kimi_k2_module.DeepseekV3DecoderLayer.forward = patched_decoder_layer_fwd
+
     return getattr(kimi_k2_module, "DeepseekV3DecoderLayer")
 
 
@@ -474,21 +484,60 @@ def enable_cp_ttt_patch():
             modelopt.torch.speculative.plugins.transformers.ENABLE_CP_TTT_PATCH = False
 
 
-def load_vlm_or_llm_with_kwargs(model_name_or_path: str, **kwargs):
-    """Load a VLM or LLM with kwargs. Returns the model and model config."""
+def load_vlm_or_llm(
+    model_name_or_path: str,
+    use_fake_base: bool = False,
+    use_offline_training: bool = False,
+    torch_dtype: str | torch.dtype | None = None,
+    device_map: str | None = None,
+    trust_remote_code: bool = False,
+):
+    """Load a VLM or LLM. Returns the model.
+
+    When ``use_offline_training=True``, returns a
+    :class:`~modelopt.torch.speculative.plugins.modeling_fakebase.FakeBaseModel` containing only
+    ``lm_head`` and ``embed_tokens``, auto-detecting weight paths from the checkpoint.
+    Otherwise, falls back to loading with ``num_hidden_layers=0`` for memory efficiency.
+
+    Args:
+        model_name_or_path: Local path or HuggingFace repo ID of the model.
+        use_offline_training: Whether to load a memory-efficient model for offline training.
+        torch_dtype: dtype to use when loading the model.
+        device_map: Device map passed to ``from_pretrained``.
+        trust_remote_code: Whether to trust remote code.
+    """
+    if use_offline_training and use_fake_base:
+        from modelopt.torch.speculative.plugins.modeling_fakebase import FakeBaseModel
+
+        return FakeBaseModel.from_source(model_name_or_path, trust_remote_code=trust_remote_code)
+
     model_config = transformers.AutoConfig.from_pretrained(
-        model_name_or_path, trust_remote_code=True
+        model_name_or_path, trust_remote_code=trust_remote_code
     )
     if "vl" in model_config.model_type.lower():
         model_cls = transformers.AutoModelForVision2Seq
     else:
         model_cls = transformers.AutoModelForCausalLM
 
-    if kwargs.get("num_hidden_layers") == 0:
+    extra = {}
+    if use_offline_training:
+        extra["num_hidden_layers"] = 0
         if hasattr(model_config, "layer_types"):
-            kwargs["layer_types"] = []
+            extra["layer_types"] = []
 
-    return model_config, model_cls.from_pretrained(model_name_or_path, **kwargs)
+    model = model_cls.from_pretrained(
+        model_name_or_path,
+        trust_remote_code=trust_remote_code,
+        torch_dtype=torch_dtype,
+        device_map=device_map,
+        **extra,
+    )
+
+    if use_offline_training:
+        # Preserve the original layer count since we loaded with num_hidden_layers=0
+        model.config.num_orig_hidden_layers = model_config.num_hidden_layers
+
+    return model
 
 
 @contextlib.contextmanager
@@ -504,10 +553,12 @@ def patch_transformers5_params_loading():
     """
     # Skip patching for non-applicable transformers version
     if importlib.util.find_spec("transformers.core_model_loading") is None:
+        yield
         return
     from transformers import core_model_loading
 
     if not hasattr(core_model_loading, "set_param_for_module"):
+        yield
         return
 
     orig_set_param_for_module = core_model_loading.set_param_for_module

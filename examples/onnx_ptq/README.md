@@ -22,7 +22,9 @@ Model Optimizer enables highly performant quantization formats including NVFP4, 
 
 ### Docker
 
-Please use the TensorRT docker image (e.g., `nvcr.io/nvidia/tensorrt:25.08-py3`) or visit our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html) for more information.
+Please use the TensorRT docker image (e.g., `nvcr.io/nvidia/tensorrt:26.02-py3`) or visit our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html) for more information.
+
+> **Note:** If you are using `onnxruntime-gpu`, we recommend using `nvcr.io/nvidia/tensorrt:25.06-py3` as it is built with CUDA 12, which is required by the stable `onnxruntime-gpu` package.
 
 Set the following environment variables inside the TensorRT docker.
 
@@ -218,6 +220,25 @@ python -m modelopt.onnx.quantization \
 trtexec --onnx=/path/to/identity_neural_network.quant.onnx \
     --staticPlugins=/path/to/libidentity_conv_iplugin_v2_io_ext.so
 ```
+
+### Optimize Q/DQ node placement with Autotune
+
+This feature automates Q/DQ (Quantize/Dequantize) node placement optimization for ONNX models using TensorRT performance measurements.
+For more information on the standalone toolkit, please refer to [autotune](./autotune).
+
+To access this feature in the ONNX quantization workflow, simply add `--autotune` in your CLI:
+
+```bash
+python -m modelopt.onnx.quantization \
+    --onnx_path=vit_base_patch16_224.onnx \
+    --quantize_mode=<fp8|int8|int4> \
+    --calibration_data=calib.npy \
+    --calibration_method=<max|entropy|awq_clip|rtn_dq> \
+    --output_path=vit_base_patch16_224.quant.onnx \
+    --autotune=<quick,default,extensive>
+```
+
+For more fine-tuned Autotune flags, please refer to the [API guide](https://nvidia.github.io/Model-Optimizer/guides/_onnx_quantization.html).
 
 ## Resources
 

@@ -15,9 +15,12 @@
 
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
-"""Processing large data to tokenize for pretraining.
+"""Processing large data pretraining and post-training datasets to tokenize for usage in megatron pretraining scripts.
 
-Usage to tokenize one or more JSONL files:
+We apply chat_template to the data if the JSON key is a list of message dicts (e.g. Nemotron-Post-Training-Dataset-v2)
+so that we can tokenize the data for usage in megatron pretraining scripts.
+
+Usage to tokenize one or more JSONL files (pretraining, ``text`` key):
 
 ```bash
 python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
@@ -36,6 +39,21 @@ python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
     --output_dir /path/to/tokenized/Qwen3/ \
     --tokenizer Qwen/Qwen3-0.6B
 ```
+
+Usage to tokenize a post-training dataset with ``messages`` key (chat format):
+
+```bash
+python -m modelopt.torch.utils.plugins.megatron_preprocess_data \
+    --jsonl_paths path/to/sft_data.jsonl \
+    --json_keys messages \
+    --output_dir /path/to/tokenized/Qwen3/ \
+    --tokenizer Qwen/Qwen3-0.6B
+```
+
+When the value for a JSON key is a list of message dicts (e.g.
+``[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]``),
+``tokenizer.apply_chat_template`` is automatically used to render the conversation
+into a single text string before tokenization.
 
 Usage to download and tokenize a dataset from Hugging Face Hub:
 
@@ -69,6 +87,7 @@ __all__ = ["megatron_preprocess_data"]
 
 class _Encoder:
     tokenizer: AutoTokenizer = None
+    _chat_template_logged: set[str] = set()
 
     def __init__(
         self,
@@ -97,21 +116,35 @@ class _Encoder:
         doc_len = 0
         enc_len = 0
         for key in self.json_keys:
-            text = data[key]
+            value = data[key]
+
+            if isinstance(value, list):
+                if key not in _Encoder._chat_template_logged:
+                    _Encoder._chat_template_logged.add(key)
+                    print(f"Applying chat_template to '{key}' key")
+                kwargs = {}
+                tools = data.get("tools")
+                if tools:
+                    kwargs["tools"] = tools
+                text = _Encoder.tokenizer.apply_chat_template(value, tokenize=False, **kwargs)
+            else:
+                text = value
 
             # Truncate text by character length if specified
-            doc_len += len(text)
             if self.max_document_length is not None:
+                original_length = len(text)
                 text = text[: self.max_document_length]
-                # print(f"Document truncated from {original_length} to {self.max_document_length} characters")
+                if original_length != len(text):
+                    print(f"Document truncated from {original_length} to {len(text)} characters")
+            doc_len += len(text)
 
             # Tokenize the entire text as one document
             encoded = _Encoder.tokenizer.encode(text)
 
-            enc_len += len(encoded)
             if self.max_sequence_length is not None:
                 encoded = encoded[: self.max_sequence_length]
                 # print(f"Sequence truncated from {original_length} to {self.max_sequence_length} tokens")
+            enc_len += len(encoded)
 
             if len(encoded) > 0 and self.append_eod:
                 encoded.append(_Encoder.tokenizer.eos_token_id)

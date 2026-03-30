@@ -20,7 +20,6 @@ import json
 from collections.abc import Callable, ItemsView, Iterator, KeysView, ValuesView
 from typing import Any, TypeAlias
 
-import pydantic
 from pydantic import (
     BaseModel,
     Field,
@@ -30,6 +29,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic import ConfigDict as PyDanticConfigDict
 from pydantic_core import PydanticUndefined
 
 # A simple type alias for a config dictionary that is used as input to initialize a ModeloptBaseConfig.
@@ -63,7 +63,7 @@ class ModeloptBaseConfig(BaseModel):
     and properties for easier access and manipulation of the configuration.
     """
 
-    model_config = pydantic.ConfigDict(extra="forbid", validate_assignment=True)
+    model_config = PyDanticConfigDict(extra="forbid", validate_assignment=True)
 
     def model_dump(self, **kwargs):
         """Dump the config to a dictionary with aliases and no warnings by default."""
@@ -214,7 +214,7 @@ class ModeloptBaseRuleConfig(ModeloptBaseConfig):
     and properties for easier access and manipulation of the configuration.
     """
 
-    model_config = pydantic.ConfigDict(extra="allow")
+    model_config = PyDanticConfigDict(extra="allow")
 
     @classmethod
     def __init_subclass__(cls, *args, registry, **kwargs):

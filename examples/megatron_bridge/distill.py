@@ -70,6 +70,10 @@ def get_args():
     # Parallelism arguments
     parser.add_argument("--tp_size", type=int, default=1, help="Tensor parallel size")
     parser.add_argument("--pp_size", type=int, default=1, help="Pipeline parallel size")
+    parser.add_argument("--cp_size", type=int, default=1, help="Context parallel size")
+    parser.add_argument("--ep_size", type=int, default=1, help="Expert parallel size")
+    parser.add_argument("--etp_size", type=int, default=1, help="Expert tensor parallel size")
+
     # Dataset arguments
     parser.add_argument(
         "--data_paths",
@@ -141,11 +145,13 @@ def main(args: argparse.Namespace):
 
         # Override parallelism / training settings
         provider.tensor_model_parallel_size = args.tp_size
-        provider.pipeline_model_parallel_size = args.pp_size
-        provider.context_parallel_size = 1
         provider.sequence_parallel = args.tp_size > 1
-        provider.seq_length = args.seq_length
+        provider.pipeline_model_parallel_size = args.pp_size
         provider.pipeline_dtype = torch.bfloat16
+        provider.context_parallel_size = args.cp_size
+        provider.expert_model_parallel_size = args.ep_size
+        provider.expert_tensor_parallel_size = args.etp_size
+        provider.seq_length = args.seq_length
         return provider
 
     # TODO: Support megatron-ckpt as an alternative to HF checkpoints (e.g. /path/to/ckpt/iter_0000000)

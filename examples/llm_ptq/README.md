@@ -15,7 +15,7 @@ This section focuses on Post-training quantization, a technique that reduces mod
 | Support Matrix | View the support matrix to see quantization compatibility and feature availability across different models | \[[Link](#support-matrix)\] | |
 | AutoQuantize | Automatically chooses layers/precisions for mixed precision quantization to enhanced inference performance and accuracy tradeoffs | \[[Link](#autoquantize)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#optimal-partial-quantization-using-auto-quantize)\] |
 | Real Quant | Real Quant compresses model weights in a low-precision format to reduce memory requirements of quantization. | \[[Link](https://nvidia.github.io/Model-Optimizer/guides/_compress_quantized_models.html)\] | |
-| Framework Scripts | Example scripts demonstrating quantization techniques for optimizing Hugging Face / NeMo / Megatron-LM models | \[[Link](#framework-scripts)\] | |
+| Framework Scripts | Example scripts demonstrating quantization techniques for optimizing Hugging Face / Megatron-Bridge / Megatron-LM models | \[[Link](#framework-scripts)\] | |
 | Evaluate Accuracy | Evaluate your model's accuracy! | \[[Link](#evaluate-accuracy)\] | |
 | Exporting Checkpoints | Export to Hugging Face Unified Checkpoint and deploy on TRT-LLM/vLLM/SGLang | \[[Link](#exporting-checkpoints)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/deployment/3_unified_hf.html)\] |
 | Pre-Quantized Checkpoints | Ready to deploy Hugging Face pre-quantized checkpoints | \[[Link](#pre-quantized-checkpoints)\] | |
@@ -27,8 +27,8 @@ This section focuses on Post-training quantization, a technique that reduces mod
 
 ### Docker
 
-For Hugging Face models, please use the TensorRT-LLM docker image (e.g., `nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc4`).
-For NeMo models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:25.09`).
+For Hugging Face models, please use the TensorRT-LLM docker image (e.g., `nvcr.io/nvidia/tensorrt-llm/release:1.2.0`).
+For Megatron-Bridge or Megatron-LM models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.02`).
 Visit our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html) for more information.
 
 Also follow the installation steps below to upgrade to the latest version of Model Optimizer and install example-specific dependencies.
@@ -69,7 +69,7 @@ def forward_loop(model):
 model = mtq.quantize(model, mtq.NVFP4_DEFAULT_CFG, forward_loop)
 ```
 
-> *For higher NVFP4 PTQ accuracy, we recommend using `mtq.NVFP4_MLP_ONLY_CFG` or `mtq.NVFP4_OMLP_ONLY_CFG` instead of `mtq.NVFP4_DEFAULT_CFG`. `NVFP4_MLP_ONLY_CFG` applies NVFP4 quantization to MLP (and MoE) layers, leaving attention layers unquantized. `NVFP4_OMLP_ONLY_CFG` additionally quantizes the `o_proj` layer. Both preserve accuracy in the sensitive attention QKV projections while still providing significant compression.*
+> *For higher NVFP4 PTQ accuracy, we recommend using `mtq.NVFP4_MLP_ONLY_CFG`, `mtq.NVFP4_EXPERTS_ONLY_CFG`, or `mtq.NVFP4_OMLP_ONLY_CFG` instead of `mtq.NVFP4_DEFAULT_CFG`. `NVFP4_MLP_ONLY_CFG` applies NVFP4 quantization to MLP (and MoE) layers, leaving attention layers unquantized. `NVFP4_EXPERTS_ONLY_CFG` quantizes only expert layers (`*mlp.experts*` and `*block_sparse_moe*`), useful for MoE models where dense MLP and attention stay in higher precision. `NVFP4_OMLP_ONLY_CFG` additionally quantizes the `o_proj` layer. All preserve accuracy in the sensitive attention QKV projections while still providing significant compression.*
 
 ### 2. Export Quantized Model
 
@@ -129,13 +129,9 @@ Please reference our [framework scripts](#framework-scripts) and our [docs](http
 > *<sup>7.</sup>[PTQ for DeepSeek](../deepseek/README.md)* \
 > *<sup>8.</sup>GLM-4.7 has MTP (Multi-Token Prediction) layers that are automatically loaded and excluded from quantization.*
 
-> *The accuracy loss after PTQ may vary depending on the actual model and the quantization method. Different models may have different accuracy loss and usually the accuracy loss is more significant when the base model is small. If the accuracy after PTQ is not meeting the requirement, please try either modifying [hf_ptq.py](./hf_ptq.py) and disabling the KV cache quantization or using the [QAT](./../llm_qat/README.md) instead. For NVFP4 quantization specifically, we recommend `nvfp4_mlp_only` or `nvfp4_omlp_only` to achieve higher accuracy by restricting quantization to the MLP layers (and optionally the `o_proj` layer) while keeping the attention QKV projections unquantized.*
+> *The accuracy loss after PTQ may vary depending on the actual model and the quantization method. Different models may have different accuracy loss and usually the accuracy loss is more significant when the base model is small. If the accuracy after PTQ is not meeting the requirement, please try either modifying [hf_ptq.py](./hf_ptq.py) and disabling the KV cache quantization or using the [QAT](./../llm_qat/README.md) instead. For NVFP4 quantization specifically, we recommend `nvfp4_mlp_only`, `nvfp4_experts_only`, or `nvfp4_omlp_only` to achieve higher accuracy by restricting quantization to the MLP/expert layers (and optionally the `o_proj` layer) while keeping the attention QKV projections unquantized.*
 
 > You can also create your own custom config using [this](https://nvidia.github.io/Model-Optimizer/guides/_pytorch_quantization.html#custom-calibration-algorithm) guide.
-
-### NeMo Supported Models
-
-Please refer to the [NeMo 2.0 PTQ documentation](https://docs.nvidia.com/nemo-framework/user-guide/latest/model-optimization/quantization/quantization.html#support-matrix) for supported models.
 
 ## Framework Scripts
 
@@ -147,7 +143,7 @@ For LLM models like [Llama-3](https://huggingface.co/meta-llama):
 # Install model specific pip dependencies if needed
 
 export HF_PATH=<the downloaded LLaMA checkpoint from the Hugging Face hub, or simply the model card>
-scripts/huggingface_example.sh --model $HF_PATH --quant [fp8|nvfp4|nvfp4_mlp_only|nvfp4_omlp_only|int8_sq|int4_awq|w4a8_awq] --tp [1|2|4|8]
+scripts/huggingface_example.sh --model $HF_PATH --quant [fp8|nvfp4|nvfp4_mlp_only|nvfp4_experts_only|nvfp4_omlp_only|int8_sq|int4_awq|w4a8_awq] --tp [1|2|4|8]
 ```
 
 > *By default `trust_remote_code` is set to false. Please turn it on if model calibration and eval requires it using `--trust_remote_code`.*
@@ -185,9 +181,9 @@ python hf_ptq.py \
 > Note: when `--calib_with_images` is set, `--calib_size` must be a single value, and the calibration dataset is nvidia/nemotron_vlm_dataset_v2.
 This functionality is currently in beta and has been tested on `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16`.
 
-### NeMo Example Script
+### Megatron-Bridge Example Script
 
-NeMo 2.0 framework PTQ and TensorRT-LLM deployment examples are maintained in the NeMo GitHub repo. Please refer to the [NeMo PTQ documentation](https://docs.nvidia.com/nemo-framework/user-guide/latest/model-optimization/quantization/quantization.html) for more details.
+Please refer to [examples/megatron_bridge/README.md](../megatron_bridge/README.md) for example scripts for PTQ with Megatron-Bridge.
 
 ### Megatron-LM Example Script
 
@@ -298,7 +294,7 @@ accelerate launch --config_file fsdp2.yaml \
     --fsdp_transformer_layer_cls_to_wrap=<decoder_layer_name>
      multinode_ptq.py \
     --pyt_ckpt_path <path_to_model> \
-    --qformat <fp8/nvfp4/nvfp4_mlp_only/nvfp4_omlp_only/nvfp4_awq/int8> \
+    --qformat <fp8/nvfp4/nvfp4_mlp_only/nvfp4_experts_only/nvfp4_omlp_only/nvfp4_awq/int8> \
     --kv_cache_qformat <fp8/nvfp4/nvfp4_affine/none> \
     --batch_size <calib_batch_size> \
     --calib_size <num_calib_samples> \
@@ -315,7 +311,7 @@ The exported checkpoint can be deployed using TensorRT-LLM/ vLLM/ SGLang. For mo
 
 ### TensorRT-LLM Validation
 
-A list of accuracy validation benchmarks are provided in the [llm_eval](../llm_eval/README.md) directory. Right now MMLU, and MTbench are supported in this example by specifying the `--tasks` flag running the scripts mentioned above. For MTBench, the task only runs the answer generation stage. Please follow [fastchat](https://github.com/lm-sys/FastChat/tree/main/fastchat/llm_judge) to get the evaluation judge score.
+A list of accuracy validation benchmarks are provided in the [llm_eval](../llm_eval/README.md) directory. Right now MMLU is supported in this example by specifying the `--tasks` flag running the scripts mentioned above.
 
 The `benchmark_suite.py` script is used as a fast performance benchmark. For details, please refer to the [TensorRT-LLM documentation](https://github.com/NVIDIA/TensorRT-LLM/blob/main/benchmarks/)
 
@@ -463,4 +459,4 @@ There are many quantization schemes supported in the example scripts:
 
 1. The W4A8 AWQ is an extension of the INT4 AWQ quantization that it also uses FP8 for activation for more speed up and acceleration.
 
-1. The [NVFP4](https://blogs.nvidia.com/blog/generative-ai-studio-ces-geforce-rtx-50-series/) is one of the new FP4 formats supported by NVIDIA Blackwell GPU and demonstrates good accuracy compared with other 4-bit alternatives. NVFP4 can be applied to both model weights as well as activations, providing the potential for both a significant increase in math throughput and reductions in memory footprint and memory bandwidth usage compared to the FP8 data format on Blackwell. For higher accuracy with NVFP4 PTQ, we recommend `nvfp4_mlp_only` or `nvfp4_omlp_only`. `nvfp4_mlp_only` restricts NVFP4 quantization to MLP (and MoE) layers only, leaving attention layers in higher precision. `nvfp4_omlp_only` extends this by also quantizing the `o_proj` layer, providing a middle ground between full NVFP4 and MLP-only quantization.
+1. The [NVFP4](https://blogs.nvidia.com/blog/generative-ai-studio-ces-geforce-rtx-50-series/) is one of the new FP4 formats supported by NVIDIA Blackwell GPU and demonstrates good accuracy compared with other 4-bit alternatives. NVFP4 can be applied to both model weights as well as activations, providing the potential for both a significant increase in math throughput and reductions in memory footprint and memory bandwidth usage compared to the FP8 data format on Blackwell. For higher accuracy with NVFP4 PTQ, we recommend `nvfp4_mlp_only`, `nvfp4_experts_only`, or `nvfp4_omlp_only`. `nvfp4_mlp_only` restricts NVFP4 quantization to MLP (and MoE) layers only, leaving attention layers in higher precision. `nvfp4_experts_only` quantizes only expert layers (`*mlp.experts*` and `*block_sparse_moe*`), ideal for MoE models. `nvfp4_omlp_only` extends MLP-only by also quantizing the `o_proj` layer, providing a middle ground between full NVFP4 and MLP-only quantization.

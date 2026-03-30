@@ -31,6 +31,7 @@ from modelopt.torch.export import export_hf_checkpoint
 from modelopt.torch.sparsity.attention_sparsity.config import (
     SKIP_SOFTMAX_CALIB,
     SKIP_SOFTMAX_DEFAULT,
+    SPARSE_SOFTMAX_DEFAULT,
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 
@@ -43,6 +44,7 @@ mto.enable_huggingface_checkpointing()
 SPARSE_ATTN_CFG_CHOICES = {
     "skip_softmax": SKIP_SOFTMAX_DEFAULT,
     "skip_softmax_calib": SKIP_SOFTMAX_CALIB,
+    "sparse_softmax": SPARSE_SOFTMAX_DEFAULT,
 }
 
 
@@ -144,13 +146,13 @@ def main(args):
 
     print(f"Loading model: {args.pyt_ckpt_path}")
 
-    # Load model and tokenizer
-    # Note: attn_implementation="eager" is required for calibration to work properly
-    # (flash_attention_2 or sdpa would bypass the softmax patching needed for stats collection)
+    # No need to specify attn_implementation here — mtsa.sparsify() sets it
+    # automatically ("eager" for pytorch backend, "modelopt_triton" for triton).
     model = AutoModelForCausalLM.from_pretrained(
         args.pyt_ckpt_path,
         attn_implementation="eager",
-        torch_dtype=torch.bfloat16,
+        torch_dtype="auto",
+        device_map="auto",
     )
     tokenizer = AutoTokenizer.from_pretrained(args.pyt_ckpt_path)
 
@@ -158,31 +160,27 @@ def main(args):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Move model to GPU if available
-    if torch.cuda.is_available():
-        model = model.cuda()
-        print("Model moved to CUDA")
-
     # Generate sample output BEFORE sparse attention
     print("\nGenerating sample output before sparse attention...")
     output_before, test_prompt, input_ids = generate_sample_output(model, tokenizer, args)
 
     # Apply sparse attention with optional calibration
-    print(f"\nApplying sparse attention: {args.sparse_attn}")
-    sparse_config = SPARSE_ATTN_CFG_CHOICES[args.sparse_attn]
+    print(f"\nApplying sparse attention: {args.sparse_attn} (backend={args.backend})")
+    sparse_config = copy.deepcopy(SPARSE_ATTN_CFG_CHOICES[args.sparse_attn])
 
-    # Override calibration options if provided via CLI
+    # Apply CLI overrides to sparse_cfg
+    sparse_cfg = sparse_config.get("sparse_cfg", {})
+    if args.backend is not None:
+        for layer_cfg in sparse_cfg.values():
+            if isinstance(layer_cfg, dict) and "method" in layer_cfg:
+                layer_cfg["backend"] = args.backend
     if args.target_sparse_ratio is not None:
-        sparse_config = copy.deepcopy(sparse_config)
-        sparse_cfg = sparse_config.get("sparse_cfg", {})
-        if isinstance(sparse_cfg, dict) and "calibration" in sparse_cfg:
-            calibration_cfg = sparse_cfg["calibration"]
-            if isinstance(calibration_cfg, dict):
-                calibration_cfg["target_sparse_ratio"] = {
-                    "prefill": args.target_sparse_ratio,
-                    "decode": args.target_sparse_ratio,
-                }
-                print(f"Overriding target_sparse_ratio to {args.target_sparse_ratio}")
+        calib = sparse_cfg.setdefault("calibration", {})
+        assert isinstance(calib, dict)
+        calib["target_sparse_ratio"] = {
+            "prefill": args.target_sparse_ratio,
+            "decode": args.target_sparse_ratio,
+        }
 
     model = mtsa.sparsify(model, config=sparse_config)
     print("Sparse attention applied successfully!")
@@ -245,9 +243,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--backend",
         type=str,
-        default="pytorch",
-        choices=["pytorch"],
-        help="Backend for sparse attention (default: pytorch). More backends coming soon.",
+        default=None,
+        choices=["pytorch", "triton"],
+        help="Backend for sparse attention. Overrides the config default if set. "
+        "'triton' uses the fused Triton kernel.",
     )
 
     # Sequence length arguments

@@ -322,8 +322,22 @@ def load_onnx_model(
 
     # Load the model and weights
     onnx_model = onnx.load(onnx_path, load_external_data=True)
-    size_threshold = 2 * (1024**3)  # 2GB
-    use_external_data_format = onnx_model.ByteSize() > size_threshold or use_external_data_format
+    if not use_external_data_format:
+        try:
+            model_size = onnx_model.ByteSize()
+        except Exception as e:
+            logger.warning(
+                "Failed to compute model size with ByteSize (%s). Saving tensors as external data.",
+                e,
+            )
+            use_external_data_format = True
+        else:
+            if model_size <= 0 or model_size >= onnx.checker.MAXIMUM_PROTOBUF:
+                use_external_data_format = True
+                logger.debug(
+                    "Model is too large to save as a single file but 'use_external_data_format'"
+                    " is False. Saving tensors as external data, regardless."
+                )
 
     # If inputs are dynamic and override shapes are given, set them as static
     dynamic_inputs = get_dynamic_graph_inputs(onnx_model)

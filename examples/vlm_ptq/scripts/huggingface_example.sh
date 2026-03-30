@@ -30,7 +30,7 @@ for i in $(env | grep ^PMI_ | cut -d"=" -f 1); do unset -v $i; done
 for i in $(env | grep ^PMIX_ | cut -d"=" -f 1); do unset -v $i; done
 
 if [ -z "$MODEL_PATH" ]; then
-    echo "Unsupported model argument: Expected a huggingface model path or model name or a nemo path" >&2
+    echo "Unsupported model argument: Expected a huggingface model path or model name" >&2
     exit 1
 fi
 
