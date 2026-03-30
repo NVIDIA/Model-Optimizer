@@ -352,11 +352,14 @@ def run_sparse(pipeline, args, output_dir, target_sparsity):
     return elapsed
 
 
-FIXED_THRESHOLDS = {
-    75: 0.054199,  # p25 from calibration at 75% sparsity
-    50: 0.234375,  # p50 from calibration at 50% sparsity
-    25: 0.535156,  # p75 from calibration at 25% sparsity
-}
+# Old per-row percentile thresholds (before per-tile min-gap fix).
+# Cleared to force fresh calibration with the corrected per-tile calibration.
+# FIXED_THRESHOLDS = {
+#     75: 0.054199,  # p25 from old per-row calibration
+#     50: 0.234375,  # p50 from old per-row calibration
+#     25: 0.535156,  # p75 from old per-row calibration
+# }
+FIXED_THRESHOLDS = {}
 
 
 def run_sparse_v25(

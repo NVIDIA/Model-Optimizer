@@ -394,6 +394,35 @@ class FlashSkipSoftmax(SparseAttentionMethod):
             from ..kernels.diffusers_eager_attention import get_skip_softmax_attention_backend
 
             stack.enter_context(get_skip_softmax_attention_backend())
+
+            # Patch dispatch_attention_fn to ignore processor-level backend kwarg.
+            # Without this, processors like WanAttnProcessor pass their stored
+            # backend directly, bypassing the context manager's eager backend.
+            import diffusers.models.attention_dispatch as _dispatch_mod
+            from diffusers.models.attention_dispatch import (
+                dispatch_attention_fn as _orig_dispatch,
+            )
+
+            def _patched_dispatch(query, key, value, *, backend=None, **kwargs):
+                return _orig_dispatch(query, key, value, backend=None, **kwargs)
+
+            stack.enter_context(
+                replace_function(_dispatch_mod, "dispatch_attention_fn", _patched_dispatch)
+            )
+
+            # Also patch modules with direct import references (e.g. transformer_wan)
+            import diffusers.models.transformers
+
+            for attr in dir(diffusers.models.transformers):
+                mod = getattr(diffusers.models.transformers, attr, None)
+                if (
+                    mod is not None
+                    and hasattr(mod, "dispatch_attention_fn")
+                    and getattr(mod, "dispatch_attention_fn", None) is _orig_dispatch
+                ):
+                    stack.enter_context(
+                        replace_function(mod, "dispatch_attention_fn", _patched_dispatch)
+                    )
         except (ImportError, RuntimeError):
             pass
 

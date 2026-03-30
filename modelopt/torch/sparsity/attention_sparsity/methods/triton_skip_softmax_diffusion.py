@@ -61,10 +61,13 @@ class TritonSkipSoftmaxDiffusion(SparseAttentionMethod):
         self.enable_v25 = config.get("enable_v25", False)
         self.enable_lite_attention = config.get("enable_lite_attention", False)
         self.lite_threshold = config.get("lite_threshold", -5.0)
+        # LLM-style: normalize_by_seqlen=False uses log2(threshold) directly
+        # Diffusion-style: normalize_by_seqlen=True uses -threshold * log2(seq_k)
+        self.normalize_by_seqlen = config.get("normalize_by_seqlen", True)
 
         # These are set by the Triton kernel integration and read by HF/diffusers backends
         self.skip_softmax_threshold: float | None = None
-        self.skip_softmax_normalize_by_seqlen: bool = True
+        self.skip_softmax_normalize_by_seqlen: bool = self.normalize_by_seqlen
 
     def set_calibration_mode(self, enabled: bool):
         """Set calibration mode."""
@@ -134,17 +137,29 @@ class TritonSkipSoftmaxDiffusion(SparseAttentionMethod):
         total_blocks = num_block_rows * num_block_cols
 
         if self._calibration_mode:
-            # Collect per-row normalized gaps for percentile calibration.
+            # Collect per-tile min gaps for percentile calibration.
             # gap shape: [batch, heads, block_rows, br, block_cols]
-            # We collect ALL per-row gaps (not per-block min) because the
-            # percentile on per-row gaps produces the correct threshold for
-            # the block-level skip decision (skip block if ALL rows agree).
-            normalized_gap = gap / log_seq_k
+            #
+            # The kernel skips a tile only when ALL rows agree (min of row
+            # gaps >= threshold). So the calibration must collect per-tile
+            # min gaps — the minimum normalized gap across the br rows within
+            # each tile — to match the kernel's skip decision granularity.
+            normalized_gap = gap / log_seq_k if self.normalize_by_seqlen else gap
 
-            # Exclude padded rows/tiles: padded positions have block_max = dtype.min
+            # Exclude padded rows: set padded positions to +inf so they
+            # don't affect the min (padded rows have block_max = dtype.min)
             valid_mask = block_max > torch.finfo(attn_weights.dtype).min
-            valid_gaps = normalized_gap[valid_mask].detach().float().cpu().numpy()
+            normalized_gap[~valid_mask] = float("inf")
+
+            # Per-tile min gap: min over br rows (dim=-2)
+            # [batch, heads, block_rows, block_cols]
+            tile_min_gap = normalized_gap.min(dim=-2)[0]
+
+            # Exclude fully-padded tiles (all rows padded → min is still inf)
+            tile_valid = tile_min_gap < float("inf")
+            valid_gaps = tile_min_gap[tile_valid].detach().float().cpu().numpy()
             del gap, normalized_gap, valid_mask, block_max, block_max_cummax
+            del tile_min_gap, tile_valid
 
             stats = {
                 "sparsity": [0.0],
@@ -226,20 +241,115 @@ class TritonSkipSoftmaxDiffusion(SparseAttentionMethod):
         else:
             yield from self._triton_inference_context(module)
 
+    def _compute_tiled_gaps(self, query, key):
+        """Compute per-tile min gaps from Q/K without materializing the full score matrix.
+
+        Streams KV tiles left-to-right, maintaining a running per-row cummax.
+        For each tile, computes the per-row gap and immediately reduces to
+        min-over-rows — only 1 scalar per tile is kept.
+
+        Memory: O(num_br × br) for running_max, not O(num_br × br × num_bc).
+
+        Args:
+            query: [B, seq_q, heads, head_dim] (diffusers convention)
+            key: [B, seq_k, heads, head_dim]
+
+        Returns:
+            1D numpy array of per-tile min normalized gaps
+        """
+        import numpy as np
+
+        B, seq_q, heads, head_dim = query.shape
+        seq_k = key.shape[1]
+        scale = 1.0 / math.sqrt(head_dim)
+        log_seq_k = math.log(seq_k)
+        br, bc = self.br, self.bc
+
+        padded_q = math.ceil(seq_q / br) * br
+        num_br = padded_q // br
+        num_bc = math.ceil(seq_k / bc)
+
+        all_tile_gaps = []
+
+        for b in range(B):
+            for h in range(heads):
+                q_h = query[b, :, h, :]  # [seq_q, dim]
+                k_h = key[b, :, h, :]    # [seq_k, dim]
+
+                # Pad Q to multiple of br
+                if padded_q > seq_q:
+                    q_padded = torch.zeros(padded_q, head_dim, device=q_h.device, dtype=q_h.dtype)
+                    q_padded[:seq_q] = q_h
+                else:
+                    q_padded = q_h
+                q_blocks = q_padded.view(num_br, br, head_dim)  # [num_br, br, dim]
+
+                # Mask for valid rows (padded Q rows should not affect min)
+                valid_rows = torch.ones(num_br, br, device=q_h.device, dtype=torch.bool)
+                if padded_q > seq_q:
+                    last_valid = seq_q - (num_br - 1) * br
+                    if last_valid < br:
+                        valid_rows[num_br - 1, last_valid:] = False
+
+                # Running per-row cummax: [num_br, br]
+                running_max = torch.full(
+                    (num_br, br), float("-inf"), device=q_h.device, dtype=q_h.dtype
+                )
+
+                # Stream KV tiles left to right
+                for kbc in range(num_bc):
+                    k_start = kbc * bc
+                    k_end = min(k_start + bc, seq_k)
+                    k_tile = k_h[k_start:k_end]  # [<=bc, dim]
+
+                    # [num_br, br, <=bc] -> per-row max -> [num_br, br]
+                    tile_row_max = torch.bmm(
+                        q_blocks, k_tile.T.unsqueeze(0).expand(num_br, -1, -1)
+                    ).mul_(scale).max(dim=-1)[0]
+
+                    # gap = running_max - tile_row_max (before updating running_max)
+                    # For the first tile, running_max=-inf so gap=-inf (will be
+                    # replaced by 0 after max with tile_row_max)
+                    gap = running_max - tile_row_max  # [num_br, br], >= 0 for non-peak
+                    gap = gap.clamp(min=0.0)
+                    if self.normalize_by_seqlen:
+                        gap = gap / log_seq_k
+
+                    # Invalidate padded rows
+                    gap[~valid_rows] = float("inf")
+
+                    # Per-tile min gap: min over br rows -> [num_br]
+                    tile_min = gap.min(dim=1)[0]
+                    # Exclude fully-invalid tiles
+                    tile_valid_mask = tile_min < float("inf")
+                    if tile_valid_mask.any():
+                        all_tile_gaps.append(
+                            tile_min[tile_valid_mask].detach().float().cpu().numpy()
+                        )
+
+                    # Update running cummax
+                    running_max = torch.maximum(running_max, tile_row_max)
+
+        if all_tile_gaps:
+            return np.concatenate(all_tile_gaps)
+        return np.array([], dtype=np.float32)
+
+    # ------------------------------------------------------------------
+    # Global calibration dispatch hook (shared across all modules)
+    # ------------------------------------------------------------------
+    _calib_dispatch_installed = False
+    _calib_dispatch_lock = __import__("threading").Lock()
+    _calib_active_modules: list = []  # list of (method, module) pairs
+    _calib_call_idx = 0  # tracks which module the current dispatch call belongs to
+
     def _eager_calibration_context(self, module: "SparseAttentionModule"):
-        """Context manager for eager calibration (F.softmax patching)."""
-        import torch.nn.functional as F_module
+        """Context manager for calibration via dispatch_attention_fn hooking.
 
-        from modelopt.torch.quantization.utils import replace_function
-
-        original_softmax = F_module.softmax
-
-        def sparse_softmax(input, dim=-1, *args, **kwargs):
-            sparse_mask, stats = self.calculate_sparsity(input)
-            module._last_stats = stats
-            if not self._calibration_mode:
-                input = self.apply_sparsity(input, sparse_mask)
-            return original_softmax(input, dim, *args, **kwargs)
+        Installs a single global hook on dispatch_attention_fn (shared across all
+        modules). Each self-attention call increments a counter to map to the
+        correct sparse attention module.
+        """
+        cls = type(self)
 
         with ExitStack() as stack:
             from ..kernels import set_skip_softmax_context
@@ -247,15 +357,76 @@ class TritonSkipSoftmaxDiffusion(SparseAttentionMethod):
             set_skip_softmax_context(True)
             stack.callback(set_skip_softmax_context, False)
 
-            try:
-                from ..kernels.diffusers_eager_attention import get_skip_softmax_attention_backend
+            # Register this module
+            entry = (self, module)
+            cls._calib_active_modules.append(entry)
+            stack.callback(cls._calib_active_modules.remove, entry)
 
-                stack.enter_context(get_skip_softmax_attention_backend())
-            except (ImportError, RuntimeError):
-                pass
+            # Install global dispatch hook once
+            if not cls._calib_dispatch_installed:
+                cls._install_calib_dispatch(stack)
 
-            stack.enter_context(replace_function(torch.nn.functional, "softmax", sparse_softmax))
             yield
+
+    @classmethod
+    def _install_calib_dispatch(cls, stack):
+        """Install a single global dispatch_attention_fn hook for calibration."""
+        from modelopt.torch.quantization.utils import replace_function
+
+        try:
+            import diffusers.models.attention_dispatch as _dispatch_mod
+            from diffusers.models.attention_dispatch import (
+                dispatch_attention_fn as _orig_dispatch,
+            )
+        except ImportError:
+            return
+
+        def _capturing_dispatch(query, key, value, *, backend=None, **kwargs):
+            is_self_attn = query.shape[1] == key.shape[1] and query.shape[1] >= 1024
+
+            if is_self_attn and cls._calib_active_modules:
+                # Map call to module by round-robin index
+                idx = cls._calib_call_idx % len(cls._calib_active_modules)
+                cls._calib_call_idx += 1
+
+                method_inst, module_inst = cls._calib_active_modules[idx]
+
+                if method_inst._calibration_mode:
+                    gaps = method_inst._compute_tiled_gaps(query, key)
+                    if len(gaps) > 0:
+                        stats = {
+                            "sparsity": [0.0],
+                            "phase": "prefill",
+                            "total_blocks": 0,
+                            "sparse_blocks": [0],
+                            "sample_length": key.shape[1],
+                            "normalized_gaps": gaps,
+                        }
+                        module_inst._last_stats = stats
+
+            return _orig_dispatch(query, key, value, backend=backend, **kwargs)
+
+        stack.enter_context(
+            replace_function(_dispatch_mod, "dispatch_attention_fn", _capturing_dispatch)
+        )
+
+        # Also patch modules with direct import references
+        import diffusers.models.transformers
+
+        for attr in dir(diffusers.models.transformers):
+            mod = getattr(diffusers.models.transformers, attr, None)
+            if (
+                mod is not None
+                and hasattr(mod, "dispatch_attention_fn")
+                and getattr(mod, "dispatch_attention_fn", None) is _orig_dispatch
+            ):
+                stack.enter_context(
+                    replace_function(mod, "dispatch_attention_fn", _capturing_dispatch)
+                )
+
+        cls._calib_dispatch_installed = True
+        stack.callback(setattr, cls, "_calib_dispatch_installed", False)
+        stack.callback(setattr, cls, "_calib_call_idx", 0)
 
     def _triton_inference_context(self, module: "SparseAttentionModule"):
         """Context manager for Triton inference (fused kernel tile skipping)."""
@@ -273,7 +444,7 @@ class TritonSkipSoftmaxDiffusion(SparseAttentionMethod):
 
                     set_triton_skip_softmax_config(
                         threshold=threshold if not use_lite else None,
-                        normalize_by_seqlen=True,
+                        normalize_by_seqlen=self.normalize_by_seqlen,
                         enable_v25=self.enable_v25,
                     )
                     stack.callback(clear_triton_skip_softmax_config)
@@ -290,7 +461,7 @@ class TritonSkipSoftmaxDiffusion(SparseAttentionMethod):
                     set_ltx_triton_context(
                         active=True,
                         threshold=threshold if not use_lite else None,
-                        normalize_by_seqlen=True,
+                        normalize_by_seqlen=self.normalize_by_seqlen,
                         enable_v25=self.enable_v25,
                         lite_threshold=self.lite_threshold if use_lite else None,
                     )
@@ -302,7 +473,7 @@ class TritonSkipSoftmaxDiffusion(SparseAttentionMethod):
                     # Also set module flags for HF Triton backend (hf_triton_attention.py)
                     module._apply_skip_softmax = True
                     self.skip_softmax_threshold = threshold
-                    self.skip_softmax_normalize_by_seqlen = True
+                    self.skip_softmax_normalize_by_seqlen = self.normalize_by_seqlen
                     stack.callback(setattr, module, "_apply_skip_softmax", False)
 
             # Activate the diffusers Triton backend
