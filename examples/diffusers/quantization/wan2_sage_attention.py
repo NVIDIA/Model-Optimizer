@@ -62,6 +62,7 @@ Usage::
 """
 
 import argparse
+import os
 import time
 from contextlib import contextmanager
 
@@ -422,10 +423,11 @@ def compute_video_metrics(
 def compute_clip_score(
     frames: list,
     prompt: str,
+    clip_model_id: str = "openai/clip-vit-large-patch14",
     device: str = "cuda",
     max_frames: int = 16,
 ) -> float:
-    """Compute mean CLIP score (text–image cosine similarity) over video frames.
+    """Compute mean CLIP score (text-image cosine similarity) over video frames.
 
     Samples up to ``max_frames`` evenly from the sequence and returns the
     average cosine similarity between the CLIP text embedding of ``prompt``
@@ -433,20 +435,22 @@ def compute_clip_score(
     aligned with the prompt.
 
     Args:
-        frames:     List of PIL images (the generated video).
-        prompt:     The text prompt used to generate the video.
-        device:     Device for the CLIP model (``"cuda"`` or ``"cpu"``).
-        max_frames: Maximum number of frames to score (evenly sampled).
+        frames:        List of PIL images (the generated video).
+        prompt:        The text prompt used to generate the video.
+        clip_model_id: HuggingFace model ID or local path for CLIP.
+                       Pass ``HF_TOKEN`` env var for authenticated downloads.
+        device:        Device for the CLIP model (``"cuda"`` or ``"cpu"``).
+        max_frames:    Maximum number of frames to score (evenly sampled).
 
     Returns:
         Mean CLIP cosine similarity score in ``[-1, 1]``.
-        Typical values for good text-video alignment: ~0.25–0.35.
+        Typical values for good text-video alignment: ~0.25-0.35.
     """
     from transformers import CLIPModel, CLIPProcessor
 
-    clip_model_id = "openai/clip-vit-large-patch14"
-    processor = CLIPProcessor.from_pretrained(clip_model_id)
-    clip_model = CLIPModel.from_pretrained(clip_model_id).to(device)
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    processor = CLIPProcessor.from_pretrained(clip_model_id, token=token)
+    clip_model = CLIPModel.from_pretrained(clip_model_id, token=token).to(device)
     clip_model.eval()
 
     # Evenly sample frames
@@ -588,6 +592,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run baseline + all available kernels, report timing table",
     )
+    parser.add_argument(
+        "--clip-model",
+        type=str,
+        default="openai/clip-vit-large-patch14",
+        help=(
+            "CLIP model ID or local path for --compare CLIP scoring. "
+            "Set HF_TOKEN env var for authenticated HuggingFace downloads."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -608,11 +621,22 @@ def main() -> None:
         # --- CLIP scores (per-video semantic alignment with prompt) ---
         device = "cuda" if torch.cuda.is_available() else "cpu"
         print("\nComputing CLIP scores (prompt-video semantic alignment)...")
-        clip_base = compute_clip_score(frames_base, args.prompt, device=device)
-        clip_quant = compute_clip_score(frames_quant, args.prompt, device=device)
-        print(f"  baseline CLIP:  {clip_base:.4f}")
-        print(f"  {args.kernel} CLIP:  {clip_quant:.4f}  (Δ {clip_quant - clip_base:+.4f})")
-        print("  (typical range ~0.25-0.35; higher = more on-prompt)")
+        try:
+            clip_base = compute_clip_score(
+                frames_base, args.prompt, clip_model_id=args.clip_model, device=device
+            )
+            clip_quant = compute_clip_score(
+                frames_quant, args.prompt, clip_model_id=args.clip_model, device=device
+            )
+            print(f"  baseline CLIP:  {clip_base:.4f}")
+            print(f"  {args.kernel} CLIP:  {clip_quant:.4f}  (delta {clip_quant - clip_base:+.4f})")
+            print("  (typical range ~0.25-0.35; higher = more on-prompt)")
+            print(
+                "  Tip: set HF_TOKEN env var or use --clip-model <local-path> to avoid rate limits"
+            )
+        except OSError as e:
+            print(f"  WARNING: CLIP scoring failed ({e})")
+            print("  To fix: set HF_TOKEN env var or pass --clip-model <local-path-to-clip>")
 
         # --- Pixel-level metrics ---
         metrics = compute_video_metrics(frames_base, frames_quant)
