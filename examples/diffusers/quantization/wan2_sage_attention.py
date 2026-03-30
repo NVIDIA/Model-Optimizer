@@ -37,7 +37,7 @@ Four attention kernel variants are supported via ``--kernel``:
 ``nvfp4`` (always available)
     Python-level NVFP4 E2M1 attention. Inspired by SageAttention3:
     - Q and K: channel-smoothed, per-token scaled, rounded to nearest of 8 levels {0,0.5,1,1.5,2,3,4,6}
-    - V: kept in original precision (BF16) — SA3 applies FP4 to the post-softmax P matrix, not V
+    - V: quantized to FP8 E4M3 (448 levels vs 8 for FP4 — preserves content quality)
     - No CUDA kernel required. Use to measure accuracy vs FP8.
 
 Requirements::
@@ -93,7 +93,7 @@ KERNEL_CHOICES = [KERNEL_FP8, KERNEL_NVFP4, KERNEL_SAGE1, KERNEL_SAGE2_FP16, KER
 
 _KERNEL_DESCRIPTIONS = {
     KERNEL_FP8: "FP8 E4M3 QKV (Python-level, SA2-inspired smoothing, no CUDA kernel required)",
-    KERNEL_NVFP4: "NVFP4 E2M1 QK + BF16 V (Python-level, SA3-inspired: V not quantized to preserve content)",
+    KERNEL_NVFP4: "NVFP4 E2M1 QK + FP8 E4M3 V (Python-level, SA3-inspired)",
     KERNEL_SAGE1: "sageattn (SA1, INT8 QK + FP16 PV, auto-select)",
     KERNEL_SAGE2_FP16: "sageattn_qk_int8_pv_fp16_cuda (SA2, INT8 QK + FP16 PV, per-thread)",
     KERNEL_SAGE2_FP8: "sageattn_qk_int8_pv_fp8_cuda (SA2++, INT8 QK + FP8 PV, fp32+fp16 accum)",
@@ -309,11 +309,13 @@ def _nvfp4_sdpa(
     Quantizing V to FP4 causes severe color/texture loss because V carries the
     actual content that gets weighted and summed into the output.  Q and K are
     only used for computing routing weights, so their quantization noise is
-    far less visible.
+    far less visible.  V is quantized to FP8 E4M3 instead, which preserves
+    content quality while still reducing precision beyond BF16.
     """
     q_dq = _smooth_quantize_fp4(query)
     k_dq = _smooth_quantize_fp4(key)
-    return _orig_sdpa(q_dq, k_dq, value, is_causal=is_causal, scale=scale)
+    v_dq = _smooth_quantize_fp8(value)
+    return _orig_sdpa(q_dq, k_dq, v_dq, is_causal=is_causal, scale=scale)
 
 
 # ---------------------------------------------------------------------------
