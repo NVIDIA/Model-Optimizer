@@ -1581,6 +1581,8 @@ def sequential_calibrate(
     try:
         for layer_idx, layer in enumerate(transformer_layers):
             print_rank_0(f"Calibrating layer {layer_idx + 1}/{len(transformer_layers)}")
+            # Store layer_idx so gptq/GPTQHelper can access it for debugging
+            layer._seq_calib_layer_idx = layer_idx
             layer_inputs = input_getter.get_input_activations(layer, forward_loop)
 
             def _layer_forward_loop(m, _inputs=layer_inputs):
@@ -1762,14 +1764,31 @@ def gptq(
                 h = torch.cholesky_inverse(torch.linalg.cholesky(h))
                 self.h_inv = torch.linalg.cholesky(h, upper=True)
             except (RuntimeError, torch.linalg.LinAlgError):
-                print_rank_0("Warning: Hessian is not positive definite, using identity matrix")
-                self.h_inv = torch.eye(h.shape[0], device=h.device, dtype=h.dtype)
+                # Retry with 10x more dampening (matches reference implementation)
+                print_rank_0(
+                    f"Warning: Hessian not positive definite for {self.name}, "
+                    "retrying with 10x dampening"
+                )
+                h[diag_indices, diag_indices] += damp * 10
+                try:
+                    h = torch.cholesky_inverse(torch.linalg.cholesky(h))
+                    self.h_inv = torch.linalg.cholesky(h, upper=True)
+                except (RuntimeError, torch.linalg.LinAlgError):
+                    print_rank_0(
+                        f"Warning: Hessian still not positive definite for {self.name}, "
+                        "using identity matrix"
+                    )
+                    self.h_inv = torch.eye(h.shape[0], device=h.device, dtype=h.dtype)
 
         def _blockwise_update(self, block_size):
             """Column-wise GPTQ update using full-matrix QDQ.
 
             For each column, quantizes the full weight matrix via the quantizer and
             extracts the quantized column. This is the standard GPTQ approach.
+
+            For PSX LUTS vector quantizers, uses a two-phase approach:
+            1. Compute scales once per outer block via dynamic quantization
+            2. Use static (pre-scaled) quantization in the inner loop
 
             Reads/writes ``self.weight`` and ``self.h_inv`` in-place.
             """
@@ -1785,6 +1804,21 @@ def gptq(
                         f"GPTQ block_size ({block_size}) must be divisible by the quantizer"
                         f" group_size ({group_size})"
                     )
+
+            # Detect PSX LUTS vector quantizer for the fast static-scale path
+            is_psx_luts_vq = (
+                getattr(quantizer, "backend", None) == "psx_luts"
+                and quantizer.backend_extra_args.get("lut_type", "vector_lut") == "vector_lut"
+            )
+
+            if is_psx_luts_vq:
+                self._blockwise_update_psx_luts(block_size, quantizer)
+            else:
+                self._blockwise_update_default(block_size, quantizer)
+
+        def _blockwise_update_default(self, block_size, quantizer):
+            """Standard GPTQ blockwise update (full QDQ per column)."""
+            assert self.weight is not None and self.h_inv is not None
             num_cols = self.weight.shape[1]
 
             for block_start in range(0, num_cols, block_size):
@@ -1807,6 +1841,118 @@ def gptq(
                 self.weight[:, block_end:].addmm_(
                     errs, self.h_inv[block_start:block_end, block_end:], alpha=-1
                 )
+
+        @staticmethod
+        def _dynamic_blockwise_vector_quantization(
+            x, vector_lut, block_size=16, scale_type="e4m3", return_scales=False
+        ):
+            """Dynamic VQ: computes scales from input, returns quantized output (and optionally scales)."""
+            from luts import clip_vector_scalesign_fast
+
+            y = clip_vector_scalesign_fast(
+                x,
+                vector_lut,
+                block_size,
+                scale_type,
+                scale_algo="max",
+                sign_scale=True,
+                return_scales=return_scales,
+            )
+            if return_scales:
+                return y[0], y[1]
+            return y
+
+        @staticmethod
+        def _static_blockwise_vector_quantization(x, vector_lut, scales):
+            """Static VQ: uses pre-computed scales, returns quantized output."""
+            from luts import clip_vector_prescaled
+
+            return clip_vector_prescaled(x, vector_lut, scales)
+
+        def _blockwise_update_psx_luts(self, block_size, quantizer):
+            """GPTQ blockwise update for PSX LUTS vector quantizers.
+
+            Uses dynamic_blockwise_vector_quantization to pre-compute scales,
+            then static_blockwise_vector_quantization inside the GPTQ loop.
+
+            Follows the 3-loop structure from the VQ GPTQ reference
+            (adaptive_rounding.py: gptq_quantize_scaled_vq).
+            """
+            extra_args = quantizer.backend_extra_args
+            encode_format = quantizer.num_bits
+            encode_path = extra_args.get("encode_path", "")
+            if encode_path and not encode_path.endswith("/"):
+                encode_path += "/"
+            quant_block_size = extra_args.get("block_sizes", 16)
+            scale_type = extra_args.get("scale_type", "e4m3")
+
+            # Load the vector LUT codebook
+            import luts
+
+            if "sorted" not in encode_format:
+                values, _ = luts.encode(encode_format, path=encode_path, norm=False, cuda=True)
+            else:
+                sorted_codebook = torch.load(
+                    encode_path + encode_format + ".pt", map_location="cpu"
+                )
+                values = sorted_codebook["sorted_values"].cuda()
+
+            values = values.to(torch.float)
+            vector_size = values.shape[1]
+            assert self.weight is not None and self.h_inv is not None
+            out_features, num_cols = self.weight.shape
+
+            assert block_size % quant_block_size == 0, (
+                f"GPTQ block_size ({block_size}) must be a multiple of "
+                f"quant_block_size ({quant_block_size})"
+            )
+
+            # Outside GPTQ loop: dynamic quantization to get scales
+            _, scales = self._dynamic_blockwise_vector_quantization(
+                self.weight,
+                values,
+                block_size=quant_block_size,
+                scale_type=scale_type,
+                return_scales=True,
+            )
+
+            # Reshape flat scales to 2D for per-vector-group extraction
+            n_scale_blocks_per_row = num_cols // quant_block_size
+            scales_2d = scales.reshape(out_features, n_scale_blocks_per_row)
+
+            w = self.weight.clone()
+            q = torch.zeros_like(w)
+            h_inv = self.h_inv
+
+            for i in range(0, num_cols, block_size):
+                j_end = min(i + block_size, num_cols)
+                e = torch.zeros(out_features, j_end - i, dtype=w.dtype, device=w.device)
+
+                for j in range(i, j_end, vector_size):
+                    d = min(vector_size, j_end - j)
+                    sb = j // quant_block_size
+                    s = scales_2d[:, sb].contiguous()
+
+                    # Inside GPTQ loop: static quantization with pre-computed scales
+                    sub_vec = w[:, j : j + d].contiguous()
+                    if d == vector_size:
+                        q_sub = self._static_blockwise_vector_quantization(sub_vec, values, s)
+                    else:
+                        padded = torch.nn.functional.pad(sub_vec, (0, vector_size - d))
+                        q_sub = self._static_blockwise_vector_quantization(padded, values, s)[:, :d]
+
+                    q[:, j : j + d] = q_sub
+
+                    for k in range(d):
+                        col = j + k
+                        err = (w[:, col] - q[:, col]) / h_inv[col, col]
+                        e[:, col - i] = err
+                        w[:, col:j_end] -= err.unsqueeze(1) * h_inv[col, col:j_end].unsqueeze(0)
+
+                if j_end < num_cols:
+                    w[:, j_end:] -= e @ h_inv[i:j_end, j_end:]
+
+            self.weight = q
 
         def _print_mse_error(self, hessian):
             """Log Hessian-weighted relative MSE between ``self.weight`` and original weights."""
@@ -1847,6 +1993,12 @@ def gptq(
     print_rank_0("Updating weights using GPTQ algorithm...")
     for handle in gptq_handles.values():
         handle.update_weights(block_size, percdamp)
+        wq = handle.module.weight_quantizer
+        backend = getattr(wq, "backend", None)
+        print_rank_0(f"  [{handle.name}] weight_quantizer.backend={backend}")
+        if backend == "psx_luts":
+            wq.disable()
+            print_rank_0(f"  Disabled weight_quantizer for {handle.name}")
         handle.free()
     del gptq_handles
 
