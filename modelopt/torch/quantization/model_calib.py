@@ -1179,15 +1179,24 @@ def awq_lite(
                     module.parallel_state.data_parallel_group,
                 )
 
-    # Disable AWQ for uncalibrated experts (e.g. when moe_calib_experts_ratio < 1.0,
+    # Handle uncalibrated experts (e.g. when moe_calib_experts_ratio < 1.0,
     # some experts may never receive tokens during the cache phase, leaving act_scale
     # as a Python float instead of a tensor, which would crash in get_scale()).
+    # We fully handle them here: max calibrate weights, apply a neutral (all-ones)
+    # pre_quant_scale for export consistency, and disable AWQ search.
     for name, module in model.named_modules():
         if (
             is_quantized_linear(module)
             and hasattr(module, "awq_lite")
             and module.awq_lite.num_cache_steps == 0
         ):
+            with enable_weight_access_and_writeback(module, model, name_to_module):
+                max_calibrate(module, lambda module: module.weight_quantizer(module.weight))
+                ones_scale = torch.ones(
+                    module.weight.shape[1], dtype=module.weight.dtype, device=module.weight.device
+                )
+                module.input_quantizer._enable_pre_quant_scale = True
+                module.input_quantizer.pre_quant_scale = ones_scale
             module.awq_lite.is_enabled = False
 
     AWQLiteHelper.cache_mode = False
@@ -1223,16 +1232,18 @@ def awq_lite(
     for name, module in model.named_modules():
         if hasattr(module, "awq_lite"):
             if module.awq_lite.num_cache_steps == 0:
-                module.awq_lite.is_enabled = False
-            elif module.awq_lite.num_search_steps == 0:
-                module.awq_lite.is_enabled = False
-                warnings.warn(
-                    "awq_lite: Calling `forward_loop(model)` the second time did not forward data through the"
-                    f" {name}. Please provide a valid `forward_loop` function that can be used to"
-                    " forward data through the model many times."
-                )
-            with enable_weight_access_and_writeback(module, model, name_to_module):
-                postprocess(module, name)
+                # Already fully handled before search phase (max calibrate + ones pre_quant_scale)
+                pass
+            else:
+                if module.awq_lite.num_search_steps == 0:
+                    module.awq_lite.is_enabled = False
+                    warnings.warn(
+                        "awq_lite: Calling `forward_loop(model)` the second time did not forward"
+                        f" data through the {name}. Please provide a valid `forward_loop` function"
+                        " that can be used to forward data through the model many times."
+                    )
+                with enable_weight_access_and_writeback(module, model, name_to_module):
+                    postprocess(module, name)
 
             module.awq_lite.cleanup()
             if not debug:
