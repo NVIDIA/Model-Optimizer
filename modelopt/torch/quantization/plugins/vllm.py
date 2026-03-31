@@ -346,10 +346,9 @@ class _QuantFusedMoEBase(QuantModule):
             # First layer of expert
             A = self.w13_input_quantizer(A)  # noqa: N806
             if self.w13_weight_quantizer.is_enabled:
-                original_weight = self.w13_weight
-                self.w13_weight = self.w13_weight_quantizer(self.w13_weight)
+                orig, self.w13_weight = self.w13_weight, self.w13_weight_quantizer(self.w13_weight)
                 vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
-                self.w13_weight = original_weight
+                self.w13_weight = orig
             else:
                 vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
             if self.w13_output_quantizer.is_enabled:
@@ -357,10 +356,9 @@ class _QuantFusedMoEBase(QuantModule):
         elif B is self.w2_weight:
             A = self.w2_input_quantizer(A)  # noqa: N806
             if self.w2_weight_quantizer.is_enabled:
-                original_weight = self.w2_weight
-                self.w2_weight = self.w2_weight_quantizer(self.w2_weight)
+                orig, self.w2_weight = self.w2_weight, self.w2_weight_quantizer(self.w2_weight)
                 vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
-                self.w2_weight = original_weight
+                self.w2_weight = orig
             else:
                 vllm_fused_moe_package._invoke_fused_moe_kernel(A, B, C, *args, **kwargs)
             if self.w2_output_quantizer.is_enabled:
@@ -368,28 +366,24 @@ class _QuantFusedMoEBase(QuantModule):
         else:
             raise ValueError("Cannot determine first or second layer of expert")
 
+    @contextmanager
+    def _patch_moe_kernel(self):
+        """Temporarily replace vLLM fused_moe kernel with quantized version."""
+        for attr in ["invoke_fused_moe_kernel", "invoke_fused_moe_triton_kernel"]:
+            if hasattr(vllm_fused_moe_package, attr):
+                orig = getattr(vllm_fused_moe_package, attr)
+                setattr(vllm_fused_moe_package, "_invoke_fused_moe_kernel", orig)
+                setattr(vllm_fused_moe_package, attr, self.invoke_fused_moe_quantized)
+                try:
+                    yield
+                finally:
+                    setattr(vllm_fused_moe_package, attr, orig)
+                return
+        raise ValueError("fused_moe_kernel is not found")
+
     def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
-        # This is again due to the bad coding of vLLM
-        # fused_moe submodule is overwritten by the fused_moe function
-        # so we need to import the fused_moe module explicitly
-        assert vllm_fused_moe_package.invoke_fused_moe_kernel is not None
-        # This context manager will conflict with torch.compile
-        # with replace_function(
-        #     vllm_fused_moe_package,
-        #     "invoke_fused_moe_kernel",
-        #     self.invoke_fused_moe_quantized,
-        # ):
-        try:
-            vllm_fused_moe_package._invoke_fused_moe_kernel = (  # type: ignore[attr-defined]
-                vllm_fused_moe_package.invoke_fused_moe_kernel
-            )
-            vllm_fused_moe_package.invoke_fused_moe_kernel = self.invoke_fused_moe_quantized  # type: ignore[attr-defined]
-            output = super().forward(hidden_states, router_logits)
-            return output
-        finally:
-            vllm_fused_moe_package.invoke_fused_moe_kernel = (  # type: ignore[attr-defined]
-                vllm_fused_moe_package._invoke_fused_moe_kernel
-            )
+        with self._patch_moe_kernel():
+            return super().forward(hidden_states, router_logits)
 
     @torch.no_grad()
     def fold_weight(self, keep_attrs: bool = False):
