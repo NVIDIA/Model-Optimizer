@@ -1267,7 +1267,7 @@ class TensorQuantizer(nn.Module):
 def _amax_to_scale(amax: torch.Tensor, max_bound: float) -> torch.Tensor:
     """Convert amax to per-block scale, guarding against zeros."""
     scale = amax.float() / max_bound
-    scale = torch.where(scale == 0, torch.ones_like(scale), scale)
+    scale = torch.where(scale <= 0, torch.ones_like(scale), scale)
     return scale
 
 
@@ -1472,7 +1472,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
                 scale_raw = _amax_to_scale(_to_local(self._amax_learnt), self._quant_max_bound)
             else:
                 scale_raw = _to_local(self._per_block_scale).float()
-            scale_raw = scale_raw.clamp(min=0)
+                scale_raw = torch.where(scale_raw <= 0, torch.ones_like(scale_raw), scale_raw)
 
             # Step 2: Optional FP8 quantization of dequant scale
             scale = self._quantize_scale(scale_raw)
@@ -1481,7 +1481,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
                 scale_frozen_raw = _amax_to_scale(
                     _to_local(self._amax_frozen), self._quant_max_bound
                 )
-                scale_frozen = self._quantize_scale(scale_frozen_raw).to(inputs.dtype)
+                scale_frozen = self._quantize_scale(scale_frozen_raw)
                 quant_input = inputs.float() / scale_frozen.float().view(-1, 1)
             elif self._lsq or self._laq:
                 quant_input = inputs.float() / scale.float().view(-1, 1)
