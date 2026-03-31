@@ -20,18 +20,18 @@
 # Override model/quant via CLI:
 #   uv run launch.py --yaml examples/llm_ptq/hf_ptq.yaml \
 #       pipeline.global_vars.hf_model=Qwen/Qwen3-8B \
-#       pipeline.task_0.args='[--model,<<global_vars.hf_local>>Qwen/Qwen3-8B,--quant,nvfp4,--tasks,quant]' \
+#       pipeline.task_0.args='[--model,<<global_vars.hf_local>>Qwen/Qwen3-8B,--quant,nvfp4]' \
 #       --yes
 
-job_name: hf_ptq_nvfp4_mlp_only
+job_name: hf_ptq_nvfp4
 pipeline:
   skip: false
   allow_to_fail: false
-  note: "HF PTQ with nvfp4_mlp_only"
+  note: "HF PTQ with nvfp4"
 
   global_vars:
     hf_local: /hf-local/
-    hf_model: Qwen/Qwen3.5-9B
+    hf_model: Qwen/Qwen3-8B
 
   # Downloads model if needed, then runs huggingface_example.sh
   task_0:
@@ -40,7 +40,7 @@ pipeline:
       - --repo <<global_vars.hf_model>>
       - --local-dir <<global_vars.hf_local>><<global_vars.hf_model>>
       - --
-      - --quant nvfp4_mlp_only
+      - --quant nvfp4
       - --tasks quant
     slurm_config:
       _factory_: "slurm_factory"
