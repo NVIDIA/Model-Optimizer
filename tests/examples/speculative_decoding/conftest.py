@@ -13,30 +13,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-
 import pytest
-from _test_utils.examples.run_command import MODELOPT_ROOT, run_example_command
+import yaml
+from _test_utils.examples.run_command import run_example_command
 
 
 @pytest.fixture(scope="session", autouse=True)
 def tiny_daring_anteater_path(tmp_path_factory):
-    dataset_path = (
-        MODELOPT_ROOT / "examples/speculative_decoding/input_conversations/daring-anteater.jsonl"
+    tmp_dir = tmp_path_factory.mktemp("daring_anteater")
+    output_file = tmp_dir / "train.jsonl"
+
+    config = {
+        "outputs": [
+            {
+                "filename": str(output_file),
+                "global_limit": 100,
+                "sources": [{"name": "daring-anteater", "splits": {"all": 100}}],
+            }
+        ]
+    }
+    config_path = tmp_dir / "data_config.yaml"
+    config_path.write_text(yaml.dump(config))
+
+    run_example_command(
+        ["python", "prepare_input_conversations/make_dataset.py", "-f", str(config_path), "--full"],
+        "speculative_decoding",
     )
-    if not os.path.exists(dataset_path):
-        try:
-            run_example_command(
-                ["python", "prepare_input_conversations/add_daring_anteater.py"],
-                "speculative_decoding",
-            )
-        except Exception as e:
-            # Ignore rate-limiting errors
-            pytest.skip(f"Failed to prepare dataset: {e}")
-    output_path = tmp_path_factory.mktemp("daring_anteater") / "train.jsonl"
-    with open(dataset_path) as src, open(output_path, "w") as dst:
-        for i, line in enumerate(src):
-            if i >= 128:
-                break
-            dst.write(line)
-    return output_path
+
+    return output_file

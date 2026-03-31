@@ -80,6 +80,7 @@ def test_unified_hf_export_and_check_safetensors(
         pyt_ckpt_path=tiny_model_dir,
         qformat=qformat,
         export_path=output_dir,
+        dataset="cnn_dailymail",
     )
 
     # Run the command

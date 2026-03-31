@@ -71,7 +71,7 @@ class TestWhisper(WithRequirements):
         "command",
         [
             # Auto-batch-size computation seems to take >10mins for Whisper hence using a fixed batch size
-            PTQCommand(quant="fp8", calib_batch_size=16, min_sm=89),
+            PTQCommand(quant="fp8", calib_batch_size=16, calib_dataset="peoples_speech", min_sm=89),
         ],
         ids=PTQCommand.param_str,
     )

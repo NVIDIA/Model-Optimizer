@@ -287,9 +287,9 @@ class EagleModule(nn.Module):
                 num_layers=self.config.parallel_draft_heads_num_layers,
             )
 
-    def _maybe_init_rope(self):
+    def _maybe_init_rope(self, device=None):
         if self.config.eagle_decoder_type == "llama" and not hasattr(self, "rotary_emb"):
-            self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
+            self.rotary_emb = LlamaRotaryEmbedding(config=self.config, device=device)
 
     def _expand_first_attn_in_dim(self, first_layer_attn):
         """Modify qkv projection in first layer to accept 2h hidden size."""
@@ -567,10 +567,6 @@ class HFEagleModel(EagleModel):
 
         self.eagle_config = PretrainedConfig.from_dict(config.eagle_architecture_config)
         self.eagle_config.eagle_decoder_type = self.eagle_decoder_type
-        # Hidden size and vocab size must match base model
-        self.eagle_config.hidden_size = self._base_llm_config.hidden_size
-        self.eagle_config.vocab_size = self._base_llm_config.vocab_size
-        self.eagle_config.max_position_embeddings = self._base_llm_config.max_position_embeddings
         self.eagle_config.draft_vocab_size = getattr(
             self.eagle_config, "draft_vocab_size", self.eagle_config.vocab_size
         )
@@ -751,7 +747,10 @@ class HFEagleModel(EagleModel):
     ) -> BlockMask | torch.Tensor:
         """Return TTT attention_mask tensor of type BlockMask or Tensor depends on eagle attn impl."""
         msk_func = get_ttt_msk_func(seq_length, ttt_step)
-        dtypemin = torch.finfo(self._base_llm_config.dtype).min
+        dtype = (
+            self._base_llm_config.dtype or self.eagle_module.layers[0].input_layernorm.weight.dtype
+        )
+        dtypemin = torch.finfo(dtype).min
         q_len = seq_length
         kv_len = seq_length * (1 + ttt_step)
         if self.eagle_config._attn_implementation == "flex_attention":
@@ -767,7 +766,7 @@ class HFEagleModel(EagleModel):
                 torch.arange(kv_len).view(1, 1, 1, kv_len),
             ).to(self.device)
             tensor_mask = torch.full_like(
-                tensor_mask, 0, dtype=self._base_llm_config.dtype, device=self.device
+                tensor_mask, 0, dtype=dtype, device=self.device
             ).masked_fill(~tensor_mask, dtypemin)
 
             return tensor_mask
@@ -937,7 +936,7 @@ class HFEagleModel(EagleModel):
                 base_outputs,
             )
 
-        self.eagle_module._maybe_init_rope()
+        self.eagle_module._maybe_init_rope(device=input_ids.device)
 
         # ====Run eagle forward with extra training-time-test steps====
         for ttt_step in range(self.eagle_ttt_steps):
@@ -1070,7 +1069,7 @@ class HFEagleModel(EagleModel):
         else:
             eagle_input_hidden_states = base_model_hidden_states
 
-        self.eagle_module._maybe_init_rope()
+        self.eagle_module._maybe_init_rope(device=eagle_input_hidden_states.device)
         draft_tokens = []
         for step in range(steps):
             b, seq_length = eagle_ids.shape
