@@ -4,8 +4,9 @@
 # Default: Qwen/Qwen3.5-9B with nvfp4_mlp_only on 8xH200.
 #
 # Usage (Slurm):
-#   export SLURM_HOST=computelab-sc-01.nvidia.com
+#   export SLURM_HOST=<slurm-host>
 #   export SLURM_ACCOUNT=<your-team>
+#   export SLURM_PARTITION=<your-partition>  # default: batch
 #   export SLURM_JOB_DIR=/home/scratch.<user>/experiments
 #   export SLURM_HF_LOCAL=/home/scratch.<user>/hf-local
 #   export HF_TOKEN=<your-hf-token>  # for gated models; auto-injected into all tasks
@@ -19,9 +20,8 @@
 # Override model/quant via CLI:
 #   uv run launch.py --yaml examples/llm_ptq/hf_ptq.yaml \
 #       pipeline.global_vars.hf_model=Qwen/Qwen3-8B \
-#       pipeline.task_0.args='[--model,<<global_vars.hf_local>>Qwen/Qwen3-8B,--quant,nvfp4,--tp,1,--calib,512,--tasks,quant]' \
-#       pipeline.task_0.slurm_config.ntasks_per_node=1 \
-#       pipeline.task_0.slurm_config.gpus_per_node=1 --yes
+#       pipeline.task_0.args='[--model,<<global_vars.hf_local>>Qwen/Qwen3-8B,--quant,nvfp4,--tasks,quant]' \
+#       --yes
 
 job_name: hf_ptq_nvfp4_mlp_only
 pipeline:
@@ -44,10 +44,8 @@ pipeline:
       - --tasks quant
     slurm_config:
       _factory_: "slurm_factory"
-      # Find the exact partition name: ssh computelab-sc-01 && cdb find "gpu.product_name=*B200*" --fields "partition"
-      partition: b200@cr+mp-1000W/umbriel-b200@ts4/8gpu-224cpu-2048gb
       nodes: 1
-      ntasks_per_node: 4
-      gpus_per_node: 4
+      ntasks_per_node: 1
+      gpus_per_node: 1
       time: "04:00:00"
       container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc7

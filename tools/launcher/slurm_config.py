@@ -50,7 +50,7 @@ class SlurmConfig:
 def slurm_factory(
     host: str = os.environ.get("SLURM_HOST", ""),
     account: str = os.environ.get("SLURM_ACCOUNT", ""),
-    partition: str = "batch",
+    partition: str = os.environ.get("SLURM_PARTITION", "batch"),
     nodes: int = 1,
     ntasks_per_node: int = 1,
     gpus_per_node: int = 1,
