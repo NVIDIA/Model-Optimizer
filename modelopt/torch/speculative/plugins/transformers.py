@@ -35,8 +35,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-import transformers
-from packaging.version import Version
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
@@ -48,7 +46,6 @@ from transformers.models.llama.modeling_llama import (
 )
 from transformers.trainer_pt_utils import LabelSmoother
 from transformers.utils import ModelOutput
-from transformers.utils.quantization_config import CompressedTensorsConfig
 
 from ...export.plugins.hf_spec_export import (
     EagleExporter,
@@ -68,6 +65,7 @@ from ..utils import (
     get_ttt_msk_func,
     temporary_set_config_value,
 )
+from .modeling_fakebase import _BASE_MODEL_PATHS, _EMBED_TOKENS_PATHS, _LM_HEAD_PATHS
 
 __all__ = ["HFARValidation", "HFEagleModel", "HFMedusaModel"]
 
@@ -79,10 +77,7 @@ CACHED_SHARD_TTT_MASKS = {}
 
 def _get_empty_cache(config):
     """Return an empty cache. Handle different versions of transformers for unit tests."""
-    if Version(transformers.__version__) >= Version("4.54"):
-        return DynamicCache(config=config)
-    else:
-        return DynamicCache()
+    return DynamicCache(config=config)
 
 
 @MedusaDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
@@ -480,19 +475,9 @@ class HFEagleModel(EagleModel):
     def _find_base_model_parts(self):
         """Find model parts from different models and set base_{part}_path attributes."""
         base_model_parts_mapping = {
-            "base_model_path": [
-                "model.language_model",
-                "model",
-                "backbone",
-                "language_model.backbone",
-            ],
-            "base_model_embeddings_path": [
-                "model.embed_tokens",
-                "backbone.embeddings",
-                "language_model.backbone.embeddings",
-                "model.language_model.embed_tokens",
-            ],
-            "base_model_lm_head_path": ["lm_head", "language_model.lm_head"],
+            "base_model_path": _BASE_MODEL_PATHS,
+            "base_model_embeddings_path": _EMBED_TOKENS_PATHS,
+            "base_model_lm_head_path": _LM_HEAD_PATHS,
         }
 
         for name, paths in base_model_parts_mapping.items():
@@ -593,11 +578,6 @@ class HFEagleModel(EagleModel):
         if self.eagle_config._attn_implementation is None:
             self.eagle_config._attn_implementation = "sdpa"
 
-        # Patch for Kimi-K2-Thinking, avoid quantizing drafter
-        quant_config = getattr(self.config, "quantization_config", None)
-        if isinstance(quant_config, CompressedTensorsConfig):
-            quant_config.ignore.append("re:.*eagle_module.*")
-
         # Set default aux_hidden_state layers
         if (
             self.eagle_config.use_aux_hidden_state
@@ -607,7 +587,7 @@ class HFEagleModel(EagleModel):
 
         # Freeze all parameters
         if self.eagle_freeze_base_model:
-            for name, param in self.named_parameters():
+            for _, param in self.named_parameters():
                 param.requires_grad = False
 
         self.eagle_module = EagleModule(
@@ -790,8 +770,6 @@ class HFEagleModel(EagleModel):
                 tensor_mask, 0, dtype=self._base_llm_config.dtype, device=self.device
             ).masked_fill(~tensor_mask, dtypemin)
 
-            # Note: (hg) repeat mask for kimi-k2 compatibility
-            tensor_mask = tensor_mask.repeat(batch_size, 1, 1, 1)
             return tensor_mask
 
     def _base_model_forward(
@@ -917,7 +895,7 @@ class HFEagleModel(EagleModel):
             assert "base_model_outputs" in kwargs
             base_outputs = EagleBaseModelOutput.from_offline_dict(kwargs["base_model_outputs"])
             if base_outputs.logits is None:
-                base_outputs.logits = self.lm_head(base_outputs.out_hiddens)
+                base_outputs.logits = self._base_model_lm_head(base_outputs.out_hiddens)
             past_key_values = None
         else:
             with self._nvtx_range("base_model_forward"):

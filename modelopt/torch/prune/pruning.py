@@ -58,7 +58,7 @@ def prune(
                 will be converted into a search space and set up to automatically perform operations
                 required for Minitron-style pruning & search. The mode's config
                 is described in :class:`MCoreMinitronConfig<modelopt.torch.prune.config.MCoreMinitronConfig>`.
-                This mode is required to prune NVIDIA Megatron-Core / NeMo GPT-type models.
+                This mode is required to prune NVIDIA Megatron-Core GPT or Mamba models.
 
             If the mode argument is specified as a dictionary, the keys should indicate the mode and
             the values specify the per-mode configuration. If not provided, then default

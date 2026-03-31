@@ -215,7 +215,7 @@ class TestQuantSparseMoe:
         ref_block.load_state_dict(moe_block.state_dict())
         converted = QuantModuleRegistry.convert(moe_block)
 
-        x = torch.randn(1, 4, 32)
+        x = torch.randn(1, 4, 32, dtype=ref_block.gate.weight.dtype)
         with torch.no_grad():
             out_ref = ref_block(x)
             out_test = converted(x)
@@ -248,7 +248,7 @@ class TestQuantSparseMoe:
                 m._if_calib = True
                 break
 
-        x = torch.randn(1, 4, 32)
+        x = torch.randn(1, 4, 32, dtype=converted.gate.weight.dtype)
         with torch.no_grad():
             converted(x)
 
@@ -274,7 +274,7 @@ class TestQuantSparseMoe:
         # block was converted, not the full model).
         next(converted.experts.modules())._if_calib = True
 
-        x = torch.randn(1, 4, 32)
+        x = torch.randn(1, 4, 32, dtype=converted.gate.weight.dtype)
         with torch.no_grad():
             converted(x)
 
@@ -292,7 +292,7 @@ class TestQuantSparseMoe:
             top_k = converted.top_k if hasattr(converted, "top_k") else converted.gate.top_k
 
         converted.expert_token_count.zero_()
-        tokens = torch.randn(8, hidden_size)
+        tokens = torch.randn(8, hidden_size, dtype=converted.gate.weight.dtype)
         with torch.no_grad():
             converted.gate(tokens)
         assert converted.expert_token_count.sum().item() == 8 * top_k

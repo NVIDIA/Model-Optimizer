@@ -13,11 +13,10 @@ This section focuses on demonstrating how to apply Model Optimizer to perform kn
 | Pre-Requisites | Required & optional packages to use this technique | \[[Link](#pre-requisites)\] | |
 | Getting Started | Learn how to optimize your models using distillation to produce more intellegant smaller models | \[[Link](#getting-started)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/4_distillation.html)\] |
 | Support Matrix | View the support matrix to see compatibility and feature availability across different models | \[[Link](#support-matrix)\] | |
+| Distillation with Megatron-Bridge | Learn how to distill your models with Megatron-Bridge Framework | \[[Link](#knowledge-distillation-kd-in-nvidia-megatron-bridge-framework)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/4_distillation.html)\] |
 | Distillation with Megatron-LM | Learn how to distill your models with Megatron-LM Framework | \[[Link](#knowledge-distillation-kd-in-nvidia-megatron-lm-framework)\] | |
-| Distillation with NeMo | Learn how to distill your models with NeMo Framework | \[[Link](#knowledge-distillation-kd-in-nvidia-nemo-framework)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/4_distillation.html)\] |
 | Distillation with Huggingface | Learn how to distill your models with Hugging Face | \[[Link](#knowledge-distillation-kd-for-huggingface-models)\] | \[[docs](https://nvidia.github.io/Model-Optimizer/guides/4_distillation.html)\] |
 | Resources | Extra links to relevant resources | \[[Link](#resources)\] | |
-| NeMo Prune + Distill Simplified Flow | Example script demonstrating end-to-end pruning plus distillation in NeMo | \[[Link](../nemo_run/prune_distill/README.md)\] | |
 
 </div>
 
@@ -25,8 +24,8 @@ This section focuses on demonstrating how to apply Model Optimizer to perform kn
 
 ### Docker
 
-For Hugging Face models, please use the PyTorch docker image (e.g., `nvcr.io/nvidia/pytorch:25.06-py3`).
-For NeMo models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:25.09`) which has all the dependencies installed.
+For Hugging Face models, please use the PyTorch docker image (e.g., `nvcr.io/nvidia/pytorch:26.01-py3`).
+For Megatron-Bridge or Megatron-LM models, use the NeMo container (e.g., `nvcr.io/nvidia/nemo:26.02`) which has all the dependencies installed.
 Visit our [installation docs](https://nvidia.github.io/Model-Optimizer/getting_started/2_installation.html) for more information.
 
 Also follow the installation steps below to upgrade to the latest version of Model Optimizer and install example-specific dependencies.
@@ -132,7 +131,7 @@ Loss balancers:
 
 | Model | type | confirmed compatible |
 | :---: | :---: | :---: |
-| Nemotron | gpt | ✅ |
+| Nemotron | mamba hybrid | ✅ |
 | Llama 3 | llama | ✅ |
 | Llama 4 | llama | ✅ |
 | Gemma 2 | gemma | ✅ |
@@ -142,15 +141,13 @@ Loss balancers:
 | Qwen 3 | qwen3 | ✅ |
 | Mamba | mamba | ✅ |
 
+## Knowledge Distillation (KD) in NVIDIA Megatron-Bridge Framework
+
+Checkout the stand-alone distillation script in the [examples/megatron_bridge/](../megatron_bridge/README.md).
+
 ## Knowledge Distillation (KD) in NVIDIA Megatron-LM Framework
 
 Checkout the Knowledge Distillation example in the [Megatron-LM repository](https://github.com/NVIDIA/Megatron-LM/tree/main/examples/post_training/modelopt).
-
-## Knowledge Distillation (KD) in NVIDIA NeMo Framework
-
-Checkout the stand-alone distillation script in the [NeMo documentation](https://docs.nvidia.com/nemo-framework/user-guide/latest/model-optimization/distillation/distillation.html).
-
-You can also look at the NeMo tutorial notebooks [here](https://github.com/NVIDIA-NeMo/NeMo/tree/main/tutorials/llm/qwen/pruning-distillation) which showcase the usage of Minitron pruning followed by distillation for Qwen 3 8B step-by-step in NeMo framework. Hugging Face models can also be converted to NeMo format and used subsequently as shown in the tutorial.
 
 ## Knowledge Distillation (KD) for HuggingFace Models
 

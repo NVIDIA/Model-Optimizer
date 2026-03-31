@@ -120,7 +120,7 @@ def test_mcore_mamba_parameter_sorting(dist_workers):
     dist_workers.run(_test_mcore_mamba_parameter_sorting)
 
 
-def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
+def _test_mcore_mamba_hybrid_pruning(ckpt_dir, rank, size):
     channel_divisor = 4
 
     num_layers = min(size * 2, 8)
@@ -196,7 +196,7 @@ def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
     prune_minitron(
         model,
         constraints,
-        {"forward_loop": forward_loop, "checkpoint": ckpt_path},
+        {"forward_loop": forward_loop, "checkpoint": ckpt_dir},
         channel_divisor,
     )
 
@@ -224,16 +224,14 @@ def _test_mcore_mamba_hybrid_pruning(ckpt_path, rank, size):
 
     # Assert re-pruning from checkpoint works without running the forward loop again
     model = _get_model(initialize_megatron=False)
-    prune_minitron(model, constraints, {"checkpoint": ckpt_path}, channel_divisor)
+    prune_minitron(model, constraints, {"checkpoint": ckpt_dir}, channel_divisor)
 
 
 def test_mcore_mamba_hybrid_pruning(dist_workers, tmp_path):
-    dist_workers.run(
-        partial(_test_mcore_mamba_hybrid_pruning, tmp_path / "modelopt_minitron_scores.pth")
-    )
+    dist_workers.run(partial(_test_mcore_mamba_hybrid_pruning, tmp_path / "minitron_scores"))
 
 
-def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
+def _test_mcore_mamba_hybrid_pruning_nas(ckpt_dir, rank, size):
     set_seed(SEED)
     channel_divisor = 4
 
@@ -299,7 +297,7 @@ def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
     constraints = {"params": int(param_count * 0.7)}
     config = {
         "forward_loop": forward_loop,
-        "checkpoint": ckpt_path,
+        "checkpoint": ckpt_dir,
         "score_func": score_func,
         "max_width_pruning": 0.5,
         "max_depth_pruning": 0.5,
@@ -365,5 +363,5 @@ def _test_mcore_mamba_hybrid_pruning_nas(ckpt_path, rank, size):
 )
 def test_mcore_mamba_hybrid_pruning_nas(dist_workers, tmp_path):
     dist_workers.run(
-        partial(_test_mcore_mamba_hybrid_pruning_nas, tmp_path / "modelopt_minitron_scores.pth"),
+        partial(_test_mcore_mamba_hybrid_pruning_nas, tmp_path / "minitron_scores"),
     )
