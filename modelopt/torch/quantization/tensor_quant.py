@@ -661,7 +661,7 @@ class FP4CastSTEFunction(Function):
         """Backward pass: STE with clip mask at |x| <= 6.0."""
         (x,) = ctx.saved_tensors
         # STE with clip mask: pass gradient where |x| <= 6.0
-        grad = grad_outputs * (x.abs() <= 6.0).float()
+        grad = torch.where(x.abs() <= 6.0, grad_outputs, torch.zeros_like(grad_outputs))
         return grad, None, None
 
 
@@ -698,7 +698,11 @@ class IntCastSTEFunction(Function):
     def backward(ctx, grad_outputs):
         """Backward pass: STE with clip mask."""
         (x,) = ctx.saved_tensors
-        grad = grad_outputs * ((x >= ctx.min_bound) & (x <= ctx.max_bound)).float()
+        grad = torch.where(
+            (x >= ctx.min_bound) & (x <= ctx.max_bound),
+            grad_outputs,
+            torch.zeros_like(grad_outputs),
+        )
         return grad, None, None, None
 
 
