@@ -62,10 +62,11 @@ packager = run.PatternPackager(
         "modules/Megatron-LM/examples/*",
         "modules/Megatron-LM/*.py",
         "modules/Model-Optimizer/modelopt/*",
+        "modules/Model-Optimizer/modelopt_recipes/*",
         "modules/Model-Optimizer/examples/*",
         "common/*",
     ],
-    relative_path=[LAUNCHER_DIR] * 6,
+    relative_path=[LAUNCHER_DIR] * 7,
 )
 
 MODELOPT_SRC_PATH = os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/modelopt")
