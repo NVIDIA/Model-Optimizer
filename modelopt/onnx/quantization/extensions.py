@@ -19,6 +19,7 @@ import os
 import sys
 from warnings import warn
 
+# TODO: cppimport is no longer maintained, switch to a different library
 import cppimport
 
 try:
@@ -30,5 +31,9 @@ try:
 except Exception as e:
     warn(
         f"{e}\nUnable to load `modelopt_round_and_pack_ext', falling back to python based optimized version"
+    )
+    print(
+        "If you see `copy_file() got an unexpected keyword argument 'dry_run'`, you will need "
+        "https://github.com/tbenthompson/cppimport/pull/98 or downgrade setuptools until we have a workaround"
     )
     round_and_pack_ext = None
