@@ -285,7 +285,10 @@ def train():
     print_rank_0("Loading dataset...")
     if training_args.mode in ("eagle3", "dflash"):
         data_module = make_eagle_supervised_data_module(
-            tokenizer, data_args, train_len=training_args.training_seq_len
+            tokenizer,
+            data_args,
+            train_len=training_args.training_seq_len,
+            answer_only_loss=(training_args.mode == "dflash"),
         )
 
     trainer = EagleTrainerWithAccLog(

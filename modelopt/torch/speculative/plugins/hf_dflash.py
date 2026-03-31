@@ -531,8 +531,11 @@ class HFDFlashModel(DFlashModel):
         effective_len = n_blocks * block_size
         input_ids_trunc = input_ids[:, :effective_len]
         target_hidden = target_hidden[:, :effective_len, :]
-        # Loss mask
-        if attention_mask is not None:
+        # Loss mask: use labels (response-only) if available, else attention_mask (padding)
+        if labels is not None:
+            # labels == -100 means "ignore" (system/user tokens when answer_only_loss=True)
+            loss_mask_input = (labels[:, :effective_len] != -100).float()
+        elif attention_mask is not None:
             loss_mask_input = attention_mask[:, :effective_len].float()
         else:
             loss_mask_input = torch.ones(bsz, effective_len, device=device)
