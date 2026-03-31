@@ -241,7 +241,7 @@ def create_parallel_state():
         # EP group is only created for MoE models; dense models don't have one.
         ep_group = get_ep_group().device_group
     except (AssertionError, RuntimeError):
-        ep_group = None
+        ep_group = -1
     return ParallelState(dp_group, tp_group, ep_group)
 
 
