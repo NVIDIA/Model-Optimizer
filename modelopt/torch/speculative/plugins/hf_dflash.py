@@ -476,13 +476,8 @@ class HFDFlashModel(DFlashModel):
         effective_len = n_blocks * block_size
         input_ids_trunc = input_ids[:, :effective_len]
         target_hidden = target_hidden[:, :effective_len, :]
-        # Loss mask: use labels to identify response-only tokens
-        # labels has -100 (IGNORE_TOKEN_ID) for prompt/padding, valid ids for response
-        # This matches SpecForge's loss_mask behavior
-        if labels is not None:
-            labels_trunc = labels[:, :effective_len]
-            loss_mask_input = (labels_trunc != -100).float()
-        elif attention_mask is not None:
+        # Loss mask
+        if attention_mask is not None:
             loss_mask_input = attention_mask[:, :effective_len].float()
         else:
             loss_mask_input = torch.ones(bsz, effective_len, device=device)

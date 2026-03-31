@@ -186,12 +186,83 @@ class LanguageDataCollator:
             input_ids = tokenized_examples["input_ids"]
             labels = input_ids.new_full(input_ids.shape, IGNORE_TOKEN_ID)
             labels[..., :-1] = input_ids[..., 1:]
-            # When answer_only_loss=True, mask non-assistant tokens in labels
-            if self.answer_only_loss and "assistant_masks" in tokenized_examples:
-                assistant_mask = tokenized_examples["assistant_masks"]
-                labels[assistant_mask == 0] = IGNORE_TOKEN_ID
+            if self.answer_only_loss:
+                # Try tokenizer's assistant_masks first
+                if "assistant_masks" in tokenized_examples:
+                    assistant_mask = tokenized_examples["assistant_masks"]
+                    if isinstance(assistant_mask, torch.Tensor) and assistant_mask.any():
+                        labels[assistant_mask == 0] = IGNORE_TOKEN_ID
+                    else:
+                        # Fallback: derive from formatted text using regex
+                        labels = self._apply_answer_only_labels(examples, labels, input_ids)
+                else:
+                    labels = self._apply_answer_only_labels(examples, labels, input_ids)
             tokenized_examples["labels"] = labels
         return tokenized_examples
+
+    def _apply_answer_only_labels(self, examples, labels, input_ids):
+        """Derive response-only labels by finding assistant spans in formatted text.
+
+        Uses regex to find assistant response spans in the chat-template-formatted text,
+        then maps character positions to token positions via offset mapping.
+        Similar to SpecForge's _apply_loss_mask_from_chat_template.
+        """
+        import re
+
+        for batch_idx, conversation in enumerate(examples):
+            # Format with chat template
+            formatted = self.tokenizer.apply_chat_template(
+                conversation, tokenize=False, add_generation_prompt=False
+            )
+
+            # Tokenize with offset mapping
+            try:
+                encoding = self.tokenizer(
+                    formatted,
+                    return_offsets_mapping=True,
+                    max_length=self.train_len,
+                    truncation=True,
+                    add_special_tokens=False,
+                )
+                offsets = encoding["offset_mapping"]
+            except Exception:
+                # Tokenizer doesn't support offset mapping — keep all labels
+                continue
+
+            # Find assistant response spans
+            # Common patterns across chat templates
+            # Try to detect the assistant marker from the formatted text
+            assistant_markers = [
+                r"<\|im_start\|>assistant\n(.*?)(?:<\|im_end\|>|$)",  # Qwen/ChatML
+                r"<\|start_header_id\|>assistant<\|end_header_id\|>\n\n(.*?)(?:<\|eot_id\|>|$)",  # Llama3
+                r"\[/INST\](.*?)(?:</s>|$)",  # Llama2
+                r"assistant\n(.*?)(?:\n\n|$)",  # Generic
+            ]
+
+            found = False
+            for pattern in assistant_markers:
+                matches = list(re.finditer(pattern, formatted, re.DOTALL))
+                if matches:
+                    # Mask all tokens, then unmask assistant spans
+                    labels[batch_idx, :] = IGNORE_TOKEN_ID
+                    for match in matches:
+                        start_char = match.start(1)
+                        end_char = match.end(1)
+                        for tok_idx, (tok_start, tok_end) in enumerate(offsets):
+                            if tok_idx >= labels.shape[1]:
+                                break
+                            if tok_start >= start_char and tok_end <= end_char:
+                                # Restore the shifted label for this position
+                                if tok_idx < input_ids.shape[1] - 1:
+                                    labels[batch_idx, tok_idx] = input_ids[batch_idx, tok_idx + 1]
+                    found = True
+                    break
+
+            if not found:
+                # No assistant pattern found — keep all labels (don't mask)
+                pass
+
+        return labels
 
     def _process_text_sample(self, examples: list):
         tokenized_examples = self.tokenizer(
