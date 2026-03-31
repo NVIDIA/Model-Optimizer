@@ -764,7 +764,7 @@ class _AutoQuantizeBaseSearcher(BaseSearcher, ABC):
 
 def _get_auto_quantize_score(grad_output, output_diff):
     x = grad_output.float() * output_diff.float()
-    return x.to(torch.float64).square().sum()
+    return x.clamp(-1e10, 1e10).square().sum()
 
 
 def _add_auto_quantize_score(grad_output, output_diff, score_tensor):
