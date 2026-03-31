@@ -476,12 +476,12 @@ class HFDFlashModel(DFlashModel):
         effective_len = n_blocks * block_size
         input_ids_trunc = input_ids[:, :effective_len]
         target_hidden = target_hidden[:, :effective_len, :]
-        # Loss mask: prefer assistant_masks (response-only) if available
-        # assistant_masks comes from LanguageDataCollator with answer_only_loss=True
-        # This matches SpecForge's loss_mask which only trains on response tokens
-        assistant_masks = kwargs.get("assistant_masks", None)
-        if assistant_masks is not None:
-            loss_mask_input = assistant_masks[:, :effective_len].float()
+        # Loss mask: use labels to identify response-only tokens
+        # labels has -100 (IGNORE_TOKEN_ID) for prompt/padding, valid ids for response
+        # This matches SpecForge's loss_mask behavior
+        if labels is not None:
+            labels_trunc = labels[:, :effective_len]
+            loss_mask_input = (labels_trunc != -100).float()
         elif attention_mask is not None:
             loss_mask_input = attention_mask[:, :effective_len].float()
         else:

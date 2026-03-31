@@ -186,6 +186,10 @@ class LanguageDataCollator:
             input_ids = tokenized_examples["input_ids"]
             labels = input_ids.new_full(input_ids.shape, IGNORE_TOKEN_ID)
             labels[..., :-1] = input_ids[..., 1:]
+            # When answer_only_loss=True, mask non-assistant tokens in labels
+            if self.answer_only_loss and "assistant_masks" in tokenized_examples:
+                assistant_mask = tokenized_examples["assistant_masks"]
+                labels[assistant_mask == 0] = IGNORE_TOKEN_ID
             tokenized_examples["labels"] = labels
         return tokenized_examples
 
