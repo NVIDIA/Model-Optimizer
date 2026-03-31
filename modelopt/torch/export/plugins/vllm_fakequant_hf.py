@@ -20,12 +20,22 @@ import torch
 import torch.nn as nn
 
 import modelopt.torch.opt as mto
+from modelopt.torch.quantization.config import RotateConfig
 from modelopt.torch.quantization.conversion import quantizer_state
 from modelopt.torch.quantization.nn import QuantModule, TensorQuantizer
 from modelopt.torch.quantization.utils import get_quantizer_state_dict
 from modelopt.torch.utils import get_unwrapped_name
 
 __all__ = ["export_hf_vllm_fq_checkpoint"]
+
+
+def disable_rotate(quantizer: TensorQuantizer):
+    """Return a disabled copy of the quantizer's ``_rotate`` field, preserving its type."""
+    if isinstance(quantizer._rotate, RotateConfig):
+        return RotateConfig(enable=False)
+    if isinstance(quantizer._rotate, dict):  # backward compat: old checkpoints stored a dict
+        return dict(quantizer._rotate, enable=False)
+    return False
 
 
 def export_hf_vllm_fq_checkpoint(
@@ -118,7 +128,7 @@ def export_hf_vllm_fq_checkpoint(
                     quantizer.disable()
                     orig_rotate = quantizer._rotate
                     if quantizer.rotate_is_enabled:
-                        quantizer._rotate = False
+                        quantizer._rotate = disable_rotate(quantizer)
                     wqs_to_restore.append((quantizer, orig_rotate))
 
     quantizer_state_dict = get_quantizer_state_dict(model)
