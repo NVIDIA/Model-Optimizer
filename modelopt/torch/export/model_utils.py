@@ -51,6 +51,7 @@ MODEL_NAME_TO_TYPE = {
     "GLM": "glm",
     "InternLM2ForCausalLM": "internlm",
     "ExaoneForCausalLM": "exaone",
+    "NemotronH": "nemotron_h",
     "Nemotron": "gpt",
     "Deepseek": "deepseek",
     "Whisper": "whisper",

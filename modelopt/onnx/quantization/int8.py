@@ -35,6 +35,7 @@ from modelopt.onnx.quantization.graph_utils import (
     classify_partition_nodes,
     expand_node_names_from_patterns,
     filter_quantizable_kgen_heads,
+    find_conv_to_layernorm_nodes,
     find_nodes_from_convs_to_exclude,
     find_nodes_from_matmul_to_exclude,
     find_nodes_to_exclude,
@@ -88,12 +89,16 @@ def _find_nodes_to_quantize(
         quantizable_op_types,
         graph,
     )
+    # Find LayerNormalization nodes fed by Conv (CASK) partitions.
+    # These need Q/DQ on their input to enable faster INT8 kernels in TRT.
+    conv_to_ln_nodes = find_conv_to_layernorm_nodes(graph, cask_fusible_partitions)
+
     logger.info(
         f"Found {len(quantizable_partition_nodes)} quantizable partition "
         f"nodes and {len(quantizable_kgen_heads)} quantizable KGEN heads"
     )
 
-    quantizable_nodes = quantizable_kgen_heads + quantizable_partition_nodes
+    quantizable_nodes = quantizable_kgen_heads + quantizable_partition_nodes + conv_to_ln_nodes
     partially_quantizable_nodes = [dst for _, dst, _ in no_quantize_inputs]
     # Quantize all inputs of partially quantizable nodes by ORT
     # but remove QDQ from non-quantizable inputs in the post-processing step

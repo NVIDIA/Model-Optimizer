@@ -21,7 +21,7 @@ import torch
 
 import modelopt.torch.opt as mto
 from modelopt.torch.export import export_speculative_decoding
-from modelopt.torch.speculative.utils import load_vlm_or_llm_with_kwargs
+from modelopt.torch.speculative.utils import load_vlm_or_llm
 
 
 def parse_args():
@@ -38,7 +38,7 @@ def parse_args():
 mto.enable_huggingface_checkpointing()
 
 args = parse_args()
-_, model = load_vlm_or_llm_with_kwargs(args.model_path, torch_dtype="auto")
+model = load_vlm_or_llm(args.model_path, torch_dtype="auto")
 model.eval()
 with torch.inference_mode():
     export_speculative_decoding(
