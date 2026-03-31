@@ -1472,6 +1472,7 @@ class StaticBlockScaleQuantizer(TensorQuantizer):
                 scale_raw = _amax_to_scale(_to_local(self._amax_learnt), self._quant_max_bound)
             else:
                 scale_raw = _to_local(self._per_block_scale).float()
+            scale_raw = scale_raw.clamp(min=0)
 
             # Step 2: Optional FP8 quantization of dequant scale
             scale = self._quantize_scale(scale_raw)
