@@ -38,10 +38,7 @@ from vllm.attention.layer import Attention as VLLMAttention
 from vllm.v1.worker.gpu_worker import Worker as BaseWorker
 
 import modelopt.torch.sparsity.attention_sparsity as mtsa
-from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import (
-    ModelOptSparseAttentionImpl,
-    set_sparse_config,
-)
+from modelopt.torch.sparsity.attention_sparsity.plugins.vllm import ModelOptSparseAttentionImpl
 
 # ---------------------------------------------------------------------------
 # Configuration from environment variables
@@ -132,29 +129,53 @@ def _replace_attention_impl(worker, config: dict):
     if cfg is None:
         return
 
-    set_sparse_config(cfg)
-
     model = worker.model_runner.model
     if hasattr(model, "unwrap"):
         model = model.unwrap()
 
     patched = 0
     for name, module in model.named_modules():
-        if isinstance(module, VLLMAttention):
-            old_impl = module.impl
-            module.impl = ModelOptSparseAttentionImpl(
-                num_heads=old_impl.num_heads,
-                head_size=old_impl.head_size,
-                scale=old_impl.scale,
-                num_kv_heads=old_impl.num_kv_heads,
-                alibi_slopes=old_impl.alibi_slopes,
-                sliding_window=None,
-                kv_cache_dtype=old_impl.kv_cache_dtype,
-                logits_soft_cap=old_impl.logits_soft_cap,
-                attn_type=old_impl.attn_type,
-                kv_sharing_target_layer_name=old_impl.kv_sharing_target_layer_name,
-            )
-            patched += 1
+        if not isinstance(module, VLLMAttention):
+            continue
+
+        # Match per-layer sparse config using name-based patterns
+        layer_cfg = _match_sparse_config(name, cfg)
+        if layer_cfg is None or not layer_cfg.get("enable", True):
+            continue
+
+        # Build per-layer sparse kwargs
+        sparse_kw = {}
+        sparsity_n = layer_cfg.get("sparsity_n", 0)
+        if sparsity_n > 0:
+            sparse_kw["sparsity_n"] = sparsity_n
+            sparse_kw["sparsity_m"] = layer_cfg.get("sparsity_m", 4)
+            sparse_kw["num_sink_tokens"] = layer_cfg.get("num_sink_tokens", 0)
+            sparse_kw["dense_window_size"] = layer_cfg.get("dense_window_size", 1)
+        threshold = layer_cfg.get("skip_softmax_threshold")
+        if threshold:
+            sparse_kw["skip_softmax_threshold"] = threshold
+
+        # Replace impl and store per-layer config
+        old_impl = module.impl
+        new_impl = ModelOptSparseAttentionImpl(
+            num_heads=old_impl.num_heads,
+            head_size=old_impl.head_size,
+            scale=old_impl.scale,
+            num_kv_heads=old_impl.num_kv_heads,
+            alibi_slopes=old_impl.alibi_slopes,
+            sliding_window=None,  # overwritten below
+            kv_cache_dtype=old_impl.kv_cache_dtype,
+            logits_soft_cap=old_impl.logits_soft_cap,
+            attn_type=old_impl.attn_type,
+            kv_sharing_target_layer_name=old_impl.kv_sharing_target_layer_name,
+        )
+        # Copy the already-transformed sliding_window tuple directly,
+        # since __init__ transforms int -> (sw-1, 0) and we can't reverse it.
+        new_impl.sliding_window = old_impl.sliding_window
+        # Store per-layer sparse kwargs on the impl for forward() to read
+        new_impl.sparse_kw = sparse_kw
+        module.impl = new_impl
+        patched += 1
     print(f"[ModelOpt] Sparse attention: replaced impl on {patched} attention layers")
 
 

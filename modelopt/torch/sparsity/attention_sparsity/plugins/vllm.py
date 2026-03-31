@@ -33,15 +33,6 @@ from vllm.v1.attention.backends.flash_attn import (
 
 from modelopt.torch.kernels.triton_fa import attention as triton_attention
 
-# Sparse config is set by the worker before model loading
-_sparse_config: dict = {}
-
-
-def set_sparse_config(config: dict):
-    """Set the sparse attention config (called by the worker)."""
-    global _sparse_config
-    _sparse_config = config
-
 
 class ModelOptSparseAttentionImpl(FlashAttentionImpl):
     """Attention implementation that uses the ModelOpt Triton kernel.
@@ -78,25 +69,8 @@ class ModelOptSparseAttentionImpl(FlashAttentionImpl):
         key_cache, value_cache = kv_cache.unbind(0)
         page_size = key_cache.shape[1]
 
-        # Build sparse kwargs from global config
-        sparse_kw = {}
-        sparse_cfg = _sparse_config.get("sparse_cfg", {})
-        if isinstance(sparse_cfg, str):
-            sparse_cfg = {}
-        for pattern, layer_cfg in sparse_cfg.items():
-            if pattern in ("default", "calibration"):
-                continue
-            if isinstance(layer_cfg, dict) and layer_cfg.get("enable", True):
-                sparsity_n = layer_cfg.get("sparsity_n", 0)
-                if sparsity_n > 0:
-                    sparse_kw["sparsity_n"] = sparsity_n
-                    sparse_kw["sparsity_m"] = layer_cfg.get("sparsity_m", 4)
-                    sparse_kw["num_sink_tokens"] = layer_cfg.get("num_sink_tokens", 0)
-                    sparse_kw["dense_window_size"] = layer_cfg.get("dense_window_size", 1)
-                threshold = layer_cfg.get("skip_softmax_threshold")
-                if threshold:
-                    sparse_kw["skip_softmax_threshold"] = threshold
-                break
+        # Per-layer sparse kwargs (set by _replace_attention_impl in the worker)
+        sparse_kw = getattr(self, "sparse_kw", {})
 
         # Prepare metadata for our kernel
         q = query[:num_actual_tokens].contiguous()
