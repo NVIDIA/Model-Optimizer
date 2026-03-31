@@ -64,13 +64,13 @@ jobs:
         include:
           - example: gpu
             timeout: 45
-            container_image: pytorch:26.03-py3
+            container_image: pytorch:26.02-py3
           - example: gpu-megatron
             timeout: 45
-            container_image: pytorch:26.03-py3
+            container_image: pytorch:26.02-py3
           - example: gpu-trtllm
             timeout: 30
-            container_image: tensorrt-llm/release:1.3.0rc9
+            container_image: tensorrt-llm/release:1.3.0rc10
     runs-on: linux-amd64-gpu-rtxpro6000-latest-1
     timeout-minutes: ${{ matrix.timeout }}
     container: &gpu_container
@@ -85,9 +85,6 @@ jobs:
       - name: Setup environment variables
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
-      - name: Upgrade transformers for gpu-trtllm test since TRT-LLM container is using transformers 4.57
-        if: matrix.example == 'gpu-trtllm'
-        run: pip install -U transformers
       - name: Run gpu tests
         run: pip install tox-current-env && tox -e cuda13-${{ matrix.example }} --current-env
   gpu-tests-non-pr:

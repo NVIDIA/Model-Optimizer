@@ -1,4 +1,3 @@
 kernels>=0.9.0
-torch>2.7.1
 trackio
 trl>=0.21.0

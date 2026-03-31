@@ -17,19 +17,18 @@
 
 import os
 import sys
+from warnings import warn
 
 import cppimport
 
-from modelopt.onnx.logging_config import logger
-
 try:
-    logger.info("Loading extension modelopt_round_and_pack_ext...")
+    print("Loading extension modelopt_round_and_pack_ext...")
     path = os.path.join(os.path.dirname(__file__), "src")
     sys.path.append(path)
     round_and_pack_ext = cppimport.imp("modelopt_round_and_pack_ext")
     sys.path.remove(path)
 except Exception as e:
-    logger.warning(
+    warn(
         f"{e}\nUnable to load `modelopt_round_and_pack_ext', falling back to python based optimized version"
     )
     round_and_pack_ext = None

@@ -16,6 +16,7 @@
 import pytest
 import torch
 from _test_utils.torch.transformers_models import get_tiny_gpt_oss, get_tiny_llama, tf_output_tester
+from packaging.version import Version
 
 pytest.importorskip("peft")
 transformers = pytest.importorskip("transformers")
@@ -53,6 +54,9 @@ def test_convert_loralinear():
     tf_output_tester(model_ref, model_test)
 
 
+@pytest.mark.skipif(
+    Version(torch.__version__) < Version("2.9"), reason="torch 2.8 grouped_mm is CUDA-only"
+)
 def test_peft_flow(tmp_path):
     model_original = get_tiny_gpt_oss(num_hidden_layers=1)
 

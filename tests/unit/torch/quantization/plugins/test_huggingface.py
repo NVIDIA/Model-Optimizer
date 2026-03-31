@@ -155,6 +155,9 @@ def test_dbrx():
 @pytest.mark.parametrize("method", ["gradient", "kl_div"])
 @pytest.mark.parametrize("model_provider", [get_tiny_llama, get_tiny_qwen3_moe])
 def test_autoquantize_huggingface(model_provider, method):
+    if model_provider == get_tiny_qwen3_moe and Version(torch.__version__) < Version("2.9"):
+        pytest.skip("torch 2.8 grouped_mm is CUDA-only")
+
     model = model_provider()
     input_ids = model.dummy_inputs["input_ids"]
 

@@ -2,10 +2,9 @@
 --extra-index-url https://download.pytorch.org/whl/cu129
 accelerate
 datasets
-numpy
 onnxruntime-genai
 pandas
 sentencepiece>=0.2.1
 tokenizers>=0.14.1
 torch>=2.6.0
-transformers>=4.53
+transformers<5.0

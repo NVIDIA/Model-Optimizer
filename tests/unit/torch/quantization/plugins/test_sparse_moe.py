@@ -20,8 +20,12 @@ import copy
 import pytest
 import torch
 import torch.nn as nn
+from packaging.version import Version
 
 pytest.importorskip("transformers")
+
+if Version(torch.__version__) < Version("2.9"):
+    pytest.skip("torch 2.8 grouped_mm is CUDA-only", allow_module_level=True)
 
 from _test_utils.torch.transformers_models import get_tiny_qwen3_moe
 
