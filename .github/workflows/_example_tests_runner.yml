@@ -47,10 +47,6 @@ jobs:
           echo "PATH=${PATH}:/usr/local/tensorrt/targets/x86_64-linux-gnu/bin" >> $GITHUB_ENV
       - name: Install dependencies
         run: |
-          # Install git-lfs for Daring-Anteater dataset
-          apt-get update && apt-get install -y git-lfs
-          git lfs install --system
-
           # use `python -m pip` instead of `pip` to avoid conflicts with system pip for nemo containers
           python -m pip install ".${{ inputs.pip_install_extras }}"
 
