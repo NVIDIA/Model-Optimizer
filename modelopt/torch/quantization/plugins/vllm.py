@@ -147,7 +147,9 @@ def _get_device_dtype(module: torch.nn.Module) -> tuple:
         t0 = kv[0] if isinstance(kv, (list, tuple)) and len(kv) > 0 else kv
         if isinstance(t0, torch.Tensor) and t0.numel() > 0:
             spec = getattr(module, "kv_cache_dtype", t0.dtype)
-            out_dtype = t0.dtype if spec == "auto" else (_vllm_attr_dtype_to_torch(spec) or t0.dtype)
+            out_dtype = (
+                t0.dtype if spec == "auto" else (_vllm_attr_dtype_to_torch(spec) or t0.dtype)
+            )
             return t0.device, out_dtype
 
     # Shallow scan: weights often live on child modules rather than the attention module itself.
