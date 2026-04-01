@@ -300,6 +300,9 @@ def _quantize_p_to_nvfp4_pertile(p: torch.Tensor, tile: int = _NVFP4_TILE) -> to
     return p_dq
 
 
+_NVFP4_CHUNK = 512  # Row chunk size to avoid materialising the full NxN matrix
+
+
 def _nvfp4_sdpa(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -307,13 +310,16 @@ def _nvfp4_sdpa(
     is_causal: bool,
     scale: float | None,
 ) -> torch.Tensor:
-    """SA3-faithful NVFP4 attention with per-tile P quantization.
+    """SA3-faithful NVFP4 attention with per-tile P quantization and row chunking.
 
     Applies NVFP4 E2M1 to the post-softmax P matrix using per-tile scaling
-    (64×64 tiles), matching the granularity of a real flash-attention CUDA kernel.
+    (64x64 tiles), matching the granularity of a real flash-attention CUDA kernel.
     Per-tile is critical: per-row scaling lets a single outlier dominate the entire
     row, wasting most of the 8 FP4 levels on near-zero values.  Per-tile gives each
-    local region its own scale → all 8 levels cover the local probability range.
+    local region its own scale -> all 8 levels cover the local probability range.
+
+    Row chunking (512 rows at a time) avoids materialising the full N×N float32
+    matrix, which would OOM for long video sequences (~8k tokens on WAN2.2).
     """
     orig_dtype = query.dtype
     scale_factor = (query.size(-1) ** -0.5) if scale is None else scale
@@ -322,17 +328,25 @@ def _nvfp4_sdpa(
     k = key.float()
     v = value.float()
 
-    attn = torch.matmul(q, k.transpose(-2, -1)) * scale_factor
+    n, m = q.size(-2), k.size(-2)
+    out_chunks = []
 
-    if is_causal:
-        n, m = attn.size(-2), attn.size(-1)
-        causal_mask = torch.ones(n, m, dtype=torch.bool, device=attn.device).tril()
-        attn = attn.masked_fill(~causal_mask, float("-inf"))
+    for start in range(0, n, _NVFP4_CHUNK):
+        end = min(start + _NVFP4_CHUNK, n)
+        q_chunk = q[..., start:end, :]
 
-    p = torch.softmax(attn, dim=-1)
-    p_dq = _quantize_p_to_nvfp4_pertile(p)
+        attn_chunk = torch.matmul(q_chunk, k.transpose(-2, -1)) * scale_factor
 
-    return torch.matmul(p_dq, v).to(orig_dtype)
+        if is_causal:
+            rows = torch.arange(start, end, device=q.device).unsqueeze(1)
+            cols = torch.arange(m, device=q.device).unsqueeze(0)
+            attn_chunk = attn_chunk.masked_fill(cols > rows, float("-inf"))
+
+        p_chunk = torch.softmax(attn_chunk, dim=-1)
+        p_dq = _quantize_p_to_nvfp4_pertile(p_chunk)
+        out_chunks.append(torch.matmul(p_dq, v))
+
+    return torch.cat(out_chunks, dim=-2).to(orig_dtype)
 
 
 # ---------------------------------------------------------------------------
