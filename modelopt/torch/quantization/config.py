@@ -168,7 +168,7 @@ class QuantizerCfgEntry(TypedDict, total=False):
     enable: bool | None  # toggles matched quantizers on/off; independent of cfg
 
 
-def find_quant_cfg_entry(
+def find_quant_cfg_entry_by_path(
     quant_cfg_list: list[QuantizerCfgEntry], quantizer_path: str
 ) -> QuantizerCfgEntry:
     """Find the last entry in a ``quant_cfg`` list whose ``quantizer_path`` key equals the query.
@@ -349,7 +349,6 @@ FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG = {
                 "num_bits": (4, 3),
                 "block_sizes": {-1: 128, -2: 128},
             },
-            "enable": True,
         },
         {"quantizer_path": "*input_quantizer", "enable": False},
         *_default_disabled_quantizer_cfg,
@@ -366,7 +365,6 @@ INT4_BLOCKWISE_WEIGHT_ONLY_CFG = {
                 "num_bits": 4,
                 "block_sizes": {-1: 128},
             },
-            "enable": True,
         },
         {"quantizer_path": "*input_quantizer", "enable": False},
         *_default_disabled_quantizer_cfg,
@@ -384,7 +382,6 @@ INT4_AWQ_CFG = {
                 "num_bits": 4,
                 "block_sizes": {-1: 128, "type": "static"},
             },
-            "enable": True,
         },
         {"quantizer_path": "*input_quantizer", "enable": False},
         *_default_disabled_quantizer_cfg,
@@ -410,14 +407,12 @@ W4A8_AWQ_BETA_CFG = {
                     "num_bits": (4, 3),
                 },
             ],
-            "enable": True,
         },
         {
             "quantizer_path": "*input_quantizer",
             "cfg": {
                 "num_bits": (4, 3),
             },
-            "enable": True,
         },
         *_default_disabled_quantizer_cfg,
     ],
@@ -433,7 +428,6 @@ MXFP8_DEFAULT_CFG = {
                 "num_bits": (4, 3),
                 "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             },
-            "enable": True,
         },
         {
             "quantizer_path": "*input_quantizer",
@@ -441,7 +435,6 @@ MXFP8_DEFAULT_CFG = {
                 "num_bits": (4, 3),
                 "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             },
-            "enable": True,
         },
         *_default_disabled_quantizer_cfg,
     ],
@@ -457,7 +450,6 @@ MXFP6_DEFAULT_CFG = {
                 "num_bits": (3, 2),
                 "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             },
-            "enable": True,
         },
         {
             "quantizer_path": "*input_quantizer",
@@ -465,7 +457,6 @@ MXFP6_DEFAULT_CFG = {
                 "num_bits": (3, 2),
                 "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             },
-            "enable": True,
         },
         *_default_disabled_quantizer_cfg,
     ],
@@ -481,7 +472,6 @@ MXFP4_DEFAULT_CFG = {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             },
-            "enable": True,
         },
         {
             "quantizer_path": "*input_quantizer",
@@ -489,7 +479,6 @@ MXFP4_DEFAULT_CFG = {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             },
-            "enable": True,
         },
         *_default_disabled_quantizer_cfg,
     ],
@@ -505,7 +494,6 @@ W4A8_MXFP4_FP8_CFG = {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             },
-            "enable": True,
         },
         {
             "quantizer_path": "*input_quantizer",
@@ -525,7 +513,6 @@ MXINT8_DEFAULT_CFG = {
                 "num_bits": 8,
                 "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             },
-            "enable": True,
         },
         {
             "quantizer_path": "*input_quantizer",
@@ -533,21 +520,20 @@ MXINT8_DEFAULT_CFG = {
                 "num_bits": 8,
                 "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             },
-            "enable": True,
         },
         *_default_disabled_quantizer_cfg,
     ],
     "algorithm": None,
 }
 
+# KV-cache configs are designed to be merged with a primary quantization config (e.g.
+# FP8_DEFAULT_CFG) that already contains _base_disable_all.  They intentionally omit both
+# _base_disable_all and "algorithm" because these are provided by the primary config.
 FP8_KV_CFG = {
     "quant_cfg": [
         {
             "quantizer_path": "*[kv]_bmm_quantizer",
-            "cfg": {
-                "num_bits": (4, 3),
-            },
-            "enable": True,
+            "cfg": {"num_bits": (4, 3)},
         },
     ]
 }
@@ -604,9 +590,8 @@ NVFP4_W4A4_WEIGHT_MSE_FP8_SWEEP_CFG = {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
             },
-            "enable": True,
         },
-        {"quantizer_path": "*input_quantizer", "cfg": _nvfp4_cfg, "enable": True},
+        {"quantizer_path": "*input_quantizer", "cfg": _nvfp4_cfg},
         *_default_disabled_quantizer_cfg,
     ],
     "algorithm": {
@@ -624,9 +609,8 @@ NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG = {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 16, "type": "static", "scale_bits": (4, 3)},
             },
-            "enable": True,
         },
-        {"quantizer_path": "*input_quantizer", "cfg": _nvfp4_cfg, "enable": True},
+        {"quantizer_path": "*input_quantizer", "cfg": _nvfp4_cfg},
         *_default_disabled_quantizer_cfg,
     ],
     "algorithm": {
@@ -638,8 +622,8 @@ NVFP4_W4A4_WEIGHT_LOCAL_HESSIAN_CFG = {
 MAMBA_MOE_NVFP4_AGGRESSIVE_CFG = {
     "quant_cfg": [
         *_base_disable_all,
-        {"quantizer_path": "*weight_quantizer", "cfg": _nvfp4_cfg, "enable": True},
-        {"quantizer_path": "*input_quantizer", "cfg": _nvfp4_cfg, "enable": True},
+        {"quantizer_path": "*weight_quantizer", "cfg": _nvfp4_cfg},
+        {"quantizer_path": "*input_quantizer", "cfg": _nvfp4_cfg},
         *_default_disabled_quantizer_cfg,
         *_mamba_moe_disabled_quantizer_cfg,
     ],
@@ -648,8 +632,8 @@ MAMBA_MOE_NVFP4_AGGRESSIVE_CFG = {
 MAMBA_MOE_NVFP4_CONSERVATIVE_CFG = {
     "quant_cfg": [
         *_base_disable_all,
-        {"quantizer_path": "*weight_quantizer", "cfg": _nvfp4_cfg, "enable": True},
-        {"quantizer_path": "*input_quantizer", "cfg": _nvfp4_cfg, "enable": True},
+        {"quantizer_path": "*weight_quantizer", "cfg": _nvfp4_cfg},
+        {"quantizer_path": "*input_quantizer", "cfg": _nvfp4_cfg},
         *_default_disabled_quantizer_cfg,
         *_mamba_moe_disabled_quantizer_cfg,
         {"quantizer_path": "*mixer.in_proj*", "enable": False},  # Skip mamba linear
@@ -666,6 +650,7 @@ NVFP4_AWQ_FULL_CFG = _nvfp4_selective_quant_cfg(
     ["*"], algorithm={"method": "awq_full", "alpha_step": 0.1}
 )
 
+# See comment above FP8_KV_CFG — KV-cache configs omit _base_disable_all and "algorithm".
 NVFP4_AFFINE_KV_CFG = {
     "quant_cfg": [
         {
@@ -674,14 +659,13 @@ NVFP4_AFFINE_KV_CFG = {
                 **_nvfp4_cfg,
                 "bias": {-2: None, -4: None, "type": "static"},
             },
-            "enable": True,
         },
     ]
 }
 
 NVFP4_KV_CFG = {
     "quant_cfg": [
-        {"quantizer_path": "*[kv]_bmm_quantizer", "cfg": _nvfp4_cfg, "enable": True},
+        {"quantizer_path": "*[kv]_bmm_quantizer", "cfg": _nvfp4_cfg},
     ]
 }
 
@@ -689,8 +673,8 @@ NVFP4_KV_CFG = {
 NVFP4_FP8_MHA_CONFIG = {
     "quant_cfg": [
         *_base_disable_all,
-        {"quantizer_path": "*weight_quantizer", "cfg": _nvfp4_cfg, "enable": True},
-        {"quantizer_path": "*input_quantizer", "cfg": _nvfp4_cfg, "enable": True},
+        {"quantizer_path": "*weight_quantizer", "cfg": _nvfp4_cfg},
+        {"quantizer_path": "*input_quantizer", "cfg": _nvfp4_cfg},
         {"quantizer_path": "*output_quantizer", "enable": False},
         {
             "quantizer_path": "*q_bmm_quantizer",
@@ -726,9 +710,12 @@ NVFP4_FP8_MHA_CONFIG = {
     "algorithm": "max",
 }
 
+# See comment above FP8_KV_CFG — KV-cache configs omit _base_disable_all and "algorithm".
 NVFP4_KV_ROTATE_CFG = {
     "quant_cfg": [
         {
+            # q_bmm is disabled but pre-configured with rotate=True so that downstream
+            # code can inspect the rotate flag even while the quantizer is off.
             "quantizer_path": "*q_bmm_quantizer",
             "cfg": {
                 "rotate": True,
@@ -741,9 +728,8 @@ NVFP4_KV_ROTATE_CFG = {
                 **_nvfp4_cfg,
                 "rotate": True,
             },
-            "enable": True,
         },
-        {"quantizer_path": "*v_bmm_quantizer", "cfg": _nvfp4_cfg, "enable": True},
+        {"quantizer_path": "*v_bmm_quantizer", "cfg": _nvfp4_cfg},
     ],
     "algorithm": "max",
 }
@@ -761,14 +747,12 @@ W4A8_NVFP4_FP8_CFG = {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (4, 3)},
             },
-            "enable": True,
         },
         {
             "quantizer_path": "*input_quantizer",
             "cfg": {
                 "num_bits": (4, 3),
             },
-            "enable": True,
         },
         *_default_disabled_quantizer_cfg,
     ],
@@ -784,7 +768,6 @@ MXFP4_MLP_WEIGHT_ONLY_CFG = {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             },
-            "enable": True,
         },
         {
             "quantizer_path": "*block_sparse_moe*weight_quantizer",
@@ -792,7 +775,6 @@ MXFP4_MLP_WEIGHT_ONLY_CFG = {
                 "num_bits": (2, 1),
                 "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (8, 0)},
             },
-            "enable": True,
         },
         *_default_disabled_quantizer_cfg,
     ],

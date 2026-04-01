@@ -24,7 +24,7 @@ from modelopt.torch.quantization.config import (
     INT4_AWQ_CFG,
     NVFP4_DEFAULT_CFG,
     W4A8_AWQ_BETA_CFG,
-    find_quant_cfg_entry,
+    find_quant_cfg_entry_by_path,
     need_calibration,
     normalize_quant_cfg_list,
 )
@@ -256,7 +256,7 @@ class TestFindQuantCfgEntry:
                 {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 4}},
             ]
         )
-        result = find_quant_cfg_entry(entries, "*weight_quantizer")
+        result = find_quant_cfg_entry_by_path(entries, "*weight_quantizer")
         assert result["cfg"] == {"num_bits": 4}
 
     def test_exact_match_only(self):
@@ -265,7 +265,7 @@ class TestFindQuantCfgEntry:
             [{"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8}}]
         )
         with pytest.raises(KeyError):
-            find_quant_cfg_entry(entries, "model.layer.weight_quantizer")
+            find_quant_cfg_entry_by_path(entries, "model.layer.weight_quantizer")
 
     def test_raises_on_missing(self):
         """Raises KeyError when no entry matches."""
@@ -273,16 +273,16 @@ class TestFindQuantCfgEntry:
             [{"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8}}]
         )
         with pytest.raises(KeyError):
-            find_quant_cfg_entry(entries, "*input_quantizer")
+            find_quant_cfg_entry_by_path(entries, "*input_quantizer")
 
     def test_single_entry(self):
         entries = normalize_quant_cfg_list([{"quantizer_path": "*", "enable": False}])
-        result = find_quant_cfg_entry(entries, "*")
+        result = find_quant_cfg_entry_by_path(entries, "*")
         assert result["enable"] is False
 
     def test_empty_list(self):
         with pytest.raises(KeyError):
-            find_quant_cfg_entry([], "*")
+            find_quant_cfg_entry_by_path([], "*")
 
 
 def test_need_calibration_with_legacy_dict_format():

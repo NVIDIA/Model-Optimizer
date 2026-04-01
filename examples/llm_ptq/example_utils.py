@@ -205,9 +205,11 @@ def build_quant_cfg(
 ) -> dict[str, Any]:
     quant_cfg = copy.deepcopy(quant_cfg)
     if "awq" in str(quant_cfg.get("algorithm")):
-        from modelopt.torch.quantization.config import find_quant_cfg_entry
+        from modelopt.torch.quantization.config import find_quant_cfg_entry_by_path
 
-        weight_quantizer_entry = find_quant_cfg_entry(quant_cfg["quant_cfg"], "*weight_quantizer")
+        weight_quantizer_entry = find_quant_cfg_entry_by_path(
+            quant_cfg["quant_cfg"], "*weight_quantizer"
+        )
         weight_quantizer = weight_quantizer_entry.get("cfg") or {}
         if isinstance(weight_quantizer, list):
             weight_quantizer = weight_quantizer[0]

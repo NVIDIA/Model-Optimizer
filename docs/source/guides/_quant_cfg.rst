@@ -293,8 +293,94 @@ are quantized first in INT4 and then in FP8:
             {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
             {"num_bits": (4, 3)},  # FP8
         ],
-        "enable": True,
     }
+
+----------
+
+.. _migrating-from-dict-format:
+
+Migrating from Dict Format
+===========================
+
+Earlier versions of ModelOpt used a flat dictionary for ``quant_cfg``. The new list format is
+preferred because it provides explicit ordering and unambiguous precedence. Existing dict-based
+configs continue to work — the normalization layer converts them automatically — but new code
+should use the list format.
+
+The table below shows common patterns and their list equivalents:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 50 50
+
+   * - Legacy dict format
+     - New list format
+   * - .. code-block:: python
+
+          "quant_cfg": {
+              "*weight_quantizer": {
+                  "num_bits": 8,
+                  "axis": 0,
+              },
+              "*input_quantizer": {
+                  "num_bits": 8,
+                  "axis": None,
+              },
+              "default": {"enable": False},
+          }
+
+     - .. code-block:: python
+
+          "quant_cfg": [
+              {"quantizer_path": "*",
+               "enable": False},
+              {"quantizer_path": "*weight_quantizer",
+               "cfg": {"num_bits": 8, "axis": 0}},
+              {"quantizer_path": "*input_quantizer",
+               "cfg": {"num_bits": 8, "axis": None}},
+          ]
+
+   * - .. code-block:: python
+
+          # Disable by key assignment
+          config["quant_cfg"]["*lm_head*"] = {
+              "enable": False,
+          }
+
+     - .. code-block:: python
+
+          # Append to the end (last entry wins)
+          config["quant_cfg"].append(
+              {"quantizer_path": "*lm_head*",
+               "enable": False}
+          )
+
+   * - .. code-block:: python
+
+          # Class-scoped entry
+          "quant_cfg": {
+              "nn.Linear": {
+                  "*input_quantizer": {
+                      "enable": False,
+                  },
+              },
+          }
+
+     - .. code-block:: python
+
+          "quant_cfg": [
+              {"quantizer_path": "*input_quantizer",
+               "parent_class": "nn.Linear",
+               "enable": False},
+          ]
+
+Key differences to keep in mind:
+
+- The ``"default"`` key becomes ``{"quantizer_path": "*", "enable": False}`` placed at the
+  **start** of the list (deny-all-then-configure pattern).
+- Dict key assignment (``config["quant_cfg"]["*lm_head*"] = ...``) becomes ``list.append()``.
+  Because later entries override earlier ones, appending achieves the same override effect.
+- ``nn.*``-scoped dict keys become entries with a ``parent_class`` field.
 
 ----------
 

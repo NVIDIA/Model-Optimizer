@@ -265,7 +265,7 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType
         else:
             parent_class = None
 
-        if not cfg:
+        if cfg is None:
             # No cfg: only toggle the enable state, leave all other attributes unchanged.
             set_quantizer_attributes_partial(
                 quant_model, quantizer_path, {"enable": enable}, parent_class
