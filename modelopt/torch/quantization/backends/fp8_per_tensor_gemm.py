@@ -100,8 +100,13 @@ def _fp8_availability_check(module, input, args, kwargs):
     quant_cfg_list: list = FP8_DEFAULT_CFG["quant_cfg"]
     input_cfg = find_quant_cfg_entry(quant_cfg_list, "*input_quantizer").get("cfg", {})
     weight_cfg = find_quant_cfg_entry(quant_cfg_list, "*weight_quantizer").get("cfg", {})
-    assert isinstance(input_cfg, dict)
-    assert isinstance(weight_cfg, dict)
+    # cfg may be a list (SequentialQuantizer); fall back to the first element.
+    if isinstance(input_cfg, list):
+        input_cfg = input_cfg[0]
+    if isinstance(weight_cfg, list):
+        weight_cfg = weight_cfg[0]
+    if not isinstance(input_cfg, dict) or not isinstance(weight_cfg, dict):
+        return False
 
     # Check hardware support
     if not torch.cuda.is_available() or not fp8_compatible():

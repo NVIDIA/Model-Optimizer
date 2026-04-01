@@ -215,8 +215,13 @@ def _nvfp4_availability_check(module, input, args, kwargs):
     # Quantizer configs
     input_cfg = mtq.config.find_quant_cfg_entry(quant_cfg_list, "*input_quantizer").get("cfg", {})
     weight_cfg = mtq.config.find_quant_cfg_entry(quant_cfg_list, "*weight_quantizer").get("cfg", {})
-    assert isinstance(input_cfg, dict)
-    assert isinstance(weight_cfg, dict)
+    # cfg may be a list (SequentialQuantizer); fall back to the first element.
+    if isinstance(input_cfg, list):
+        input_cfg = input_cfg[0]
+    if isinstance(weight_cfg, list):
+        weight_cfg = weight_cfg[0]
+    if not isinstance(input_cfg, dict) or not isinstance(weight_cfg, dict):
+        return False
 
     # Check input quantizer config
     for key, value in input_cfg.items():

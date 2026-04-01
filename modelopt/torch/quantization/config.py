@@ -171,17 +171,23 @@ class QuantizerCfgEntry(TypedDict, total=False):
 def find_quant_cfg_entry(
     quant_cfg_list: list[QuantizerCfgEntry], quantizer_path: str
 ) -> QuantizerCfgEntry:
-    """Find the last entry in a ``quant_cfg`` list matching the given ``quantizer_path``.
+    """Find the last entry in a ``quant_cfg`` list whose ``quantizer_path`` key equals the query.
+
+    This performs an **exact string comparison** against the ``quantizer_path`` field of each
+    entry — it does *not* apply ``fnmatch`` pattern matching.  For example, passing
+    ``"*input_quantizer"`` will only match entries whose ``quantizer_path`` is literally
+    ``"*input_quantizer"``, not entries with a different wildcard that would match the same
+    module names at apply time.
 
     Returns the *last* match because entries are applied in list order and later entries
     override earlier ones, so the last match represents the effective configuration.
 
     Args:
         quant_cfg_list: A list of :class:`QuantizerCfgEntry` dicts.
-        quantizer_path: The ``quantizer_path`` value to search for.
+        quantizer_path: The exact ``quantizer_path`` string to search for.
 
     Returns:
-        The last matching :class:`QuantizerCfgEntry`.
+        The last entry whose ``quantizer_path`` equals *quantizer_path*.
 
     Raises:
         KeyError: If no entry with the given ``quantizer_path`` is found.
