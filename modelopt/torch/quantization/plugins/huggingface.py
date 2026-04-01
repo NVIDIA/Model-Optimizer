@@ -1473,12 +1473,9 @@ LayerActivationCollector.register_decoder_layer_support(
 )
 
 
-def _hf_checkpoint_save(model: nn.Module, checkpoint_dir: str) -> None:
-    """Save an HF model checkpoint for sequential calibration resume."""
-    model.save_pretrained(checkpoint_dir)
-
-
-register_seq_calib_checkpoint_saver(_is_supported_hf_model, _hf_checkpoint_save)
+register_seq_calib_checkpoint_saver(
+    _is_supported_hf_model, lambda model, checkpoint_dir: model.save_pretrained(checkpoint_dir)
+)
 
 
 class _QuantMoELinear(QuantModule):

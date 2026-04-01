@@ -93,7 +93,7 @@ def get_checkpoint_saver(
 # ---------------------------------------------------------------------------
 
 
-def detect_resume_point(model: nn.Module, num_layers: int) -> tuple[int, dict | None]:
+def detect_seq_calib_resume_point(model: nn.Module, num_layers: int) -> tuple[int, dict | None]:
     """Read checkpoint progress from the model and return where to resume.
 
     Returns:
@@ -131,7 +131,7 @@ def detect_resume_point(model: nn.Module, num_layers: int) -> tuple[int, dict | 
 # ---------------------------------------------------------------------------
 
 
-def should_save_checkpoint(
+def should_save_seq_calib_checkpoint(
     layer_idx: int, num_layers: int, checkpoint_dir: str | None, checkpoint_interval: int | None
 ) -> bool:
     """Return *True* when a checkpoint should be saved after calibrating *layer_idx*."""

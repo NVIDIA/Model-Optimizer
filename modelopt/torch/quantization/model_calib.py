@@ -50,9 +50,9 @@ from .utils import (
     weight_attr_names,
 )
 from .utils.checkpoint import (
-    detect_resume_point,
+    detect_seq_calib_resume_point,
     save_sequential_checkpoint,
-    should_save_checkpoint,
+    should_save_seq_calib_checkpoint,
 )
 
 __all__ = [
@@ -1913,7 +1913,7 @@ def sequential_calibrate(
     num_layers = len(transformer_layers)
     print_rank_0(f"Sequential calibration: Found {num_layers} transformer layers")
 
-    resume_from_layer, saved_output_metas = detect_resume_point(model, num_layers)
+    resume_from_layer, saved_output_metas = detect_seq_calib_resume_point(model, num_layers)
 
     input_getter = LayerActivationCollector(model)
     input_getter._patch_all_layers(decoder_layers=transformer_layers)
@@ -1936,8 +1936,10 @@ def sequential_calibrate(
             del layer_inputs
             torch.cuda.empty_cache()
 
-            if should_save_checkpoint(layer_idx, num_layers, checkpoint_dir, checkpoint_interval):
-                assert checkpoint_dir is not None  # narrowed by should_save_checkpoint
+            if should_save_seq_calib_checkpoint(
+                layer_idx, num_layers, checkpoint_dir, checkpoint_interval
+            ):
+                assert checkpoint_dir is not None  # narrowed by should_save_seq_calib_checkpoint
                 save_sequential_checkpoint(
                     model, layer_idx, num_layers, checkpoint_dir, input_getter
                 )
