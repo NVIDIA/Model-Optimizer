@@ -58,6 +58,7 @@ if [[ -n "$CONFIG_FILE" ]]; then
     fi
 fi
 
+LOG_DIR="${LOG_DIR:-${QAD_CHECKPOINT_ROOT}/logs_slurm}"
 
 # Parallelism (required from config)
 TP_SIZE="${TP_SIZE:?ERROR: TP_SIZE must be set in config}"
