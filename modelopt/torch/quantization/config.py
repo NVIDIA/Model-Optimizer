@@ -1712,11 +1712,7 @@ def need_calibration(config):
         return True
 
     def _not_dynamic(cfg):
-        return (
-            cfg.get("enable", True)
-            and cfg.get("type", "") != "dynamic"
-            and cfg.get("*", {}).get("enable", True)
-        )
+        return cfg.get("enable", True) and cfg.get("type", "") != "dynamic"
 
     quant_cfg: list = config.get("quant_cfg") or []
     for entry in quant_cfg:
@@ -1727,18 +1723,20 @@ def need_calibration(config):
                 "Did you forget to call normalize_quant_cfg_list()?"
             )
         name = entry["quantizer_path"]
-        cfg = dict(entry.get("cfg") or {})
-        if "enable" in entry:
-            cfg["enable"] = entry["enable"]
+        raw_cfg = entry.get("cfg")
         if "weight_quantizer" in name:
             # We don't calibrate weight quantizer
             continue
-        # quantization like W4A8 has a list of weight quantizers
-        if isinstance(cfg, list):
-            for _config in cfg:
+        # Sequential quantizers (e.g. W4A8) have a list of cfg dicts
+        if isinstance(raw_cfg, list):
+            for _config in raw_cfg:
                 if _not_dynamic(_config):
                     return True
-        elif isinstance(cfg, dict) and _not_dynamic(cfg):
+            continue
+        cfg = dict(raw_cfg or {})
+        if "enable" in entry:
+            cfg["enable"] = entry["enable"]
+        if _not_dynamic(cfg):
             return True
 
     return False

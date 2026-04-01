@@ -38,6 +38,38 @@ def test_need_calibration():
     assert need_calibration(NVFP4_DEFAULT_CFG)
 
 
+def test_need_calibration_with_list_cfg():
+    """need_calibration must handle sequential (list) cfg entries without crashing."""
+    # Static list-cfg on a non-weight quantizer → needs calibration
+    cfg_static = {
+        "quant_cfg": [
+            {
+                "quantizer_path": "*input_quantizer",
+                "cfg": [
+                    {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
+                    {"num_bits": (4, 3)},
+                ],
+                "enable": True,
+            },
+        ],
+        "algorithm": "max",
+    }
+    assert need_calibration(cfg_static)
+
+    # Dynamic list-cfg on a non-weight quantizer → no calibration needed
+    cfg_dynamic = {
+        "quant_cfg": [
+            {
+                "quantizer_path": "*input_quantizer",
+                "cfg": [{"num_bits": (4, 3), "type": "dynamic"}],
+                "enable": True,
+            },
+        ],
+        "algorithm": "max",
+    }
+    assert not need_calibration(cfg_dynamic)
+
+
 class TestNormalizeQuantCfgList:
     def test_new_format_passthrough(self):
         """New-format entries are returned unchanged (only canonical defaults added)."""
