@@ -70,16 +70,37 @@ squeue -u $USER -o "%j %N %S"  # Get the node name
 
 ## Docker Deployment
 
-### vLLM with ModelOpt
+### Official Images (recommended)
 
-A Dockerfile is available at `examples/vllm_serve/Dockerfile`:
+| Framework | Image | Source |
+|-----------|-------|--------|
+| vLLM | `vllm/vllm-openai:latest` | <https://hub.docker.com/r/vllm/vllm-openai> |
+| SGLang | `lmsysorg/sglang:latest` | <https://hub.docker.com/r/lmsysorg/sglang> |
+| TRT-LLM | `nvcr.io/nvidia/tensorrt-llm/release:latest` | <https://catalog.ngc.nvidia.com/orgs/nvidia/teams/tensorrt-llm/containers/release/> |
+
+Example with the official vLLM image:
+
+```bash
+docker run --gpus all -p 8000:8000 \
+    -v /path/to/checkpoint:/model \
+    vllm/vllm-openai:latest \
+    --model /model \
+    --quantization modelopt \
+    --host 0.0.0.0 --port 8000
+```
+
+### Custom Image (optional)
+
+A Dockerfile is also available at `examples/vllm_serve/Dockerfile` if you need a custom build:
 
 ```bash
 docker build -f examples/vllm_serve/Dockerfile -t vllm-modelopt .
 
-docker run --gpus all -p 8000:8000 vllm-modelopt \
+docker run --gpus all -p 8000:8000 \
+    -v /path/to/checkpoint:/model \
+    vllm-modelopt \
     python -m vllm.entrypoints.openai.api_server \
-        --model <checkpoint_path> \
+        --model /model \
         --quantization modelopt \
         --host 0.0.0.0 --port 8000
 ```

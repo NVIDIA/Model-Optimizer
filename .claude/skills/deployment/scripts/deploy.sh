@@ -127,9 +127,18 @@ print(quant_algo)
             return 1
         }
 
-        if echo "$quant_algo" | grep -qi "fp4"; then
+        if echo "$quant_algo" | grep -qi "fp4\|nvfp4"; then
             echo "modelopt_fp4"
+        elif echo "$quant_algo" | grep -qi "fp8"; then
+            echo "modelopt"
+        elif echo "$quant_algo" | grep -qi "int4_awq\|w4a8_awq\|w4a16_awq\|w8a"; then
+            log_error "Quantization format '$quant_algo' is only supported by TRT-LLM, not vLLM/SGLang"
+            log_error "Use --framework trtllm or deploy with TRT-LLM directly"
+            return 1
+        elif [[ -z "$quant_algo" ]]; then
+            echo "none"
         else
+            log_warn "Unknown quant_algo '$quant_algo' — trying --quantization modelopt"
             echo "modelopt"
         fi
     elif [[ -f "$model_path/config.json" ]]; then

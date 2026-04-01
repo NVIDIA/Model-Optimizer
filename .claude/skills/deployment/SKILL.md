@@ -1,6 +1,6 @@
 ---
 name: deployment
-description: Serve a quantized or unquantized LLM checkpoint as an OpenAI-compatible API endpoint using vLLM, SGLang, or TRT-LLM. Use when user says "deploy model", "serve model", "start vLLM server", "launch SGLang", "TRT-LLM deploy", "AutoDeploy", "benchmark throughput", "serve checkpoint", or needs an inference endpoint from a HuggingFace or ModelOpt-quantized checkpoint.
+description: Serve a quantized or unquantized LLM checkpoint as an OpenAI-compatible API endpoint using vLLM, SGLang, or TRT-LLM. Use when user says "deploy model", "serve model", "start vLLM server", "launch SGLang", "TRT-LLM deploy", "AutoDeploy", "benchmark throughput", "serve checkpoint", or needs an inference endpoint from a HuggingFace or ModelOpt-quantized checkpoint. Do NOT use for quantizing models (use ptq) or evaluating accuracy (use evaluation).
 license: Apache-2.0
 ---
 
@@ -79,32 +79,23 @@ Check the support matrix in `references/support-matrix.md` to confirm the model 
 
 ### 3. Check the environment
 
-**GPU availability:**
+Read `skills/common/environment-setup.md` for GPU detection, local vs remote, and SLURM/Docker/bare metal detection. After completing it you should know: GPU model/count, local or remote, and execution environment.
+
+Then check the **deployment framework** is installed:
 
 ```bash
-python -c "import torch; [print(f'GPU {i}: {torch.cuda.get_device_name(i)}') for i in range(torch.cuda.device_count())] if torch.cuda.is_available() else print('no-gpu')"
-```
-
-**Framework installed?**
-
-```bash
-# vLLM
 python -c "import vllm; print(f'vLLM {vllm.__version__}')" 2>/dev/null || echo "vLLM not installed"
-
-# SGLang
 python -c "import sglang; print(f'SGLang {sglang.__version__}')" 2>/dev/null || echo "SGLang not installed"
-
-# TRT-LLM
 python -c "import tensorrt_llm; print(f'TRT-LLM {tensorrt_llm.__version__}')" 2>/dev/null || echo "TRT-LLM not installed"
 ```
 
-If the framework is not installed, consult `references/setup.md` for installation instructions.
+If not installed, consult `references/setup.md`.
 
-**GPU memory estimate:**
+**GPU memory estimate** (to determine tensor parallelism):
 
-- BF16 model: `num_params × 2 bytes` (e.g., 8B model ≈ 16 GB)
-- FP8 model: `num_params × 1 byte` (e.g., 8B model ≈ 8 GB)
-- FP4 model: `num_params × 0.5 bytes` (e.g., 8B model ≈ 4 GB)
+- BF16: `params × 2 bytes` (8B ≈ 16 GB)
+- FP8: `params × 1 byte` (8B ≈ 8 GB)
+- FP4: `params × 0.5 bytes` (8B ≈ 4 GB)
 - Add ~2-4 GB for KV cache and framework overhead
 
 If the model exceeds single GPU memory, use tensor parallelism (`-tp <num_gpus>`).
@@ -179,24 +170,7 @@ curl -s http://localhost:8000/v1/completions \
 
 All checks must pass before reporting success to the user.
 
-### 6. Benchmark (optional)
-
-If the user wants throughput/latency numbers, run a quick benchmark:
-
-```bash
-# vLLM benchmark
-python -m vllm.entrypoints.openai.api_server ... &  # if not already running
-
-python -m vllm.benchmark_serving \
-    --model <model_name> \
-    --port 8000 \
-    --num-prompts 100 \
-    --request-rate 10
-```
-
-Report: throughput (tok/s), latency p50/p99, time to first token (TTFT).
-
-### 7. Remote deployment (SSH/SLURM)
+### 6. Remote deployment (SSH/SLURM)
 
 If a cluster config exists (`~/.config/modelopt/clusters.yaml` or `.claude/clusters.yaml`), or the user mentions running on a remote machine:
 
@@ -219,18 +193,7 @@ If a cluster config exists (`~/.config/modelopt/clusters.yaml` or `.claude/clust
 
 3. **Deploy based on remote environment:**
 
-   - **SLURM** — write a job script that starts the server inside a container, then submit:
-
-     ```bash
-     srun --container-image="<container.sqsh>" \
-         --container-mounts="<data_root>:<data_root>" \
-         python -m vllm.entrypoints.openai.api_server \
-             --model <remote_checkpoint_path> \
-             --quantization modelopt \
-             --host 0.0.0.0 --port 8000
-     ```
-
-     Use `remote_submit_job` and `remote_poll_job` to manage the job. The server runs on the allocated node — get its hostname from `squeue -j $JOBID -o %N`.
+   - **SLURM** — see `skills/common/slurm-setup.md` for job script templates (container setup, account/partition discovery). The server command inside the container is the same as Step 4 (e.g., `python -m vllm.entrypoints.openai.api_server --model <path> --quantization modelopt`). Use `remote_submit_job` and `remote_poll_job` to manage the job. Get the node hostname from `squeue -j $JOBID -o %N`.
 
    - **Bare metal / Docker** — use `remote_run` to start the server directly:
 

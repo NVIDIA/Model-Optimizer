@@ -50,9 +50,16 @@
 | SGLang | `quantization="modelopt"` | `quantization="modelopt_fp4"` |
 | TRT-LLM | auto-detected from checkpoint | auto-detected from checkpoint |
 
+## Models not in this list
+
+This matrix covers officially validated combinations. For unlisted models:
+
+1. **Check the framework's own docs** — vLLM and SGLang support many HuggingFace models natively. Use WebSearch to check `vllm supported models` or `sglang supported models`.
+2. **Try it** — if the model uses standard `nn.Linear` layers and has `hf_quant_config.json`, vLLM/SGLang will likely work with `--quantization modelopt`.
+3. **Ask the user** — if unsure, ask: "This model isn't in the validated support matrix. Would you like to try deploying it anyway?"
+
 ## Notes
 
 - **NVFP4 inference requires Blackwell GPUs** (B100, B200, GB200). Hopper can run FP4 calibration but not inference.
 - INT4_AWQ and W4A8_AWQ are only supported by TRT-LLM (not vLLM or SGLang).
-- Other models/formats may work but are not officially validated.
 - Source: `examples/llm_ptq/README.md` and `docs/source/deployment/3_unified_hf.rst`

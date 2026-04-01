@@ -1,0 +1,58 @@
+[
+  {
+    "name": "vllm-fp8-local",
+    "skills": ["deployment"],
+    "query": "deploy my quantized model at ./qwen3-0.6b-fp8 with vLLM",
+    "files": [],
+    "expected_behavior": [
+      "Identifies ./qwen3-0.6b-fp8 as a local quantized checkpoint",
+      "Reads hf_quant_config.json and detects FP8 quantization format",
+      "Confirms vLLM is the chosen framework",
+      "Checks vLLM is installed and version >= 0.10.1",
+      "Detects local GPU via nvidia-smi or torch.cuda",
+      "Estimates GPU memory: 0.6B params x 1 byte (FP8) = ~0.6 GB, fits single GPU",
+      "Reads references/vllm.md for deployment instructions",
+      "Uses deploy.sh or runs: python -m vllm.entrypoints.openai.api_server --model ./qwen3-0.6b-fp8 --quantization modelopt --host 0.0.0.0 --port 8000",
+      "Passes --quantization modelopt (not modelopt_fp4) since checkpoint is FP8",
+      "Waits for server health check at /health endpoint",
+      "Verifies /v1/models lists the model",
+      "Sends test generation request to /v1/completions and confirms coherent output",
+      "Reports server URL (http://localhost:8000) and port to user"
+    ]
+  },
+  {
+    "name": "remote-slurm-deployment",
+    "skills": ["deployment"],
+    "query": "deploy my quantized model on the SLURM cluster",
+    "files": [],
+    "expected_behavior": [
+      "Checks for cluster config at ~/.config/modelopt/clusters.yaml or .claude/clusters.yaml",
+      "Sources .claude/skills/common/remote_exec.sh",
+      "Calls remote_load_cluster, remote_check_ssh, remote_detect_env",
+      "Checks if checkpoint is already on remote (e.g., from prior PTQ run) before syncing; only syncs if local",
+      "For SLURM: writes a job script with srun --container-image and --container-mounts on srun line (not #SBATCH)",
+      "Starts vLLM/SGLang server inside the container via srun",
+      "Gets allocated node hostname from squeue -j $JOBID -o %N",
+      "Verifies remotely: remote_run 'curl -s http://localhost:8000/health'",
+      "Reports the remote endpoint (http://<node_hostname>:8000) and notes SLURM network restrictions",
+      "Reads framework-specific reference (references/vllm.md or references/sglang.md) for deployment flags"
+    ]
+  },
+  {
+    "name": "unquantized-hf-model",
+    "skills": ["deployment"],
+    "query": "deploy Qwen/Qwen3-0.6B with vLLM",
+    "files": [],
+    "expected_behavior": [
+      "Identifies Qwen/Qwen3-0.6B as a HuggingFace model ID (not a local path)",
+      "Detects no quantization format in the model name — treats as unquantized (BF16)",
+      "Does not pass --quantization flag to vLLM",
+      "Checks vLLM is installed and GPU is available",
+      "Estimates memory: 0.6B params x 2 bytes = ~1.2 GB, fits single GPU",
+      "Starts vLLM server: python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen3-0.6B --host 0.0.0.0 --port 8000",
+      "Waits for health check at /health endpoint",
+      "Tests generation via /v1/completions and confirms coherent output",
+      "Reports server URL to user"
+    ]
+  }
+]
