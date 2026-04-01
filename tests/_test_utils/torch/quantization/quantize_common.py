@@ -29,19 +29,19 @@ from modelopt.torch.quantization.nn.modules.tensor_quantizer import SequentialQu
 from modelopt.torch.quantization.utils import is_quantized_linear
 from modelopt.torch.utils import torch_to
 
-INT4_AWQ_FULL_CFG = mtq.INT4_AWQ_CFG.copy()
+INT4_AWQ_FULL_CFG = copy.deepcopy(mtq.INT4_AWQ_CFG)
 
 INT4_AWQ_FULL_CFG["algorithm"] = "awq_full"
 
-INT4_AWQ_CLIP_CFG = mtq.INT4_AWQ_CFG.copy()
+INT4_AWQ_CLIP_CFG = copy.deepcopy(mtq.INT4_AWQ_CFG)
 INT4_AWQ_CLIP_CFG["algorithm"] = "awq_clip"
 
 # SVDQuant test cfg
-INT4_SVDQUANT_CFG = mtq.INT4_AWQ_CFG.copy()
+INT4_SVDQUANT_CFG = copy.deepcopy(mtq.INT4_AWQ_CFG)
 INT4_SVDQUANT_CFG["algorithm"] = {"method": "svdquant", "lowrank": 8}
 
 # SVDQuant test cfg
-FP4_SVDQUANT_CFG = mtq.NVFP4_AWQ_LITE_CFG.copy()
+FP4_SVDQUANT_CFG = copy.deepcopy(mtq.NVFP4_AWQ_LITE_CFG)
 FP4_SVDQUANT_CFG["algorithm"] = {"method": "svdquant", "lowrank": 8}
 
 
