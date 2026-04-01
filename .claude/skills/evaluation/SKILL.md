@@ -1,6 +1,6 @@
 ---
 name: evaluation
-description: Evaluate accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Use when user says "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "accuracy drop", "run nel", or needs to measure how quantization affects model quality. Handles model deployment, config generation, and evaluation execution.
+description: Evaluates accuracy of quantized or unquantized LLMs using NeMo Evaluator Launcher (NEL). Triggers on "evaluate model", "benchmark accuracy", "run MMLU", "evaluate quantized model", "accuracy drop", "run nel". Handles deployment, config generation, and evaluation execution. Not for quantizing models (use ptq) or deploying/serving models (use deployment).
 license: Apache-2.0
 # Based on nel-assistant skill from NeMo Evaluator Launcher (commit f1fa073)
 # https://github.com/NVIDIA-NeMo/Evaluator/tree/f1fa073/packages/nemo-evaluator-launcher/.claude/skills/nel-assistant
@@ -21,7 +21,7 @@ If `MODELOPT_WORKSPACE_ROOT` is set, read `skills/common/workspace-management.md
 ```text
 Config Generation Progress:
 - [ ] Step 0: Check workspace (if MODELOPT_WORKSPACE_ROOT is set)
-- [ ] Step 1: Check if nel is installed
+- [ ] Step 1: Check if nel is installed and if user has existing config
 - [ ] Step 2: Build the base config file
 - [ ] Step 3: Configure model path and parameters
 - [ ] Step 4: Fill in remaining missing values
@@ -31,11 +31,11 @@ Config Generation Progress:
 - [ ] Step 8: Run the evaluation
 ```
 
-**Step 1: Check if nel is installed**
+**Step 1: Check prerequisites**
 
-Test that `nel` is installed with `nel --version`.
+Test that `nel` is installed with `nel --version`. If not, instruct the user to `pip install nemo-evaluator-launcher`.
 
-If not, instruct the user to `pip install nemo-evaluator-launcher`.
+If the user already has a config file (e.g., "run this config", "evaluate with my-config.yaml"), skip to Step 8. Optionally review it for common issues (missing `???` values, quantization flags) before running.
 
 **Step 2: Build the base config file**
 
@@ -76,6 +76,8 @@ Prompt the user with "I'll ask you 5 questions to build the base config we'll ad
 
 DON'T ALLOW FOR ANY OTHER OPTIONS, only the ones listed above under each category (Execution, Deployment, Auto-export, Model type, Benchmarks). YOU HAVE TO GATHER THE ANSWERS for the 5 questions before you can build the base config.
 
+> **Note:** These categories come from NEL's `build-config` CLI. If `nel skills build-config --help` shows different options than listed above, use the CLI's current options instead.
+
 When you have all the answers, run the script to build the base config:
 
 ```bash
@@ -94,8 +96,8 @@ It never overwrites existing files.
 
 Ask for model path. Determine type:
 
-- Checkpoint path (starts with `/` or `./`) → set `deployment.checkpoint_path: <path>` and `deployment.hf_model_handle: null`
-- HF handle (e.g., `org/model-name`) → set `deployment.hf_model_handle: <handle>` and `deployment.checkpoint_path: null`
+- Checkpoint path (local directory — starts with `/`, `./`, `../`, `~`, or contains no `/` but exists on disk) → set `deployment.checkpoint_path: <path>` and `deployment.hf_model_handle: null`
+- HF handle (e.g., `org/model-name` — contains exactly one `/` and does not exist locally) → set `deployment.hf_model_handle: <handle>` and `deployment.checkpoint_path: null`
 
 **Auto-detect ModelOpt quantization format** (checkpoint paths only):
 
@@ -116,16 +118,11 @@ If found, read `quantization.quant_algo` and set the correct vLLM/SGLang quantiz
 
 If no `hf_quant_config.json`, also check `config.json` for a `quantization_config` section with `quant_method: "modelopt"`. If neither is found, the checkpoint is unquantized — no flag needed.
 
+> **Note:** Some models require additional env vars for deployment (e.g., `VLLM_NVFP4_GEMM_BACKEND=marlin` for Nemotron Super). These are not in `hf_quant_config.json` — they are discovered during model card research below.
+
 **Quantization-aware benchmark defaults:**
 
-When a quantized checkpoint is detected, recommend benchmarks sensitive to quantization accuracy loss:
-
-- **Always include**: MMLU (general knowledge — typically shows measurable accuracy loss from quantization)
-- **Recommended**: GSM8K (math reasoning — sensitive to precision loss), ARC-Challenge (reasoning)
-- **Good to add**: HumanEval (code generation — catches subtle degradation), Winogrande (commonsense)
-- **Less useful for quant comparison**: IFEval (instruction following — typically less affected, but worth including for aggressive quantization like FP4)
-
-Present these recommendations to the user and ask which to include. If the user already specified benchmarks, keep their choice but mention any accuracy-sensitive benchmarks they may have missed.
+When a quantized checkpoint is detected, read `references/quantization-benchmarks.md` for benchmark sensitivity rankings and recommended sets. Present recommendations to the user and ask which to include.
 
 Read `references/model-card-research.md` for the full extraction checklist (sampling params, reasoning config, ARM64 compatibility, pre_cmd, etc.). Use WebSearch to research the model card, present findings, and ask the user to confirm.
 
@@ -191,7 +188,7 @@ Print the following commands to the user. Propose to execute them in order to co
 **Important**: Export required environment variables based on your config. If any tokens or keys are missing (e.g. `HF_TOKEN`, `NGC_API_KEY`, `api_key_name` from the config), ask the user to put them in a `.env` file in the project root so you can run `set -a && source .env && set +a` (or equivalent) before executing `nel run` commands.
 
 ```bash
-# If using pre_cmd or post_cmd:
+# If using pre_cmd or post_cmd (review pre_cmd content before enabling — it runs arbitrary commands):
 export NEMO_EVALUATOR_TRUST_PRE_CMD=1
 
 # If using nemo_skills.* tasks with self-deployment:
@@ -299,7 +296,7 @@ Now, copy this checklist and track your progress:
 ```text
 Config Generation Progress:
 - [ ] Step 0: Check workspace (if MODELOPT_WORKSPACE_ROOT is set)
-- [ ] Step 1: Check if nel is installed
+- [ ] Step 1: Check if nel is installed and if user has existing config
 - [ ] Step 2: Build the base config file
 - [ ] Step 3: Configure model path and parameters
 - [ ] Step 4: Fill in remaining missing values
