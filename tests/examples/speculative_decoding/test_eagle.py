@@ -211,8 +211,14 @@ def test_convert_to_vllm_ckpt(tiny_llama_path, eagle_output_dir):
     [
         (None, False),                       # tiny_llama (from fixture), no FakeBase
         ("moonshotai/Kimi-K2.5", True),      # remote HF repo, FakeBaseModel
-        ("moonshotai/Kimi-K2-Thinking", True),     # remote HF repo, no FakeBaseModel
-        ("MiniMaxAI/MiniMax-M2.5", True),
+        pytest.param(
+            "moonshotai/Kimi-K2-Thinking", True,   # remote HF repo, no FakeBaseModel
+            marks=pytest.mark.manual(reason="skip redundand test, too slow"),
+        ),
+        pytest.param(
+            "MiniMaxAI/MiniMax-M2.5", True,
+            marks=pytest.mark.manual(reason="skip redundand test, too slow"),
+        ),
     ],
     ids=["tinyllama", "kimi-k2.5","kimi-k2-thinking","minimax-m2.5"],
 )
