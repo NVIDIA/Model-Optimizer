@@ -819,7 +819,7 @@ class TestPrepareForResume:
         fwd = _make_forward_loop(tokens)
         collector = LayerActivationCollector(model)
         with pytest.raises(RuntimeError, match="requires _patch_all_layers"):
-            collector.prepare_for_resume(1, fwd, None)
+            collector.prepare_for_resume(1, fwd)
 
     def test_resume_missing_output_meta_raises(self):
         """If a layer needs skip mode but has no output_meta, should raise."""
