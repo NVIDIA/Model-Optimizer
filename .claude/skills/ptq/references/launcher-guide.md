@@ -43,11 +43,13 @@ Extra `hf_ptq.py` flags can be passed via `args`:
 
 `EXPORT_PATH` controls the path inside the container (default: `/scratchspace/exported_model`). The launcher mounts `/scratchspace` to a host directory automatically — you cannot change the host path.
 
-To find the checkpoint on the host after completion:
+**Local Docker** — find the checkpoint on the local host:
 
 ```bash
 find tools/launcher/local_experiments -name "config.json" -path "*/exported_model/*" 2>/dev/null
 ```
+
+**Remote SLURM** — the checkpoint is on the remote machine. Check the launcher's experiment directory on the remote host (typically `~/experiments/cicd/...`). Use `remote_run "find ..."` or check the job log for the export path.
 
 ## SLURM vs Local Docker
 

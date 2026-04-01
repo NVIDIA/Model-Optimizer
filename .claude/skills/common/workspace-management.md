@@ -42,7 +42,7 @@ ls ./workspaces/ 2>/dev/null
 **Reuse** when:
 
 - Same model (e.g., deploying a model you just quantized)
-- Task needs output from a previous step (e.g., eval needs the PTQ checkpoint)
+- Task requires output from a previous step (e.g., eval requires the PTQ checkpoint)
 - User says "deploy the model I just quantized"
 
 **Create new** when:

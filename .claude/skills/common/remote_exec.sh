@@ -66,20 +66,20 @@ _remote_config_file() {
 _parse_yaml_value() {
     # Simple YAML value extractor: _parse_yaml_value <file> <dot.path>
     # Handles simple scalar values only (not arrays/nested objects)
+    # Uses sys.argv to avoid shell injection via file paths or YAML keys.
     local file="$1" path="$2"
-    python3 -c "
+    python3 - "$file" "$path" <<'PYEOF' 2>/dev/null || true
 import yaml, sys
-with open('$file') as f:
+with open(sys.argv[1]) as f:
     data = yaml.safe_load(f)
-keys = '$path'.split('.')
-for k in keys:
+for k in sys.argv[2].split('.'):
     if isinstance(data, dict) and k in data:
         data = data[k]
     else:
         sys.exit(0)
 if data is not None:
     print(data)
-" 2>/dev/null || true
+PYEOF
 }
 
 _ssh_control_path() {
@@ -231,6 +231,10 @@ remote_load_cluster() {
     # Validate required fields
     if [[ -z "$REMOTE_HOST" ]]; then
         echo "ERROR: Cluster '$cluster_name' has no login_node defined." >&2
+        return 1
+    fi
+    if [[ -z "${REMOTE_WORKSPACE:-}" || "$REMOTE_WORKSPACE" == "/" ]]; then
+        echo "ERROR: Cluster '$cluster_name' must define a non-root workspace." >&2
         return 1
     fi
 

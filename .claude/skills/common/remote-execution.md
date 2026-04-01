@@ -86,7 +86,7 @@ remote_sync_to /local/path remote_subdir
 remote_sync_from remote_subdir /local/path
 ```
 
-Both use rsync over the persistent SSH session with default excludes (`.git`, `__pycache__`, etc.).
+Both use rsync over the persistent SSH session with default excludes (`.git`, `__pycache__`, `.claude`, `*.pyc`, `node_modules`, `*.egg-info`). The `.claude` directory is intentionally excluded — skills and config should not be synced to the remote machine.
 
 ### SCP (alternative to rsync)
 

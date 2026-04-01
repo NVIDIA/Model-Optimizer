@@ -236,6 +236,8 @@ def dequantize_fp8_params(model, param_names=("gate_up_proj", "down_proj")):
                 # Per-block scale: reshape, broadcast, multiply
                 w = param.data
                 s = scale.data
+                assert w.shape[-2] % s.shape[-2] == 0 and w.shape[-1] % s.shape[-1] == 0, (
+                    f"Incompatible FP8 scale shape: weight={tuple(w.shape)}, scale={tuple(s.shape)}")
                 block_m = w.shape[-2] // s.shape[-2]
                 block_n = w.shape[-1] // s.shape[-1]
                 reshaped = w.to(torch.bfloat16).reshape(-1, s.shape[-2], block_m, s.shape[-1], block_n)

@@ -90,13 +90,13 @@ SLURM_HOST=<host> SLURM_ACCOUNT=<acct> uv run launch.py --yaml <config.yaml> use
 uv run launch.py --yaml <config.yaml> hf_local=<hf_cache> --yes
 ```
 
-The launcher blocks and tails logs until the job completes.
+The launcher blocks and tails logs until the job completes. If the launcher fails (missing deps, config errors), fall back to path 4A (manual execution).
 
 ### 4C — Unlisted model
 
 Follow `references/unsupported-models.md`. It guides you through checking the model source, deciding whether a patched script is needed, and writing patches if required. Unlisted models are risky — monitor the run and be ready to debug.
 
-Run directly (local) or via `remote_run` (remote). For SLURM, use a job script — see `skills/common/slurm-setup.md` for generic patterns and `references/slurm-setup.md` for PTQ-specific details (container, GPU sizing, FSDP2).
+Run directly (local) or via `remote_run` (remote). For SLURM, use a job script — see `skills/common/slurm-setup.md` for generic patterns and `references/slurm-setup-ptq.md` for PTQ-specific details (container, GPU sizing, FSDP2).
 
 ### Monitoring
 
@@ -133,7 +133,7 @@ Report the path and size to the user.
 | `references/unsupported-models.md` | Step 4C only (unlisted model) |
 | `skills/common/remote-execution.md` | Step 4A/4C only, if target is remote |
 | `skills/common/slurm-setup.md` | Step 4A/4C only, if using SLURM manually (not launcher) |
-| `references/slurm-setup.md` | Step 4A/4C only, PTQ-specific SLURM (container, FSDP2) |
+| `references/slurm-setup-ptq.md` | Step 4A/4C only, PTQ-specific SLURM (container, FSDP2) |
 | `examples/llm_ptq/README.md` | Step 3: support matrix, CLI flags, accuracy |
 | `modelopt/torch/quantization/config.py` | Step 3: format definitions |
 | `modelopt/torch/export/model_utils.py` | Step 4C: TRT-LLM export type mapping |
