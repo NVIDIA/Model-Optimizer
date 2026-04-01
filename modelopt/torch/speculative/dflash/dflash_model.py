@@ -22,6 +22,7 @@ class DFlashModel(DynamicModule):
     """Base DFlash Model."""
 
     def _setup(self):
+        """Register temporary attributes for the DFlash module."""
         self._register_temp_attribute("dflash_module", None)
 
     def modify(self, config):

@@ -110,6 +110,7 @@ class DFlashAttention(nn.Module):
     """Attention with KV injection, matching SpecForge Qwen3DFlashAttention."""
 
     def __init__(self, config, layer_idx):
+        """Initialize DFlash attention with KV injection projections and QK-norm."""
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -131,6 +132,7 @@ class DFlashAttention(nn.Module):
         self.k_norm = _NORM_CLS(self.head_dim, eps=config.rms_norm_eps)
 
     def forward(self, hidden_states, target_hidden, position_embeddings, attention_mask=None):
+        """Forward with KV injection: Q from noise, K/V from context+noise."""
         bsz, q_len, _ = hidden_states.shape
         ctx_len = target_hidden.shape[1]
 
@@ -176,6 +178,7 @@ class DFlashDecoderLayer(nn.Module):
     """Draft decoder layer with KV injection."""
 
     def __init__(self, config, layer_idx):
+        """Initialize decoder layer with attention, MLP, and layer norms."""
         super().__init__()
         self.self_attn = DFlashAttention(config, layer_idx)
         self.mlp = _MLP_CLS(config)
@@ -183,6 +186,7 @@ class DFlashDecoderLayer(nn.Module):
         self.post_attention_layernorm = _NORM_CLS(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(self, hidden_states, target_hidden, position_embeddings, attention_mask=None):
+        """Forward pass with residual connections."""
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.self_attn(
@@ -201,6 +205,7 @@ class DFlashModule(nn.Module):
     """DFlash draft module matching SpecForge DFlashDraftModel."""
 
     def __init__(self, config):
+        """Initialize DFlash module with feature fusion, decoder layers, and rotary embeddings."""
         super().__init__()
         self.config = config
         self.block_size = config.block_size
@@ -338,6 +343,7 @@ class HFDFlashModel(DFlashModel):
         return eos_id or 0
 
     def _find_base_model_parts(self):
+        """Locate base model submodules (backbone, embeddings, lm_head) by probing known paths."""
         for name, paths in {
             "base_model_path": ["model.language_model", "model", "backbone"],
             "base_model_embeddings_path": [
