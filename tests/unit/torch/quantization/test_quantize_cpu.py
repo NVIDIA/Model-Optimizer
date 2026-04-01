@@ -400,3 +400,47 @@ class TestSetQuantizerAttributesFull:
             if name.endswith("weight_quantizer"):
                 assert isinstance(module, SequentialQuantizer)
                 assert len(module) == 2
+
+
+def test_ordering_later_entry_overrides_earlier():
+    """Later entries in quant_cfg override earlier ones for the same quantizer."""
+    model = SimpleLinear()
+    config = {
+        "quant_cfg": [
+            {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
+            {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        ],
+        "algorithm": "max",
+    }
+    model = mtq.quantize(model, config, lambda m: m(m.get_input()))
+    for name, module in model.named_modules():
+        if name.endswith("weight_quantizer"):
+            assert module.num_bits == 4, "Later entry (num_bits=4) should override earlier (8)"
+        if name.endswith("input_quantizer"):
+            assert module.num_bits == 8
+
+
+def test_legacy_dict_format_end_to_end():
+    """Old dict-format quant_cfg works end-to-end through mtq.quantize via normalization."""
+    model = SimpleLinear()
+    # Old-style dict config with "default" key and wildcard keys
+    old_config = {
+        "quant_cfg": {
+            "default": {"enable": False},
+            "*weight_quantizer": {"num_bits": 8, "axis": 0},
+            "*input_quantizer": {"num_bits": 8, "axis": None},
+        },
+        "algorithm": "max",
+    }
+    model = mtq.quantize(model, old_config, lambda m: m(m.get_input()))
+    for name, module in model.named_modules():
+        if isinstance(module, TensorQuantizer):
+            if name.endswith(("weight_quantizer", "input_quantizer")):
+                assert module.is_enabled
+                assert module.num_bits == 8
+            elif name.endswith("output_quantizer"):
+                # "default" key → quantizer_path="*" with enable=False disables everything,
+                # but weight/input quantizers are re-enabled by subsequent entries.
+                # output_quantizer is NOT re-enabled so it stays disabled.
+                assert not module.is_enabled

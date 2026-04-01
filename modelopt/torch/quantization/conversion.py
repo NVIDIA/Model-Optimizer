@@ -254,7 +254,16 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType
         cfg = entry["cfg"]  # None, dict, or list — always explicit after normalization
         enable: bool = entry["enable"]  # always explicit after normalization
         parent_class_name = entry.get("parent_class")
-        parent_class = QuantModuleRegistry[parent_class_name] if parent_class_name else None
+        if parent_class_name:
+            try:
+                parent_class = QuantModuleRegistry[parent_class_name]
+            except KeyError:
+                raise ValueError(
+                    f"parent_class {parent_class_name!r} not found in QuantModuleRegistry. "
+                    "Make sure the class has a registered quantized equivalent."
+                ) from None
+        else:
+            parent_class = None
 
         if not cfg:
             # No cfg: only toggle the enable state, leave all other attributes unchanged.
@@ -288,6 +297,8 @@ def _match_quantizer(
     else:
         raise NotImplementedError(f"Unsupported type {type(wildcard_or_filter_func)}")
 
+    # Get the parent module of this quantizer. When name has no dots (root-level quantizer),
+    # ".".join([]) == "" and get_submodule("") returns the model itself (PyTorch convention).
     return parent_class is None or isinstance(
         full_model.get_submodule(".".join(name.split(".")[:-1])), parent_class
     )

@@ -156,7 +156,7 @@ class TestNormalizeQuantCfgList:
             normalize_quant_cfg_list([{}])
 
     def test_error_on_multi_key_legacy_dict(self):
-        """A multi-key legacy dict (no quantizer_path) is rejected."""
+        """A multi-key legacy dict (no quantizer_path, no nn.* keys) is rejected."""
         with pytest.raises(ValueError):
             normalize_quant_cfg_list([{"*weight_quantizer": {}, "*input_quantizer": {}}])
 
@@ -202,3 +202,44 @@ class TestNormalizeQuantCfgList:
         assert result[0]["cfg"] is None
         assert result[0]["enable"] is False
         assert result[0]["parent_class"] == "nn.Linear"
+
+    def test_legacy_default_key(self):
+        """Legacy 'default' key is converted to quantizer_path='*'."""
+        raw = [{"default": {"enable": False}}]
+        result = normalize_quant_cfg_list(raw)
+        assert result[0]["quantizer_path"] == "*"
+        assert result[0]["enable"] is False
+        assert result[0]["cfg"] is None
+
+    def test_legacy_default_key_with_cfg(self):
+        """Legacy 'default' key with cfg attributes maps to '*'."""
+        raw = [{"default": {"num_bits": 8, "axis": None}}]
+        result = normalize_quant_cfg_list(raw)
+        assert result[0]["quantizer_path"] == "*"
+        assert result[0]["cfg"] == {"num_bits": 8, "axis": None}
+        assert result[0]["enable"] is True
+
+    def test_legacy_flat_dict_with_default_key(self):
+        """Legacy flat dict containing 'default' key converts it to '*'."""
+        raw = {"default": {"enable": False}, "*weight_quantizer": {"num_bits": 8}}
+        result = normalize_quant_cfg_list(raw)
+        default_entries = [e for e in result if e["quantizer_path"] == "*"]
+        assert len(default_entries) == 1
+        assert default_entries[0]["enable"] is False
+
+    def test_legacy_nn_class_multi_key(self):
+        """Legacy nn.* scoped format with multiple sub-keys produces multiple entries."""
+        raw = [
+            {
+                "nn.Linear": {
+                    "*input_quantizer": {"enable": False},
+                    "*weight_quantizer": {"num_bits": 4},
+                }
+            }
+        ]
+        result = normalize_quant_cfg_list(raw)
+        assert len(result) == 2
+        paths = {e["quantizer_path"] for e in result}
+        assert paths == {"*input_quantizer", "*weight_quantizer"}
+        for e in result:
+            assert e["parent_class"] == "nn.Linear"

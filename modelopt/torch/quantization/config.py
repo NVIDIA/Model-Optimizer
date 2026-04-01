@@ -1593,24 +1593,30 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
     if isinstance(v, dict):
         v = [{k: val} for k, val in v.items()]
 
-    def _dict_to_entry(key: str, value) -> QuantizerCfgEntry:
+    def _dict_to_entry(key: str, value) -> list[QuantizerCfgEntry]:
+        """Convert a single legacy key-value pair to one or more QuantizerCfgEntry dicts."""
+        # Legacy "default" key was a catch-all applied as "*" in the old conversion code.
+        if key == "default":
+            key = "*"
+
         if isinstance(key, str) and key.startswith("nn."):
-            if not isinstance(value, dict) or len(value) != 1:
-                raise ValueError(
-                    f"For 'nn.*' scoped format, value must be a single-key dict, got {value!r}"
-                )
-            q_path, sub_cfg = next(iter(value.items()))
-            sub_cfg = dict(sub_cfg)
-            enable = sub_cfg.pop("enable", None)
-            cfg = sub_cfg or None
-            entry: QuantizerCfgEntry = {
-                "parent_class": key,
-                "quantizer_path": q_path,
-                "cfg": cfg,
-            }
-            if enable is not None:
-                entry["enable"] = enable
-            return entry
+            if not isinstance(value, dict):
+                raise ValueError(f"For 'nn.*' scoped format, value must be a dict, got {value!r}")
+            # Support multi-key nn.*-scoped dicts by emitting one entry per sub-key.
+            entries: list[QuantizerCfgEntry] = []
+            for q_path, sub_cfg in value.items():
+                sub_cfg = dict(sub_cfg)
+                enable = sub_cfg.pop("enable", None)
+                cfg = sub_cfg or None
+                entry: QuantizerCfgEntry = {
+                    "parent_class": key,
+                    "quantizer_path": q_path,
+                    "cfg": cfg,
+                }
+                if enable is not None:
+                    entry["enable"] = enable
+                entries.append(entry)
+            return entries
         else:
             if isinstance(value, dict):
                 cfg = {k: val for k, val in value.items() if k != "enable"} or None
@@ -1621,31 +1627,37 @@ def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
             entry = {"quantizer_path": key, "cfg": cfg}
             if enable is not None:
                 entry["enable"] = enable
-            return entry
+            return [entry]
 
     result: list[QuantizerCfgEntry] = []
     for raw in v:
         if isinstance(raw, dict) and "quantizer_path" in raw:
-            entry: dict = dict(raw)  # copy to avoid mutating caller's data
+            entries = [dict(raw)]  # copy to avoid mutating caller's data
         elif isinstance(raw, dict) and len(raw) == 1:
             key, val = next(iter(raw.items()))
-            entry = dict(_dict_to_entry(key, val))
+            entries = [dict(e) for e in _dict_to_entry(key, val)]
+        elif isinstance(raw, dict) and len(raw) > 1 and any(k.startswith("nn.") for k in raw):
+            # Legacy flat dict with nn.*-scoped keys mixed with other keys — expand all pairs.
+            entries = []
+            for k, val in raw.items():
+                entries.extend(dict(e) for e in _dict_to_entry(k, val))
         else:
             raise ValueError(f"Invalid quant_cfg entry: {raw!r}.")
 
-        # Validate: must carry at least one instruction beyond the path selector.
-        if "cfg" not in entry and "enable" not in entry:
-            raise ValueError(
-                f"Invalid quant_cfg entry: {raw!r} — each entry must specify 'cfg', 'enable', "
-                "or both. An entry with only 'quantizer_path' has no effect (implicit "
-                "enable=True is not allowed; set it explicitly)."
-            )
+        for entry in entries:
+            # Validate: must carry at least one instruction beyond the path selector.
+            if "cfg" not in entry and "enable" not in entry:
+                raise ValueError(
+                    f"Invalid quant_cfg entry: {raw!r} — each entry must specify 'cfg', 'enable', "
+                    "or both. An entry with only 'quantizer_path' has no effect (implicit "
+                    "enable=True is not allowed; set it explicitly)."
+                )
 
-        # Normalize: make enable and cfg always explicit.
-        entry.setdefault("enable", True)
-        entry.setdefault("cfg", None)
+            # Normalize: make enable and cfg always explicit.
+            entry.setdefault("enable", True)
+            entry.setdefault("cfg", None)
 
-        result.append(cast("QuantizerCfgEntry", entry))
+            result.append(cast("QuantizerCfgEntry", entry))
     return result
 
 
