@@ -255,6 +255,8 @@ For exploring new quantization recipes, you can compose a completely new configu
 
 .. code-block:: python
 
+    from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg
+
     # Custom configuration for INT4 block-wise weights and INT8 dynamic activations
     MY_CUSTOM_CONFIG = {
         "quant_cfg": [

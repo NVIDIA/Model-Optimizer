@@ -93,8 +93,13 @@ def estimate_quant_compression(quant_cfg: QuantizeConfig) -> float:
 
         raise ValueError(f"Unknown type {type(quantizer_attr_cfg)}, {quantizer_attr_cfg}")
 
-    cfgs = [e.get("cfg", {}) for e in quant_cfg.quant_cfg]
-    cfgs = [c for c in cfgs if c is not None]
+    cfgs = []
+    for e in quant_cfg.quant_cfg:
+        if e.get("enable", True) is False:
+            continue
+        c = e.get("cfg")
+        if c is not None:
+            cfgs.append(c)
     return estimate_quant_compression_for_quantizer(cfgs) if cfgs else 1.0
 
 
@@ -1380,14 +1385,19 @@ def _resolve_best_recipe(search_state, constraints, verbose=False):
 
 
 def _match_quantizer_cfg(quant_cfg, quantizer_attr):
-    # Last-match-wins to mirror set_quantizer_by_cfg behavior
+    # Last-match-wins to mirror set_quantizer_by_cfg behavior.
+    # Patterns may be path-scoped (e.g. "*mlp*weight_quantizer") while quantizer_attr
+    # is a bare name like "weight_quantizer".  We match if the bare name matches directly
+    # OR if the pattern ends with the bare quantizer_attr (path-scoped match).
     matched = None
     matched_enable = False
     for entry in quant_cfg:
         pattern = entry["quantizer_path"]
         cfg = entry.get("cfg", {})
         enable = entry.get("enable", True)
-        if fnmatch.fnmatch(quantizer_attr, pattern):
+        if fnmatch.fnmatch(quantizer_attr, pattern) or fnmatch.fnmatch(
+            quantizer_attr, pattern.rsplit("*", 1)[-1] if "*" in pattern else pattern
+        ):
             matched = cfg
             matched_enable = enable
 

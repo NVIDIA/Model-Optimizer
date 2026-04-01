@@ -1720,17 +1720,16 @@ def need_calibration(config):
 
     quant_cfg: list = config.get("quant_cfg") or []
     for entry in quant_cfg:
-        name = (
-            entry["quantizer_path"]
-            if isinstance(entry, dict) and "quantizer_path" in entry
-            else entry[0]
-        )
-        if isinstance(entry, dict) and "quantizer_path" in entry:
-            cfg = dict(entry.get("cfg") or {})
-            if "enable" in entry:
-                cfg["enable"] = entry["enable"]
-        else:
-            cfg = entry[1]
+        if not isinstance(entry, dict) or "quantizer_path" not in entry:
+            raise ValueError(
+                f"Invalid quant_cfg entry: {entry!r}. "
+                "Each entry must be a dict with a 'quantizer_path' key. "
+                "Did you forget to call normalize_quant_cfg_list()?"
+            )
+        name = entry["quantizer_path"]
+        cfg = dict(entry.get("cfg") or {})
+        if "enable" in entry:
+            cfg["enable"] = entry["enable"]
         if "weight_quantizer" in name:
             # We don't calibrate weight quantizer
             continue

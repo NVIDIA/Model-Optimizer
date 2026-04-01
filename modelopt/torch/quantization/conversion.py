@@ -48,6 +48,7 @@ from .utils import is_quantized, is_quantized_linear
 __all__ = [
     "register",
     "replace_quant_module",
+    "set_quantizer_attribute",
     "set_quantizer_attributes_full",
     "set_quantizer_attributes_partial",
     "set_quantizer_by_cfg",
@@ -353,6 +354,12 @@ def set_quantizer_attributes_full(
                     )
                 module.set_from_attribute_config(attributes)
             else:
+                if isinstance(module, SequentialQuantizer):
+                    # Downgrade SequentialQuantizer back to TensorQuantizer when the
+                    # new entry provides a single (non-list) config.
+                    parent_module = quant_model.get_submodule(name.rpartition(".")[0])
+                    module = TensorQuantizer()
+                    setattr(parent_module, name.split(".")[-1], module)
                 cast("TensorQuantizer", module).set_from_attribute_config(attributes)
 
 
@@ -459,6 +466,24 @@ def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: QuantizeQuan
     for name, module in quant_model.named_modules():
         if isinstance(module, TensorQuantizer):
             module.set_from_modelopt_state(original_attributes[name], properties_only=True)
+
+
+def set_quantizer_attribute(
+    quant_model: nn.Module,
+    wildcard_or_filter_func: str | Callable,
+    attribute: Any,
+    parent_class: type[nn.Module] | None = None,
+):
+    """Deprecated: use :func:`set_quantizer_attributes_partial` instead."""
+    warnings.warn(
+        "set_quantizer_attribute is deprecated, use set_quantizer_attributes_partial "
+        "or set_quantizer_attributes_full instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return set_quantizer_attributes_partial(
+        quant_model, wildcard_or_filter_func, attribute, parent_class
+    )
 
 
 def register(original_cls: nn.Module, quantized_cls: nn.Module):

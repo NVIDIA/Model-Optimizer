@@ -161,13 +161,15 @@ def quantize(
             :class:`QuantizeConfig <modelopt.torch.quantization.config.QuantizeConfig>` specifying the
             values for keys ``"quant_cfg"`` and ``"algorithm"``.
             It is basically a dictionary specifying the values for keys ``"quant_cfg"`` and ``"algorithm"``.
-            The ``"quant_cfg"`` key specifies the quantization configurations.
+            The ``"quant_cfg"`` key specifies the quantization configurations as an ordered list of
+            :class:`QuantizerCfgEntry <modelopt.torch.quantization.config.QuantizerCfgEntry>` dicts.
             The ``"algorithm"`` key specifies the ``algorithm`` argument to
             :meth:`calibrate <modelopt.torch.quantization.model_quant.calibrate>`.
 
-            Quantization configurations is a dictionary mapping wildcards or filter functions
-            to its quantizer attributes. The wildcards or filter functions  are matched
-            against the quantizer module names. The quantizer modules have names ending with
+            Each entry in the ``"quant_cfg"`` list has a ``"quantizer_path"`` wildcard matched
+            against quantizer module names, an optional ``"cfg"`` dict of quantizer attributes,
+            and an optional ``"enable"`` toggle. Entries are applied in list order; later entries
+            override earlier ones. The quantizer modules have names ending with
             ``weight_quantizer`` and ``input_quantizer`` and they perform weight quantization and
             input quantization (or activation quantization) respectively. The quantizer modules
             are instances of
