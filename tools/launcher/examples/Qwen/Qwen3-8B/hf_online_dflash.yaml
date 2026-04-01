@@ -1,12 +1,11 @@
 # DFlash online speculative decoding training for Qwen3-8B.
 #
 # Trains a DFlash draft model (block diffusion) using the frozen target model
-# to extract multi-layer hidden states on the fly.
+# to extract multi-layer hidden states on the fly, then evaluates AR on MT-Bench.
 #
-# 3-step pipeline:
-#   task_0: Online DFlash training
-#   task_1: AR (Acceptance Rate) validation on MT-Bench
-#   task_2: Benchmark speculative decoding speedup via VLLM
+# 2-step pipeline:
+#   task_0: Online DFlash training + AR validation
+#   task_1: Benchmark speculative decoding speedup via VLLM
 #
 # Reference: "DFlash: Block Diffusion for Flash Speculative Decoding" (arXiv:2602.06036)
 #
@@ -16,7 +15,7 @@
 
 job_name: Qwen3-8B_DFlash_online
 pipeline:
-  # Step 1: Online DFlash training
+  # Step 1: Online DFlash training + AR validation
   task_0:
     script: common/dflash/online_training.sh
     args:
@@ -34,30 +33,15 @@ pipeline:
       - --dflash_mask_token_id 151643
     environment:
       - HF_MODEL_CKPT: /hf-local/Qwen/Qwen3-8B
+      - NUM_AR_SAMPLES: "20"
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
       ntasks_per_node: 1
       gpus_per_node: 8
 
-  # Step 2: AR validation on MT-Bench
+  # Step 2: Benchmark speculative decoding (VLLM backend)
   task_1:
-    script: common/dflash/ar_validate.sh
-    environment:
-      - HF_MODEL_CKPT: /hf-local/Qwen/Qwen3-8B
-      - DFLASH_CKPT: /scratchspace/dflash
-      - DFLASH_BLOCK_SIZE: "16"
-      - DFLASH_NUM_LAYERS: "5"
-      - DFLASH_MASK_TOKEN_ID: "151643"
-      - NUM_SAMPLES: "20"
-    slurm_config:
-      _factory_: "slurm_factory"
-      nodes: 1
-      ntasks_per_node: 1
-      gpus_per_node: 1
-
-  # Step 3: Benchmark speculative decoding (VLLM backend)
-  task_2:
     script: common/specdec_bench/quick_check.sh
     args:
       - --draft_model_dir /scratchspace/dflash
