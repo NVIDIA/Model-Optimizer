@@ -264,10 +264,13 @@ def build_quant_config(
         "enable": True,
     }
     quant_cfg = [
-        ("*weight_quantizer", _nvfp4_cfg),
-        ("*input_quantizer", _nvfp4_cfg),
-        *[(pattern, {"enable": False}) for pattern in SENSITIVE_LAYER_PATTERNS],
-        *[(f"*transformer_blocks.{i}.*", {"enable": False}) for i in exclude_blocks],
+        {"quantizer_path": "*weight_quantizer", "cfg": _nvfp4_cfg},
+        {"quantizer_path": "*input_quantizer", "cfg": _nvfp4_cfg},
+        *[{"quantizer_path": pattern, "enable": False} for pattern in SENSITIVE_LAYER_PATTERNS],
+        *[
+            {"quantizer_path": f"*transformer_blocks.{i}.*", "enable": False}
+            for i in exclude_blocks
+        ],
     ]
 
     return {

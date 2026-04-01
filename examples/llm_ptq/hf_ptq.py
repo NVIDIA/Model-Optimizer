@@ -84,21 +84,17 @@ def _set_kv_cache_constant_amax(quant_cfg: list) -> None:
     Creates a new dict for the KV bmm quantizer config to avoid mutating shared references.
     """
     for i, entry in enumerate(quant_cfg):
-        pattern = (
-            entry["quantizer_path"]
-            if isinstance(entry, dict) and "quantizer_path" in entry
-            else entry[0]
-        )
-        if pattern == "*[kv]_bmm_quantizer":
-            assert isinstance(entry, dict) and isinstance(entry.get("cfg", {}), dict)
-            new_entry = {
-                "quantizer_path": "*[kv]_bmm_quantizer",
-                "cfg": {**entry.get("cfg", {}), "use_constant_amax": True},
-            }
-            if entry.get("enable") is not None:
-                new_entry["enable"] = entry["enable"]
-            quant_cfg[i] = new_entry
-            break
+        if entry.get("quantizer_path") != "*[kv]_bmm_quantizer":
+            continue
+        assert isinstance(entry.get("cfg", {}), dict)
+        new_entry = {
+            "quantizer_path": "*[kv]_bmm_quantizer",
+            "cfg": {**entry.get("cfg", {}), "use_constant_amax": True},
+        }
+        if entry.get("enable") is not None:
+            new_entry["enable"] = entry["enable"]
+        quant_cfg[i] = new_entry
+        break
 
 
 QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {

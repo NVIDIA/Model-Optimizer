@@ -168,6 +168,33 @@ class QuantizerCfgEntry(TypedDict, total=False):
     enable: bool | None  # toggles matched quantizers on/off; independent of cfg
 
 
+def find_quant_cfg_entry(
+    quant_cfg_list: list[QuantizerCfgEntry], quantizer_path: str
+) -> QuantizerCfgEntry:
+    """Find the last entry in a ``quant_cfg`` list matching the given ``quantizer_path``.
+
+    Returns the *last* match because entries are applied in list order and later entries
+    override earlier ones, so the last match represents the effective configuration.
+
+    Args:
+        quant_cfg_list: A list of :class:`QuantizerCfgEntry` dicts.
+        quantizer_path: The ``quantizer_path`` value to search for.
+
+    Returns:
+        The last matching :class:`QuantizerCfgEntry`.
+
+    Raises:
+        KeyError: If no entry with the given ``quantizer_path`` is found.
+    """
+    result = None
+    for entry in quant_cfg_list:
+        if isinstance(entry, dict) and entry.get("quantizer_path") == quantizer_path:
+            result = entry
+    if result is None:
+        raise KeyError(f"No quant_cfg entry with quantizer_path={quantizer_path!r}")
+    return result
+
+
 _base_disable_all: list[QuantizerCfgEntry] = [
     {"quantizer_path": "*", "enable": False},
 ]
@@ -539,7 +566,6 @@ _nvfp4_cfg = {
 _nvfp4_cfg_bs32 = {
     "num_bits": (2, 1),
     "block_sizes": {-1: 32, "type": "dynamic", "scale_bits": (4, 3)},
-    "enable": True,
 }
 
 
@@ -712,7 +738,8 @@ NVFP4_KV_ROTATE_CFG = {
             "enable": True,
         },
         {"quantizer_path": "*v_bmm_quantizer", "cfg": _nvfp4_cfg, "enable": True},
-    ]
+    ],
+    "algorithm": "max",
 }
 
 NVFP4_SVDQUANT_DEFAULT_CFG = _nvfp4_selective_quant_cfg(

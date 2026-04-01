@@ -361,12 +361,8 @@ def ptq(
 
     if not args.disable_wo_quant and "FP4" in quant_cfg:
         # Find the default input/weight quantizer cfgs to swap for wo layers
-        input_cfg = next(
-            e["cfg"] for e in mtq_cfg["quant_cfg"] if e.get("quantizer_path") == "*input_quantizer"
-        )
-        weight_cfg = next(
-            e["cfg"] for e in mtq_cfg["quant_cfg"] if e.get("quantizer_path") == "*weight_quantizer"
-        )
+        input_cfg = mtq.find_quant_cfg_entry(mtq_cfg["quant_cfg"], "*input_quantizer")["cfg"]
+        weight_cfg = mtq.find_quant_cfg_entry(mtq_cfg["quant_cfg"], "*weight_quantizer")["cfg"]
         mtq_cfg["quant_cfg"].extend(
             [
                 {"quantizer_path": "*wo*weight_quantizer", "cfg": input_cfg},
