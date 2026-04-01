@@ -946,19 +946,15 @@ class TestResumeDetection:
 class TestMetadataIntegration:
     def test_update_quantize_metadata_includes_progress(self):
         """update_quantize_metadata should pick up _seq_calib_progress."""
+        from modelopt.torch.quantization.config import QuantizeConfig
+        from modelopt.torch.quantization.conversion import update_quantize_metadata
 
         model = nn.Linear(4, 4)
         progress = {"completed_layer_idx": 5, "total_layers": 10}
         setattr(model, SEQ_CALIB_PROGRESS_ATTR, progress)
 
         metadata = {}
-        # update_quantize_metadata expects a config; use None-safe approach
-        # by calling the progress logic directly
-        from modelopt.torch.quantization.utils.checkpoint import SEQ_CALIB_PROGRESS_ATTR as ATTR
-
-        p = getattr(model, ATTR, None)
-        if p is not None:
-            metadata["seq_calib_progress"] = p
+        update_quantize_metadata(model, QuantizeConfig(), metadata)
 
         assert metadata["seq_calib_progress"] == progress
         delattr(model, SEQ_CALIB_PROGRESS_ATTR)

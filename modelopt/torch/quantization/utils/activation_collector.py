@@ -150,6 +150,25 @@ class LayerActivationCollector:
         # downstream run-mode layer, which replays from its own cached inputs instead.
         return meta[1]
 
+    @staticmethod
+    def _remap_meta_device(meta, device: torch.device):
+        """Return a copy of *meta* with all tensor devices replaced by *device*."""
+        tag = meta[0]
+        if tag == "tensor":
+            _, shape, dtype, _old_device = meta
+            return ("tensor", shape, dtype, device)
+        if tag == "tuple":
+            return (
+                "tuple",
+                tuple(LayerActivationCollector._remap_meta_device(m, device) for m in meta[1]),
+            )
+        if tag == "list":
+            return (
+                "list",
+                [LayerActivationCollector._remap_meta_device(m, device) for m in meta[1]],
+            )
+        return meta
+
     def _patch_all_layers(
         self,
         decoder_layers: nn.ModuleList | None = None,
@@ -162,6 +181,8 @@ class LayerActivationCollector:
                 discovered via :meth:`get_decoder_layers`.
             layer_output_metas: ``{layer_idx: output_meta}`` mapping from a
                 checkpoint, used to pre-populate skip-mode metadata on resume.
+                Tensor devices in the metas are remapped to each layer's current
+                device so that checkpoints are portable across placements.
         """
 
         def _patched_forward(self, *args, **kwargs):
@@ -211,7 +232,11 @@ class LayerActivationCollector:
                     name=module_to_name.get(layer, type(layer).__name__),
                 )
                 if layer_output_metas and i in layer_output_metas:
-                    layer._seq_calib.output_meta = layer_output_metas[i]
+                    p = next(layer.parameters(), None)
+                    device = p.device if p is not None else torch.device("cpu")
+                    layer._seq_calib.output_meta = self._remap_meta_device(
+                        layer_output_metas[i], device
+                    )
                 bind_forward_method(layer, _patched_forward, "_original_forward")
 
             def _early_stop_forward(module_self, *args, **kwargs):

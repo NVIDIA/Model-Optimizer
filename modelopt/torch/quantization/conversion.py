@@ -109,6 +109,12 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
     details regarding how MCore sharded checkpoint is restored,
     see modelopt.torch.opt.plugins.mcore_dist_checkpointing.restore_sharded_modelopt_state.
     """
+    # Propagate sequential calibration progress to the model for resume.
+    # This is global metadata (not per-module), so it must run before the
+    # MCore early return — it applies to both HF and MCore checkpoint paths.
+    if "seq_calib_progress" in metadata:
+        setattr(model, SEQ_CALIB_PROGRESS_ATTR, metadata["seq_calib_progress"])
+
     if "quantizer_state" not in metadata:
         # MCore sharded checkpoint (`torch-dist`) has its quantizer_state stored as the
         # extra_state of `QuantModule`. The quantizer_state is resumed with
@@ -139,10 +145,6 @@ def restore_quantizer_state(model: nn.Module, config: QuantizeConfig, metadata: 
         if isinstance(module, QuantModule):
             name = get_unwrapped_name(name, model)
             module.modelopt_post_restore(name)
-
-    # Propagate sequential calibration progress to the model for resume
-    if "seq_calib_progress" in metadata:
-        setattr(model, SEQ_CALIB_PROGRESS_ATTR, metadata["seq_calib_progress"])
 
     return model
 

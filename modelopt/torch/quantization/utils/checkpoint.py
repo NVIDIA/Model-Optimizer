@@ -84,13 +84,33 @@ def detect_sequential_resume_layer(model: nn.Module, num_layers: int) -> tuple[i
     if progress is None:
         return 0, None
 
+    if not isinstance(progress, dict):
+        raise ValueError(
+            f"Expected seq_calib_progress to be a dict, got {type(progress).__name__}."
+        )
+    for key in ("completed_layer_idx", "total_layers"):
+        if key not in progress:
+            raise ValueError(f"Checkpoint progress is missing required key {key!r}.")
+
     completed_layer = progress["completed_layer_idx"]
     saved_total = progress["total_layers"]
+
+    if not isinstance(completed_layer, int) or not isinstance(saved_total, int):
+        raise ValueError(
+            f"Checkpoint progress values must be ints, got "
+            f"completed_layer_idx={completed_layer!r}, total_layers={saved_total!r}."
+        )
 
     if saved_total != num_layers:
         raise ValueError(
             f"Checkpoint was saved with {saved_total} layers but model has "
             f"{num_layers} layers. Cannot resume."
+        )
+
+    if not (0 <= completed_layer < num_layers):
+        raise ValueError(
+            f"completed_layer_idx={completed_layer} is out of range for "
+            f"{num_layers} layers (expected 0..{num_layers - 1})."
         )
 
     resume_from = completed_layer + 1
@@ -105,6 +125,10 @@ def should_save_seq_calib_checkpoint(
     layer_idx: int, num_layers: int, checkpoint_dir: str | None, checkpoint_interval: int | None
 ) -> bool:
     """Return *True* when a checkpoint should be saved after calibrating *layer_idx*."""
+    if checkpoint_interval is not None and checkpoint_interval <= 0:
+        raise ValueError(
+            f"checkpoint_interval must be a positive integer, got {checkpoint_interval}."
+        )
     return (
         checkpoint_dir is not None
         and checkpoint_interval is not None
