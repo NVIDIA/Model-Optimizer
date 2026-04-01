@@ -1473,9 +1473,12 @@ LayerActivationCollector.register_decoder_layer_support(
 )
 
 
-register_seq_calib_checkpoint_saver(
-    _is_supported_hf_model, lambda model, checkpoint_dir: model.save_pretrained(checkpoint_dir)
-)
+def _save_hf_checkpoint(model: nn.Module, checkpoint_dir: str) -> None:
+    """Save a HuggingFace model checkpoint using ``save_pretrained``."""
+    model.save_pretrained(checkpoint_dir)
+
+
+register_seq_calib_checkpoint_saver(_is_supported_hf_model, _save_hf_checkpoint)
 
 
 class _QuantMoELinear(QuantModule):

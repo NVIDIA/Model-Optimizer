@@ -17,21 +17,18 @@
 """Quantization utilities."""
 
 from .activation_collector import LayerActivationCollector
-from .checkpoint import get_checkpoint_saver, register_seq_calib_checkpoint_saver
 from .core_utils import *
 
 __all__ = [
     "EXPORT_MODE",
     "convert_quantization_axis_to_reduce_axis",
     "export_torch_mode",
-    "get_checkpoint_saver",
     "is_quantized",
     "is_quantized_column_parallel_linear",
     "is_quantized_linear",
     "is_quantized_row_parallel_linear",
     "reduce_amax",
     "reduce_sum",
-    "register_seq_calib_checkpoint_saver",
     "replace_function",
     "update_quant_cfg_with_kv_cache_quant",
     "weight_attr_names",

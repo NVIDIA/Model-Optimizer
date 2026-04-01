@@ -841,7 +841,7 @@ class TestPrepareForResume:
         try:
             # Try to resume from layer 3 with no saved output_metas
             with pytest.raises(RuntimeError, match="no output_meta"):
-                collector.prepare_for_resume(3, fwd, saved_output_metas=None)
+                collector.prepare_for_resume(3, fwd)
         finally:
             collector._unpatch_all_layers()
 

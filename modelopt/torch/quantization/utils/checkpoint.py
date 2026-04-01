@@ -21,16 +21,13 @@ Provides:
   ``(predicate, save_fn)`` pair at import time so that
   :func:`get_checkpoint_saver` can find the right saver for any model.
 
-* **Resume detection** — :func:`detect_resume_point` reads progress metadata
-  previously attached to the model and returns the layer index to resume from.
+* **Resume detection** — :func:`detect_sequential_resume_layer` reads progress
+  metadata previously attached to the model and returns the layer index to
+  resume from.
 
 * **Checkpoint saving** — :func:`save_sequential_checkpoint` collects layer
   output metadata, attaches progress to the model, and delegates to the
   registered saver.
-
-This follows the same registry pattern as
-:attr:`LayerActivationCollector._decoder_layer_support` in
-``activation_collector.py``.
 """
 
 from __future__ import annotations
@@ -45,17 +42,12 @@ if TYPE_CHECKING:
 
     import torch.nn as nn
 
-    from .activation_collector import LayerActivationCollector
-
 #: Model attribute name used to store sequential calibration progress.
 SEQ_CALIB_PROGRESS_ATTR = "_seq_calib_progress"
 
 # ---------------------------------------------------------------------------
 # Save registry
 # ---------------------------------------------------------------------------
-
-# Global registry of (predicate, save_fn) pairs.  Populated at import time
-# by plugins.  Order matters: the first matching entry wins.
 _CHECKPOINT_SAVE_SUPPORT: list[
     tuple[Callable[[nn.Module], bool], Callable[[nn.Module, str], None]]
 ] = []
@@ -65,14 +57,7 @@ def register_seq_calib_checkpoint_saver(
     is_supported: Callable[[nn.Module], bool],
     save_fn: Callable[[nn.Module, str], None],
 ) -> None:
-    """Register a (predicate, saver) pair for sequential calibration checkpointing.
-
-    Args:
-        is_supported: ``Callable(model) -> bool`` — returns *True* if *save_fn*
-            can handle this model.
-        save_fn: ``Callable(model, checkpoint_dir) -> None`` — saves the model
-            (weights + modelopt state) to *checkpoint_dir*.
-    """
+    """Register a ``(predicate, saver)`` pair for sequential calibration checkpointing."""
     entry = (is_supported, save_fn)
     if entry not in _CHECKPOINT_SAVE_SUPPORT:
         _CHECKPOINT_SAVE_SUPPORT.append(entry)
@@ -88,21 +73,10 @@ def get_checkpoint_saver(
     return None
 
 
-# ---------------------------------------------------------------------------
-# Resume detection
-# ---------------------------------------------------------------------------
+def detect_sequential_resume_layer(model: nn.Module, num_layers: int) -> tuple[int, dict | None]:
+    """Read checkpoint progress from the model and return ``(resume_layer_idx, layer_output_metas)``.
 
-
-def detect_seq_calib_resume_point(model: nn.Module, num_layers: int) -> tuple[int, dict | None]:
-    """Read checkpoint progress from the model and return where to resume.
-
-    Returns:
-        ``(resume_layer_idx, saved_output_metas)`` — ``(0, None)`` for a fresh
-        run (no checkpoint present).  Removes the progress attribute from the
-        model after reading it.
-
-    Raises:
-        ValueError: If the checkpoint's layer count doesn't match *num_layers*.
+    Returns ``(0, None)`` for a fresh run with no checkpoint present.
     """
     progress = getattr(model, SEQ_CALIB_PROGRESS_ATTR, None)
     if progress is None:
@@ -126,11 +100,6 @@ def detect_seq_calib_resume_point(model: nn.Module, num_layers: int) -> tuple[in
     return resume_from, progress.get("layer_output_metas", {})
 
 
-# ---------------------------------------------------------------------------
-# Checkpoint saving
-# ---------------------------------------------------------------------------
-
-
 def should_save_seq_calib_checkpoint(
     layer_idx: int, num_layers: int, checkpoint_dir: str | None, checkpoint_interval: int | None
 ) -> bool:
@@ -148,13 +117,12 @@ def save_sequential_checkpoint(
     completed_layer_idx: int,
     total_layers: int,
     checkpoint_dir: str,
-    input_getter: LayerActivationCollector,
+    layer_output_metas: dict,
 ) -> None:
     """Save a rolling checkpoint during sequential calibration.
 
-    Collects layer output metadata from *input_getter*, attaches progress to
-    the model (so ``update_quantize_metadata`` serialises it), calls the
-    registered saver, then cleans up the progress attribute.
+    Attaches progress to the model, calls the registered saver, then cleans up
+    the progress attribute.
     """
     saver = get_checkpoint_saver(model)
     if saver is None:
@@ -163,8 +131,6 @@ def save_sequential_checkpoint(
             "for this model type. Skipping checkpoint save."
         )
         return
-
-    layer_output_metas = input_getter.get_layer_output_metas(completed_layer_idx)
 
     model._seq_calib_progress = {
         "completed_layer_idx": completed_layer_idx,

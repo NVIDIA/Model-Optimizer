@@ -50,7 +50,7 @@ from .utils import (
     weight_attr_names,
 )
 from .utils.checkpoint import (
-    detect_seq_calib_resume_point,
+    detect_sequential_resume_layer,
     save_sequential_checkpoint,
     should_save_seq_calib_checkpoint,
 )
@@ -1913,14 +1913,16 @@ def sequential_calibrate(
     num_layers = len(transformer_layers)
     print_rank_0(f"Sequential calibration: Found {num_layers} transformer layers")
 
-    resume_from_layer, saved_output_metas = detect_seq_calib_resume_point(model, num_layers)
+    resume_from_layer, layer_output_metas = detect_sequential_resume_layer(model, num_layers)
 
     input_getter = LayerActivationCollector(model)
-    input_getter._patch_all_layers(decoder_layers=transformer_layers)
+    input_getter._patch_all_layers(
+        decoder_layers=transformer_layers, layer_output_metas=layer_output_metas
+    )
 
     try:
         if resume_from_layer > 0:
-            input_getter.prepare_for_resume(resume_from_layer, forward_loop, saved_output_metas)
+            input_getter.prepare_for_resume(resume_from_layer, forward_loop)
 
         for layer_idx in range(resume_from_layer, num_layers):
             layer = transformer_layers[layer_idx]
@@ -1940,8 +1942,9 @@ def sequential_calibrate(
                 layer_idx, num_layers, checkpoint_dir, checkpoint_interval
             ):
                 assert checkpoint_dir is not None  # narrowed by should_save_seq_calib_checkpoint
+                layer_output_metas = input_getter.get_layer_output_metas(layer_idx)
                 save_sequential_checkpoint(
-                    model, layer_idx, num_layers, checkpoint_dir, input_getter
+                    model, layer_idx, num_layers, checkpoint_dir, layer_output_metas
                 )
     finally:
         if hasattr(model, "_seq_calib_progress"):
