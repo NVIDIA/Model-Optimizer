@@ -369,6 +369,8 @@ class _QuantFusedMoEBase(QuantModule):
     @contextmanager
     def _patch_moe_kernel(self):
         """Temporarily replace vLLM fused_moe kernel with quantized version."""
+        # `invoke_fused_moe_kernel` was used through v0.14.0rc0; it was renamed
+        # to `invoke_fused_moe_triton_kernel` starting from v0.14.0rc1.
         for attr in ["invoke_fused_moe_kernel", "invoke_fused_moe_triton_kernel"]:
             if hasattr(vllm_fused_moe_package, attr):
                 orig = getattr(vllm_fused_moe_package, attr)
