@@ -11,19 +11,11 @@
 
 job_name: Qwen3-8B_DFlash_online
 pipeline:
-  allow_to_fail: false
-  skip: false
-  note:
-
-  global_vars:
-    hf_model: /hf-local/Qwen/Qwen3-8B
-    data: /hf-local/modelopt/Speculative-Decoding-Dataset-v1-Qwen3-8B/sample-100K.jsonl
-
   # Step 1: Online DFlash training
   task_0:
     script: common/dflash/online_training.sh
     args:
-      - --data <<global_vars.data>>
+      - --data /hf-local/modelopt/Speculative-Decoding-Dataset-v1-Qwen3-8B/sample-100K.jsonl
       - --output_dir /scratchspace/dflash
       - --num_epochs 3
       - --lr 1e-4
@@ -36,7 +28,7 @@ pipeline:
       - --dflash_num_layers 5
       - --dflash_mask_token_id 151643
     environment:
-      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - HF_MODEL_CKPT: /hf-local/Qwen/Qwen3-8B
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
@@ -57,7 +49,7 @@ pipeline:
       - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
       - --concurrency 1
     environment:
-      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+      - HF_MODEL_CKPT: /hf-local/Qwen/Qwen3-8B
     slurm_config:
       _factory_: "slurm_factory"
       nodes: 1
