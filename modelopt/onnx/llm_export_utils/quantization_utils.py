@@ -15,6 +15,7 @@
 
 """Quantization utilities for LLM models."""
 
+import copy
 import time
 
 import modelopt.torch.quantization as mtq
@@ -57,13 +58,13 @@ def _quantize_model(model, quant_config, calib_dataloader=None):
 def get_quant_config(precision, lm_head_precision="fp16"):
     """Get the quantization configuration."""
     if precision == "fp8":
-        quant_cfg = mtq.FP8_DEFAULT_CFG
+        quant_cfg = copy.deepcopy(mtq.FP8_DEFAULT_CFG)
 
     elif precision == "nvfp4":
-        quant_cfg = mtq.NVFP4_DEFAULT_CFG
+        quant_cfg = copy.deepcopy(mtq.NVFP4_DEFAULT_CFG)
 
     elif precision == "int4_awq":
-        quant_cfg = mtq.INT4_AWQ_CFG
+        quant_cfg = copy.deepcopy(mtq.INT4_AWQ_CFG)  # type: ignore[arg-type]
 
     else:
         raise ValueError(f"Unsupported precision: {precision}")

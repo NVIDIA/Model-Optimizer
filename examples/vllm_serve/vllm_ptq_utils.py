@@ -139,9 +139,15 @@ def update_kv_cfg_for_mla(model: torch.nn.Module, kv_quant_cfg: list) -> list:
 
 
 def get_quant_config(quant_config: dict[str, Any], model: Any) -> dict[str, Any]:
-    quant_cfg = getattr(mtq, quant_config["quant_cfg"]) if quant_config["quant_cfg"] else {}
+    import copy
+
+    quant_cfg = (
+        copy.deepcopy(getattr(mtq, quant_config["quant_cfg"])) if quant_config["quant_cfg"] else {}
+    )
     quant_kv_cfg = (
-        getattr(mtq, quant_config["kv_quant_cfg"]) if quant_config["kv_quant_cfg"] else {}
+        copy.deepcopy(getattr(mtq, quant_config["kv_quant_cfg"]))
+        if quant_config["kv_quant_cfg"]
+        else {}
     )
 
     # Check if model has MLA and update KV config accordingly

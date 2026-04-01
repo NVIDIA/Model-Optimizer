@@ -15,6 +15,8 @@
 
 """High-level tests for quantization."""
 
+import copy
+
 import pytest
 from _test_utils.torch.quantization.models import SimpleConv, SimpleConvLinear, SimpleLinear
 from _test_utils.torch.quantization.quantize_common import (
@@ -130,6 +132,7 @@ def test_quantize(model_cls, config):
 
     if config == mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG:
         # reduce block sizes for simple testing models
+        config = copy.deepcopy(config)
         for entry in config["quant_cfg"]:
             if entry.get("quantizer_path") == "*weight_quantizer":
                 entry.setdefault("cfg", {})["block_sizes"] = {-1: 8, -2: 8}

@@ -150,6 +150,7 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 
 """
 
+import copy
 from typing import Any, Literal, cast
 
 from pydantic import ValidationInfo, field_validator, model_validator
@@ -572,9 +573,14 @@ def _nvfp4_selective_quant_cfg(
     quant_cfg: list[QuantizerCfgEntry] = []
     quant_cfg.extend(_base_disable_all)
     for pattern in layer_patterns:
-        quant_cfg.append({"quantizer_path": f"{pattern}weight_quantizer", "cfg": quantizer})
+        # Deep-copy the quantizer dict so each config constant gets its own instance.
+        quant_cfg.append(
+            {"quantizer_path": f"{pattern}weight_quantizer", "cfg": copy.deepcopy(quantizer)}
+        )
         if not weight_only:
-            quant_cfg.append({"quantizer_path": f"{pattern}input_quantizer", "cfg": quantizer})
+            quant_cfg.append(
+                {"quantizer_path": f"{pattern}input_quantizer", "cfg": copy.deepcopy(quantizer)}
+            )
     quant_cfg.extend(_default_disabled_quantizer_cfg)
     return {"quant_cfg": quant_cfg, "algorithm": algorithm}
 

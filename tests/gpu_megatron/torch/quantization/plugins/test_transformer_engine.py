@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
+
 import pytest
 import torch
 import torch.nn as nn
@@ -73,6 +75,7 @@ def test_quantize(model_cls, config):
 
     if config == mtq.FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG:
         # reduce block sizes for simple testing models
+        config = copy.deepcopy(config)
         for entry in config["quant_cfg"]:
             if entry.get("quantizer_path") == "*weight_quantizer":
                 entry["cfg"]["block_sizes"] = {-1: 8, -2: 8}

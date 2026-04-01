@@ -306,7 +306,9 @@ def ptq(
     dist.barrier()
 
     ## quant config
-    mtq_cfg = getattr(mtq, quant_cfg)
+    import copy
+
+    mtq_cfg = copy.deepcopy(getattr(mtq, quant_cfg))
 
     # disable head that corresponds to lm_head (for the huggingface checkpoint)
     mtq_cfg["quant_cfg"].append({"quantizer_path": "*head*", "enable": False})
