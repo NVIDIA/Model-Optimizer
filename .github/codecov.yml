@@ -1,8 +1,13 @@
-# Allow atmost 5% coverage drop from main branch.
+# Flags partition coverage by test suite. carryforward ensures that if GPU tests are skipped
+# on a PR (no relevant file changes), their coverage from the last nightly run is reused so
+# the comparison is not penalized for the missing upload.
+flag_management:
+  default_rules:
+    carryforward: true
 coverage:
   status:
     project:
       default:
         target: auto
-        threshold: 5%
+        threshold: 2% # Allow atmost 2% coverage drop from main branch.
     patch: false
