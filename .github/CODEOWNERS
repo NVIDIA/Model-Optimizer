@@ -29,6 +29,7 @@ modelopt/torch/sparsity @NVIDIA/modelopt-torch-sparsity-codeowners
 modelopt/torch/speculative @NVIDIA/modelopt-torch-speculative-codeowners
 modelopt/torch/trace @NVIDIA/modelopt-torch-nas-prune-codeowners
 modelopt/torch/utils @NVIDIA/modelopt-torch-utils-codeowners
+modelopt_recipes @NVIDIA/modelopt-recipes-codeowners
 
 # Examples
 /README.md @NVIDIA/modelopt-examples-codeowners
