@@ -272,10 +272,17 @@ def set_quantizer_by_cfg(quant_model: nn.Module, quant_cfg: QuantizeQuantCfgType
             )
         else:
             # Has cfg: apply full replacement with the explicit enable value.
-            if isinstance(cfg, dict):
+            if isinstance(cfg, QuantizerAttributeConfig):
+                attributes = cfg.model_copy(update={"enable": enable})
+            elif isinstance(cfg, dict):
                 attributes = QuantizerAttributeConfig(**cfg, enable=enable)
             else:
-                attributes = [QuantizerAttributeConfig(**c, enable=enable) for c in cfg]
+                attributes = [
+                    c.model_copy(update={"enable": enable})
+                    if isinstance(c, QuantizerAttributeConfig)
+                    else QuantizerAttributeConfig(**c, enable=enable)
+                    for c in cfg
+                ]
             set_quantizer_attributes_full(quant_model, quantizer_path, attributes, parent_class)
 
 

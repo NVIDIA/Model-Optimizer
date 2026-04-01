@@ -1390,14 +1390,13 @@ def _match_quantizer_cfg(quant_cfg, quantizer_attr):
     # is a bare name like "weight_quantizer".  We match if the bare name matches directly
     # OR if the pattern ends with the bare quantizer_attr (path-scoped match).
     matched = None
-    matched_enable = False
+    matched_enable = None
     for entry in quant_cfg:
         pattern = entry["quantizer_path"]
-        cfg = entry.get("cfg", {})
+        cfg = entry.get("cfg")
         enable = entry.get("enable", True)
-        if fnmatch.fnmatch(quantizer_attr, pattern) or fnmatch.fnmatch(
-            quantizer_attr, pattern.rsplit("*", 1)[-1] if "*" in pattern else pattern
-        ):
+        # Direct match: the bare quantizer_attr matches the whole pattern (e.g. "*weight_quantizer")
+        if fnmatch.fnmatch(quantizer_attr, pattern) or pattern.endswith(quantizer_attr):
             matched = cfg
             matched_enable = enable
 

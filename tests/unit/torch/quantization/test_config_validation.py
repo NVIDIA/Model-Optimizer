@@ -301,3 +301,105 @@ def test_need_calibration_with_legacy_list_of_single_key_dicts():
         "algorithm": "max",
     }
     assert need_calibration(legacy_config)
+
+
+class TestMatchQuantizerCfg:
+    """Tests for _match_quantizer_cfg in algorithms.py."""
+
+    def test_wildcard_matches_bare_name(self):
+        """'*weight_quantizer' matches bare 'weight_quantizer'."""
+        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
+
+        quant_cfg = normalize_quant_cfg_list(
+            [{"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8}}]
+        )
+        matched, enable = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
+        assert matched == {"num_bits": 8}
+        assert enable is True
+
+    def test_star_matches_any_bare_name(self):
+        """'*' matches any bare quantizer name."""
+        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
+
+        quant_cfg = normalize_quant_cfg_list([{"quantizer_path": "*", "enable": False}])
+        matched, enable = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
+        assert matched is None  # enable-only entry has cfg=None
+        assert enable is False
+
+    def test_path_scoped_pattern_matches_matching_suffix(self):
+        """'*mlp*weight_quantizer' matches bare 'weight_quantizer' (suffix match)."""
+        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
+
+        quant_cfg = normalize_quant_cfg_list(
+            [{"quantizer_path": "*mlp*weight_quantizer", "cfg": {"num_bits": 4}}]
+        )
+        matched, enable = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
+        assert matched == {"num_bits": 4}
+
+    def test_path_scoped_pattern_does_not_match_different_suffix(self):
+        """'*mlp*weight_quantizer' does NOT match bare 'input_quantizer'."""
+        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
+
+        quant_cfg = normalize_quant_cfg_list(
+            [{"quantizer_path": "*mlp*weight_quantizer", "cfg": {"num_bits": 4}}]
+        )
+        matched, enable = _match_quantizer_cfg(quant_cfg, "input_quantizer")
+        assert matched is None
+        assert enable is None
+
+    def test_last_match_wins(self):
+        """Later entries override earlier ones."""
+        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
+
+        quant_cfg = normalize_quant_cfg_list(
+            [
+                {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8}},
+                {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 4}},
+            ]
+        )
+        matched, _ = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
+        assert matched == {"num_bits": 4}
+
+    def test_no_match_returns_none(self):
+        """No matching entry returns (None, None)."""
+        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
+
+        quant_cfg = normalize_quant_cfg_list(
+            [{"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8}}]
+        )
+        matched, enable = _match_quantizer_cfg(quant_cfg, "output_quantizer")
+        assert matched is None
+        assert enable is None
+
+    def test_bracket_pattern_matches_correctly(self):
+        """'*[kv]_bmm_quantizer' matches 'k_bmm_quantizer' and 'v_bmm_quantizer'."""
+        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
+
+        quant_cfg = normalize_quant_cfg_list(
+            [{"quantizer_path": "*[kv]_bmm_quantizer", "cfg": {"num_bits": (4, 3)}}]
+        )
+        matched_k, _ = _match_quantizer_cfg(quant_cfg, "k_bmm_quantizer")
+        matched_v, _ = _match_quantizer_cfg(quant_cfg, "v_bmm_quantizer")
+        matched_w, _ = _match_quantizer_cfg(quant_cfg, "weight_quantizer")
+        assert matched_k is not None
+        assert matched_v is not None
+        assert matched_w is None
+
+    def test_path_scoped_does_not_overmatch(self):
+        """'*mixer*weight_quantizer' should NOT match 'input_quantizer'.
+
+        Regression test: the old rsplit('*') logic would strip to 'weight_quantizer' and
+        overmatch any quantizer ending in 'weight_quantizer', but should not match unrelated names.
+        """
+        from modelopt.torch.quantization.algorithms import _match_quantizer_cfg
+
+        quant_cfg = normalize_quant_cfg_list(
+            [
+                {"quantizer_path": "*", "enable": False},
+                {"quantizer_path": "*mixer*weight_quantizer", "cfg": {"num_bits": 4}},
+            ]
+        )
+        # input_quantizer should only match the disable-all, not the mixer pattern
+        matched, enable = _match_quantizer_cfg(quant_cfg, "input_quantizer")
+        assert matched is None  # cfg is None (enable-only entry)
+        assert enable is False
