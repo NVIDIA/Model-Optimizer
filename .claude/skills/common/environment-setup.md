@@ -10,6 +10,12 @@ ls examples/llm_ptq/hf_ptq.py 2>/dev/null && echo "Source found"
 
 If not found: `git clone https://github.com/NVIDIA/Model-Optimizer.git && cd Model-Optimizer`
 
+If found, ensure the source is clean and up to date — previous runs may have left local patches:
+
+```bash
+git checkout main && git pull origin main
+```
+
 ## Env-2. Local or remote?
 
 1. **User explicitly requests local or remote** → follow the user's choice

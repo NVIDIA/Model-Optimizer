@@ -51,6 +51,31 @@ ls ./workspaces/ 2>/dev/null
 - User explicitly asks for a fresh start
 - Different quantization format for same model (e.g., `qwen3-0.6b-fp8` vs `qwen3-0.6b-nvfp4`)
 
+## Remote execution
+
+When using a remote machine (clusters.yaml configured), create matching workspaces on **both** local and remote:
+
+- **Local** `./workspaces/<model>/` — write and edit scripts here
+- **Remote** `<remote_workspace>/workspaces/<model>/` — model downloads, execution, outputs
+
+Before running, sync the local ModelOpt source and scripts to the remote workspace:
+
+```bash
+# Sync ModelOpt source (first time or after local changes)
+remote_sync_to ./ workspaces/<model>/Model-Optimizer/
+
+# Sync custom scripts
+remote_sync_to ./workspaces/<model>/scripts/ workspaces/<model>/scripts/
+```
+
+Download the model on the **remote** machine (avoids transferring large model files):
+
+```bash
+remote_run "python -c \"from huggingface_hub import snapshot_download; snapshot_download('<model_id>', local_dir='<remote_workspace>/workspaces/<model>/model')\""
+```
+
+Inspect remote files with `remote_run "cat ..."` — read README, config.json, tokenizer_config.json to understand requirements before writing scripts locally.
+
 ## Multi-user / Slack bot
 
 When `MODELOPT_WORKSPACE_ROOT` is set, use it instead of `./workspaces/`:

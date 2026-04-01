@@ -4,14 +4,23 @@ The model is not in the verified support table (`examples/llm_ptq/README.md`). T
 
 Follow the investigation steps below to determine if `hf_ptq.py` works or if patches are needed.
 
-## Step A — Locate the model source
+## Step A — Download the model and locate the source
 
-**Is it a HuggingFace checkpoint?** Check for `config.json`. If present, try loading:
+**Download first.** Follow `skills/common/workspace-management.md` to set up local and remote workspaces, sync ModelOpt source, and download the model on the target machine. This avoids downloading twice and gives access to README, custom modeling code, and tokenizer config.
+
+After download, inspect the model files on the target machine (use `remote_run` if remote):
+
+1. **Read `README.md`** — often lists required transformers versions, dependencies, or `trust_remote_code` requirements
+2. **Check for `modeling_*.py` or `tokenization_*.py`** — custom code shipped with the model. If found, **always use `--trust_remote_code`** with `hf_ptq.py`, and `trust_remote_code=True` in any custom scripts. Without it, `AutoConfig`, `AutoTokenizer`, and `AutoModel` will fail to resolve custom classes.
+
+Write custom scripts locally (in `./workspaces/<model>/scripts/`), then sync to remote before running.
+
+**Then check `config.json`** (on the target machine):
 
 ```bash
 python -c "
 from transformers import AutoConfig
-cfg = AutoConfig.from_pretrained('<ckpt_path>')
+cfg = AutoConfig.from_pretrained('<workspace>/model', trust_remote_code=True)
 print(type(cfg).__name__)
 "
 ```
@@ -22,7 +31,7 @@ print(type(cfg).__name__)
   python -c "
   import importlib, inspect
   from transformers import AutoConfig
-  cfg = AutoConfig.from_pretrained('<ckpt_path>')
+  cfg = AutoConfig.from_pretrained('<workspace>/model', trust_remote_code=True)
   mod_name = 'transformers.models.' + cfg.model_type.replace('-', '_')
   mod = importlib.import_module(mod_name + '.modeling_' + cfg.model_type.replace('-', '_'))
   print(inspect.getfile(mod))
@@ -33,9 +42,7 @@ print(type(cfg).__name__)
 
 - **Raises `ValueError` / `OSError` (unknown architecture)** → not in the installed transformers. Determine why:
 
-  1. **Search the working directory** for the class — a local fork or custom modeling file may already be present. If found, add its path to `sys.path`.
-
-  2. **Check the transformers `main` branch** (not yet released):
+  1. **Check the transformers `main` branch** (not yet released):
 
      ```bash
      git clone --depth 1 https://github.com/huggingface/transformers.git /tmp/transformers-main --quiet
@@ -59,7 +66,7 @@ Read the model source to identify how weights are stored. **If all linear layers
 
 Custom patches are required when:
 
-- **Fused/batched expert weights** — experts stored as a single parameter (e.g., 3D `[num_experts, in, out]`) rather than separate `nn.Linear` modules → Pattern 1 + 2
+- **Fused/batched expert weights** — experts stored as a single parameter (e.g., 3D `[num_experts, in, out]`) rather than separate `nn.Linear` modules → Pattern 1 + 3
 - **Self-defined weight parameters** (`nn.Parameter` used directly instead of `nn.Linear`) — common in non-HF or research models → Pattern 1 + 3
 - **VLM structure** (vision encoder that should be excluded) → Pattern 4
 - **FP8 checkpoint** that needs dequantization before re-quantizing → Pattern 5
@@ -186,6 +193,8 @@ Also add safety overrides to the config:
 quant_cfg["quant_cfg"]["*vision*"] = {"enable": False}
 quant_cfg["quant_cfg"]["*multi_modal_projector*"] = {"enable": False}
 ```
+
+**Known VLM export issue**: The export step (`requantize_resmooth_fused_llm_layers` in `unified_export_hf.py`) may try to run a dummy forward pass on the full VLM instead of the language model backbone. This currently only handles Nemotron VLMs. If hit, patch the export to use `is_multimodal_model()` for the VLM check instead of model-specific string matching.
 
 ## Pattern 5: FP8 Checkpoint Dequantization
 

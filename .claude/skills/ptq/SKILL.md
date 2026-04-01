@@ -121,7 +121,6 @@ Report the path and size to the user.
 - VLMs need `AutoModel`, not `AutoModelForCausalLM`
 - FP8 loading: `FineGrainedFP8Config(dequantize=True)`, not a dict
 - Custom quantizer names must end with `_input_quantizer` or `_weight_quantizer`
-- Never modify files under `modelopt/` — custom code goes in your own script
 
 ## References
 
