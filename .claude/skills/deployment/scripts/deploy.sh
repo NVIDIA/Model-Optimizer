@@ -229,7 +229,10 @@ start_server() {
 
     # Auto-detect quantization if not forced
     if [[ -z "$QUANTIZATION" ]]; then
-        QUANTIZATION=$(detect_quantization "$MODEL")
+        if ! QUANTIZATION=$(detect_quantization "$MODEL"); then
+            log_error "Failed to detect quantization — fix the checkpoint or use --quantization to override"
+            exit 1
+        fi
     fi
     log_info "Quantization: $QUANTIZATION"
 
@@ -551,18 +554,17 @@ case "$COMMAND" in
     restart)
         # Load ALL fields from metadata, then let CLI args override
         if [[ -f "$META_FILE" ]]; then
-            local saved_model saved_framework saved_port saved_quant saved_tp
-            saved_model=$(grep '^MODEL=' "$META_FILE" | cut -d= -f2- | tr -d "'")
-            saved_framework=$(grep '^FRAMEWORK=' "$META_FILE" | cut -d= -f2- | tr -d "'")
-            saved_port=$(grep '^PORT=' "$META_FILE" | cut -d= -f2- | tr -d "'")
-            saved_quant=$(grep '^QUANTIZATION=' "$META_FILE" | cut -d= -f2- | tr -d "'")
-            saved_tp=$(grep '^TP_SIZE=' "$META_FILE" | cut -d= -f2- | tr -d "'")
+            _saved_model=$(grep '^MODEL=' "$META_FILE" | cut -d= -f2- | tr -d "'")
+            _saved_framework=$(grep '^FRAMEWORK=' "$META_FILE" | cut -d= -f2- | tr -d "'")
+            _saved_port=$(grep '^PORT=' "$META_FILE" | cut -d= -f2- | tr -d "'")
+            _saved_quant=$(grep '^QUANTIZATION=' "$META_FILE" | cut -d= -f2- | tr -d "'")
+            _saved_tp=$(grep '^TP_SIZE=' "$META_FILE" | cut -d= -f2- | tr -d "'")
             # Apply saved values as defaults; CLI args (tracked via _CLI_*) win
-            [[ -z "${_CLI_MODEL:-}" ]]     && MODEL="${saved_model:-$MODEL}"
-            [[ -z "${_CLI_FRAMEWORK:-}" ]] && FRAMEWORK="${saved_framework:-$FRAMEWORK}"
-            [[ -z "${_CLI_PORT:-}" ]]      && PORT="${saved_port:-$PORT}"
-            [[ -z "${_CLI_QUANT:-}" ]]     && QUANTIZATION="${saved_quant:-$QUANTIZATION}"
-            [[ -z "${_CLI_TP:-}" ]]        && TP_SIZE="${saved_tp:-$TP_SIZE}"
+            [[ -z "${_CLI_MODEL:-}" ]]     && MODEL="${_saved_model:-$MODEL}"
+            [[ -z "${_CLI_FRAMEWORK:-}" ]] && FRAMEWORK="${_saved_framework:-$FRAMEWORK}"
+            [[ -z "${_CLI_PORT:-}" ]]      && PORT="${_saved_port:-$PORT}"
+            [[ -z "${_CLI_QUANT:-}" ]]     && QUANTIZATION="${_saved_quant:-$QUANTIZATION}"
+            [[ -z "${_CLI_TP:-}" ]]        && TP_SIZE="${_saved_tp:-$TP_SIZE}"
         fi
         stop_server; sleep 2; start_server ;;
     detect)
@@ -570,7 +572,9 @@ case "$COMMAND" in
             log_error "--model is required for detect"
             exit 1
         fi
-        quant=$(detect_quantization "$MODEL")
+        if ! quant=$(detect_quantization "$MODEL"); then
+            exit 1
+        fi
         echo "Detected quantization: $quant"
         ;;
     *)       usage ;;
