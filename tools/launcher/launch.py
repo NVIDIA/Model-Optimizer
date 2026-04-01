@@ -90,9 +90,9 @@ def launch(
 ) -> None:
     """Launch ModelOpt jobs on Slurm or locally with Docker."""
     if clean:
-        examples_dir = os.path.join(LAUNCHER_DIR, "examples")
+        examples_dir = os.path.join(_mo_symlink, "examples")
         print(f"Cleaning {examples_dir} with git clean -xdf ...")
-        subprocess.run(["git", "clean", "-xdf", examples_dir], check=True)  # nosec B603 B607
+        subprocess.run(["git", "clean", "-xdf", "."], cwd=examples_dir, check=True)  # nosec B603 B607
 
     if "NEMORUN_HOME" not in os.environ:
         warnings.warn("NEMORUN_HOME is not set. Defaulting to current working directory.")
