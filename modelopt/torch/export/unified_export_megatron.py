@@ -479,8 +479,11 @@ class GPTModelExporter:
         elif (
             not isinstance(layer.mlp, IdentityOp)
             and "MoE" not in str(type(layer.mlp))
-            and (norm_weight := self._get_fused_norm_weight(getattr(layer.mlp, "linear_fc1", None)))
-            is not None
+            and (
+                norm_weight := self._get_fused_norm_weight(
+                    getattr(layer.mlp, "linear_fc1", None)
+                )
+            ) is not None
         ):
             self.rules["fused_norm"](norm_weight, layer_id)
 
