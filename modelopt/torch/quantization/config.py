@@ -153,7 +153,7 @@ the layer named ``lm_head``,  you can create a custom config and quantize your m
 from typing import Any, Literal, cast
 
 from pydantic import ValidationInfo, field_validator, model_validator
-from typing_extensions import TypedDict
+from typing_extensions import Required, TypedDict
 
 from modelopt.torch.opt.config import ModeloptBaseConfig, ModeloptField
 from modelopt.torch.utils.network import ConstructorLike
@@ -162,7 +162,7 @@ from modelopt.torch.utils.network import ConstructorLike
 class QuantizerCfgEntry(TypedDict, total=False):
     """A single entry in a ``quant_cfg`` list."""
 
-    quantizer_path: str  # required; matched against quantizer module names
+    quantizer_path: Required[str]  # matched against quantizer module names
     parent_class: str | None  # optional; filters by pytorch module class name (e.g. "nn.Linear")
     cfg: dict[str, Any] | list[dict[str, Any]] | None  # quantizer attribute config(s)
     enable: bool | None  # toggles matched quantizers on/off; independent of cfg
@@ -1733,13 +1733,8 @@ def need_calibration(config):
         return cfg.get("enable", True) and cfg.get("type", "") != "dynamic"
 
     quant_cfg: list = config.get("quant_cfg") or []
+    quant_cfg = normalize_quant_cfg_list(quant_cfg)
     for entry in quant_cfg:
-        if not isinstance(entry, dict) or "quantizer_path" not in entry:
-            raise ValueError(
-                f"Invalid quant_cfg entry: {entry!r}. "
-                "Each entry must be a dict with a 'quantizer_path' key. "
-                "Did you forget to call normalize_quant_cfg_list()?"
-            )
         name = entry["quantizer_path"]
         raw_cfg = entry.get("cfg")
         if "weight_quantizer" in name:

@@ -24,6 +24,7 @@ from modelopt.torch.quantization.config import (
     INT4_AWQ_CFG,
     NVFP4_DEFAULT_CFG,
     W4A8_AWQ_BETA_CFG,
+    find_quant_cfg_entry,
     need_calibration,
     normalize_quant_cfg_list,
 )
@@ -243,3 +244,60 @@ class TestNormalizeQuantCfgList:
         assert paths == {"*input_quantizer", "*weight_quantizer"}
         for e in result:
             assert e["parent_class"] == "nn.Linear"
+
+
+class TestFindQuantCfgEntry:
+    def test_finds_last_match(self):
+        """When multiple entries share the same quantizer_path, returns the last one."""
+        entries = normalize_quant_cfg_list(
+            [
+                {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8}},
+                {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 4}},
+                {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 4}},
+            ]
+        )
+        result = find_quant_cfg_entry(entries, "*weight_quantizer")
+        assert result["cfg"] == {"num_bits": 4}
+
+    def test_exact_match_only(self):
+        """Does not do fnmatch — only exact string equality on quantizer_path."""
+        entries = normalize_quant_cfg_list(
+            [{"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8}}]
+        )
+        with pytest.raises(KeyError):
+            find_quant_cfg_entry(entries, "model.layer.weight_quantizer")
+
+    def test_raises_on_missing(self):
+        """Raises KeyError when no entry matches."""
+        entries = normalize_quant_cfg_list(
+            [{"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8}}]
+        )
+        with pytest.raises(KeyError):
+            find_quant_cfg_entry(entries, "*input_quantizer")
+
+    def test_single_entry(self):
+        entries = normalize_quant_cfg_list([{"quantizer_path": "*", "enable": False}])
+        result = find_quant_cfg_entry(entries, "*")
+        assert result["enable"] is False
+
+    def test_empty_list(self):
+        with pytest.raises(KeyError):
+            find_quant_cfg_entry([], "*")
+
+
+def test_need_calibration_with_legacy_dict_format():
+    """need_calibration should accept legacy dict-format quant_cfg without crashing."""
+    legacy_config = {
+        "quant_cfg": {"*input_quantizer": {"num_bits": 8, "axis": None}},
+        "algorithm": "max",
+    }
+    assert need_calibration(legacy_config)
+
+
+def test_need_calibration_with_legacy_list_of_single_key_dicts():
+    """need_calibration should accept legacy list-of-single-key-dicts format."""
+    legacy_config = {
+        "quant_cfg": [{"*input_quantizer": {"num_bits": 8, "axis": None}}],
+        "algorithm": "max",
+    }
+    assert need_calibration(legacy_config)
