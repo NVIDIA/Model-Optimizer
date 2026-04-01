@@ -1,0 +1,66 @@
+# DFlash online speculative decoding training for Qwen3-8B.
+#
+# Trains a DFlash draft model (block diffusion) using the frozen target model
+# to extract multi-layer hidden states on the fly.
+#
+# Reference: "DFlash: Block Diffusion for Flash Speculative Decoding" (arXiv:2602.06036)
+#
+# Usage:
+#   uv run launch.py --yaml examples/Qwen/Qwen3-8B/hf_online_dflash.yaml --yes
+#   uv run slurm.py --yaml modules/Model-Optimizer/tools/launcher/examples/Qwen/Qwen3-8B/hf_online_dflash.yaml --yes
+
+job_name: Qwen3-8B_DFlash_online
+pipeline:
+  allow_to_fail: false
+  skip: false
+  note:
+
+  global_vars:
+    hf_model: /hf-local/Qwen/Qwen3-8B
+    data: /hf-local/modelopt/Speculative-Decoding-Dataset-v1-Qwen3-8B/sample-100K.jsonl
+
+  # Step 1: Online DFlash training
+  task_0:
+    script: common/dflash/online_training.sh
+    args:
+      - --data <<global_vars.data>>
+      - --output_dir /scratchspace/dflash
+      - --num_epochs 3
+      - --lr 1e-4
+      - --training_seq_len 512
+      - --save_steps 500000
+      - --log_steps 100
+      - --disable_tqdm True
+      - --ar_validate_steps 0
+      - --dflash_block_size 16
+      - --dflash_num_layers 5
+      - --dflash_mask_token_id 151643
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 8
+
+  # Step 2: Benchmark speculative decoding (VLLM backend)
+  task_1:
+    script: common/specdec_bench/quick_check.sh
+    args:
+      - --draft_model_dir /scratchspace/dflash
+      - --draft_length 3
+      - --output_length 4096
+      - --engine VLLM
+      - --tp_size 4
+      - --ep_size 1
+      - --speculative_algorithm EAGLE3
+      - --mtbench /hf-local/HuggingFaceH4/mt_bench_prompts/raw/question.jsonl
+      - --concurrency 1
+    environment:
+      - HF_MODEL_CKPT: <<global_vars.hf_model>>
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 4
+      container: vllm/vllm-openai:latest

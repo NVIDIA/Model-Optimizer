@@ -134,6 +134,22 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       FSDP="${1#*=}"
       ;;
+    --dflash_block_size*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      DFLASH_BLOCK_SIZE="${1#*=}"
+      ;;
+    --dflash_num_layers*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      DFLASH_NUM_LAYERS="${1#*=}"
+      ;;
+    --dflash_config*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      DFLASH_CONFIG="${1#*=}"
+      ;;
+    --dflash_mask_token_id*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      DFLASH_MASK_TOKEN_ID="${1#*=}"
+      ;;
     *)
       >&2 printf "Error: Invalid argument ${1#*=}\n"
       exit 1
@@ -195,8 +211,20 @@ if [[ "$MODE" == "eagle3" ]]; then
   else
     SPECULATIVE_ARGS=""
   fi
+elif [[ "$MODE" == "dflash" ]]; then
+  DFLASH_BLOCK_SIZE=${DFLASH_BLOCK_SIZE:-16}
+  DFLASH_NUM_LAYERS=${DFLASH_NUM_LAYERS:-5}
+  SPECULATIVE_ARGS="--dflash_block_size $DFLASH_BLOCK_SIZE --dflash_num_layers $DFLASH_NUM_LAYERS --dflash_disable_torch_compile"
+  if [[ -n "$DFLASH_CONFIG" ]]; then
+    SPECULATIVE_ARGS="$SPECULATIVE_ARGS --dflash_config $DFLASH_CONFIG"
+  fi
+  if [[ -n "$DFLASH_MASK_TOKEN_ID" ]]; then
+    SPECULATIVE_ARGS="$SPECULATIVE_ARGS --dflash_mask_token_id $DFLASH_MASK_TOKEN_ID"
+  fi
+  # DFlash uses DDP instead of FSDP
+  FSDP_ARGS="--ddp_find_unused_parameters True --ddp_timeout 300"
 else
-  echo "Only eagle3 supported for now!"
+  echo "Unsupported mode: $MODE. Supported: eagle3, dflash"
   exit 1
 fi
 
@@ -218,12 +246,14 @@ else
   VLM_ARGS=""
 fi
 
-if [[ "$TOTAL_GPU" -gt 1 && "$FSDP" == "True" ]]; then
-  #Use FSDP2 when multi GPU available
-  FSDP_ARGS="--fsdp 'full_shard' --fsdp_config ${SCRIPT_DIR}/fsdp_config.json"
-else
-  #Otherwise, single GPU training
-  FSDP_ARGS=""
+if [[ "$MODE" != "dflash" ]]; then
+  if [[ "$TOTAL_GPU" -gt 1 && "$FSDP" == "True" ]]; then
+    #Use FSDP2 when multi GPU available
+    FSDP_ARGS="--fsdp 'full_shard' --fsdp_config ${SCRIPT_DIR}/fsdp_config.json"
+  else
+    #Otherwise, single GPU training
+    FSDP_ARGS=""
+  fi
 fi
 
 
