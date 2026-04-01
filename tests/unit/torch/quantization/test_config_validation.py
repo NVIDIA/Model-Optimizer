@@ -76,7 +76,7 @@ class TestNormalizeQuantCfgList:
         result = normalize_quant_cfg_list(raw)
         assert result[0]["quantizer_path"] == "*input_quantizer"
         assert result[0]["enable"] is False
-        assert result[0]["cfg"] == {}
+        assert result[0]["cfg"] is None
 
     def test_legacy_nn_class_scoped(self):
         """Legacy {'nn.Linear': {'*': {attrs}}} is converted with parent_class."""
@@ -127,3 +127,46 @@ class TestNormalizeQuantCfgList:
         """A multi-key legacy dict (no quantizer_path) is rejected."""
         with pytest.raises(ValueError):
             normalize_quant_cfg_list([{"*weight_quantizer": {}, "*input_quantizer": {}}])
+
+    def test_new_format_with_list_cfg(self):
+        """cfg can be a list of dicts for SequentialQuantizer."""
+        raw = [
+            {
+                "quantizer_path": "*weight_quantizer",
+                "cfg": [
+                    {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
+                    {"num_bits": (4, 3)},
+                ],
+            }
+        ]
+        result = normalize_quant_cfg_list(raw)
+        assert len(result) == 1
+        assert result[0]["cfg"] == raw[0]["cfg"]
+        assert result[0]["enable"] is True
+
+    def test_legacy_flat_dict_conversion(self):
+        """Legacy flat dict {'*': {...}, '*weight_quantizer': {...}} is converted to list."""
+        raw = {"*": {"enable": False}, "*weight_quantizer": {"num_bits": 8, "axis": 0}}
+        result = normalize_quant_cfg_list(raw)
+        assert len(result) == 2
+        assert result[0]["quantizer_path"] == "*"
+        assert result[0]["enable"] is False
+        assert result[0]["cfg"] is None
+        assert result[1]["quantizer_path"] == "*weight_quantizer"
+        assert result[1]["cfg"] == {"num_bits": 8, "axis": 0}
+        assert result[1]["enable"] is True
+
+    def test_legacy_enable_only_produces_cfg_none(self):
+        """Legacy {'*': {'enable': False}} should produce cfg=None, not cfg={}."""
+        raw = [{"*": {"enable": False}}]
+        result = normalize_quant_cfg_list(raw)
+        assert result[0]["cfg"] is None
+        assert result[0]["enable"] is False
+
+    def test_legacy_nn_class_enable_only_produces_cfg_none(self):
+        """Legacy nn.* scoped format with only enable produces cfg=None."""
+        raw = [{"nn.Linear": {"*": {"enable": False}}}]
+        result = normalize_quant_cfg_list(raw)
+        assert result[0]["cfg"] is None
+        assert result[0]["enable"] is False
+        assert result[0]["parent_class"] == "nn.Linear"

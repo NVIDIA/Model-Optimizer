@@ -442,6 +442,13 @@ def set_quantizer_by_cfg_context(quant_model: nn.Module, quant_cfg: QuantizeQuan
     """
     quant_cfg = normalize_quant_cfg_list(quant_cfg)
 
+    for entry in quant_cfg:
+        if isinstance(entry.get("cfg"), list):
+            raise ValueError(
+                "Sequential cfg lists are not allowed in set_quantizer_by_cfg_context. "
+                "Use only single-dict cfg entries."
+            )
+
     original_attributes = {}
     for name, module in quant_model.named_modules():
         if isinstance(module, TensorQuantizer):

@@ -1315,12 +1315,10 @@ def get_auto_quantize_config(search_state, constraints=None, verbose=False):
 
     def _cfg_to_dict(v):
         if isinstance(v, mtq_config.QuantizerAttributeConfig):
-            return (
-                {
-                    "num_bits": v.num_bits,
-                    **v.model_dump(exclude_defaults=True),
-                },
-            )
+            return {
+                "num_bits": v.num_bits,
+                **v.model_dump(exclude_defaults=True),
+            }
         if isinstance(v, list):
             return [_cfg_to_dict(c) for c in v]
         return v

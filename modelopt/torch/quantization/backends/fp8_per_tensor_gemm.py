@@ -19,7 +19,7 @@ import torch
 from torch.autograd import Function
 
 from modelopt.torch.quantization.backends.gemm_registry import gemm_registry
-from modelopt.torch.quantization.config import FP8_DEFAULT_CFG
+from modelopt.torch.quantization.config import FP8_DEFAULT_CFG, find_quant_cfg_entry
 from modelopt.torch.quantization.nn.modules.quant_linear import RealQuantLinear
 from modelopt.torch.quantization.qtensor import FP8QTensor, QTensorWrapper
 from modelopt.torch.quantization.utils import reduce_amax
@@ -97,21 +97,9 @@ def fp8_per_tensor_gemm(quant_module, input, bias=None):
 def _fp8_availability_check(module, input, args, kwargs):
     """Comprehensive check for FP8 GEMM availability."""
     # Quantizer configs
-    quant_cfg_list = FP8_DEFAULT_CFG["quant_cfg"]
-    input_cfg = next(
-        e.get("cfg", {})
-        for e in quant_cfg_list
-        if isinstance(e, dict)
-        and "quantizer_path" in e
-        and e["quantizer_path"] == "*input_quantizer"
-    )
-    weight_cfg = next(
-        e.get("cfg", {})
-        for e in quant_cfg_list
-        if isinstance(e, dict)
-        and "quantizer_path" in e
-        and e["quantizer_path"] == "*weight_quantizer"
-    )
+    quant_cfg_list: list = FP8_DEFAULT_CFG["quant_cfg"]
+    input_cfg = find_quant_cfg_entry(quant_cfg_list, "*input_quantizer").get("cfg", {})
+    weight_cfg = find_quant_cfg_entry(quant_cfg_list, "*weight_quantizer").get("cfg", {})
     assert isinstance(input_cfg, dict)
     assert isinstance(weight_cfg, dict)
 

@@ -1542,10 +1542,16 @@ _QuantizeAlgoCfgType = str | dict | QuantizeAlgorithmConfig | None
 QuantizeAlgoCfgType = _QuantizeAlgoCfgType | list[_QuantizeAlgoCfgType] | None
 
 
-def normalize_quant_cfg_list(v: list) -> list[QuantizerCfgEntry]:
-    """Normalize a raw quant_cfg list into a list of :class:`QuantizerCfgEntry` dicts.
+def normalize_quant_cfg_list(v: dict | list) -> list[QuantizerCfgEntry]:
+    """Normalize a raw quant_cfg into a list of :class:`QuantizerCfgEntry` dicts.
 
-    Supports the following input forms per entry:
+    Supports the following input forms:
+
+    - A ``list`` of entries in any of the per-entry forms below.
+    - A legacy flat ``dict`` (``{"*": ..., "*weight_quantizer": ...}``) — each key/value pair is
+      converted to a single-key dict entry and then normalized.
+
+    Per-entry forms (when input is a list):
 
     - New format: ``{"quantizer_path": ..., "enable": ..., "cfg": ...}`` — passed through.
     - Legacy single-key format: ``{"<quantizer_path>": <cfg_or_dict>}`` — converted to new format.
@@ -1568,7 +1574,7 @@ def normalize_quant_cfg_list(v: list) -> list[QuantizerCfgEntry]:
     and ``cfg`` (plus optionally ``parent_class``).
 
     Args:
-        v: A list of raw quant_cfg entries in any supported format.
+        v: A list of raw quant_cfg entries in any supported format, or a legacy flat dict.
 
     Returns:
         A list of :class:`QuantizerCfgEntry` dicts in canonical normalized form.
@@ -1577,24 +1583,31 @@ def normalize_quant_cfg_list(v: list) -> list[QuantizerCfgEntry]:
         ValueError: If any entry has only ``quantizer_path`` with neither ``cfg`` nor ``enable``,
             or if the entry format is not recognized.
     """
+    # Legacy flat-dict format: {"*": {...}, "*weight_quantizer": {...}} → list of single-key dicts.
+    if isinstance(v, dict):
+        v = [{k: val} for k, val in v.items()]
 
     def _dict_to_entry(key: str, value) -> QuantizerCfgEntry:
         if isinstance(key, str) and key.startswith("nn."):
-            assert isinstance(value, dict) and len(value) == 1
+            if not isinstance(value, dict) or len(value) != 1:
+                raise ValueError(
+                    f"For 'nn.*' scoped format, value must be a single-key dict, got {value!r}"
+                )
             q_path, sub_cfg = next(iter(value.items()))
             sub_cfg = dict(sub_cfg)
             enable = sub_cfg.pop("enable", None)
+            cfg = sub_cfg or None
             entry: QuantizerCfgEntry = {
                 "parent_class": key,
                 "quantizer_path": q_path,
-                "cfg": sub_cfg,
+                "cfg": cfg,
             }
             if enable is not None:
                 entry["enable"] = enable
             return entry
         else:
             if isinstance(value, dict):
-                cfg = {k: val for k, val in value.items() if k != "enable"}
+                cfg = {k: val for k, val in value.items() if k != "enable"} or None
                 enable = value.get("enable")
             else:
                 cfg = value
@@ -1650,7 +1663,7 @@ class QuantizeConfig(ModeloptBaseConfig):
     @classmethod
     def normalize_quant_cfg(cls, v):
         """Normalize quant_cfg entries: convert dict and tuple forms to QuantizerCfgEntry dicts."""
-        if not isinstance(v, list):
+        if not isinstance(v, (list, dict)):
             return v
         return normalize_quant_cfg_list(v)
 
@@ -1660,9 +1673,13 @@ class QuantizeConfig(ModeloptBaseConfig):
         """Validate quantizer attribute configs to surface errors (e.g. invalid axis/block_sizes)."""
         qac_fields = set(QuantizerAttributeConfig.model_fields.keys())
         for entry in v:
-            cfg = entry.get("cfg", {})
-            if isinstance(cfg, dict) and qac_fields & set(cfg.keys()):
-                QuantizerAttributeConfig.model_validate(cfg)
+            cfg = entry.get("cfg")
+            if cfg is None:
+                continue
+            cfgs = cfg if isinstance(cfg, list) else [cfg]
+            for c in cfgs:
+                if isinstance(c, dict) and qac_fields & set(c.keys()):
+                    QuantizerAttributeConfig.model_validate(c)
         return v
 
 
