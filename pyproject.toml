@@ -101,6 +101,7 @@ dev-docs = [
     "sphinx-togglebutton>=0.3.2",
 ]
 dev-test = [
+    "coverage[toml]>=7.13.0",  # a1_coverage.pth for subprocess tracking requires this
     "pytest",
     "pytest-cov",
     "pytest-instafail",
@@ -132,7 +133,7 @@ managed = true
 
 
 ####################################################################################################
-###############################  LINTING, FORMATTING AND TESTING CONFIGURATION  ####################
+###############################  LINTING, FORMATTING CONFIGURATION  ################################
 ####################################################################################################
 [tool.ruff]
 target-version = "py310"
@@ -256,6 +257,22 @@ ignore_errors = true
 module = ["examples.*"]
 disable_error_code = ["attr-defined"]
 
+[tool.bandit]
+exclude_dirs = [".github/", "examples/", "tests/"]
+# Do not change `skips`. It should be consistent with NVIDIA's Wheel-CI-CD bandit.yml config.
+# Use of `# nosec BXXX` requires special approval
+skips = [
+    "B101", # assert_used
+    "B110", # try_except_pass
+    "B112", # try_except_continue
+    "B303", # MD2, MD4, MD5, or SHA1
+    "B311", # random
+]
+
+
+####################################################################################################
+###############################  TESTING CONFIGURATION  ############################################
+####################################################################################################
 [tool.pytest.ini_options]
 # Default additional options
 # Show a short test summary info for all except passed tests with -ra flag
@@ -270,12 +287,12 @@ markers = [
 
 [tool.coverage.run]
 branch = false
-include = ["modelopt/*"]
-omit = ["*/plugins/*", "*/export/*"]
+parallel = true
+concurrency = ["multiprocessing", "thread"]
+source_pkgs = ["modelopt", "modelopt_recipes"]
 
 
 [tool.coverage.report]
-fail_under = 70
 skip_covered = true
 ignore_errors = true
 exclude_lines = [
@@ -296,17 +313,4 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     # Don't complain about abstract methods, they aren't run
     "@(abc\\.)?abstractmethod",
-]
-
-
-[tool.bandit]
-exclude_dirs = [".github/", "examples/", "tests/"]
-# Do not change `skips`. It should be consistent with NVIDIA's Wheel-CI-CD bandit.yml config.
-# Use of `# nosec BXXX` requires special approval
-skips = [
-    "B101", # assert_used
-    "B110", # try_except_pass
-    "B112", # try_except_continue
-    "B303", # MD2, MD4, MD5, or SHA1
-    "B311", # random
 ]
