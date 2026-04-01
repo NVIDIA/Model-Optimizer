@@ -22,7 +22,7 @@ git clone https://github.com/NVIDIA/Model-Optimizer.git ${MODELOPT_DIR}
 
 **Start Docker container:**
 
-Use the [NeMo 26.02.01 container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo?version=26.02.01):
+Use the [NeMo 26.02 container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo?version=26.02):
 
 ```bash
 # Recommended to mount a workspace directory for storing datasets and distilled models
@@ -31,7 +31,7 @@ docker run --gpus all -it --rm \
   -v ${MODELOPT_DIR}:/opt/Model-Optimizer \
   -v ${MODELOPT_DIR}/modelopt:/opt/venv/lib/python3.12/site-packages/modelopt \
   -w /opt/Model-Optimizer \
-  nvcr.io/nvidia/nemo:26.02.01 \
+  nvcr.io/nvidia/nemo:26.02 \
   /bin/bash
 ```
 
@@ -66,7 +66,7 @@ Run distillation directly from HuggingFace checkpoints (student and teacher) wit
 
 ```bash
 torchrun --nproc_per_node=8 examples/puzzletron/mbridge_distillation/distill_hf.py \
-    --student_hf_path /path/to/student/huggingface/checkpoint \
+    --student_hf_path /path/to/student/puzzletron/checkpoint \
     --student_hf_model meta-llama/Llama-3.1-8B-Instruct \
     --teacher_hf_path /path/to/teacher/huggingface/checkpoint \
     --data_paths 1.0 /path/to/hf_datasets/wikitext-103-v1/Salesforce--wikitext_wikitext-103-v1_train_text_document \

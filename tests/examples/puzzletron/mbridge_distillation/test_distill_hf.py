@@ -33,8 +33,8 @@ def test_distill_hf(project_root_path: Path, tmp_path: Path):
     Models are converted to include block_configs.
     """
     # Prepare student and teacher models
-    student_hf_dir, student_anymodel_dir, _, teacher_anymodel_dir = (
-        _prepare_student_and_teacher_models(project_root_path, tmp_path)
+    student_hf_dir, student_anymodel_dir, teacher_hf_dir, _ = _prepare_student_and_teacher_models(
+        project_root_path, tmp_path
     )
 
     output_dir = tmp_path / "distill_output"
@@ -58,7 +58,7 @@ def test_distill_hf(project_root_path: Path, tmp_path: Path):
     extend_cmd_parts(
         cmd_parts,
         student_hf_path=student_anymodel_dir,
-        teacher_hf_path=teacher_anymodel_dir,
+        teacher_hf_path=teacher_hf_dir,
         output_dir=output_dir,
         tp_size=tp_size,
         pp_size=1,

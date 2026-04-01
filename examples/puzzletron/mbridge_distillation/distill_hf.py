@@ -61,13 +61,13 @@ def get_args():
         "--student_hf_path",
         type=str,
         required=True,
-        help="HuggingFace model path for the student in puzzletron any_model format",
+        help="HuggingFace model name or path for the student (standard HF format or puzzletron any_model format)",
     )
     parser.add_argument(
         "--teacher_hf_path",
         type=str,
         required=True,
-        help="HuggingFace model path for the teacher in puzzletron any_model format",
+        help="HuggingFace model name or path for the teacher (standard HF format or puzzletron any_model format)",
     )
     parser.add_argument("--trust_remote_code", action="store_true", help="Trust remote code")
     # Parallelism arguments

@@ -28,11 +28,19 @@ from dataclasses import dataclass, fields
 
 from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.bridge.models.hf_pretrained.causal_lm import PreTrainedCausalLM
-from megatron.bridge.models.transformer_config import HeterogeneousTransformerConfig
+from megatron.bridge.models.transformer_config import (
+    HeterogeneousTransformerConfig,
+    TransformerConfig,
+)
 from megatron.core.models.gpt.heterogeneous.heterogeneous_layer_specs import (
     get_gpt_heterogeneous_layer_spec,
 )
 from megatron.core.transformer.spec_utils import ModuleSpec
+
+# Monkey-patch: add get_config_for_layer to TransformerConfig if missing
+# (needed for non-heterogeneous teacher models in this container version)
+if not hasattr(TransformerConfig, "get_config_for_layer"):
+    TransformerConfig.get_config_for_layer = lambda self, layer_number: self
 
 
 def heterogeneous_layer_spec(config) -> ModuleSpec:
@@ -87,8 +95,11 @@ class HeterogeneousBridgeMixin:
         GenericHeterogeneousProvider inherits from GPTModelProvider, which includes all
         the fields that the parent bridge sets.
         """
-
         parent_provider = super().provider_bridge(hf_pretrained)  # type: ignore[misc]
+
+        # If no block_configs, fall back to standard (non-heterogeneous) provider.
+        if not (hasattr(hf_pretrained.config, "block_configs")):
+            return parent_provider
 
         provider_kwargs = dataclasses.asdict(parent_provider)
 
