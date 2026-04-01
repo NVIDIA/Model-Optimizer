@@ -575,9 +575,6 @@ class HFEagleModel(EagleModel):
 
         self.eagle_config = PretrainedConfig.from_dict(arch_config)
         self.eagle_config.eagle_decoder_type = self.eagle_decoder_type
-        self.eagle_config.hidden_size = self._base_llm_config.hidden_size
-        self.eagle_config.vocab_size = self._base_llm_config.vocab_size
-        self.eagle_config.max_position_embeddings = self._base_llm_config.max_position_embeddings
         self.eagle_config.draft_vocab_size = getattr(
             self.eagle_config, "draft_vocab_size", self.eagle_config.vocab_size
         )
