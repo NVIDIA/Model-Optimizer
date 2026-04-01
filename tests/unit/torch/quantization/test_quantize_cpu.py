@@ -421,6 +421,49 @@ def test_ordering_later_entry_overrides_earlier():
             assert module.num_bits == 8
 
 
+def test_enable_only_entry_preserves_attributes():
+    """An enable-only entry toggles the quantizer without resetting its attributes."""
+    model = SimpleLinear()
+    config = {
+        "quant_cfg": [
+            {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 4, "axis": 0}},
+            {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+            # This enable-only entry should disable without resetting num_bits/axis
+            {"quantizer_path": "*weight_quantizer", "enable": False},
+        ],
+        "algorithm": "max",
+    }
+    model = mtq.quantize(model, config, lambda m: m(m.get_input()))
+    for name, module in model.named_modules():
+        if name.endswith("weight_quantizer"):
+            assert not module.is_enabled, "weight_quantizer should be disabled"
+            assert module.num_bits == 4, "num_bits should be preserved by enable-only entry"
+            assert module.axis == 0, "axis should be preserved by enable-only entry"
+
+
+def test_atomicity_later_cfg_entry_does_not_inherit_earlier():
+    """When two cfg-bearing entries match the same quantizer, the second fully replaces the first."""
+    model = SimpleLinear()
+    config = {
+        "quant_cfg": [
+            # Entry 1: set axis=0
+            {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+            # Entry 2: only set num_bits=4, no axis — axis should revert to default (None), not 0
+            {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 4}},
+            {"quantizer_path": "*input_quantizer", "cfg": {"num_bits": 8, "axis": None}},
+        ],
+        "algorithm": "max",
+    }
+    model = mtq.quantize(model, config, lambda m: m(m.get_input()))
+    default_axis = QuantizerAttributeConfig().axis
+    for name, module in model.named_modules():
+        if name.endswith("weight_quantizer"):
+            assert module.num_bits == 4
+            assert module.axis == default_axis, (
+                f"axis should revert to default ({default_axis}), not inherit 0 from earlier entry"
+            )
+
+
 def test_legacy_dict_format_end_to_end():
     """Old dict-format quant_cfg works end-to-end through mtq.quantize via normalization."""
     model = SimpleLinear()

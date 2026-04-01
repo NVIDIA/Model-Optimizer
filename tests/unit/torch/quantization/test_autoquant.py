@@ -491,18 +491,7 @@ def test_get_auto_quantize_config(method):
     assert "quant_cfg" in config
     assert isinstance(config["quant_cfg"], list)
     assert any(
-        (
-            entry["quantizer_path"]
-            if isinstance(entry, dict) and "quantizer_path" in entry
-            else entry[0]
-        )
-        == "*"
-        and (
-            entry.get("enable")
-            if isinstance(entry, dict) and "quantizer_path" in entry
-            else entry[1].get("enable")
-        )
-        is False
+        entry["quantizer_path"] == "*" and entry.get("enable") is False
         for entry in config["quant_cfg"]
     )
     assert config["algorithm"] == "max"

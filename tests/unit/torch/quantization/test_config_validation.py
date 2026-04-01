@@ -16,6 +16,7 @@
 """Test of quantization config validations."""
 
 import pytest
+from pydantic import ValidationError
 
 from modelopt.torch.quantization.config import (
     FP8_2D_BLOCKWISE_WEIGHT_ONLY_CFG,
@@ -24,6 +25,7 @@ from modelopt.torch.quantization.config import (
     INT4_AWQ_CFG,
     NVFP4_DEFAULT_CFG,
     W4A8_AWQ_BETA_CFG,
+    QuantizeConfig,
     find_quant_cfg_entry_by_path,
     need_calibration,
     normalize_quant_cfg_list,
@@ -245,6 +247,35 @@ class TestNormalizeQuantCfgList:
         for e in result:
             assert e["parent_class"] == "nn.Linear"
 
+    def test_legacy_nn_class_with_cfg(self):
+        """Legacy nn.* scoped format with actual quantizer attributes (not just enable)."""
+        raw = [{"nn.Linear": {"*weight_quantizer": {"num_bits": 4, "axis": 0}}}]
+        result = normalize_quant_cfg_list(raw)
+        assert len(result) == 1
+        assert result[0]["parent_class"] == "nn.Linear"
+        assert result[0]["quantizer_path"] == "*weight_quantizer"
+        assert result[0]["cfg"] == {"num_bits": 4, "axis": 0}
+        assert result[0]["enable"] is True
+
+    def test_legacy_list_valued_cfg(self):
+        """Legacy dict format with list-valued cfg (SequentialQuantizer) normalizes correctly."""
+        raw = [
+            {
+                "*weight_quantizer": [
+                    {"num_bits": 4, "block_sizes": {-1: 128, "type": "static"}},
+                    {"num_bits": 8, "axis": 0},
+                ]
+            }
+        ]
+        result = normalize_quant_cfg_list(raw)
+        assert len(result) == 1
+        assert result[0]["quantizer_path"] == "*weight_quantizer"
+        assert isinstance(result[0]["cfg"], list)
+        assert len(result[0]["cfg"]) == 2
+        assert result[0]["cfg"][0]["num_bits"] == 4
+        assert result[0]["cfg"][1]["num_bits"] == 8
+        assert result[0]["enable"] is True
+
 
 class TestFindQuantCfgEntry:
     def test_finds_last_match(self):
@@ -403,3 +434,40 @@ class TestMatchQuantizerCfg:
         matched, enable = _match_quantizer_cfg(quant_cfg, "input_quantizer")
         assert matched is None  # cfg is None (enable-only entry)
         assert enable is False
+
+
+class TestQuantizeConfigValidators:
+    """Tests for QuantizeConfig Pydantic field validators."""
+
+    def test_normalize_validator_converts_legacy_dict(self):
+        """The 'before' validator auto-normalizes legacy dict format."""
+        cfg = QuantizeConfig(
+            quant_cfg={"*": {"enable": False}, "*weight_quantizer": {"num_bits": 8}},
+            algorithm="max",
+        )
+        assert isinstance(cfg.quant_cfg, list)
+        assert all("quantizer_path" in e for e in cfg.quant_cfg)
+
+    def test_validate_quant_cfg_entries_catches_invalid_cfg(self):
+        """The 'after' validator surfaces QuantizerAttributeConfig errors early."""
+        with pytest.raises(ValidationError):
+            QuantizeConfig(
+                quant_cfg=[
+                    {
+                        "quantizer_path": "*weight_quantizer",
+                        "cfg": {"num_bits": 8, "axis": 0, "block_sizes": {-1: 128}},
+                    }
+                ],
+                algorithm="max",
+            )
+
+    def test_validate_quant_cfg_entries_accepts_valid_cfg(self):
+        """The 'after' validator passes for valid configs."""
+        cfg = QuantizeConfig(
+            quant_cfg=[
+                {"quantizer_path": "*weight_quantizer", "cfg": {"num_bits": 8, "axis": 0}},
+                {"quantizer_path": "*input_quantizer", "enable": False},
+            ],
+            algorithm="max",
+        )
+        assert len(cfg.quant_cfg) == 2
