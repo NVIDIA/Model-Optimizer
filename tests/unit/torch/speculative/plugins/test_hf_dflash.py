@@ -151,21 +151,21 @@ class TestDFlashAttentionMask:
         assert (ctx_mask[4:8, 4:8] < 0).all()  # cannot see own block
 
     def test_mask_noise_causal_within_block(self):
-        """Noise (right half): standard causal within same block, blocked across blocks.
+        """Noise (right half): reverse-causal within same block, matching SpecForge.
 
-        Standard causal: position i can attend to positions j <= i.
-        Position 0 (anchor) sees only itself, position B-1 sees all positions in block.
+        SpecForge uses j >= i: position 0 (anchor) sees all positions in block,
+        position B-1 sees only itself. Cross-block noise is fully masked.
         """
         mask = create_dflash_attention_mask(8, 4, "cpu", torch.float32)
         mask_2d = mask[0, 0]
         noise_mask = mask_2d[:, 8:]  # noise part
 
-        # Block 0, position 0: can only see position 0
-        assert noise_mask[0, 0] == 0
-        assert (noise_mask[0, 1:4] < 0).all()
+        # Block 0, position 0: can see all positions in block (0-3)
+        assert (noise_mask[0, :4] == 0).all()
 
-        # Block 0, position 3: can see positions 0-3
-        assert (noise_mask[3, :4] == 0).all()
+        # Block 0, position 3: can only see position 3
+        assert (noise_mask[3, :3] < 0).all()
+        assert noise_mask[3, 3] == 0
 
         # Block 1 cannot see block 0 noise
         assert (noise_mask[4:8, :4] < 0).all()

@@ -248,7 +248,7 @@ def create_dflash_attention_mask(seq_len, block_size, device, dtype):
 
     ctx_mask = k_block_ids < q_block_ids
     same_block = q_block_ids == k_block_ids
-    causal = indices.unsqueeze(0) <= indices.unsqueeze(1)  # standard causal: j <= i
+    causal = indices.unsqueeze(0) >= indices.unsqueeze(1)  # matching SpecForge: j >= i
     noise_mask = same_block & causal
 
     full_mask_bool = torch.cat([ctx_mask, noise_mask], dim=1)
@@ -681,16 +681,14 @@ class HFDFlashModel(DFlashModel):
         block_positions = torch.arange(block_size, device=device)
         pos_ids = torch.cat([ctx_positions, block_positions]).unsqueeze(0).expand(bsz, -1)
 
-        # Attention mask: block sees ALL context + standard causal within block
-        # Standard causal: position i can attend to positions j <= i (see anchor + previous)
+        # Attention mask: block sees ALL context + reverse-causal within block
+        # Matching SpecForge training: j >= i (pos 0 sees all, pos B-1 sees only itself)
         attn_mask = torch.zeros(1, 1, block_size, ctx_len + block_size, device=device, dtype=dtype)
-        block_causal = torch.triu(
-            torch.full(
-                (block_size, block_size), torch.finfo(dtype).min, device=device, dtype=dtype
-            ),
-            diagonal=1,
-        )
-        attn_mask[:, :, :, ctx_len:] = block_causal
+        block_indices = torch.arange(block_size, device=device)
+        reverse_causal = block_indices.unsqueeze(0) >= block_indices.unsqueeze(1)
+        noise_mask = torch.zeros(block_size, block_size, device=device, dtype=dtype)
+        noise_mask.masked_fill_(~reverse_causal, torch.finfo(dtype).min)
+        attn_mask[:, :, :, ctx_len:] = noise_mask
 
         # Draft forward
         draft_hidden = self.dflash_module(
