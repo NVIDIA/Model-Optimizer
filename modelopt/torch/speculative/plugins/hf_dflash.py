@@ -673,21 +673,25 @@ class HFDFlashModel(DFlashModel):
         block_ids[:, 0] = base_token.squeeze(-1)
         noise_embedding = self._base_model_embeddings(block_ids)
 
-        # Position IDs: context 0..ctx_len-1, block seq_len..seq_len+block_size-1
+        # Position IDs must match training: [0..ctx_len-1, 0..block_size-1]
+        # Training uses [0..L-1, 0..L-1] — context and noise share positions.
+        # At inference, the block positions should start from 0 (same as training blocks).
         ctx_len = target_hidden.shape[1]
         ctx_positions = torch.arange(ctx_len, device=device)
-        block_positions = torch.arange(seq_len, seq_len + block_size, device=device)
+        block_positions = torch.arange(block_size, device=device)
         pos_ids = torch.cat([ctx_positions, block_positions]).unsqueeze(0).expand(bsz, -1)
 
-        # Attention mask: block sees ALL context + causal within block
+        # Attention mask must match training pattern:
+        # - Context part: block sees ALL previous context (at inference there's only 1 block)
+        # - Noise part: reverse-causal within block (pos 0 sees all, pos B-1 sees only itself)
+        #   This matches training: indices.unsqueeze(0) >= indices.unsqueeze(1)
         attn_mask = torch.zeros(1, 1, block_size, ctx_len + block_size, device=device, dtype=dtype)
-        block_causal = torch.triu(
-            torch.full(
-                (block_size, block_size), torch.finfo(dtype).min, device=device, dtype=dtype
-            ),
-            diagonal=1,
-        )
-        attn_mask[:, :, :, ctx_len:] = block_causal
+        # Noise part: reverse-causal (lower-triangular is masked)
+        block_indices = torch.arange(block_size, device=device)
+        reverse_causal = block_indices.unsqueeze(0) >= block_indices.unsqueeze(1)  # [B, B]
+        noise_mask = torch.zeros(block_size, block_size, device=device, dtype=dtype)
+        noise_mask.masked_fill_(~reverse_causal, torch.finfo(dtype).min)
+        attn_mask[:, :, :, ctx_len:] = noise_mask
 
         # Draft forward
         draft_hidden = self.dflash_module(
