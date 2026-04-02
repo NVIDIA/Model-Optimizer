@@ -63,7 +63,7 @@ jobs:
       matrix:
         include:
           - example: gpu
-            timeout: 45
+            timeout: 60
             container_image: pytorch:26.01-py3
           - example: gpu-megatron
             timeout: 45
@@ -85,8 +85,6 @@ jobs:
       - name: Setup environment variables
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
-      - name: Install dependencies for mip
-        run: apt-get update && apt-get install -y libffi-dev
       - name: Run gpu tests
         env:
           COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml

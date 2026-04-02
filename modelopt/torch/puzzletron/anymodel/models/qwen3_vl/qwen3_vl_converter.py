@@ -15,9 +15,7 @@
 
 # mypy: ignore-errors
 
-from typing import List
-
-from transformers import Qwen3VLMoeConfig
+from typing import TYPE_CHECKING, List
 
 from modelopt.torch.puzzletron.anymodel.converter import Converter, ConverterFactory
 from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
@@ -27,11 +25,14 @@ from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import (
     MoEConfig,
 )
 
+if TYPE_CHECKING:
+    from transformers import Qwen3VLMoeConfig
+
 
 @ConverterFactory.register_decorator("qwen3_vl")
 class Qwen3VLConverter(Converter):
     @staticmethod
-    def create_block_configs_from_main_config(config: Qwen3VLMoeConfig) -> List[BlockConfig]:
+    def create_block_configs_from_main_config(config: "Qwen3VLMoeConfig") -> List[BlockConfig]:
         # Qwen3-VL MoE has nested text_config
         text_config = config.text_config if hasattr(config, "text_config") else config
 
