@@ -15,8 +15,6 @@
 
 """Sparse attention methods package."""
 
-from modelopt.torch.utils import import_plugin
-
 from .registry import SparseAttentionMethod, get_sparse_method, register_sparse_method
 
 __all__ = [
@@ -26,7 +24,5 @@ __all__ = [
 ]
 
 # Import method implementations to trigger registration
-from . import flash_skip_softmax
-
-with import_plugin("vsa"):
-    from . import vsa  # Video Sparse Attention (requires fastvideo_kernel)
+# Note: vsa imports no external deps at module level; fastvideo_kernel is imported lazily at runtime.
+from . import flash_skip_softmax, triton_skip_softmax, triton_sparse_softmax, vsa

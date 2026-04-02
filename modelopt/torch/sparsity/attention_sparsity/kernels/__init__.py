@@ -15,10 +15,16 @@
 
 """Re-exports from modelopt.torch.kernels for backward compatibility."""
 
-from modelopt.torch.kernels import IS_AVAILABLE, attention, register_triton_attention
+from modelopt.torch.kernels import (
+    IS_AVAILABLE,
+    attention,
+    register_triton_attention,
+    register_vsa_attention,
+)
 
 __all__ = [
     "IS_AVAILABLE",
     "attention",
     "register_triton_attention",
+    "register_vsa_attention",
 ]

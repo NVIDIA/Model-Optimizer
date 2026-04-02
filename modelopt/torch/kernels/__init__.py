@@ -35,13 +35,15 @@ if torch.cuda.is_available():
 
         attention = _attention
         IS_AVAILABLE = True
-        with import_plugin("transformers"):
-            from .hf_triton_attention import register_triton_attention as _register_triton_attention
+        from .hf_triton_attention import register_triton_attention as _register_triton_attention
 
-            register_triton_attention = _register_triton_attention
+        register_triton_attention = _register_triton_attention
+
+from .hf_vsa_attention import register_vsa_attention  # noqa: E402
 
 __all__ = [
     "IS_AVAILABLE",
     "attention",
     "register_triton_attention",
+    "register_vsa_attention",
 ]

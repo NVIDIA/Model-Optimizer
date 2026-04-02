@@ -19,12 +19,21 @@ VSA implements a two-branch sparse attention architecture:
 1. Compression Branch: Averages tokens within 3D video blocks and computes coarse attention
 2. Sparse Branch: Selects top-K blocks based on importance and computes fine-grained attention
 
-This method requires model modification to expose gate_compress for optimal quality.
+Uses the optimized Triton kernel from fastvideo_kernel.
 
-Uses the optimized Triton kernel from fastvideo_kernel for 2-6x speedup.
+Integration:
+    For HuggingFace models, VSA registers as ``attn_implementation="modelopt_vsa"``
+    via ``ALL_ATTENTION_FUNCTIONS`` (same pattern as the Triton FA backend).  HF
+    dispatches Q, K, V directly to the VSA kernel — no monkey-patching needed.
+    This is set up automatically by ``mtsa.sparsify()``.
 
-The data flow mirrors FastVideo's VideoSparseAttentionImpl:
-  tile(Q,K,V,gate) -> Triton kernel -> untile(output)
+    For non-HF models, call ``forward_attention(q, k, v, ...)`` directly::
+
+        for module in model.modules():
+            if isinstance(module, SparseAttentionModule):
+                vsa = module._sparse_method_instance
+                vsa.set_video_shape((T, H, W))
+                output, stats = vsa.forward_attention(q, k, v)
 """
 
 import math
@@ -76,14 +85,25 @@ class VSA(SparseAttentionMethod):
         block_size = config.get("block_size_3d", (4, 4, 4))
         if isinstance(block_size, list):
             block_size = tuple(block_size)
+        if len(block_size) != 3 or any(x <= 0 for x in block_size):
+            raise ValueError(f"block_size_3d must be 3 positive integers, got {block_size}")
         self.block_size_3d = block_size
         self.block_elements = block_size[0] * block_size[1] * block_size[2]
 
         # Sparsity configuration
-        self.top_k_ratio = config.get("top_k_ratio", 0.5)
+        top_k_ratio = config.get("top_k_ratio", 0.5)
+        if not 0.0 < top_k_ratio <= 1.0:
+            raise ValueError(f"top_k_ratio must be in (0, 1], got {top_k_ratio}")
+        self.top_k_ratio = top_k_ratio
 
-        # Video shape (can be set dynamically)
-        self.video_shape = config.get("video_shape", None)
+        # Video shape (can be set dynamically via set_video_shape or at call time)
+        video_shape = config.get("video_shape", None)
+        if video_shape is not None:
+            if isinstance(video_shape, list):
+                video_shape = tuple(video_shape)
+            if len(video_shape) != 3 or any(x <= 0 for x in video_shape):
+                raise ValueError(f"video_shape must be 3 positive integers, got {video_shape}")
+        self.video_shape = video_shape
 
         # Track last computed statistics
         self._last_stats: dict = {}
@@ -124,7 +144,7 @@ class VSA(SparseAttentionMethod):
             )
 
         # Return cached metadata if inputs haven't changed
-        cache_key = (seq_len, self.video_shape)
+        cache_key = (seq_len, self.video_shape, device)
         if self._cached_metadata is not None and self._cached_metadata_key == cache_key:
             return self._cached_metadata
 
@@ -285,18 +305,14 @@ class VSA(SparseAttentionMethod):
         except ModuleNotFoundError:
             raise ModuleNotFoundError(
                 "VSA requires the 'fastvideo_kernel' package for its Triton sparse attention "
-                "kernel.  The VSA method registered successfully, but the kernel is needed at "
-                "runtime.  Install it with:\n"
-                "  git clone https://github.com/FastVideo/FastVideo.git\n"
-                "  cd FastVideo/fastvideo-kernel && ./build.sh\n"
-                "See https://github.com/hao-ai-lab/FastVideo/tree/main/fastvideo-kernel for details."
+                "kernel. Install it with: pip install fastvideo_kernel"
             ) from None
         output_tiled = triton_vsa_kernel(
             query_tiled,
             key_tiled,
             value_tiled,
-            variable_sizes,  # q_variable_sizes
-            variable_sizes,  # kv_variable_sizes
+            variable_sizes,  # variable_block_sizes (KV)
+            variable_sizes,  # q_variable_block_sizes (Q)
             top_k,
             block_size=self.block_size_3d,
             compress_attn_weight=gate_tiled,
@@ -309,51 +325,16 @@ class VSA(SparseAttentionMethod):
         # Compute statistics
         actual_sparsity = 1.0 - (top_k / total_tiles)
         stats = {
-            "sparsity": actual_sparsity,
+            "sparsity": [actual_sparsity],
             "phase": "vsa_triton",
             "total_blocks": total_tiles,
-            "sparse_blocks": total_tiles - top_k,
+            "sparse_blocks": [total_tiles - top_k],
             "top_k": top_k,
             "video_shape": self.video_shape,
         }
         self._last_stats = stats
 
         return output, stats
-
-    def calculate_sparsity(
-        self,
-        attention_scores: torch.Tensor,
-    ) -> tuple[torch.Tensor, dict]:
-        """Not used by VSA. Required stub for the abstract base class.
-
-        VSA replaces the entire attention computation via ``forward_attention()``,
-        which is called directly by model-specific plugins (e.g., ``_LTX2SparseAttention``).
-        The softmax-patching path that calls this method is never reached in the VSA flow.
-
-        Raises:
-            NotImplementedError: Always. Use ``forward_attention()`` instead.
-        """
-        raise NotImplementedError(
-            "VSA does not use the softmax-patching path. "
-            "Use forward_attention() via a model-specific plugin instead."
-        )
-
-    def apply_sparsity(
-        self,
-        attention_scores: torch.Tensor,
-        sparse_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Not used by VSA. Required stub for the abstract base class.
-
-        See ``calculate_sparsity`` for details.
-
-        Raises:
-            NotImplementedError: Always. Use ``forward_attention()`` instead.
-        """
-        raise NotImplementedError(
-            "VSA does not use the softmax-patching path. "
-            "Use forward_attention() via a model-specific plugin instead."
-        )
 
     def get_threshold_info(self) -> dict[str, Any]:
         """Get VSA configuration info.

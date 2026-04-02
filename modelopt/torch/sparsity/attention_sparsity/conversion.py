@@ -33,8 +33,11 @@ from .utils import get_named_sparse_attention_modules, get_sparse_attention_modu
 
 
 def _set_attn_implementation(model: nn.Module, config: SparseAttentionConfig) -> None:
-    """Set the correct attn_implementation based on the sparse attention backend.
+    """Set the correct attn_implementation based on the sparse attention method/backend.
 
+    - ``method="vsa"``: registers the VSA kernel with HF and sets
+      ``attn_implementation="modelopt_vsa"``.  HF calls VSA directly via the
+      registered attention function — no monkey-patching needed.
     - ``backend="triton"``: registers the Triton kernel with HF and sets
       ``attn_implementation="modelopt_triton"``.
     - ``backend="pytorch"`` (default): sets ``attn_implementation="eager"`` so that
@@ -46,13 +49,36 @@ def _set_attn_implementation(model: nn.Module, config: SparseAttentionConfig) ->
     """
     sparse_cfg = config.sparse_cfg if hasattr(config, "sparse_cfg") else {}
 
-    # Collect backends only from layer configs (identified by having a "method" key).
+    # Collect methods and backends only from layer configs (identified by having a "method" key).
     # Other dict entries (e.g. "calibration") are not layer configs.
-    backends = {
-        v.get("backend", "pytorch")
-        for v in sparse_cfg.values()
-        if isinstance(v, dict) and "method" in v
-    }
+    layer_cfgs = [v for v in sparse_cfg.values() if isinstance(v, dict) and "method" in v]
+    methods = {v.get("method") for v in layer_cfgs}
+    backends = {v.get("backend", "pytorch") for v in layer_cfgs}
+
+    # VSA uses attn_implementation="modelopt_vsa", which is incompatible
+    # with softmax-patching methods that need "eager" or triton methods that need
+    # "modelopt_triton". Reject mixed configs.
+    non_vsa_methods = methods - {"vsa"}
+    if "vsa" in methods and non_vsa_methods:
+        raise ValueError(
+            f"Cannot mix VSA with other sparse attention methods ({non_vsa_methods}). "
+            f"VSA sets attn_implementation='modelopt_vsa' model-wide, which is incompatible "
+            f"with softmax-patching or triton methods."
+        )
+
+    model_config = getattr(model, "config", None)
+
+    if "vsa" in methods:
+        from .kernels import register_vsa_attention
+
+        if not register_vsa_attention():
+            raise RuntimeError(
+                "Failed to register VSA attention with HuggingFace. "
+                "Check that your transformers version supports ALL_ATTENTION_FUNCTIONS."
+            )
+        if model_config is not None:
+            model_config._attn_implementation = "modelopt_vsa"
+        return
 
     if "triton" in backends and "pytorch" in backends:
         raise ValueError(
@@ -60,15 +86,12 @@ def _set_attn_implementation(model: nn.Module, config: SparseAttentionConfig) ->
             "supported. All sparse attention layers must use the same backend."
         )
 
-    model_config = getattr(model, "config", None)
-
     if "triton" in backends:
         from .kernels import register_triton_attention
 
         if register_triton_attention is None:
             raise ImportError(
-                "Triton backend requires 'triton' and 'transformers' packages. "
-                "Install with: pip install triton transformers"
+                "Triton backend requires 'triton' package. Install with: pip install triton"
             )
         if not register_triton_attention():
             raise RuntimeError(
@@ -83,7 +106,6 @@ def _set_attn_implementation(model: nn.Module, config: SparseAttentionConfig) ->
             model_config._attn_implementation = "modelopt_triton"
     elif model_config is not None:
         # For pytorch backend, force eager for softmax patching.
-        # TODO: Add the triton backend support for skip-softmax.
         model_config._attn_implementation = "eager"
 
 

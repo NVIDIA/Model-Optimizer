@@ -427,18 +427,26 @@ class CalibrationConfig(ModeloptBaseConfig):
 
 
 class SparseAttentionConfig(ModeloptBaseConfig):
-    """Base configuration for sparse attention optimization."""
+    """Base configuration for sparse attention optimization.
 
+    This base configuration provides the common structure for all sparse
+    attention methods and supports pattern-based layer configuration.
+    """
+
+    # Pattern-based sparse configuration (similar to quant_cfg in quantization)
     sparse_cfg: SparseAttentionCfgType = ModeloptField(
         default={
             "*attention*": {"method": "flash_skip_softmax", "enable": True},
             "default": {"enable": False},
         },
         title="Sparse attention configuration",
-        description="Pattern-based configuration for sparse attention.",
+        description="Pattern-based configuration for sparse attention. Keys are patterns to match module names "
+        "(or 'calibration' for global calibration settings), values are configuration dicts with parameters like "
+        "'threshold', 'enable', etc.",
         validate_default=True,
     )
 
+    # Export configuration
     export_format: str | None = Field(
         None, description="Export format for sparse attention (e.g., 'onnx', 'tensorrt')"
     )
@@ -447,38 +455,40 @@ class SparseAttentionConfig(ModeloptBaseConfig):
 class FlashSkipSoftmaxConfig(SparseAttentionConfig):
     """Configuration for Flash Attention-aware softmax skip sparse attention."""
 
+    # Override sparse_cfg with flash_skip_softmax specific defaults
     sparse_cfg: SparseAttentionCfgType = ModeloptField(
         default={
             "*attention*": {
                 "method": "flash_skip_softmax",
                 "thresholds": {"prefill": [1e-3], "decode": [1e-5]},
-                "br": 128,
-                "bc": 128,
-                "backend": "pytorch",
-                "collect_stats": True,
+                "br": 128,  # Flash Attention block rows
+                "bc": 128,  # Flash Attention block columns
+                "backend": "pytorch",  # Only pytorch backend supported
+                "collect_stats": True,  # Enable statistics collection
                 "enable": True,
             },
             "default": {"enable": False},
         },
         title="Flash softmax skip sparse configuration",
-        description="Pattern-based configuration with flash_skip_softmax specific defaults.",
+        description="Pattern-based configuration with flash_skip_softmax specific defaults. "
+        "Includes FA block sizes (br, bc) and correction factor settings.",
         validate_default=True,
     )
 
 
-# Pre-defined Sparse Attention Configurations
-
+# Pre-defined Sparse Attention Configuration
+# Default configuration with block-wise sparsity optimized for Flash Attention
 SKIP_SOFTMAX_DEFAULT = {
     "sparse_cfg": {
         "*attn*": {
             "method": "flash_skip_softmax",
             "thresholds": {
-                "prefill": [1e-3],
-                "decode": [1e-4],
+                "prefill": [1e-3],  # More aggressive during prefill
+                "decode": [1e-4],  # Conservative during decode
             },
-            "br": 128,
-            "bc": 128,
-            "backend": "pytorch",
+            "br": 128,  # Flash Attention block rows
+            "bc": 128,  # Flash Attention block columns
+            "backend": "pytorch",  # Only pytorch backend supported
             "collect_stats": True,
             "enable": True,
         },
@@ -486,6 +496,10 @@ SKIP_SOFTMAX_DEFAULT = {
     },
 }
 
+
+# Configuration with RULER calibration
+# Note: threshold field is omitted - calibration determines dynamic threshold lambda = a / length
+# The calibrated threshold adapts to sequence length for optimal sparsity
 SKIP_SOFTMAX_CALIB = {
     "sparse_cfg": {
         "calibration": {
@@ -498,18 +512,13 @@ SKIP_SOFTMAX_CALIB = {
             "method": "flash_skip_softmax",
             "br": 128,
             "bc": 128,
-            "backend": "pytorch",
+            "backend": "pytorch",  # Only pytorch backend supported
             "collect_stats": True,
             "enable": True,
         },
         "default": {"enable": False},
     },
 }
-
-
-# ---------------------------------------------------------------------------
-# VSA (Video Sparse Attention) configuration
-# ---------------------------------------------------------------------------
 
 
 class VSAAttributeConfig(ModeloptBaseConfig):
@@ -642,9 +651,42 @@ VSA_DEFAULT = {
 }
 
 
+# Default N:M sparse softmax configuration
+SPARSE_SOFTMAX_DEFAULT = {
+    "sparse_cfg": {
+        "*attn*": {
+            "method": "triton_sparse_softmax",
+            "sparsity_n": 2,
+            "sparsity_m": 4,
+            "num_sink_tokens": 0,
+            "dense_window_size": 64,
+            "backend": "triton",
+            "enable": True,
+        },
+        "default": {"enable": False},
+    },
+}
+
+
+# Default skip-softmax configuration for Triton kernel
+SKIP_SOFTMAX_TRITON_DEFAULT = {
+    "sparse_cfg": {
+        "*attn*": {
+            "method": "triton_skip_softmax",
+            "skip_softmax_threshold": 0.1,
+            "backend": "triton",
+            "enable": True,
+        },
+        "default": {"enable": False},
+    },
+}
+
+
 __all__ = [
     "SKIP_SOFTMAX_CALIB",
     "SKIP_SOFTMAX_DEFAULT",
+    "SKIP_SOFTMAX_TRITON_DEFAULT",
+    "SPARSE_SOFTMAX_DEFAULT",
     "VSA_DEFAULT",
     "CalibrationConfig",
     "FlashSkipSoftmaxConfig",

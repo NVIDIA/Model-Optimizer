@@ -17,14 +17,21 @@
 
 Tests cover:
 - vsa_utils.py: tile/untile index logic, variable block sizes
-- vsa.py: VSA method init, metadata computation, validation, caching
+- vsa.py: VSA method init, metadata computation, validation, caching, forward_attention
 - config.py: VSAAttributeConfig validation
-- plugins/ltx2.py: model/module detection helpers
+- HF integration: registration, sparsify, forward dispatch
 """
 
 import math
+import sys
+from unittest.mock import patch
 
 import pytest
+
+# The attention_sparsity package transitively imports the HF plugin, which
+# requires transformers.  Skip the entire module when it is not installed.
+pytest.importorskip("transformers")
+
 import torch
 from pydantic import ValidationError
 
@@ -129,16 +136,43 @@ class TestNonPadIndex:
     """Tests for get_non_pad_index."""
 
     def test_full_blocks(self):
-        """All blocks full size → non_pad covers everything."""
+        """All blocks full size -> non_pad covers everything."""
         sizes = torch.tensor([64, 64, 64])
         npi = get_non_pad_index(sizes, 64)
         assert npi.shape == (192,)  # 3 * 64
 
     def test_partial_blocks(self):
-        """Partial blocks → non_pad skips padding positions."""
+        """Partial blocks -> non_pad skips padding positions."""
         sizes = torch.tensor([64, 16])
         npi = get_non_pad_index(sizes, 64)
         assert npi.shape == (80,)  # 64 + 16
+
+
+# ---------------------------------------------------------------------------
+# VSA: tile/untile round-trip
+# ---------------------------------------------------------------------------
+
+
+class TestTileUntileRoundTrip:
+    """Test _tile_tensor / _untile_tensor preserve data."""
+
+    @pytest.mark.parametrize(
+        "video_shape",
+        [(8, 8, 8), (5, 6, 7), (4, 4, 4)],
+        ids=["even", "non-divisible", "single-tile"],
+    )
+    def test_round_trip(self, video_shape):
+        """tile then untile recovers the original tensor."""
+        seq_len = video_shape[0] * video_shape[1] * video_shape[2]
+        vsa = VSA({"video_shape": video_shape})
+        meta = vsa._compute_metadata(seq_len, torch.device("cpu"))
+
+        x = torch.randn(2, 4, seq_len, 16)  # [batch, heads, seq, dim]
+        tiled = vsa._tile_tensor(x, meta)
+        recovered = vsa._untile_tensor(tiled, meta, seq_len)
+
+        assert recovered.shape == x.shape
+        assert torch.allclose(recovered, x)
 
 
 # ---------------------------------------------------------------------------
@@ -209,22 +243,38 @@ class TestVSAMetadata:
 
 
 # ---------------------------------------------------------------------------
-# VSA method: abstract stubs raise
+# VSA: forward_attention (kernel import guard)
 # ---------------------------------------------------------------------------
 
 
-class TestVSAStubs:
-    """calculate_sparsity and apply_sparsity should raise NotImplementedError."""
+class TestVSAForwardAttention:
+    """Tests for VSA.forward_attention."""
 
-    def test_calculate_sparsity_raises(self):
-        vsa = VSA()
-        with pytest.raises(NotImplementedError, match="softmax-patching"):
-            vsa.calculate_sparsity(torch.zeros(1))
+    def test_missing_kernel_raises(self):
+        """forward_attention raises ModuleNotFoundError when fastvideo_kernel is missing."""
+        vsa = VSA({"video_shape": (4, 4, 4), "top_k_ratio": 0.5})
+        seq_len = 4 * 4 * 4
+        q = torch.randn(1, 2, seq_len, 16)
+        k = torch.randn(1, 2, seq_len, 16)
+        v = torch.randn(1, 2, seq_len, 16)
+        with (
+            patch.dict(sys.modules, {"fastvideo_kernel": None}),
+            pytest.raises(ModuleNotFoundError, match="fastvideo_kernel"),
+        ):
+            vsa.forward_attention(q, k, v)
 
-    def test_apply_sparsity_raises(self):
-        vsa = VSA()
-        with pytest.raises(NotImplementedError, match="softmax-patching"):
-            vsa.apply_sparsity(torch.zeros(1))
+    def test_video_shape_override(self):
+        """forward_attention accepts video_shape kwarg to override instance shape."""
+        vsa = VSA({"video_shape": (4, 4, 4), "top_k_ratio": 0.5})
+        new_shape = (8, 8, 8)
+        seq_len = 8 * 8 * 8
+        q = torch.randn(1, 2, seq_len, 16)
+        with (
+            patch.dict(sys.modules, {"fastvideo_kernel": None}),
+            pytest.raises(ModuleNotFoundError),
+        ):
+            vsa.forward_attention(q, q, q, video_shape=new_shape)
+        assert vsa.video_shape == new_shape
 
 
 # ---------------------------------------------------------------------------
@@ -266,70 +316,132 @@ class TestVSAAttributeConfig:
 
 
 # ---------------------------------------------------------------------------
-# LTX-2 plugin: detection helpers
+# ModelOpt integration: sparsify() with VSA config
 # ---------------------------------------------------------------------------
 
+from _test_utils.torch.sparsity.sparse_attention_common import SimpleAttentionModel
 
-class TestLTX2Detection:
-    """Tests for _is_ltx2_model and _is_ltx2_attention_module."""
+import modelopt.torch.opt as mto
+import modelopt.torch.sparsity.attention_sparsity as sparse_attn
+from modelopt.torch.sparsity.attention_sparsity.sparse_attention import SparseAttentionModule
 
-    def test_non_ltx2_model(self):
-        from modelopt.torch.sparsity.attention_sparsity.plugins.ltx2 import _is_ltx2_model
+VSA_TEST_CFG = {
+    "sparse_cfg": {
+        "*attention*": {
+            "method": "vsa",
+            "block_size_3d": (4, 4, 4),
+            "top_k_ratio": 0.5,
+            "enable": True,
+        },
+        "default": {"enable": False},
+    },
+}
 
-        model = torch.nn.Linear(10, 10)
-        assert _is_ltx2_model(model) is False
 
-    def test_ltx2_model_by_class_name(self):
-        from modelopt.torch.sparsity.attention_sparsity.plugins.ltx2 import _is_ltx2_model
+class TestVSASparsifyIntegration:
+    """Test VSA integration with modelopt sparsify() API."""
 
-        # Fake a class named LTXModel
-        class LTXModel(torch.nn.Module):
-            pass
+    def test_sparsify_creates_sparse_modules(self):
+        """sparsify() with VSA config replaces attention modules."""
+        model = SimpleAttentionModel()
+        sparse_model = sparse_attn.sparsify(model, VSA_TEST_CFG)
 
-        assert _is_ltx2_model(LTXModel()) is True
+        sparse_modules = [m for m in sparse_model.modules() if isinstance(m, SparseAttentionModule)]
+        assert len(sparse_modules) > 0
 
-    def test_ltx2_attention_by_class_name(self):
-        from modelopt.torch.sparsity.attention_sparsity.plugins.ltx2 import (
-            _is_ltx2_attention_module,
-        )
+    def test_sparse_module_has_vsa_method(self):
+        """Replaced modules are configured with VSA method."""
+        model = SimpleAttentionModel()
+        sparse_model = sparse_attn.sparsify(model, VSA_TEST_CFG)
 
-        class LTXSelfAttention(torch.nn.Module):
-            pass
+        for module in sparse_model.modules():
+            if isinstance(module, SparseAttentionModule):
+                assert module._method == "vsa"
+                assert isinstance(module._sparse_method_instance, VSA)
+                assert module._sparse_method_instance.block_size_3d == (4, 4, 4)
+                assert module._sparse_method_instance.top_k_ratio == 0.5
 
-        assert _is_ltx2_attention_module(LTXSelfAttention()) is True
+    def test_enable_disable(self):
+        """Enable/disable works on VSA sparse modules."""
+        model = SimpleAttentionModel()
+        sparse_model = sparse_attn.sparsify(model, VSA_TEST_CFG)
 
-    def test_ltx2_attention_by_structure(self):
-        from modelopt.torch.sparsity.attention_sparsity.plugins.ltx2 import (
-            _is_ltx2_attention_module,
-        )
+        for module in sparse_model.modules():
+            if isinstance(module, SparseAttentionModule):
+                assert module.is_enabled
+                module.disable()
+                assert not module.is_enabled
+                module.enable()
+                assert module.is_enabled
 
-        # Module with LTX-2 attribute signature (includes rope_type)
-        m = torch.nn.Module()
-        m.to_q = torch.nn.Linear(8, 8)
-        m.to_k = torch.nn.Linear(8, 8)
-        m.to_v = torch.nn.Linear(8, 8)
-        m.q_norm = torch.nn.LayerNorm(8)
-        m.k_norm = torch.nn.LayerNorm(8)
-        m.rope_type = "interleaved"
-        assert _is_ltx2_attention_module(m) is True
+    def test_threshold_info(self):
+        """VSA sparse modules report correct threshold info."""
+        model = SimpleAttentionModel()
+        sparse_model = sparse_attn.sparsify(model, VSA_TEST_CFG)
 
-    def test_ltx2_attention_missing_rope_type(self):
-        from modelopt.torch.sparsity.attention_sparsity.plugins.ltx2 import (
-            _is_ltx2_attention_module,
-        )
+        for module in sparse_model.modules():
+            if isinstance(module, SparseAttentionModule):
+                info = module.get_threshold_info()
+                assert info["type"] == "vsa"
+                assert info["top_k_ratio"] == 0.5
 
-        # Module with to_q/k/v + norms but NO rope_type — should NOT match
-        m = torch.nn.Module()
-        m.to_q = torch.nn.Linear(8, 8)
-        m.to_k = torch.nn.Linear(8, 8)
-        m.to_v = torch.nn.Linear(8, 8)
-        m.q_norm = torch.nn.LayerNorm(8)
-        m.k_norm = torch.nn.LayerNorm(8)
-        assert _is_ltx2_attention_module(m) is False
+    def test_save_restore(self):
+        """VSA modelopt_state can be saved and restored."""
+        model = SimpleAttentionModel()
+        sparse_model = sparse_attn.sparsify(model, VSA_TEST_CFG)
 
-    def test_non_attention_module(self):
-        from modelopt.torch.sparsity.attention_sparsity.plugins.ltx2 import (
-            _is_ltx2_attention_module,
-        )
+        state = mto.modelopt_state(sparse_model)
 
-        assert _is_ltx2_attention_module(torch.nn.Linear(10, 10)) is False
+        # Restore to a fresh model
+        model_restored = SimpleAttentionModel()
+        mto.restore_from_modelopt_state(model_restored, state)
+
+        # Verify VSA method is restored
+        for module in model_restored.modules():
+            if isinstance(module, SparseAttentionModule):
+                assert module._method == "vsa"
+                assert isinstance(module._sparse_method_instance, VSA)
+
+    def test_pattern_matching(self):
+        """Pattern-based config selectively applies VSA."""
+        model = SimpleAttentionModel()
+
+        # Pattern that won't match anything
+        config = {
+            "sparse_cfg": {
+                "*nonexistent*": {
+                    "method": "vsa",
+                    "enable": True,
+                },
+                "default": {"enable": False},
+            },
+        }
+        sparse_model = sparse_attn.sparsify(model, config)
+
+        # No modules should have VSA enabled
+        for module in sparse_model.modules():
+            if isinstance(module, SparseAttentionModule):
+                assert not module.is_enabled
+
+    def test_non_hf_forward_passes_through(self):
+        """For non-HF models, VSA forward passes through to original attention.
+
+        SimpleAttentionModel uses nn.MultiheadAttention (not HF), so VSA
+        pass-through runs the original attention unchanged.
+        """
+        model = SimpleAttentionModel()
+        sparse_model = sparse_attn.sparsify(model, VSA_TEST_CFG)
+
+        output = sparse_model(torch.randn(1, 64, 256))
+        assert output.shape == (1, 64, 256)
+
+    def test_hf_vsa_registration(self):
+        """VSA registers modelopt_vsa in HF ALL_ATTENTION_FUNCTIONS."""
+        from modelopt.torch.sparsity.attention_sparsity.kernels import register_vsa_attention
+
+        result = register_vsa_attention()
+        assert result is True
+
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        assert "modelopt_vsa" in ALL_ATTENTION_FUNCTIONS

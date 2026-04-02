@@ -176,14 +176,25 @@ class SparseAttentionModule(DynamicModule):
     def forward(self, *args, **kwargs):
         """Forward with selected sparse attention method.
 
-        Methods that replace the full attention computation (e.g., VSA) override
-        ``forward()`` in their model-specific plugin (e.g., ``_LTX2SparseAttention``)
-        and never reach this path.  This method handles the softmax-patching path
-        used by methods like ``flash_skip_softmax``.
+        - VSA: dispatched by HF via ``ALL_ATTENTION_FUNCTIONS["modelopt_vsa"]``
+          inside the original forward — just pass through.
+        - Softmax-patching methods (e.g. ``flash_skip_softmax``): use the
+          context manager path below.
         """
         # Pass through if sparse attention is disabled
         if not self.is_enabled:
             return super().forward(*args, **kwargs)
+
+        # VSA is dispatched by HF via ALL_ATTENTION_FUNCTIONS["modelopt_vsa"]
+        # inside the original forward — pass through and let HF call our
+        # registered vsa_attention_forward().
+        if self._method == "vsa":
+            result = super().forward(*args, **kwargs)
+            # Collect stats set by vsa_attention_forward
+            if self._stats_manager is not None and self._last_stats is not None:
+                self._stats_manager.collect(self._last_stats)
+                self._last_stats = None
+            return result
 
         # Standard path: softmax patching
         context = self._get_sparse_context()
