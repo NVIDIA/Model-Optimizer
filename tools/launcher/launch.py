@@ -30,6 +30,7 @@ Environment variables:
 
 import getpass
 import os
+import subprocess  # nosec B404
 import warnings
 
 import nemo_run as run
@@ -61,10 +62,11 @@ packager = run.PatternPackager(
         "modules/Megatron-LM/examples/*",
         "modules/Megatron-LM/*.py",
         "modules/Model-Optimizer/modelopt/*",
+        "modules/Model-Optimizer/modelopt_recipes/*",
         "modules/Model-Optimizer/examples/*",
         "common/*",
     ],
-    relative_path=[LAUNCHER_DIR] * 6,
+    relative_path=[LAUNCHER_DIR] * 7,
 )
 
 MODELOPT_SRC_PATH = os.path.join(LAUNCHER_DIR, "modules/Model-Optimizer/modelopt")
@@ -84,8 +86,14 @@ def launch(
     user: str = getpass.getuser(),
     identity: str = None,  # noqa: RUF013
     detach: bool = False,
+    clean: bool = False,
 ) -> None:
     """Launch ModelOpt jobs on Slurm or locally with Docker."""
+    if clean:
+        examples_dir = os.path.join(_mo_symlink, "examples")
+        print(f"Cleaning {examples_dir} with git clean -xdf ...")
+        subprocess.run(["git", "clean", "-xdf", "."], cwd=examples_dir, check=True)  # nosec B603 B607
+
     if "NEMORUN_HOME" not in os.environ:
         warnings.warn("NEMORUN_HOME is not set. Defaulting to current working directory.")
     run.config.set_nemorun_home(os.environ.get("NEMORUN_HOME", os.getcwd()))

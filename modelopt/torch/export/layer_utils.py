@@ -1184,6 +1184,18 @@ def sync_moe_gate_up_amax(model: nn.Module) -> int:
                 up_amax = getattr(up_wq, "amax", None)
                 if gate_amax is None or up_amax is None:
                     break
+                # Meta tensors have no storage (e.g. CPU-offloaded experts that
+                # were never activated during calibration). Skip — there is no
+                # real amax data to sync.
+                if gate_amax.is_meta or up_amax.is_meta:
+                    warn(
+                        f"Skipping gate/up amax sync for expert with meta tensors "
+                        f"(gate_amax.is_meta={gate_amax.is_meta}, "
+                        f"up_amax.is_meta={up_amax.is_meta}). "
+                        f"This typically means the expert was CPU-offloaded and "
+                        f"not activated during calibration."
+                    )
+                    break
                 if not torch.equal(gate_amax, up_amax):
                     shared_amax = torch.max(gate_amax, up_amax)
                     gate_wq.amax = shared_amax

@@ -1,0 +1,51 @@
+# HuggingFace PTQ via huggingface_example.sh
+#
+# Quantizes a HuggingFace model using examples/llm_ptq/scripts/huggingface_example.sh.
+# Default: Qwen/Qwen3.5-9B with nvfp4_mlp_only on 8xH200.
+#
+# Usage (Slurm):
+#   export SLURM_HOST=<slurm-host>
+#   export SLURM_ACCOUNT=<your-team>
+#   export SLURM_PARTITION=<your-partition>  # default: batch
+#   export SLURM_JOB_DIR=/home/scratch.<user>/experiments
+#   export SLURM_HF_LOCAL=/home/scratch.<user>/hf-local
+#   export HF_TOKEN=<your-hf-token>  # for gated models; auto-injected into all tasks
+#   cd tools/launcher
+#   uv run launch.py --yaml examples/llm_ptq/hf_ptq.yaml --yes
+#
+# Usage (local Docker):
+#   cd tools/launcher
+#   uv run launch.py --yaml examples/llm_ptq/hf_ptq.yaml hf_local=/mnt/hf-local --yes
+#
+# Override model/quant via CLI:
+#   uv run launch.py --yaml examples/llm_ptq/hf_ptq.yaml \
+#       pipeline.global_vars.hf_model=Qwen/Qwen3-8B \
+#       pipeline.task_0.args='[--model,<<global_vars.hf_local>>Qwen/Qwen3-8B,--quant,nvfp4]' \
+#       --yes
+
+job_name: hf_ptq_nvfp4
+pipeline:
+  skip: false
+  allow_to_fail: false
+  note: "HF PTQ with nvfp4"
+
+  global_vars:
+    hf_local: /hf-local/
+    hf_model: Qwen/Qwen3-8B
+
+  # Downloads model if needed, then runs huggingface_example.sh
+  task_0:
+    script: common/hf/ptq.sh
+    args:
+      - --repo <<global_vars.hf_model>>
+      - --local-dir <<global_vars.hf_local>><<global_vars.hf_model>>
+      - --
+      - --quant nvfp4
+      - --tasks quant
+    slurm_config:
+      _factory_: "slurm_factory"
+      nodes: 1
+      ntasks_per_node: 1
+      gpus_per_node: 1
+      time: "04:00:00"
+      container: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc7
