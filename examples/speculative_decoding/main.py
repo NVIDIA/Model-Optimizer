@@ -47,10 +47,7 @@ from transformers.trainer_utils import get_last_checkpoint
 
 import modelopt.torch.opt as mto
 import modelopt.torch.speculative as mtsp
-from modelopt.torch.speculative.utils import (
-    load_vlm_or_llm_with_kwargs,
-    patch_transformers5_params_loading,
-)
+from modelopt.torch.speculative.utils import load_vlm_or_llm, patch_transformers5_params_loading
 from modelopt.torch.utils import print_rank_0
 
 torch.manual_seed(0)
@@ -60,11 +57,18 @@ mto.enable_huggingface_checkpointing()
 @dataclass
 class ModelArguments:
     model_name_or_path: str | None = field(default="TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+    use_fake_base_for_offline: bool = field(
+        default=False, metadata={"help": "Whether to use fake base for offline training."}
+    )
+    trust_remote_code: bool = field(
+        default=False, metadata={"help": "Whether to trust remote code."}
+    )
 
 
 @dataclass
 class DataArguments:
     data_path: str = field(
+        default=None,
         metadata={"help": "Path to the training data."},
     )
     eval_data_path: str = field(default=None, metadata={"help": "Path to the evaluation data."})
@@ -153,6 +157,8 @@ def train():
     model_args, data_args, training_args, medusa_args, eagle_args = (
         parser.parse_args_into_dataclasses()
     )
+    if not data_args.data_path and not data_args.offline_data_path:
+        raise ValueError("Either data_path or offline_data_path must be provided.")
     if training_args.cp_size > 1 or training_args.dp_shard_size > 1:
         training_args.parallelism_config = ParallelismConfig(
             cp_size=training_args.cp_size, dp_shard_size=training_args.dp_shard_size
@@ -178,29 +184,27 @@ def train():
 
     if checkpoint:
         with patch_transformers5_params_loading():
-            _, model = load_vlm_or_llm_with_kwargs(
-                checkpoint, torch_dtype="auto", trust_remote_code=True
+            model = load_vlm_or_llm(
+                checkpoint, torch_dtype="auto", trust_remote_code=model_args.trust_remote_code
             )
-        tokenizer = transformers.AutoTokenizer.from_pretrained(checkpoint, trust_remote_code=True)
+        tokenizer = transformers.AutoTokenizer.from_pretrained(
+            checkpoint, trust_remote_code=model_args.trust_remote_code
+        )
     else:
         # To avoid OOM for large models, we load and convert model on CPU first.
         # Model will be moved to GPU during HF trainer.init().
-        offline_kwargs = {"num_hidden_layers": 0} if use_offline_training else {}
-        model_config, model = load_vlm_or_llm_with_kwargs(
+        model = load_vlm_or_llm(
             model_args.model_name_or_path,
+            use_fake_base=model_args.use_fake_base_for_offline,
+            use_offline_training=use_offline_training,
             torch_dtype="auto",
             device_map="cpu",
-            trust_remote_code=True,
-            **offline_kwargs,
+            trust_remote_code=model_args.trust_remote_code,
         )
-        if use_offline_training:
-            # When doing offline training, we need to set num_hidden_layers
-            # since we override it when loading the model for space savings
-            model.config.num_orig_hidden_layers = model_config.num_hidden_layers
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_args.model_name_or_path,
             model_max_length=training_args.training_seq_len,
-            trust_remote_code=True,
+            trust_remote_code=model_args.trust_remote_code,
         )
         if training_args.mode == "medusa":
             config = {

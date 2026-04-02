@@ -28,11 +28,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import modelopt.torch.opt as mto
 import modelopt.torch.sparsity.attention_sparsity as mtsa
 from modelopt.torch.export import export_hf_checkpoint
-from modelopt.torch.sparsity.attention_sparsity.config import (
-    SKIP_SOFTMAX_CALIB,
-    SKIP_SOFTMAX_DEFAULT,
-    SPARSE_SOFTMAX_DEFAULT,
-)
+from modelopt.torch.sparsity.attention_sparsity.config import SKIP_SOFTMAX_CALIB
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 
 RAND_SEED = 1234
@@ -42,9 +38,7 @@ mto.enable_huggingface_checkpointing()
 
 # Sparse attention configuration choices
 SPARSE_ATTN_CFG_CHOICES = {
-    "skip_softmax": SKIP_SOFTMAX_DEFAULT,
     "skip_softmax_calib": SKIP_SOFTMAX_CALIB,
-    "sparse_softmax": SPARSE_SOFTMAX_DEFAULT,
 }
 
 
@@ -236,7 +230,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sparse_attn",
         type=str,
-        default="skip_softmax",
+        default="skip_softmax_calib",
         choices=list(SPARSE_ATTN_CFG_CHOICES.keys()),
         help="Sparse attention configuration to apply.",
     )

@@ -76,10 +76,7 @@ class SparseAttentionMethod(ABC):
         Returns:
             Masked attention scores with sparse elements set to -inf
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} does not implement apply_sparsity. "
-            "Sparsity may be fused into the kernel (Triton backend)."
-        )
+        raise NotImplementedError(f"{type(self).__name__} does not implement apply_sparsity.")
 
     def get_sparse_context(self, module: torch.nn.Module):
         """Return a context manager that activates this method's sparsity during forward.

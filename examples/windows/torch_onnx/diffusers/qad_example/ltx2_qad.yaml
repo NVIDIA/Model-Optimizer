@@ -1,9 +1,9 @@
 # LTX-2 QAD Training Configuration
 model:
-  model_path: "/lustre/fsw/portfolios/adlr/projects/adlr_psx_numerics/users/ynankani/ComfyUI/models/checkpoints/ltx-av-step-1933500-split-new-vae.safetensors"
+  model_path: "/path/to/ltx2/checkpoint.safetensors"  # TODO: Set your LTX-2 checkpoint path
   training_mode: "full"
   load_checkpoint:
-  text_encoder_path: "/lustre/fsw/portfolios/adlr/users/dhutchins/models/gemma"
+  text_encoder_path: "/path/to/gemma"  # TODO: Set your Gemma text encoder path
 
 training_strategy:
   name: "text_to_video"
@@ -26,7 +26,7 @@ acceleration:
   load_text_encoder_in_8bit: true
 
 data:
-  preprocessed_data_root: "/lustre/fsw/portfolios/adlr/users/scavallari/ltx-qad/qad-dataset"
+  preprocessed_data_root: "/path/to/preprocessed"  # TODO: Set your preprocessed dataset path
   num_dataloader_workers: 2
 
 validation:

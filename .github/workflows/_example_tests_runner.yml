@@ -61,6 +61,19 @@ jobs:
 
           find examples/${{ inputs.example }} -name "requirements.txt" | while read req_file; do python -m pip install -r "$req_file" || exit 1; done
       - name: Run tests
+        env:
+          # Absolute paths so subprocesses running from different working directories
+          # all find the config and write .coverage.* files to the same location.
+          COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
+          COVERAGE_FILE: ${{ github.workspace }}/.coverage
         run: |
           echo "Running tests for: ${{ inputs.example }}"
-          pytest tests/examples/${{ inputs.example }}
+          pytest tests/examples/${{ inputs.example }} --cov
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          flags: examples
+          fail_ci_if_error: false # test may be skipped if relevant file changes are not detected
+          verbose: true

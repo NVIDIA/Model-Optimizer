@@ -122,6 +122,18 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       DISABLE_TORCH_COMPILE="${1#*=}"
       ;;
+    --use_fake_base_for_offline*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      USE_FAKE_BASE_FOR_OFFLINE="${1#*=}"
+      ;;
+    --trust_remote_code*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      TRUST_REMOTE_CODE="${1#*=}"
+      ;;
+    --fsdp*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      FSDP="${1#*=}"
+      ;;
     *)
       >&2 printf "Error: Invalid argument ${1#*=}\n"
       exit 1
@@ -134,9 +146,16 @@ set -x
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 NUM_NODES=${NUM_NODES:-1}
-GPU_PER_NODE=${GPU_PER_NODE:-$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)}
-TOTAL_GPU=$((NUM_NODES * GPU_PER_NODE))
-echo "Total GPUs: $TOTAL_GPU (NUM_NODES: $NUM_NODES, GPU_PER_NODE: $GPU_PER_NODE)"
+if [[ "$NUM_NODES" != 1 ]]; then
+  #Multi Node Training
+  GPU_PER_NODE=${GPU_PER_NODE:-$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)}
+  TOTAL_GPU=$((NUM_NODES * GPU_PER_NODE))
+  echo "Total GPUs: $TOTAL_GPU (NUM_NODES: $NUM_NODES, GPU_PER_NODE: $GPU_PER_NODE)"
+else
+  #Single Node Training, GPU can be specified by $CUDA_VISIBLE_DEVICES
+  TOTAL_GPU=$(python -c "import torch; print(torch.cuda.device_count())")
+  echo "Total GPUs: $TOTAL_GPU (Single Node Training)"
+fi
 # Calculate save_steps
 DEFAULT_SAVE_STEPS=$((8192 / TOTAL_GPU))
 
@@ -151,6 +170,7 @@ SAVE_STEPS=${SAVE_STEPS:-$DEFAULT_SAVE_STEPS}
 LR=${LR:-"1e-4"}
 TRAIN_BS=${TRAIN_BS:-1}
 TRAINING_SEQ_LEN=${TRAINING_SEQ_LEN:-2048}
+DATA=${DATA:-""}
 OFFLINE_DATA_PATH=${OFFLINE_DATA_PATH:-""}
 DISABLE_TQDM=${DISABLE_TQDM:-False}
 VLM_PROCESSOR=${VLM_PROCESSOR:-}
@@ -165,6 +185,9 @@ MIX_HIDDEN_STATES=${MIX_HIDDEN_STATES:-"False"}
 DISABLE_TORCH_COMPILE=${DISABLE_TORCH_COMPILE:-"False"}
 NUM_TTT_STEPS=${NUM_TTT_STEPS:-3}
 
+USE_FAKE_BASE_FOR_OFFLINE=${USE_FAKE_BASE_FOR_OFFLINE:-"False"}
+TRUST_REMOTE_CODE=${TRUST_REMOTE_CODE:-"False"}
+FSDP=${FSDP:-"False"}
 
 if [[ "$MODE" == "eagle3" ]]; then
   if [[ -n "$EAGLE_CONFIG" ]]; then
@@ -182,10 +205,10 @@ if [[ "$OFFLINE_DATA_PATH" != "" ]]; then
     echo "Offline data path $OFFLINE_DATA_PATH does not exist or is not a directory."
     exit 1
   else
-    OFFLINE_TRAINING_ARGS="--offline-data-path $OFFLINE_DATA_PATH --ar_validate_steps -1"
+    DATA_ARGS="--offline-data-path $OFFLINE_DATA_PATH --ar_validate_steps -1"
   fi
 else
-  OFFLINE_TRAINING_ARGS=""
+  DATA_ARGS="--data_path $DATA"
 fi
 
 
@@ -195,7 +218,7 @@ else
   VLM_ARGS=""
 fi
 
-if [[ "$TOTAL_GPU" -gt 1 ]]; then
+if [[ "$TOTAL_GPU" -gt 1 && "$FSDP" == "True" ]]; then
   #Use FSDP2 when multi GPU available
   FSDP_ARGS="--fsdp 'full_shard' --fsdp_config ${SCRIPT_DIR}/fsdp_config.json"
 else
@@ -245,15 +268,16 @@ CMD="accelerate launch $MULTI_NODE_ARGS --mixed_precision bf16 ${SCRIPT_DIR}/mai
     --lr_scheduler_type linear \
     --logging_steps $LOG_STEPS \
     --tf32 True \
-    --data_path $DATA \
+    $DATA_ARGS \
     --disable_tqdm $DISABLE_TQDM \
     --estimate_ar $ESTIMATE_AR \
     --ar_validate_steps $AR_VALIDATE_STEPS \
     --mix_hidden_states $MIX_HIDDEN_STATES \
     --disable_torch_compile $DISABLE_TORCH_COMPILE \
+    --use_fake_base_for_offline $USE_FAKE_BASE_FOR_OFFLINE \
+    --trust_remote_code $TRUST_REMOTE_CODE \
     $DRAFT_VOCAB_CACHE_ARGS \
     $VLM_ARGS \
-    $OFFLINE_TRAINING_ARGS \
     $SPECULATIVE_ARGS \
     $FSDP_ARGS \
     --cp_size $CP_SIZE \

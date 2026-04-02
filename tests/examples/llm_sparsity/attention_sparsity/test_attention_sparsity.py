@@ -19,7 +19,7 @@ import pytest
 from _test_utils.examples.run_command import extend_cmd_parts, run_example_command
 
 
-def run_attention_sparsity_command(*, model: str, method: str = "skip_softmax", **kwargs):
+def run_attention_sparsity_command(*, model: str, method: str = "skip_softmax_calib", **kwargs):
     """Run attention sparsity example script.
 
     Args:
@@ -40,7 +40,7 @@ def run_attention_sparsity_command(*, model: str, method: str = "skip_softmax", 
     run_example_command(cmd_parts, "llm_sparsity/attention_sparsity")
 
 
-@pytest.mark.parametrize("method", ["skip_softmax"])
+@pytest.mark.parametrize("method", ["skip_softmax_calib"])
 def test_attention_sparsity(tiny_llama_path, tmp_path, method):
     """Test sparse attention with TinyLlama (with and without calibration)."""
     run_attention_sparsity_command(

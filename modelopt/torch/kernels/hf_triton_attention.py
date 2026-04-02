@@ -105,16 +105,20 @@ def triton_attention_forward(
         kw["b_seq_len_k"] = torch.full((batch,), seq_k, device=device, dtype=torch.int32)
         kw["max_input_len_k"] = seq_k
 
-    # N:M sparse softmax — prefill only (decode should not sparsify KV)
-    if not is_decode and getattr(module, "_apply_sparse_nm", False):
-        # _sparse_method_instance is set by SparseAttentionModule._init_sparse_method()
-        # in modelopt/torch/sparsity/attention_sparsity/sparse_attention.py
-        method = getattr(module, "_sparse_method_instance", None)
-        if method is not None:
-            kw["sparsity_n"] = getattr(method, "sparsity_n", 2)
-            kw["sparsity_m"] = getattr(method, "sparsity_m", 4)
-            kw["num_sink_tokens"] = getattr(method, "num_sink_tokens", 0)
-            kw["dense_window_size"] = getattr(method, "dense_window_size", 64)
+    # Sparse attention params
+    method = getattr(module, "_sparse_method_instance", None)
+
+    # N:M sparse softmax: prefill only (no perf benefit for decode)
+    if method is not None and not is_decode and getattr(module, "_apply_sparse_nm", False):
+        kw["sparsity_n"] = method.sparsity_n
+        kw["sparsity_m"] = method.sparsity_m
+        kw["num_sink_tokens"] = method.num_sink_tokens
+        kw["dense_window_size"] = method.dense_window_size
+
+    # Skip-softmax: applies to both prefill and decode
+    if method is not None and getattr(module, "_apply_skip_softmax", False):
+        if method.skip_softmax_threshold:
+            kw["skip_softmax_threshold"] = method.skip_softmax_threshold
 
     o = attention(q, k, v, **kw)
 
