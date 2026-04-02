@@ -779,8 +779,8 @@ class _QuantQwen35MoeExperts(_QuantFunctionalMixin):
     calibration granularity matches the per-expert decomposition approach.
     """
 
-    def _get_expert_idx(self, weight: torch.Tensor) -> int:
-        """Recover expert index from a weight slice's storage offset."""
+    def _get_expert_idx_from_gate_up(self, weight: torch.Tensor) -> int:
+        """Recover expert index from a ``gate_up_proj`` weight slice's storage offset."""
         base_offset = self.gate_up_proj.storage_offset()
         stride = self.gate_up_proj.stride(0)
         if stride == 0:
@@ -795,6 +795,7 @@ class _QuantQwen35MoeExperts(_QuantFunctionalMixin):
         self.down_proj_weight_quantizers = nn.ModuleList([TensorQuantizer() for _ in range(n)])
 
         self._register_temp_attribute("_down_proj_linear", False)
+        self._register_temp_attribute("_current_expert_idx", 0)
 
     @property
     def functionals_to_replace(self):
@@ -806,7 +807,7 @@ class _QuantQwen35MoeExperts(_QuantFunctionalMixin):
                 input = self.down_proj_input_quantizers[expert_idx](input)
                 weight = self.down_proj_weight_quantizers[expert_idx](weight)
             else:
-                expert_idx = self._get_expert_idx(weight)
+                expert_idx = self._get_expert_idx_from_gate_up(weight)
                 self._current_expert_idx = expert_idx
                 input = self.gate_up_proj_input_quantizers[expert_idx](input)
                 weight = self.gate_up_proj_weight_quantizers[expert_idx](weight)

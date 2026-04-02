@@ -727,7 +727,7 @@ def _export_transformers_checkpoint(
                     # Qwen3.5 MoE uses per-expert quantizer ModuleLists.
                     # Amax fallback and scale export are handled by
                     # _export_qwen35_experts in _process_quantized_modules.
-                    break
+                    break  # exits the inner `for linear_name` loop; type check prevents re-entry
                 elif "QuantGptOssExperts" in type(sub_module.experts).__name__:
                     # Handle GPT-OSS experts specifically
                     # GPT-OSS experts use gate_up_proj and down_proj

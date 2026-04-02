@@ -73,41 +73,53 @@ def _export_qwen35_experts(module: nn.Module, dtype: torch.dtype) -> None:
         expert = nn.Module()
 
         projections = [
-            ("gate_proj", gate_up[idx, :expert_dim, :], 0, fused_dim0),
-            ("up_proj", gate_up[idx, expert_dim:, :], expert_dim, fused_dim0),
-            ("down_proj", down[idx], None, None),
+            ("gate_proj", gate_up[idx, :expert_dim, :], 0, fused_dim0, True),
+            ("up_proj", gate_up[idx, expert_dim:, :], expert_dim, fused_dim0, True),
+            ("down_proj", down[idx], 0, down.shape[1], False),
         ]
 
-        for proj_name, weight_slice, fused_start, fused_total in projections:
-            is_down = proj_name == "down_proj"
+        for proj_name, weight_slice, fused_start, fused_total, is_gate_up in projections:
             w_quantizer_src = (
-                module.down_proj_weight_quantizers[idx]
-                if is_down
-                else module.gate_up_proj_weight_quantizers[idx]
+                module.gate_up_proj_weight_quantizers[idx]
+                if is_gate_up
+                else module.down_proj_weight_quantizers[idx]
             )
             i_quantizer = (
-                module.down_proj_input_quantizers[idx]
-                if is_down
-                else module.gate_up_proj_input_quantizers[idx]
+                module.gate_up_proj_input_quantizers[idx]
+                if is_gate_up
+                else module.down_proj_input_quantizers[idx]
             )
 
-            # Clone weight quantizer so gate/up each get independent amax
-            w_quantizer = copy.deepcopy(w_quantizer_src)
+            # gate/up share a weight quantizer — clone so each gets independent amax.
+            # down_proj has its own quantizer and uses the full range, no clone needed.
+            w_quantizer = copy.deepcopy(w_quantizer_src) if is_gate_up else w_quantizer_src
 
-            # For shared gate_up quantizers with per-channel amax (dim >= 1),
-            # proportionally slice dim0 to match the split weight.
-            if fused_start is not None and hasattr(w_quantizer, "_amax"):
+            # For per-channel amax (dim >= 1), proportionally slice dim0
+            # to match the split weight.
+            if hasattr(w_quantizer, "_amax") and w_quantizer._amax.dim() >= 1:
                 amax = w_quantizer._amax
-                if amax.dim() >= 1:
-                    amax_dim0 = amax.shape[0]
-                    if fused_total % amax_dim0 != 0:
-                        raise ValueError(
-                            f"Fused weight dim0 ({fused_total}) is not divisible by "
-                            f"amax dim0 ({amax_dim0})."
-                        )
-                    slice_start = fused_start * amax_dim0 // fused_total
-                    slice_end = (fused_start + weight_slice.shape[0]) * amax_dim0 // fused_total
-                    w_quantizer._amax = amax[slice_start:slice_end].contiguous()
+                amax_dim0 = amax.shape[0]
+                if fused_total % amax_dim0 != 0:
+                    raise ValueError(
+                        f"Fused weight dim0 ({fused_total}) is not divisible by "
+                        f"amax dim0 ({amax_dim0})."
+                    )
+                slice_start = fused_start * amax_dim0 // fused_total
+                slice_end = (fused_start + weight_slice.shape[0]) * amax_dim0 // fused_total
+                w_quantizer._amax = amax[slice_start:slice_end].contiguous()
+
+            # If the weight quantizer was never calibrated (expert received no
+            # tokens), compute amax directly from the weight data.
+            if (
+                hasattr(w_quantizer, "is_enabled")
+                and w_quantizer.is_enabled
+                and (
+                    not hasattr(w_quantizer, "_amax")
+                    or w_quantizer._amax is None
+                    or torch.all(w_quantizer._amax == 0)
+                )
+            ):
+                w_quantizer.amax = weight_slice.abs().amax().to(torch.float32)
 
             # Build a wrapper module that _export_quantized_weight understands
             wrapper = nn.Module()

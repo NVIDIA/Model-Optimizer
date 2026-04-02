@@ -980,7 +980,7 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
     elif module_match_name_list(module, ["DBRXMoeSparseMoeBlock"]):
         return ["w1_linear", "w2_linear", "v1_linear"]
     elif module_match_name_list(module, ["GptOssMoE", "Qwen3_5MoeSparseMoeBlock"]):
-        # These MoE modules use fused gate_up_proj and down_proj
+        # GptOssMoE and Qwen3_5MoeSparseMoeBlock use fused gate_up_proj and down_proj
         return ["gate_up_proj", "down_proj"]
     else:
         # assuming w1, w2, w3 by default
