@@ -94,6 +94,10 @@ class SparseAttentionMethod(ABC):
         """
         return {"type": "none", "value": None}
 
+    def set_calibration_mode(self, enabled: bool):
+        """Set calibration mode. Override in subclasses that support calibration."""
+        self._calibration_mode = enabled
+
     @property
     @abstractmethod
     def name(self) -> str:

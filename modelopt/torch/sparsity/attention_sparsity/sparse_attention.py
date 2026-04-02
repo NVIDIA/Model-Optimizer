@@ -61,9 +61,26 @@ class SparseAttentionModule(DynamicModule):
         Args:
             attribute_cfg: Sparse attention attribute configuration.
         """
+        from .config import VSAAttributeConfig
+
+        # Determine which config class to use based on method
+        config_dict = attribute_cfg or {}
+        if isinstance(attribute_cfg, dict):
+            method = config_dict.get("method", "flash_skip_softmax")
+        elif attribute_cfg is not None and hasattr(attribute_cfg, "method"):
+            method = attribute_cfg.method
+        else:
+            method = "flash_skip_softmax"
+
+        # Select appropriate config class based on method
+        if method == "vsa":
+            config_class = VSAAttributeConfig
+        else:
+            config_class = SparseAttentionAttributeConfig
+
         # Ensure config is validated through Pydantic
-        if not isinstance(attribute_cfg, SparseAttentionAttributeConfig):
-            attribute_cfg = SparseAttentionAttributeConfig(**(attribute_cfg or {}))
+        if not isinstance(attribute_cfg, (SparseAttentionAttributeConfig, VSAAttributeConfig)):
+            attribute_cfg = config_class(**(config_dict))
 
         # Store raw config for method initialization
         self._method_config = {}
@@ -80,10 +97,10 @@ class SparseAttentionModule(DynamicModule):
 
         # Process each attribute from validated config
         for attribute, val in attribute_cfg.model_dump().items():
-            # Validate attribute if using config class
-            if hasattr(SparseAttentionAttributeConfig, "model_fields"):
-                assert attribute in SparseAttentionAttributeConfig.model_fields, (
-                    f"{attribute} is not a valid SparseAttentionModule attribute"
+            # Validate attribute against the appropriate config class
+            if hasattr(config_class, "model_fields"):
+                assert attribute in config_class.model_fields, (
+                    f"{attribute} is not a valid {config_class.__name__} attribute"
                 )
 
             if attribute in _module_attributes:
