@@ -664,7 +664,6 @@ class HFDFlashModel(DFlashModel):
         bsz = input_ids.shape[0]
         seq_len = input_ids.shape[1]
         device = input_ids.device
-        dtype = target_hidden.dtype
 
         # Block: first token is base_token (anchor), rest are mask
         block_ids = torch.full(
@@ -681,21 +680,16 @@ class HFDFlashModel(DFlashModel):
         block_positions = torch.arange(ctx_len, ctx_len + block_size, device=device)
         pos_ids = torch.cat([ctx_positions, block_positions]).unsqueeze(0).expand(bsz, -1)
 
-        # Attention mask: block sees ALL context + reverse-causal within block
-        # Matching SpecForge training: j >= i (pos 0 sees all, pos B-1 sees only itself)
-        attn_mask = torch.zeros(1, 1, block_size, ctx_len + block_size, device=device, dtype=dtype)
-        block_indices = torch.arange(block_size, device=device)
-        reverse_causal = block_indices.unsqueeze(0) >= block_indices.unsqueeze(1)
-        noise_mask = torch.zeros(block_size, block_size, device=device, dtype=dtype)
-        noise_mask.masked_fill_(~reverse_causal, torch.finfo(dtype).min)
-        attn_mask[:, :, :, ctx_len:] = noise_mask
+        # No attention mask at inference — matching SpecForge's spec_generate
+        # which uses KV cache with no mask. All positions attend freely to
+        # context and each other within the block.
 
         # Draft forward
         draft_hidden = self.dflash_module(
             noise_embedding=noise_embedding,
             target_hidden=target_hidden,
             position_ids=pos_ids,
-            attention_mask=attn_mask,
+            attention_mask=None,
         )
 
         # Logits on positions 1..block_size-1 (skip anchor at position 0)
