@@ -16,7 +16,6 @@
 """Dynamic sparse attention registration for HuggingFace models."""
 
 import torch.nn as nn
-import transformers
 
 from modelopt.torch.opt.dynamic import DynamicModule
 
@@ -112,6 +111,8 @@ def _is_supported_model(model: nn.Module) -> bool:
     """
     # Check for HuggingFace PreTrainedModel
     try:
+        import transformers
+
         if isinstance(model, transformers.PreTrainedModel):
             return True
     except ImportError:
