@@ -151,11 +151,13 @@ class DFlashAttention(nn.Module):
             impl = getattr(self.config, "_attn_implementation", "eager")
             if impl and impl != "eager" and impl in ALL_ATTENTION_FUNCTIONS:
                 self._attn_fn = ALL_ATTENTION_FUNCTIONS[impl]
+                print(f"[DFlash] attn_fn resolved to: {impl} -> {self._attn_fn.__name__}")
             else:
-                # Fall back to eager (manual matmul + softmax)
                 self._attn_fn = self._eager_attention
-        except (ImportError, AttributeError):
+                print(f"[DFlash] attn_fn fallback to eager (impl={impl})")
+        except (ImportError, AttributeError) as e:
             self._attn_fn = self._eager_attention
+            print(f"[DFlash] attn_fn fallback to eager (error: {e})")
         return self._attn_fn
 
     def _eager_attention(self, module, q, k, v, attention_mask, **kwargs):
