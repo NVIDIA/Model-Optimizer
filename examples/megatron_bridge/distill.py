@@ -104,7 +104,9 @@ def get_args():
     parser.add_argument(
         "--train_iters", type=int, required=True, help="Number of training iterations"
     )
-    parser.add_argument("--no_skip_lm_loss", action="store_true", help="Skip language model loss")
+    parser.add_argument(
+        "--no_skip_lm_loss", action="store_true", help="Disable skipping language model loss"
+    )
     parser.add_argument("--kd_loss_scale", type=float, default=1.0, help="KD loss weight")
     parser.add_argument("--lr", type=float, default=1e-4, help="Peak learning rate")
     parser.add_argument("--min_lr", type=float, default=1e-5, help="Minimum learning rate")
