@@ -41,6 +41,22 @@
         "Uses remote cluster if clusters.yaml exists",
         "Runs smoke test first (unlisted model)"
       ]
+    },
+    {
+      "id": 4,
+      "prompt": "Quantize supermmx/FakeUnsupported-0.6B to nvfp4",
+      "expected_output": "Agent discovers custom FusedGateUpProj, writes QuantModule patch, registers with mtq.register(), produces quantized checkpoint",
+      "files": [],
+      "expectations": [
+        "Checks README — model is NOT listed",
+        "Reads unsupported-models.md (4C path)",
+        "Finds modeling_fake_model.py — uses trust_remote_code",
+        "Identifies FusedGateUpProj as non-standard (nn.Parameter, not nn.Linear)",
+        "Writes QuantFusedGateUpProj with TensorQuantizers (Pattern 1)",
+        "Registers with mtq.register() (Pattern 3)",
+        "Writes custom PTQ script",
+        "Runs smoke test first, then full calibration"
+      ]
     }
   ]
 }
