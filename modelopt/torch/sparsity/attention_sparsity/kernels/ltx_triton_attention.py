@@ -28,7 +28,7 @@ import threading
 import torch
 from ltx_core.model.transformer.attention import Attention
 
-from modelopt.torch.kernels.triton_fa import attention
+from modelopt.torch.kernels import attention
 
 # Thread-local storage for skip-softmax configuration
 _thread_local = threading.local()
@@ -106,6 +106,7 @@ def _ltx_triton_attention(
     if threshold is not None and threshold > 0.0:
         kw["skip_softmax_threshold"] = threshold
 
+    assert attention is not None, "Triton attention kernel not available (requires CUDA + triton)"
     o = attention(q_flat, k_flat, v_flat, **kw)
 
     # Reshape back: [B*T, H, D] -> [B, T, H*D]

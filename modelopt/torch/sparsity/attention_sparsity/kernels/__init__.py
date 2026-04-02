@@ -47,16 +47,17 @@ register_diffusers_triton_attention = None
 register_ltx_eager_attention = None
 register_ltx_triton_attention = None
 
-with contextlib.suppress(ImportError):
+# Suppress ImportError (missing package) and RuntimeError (triton without GPU driver)
+with contextlib.suppress(ImportError, RuntimeError):
     from .diffusers_eager_attention import register_diffusers_eager_attention
 
-with contextlib.suppress(ImportError):
+with contextlib.suppress(ImportError, RuntimeError):
     from .diffusers_triton_attention import register_diffusers_triton_attention
 
-with contextlib.suppress(ImportError):
+with contextlib.suppress(ImportError, RuntimeError):
     from .ltx_eager_attention import register_ltx_eager_attention
 
-with contextlib.suppress(ImportError):
+with contextlib.suppress(ImportError, RuntimeError):
     from .ltx_triton_attention import register_ltx_triton_attention
 
 __all__ = [

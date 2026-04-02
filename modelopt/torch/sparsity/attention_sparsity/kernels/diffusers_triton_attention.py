@@ -33,7 +33,7 @@ from diffusers.models.attention_dispatch import (
     attention_backend,
 )
 
-from modelopt.torch.kernels.triton_fa import attention
+from modelopt.torch.kernels import attention
 
 _BACKEND_NAME = "modelopt_triton"
 _BACKEND_REGISTERED = False
@@ -110,6 +110,7 @@ def _diffusers_triton_attention(
     if threshold is not None and threshold > 0.0:
         kw["skip_softmax_threshold"] = threshold
 
+    assert attention is not None, "Triton attention kernel not available (requires CUDA + triton)"
     o = attention(q, k, v, **kw)
 
     # Reshape back: [B*S, H, D] -> [B, S, H, D]

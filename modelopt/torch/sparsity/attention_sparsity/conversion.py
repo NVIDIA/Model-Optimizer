@@ -121,13 +121,16 @@ def _register_diffusers_backends_if_needed(model: nn.Module) -> None:
                 register_diffusers_eager_attention()
             if register_diffusers_triton_attention is not None:
                 register_diffusers_triton_attention()
-    except ImportError:
+    except (ImportError, Exception):
         pass
 
     # Patch ltx_core Attention modules if present (independent of diffusers)
     import contextlib
 
-    from .kernels import register_ltx_eager_attention, register_ltx_triton_attention
+    try:
+        from .kernels import register_ltx_eager_attention, register_ltx_triton_attention
+    except (ImportError, RuntimeError):
+        return
 
     if register_ltx_eager_attention is not None:
         with contextlib.suppress(Exception):
