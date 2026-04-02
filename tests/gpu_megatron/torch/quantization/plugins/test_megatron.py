@@ -245,7 +245,6 @@ def _gpt_model_provider(
     meta_device=False,
     ep_size=1,
     etp_size=None,
-    use_te=False,
     transformer_impl="local",
     # Hybrid mamba MOE parameters
     is_hybrid=False,
@@ -285,7 +284,7 @@ def _gpt_model_provider(
                 ffn_hidden_size=None,
                 num_attention_heads=8,
                 activation_func="squared_relu",
-                transformer_impl="transformer_engine" if use_te else transformer_impl,
+                transformer_impl=transformer_impl,
                 hidden_size=hidden_size,
                 vocab_size=vocab_size,
                 use_cpu_initialization=meta_device,
@@ -314,7 +313,6 @@ def _test_sharded_state_dict(
     etp_size = model_config.get("etp_size", None)
     num_moe_experts = model_config.get("num_moe_experts", None)
     moe_grouped_gemm = model_config.get("moe_grouped_gemm", False)
-    use_te = model_config.get("use_te", False)
     transformer_impl = model_config.get("transformer_impl", "local")
     # Hybrid mamba MOE parameters
     is_hybrid = model_config.get("is_hybrid", False)
@@ -333,7 +331,6 @@ def _test_sharded_state_dict(
         vocab_size=256,
         num_moe_experts=num_moe_experts,
         moe_grouped_gemm=moe_grouped_gemm,
-        use_te=use_te,
         ep_size=ep_size,
         etp_size=etp_size,
         transformer_impl=transformer_impl,
@@ -346,7 +343,6 @@ def _test_sharded_state_dict(
         vocab_size=256,
         num_moe_experts=num_moe_experts,
         moe_grouped_gemm=moe_grouped_gemm,
-        use_te=use_te,
         meta_device=meta_device,
         ep_size=ep_size,
         etp_size=etp_size,
@@ -444,8 +440,6 @@ def test_homogeneous_sharded_state_dict(
             )
 
     model_config = {"transformer_impl": transformer_impl}
-    if transformer_impl == "modelopt":
-        model_config["use_te"] = True
     dist_workers.run(
         partial(
             _test_sharded_state_dict,
@@ -597,8 +591,7 @@ def test_moe_sharded_state_dict(dist_workers, need_4_gpus, tmp_path, config, moe
         "etp_size": 1,
         "num_moe_experts": 4,
         "moe_grouped_gemm": moe_grouped_gemm,
-        "use_te": moe_grouped_gemm,
-        "transformer_impl": "modelopt",
+        "transformer_impl": "transformer_engine" if moe_grouped_gemm else "modelopt",
     }
     if not moe_grouped_gemm:
         moe_config["tp_size"] = 1  # TODO: TP+EP is not supported by QuantSequentialMLP
@@ -630,7 +623,7 @@ def _test_te_grouped_vs_sequential_quantize_helper(tp_size, ep_size, quant_cfg, 
         ep_size=ep_size,
         hidden_size=32,
         moe_grouped_gemm=True,
-        use_te=True,
+        transformer_impl="transformer_engine",
         num_moe_experts=4,
     )
 
@@ -695,7 +688,10 @@ def test_te_grouped_vs_sequential_quantize(dist_workers_size_4, quant_cfg):
 
 @pytest.mark.parametrize("ep_size", [1, 2])
 @pytest.mark.parametrize("moe_grouped_gemm", [True, False])
-def test_layer_sync_moe_local_experts_amax(dist_workers, ep_size, moe_grouped_gemm):
+@pytest.mark.parametrize("sync_weight_amax", [True, False])
+def test_layer_sync_moe_local_experts_amax(
+    dist_workers, ep_size, moe_grouped_gemm, sync_weight_amax
+):
     """Test expert model parallel synchronization."""
     if torch.cuda.device_count() < ep_size:
         pytest.skip(f"Requires at least {ep_size} GPUs for expert model parallel test")
@@ -705,11 +701,14 @@ def test_layer_sync_moe_local_experts_amax(dist_workers, ep_size, moe_grouped_ge
             _test_layer_sync_moe_local_experts_amax,
             ep_size,
             moe_grouped_gemm,
+            sync_weight_amax,
         ),
     )
 
 
-def _test_layer_sync_moe_local_experts_amax(ep_size, moe_grouped_gemm, rank, size):
+def _test_layer_sync_moe_local_experts_amax(
+    ep_size, moe_grouped_gemm, sync_weight_amax, rank, size
+):
     initialize_for_megatron(
         tensor_model_parallel_size=1,
         pipeline_model_parallel_size=1,
@@ -723,21 +722,21 @@ def _test_layer_sync_moe_local_experts_amax(ep_size, moe_grouped_gemm, rank, siz
         etp_size=1,
         hidden_size=256,
         moe_grouped_gemm=moe_grouped_gemm,
-        use_te=moe_grouped_gemm,
         num_moe_experts=8,
         transformer_impl="modelopt",
     )
-    # Make weight initialization different across experts, otherwise experts will have similar amax values
-    for layer in model.decoder.layers:
-        for i, expert in enumerate(layer.mlp.experts.local_experts):
-            expert.linear_fc1.weight.data.fill_(0.1 + i * 0.05)
-            expert.linear_fc2.weight.data.fill_(0.2 + i * 0.05)
+    if not moe_grouped_gemm:
+        # Make weight initialization different across experts, otherwise experts will have similar amax values
+        for layer in model.decoder.layers:
+            for i, expert in enumerate(layer.mlp.experts.local_experts):
+                expert.linear_fc1.weight.data.fill_(0.1 + i * 0.05)
+                expert.linear_fc2.weight.data.fill_(0.2 + i * 0.05)
 
     quant_cfg = mtq.FP8_DEFAULT_CFG
     model = mtq.quantize(model, quant_cfg, get_forward(model))
 
     for layer in model.decoder.layers:
-        layer.mlp.experts.layer_sync_moe_local_experts_amax()
+        layer.mlp.experts.layer_sync_moe_local_experts_amax(sync_weight_amax=sync_weight_amax)
 
     for layer in model.decoder.layers:
         # Check input quantizer amax is synced across local experts
@@ -755,7 +754,7 @@ def _test_layer_sync_moe_local_experts_amax(ep_size, moe_grouped_gemm, rank, siz
             else:
                 assert torch.allclose(fc2_amax, expert.linear_fc2.input_quantizer.amax)
 
-        # Check weight quantizer amax is different across local experts
+        # Check weight quantizer amax
         fc1_amax = None
         fc2_amax = None
         for expert in layer.mlp.experts.local_experts:
@@ -763,10 +762,14 @@ def _test_layer_sync_moe_local_experts_amax(ep_size, moe_grouped_gemm, rank, siz
             assert expert.linear_fc2.weight_quantizer.amax is not None
             if fc1_amax is None:
                 fc1_amax = expert.linear_fc1.weight_quantizer.amax
+            elif sync_weight_amax:
+                assert torch.allclose(fc1_amax, expert.linear_fc1.weight_quantizer.amax)
             else:
                 assert not torch.allclose(fc1_amax, expert.linear_fc1.weight_quantizer.amax)
             if fc2_amax is None:
                 fc2_amax = expert.linear_fc2.weight_quantizer.amax
+            elif sync_weight_amax:
+                assert torch.allclose(fc2_amax, expert.linear_fc2.weight_quantizer.amax)
             else:
                 assert not torch.allclose(fc2_amax, expert.linear_fc2.weight_quantizer.amax)
 
@@ -790,7 +793,6 @@ def _test_expert_model_parallel_amax_sync(
         etp_size=etp_size,
         hidden_size=256,
         moe_grouped_gemm=moe_grouped_gemm,
-        use_te=moe_grouped_gemm,
         num_moe_experts=8,
         transformer_impl="modelopt",
     )
