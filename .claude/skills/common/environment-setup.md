@@ -10,11 +10,13 @@ ls examples/llm_ptq/hf_ptq.py 2>/dev/null && echo "Source found"
 
 If not found: `git clone https://github.com/NVIDIA/Model-Optimizer.git && cd Model-Optimizer`
 
-If found, ensure the source is clean and up to date — previous runs may have left local patches:
+If found, ensure the source is up to date:
 
 ```bash
-git checkout main && git pull origin main
+git pull origin main
 ```
+
+If previous runs left patches in `modelopt/` (from 4C unlisted model work), check whether they should be kept. Reset only if starting a completely new task: `git checkout main`.
 
 ## Env-2. Local or remote?
 

@@ -94,9 +94,9 @@ The launcher blocks and tails logs until the job completes. If the launcher fail
 
 ### 4C — Unlisted model
 
-Follow `references/unsupported-models.md`. It guides you through checking the model source, deciding whether a patched script is needed, and writing patches if required. Unlisted models are risky — monitor the run and be ready to debug.
+Follow `references/unsupported-models.md`. It walks through investigating the model, patching ModelOpt if needed, and running `hf_ptq.py`. Run manually (like 4A) for easier monitoring and debugging.
 
-Run directly (local) or via `remote_run` (remote). For SLURM, use a job script — see `skills/common/slurm-setup.md` for generic patterns and `references/slurm-setup-ptq.md` for PTQ-specific details (container, GPU sizing, FSDP2).
+For SLURM, see `skills/common/slurm-setup.md` and `references/slurm-setup-ptq.md`.
 
 ### Monitoring
 

@@ -45,16 +45,16 @@
     {
       "id": 4,
       "prompt": "Quantize supermmx/FakeUnsupported-0.6B to nvfp4",
-      "expected_output": "Agent discovers custom FusedGateUpProj, writes QuantModule patch, registers with mtq.register(), produces quantized checkpoint",
+      "expected_output": "Agent patches ModelOpt plugin directly, then runs hf_ptq.py",
       "files": [],
       "expectations": [
         "Checks README — model is NOT listed",
         "Reads unsupported-models.md (4C path)",
         "Finds modeling_fake_model.py — uses trust_remote_code",
         "Identifies FusedGateUpProj as non-standard (nn.Parameter, not nn.Linear)",
-        "Writes QuantFusedGateUpProj with TensorQuantizers (Pattern 1)",
-        "Registers with mtq.register() (Pattern 3)",
-        "Writes custom PTQ script",
+        "Patches modelopt/torch/quantization/plugins/huggingface.py with QuantFusedGateUpProj (Pattern 1)",
+        "Uses QuantModuleRegistry.register or on-the-fly registration (Pattern 3)",
+        "Runs hf_ptq.py (not a standalone custom script)",
         "Runs smoke test first, then full calibration"
       ]
     }

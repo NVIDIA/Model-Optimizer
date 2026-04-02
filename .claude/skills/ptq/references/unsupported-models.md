@@ -90,7 +90,7 @@ Compare against the `enable`/`disable` patterns in the config. Add custom overri
 After Steps A-D:
 
 - **No patches needed** (all standard modules) → run `hf_ptq.py` with a smoke test (`--calib_size 4`). If it succeeds, proceed with full calibration. If it fails, read the error and revisit Steps C/D.
-- **Patches needed** → write a custom script using the patterns below, then smoke test it. Debug failures iteratively — quantization errors often reveal additional modules that need patching.
+- **Patches needed** → patch ModelOpt directly using the patterns below (add `QuantModule` in `modelopt/torch/quantization/plugins/huggingface.py`, update `modelopt/torch/export/` if needed), then run `hf_ptq.py` with a smoke test. This is preferred over writing a standalone script because it reuses all existing `hf_ptq.py` logic. Debug failures iteratively — quantization errors often reveal additional modules that need patching.
 
 ---
 
@@ -158,15 +158,32 @@ for name, module in model.named_modules():
 
 ## Pattern 3: Registering with ModelOpt
 
-Register all custom classes BEFORE calling `mtq.quantize()`:
+**When patching the plugin directly** (preferred): Use `QuantModuleRegistry.register` in `modelopt/torch/quantization/plugins/huggingface.py`, following existing examples:
+
+```python
+from modelopt.torch.quantization.nn import QuantModuleRegistry
+
+# Static registration (class available at import time):
+QuantModuleRegistry.register({OriginalModule: "hf.OriginalModule"})(QuantCustomModule)
+
+# Dynamic registration (trust_remote_code, class only available at runtime):
+def register_my_model_on_the_fly(model):
+    for module in model.modules():
+        if type(module).__name__ == "OriginalModule":
+            mod_type = type(module)
+            if QuantModuleRegistry.get(mod_type) is None:
+                QuantModuleRegistry.register({mod_type: f"hf.{mod_type.__name__}"})(QuantCustomModule)
+            break
+```
+
+**When writing a standalone script** (fallback): Use `mtq.register()`:
 
 ```python
 import modelopt.torch.quantization as mtq
-
 mtq.register(original_cls=OriginalModule, quantized_cls=QuantCustomModule)
 ```
 
-`mtq.register()` tells ModelOpt to replace all instances of `original_cls` with `quantized_cls` during quantization. The replacement class must be a subclass of the original.
+Both methods replace all instances of `original_cls` with `quantized_cls` during quantization. The replacement class must be a subclass of the original.
 
 ## Pattern 4: VLM Language Model Extraction
 
@@ -285,7 +302,9 @@ cfg["quant_cfg"]["*custom_experts*input_quantizer"] = {
 mtq.print_quant_summary(model)
 ```
 
-## General Custom PTQ Script Structure
+## Fallback: Custom PTQ Script
+
+Only if patching ModelOpt is not feasible (e.g., the model is not a standard transformer and `hf_ptq.py` fundamentally won't work):
 
 ```python
 import modelopt.torch.opt as mto
