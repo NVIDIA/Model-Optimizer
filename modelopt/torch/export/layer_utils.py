@@ -971,7 +971,6 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
             "Qwen2MoeSparseMoeBlock",
             "Qwen3MoeSparseMoeBlock",
             "Qwen3NextSparseMoeBlock",
-            "Qwen3_5MoeSparseMoeBlock",
             "DeepseekMoE",
         ],
     ):
@@ -980,8 +979,8 @@ def get_expert_linear_names(module: nn.Module) -> list[str]:
         return ["linear_fc1", "linear_fc2"]
     elif module_match_name_list(module, ["DBRXMoeSparseMoeBlock"]):
         return ["w1_linear", "w2_linear", "v1_linear"]
-    elif module_match_name_list(module, ["GptOssMoE"]):
-        # GPT-OSS MoE modules use gate_up_proj and down_proj
+    elif module_match_name_list(module, ["GptOssMoE", "Qwen3_5MoeSparseMoeBlock"]):
+        # These MoE modules use fused gate_up_proj and down_proj
         return ["gate_up_proj", "down_proj"]
     else:
         # assuming w1, w2, w3 by default

@@ -17,7 +17,124 @@
 
 from pathlib import Path
 
+import torch
 import torch.nn as nn
+
+
+def _export_qwen35_experts(module: nn.Module, dtype: torch.dtype) -> None:
+    """Split fused Qwen3.5 MoE expert weights and export per-expert quantization scales.
+
+    The quantized ``Qwen3_5MoeExperts`` keeps fused 3D ``gate_up_proj`` and ``down_proj``
+    parameters with per-expert quantizer ``ModuleList`` s at runtime.  This function:
+
+    1. Handles amax fallback for uncalibrated expert quantizers.
+    2. Splits the fused 3D weights into per-expert 2D projections.
+    3. Calls ``_export_quantized_weight`` on each projection to compute scales and
+       quantize weights in the format expected by downstream consumers.
+    4. Registers the results under the standard per-expert naming convention::
+
+           {E}.gate_proj.weight, {E}.gate_proj.weight_scale, ...
+           {E}.up_proj.weight, {E}.up_proj.weight_scale, ...
+           {E}.down_proj.weight, {E}.down_proj.weight_scale, ...
+    """
+    import copy
+
+    from modelopt.torch.export.layer_utils import set_expert_quantizer_amax
+    from modelopt.torch.export.unified_export_hf import _export_quantized_weight
+
+    n = module.num_experts
+    expert_dim = module.intermediate_dim
+
+    # 1. Amax fallback for uncalibrated expert input quantizers.
+    #    Input amax depends on activations seen during calibration and can't be
+    #    recomputed from weights, so borrow from calibrated peers.
+    #    Weight quantizer amax is handled by _export_quantized_weight directly.
+    for quantizer_list in [
+        module.gate_up_proj_input_quantizers,
+        module.down_proj_input_quantizers,
+    ]:
+        wrappers = []
+        for q in quantizer_list:
+            w = nn.Module()
+            w.input_quantizer = q
+            wrappers.append(w)
+        set_expert_quantizer_amax(modules=wrappers, quantizer_attrs=["input_quantizer"])
+
+    gate_up = module.gate_up_proj.data
+    down = module.down_proj.data
+
+    # 2-3. Split weights, export per-expert projections
+    #    Each projection is (name, weight_slice, fused_start, fused_dim0).
+    #    fused_start/fused_dim0 are used to proportionally slice per-channel amax
+    #    when gate/up share a weight quantizer from the fused gate_up_proj.
+    fused_dim0 = gate_up.shape[1]  # 2 * expert_dim
+
+    for idx in range(n):
+        expert = nn.Module()
+
+        projections = [
+            ("gate_proj", gate_up[idx, :expert_dim, :], 0, fused_dim0),
+            ("up_proj", gate_up[idx, expert_dim:, :], expert_dim, fused_dim0),
+            ("down_proj", down[idx], None, None),
+        ]
+
+        for proj_name, weight_slice, fused_start, fused_total in projections:
+            is_down = proj_name == "down_proj"
+            w_quantizer_src = (
+                module.down_proj_weight_quantizers[idx]
+                if is_down
+                else module.gate_up_proj_weight_quantizers[idx]
+            )
+            i_quantizer = (
+                module.down_proj_input_quantizers[idx]
+                if is_down
+                else module.gate_up_proj_input_quantizers[idx]
+            )
+
+            # Clone weight quantizer so gate/up each get independent amax
+            w_quantizer = copy.deepcopy(w_quantizer_src)
+
+            # For shared gate_up quantizers with per-channel amax (dim >= 1),
+            # proportionally slice dim0 to match the split weight.
+            if fused_start is not None and hasattr(w_quantizer, "_amax"):
+                amax = w_quantizer._amax
+                if amax.dim() >= 1:
+                    amax_dim0 = amax.shape[0]
+                    if fused_total % amax_dim0 != 0:
+                        raise ValueError(
+                            f"Fused weight dim0 ({fused_total}) is not divisible by "
+                            f"amax dim0 ({amax_dim0})."
+                        )
+                    slice_start = fused_start * amax_dim0 // fused_total
+                    slice_end = (fused_start + weight_slice.shape[0]) * amax_dim0 // fused_total
+                    w_quantizer._amax = amax[slice_start:slice_end].contiguous()
+
+            # Build a wrapper module that _export_quantized_weight understands
+            wrapper = nn.Module()
+            wrapper.weight = nn.Parameter(weight_slice.contiguous(), requires_grad=False)
+            wrapper.weight_quantizer = w_quantizer
+            wrapper.input_quantizer = i_quantizer
+
+            _export_quantized_weight(wrapper, dtype)
+
+            # Collect results into the per-expert submodule
+            proj = nn.Module()
+            proj.weight = wrapper.weight
+            for attr in ("weight_scale", "weight_scale_2", "input_scale"):
+                if hasattr(wrapper, attr):
+                    proj.register_buffer(attr, getattr(wrapper, attr))
+
+            expert.add_module(proj_name, proj)
+
+        module.add_module(str(idx), expert)
+
+    # 4. Remove fused params and quantizer lists — replaced by per-expert submodules
+    delattr(module, "gate_up_proj")
+    delattr(module, "down_proj")
+    delattr(module, "gate_up_proj_weight_quantizers")
+    delattr(module, "gate_up_proj_input_quantizers")
+    delattr(module, "down_proj_weight_quantizers")
+    delattr(module, "down_proj_input_quantizers")
 
 
 def save_expert_token_count_table(model: nn.Module, output_dir: str | Path | None = None):
