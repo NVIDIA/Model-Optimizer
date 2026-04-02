@@ -29,17 +29,17 @@ import modelopt.torch.nas as mtn
 from modelopt.torch.nas.modules import DynamicModuleList
 from modelopt.torch.nas.plugins.megatron import (
     NumAttentionHeadsHp,
-    _DynamicColumnParallelLinear,
     _DynamicEmbedding,
     _DynamicLanguageModelEmbedding,
     _DynamicMCoreLanguageModel,
     _DynamicMLP,
     _DynamicMoELayer,
-    _DynamicProjRowParallelLinear,
-    _DynamicQKVColumnParallelLinear,
-    _DynamicRowParallelLinear,
     _DynamicSelfAttention,
     _DynamicSequentialMLP,
+    _DynamicTELayerNormColumnParallelLinear,
+    _DynamicTEProjRowParallelLinear,
+    _DynamicTEQKVLayerNormColumnParallelLinear,
+    _DynamicTERowParallelLinear,
     _DynamicTopKRouter,
     _DynamicTransformerLayer,
     expand_head_indices,
@@ -76,6 +76,7 @@ def _test_gpt_search_space(
         vocab_size=vocab_size,
         activation_func=activation_func,
         normalization=normalization,
+        transformer_impl="transformer_engine",
     ).cuda()
 
     mtn.convert(
@@ -101,12 +102,12 @@ def _test_gpt_search_space(
             assert isinstance(m, _DynamicTransformerLayer)
         elif isinstance(m, MLP):
             assert isinstance(m, _DynamicMLP)
-            assert isinstance(m.linear_fc1, _DynamicColumnParallelLinear)
-            assert isinstance(m.linear_fc2, _DynamicRowParallelLinear)
+            assert isinstance(m.linear_fc1, _DynamicTELayerNormColumnParallelLinear)
+            assert isinstance(m.linear_fc2, _DynamicTERowParallelLinear)
         elif isinstance(m, SelfAttention):
             assert isinstance(m, _DynamicSelfAttention)
-            assert isinstance(m.linear_qkv, _DynamicQKVColumnParallelLinear)
-            assert isinstance(m.linear_proj, _DynamicProjRowParallelLinear)
+            assert isinstance(m.linear_qkv, _DynamicTEQKVLayerNormColumnParallelLinear)
+            assert isinstance(m.linear_proj, _DynamicTEProjRowParallelLinear)
 
     # NOTE: `search_space_size` does not reduce across TP/PP groups
     ss_size_per_pp = search_space_size(model)
@@ -139,7 +140,6 @@ def _test_gpt_search_space(
     [
         (8, 8, "squared_relu", "LayerNorm"),  # MHA
         (8, 4, "swiglu", "RMSNorm"),  # GQA
-        # (8, 1, "swiglu", "RMSNorm"),  # MQA
     ],
 )
 def test_gpt_search_space(
@@ -173,14 +173,15 @@ def test_gpt_self_attention_head_sorting(distributed_setup_size_1):
         num_query_groups=2,
         ffn_hidden_size=16,
         activation_func="squared_relu",
+        transformer_impl="transformer_engine",
     ).cuda()
 
     model = mtn.convert(model, "mcore_minitron")
 
     self_attn = model.decoder.layers[0].self_attention
     assert isinstance(self_attn, _DynamicSelfAttention)
-    assert isinstance(self_attn.linear_qkv, _DynamicQKVColumnParallelLinear)
-    assert isinstance(self_attn.linear_proj, _DynamicProjRowParallelLinear)
+    assert isinstance(self_attn.linear_qkv, _DynamicTEQKVLayerNormColumnParallelLinear)
+    assert isinstance(self_attn.linear_proj, _DynamicTEProjRowParallelLinear)
 
     hp_num_attention_heads = self_attn.get_hparam("num_attention_heads")
     assert isinstance(hp_num_attention_heads, NumAttentionHeadsHp)
@@ -255,6 +256,7 @@ def _test_gpt_moe_search_space(rank, size):
         max_sequence_length=max_sequence_length,
         vocab_size=vocab_size,
         activation_func="squared_relu",
+        transformer_impl="transformer_engine",
         num_moe_experts=num_moe_experts,
         moe_ffn_hidden_size=moe_ffn_hidden_size,
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
@@ -291,6 +293,7 @@ def _test_gpt_moe_search_space(rank, size):
     moe_shared_ffn_choices = moe_shared_expert_intermediate_size // channel_divisor
     hidden_size_choices = hidden_size // channel_divisor
     num_layers_per_pp = num_layers // size
+    # SequentialMLP has per-expert moe_ffn_hidden_size hparams
     assert (
         ss_size_per_pp
         == (

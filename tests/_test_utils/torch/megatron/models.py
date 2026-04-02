@@ -31,6 +31,7 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
 
 from modelopt.torch.export.unified_export_megatron import import_mcore_gpt_from_hf
+from modelopt.torch.nas.plugins.megatron import get_te_mamba_stack_spec
 
 try:
     from megatron.core.extensions.transformer_engine import TENorm
@@ -183,8 +184,8 @@ def get_mcore_gpt_model(
         pipeline_dtype=torch.bfloat16 if bf16 else torch.float32,
         bf16=bf16,
         # MoE-specific parameters
+        moe_router_dtype=None,
         moe_grouped_gemm=moe_grouped_gemm,
-        moe_router_dtype="fp32",
         moe_ffn_hidden_size=moe_ffn_hidden_size,
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
         moe_router_enable_expert_bias=True,
@@ -207,23 +208,21 @@ def get_mcore_gpt_model(
         assert HAS_APEX, "Apex not installed"
         transformer_layer_spec = get_gpt_layer_local_spec(
             num_experts=num_moe_experts,
-            normalization=normalization,
             moe_grouped_gemm=moe_grouped_gemm,
-            # TODO: uncomment this when TEGroupedMLP is enabled in Megatron-LM
-            # use_te=use_te,
+            normalization=normalization,
         )
     else:
         assert HAS_TE, "Transformer Engine not installed"
-        transformer_layer_spec = (
-            get_gpt_modelopt_spec(
+        if transformer_impl == "modelopt":
+            transformer_layer_spec = get_gpt_modelopt_spec(
                 config,
                 remap_te_layernorm=True,
-                # TODO: uncomment this when TEGroupedMLP is enabled in Megatron-LM
-                # moe_grouped_gemm=moe_grouped_gemm
             )
-            if transformer_impl == "modelopt"
-            else get_gpt_layer_with_transformer_engine_spec()
-        )
+        else:
+            transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
+                num_experts=num_moe_experts,
+                moe_grouped_gemm=moe_grouped_gemm,
+            )
 
     model = GPTModel(
         config=config,
@@ -306,6 +305,7 @@ def get_mcore_mamba_hybrid_model(
     vocab_size: int = 64,
     bf16: bool = True,
     sequence_parallel: bool = False,
+    transformer_impl: str = "modelopt",
     # Mamba-specific parameters
     mamba_state_dim: int = 32,
     mamba_num_heads: int | None = None,
@@ -313,6 +313,7 @@ def get_mcore_mamba_hybrid_model(
     mamba_num_groups: int = 2,
     # MoE-specific parameters
     skip_moe: bool = False,
+    moe_grouped_gemm: bool = False,
     moe_ffn_hidden_size: int | None = 64,
     moe_shared_expert_intermediate_size: int | None = 32,
     num_moe_experts: int | None = 8,
@@ -346,8 +347,11 @@ def get_mcore_mamba_hybrid_model(
         mamba_head_dim=mamba_head_dim,
         mamba_num_groups=mamba_num_groups,
         num_moe_experts=num_moe_experts,
+        moe_grouped_gemm=moe_grouped_gemm,
         moe_ffn_hidden_size=moe_ffn_hidden_size,
         moe_shared_expert_intermediate_size=moe_shared_expert_intermediate_size,
+        moe_router_enable_expert_bias=True,
+        moe_router_score_function="sigmoid",
         add_bias_linear=False,
         pipeline_dtype=torch.bfloat16 if bf16 else torch.float32,
         bf16=bf16,
@@ -383,9 +387,14 @@ def get_mcore_mamba_hybrid_model(
     assert len(hybrid_override_pattern.replace("|", "")) == num_layers
     print(f"Using `{hybrid_override_pattern=}` for building MambaModel")
 
+    if transformer_impl == "transformer_engine":
+        mamba_spec = get_te_mamba_stack_spec(moe_grouped_gemm=moe_grouped_gemm)
+    else:
+        mamba_spec = get_mamba_stack_modelopt_spec(remap_te_layernorm=True)
+
     model = MambaModel(
         config=config,
-        mamba_stack_spec=get_mamba_stack_modelopt_spec(remap_te_layernorm=True),
+        mamba_stack_spec=mamba_spec,
         vocab_size=vocab_size,
         max_sequence_length=max_sequence_length,
         hybrid_override_pattern=hybrid_override_pattern,

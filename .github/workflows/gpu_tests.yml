@@ -86,7 +86,20 @@ jobs:
         run: |
           echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/include:/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
       - name: Run gpu tests
-        run: pip install tox-current-env && tox -e cuda13-${{ matrix.example }} --current-env
+        env:
+          COVERAGE_PROCESS_START: ${{ github.workspace }}/pyproject.toml
+          COVERAGE_FILE: ${{ github.workspace }}/.coverage
+        run: |
+          pip install tox-current-env
+          COV_ARGS="--cov" tox -e cuda13-${{ matrix.example }} --current-env
+      - name: Upload GPU coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          flags: gpu
+          fail_ci_if_error: false # test may be skipped if relevant file changes are not detected
+          verbose: true
   gpu-tests-non-pr:
     if: ${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}
     strategy: *gpu_strategy

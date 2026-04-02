@@ -29,7 +29,7 @@
 echo "SLURM_ARRAY_TASK_ID: $SLURM_ARRAY_TASK_ID"
 echo "SLURM_ARRAY_TASK_COUNT: $SLURM_ARRAY_TASK_COUNT"
 
-CONTAINER="nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc4"
+CONTAINER="nvcr.io/nvidia/tensorrt-llm/release:1.2.0"
 
 INPUT_DIR="<Can be directory containing the .jsonl files, or path to single .jsonl file>"
 DUMP_DIR="<Directory for output hidden states>"

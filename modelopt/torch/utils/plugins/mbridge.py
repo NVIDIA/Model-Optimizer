@@ -23,13 +23,9 @@ from megatron.bridge import AutoBridge
 from megatron.bridge.data.builders.hf_dataset import HFDatasetConfig
 from megatron.bridge.data.loaders import setup_data_iterators
 from megatron.bridge.data.utils import get_dataset_provider
-from megatron.bridge.models.gpt_provider import GPTModelProvider, modelopt_transformer_layer_spec
+from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
-from megatron.bridge.models.mamba.mamba_provider import (
-    MambaModelProvider,
-    modelopt_mamba_stack_spec,
-)
-from megatron.bridge.models.nemotronh.nemotron_h_provider import NemotronHModelProvider
+from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider
 from megatron.bridge.training.config import (
     CheckpointConfig,
     ConfigContainer,
@@ -44,12 +40,14 @@ from megatron.bridge.training.gpt_step import forward_step
 from megatron.bridge.training.state import GlobalState
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.core.models.gpt import GPTModel
+from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transformer_engine_spec
 from megatron.core.models.mamba import MambaModel
 from megatron.core.parallel_state import get_data_parallel_group
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.utils import unwrap_model
 from transformers import AutoTokenizer
 
+from modelopt.torch.nas.plugins.megatron import get_te_mamba_stack_spec
 from modelopt.torch.utils import get_dataset_samples, print_rank_0, warn_rank_0
 
 __all__ = ["get_hf_mbridge_calibration_loop", "load_mbridge_model_from_hf"]
@@ -61,6 +59,7 @@ def load_mbridge_model_from_hf(
     trust_remote_code: bool = False,
     provider_overrides: dict[str, Any] | None = None,
     init_model_parallel: bool = True,
+    moe_grouped_gemm: bool = True,
 ) -> tuple[
     AutoBridge,
     GPTModelProvider | MambaModelProvider,
@@ -75,6 +74,8 @@ def load_mbridge_model_from_hf(
         trust_remote_code: Whether to trust remote code.
         provider_overrides: Overrides for the provider.
         init_model_parallel: Whether to initialize model parallel.
+        moe_grouped_gemm: Whether to use grouped GEMM for MoE.
+            Pruning does not support grouped GEMM yet.
 
     Returns:
         A tuple of (bridge, provider, model, unwrapped_model, tokenizer).
@@ -94,12 +95,15 @@ def load_mbridge_model_from_hf(
             assert hasattr(provider, key), f"{type(provider)} does not have attribute {key}"
             setattr(provider, key, value)
 
-    print_rank_0("Setting ModelOpt spec for model provider")
+    # disable moe_grouped_gemm in default TE spec until its supported
     if isinstance(provider, MambaModelProvider):
-        provider.mamba_stack_spec = modelopt_mamba_stack_spec
+        provider.mamba_stack_spec = get_te_mamba_stack_spec(moe_grouped_gemm=moe_grouped_gemm)
     else:
-        provider.transformer_layer_spec = modelopt_transformer_layer_spec
-
+        provider.transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
+            num_experts=provider.num_moe_experts,
+            moe_grouped_gemm=moe_grouped_gemm,
+            qk_layernorm=provider.qk_layernorm,
+        )
     provider.finalize()
     if init_model_parallel:
         provider.initialize_model_parallel(seed=0)
@@ -179,9 +183,6 @@ def get_hf_mbridge_calibration_loop(
         global_batch_size = micro_batch_size
     num_iters = num_samples // global_batch_size
 
-    # NOTE: Issue with NemotronH tokenizer's len() hence using use_fast=True as a WAR
-    use_fast_tokenizer = isinstance(provider, NemotronHModelProvider)
-
     cfg = ConfigContainer(
         model=provider,
         train=TrainingConfig(
@@ -203,9 +204,10 @@ def get_hf_mbridge_calibration_loop(
         tokenizer=TokenizerConfig(
             tokenizer_type="HuggingFaceTokenizer",
             tokenizer_model=hf_model_name_or_path,
+            # NOTE: Issue with Nemotron Nano v2 tokenizer returning bool hence using use_fast=True as a WAR
             hf_tokenizer_kwargs={
                 "trust_remote_code": trust_remote_code,
-                "use_fast": use_fast_tokenizer,
+                "use_fast": tokenizer.is_fast,
             },
         ),
         # Unused

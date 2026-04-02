@@ -110,3 +110,13 @@ class EagleConfig(ModeloptBaseConfig):
             "Whether to mix hidden states of multiple TTT steps. It is a technique to reduce training cost."
         ),
     )
+
+    eagle_use_torch_compile: bool = ModeloptField(
+        default=True,
+        description="Whether to use torch.compile on eagle forward/loss methods for faster training.",
+    )
+
+    eagle_enable_nvtx: bool = ModeloptField(
+        default=False,
+        description="Whether to enable NVTX ranges for profiling eagle forward/loss methods.",
+    )

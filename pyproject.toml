@@ -2,7 +2,7 @@
 ###############################  BUILD CONFIGURATION  ##############################################
 ####################################################################################################
 [build-system]
-requires = ["setuptools>=80", "setuptools-scm>=8"]
+requires = ["setuptools>=80", "setuptools-scm>=8,<10"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools_scm]
@@ -41,14 +41,14 @@ dependencies = [
     "torch>=2.6",
     "tqdm",
     # modelopt.torch
+    "PyYAML>=6.0",
+    "omegaconf>=2.3.0",
     "pulp",
     "pydantic>=2.0",
     "regex",
     "rich",
     "safetensors",
     "scipy",
-    "PyYAML>=6.0",
-    "omegaconf>=2.3.0"
 ]
 
 [project.optional-dependencies]
@@ -81,7 +81,7 @@ hf = [
     "nltk",
     "peft>=0.17.0",
     "sentencepiece>=0.2.1",                                                           # Also implicitly used in test_unified_export_megatron, test_vllm_fakequant_megatron_export
-    "transformers>=4.53,<5.0",                                                        # Should match modelopt/torch/__init__.py and tox.ini
+    "transformers>=4.56,<5.0",                                                        # Should match modelopt/torch/__init__.py and tox.ini
     "wonderwords",
 ]
 dev-lint = [
@@ -101,6 +101,7 @@ dev-docs = [
     "sphinx-togglebutton>=0.3.2",
 ]
 dev-test = [
+    "coverage[toml]>=7.13.0",  # a1_coverage.pth for subprocess tracking requires this
     "pytest",
     "pytest-cov",
     "pytest-instafail",
@@ -132,7 +133,7 @@ managed = true
 
 
 ####################################################################################################
-###############################  LINTING, FORMATTING AND TESTING CONFIGURATION  ####################
+###############################  LINTING, FORMATTING CONFIGURATION  ################################
 ####################################################################################################
 [tool.ruff]
 target-version = "py310"
@@ -204,7 +205,10 @@ extend-ignore = [
     "E501",
 ] # Ignore missing docstrings or line length for Jupyter notebooks
 "modelopt/torch/quantization/triton/*" = ["N803", "N806", "E731"] # triton style
-"modelopt/torch/sparsity/attention_sparsity/kernels/*" = ["N803", "N806"] # triton kernel style
+"modelopt/torch/sparsity/attention_sparsity/kernels/*" = [
+    "N803",
+    "N806",
+] # triton kernel style
 "examples/deepseek/ds_kernel.py" = ["N803", "N806", "E731"] # triton style
 
 [tool.ruff.lint.pycodestyle]
@@ -253,6 +257,22 @@ ignore_errors = true
 module = ["examples.*"]
 disable_error_code = ["attr-defined"]
 
+[tool.bandit]
+exclude_dirs = [".github/", "examples/", "tests/"]
+# Do not change `skips`. It should be consistent with NVIDIA's Wheel-CI-CD bandit.yml config.
+# Use of `# nosec BXXX` requires special approval
+skips = [
+    "B101", # assert_used
+    "B110", # try_except_pass
+    "B112", # try_except_continue
+    "B303", # MD2, MD4, MD5, or SHA1
+    "B311", # random
+]
+
+
+####################################################################################################
+###############################  TESTING CONFIGURATION  ############################################
+####################################################################################################
 [tool.pytest.ini_options]
 # Default additional options
 # Show a short test summary info for all except passed tests with -ra flag
@@ -267,12 +287,12 @@ markers = [
 
 [tool.coverage.run]
 branch = false
-include = ["modelopt/*"]
-omit = ["*/plugins/*", "*/export/*"]
+parallel = true
+concurrency = ["multiprocessing", "thread"]
+source_pkgs = ["modelopt", "modelopt_recipes"]
 
 
 [tool.coverage.report]
-fail_under = 70
 skip_covered = true
 ignore_errors = true
 exclude_lines = [
@@ -293,17 +313,4 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     # Don't complain about abstract methods, they aren't run
     "@(abc\\.)?abstractmethod",
-]
-
-
-[tool.bandit]
-exclude_dirs = [".github/", "examples/", "tests/"]
-# Do not change `skips`. It should be consistent with NVIDIA's Wheel-CI-CD bandit.yml config.
-# Use of `# nosec BXXX` requires special approval
-skips = [
-    "B101", # assert_used
-    "B110", # try_except_pass
-    "B112", # try_except_continue
-    "B303", # MD2, MD4, MD5, or SHA1
-    "B311", # random
 ]

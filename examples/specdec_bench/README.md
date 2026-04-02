@@ -4,7 +4,7 @@
 
 This benchmark is meant to be a lightweight layer ontop of an existing vLLM/SGLang/TRTLLM installation. For example, no install
 is required if one is running in the following dockers: `vllm/vllm-openai:v0.11.0` (vLLM), `lmsysorg/sglang:v0.5.4.post2` (SGLang), or
-`nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc4` (TRT-LLM).
+`nvcr.io/nvidia/tensorrt-llm/release:1.2.0` (TRT-LLM).
 
 Next
 

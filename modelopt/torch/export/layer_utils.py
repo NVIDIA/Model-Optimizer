@@ -150,33 +150,6 @@ def check_model_compatibility(module_list: list[nn.Module]) -> tuple[bool, bool,
 
 def get_transformer_layers(model: nn.Module) -> list[nn.Module]:
     """Returns the root module of the transformer model."""
-    if "Megatron" in type(model).__name__:
-        if hasattr(model, "model") and "GPTModel" in type(model.model).__name__:
-            # NEMO mcore models can be handled with the following branch.
-            model = model.model
-
-        # NEMO non mcore models, we need to find the language_model module first.
-        children = [model]
-        language_model = None
-        while children and not language_model:
-            next_children = []
-            for child in children:
-                if type(child).__name__ == "TransformerLanguageModel":
-                    language_model = child
-                    break
-                next_children.extend(list(child.children()))
-            children = next_children
-        if language_model:
-            warn("Warning: this is an old NEMO checkpoint format and will be deprecated soon.")
-            layers = list(language_model.embedding.children()) + list(
-                language_model.encoder.children()
-            )
-
-            if hasattr(language_model, "output_layer"):
-                layers.append(language_model.output_layer)
-
-            return layers
-
     if "GPTModel" in type(model).__name__:
         # mcore models
         layers = []
@@ -385,7 +358,7 @@ def build_qkv(
         num_kv_heads = ext_config.num_kv_heads
 
         if "ColumnParallelLinear" in type(qkv_module).__name__:
-            # For NEMO model, num_kv_heads/num_attention_heads is the first dimension of QKV
+            # For Megatron-core model, num_kv_heads/num_attention_heads is the first dimension of QKV
             model_metadata_config["head_is_first_dim"] = True
 
         qkv_weight = qkv_module.weight
@@ -1211,6 +1184,18 @@ def sync_moe_gate_up_amax(model: nn.Module) -> int:
                 up_amax = getattr(up_wq, "amax", None)
                 if gate_amax is None or up_amax is None:
                     break
+                # Meta tensors have no storage (e.g. CPU-offloaded experts that
+                # were never activated during calibration). Skip — there is no
+                # real amax data to sync.
+                if gate_amax.is_meta or up_amax.is_meta:
+                    warn(
+                        f"Skipping gate/up amax sync for expert with meta tensors "
+                        f"(gate_amax.is_meta={gate_amax.is_meta}, "
+                        f"up_amax.is_meta={up_amax.is_meta}). "
+                        f"This typically means the expert was CPU-offloaded and "
+                        f"not activated during calibration."
+                    )
+                    break
                 if not torch.equal(gate_amax, up_amax):
                     shared_amax = torch.max(gate_amax, up_amax)
                     gate_wq.amax = shared_amax
@@ -1482,7 +1467,7 @@ def _set_layer_config_from_metaconfig(layer_config, metaconfig):
             if k in metaconfig:
                 setattr(layer_config, name, metaconfig[k])
 
-    # MCore / NeMo use "rope" as an alias for "rope_gpt_neox"
+    # MCore use "rope" as an alias for "rope_gpt_neox"
     if layer_config.position_embedding_type == "rope":
         layer_config.position_embedding_type = "rope_gpt_neox"
 

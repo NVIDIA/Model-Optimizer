@@ -53,7 +53,7 @@ def slurm_factory(
     nodes: int = 1,
     ntasks_per_node: int = 1,
     gpus_per_node: int = 1,
-    container: str = "nvcr.io/nvidia/tensorrt-llm/release:1.2.0",
+    container: str = "nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc8",
     modelopt_install_path: str = "/usr/local/lib/python3.12/dist-packages/modelopt",
     container_mounts: list[str] = [
         "{}:/hf-local".format(os.environ.get("SLURM_HF_LOCAL", "/hf-local")),
