@@ -129,18 +129,23 @@ class QuantCustomModule(OriginalModule):
 
 ## Pattern 2: MoE Models
 
-MoE models route tokens to a subset of experts (top-k). During calibration, experts that receive no tokens won't have their quantization scales calibrated.
+**Standard MoE** (per-expert `nn.Linear` in a `ModuleList` with `gate` + `experts`): Auto-detected by `register_sparse_moe_on_the_fly`. No custom code needed — amax sync and calibration coverage are handled automatically.
 
-**In most cases, ModelOpt handles this automatically.** The HuggingFace plugin auto-detects MoE blocks with the standard `gate` + `experts` pattern (`register_sparse_moe_on_the_fly`) and registers `_QuantSparseMoe`, which:
+**Custom MoE** requires patching. Read the model source to understand how expert weights are stored and computed, then find the closest pattern in the plugin (`modelopt/torch/quantization/plugins/huggingface.py`):
 
-- Syncs input quantizer amax across all experts after calibration (`layer_sync_moe_local_experts_amax`)
-- Runs weight-only calibration for experts that received no tokens (`sync_moe_expert_amax`)
+| MoE design | Strategy | Plugin example |
+| --- | --- | --- |
+| Fused weights + per-expert dispatch loop | Expand to per-expert `nn.Linear` | `_QuantQwen35MoeExperts` |
+| Fused weights + `torch.bmm` | Add `TensorQuantizer` around bmm | `_QuantLlama4TextExperts` |
+| Fused weights + functional interception | Intercept matmul ops | `_QuantGptOssExperts` |
+| Fused 2D weights (experts stacked in rows) | Two-level expansion | `_QuantDbrxExpertGLU` |
+| Fused weights + `forward(x, expert_id)` | Expand + reconstruct on export | `_QuantMoELinear` (Step3.5) |
 
-**When you still need custom work:**
+For the full guide, see `examples/llm_ptq/moe.md`.
 
-- **Fused expert weights** (e.g., Qwen3.5's `Qwen3_5MoeExperts`, Step3.5's `MoELinear`): These store all expert weights in a single tensor `[num_experts, out, in]` instead of separate `nn.Linear` per expert. Use Pattern 1 to create a `QuantModule` that expands fused weights into per-expert modules with their own quantizers.
+**Critical: always check the weight layout.** `nn.Linear` expects `(out_features, in_features)` — the last dimension must be `in_features`. If the fused tensor is `(num_experts, in_dim, out_dim)`, you must transpose (`.T`) when copying. Getting this wrong silently corrupts quantization scales. Inspect the original forward pass to determine which dimension is which.
 
-- **Non-standard MoE structure** (no `gate`/`experts` attributes): Auto-detection won't find it. Either add `layer_sync_moe_local_experts_amax` to your custom class, or call `sync_moe_expert_amax` manually after quantization:
+For non-standard MoE structures (no `gate`/`experts` attributes), auto-detection won't find the outer block. Call `sync_moe_expert_amax` manually after quantization:
 
 ```python
 from modelopt.torch.quantization.utils import sync_moe_expert_amax
