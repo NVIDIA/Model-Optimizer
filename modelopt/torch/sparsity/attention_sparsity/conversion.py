@@ -101,6 +101,42 @@ def is_attn_sparsified(model: nn.Module) -> bool:
     return any(isinstance(module, SparseAttentionModule) for module in model.modules())
 
 
+def _register_diffusers_backends_if_needed(model: nn.Module) -> None:
+    """Register diffusers/LTX attention backends if the model needs them.
+
+    Called before plugin registration so that the backends are available
+    when ``SparseAttentionModule.forward()`` activates the skip-softmax context.
+    """
+    # Register the diffusers eager and Triton backends if the model is a diffusers ModelMixin
+    try:
+        from diffusers.models.modeling_utils import ModelMixin
+
+        if isinstance(model, ModelMixin):
+            from .kernels import (
+                register_diffusers_eager_attention,
+                register_diffusers_triton_attention,
+            )
+
+            if register_diffusers_eager_attention is not None:
+                register_diffusers_eager_attention()
+            if register_diffusers_triton_attention is not None:
+                register_diffusers_triton_attention()
+    except ImportError:
+        pass
+
+    # Patch ltx_core Attention modules if present (independent of diffusers)
+    import contextlib
+
+    from .kernels import register_ltx_eager_attention, register_ltx_triton_attention
+
+    if register_ltx_eager_attention is not None:
+        with contextlib.suppress(Exception):
+            register_ltx_eager_attention(model)
+    if register_ltx_triton_attention is not None:
+        with contextlib.suppress(Exception):
+            register_ltx_triton_attention(model)
+
+
 def convert_to_sparse_attention_model(
     model: ModelLikeModule, config: SparseAttentionConfig
 ) -> ConvertReturnType:
@@ -115,6 +151,9 @@ def convert_to_sparse_attention_model(
     """
     # Initialize the true module if necessary
     model = model.init_modellike() if isinstance(model, ModelLikeModule) else model
+
+    # Register diffusers backends for diffusion models
+    _register_diffusers_backends_if_needed(model)
 
     # Set the correct attn_implementation for the chosen backend
     _set_attn_implementation(model, config)
@@ -346,31 +385,45 @@ def export_sparse_attention_config(model: nn.Module) -> dict[str, Any] | None:
     if calibration_params is None:
         return None
 
-    # Build threshold_scale_factor with model parameters
-    threshold_scale_factor: dict[str, Any] = {
-        "formula": "a * exp(b * target_sparsity)",
-    }
-    for phase in ["prefill", "decode"]:
-        if phase in calibration_params:
-            threshold_scale_factor[phase] = {
-                "a": calibration_params[phase]["a"],
-                "b": calibration_params[phase]["b"],
-            }
+    # Detect calibration type from params
+    sample_params = next(iter(calibration_params.values()))
+    is_percentile = "threshold" in sample_params
 
     # Build the export config
     export_config: dict[str, Any] = {
         "config_groups": {
             "group_0": {
-                "sparse_algo": "softmax_skip",
+                "sparse_algo": "softmax_skip_diffusion" if is_percentile else "softmax_skip",
                 "targets": sorted(target_classes) if target_classes else ["Attention"],
             }
         },
-        "threshold_scale_factor": threshold_scale_factor,
         "producer": {
             "name": "modelopt",
             "version": mo_version,
         },
     }
+
+    if is_percentile:
+        threshold_config: dict[str, Any] = {
+            "formula": "skip if gap >= threshold * log(seq_k)",
+        }
+        for phase in ["prefill", "decode"]:
+            if phase in calibration_params:
+                threshold_config[phase] = {
+                    "threshold": calibration_params[phase]["threshold"],
+                }
+        export_config["threshold_config"] = threshold_config
+    else:
+        threshold_scale_factor: dict[str, Any] = {
+            "formula": "a * exp(b * target_sparsity)",
+        }
+        for phase in ["prefill", "decode"]:
+            if phase in calibration_params:
+                threshold_scale_factor[phase] = {
+                    "a": calibration_params[phase]["a"],
+                    "b": calibration_params[phase]["b"],
+                }
+        export_config["threshold_scale_factor"] = threshold_scale_factor
 
     return export_config
 
@@ -443,6 +496,16 @@ def _format_threshold(info: dict) -> str:
                 s = target.get(phase, 0.5)
                 parts.append(f"{phase}: a={a:.4f}, b={b:.2f}, target={s:.0%}")
         return f"calibrated({', '.join(parts)})"
+    if t == "dynamic_calibrated_percentile":
+        params = info.get("calibration_params", {})
+        target = info.get("target_sparse_ratio", {})
+        parts = []
+        for phase in ["prefill", "decode"]:
+            if phase in params and "threshold" in params[phase]:
+                th = params[phase]["threshold"]
+                s = target.get(phase, 0.2)
+                parts.append(f"{phase}: threshold={th:.4f}, target={s:.0%}")
+        return f"percentile({', '.join(parts)})"
     if t == "static":
         v = info.get("value")
         if isinstance(v, dict):
@@ -470,6 +533,8 @@ def print_sparse_attention_summary(model: nn.Module):
     # Group by (method, threshold)
     groups: dict[tuple[str, str], int] = {}
     for _, module in sparse_modules:
+        if not module.is_enabled:
+            continue
         method = getattr(module, "_method", "unknown")
         threshold = _format_threshold(module.get_threshold_info())
         groups[(method, threshold)] = groups.get((method, threshold), 0) + 1

@@ -117,6 +117,15 @@ def _is_supported_model(model: nn.Module) -> bool:
     except ImportError:
         pass
 
+    # Check for diffusers ModelMixin
+    try:
+        from diffusers.models.modeling_utils import ModelMixin
+
+        if isinstance(model, ModelMixin):
+            return True
+    except ImportError:
+        pass
+
     # Support any PyTorch model with attention modules
     return isinstance(model, nn.Module)
 

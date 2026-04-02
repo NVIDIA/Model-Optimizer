@@ -79,14 +79,15 @@ class SparseAttentionStatsManager:
 
         # In calibration mode, store per-sample stats
         if self.calibration_mode:
-            self.per_sample_stats.append(
-                {
-                    "module": self.module_name,
-                    "sparsity": stats.get("sparsity", 0.0),
-                    "sample_length": stats.get("sample_length", 0),
-                    "phase": phase,
-                }
-            )
+            sample_stat = {
+                "module": self.module_name,
+                "sparsity": stats.get("sparsity", 0.0),
+                "sample_length": stats.get("sample_length", 0),
+                "phase": phase,
+            }
+            if "normalized_gaps" in stats:
+                sample_stat["normalized_gaps"] = stats["normalized_gaps"]
+            self.per_sample_stats.append(sample_stat)
 
     def get_summary(self) -> dict:
         """Get aggregated statistics summary.

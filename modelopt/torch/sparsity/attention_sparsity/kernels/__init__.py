@@ -13,12 +13,60 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Re-exports from modelopt.torch.kernels for backward compatibility."""
+"""Kernel integrations for sparse attention: Triton FA and diffusers backends."""
 
+import contextlib
+import threading
+
+# ---------------------------------------------------------------------------
+# Triton FA kernel re-exports (for HuggingFace LLM integration)
+# ---------------------------------------------------------------------------
 from modelopt.torch.kernels import IS_AVAILABLE, attention, register_triton_attention
+
+# ---------------------------------------------------------------------------
+# Thread-local context: shared by diffusers eager and Triton backends
+# ---------------------------------------------------------------------------
+_thread_local = threading.local()
+
+
+def set_skip_softmax_context(active: bool) -> None:
+    """Set thread-local flag indicating skip-softmax eager attention is active."""
+    _thread_local.skip_softmax_active = active
+
+
+def get_skip_softmax_context() -> bool:
+    """Return True if skip-softmax eager attention is active in this thread."""
+    return getattr(_thread_local, "skip_softmax_active", False)
+
+
+# ---------------------------------------------------------------------------
+# Optional backend registrations (depend on diffusers / ltx_core)
+# ---------------------------------------------------------------------------
+register_diffusers_eager_attention = None
+register_diffusers_triton_attention = None
+register_ltx_eager_attention = None
+register_ltx_triton_attention = None
+
+with contextlib.suppress(ImportError):
+    from .diffusers_eager_attention import register_diffusers_eager_attention
+
+with contextlib.suppress(ImportError):
+    from .diffusers_triton_attention import register_diffusers_triton_attention
+
+with contextlib.suppress(ImportError):
+    from .ltx_eager_attention import register_ltx_eager_attention
+
+with contextlib.suppress(ImportError):
+    from .ltx_triton_attention import register_ltx_triton_attention
 
 __all__ = [
     "IS_AVAILABLE",
     "attention",
+    "get_skip_softmax_context",
+    "register_diffusers_eager_attention",
+    "register_diffusers_triton_attention",
+    "register_ltx_eager_attention",
+    "register_ltx_triton_attention",
     "register_triton_attention",
+    "set_skip_softmax_context",
 ]
