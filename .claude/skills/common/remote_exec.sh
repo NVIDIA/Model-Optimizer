@@ -223,9 +223,12 @@ remote_load_cluster() {
     REMOTE_SLURM_ACCOUNT="$(_parse_yaml_value "$config_file" "clusters.${cluster_name}.slurm.default_account")"
     REMOTE_SLURM_PARTITION="$(_parse_yaml_value "$config_file" "clusters.${cluster_name}.slurm.default_partition")"
 
-    # Expand ~ in ssh_key
+    # Expand ~ in paths
     if [[ "${REMOTE_SSH_KEY:-}" == "~/"* ]]; then
         REMOTE_SSH_KEY="${HOME}/${REMOTE_SSH_KEY#\~/}"
+    fi
+    if [[ "${REMOTE_WORKSPACE:-}" == "~/"* ]]; then
+        REMOTE_WORKSPACE="${HOME}/${REMOTE_WORKSPACE#\~/}"
     fi
 
     # Validate required fields
