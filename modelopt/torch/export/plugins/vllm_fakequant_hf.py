@@ -14,6 +14,11 @@
 # limitations under the License.
 """Export HuggingFace model to vLLM fakequant checkpoint."""
 
+import logging
+import time
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -28,6 +33,92 @@ from modelopt.torch.utils import get_unwrapped_name
 
 __all__ = ["export_hf_vllm_fq_checkpoint"]
 
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _WeightQuantWork:
+    """A single weight tensor to be fake-quantized during export."""
+
+    sd_key: str
+    quantizer: TensorQuantizer
+    weight: torch.Tensor
+    # For optional pre_quant_scale folding:
+    inp_q: TensorQuantizer | None
+    inp_q_key: str | None
+
+
+def _collect_quant_work(
+    model: nn.Module, state_dict: dict[str, torch.Tensor]
+) -> list[_WeightQuantWork]:
+    """Collect all weight quantization work items from the model."""
+    work_items = []
+    seen_keys: set[str] = set()
+    for module_name, module in model.named_modules():
+        if not isinstance(module, QuantModule):
+            continue
+        for attr_name, quantizer in module.named_children():
+            if not (
+                attr_name.endswith("weight_quantizer")
+                and isinstance(quantizer, TensorQuantizer)
+                and quantizer.fake_quant
+                and quantizer.is_enabled
+            ):
+                continue
+            weight_name = attr_name.removesuffix("_quantizer")
+            prefix = f"{module_name}." if module_name else ""
+            sd_key = f"{prefix}{weight_name}"
+            assert sd_key not in seen_keys, f"Weight {sd_key} has already been fakequantized"
+            seen_keys.add(sd_key)
+            if sd_key not in state_dict:
+                continue
+            # Check for pre_quant_scale folding eligibility.
+            inp_q = None
+            inp_q_key = None
+            inp_attr = attr_name.replace("weight_quantizer", "input_quantizer")
+            if hasattr(module, inp_attr):
+                candidate = getattr(module, inp_attr)
+                if (
+                    hasattr(candidate, "_pre_quant_scale")
+                    and candidate._pre_quant_scale is not None
+                    and candidate._disabled
+                ):
+                    inp_q = candidate
+                    inp_q_key = get_unwrapped_name(
+                        f"{module_name}.{inp_attr}" if module_name else inp_attr, model
+                    )
+            work_items.append(
+                _WeightQuantWork(
+                    sd_key=sd_key,
+                    quantizer=quantizer,
+                    weight=state_dict[sd_key],
+                    inp_q=inp_q,
+                    inp_q_key=inp_q_key,
+                )
+            )
+    return work_items
+
+
+def _process_weight(item: _WeightQuantWork) -> tuple[str, torch.Tensor, str | None]:
+    """Fake-quantize a single weight tensor and optionally fold pre_quant_scale.
+
+    Returns (sd_key, quantized_weight_on_cpu, inp_q_key_or_None).
+    """
+    w = item.weight
+    w_quant = item.quantizer(w.float()).to(w.dtype).cpu()
+    if item.inp_q is not None:
+        scale = item.inp_q._pre_quant_scale.squeeze().to(device=w_quant.device)
+        w_quant = (w_quant * scale[None, :]).to(w_quant.dtype)
+    return item.sd_key, w_quant, item.inp_q_key
+
+
+def _process_device_batch(items: list[_WeightQuantWork], device: torch.device):
+    """Process all weight items on a single GPU. Runs in a dedicated thread."""
+    with torch.cuda.device(device):
+        results = [_process_weight(item) for item in items]
+        torch.cuda.synchronize(device)
+    return results
+
 
 def disable_rotate(quantizer: TensorQuantizer):
     """Return a disabled copy of the quantizer's ``_rotate`` field, preserving its type."""
@@ -41,6 +132,7 @@ def disable_rotate(quantizer: TensorQuantizer):
 def export_hf_vllm_fq_checkpoint(
     model: nn.Module,
     export_dir: Path | str,
+    parallel: bool = True,
 ):
     """Export quantized HF weights + ``vllm_fq_modelopt_state.pth`` for vLLM fake-quant reload.
 
@@ -53,6 +145,9 @@ def export_hf_vllm_fq_checkpoint(
     Args:
         model: In-memory quantized model.
         export_dir: Output dir for HF files and ``vllm_fq_modelopt_state.pth``.
+        parallel: If True, fake-quantize weights across GPUs concurrently using
+            one thread per GPU device. Falls back to sequential when all weights
+            are on the same device or on CPU. Default True.
     """
     export_dir = Path(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
@@ -62,50 +157,60 @@ def export_hf_vllm_fq_checkpoint(
     # parameters are never modified. Apply each weight quantizer's fake-quant
     # to the corresponding weight tensor in the copy.
     state_dict = model.state_dict()
-    fakequant_weights = set()
-    input_quantizers_folded_pqs = (
-        set()
-    )  # keys for input_quantizers where pre_quant_scale was folded
+    fakequant_weights: set[str] = set()
+    input_quantizers_folded_pqs: set[str] = set()
+
+    work_items = _collect_quant_work(model, state_dict)
+
+    # Group work items by device for parallel dispatch.
+    device_groups: dict[torch.device, list[_WeightQuantWork]] = defaultdict(list)
+    for item in work_items:
+        device_groups[item.weight.device].append(item)
+
+    num_cuda_devices = sum(1 for d in device_groups if d.type == "cuda")
+    use_parallel = parallel and num_cuda_devices > 1
+
+    t0 = time.monotonic()
     with torch.inference_mode():
-        for module_name, module in model.named_modules():
-            if not isinstance(module, QuantModule):
-                continue
-            for attr_name, quantizer in module.named_children():
-                if not (
-                    attr_name.endswith("weight_quantizer")
-                    and isinstance(quantizer, TensorQuantizer)
-                    and quantizer.fake_quant
-                    and quantizer.is_enabled
-                ):
-                    continue
-                weight_name = attr_name.removesuffix("_quantizer")
-                prefix = f"{module_name}." if module_name else ""
-                sd_key = f"{prefix}{weight_name}"
-                assert sd_key not in fakequant_weights, (
-                    f"Weight {sd_key} has already been fakequantized"
-                )
-                if sd_key in state_dict:
-                    w = state_dict[sd_key]
-                    w_quant = quantizer(w.float()).to(w.dtype).cpu()
-                    # Fold pre_quant_scale: (x*s)@fake_quant(W) = x@(fake_quant(W)*s)
-                    # Only valid when input_quantizer does NOT fake-quant activations. If it does
-                    # fake_quant(x*s), the non-linearity prevents folding s into W.
-                    inp_attr = attr_name.replace("weight_quantizer", "input_quantizer")
-                    if hasattr(module, inp_attr):
-                        inp_q = getattr(module, inp_attr)
-                        if (
-                            hasattr(inp_q, "_pre_quant_scale")
-                            and inp_q._pre_quant_scale is not None
-                            and inp_q._disabled
-                        ):
-                            scale = inp_q._pre_quant_scale.squeeze().to(device=w_quant.device)
-                            w_quant = (w_quant * scale[None, :]).to(w_quant.dtype)
-                            inp_q_key = get_unwrapped_name(
-                                f"{module_name}.{inp_attr}" if module_name else inp_attr, model
-                            )
-                            input_quantizers_folded_pqs.add(inp_q_key)
-                    state_dict[sd_key] = w_quant
-                    fakequant_weights.add(sd_key)
+        if use_parallel:
+            logger.info(
+                "Parallel export: %d weights across %d GPUs (%s)",
+                len(work_items),
+                num_cuda_devices,
+                ", ".join(f"{d}: {len(items)} weights" for d, items in device_groups.items()),
+            )
+            all_results: list[tuple[str, torch.Tensor, str | None]] = []
+            with ThreadPoolExecutor(max_workers=num_cuda_devices) as pool:
+                futures = []
+                for device, items in device_groups.items():
+                    if device.type == "cuda":
+                        futures.append(pool.submit(_process_device_batch, items, device))
+                    else:
+                        # CPU weights: process inline (no thread needed).
+                        all_results.extend([_process_weight(item) for item in items])
+                for future in futures:
+                    all_results.extend(future.result())
+            for sd_key, w_quant, inp_q_key in all_results:
+                state_dict[sd_key] = w_quant
+                fakequant_weights.add(sd_key)
+                if inp_q_key is not None:
+                    input_quantizers_folded_pqs.add(inp_q_key)
+        else:
+            # Sequential fallback (single GPU, CPU, or parallel=False).
+            for item in work_items:
+                sd_key, w_quant, inp_q_key = _process_weight(item)
+                state_dict[sd_key] = w_quant
+                fakequant_weights.add(sd_key)
+                if inp_q_key is not None:
+                    input_quantizers_folded_pqs.add(inp_q_key)
+
+    elapsed = time.monotonic() - t0
+    logger.info(
+        "Export step 1 (%s): %d weights fake-quantized in %.1fs",
+        "parallel" if use_parallel else "sequential",
+        len(fakequant_weights),
+        elapsed,
+    )
 
     # Filter quantizer tensors out for a clean HF checkpoint.
     clean_sd = {k: v for k, v in state_dict.items() if "quantizer" not in k}
@@ -166,4 +271,5 @@ def export_hf_vllm_fq_checkpoint(
 
     for wq, orig_rotate in wqs_to_restore:
         wq.enable()
-        wq._rotate = orig_rotate
+        if orig_rotate is not None:
+            wq._rotate = orig_rotate
