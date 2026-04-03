@@ -450,11 +450,13 @@ _TRITON_SPARSE_CONFIG = {
     }
 }
 
+_TRITON_SKIP_DEFAULT_THRESHOLD = 0.01
+
 _TRITON_SKIP_CONFIG = {
     "sparse_cfg": {
         "*": {
             "method": "triton_skip_softmax",
-            "skip_softmax_threshold": 0.1,
+            "skip_softmax_threshold": _TRITON_SKIP_DEFAULT_THRESHOLD,
             "backend": "diffusers_triton",
             "enable": True,
         },
@@ -482,7 +484,7 @@ _TRITON_SKIP_NVFP4_CONFIG = {
     "sparse_cfg": {
         "*": {
             "method": "triton_skip_softmax",
-            "skip_softmax_threshold": 0.1,
+            "skip_softmax_threshold": _TRITON_SKIP_DEFAULT_THRESHOLD,
             "backend": "diffusers_triton",
             "quantize_p": True,
             "enable": True,
@@ -499,7 +501,11 @@ _TRITON_KERNEL_CONFIGS = {
 }
 
 
-def apply_triton_sparse_kernel(transformer: torch.nn.Module, kernel: str) -> None:
+def apply_triton_sparse_kernel(
+    transformer: torch.nn.Module,
+    kernel: str,
+    skip_threshold: float | None = None,
+) -> None:
     """Apply a ModelOpt Triton sparse attention kernel to the WAN transformer.
 
     Calls ``mtsa.sparsify()`` with ``backend="diffusers_triton"``, which installs
@@ -512,12 +518,23 @@ def apply_triton_sparse_kernel(transformer: torch.nn.Module, kernel: str) -> Non
     Args:
         transformer: The ``pipe.transformer`` WAN model.
         kernel: One of the ``KERNEL_TRITON_*`` constants.
+        skip_threshold: Override ``skip_softmax_threshold`` for skip-softmax kernels.
+            ``None`` uses the kernel's built-in default.
+            Lower = better quality, less speedup.  Typical range: 0.001–0.1.
     """
+    import copy
+
     import modelopt.torch.sparsity.attention_sparsity as mtsa
 
-    config = _TRITON_KERNEL_CONFIGS[kernel]
+    config = copy.deepcopy(_TRITON_KERNEL_CONFIGS[kernel])
+    if skip_threshold is not None and kernel in (KERNEL_TRITON_SKIP, KERNEL_TRITON_SKIP_NVFP4):
+        config["sparse_cfg"]["*"]["skip_softmax_threshold"] = skip_threshold
+
     mtsa.sparsify(transformer, config)
+    thr = config["sparse_cfg"].get("*", {}).get("skip_softmax_threshold", "n/a")
     print(f"[Attention] Applied {kernel}: {_KERNEL_DESCRIPTIONS[kernel]}")
+    if kernel in (KERNEL_TRITON_SKIP, KERNEL_TRITON_SKIP_NVFP4):
+        print(f"[Attention]   skip_softmax_threshold={thr}")
 
 
 def print_kernel_stats() -> None:
@@ -770,6 +787,19 @@ def parse_args() -> argparse.Namespace:
         help="Run baseline + all available kernels, report timing table",
     )
     parser.add_argument(
+        "--skip-threshold",
+        type=float,
+        default=None,
+        metavar="LAMBDA",
+        help=(
+            "Override skip_softmax_threshold for triton-skip / triton-skip-nvfp4 kernels. "
+            f"Default: {_TRITON_SKIP_DEFAULT_THRESHOLD}. "
+            "A tile is skipped when its max attention score is less than LAMBDA times the "
+            "running maximum (BLASST criterion).  Lower = better quality, less speedup. "
+            "Typical sweep: 0.1 (aggressive), 0.01 (moderate), 0.001 (conservative)."
+        ),
+    )
+    parser.add_argument(
         "--clip-model",
         type=str,
         default="openai/clip-vit-large-patch14",
@@ -791,7 +821,7 @@ def main() -> None:
 
         # --- Quantized ---
         if args.kernel in _TRITON_MODELOPT_KERNELS:
-            apply_triton_sparse_kernel(pipe.transformer, args.kernel)
+            apply_triton_sparse_kernel(pipe.transformer, args.kernel, skip_threshold=args.skip_threshold)
         else:
             enable_attention_kernel(args.kernel)
         _, frames_quant = run_inference(pipe, args, label=args.kernel)
@@ -865,7 +895,7 @@ def main() -> None:
         run_inference(pipe, args, label="baseline")
 
     elif args.kernel in _TRITON_MODELOPT_KERNELS:
-        apply_triton_sparse_kernel(pipe.transformer, args.kernel)
+        apply_triton_sparse_kernel(pipe.transformer, args.kernel, skip_threshold=args.skip_threshold)
         run_inference(pipe, args, label=args.kernel)
 
     else:
