@@ -153,10 +153,11 @@ def calc_subblock_runtime(
     subblock_config: SubblockConfig,
 ) -> float:
 
-    if not isinstance(subblock_config, AttentionConfig) and not isinstance(
-        subblock_config, FFNConfig
-    ):
-        raise Exception("Runtime stats:Not supported subblock type")
+    if subblock_config is not None:
+        if not isinstance(subblock_config, AttentionConfig) and not isinstance(
+            subblock_config, FFNConfig
+        ):
+            raise Exception("Runtime stats: Not supported subblock type: {subblock_config}")
 
     model = create_benchmark_model(
         runtime_config.vocab_size,
@@ -164,7 +165,7 @@ def calc_subblock_runtime(
         runtime_config.num_attention_heads,
         runtime_config.prefill_seq_len,
         runtime_config.generation_seq_len,
-        block_config=subblock_config.to_blockconfig(),
+        block_config=subblock_config.to_blockconfig() if subblock_config is not None else None,
         repeat_block_n_times=runtime_config.repeat_block_n_times,
     )
     with tempfile.TemporaryDirectory() as model_tmpdir:
@@ -178,10 +179,6 @@ def calc_subblock_runtime(
         subblock_total_runtime_ms = run_vllm_latency_benchmark(Path(model_tmpdir), runtime_config)
 
     return subblock_total_runtime_ms
-
-
-def calc_baseline_runtime(runtime_config: RuntimeConfig, subblock_config: SubblockConfig) -> float:
-    return 0.1
 
 
 def calc_runtime_for_subblocks(
@@ -224,7 +221,7 @@ def calc_runtime_for_subblocks(
             total_runtime_ms = 0.0
         else:
             subblock_total_runtime_ms = calc_subblock_runtime(runtime_config, subblock_config)
-            baseline_runtime_ms = calc_baseline_runtime(runtime_config, subblock_config)
+            baseline_runtime_ms = calc_subblock_runtime(runtime_config, None)
             total_runtime_ms = subblock_total_runtime_ms - baseline_runtime_ms
             mprint(
                 f"|||| {subblock_config=} {subblock_total_runtime_ms=} {baseline_runtime_ms=} {total_runtime_ms=}"
