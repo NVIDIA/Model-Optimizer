@@ -1,14 +1,12 @@
 config:
+  MD005: false # list-indent - allow flexible list item indentation
+  MD007: false # ul-indent - allow unindented sub-lists under numbered lists
   MD013: false # line-length
   MD024: false # no-duplicate-heading
   MD028: false # no-blanks-blockquote
-  MD029: false # ol-prefix — upstream NEL skill uses actual numbers
-  MD033: false # no-inline-html
-  MD036: false # no-emphasis-as-heading — upstream NEL skill uses **Bold** as headers
-  MD041: false # first-line-heading
-  MD059: false # no-hard-tabs
   MD029: false # ol-prefix - allow 1. 2. 3. style numbered lists
   MD032: false # blanks-around-lists - don't force blank lines around lists
+  MD033: false # no-inline-html
   MD036: false # no-emphasis-as-heading - allow **bold** as section markers
-  MD005: false # list-indent - allow flexible list item indentation
-  MD007: false # ul-indent - allow unindented sub-lists under numbered lists
+  MD041: false # first-line-heading
+  MD059: false # no-hard-tabs

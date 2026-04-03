@@ -101,6 +101,7 @@ repos:
               examples/speculative_decoding/server_generate.py|
               experimental/dms/models/qwen3/configuration_qwen3_dms.py|
               experimental/dms/models/qwen3/modeling_qwen3_dms.py|
+              modelopt/torch/sparsity/attention_sparsity/methods/vsa_utils.py|
           )$
 
       # Default hook for Apache 2.0 in c/c++/cuda files

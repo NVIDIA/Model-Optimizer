@@ -37,6 +37,31 @@ class SparseAttentionMethod(ABC):
         self.calibration_params: dict[str, dict[str, float]] | None = None
         # Target sparsity ratio per phase: {"prefill": 0.5, "decode": 0.5}
         self.target_sparse_ratio: dict[str, float] | None = None
+        # Video shape for VSA (T, H, W). None for non-VSA methods.
+        self.video_shape: tuple[int, int, int] | None = None
+
+    def forward_attention(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        **kwargs,
+    ) -> tuple[torch.Tensor, dict]:
+        """Compute full attention replacement (e.g. VSA).
+
+        Default: raises NotImplementedError. Override for methods that replace
+        the entire attention computation rather than patching softmax.
+
+        Args:
+            query: Query tensor [batch, heads, seq_len, dim].
+            key: Key tensor [batch, heads, seq_len, dim].
+            value: Value tensor [batch, heads, seq_len, dim].
+            **kwargs: Method-specific arguments.
+
+        Returns:
+            Tuple of (attention_output, stats_dict).
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement forward_attention.")
 
     def calculate_sparsity(
         self,
