@@ -31,5 +31,6 @@ class DFlashModel(DynamicModule):
         self.dflash_freeze_base_model = config.dflash_freeze_base_model
         self.dflash_loss_decay_factor = config.dflash_loss_decay_factor
         self.dflash_self_logit_distillation = config.dflash_self_logit_distillation
+        self.dflash_num_anchors = config.dflash_num_anchors
         self.dflash_report_acc = config.dflash_report_acc
         self.dflash_use_torch_compile = config.dflash_use_torch_compile

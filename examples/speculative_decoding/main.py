@@ -168,6 +168,17 @@ class DFlashArguments:
             "Enables training with data not synthesized by the target model."
         },
     )
+    dflash_num_anchors: int = field(
+        default=512,
+        metadata={"help": "Number of random anchor positions per sequence during training."},
+    )
+    dflash_loss_decay_gamma: float = field(
+        default=0.0,
+        metadata={
+            "help": "Gamma for loss decay weighting (paper Eq.4). "
+            "Suggested: 7 for block_size=16. 0 disables."
+        },
+    )
 
 
 def train():
@@ -275,6 +286,8 @@ def train():
                 "dflash_block_size": dflash_args.dflash_block_size,
                 "dflash_use_torch_compile": not dflash_args.dflash_disable_torch_compile,
                 "dflash_self_logit_distillation": dflash_args.dflash_use_logit_distillation,
+                "dflash_num_anchors": dflash_args.dflash_num_anchors,
+                "dflash_loss_decay_factor": dflash_args.dflash_loss_decay_gamma,
                 "dflash_architecture_config": custom_config,
             }
 

@@ -77,7 +77,14 @@ class DFlashConfig(ModeloptBaseConfig):
     )
 
     dflash_loss_decay_factor: float = ModeloptField(
-        default=0.9, description="Decay factor for per-block loss weighting."
+        default=0.0,
+        description="Gamma for exponential loss decay weighting (paper Eq.4). "
+        "Suggested: 7 for block_size=16, 5 for 10, 4 for 8. 0 disables.",
+    )
+
+    dflash_num_anchors: int = ModeloptField(
+        default=512,
+        description="Number of random anchor positions sampled per sequence during training.",
     )
 
     dflash_report_acc: bool = ModeloptField(

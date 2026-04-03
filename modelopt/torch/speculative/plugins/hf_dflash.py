@@ -516,6 +516,7 @@ class HFDFlashModel(DFlashModel):
         )
 
         self.is_quantized = False
+        self._num_anchors = self.dflash_num_anchors
 
         # Store bound reference to the original model class's forward.
         # DynamicModule changes type(self) but the original class is in _original_cls.
@@ -549,6 +550,42 @@ class HFDFlashModel(DFlashModel):
         """Call the original model's forward, bypassing DFlash wrapper."""
         return self._original_forward_cls.forward(self, **kwargs)
 
+    def _sample_anchor_positions(self, seq_len, loss_mask, device):
+        """Randomly sample anchor positions per sample, matching SpecForge PR #473.
+
+        Returns (anchor_positions [B, N], block_keep_mask [B, N]).
+        """
+        bs = self.dflash_block_size
+        bsz = loss_mask.shape[0]
+        max_anchor = max(seq_len - bs, 0)
+        num_anchors = getattr(self, "_num_anchors", 512)
+
+        valid = loss_mask[:, : max_anchor + 1] > 0.5
+        valid_counts = valid.sum(dim=1)
+        max_n = min(num_anchors, int(valid_counts.max().item()) - 1)
+
+        if max_n <= 0:
+            # No valid anchors — return empty
+            anchors = torch.zeros(bsz, 1, dtype=torch.long, device=device)
+            keep = torch.zeros(bsz, 1, dtype=torch.bool, device=device)
+            return anchors, keep
+
+        indices = torch.arange(max_anchor + 1, device=device).unsqueeze(0).expand(bsz, -1)
+        masked_indices = torch.where(valid, indices, torch.tensor(seq_len + 1, device=device))
+
+        random_vals = torch.rand(bsz, max_anchor + 1, device=device)
+        random_vals = torch.where(valid, random_vals, torch.tensor(2.0, device=device))
+
+        _, sorted_idx = random_vals.sort(dim=1)
+        gathered = torch.gather(masked_indices, 1, sorted_idx)
+        anchors = gathered[:, :max_n].sort(dim=1).values
+
+        keep = torch.arange(max_n, device=device).unsqueeze(0) < valid_counts.unsqueeze(1).clamp(
+            max=max_n
+        )
+        anchors = torch.where(keep, anchors, torch.tensor(0, dtype=torch.long, device=device))
+        return anchors, keep
+
     def forward(
         self,
         input_ids=None,
@@ -563,7 +600,15 @@ class HFDFlashModel(DFlashModel):
         cache_position=None,
         **kwargs,
     ):
-        """Training forward matching SpecForge OnlineDFlashModel.forward."""
+        """Training forward matching SpecForge latest (post-PR #473).
+
+        Key changes from original PR #415:
+        - Random anchor sampling instead of uniform block division
+        - Bidirectional intra-block attention (no causal constraint)
+        - Context sees strictly before anchor position
+        - Label alignment: position k predicts token at anchor+k
+        - Optional loss decay weighting
+        """
         if not self.training:
             return super().forward(
                 input_ids=input_ids,
@@ -583,9 +628,7 @@ class HFDFlashModel(DFlashModel):
         block_size = self.dflash_block_size
         device = input_ids.device
 
-        # 1. Run base model → raw multi-layer hidden states
-        # Use super().forward() which goes through DynamicModule → original model
-        # (same pattern as EAGLE's HFEagleModel)
+        # 1. Run base model → hidden states
         with torch.no_grad():
             base_outputs = super().forward(
                 input_ids=input_ids,
@@ -593,83 +636,137 @@ class HFDFlashModel(DFlashModel):
                 output_hidden_states=True,
             )
 
-        # Extract and concatenate target layer hidden states
         offset = 1
         selected = [base_outputs.hidden_states[lid + offset] for lid in self.target_layer_ids]
         target_hidden = torch.cat(selected, dim=-1)  # [B, seq, num_layers * H]
 
-        # 2. Truncate to multiple of block_size
-        n_blocks = seq_len // block_size
-        effective_len = n_blocks * block_size
-        input_ids_trunc = input_ids[:, :effective_len]
-        target_hidden = target_hidden[:, :effective_len, :]
-        # Loss mask: use labels (response-only) if available, else attention_mask (padding)
+        # 2. Build loss mask from labels or attention_mask
         if labels is not None:
-            # labels == -100 means "ignore" (system/user tokens when answer_only_loss=True)
-            loss_mask_input = (labels[:, :effective_len] != -100).float()
+            loss_mask = (labels != -100).float()
         elif attention_mask is not None:
-            loss_mask_input = attention_mask[:, :effective_len].float()
+            loss_mask = attention_mask.float()
         else:
-            loss_mask_input = torch.ones(bsz, effective_len, device=device)
+            loss_mask = torch.ones(bsz, seq_len, device=device)
 
-        # 3. Prepare noise: mask_token_id everywhere, real token at block starts
-        positions = torch.arange(effective_len, device=device)
-        is_block_start = (positions % block_size) == 0
-        noise_input_ids = torch.full_like(input_ids_trunc, self.mask_token_id)
-        noise_input_ids[:, is_block_start] = input_ids_trunc[:, is_block_start]
-        noise_embedding = self._base_model_embeddings(noise_input_ids)
+        # 3. Random anchor sampling (SpecForge PR #463/#473)
+        anchor_positions, block_keep_mask = self._sample_anchor_positions(
+            seq_len, loss_mask, device
+        )
+        n_blocks = anchor_positions.shape[1]
 
-        # 4. Position IDs: [0..L-1, 0..L-1]
-        pos_seq = torch.arange(effective_len, device=device)
-        position_ids_2l = torch.cat([pos_seq, pos_seq]).unsqueeze(0).expand(bsz, -1)
+        if n_blocks == 0 or not block_keep_mask.any():
+            loss = (
+                self._base_model_lm_head(target_hidden[:, :1, : self.config.hidden_size]).sum()
+                * 0.0
+            )
+            return ModelOutput(loss=loss, logits=base_outputs.logits, train_acc=[[0.0]])
 
-        # 5. Attention mask: [1, 1, L, 2L]
+        # 4. Create noise embeddings: anchor token at block start, mask_token elsewhere
+        noise_ids = torch.full(
+            (bsz, n_blocks * block_size), self.mask_token_id, dtype=torch.long, device=device
+        )
+        block_starts = torch.arange(n_blocks, device=device) * block_size
+        block_starts_exp = block_starts.unsqueeze(0).expand(bsz, -1)
+        valid_anchors = anchor_positions.clamp(0, seq_len - 1)
+        anchor_tokens = torch.gather(input_ids, 1, valid_anchors)
+        batch_idx = torch.arange(bsz, device=device).unsqueeze(1).expand(bsz, n_blocks)
+        noise_ids[batch_idx, block_starts_exp] = torch.where(
+            block_keep_mask,
+            anchor_tokens,
+            torch.tensor(self.mask_token_id, dtype=torch.long, device=device),
+        )
+        noise_embedding = self._base_model_embeddings(noise_ids)
+
+        # 5. Position IDs: context [0..S-1], draft blocks [anchor+0..anchor+B-1]
+        ctx_pos = torch.arange(seq_len, device=device).unsqueeze(0).expand(bsz, -1)
+        offsets = torch.arange(block_size, device=device).view(1, 1, -1)
+        draft_pos = (anchor_positions.unsqueeze(-1) + offsets).view(bsz, -1)
+        full_pos = torch.cat([ctx_pos, draft_pos], dim=1)
+
+        # 6. Attention mask: SDPA bool mask [B, 1, Q_LEN, KV_LEN]
+        q_len = n_blocks * block_size
+        kv_len = seq_len + q_len
+
+        q_indices = torch.arange(q_len, device=device).view(1, 1, -1, 1)
+        kv_indices = torch.arange(kv_len, device=device).view(1, 1, 1, -1)
+        q_block_ids = q_indices // block_size
+
+        anchor_exp = anchor_positions.view(bsz, 1, n_blocks, 1).repeat_interleave(block_size, dim=2)
+
+        # Context: kv < S and kv < anchor
+        mask_ctx = (kv_indices < seq_len) & (kv_indices < anchor_exp)
+        # Draft: kv >= S and same block
+        is_draft = kv_indices >= seq_len
+        kv_block_ids = (kv_indices - seq_len) // block_size
+        mask_draft = is_draft & (q_block_ids == kv_block_ids)
+        # Valid block
+        valid_block = block_keep_mask.view(bsz, 1, n_blocks, 1).repeat_interleave(block_size, dim=2)
+
+        final_mask = ((mask_ctx | mask_draft) & valid_block).unsqueeze(1)  # [B, 1, Q, KV]
+
+        # Convert bool mask to float additive mask for SDPA
         dtype = target_hidden.dtype
-        dflash_attn_mask = create_dflash_attention_mask(effective_len, block_size, device, dtype)
+        attn_mask = torch.zeros(bsz, 1, q_len, kv_len, device=device, dtype=dtype)
+        attn_mask.masked_fill_(~final_mask, torch.finfo(torch.float32).min)
+        attn_mask = attn_mask.to(dtype)
 
-        # 6. Draft forward
+        # 7. Draft forward
         hidden = self.dflash_module(
             noise_embedding=noise_embedding,
             target_hidden=target_hidden,
-            position_ids=position_ids_2l,
-            attention_mask=dflash_attn_mask,
+            position_ids=full_pos,
+            attention_mask=attn_mask,
         )
 
-        # 7. Loss computation
+        # 8. Loss: same-position prediction (position k predicts token at anchor+k)
         logits = self._base_model_lm_head(hidden)
-        dflash_loss_mask = create_dflash_loss_mask(effective_len, block_size, device)
-        combined_mask = loss_mask_input * dflash_loss_mask.unsqueeze(0)
 
-        logits_flat = logits.reshape(-1, logits.size(-1))
-        labels_flat = input_ids_trunc.reshape(-1)
-        mask_flat = combined_mask.reshape(-1)
+        label_offsets = torch.arange(0, block_size, device=device).view(1, 1, -1)
+        label_indices = anchor_positions.unsqueeze(-1) + label_offsets
+        valid_label = label_indices < seq_len
+        safe_label_indices = label_indices.clamp(max=seq_len - 1)
 
-        active_indices = mask_flat > 0.5
-        active_logits = logits_flat[active_indices]
-        active_labels = labels_flat[active_indices]
+        target_ids = torch.gather(
+            input_ids.unsqueeze(1).expand(-1, n_blocks, -1), 2, safe_label_indices
+        )
 
-        if active_logits.numel() > 0:
-            if self.dflash_self_logit_distillation:
-                # Logit distillation: learn from target model's output distribution
-                # This works regardless of whether training data matches the target model
-                base_logits_trunc = base_outputs.logits[:, :effective_len, :]
-                base_logits_flat = base_logits_trunc.reshape(-1, base_logits_trunc.size(-1))
-                active_base_logits = base_logits_flat[active_indices].detach()
-                target_soft = torch.softmax(active_base_logits, dim=-1)
-                draft_logsoft = torch.log_softmax(active_logits, dim=-1)
-                loss = -(target_soft * draft_logsoft).sum(dim=-1).mean()
-            else:
-                # Hard CE: predict ground truth tokens directly
-                # Only works well when training data is synthesized by the target model
-                loss = F.cross_entropy(active_logits, active_labels)
+        # Weight mask: valid block * in bounds * exclude anchor (pos 0) * loss_mask
+        weight_mask = block_keep_mask.unsqueeze(-1).expand(-1, -1, block_size).float()
+        weight_mask = weight_mask * valid_label.float()
+        pos_in_block = torch.arange(block_size, device=device).view(1, 1, -1)
+        weight_mask = weight_mask * (pos_in_block > 0).float()
+
+        orig_loss_mask = torch.gather(
+            loss_mask.unsqueeze(1).expand(-1, n_blocks, -1), 2, safe_label_indices
+        )
+        weight_mask = weight_mask * orig_loss_mask
+
+        binary_eval_mask = weight_mask.view(-1)
+
+        # Optional loss decay
+        if self.dflash_loss_decay_factor > 0:
+            k = torch.arange(block_size, device=device).view(1, 1, -1)
+            decay = torch.exp(-(k - 1).clamp(min=0).float() / self.dflash_loss_decay_factor)
+            weight_mask = weight_mask * decay
+
+        # Cross entropy
+        flat_logits = logits.view(-1, logits.size(-1))
+        flat_targets = target_ids.view(-1)
+        flat_weights = weight_mask.view(-1)
+
+        valid_count = flat_weights.sum() + 1e-6
+
+        if valid_count > 1.0:
+            loss_per_token = F.cross_entropy(flat_logits, flat_targets, reduction="none")
+            loss = (loss_per_token * flat_weights).sum() / valid_count
 
             with torch.no_grad():
-                preds = active_logits.argmax(dim=-1)
-                accuracy = (preds == active_labels).float().mean().item()
+                preds = flat_logits.argmax(dim=-1)
+                correct = (preds == flat_targets) & (binary_eval_mask > 0.5)
+                accuracy = correct.sum().float() / (binary_eval_mask.sum() + 1e-6)
+                accuracy = accuracy.item()
         else:
-            # No valid positions — compute a zero loss that still flows through
-            # dflash_module parameters to keep DDP gradient sync happy
-            loss = logits.sum() * 0.0
+            loss = flat_logits.sum() * 0.0
             accuracy = 0.0
 
         return ModelOutput(
