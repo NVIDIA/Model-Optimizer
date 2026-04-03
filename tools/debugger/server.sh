@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -64,7 +64,7 @@ RESULT_DIR="$RELAY_DIR/result"
 cleanup() {
     echo "[server] Shutting down..."
     # Kill any child processes in our process group
-    kill -- -$$ 2>/dev/null || true
+    pkill -P $$ 2>/dev/null || true
     rm -f "$RELAY_DIR/server.ready"
     rm -f "$RELAY_DIR/handshake.done"
     exit 0
@@ -87,12 +87,19 @@ fi
 rm -rf "$RELAY_DIR"
 mkdir -p "$CMD_DIR" "$RESULT_DIR"
 
-# Install modelopt in editable mode
-echo "[server] Installing modelopt (pip install -e .[dev]) ..."
-(cd "$WORKDIR" && pip install -e ".[dev]") || {
-    echo "[server] WARNING: pip install failed (exit=$?), continuing anyway."
-}
-echo "[server] Install done."
+# Install modelopt in editable mode (skip if already editable-installed from WORKDIR)
+if python -c "
+import modelopt, os
+assert os.path.realpath(modelopt.__path__[0]).startswith(os.path.realpath('$WORKDIR'))
+" 2>/dev/null; then
+    echo "[server] modelopt already editable-installed from $WORKDIR, skipping pip install."
+else
+    echo "[server] Installing modelopt (pip install -e .[dev]) ..."
+    (cd "$WORKDIR" && pip install -e ".[dev]") || {
+        echo "[server] WARNING: pip install failed (exit=$?), continuing anyway."
+    }
+    echo "[server] Install done."
+fi
 
 # Signal that server is ready
 echo "$(hostname):$$:$(date -Iseconds)" > "$RELAY_DIR/server.ready"
@@ -122,7 +129,6 @@ while true; do
         exit_code=${PIPESTATUS[0]}
 
         # Atomic write of exit code (signal to client that result is ready)
-        sync "$RESULT_DIR/$cmd_id.log" 2>/dev/null || true
         echo "$exit_code" > "$RESULT_DIR/$cmd_id.exit.tmp"
         mv "$RESULT_DIR/$cmd_id.exit.tmp" "$RESULT_DIR/$cmd_id.exit"
 

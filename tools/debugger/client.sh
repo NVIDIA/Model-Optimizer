@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -140,7 +140,7 @@ case "$SUBCOMMAND" in
             echo "Handshake: not started"
         fi
         if [[ -d "$CMD_DIR" ]]; then
-            pending=$(ls "$CMD_DIR"/*.sh 2>/dev/null | wc -l)
+            pending=$(find "$CMD_DIR" -maxdepth 1 -type f -name '*.sh' 2>/dev/null | wc -l)
         else
             pending=0
         fi
