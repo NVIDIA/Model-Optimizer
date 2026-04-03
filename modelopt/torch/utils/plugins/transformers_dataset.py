@@ -179,6 +179,7 @@ class LanguageDataCollator:
     # assistant content for loss masking. The training data should already contain
     # the full assistant response including <think> blocks.
     _GENERATION_TEMPLATES = {
+        # Basic ChatML without <think> injection
         "chatml": (
             "{% for message in messages %}"
             "{% if message['role'] == 'system' %}"
@@ -188,6 +189,26 @@ class LanguageDataCollator:
             "{% elif message['role'] == 'assistant' %}"
             "{{ '<|im_start|>assistant\n' }}"
             "{% generation %}"
+            "{{ message['content'] }}"
+            "{% endgeneration %}"
+            "{{ '<|im_end|>\n' }}"
+            "{% endif %}"
+            "{% endfor %}"
+            "{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
+        ),
+        # ChatML with <think> wrapper on last assistant turn (Qwen3-style)
+        "chatml_think": (
+            "{% for message in messages %}"
+            "{% if message['role'] == 'system' %}"
+            "{{ '<|im_start|>system\n' + message['content'] + '<|im_end|>\n' }}"
+            "{% elif message['role'] == 'user' %}"
+            "{{ '<|im_start|>user\n' + message['content'] + '<|im_end|>\n' }}"
+            "{% elif message['role'] == 'assistant' %}"
+            "{{ '<|im_start|>assistant\n' }}"
+            "{% generation %}"
+            "{% if loop.last and not message['content'].startswith('<think>') %}"
+            "{{ '<think>\n\n</think>\n\n' }}"
+            "{% endif %}"
             "{{ message['content'] }}"
             "{% endgeneration %}"
             "{{ '<|im_end|>\n' }}"
@@ -227,7 +248,8 @@ class LanguageDataCollator:
         # Detect template style and replace with generation-tagged version
         old_template = template
         if "<|im_start|>" in template and "<|im_end|>" in template:
-            style = "chatml"
+            # Check if original template injects <think> (Qwen3-style)
+            style = "chatml_think" if "<think>" in template else "chatml"
         elif "<|start_header_id|>" in template and "<|eot_id|>" in template:
             style = "llama3"
         else:
