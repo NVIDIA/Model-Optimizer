@@ -224,12 +224,10 @@ class TestForwardShape:
     """
 
     def _run_with_sdpa_fallback(self, model, hidden):
-        """Disable triton path so SDPA fallback is used (works on CPU)."""
+        """Disable sparse modules so the SDPA fallback is used (works on CPU)."""
         for m in model.modules():
             if isinstance(m, WanSparseAttentionModule):
-                proc = getattr(m, "processor", None)
-                if isinstance(proc, ModelOptWanAttnProcessor):
-                    proc._enabled = False
+                m.disable()
         return model(hidden)
 
     def test_output_shape_self_attention(self):
